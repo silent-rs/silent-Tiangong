@@ -1,0 +1,18 @@
+app = "tiangong"
+version = "0.1.0"
+identifier = "io.silent.tiangong"
+
+[updater]
+mode = "embedded"
+
+[macos]
+out_dir = "output/release"
+format = "dmg"
+
+[windows]
+out_dir = "output/release"
+format = "zip"
+
+[linux]
+out_dir = "output/release"
+format = "tar.gz"
