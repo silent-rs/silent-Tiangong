@@ -1,11 +1,401 @@
-Container.app {
+Container.app_root {
+  display: flex;
+  flex-direction: row;
+  width: 100%;
+  height: 100%;
+  background-color: #202123;
+}
+
+Container.sidebar {
+  display: flex;
+  flex-direction: column;
+  width: 276px;
+  min-height: 0px;
+  padding: 14px;
+  gap: 10px;
+  background-color: #171717;
+}
+
+Container.sidebar_brand {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 4px;
+}
+
+Text.sidebar_title {
+  font-size: 36px;
+  color: #f3f4f6;
+  font-weight: 700;
+}
+
+Text.sidebar_subtitle {
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+Text.sidebar_provider {
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+Container.session_section {
+  display: flex;
+  flex-direction: column;
+  flex-grow: 1;
+  min-height: 0px;
+  overflow: auto;
+  gap: 8px;
+}
+
+Container.sidebar_footer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+Button.session_new_btn {
+  min-height: 40px;
+  background-color: #2d2d2d;
+  color: #f3f4f6;
+}
+
+Button.settings_open_btn {
+  min-height: 36px;
+  background-color: #2d2d2d;
+  color: #f3f4f6;
+}
+
+Button.session_btn {
+  min-height: 36px;
+  background-color: #222324;
+  color: #d1d5db;
+}
+
+Button.session_btn_active {
+  background-color: #343541;
+  color: #f9fafb;
+}
+
+Container.main_panel {
+  display: flex;
+  flex-direction: column;
+  flex-grow: 1;
+  min-height: 0px;
+  padding: 14px;
+  gap: 12px;
+  background-color: #202123;
+}
+
+Container.top_bar {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  min-height: 56px;
+  padding: 0px 4px;
+}
+
+Container.main_heading {
+  display: flex;
+  flex-direction: column;
+  flex-grow: 1;
+  gap: 2px;
+}
+
+Text.main_title {
+  font-size: 24px;
+  color: #f3f4f6;
+  font-weight: 700;
+}
+
+Text.main_subtitle {
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+Container.top_actions {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+
+Text.model_pill {
+  font-size: 12px;
+  color: #d1d5db;
+  background-color: #2c2d2f;
+  padding: 6px 12px;
+}
+
+Button.top_settings_btn {
+  min-height: 34px;
+  min-width: 70px;
+  background-color: #343541;
+  color: #f3f4f6;
+}
+
+Container.conversation {
+  display: flex;
+  flex-direction: column;
+  flex-grow: 1;
+  min-height: 0px;
+  padding: 14px;
+  border-radius: 12px;
+  background-color: #2b2c2f;
+  gap: 12px;
+}
+
+Container.message_row {
+  display: flex;
+  flex-direction: row;
+}
+
+Container.message_row_user {
+  justify-content: flex-end;
+}
+
+Container.message_row_assistant {
+  justify-content: flex-start;
+}
+
+Container.message_row_system {
+  justify-content: flex-start;
+}
+
+Container.message_bubble {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 12px;
+  border-radius: 10px;
+}
+
+Container.message_bubble_user {
+  background-color: #1f6feb;
+}
+
+Container.message_bubble_assistant {
+  background-color: #3a3b3f;
+}
+
+Container.message_bubble_system {
+  background-color: #4b1f1f;
+}
+
+Text.message_role {
+  font-size: 11px;
+  color: #cbd5e1;
+  font-weight: 600;
+}
+
+Container.message_list {
+  display: flex;
+  flex-direction: column;
+  flex-grow: 1;
+  min-height: 0px;
+  padding: 4px;
+  border-radius: 8px;
+  background-color: #2b2c2f;
+  overflow: auto;
+  gap: 10px;
+}
+
+Text.message_content {
+  font-size: 15px;
+  color: #f3f4f6;
+}
+
+Container.message_empty {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  flex-grow: 1;
+  gap: 6px;
 }
 
-Text.hello_text {
-  font-size: 48px;
-  color: #0f172a;
+Text.message_empty_title {
+  color: #f3f4f6;
+  font-size: 22px;
+  font-weight: 700;
+}
+
+Text.message_empty_desc {
+  color: #9ca3af;
+  font-size: 14px;
+}
+
+Container.composer {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+Container.composer_model_row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+
+Text.composer_model_label {
+  min-width: 32px;
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+Container.composer_input_row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+
+Container.composer_model_row Select.select {
+  flex-grow: 1;
+}
+
+Container.composer_model_row SelectTrigger.select__trigger {
+  background-color: #202123;
+  border-color: #3f4046;
+  color: #f3f4f6;
+}
+
+Container.composer_model_row SelectValue.select__value,
+Container.composer_model_row SelectPlaceholder.select__placeholder,
+Container.composer_model_row SelectArrow.select__arrow {
+  color: #d1d5db;
+}
+
+Input.composer_input {
+  min-height: 42px;
+}
+
+Button.send_btn {
+  min-width: 96px;
+  min-height: 42px;
+  background-color: #10a37f;
+  color: #ffffff;
+}
+
+Container.status_panel {
+  display: flex;
+  flex-direction: column;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background-color: #303136;
+  gap: 4px;
+}
+
+Text.status_title {
+  font-size: 13px;
+  color: #f3f4f6;
+  font-weight: 700;
+}
+
+Text.status_summary,
+Text.status_plan,
+Text.status_tool,
+Text.status_usage,
+Text.status_time {
+  font-size: 12px;
+  color: #cbd5e1;
+}
+
+Text.status_error {
+  font-size: 12px;
+  color: #f87171;
+}
+
+Container.settings_root {
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  background-color: #1f2937;
+}
+
+Container.settings_panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 8px;
+  background-color: #111827;
+}
+
+Text.settings_title {
+  font-size: 20px;
+  font-weight: 700;
+  color: #f9fafb;
+}
+
+Text.settings_current {
+  font-size: 13px;
+  color: #94a3b8;
+}
+
+Text.settings_label {
+  font-size: 14px;
+  color: #cbd5e1;
+  font-weight: 600;
+}
+
+Input.settings_input {
+  min-width: 420px;
+}
+
+Container.settings_actions {
+  display: flex;
+  flex-direction: row;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+Button.settings_refresh_btn {
+  min-width: 120px;
+  background-color: #1f6feb;
+  color: #ffffff;
+}
+
+Container.settings_model_list {
+  display: flex;
+  flex-direction: column;
+  max-height: 120px;
+  min-height: 40px;
+  overflow: auto;
+  gap: 6px;
+  padding: 6px;
+  border-radius: 6px;
+  background-color: #1f2937;
+}
+
+Text.settings_hint {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+Button.model_item_btn {
+  min-height: 30px;
+  background-color: #374151;
+  color: #e5e7eb;
+}
+
+Button.model_item_btn_active {
+  background-color: #10a37f;
+  color: #ffffff;
+}
+
+Button.settings_save_btn {
+  min-width: 120px;
+  background-color: #10a37f;
+  color: #ffffff;
+}
+
+Button.settings_cancel_btn {
+  min-width: 90px;
+  background-color: #374151;
+  color: #f3f4f6;
 }

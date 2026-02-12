@@ -1,0 +1,61 @@
+fail_fast: false
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: check-byte-order-marker
+      - id: check-case-conflict
+      - id: check-merge-conflict
+      - id: check-symlinks
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+      - id: trailing-whitespace
+  - repo: https://github.com/psf/black
+    rev: 23.11.0
+    hooks:
+      - id: black
+  # Apple Silicon 需要 rosetta2 支持
+  #  - repo: https://github.com/crate-ci/typos
+  #    rev: v1.8.1
+  #    hooks:
+  #      - id: typos
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        description: Format files with rustfmt.
+        entry: bash -c 'cargo fmt -- --check'
+        language: system
+        files: (\.rs$|rustfmt\.toml$)
+        args: []
+        pass_filenames: false
+      - id: cargo-deny
+        name: cargo deny check
+        description: Check cargo dependencies
+        entry: bash -c 'cargo deny check --disable-fetch'
+        language: system
+        files: (Cargo\.toml$|Cargo\.lock$|deny\.toml$)
+        args: []
+        pass_filenames: false
+      - id: cargo-check
+        name: cargo check
+        description: Check the package for errors.
+        entry: bash -c 'cargo check --workspace'
+        language: system
+        files: (\.rs$|Cargo\.toml$|Cargo\.lock$|\.cargo/.*\.toml$)
+        pass_filenames: false
+      - id: cargo-clippy
+        name: cargo clippy
+        description: Lint rust sources
+        entry: bash -c 'cargo clippy --workspace --all-targets --tests --benches -- -D warnings'
+        language: system
+        files: (\.rs$|Cargo\.toml$|Cargo\.lock$|\.cargo/.*\.toml$)
+        pass_filenames: false
+      - id: cargo-test
+        name: cargo test
+        description: unit test for the project
+        entry: bash -c 'cargo nextest run --workspace --no-tests pass'
+        language: system
+        files: (\.rs$|Cargo\.toml$|Cargo\.lock$|\.cargo/.*\.toml$)
+        pass_filenames: false
