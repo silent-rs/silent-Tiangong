@@ -1,0 +1,11 @@
+Container.app {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+Text.hello_text {
+  font-size: 48px;
+  color: #0f172a;
+}
