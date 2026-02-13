@@ -2,13 +2,16 @@ use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use crate::core::model::{ModelProviderConfig, SingleProviderClient};
-use crate::core::runtime::{RunSnapshot, RunStatus, RuntimeEngine};
-use crate::core::session::{MessageRole, Session, now_text};
+use crate::core::runtime::{RunSnapshot, RunStatus, RuntimeEngine, TurnExecution};
+use crate::core::session::{Message, MessageRole, Session, now_text};
 
 const DEFAULT_SESSION_TITLE: &str = "默认会话";
 const DEFAULT_CONTEXT_LIMIT: usize = 16;
@@ -44,10 +47,27 @@ struct LoadedState {
 }
 
 #[derive(Debug)]
+enum TurnEvent {
+    Chunk(String),
+    Completed(TurnExecution),
+    Failed(String),
+}
+
+#[derive(Debug)]
+struct PendingTurn {
+    session_id: String,
+    task_id: String,
+    assistant_message_id: String,
+    started_at: Instant,
+    rx: Receiver<TurnEvent>,
+}
+
+#[derive(Debug)]
 pub struct TiangongState {
     sessions: Vec<Session>,
     active_session_id: String,
     model_config: ModelProviderConfig,
+    session_title_draft: String,
     settings_api_auth_token_draft: String,
     settings_api_base_url_draft: String,
     settings_api_timeout_ms_draft: String,
@@ -55,6 +75,7 @@ pub struct TiangongState {
     settings_model_list: Vec<String>,
     pub input_draft: String,
     pub run: RunSnapshot,
+    pending_turn: Option<PendingTurn>,
     app_storage_path: PathBuf,
     sessions_dir_path: PathBuf,
     runtime: RuntimeEngine,
@@ -80,6 +101,7 @@ impl TiangongState {
             sessions: Vec::new(),
             active_session_id: String::new(),
             model_config: default_model_config.clone(),
+            session_title_draft: DEFAULT_SESSION_TITLE.to_string(),
             settings_api_auth_token_draft: default_model_config.api_auth_token.clone(),
             settings_api_base_url_draft: default_model_config.api_base_url.clone(),
             settings_api_timeout_ms_draft: default_model_config.api_timeout_ms.clone(),
@@ -87,6 +109,7 @@ impl TiangongState {
             settings_model_list: Vec::new(),
             input_draft: String::new(),
             run: RunSnapshot::default(),
+            pending_turn: None,
             app_storage_path,
             sessions_dir_path,
             runtime,
@@ -122,6 +145,10 @@ impl TiangongState {
         state.settings_api_base_url_draft = state.model_config.api_base_url.clone();
         state.settings_api_timeout_ms_draft = state.model_config.api_timeout_ms.clone();
         state.settings_api_model_draft = state.model_config.api_model.clone();
+        state.session_title_draft = state
+            .active_session()
+            .map(|session| session.title.clone())
+            .unwrap_or_else(|| DEFAULT_SESSION_TITLE.to_string());
         state.settings_model_list = normalize_model_list(
             state.settings_model_list.clone(),
             &state.model_config.api_model,
@@ -160,18 +187,59 @@ impl TiangongState {
             .find(|session| session.id == self.active_session_id)
     }
 
+    pub fn has_pending_turn(&self) -> bool {
+        self.pending_turn.is_some()
+    }
+
+    pub fn poll_pending_turn(&mut self) {
+        let mut should_clear = false;
+        let mut disconnected = false;
+
+        while let Some(event) = self.try_recv_turn_event(&mut disconnected) {
+            match event {
+                TurnEvent::Chunk(delta) => {
+                    self.apply_assistant_delta(&delta);
+                }
+                TurnEvent::Completed(exec) => {
+                    self.finish_pending_turn_success(exec);
+                    should_clear = true;
+                }
+                TurnEvent::Failed(err_msg) => {
+                    self.finish_pending_turn_error(&err_msg);
+                    should_clear = true;
+                }
+            }
+        }
+
+        if disconnected && !should_clear {
+            self.finish_pending_turn_error("执行中断：后台任务通道已关闭");
+            should_clear = true;
+        }
+
+        if should_clear {
+            self.pending_turn = None;
+        }
+    }
+
     pub fn create_session(&mut self) {
         let title = format!("会话 {}", self.sessions.len() + 1);
         let session = Session::new(title);
         self.active_session_id = session.id.clone();
+        self.session_title_draft = session.title.clone();
+        let session_id = session.id.clone();
         self.sessions.push(session);
-        let _ = self.persist_to_disk();
+        let _ = self.persist_session_and_app(&session_id);
     }
 
     pub fn switch_session(&mut self, session_id: &str) {
-        if self.sessions.iter().any(|session| session.id == session_id) {
+        if let Some(session) = self
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+        {
             self.active_session_id = session_id.to_string();
-            let _ = self.persist_to_disk();
+            self.session_title_draft = session.title.clone();
+            let _ = self.persist_app_only();
         }
     }
 
@@ -189,6 +257,70 @@ impl TiangongState {
 
     pub fn settings_api_auth_token_draft(&self) -> &str {
         &self.settings_api_auth_token_draft
+    }
+
+    pub fn session_title_draft(&self) -> &str {
+        &self.session_title_draft
+    }
+
+    pub fn update_session_title_draft(&mut self, value: String) {
+        self.session_title_draft = value;
+    }
+
+    pub fn save_active_session_title(&mut self) -> Result<()> {
+        let new_title = self.session_title_draft.trim();
+        if new_title.is_empty() {
+            return Err(anyhow!("会话标题不能为空"));
+        }
+
+        let active_id = self.active_session_id.clone();
+        let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == active_id)
+        else {
+            return Err(anyhow!("当前会话不存在，无法重命名"));
+        };
+
+        session.title = new_title.to_string();
+        session.updated_at = now_text();
+        self.session_title_draft = session.title.clone();
+        self.persist_session_and_app(&active_id)
+    }
+
+    pub fn delete_active_session(&mut self) -> Result<()> {
+        let active_id = self.active_session_id.clone();
+        let Some(remove_idx) = self
+            .sessions
+            .iter()
+            .position(|session| session.id == active_id)
+        else {
+            return Err(anyhow!("当前会话不存在，无法删除"));
+        };
+
+        self.sessions.remove(remove_idx);
+
+        if self.sessions.is_empty() {
+            let session = Session::new(DEFAULT_SESSION_TITLE);
+            self.active_session_id = session.id.clone();
+            self.session_title_draft = session.title.clone();
+            self.sessions.push(session);
+        } else {
+            let next_idx = if remove_idx >= self.sessions.len() {
+                self.sessions.len() - 1
+            } else {
+                remove_idx
+            };
+            self.active_session_id = self.sessions[next_idx].id.clone();
+            self.session_title_draft = self.sessions[next_idx].title.clone();
+        }
+
+        self.remove_session_file(&active_id)?;
+        if self.sessions.len() == 1 && self.sessions[0].messages.is_empty() {
+            let current_id = self.sessions[0].id.clone();
+            self.persist_session(&current_id)?;
+        }
+        self.persist_app_only()
     }
 
     pub fn settings_api_base_url_draft(&self) -> &str {
@@ -234,13 +366,17 @@ impl TiangongState {
         self.run = RunSnapshot {
             status: RunStatus::Idle,
             summary: format!("模型已切换：{}", self.model_config.api_model),
+            last_session_id: self.run.last_session_id.clone(),
+            last_task_id: self.run.last_task_id.clone(),
+            last_duration_ms: self.run.last_duration_ms,
+            last_result: self.run.last_result.clone(),
             last_plan: self.run.last_plan.clone(),
             last_tool_result: self.run.last_tool_result.clone(),
             last_error: None,
             last_usage: self.run.last_usage.clone(),
             updated_at: now_text(),
         };
-        self.persist_to_disk()
+        self.persist_app_only()
     }
 
     pub fn open_provider_settings(&mut self) {
@@ -286,7 +422,7 @@ impl TiangongState {
             self.settings_model_list.clone(),
             self.settings_api_model_draft.trim(),
         );
-        self.persist_to_disk()?;
+        self.persist_app_only()?;
 
         Ok(self.settings_model_list.len())
     }
@@ -337,39 +473,61 @@ impl TiangongState {
         self.run = RunSnapshot {
             status: RunStatus::Idle,
             summary: format!("模型供应商已更新：{}", self.runtime.provider_label()),
+            last_session_id: self.run.last_session_id.clone(),
+            last_task_id: self.run.last_task_id.clone(),
+            last_duration_ms: self.run.last_duration_ms,
+            last_result: self.run.last_result.clone(),
             last_plan: self.run.last_plan.clone(),
             last_tool_result: self.run.last_tool_result.clone(),
             last_error: None,
             last_usage: self.run.last_usage.clone(),
             updated_at: now_text(),
         };
-        self.persist_to_disk()
+        self.persist_app_only()
     }
 
     pub fn send_current_input(&mut self) -> Result<()> {
+        if self.pending_turn.is_some() {
+            return Ok(());
+        }
+
         let input = self.input_draft.trim().to_string();
         if input.is_empty() {
             return Ok(());
         }
 
         let active_idx = self.ensure_active_session_index();
+        let session_id = self.sessions[active_idx].id.clone();
+        let task_id = new_scru128_string();
         self.sessions[active_idx].append_message(MessageRole::User, input.clone());
+        self.sessions[active_idx].append_message(MessageRole::Assistant, String::new());
+        let assistant_message_id = self.sessions[active_idx]
+            .messages
+            .last()
+            .map(|msg| msg.id.clone())
+            .ok_or_else(|| anyhow!("创建助手消息占位失败"))?;
 
         self.run = RunSnapshot {
             status: RunStatus::Planning,
             summary: "正在生成执行计划".to_string(),
+            last_session_id: Some(session_id.clone()),
+            last_task_id: Some(task_id.clone()),
+            last_duration_ms: None,
+            last_result: None,
             last_plan: None,
             last_tool_result: None,
             last_error: None,
             last_usage: None,
             updated_at: now_text(),
         };
-
-        let session_snapshot = self.sessions[active_idx].clone();
 
         self.run = RunSnapshot {
             status: RunStatus::Executing,
-            summary: "正在调用模型并执行".to_string(),
+            summary: "正在流式调用模型".to_string(),
+            last_session_id: Some(session_id.clone()),
+            last_task_id: Some(task_id.clone()),
+            last_duration_ms: None,
+            last_result: None,
             last_plan: None,
             last_tool_result: None,
             last_error: None,
@@ -377,50 +535,252 @@ impl TiangongState {
             updated_at: now_text(),
         };
 
-        match self.runtime.execute_turn(&session_snapshot, &input) {
-            Ok(exec) => {
-                self.sessions[active_idx]
-                    .append_message(MessageRole::Assistant, exec.assistant_message);
-                self.run = RunSnapshot {
-                    status: RunStatus::Completed,
-                    summary: "执行完成".to_string(),
-                    last_plan: Some(exec.plan.summary),
-                    last_tool_result: exec.tool_result_summary,
-                    last_error: None,
-                    last_usage: Some(exec.usage),
-                    updated_at: now_text(),
-                };
-            }
-            Err(err) => {
-                let err_msg = RuntimeEngine::fallback_error_message(&err);
-                self.sessions[active_idx].append_message(MessageRole::System, &err_msg);
-                self.run = RunSnapshot {
-                    status: RunStatus::Failed,
-                    summary: "执行失败".to_string(),
-                    last_plan: None,
-                    last_tool_result: None,
-                    last_error: Some(err_msg),
-                    last_usage: None,
-                    updated_at: now_text(),
-                };
-            }
-        }
-
         self.input_draft.clear();
 
-        if let Err(err) = self.persist_to_disk() {
+        let runtime = self.runtime.clone();
+        let session_snapshot = self.sessions[active_idx].clone();
+        let worker_input = input.clone();
+        let (tx, rx) = mpsc::channel::<TurnEvent>();
+
+        thread::spawn(move || {
+            let chunk_tx = tx.clone();
+            let result =
+                runtime.execute_turn_with_streaming(&session_snapshot, &worker_input, |delta| {
+                    let _ = chunk_tx.send(TurnEvent::Chunk(delta.to_string()));
+                });
+
+            match result {
+                Ok(exec) => {
+                    let _ = tx.send(TurnEvent::Completed(exec));
+                }
+                Err(err) => {
+                    let _ = tx.send(TurnEvent::Failed(RuntimeEngine::fallback_error_message(
+                        &err,
+                    )));
+                }
+            }
+        });
+
+        self.pending_turn = Some(PendingTurn {
+            session_id,
+            task_id,
+            assistant_message_id,
+            started_at: Instant::now(),
+            rx,
+        });
+
+        Ok(())
+    }
+
+    fn try_recv_turn_event(&mut self, disconnected: &mut bool) -> Option<TurnEvent> {
+        let pending = self.pending_turn.as_ref()?;
+
+        match pending.rx.try_recv() {
+            Ok(event) => Some(event),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => {
+                *disconnected = true;
+                None
+            }
+        }
+    }
+
+    fn apply_assistant_delta(&mut self, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+
+        let Some((session_id, assistant_message_id)) = self.pending_turn.as_ref().map(|pending| {
+            (
+                pending.session_id.clone(),
+                pending.assistant_message_id.clone(),
+            )
+        }) else {
+            return;
+        };
+
+        if let Some(message) = self.find_message_mut(&session_id, &assistant_message_id) {
+            message.content.push_str(delta);
+        }
+    }
+
+    fn finish_pending_turn_success(&mut self, exec: TurnExecution) {
+        let Some((session_id, task_id, assistant_message_id, started_at)) =
+            self.pending_turn.as_ref().map(|pending| {
+                (
+                    pending.session_id.clone(),
+                    pending.task_id.clone(),
+                    pending.assistant_message_id.clone(),
+                    pending.started_at,
+                )
+            })
+        else {
+            return;
+        };
+
+        if let Some(message) = self.find_message_mut(&session_id, &assistant_message_id) {
+            if message.content.trim().is_empty() {
+                message.content = exec.assistant_message.clone();
+            }
+        } else if let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
+            session.append_message(MessageRole::Assistant, exec.assistant_message.clone());
+        }
+
+        self.run = RunSnapshot {
+            status: RunStatus::Completed,
+            summary: "执行完成".to_string(),
+            last_session_id: Some(session_id.clone()),
+            last_task_id: Some(task_id),
+            last_duration_ms: Some(elapsed_ms_u64(started_at.elapsed().as_millis())),
+            last_result: Some(format!(
+                "success; output_mode={}; chunks={}",
+                exec.output_mode, exec.output_chunk_count
+            )),
+            last_plan: Some(exec.plan.summary),
+            last_tool_result: exec.tool_result_summary,
+            last_error: None,
+            last_usage: Some(exec.usage),
+            updated_at: now_text(),
+        };
+
+        if let Err(err) = self.persist_session_and_app(&session_id) {
             self.run = RunSnapshot {
                 status: RunStatus::Failed,
                 summary: "会话持久化失败".to_string(),
+                last_session_id: self.run.last_session_id.clone(),
+                last_task_id: self.run.last_task_id.clone(),
+                last_duration_ms: self.run.last_duration_ms,
+                last_result: Some("failed".to_string()),
                 last_plan: self.run.last_plan.clone(),
                 last_tool_result: self.run.last_tool_result.clone(),
                 last_error: Some(err.to_string()),
                 last_usage: self.run.last_usage.clone(),
                 updated_at: now_text(),
             };
-            return Err(err);
+        }
+    }
+
+    fn finish_pending_turn_error(&mut self, err_msg: &str) {
+        let Some((session_id, task_id, assistant_message_id, started_at)) =
+            self.pending_turn.as_ref().map(|pending| {
+                (
+                    pending.session_id.clone(),
+                    pending.task_id.clone(),
+                    pending.assistant_message_id.clone(),
+                    pending.started_at,
+                )
+            })
+        else {
+            return;
+        };
+
+        if let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
+            if let Some(position) = session
+                .messages
+                .iter()
+                .position(|msg| msg.id == assistant_message_id && msg.content.trim().is_empty())
+            {
+                session.messages.remove(position);
+                session.updated_at = now_text();
+            }
+            session.append_message(MessageRole::System, err_msg);
         }
 
+        self.run = RunSnapshot {
+            status: RunStatus::Failed,
+            summary: "执行失败".to_string(),
+            last_session_id: Some(session_id.clone()),
+            last_task_id: Some(task_id),
+            last_duration_ms: Some(elapsed_ms_u64(started_at.elapsed().as_millis())),
+            last_result: Some("failed".to_string()),
+            last_plan: None,
+            last_tool_result: None,
+            last_error: Some(err_msg.to_string()),
+            last_usage: None,
+            updated_at: now_text(),
+        };
+
+        if let Err(err) = self.persist_session_and_app(&session_id) {
+            self.run = RunSnapshot {
+                status: RunStatus::Failed,
+                summary: "会话持久化失败".to_string(),
+                last_session_id: self.run.last_session_id.clone(),
+                last_task_id: self.run.last_task_id.clone(),
+                last_duration_ms: self.run.last_duration_ms,
+                last_result: Some("failed".to_string()),
+                last_plan: self.run.last_plan.clone(),
+                last_tool_result: self.run.last_tool_result.clone(),
+                last_error: Some(err.to_string()),
+                last_usage: self.run.last_usage.clone(),
+                updated_at: now_text(),
+            };
+        }
+    }
+
+    fn find_message_mut(&mut self, session_id: &str, message_id: &str) -> Option<&mut Message> {
+        self.sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)?
+            .messages
+            .iter_mut()
+            .find(|msg| msg.id == message_id)
+    }
+
+    fn persist_session_and_app(&mut self, session_id: &str) -> Result<()> {
+        self.persist_session(session_id)?;
+        self.persist_app_only()
+    }
+
+    fn persist_session(&mut self, session_id: &str) -> Result<()> {
+        self.normalize_sessions_for_storage();
+        ensure_dir(&self.sessions_dir_path)?;
+
+        let session = self
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .ok_or_else(|| anyhow!("会话不存在，无法持久化：{session_id}"))?;
+
+        let session_path = session_storage_path(&self.sessions_dir_path, session_id);
+        let content = serde_json::to_string_pretty(session)
+            .with_context(|| format!("序列化会话失败：{session_id}"))?;
+        fs::write(&session_path, content)
+            .with_context(|| format!("写入会话文件失败：{}", session_path.display()))
+    }
+
+    fn persist_app_only(&mut self) -> Result<()> {
+        self.normalize_sessions_for_storage();
+        ensure_parent_dir(&self.app_storage_path)?;
+
+        let payload = PersistedAppState {
+            active_session_id: self.active_session_id.clone(),
+            session_ids: self
+                .sessions
+                .iter()
+                .map(|session| session.id.clone())
+                .collect(),
+            model_config: Some(self.model_config.clone()),
+            model_list: self.settings_model_list.clone(),
+        };
+        let content = serde_json::to_string_pretty(&payload).context("序列化应用存储失败")?;
+        fs::write(&self.app_storage_path, content)
+            .with_context(|| format!("写入应用存储失败：{}", self.app_storage_path.display()))
+    }
+
+    fn remove_session_file(&self, session_id: &str) -> Result<()> {
+        let session_path = session_storage_path(&self.sessions_dir_path, session_id);
+        if session_path.exists() {
+            fs::remove_file(&session_path)
+                .with_context(|| format!("删除会话文件失败：{}", session_path.display()))?;
+        }
         Ok(())
     }
 
@@ -697,6 +1057,10 @@ fn canonical_scru128_id(raw: &str) -> Option<String> {
 
 fn new_scru128_string() -> String {
     scru128::new().to_string()
+}
+
+fn elapsed_ms_u64(value: u128) -> u64 {
+    value.min(u128::from(u64::MAX)) as u64
 }
 
 fn normalize_model_list(models: Vec<String>, current_model: &str) -> Vec<String> {

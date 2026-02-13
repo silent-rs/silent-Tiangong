@@ -11,6 +11,9 @@ struct TiangongApp {
     new_session_btn: WidgetId,
     sidebar_settings_btn: WidgetId,
     header_settings_btn: WidgetId,
+    session_title_input: WidgetId,
+    session_title_save_btn: WidgetId,
+    session_delete_btn: WidgetId,
     model_select: WidgetId,
     send_btn: WidgetId,
     input_widget: WidgetId,
@@ -23,6 +26,9 @@ impl Default for TiangongApp {
             new_session_btn: WidgetId::new(),
             sidebar_settings_btn: WidgetId::new(),
             header_settings_btn: WidgetId::new(),
+            session_title_input: WidgetId::new(),
+            session_title_save_btn: WidgetId::new(),
+            session_delete_btn: WidgetId::new(),
             model_select: WidgetId::new(),
             send_btn: WidgetId::new(),
             input_widget: WidgetId::new(),
@@ -38,13 +44,16 @@ impl Component for TiangongApp {
         states: &mut StateMap,
         cx: AppCtx,
     ) {
+        states.ensure::<TiangongState>().poll_pending_turn();
         let state = states.ensure::<TiangongState>();
         let active_session_id = state.active_session_id().to_string();
         let provider_label = state.provider_label();
         let draft = state.input_draft.clone();
+        let has_pending_turn = state.has_pending_turn();
         let run_snapshot = state.run.clone();
         let current_model = state.current_model().to_string();
         let model_list = state.model_list().to_vec();
+        let session_title_draft = state.session_title_draft().to_string();
 
         let sessions_snapshot = state
             .sessions()
@@ -160,8 +169,95 @@ impl Component for TiangongApp {
             .class("top_bar")
             .mount(tree, handlers);
 
+        let session_title_input = Input::new()
+            .widget_id(self.session_title_input)
+            .text(session_title_draft.clone())
+            .placeholder("会话标题")
+            .class("session_title_input")
+            .on_input(|states, ictx| {
+                states
+                    .ensure::<TiangongState>()
+                    .update_session_title_draft(ictx.value);
+            })
+            .on_submit(|states, sctx| {
+                let state = states.ensure::<TiangongState>();
+                state.update_session_title_draft(sctx.value);
+                if let Err(err) = state.save_active_session_title() {
+                    state.run = RunSnapshot {
+                        status: RunStatus::Failed,
+                        summary: "会话重命名失败".to_string(),
+                        last_session_id: state.run.last_session_id.clone(),
+                        last_task_id: state.run.last_task_id.clone(),
+                        last_duration_ms: state.run.last_duration_ms,
+                        last_result: state.run.last_result.clone(),
+                        last_plan: state.run.last_plan.clone(),
+                        last_tool_result: state.run.last_tool_result.clone(),
+                        last_error: Some(err.to_string()),
+                        last_usage: state.run.last_usage.clone(),
+                        updated_at: now_text(),
+                    };
+                }
+            })
+            .mount(tree, handlers, cx);
+
+        let save_session_title_btn = Button::new("保存标题")
+            .widget_id(self.session_title_save_btn)
+            .class("session_title_save_btn")
+            .disabled(session_title_draft.trim().is_empty())
+            .on_click(|states: &mut StateMap, _ctx| {
+                let state = states.ensure::<TiangongState>();
+                if let Err(err) = state.save_active_session_title() {
+                    state.run = RunSnapshot {
+                        status: RunStatus::Failed,
+                        summary: "会话重命名失败".to_string(),
+                        last_session_id: state.run.last_session_id.clone(),
+                        last_task_id: state.run.last_task_id.clone(),
+                        last_duration_ms: state.run.last_duration_ms,
+                        last_result: state.run.last_result.clone(),
+                        last_plan: state.run.last_plan.clone(),
+                        last_tool_result: state.run.last_tool_result.clone(),
+                        last_error: Some(err.to_string()),
+                        last_usage: state.run.last_usage.clone(),
+                        updated_at: now_text(),
+                    };
+                }
+            })
+            .mount(tree, handlers);
+
+        let delete_session_btn = Button::new("删除会话")
+            .widget_id(self.session_delete_btn)
+            .class("session_delete_btn")
+            .on_click(|states: &mut StateMap, _ctx| {
+                let state = states.ensure::<TiangongState>();
+                if let Err(err) = state.delete_active_session() {
+                    state.run = RunSnapshot {
+                        status: RunStatus::Failed,
+                        summary: "删除会话失败".to_string(),
+                        last_session_id: state.run.last_session_id.clone(),
+                        last_task_id: state.run.last_task_id.clone(),
+                        last_duration_ms: state.run.last_duration_ms,
+                        last_result: state.run.last_result.clone(),
+                        last_plan: state.run.last_plan.clone(),
+                        last_tool_result: state.run.last_tool_result.clone(),
+                        last_error: Some(err.to_string()),
+                        last_usage: state.run.last_usage.clone(),
+                        updated_at: now_text(),
+                    };
+                }
+            })
+            .mount(tree, handlers);
+
+        let session_actions = Container::new(vec![
+            session_title_input,
+            save_session_title_btn,
+            delete_session_btn,
+        ])
+        .class("session_actions")
+        .mount(tree, handlers);
+
         let mut message_children = Vec::new();
-        if active_messages.is_empty() {
+        let visible_messages = active_messages.iter().collect::<Vec<_>>();
+        if visible_messages.is_empty() {
             let empty_title = Text::new("开始一个新对话")
                 .class("message_empty_title")
                 .mount(tree, handlers);
@@ -174,37 +270,33 @@ impl Component for TiangongApp {
                     .mount(tree, handlers),
             );
         } else {
-            for msg in &active_messages {
-                let role_label = match msg.role {
-                    MessageRole::System => "系统",
-                    MessageRole::User => "你",
-                    MessageRole::Assistant => "天工",
-                };
-
+            for msg in visible_messages {
                 let row_class = match msg.role {
                     MessageRole::System => "message_row_system",
-                    MessageRole::User => "message_row_user",
                     MessageRole::Assistant => "message_row_assistant",
+                    MessageRole::User => "message_row_user",
+                };
+                let content_class = match msg.role {
+                    MessageRole::System => "message_content_system",
+                    MessageRole::Assistant => "message_content_assistant",
+                    MessageRole::User => "message_content_user",
+                };
+                let block_class = match msg.role {
+                    MessageRole::System => "message_block_system",
+                    MessageRole::Assistant => "message_block_assistant",
+                    MessageRole::User => "message_block_user",
                 };
 
-                let bubble_class = match msg.role {
-                    MessageRole::System => "message_bubble_system",
-                    MessageRole::User => "message_bubble_user",
-                    MessageRole::Assistant => "message_bubble_assistant",
-                };
-
-                let role = Text::new(role_label)
-                    .class("message_role")
-                    .mount(tree, handlers);
                 let content = Text::new(msg.content.clone())
                     .class("message_content")
+                    .class(content_class)
                     .mount(tree, handlers);
-                let bubble = Container::new(vec![role, content])
-                    .class("message_bubble")
-                    .class(bubble_class)
+                let block = Container::new(vec![content])
+                    .class("message_block")
+                    .class(block_class)
                     .mount(tree, handlers);
                 message_children.push(
-                    Container::new(vec![bubble])
+                    Container::new(vec![block])
                         .class("message_row")
                         .class(row_class)
                         .mount(tree, handlers),
@@ -229,7 +321,23 @@ impl Component for TiangongApp {
             .on_submit(|states, sctx| {
                 let state = states.ensure::<TiangongState>();
                 state.update_draft(sctx.value);
-                let _ = state.send_current_input();
+                if let Err(err) = state.send_current_input() {
+                    state.run = RunSnapshot {
+                        status: RunStatus::Failed,
+                        summary: "发送失败".to_string(),
+                        last_session_id: state.run.last_session_id.clone(),
+                        last_task_id: state.run.last_task_id.clone(),
+                        last_duration_ms: state.run.last_duration_ms,
+                        last_result: state.run.last_result.clone(),
+                        last_plan: state.run.last_plan.clone(),
+                        last_tool_result: state.run.last_tool_result.clone(),
+                        last_error: Some(err.to_string()),
+                        last_usage: state.run.last_usage.clone(),
+                        updated_at: now_text(),
+                    };
+                }
+                let windows = states.ensure::<WindowStateManager>();
+                windows.request_redraw(sctx.app_ctx.window_id);
             })
             .mount(tree, handlers, cx);
 
@@ -270,6 +378,10 @@ impl Component for TiangongApp {
                     state.run = RunSnapshot {
                         status: RunStatus::Failed,
                         summary: "模型切换失败".to_string(),
+                        last_session_id: state.run.last_session_id.clone(),
+                        last_task_id: state.run.last_task_id.clone(),
+                        last_duration_ms: state.run.last_duration_ms,
+                        last_result: state.run.last_result.clone(),
                         last_plan: state.run.last_plan.clone(),
                         last_tool_result: state.run.last_tool_result.clone(),
                         last_error: Some(err.to_string()),
@@ -290,9 +402,26 @@ impl Component for TiangongApp {
         let send_button = Button::new("发送")
             .widget_id(self.send_btn)
             .class("send_btn")
-            .disabled(draft.trim().is_empty())
-            .on_click(|states: &mut StateMap, _ctx| {
-                let _ = states.ensure::<TiangongState>().send_current_input();
+            .disabled(draft.trim().is_empty() || has_pending_turn)
+            .on_click(|states: &mut StateMap, ctx| {
+                let state = states.ensure::<TiangongState>();
+                if let Err(err) = state.send_current_input() {
+                    state.run = RunSnapshot {
+                        status: RunStatus::Failed,
+                        summary: "发送失败".to_string(),
+                        last_session_id: state.run.last_session_id.clone(),
+                        last_task_id: state.run.last_task_id.clone(),
+                        last_duration_ms: state.run.last_duration_ms,
+                        last_result: state.run.last_result.clone(),
+                        last_plan: state.run.last_plan.clone(),
+                        last_tool_result: state.run.last_tool_result.clone(),
+                        last_error: Some(err.to_string()),
+                        last_usage: state.run.last_usage.clone(),
+                        updated_at: now_text(),
+                    };
+                }
+                let windows = states.ensure::<WindowStateManager>();
+                windows.request_redraw(ctx.app_ctx.window_id);
             })
             .mount(tree, handlers);
 
@@ -311,9 +440,14 @@ impl Component for TiangongApp {
             .class("conversation")
             .mount(tree, handlers);
 
-        let main_panel = Container::new(vec![top_bar, conversation_node, run_status_node])
-            .class("main_panel")
-            .mount(tree, handlers);
+        let main_panel = Container::new(vec![
+            top_bar,
+            session_actions,
+            conversation_node,
+            run_status_node,
+        ])
+        .class("main_panel")
+        .mount(tree, handlers);
 
         let root = Container::new(vec![sidebar_node, main_panel])
             .size(Dimension::Percent(1.0), Dimension::Percent(1.0))
@@ -321,6 +455,11 @@ impl Component for TiangongApp {
             .mount(tree, handlers);
 
         tree.root_mut().children.push(root);
+
+        if has_pending_turn {
+            let windows = states.ensure::<WindowStateManager>();
+            windows.request_redraw(cx.window_id);
+        }
     }
 }
 
@@ -484,6 +623,10 @@ impl Component for ProviderSettingsWindow {
                         state.run = RunSnapshot {
                             status: RunStatus::Idle,
                             summary: format!("模型列表已更新：{count} 项"),
+                            last_session_id: state.run.last_session_id.clone(),
+                            last_task_id: state.run.last_task_id.clone(),
+                            last_duration_ms: state.run.last_duration_ms,
+                            last_result: state.run.last_result.clone(),
                             last_plan: state.run.last_plan.clone(),
                             last_tool_result: state.run.last_tool_result.clone(),
                             last_error: None,
@@ -495,6 +638,10 @@ impl Component for ProviderSettingsWindow {
                         state.run = RunSnapshot {
                             status: RunStatus::Failed,
                             summary: "更新模型列表失败".to_string(),
+                            last_session_id: state.run.last_session_id.clone(),
+                            last_task_id: state.run.last_task_id.clone(),
+                            last_duration_ms: state.run.last_duration_ms,
+                            last_result: state.run.last_result.clone(),
                             last_plan: state.run.last_plan.clone(),
                             last_tool_result: state.run.last_tool_result.clone(),
                             last_error: Some(err.to_string()),
@@ -567,6 +714,10 @@ impl Component for ProviderSettingsWindow {
                         state.run = RunSnapshot {
                             status: RunStatus::Failed,
                             summary: "模型配置保存失败".to_string(),
+                            last_session_id: state.run.last_session_id.clone(),
+                            last_task_id: state.run.last_task_id.clone(),
+                            last_duration_ms: state.run.last_duration_ms,
+                            last_result: state.run.last_result.clone(),
                             last_plan: state.run.last_plan.clone(),
                             last_tool_result: state.run.last_tool_result.clone(),
                             last_error: Some(err.to_string()),
@@ -646,6 +797,38 @@ fn build_run_status_node(
             .class("status_summary")
             .mount(tree, handlers),
     ];
+
+    if let Some(session_id) = &run.last_session_id {
+        children.push(
+            Text::new(format!("会话ID：{session_id}"))
+                .class("status_summary")
+                .mount(tree, handlers),
+        );
+    }
+
+    if let Some(task_id) = &run.last_task_id {
+        children.push(
+            Text::new(format!("任务ID：{task_id}"))
+                .class("status_summary")
+                .mount(tree, handlers),
+        );
+    }
+
+    if let Some(duration_ms) = run.last_duration_ms {
+        children.push(
+            Text::new(format!("耗时：{duration_ms}ms"))
+                .class("status_summary")
+                .mount(tree, handlers),
+        );
+    }
+
+    if let Some(result) = &run.last_result {
+        children.push(
+            Text::new(format!("结果：{result}"))
+                .class("status_summary")
+                .mount(tree, handlers),
+        );
+    }
 
     if let Some(plan) = &run.last_plan {
         children.push(

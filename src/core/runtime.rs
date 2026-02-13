@@ -6,7 +6,7 @@ use crate::core::model::{
 };
 use crate::core::planner::{TaskPlan, build_minimal_plan};
 use crate::core::session::{Session, now_text};
-use crate::core::tool::{PlaceholderToolExecutor, ToolCall, ToolExecutor, ToolName};
+use crate::core::tool::{LocalToolExecutor, ToolCall, ToolExecutor, ToolName};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -22,6 +22,10 @@ pub enum RunStatus {
 pub struct RunSnapshot {
     pub status: RunStatus,
     pub summary: String,
+    pub last_session_id: Option<String>,
+    pub last_task_id: Option<String>,
+    pub last_duration_ms: Option<u64>,
+    pub last_result: Option<String>,
     pub last_plan: Option<String>,
     pub last_tool_result: Option<String>,
     pub last_error: Option<String>,
@@ -34,6 +38,10 @@ impl Default for RunSnapshot {
         Self {
             status: RunStatus::Idle,
             summary: "系统就绪".to_string(),
+            last_session_id: None,
+            last_task_id: None,
+            last_duration_ms: None,
+            last_result: None,
             last_plan: None,
             last_tool_result: None,
             last_error: None,
@@ -48,13 +56,15 @@ pub struct TurnExecution {
     pub assistant_message: String,
     pub plan: TaskPlan,
     pub tool_result_summary: Option<String>,
+    pub output_mode: String,
+    pub output_chunk_count: usize,
     pub usage: TokenUsage,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RuntimeEngine {
     client: SingleProviderClient,
-    tool_executor: PlaceholderToolExecutor,
+    tool_executor: LocalToolExecutor,
     context_limit: usize,
 }
 
@@ -62,7 +72,7 @@ impl RuntimeEngine {
     pub fn new(client: SingleProviderClient, context_limit: usize) -> Self {
         Self {
             client,
-            tool_executor: PlaceholderToolExecutor,
+            tool_executor: LocalToolExecutor,
             context_limit,
         }
     }
@@ -76,7 +86,15 @@ impl RuntimeEngine {
         )
     }
 
-    pub fn execute_turn(&self, session: &Session, user_input: &str) -> Result<TurnExecution> {
+    pub fn execute_turn_with_streaming<F>(
+        &self,
+        session: &Session,
+        user_input: &str,
+        mut on_chunk: F,
+    ) -> Result<TurnExecution>
+    where
+        F: FnMut(&str),
+    {
         let plan = build_minimal_plan(user_input);
         let context = session.recent_messages(self.context_limit);
         let tool_result_summary = self.maybe_execute_tool(user_input)?;
@@ -91,12 +109,35 @@ impl RuntimeEngine {
             context,
         };
 
-        let ModelResponse { text, usage } = self.client.complete(&req)?;
+        let ModelResponse {
+            text,
+            usage,
+            output_mode,
+            output_chunk_count,
+        } = if use_stream_mode() {
+            match self
+                .client
+                .complete_stream_with_callback(&req, |delta| on_chunk(delta))
+            {
+                Ok(resp) => resp,
+                Err(_) => {
+                    let resp = self.client.complete(&req)?;
+                    on_chunk(&resp.text);
+                    resp
+                }
+            }
+        } else {
+            let resp = self.client.complete(&req)?;
+            on_chunk(&resp.text);
+            resp
+        };
 
         Ok(TurnExecution {
             assistant_message: text,
             plan,
             tool_result_summary,
+            output_mode,
+            output_chunk_count,
             usage,
         })
     }
@@ -132,5 +173,15 @@ impl RuntimeEngine {
 
     pub fn fallback_error_message(err: &anyhow::Error) -> String {
         format!("执行失败：{err}")
+    }
+}
+
+fn use_stream_mode() -> bool {
+    match std::env::var("API_STREAM") {
+        Ok(raw) => {
+            let normalized = raw.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "0" | "false" | "off" | "no")
+        }
+        Err(_) => true,
     }
 }

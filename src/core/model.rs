@@ -8,6 +8,7 @@ use async_openai::types::{
     ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
     CreateChatCompletionRequestArgs,
 };
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::time::timeout;
@@ -32,6 +33,8 @@ pub struct ModelRequest {
 pub struct ModelResponse {
     pub text: String,
     pub usage: TokenUsage,
+    pub output_mode: String,
+    pub output_chunk_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +127,92 @@ impl SingleProviderClient {
         models.dedup();
         Ok(models)
     }
+
+    pub fn complete_stream_with_callback<F>(
+        &self,
+        req: &ModelRequest,
+        mut on_delta: F,
+    ) -> Result<ModelResponse>
+    where
+        F: FnMut(&str),
+    {
+        let token = self.cfg.api_auth_token.trim();
+        if token.is_empty() {
+            return Err(anyhow!("API_AUTH_TOKEN 不能为空，无法发起流式模型请求"));
+        }
+
+        let timeout_ms = parse_timeout_ms(&self.cfg.api_timeout_ms)?;
+        let model = self.cfg.api_model.trim();
+        if model.is_empty() {
+            return Err(anyhow!("API_MODEL 不能为空，无法发起流式模型请求"));
+        }
+
+        let api_base = normalize_api_base(&self.cfg.api_base_url)?;
+        let messages = build_openai_messages(req)?;
+        let mut request = CreateChatCompletionRequestArgs::default()
+            .model(model.to_string())
+            .messages(messages)
+            .temperature(default_temperature())
+            .max_tokens(default_max_tokens())
+            .build()
+            .context("构建 OpenAI 流式请求失败")?;
+        request.stream = Some(true);
+
+        let config = OpenAIConfig::new()
+            .with_api_key(token.to_string())
+            .with_api_base(api_base);
+        let client = Client::with_config(config);
+
+        let runtime = TokioRuntimeBuilder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("初始化异步运行时失败")?;
+
+        let response = runtime.block_on(async {
+            timeout(Duration::from_millis(timeout_ms), async {
+                let mut stream = client.chat().create_stream(request).await?;
+                let mut text = String::new();
+                let mut chunks = 0usize;
+
+                while let Some(item) = stream.next().await {
+                    let event = item?;
+                    for choice in event.choices {
+                        if let Some(delta) = choice.delta.content
+                            && !delta.is_empty()
+                        {
+                            on_delta(&delta);
+                            text.push_str(&delta);
+                            chunks += 1;
+                        }
+                    }
+                }
+
+                Ok::<(String, usize), async_openai::error::OpenAIError>((text, chunks))
+            })
+            .await
+        });
+
+        let (text, chunks) = match response {
+            Ok(Ok(payload)) => payload,
+            Ok(Err(err)) => {
+                let hint = build_sdk_error_hint(&err.to_string());
+                return Err(anyhow!("OpenAI SDK 流式请求失败：{err}{hint}"));
+            }
+            Err(_) => return Err(anyhow!("流式模型请求超时：{timeout_ms}ms")),
+        };
+
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return Err(anyhow!("流式模型响应缺少文本内容"));
+        }
+
+        Ok(ModelResponse {
+            text,
+            usage: TokenUsage::default(),
+            output_mode: "stream".to_string(),
+            output_chunk_count: chunks.max(1),
+        })
+    }
 }
 
 impl ModelClient for SingleProviderClient {
@@ -153,13 +242,14 @@ impl ModelClient for SingleProviderClient {
 
         let api_base = normalize_api_base(&self.cfg.api_base_url)?;
         let messages = build_openai_messages(req)?;
-        let request = CreateChatCompletionRequestArgs::default()
+        let mut request = CreateChatCompletionRequestArgs::default()
             .model(model.to_string())
             .messages(messages)
             .temperature(default_temperature())
             .max_tokens(default_max_tokens())
             .build()
             .context("构建 OpenAI 请求失败")?;
+        request.stream = Some(false);
 
         let config = OpenAIConfig::new()
             .with_api_key(token.to_string())
@@ -209,6 +299,8 @@ impl ModelClient for SingleProviderClient {
                 completion_tokens,
                 total_tokens,
             },
+            output_mode: "non-stream".to_string(),
+            output_chunk_count: 1,
         })
     }
 }

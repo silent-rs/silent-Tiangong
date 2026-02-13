@@ -3405,6 +3405,7 @@ dependencies = [
  "anyhow",
  "async-openai",
  "chrono",
+ "futures-util",
  "hetu",
  "scru128",
  "serde",

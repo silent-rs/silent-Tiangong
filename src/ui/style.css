@@ -3,12 +3,14 @@ Container.app_root {
   flex-direction: row;
   width: 100%;
   height: 100%;
+  overflow: hidden;
   background-color: #202123;
 }
 
 Container.sidebar {
   display: flex;
   flex-direction: column;
+  flex-shrink: 0;
   width: 276px;
   min-height: 0px;
   padding: 14px;
@@ -37,6 +39,7 @@ Text.sidebar_subtitle {
 Text.sidebar_provider {
   font-size: 12px;
   color: #9ca3af;
+  overflow-wrap: break-word;
 }
 
 Container.session_section {
@@ -44,7 +47,9 @@ Container.session_section {
   flex-direction: column;
   flex-grow: 1;
   min-height: 0px;
-  overflow: auto;
+  min-width: 0px;
+  overflow-y: auto;
+  overflow-x: hidden;
   gap: 8px;
 }
 
@@ -83,6 +88,8 @@ Container.main_panel {
   flex-direction: column;
   flex-grow: 1;
   min-height: 0px;
+  min-width: 0px;
+  overflow: hidden;
   padding: 14px;
   gap: 12px;
   background-color: #202123;
@@ -94,6 +101,8 @@ Container.top_bar {
   align-items: center;
   gap: 10px;
   min-height: 56px;
+  min-width: 0px;
+  flex-shrink: 0;
   padding: 0px 4px;
 }
 
@@ -101,6 +110,7 @@ Container.main_heading {
   display: flex;
   flex-direction: column;
   flex-grow: 1;
+  min-width: 0px;
   gap: 2px;
 }
 
@@ -119,14 +129,22 @@ Container.top_actions {
   display: flex;
   flex-direction: row;
   align-items: center;
+  min-width: 0px;
+  flex-shrink: 1;
   gap: 10px;
 }
 
 Text.model_pill {
+  display: inline-block;
+  min-width: 0px;
+  max-width: 520px;
   font-size: 12px;
   color: #d1d5db;
   background-color: #2c2d2f;
   padding: 6px 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 Button.top_settings_btn {
@@ -136,75 +154,128 @@ Button.top_settings_btn {
   color: #f3f4f6;
 }
 
+Container.session_actions {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  min-width: 0px;
+  flex-shrink: 0;
+  gap: 8px;
+  padding: 0px 4px;
+}
+
+Input.session_title_input {
+  flex-grow: 1;
+  min-height: 34px;
+}
+
+Button.session_title_save_btn {
+  min-width: 88px;
+  min-height: 34px;
+  background-color: #10a37f;
+  color: #ffffff;
+}
+
+Button.session_delete_btn {
+  min-width: 88px;
+  min-height: 34px;
+  background-color: #7f1d1d;
+  color: #ffffff;
+}
+
 Container.conversation {
   display: flex;
   flex-direction: column;
   flex-grow: 1;
   min-height: 0px;
-  padding: 14px;
-  border-radius: 12px;
-  background-color: #2b2c2f;
-  gap: 12px;
+  min-width: 0px;
+  overflow: hidden;
+  padding: 0px;
+  border-radius: 0px;
+  background-color: transparent;
+  gap: 8px;
 }
 
 Container.message_row {
   display: flex;
   flex-direction: row;
-}
-
-Container.message_row_user {
-  justify-content: flex-end;
+  width: 100%;
+  min-width: 0px;
+  justify-content: flex-start;
+  padding: 0px 12px;
 }
 
 Container.message_row_assistant {
   justify-content: flex-start;
 }
 
+Container.message_row_user {
+  justify-content: flex-end;
+}
+
 Container.message_row_system {
   justify-content: flex-start;
 }
 
-Container.message_bubble {
+Container.message_block {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  padding: 10px 12px;
-  border-radius: 10px;
+  min-width: 0px;
+  max-width: 100%;
 }
 
-Container.message_bubble_user {
-  background-color: #1f6feb;
+Container.message_block_assistant {
+  max-width: 100%;
 }
 
-Container.message_bubble_assistant {
-  background-color: #3a3b3f;
+Container.message_block_user {
+  max-width: 62%;
 }
 
-Container.message_bubble_system {
-  background-color: #4b1f1f;
-}
-
-Text.message_role {
-  font-size: 11px;
-  color: #cbd5e1;
-  font-weight: 600;
+Container.message_block_system {
+  max-width: 100%;
 }
 
 Container.message_list {
   display: flex;
   flex-direction: column;
   flex-grow: 1;
+  flex-shrink: 1;
   min-height: 0px;
-  padding: 4px;
-  border-radius: 8px;
-  background-color: #2b2c2f;
-  overflow: auto;
-  gap: 10px;
+  min-width: 0px;
+  padding: 6px 0px 10px 0px;
+  border-radius: 0px;
+  background-color: transparent;
+  overflow-y: auto;
+  overflow-x: hidden;
+  gap: 14px;
 }
 
 Text.message_content {
-  font-size: 15px;
+  display: block;
+  min-width: 0px;
+  max-width: 100%;
+  white-space: pre-wrap;
+  font-size: 16px;
+  line-height: 1.75;
   color: #f3f4f6;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+Text.message_content_assistant {
+  color: #ececec;
+}
+
+Text.message_content_user {
+  max-width: 100%;
+  text-align: left;
+  color: #f3f4f6;
+}
+
+Text.message_content_system {
+  color: #f87171;
+  font-size: 14px;
 }
 
 Container.message_empty {
@@ -231,6 +302,8 @@ Container.composer {
   display: flex;
   flex-direction: column;
   align-items: stretch;
+  flex-shrink: 0;
+  min-width: 0px;
   gap: 8px;
 }
 
@@ -238,6 +311,7 @@ Container.composer_model_row {
   display: flex;
   flex-direction: row;
   align-items: center;
+  min-width: 0px;
   gap: 10px;
 }
 
@@ -251,11 +325,13 @@ Container.composer_input_row {
   display: flex;
   flex-direction: row;
   align-items: center;
+  min-width: 0px;
   gap: 10px;
 }
 
 Container.composer_model_row Select.select {
   flex-grow: 1;
+  min-width: 0px;
 }
 
 Container.composer_model_row SelectTrigger.select__trigger {
@@ -271,11 +347,14 @@ Container.composer_model_row SelectArrow.select__arrow {
 }
 
 Input.composer_input {
+  flex-grow: 1;
+  min-width: 0px;
   min-height: 42px;
 }
 
 Button.send_btn {
   min-width: 96px;
+  flex-shrink: 0;
   min-height: 42px;
   background-color: #10a37f;
   color: #ffffff;
@@ -284,6 +363,8 @@ Button.send_btn {
 Container.status_panel {
   display: flex;
   flex-direction: column;
+  flex-shrink: 0;
+  min-width: 0px;
   padding: 10px 12px;
   border-radius: 8px;
   background-color: #303136;
@@ -303,6 +384,8 @@ Text.status_usage,
 Text.status_time {
   font-size: 12px;
   color: #cbd5e1;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 Text.status_error {
