@@ -1,6 +1,8 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::core::agent_config::AgentConfig;
+use crate::core::mcp::collect_mcp_context;
 use crate::core::model::{
     ModelClient, ModelRequest, ModelResponse, SingleProviderClient, TokenUsage,
 };
@@ -69,14 +71,20 @@ pub struct RuntimeEngine {
     client: SingleProviderClient,
     tool_executor: LocalToolExecutor,
     context_limit: usize,
+    agent_config: AgentConfig,
 }
 
 impl RuntimeEngine {
-    pub fn new(client: SingleProviderClient, context_limit: usize) -> Self {
+    pub fn new(
+        client: SingleProviderClient,
+        context_limit: usize,
+        agent_config: AgentConfig,
+    ) -> Self {
         Self {
             client,
             tool_executor: LocalToolExecutor,
             context_limit,
+            agent_config,
         }
     }
 
@@ -98,16 +106,24 @@ impl RuntimeEngine {
     where
         F: FnMut(&str),
     {
-        let plan = build_minimal_plan(user_input);
+        let plan = build_minimal_plan(user_input, &self.agent_config);
         let context = session.recent_messages(self.context_limit);
         let tool_result = self.maybe_execute_tool(user_input)?;
         let tool_result_summary = tool_result.as_ref().map(format_tool_result_for_display);
-        let prompt =
-            if let Some(summary) = tool_result.as_ref().map(|result| result.summary.clone()) {
-                format!("{user_input}\n\n工具预执行摘要：{summary}")
-            } else {
-                user_input.to_string()
-            };
+        let mcp_context = collect_mcp_context(user_input, &self.agent_config.mcp);
+        let mut prompt = user_input.to_string();
+        if let Some(summary) = tool_result.as_ref().map(|result| result.summary.clone()) {
+            prompt.push_str(&format!("\n\n工具预执行摘要：{summary}"));
+        }
+        if !mcp_context.is_empty() {
+            prompt.push_str("\n\nMCP上下文：\n");
+            for item in &mcp_context {
+                prompt.push_str("- ");
+                prompt.push_str(item);
+                prompt.push('\n');
+            }
+        }
+
         let req = ModelRequest {
             session_title: session.title.clone(),
             user_input: prompt,
@@ -151,12 +167,25 @@ impl RuntimeEngine {
     fn maybe_execute_tool(&self, user_input: &str) -> Result<Option<ToolResult>> {
         if !(user_input.contains("目录")
             || user_input.contains("文件")
-            || user_input.contains("命令"))
+            || user_input.contains("命令")
+            || user_input.contains("搜索")
+            || user_input.contains("查找")
+            || user_input.contains("grep")
+            || user_input.contains("rg"))
         {
             return Ok(None);
         }
 
-        let call = if user_input.contains("目录") {
+        let call = if user_input.contains("搜索")
+            || user_input.contains("查找")
+            || user_input.contains("grep")
+            || user_input.contains("rg")
+        {
+            ToolCall {
+                name: ToolName::SearchCode,
+                args: vec![infer_search_pattern(user_input), ".".to_string()],
+            }
+        } else if user_input.contains("目录") {
             ToolCall {
                 name: ToolName::ListDir,
                 args: vec![".".to_string()],
@@ -200,5 +229,36 @@ fn format_tool_result_for_display(result: &ToolResult) -> String {
         )
     } else {
         result.summary.clone()
+    }
+}
+
+fn infer_search_pattern(user_input: &str) -> String {
+    if let Some(pattern) = extract_between(user_input, '"', '"') {
+        return pattern;
+    }
+    if let Some(pattern) = extract_between(user_input, '“', '”') {
+        return pattern;
+    }
+    if let Some(pattern) = extract_between(user_input, '`', '`') {
+        return pattern;
+    }
+    if user_input.contains("TODO") {
+        return "TODO".to_string();
+    }
+    if user_input.contains("FIXME") {
+        return "FIXME".to_string();
+    }
+    "main".to_string()
+}
+
+fn extract_between(input: &str, start: char, end: char) -> Option<String> {
+    let start_pos = input.find(start)?;
+    let tail = input.get(start_pos + start.len_utf8()..)?;
+    let end_rel = tail.find(end)?;
+    let value = tail.get(..end_rel)?.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
     }
 }

@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+use crate::core::agent_config::AgentConfig;
+use crate::core::mcp::build_mcp_hints;
+use crate::core::skills::build_skill_hints;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanStep {
     pub id: String,
@@ -15,9 +19,11 @@ pub struct TaskPlan {
     pub steps: Vec<PlanStep>,
     pub risks: Vec<String>,
     pub verify_commands: Vec<String>,
+    pub skill_hints: Vec<String>,
+    pub mcp_hints: Vec<String>,
 }
 
-pub fn build_minimal_plan(user_input: &str) -> TaskPlan {
+pub fn build_minimal_plan(user_input: &str, agent_config: &AgentConfig) -> TaskPlan {
     let has_tool_intent =
         user_input.contains("读取") || user_input.contains("文件") || user_input.contains("目录");
     let has_command_intent = user_input.contains("命令");
@@ -62,6 +68,9 @@ pub fn build_minimal_plan(user_input: &str) -> TaskPlan {
         vec!["无".to_string()]
     };
 
+    let skill_hints = build_skill_hints(user_input, &agent_config.skills);
+    let mcp_hints = build_mcp_hints(user_input, &agent_config.mcp);
+
     TaskPlan {
         id: new_id(),
         objective,
@@ -69,6 +78,8 @@ pub fn build_minimal_plan(user_input: &str) -> TaskPlan {
         steps: vec![step],
         risks,
         verify_commands,
+        skill_hints,
+        mcp_hints,
     }
 }
 

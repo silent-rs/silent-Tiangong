@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::Instant;
@@ -9,6 +10,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
+use crate::core::agent_config::AgentConfig;
 use crate::core::model::{ModelProviderConfig, SingleProviderClient};
 use crate::core::planner::TaskPlan;
 use crate::core::runtime::{RunSnapshot, RunStatus, RuntimeEngine, TurnExecution};
@@ -28,6 +30,8 @@ struct PersistedAppState {
     model_config: Option<ModelProviderConfig>,
     #[serde(default)]
     model_list: Vec<String>,
+    #[serde(default)]
+    agent_config: Option<AgentConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -46,6 +50,7 @@ struct LoadedState {
     active_session_id: String,
     model_config: Option<ModelProviderConfig>,
     model_list: Vec<String>,
+    agent_config: Option<AgentConfig>,
 }
 
 #[derive(Debug)]
@@ -69,6 +74,7 @@ pub struct TiangongState {
     sessions: Vec<Session>,
     active_session_id: String,
     model_config: ModelProviderConfig,
+    agent_config: AgentConfig,
     session_title_draft: String,
     settings_api_auth_token_draft: String,
     settings_api_base_url_draft: String,
@@ -94,15 +100,18 @@ impl TiangongState {
         let app_storage_path = default_app_storage_path();
         let sessions_dir_path = default_sessions_dir_path();
         let default_model_config = ModelProviderConfig::from_env();
+        let default_agent_config = AgentConfig::default();
         let runtime = RuntimeEngine::new(
             SingleProviderClient::new(default_model_config.clone()),
             DEFAULT_CONTEXT_LIMIT,
+            default_agent_config.clone(),
         );
 
         let mut state = Self {
             sessions: Vec::new(),
             active_session_id: String::new(),
             model_config: default_model_config.clone(),
+            agent_config: default_agent_config,
             session_title_draft: DEFAULT_SESSION_TITLE.to_string(),
             settings_api_auth_token_draft: default_model_config.api_auth_token.clone(),
             settings_api_base_url_draft: default_model_config.api_base_url.clone(),
@@ -166,11 +175,15 @@ impl TiangongState {
         self.sessions = loaded.sessions;
         self.active_session_id = loaded.active_session_id;
         self.settings_model_list = loaded.model_list;
+        if let Some(agent_config) = loaded.agent_config {
+            self.agent_config = agent_config;
+        }
         if let Some(model_config) = loaded.model_config {
             self.model_config = model_config;
             self.runtime = RuntimeEngine::new(
                 SingleProviderClient::new(self.model_config.clone()),
                 DEFAULT_CONTEXT_LIMIT,
+                self.agent_config.clone(),
             );
         }
     }
@@ -349,6 +362,89 @@ impl TiangongState {
         &self.model_config.api_model
     }
 
+    pub fn agent_config_summary(&self) -> String {
+        format!(
+            "skills.enabled={}, skills.max_matches={}, skills.dirs={}, mcp.enabled={}, mcp.timeout_ms={}, mcp.servers={}",
+            self.agent_config.skills.enabled,
+            self.agent_config.skills.max_matches,
+            self.agent_config.skills.dirs.len(),
+            self.agent_config.mcp.enabled,
+            self.agent_config.mcp.timeout_ms,
+            self.agent_config.mcp.servers.len()
+        )
+    }
+
+    pub fn validate_agent_config(&self) -> Result<()> {
+        validate_agent_config(&self.agent_config)
+    }
+
+    pub fn update_agent_config_entry(&mut self, key: &str, value: &str) -> Result<String> {
+        let key = key.trim();
+        let value = value.trim();
+
+        if key.is_empty() {
+            return Err(anyhow!("配置键不能为空"));
+        }
+
+        let updated_value = match key {
+            "skills.enabled" => {
+                let parsed = parse_bool(value)?;
+                self.agent_config.skills.enabled = parsed;
+                parsed.to_string()
+            }
+            "skills.max_matches" => {
+                let parsed = value
+                    .parse::<usize>()
+                    .with_context(|| format!("配置值无效，要求正整数：{value}"))?;
+                if parsed == 0 {
+                    return Err(anyhow!("skills.max_matches 必须大于 0"));
+                }
+                self.agent_config.skills.max_matches = parsed;
+                parsed.to_string()
+            }
+            "skills.dirs" => {
+                let parsed = parse_list_value(value);
+                self.agent_config.skills.dirs = parsed.clone();
+                if parsed.is_empty() {
+                    "(empty)".to_string()
+                } else {
+                    parsed.join(",")
+                }
+            }
+            "mcp.enabled" => {
+                let parsed = parse_bool(value)?;
+                self.agent_config.mcp.enabled = parsed;
+                parsed.to_string()
+            }
+            "mcp.timeout_ms" => {
+                let parsed = value
+                    .parse::<u64>()
+                    .with_context(|| format!("配置值无效，要求正整数：{value}"))?;
+                if parsed == 0 {
+                    return Err(anyhow!("mcp.timeout_ms 必须大于 0"));
+                }
+                self.agent_config.mcp.timeout_ms = parsed;
+                parsed.to_string()
+            }
+            _ => {
+                return Err(anyhow!(
+                    "不支持的配置键：{key}。支持：skills.enabled、skills.max_matches、skills.dirs、mcp.enabled、mcp.timeout_ms"
+                ));
+            }
+        };
+
+        validate_agent_config(&self.agent_config)?;
+
+        self.runtime = RuntimeEngine::new(
+            SingleProviderClient::new(self.model_config.clone()),
+            DEFAULT_CONTEXT_LIMIT,
+            self.agent_config.clone(),
+        );
+        self.persist_app_only()?;
+
+        Ok(format!("配置已更新：{key}={updated_value}"))
+    }
+
     pub fn select_model(&mut self, model: &str) -> Result<()> {
         let api_model = model.trim();
         if api_model.is_empty() {
@@ -364,6 +460,7 @@ impl TiangongState {
         self.runtime = RuntimeEngine::new(
             SingleProviderClient::new(self.model_config.clone()),
             DEFAULT_CONTEXT_LIMIT,
+            self.agent_config.clone(),
         );
         self.run = RunSnapshot {
             status: RunStatus::Idle,
@@ -471,6 +568,7 @@ impl TiangongState {
         self.runtime = RuntimeEngine::new(
             SingleProviderClient::new(self.model_config.clone()),
             DEFAULT_CONTEXT_LIMIT,
+            self.agent_config.clone(),
         );
         self.run = RunSnapshot {
             status: RunStatus::Idle,
@@ -632,8 +730,17 @@ impl TiangongState {
             session.append_message(MessageRole::Assistant, exec.assistant_message.clone());
         }
 
+        let base_result = format!(
+            "success; output_mode={}; chunks={}",
+            exec.output_mode, exec.output_chunk_count
+        );
+        let turn_conclusion = build_turn_conclusion(&exec);
         let tool_result_text =
             merge_tool_result_text(exec.tool_result_summary, exec.tool_execution.as_ref());
+        let result_with_workspace = match workspace_change_overview() {
+            Some(overview) => format!("{base_result}; {overview}; {turn_conclusion}"),
+            None => format!("{base_result}; {turn_conclusion}"),
+        };
 
         self.run = RunSnapshot {
             status: RunStatus::Completed,
@@ -641,10 +748,7 @@ impl TiangongState {
             last_session_id: Some(session_id.clone()),
             last_task_id: Some(task_id),
             last_duration_ms: Some(elapsed_ms_u64(started_at.elapsed().as_millis())),
-            last_result: Some(format!(
-                "success; output_mode={}; chunks={}",
-                exec.output_mode, exec.output_chunk_count
-            )),
+            last_result: Some(result_with_workspace),
             last_plan: Some(format_plan_snapshot(&exec.plan)),
             last_tool_result: tool_result_text,
             last_error: None,
@@ -774,6 +878,7 @@ impl TiangongState {
                 .collect(),
             model_config: Some(self.model_config.clone()),
             model_list: self.settings_model_list.clone(),
+            agent_config: Some(self.agent_config.clone()),
         };
         let content = serde_json::to_string_pretty(&payload).context("序列化应用存储失败")?;
         fs::write(&self.app_storage_path, content)
@@ -823,6 +928,7 @@ impl TiangongState {
                 active_session_id: session_ids.first().cloned().unwrap_or_default(),
                 model_config: None,
                 model_list: Vec::new(),
+                agent_config: None,
             }));
         }
 
@@ -848,6 +954,7 @@ impl TiangongState {
             active_session_id: persisted.active_session_id,
             model_config: persisted.model_config,
             model_list: persisted.model_list,
+            agent_config: persisted.agent_config,
         }))
     }
 
@@ -867,6 +974,7 @@ impl TiangongState {
             active_session_id: persisted.active_session_id,
             model_config: persisted.model_config,
             model_list: persisted.model_list,
+            agent_config: None,
         }))
     }
 
@@ -964,6 +1072,7 @@ impl TiangongState {
                 .collect(),
             model_config: Some(self.model_config.clone()),
             model_list: self.settings_model_list.clone(),
+            agent_config: Some(self.agent_config.clone()),
         };
         let content = serde_json::to_string_pretty(&payload).context("序列化应用存储失败")?;
         fs::write(&self.app_storage_path, content)
@@ -1100,14 +1209,136 @@ fn format_plan_snapshot(plan: &TaskPlan) -> String {
     } else {
         plan.verify_commands.join("；")
     };
+    let skill_hints = if plan.skill_hints.is_empty() {
+        "无".to_string()
+    } else {
+        plan.skill_hints.join("；")
+    };
+    let mcp_hints = if plan.mcp_hints.is_empty() {
+        "无".to_string()
+    } else {
+        plan.mcp_hints.join("；")
+    };
 
     format!(
-        "{}\n目标：{}\n步骤数：{}\n风险：{}\n验证命令：{}",
+        "{}\n目标：{}\n步骤数：{}\n风险：{}\n验证命令：{}\nSkills：{}\nMCP：{}",
         plan.summary,
         plan.objective,
         plan.steps.len(),
         risks,
-        verify_commands
+        verify_commands,
+        skill_hints,
+        mcp_hints
+    )
+}
+
+fn workspace_change_overview() -> Option<String> {
+    let status_output = Command::new("git")
+        .arg("status")
+        .arg("--short")
+        .output()
+        .ok()?;
+    if !status_output.status.success() {
+        return None;
+    }
+    let status_text = String::from_utf8_lossy(&status_output.stdout);
+    let mut files = Vec::new();
+    for line in status_text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let path = trimmed
+            .split_whitespace()
+            .last()
+            .unwrap_or(trimmed)
+            .to_string();
+        files.push(path);
+    }
+    if files.is_empty() {
+        return Some("changed_files=0".to_string());
+    }
+
+    let preview_limit = 6usize;
+    let preview = files
+        .iter()
+        .take(preview_limit)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(",");
+    let extra = files.len().saturating_sub(preview_limit);
+    let file_part = if extra == 0 {
+        format!("changed_files={},files={preview}", files.len())
+    } else {
+        format!(
+            "changed_files={},files={}...(+{})",
+            files.len(),
+            preview,
+            extra
+        )
+    };
+
+    let diff_output = Command::new("git")
+        .arg("diff")
+        .arg("--stat")
+        .output()
+        .ok()?;
+    if !diff_output.status.success() {
+        return Some(file_part);
+    }
+    let diff_text = String::from_utf8_lossy(&diff_output.stdout);
+    let mut stat_summary = String::new();
+    for line in diff_text.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.contains("files changed")
+            || trimmed.contains("file changed")
+            || trimmed.contains("insertions")
+            || trimmed.contains("deletions")
+        {
+            stat_summary = trimmed.to_string();
+            break;
+        }
+    }
+
+    if stat_summary.is_empty() {
+        Some(file_part)
+    } else {
+        Some(format!("{file_part}; diff={stat_summary}"))
+    }
+}
+
+fn build_turn_conclusion(exec: &TurnExecution) -> String {
+    let mut completed = vec!["计划生成".to_string(), "模型响应".to_string()];
+    if let Some(tool_execution) = &exec.tool_execution {
+        completed.push(format!("工具执行({})", tool_execution.tool_name));
+    }
+
+    let pending = {
+        let commands = exec
+            .plan
+            .verify_commands
+            .iter()
+            .filter(|cmd| cmd.as_str() != "无")
+            .cloned()
+            .collect::<Vec<_>>();
+        if commands.is_empty() {
+            "人工复核输出结果".to_string()
+        } else {
+            format!("执行验证命令：{}", commands.join("；"))
+        }
+    };
+
+    let risks = if exec.plan.risks.is_empty() {
+        "无".to_string()
+    } else {
+        exec.plan.risks.join("；")
+    };
+
+    format!(
+        "结论=完成:{} | 未完成:{} | 风险:{}",
+        completed.join("、"),
+        pending,
+        risks
     )
 }
 
@@ -1129,4 +1360,44 @@ fn normalize_model_list(models: Vec<String>, current_model: &str) -> Vec<String>
         list.push(model.to_string());
     }
     list
+}
+
+fn validate_agent_config(config: &AgentConfig) -> Result<()> {
+    if config.skills.max_matches == 0 {
+        return Err(anyhow!("skills.max_matches 必须大于 0"));
+    }
+    if config.mcp.timeout_ms == 0 {
+        return Err(anyhow!("mcp.timeout_ms 必须大于 0"));
+    }
+    if let Some(server) = config
+        .mcp
+        .servers
+        .iter()
+        .find(|server| server.name.trim().is_empty())
+    {
+        return Err(anyhow!("mcp.servers 包含空名称配置：{:?}", server));
+    }
+    Ok(())
+}
+
+fn parse_bool(raw: &str) -> Result<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(anyhow!("布尔值无效：{raw}（可用 true/false）")),
+    }
+}
+
+fn parse_list_value(raw: &str) -> Vec<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "[]" || trimmed == "-" {
+        return Vec::new();
+    }
+
+    trimmed
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
 }

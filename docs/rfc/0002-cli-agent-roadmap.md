@@ -1,6 +1,6 @@
 # RFC 0002：天工 CLI 完整 AI Agent 主线
 
-- 状态：Draft
+- 状态：In Progress（进行中）
 - 日期：2026-02-13
 - 作者：Tiangong 工程组
 - 关联文档：
@@ -36,11 +36,11 @@
 
 ## 4. 产品形态
 
-`tiangong` CLI 应从“chat 模式”升级为“agent 模式”：
+`tiangong` CLI 需要从“chat 模式”升级为“agent 模式能力”：
 
-- `tiangong` 默认进入 Agent 工作流。
-- 支持显式子命令（如 `chat`）作为兼容入口，但主线能力在 Agent 模式内演进。
-- 用户交互焦点从“问答”转为“任务执行”。
+- `tiangong` 默认保持桌面 UI 入口，避免破坏现有使用习惯。
+- Agent 主线能力通过显式子命令进入（`tiangong cli`），并保留 `tiangong chat` 兼容别名。
+- CLI 用户交互焦点从“问答”转为“任务执行”。
 
 ## 5. 核心能力分解
 

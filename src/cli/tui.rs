@@ -258,6 +258,9 @@ impl CliApp {
             _ if command == "/model" || command.starts_with("/model ") => {
                 self.handle_model_command(command)
             }
+            _ if command == "/config" || command.starts_with("/config ") => {
+                self.handle_config_command(command)
+            }
             _ => {
                 self.status_message = "未知命令，输入 /help 查看可用命令".to_string();
                 Ok(())
@@ -288,6 +291,46 @@ impl CliApp {
         });
         self.status_message = "历史会话选择已打开（Esc 关闭）".to_string();
         Ok(())
+    }
+
+    fn handle_config_command(&mut self, command: &str) -> Result<()> {
+        let args = command.trim_start_matches("/config").trim();
+        if args.is_empty() || args == "show" {
+            self.status_message = format!("当前配置：{}", self.state.agent_config_summary());
+            return Ok(());
+        }
+
+        if args == "validate" {
+            self.state.validate_agent_config()?;
+            self.status_message = "配置校验通过".to_string();
+            return Ok(());
+        }
+
+        if let Some(raw_set) = args.strip_prefix("set ") {
+            let raw_set = raw_set.trim();
+            if raw_set.is_empty() {
+                return Err(anyhow!("缺少配置键，示例：/config set skills.enabled true"));
+            }
+
+            let mut parts = raw_set.splitn(2, char::is_whitespace);
+            let key = parts
+                .next()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| anyhow!("缺少配置键"))?;
+            let value = parts
+                .next()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| anyhow!("缺少配置值"))?;
+            let message = self.state.update_agent_config_entry(key, value)?;
+            self.status_message = message;
+            return Ok(());
+        }
+
+        Err(anyhow!(
+            "不支持的 /config 命令。可用：/config show、/config validate、/config set <key> <value>"
+        ))
     }
 
     fn confirm_history_modal_selection(&mut self) -> Result<()> {
@@ -469,9 +512,13 @@ impl CliApp {
         if raw == "/model" || raw.starts_with("/model ") {
             return self.model_command_hints(raw);
         }
+        if raw == "/config" || raw.starts_with("/config ") {
+            return self.config_command_hints(raw);
+        }
 
         let mut hints = vec![
             CommandHint::new("/model", "切换模型或查看可选模型"),
+            CommandHint::new("/config", "查看或更新 Agent 配置"),
             CommandHint::new("/history", "恢复历史会话"),
             CommandHint::new("/new", "新建会话"),
             CommandHint::new("/help", "展示命令提示"),
@@ -486,6 +533,36 @@ impl CliApp {
             hints.push(CommandHint::new_note(
                 "/help",
                 "未命中命令，继续输入后回车直接执行",
+            ));
+        }
+
+        hints
+    }
+
+    fn config_command_hints(&self, raw: &str) -> Vec<CommandHint> {
+        let mut hints = vec![
+            CommandHint::new("/config show", "查看当前 Agent 配置摘要"),
+            CommandHint::new("/config validate", "校验当前 Agent 配置"),
+            CommandHint::new("/config set skills.enabled true", "开启或关闭 skills 功能"),
+            CommandHint::new(
+                "/config set skills.max_matches 3",
+                "设置 skills 最大匹配数量",
+            ),
+            CommandHint::new(
+                "/config set skills.dirs /path/a,/path/b",
+                "设置 skills 目录列表（逗号分隔）",
+            ),
+            CommandHint::new("/config set mcp.enabled true", "开启或关闭 mcp 功能"),
+            CommandHint::new("/config set mcp.timeout_ms 15000", "设置 mcp 超时（毫秒）"),
+        ];
+
+        if raw != "/config" {
+            hints.retain(|hint| hint.command.starts_with(raw));
+        }
+        if hints.is_empty() {
+            hints.push(CommandHint::new_note(
+                "/config set <key> <value>",
+                "支持键：skills.enabled、skills.max_matches、skills.dirs、mcp.enabled、mcp.timeout_ms",
             ));
         }
 
