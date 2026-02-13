@@ -6,7 +6,9 @@ use crate::core::model::{
 };
 use crate::core::planner::{TaskPlan, build_minimal_plan};
 use crate::core::session::{Session, now_text};
-use crate::core::tool::{LocalToolExecutor, ToolCall, ToolExecutor, ToolName};
+use crate::core::tool::{
+    LocalToolExecutor, ToolCall, ToolExecutionRecord, ToolExecutor, ToolName, ToolResult,
+};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -56,6 +58,7 @@ pub struct TurnExecution {
     pub assistant_message: String,
     pub plan: TaskPlan,
     pub tool_result_summary: Option<String>,
+    pub tool_execution: Option<ToolExecutionRecord>,
     pub output_mode: String,
     pub output_chunk_count: usize,
     pub usage: TokenUsage,
@@ -97,12 +100,14 @@ impl RuntimeEngine {
     {
         let plan = build_minimal_plan(user_input);
         let context = session.recent_messages(self.context_limit);
-        let tool_result_summary = self.maybe_execute_tool(user_input)?;
-        let prompt = if let Some(summary) = &tool_result_summary {
-            format!("{user_input}\n\n工具预执行摘要：{summary}")
-        } else {
-            user_input.to_string()
-        };
+        let tool_result = self.maybe_execute_tool(user_input)?;
+        let tool_result_summary = tool_result.as_ref().map(format_tool_result_for_display);
+        let prompt =
+            if let Some(summary) = tool_result.as_ref().map(|result| result.summary.clone()) {
+                format!("{user_input}\n\n工具预执行摘要：{summary}")
+            } else {
+                user_input.to_string()
+            };
         let req = ModelRequest {
             session_title: session.title.clone(),
             user_input: prompt,
@@ -136,13 +141,14 @@ impl RuntimeEngine {
             assistant_message: text,
             plan,
             tool_result_summary,
+            tool_execution: tool_result.and_then(|result| result.execution),
             output_mode,
             output_chunk_count,
             usage,
         })
     }
 
-    fn maybe_execute_tool(&self, user_input: &str) -> Result<Option<String>> {
+    fn maybe_execute_tool(&self, user_input: &str) -> Result<Option<ToolResult>> {
         if !(user_input.contains("目录")
             || user_input.contains("文件")
             || user_input.contains("命令"))
@@ -168,7 +174,7 @@ impl RuntimeEngine {
         };
 
         let result = self.tool_executor.execute(&call)?;
-        Ok(Some(result.summary))
+        Ok(Some(result))
     }
 
     pub fn fallback_error_message(err: &anyhow::Error) -> String {
@@ -183,5 +189,16 @@ fn use_stream_mode() -> bool {
             !matches!(normalized.as_str(), "0" | "false" | "off" | "no")
         }
         Err(_) => true,
+    }
+}
+
+fn format_tool_result_for_display(result: &ToolResult) -> String {
+    if let Some(record) = &result.execution {
+        format!(
+            "{} | tool={} | exit_code={} | duration={}ms",
+            result.summary, record.tool_name, record.exit_code, record.duration_ms
+        )
+    } else {
+        result.summary.clone()
     }
 }

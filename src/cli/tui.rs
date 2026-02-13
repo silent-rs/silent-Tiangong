@@ -26,7 +26,7 @@ const CONVERSATION_SCROLL_PAGE_STEP: u16 = 16;
 
 type CliTerminal = Terminal<CrosstermBackend<Stdout>>;
 
-pub fn run_chat() -> Result<()> {
+pub fn run_cli() -> Result<()> {
     let mut terminal = init_terminal()?;
     let mut app = CliApp::new();
 

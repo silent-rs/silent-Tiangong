@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -12,10 +13,30 @@ pub enum ToolName {
     RunCommand,
 }
 
+impl ToolName {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ReadFile => "read_file",
+            Self::ListDir => "list_dir",
+            Self::RunCommand => "run_command",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub name: ToolName,
     pub args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolExecutionRecord {
+    pub tool_name: String,
+    pub args: Vec<String>,
+    pub duration_ms: u64,
+    pub ok: bool,
+    pub exit_code: i32,
+    pub summary: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +46,8 @@ pub struct ToolResult {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+    #[serde(default)]
+    pub execution: Option<ToolExecutionRecord>,
 }
 
 pub trait ToolExecutor {
@@ -36,21 +59,44 @@ pub struct LocalToolExecutor;
 
 impl ToolExecutor for LocalToolExecutor {
     fn execute(&self, call: &ToolCall) -> Result<ToolResult> {
+        let started = Instant::now();
         let result = match call.name {
             ToolName::ReadFile => self.read_file(call),
             ToolName::ListDir => self.list_dir(call),
             ToolName::RunCommand => self.run_command(call),
         };
+        let duration_ms = elapsed_ms_u64(started.elapsed().as_millis());
 
         Ok(match result {
-            Ok(ok) => ok,
-            Err(err) => ToolResult {
-                ok: false,
-                summary: format!("工具执行失败：{err}"),
-                stdout: String::new(),
-                stderr: err.to_string(),
-                exit_code: 1,
-            },
+            Ok(mut ok) => {
+                ok.execution = Some(ToolExecutionRecord {
+                    tool_name: call.name.as_str().to_string(),
+                    args: call.args.clone(),
+                    duration_ms,
+                    ok: ok.ok,
+                    exit_code: ok.exit_code,
+                    summary: ok.summary.clone(),
+                });
+                ok
+            }
+            Err(err) => {
+                let summary = format!("工具执行失败：{err}");
+                ToolResult {
+                    ok: false,
+                    summary: summary.clone(),
+                    stdout: String::new(),
+                    stderr: err.to_string(),
+                    exit_code: 1,
+                    execution: Some(ToolExecutionRecord {
+                        tool_name: call.name.as_str().to_string(),
+                        args: call.args.clone(),
+                        duration_ms,
+                        ok: false,
+                        exit_code: 1,
+                        summary,
+                    }),
+                }
+            }
         })
     }
 }
@@ -77,6 +123,7 @@ impl LocalToolExecutor {
             stdout,
             stderr: String::new(),
             exit_code: 0,
+            execution: None,
         })
     }
 
@@ -112,6 +159,7 @@ impl LocalToolExecutor {
             stdout: truncate_output(&items.join("\n")),
             stderr: String::new(),
             exit_code: 0,
+            execution: None,
         })
     }
 
@@ -145,6 +193,7 @@ impl LocalToolExecutor {
             stdout,
             stderr,
             exit_code,
+            execution: None,
         })
     }
 }
@@ -190,6 +239,10 @@ fn display_rel_path(path: &Path) -> String {
 
 fn is_allowed_command(cmd: &str) -> bool {
     matches!(cmd, "echo" | "pwd" | "ls" | "cat" | "head" | "tail" | "wc")
+}
+
+fn elapsed_ms_u64(raw: u128) -> u64 {
+    raw.min(u64::MAX as u128) as u64
 }
 
 fn truncate_output(raw: &str) -> String {

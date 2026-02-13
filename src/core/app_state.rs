@@ -10,8 +10,10 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use crate::core::model::{ModelProviderConfig, SingleProviderClient};
+use crate::core::planner::TaskPlan;
 use crate::core::runtime::{RunSnapshot, RunStatus, RuntimeEngine, TurnExecution};
 use crate::core::session::{Message, MessageRole, Session, now_text};
+use crate::core::tool::ToolExecutionRecord;
 
 const DEFAULT_SESSION_TITLE: &str = "默认会话";
 const DEFAULT_CONTEXT_LIMIT: usize = 16;
@@ -49,7 +51,7 @@ struct LoadedState {
 #[derive(Debug)]
 enum TurnEvent {
     Chunk(String),
-    Completed(TurnExecution),
+    Completed(Box<TurnExecution>),
     Failed(String),
 }
 
@@ -201,7 +203,7 @@ impl TiangongState {
                     self.apply_assistant_delta(&delta);
                 }
                 TurnEvent::Completed(exec) => {
-                    self.finish_pending_turn_success(exec);
+                    self.finish_pending_turn_success(*exec);
                     should_clear = true;
                 }
                 TurnEvent::Failed(err_msg) => {
@@ -551,7 +553,7 @@ impl TiangongState {
 
             match result {
                 Ok(exec) => {
-                    let _ = tx.send(TurnEvent::Completed(exec));
+                    let _ = tx.send(TurnEvent::Completed(Box::new(exec)));
                 }
                 Err(err) => {
                     let _ = tx.send(TurnEvent::Failed(RuntimeEngine::fallback_error_message(
@@ -630,6 +632,9 @@ impl TiangongState {
             session.append_message(MessageRole::Assistant, exec.assistant_message.clone());
         }
 
+        let tool_result_text =
+            merge_tool_result_text(exec.tool_result_summary, exec.tool_execution.as_ref());
+
         self.run = RunSnapshot {
             status: RunStatus::Completed,
             summary: "执行完成".to_string(),
@@ -640,8 +645,8 @@ impl TiangongState {
                 "success; output_mode={}; chunks={}",
                 exec.output_mode, exec.output_chunk_count
             )),
-            last_plan: Some(exec.plan.summary),
-            last_tool_result: exec.tool_result_summary,
+            last_plan: Some(format_plan_snapshot(&exec.plan)),
+            last_tool_result: tool_result_text,
             last_error: None,
             last_usage: Some(exec.usage),
             updated_at: now_text(),
@@ -1061,6 +1066,49 @@ fn new_scru128_string() -> String {
 
 fn elapsed_ms_u64(value: u128) -> u64 {
     value.min(u128::from(u64::MAX)) as u64
+}
+
+fn merge_tool_result_text(
+    base: Option<String>,
+    record: Option<&ToolExecutionRecord>,
+) -> Option<String> {
+    match (base, record) {
+        (Some(base), Some(record)) => Some(format!(
+            "{base} | args={} | ok={}",
+            record.args.join(" "),
+            record.ok
+        )),
+        (Some(base), None) => Some(base),
+        (None, Some(record)) => Some(format!(
+            "{} | args={} | ok={}",
+            record.summary,
+            record.args.join(" "),
+            record.ok
+        )),
+        (None, None) => None,
+    }
+}
+
+fn format_plan_snapshot(plan: &TaskPlan) -> String {
+    let risks = if plan.risks.is_empty() {
+        "无".to_string()
+    } else {
+        plan.risks.join("；")
+    };
+    let verify_commands = if plan.verify_commands.is_empty() {
+        "无".to_string()
+    } else {
+        plan.verify_commands.join("；")
+    };
+
+    format!(
+        "{}\n目标：{}\n步骤数：{}\n风险：{}\n验证命令：{}",
+        plan.summary,
+        plan.objective,
+        plan.steps.len(),
+        risks,
+        verify_commands
+    )
 }
 
 fn normalize_model_list(models: Vec<String>, current_model: &str) -> Vec<String> {

@@ -158,7 +158,10 @@ Silent-Tiangong 不是简单的 ChatGPT 桌面壳。
 # RFC 0002 目标：默认进入 CLI Agent 模式
 tiangong
 
-# 兼容的终端对话模式
+# CLI 模式
+tiangong cli
+
+# 兼容别名
 tiangong chat
 
 # 桌面 UI 模式（RFC 0001 暂停迭代）
