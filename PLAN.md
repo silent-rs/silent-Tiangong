@@ -9,6 +9,11 @@
 - 安全目标：在工具执行与模型调用链路落实最小权限、审计与可追踪。
 - 工程目标：采用小步迭代，按 Phase 分期交付可运行版本。
 
+## 当前执行策略（2026-02-13）
+- 当前主线：`docs/rfc/0002-cli-agent-roadmap.md`
+- 当前目标：优先交付 CLI Agent 主能力闭环，建立工程可用研发入口。
+- 暂停项：`docs/rfc/0001-tiangong-desktop-agent-roadmap.md` 的新功能开发。
+
 ## 里程碑
 
 ### Phase 1（基础能力）
@@ -16,6 +21,7 @@
 - 最小任务执行链路可跑通（输入 -> 规划 -> 执行 -> 反馈）。
 - 工具调用接口具备最小可用实现。
 - 单一远程模型供应商接入可稳定运行。
+- 提供 CLI Agent 可执行闭环（计划 -> 执行 -> 验证 -> 汇报）。
 
 ### Phase 2（任务编排）
 - Task Graph 支持。
@@ -39,4 +45,5 @@
 
 ## 参考文档
 - 项目说明：`README.md`
-- 架构 RFC：`docs/rfc/0001-tiangong-desktop-agent-roadmap.md`
+- RFC 0001：`docs/rfc/0001-tiangong-desktop-agent-roadmap.md`
+- RFC 0002：`docs/rfc/0002-cli-agent-roadmap.md`
