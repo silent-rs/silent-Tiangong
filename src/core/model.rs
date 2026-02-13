@@ -1,15 +1,16 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use async_openai::Client;
+use async_openai::Client as OpenAIClient;
 use async_openai::config::OpenAIConfig;
-use async_openai::types::{
+use async_openai::types::chat::{
     ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
     ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
     CreateChatCompletionRequestArgs,
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::time::timeout;
 
@@ -103,7 +104,7 @@ impl SingleProviderClient {
         let config = OpenAIConfig::new()
             .with_api_key(token.to_string())
             .with_api_base(api_base);
-        let client = Client::with_config(config);
+        let client = OpenAIClient::with_config(config);
         let runtime = TokioRuntimeBuilder::new_current_thread()
             .enable_all()
             .build()
@@ -152,8 +153,7 @@ impl SingleProviderClient {
         let mut request_args_binding = CreateChatCompletionRequestArgs::default();
         let mut request_args = request_args_binding
             .model(model.to_string())
-            .messages(messages)
-            .temperature(default_temperature());
+            .messages(messages);
         if let Some(max_tokens) = configured_max_tokens() {
             request_args = request_args.max_tokens(max_tokens);
         }
@@ -163,7 +163,10 @@ impl SingleProviderClient {
         let config = OpenAIConfig::new()
             .with_api_key(token.to_string())
             .with_api_base(api_base);
-        let client = Client::with_config(config);
+        let client = OpenAIClient::with_config(config);
+        let mut request_json = serde_json::to_value(&request).context("序列化流式请求失败")?;
+        inject_temperature_config(&mut request_json);
+        inject_thinking_config(&mut request_json);
 
         let runtime = TokioRuntimeBuilder::new_current_thread()
             .enable_all()
@@ -172,48 +175,112 @@ impl SingleProviderClient {
 
         let response = runtime.block_on(async {
             timeout(Duration::from_millis(timeout_ms), async {
-                let mut stream = client.chat().create_stream(request).await?;
+                let mut stream = client
+                    .chat()
+                    .create_stream_byot::<_, Value>(request_json)
+                    .await?;
                 let mut text = String::new();
                 let mut chunks = 0usize;
+                let mut has_think_output = false;
+                let mut think_open = false;
 
                 while let Some(item) = stream.next().await {
-                    let event = item?;
-                    for choice in event.choices {
-                        if let Some(delta) = choice.delta.content
-                            && !delta.is_empty()
-                        {
-                            on_delta(&delta);
-                            text.push_str(&delta);
-                            chunks += 1;
+                    let payload = match item {
+                        Ok(payload) => payload,
+                        Err(err) => {
+                            if let async_openai::error::OpenAIError::JSONDeserialize(_, raw) = &err
+                                && should_skip_stream_payload(raw)
+                            {
+                                continue;
+                            }
+                            return Err(err);
+                        }
+                    };
+                    if let Some(choices) = payload.get("choices").and_then(Value::as_array) {
+                        for choice in choices {
+                            let delta = choice.get("delta").unwrap_or(&Value::Null);
+
+                            let think_delta = extract_delta_text(delta, "reasoning_content");
+                            if !think_delta.is_empty() {
+                                has_think_output = true;
+                                if !think_open {
+                                    push_stream_piece(
+                                        "\n[思考]\n",
+                                        &mut on_delta,
+                                        &mut text,
+                                        &mut chunks,
+                                    );
+                                    think_open = true;
+                                }
+                                push_stream_piece(
+                                    &think_delta,
+                                    &mut on_delta,
+                                    &mut text,
+                                    &mut chunks,
+                                );
+                            }
+
+                            let content_delta = extract_delta_text(delta, "content");
+                            if !content_delta.is_empty() {
+                                if think_open {
+                                    push_stream_piece(
+                                        "\n[/思考]\n",
+                                        &mut on_delta,
+                                        &mut text,
+                                        &mut chunks,
+                                    );
+                                    think_open = false;
+                                }
+                                push_stream_piece(
+                                    &content_delta,
+                                    &mut on_delta,
+                                    &mut text,
+                                    &mut chunks,
+                                );
+                            }
                         }
                     }
                 }
 
-                Ok::<(String, usize), async_openai::error::OpenAIError>((text, chunks))
+                if think_open {
+                    push_stream_piece("\n[/思考]\n", &mut on_delta, &mut text, &mut chunks);
+                }
+
+                Ok::<(String, usize, bool), async_openai::error::OpenAIError>((
+                    text,
+                    chunks,
+                    has_think_output,
+                ))
             })
             .await
         });
 
-        let (text, chunks) = match response {
-            Ok(Ok(payload)) => payload,
-            Ok(Err(err)) => {
-                let hint = build_sdk_error_hint(&err.to_string());
-                return Err(anyhow!("OpenAI SDK 流式请求失败：{err}{hint}"));
-            }
-            Err(_) => return Err(anyhow!("流式模型请求超时：{timeout_ms}ms")),
+        let byot_outcome = match response {
+            Ok(Ok(payload)) => Some(payload),
+            Ok(Err(_)) => None,
+            Err(_) => None,
         };
 
-        let text = text.trim().to_string();
-        if text.is_empty() {
-            return Err(anyhow!("流式模型响应缺少文本内容"));
+        if let Some((text, chunks, has_think_output)) = byot_outcome {
+            let text = text.trim().to_string();
+            if !text.is_empty() && chunks > 0 {
+                return Ok(ModelResponse {
+                    text,
+                    usage: TokenUsage::default(),
+                    output_mode: if has_think_output {
+                        "stream-think".to_string()
+                    } else {
+                        "stream".to_string()
+                    },
+                    output_chunk_count: chunks.max(1),
+                });
+            }
         }
 
-        Ok(ModelResponse {
-            text,
-            usage: TokenUsage::default(),
-            output_mode: "stream".to_string(),
-            output_chunk_count: chunks.max(1),
-        })
+        // 当流式 BYOT 路径失败时，转为非流式补偿请求，避免吞掉 reasoning_content。
+        let fallback_resp = self.complete(req)?;
+        on_delta(&fallback_resp.text);
+        Ok(fallback_resp)
     }
 }
 
@@ -247,18 +314,21 @@ impl ModelClient for SingleProviderClient {
         let mut request_args_binding = CreateChatCompletionRequestArgs::default();
         let mut request_args = request_args_binding
             .model(model.to_string())
-            .messages(messages)
-            .temperature(default_temperature());
+            .messages(messages);
         if let Some(max_tokens) = configured_max_tokens() {
             request_args = request_args.max_tokens(max_tokens);
         }
         let mut request = request_args.build().context("构建 OpenAI 请求失败")?;
         request.stream = Some(false);
+        let request_for_fallback = request.clone();
 
         let config = OpenAIConfig::new()
             .with_api_key(token.to_string())
             .with_api_base(api_base);
-        let client = Client::with_config(config);
+        let client = OpenAIClient::with_config(config);
+        let mut request_json = serde_json::to_value(&request).context("序列化请求失败")?;
+        inject_temperature_config(&mut request_json);
+        inject_thinking_config(&mut request_json);
 
         let runtime = TokioRuntimeBuilder::new_current_thread()
             .enable_all()
@@ -268,7 +338,21 @@ impl ModelClient for SingleProviderClient {
         let response = runtime.block_on(async {
             timeout(
                 Duration::from_millis(timeout_ms),
-                client.chat().create(request),
+                client.chat().create_byot::<_, Value>(request_json),
+            )
+            .await
+        });
+
+        if let Ok(Ok(payload)) = response
+            && let Some(resp) = parse_non_stream_byot_response(&payload)
+        {
+            return Ok(resp);
+        }
+
+        let response = runtime.block_on(async {
+            timeout(
+                Duration::from_millis(timeout_ms),
+                client.chat().create(request_for_fallback),
             )
             .await
         });
@@ -393,19 +477,133 @@ fn build_sdk_error_hint(error_text: &str) -> String {
     String::new()
 }
 
+fn extract_delta_text(delta: &Value, field: &str) -> String {
+    let Some(raw) = delta.get(field) else {
+        return String::new();
+    };
+
+    match raw {
+        Value::String(value) => value.clone(),
+        Value::Array(items) => {
+            let mut out = String::new();
+            for item in items {
+                if let Some(value) = item.as_str() {
+                    out.push_str(value);
+                    continue;
+                }
+                if let Some(value) = item.get("text").and_then(Value::as_str) {
+                    out.push_str(value);
+                    continue;
+                }
+                if let Some(value) = item.get("content").and_then(Value::as_str) {
+                    out.push_str(value);
+                }
+            }
+            out
+        }
+        _ => String::new(),
+    }
+}
+
+fn push_stream_piece(
+    piece: &str,
+    on_delta: &mut impl FnMut(&str),
+    text: &mut String,
+    chunks: &mut usize,
+) {
+    if piece.is_empty() {
+        return;
+    }
+    on_delta(piece);
+    text.push_str(piece);
+    *chunks += 1;
+}
+
+fn should_skip_stream_payload(raw: &str) -> bool {
+    let normalized = raw.trim().to_ascii_lowercase();
+    normalized.is_empty()
+        || normalized == "[done]"
+        || normalized == "ping"
+        || normalized == "pong"
+        || normalized.contains("\"event\":\"ping\"")
+}
+
+fn inject_thinking_config(payload: &mut Value) {
+    if !thinking_enabled() {
+        return;
+    }
+
+    let Some(obj) = payload.as_object_mut() else {
+        return;
+    };
+
+    let thinking = serde_json::json!({
+        "type": thinking_type(),
+        "clear_thinking": clear_thinking(),
+    });
+    obj.insert("thinking".to_string(), thinking);
+}
+
+fn thinking_enabled() -> bool {
+    match std::env::var("API_THINKING_ENABLED") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
+        Err(_) => true,
+    }
+}
+
+fn thinking_type() -> String {
+    match std::env::var("API_THINKING_TYPE") {
+        Ok(v) => {
+            let normalized = v.trim().to_ascii_lowercase();
+            if normalized == "disabled" {
+                "disabled".to_string()
+            } else {
+                "enabled".to_string()
+            }
+        }
+        Err(_) => "enabled".to_string(),
+    }
+}
+
+fn clear_thinking() -> bool {
+    match std::env::var("API_CLEAR_THINKING") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
+        Err(_) => true,
+    }
+}
+
+fn inject_temperature_config(payload: &mut Value) {
+    let Some(temp) = configured_temperature_number() else {
+        return;
+    };
+    let Some(obj) = payload.as_object_mut() else {
+        return;
+    };
+    obj.insert("temperature".to_string(), Value::Number(temp));
+}
+
+fn configured_temperature_number() -> Option<serde_json::Number> {
+    let raw = std::env::var("API_TEMPERATURE").unwrap_or_else(|_| "0.2".to_string());
+    let value = raw.trim().parse::<f64>().ok()?;
+    if !(0.0..=2.0).contains(&value) {
+        return None;
+    }
+    let rounded = (value * 100.0).round() / 100.0;
+    serde_json::Number::from_f64(rounded)
+}
+
 fn configured_max_tokens() -> Option<u16> {
     std::env::var("API_MAX_TOKENS")
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
         .and_then(|v| v.parse::<u16>().ok())
-}
-
-fn default_temperature() -> f32 {
-    std::env::var("API_TEMPERATURE")
-        .ok()
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(0.2)
 }
 
 fn default_api_auth_token() -> String {
@@ -422,6 +620,66 @@ fn default_api_timeout_ms() -> String {
 
 fn default_api_model() -> String {
     "gpt-4o-mini".to_string()
+}
+
+fn parse_non_stream_byot_response(payload: &Value) -> Option<ModelResponse> {
+    let choice = payload
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())?;
+    let message = choice.get("message")?;
+
+    let reasoning = extract_delta_text(message, "reasoning_content");
+    let content = extract_delta_text(message, "content");
+    let text = merge_reasoning_and_content(&reasoning, &content);
+    if text.is_empty() {
+        return None;
+    }
+
+    let usage = payload.get("usage");
+    let prompt_tokens = usage
+        .and_then(|v| v.get("prompt_tokens"))
+        .and_then(Value::as_u64)
+        .map(|v| v as usize)
+        .unwrap_or(0);
+    let completion_tokens = usage
+        .and_then(|v| v.get("completion_tokens"))
+        .and_then(Value::as_u64)
+        .map(|v| v as usize)
+        .unwrap_or(0);
+    let total_tokens = usage
+        .and_then(|v| v.get("total_tokens"))
+        .and_then(Value::as_u64)
+        .map(|v| v as usize)
+        .unwrap_or(0);
+
+    Some(ModelResponse {
+        text,
+        usage: TokenUsage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+        },
+        output_mode: if reasoning.trim().is_empty() {
+            "non-stream".to_string()
+        } else {
+            "non-stream-think".to_string()
+        },
+        output_chunk_count: 1,
+    })
+}
+
+fn merge_reasoning_and_content(reasoning: &str, content: &str) -> String {
+    let mut out = String::new();
+    if !reasoning.trim().is_empty() {
+        out.push_str("[思考]\n");
+        out.push_str(reasoning);
+        out.push_str("\n[/思考]\n");
+    }
+    if !content.trim().is_empty() {
+        out.push_str(content);
+    }
+    out.trim().to_string()
 }
 
 fn parse_timeout_ms(raw: &str) -> Result<u64> {

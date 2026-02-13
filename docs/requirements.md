@@ -23,6 +23,8 @@
 - 会话文件名必须使用 `scru128`（如 `<scru128>.json`）。
 - 统一配置结构需覆盖 Model/Skills/MCP/Agent，并支持本地恢复。
 - CLI 必须提供配置入口，至少支持配置查看、更新和校验，并在更新后即时生效。
+- 模型适配需支持 BigModel `thinking` 参数透传，并正确解析/持久化 `reasoning_content`（与正文区分）。
+- `async-openai` 允许暂时使用本地 fork 版本，以承载上述兼容字段能力。
 
 ### Should
 - 计划在执行中可修正，并记录修正原因。

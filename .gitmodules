@@ -1,0 +1,3 @@
+[submodule "deps/async-openai"]
+	path = deps/async-openai
+	url = git@github.com:hubertshelley/async-openai.git
