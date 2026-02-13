@@ -201,6 +201,7 @@ Container.message_row {
   flex-direction: row;
   width: 100%;
   min-width: 0px;
+  flex-shrink: 0;
   justify-content: flex-start;
   padding: 0px 12px;
 }
@@ -221,6 +222,7 @@ Container.message_block {
   display: flex;
   flex-direction: column;
   min-width: 0px;
+  flex-shrink: 0;
   max-width: 100%;
 }
 
@@ -246,6 +248,7 @@ Container.message_list {
   padding: 6px 0px 10px 0px;
   border-radius: 0px;
   background-color: transparent;
+  align-items: stretch;
   overflow-y: auto;
   overflow-x: hidden;
   gap: 14px;
@@ -284,6 +287,7 @@ Container.message_empty {
   align-items: center;
   justify-content: center;
   flex-grow: 1;
+  flex-shrink: 0;
   gap: 6px;
 }
 

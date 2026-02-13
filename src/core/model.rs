@@ -149,13 +149,15 @@ impl SingleProviderClient {
 
         let api_base = normalize_api_base(&self.cfg.api_base_url)?;
         let messages = build_openai_messages(req)?;
-        let mut request = CreateChatCompletionRequestArgs::default()
+        let mut request_args_binding = CreateChatCompletionRequestArgs::default();
+        let mut request_args = request_args_binding
             .model(model.to_string())
             .messages(messages)
-            .temperature(default_temperature())
-            .max_tokens(default_max_tokens())
-            .build()
-            .context("构建 OpenAI 流式请求失败")?;
+            .temperature(default_temperature());
+        if let Some(max_tokens) = configured_max_tokens() {
+            request_args = request_args.max_tokens(max_tokens);
+        }
+        let mut request = request_args.build().context("构建 OpenAI 流式请求失败")?;
         request.stream = Some(true);
 
         let config = OpenAIConfig::new()
@@ -242,13 +244,15 @@ impl ModelClient for SingleProviderClient {
 
         let api_base = normalize_api_base(&self.cfg.api_base_url)?;
         let messages = build_openai_messages(req)?;
-        let mut request = CreateChatCompletionRequestArgs::default()
+        let mut request_args_binding = CreateChatCompletionRequestArgs::default();
+        let mut request_args = request_args_binding
             .model(model.to_string())
             .messages(messages)
-            .temperature(default_temperature())
-            .max_tokens(default_max_tokens())
-            .build()
-            .context("构建 OpenAI 请求失败")?;
+            .temperature(default_temperature());
+        if let Some(max_tokens) = configured_max_tokens() {
+            request_args = request_args.max_tokens(max_tokens);
+        }
+        let mut request = request_args.build().context("构建 OpenAI 请求失败")?;
         request.stream = Some(false);
 
         let config = OpenAIConfig::new()
@@ -389,11 +393,12 @@ fn build_sdk_error_hint(error_text: &str) -> String {
     String::new()
 }
 
-fn default_max_tokens() -> u16 {
+fn configured_max_tokens() -> Option<u16> {
     std::env::var("API_MAX_TOKENS")
         .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
         .and_then(|v| v.parse::<u16>().ok())
-        .unwrap_or(2048)
 }
 
 fn default_temperature() -> f32 {
