@@ -27,6 +27,10 @@ pub fn build_minimal_plan(user_input: &str, agent_config: &AgentConfig) -> TaskP
     let has_tool_intent =
         user_input.contains("读取") || user_input.contains("文件") || user_input.contains("目录");
     let has_command_intent = user_input.contains("命令");
+    let has_code_intent = user_input.contains("代码")
+        || user_input.contains("rust")
+        || user_input.contains("Rust")
+        || user_input.contains(".rs");
 
     let step = if user_input.contains("读取") || user_input.contains("文件") {
         PlanStep {
@@ -62,8 +66,15 @@ pub fn build_minimal_plan(user_input: &str, agent_config: &AgentConfig) -> TaskP
         vec!["上下文信息不足时回答可能不完整".to_string()]
     };
 
-    let verify_commands = if has_command_intent || user_input.contains("代码") {
-        vec!["cargo check --workspace".to_string()]
+    let verify_commands = if has_command_intent || has_code_intent {
+        let mut commands = vec!["cargo check --workspace".to_string()];
+        if user_input.contains("clippy") || user_input.contains("严格") {
+            commands.push(
+                "cargo clippy --workspace --all-targets --tests --benches -- -D warnings"
+                    .to_string(),
+            );
+        }
+        commands
     } else {
         vec!["无".to_string()]
     };

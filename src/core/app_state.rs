@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 use crate::core::agent_config::AgentConfig;
 use crate::core::model::{ModelProviderConfig, SingleProviderClient};
 use crate::core::planner::TaskPlan;
-use crate::core::runtime::{RunSnapshot, RunStatus, RuntimeEngine, TurnExecution};
+use crate::core::runtime::{
+    RunSnapshot, RunStatus, RuntimeEngine, TurnExecution, VerifyExecutionRecord,
+};
 use crate::core::session::{Message, MessageRole, Session, now_text};
 use crate::core::tool::ToolExecutionRecord;
 
@@ -735,11 +737,21 @@ impl TiangongState {
             exec.output_mode, exec.output_chunk_count
         );
         let turn_conclusion = build_turn_conclusion(&exec);
-        let tool_result_text =
-            merge_tool_result_text(exec.tool_result_summary, exec.tool_execution.as_ref());
-        let result_with_workspace = match workspace_change_overview() {
-            Some(overview) => format!("{base_result}; {overview}; {turn_conclusion}"),
-            None => format!("{base_result}; {turn_conclusion}"),
+        let tool_result_text = merge_tool_result_text(
+            exec.tool_result_summary,
+            exec.tool_execution.as_ref(),
+            &exec.verify_records,
+        );
+        let result_with_workspace = match (
+            workspace_change_overview(),
+            summarize_verify_for_result(&exec.verify_records),
+        ) {
+            (Some(overview), Some(verify)) => {
+                format!("{base_result}; {overview}; {verify}; {turn_conclusion}")
+            }
+            (Some(overview), None) => format!("{base_result}; {overview}; {turn_conclusion}"),
+            (None, Some(verify)) => format!("{base_result}; {verify}; {turn_conclusion}"),
+            (None, None) => format!("{base_result}; {turn_conclusion}"),
         };
 
         self.run = RunSnapshot {
@@ -1180,8 +1192,9 @@ fn elapsed_ms_u64(value: u128) -> u64 {
 fn merge_tool_result_text(
     base: Option<String>,
     record: Option<&ToolExecutionRecord>,
+    verify_records: &[VerifyExecutionRecord],
 ) -> Option<String> {
-    match (base, record) {
+    let base_text = match (base, record) {
         (Some(base), Some(record)) => Some(format!(
             "{base} | args={} | ok={}",
             record.args.join(" "),
@@ -1194,6 +1207,14 @@ fn merge_tool_result_text(
             record.args.join(" "),
             record.ok
         )),
+        (None, None) => None,
+    };
+
+    let verify_text = summarize_verify_for_result(verify_records);
+    match (base_text, verify_text) {
+        (Some(base), Some(verify)) => Some(format!("{base} | {verify}")),
+        (Some(base), None) => Some(base),
+        (None, Some(verify)) => Some(verify),
         (None, None) => None,
     }
 }
@@ -1312,20 +1333,32 @@ fn build_turn_conclusion(exec: &TurnExecution) -> String {
     if let Some(tool_execution) = &exec.tool_execution {
         completed.push(format!("工具执行({})", tool_execution.tool_name));
     }
+    let planned_verify_commands = exec
+        .plan
+        .verify_commands
+        .iter()
+        .filter(|cmd| cmd.as_str() != "无")
+        .cloned()
+        .collect::<Vec<_>>();
+    let failed_verify = exec
+        .verify_records
+        .iter()
+        .filter(|record| !record.ok)
+        .collect::<Vec<_>>();
 
-    let pending = {
-        let commands = exec
-            .plan
-            .verify_commands
+    let pending = if planned_verify_commands.is_empty() {
+        "人工复核输出结果".to_string()
+    } else if exec.verify_records.is_empty() {
+        format!("执行验证命令：{}", planned_verify_commands.join("；"))
+    } else if failed_verify.is_empty() {
+        completed.push("验证执行".to_string());
+        "无".to_string()
+    } else {
+        let hints = failed_verify
             .iter()
-            .filter(|cmd| cmd.as_str() != "无")
-            .cloned()
+            .map(|record| format!("{} => {}", record.command, record.summary))
             .collect::<Vec<_>>();
-        if commands.is_empty() {
-            "人工复核输出结果".to_string()
-        } else {
-            format!("执行验证命令：{}", commands.join("；"))
-        }
+        format!("修复验证失败：{}", hints.join("；"))
     };
 
     let risks = if exec.plan.risks.is_empty() {
@@ -1340,6 +1373,53 @@ fn build_turn_conclusion(exec: &TurnExecution) -> String {
         pending,
         risks
     )
+}
+
+fn summarize_verify_for_result(verify_records: &[VerifyExecutionRecord]) -> Option<String> {
+    if verify_records.is_empty() {
+        return None;
+    }
+
+    let passed = verify_records.iter().filter(|record| record.ok).count();
+    let failed = verify_records.len().saturating_sub(passed);
+    let slowest_ms = verify_records
+        .iter()
+        .map(|record| record.duration_ms)
+        .max()
+        .unwrap_or(0);
+    let output_bytes = verify_records
+        .iter()
+        .map(|record| record.stdout.len() + record.stderr.len())
+        .sum::<usize>();
+    let first_failure = verify_records
+        .iter()
+        .find(|record| !record.ok)
+        .map(|record| {
+            let detail = first_non_empty_line(&record.stderr)
+                .or_else(|| first_non_empty_line(&record.stdout))
+                .unwrap_or_else(|| "无".to_string());
+            format!(
+                "; first_failure={} (exit_code={}) detail={}",
+                record.command, record.exit_code, detail
+            )
+        })
+        .unwrap_or_default();
+    Some(format!(
+        "verify_passed={}/{}; verify_failed={}; verify_slowest_ms={}; verify_output_bytes={}{}",
+        passed,
+        verify_records.len(),
+        failed,
+        slowest_ms,
+        output_bytes,
+        first_failure
+    ))
+}
+
+fn first_non_empty_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToString::to_string)
 }
 
 fn normalize_model_list(models: Vec<String>, current_model: &str) -> Vec<String> {

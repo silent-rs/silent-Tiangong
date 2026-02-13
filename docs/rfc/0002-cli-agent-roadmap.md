@@ -39,7 +39,7 @@
 `tiangong` CLI 需要从“chat 模式”升级为“agent 模式能力”：
 
 - `tiangong` 默认保持桌面 UI 入口，避免破坏现有使用习惯。
-- Agent 主线能力通过显式子命令进入（`tiangong cli`），并保留 `tiangong chat` 兼容别名。
+- Agent 主线能力通过显式子命令进入（`tiangong cli`）。
 - CLI 用户交互焦点从“问答”转为“任务执行”。
 
 ## 5. 核心能力分解

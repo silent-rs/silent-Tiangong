@@ -29,7 +29,7 @@
 ### B1 命令入口
 
 - [x] `tiangong` 默认保持进入 UI 模式，不改现有默认入口行为
-- [x] CLI 入口由 `tiangong chat` 调整为 `tiangong cli`（必要时保留兼容别名）
+- [x] CLI 入口固定为 `tiangong cli`
 - [x] 帮助信息覆盖 `tiangong cli` 模式示例
 
 ### B2 计划能力
@@ -68,9 +68,9 @@
 
 ### C1 验证链路
 
-- [ ] 自动推荐验证命令（Rust 优先 `cargo check` / `cargo clippy`）
-- [ ] 执行验证命令并汇总结果
-- [ ] 验证失败时给出可操作错误摘要
+- [x] 自动推荐验证命令（Rust 优先 `cargo check` / `cargo clippy`）
+- [x] 执行验证命令并汇总结果
+- [x] 验证失败时给出可操作错误摘要
 
 ### C2 会话与状态
 
