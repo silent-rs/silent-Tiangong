@@ -20,7 +20,8 @@
   - 命令：受控 `run_command`，且默认强制超时。
 - 工具与文件写入必须限制在工作区边界内，不允许越界访问。
 - 每轮输出需包含改动文件概览、差异摘要与执行结论（完成/未完成/风险）。
-- 会话数据本地持久化到 `.tiangong/sessions/`，应用配置持久化到 `.tiangong/app.json`。
+- 会话数据本地持久化到用户目录（Unix: `~/.tiangong/sessions/`，Windows: `%USERPROFILE%\\.tiangong\\sessions\\`），应用配置持久化到对应的 `app.json`。
+- MVP 阶段运行时不自动迁移项目目录内旧 `.tiangong/` 数据。
 - 会话文件名必须使用 `scru128`（如 `<scru128>.json`）。
 - 统一配置结构需覆盖 Model/Skills/MCP/Agent，并支持本地恢复。
 - CLI 必须提供配置入口，至少支持配置查看、更新和校验，并在更新后即时生效。

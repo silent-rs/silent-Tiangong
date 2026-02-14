@@ -76,11 +76,12 @@
 
 ### C2 会话与状态
 
-- [ ] 任务状态机统一：`planning` / `executing` / `completed` / `failed`
-- [ ] 支持任务中断与恢复（最小可用）
-- [ ] 会话持久化写入任务级元数据
+- [x] 任务状态机统一：`planning` / `executing` / `completed` / `failed`
+- [x] 支持任务中断与恢复（最小可用）
+- [x] 会话持久化写入任务级元数据
 - [x] 会话索引改为扫描 `.tiangong/sessions/` 目录，不在 `app.json` 冗余 `session_ids`
 - [x] `active_session_id` 对应会话不存在时自动回退至第一个可用会话
+- [x] `.tiangong` 存储迁移到用户目录（Unix: `~/.tiangong`，Windows: `%USERPROFILE%\\.tiangong`），MVP 阶段不兼容旧项目目录存储（运行时不自动迁移）
 
 ### C3 非交互模式
 
@@ -107,6 +108,6 @@
 
 ### D2 安全与审计
 
-- [ ] 强化工作区边界检查
+- [x] 强化工作区边界检查
 - [ ] 高风险命令拦截/确认策略
 - [ ] 审计日志落盘（命令、改动、时间、结果）

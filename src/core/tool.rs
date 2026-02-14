@@ -184,6 +184,7 @@ impl LocalToolExecutor {
         if !is_allowed_command(cmd) {
             return Err(anyhow!("不允许执行命令：{cmd}"));
         }
+        validate_command_args_in_allowed_roots(cmd, &call.args[1..])?;
 
         let timeout_ms = command_timeout_ms();
         let (output, timed_out) = execute_command_with_timeout(
@@ -423,23 +424,44 @@ fn workspace_root() -> Result<PathBuf> {
     std::env::current_dir().context("读取当前工作目录失败")
 }
 
+fn allowed_roots() -> Result<Vec<PathBuf>> {
+    let workspace = workspace_root()?;
+    let workspace_canonical = workspace
+        .canonicalize()
+        .with_context(|| format!("解析工作目录失败：{}", workspace.display()))?;
+    let temp = std::env::temp_dir();
+    let temp_canonical = temp.canonicalize().unwrap_or(temp);
+
+    let mut roots = vec![workspace_canonical];
+    if !roots.iter().any(|root| root == &temp_canonical) {
+        roots.push(temp_canonical);
+    }
+    Ok(roots)
+}
+
 fn resolve_workspace_path(raw: &str) -> Result<PathBuf> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err(anyhow!("路径参数不能为空"));
     }
+    if raw.starts_with('~') {
+        return Err(anyhow!(
+            "不允许使用 home 路径：{raw}；仅允许当前目录与临时目录"
+        ));
+    }
 
     let root = workspace_root()?;
-    let root_canonical = root
-        .canonicalize()
-        .with_context(|| format!("解析工作目录失败：{}", root.display()))?;
-    let candidate = root.join(raw);
+    let candidate = resolve_path_candidate(raw, &root);
     let canonical = candidate
         .canonicalize()
         .with_context(|| format!("解析路径失败：{}", candidate.display()))?;
+    let roots = allowed_roots()?;
 
-    if !canonical.starts_with(&root_canonical) {
-        return Err(anyhow!("路径越界，超出工作目录：{}", canonical.display()));
+    if !is_path_in_allowed_roots(&canonical, &roots) {
+        return Err(anyhow!(
+            "路径越界，仅允许当前目录或临时目录：{}",
+            canonical.display()
+        ));
     }
     Ok(canonical)
 }
@@ -449,12 +471,14 @@ fn resolve_workspace_write_path(raw: &str) -> Result<PathBuf> {
     if raw.is_empty() {
         return Err(anyhow!("路径参数不能为空"));
     }
+    if raw.starts_with('~') {
+        return Err(anyhow!(
+            "不允许使用 home 路径：{raw}；仅允许当前目录与临时目录"
+        ));
+    }
 
     let root = workspace_root()?;
-    let root_canonical = root
-        .canonicalize()
-        .with_context(|| format!("解析工作目录失败：{}", root.display()))?;
-    let candidate = root.join(raw);
+    let candidate = resolve_path_candidate(raw, &root);
     let mut anchor = candidate
         .parent()
         .map(Path::to_path_buf)
@@ -468,11 +492,109 @@ fn resolve_workspace_write_path(raw: &str) -> Result<PathBuf> {
     let parent_canonical = anchor
         .canonicalize()
         .with_context(|| format!("解析目标目录失败：{}", anchor.display()))?;
+    let roots = allowed_roots()?;
 
-    if !parent_canonical.starts_with(&root_canonical) {
-        return Err(anyhow!("路径越界，超出工作目录：{}", candidate.display()));
+    if !is_path_in_allowed_roots(&parent_canonical, &roots) {
+        return Err(anyhow!(
+            "路径越界，仅允许当前目录或临时目录：{}",
+            candidate.display()
+        ));
     }
     Ok(candidate)
+}
+
+fn resolve_path_candidate(raw: &str, workspace: &Path) -> PathBuf {
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        path
+    } else {
+        workspace.join(path)
+    }
+}
+
+fn is_path_in_allowed_roots(path: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| path.starts_with(root))
+}
+
+fn validate_command_args_in_allowed_roots(cmd: &str, args: &[String]) -> Result<()> {
+    if matches!(cmd, "echo" | "pwd") {
+        return Ok(());
+    }
+
+    let workspace = workspace_root()?;
+    let roots = allowed_roots()?;
+    let mut skip_next_value = false;
+    for arg in args {
+        let raw = arg.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        if skip_next_value {
+            skip_next_value = false;
+            continue;
+        }
+        if raw.starts_with('-') {
+            skip_next_value = option_requires_value(cmd, raw);
+            continue;
+        }
+        if !argument_may_be_path(cmd, raw) {
+            continue;
+        }
+        ensure_command_arg_path_allowed(raw, &workspace, &roots)?;
+    }
+    Ok(())
+}
+
+fn option_requires_value(cmd: &str, option: &str) -> bool {
+    match cmd {
+        "head" | "tail" => matches!(option, "-n" | "--lines" | "-c" | "--bytes"),
+        _ => false,
+    }
+}
+
+fn argument_may_be_path(cmd: &str, raw: &str) -> bool {
+    match cmd {
+        "ls" | "cat" | "wc" => true,
+        "head" | "tail" => !raw
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || ch == '+' || ch == '-'),
+        _ => false,
+    }
+}
+
+fn ensure_command_arg_path_allowed(raw: &str, workspace: &Path, roots: &[PathBuf]) -> Result<()> {
+    if raw.starts_with('~') {
+        return Err(anyhow!(
+            "命令参数路径不允许使用 home 目录：{raw}；仅允许当前目录与临时目录"
+        ));
+    }
+
+    let candidate = resolve_path_candidate(raw, workspace);
+    let anchor = if candidate.exists() {
+        candidate
+    } else {
+        let mut parent = candidate
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| anyhow!("命令参数路径非法，无法解析父目录：{}", candidate.display()))?;
+        while !parent.exists() {
+            parent = parent.parent().map(Path::to_path_buf).ok_or_else(|| {
+                anyhow!("命令参数路径非法，无法解析父目录：{}", candidate.display())
+            })?;
+        }
+        parent
+    };
+
+    let canonical = anchor
+        .canonicalize()
+        .with_context(|| format!("解析命令参数路径失败：{}", anchor.display()))?;
+    if !is_path_in_allowed_roots(&canonical, roots) {
+        return Err(anyhow!(
+            "命令参数路径越界，仅允许当前目录或临时目录：{}",
+            raw
+        ));
+    }
+    Ok(())
 }
 
 fn write_temp_patch_file(patch: &str) -> Result<PathBuf> {

@@ -114,16 +114,19 @@ impl RuntimeEngine {
         )
     }
 
-    pub fn execute_turn_with_streaming<F>(
+    pub fn execute_turn_with_streaming<F, P>(
         &self,
         session: &Session,
         user_input: &str,
+        mut on_plan_ready: P,
         mut on_chunk: F,
     ) -> Result<TurnExecution>
     where
+        P: FnMut(&TaskPlan),
         F: FnMut(&ModelStreamChunk),
     {
         let plan = build_minimal_plan(user_input, &self.agent_config);
+        on_plan_ready(&plan);
         let context = session.recent_messages(self.context_limit);
         let tool_result = self.maybe_execute_tool(user_input)?;
         let tool_result_summary = tool_result.as_ref().map(format_tool_result_for_display);

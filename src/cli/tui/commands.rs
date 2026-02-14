@@ -66,6 +66,14 @@ impl CliApp {
                 self.follow_conversation_bottom = true;
                 Ok(())
             }
+            "/cancel" => {
+                if self.state.cancel_pending_turn()? {
+                    self.status_message = "已取消当前任务".to_string();
+                } else {
+                    self.status_message = "当前没有可取消的任务".to_string();
+                }
+                Ok(())
+            }
             _ if command == "/history" || command.starts_with("/history ") => {
                 self.handle_history_command(command)
             }
@@ -306,6 +314,7 @@ impl CliApp {
         }
 
         let mut hints = vec![
+            CommandHint::new("/cancel", "取消当前执行中的任务"),
             CommandHint::new("/model", "切换模型或查看可选模型"),
             CommandHint::new("/config", "查看或更新 Agent 配置"),
             CommandHint::new("/history", "恢复历史会话"),

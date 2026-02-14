@@ -4,14 +4,17 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use super::super::CliApp;
+use crate::core::runtime::RunStatus;
 
 impl CliApp {
     pub(in crate::cli::tui) fn render_status_panel(&self, frame: &mut ratatui::Frame, area: Rect) {
         let title = self.active_session_title_for_view().to_string();
-        let status_text = if self.state.has_pending_turn() {
-            "请求中"
-        } else {
-            "空闲"
+        let status_text = match self.state.run.status {
+            RunStatus::Idle => "空闲",
+            RunStatus::Planning => "planning",
+            RunStatus::Executing => "executing",
+            RunStatus::Completed => "completed",
+            RunStatus::Failed => "failed",
         };
         let header_lines = vec![
             Line::from(vec![

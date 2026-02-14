@@ -403,7 +403,11 @@ impl ModelClient for SingleProviderClient {
 
 fn build_openai_messages(req: &ModelRequest) -> Result<Vec<ChatCompletionRequestMessage>> {
     let mut messages = Vec::new();
-    let mut system_texts = vec![format!("当前会话：{}", req.session_title)];
+    let mut system_texts = vec![
+        format!("当前会话：{}", req.session_title),
+        format!("当前工作目录：{}", current_working_directory_text()),
+        format!("允许文件操作目录：{}", allowed_file_roots_text()),
+    ];
 
     for msg in &req.context {
         match msg.role {
@@ -451,6 +455,18 @@ fn build_openai_messages(req: &ModelRequest) -> Result<Vec<ChatCompletionRequest
     );
 
     Ok(messages)
+}
+
+fn current_working_directory_text() -> String {
+    std::env::current_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| ".".to_string())
+}
+
+fn allowed_file_roots_text() -> String {
+    let workspace = current_working_directory_text();
+    let temp = std::env::temp_dir().display().to_string();
+    format!("{workspace}；{temp}")
 }
 
 fn normalize_api_base(base_url: &str) -> Result<String> {
