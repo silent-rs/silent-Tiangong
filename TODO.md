@@ -23,9 +23,9 @@
 - [x] 新增 `src/cli/` 目录，承载 CLI 的 TUI 代码拆分（渲染、输入、事件循环）
 - [x] `src/cli/` 仅放界面与交互适配，不放智能体业务逻辑
 - [x] TUI 组件拆分：状态、对话框、输入框、历史对话、模型选择独立组件化
-- [ ] 智能体实现统一沉淀在 `src/core/`（Planner/Runtime/Tool/Session 等）
-- [ ] 提供 Core 层复用接口，确保 CLI 与 UI 共用同一套智能体执行链路
-- [ ] 清理 CLI 内部与 Core 重复实现，避免两套逻辑分叉
+- [x] 智能体实现统一沉淀在 `src/core/`（Planner/Runtime/Tool/Session 等）
+- [x] 提供 Core 层复用接口，确保 CLI 与 UI 共用同一套智能体执行链路
+- [x] 清理 CLI 内部与 Core 重复实现，避免两套逻辑分叉
 
 ### B1 命令入口
 

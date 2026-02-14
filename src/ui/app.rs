@@ -2,8 +2,6 @@ use components::{Button, Container, Input, Text};
 use hetu::prelude::*;
 
 use crate::core::app_state::TiangongState;
-use crate::core::runtime::{RunSnapshot, RunStatus};
-use crate::core::session::now_text;
 use crate::ui::components::conversation::{
     ConversationData, ConversationIds, build_conversation_panel,
 };
@@ -296,34 +294,10 @@ impl Component for ProviderSettingsWindow {
                 let state = states.ensure::<TiangongState>();
                 match refresh_result {
                     Ok(count) => {
-                        state.run = RunSnapshot {
-                            status: RunStatus::Idle,
-                            summary: format!("模型列表已更新：{count} 项"),
-                            last_session_id: state.run.last_session_id.clone(),
-                            last_task_id: state.run.last_task_id.clone(),
-                            last_duration_ms: state.run.last_duration_ms,
-                            last_result: state.run.last_result.clone(),
-                            last_plan: state.run.last_plan.clone(),
-                            last_tool_result: state.run.last_tool_result.clone(),
-                            last_error: None,
-                            last_usage: state.run.last_usage.clone(),
-                            updated_at: now_text(),
-                        };
+                        state.report_run_idle(format!("模型列表已更新：{count} 项"));
                     }
                     Err(err) => {
-                        state.run = RunSnapshot {
-                            status: RunStatus::Failed,
-                            summary: "更新模型列表失败".to_string(),
-                            last_session_id: state.run.last_session_id.clone(),
-                            last_task_id: state.run.last_task_id.clone(),
-                            last_duration_ms: state.run.last_duration_ms,
-                            last_result: state.run.last_result.clone(),
-                            last_plan: state.run.last_plan.clone(),
-                            last_tool_result: state.run.last_tool_result.clone(),
-                            last_error: Some(err.to_string()),
-                            last_usage: state.run.last_usage.clone(),
-                            updated_at: now_text(),
-                        };
+                        state.report_run_failed("更新模型列表失败", err.to_string());
                     }
                 }
 
@@ -387,19 +361,7 @@ impl Component for ProviderSettingsWindow {
                     }
                     Err(err) => {
                         let state = states.ensure::<TiangongState>();
-                        state.run = RunSnapshot {
-                            status: RunStatus::Failed,
-                            summary: "模型配置保存失败".to_string(),
-                            last_session_id: state.run.last_session_id.clone(),
-                            last_task_id: state.run.last_task_id.clone(),
-                            last_duration_ms: state.run.last_duration_ms,
-                            last_result: state.run.last_result.clone(),
-                            last_plan: state.run.last_plan.clone(),
-                            last_tool_result: state.run.last_tool_result.clone(),
-                            last_error: Some(err.to_string()),
-                            last_usage: state.run.last_usage.clone(),
-                            updated_at: now_text(),
-                        };
+                        state.report_run_failed("模型配置保存失败", err.to_string());
                         let windows = states.ensure::<WindowStateManager>();
                         if let Some(main_id) = windows.find_window("main") {
                             windows.request_redraw(main_id);

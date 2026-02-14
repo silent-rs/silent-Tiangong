@@ -215,6 +215,38 @@ impl TiangongState {
         self.pending_turn.is_some()
     }
 
+    pub fn report_run_failed(&mut self, summary: impl Into<String>, error: impl Into<String>) {
+        self.run = RunSnapshot {
+            status: RunStatus::Failed,
+            summary: summary.into(),
+            last_session_id: self.run.last_session_id.clone(),
+            last_task_id: self.run.last_task_id.clone(),
+            last_duration_ms: self.run.last_duration_ms,
+            last_result: self.run.last_result.clone(),
+            last_plan: self.run.last_plan.clone(),
+            last_tool_result: self.run.last_tool_result.clone(),
+            last_error: Some(error.into()),
+            last_usage: self.run.last_usage.clone(),
+            updated_at: now_text(),
+        };
+    }
+
+    pub fn report_run_idle(&mut self, summary: impl Into<String>) {
+        self.run = RunSnapshot {
+            status: RunStatus::Idle,
+            summary: summary.into(),
+            last_session_id: self.run.last_session_id.clone(),
+            last_task_id: self.run.last_task_id.clone(),
+            last_duration_ms: self.run.last_duration_ms,
+            last_result: self.run.last_result.clone(),
+            last_plan: self.run.last_plan.clone(),
+            last_tool_result: self.run.last_tool_result.clone(),
+            last_error: None,
+            last_usage: self.run.last_usage.clone(),
+            updated_at: now_text(),
+        };
+    }
+
     pub fn cancel_pending_turn(&mut self) -> Result<bool> {
         let Some(pending) = self.pending_turn.take() else {
             return Ok(false);

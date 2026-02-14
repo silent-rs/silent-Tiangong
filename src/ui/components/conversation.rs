@@ -3,7 +3,7 @@ use hetu::prelude::*;
 
 use crate::core::app_state::TiangongState;
 use crate::core::runtime::{RunSnapshot, RunStatus};
-use crate::core::session::{Message, MessageRole, now_text};
+use crate::core::session::{Message, MessageRole};
 use crate::ui::components::composer::{ComposerData, ComposerIds, build_composer};
 
 #[derive(Debug, Clone)]
@@ -80,7 +80,7 @@ pub(crate) fn build_conversation_panel(
             let state = states.ensure::<TiangongState>();
             state.update_session_title_draft(sctx.value);
             if let Err(err) = state.save_active_session_title() {
-                set_run_failed(state, "会话重命名失败", err.to_string());
+                state.report_run_failed("会话重命名失败", err.to_string());
             }
         })
         .mount(tree, handlers, cx);
@@ -92,7 +92,7 @@ pub(crate) fn build_conversation_panel(
         .on_click(|states: &mut StateMap, _ctx| {
             let state = states.ensure::<TiangongState>();
             if let Err(err) = state.save_active_session_title() {
-                set_run_failed(state, "会话重命名失败", err.to_string());
+                state.report_run_failed("会话重命名失败", err.to_string());
             }
         })
         .mount(tree, handlers);
@@ -103,7 +103,7 @@ pub(crate) fn build_conversation_panel(
         .on_click(|states: &mut StateMap, _ctx| {
             let state = states.ensure::<TiangongState>();
             if let Err(err) = state.delete_active_session() {
-                set_run_failed(state, "删除会话失败", err.to_string());
+                state.report_run_failed("删除会话失败", err.to_string());
             }
         })
         .mount(tree, handlers);
@@ -234,22 +234,6 @@ fn build_message_content_nodes(
             .class(content_class)
             .mount(tree, handlers),
     ]
-}
-
-fn set_run_failed(state: &mut TiangongState, summary: &str, error: String) {
-    state.run = RunSnapshot {
-        status: RunStatus::Failed,
-        summary: summary.to_string(),
-        last_session_id: state.run.last_session_id.clone(),
-        last_task_id: state.run.last_task_id.clone(),
-        last_duration_ms: state.run.last_duration_ms,
-        last_result: state.run.last_result.clone(),
-        last_plan: state.run.last_plan.clone(),
-        last_tool_result: state.run.last_tool_result.clone(),
-        last_error: Some(error),
-        last_usage: state.run.last_usage.clone(),
-        updated_at: now_text(),
-    };
 }
 
 fn build_run_status_node(

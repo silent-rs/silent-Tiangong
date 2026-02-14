@@ -2,8 +2,6 @@ use components::{Button, Container, Input, SelectBuilder, SelectOption, SelectVa
 use hetu::prelude::*;
 
 use crate::core::app_state::TiangongState;
-use crate::core::runtime::{RunSnapshot, RunStatus};
-use crate::core::session::now_text;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ComposerData {
@@ -39,7 +37,7 @@ pub(crate) fn build_composer(
             let state = states.ensure::<TiangongState>();
             state.update_draft(sctx.value);
             if let Err(err) = state.send_current_input() {
-                set_run_failed(state, "发送失败", err.to_string());
+                state.report_run_failed("发送失败", err.to_string());
             }
             let windows = states.ensure::<WindowStateManager>();
             windows.request_redraw(sctx.app_ctx.window_id);
@@ -80,7 +78,7 @@ pub(crate) fn build_composer(
 
             if let Err(err) = states.ensure::<TiangongState>().select_model(&model) {
                 let state = states.ensure::<TiangongState>();
-                set_run_failed(state, "模型切换失败", err.to_string());
+                state.report_run_failed("模型切换失败", err.to_string());
             }
 
             let windows = states.ensure::<WindowStateManager>();
@@ -99,7 +97,7 @@ pub(crate) fn build_composer(
         .on_click(|states: &mut StateMap, ctx| {
             let state = states.ensure::<TiangongState>();
             if let Err(err) = state.send_current_input() {
-                set_run_failed(state, "发送失败", err.to_string());
+                state.report_run_failed("发送失败", err.to_string());
             }
             let windows = states.ensure::<WindowStateManager>();
             windows.request_redraw(ctx.app_ctx.window_id);
@@ -116,20 +114,4 @@ pub(crate) fn build_composer(
     Container::new(vec![composer_model_row, composer_input_row])
         .class("composer")
         .mount(tree, handlers)
-}
-
-fn set_run_failed(state: &mut TiangongState, summary: &str, error: String) {
-    state.run = RunSnapshot {
-        status: RunStatus::Failed,
-        summary: summary.to_string(),
-        last_session_id: state.run.last_session_id.clone(),
-        last_task_id: state.run.last_task_id.clone(),
-        last_duration_ms: state.run.last_duration_ms,
-        last_result: state.run.last_result.clone(),
-        last_plan: state.run.last_plan.clone(),
-        last_tool_result: state.run.last_tool_result.clone(),
-        last_error: Some(error),
-        last_usage: state.run.last_usage.clone(),
-        updated_at: now_text(),
-    };
 }
