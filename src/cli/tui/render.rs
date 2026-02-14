@@ -21,9 +21,10 @@ impl CliApp {
         let cursor = self.input_cursor_position(sections[2]);
         frame.set_cursor_position(cursor);
 
-        if self.history_modal.is_none() {
+        if self.history_modal.is_none() && self.planning_modal.is_none() {
             self.render_model_selector(frame, sections[2]);
         }
         self.render_history_dialog(frame);
+        self.render_planning_dialog(frame);
     }
 }

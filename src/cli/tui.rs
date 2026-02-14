@@ -45,6 +45,7 @@ struct CliApp {
     status_message: String,
     selected_hint_idx: usize,
     history_modal: Option<HistoryModalState>,
+    planning_modal: Option<PlanningModalState>,
     draft_new_session: bool,
     conversation_scroll: u16,
     max_conversation_scroll: u16,
@@ -61,6 +62,7 @@ impl CliApp {
             status_message: "输入 / 查看命令提示".to_string(),
             selected_hint_idx: 0,
             history_modal: None,
+            planning_modal: None,
             draft_new_session: false,
             conversation_scroll: 0,
             max_conversation_scroll: 0,
@@ -115,6 +117,9 @@ impl CliApp {
 
         if self.history_modal.is_some() {
             return self.handle_history_modal_key(key);
+        }
+        if self.planning_modal.is_some() {
+            return self.handle_planning_modal_key(key);
         }
 
         match key.code {
@@ -193,6 +198,32 @@ impl CliApp {
         Ok(())
     }
 
+    fn handle_planning_modal_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.planning_modal = None;
+                self.status_message = "已关闭 planning 列表".to_string();
+            }
+            KeyCode::Up => self.move_planning_modal_selection(-1),
+            KeyCode::Down => self.move_planning_modal_selection(1),
+            KeyCode::PageUp => self.move_planning_modal_selection(-8),
+            KeyCode::PageDown => self.move_planning_modal_selection(8),
+            KeyCode::Home => self.move_planning_modal_to_edge(true),
+            KeyCode::End => self.move_planning_modal_to_edge(false),
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                self.delete_selected_pending_planning_step()?;
+            }
+            KeyCode::Char('k') | KeyCode::Char('K') => {
+                self.move_selected_pending_planning_step(true)?;
+            }
+            KeyCode::Char('j') | KeyCode::Char('J') => {
+                self.move_selected_pending_planning_step(false)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn scroll_conversation_up(&mut self, lines: u16) {
         self.conversation_scroll = self.conversation_scroll.saturating_sub(lines);
         self.follow_conversation_bottom = false;
@@ -222,6 +253,11 @@ impl CliApp {
 #[derive(Debug, Clone, Default)]
 struct HistoryModalState {
     query: String,
+    selected_idx: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PlanningModalState {
     selected_idx: usize,
 }
 

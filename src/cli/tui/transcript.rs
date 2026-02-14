@@ -395,6 +395,7 @@ fn parse_inline_markdown(line: &str, base_style: Style) -> Vec<Span<'static>> {
     let mut buffer = String::new();
     let mut bold = false;
     let mut italic = false;
+    let mut strike = false;
     let mut code = false;
 
     let chars: Vec<char> = line.chars().collect();
@@ -406,10 +407,21 @@ fn parse_inline_markdown(line: &str, base_style: Style) -> Vec<Span<'static>> {
             flush_inline_buffer(
                 &mut spans,
                 &mut buffer,
-                inline_style(base_style, bold, italic, code),
+                inline_style(base_style, bold, italic, strike, code),
             );
             code = !code;
             idx += 1;
+            continue;
+        }
+
+        if !code && ch == '~' && idx + 1 < chars.len() && chars[idx + 1] == '~' {
+            flush_inline_buffer(
+                &mut spans,
+                &mut buffer,
+                inline_style(base_style, bold, italic, strike, code),
+            );
+            strike = !strike;
+            idx += 2;
             continue;
         }
 
@@ -417,7 +429,7 @@ fn parse_inline_markdown(line: &str, base_style: Style) -> Vec<Span<'static>> {
             flush_inline_buffer(
                 &mut spans,
                 &mut buffer,
-                inline_style(base_style, bold, italic, code),
+                inline_style(base_style, bold, italic, strike, code),
             );
             bold = !bold;
             idx += 2;
@@ -428,7 +440,7 @@ fn parse_inline_markdown(line: &str, base_style: Style) -> Vec<Span<'static>> {
             flush_inline_buffer(
                 &mut spans,
                 &mut buffer,
-                inline_style(base_style, bold, italic, code),
+                inline_style(base_style, bold, italic, strike, code),
             );
             italic = !italic;
             idx += 1;
@@ -442,7 +454,7 @@ fn parse_inline_markdown(line: &str, base_style: Style) -> Vec<Span<'static>> {
     flush_inline_buffer(
         &mut spans,
         &mut buffer,
-        inline_style(base_style, bold, italic, code),
+        inline_style(base_style, bold, italic, strike, code),
     );
 
     if spans.is_empty() {
@@ -469,13 +481,16 @@ fn heading_style(level: usize) -> Style {
     Style::default().fg(color).add_modifier(Modifier::BOLD)
 }
 
-fn inline_style(base: Style, bold: bool, italic: bool, code: bool) -> Style {
+fn inline_style(base: Style, bold: bool, italic: bool, strike: bool, code: bool) -> Style {
     let mut style = base;
     if bold {
         style = style.add_modifier(Modifier::BOLD);
     }
     if italic {
         style = style.add_modifier(Modifier::ITALIC);
+    }
+    if strike {
+        style = style.add_modifier(Modifier::CROSSED_OUT);
     }
     if code {
         style = style

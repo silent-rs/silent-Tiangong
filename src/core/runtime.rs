@@ -10,7 +10,7 @@ use crate::core::mcp::collect_mcp_context;
 use crate::core::model::{
     ModelClient, ModelRequest, ModelResponse, ModelStreamChunk, SingleProviderClient, TokenUsage,
 };
-use crate::core::planner::{TaskPlan, build_minimal_plan};
+use crate::core::planner::{PlanStepStatus, TaskPlan, build_minimal_plan};
 use crate::core::session::{Session, now_text};
 use crate::core::tool::{
     LocalToolExecutor, ToolCall, ToolExecutionRecord, ToolExecutor, ToolName, ToolResult,
@@ -125,10 +125,13 @@ impl RuntimeEngine {
         P: FnMut(&TaskPlan),
         F: FnMut(&ModelStreamChunk),
     {
-        let plan = build_minimal_plan(user_input, &self.agent_config);
+        let mut plan = build_minimal_plan(user_input, &self.agent_config);
         on_plan_ready(&plan);
         let context = session.recent_messages(self.context_limit);
         let tool_result = self.maybe_execute_tool(user_input)?;
+        if revise_plan_for_tool_result(&mut plan, tool_result.as_ref()) {
+            on_plan_ready(&plan);
+        }
         let tool_result_summary = tool_result.as_ref().map(format_tool_result_for_display);
         let mcp_context = collect_mcp_context(user_input, &self.agent_config.mcp);
         let mut prompt = user_input.to_string();
@@ -196,6 +199,10 @@ impl RuntimeEngine {
             resp
         };
         let verify_records = run_verify_commands(&plan.verify_commands);
+        if revise_plan_for_verify_result(&mut plan, &verify_records) {
+            on_plan_ready(&plan);
+        }
+        plan.mark_first_step_completed();
 
         Ok(TurnExecution {
             assistant_message: text,
@@ -276,6 +283,60 @@ fn format_tool_result_for_display(result: &ToolResult) -> String {
     } else {
         result.summary.clone()
     }
+}
+
+fn revise_plan_for_tool_result(plan: &mut TaskPlan, tool_result: Option<&ToolResult>) -> bool {
+    let Some(result) = tool_result else {
+        return false;
+    };
+    if result.ok {
+        return false;
+    }
+
+    plan.revise(
+        "tool_execution",
+        format!("工具执行未通过：{}", result.summary),
+        "工具执行失败，切换为保守策略并提示用户修复后重试".to_string(),
+    );
+    plan.ensure_risk("工具执行失败导致上下文不足，需要用户确认后继续".to_string());
+    plan.push_step_with_status(
+        "fallback_after_tool_failure",
+        "记录工具失败原因，提供保守回答并建议重试".to_string(),
+        PlanStepStatus::Completed,
+    );
+    true
+}
+
+fn revise_plan_for_verify_result(
+    plan: &mut TaskPlan,
+    verify_records: &[VerifyExecutionRecord],
+) -> bool {
+    if verify_records.is_empty() {
+        return false;
+    }
+
+    let failed = verify_records.iter().filter(|record| !record.ok).count();
+    if failed == 0 {
+        return false;
+    }
+
+    let failed_commands = verify_records
+        .iter()
+        .filter(|record| !record.ok)
+        .map(|record| format!("{}(exit={})", record.command, record.exit_code))
+        .collect::<Vec<_>>();
+
+    plan.revise(
+        "verify_execution",
+        format!("{} 条验证命令失败：{}", failed, failed_commands.join("；")),
+        "根据验证失败结果调整计划，建议先修复问题后再继续".to_string(),
+    );
+    plan.ensure_risk("验证未通过，当前结果存在回归或构建失败风险".to_string());
+    plan.push_step(
+        "repair_after_verify_failure",
+        "优先修复失败的验证命令，再重新执行完整验证".to_string(),
+    );
+    true
 }
 
 fn infer_search_pattern(user_input: &str) -> String {

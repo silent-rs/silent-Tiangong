@@ -9,6 +9,9 @@
 - `tiangong` 默认保持桌面 UI 入口，不改变现有默认行为。
 - 提供 CLI Agent 入口 `tiangong cli`。
 - CLI 交互界面使用 `ratatui`，支持连续多轮任务执行与会话恢复。
+- CLI 需提供 `/planing` 弹窗（与历史会话弹窗交互风格一致）查看当前 planning 列表。
+- planning 的删除与调序仅在 `/planing` 弹窗内完成，且只允许操作未开始（pending）步骤。
+- planning 列表中的已完成步骤需以删除线样式显示。
 - CLI 对话输出需支持 Markdown 轻量渲染（至少覆盖标题、粗体、列表、代码块），提升终端可读性。
 - CLI 层仅承载 TUI 与交互适配代码；智能体能力统一沉淀在 `src/core/`，供 UI 与 CLI 复用。
 - 建立最小执行链路：输入 -> 规划 -> 执行 -> 输出。

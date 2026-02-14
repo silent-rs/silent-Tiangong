@@ -1,5 +1,7 @@
 use anyhow::{Result, anyhow};
 
+use crate::core::planner::PlanStepStatus;
+
 use super::{CliApp, CommandHint};
 
 impl CliApp {
@@ -58,6 +60,7 @@ impl CliApp {
             "/new" => {
                 self.draft_new_session = true;
                 self.history_modal = None;
+                self.planning_modal = None;
                 self.status_message = "已打开新对话（发送首条消息后才会记录）".to_string();
                 self.input.clear();
                 self.selected_hint_idx = 0;
@@ -73,6 +76,13 @@ impl CliApp {
                     self.status_message = "当前没有可取消的任务".to_string();
                 }
                 Ok(())
+            }
+            _ if command == "/planing"
+                || command.starts_with("/planing ")
+                || command == "/plan"
+                || command.starts_with("/plan ") =>
+            {
+                self.handle_planing_command(command)
             }
             _ if command == "/history" || command.starts_with("/history ") => {
                 self.handle_history_command(command)
@@ -107,11 +117,39 @@ impl CliApp {
 
     fn handle_history_command(&mut self, command: &str) -> Result<()> {
         let query = command.trim_start_matches("/history").trim();
+        self.planning_modal = None;
         self.history_modal = Some(super::HistoryModalState {
             query: query.to_string(),
             selected_idx: 0,
         });
         self.status_message = "历史会话选择已打开（Esc 关闭）".to_string();
+        Ok(())
+    }
+
+    fn handle_planing_command(&mut self, command: &str) -> Result<()> {
+        let args = if let Some(raw) = command.strip_prefix("/planing") {
+            raw.trim()
+        } else if let Some(raw) = command.strip_prefix("/plan") {
+            raw.trim()
+        } else {
+            ""
+        };
+
+        if !args.is_empty() && args != "show" {
+            return Err(anyhow!(
+                "不支持的 /planing 命令，仅支持：/planing 或 /planing show"
+            ));
+        }
+
+        self.history_modal = None;
+        self.planning_modal = Some(super::PlanningModalState::default());
+        self.clamp_planning_modal_selection();
+        if let Some(first_pending_row) = self.plan_row_by_pending_index(1)
+            && let Some(modal) = self.planning_modal.as_mut()
+        {
+            modal.selected_idx = first_pending_row;
+        }
+        self.status_message = "planning 列表已打开（D 删除，K/J 调序）".to_string();
         Ok(())
     }
 
@@ -221,6 +259,152 @@ impl CliApp {
         }
     }
 
+    pub(super) fn move_planning_modal_selection(&mut self, step: i32) {
+        let total = self
+            .state
+            .active_session()
+            .map(|session| session.plan_steps.len())
+            .unwrap_or(0);
+        if total == 0 {
+            if let Some(modal) = self.planning_modal.as_mut() {
+                modal.selected_idx = 0;
+            }
+            return;
+        }
+
+        let Some(current_idx) = self.planning_modal.as_ref().map(|modal| modal.selected_idx) else {
+            return;
+        };
+        let current = current_idx.min(total - 1) as i32;
+        let next = (current + step).clamp(0, total as i32 - 1) as usize;
+        if let Some(modal) = self.planning_modal.as_mut() {
+            modal.selected_idx = next;
+        }
+    }
+
+    pub(super) fn move_planning_modal_to_edge(&mut self, to_start: bool) {
+        let total = self
+            .state
+            .active_session()
+            .map(|session| session.plan_steps.len())
+            .unwrap_or(0);
+        if total == 0 {
+            if let Some(modal) = self.planning_modal.as_mut() {
+                modal.selected_idx = 0;
+            }
+            return;
+        }
+
+        if let Some(modal) = self.planning_modal.as_mut() {
+            modal.selected_idx = if to_start { 0 } else { total - 1 };
+        }
+    }
+
+    pub(super) fn delete_selected_pending_planning_step(&mut self) -> Result<()> {
+        let Some(selected_row) = self.planning_modal.as_ref().map(|modal| modal.selected_idx)
+        else {
+            return Ok(());
+        };
+        let Some(pending_idx) = self.pending_index_by_plan_row(selected_row) else {
+            self.status_message = "仅支持删除 pending 步骤".to_string();
+            return Ok(());
+        };
+
+        if self.state.delete_pending_plan_step(pending_idx)? {
+            self.status_message = format!("已删除 pending 规划步骤 P{pending_idx}");
+        } else {
+            self.status_message = format!("删除失败，未找到 pending 规划步骤 P{pending_idx}");
+        }
+        self.clamp_planning_modal_selection();
+        Ok(())
+    }
+
+    pub(super) fn move_selected_pending_planning_step(&mut self, upward: bool) -> Result<()> {
+        let Some(selected_row) = self.planning_modal.as_ref().map(|modal| modal.selected_idx)
+        else {
+            return Ok(());
+        };
+        let Some(from_pending_idx) = self.pending_index_by_plan_row(selected_row) else {
+            self.status_message = "仅支持调序 pending 步骤".to_string();
+            return Ok(());
+        };
+
+        let to_pending_idx = if upward {
+            from_pending_idx.saturating_sub(1)
+        } else {
+            from_pending_idx.saturating_add(1)
+        };
+        if to_pending_idx == 0 {
+            self.status_message = "已经是首个 pending 步骤".to_string();
+            return Ok(());
+        }
+
+        if self
+            .state
+            .move_pending_plan_step(from_pending_idx, to_pending_idx)?
+        {
+            if let Some(new_row) = self.plan_row_by_pending_index(to_pending_idx)
+                && let Some(modal) = self.planning_modal.as_mut()
+            {
+                modal.selected_idx = new_row;
+            }
+            self.status_message =
+                format!("已调整 pending 规划步骤：P{from_pending_idx} -> P{to_pending_idx}");
+        } else if upward {
+            self.status_message = "已经是首个 pending 步骤".to_string();
+        } else {
+            self.status_message = "已经是最后一个 pending 步骤".to_string();
+        }
+
+        Ok(())
+    }
+
+    fn clamp_planning_modal_selection(&mut self) {
+        let total = self
+            .state
+            .active_session()
+            .map(|session| session.plan_steps.len())
+            .unwrap_or(0);
+        if let Some(modal) = self.planning_modal.as_mut() {
+            modal.selected_idx = if total == 0 {
+                0
+            } else {
+                modal.selected_idx.min(total - 1)
+            };
+        }
+    }
+
+    fn pending_index_by_plan_row(&self, row_idx: usize) -> Option<usize> {
+        let session = self.state.active_session()?;
+        let mut pending_idx = 0usize;
+        for (idx, step) in session.plan_steps.iter().enumerate() {
+            if step.status == PlanStepStatus::Pending {
+                pending_idx += 1;
+                if idx == row_idx {
+                    return Some(pending_idx);
+                }
+            }
+        }
+        None
+    }
+
+    fn plan_row_by_pending_index(&self, pending_index_1_based: usize) -> Option<usize> {
+        if pending_index_1_based == 0 {
+            return None;
+        }
+        let session = self.state.active_session()?;
+        let mut pending_idx = 0usize;
+        for (idx, step) in session.plan_steps.iter().enumerate() {
+            if step.status == PlanStepStatus::Pending {
+                pending_idx += 1;
+                if pending_idx == pending_index_1_based {
+                    return Some(idx);
+                }
+            }
+        }
+        None
+    }
+
     pub(super) fn history_match_indices(&self, query: &str) -> Vec<usize> {
         let query = query.trim();
         self.state
@@ -306,6 +490,13 @@ impl CliApp {
             )];
         }
 
+        if raw == "/planing" || raw.starts_with("/planing ") || raw == "/plan" {
+            return vec![CommandHint::new(
+                "/planing",
+                "打开 planning 列表弹窗（D删除，K/J调序）",
+            )];
+        }
+
         if raw == "/model" || raw.starts_with("/model ") {
             return self.model_command_hints(raw);
         }
@@ -315,6 +506,7 @@ impl CliApp {
 
         let mut hints = vec![
             CommandHint::new("/cancel", "取消当前执行中的任务"),
+            CommandHint::new("/planing", "打开 planning 列表弹窗"),
             CommandHint::new("/model", "切换模型或查看可选模型"),
             CommandHint::new("/config", "查看或更新 Agent 配置"),
             CommandHint::new("/history", "恢复历史会话"),

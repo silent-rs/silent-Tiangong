@@ -9,6 +9,24 @@ pub struct PlanStep {
     pub id: String,
     pub name: String,
     pub description: String,
+    #[serde(default)]
+    pub status: PlanStepStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PlanStepStatus {
+    #[default]
+    Pending,
+    Completed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanRevision {
+    pub id: String,
+    pub phase: String,
+    pub reason: String,
+    pub summary_after_revision: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +39,57 @@ pub struct TaskPlan {
     pub verify_commands: Vec<String>,
     pub skill_hints: Vec<String>,
     pub mcp_hints: Vec<String>,
+    #[serde(default)]
+    pub revisions: Vec<PlanRevision>,
+}
+
+impl TaskPlan {
+    pub fn revise(
+        &mut self,
+        phase: impl Into<String>,
+        reason: impl Into<String>,
+        summary_after_revision: impl Into<String>,
+    ) {
+        let summary_after_revision = summary_after_revision.into();
+        self.revisions.push(PlanRevision {
+            id: new_id(),
+            phase: phase.into(),
+            reason: reason.into(),
+            summary_after_revision: summary_after_revision.clone(),
+        });
+        self.summary = summary_after_revision;
+    }
+
+    pub fn ensure_risk(&mut self, risk: impl Into<String>) {
+        let risk = risk.into();
+        if !self.risks.iter().any(|existing| existing == &risk) {
+            self.risks.push(risk);
+        }
+    }
+
+    pub fn push_step(&mut self, name: impl Into<String>, description: impl Into<String>) {
+        self.push_step_with_status(name, description, PlanStepStatus::Pending);
+    }
+
+    pub fn push_step_with_status(
+        &mut self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        status: PlanStepStatus,
+    ) {
+        self.steps.push(PlanStep {
+            id: new_id(),
+            name: name.into(),
+            description: description.into(),
+            status,
+        });
+    }
+
+    pub fn mark_first_step_completed(&mut self) {
+        if let Some(step) = self.steps.first_mut() {
+            step.status = PlanStepStatus::Completed;
+        }
+    }
 }
 
 pub fn build_minimal_plan(user_input: &str, agent_config: &AgentConfig) -> TaskPlan {
@@ -37,12 +106,14 @@ pub fn build_minimal_plan(user_input: &str, agent_config: &AgentConfig) -> TaskP
             id: new_id(),
             name: "prepare_tool_call".to_string(),
             description: "准备工具调用参数并进入执行阶段".to_string(),
+            status: PlanStepStatus::Pending,
         }
     } else {
         PlanStep {
             id: new_id(),
             name: "generate_response".to_string(),
             description: "基于上下文生成回答".to_string(),
+            status: PlanStepStatus::Pending,
         }
     };
 
@@ -91,6 +162,7 @@ pub fn build_minimal_plan(user_input: &str, agent_config: &AgentConfig) -> TaskP
         verify_commands,
         skill_hints,
         mcp_hints,
+        revisions: Vec::new(),
     }
 }
 

@@ -1,6 +1,8 @@
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 
+use crate::core::planner::{PlanStep, PlanStepStatus};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MessageRole {
@@ -26,6 +28,8 @@ pub struct Session {
     pub messages: Vec<Message>,
     #[serde(default)]
     pub task_records: Vec<SessionTaskRecord>,
+    #[serde(default)]
+    pub plan_steps: Vec<SessionPlanStep>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -61,6 +65,17 @@ pub struct SessionTaskRecord {
     pub duration_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionPlanStep {
+    pub id: String,
+    pub task_id: String,
+    pub name: String,
+    pub description: String,
+    pub status: PlanStepStatus,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 impl Session {
     pub fn new(title: impl Into<String>) -> Self {
         let now = now_text();
@@ -69,6 +84,7 @@ impl Session {
             title: title.into(),
             messages: Vec::new(),
             task_records: Vec::new(),
+            plan_steps: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
         }
@@ -135,6 +151,79 @@ impl Session {
         }
         record.updated_at = now_text();
         self.updated_at = now_text();
+    }
+
+    pub fn sync_task_plan_steps(&mut self, task_id: &str, steps: &[PlanStep]) {
+        for step in steps {
+            if let Some(existing) = self
+                .plan_steps
+                .iter_mut()
+                .find(|record| record.task_id == task_id && record.id == step.id)
+            {
+                existing.name = step.name.clone();
+                existing.description = step.description.clone();
+                existing.status = step.status;
+                existing.updated_at = now_text();
+                continue;
+            }
+
+            let now = now_text();
+            self.plan_steps.push(SessionPlanStep {
+                id: step.id.clone(),
+                task_id: task_id.to_string(),
+                name: step.name.clone(),
+                description: step.description.clone(),
+                status: step.status,
+                created_at: now.clone(),
+                updated_at: now,
+            });
+        }
+        self.updated_at = now_text();
+    }
+
+    pub fn delete_pending_plan_step(&mut self, pending_index: usize) -> bool {
+        let Some(pos) = self
+            .pending_plan_step_positions()
+            .get(pending_index)
+            .copied()
+        else {
+            return false;
+        };
+        self.plan_steps.remove(pos);
+        self.updated_at = now_text();
+        true
+    }
+
+    pub fn move_pending_plan_step(&mut self, from_idx: usize, to_idx: usize) -> bool {
+        let pending_positions = self.pending_plan_step_positions();
+        if pending_positions.is_empty()
+            || from_idx >= pending_positions.len()
+            || to_idx >= pending_positions.len()
+            || from_idx == to_idx
+        {
+            return false;
+        }
+
+        let mut pending = pending_positions
+            .iter()
+            .map(|idx| self.plan_steps[*idx].clone())
+            .collect::<Vec<_>>();
+        let item = pending.remove(from_idx);
+        pending.insert(to_idx, item);
+
+        for (slot, item) in pending_positions.iter().zip(pending.into_iter()) {
+            self.plan_steps[*slot] = item;
+        }
+        self.updated_at = now_text();
+        true
+    }
+
+    fn pending_plan_step_positions(&self) -> Vec<usize> {
+        self.plan_steps
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, step)| (step.status == PlanStepStatus::Pending).then_some(idx))
+            .collect()
     }
 
     pub fn complete_task(

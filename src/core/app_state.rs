@@ -297,6 +297,52 @@ impl TiangongState {
         Ok(true)
     }
 
+    pub fn delete_pending_plan_step(&mut self, pending_index_1_based: usize) -> Result<bool> {
+        if pending_index_1_based == 0 {
+            return Err(anyhow!("删除索引必须从 1 开始"));
+        }
+
+        let active_id = self.active_session_id.clone();
+        let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == active_id)
+        else {
+            return Err(anyhow!("当前会话不存在"));
+        };
+
+        let removed = session.delete_pending_plan_step(pending_index_1_based - 1);
+        if removed {
+            self.persist_session_and_app(&active_id)?;
+        }
+        Ok(removed)
+    }
+
+    pub fn move_pending_plan_step(
+        &mut self,
+        from_index_1_based: usize,
+        to_index_1_based: usize,
+    ) -> Result<bool> {
+        if from_index_1_based == 0 || to_index_1_based == 0 {
+            return Err(anyhow!("调序索引必须从 1 开始"));
+        }
+
+        let active_id = self.active_session_id.clone();
+        let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == active_id)
+        else {
+            return Err(anyhow!("当前会话不存在"));
+        };
+
+        let moved = session.move_pending_plan_step(from_index_1_based - 1, to_index_1_based - 1);
+        if moved {
+            self.persist_session_and_app(&active_id)?;
+        }
+        Ok(moved)
+    }
+
     pub fn poll_pending_turn(&mut self) {
         let mut should_clear = false;
         let mut disconnected = false;
@@ -820,6 +866,7 @@ impl TiangongState {
             .find(|session| session.id == session_id)
         {
             session.mark_task_executing(&task_id, Some(format_plan_snapshot(plan)));
+            session.sync_task_plan_steps(&task_id, &plan.steps);
         }
 
         self.run = RunSnapshot {
@@ -897,6 +944,7 @@ impl TiangongState {
             .iter_mut()
             .find(|session| session.id == session_id)
         {
+            session.sync_task_plan_steps(&task_id, &exec.plan.steps);
             session.complete_task(
                 &task_id,
                 Some(plan_snapshot.clone()),
@@ -1413,16 +1461,35 @@ fn format_plan_snapshot(plan: &TaskPlan) -> String {
     } else {
         plan.mcp_hints.join("；")
     };
+    let revisions = if plan.revisions.is_empty() {
+        "无".to_string()
+    } else {
+        plan.revisions
+            .iter()
+            .enumerate()
+            .map(|(idx, revision)| {
+                format!(
+                    "{}. [{}] {} => {}",
+                    idx + 1,
+                    revision.phase,
+                    revision.reason,
+                    revision.summary_after_revision
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("；")
+    };
 
     format!(
-        "{}\n目标：{}\n步骤数：{}\n风险：{}\n验证命令：{}\nSkills：{}\nMCP：{}",
+        "{}\n目标：{}\n步骤数：{}\n风险：{}\n验证命令：{}\nSkills：{}\nMCP：{}\n计划修正：{}",
         plan.summary,
         plan.objective,
         plan.steps.len(),
         risks,
         verify_commands,
         skill_hints,
-        mcp_hints
+        mcp_hints,
+        revisions
     )
 }
 
