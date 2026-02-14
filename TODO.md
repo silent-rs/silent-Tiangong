@@ -1,6 +1,6 @@
 # TODO - 天工 RFC 0002（CLI Agent）任务清单
 
-> 最后更新：2026-02-13
+> 最后更新：2026-02-14
 > 主线 RFC：`docs/rfc/0002-cli-agent-roadmap.md`
 > 暂停 RFC：`docs/rfc/0001-tiangong-desktop-agent-roadmap.md`
 > 参考：`PLAN.md`
@@ -22,6 +22,7 @@
 
 - [x] 新增 `src/cli/` 目录，承载 CLI 的 TUI 代码拆分（渲染、输入、事件循环）
 - [x] `src/cli/` 仅放界面与交互适配，不放智能体业务逻辑
+- [x] TUI 组件拆分：状态、对话框、输入框、历史对话、模型选择独立组件化
 - [ ] 智能体实现统一沉淀在 `src/core/`（Planner/Runtime/Tool/Session 等）
 - [ ] 提供 Core 层复用接口，确保 CLI 与 UI 共用同一套智能体执行链路
 - [ ] 清理 CLI 内部与 Core 重复实现，避免两套逻辑分叉
@@ -31,6 +32,7 @@
 - [x] `tiangong` 默认保持进入 UI 模式，不改现有默认入口行为
 - [x] CLI 入口固定为 `tiangong cli`
 - [x] 帮助信息覆盖 `tiangong cli` 模式示例
+- [x] CLI 退出语义统一：仅 `Ctrl+C` 与 `/exit` 退出，`Esc` 仅用于清空输入
 
 ### B2 计划能力
 
@@ -77,6 +79,8 @@
 - [ ] 任务状态机统一：`planning` / `executing` / `completed` / `failed`
 - [ ] 支持任务中断与恢复（最小可用）
 - [ ] 会话持久化写入任务级元数据
+- [x] 会话索引改为扫描 `.tiangong/sessions/` 目录，不在 `app.json` 冗余 `session_ids`
+- [x] `active_session_id` 对应会话不存在时自动回退至第一个可用会话
 
 ### C3 非交互模式
 

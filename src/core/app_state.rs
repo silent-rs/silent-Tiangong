@@ -27,8 +27,6 @@ struct PersistedAppState {
     #[serde(default)]
     active_session_id: String,
     #[serde(default)]
-    session_ids: Vec<String>,
-    #[serde(default)]
     model_config: Option<ModelProviderConfig>,
     #[serde(default)]
     model_list: Vec<String>,
@@ -887,11 +885,6 @@ impl TiangongState {
 
         let payload = PersistedAppState {
             active_session_id: self.active_session_id.clone(),
-            session_ids: self
-                .sessions
-                .iter()
-                .map(|session| session.id.clone())
-                .collect(),
             model_config: Some(self.model_config.clone()),
             model_list: self.settings_model_list.clone(),
             agent_config: Some(self.agent_config.clone()),
@@ -926,8 +919,8 @@ impl TiangongState {
     }
 
     fn load_from_disk(&self) -> Result<Option<LoadedState>> {
+        let session_ids = self.list_session_ids_from_dir()?;
         if !self.app_storage_path.exists() {
-            let session_ids = self.list_session_ids_from_dir()?;
             if session_ids.is_empty() {
                 return Ok(None);
             }
@@ -953,21 +946,24 @@ impl TiangongState {
         let persisted: PersistedAppState =
             serde_json::from_str(&content).context("解析应用存储失败")?;
 
-        let mut session_ids = dedup_session_ids(persisted.session_ids);
-        if session_ids.is_empty() {
-            session_ids = self.list_session_ids_from_dir()?;
-        }
-
         let mut sessions = Vec::new();
         for session_id in &session_ids {
             if let Some(session) = self.load_session_from_disk(session_id)? {
                 sessions.push(session);
             }
         }
+        let active_session_id = if session_ids
+            .iter()
+            .any(|session_id| session_id == &persisted.active_session_id)
+        {
+            persisted.active_session_id
+        } else {
+            session_ids.first().cloned().unwrap_or_default()
+        };
 
         Ok(Some(LoadedState {
             sessions,
-            active_session_id: persisted.active_session_id,
+            active_session_id,
             model_config: persisted.model_config,
             model_list: persisted.model_list,
             agent_config: persisted.agent_config,
@@ -1081,11 +1077,6 @@ impl TiangongState {
 
         let payload = PersistedAppState {
             active_session_id: self.active_session_id.clone(),
-            session_ids: self
-                .sessions
-                .iter()
-                .map(|session| session.id.clone())
-                .collect(),
             model_config: Some(self.model_config.clone()),
             model_list: self.settings_model_list.clone(),
             agent_config: Some(self.agent_config.clone()),
@@ -1160,22 +1151,6 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
 
 fn ensure_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path).with_context(|| format!("创建目录失败：{}", path.display()))
-}
-
-fn dedup_session_ids(raw_ids: Vec<String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut ids = Vec::new();
-
-    for raw_id in raw_ids {
-        let Some(session_id) = canonical_scru128_id(&raw_id) else {
-            continue;
-        };
-        if seen.insert(session_id.clone()) {
-            ids.push(session_id);
-        }
-    }
-
-    ids
 }
 
 fn canonical_scru128_id(raw: &str) -> Option<String> {

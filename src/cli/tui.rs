@@ -118,7 +118,13 @@ impl CliApp {
         }
 
         match key.code {
-            KeyCode::Esc => self.should_quit = true,
+            KeyCode::Esc => {
+                if !self.input.is_empty() {
+                    self.input.clear();
+                    self.selected_hint_idx = 0;
+                    self.status_message = "已清空输入".to_string();
+                }
+            }
             KeyCode::Up => {
                 if self.is_command_palette_active() {
                     self.move_hint_selection(-1);
