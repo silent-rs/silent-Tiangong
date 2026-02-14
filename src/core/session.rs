@@ -14,6 +14,8 @@ pub struct Message {
     pub id: String,
     pub role: MessageRole,
     pub content: String,
+    #[serde(default)]
+    pub reasoning_content: String,
     pub created_at: String,
 }
 
@@ -39,10 +41,20 @@ impl Session {
     }
 
     pub fn append_message(&mut self, role: MessageRole, content: impl Into<String>) {
+        self.append_message_with_reasoning(role, content, String::new());
+    }
+
+    pub fn append_message_with_reasoning(
+        &mut self,
+        role: MessageRole,
+        content: impl Into<String>,
+        reasoning_content: impl Into<String>,
+    ) {
         self.messages.push(Message {
             id: new_id(),
             role,
             content: content.into(),
+            reasoning_content: reasoning_content.into(),
             created_at: now_text(),
         });
         self.updated_at = now_text();

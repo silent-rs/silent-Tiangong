@@ -148,11 +148,8 @@ pub(crate) fn build_conversation_panel(
                 MessageRole::User => "message_block_user",
             };
 
-            let content = Text::new(msg.content.clone())
-                .class("message_content")
-                .class(content_class)
-                .mount(tree, handlers);
-            let block = Container::new(vec![content])
+            let content_nodes = build_message_content_nodes(tree, handlers, msg, content_class);
+            let block = Container::new(content_nodes)
                 .class("message_block")
                 .class(block_class)
                 .mount(tree, handlers);
@@ -194,6 +191,49 @@ pub(crate) fn build_conversation_panel(
     ])
     .class("main_panel")
     .mount(tree, handlers)
+}
+
+fn build_message_content_nodes(
+    tree: &mut UiTree,
+    handlers: &mut UiHandlers<StateMap>,
+    msg: &Message,
+    content_class: &str,
+) -> Vec<NodeId> {
+    if msg.role != MessageRole::Assistant {
+        return vec![
+            Text::new(msg.content.clone())
+                .class("message_content")
+                .class(content_class)
+                .mount(tree, handlers),
+        ];
+    }
+
+    if !msg.reasoning_content.trim().is_empty() {
+        let mut nodes = vec![
+            Text::new(msg.reasoning_content.clone())
+                .class("message_content")
+                .class(content_class)
+                .class("message_content_thinking")
+                .mount(tree, handlers),
+        ];
+
+        if !msg.content.trim().is_empty() {
+            nodes.push(
+                Text::new(msg.content.clone())
+                    .class("message_content")
+                    .class(content_class)
+                    .mount(tree, handlers),
+            );
+        }
+        return nodes;
+    }
+
+    vec![
+        Text::new(msg.content.clone())
+            .class("message_content")
+            .class(content_class)
+            .mount(tree, handlers),
+    ]
 }
 
 fn set_run_failed(state: &mut TiangongState, summary: &str, error: String) {

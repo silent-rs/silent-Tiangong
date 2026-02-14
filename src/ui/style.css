@@ -270,6 +270,11 @@ Text.message_content_assistant {
   color: #ececec;
 }
 
+Text.message_content_thinking {
+  color: #c9d7e6;
+  background-color: #273142;
+}
+
 Text.message_content_user {
   max-width: 100%;
   text-align: left;

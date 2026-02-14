@@ -33,9 +33,16 @@ pub struct ModelRequest {
 #[derive(Debug, Clone)]
 pub struct ModelResponse {
     pub text: String,
+    pub reasoning_content: String,
     pub usage: TokenUsage,
     pub output_mode: String,
     pub output_chunk_count: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ModelStreamChunk {
+    pub content: String,
+    pub reasoning_content: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,7 +142,7 @@ impl SingleProviderClient {
         mut on_delta: F,
     ) -> Result<ModelResponse>
     where
-        F: FnMut(&str),
+        F: FnMut(&ModelStreamChunk),
     {
         let token = self.cfg.api_auth_token.trim();
         if token.is_empty() {
@@ -179,10 +186,10 @@ impl SingleProviderClient {
                     .chat()
                     .create_stream_byot::<_, Value>(request_json)
                     .await?;
-                let mut text = String::new();
+                let mut content = String::new();
+                let mut reasoning_content = String::new();
                 let mut chunks = 0usize;
                 let mut has_think_output = false;
-                let mut think_open = false;
 
                 while let Some(item) = stream.next().await {
                     let payload = match item {
@@ -203,38 +210,28 @@ impl SingleProviderClient {
                             let think_delta = extract_delta_text(delta, "reasoning_content");
                             if !think_delta.is_empty() {
                                 has_think_output = true;
-                                if !think_open {
-                                    push_stream_piece(
-                                        "\n[思考]\n",
-                                        &mut on_delta,
-                                        &mut text,
-                                        &mut chunks,
-                                    );
-                                    think_open = true;
-                                }
                                 push_stream_piece(
-                                    &think_delta,
+                                    ModelStreamChunk {
+                                        content: String::new(),
+                                        reasoning_content: think_delta.clone(),
+                                    },
                                     &mut on_delta,
-                                    &mut text,
+                                    &mut content,
+                                    &mut reasoning_content,
                                     &mut chunks,
                                 );
                             }
 
                             let content_delta = extract_delta_text(delta, "content");
                             if !content_delta.is_empty() {
-                                if think_open {
-                                    push_stream_piece(
-                                        "\n[/思考]\n",
-                                        &mut on_delta,
-                                        &mut text,
-                                        &mut chunks,
-                                    );
-                                    think_open = false;
-                                }
                                 push_stream_piece(
-                                    &content_delta,
+                                    ModelStreamChunk {
+                                        content: content_delta.clone(),
+                                        reasoning_content: String::new(),
+                                    },
                                     &mut on_delta,
-                                    &mut text,
+                                    &mut content,
+                                    &mut reasoning_content,
                                     &mut chunks,
                                 );
                             }
@@ -242,12 +239,9 @@ impl SingleProviderClient {
                     }
                 }
 
-                if think_open {
-                    push_stream_piece("\n[/思考]\n", &mut on_delta, &mut text, &mut chunks);
-                }
-
-                Ok::<(String, usize, bool), async_openai::error::OpenAIError>((
-                    text,
+                Ok::<(String, String, usize, bool), async_openai::error::OpenAIError>((
+                    content,
+                    reasoning_content,
                     chunks,
                     has_think_output,
                 ))
@@ -261,11 +255,13 @@ impl SingleProviderClient {
             Err(_) => None,
         };
 
-        if let Some((text, chunks, has_think_output)) = byot_outcome {
+        if let Some((text, reasoning_content, chunks, has_think_output)) = byot_outcome {
             let text = text.trim().to_string();
-            if !text.is_empty() && chunks > 0 {
+            let reasoning_content = reasoning_content.trim().to_string();
+            if (!text.is_empty() || !reasoning_content.is_empty()) && chunks > 0 {
                 return Ok(ModelResponse {
                     text,
+                    reasoning_content,
                     usage: TokenUsage::default(),
                     output_mode: if has_think_output {
                         "stream-think".to_string()
@@ -279,7 +275,18 @@ impl SingleProviderClient {
 
         // 当流式 BYOT 路径失败时，转为非流式补偿请求，避免吞掉 reasoning_content。
         let fallback_resp = self.complete(req)?;
-        on_delta(&fallback_resp.text);
+        if !fallback_resp.reasoning_content.is_empty() {
+            on_delta(&ModelStreamChunk {
+                content: String::new(),
+                reasoning_content: fallback_resp.reasoning_content.clone(),
+            });
+        }
+        if !fallback_resp.text.is_empty() {
+            on_delta(&ModelStreamChunk {
+                content: fallback_resp.text.clone(),
+                reasoning_content: String::new(),
+            });
+        }
         Ok(fallback_resp)
     }
 }
@@ -382,6 +389,7 @@ impl ModelClient for SingleProviderClient {
 
         Ok(ModelResponse {
             text,
+            reasoning_content: String::new(),
             usage: TokenUsage {
                 prompt_tokens,
                 completion_tokens,
@@ -506,16 +514,18 @@ fn extract_delta_text(delta: &Value, field: &str) -> String {
 }
 
 fn push_stream_piece(
-    piece: &str,
-    on_delta: &mut impl FnMut(&str),
+    piece: ModelStreamChunk,
+    on_delta: &mut impl FnMut(&ModelStreamChunk),
     text: &mut String,
+    reasoning_content: &mut String,
     chunks: &mut usize,
 ) {
-    if piece.is_empty() {
+    if piece.content.is_empty() && piece.reasoning_content.is_empty() {
         return;
     }
-    on_delta(piece);
-    text.push_str(piece);
+    on_delta(&piece);
+    text.push_str(&piece.content);
+    reasoning_content.push_str(&piece.reasoning_content);
     *chunks += 1;
 }
 
@@ -529,43 +539,15 @@ fn should_skip_stream_payload(raw: &str) -> bool {
 }
 
 fn inject_thinking_config(payload: &mut Value) {
-    if !thinking_enabled() {
-        return;
-    }
-
     let Some(obj) = payload.as_object_mut() else {
         return;
     };
 
     let thinking = serde_json::json!({
-        "type": thinking_type(),
+        "type": "enabled",
         "clear_thinking": clear_thinking(),
     });
     obj.insert("thinking".to_string(), thinking);
-}
-
-fn thinking_enabled() -> bool {
-    match std::env::var("API_THINKING_ENABLED") {
-        Ok(v) => !matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "off" | "no"
-        ),
-        Err(_) => true,
-    }
-}
-
-fn thinking_type() -> String {
-    match std::env::var("API_THINKING_TYPE") {
-        Ok(v) => {
-            let normalized = v.trim().to_ascii_lowercase();
-            if normalized == "disabled" {
-                "disabled".to_string()
-            } else {
-                "enabled".to_string()
-            }
-        }
-        Err(_) => "enabled".to_string(),
-    }
 }
 
 fn clear_thinking() -> bool {
@@ -631,8 +613,9 @@ fn parse_non_stream_byot_response(payload: &Value) -> Option<ModelResponse> {
 
     let reasoning = extract_delta_text(message, "reasoning_content");
     let content = extract_delta_text(message, "content");
-    let text = merge_reasoning_and_content(&reasoning, &content);
-    if text.is_empty() {
+    let text = content.trim().to_string();
+    let reasoning_content = reasoning.trim().to_string();
+    if text.is_empty() && reasoning_content.is_empty() {
         return None;
     }
 
@@ -655,6 +638,7 @@ fn parse_non_stream_byot_response(payload: &Value) -> Option<ModelResponse> {
 
     Some(ModelResponse {
         text,
+        reasoning_content,
         usage: TokenUsage {
             prompt_tokens,
             completion_tokens,
@@ -667,19 +651,6 @@ fn parse_non_stream_byot_response(payload: &Value) -> Option<ModelResponse> {
         },
         output_chunk_count: 1,
     })
-}
-
-fn merge_reasoning_and_content(reasoning: &str, content: &str) -> String {
-    let mut out = String::new();
-    if !reasoning.trim().is_empty() {
-        out.push_str("[思考]\n");
-        out.push_str(reasoning);
-        out.push_str("\n[/思考]\n");
-    }
-    if !content.trim().is_empty() {
-        out.push_str(content);
-    }
-    out.trim().to_string()
 }
 
 fn parse_timeout_ms(raw: &str) -> Result<u64> {

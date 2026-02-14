@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::agent_config::AgentConfig;
 use crate::core::mcp::collect_mcp_context;
 use crate::core::model::{
-    ModelClient, ModelRequest, ModelResponse, SingleProviderClient, TokenUsage,
+    ModelClient, ModelRequest, ModelResponse, ModelStreamChunk, SingleProviderClient, TokenUsage,
 };
 use crate::core::planner::{TaskPlan, build_minimal_plan};
 use crate::core::session::{Session, now_text};
@@ -62,6 +62,7 @@ impl Default for RunSnapshot {
 #[derive(Debug, Clone)]
 pub struct TurnExecution {
     pub assistant_message: String,
+    pub assistant_reasoning_content: String,
     pub plan: TaskPlan,
     pub tool_result_summary: Option<String>,
     pub tool_execution: Option<ToolExecutionRecord>,
@@ -120,7 +121,7 @@ impl RuntimeEngine {
         mut on_chunk: F,
     ) -> Result<TurnExecution>
     where
-        F: FnMut(&str),
+        F: FnMut(&ModelStreamChunk),
     {
         let plan = build_minimal_plan(user_input, &self.agent_config);
         let context = session.recent_messages(self.context_limit);
@@ -148,6 +149,7 @@ impl RuntimeEngine {
 
         let ModelResponse {
             text,
+            reasoning_content,
             usage,
             output_mode,
             output_chunk_count,
@@ -159,19 +161,42 @@ impl RuntimeEngine {
                 Ok(resp) => resp,
                 Err(_) => {
                     let resp = self.client.complete(&req)?;
-                    on_chunk(&resp.text);
+                    if !resp.reasoning_content.is_empty() {
+                        on_chunk(&ModelStreamChunk {
+                            content: String::new(),
+                            reasoning_content: resp.reasoning_content.clone(),
+                        });
+                    }
+                    if !resp.text.is_empty() {
+                        on_chunk(&ModelStreamChunk {
+                            content: resp.text.clone(),
+                            reasoning_content: String::new(),
+                        });
+                    }
                     resp
                 }
             }
         } else {
             let resp = self.client.complete(&req)?;
-            on_chunk(&resp.text);
+            if !resp.reasoning_content.is_empty() {
+                on_chunk(&ModelStreamChunk {
+                    content: String::new(),
+                    reasoning_content: resp.reasoning_content.clone(),
+                });
+            }
+            if !resp.text.is_empty() {
+                on_chunk(&ModelStreamChunk {
+                    content: resp.text.clone(),
+                    reasoning_content: String::new(),
+                });
+            }
             resp
         };
         let verify_records = run_verify_commands(&plan.verify_commands);
 
         Ok(TurnExecution {
             assistant_message: text,
+            assistant_reasoning_content: reasoning_content,
             plan,
             tool_result_summary,
             tool_execution: tool_result.and_then(|result| result.execution),

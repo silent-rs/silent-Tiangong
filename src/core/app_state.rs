@@ -11,7 +11,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use crate::core::agent_config::AgentConfig;
-use crate::core::model::{ModelProviderConfig, SingleProviderClient};
+use crate::core::model::{ModelProviderConfig, ModelStreamChunk, SingleProviderClient};
 use crate::core::planner::TaskPlan;
 use crate::core::runtime::{
     RunSnapshot, RunStatus, RuntimeEngine, TurnExecution, VerifyExecutionRecord,
@@ -57,7 +57,7 @@ struct LoadedState {
 
 #[derive(Debug)]
 enum TurnEvent {
-    Chunk(String),
+    Chunk(ModelStreamChunk),
     Completed(Box<TurnExecution>),
     Failed(String),
 }
@@ -648,7 +648,7 @@ impl TiangongState {
             let chunk_tx = tx.clone();
             let result =
                 runtime.execute_turn_with_streaming(&session_snapshot, &worker_input, |delta| {
-                    let _ = chunk_tx.send(TurnEvent::Chunk(delta.to_string()));
+                    let _ = chunk_tx.send(TurnEvent::Chunk(delta.clone()));
                 });
 
             match result {
@@ -687,8 +687,8 @@ impl TiangongState {
         }
     }
 
-    fn apply_assistant_delta(&mut self, delta: &str) {
-        if delta.is_empty() {
+    fn apply_assistant_delta(&mut self, delta: &ModelStreamChunk) {
+        if delta.content.is_empty() && delta.reasoning_content.is_empty() {
             return;
         }
 
@@ -702,7 +702,8 @@ impl TiangongState {
         };
 
         if let Some(message) = self.find_message_mut(&session_id, &assistant_message_id) {
-            message.content.push_str(delta);
+            message.content.push_str(&delta.content);
+            message.reasoning_content.push_str(&delta.reasoning_content);
         }
     }
 
@@ -721,15 +722,18 @@ impl TiangongState {
         };
 
         if let Some(message) = self.find_message_mut(&session_id, &assistant_message_id) {
-            if message.content.trim().is_empty() {
-                message.content = exec.assistant_message.clone();
-            }
+            message.content = exec.assistant_message.clone();
+            message.reasoning_content = exec.assistant_reasoning_content.clone();
         } else if let Some(session) = self
             .sessions
             .iter_mut()
             .find(|session| session.id == session_id)
         {
-            session.append_message(MessageRole::Assistant, exec.assistant_message.clone());
+            session.append_message_with_reasoning(
+                MessageRole::Assistant,
+                exec.assistant_message.clone(),
+                exec.assistant_reasoning_content.clone(),
+            );
         }
 
         let base_result = format!(
@@ -804,11 +808,11 @@ impl TiangongState {
             .iter_mut()
             .find(|session| session.id == session_id)
         {
-            if let Some(position) = session
-                .messages
-                .iter()
-                .position(|msg| msg.id == assistant_message_id && msg.content.trim().is_empty())
-            {
+            if let Some(position) = session.messages.iter().position(|msg| {
+                msg.id == assistant_message_id
+                    && msg.content.trim().is_empty()
+                    && msg.reasoning_content.trim().is_empty()
+            }) {
                 session.messages.remove(position);
                 session.updated_at = now_text();
             }
