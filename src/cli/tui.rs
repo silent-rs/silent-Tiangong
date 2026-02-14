@@ -2,7 +2,10 @@ use std::io::{self, Stdout};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -19,8 +22,8 @@ mod render;
 mod transcript;
 
 const TICK_RATE: Duration = Duration::from_millis(60);
-const CONVERSATION_SCROLL_LINE_STEP: u16 = 3;
 const CONVERSATION_SCROLL_PAGE_STEP: u16 = 16;
+const CONVERSATION_SCROLL_MOUSE_STEP: u16 = 3;
 
 type CliTerminal = Terminal<CrosstermBackend<Stdout>>;
 
@@ -42,6 +45,10 @@ pub fn run_cli() -> Result<()> {
 struct CliApp {
     state: TiangongState,
     input: String,
+    input_cursor_char: usize,
+    input_history: Vec<String>,
+    input_history_cursor: Option<usize>,
+    input_history_draft: Option<String>,
     status_message: String,
     selected_hint_idx: usize,
     history_modal: Option<HistoryModalState>,
@@ -59,6 +66,10 @@ impl CliApp {
         Self {
             state: TiangongState::load_or_default(),
             input: String::new(),
+            input_cursor_char: 0,
+            input_history: Vec::new(),
+            input_history_cursor: None,
+            input_history_draft: None,
             status_message: "输入 / 查看命令提示".to_string(),
             selected_hint_idx: 0,
             history_modal: None,
@@ -78,11 +89,12 @@ impl CliApp {
             self.sync_status_after_poll();
             terminal.draw(|frame| self.render(frame))?;
 
-            if event::poll(TICK_RATE)?
-                && let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-            {
-                self.handle_key(key)?;
+            if event::poll(TICK_RATE)? {
+                match event::read()? {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => self.handle_key(key)?,
+                    Event::Mouse(mouse) => self.handle_mouse(mouse),
+                    _ => {}
+                }
             }
         }
         Ok(())
@@ -126,24 +138,32 @@ impl CliApp {
             KeyCode::Esc => {
                 if !self.input.is_empty() {
                     self.input.clear();
+                    self.input_cursor_char = 0;
+                    self.reset_input_history_navigation();
                     self.selected_hint_idx = 0;
                     self.status_message = "已清空输入".to_string();
                 }
             }
             KeyCode::Up => {
-                if self.is_command_palette_active() {
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    self.navigate_input_history(true);
+                } else if self.is_command_palette_active() {
                     self.move_hint_selection(-1);
                 } else {
-                    self.scroll_conversation_up(CONVERSATION_SCROLL_LINE_STEP);
+                    self.move_input_cursor_up();
                 }
             }
             KeyCode::Down => {
-                if self.is_command_palette_active() {
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    self.navigate_input_history(false);
+                } else if self.is_command_palette_active() {
                     self.move_hint_selection(1);
                 } else {
-                    self.scroll_conversation_down(CONVERSATION_SCROLL_LINE_STEP);
+                    self.move_input_cursor_down();
                 }
             }
+            KeyCode::Left => self.move_input_cursor_left(),
+            KeyCode::Right => self.move_input_cursor_right(),
             KeyCode::PageUp => self.scroll_conversation_up(CONVERSATION_SCROLL_PAGE_STEP),
             KeyCode::PageDown => self.scroll_conversation_down(CONVERSATION_SCROLL_PAGE_STEP),
             KeyCode::Home => self.scroll_conversation_to_top(),
@@ -152,18 +172,38 @@ impl CliApp {
             KeyCode::BackTab => self.move_hint_selection(-1),
             KeyCode::Enter => self.submit_input()?,
             KeyCode::Backspace => {
-                self.input.pop();
+                self.backspace_input_char();
+                self.reset_input_history_navigation();
+                self.selected_hint_idx = 0;
+            }
+            KeyCode::Delete => {
+                self.delete_input_char();
+                self.reset_input_history_navigation();
                 self.selected_hint_idx = 0;
             }
             KeyCode::Char(ch) => {
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
-                    self.input.push(ch);
+                    self.insert_input_char(ch);
+                    self.reset_input_history_navigation();
                     self.selected_hint_idx = 0;
                 }
             }
             _ => {}
         }
         Ok(())
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.history_modal.is_some() || self.planning_modal.is_some() {
+            return;
+        }
+        match mouse.kind {
+            MouseEventKind::ScrollUp => self.scroll_conversation_up(CONVERSATION_SCROLL_MOUSE_STEP),
+            MouseEventKind::ScrollDown => {
+                self.scroll_conversation_down(CONVERSATION_SCROLL_MOUSE_STEP)
+            }
+            _ => {}
+        }
     }
 
     fn handle_history_modal_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -248,6 +288,132 @@ impl CliApp {
         self.conversation_scroll = self.max_conversation_scroll;
         self.follow_conversation_bottom = true;
     }
+
+    fn move_input_cursor_left(&mut self) {
+        self.input_cursor_char = self.input_cursor_char.saturating_sub(1);
+    }
+
+    fn move_input_cursor_right(&mut self) {
+        self.input_cursor_char = self
+            .input_cursor_char
+            .saturating_add(1)
+            .min(self.input_char_len());
+    }
+
+    fn move_input_cursor_up(&mut self) {
+        self.input_cursor_char = 0;
+    }
+
+    fn move_input_cursor_down(&mut self) {
+        self.input_cursor_char = self.input_char_len();
+    }
+
+    fn insert_input_char(&mut self, ch: char) {
+        let byte_idx = self.byte_index_for_char_pos(self.input_cursor_char);
+        self.input.insert(byte_idx, ch);
+        self.input_cursor_char = self.input_cursor_char.saturating_add(1);
+    }
+
+    fn backspace_input_char(&mut self) {
+        if self.input_cursor_char == 0 {
+            return;
+        }
+        let end = self.byte_index_for_char_pos(self.input_cursor_char);
+        let start = self.byte_index_for_char_pos(self.input_cursor_char.saturating_sub(1));
+        self.input.replace_range(start..end, "");
+        self.input_cursor_char = self.input_cursor_char.saturating_sub(1);
+    }
+
+    fn delete_input_char(&mut self) {
+        if self.input_cursor_char >= self.input_char_len() {
+            return;
+        }
+        let start = self.byte_index_for_char_pos(self.input_cursor_char);
+        let end = self.byte_index_for_char_pos(self.input_cursor_char.saturating_add(1));
+        self.input.replace_range(start..end, "");
+    }
+
+    pub(in crate::cli::tui) fn input_cursor_prefix_display_width(&self) -> u16 {
+        let byte_idx = self.byte_index_for_char_pos(self.input_cursor_char);
+        crate::cli::tui::transcript::text_display_width(&self.input[..byte_idx])
+    }
+
+    fn input_char_len(&self) -> usize {
+        self.input.chars().count()
+    }
+
+    fn byte_index_for_char_pos(&self, char_pos: usize) -> usize {
+        char_to_byte_index(&self.input, char_pos)
+    }
+
+    fn push_input_history(&mut self, raw: String) {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if self
+            .input_history
+            .last()
+            .is_some_and(|existing| existing == trimmed)
+        {
+            self.reset_input_history_navigation();
+            return;
+        }
+        self.input_history.push(trimmed.to_string());
+        const MAX_HISTORY_LEN: usize = 200;
+        if self.input_history.len() > MAX_HISTORY_LEN {
+            let overflow = self.input_history.len() - MAX_HISTORY_LEN;
+            self.input_history.drain(0..overflow);
+        }
+        self.reset_input_history_navigation();
+    }
+
+    fn reset_input_history_navigation(&mut self) {
+        self.input_history_cursor = None;
+        self.input_history_draft = None;
+    }
+
+    fn navigate_input_history(&mut self, older: bool) {
+        if self.input_history.is_empty() {
+            return;
+        }
+
+        if older {
+            let next_idx = match self.input_history_cursor {
+                Some(current) => current.saturating_sub(1),
+                None => {
+                    self.input_history_draft = Some(self.input.clone());
+                    self.input_history.len().saturating_sub(1)
+                }
+            };
+            self.input_history_cursor = Some(next_idx);
+            if let Some(value) = self.input_history.get(next_idx) {
+                self.input = value.clone();
+                self.input_cursor_char = self.input_char_len();
+                self.selected_hint_idx = 0;
+            }
+            return;
+        }
+
+        let Some(current) = self.input_history_cursor else {
+            return;
+        };
+        if current + 1 < self.input_history.len() {
+            let next_idx = current + 1;
+            self.input_history_cursor = Some(next_idx);
+            if let Some(value) = self.input_history.get(next_idx) {
+                self.input = value.clone();
+                self.input_cursor_char = self.input_char_len();
+                self.selected_hint_idx = 0;
+            }
+            return;
+        }
+
+        self.input_history_cursor = None;
+        self.input = self.input_history_draft.take().unwrap_or_default();
+        self.input_cursor_char = self.input_char_len();
+        self.selected_hint_idx = 0;
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -288,7 +454,7 @@ impl CommandHint {
 fn init_terminal() -> Result<CliTerminal> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
@@ -297,7 +463,22 @@ fn init_terminal() -> Result<CliTerminal> {
 
 fn restore_terminal(mut terminal: CliTerminal) -> Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
     Ok(())
+}
+
+fn char_to_byte_index(text: &str, char_pos: usize) -> usize {
+    let clamped = char_pos.min(text.chars().count());
+    if clamped == 0 {
+        return 0;
+    }
+    text.char_indices()
+        .nth(clamped)
+        .map(|(idx, _)| idx)
+        .unwrap_or_else(|| text.len())
 }

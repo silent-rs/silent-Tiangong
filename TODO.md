@@ -36,10 +36,11 @@
 
 ### B2 计划能力
 
-- [x] 定义 Plan 结构：目标、步骤、风险、预期验证命令
+- [x] 定义 Plan 结构：目标、`plan` 事项、事项执行步骤、风险（不包含验证命令）
 - [x] 每轮任务先产出计划再执行
 - [x] 计划可在执行中修正并记录变更原因
-- [x] 支持 `/planing` 弹窗查看 planning 列表，并在弹窗内删除/调序 pending 步骤
+- [x] 支持 `/planing` 弹窗查看 `plan` 列表（含每个 plan 的执行步骤），并在弹窗内删除/调序 pending plan
+- [x] 内置 planing 智能体生成多 `plan` 事项及执行步骤（失败自动回退最小计划并记录原因）
 
 ### B3 工具能力
 
@@ -49,7 +50,9 @@
 - [x] 写能力子项：文件创建/覆盖（`write_file`）
 - [x] 写能力子项：定点替换（`replace_in_file`）
 - [x] 写能力子项：补丁应用（`apply_patch`）
+- [x] 基础文件读写改走 `function call` 主链路
 - [x] 命令执行默认强制超时
+- [x] 统一命令工具为 `run_command`，并支持 `bash -lc` 受控执行（`function call`）
 
 ### B4 输出能力
 
@@ -74,6 +77,7 @@
 - [x] 自动推荐验证命令（Rust 优先 `cargo check` / `cargo clippy`）
 - [x] 执行验证命令并汇总结果
 - [x] 验证失败时给出可操作错误摘要
+- [x] 验证链路与 `plan` 结构解耦（验证信息不进入 plan 事项）
 
 ### C2 会话与状态
 
@@ -83,6 +87,8 @@
 - [x] 会话索引改为扫描 `.tiangong/sessions/` 目录，不在 `app.json` 冗余 `session_ids`
 - [x] `active_session_id` 对应会话不存在时自动回退至第一个可用会话
 - [x] `.tiangong` 存储迁移到用户目录（Unix: `~/.tiangong`，Windows: `%USERPROFILE%\\.tiangong`），MVP 阶段不兼容旧项目目录存储（运行时不自动迁移）
+- [x] 切换历史会话时若存在未完成 plan 事项，自动继续执行
+- [x] 应用启动时若当前会话存在未完成 plan 事项，自动继续执行
 
 ### C3 非交互模式
 

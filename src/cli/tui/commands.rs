@@ -13,8 +13,10 @@ impl CliApp {
         }
 
         if raw.starts_with('/') {
+            self.push_input_history(raw.clone());
             let command = self.resolve_command_to_execute(&raw);
             self.input.clear();
+            self.input_cursor_char = 0;
             self.selected_hint_idx = 0;
             if let Err(err) = self.handle_command(&command) {
                 self.status_message = format!("命令执行失败：{err}");
@@ -32,6 +34,7 @@ impl CliApp {
             self.draft_new_session = false;
         }
 
+        self.push_input_history(raw.clone());
         self.state.update_draft(raw);
         if let Err(err) = self.state.send_current_input() {
             self.status_message = format!("发送失败：{err}");
@@ -40,6 +43,8 @@ impl CliApp {
             self.follow_conversation_bottom = true;
         }
         self.input.clear();
+        self.input_cursor_char = 0;
+        self.reset_input_history_navigation();
         self.selected_hint_idx = 0;
 
         Ok(())
@@ -53,6 +58,7 @@ impl CliApp {
             }
             "/help" => {
                 self.input = "/".to_string();
+                self.input_cursor_char = self.input.chars().count();
                 self.selected_hint_idx = 0;
                 self.status_message = "命令提示已打开".to_string();
                 Ok(())
@@ -63,6 +69,7 @@ impl CliApp {
                 self.planning_modal = None;
                 self.status_message = "已打开新对话（发送首条消息后才会记录）".to_string();
                 self.input.clear();
+                self.input_cursor_char = 0;
                 self.selected_hint_idx = 0;
                 self.conversation_scroll = 0;
                 self.max_conversation_scroll = 0;
@@ -105,6 +112,7 @@ impl CliApp {
         if arg.is_empty() {
             let current = self.state.current_model().to_string();
             self.input = "/model ".to_string();
+            self.input_cursor_char = self.input.chars().count();
             self.selected_hint_idx = 0;
             self.status_message = format!("当前模型：{current}，输入后缀可筛选并切换");
             return Ok(());
@@ -149,7 +157,7 @@ impl CliApp {
         {
             modal.selected_idx = first_pending_row;
         }
-        self.status_message = "planning 列表已打开（D 删除，K/J 调序）".to_string();
+        self.status_message = "planning 列表已打开（D 删除 pending plan，K/J 调序）".to_string();
         Ok(())
     }
 
@@ -212,11 +220,17 @@ impl CliApp {
             return Err(anyhow!("所选历史会话不存在"));
         };
 
+        let had_pending_before = self.state.has_pending_turn();
         self.state.switch_session(&session_id);
+        let auto_resumed = !had_pending_before && self.state.has_pending_turn();
         self.draft_new_session = false;
         self.follow_conversation_bottom = true;
         self.history_modal = None;
-        self.status_message = format!("已切换到历史会话：{title}");
+        self.status_message = if auto_resumed {
+            format!("已切换到历史会话：{title}，检测到未完成 plan，已自动继续执行")
+        } else {
+            format!("已切换到历史会话：{title}")
+        };
         Ok(())
     }
 
@@ -260,11 +274,7 @@ impl CliApp {
     }
 
     pub(super) fn move_planning_modal_selection(&mut self, step: i32) {
-        let total = self
-            .state
-            .active_session()
-            .map(|session| session.plan_steps.len())
-            .unwrap_or(0);
+        let total = self.state.active_task_plans().len();
         if total == 0 {
             if let Some(modal) = self.planning_modal.as_mut() {
                 modal.selected_idx = 0;
@@ -283,11 +293,7 @@ impl CliApp {
     }
 
     pub(super) fn move_planning_modal_to_edge(&mut self, to_start: bool) {
-        let total = self
-            .state
-            .active_session()
-            .map(|session| session.plan_steps.len())
-            .unwrap_or(0);
+        let total = self.state.active_task_plans().len();
         if total == 0 {
             if let Some(modal) = self.planning_modal.as_mut() {
                 modal.selected_idx = 0;
@@ -306,14 +312,14 @@ impl CliApp {
             return Ok(());
         };
         let Some(pending_idx) = self.pending_index_by_plan_row(selected_row) else {
-            self.status_message = "仅支持删除 pending 步骤".to_string();
+            self.status_message = "仅支持删除 pending plan".to_string();
             return Ok(());
         };
 
-        if self.state.delete_pending_plan_step(pending_idx)? {
-            self.status_message = format!("已删除 pending 规划步骤 P{pending_idx}");
+        if self.state.delete_pending_task_plan(pending_idx)? {
+            self.status_message = format!("已删除 pending plan P{pending_idx}");
         } else {
-            self.status_message = format!("删除失败，未找到 pending 规划步骤 P{pending_idx}");
+            self.status_message = format!("删除失败，未找到 pending plan P{pending_idx}");
         }
         self.clamp_planning_modal_selection();
         Ok(())
@@ -325,7 +331,7 @@ impl CliApp {
             return Ok(());
         };
         let Some(from_pending_idx) = self.pending_index_by_plan_row(selected_row) else {
-            self.status_message = "仅支持调序 pending 步骤".to_string();
+            self.status_message = "仅支持调序 pending plan".to_string();
             return Ok(());
         };
 
@@ -335,13 +341,13 @@ impl CliApp {
             from_pending_idx.saturating_add(1)
         };
         if to_pending_idx == 0 {
-            self.status_message = "已经是首个 pending 步骤".to_string();
+            self.status_message = "已经是首个 pending plan".to_string();
             return Ok(());
         }
 
         if self
             .state
-            .move_pending_plan_step(from_pending_idx, to_pending_idx)?
+            .move_pending_task_plan(from_pending_idx, to_pending_idx)?
         {
             if let Some(new_row) = self.plan_row_by_pending_index(to_pending_idx)
                 && let Some(modal) = self.planning_modal.as_mut()
@@ -349,22 +355,18 @@ impl CliApp {
                 modal.selected_idx = new_row;
             }
             self.status_message =
-                format!("已调整 pending 规划步骤：P{from_pending_idx} -> P{to_pending_idx}");
+                format!("已调整 pending plan：P{from_pending_idx} -> P{to_pending_idx}");
         } else if upward {
-            self.status_message = "已经是首个 pending 步骤".to_string();
+            self.status_message = "已经是首个 pending plan".to_string();
         } else {
-            self.status_message = "已经是最后一个 pending 步骤".to_string();
+            self.status_message = "已经是最后一个 pending plan".to_string();
         }
 
         Ok(())
     }
 
     fn clamp_planning_modal_selection(&mut self) {
-        let total = self
-            .state
-            .active_session()
-            .map(|session| session.plan_steps.len())
-            .unwrap_or(0);
+        let total = self.state.active_task_plans().len();
         if let Some(modal) = self.planning_modal.as_mut() {
             modal.selected_idx = if total == 0 {
                 0
@@ -375,10 +377,10 @@ impl CliApp {
     }
 
     fn pending_index_by_plan_row(&self, row_idx: usize) -> Option<usize> {
-        let session = self.state.active_session()?;
+        let plans = self.state.active_task_plans();
         let mut pending_idx = 0usize;
-        for (idx, step) in session.plan_steps.iter().enumerate() {
-            if step.status == PlanStepStatus::Pending {
+        for (idx, plan) in plans.iter().enumerate() {
+            if plan.status == PlanStepStatus::Pending {
                 pending_idx += 1;
                 if idx == row_idx {
                     return Some(pending_idx);
@@ -392,10 +394,10 @@ impl CliApp {
         if pending_index_1_based == 0 {
             return None;
         }
-        let session = self.state.active_session()?;
+        let plans = self.state.active_task_plans();
         let mut pending_idx = 0usize;
-        for (idx, step) in session.plan_steps.iter().enumerate() {
-            if step.status == PlanStepStatus::Pending {
+        for (idx, plan) in plans.iter().enumerate() {
+            if plan.status == PlanStepStatus::Pending {
                 pending_idx += 1;
                 if pending_idx == pending_index_1_based {
                     return Some(idx);

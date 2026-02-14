@@ -2,7 +2,6 @@ use ratatui::layout::Rect;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use super::super::CliApp;
-use super::super::transcript::text_display_width;
 
 impl CliApp {
     pub(in crate::cli::tui) fn render_input_panel(&self, frame: &mut ratatui::Frame, area: Rect) {
@@ -18,7 +17,7 @@ impl CliApp {
 
     pub(in crate::cli::tui) fn input_cursor_position(&self, area: Rect) -> (u16, u16) {
         let max_input_width = area.width.saturating_sub(3);
-        let input_char_count = text_display_width(self.input.as_str());
+        let input_char_count = self.input_cursor_prefix_display_width();
         let cursor_x = area
             .x
             .saturating_add(1)

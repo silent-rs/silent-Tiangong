@@ -10,7 +10,7 @@ use async_openai::types::chat::{
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::time::timeout;
 
@@ -43,6 +43,28 @@ pub struct ModelResponse {
 pub struct ModelStreamChunk {
     pub content: String,
     pub reasoning_content: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct FunctionToolSpec {
+    pub name: String,
+    pub description: String,
+    pub parameters: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelFunctionCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelFunctionResponse {
+    pub text: String,
+    pub reasoning_content: String,
+    pub usage: TokenUsage,
+    pub tool_calls: Vec<ModelFunctionCall>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +109,19 @@ pub trait ModelClient {
     fn api_timeout_ms(&self) -> &str;
     fn api_model(&self) -> &str;
     fn complete(&self, req: &ModelRequest) -> Result<ModelResponse>;
+    fn complete_with_functions(
+        &self,
+        req: &ModelRequest,
+        _functions: &[FunctionToolSpec],
+    ) -> Result<ModelFunctionResponse> {
+        let resp = self.complete(req)?;
+        Ok(ModelFunctionResponse {
+            text: resp.text,
+            reasoning_content: resp.reasoning_content,
+            usage: resp.usage,
+            tool_calls: Vec::new(),
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -399,6 +434,65 @@ impl ModelClient for SingleProviderClient {
             output_chunk_count: 1,
         })
     }
+
+    fn complete_with_functions(
+        &self,
+        req: &ModelRequest,
+        functions: &[FunctionToolSpec],
+    ) -> Result<ModelFunctionResponse> {
+        let token = self.cfg.api_auth_token.trim();
+        if token.is_empty() {
+            return Err(anyhow!("API_AUTH_TOKEN 不能为空，无法发起工具模型请求"));
+        }
+
+        let timeout_ms = parse_timeout_ms(&self.cfg.api_timeout_ms)?;
+        let model = self.cfg.api_model.trim();
+        if model.is_empty() {
+            return Err(anyhow!("API_MODEL 不能为空，无法发起工具模型请求"));
+        }
+
+        let api_base = normalize_api_base(&self.cfg.api_base_url)?;
+        let messages = build_openai_messages(req)?;
+        let mut request_args_binding = CreateChatCompletionRequestArgs::default();
+        let request_args = request_args_binding
+            .model(model.to_string())
+            .messages(messages);
+        let mut request = request_args
+            .build()
+            .context("构建 function call 请求失败")?;
+        request.stream = Some(false);
+
+        let config = OpenAIConfig::new()
+            .with_api_key(token.to_string())
+            .with_api_base(api_base);
+        let client = OpenAIClient::with_config(config);
+        let mut request_json = serde_json::to_value(&request).context("序列化请求失败")?;
+        inject_temperature_config(&mut request_json);
+        inject_thinking_config(&mut request_json);
+        inject_function_tools(&mut request_json, functions);
+
+        let runtime = TokioRuntimeBuilder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("初始化异步运行时失败")?;
+
+        let response = runtime.block_on(async {
+            timeout(
+                Duration::from_millis(timeout_ms),
+                client.chat().create_byot::<_, Value>(request_json),
+            )
+            .await
+        });
+
+        match response {
+            Ok(Ok(payload)) => parse_function_byot_response(&payload),
+            Ok(Err(err)) => {
+                let hint = build_sdk_error_hint(&err.to_string());
+                Err(anyhow!("OpenAI SDK 工具调用请求失败：{err}{hint}"))
+            }
+            Err(_) => Err(anyhow!("工具调用请求超时：{timeout_ms}ms")),
+        }
+    }
 }
 
 fn build_openai_messages(req: &ModelRequest) -> Result<Vec<ChatCompletionRequestMessage>> {
@@ -586,6 +680,27 @@ fn inject_temperature_config(payload: &mut Value) {
     obj.insert("temperature".to_string(), Value::Number(temp));
 }
 
+fn inject_function_tools(payload: &mut Value, functions: &[FunctionToolSpec]) {
+    let Some(obj) = payload.as_object_mut() else {
+        return;
+    };
+    let tools = functions
+        .iter()
+        .map(|spec| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": spec.name,
+                    "description": spec.description,
+                    "parameters": spec.parameters,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    obj.insert("tools".to_string(), Value::Array(tools));
+    obj.insert("tool_choice".to_string(), Value::String("auto".to_string()));
+}
+
 fn configured_temperature_number() -> Option<serde_json::Number> {
     let raw = std::env::var("API_TEMPERATURE").unwrap_or_else(|_| "0.2".to_string());
     let value = raw.trim().parse::<f64>().ok()?;
@@ -666,6 +781,94 @@ fn parse_non_stream_byot_response(payload: &Value) -> Option<ModelResponse> {
             "non-stream-think".to_string()
         },
         output_chunk_count: 1,
+    })
+}
+
+fn parse_function_byot_response(payload: &Value) -> Result<ModelFunctionResponse> {
+    let choice = payload
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .ok_or_else(|| anyhow!("工具调用响应缺少 choices"))?;
+    let message = choice
+        .get("message")
+        .ok_or_else(|| anyhow!("工具调用响应缺少 message"))?;
+
+    let text = extract_delta_text(message, "content").trim().to_string();
+    let reasoning_content = extract_delta_text(message, "reasoning_content")
+        .trim()
+        .to_string();
+    let tool_calls = message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(parse_function_call_item)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if text.is_empty() && reasoning_content.is_empty() && tool_calls.is_empty() {
+        return Err(anyhow!("工具调用响应既没有文本也没有函数调用"));
+    }
+
+    let usage = payload.get("usage");
+    let prompt_tokens = usage
+        .and_then(|v| v.get("prompt_tokens"))
+        .and_then(Value::as_u64)
+        .map(|v| v as usize)
+        .unwrap_or(0);
+    let completion_tokens = usage
+        .and_then(|v| v.get("completion_tokens"))
+        .and_then(Value::as_u64)
+        .map(|v| v as usize)
+        .unwrap_or(0);
+    let total_tokens = usage
+        .and_then(|v| v.get("total_tokens"))
+        .and_then(Value::as_u64)
+        .map(|v| v as usize)
+        .unwrap_or(0);
+
+    Ok(ModelFunctionResponse {
+        text,
+        reasoning_content,
+        usage: TokenUsage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+        },
+        tool_calls,
+    })
+}
+
+fn parse_function_call_item(item: &Value) -> Option<ModelFunctionCall> {
+    let name = item
+        .get("function")
+        .and_then(|v| v.get("name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())?
+        .to_string();
+    let id = item
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let raw_args = item
+        .get("function")
+        .and_then(|v| v.get("arguments"))
+        .and_then(Value::as_str)
+        .unwrap_or("{}");
+    let arguments = serde_json::from_str::<Value>(raw_args)
+        .ok()
+        .filter(|v| v.is_object())
+        .unwrap_or_else(|| Value::Object(Map::new()));
+
+    Some(ModelFunctionCall {
+        id,
+        name,
+        arguments,
     })
 }
 

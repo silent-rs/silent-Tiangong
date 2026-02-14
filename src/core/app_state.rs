@@ -12,11 +12,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::agent_config::AgentConfig;
 use crate::core::model::{ModelProviderConfig, ModelStreamChunk, SingleProviderClient};
-use crate::core::planner::TaskPlan;
+use crate::core::planner::{PlanStepStatus, TaskPlan};
 use crate::core::runtime::{
     RunSnapshot, RunStatus, RuntimeEngine, TurnExecution, VerifyExecutionRecord,
 };
-use crate::core::session::{Message, MessageRole, Session, now_text};
+use crate::core::session::{Message, MessageRole, Session, SessionTaskPlan, now_text};
 use crate::core::tool::ToolExecutionRecord;
 
 const DEFAULT_SESSION_TITLE: &str = "默认会话";
@@ -175,6 +175,12 @@ impl TiangongState {
             state.run.last_error = Some("存在未完成任务，已在启动时恢复为失败".to_string());
             let _ = state.persist_to_disk();
         }
+
+        if let Ok(true) = state.try_auto_resume_unfinished_plan_for_active_session() {
+            state.run.summary = "检测到未完成 plan，已在启动时自动继续执行".to_string();
+            state.run.last_result = Some("auto_resumed_unfinished_plan_on_startup".to_string());
+            state.run.last_error = None;
+        }
         state.run.updated_at = now_text();
 
         state
@@ -209,6 +215,21 @@ impl TiangongState {
         self.sessions
             .iter()
             .find(|session| session.id == self.active_session_id)
+    }
+
+    pub fn active_task_plans(&self) -> Vec<SessionTaskPlan> {
+        let Some(session) = self.active_session() else {
+            return Vec::new();
+        };
+        let Some(task_id) = self.active_task_id_for_session(&session.id) else {
+            return Vec::new();
+        };
+        session
+            .task_plans
+            .iter()
+            .filter(|plan| plan.task_id == task_id)
+            .cloned()
+            .collect()
     }
 
     pub fn has_pending_turn(&self) -> bool {
@@ -297,12 +318,15 @@ impl TiangongState {
         Ok(true)
     }
 
-    pub fn delete_pending_plan_step(&mut self, pending_index_1_based: usize) -> Result<bool> {
+    pub fn delete_pending_task_plan(&mut self, pending_index_1_based: usize) -> Result<bool> {
         if pending_index_1_based == 0 {
             return Err(anyhow!("删除索引必须从 1 开始"));
         }
 
         let active_id = self.active_session_id.clone();
+        let Some(task_id) = self.active_task_id_for_session(&active_id) else {
+            return Err(anyhow!("当前没有可用任务"));
+        };
         let Some(session) = self
             .sessions
             .iter_mut()
@@ -311,14 +335,15 @@ impl TiangongState {
             return Err(anyhow!("当前会话不存在"));
         };
 
-        let removed = session.delete_pending_plan_step(pending_index_1_based - 1);
+        let removed =
+            session.delete_pending_task_plan_for_task(&task_id, pending_index_1_based - 1);
         if removed {
             self.persist_session_and_app(&active_id)?;
         }
         Ok(removed)
     }
 
-    pub fn move_pending_plan_step(
+    pub fn move_pending_task_plan(
         &mut self,
         from_index_1_based: usize,
         to_index_1_based: usize,
@@ -328,6 +353,9 @@ impl TiangongState {
         }
 
         let active_id = self.active_session_id.clone();
+        let Some(task_id) = self.active_task_id_for_session(&active_id) else {
+            return Err(anyhow!("当前没有可用任务"));
+        };
         let Some(session) = self
             .sessions
             .iter_mut()
@@ -336,7 +364,11 @@ impl TiangongState {
             return Err(anyhow!("当前会话不存在"));
         };
 
-        let moved = session.move_pending_plan_step(from_index_1_based - 1, to_index_1_based - 1);
+        let moved = session.move_pending_task_plan_for_task(
+            &task_id,
+            from_index_1_based - 1,
+            to_index_1_based - 1,
+        );
         if moved {
             self.persist_session_and_app(&active_id)?;
         }
@@ -395,6 +427,7 @@ impl TiangongState {
             self.active_session_id = session_id.to_string();
             self.session_title_draft = session.title.clone();
             let _ = self.persist_app_only();
+            let _ = self.try_auto_resume_unfinished_plan_for_active_session();
         }
     }
 
@@ -727,15 +760,21 @@ impl TiangongState {
     }
 
     pub fn send_current_input(&mut self) -> Result<()> {
-        if self.pending_turn.is_some() {
-            return Ok(());
-        }
-
         let input = self.input_draft.trim().to_string();
-        if input.is_empty() {
-            return Ok(());
+        let started = self.start_turn_with_input(input)?;
+        if started {
+            self.input_draft.clear();
         }
+        Ok(())
+    }
 
+    fn start_turn_with_input(&mut self, input: String) -> Result<bool> {
+        if self.pending_turn.is_some() {
+            return Ok(false);
+        }
+        if input.trim().is_empty() {
+            return Ok(false);
+        }
         let active_idx = self.ensure_active_session_index();
         let session_id = self.sessions[active_idx].id.clone();
         let task_id = new_scru128_string();
@@ -773,8 +812,6 @@ impl TiangongState {
         };
 
         self.persist_session_and_app(&session_id)?;
-
-        self.input_draft.clear();
 
         let runtime = self.runtime.clone();
         let session_snapshot = self.sessions[active_idx].clone();
@@ -815,7 +852,7 @@ impl TiangongState {
             rx,
         });
 
-        Ok(())
+        Ok(true)
     }
 
     fn try_recv_turn_event(&mut self, disconnected: &mut bool) -> Option<TurnEvent> {
@@ -866,7 +903,7 @@ impl TiangongState {
             .find(|session| session.id == session_id)
         {
             session.mark_task_executing(&task_id, Some(format_plan_snapshot(plan)));
-            session.sync_task_plan_steps(&task_id, &plan.steps);
+            session.sync_task_plans(&task_id, &plan.plans);
         }
 
         self.run = RunSnapshot {
@@ -944,7 +981,7 @@ impl TiangongState {
             .iter_mut()
             .find(|session| session.id == session_id)
         {
-            session.sync_task_plan_steps(&task_id, &exec.plan.steps);
+            session.sync_task_plans(&task_id, &exec.plan.plans);
             session.complete_task(
                 &task_id,
                 Some(plan_snapshot.clone()),
@@ -1115,6 +1152,47 @@ impl TiangongState {
         self.active_session_id = session.id.clone();
         self.sessions.push(session);
         self.sessions.len() - 1
+    }
+
+    fn try_auto_resume_unfinished_plan_for_active_session(&mut self) -> Result<bool> {
+        if self.pending_turn.is_some() {
+            return Ok(false);
+        }
+
+        let active_id = self.active_session_id.clone();
+        let Some(session) = self.sessions.iter().find(|session| session.id == active_id) else {
+            return Ok(false);
+        };
+        let Some(last_task) = session.task_records.last() else {
+            return Ok(false);
+        };
+        let has_pending_plans = session.task_plans.iter().any(|plan| {
+            plan.task_id == last_task.task_id && plan.status == PlanStepStatus::Pending
+        });
+        if !has_pending_plans {
+            return Ok(false);
+        }
+
+        let resume_input = last_task.user_input.trim().to_string();
+        if resume_input.is_empty() {
+            return Ok(false);
+        }
+
+        self.start_turn_with_input(resume_input)
+    }
+
+    fn active_task_id_for_session(&self, session_id: &str) -> Option<String> {
+        if let Some(pending) = self.pending_turn.as_ref()
+            && pending.session_id == session_id
+        {
+            return Some(pending.task_id.clone());
+        }
+        self.sessions
+            .iter()
+            .find(|session| session.id == session_id)?
+            .task_records
+            .last()
+            .map(|record| record.task_id.clone())
     }
 
     fn recover_interrupted_tasks(&mut self) -> usize {
@@ -1446,11 +1524,12 @@ fn format_plan_snapshot(plan: &TaskPlan) -> String {
     } else {
         plan.risks.join("；")
     };
-    let verify_commands = if plan.verify_commands.is_empty() {
-        "无".to_string()
-    } else {
-        plan.verify_commands.join("；")
-    };
+    let plan_count = plan.plans.len();
+    let step_count = plan
+        .plans
+        .iter()
+        .map(|item| item.execution_steps.len())
+        .sum::<usize>();
     let skill_hints = if plan.skill_hints.is_empty() {
         "无".to_string()
     } else {
@@ -1481,12 +1560,12 @@ fn format_plan_snapshot(plan: &TaskPlan) -> String {
     };
 
     format!(
-        "{}\n目标：{}\n步骤数：{}\n风险：{}\n验证命令：{}\nSkills：{}\nMCP：{}\n计划修正：{}",
+        "{}\n目标：{}\n事项数：{}\n执行步骤数：{}\n风险：{}\nSkills：{}\nMCP：{}\n计划修正：{}",
         plan.summary,
         plan.objective,
-        plan.steps.len(),
+        plan_count,
+        step_count,
         risks,
-        verify_commands,
         skill_hints,
         mcp_hints,
         revisions
@@ -1573,12 +1652,12 @@ fn build_turn_conclusion(exec: &TurnExecution) -> String {
     if let Some(tool_execution) = &exec.tool_execution {
         completed.push(format!("工具执行({})", tool_execution.tool_name));
     }
-    let planned_verify_commands = exec
+    let pending_plans = exec
         .plan
-        .verify_commands
+        .plans
         .iter()
-        .filter(|cmd| cmd.as_str() != "无")
-        .cloned()
+        .filter(|item| item.status == PlanStepStatus::Pending)
+        .map(|item| item.name.clone())
         .collect::<Vec<_>>();
     let failed_verify = exec
         .verify_records
@@ -1586,10 +1665,14 @@ fn build_turn_conclusion(exec: &TurnExecution) -> String {
         .filter(|record| !record.ok)
         .collect::<Vec<_>>();
 
-    let pending = if planned_verify_commands.is_empty() {
-        "人工复核输出结果".to_string()
+    if pending_plans.is_empty() {
+        completed.push("plan事项执行".to_string());
+    }
+
+    let pending = if !pending_plans.is_empty() {
+        format!("待完成 plan：{}", pending_plans.join("；"))
     } else if exec.verify_records.is_empty() {
-        format!("执行验证命令：{}", planned_verify_commands.join("；"))
+        "人工复核输出结果".to_string()
     } else if failed_verify.is_empty() {
         completed.push("验证执行".to_string());
         "无".to_string()

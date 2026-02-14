@@ -181,15 +181,21 @@ impl LocalToolExecutor {
             .args
             .first()
             .ok_or_else(|| anyhow!("run_command 缺少命令参数"))?;
-        if !is_allowed_command(cmd) {
-            return Err(anyhow!("不允许执行命令：{cmd}"));
+        let args = call.args.iter().skip(1).cloned().collect::<Vec<_>>();
+
+        if cmd == "bash" {
+            validate_bash_args(&args)?;
+        } else {
+            if !is_allowed_command(cmd) {
+                return Err(anyhow!("不允许执行命令：{cmd}"));
+            }
+            validate_command_args_in_allowed_roots(cmd, &args)?;
         }
-        validate_command_args_in_allowed_roots(cmd, &call.args[1..])?;
 
         let timeout_ms = command_timeout_ms();
         let (output, timed_out) = execute_command_with_timeout(
             Command::new(cmd)
-                .args(call.args.iter().skip(1))
+                .args(&args)
                 .current_dir(workspace_root()?)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped()),
@@ -620,6 +626,61 @@ fn display_rel_path(path: &Path) -> String {
 
 fn is_allowed_command(cmd: &str) -> bool {
     matches!(cmd, "echo" | "pwd" | "ls" | "cat" | "head" | "tail" | "wc")
+}
+
+fn validate_bash_args(args: &[String]) -> Result<()> {
+    if args.len() != 2 || args.first().map(String::as_str) != Some("-lc") {
+        return Err(anyhow!(
+            "bash 仅允许以 -lc 单脚本形式执行：run_command(cmd=bash,args=[\"-lc\",\"<script>\"])"
+        ));
+    }
+    let script = args
+        .get(1)
+        .map(String::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if script.is_empty() {
+        return Err(anyhow!("bash 脚本不能为空"));
+    }
+    validate_bash_script(script)
+}
+
+fn validate_bash_script(script: &str) -> Result<()> {
+    let lowered = script.to_ascii_lowercase();
+    if contains_forbidden_bash_tokens(&lowered) {
+        return Err(anyhow!("bash 脚本包含不允许的高风险控制符或命令"));
+    }
+
+    let cmd = extract_bash_head_command(script).ok_or_else(|| anyhow!("无法识别 bash 命令"))?;
+    if !is_allowed_bash_head_command(cmd) {
+        return Err(anyhow!("bash 脚本首命令不在允许列表：{cmd}"));
+    }
+
+    let args = script
+        .split_whitespace()
+        .skip(1)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    validate_command_args_in_allowed_roots(cmd, &args)
+}
+
+fn contains_forbidden_bash_tokens(script: &str) -> bool {
+    const FORBIDDEN: [&str; 17] = [
+        "&&", "||", ";", "|", ">", "<", "`", "$(", "sudo ", " rm -", "mv /", "chmod -r", "chown ",
+        "shutdown", "reboot", "poweroff", "mkfs",
+    ];
+    FORBIDDEN.iter().any(|token| script.contains(token))
+}
+
+fn extract_bash_head_command(script: &str) -> Option<&str> {
+    script.split_whitespace().next()
+}
+
+fn is_allowed_bash_head_command(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "echo" | "pwd" | "ls" | "cat" | "head" | "tail" | "wc" | "rg" | "grep" | "cargo" | "git"
+    )
 }
 
 fn command_timeout_ms() -> u64 {

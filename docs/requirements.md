@@ -9,21 +9,27 @@
 - `tiangong` 默认保持桌面 UI 入口，不改变现有默认行为。
 - 提供 CLI Agent 入口 `tiangong cli`。
 - CLI 交互界面使用 `ratatui`，支持连续多轮任务执行与会话恢复。
+- 主界面交互规则：输入以 `/` 开头且命令提示可见时，`↑/↓` 用于命令项选择；普通输入时 `Shift+↑/↓` 切换输入历史，`↑/↓` 仅用于输入框光标移动；鼠标滚轮用于对话区滚动。
 - CLI 需提供 `/planing` 弹窗（与历史会话弹窗交互风格一致）查看当前 planning 列表。
-- planning 的删除与调序仅在 `/planing` 弹窗内完成，且只允许操作未开始（pending）步骤。
-- planning 列表中的已完成步骤需以删除线样式显示。
+- planning 的删除与调序仅在 `/planing` 弹窗内完成，且只允许操作未开始（pending）plan 事项。
+- planning 列表中的已完成 plan 事项需以删除线样式显示。
 - CLI 对话输出需支持 Markdown 轻量渲染（至少覆盖标题、粗体、列表、代码块），提升终端可读性。
 - CLI 层仅承载 TUI 与交互适配代码；智能体能力统一沉淀在 `src/core/`，供 UI 与 CLI 复用。
 - 建立最小执行链路：输入 -> 规划 -> 执行 -> 输出。
-- 规划结果至少包含：目标、步骤、风险、预期验证命令。
+- 规划阶段需内置 planing 智能体（Planning Agent），优先由模型生成结构化计划。
+- 规划结果至少包含：目标、`plan` 事项列表、每个 `plan` 的独立执行步骤列表、风险。
+- `plan` 仅表达待办事项，不承载验证命令或验证结论；验证链路在运行时独立执行。
 - 工具执行需支持结构化记录（工具名、参数、耗时、退出码、摘要）。
+- 基础文件读写改能力（`read_file` / `write_file` / `replace_in_file` / `apply_patch`）需优先通过 `function call` 驱动执行。
 - 工具能力至少包含：
   - 读：`list_dir`、`read_file`、代码检索。
   - 写：`write_file`、`replace_in_file`、`apply_patch`。
-  - 命令：受控 `run_command`，且默认强制超时。
+  - 命令：统一使用受控 `run_command`（支持 `cmd=bash,args=["-lc","..."]`），默认强制超时。
 - 工具与文件写入必须限制在工作区边界内，不允许越界访问。
 - 每轮输出需包含改动文件概览、差异摘要与执行结论（完成/未完成/风险）。
 - 会话数据本地持久化到用户目录（Unix: `~/.tiangong/sessions/`，Windows: `%USERPROFILE%\\.tiangong\\sessions\\`），应用配置持久化到对应的 `app.json`。
+- 当用户切换到历史会话时，如果该会话存在未完成（pending）的当前任务 plan 事项，系统需自动继续执行该 plan。
+- 应用启动后，若当前激活会话存在未完成（pending）的当前任务 plan 事项，系统需自动继续执行该 plan。
 - MVP 阶段运行时不自动迁移项目目录内旧 `.tiangong/` 数据。
 - 会话文件名必须使用 `scru128`（如 `<scru128>.json`）。
 - 统一配置结构需覆盖 Model/Skills/MCP/Agent，并支持本地恢复。
@@ -33,7 +39,9 @@
 
 ### Should
 - 计划在执行中可修正，并记录修正原因。
+- 当 planing 智能体不可用或返回非法结构时，自动回退到最小计划策略并记录原因。
 - 自动推荐并执行验证命令（Rust 优先 `cargo check` / `cargo clippy`），失败返回可操作摘要。
+- 验证能力与 `plan` 解耦：验证失败不应作为 `plan` 事项描述的一部分。
 - 支持 Skills 本地扫描、索引与按任务意图匹配。
 - 定义 MCP 客户端抽象（连接、资源发现、资源读取、错误处理）。
 - 将 MCP 资源读取结果接入执行链路，作为模型上下文输入。
