@@ -14,11 +14,11 @@ use crate::core::app_state::TiangongState;
 use crate::core::runtime::RunStatus;
 
 mod commands;
+mod components;
 mod render;
 mod transcript;
 
 const TICK_RATE: Duration = Duration::from_millis(60);
-const MAX_COMMAND_HINTS: usize = 8;
 const CONVERSATION_SCROLL_LINE_STEP: u16 = 3;
 const CONVERSATION_SCROLL_PAGE_STEP: u16 = 16;
 

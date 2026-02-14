@@ -361,44 +361,4 @@ impl CliApp {
     pub(super) fn is_command_palette_active(&self) -> bool {
         !self.command_hints().is_empty()
     }
-
-    fn model_command_hints(&self, raw: &str) -> Vec<CommandHint> {
-        let mut hints = vec![CommandHint::new("/model", "查看当前模型与模型列表")];
-        let query = raw.trim_start_matches("/model").trim();
-        let current = self.state.current_model();
-        let models = self.state.model_list();
-
-        if models.is_empty() {
-            hints.push(CommandHint::new(
-                format!("/model {current}"),
-                "模型列表为空，仍可输入完整模型名切换",
-            ));
-            return hints;
-        }
-
-        let mut matched = 0usize;
-        for model in models {
-            if query.is_empty() || model.contains(query) {
-                let desc = if model == current {
-                    "当前模型"
-                } else {
-                    "切换到该模型"
-                };
-                hints.push(CommandHint::new(format!("/model {model}"), desc));
-                matched += 1;
-                if matched >= 6 {
-                    break;
-                }
-            }
-        }
-
-        if matched == 0 {
-            hints.push(CommandHint::new_note(
-                "/model <name>",
-                "未匹配到模型，输入完整名称后回车切换",
-            ));
-        }
-
-        hints
-    }
 }
