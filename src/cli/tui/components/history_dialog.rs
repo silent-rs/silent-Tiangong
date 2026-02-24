@@ -39,7 +39,7 @@ impl CliApp {
 
         frame.render_widget(Clear, modal_rect);
         frame.render_widget(
-            Block::default().borders(Borders::ALL).title("历史会话"),
+            Block::default().borders(Borders::ALL).title("切换会话"),
             modal_rect,
         );
 

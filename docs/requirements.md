@@ -10,7 +10,7 @@
 - 提供 CLI Agent 入口 `tiangong cli`。
 - CLI 交互界面使用 `ratatui`，支持连续多轮任务执行与会话恢复。
 - 主界面交互规则：输入以 `/` 开头且命令提示可见时，`↑/↓` 用于命令项选择；普通输入时 `Shift+↑/↓` 切换输入历史，`↑/↓` 仅用于输入框光标移动；鼠标滚轮用于对话区滚动。
-- CLI 需提供 `/planing` 弹窗（与历史会话弹窗交互风格一致）查看当前 planning 列表。
+- CLI 需提供 `/planing` 弹窗（与“切换会话”弹窗交互风格一致）查看当前 planning 列表。
 - 状态栏需支持复合阶段显示（如 `planning + executing`），并展示当前执行中的 plan/step（含序号与进度）。
 - 同一会话内，plan 需保持完整历史：新增输入只追加新 plan，不清理已完成 plan，不自动调整历史顺序；未完成（pending）plan 允许用户手动调序与删改。
 - planning 的删除与调序仅在 `/planing` 弹窗内完成，且只允许操作未开始（pending）plan 事项。
@@ -34,7 +34,8 @@
 - 工具与文件写入必须限制在工作区边界内，不允许越界访问。
 - 每轮输出需包含改动文件概览、差异摘要与执行结论（完成/未完成/风险）。
 - 会话数据本地持久化到用户目录（Unix: `~/.tiangong/sessions/`，Windows: `%USERPROFILE%\\.tiangong\\sessions\\`），应用配置持久化到对应的 `app.json`。
-- 当用户切换到历史会话时，如果该会话存在未完成（pending）的当前任务 plan 事项，系统需自动继续执行该 plan。
+- CLI 需提供 `/sessions` 命令用于“切换会话”。
+- 当用户切换会话时，如果该会话存在未完成（pending）的当前任务 plan 事项，系统需自动继续执行该 plan。
 - 应用启动后，若当前激活会话存在未完成（pending）的当前任务 plan 事项，系统需自动继续执行该 plan。
 - MVP 阶段运行时不自动迁移项目目录内旧 `.tiangong/` 数据。
 - 会话文件名必须使用 `scru128`（如 `<scru128>.json`）。

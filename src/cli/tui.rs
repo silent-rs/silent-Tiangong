@@ -210,7 +210,7 @@ impl CliApp {
         match key.code {
             KeyCode::Esc => {
                 self.history_modal = None;
-                self.status_message = "已关闭历史会话选择".to_string();
+                self.status_message = "已关闭会话切换".to_string();
             }
             KeyCode::Enter => self.confirm_history_modal_selection()?,
             KeyCode::Up => self.move_history_modal_selection(-1),

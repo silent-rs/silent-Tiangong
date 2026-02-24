@@ -87,7 +87,7 @@
 - [x] 会话索引改为扫描 `.tiangong/sessions/` 目录，不在 `app.json` 冗余 `session_ids`
 - [x] `active_session_id` 对应会话不存在时自动回退至第一个可用会话
 - [x] `.tiangong` 存储迁移到用户目录（Unix: `~/.tiangong`，Windows: `%USERPROFILE%\\.tiangong`），MVP 阶段不兼容旧项目目录存储（运行时不自动迁移）
-- [x] 切换历史会话时若存在未完成 plan 事项，自动继续执行
+- [x] 切换会话时若存在未完成 plan 事项，自动继续执行
 - [x] 应用启动时若当前会话存在未完成 plan 事项，自动继续执行
 
 ### C3 非交互模式

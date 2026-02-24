@@ -91,7 +91,7 @@ impl CliApp {
             {
                 self.handle_planing_command(command)
             }
-            _ if command == "/history" || command.starts_with("/history ") => {
+            _ if command == "/sessions" || command.starts_with("/sessions ") => {
                 self.handle_history_command(command)
             }
             _ if command == "/model" || command.starts_with("/model ") => {
@@ -124,13 +124,13 @@ impl CliApp {
     }
 
     fn handle_history_command(&mut self, command: &str) -> Result<()> {
-        let query = command.trim_start_matches("/history").trim();
+        let query = command.trim_start_matches("/sessions").trim();
         self.planning_modal = None;
         self.history_modal = Some(super::HistoryModalState {
             query: query.to_string(),
             selected_idx: 0,
         });
-        self.status_message = "历史会话选择已打开（Esc 关闭）".to_string();
+        self.status_message = "会话切换已打开（Esc 关闭）".to_string();
         Ok(())
     }
 
@@ -207,7 +207,7 @@ impl CliApp {
         };
         let matched = self.history_match_indices(&modal.query);
         if matched.is_empty() {
-            self.status_message = "未匹配到历史会话".to_string();
+            self.status_message = "未匹配到会话".to_string();
             return Ok(());
         }
         let picked = matched[modal.selected_idx.min(matched.len() - 1)];
@@ -217,7 +217,7 @@ impl CliApp {
             .get(picked)
             .map(|session| (session.id.clone(), session.title.clone()))
         else {
-            return Err(anyhow!("所选历史会话不存在"));
+            return Err(anyhow!("所选会话不存在"));
         };
 
         let had_pending_before = self.state.has_pending_turn();
@@ -227,9 +227,9 @@ impl CliApp {
         self.follow_conversation_bottom = true;
         self.history_modal = None;
         self.status_message = if auto_resumed {
-            format!("已切换到历史会话：{title}，检测到未完成 plan，已自动继续执行")
+            format!("已切换会话：{title}，检测到未完成 plan，已自动继续执行")
         } else {
-            format!("已切换到历史会话：{title}")
+            format!("已切换会话：{title}")
         };
         Ok(())
     }
@@ -482,13 +482,13 @@ impl CliApp {
             return Vec::new();
         }
 
-        if raw == "/history" {
-            return vec![CommandHint::new("/history", "打开历史会话选择弹窗")];
+        if raw == "/sessions" {
+            return vec![CommandHint::new("/sessions", "切换会话")];
         }
-        if raw.starts_with("/history ") {
+        if raw.starts_with("/sessions ") {
             return vec![CommandHint::new_note(
-                "/history <关键词>",
-                "回车后在弹窗中按关键词筛选历史会话",
+                "/sessions <关键词>",
+                "回车后在弹窗中按关键词筛选会话",
             )];
         }
 
@@ -511,7 +511,7 @@ impl CliApp {
             CommandHint::new("/planing", "打开 planning 列表弹窗"),
             CommandHint::new("/model", "切换模型或查看可选模型"),
             CommandHint::new("/config", "查看或更新 Agent 配置"),
-            CommandHint::new("/history", "恢复历史会话"),
+            CommandHint::new("/sessions", "切换会话"),
             CommandHint::new("/new", "新建会话"),
             CommandHint::new("/help", "展示命令提示"),
             CommandHint::new("/exit", "退出 CLI"),
