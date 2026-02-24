@@ -221,15 +221,7 @@ impl TiangongState {
         let Some(session) = self.active_session() else {
             return Vec::new();
         };
-        let Some(task_id) = self.active_task_id_for_session(&session.id) else {
-            return Vec::new();
-        };
-        session
-            .task_plans
-            .iter()
-            .filter(|plan| plan.task_id == task_id)
-            .cloned()
-            .collect()
+        session.task_plans.to_vec()
     }
 
     pub fn has_pending_turn(&self) -> bool {
@@ -324,9 +316,6 @@ impl TiangongState {
         }
 
         let active_id = self.active_session_id.clone();
-        let Some(task_id) = self.active_task_id_for_session(&active_id) else {
-            return Err(anyhow!("当前没有可用任务"));
-        };
         let Some(session) = self
             .sessions
             .iter_mut()
@@ -335,8 +324,7 @@ impl TiangongState {
             return Err(anyhow!("当前会话不存在"));
         };
 
-        let removed =
-            session.delete_pending_task_plan_for_task(&task_id, pending_index_1_based - 1);
+        let removed = session.delete_pending_task_plan(pending_index_1_based - 1);
         if removed {
             self.persist_session_and_app(&active_id)?;
         }
@@ -353,9 +341,6 @@ impl TiangongState {
         }
 
         let active_id = self.active_session_id.clone();
-        let Some(task_id) = self.active_task_id_for_session(&active_id) else {
-            return Err(anyhow!("当前没有可用任务"));
-        };
         let Some(session) = self
             .sessions
             .iter_mut()
@@ -364,11 +349,7 @@ impl TiangongState {
             return Err(anyhow!("当前会话不存在"));
         };
 
-        let moved = session.move_pending_task_plan_for_task(
-            &task_id,
-            from_index_1_based - 1,
-            to_index_1_based - 1,
-        );
+        let moved = session.move_pending_task_plan(from_index_1_based - 1, to_index_1_based - 1);
         if moved {
             self.persist_session_and_app(&active_id)?;
         }
@@ -1181,20 +1162,6 @@ impl TiangongState {
         self.start_turn_with_input(resume_input)
     }
 
-    fn active_task_id_for_session(&self, session_id: &str) -> Option<String> {
-        if let Some(pending) = self.pending_turn.as_ref()
-            && pending.session_id == session_id
-        {
-            return Some(pending.task_id.clone());
-        }
-        self.sessions
-            .iter()
-            .find(|session| session.id == session_id)?
-            .task_records
-            .last()
-            .map(|record| record.task_id.clone())
-    }
-
     fn recover_interrupted_tasks(&mut self) -> usize {
         let mut recovered = 0usize;
         for session in &mut self.sessions {
@@ -1659,18 +1626,44 @@ fn build_turn_conclusion(exec: &TurnExecution) -> String {
         .filter(|item| item.status == PlanStepStatus::Pending)
         .map(|item| item.name.clone())
         .collect::<Vec<_>>();
+    let failed_plans = exec
+        .plan
+        .plans
+        .iter()
+        .filter(|item| item.status == PlanStepStatus::Failed)
+        .map(|item| {
+            let summary = item.execution_summary.clone().unwrap_or_default();
+            if summary.is_empty() {
+                item.name.clone()
+            } else {
+                format!("{}({})", item.name, summary.replace('\n', " | "))
+            }
+        })
+        .collect::<Vec<_>>();
+    let ignored_step_count = exec
+        .plan
+        .plans
+        .iter()
+        .flat_map(|item| item.execution_steps.iter())
+        .filter(|step| step.status == PlanStepStatus::Ignored)
+        .count();
     let failed_verify = exec
         .verify_records
         .iter()
         .filter(|record| !record.ok)
         .collect::<Vec<_>>();
 
-    if pending_plans.is_empty() {
+    if pending_plans.is_empty() && failed_plans.is_empty() {
         completed.push("plan事项执行".to_string());
     }
 
     let pending = if !pending_plans.is_empty() {
         format!("待完成 plan：{}", pending_plans.join("；"))
+    } else if !failed_plans.is_empty() {
+        format!(
+            "plan执行存在失败：{}；忽略步骤数={ignored_step_count}",
+            failed_plans.join("；")
+        )
     } else if exec.verify_records.is_empty() {
         "人工复核输出结果".to_string()
     } else if failed_verify.is_empty() {

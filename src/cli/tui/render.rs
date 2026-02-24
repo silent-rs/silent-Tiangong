@@ -8,7 +8,7 @@ impl CliApp {
         let sections = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(4),
+                Constraint::Length(7),
                 Constraint::Min(8),
                 Constraint::Length(3),
             ])

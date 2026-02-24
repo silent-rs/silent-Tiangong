@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::agent_config::AgentConfig;
 use crate::core::mcp::build_mcp_hints;
 use crate::core::model::{ModelClient, ModelRequest};
-use crate::core::session::Session;
+use crate::core::session::{MessageRole, Session};
 use crate::core::skills::build_skill_hints;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +24,8 @@ pub struct PlanItem {
     #[serde(default)]
     pub status: PlanStepStatus,
     #[serde(default)]
+    pub execution_summary: Option<String>,
+    #[serde(default)]
     pub execution_steps: Vec<PlanStep>,
 }
 
@@ -33,6 +35,8 @@ pub enum PlanStepStatus {
     #[default]
     Pending,
     Completed,
+    Failed,
+    Ignored,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,11 +62,32 @@ pub struct TaskPlan {
 
 impl PlanItem {
     pub fn refresh_status(&mut self) {
-        self.status = if self
+        let has_failed = self
             .execution_steps
             .iter()
-            .all(|step| step.status == PlanStepStatus::Completed)
-        {
+            .any(|step| step.status == PlanStepStatus::Failed);
+        let has_pending = self
+            .execution_steps
+            .iter()
+            .any(|step| step.status == PlanStepStatus::Pending);
+        let all_ignored = !self.execution_steps.is_empty()
+            && self
+                .execution_steps
+                .iter()
+                .all(|step| step.status == PlanStepStatus::Ignored);
+        let all_finished = !self.execution_steps.is_empty()
+            && self
+                .execution_steps
+                .iter()
+                .all(|step| step.status != PlanStepStatus::Pending);
+
+        self.status = if has_failed {
+            PlanStepStatus::Failed
+        } else if has_pending {
+            PlanStepStatus::Pending
+        } else if all_ignored {
+            PlanStepStatus::Ignored
+        } else if all_finished {
             PlanStepStatus::Completed
         } else {
             PlanStepStatus::Pending
@@ -105,6 +130,7 @@ impl TaskPlan {
             name: name.into(),
             description: description.into(),
             status: PlanStepStatus::Pending,
+            execution_summary: None,
             execution_steps,
         };
         item.refresh_status();
@@ -209,9 +235,10 @@ fn build_plan_with_agent_inner(
     agent_config: &AgentConfig,
     context_limit: usize,
 ) -> Result<TaskPlan> {
+    let input_list = collect_user_input_list(session, user_input, context_limit);
     let request = ModelRequest {
         session_title: format!("{} · planing-agent", session.title),
-        user_input: build_planing_prompt(user_input),
+        user_input: build_planing_prompt(user_input, &input_list),
         context: session.recent_messages(context_limit),
     };
     let response = client
@@ -285,6 +312,7 @@ fn build_plan_with_agent_inner(
                 plan_desc
             },
             status: PlanStepStatus::Pending,
+            execution_summary: None,
             execution_steps,
         };
         item.refresh_status();
@@ -381,7 +409,17 @@ impl PlaningAgentOutput {
     }
 }
 
-fn build_planing_prompt(user_input: &str) -> String {
+fn build_planing_prompt(user_input: &str, input_list: &[String]) -> String {
+    let input_list_text = if input_list.is_empty() {
+        format!("1. {}", user_input.trim())
+    } else {
+        input_list
+            .iter()
+            .enumerate()
+            .map(|(idx, input)| format!("{}. {}", idx + 1, input))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     format!(
         r#"你是天工内置的 planing 智能体。你的任务是只输出 JSON 格式的执行计划。
 
@@ -406,10 +444,44 @@ fn build_planing_prompt(user_input: &str) -> String {
 4. 每个 plan 的 execution_steps 至少 1 条，按该 plan 的执行顺序排列。
 5. plan 只描述事项，不要把验证命令或验证结论写入 plan/steps。
 6. 保持计划通用、可执行，避免空泛描述。
+7. 你会收到“用户连续输入列表”，需要基于完整列表进行增量式规划：保留仍有效事项、移除已无效事项、补充新增事项，并输出最终有序 plan。
 
-用户任务：
+用户连续输入列表（按时间顺序）：
+{input_list_text}
+
+本轮新增输入：
 {user_input}"#
     )
+}
+
+fn collect_user_input_list(
+    session: &Session,
+    user_input: &str,
+    context_limit: usize,
+) -> Vec<String> {
+    let mut items = session
+        .recent_messages(context_limit)
+        .into_iter()
+        .filter(|message| matches!(message.role, MessageRole::User))
+        .map(|message| normalize_text(message.content))
+        .filter(|content| !content.is_empty())
+        .collect::<Vec<_>>();
+
+    let current = normalize_text(user_input.to_string());
+    if !current.is_empty()
+        && items
+            .last()
+            .is_none_or(|last| !last.eq_ignore_ascii_case(current.as_str()))
+    {
+        items.push(current);
+    }
+
+    // 避免长会话导致 planning 提示词膨胀，仅保留最近输入列表。
+    const MAX_INPUT_ITEMS: usize = 10;
+    if items.len() > MAX_INPUT_ITEMS {
+        items = items[items.len() - MAX_INPUT_ITEMS..].to_vec();
+    }
+    items
 }
 
 fn parse_planing_output(raw: &str) -> Result<PlaningAgentOutput> {

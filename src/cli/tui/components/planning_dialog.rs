@@ -53,7 +53,18 @@ impl CliApp {
             .iter()
             .filter(|plan| plan.status == PlanStepStatus::Pending)
             .count();
-        let completed_count = total.saturating_sub(pending_count);
+        let completed_count = plans
+            .iter()
+            .filter(|plan| plan.status == PlanStepStatus::Completed)
+            .count();
+        let failed_count = plans
+            .iter()
+            .filter(|plan| plan.status == PlanStepStatus::Failed)
+            .count();
+        let ignored_count = plans
+            .iter()
+            .filter(|plan| plan.status == PlanStepStatus::Ignored)
+            .count();
         let summary_widget = Paragraph::new(Line::from(vec![
             Span::styled("总数: ", Style::default().fg(Color::Gray)),
             Span::styled(
@@ -71,6 +82,13 @@ impl CliApp {
             Span::styled(
                 completed_count.to_string(),
                 Style::default().fg(Color::Green),
+            ),
+            Span::styled("  failed: ", Style::default().fg(Color::Gray)),
+            Span::styled(failed_count.to_string(), Style::default().fg(Color::Red)),
+            Span::styled("  ignored: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                ignored_count.to_string(),
+                Style::default().fg(Color::Magenta),
             ),
         ]))
         .block(Block::default().borders(Borders::ALL).title("概览"));
@@ -110,7 +128,12 @@ impl CliApp {
                     let prefix = if let Some(p_idx) = pending_indexes[idx] {
                         format!("[P{p_idx}]")
                     } else {
-                        "[DONE]".to_string()
+                        match plan.status {
+                            PlanStepStatus::Completed => "[DONE]".to_string(),
+                            PlanStepStatus::Failed => "[FAIL]".to_string(),
+                            PlanStepStatus::Ignored => "[SKIP]".to_string(),
+                            PlanStepStatus::Pending => "[P?]".to_string(),
+                        }
                     };
                     let total_steps = plan.execution_steps.len();
                     let done_steps = plan
@@ -138,6 +161,14 @@ impl CliApp {
                                 .bg(Color::Gray)
                                 .add_modifier(Modifier::CROSSED_OUT),
                         )),
+                        (true, PlanStepStatus::Failed) => Line::from(Span::styled(
+                            text,
+                            Style::default().fg(Color::Black).bg(Color::Red),
+                        )),
+                        (true, PlanStepStatus::Ignored) => Line::from(Span::styled(
+                            text,
+                            Style::default().fg(Color::Black).bg(Color::Magenta),
+                        )),
                         (false, PlanStepStatus::Pending) => {
                             Line::from(Span::styled(text, Style::default().fg(Color::White)))
                         }
@@ -146,6 +177,15 @@ impl CliApp {
                             Style::default()
                                 .fg(Color::DarkGray)
                                 .add_modifier(Modifier::CROSSED_OUT),
+                        )),
+                        (false, PlanStepStatus::Failed) => {
+                            Line::from(Span::styled(text, Style::default().fg(Color::Red)))
+                        }
+                        (false, PlanStepStatus::Ignored) => Line::from(Span::styled(
+                            text,
+                            Style::default()
+                                .fg(Color::Magenta)
+                                .add_modifier(Modifier::ITALIC),
                         )),
                     }
                 })
@@ -166,28 +206,59 @@ impl CliApp {
                     Style::default().fg(Color::DarkGray),
                 ))]
             } else {
-                plan.execution_steps
+                let mut lines = plan
+                    .execution_steps
                     .iter()
                     .enumerate()
                     .map(|(idx, step)| {
-                        let prefix = if step.status == PlanStepStatus::Completed {
-                            format!("[DONE:{}]", idx + 1)
-                        } else {
-                            format!("[TODO:{}]", idx + 1)
+                        let prefix = match step.status {
+                            PlanStepStatus::Completed => format!("[DONE:{}]", idx + 1),
+                            PlanStepStatus::Failed => format!("[FAIL:{}]", idx + 1),
+                            PlanStepStatus::Ignored => format!("[SKIP:{}]", idx + 1),
+                            PlanStepStatus::Pending => format!("[TODO:{}]", idx + 1),
                         };
                         let text = format!("{:<10} {} · {}", prefix, step.name, step.description);
-                        if step.status == PlanStepStatus::Completed {
-                            Line::from(Span::styled(
+                        match step.status {
+                            PlanStepStatus::Completed => Line::from(Span::styled(
                                 text,
                                 Style::default()
                                     .fg(Color::DarkGray)
                                     .add_modifier(Modifier::CROSSED_OUT),
-                            ))
-                        } else {
-                            Line::from(Span::styled(text, Style::default().fg(Color::White)))
+                            )),
+                            PlanStepStatus::Failed => {
+                                Line::from(Span::styled(text, Style::default().fg(Color::Red)))
+                            }
+                            PlanStepStatus::Ignored => Line::from(Span::styled(
+                                text,
+                                Style::default()
+                                    .fg(Color::Magenta)
+                                    .add_modifier(Modifier::ITALIC),
+                            )),
+                            PlanStepStatus::Pending => {
+                                Line::from(Span::styled(text, Style::default().fg(Color::White)))
+                            }
                         }
                     })
-                    .collect()
+                    .collect::<Vec<_>>();
+
+                if let Some(summary) = plan.execution_summary.as_ref()
+                    && !summary.trim().is_empty()
+                {
+                    lines.push(Line::from(Span::raw("")));
+                    lines.push(Line::from(Span::styled(
+                        "执行结果：",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                    for line in summary.lines() {
+                        lines.push(Line::from(Span::styled(
+                            line.to_string(),
+                            Style::default().fg(Color::Gray),
+                        )));
+                    }
+                }
+                lines
             }
         } else {
             vec![Line::from(Span::styled(

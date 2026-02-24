@@ -3,7 +3,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use std::{env, path::PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use crate::core::agent_config::AgentConfig;
@@ -13,7 +13,7 @@ use crate::core::model::{
     ModelStreamChunk, SingleProviderClient, TokenUsage,
 };
 use crate::core::planner::{PlanStep, PlanStepStatus, TaskPlan, build_plan_with_agent};
-use crate::core::session::{Message, MessageRole, Session, now_text};
+use crate::core::session::{Message, Session, now_text};
 use crate::core::tool::{
     LocalToolExecutor, ToolCall, ToolExecutionRecord, ToolExecutor, ToolName, ToolResult,
 };
@@ -137,43 +137,9 @@ impl RuntimeEngine {
         on_plan_ready(&plan);
         let context = session.recent_messages(self.context_limit);
         let mut tool_results = Vec::new();
-        let used_function_calls = self.execute_file_tools_with_function_call(
-            session,
-            user_input,
-            &context,
-            &mut plan,
-            &mut tool_results,
-            &mut on_chunk,
-            &mut on_plan_ready,
-        )?;
-        if !used_function_calls {
-            self.execute_pre_model_plan_steps(
-                &mut plan,
-                user_input,
-                &mut tool_results,
-                &mut on_plan_ready,
-            )?;
-            if tool_results.is_empty()
-                && let Some(result) = self.maybe_execute_tool(user_input)?
-            {
-                if revise_plan_for_tool_result(&mut plan, Some(&result)) {
-                    on_plan_ready(&plan);
-                }
-                if result.ok
-                    && let Some(location) = next_pending_step_location(&plan)
-                {
-                    mark_step_completed(&mut plan, location);
-                    on_plan_ready(&plan);
-                }
-                tool_results.push(result);
-            }
-        }
 
         let mcp_context = collect_mcp_context(user_input, &self.agent_config.mcp);
         let mut prompt = user_input.to_string();
-        if let Some(summary) = summarize_tool_results(&tool_results) {
-            prompt.push_str(&format!("\n\n工具预执行摘要：{summary}"));
-        }
         if !mcp_context.is_empty() {
             prompt.push_str("\n\nMCP上下文：\n");
             for item in &mcp_context {
@@ -186,7 +152,7 @@ impl RuntimeEngine {
         let req = ModelRequest {
             session_title: session.title.clone(),
             user_input: prompt,
-            context,
+            context: context.clone(),
         };
 
         let ModelResponse {
@@ -234,12 +200,12 @@ impl RuntimeEngine {
             }
             resp
         };
-        self.complete_model_step_if_needed(&mut plan, &mut on_plan_ready);
-        self.execute_post_model_plan_steps(
+        self.execute_plan_steps_with_execution_agent(
             &mut plan,
             session,
             user_input,
             &text,
+            &context,
             &mut tool_results,
             &mut on_plan_ready,
         )?;
@@ -265,212 +231,176 @@ impl RuntimeEngine {
         })
     }
 
-    fn maybe_execute_tool(&self, user_input: &str) -> Result<Option<ToolResult>> {
-        if !(user_input.contains("目录")
-            || user_input.contains("文件")
-            || user_input.contains("命令")
-            || user_input.contains("搜索")
-            || user_input.contains("查找")
-            || user_input.contains("grep")
-            || user_input.contains("rg"))
-        {
-            return Ok(None);
-        }
-
-        let call = if user_input.contains("搜索")
-            || user_input.contains("查找")
-            || user_input.contains("grep")
-            || user_input.contains("rg")
-        {
-            ToolCall {
-                name: ToolName::SearchCode,
-                args: vec![infer_search_pattern(user_input), ".".to_string()],
-            }
-        } else if user_input.contains("目录") {
-            ToolCall {
-                name: ToolName::ListDir,
-                args: vec![".".to_string()],
-            }
-        } else if user_input.contains("命令") {
-            ToolCall {
-                name: ToolName::RunCommand,
-                args: vec!["echo".to_string(), "phase1".to_string()],
-            }
-        } else {
-            ToolCall {
-                name: ToolName::ReadFile,
-                args: vec!["README.md".to_string()],
-            }
-        };
-
-        let result = self.tool_executor.execute(&call)?;
-        Ok(Some(result))
-    }
-
     pub fn fallback_error_message(err: &anyhow::Error) -> String {
         format!("执行失败：{err}")
     }
 
-    fn execute_pre_model_plan_steps<P>(
-        &self,
-        plan: &mut TaskPlan,
-        user_input: &str,
-        tool_results: &mut Vec<ToolResult>,
-        on_plan_ready: &mut P,
-    ) -> Result<()>
-    where
-        P: FnMut(&TaskPlan),
-    {
-        loop {
-            let Some(location) = next_pending_step_location(plan) else {
-                break;
-            };
-            let step = plan.plans[location.plan_idx].execution_steps[location.step_idx].clone();
-            let Some(call) = infer_pre_model_tool_call(user_input, &step) else {
-                break;
-            };
-
-            let result = self.tool_executor.execute(&call)?;
-            if revise_plan_for_tool_result(plan, Some(&result)) {
-                on_plan_ready(plan);
-            }
-            if result.ok {
-                mark_step_completed(plan, location);
-                on_plan_ready(plan);
-            } else {
-                on_plan_ready(plan);
-            }
-            tool_results.push(result.clone());
-            if !result.ok {
-                break;
-            }
-        }
-        Ok(())
-    }
-
     #[allow(clippy::too_many_arguments)]
-    fn execute_file_tools_with_function_call<F, P>(
-        &self,
-        session: &Session,
-        user_input: &str,
-        context: &[Message],
-        plan: &mut TaskPlan,
-        tool_results: &mut Vec<ToolResult>,
-        on_chunk: &mut F,
-        on_plan_ready: &mut P,
-    ) -> Result<bool>
-    where
-        F: FnMut(&ModelStreamChunk),
-        P: FnMut(&TaskPlan),
-    {
-        if !should_use_file_function_calls(user_input) {
-            return Ok(false);
-        }
-
-        let prompt = format!(
-            "{}\n\n当涉及文件读取、写入、替换、补丁应用时，必须优先使用函数工具，不要只给出文字说明。",
-            user_input
-        );
-        let request = ModelRequest {
-            session_title: format!("{} · function-call", session.title),
-            user_input: prompt,
-            context: context.to_vec(),
-        };
-        let response = self
-            .client
-            .complete_with_functions(&request, &basic_file_function_tools())?;
-        let _function_call_usage_total = response.usage.total_tokens;
-
-        if !response.reasoning_content.trim().is_empty() {
-            on_chunk(&ModelStreamChunk {
-                content: String::new(),
-                reasoning_content: response.reasoning_content.clone(),
-            });
-        }
-        if !response.text.trim().is_empty() {
-            on_chunk(&ModelStreamChunk {
-                content: response.text.clone(),
-                reasoning_content: String::new(),
-            });
-        }
-
-        if response.tool_calls.is_empty() {
-            return Ok(false);
-        }
-
-        for tool_call in &response.tool_calls {
-            let _function_call_id = tool_call.id.as_str();
-            let call = build_tool_call_from_function(tool_call);
-            let result = self.tool_executor.execute(&call)?;
-            if revise_plan_for_tool_result(plan, Some(&result)) {
-                on_plan_ready(plan);
-            }
-            if result.ok
-                && let Some(location) = next_pending_step_location(plan)
-            {
-                mark_step_completed(plan, location);
-                on_plan_ready(plan);
-            }
-            tool_results.push(result);
-        }
-        Ok(true)
-    }
-
-    fn complete_model_step_if_needed<P>(&self, plan: &mut TaskPlan, on_plan_ready: &mut P)
-    where
-        P: FnMut(&TaskPlan),
-    {
-        let Some(location) = next_pending_step_location(plan) else {
-            return;
-        };
-        if is_model_generation_step(
-            &plan.plans[location.plan_idx].execution_steps[location.step_idx],
-        ) {
-            mark_step_completed(plan, location);
-            on_plan_ready(plan);
-        }
-    }
-
-    fn execute_post_model_plan_steps<P>(
+    fn execute_plan_steps_with_execution_agent<P>(
         &self,
         plan: &mut TaskPlan,
         session: &Session,
         user_input: &str,
         assistant_text: &str,
+        context: &[Message],
         tool_results: &mut Vec<ToolResult>,
         on_plan_ready: &mut P,
     ) -> Result<()>
     where
         P: FnMut(&TaskPlan),
     {
-        loop {
-            let Some(location) = next_pending_step_location(plan) else {
-                break;
-            };
-            let step = plan.plans[location.plan_idx].execution_steps[location.step_idx].clone();
-            match infer_post_model_step_action(session, user_input, assistant_text, &step) {
-                PostModelStepAction::MarkCompleted => {
-                    mark_step_completed(plan, location);
-                    on_plan_ready(plan);
+        let mut previous_plan_summaries = Vec::new();
+
+        for plan_idx in 0..plan.plans.len() {
+            if plan.plans[plan_idx].status != PlanStepStatus::Pending {
+                continue;
+            }
+
+            let current_plan_name = plan.plans[plan_idx].name.clone();
+            let step_count = plan.plans[plan_idx].execution_steps.len();
+            let mut reports = Vec::new();
+            if let Some(item) = plan.plans.get_mut(plan_idx) {
+                item.execution_summary = Some("执行中：准备执行当前 plan".to_string());
+            }
+            on_plan_ready(plan);
+
+            for step_idx in 0..step_count {
+                if plan.plans[plan_idx].execution_steps[step_idx].status != PlanStepStatus::Pending
+                {
+                    continue;
                 }
-                PostModelStepAction::Tool(call) => {
-                    let result = self.tool_executor.execute(&call)?;
-                    if revise_plan_for_tool_result(plan, Some(&result)) {
-                        on_plan_ready(plan);
+
+                let step = plan.plans[plan_idx].execution_steps[step_idx].clone();
+                match self.execute_single_plan_step_with_execution_agent(
+                    session,
+                    user_input,
+                    assistant_text,
+                    context,
+                    plan,
+                    &current_plan_name,
+                    &step,
+                    &previous_plan_summaries,
+                    tool_results,
+                ) {
+                    Ok(report) => {
+                        mark_step_status(plan, plan_idx, step_idx, PlanStepStatus::Completed);
+                        reports.push(report);
                     }
-                    if result.ok {
-                        mark_step_completed(plan, location);
-                    }
-                    on_plan_ready(plan);
-                    tool_results.push(result.clone());
-                    if !result.ok {
+                    Err(err) => {
+                        mark_step_status(plan, plan_idx, step_idx, PlanStepStatus::Failed);
+                        reports.push(PlanStepExecutionReport {
+                            step_name: step.name.clone(),
+                            status: PlanStepStatus::Failed,
+                            summary: err.to_string(),
+                        });
+                        let ignored = mark_remaining_steps_ignored(plan, plan_idx, step_idx + 1);
+                        for ignored_step in ignored {
+                            reports.push(PlanStepExecutionReport {
+                                step_name: ignored_step.name,
+                                status: PlanStepStatus::Ignored,
+                                summary: "前置步骤失败，本步骤已忽略".to_string(),
+                            });
+                        }
                         break;
                     }
                 }
-                PostModelStepAction::Stop => break,
+                on_plan_ready(plan);
             }
+
+            if let Some(item) = plan.plans.get_mut(plan_idx) {
+                let summary = summarize_plan_execution(item.name.as_str(), &reports);
+                item.execution_summary = Some(summary.clone());
+                item.refresh_status();
+                previous_plan_summaries.push(summary);
+            }
+            plan.refresh_plan_statuses();
+            on_plan_ready(plan);
         }
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_single_plan_step_with_execution_agent(
+        &self,
+        session: &Session,
+        user_input: &str,
+        assistant_text: &str,
+        context: &[Message],
+        plan: &TaskPlan,
+        plan_name: &str,
+        step: &PlanStep,
+        previous_plan_summaries: &[String],
+        tool_results: &mut Vec<ToolResult>,
+    ) -> Result<PlanStepExecutionReport> {
+        let request = ModelRequest {
+            session_title: format!("{} · execution-agent", session.title),
+            user_input: build_step_execution_prompt(
+                user_input,
+                assistant_text,
+                plan,
+                plan_name,
+                step,
+                previous_plan_summaries,
+            ),
+            context: context.to_vec(),
+        };
+        let response = self
+            .client
+            .complete_with_functions(&request, &basic_file_function_tools())?;
+        let _ = (
+            response.text.as_str(),
+            response.reasoning_content.as_str(),
+            response.usage.total_tokens,
+        );
+
+        if response.tool_calls.is_empty() {
+            return Err(anyhow!(
+                "执行智能体未提交任何函数调用：step={} {}",
+                step.name,
+                step.description
+            ));
+        }
+
+        let mut step_completed = false;
+        let mut executed_tools = Vec::new();
+        for tool_call in &response.tool_calls {
+            let _function_call_id = tool_call.id.as_str();
+            if tool_call.name == "mark_step_completed" {
+                step_completed = true;
+                continue;
+            }
+            let call = build_tool_call_from_function(tool_call)?;
+            let result = self.tool_executor.execute(&call)?;
+            if let Some(execution) = result.execution.as_ref() {
+                executed_tools.push(execution.tool_name.clone());
+            }
+            tool_results.push(result.clone());
+            if !result.ok {
+                return Err(anyhow!("{}", build_tool_failure_error(&result)));
+            }
+        }
+        if !step_completed && executed_tools.is_empty() {
+            return Err(anyhow!(
+                "执行智能体未显式提交步骤完成信号（mark_step_completed）：step={} {}",
+                step.name,
+                step.description
+            ));
+        }
+        let tool_summary = if executed_tools.is_empty() {
+            "未调用外部工具".to_string()
+        } else if step_completed {
+            format!("工具成功：{}", executed_tools.join(","))
+        } else {
+            format!(
+                "工具成功：{}；未显式调用 mark_step_completed，已按执行成功处理",
+                executed_tools.join(",")
+            )
+        };
+        Ok(PlanStepExecutionReport {
+            step_name: step.name.clone(),
+            status: PlanStepStatus::Completed,
+            summary: tool_summary,
+        })
     }
 }
 
@@ -508,148 +438,193 @@ fn summarize_tool_results(results: &[ToolResult]) -> Option<String> {
     )
 }
 
-#[derive(Debug, Clone)]
-enum PostModelStepAction {
-    MarkCompleted,
-    Tool(ToolCall),
-    Stop,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct PlanStepLocation {
-    plan_idx: usize,
-    step_idx: usize,
-}
-
-fn next_pending_step_location(plan: &TaskPlan) -> Option<PlanStepLocation> {
-    for (plan_idx, item) in plan.plans.iter().enumerate() {
-        for (step_idx, step) in item.execution_steps.iter().enumerate() {
-            if step.status == PlanStepStatus::Pending {
-                return Some(PlanStepLocation { plan_idx, step_idx });
-            }
-        }
+fn build_tool_failure_error(result: &ToolResult) -> String {
+    let tool_name = result
+        .execution
+        .as_ref()
+        .map(|record| record.tool_name.as_str())
+        .unwrap_or("unknown");
+    let stderr_line = result
+        .stderr
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default()
+        .to_string();
+    if stderr_line.is_empty() {
+        format!("工具调用失败：tool={tool_name}，summary={}", result.summary)
+    } else {
+        format!(
+            "工具调用失败：tool={tool_name}，summary={}，stderr={stderr_line}",
+            result.summary
+        )
     }
-    None
 }
 
-fn mark_step_completed(plan: &mut TaskPlan, location: PlanStepLocation) {
-    if let Some(item) = plan.plans.get_mut(location.plan_idx) {
-        if let Some(step) = item.execution_steps.get_mut(location.step_idx) {
-            step.status = PlanStepStatus::Completed;
+#[derive(Debug, Clone)]
+struct PlanStepExecutionReport {
+    step_name: String,
+    status: PlanStepStatus,
+    summary: String,
+}
+
+#[derive(Debug, Clone)]
+struct IgnoredStep {
+    name: String,
+}
+
+fn mark_step_status(plan: &mut TaskPlan, plan_idx: usize, step_idx: usize, status: PlanStepStatus) {
+    if let Some(item) = plan.plans.get_mut(plan_idx) {
+        if let Some(step) = item.execution_steps.get_mut(step_idx) {
+            step.status = status;
         }
         item.refresh_status();
     }
     plan.refresh_plan_statuses();
 }
 
-fn infer_pre_model_tool_call(user_input: &str, step: &PlanStep) -> Option<ToolCall> {
-    let raw_text = format!("{} {}", step.name, step.description);
-    let text = raw_text.to_ascii_lowercase();
-    if contains_any(&text, &["读取", "read", "查看文件"]) {
-        let path = infer_read_target_path(user_input, &raw_text)
-            .unwrap_or_else(|| "README.md".to_string());
-        return Some(ToolCall {
-            name: ToolName::ReadFile,
-            args: vec![path],
-        });
+fn mark_remaining_steps_ignored(
+    plan: &mut TaskPlan,
+    plan_idx: usize,
+    from_step_idx: usize,
+) -> Vec<IgnoredStep> {
+    let mut ignored = Vec::new();
+    if let Some(item) = plan.plans.get_mut(plan_idx) {
+        for step in item.execution_steps.iter_mut().skip(from_step_idx) {
+            if step.status == PlanStepStatus::Pending {
+                step.status = PlanStepStatus::Ignored;
+                ignored.push(IgnoredStep {
+                    name: step.name.clone(),
+                });
+            }
+        }
+        item.refresh_status();
     }
-    if contains_any(&text, &["目录", "list_dir", "浏览文件"]) {
-        return Some(ToolCall {
-            name: ToolName::ListDir,
-            args: vec![".".to_string()],
-        });
-    }
-    if contains_any(&text, &["检索", "搜索", "查找", "search", "grep", "rg"]) {
-        return Some(ToolCall {
-            name: ToolName::SearchCode,
-            args: vec![infer_search_pattern(user_input), ".".to_string()],
-        });
-    }
-    None
+    plan.refresh_plan_statuses();
+    ignored
 }
 
-fn infer_post_model_step_action(
-    session: &Session,
-    user_input: &str,
-    assistant_text: &str,
-    step: &PlanStep,
-) -> PostModelStepAction {
-    let raw_text = format!("{} {}", step.name, step.description);
-    let text = raw_text.to_ascii_lowercase();
-    if contains_any(&text, &["写入", "创建文件", "保存到", "落盘", "write_file"]) {
-        let path = infer_write_target_path(user_input, &raw_text)
-            .unwrap_or_else(|| "output.txt".to_string());
-        let content = resolve_write_content(session, user_input, assistant_text);
-        return PostModelStepAction::Tool(ToolCall {
-            name: ToolName::WriteFile,
-            args: vec![path, content],
-        });
+fn summarize_plan_execution(plan_name: &str, reports: &[PlanStepExecutionReport]) -> String {
+    if reports.is_empty() {
+        return format!("{plan_name}: 未执行任何步骤");
     }
 
-    if contains_any(&text, &["完成", "确认", "收尾"]) {
-        return PostModelStepAction::MarkCompleted;
+    let mut done = 0usize;
+    let mut failed = 0usize;
+    let mut ignored = 0usize;
+    let mut lines = Vec::new();
+    for report in reports {
+        match report.status {
+            PlanStepStatus::Completed => done += 1,
+            PlanStepStatus::Failed => failed += 1,
+            PlanStepStatus::Ignored => ignored += 1,
+            PlanStepStatus::Pending => {}
+        }
+        lines.push(format!(
+            "- [{}] {} => {}",
+            plan_step_status_label(report.status),
+            report.step_name,
+            report.summary
+        ));
     }
-
-    if is_model_generation_step(step) {
-        return PostModelStepAction::MarkCompleted;
-    }
-
-    PostModelStepAction::Stop
-}
-
-fn is_model_generation_step(step: &PlanStep) -> bool {
-    let text = step_text(step);
-    contains_any(
-        &text,
-        &[
-            "generate",
-            "response",
-            "回答",
-            "生成回答",
-            "整合",
-            "总结",
-            "撰写",
-            "输出",
-            "草稿",
-            "润色",
-        ],
+    format!(
+        "{plan_name}: completed={done}, failed={failed}, ignored={ignored}\n{}",
+        lines.join("\n")
     )
 }
 
-fn step_text(step: &PlanStep) -> String {
-    format!("{} {}", step.name, step.description).to_ascii_lowercase()
+fn plan_step_status_label(status: PlanStepStatus) -> &'static str {
+    match status {
+        PlanStepStatus::Pending => "PENDING",
+        PlanStepStatus::Completed => "DONE",
+        PlanStepStatus::Failed => "FAILED",
+        PlanStepStatus::Ignored => "IGNORED",
+    }
 }
 
 fn contains_any(text: &str, keywords: &[&str]) -> bool {
     keywords.iter().any(|keyword| text.contains(keyword))
 }
 
-fn should_use_file_function_calls(user_input: &str) -> bool {
-    let text = user_input.to_ascii_lowercase();
-    contains_any(
-        &text,
-        &[
-            "文件",
-            "目录",
-            "读取",
-            "读一下",
-            "写入",
-            "保存",
-            "替换",
-            "修改",
-            "补丁",
-            "apply patch",
-            "read_file",
-            "write_file",
-            "replace_in_file",
-            "apply_patch",
-            "命令",
-            "终端",
-            "bash",
-            "shell",
-            "run_command",
-        ],
+fn build_step_execution_prompt(
+    user_input: &str,
+    assistant_text: &str,
+    plan: &TaskPlan,
+    plan_name: &str,
+    step: &PlanStep,
+    previous_plan_summaries: &[String],
+) -> String {
+    let plan_snapshot = format_plan_snapshot(plan);
+    let previous_plan_result_text = if previous_plan_summaries.is_empty() {
+        "无".to_string()
+    } else {
+        previous_plan_summaries
+            .iter()
+            .enumerate()
+            .map(|(idx, summary)| format!("{}. {}", idx + 1, summary))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        r#"你是执行智能体，负责执行当前 plan 步骤并确保结果可落地。
+
+约束：
+1. 只围绕“当前步骤”执行，不要改写 plan，不要新增步骤。
+2. 需要文件/命令操作时，必须调用可用工具完成。
+3. 完成步骤时，必须调用 `mark_step_completed` 函数作为完成信号。
+4. 若调用了工具，`mark_step_completed` 必须在所有工具调用成功后再调用。
+5. 不要输出冗长解释，聚焦执行结果。
+
+用户输入：
+{user_input}
+
+模型本轮回答（可作为上下文）：
+{assistant_text}
+
+当前 plan：
+{plan_name}
+
+已完成 plan 的执行汇总（仅供参考）：
+{previous_plan_result_text}
+
+当前计划快照：
+{plan_snapshot}
+
+当前步骤：
+- name: {step_name}
+- description: {step_desc}"#,
+        plan_name = plan_name,
+        previous_plan_result_text = previous_plan_result_text,
+        step_name = step.name,
+        step_desc = step.description
     )
+}
+
+fn format_plan_snapshot(plan: &TaskPlan) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("objective: {}", plan.objective));
+    for (plan_idx, item) in plan.plans.iter().enumerate() {
+        lines.push(format!(
+            "P{} [{}] {} - {}",
+            plan_idx + 1,
+            plan_step_status_label(item.status),
+            item.name,
+            item.description
+        ));
+        if let Some(summary) = item.execution_summary.as_ref() {
+            lines.push(format!("  RESULT: {}", summary.replace('\n', " | ")));
+        }
+        for (step_idx, step) in item.execution_steps.iter().enumerate() {
+            lines.push(format!(
+                "  S{}.{} [{}] {} - {}",
+                plan_idx + 1,
+                step_idx + 1,
+                plan_step_status_label(step.status),
+                step.name,
+                step.description
+            ));
+        }
+    }
+    lines.join("\n")
 }
 
 fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
@@ -728,12 +703,23 @@ fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
                 "required": ["patch"]
             }),
         },
+        FunctionToolSpec {
+            name: "mark_step_completed".to_string(),
+            description: "标记当前执行步骤已完成。仅在本步骤真正完成后调用。".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "result": { "type": "string", "description": "本步骤完成结果摘要" }
+                },
+                "required": []
+            }),
+        },
     ]
 }
 
-fn build_tool_call_from_function(call: &ModelFunctionCall) -> ToolCall {
+fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<ToolCall> {
     let mut args = Vec::new();
-    match call.name.as_str() {
+    let tool_call = match call.name.as_str() {
         "list_dir" => {
             let path = call
                 .arguments
@@ -742,10 +728,10 @@ fn build_tool_call_from_function(call: &ModelFunctionCall) -> ToolCall {
                 .unwrap_or(".")
                 .to_string();
             args.push(path);
-            ToolCall {
+            Ok(ToolCall {
                 name: ToolName::ListDir,
                 args,
-            }
+            })
         }
         "read_file" => {
             let path = call
@@ -755,10 +741,10 @@ fn build_tool_call_from_function(call: &ModelFunctionCall) -> ToolCall {
                 .unwrap_or_default()
                 .to_string();
             args.push(path);
-            ToolCall {
+            Ok(ToolCall {
                 name: ToolName::ReadFile,
                 args,
-            }
+            })
         }
         "write_file" => {
             let path = call
@@ -775,10 +761,10 @@ fn build_tool_call_from_function(call: &ModelFunctionCall) -> ToolCall {
                 .to_string();
             args.push(path);
             args.push(content);
-            ToolCall {
+            Ok(ToolCall {
                 name: ToolName::WriteFile,
                 args,
-            }
+            })
         }
         "replace_in_file" => {
             let path = call
@@ -802,10 +788,10 @@ fn build_tool_call_from_function(call: &ModelFunctionCall) -> ToolCall {
             args.push(path);
             args.push(old);
             args.push(new);
-            ToolCall {
+            Ok(ToolCall {
                 name: ToolName::ReplaceInFile,
                 args,
-            }
+            })
         }
         "run_command" => {
             let cmd = call
@@ -826,10 +812,10 @@ fn build_tool_call_from_function(call: &ModelFunctionCall) -> ToolCall {
                         .map(ToString::to_string),
                 );
             }
-            ToolCall {
+            Ok(ToolCall {
                 name: ToolName::RunCommand,
                 args,
-            }
+            })
         }
         "run_bash" => {
             let script = call
@@ -841,10 +827,10 @@ fn build_tool_call_from_function(call: &ModelFunctionCall) -> ToolCall {
             args.push("bash".to_string());
             args.push("-lc".to_string());
             args.push(script);
-            ToolCall {
+            Ok(ToolCall {
                 name: ToolName::RunCommand,
                 args,
-            }
+            })
         }
         "apply_patch" => {
             let patch = call
@@ -854,278 +840,14 @@ fn build_tool_call_from_function(call: &ModelFunctionCall) -> ToolCall {
                 .unwrap_or_default()
                 .to_string();
             args.push(patch);
-            ToolCall {
+            Ok(ToolCall {
                 name: ToolName::ApplyPatch,
                 args,
-            }
+            })
         }
-        _ => ToolCall {
-            name: ToolName::ReadFile,
-            args: vec![format!("__unknown_function_call__:{}", call.name)],
-        },
-    }
-}
-
-fn infer_read_target_path(user_input: &str, step_text: &str) -> Option<String> {
-    extract_file_path_candidate(step_text).or_else(|| extract_file_path_candidate(user_input))
-}
-
-fn infer_write_target_path(user_input: &str, step_text: &str) -> Option<String> {
-    extract_file_path_candidate(step_text).or_else(|| extract_file_path_candidate(user_input))
-}
-
-fn resolve_write_content(session: &Session, user_input: &str, assistant_text: &str) -> String {
-    let current = assistant_text.trim();
-    let write_request = is_write_like_request(user_input);
-    if write_request {
-        if is_story_write_request(user_input) {
-            let merged_stories = collect_story_outputs_from_session(session);
-            if !merged_stories.is_empty() {
-                return merged_stories.join("\n\n");
-            }
-        }
-        if is_story_like_candidate(current) {
-            return current.to_string();
-        }
-        if let Some(previous_body) = latest_story_like_content_from_session(session)
-            && is_story_like_candidate(previous_body.trim())
-        {
-            return previous_body;
-        }
-    }
-    if !current.is_empty() {
-        return current.to_string();
-    }
-    latest_story_like_content_from_session(session).unwrap_or_default()
-}
-
-fn latest_story_like_content_from_session(session: &Session) -> Option<String> {
-    session
-        .messages
-        .iter()
-        .rev()
-        .filter(|msg| matches!(msg.role, MessageRole::Assistant | MessageRole::User))
-        .map(|msg| msg.content.trim())
-        .find(|content| is_story_like_candidate(content))
-        .map(ToString::to_string)
-}
-
-fn is_write_like_request(user_input: &str) -> bool {
-    let text = user_input.to_ascii_lowercase();
-    contains_any(
-        &text,
-        &[
-            "保存", "写入", "落盘", "导出", "存到", "文件", "write", "save", "export",
-        ],
-    )
-}
-
-fn is_story_write_request(user_input: &str) -> bool {
-    let text = user_input.to_ascii_lowercase();
-    contains_any(&text, &["故事", "续写", "小说", "写到txt", "保存故事"])
-}
-
-fn collect_story_outputs_from_session(session: &Session) -> Vec<String> {
-    let mut outputs = Vec::new();
-    for (idx, message) in session.messages.iter().enumerate() {
-        if !matches!(message.role, MessageRole::Assistant) {
-            continue;
-        }
-        let content = message.content.trim();
-        if content.is_empty()
-            || looks_like_save_confirmation(content)
-            || !is_story_like_candidate(content)
-        {
-            continue;
-        }
-
-        let triggered_by_story_prompt = (0..idx).rev().find_map(|cursor| {
-            let prev = &session.messages[cursor];
-            if matches!(prev.role, MessageRole::User) {
-                Some(is_story_generation_prompt(prev.content.as_str()))
-            } else {
-                None
-            }
-        });
-
-        if triggered_by_story_prompt.unwrap_or(false)
-            && !outputs.iter().any(|existing: &String| existing == content)
-        {
-            outputs.push(content.to_string());
-        }
-    }
-    outputs
-}
-
-fn is_story_generation_prompt(user_input: &str) -> bool {
-    let text = user_input.to_ascii_lowercase();
-    contains_any(
-        &text,
-        &["故事", "续写", "编一个", "讲个", "讲一个", "300字", "200字"],
-    )
-}
-
-fn looks_like_save_confirmation(text: &str) -> bool {
-    let normalized = text.to_ascii_lowercase();
-    let confirmation_hit = contains_any(
-        &normalized,
-        &[
-            "我已经",
-            "已保存",
-            "保存到",
-            "文件已保存",
-            "文件保存在",
-            "写入完成",
-            "已经将",
-            "saved to",
-            "has been saved",
-            "file saved",
-        ],
-    );
-    let likely_short_notice = text.chars().count() < 260;
-    confirmation_hit && likely_short_notice
-}
-
-fn is_story_like_candidate(text: &str) -> bool {
-    let body = text.trim();
-    if body.is_empty() {
-        return false;
-    }
-    if looks_like_save_confirmation(body) {
-        return false;
-    }
-    let normalized = body.to_ascii_lowercase();
-    if contains_any(
-        &normalized,
-        &[
-            "文件名",
-            "保存路径",
-            "验证命令",
-            "pending",
-            "completed",
-            "repair_after_verify_failure",
-            "步骤",
-            "计划",
-        ],
-    ) && body.chars().count() < 500
-    {
-        return false;
-    }
-    body.chars().count() >= 120
-}
-
-fn extract_file_path_candidate(text: &str) -> Option<String> {
-    for token in text.split_whitespace() {
-        let cleaned = trim_token_punctuation(token);
-        if cleaned.is_empty() {
-            continue;
-        }
-        if is_file_like_token(&cleaned) {
-            return Some(cleaned);
-        }
-    }
-    None
-}
-
-fn trim_token_punctuation(token: &str) -> String {
-    let mut trimmed = token.trim_matches(|ch: char| {
-        matches!(
-            ch,
-            '"' | '\''
-                | '`'
-                | '“'
-                | '”'
-                | '('
-                | ')'
-                | '['
-                | ']'
-                | '{'
-                | '}'
-                | ','
-                | ';'
-                | ':'
-                | '，'
-                | '。'
-                | '；'
-                | '：'
-        )
-    });
-    while let Some(ch) = trimmed.chars().last() {
-        if matches!(ch, ',' | ';' | ':' | '，' | '。' | '；' | '：') {
-            trimmed = &trimmed[..trimmed.len().saturating_sub(ch.len_utf8())];
-        } else {
-            break;
-        }
-    }
-    trimmed.to_string()
-}
-
-fn is_file_like_token(token: &str) -> bool {
-    let lowercase = token.to_ascii_lowercase();
-    let has_separator = token.contains('/') || token.contains('\\');
-    let extensions = [
-        ".txt", ".md", ".rs", ".toml", ".json", ".yaml", ".yml", ".log", ".csv",
-    ];
-    has_separator || extensions.iter().any(|ext| lowercase.ends_with(ext))
-}
-
-fn revise_plan_for_tool_result(plan: &mut TaskPlan, tool_result: Option<&ToolResult>) -> bool {
-    let Some(result) = tool_result else {
-        return false;
-    };
-    if result.ok {
-        return false;
-    }
-
-    plan.revise(
-        "tool_execution",
-        format!("工具执行未通过：{}", result.summary),
-        "工具执行失败，切换为保守策略并提示用户修复后重试".to_string(),
-    );
-    plan.ensure_risk("工具执行失败导致上下文不足，需要用户确认后继续".to_string());
-    plan.push_plan(
-        "fallback_after_tool_failure",
-        "记录工具失败原因，提供保守回答并建议重试",
-        vec![PlanStep {
-            id: scru128::new().to_string(),
-            name: "fallback_response".to_string(),
-            description: "保守输出当前结果并提示用户确认后重试".to_string(),
-            status: PlanStepStatus::Completed,
-        }],
-    );
-    plan.refresh_plan_statuses();
-    true
-}
-
-fn infer_search_pattern(user_input: &str) -> String {
-    if let Some(pattern) = extract_between(user_input, '"', '"') {
-        return pattern;
-    }
-    if let Some(pattern) = extract_between(user_input, '“', '”') {
-        return pattern;
-    }
-    if let Some(pattern) = extract_between(user_input, '`', '`') {
-        return pattern;
-    }
-    if user_input.contains("TODO") {
-        return "TODO".to_string();
-    }
-    if user_input.contains("FIXME") {
-        return "FIXME".to_string();
-    }
-    "main".to_string()
-}
-
-fn extract_between(input: &str, start: char, end: char) -> Option<String> {
-    let start_pos = input.find(start)?;
-    let tail = input.get(start_pos + start.len_utf8()..)?;
-    let end_rel = tail.find(end)?;
-    let value = tail.get(..end_rel)?.trim();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value.to_string())
-    }
+        _ => Err(anyhow!("未知函数调用：{}", call.name)),
+    }?;
+    Ok(tool_call)
 }
 
 fn recommend_verify_commands(user_input: &str) -> Vec<String> {

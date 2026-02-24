@@ -184,7 +184,7 @@ impl SingleProviderClient {
             return Err(anyhow!("API_AUTH_TOKEN 不能为空，无法发起流式模型请求"));
         }
 
-        let timeout_ms = parse_timeout_ms(&self.cfg.api_timeout_ms)?;
+        let timeout_ms = parse_function_timeout_ms(&self.cfg.api_timeout_ms)?;
         let model = self.cfg.api_model.trim();
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起流式模型请求"));
@@ -881,4 +881,21 @@ fn parse_timeout_ms(raw: &str) -> Result<u64> {
         return Err(anyhow!("API_TIMEOUT_MS 必须大于 0"));
     }
     Ok(timeout_ms)
+}
+
+fn parse_function_timeout_ms(raw: &str) -> Result<u64> {
+    let fallback = parse_timeout_ms(raw)?;
+    if let Ok(custom) = std::env::var("API_FUNCTION_TIMEOUT_MS") {
+        let parsed = custom
+            .trim()
+            .parse::<u64>()
+            .context("API_FUNCTION_TIMEOUT_MS 解析失败，必须是毫秒数字")?;
+        if parsed == 0 {
+            return Err(anyhow!("API_FUNCTION_TIMEOUT_MS 必须大于 0"));
+        }
+        return Ok(parsed);
+    }
+
+    // 工具调用阶段默认用更保守的超时，避免长时间卡住导致后续 plan 看似不执行。
+    Ok(fallback.min(120_000))
 }
