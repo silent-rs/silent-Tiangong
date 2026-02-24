@@ -2,26 +2,46 @@ mod cli;
 mod core;
 mod ui;
 
-fn main() -> anyhow::Result<()> {
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
+use clap::error::ErrorKind;
+use clap::{Parser, Subcommand};
 
-    match args.first().map(String::as_str) {
-        None | Some("ui") => ui::run(),
-        Some("cli") => cli::run_cli(),
-        Some("-h") | Some("--help") => {
-            print_usage();
-            Ok(())
-        }
-        Some(other) => Err(anyhow::anyhow!(
-            "未知命令：{other}\n\n用法：\n  tiangong            启动桌面 UI\n  tiangong ui         启动桌面 UI\n  tiangong cli        启动 CLI 模式\n  tiangong --help     查看帮助"
-        )),
-    }
+#[derive(Debug, Parser)]
+#[command(
+    name = "tiangong",
+    disable_help_subcommand = true,
+    arg_required_else_help = false,
+    about = "天工应用入口"
+)]
+struct MainArgs {
+    #[command(subcommand)]
+    command: Option<MainCommand>,
 }
 
-fn print_usage() {
-    println!("用法：");
-    println!("  tiangong            启动桌面 UI");
-    println!("  tiangong ui         启动桌面 UI");
-    println!("  tiangong cli        启动 CLI 模式");
-    println!("  tiangong --help     查看帮助");
+#[derive(Debug, Subcommand)]
+enum MainCommand {
+    #[command(about = "启动桌面 UI")]
+    Ui,
+    #[command(about = "启动 CLI 模式")]
+    Cli,
+}
+
+fn main() -> anyhow::Result<()> {
+    let args = match MainArgs::try_parse() {
+        Ok(args) => args,
+        Err(err) => {
+            if matches!(
+                err.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) {
+                print!("{err}");
+                return Ok(());
+            }
+            return Err(anyhow::anyhow!(err.to_string()));
+        }
+    };
+
+    match args.command {
+        None | Some(MainCommand::Ui) => ui::run(),
+        Some(MainCommand::Cli) => cli::run_cli(),
+    }
 }

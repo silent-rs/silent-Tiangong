@@ -32,6 +32,7 @@
 - [x] `tiangong` 默认保持进入 UI 模式，不改现有默认入口行为
 - [x] CLI 入口固定为 `tiangong cli`
 - [x] 帮助信息覆盖 `tiangong cli` 模式示例
+- [x] `main` 命令参数解析改为使用 `clap`
 - [x] CLI 退出语义统一：仅 `Ctrl+C` 与 `/exit` 退出，`Esc` 仅用于清空输入
 
 ### B2 计划能力
