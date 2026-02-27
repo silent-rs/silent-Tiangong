@@ -23,12 +23,10 @@ pub(super) fn format_transcript(messages: &[Message], content_width: u16) -> Tex
             content
         };
         let user_style = Style::default()
-            .fg(Color::White)
-            .bg(Color::Rgb(47, 63, 86))
+            .fg(Color::LightCyan)
             .add_modifier(Modifier::BOLD);
         let thinking_style = Style::default()
             .fg(Color::Rgb(196, 214, 235))
-            .bg(Color::Rgb(35, 47, 64))
             .add_modifier(Modifier::ITALIC);
 
         if message.role == MessageRole::User {
@@ -267,7 +265,7 @@ fn markdown_to_owned_lines(markdown: &str) -> Vec<Line<'static>> {
                 line.to_string(),
                 Style::default()
                     .fg(Color::Rgb(202, 217, 202))
-                    .bg(Color::Rgb(36, 45, 42)),
+                    .add_modifier(Modifier::DIM),
             )));
             continue;
         }
@@ -495,7 +493,7 @@ fn inline_style(base: Style, bold: bool, italic: bool, strike: bool, code: bool)
     if code {
         style = style
             .fg(Color::Rgb(255, 232, 168))
-            .bg(Color::Rgb(44, 44, 46));
+            .add_modifier(Modifier::UNDERLINED);
     }
     style
 }

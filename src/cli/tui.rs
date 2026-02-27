@@ -16,6 +16,7 @@ use ratatui::layout::Rect;
 
 use crate::core::app_state::TiangongState;
 use crate::core::runtime::RunStatus;
+use crate::core::session::MessageRole;
 
 mod commands;
 mod components;
@@ -27,6 +28,7 @@ const CONVERSATION_SCROLL_PAGE_STEP: u16 = 16;
 const CONVERSATION_SCROLL_MOUSE_STEP: u16 = 3;
 const PLAN_SCROLL_PAGE_STEP: u16 = 12;
 const PLAN_SCROLL_MOUSE_STEP: u16 = 2;
+const INPUT_HISTORY_MAX_LEN: usize = 200;
 
 type CliTerminal = Terminal<CrosstermBackend<Stdout>>;
 
@@ -70,7 +72,7 @@ struct CliApp {
 
 impl CliApp {
     fn new() -> Self {
-        Self {
+        let mut app = Self {
             state: TiangongState::load_or_default(),
             input: String::new(),
             input_cursor_char: 0,
@@ -91,7 +93,9 @@ impl CliApp {
             plan_panel_area: None,
             was_pending_turn: false,
             should_quit: false,
-        }
+        };
+        app.rebuild_input_history_from_active_session();
+        app
     }
 
     fn run(&mut self, terminal: &mut CliTerminal) -> Result<()> {
@@ -160,6 +164,8 @@ impl CliApp {
                     self.navigate_input_history(true);
                 } else if self.is_command_palette_active() {
                     self.move_hint_selection(-1);
+                } else if self.should_use_plain_arrow_for_history() {
+                    self.navigate_input_history(true);
                 } else {
                     self.move_input_cursor_up();
                 }
@@ -169,6 +175,8 @@ impl CliApp {
                     self.navigate_input_history(false);
                 } else if self.is_command_palette_active() {
                     self.move_hint_selection(1);
+                } else if self.should_use_plain_arrow_for_history() {
+                    self.navigate_input_history(false);
                 } else {
                     self.move_input_cursor_down();
                 }
@@ -423,11 +431,49 @@ impl CliApp {
             return;
         }
         self.input_history.push(trimmed.to_string());
-        const MAX_HISTORY_LEN: usize = 200;
-        if self.input_history.len() > MAX_HISTORY_LEN {
-            let overflow = self.input_history.len() - MAX_HISTORY_LEN;
+        if self.input_history.len() > INPUT_HISTORY_MAX_LEN {
+            let overflow = self.input_history.len() - INPUT_HISTORY_MAX_LEN;
             self.input_history.drain(0..overflow);
         }
+        self.reset_input_history_navigation();
+    }
+
+    pub(super) fn rebuild_input_history_from_active_session(&mut self) {
+        if self.draft_new_session {
+            self.input_history.clear();
+            self.reset_input_history_navigation();
+            return;
+        }
+
+        let Some(session) = self.state.active_session() else {
+            self.input_history.clear();
+            self.reset_input_history_navigation();
+            return;
+        };
+
+        let mut history = Vec::new();
+        for message in &session.messages {
+            if message.role != MessageRole::User {
+                continue;
+            }
+            let trimmed = message.content.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if history
+                .last()
+                .is_some_and(|existing: &String| existing == trimmed)
+            {
+                continue;
+            }
+            history.push(trimmed.to_string());
+        }
+
+        if history.len() > INPUT_HISTORY_MAX_LEN {
+            let overflow = history.len() - INPUT_HISTORY_MAX_LEN;
+            history.drain(0..overflow);
+        }
+        self.input_history = history;
         self.reset_input_history_navigation();
     }
 
@@ -476,6 +522,11 @@ impl CliApp {
         self.input = self.input_history_draft.take().unwrap_or_default();
         self.input_cursor_char = self.input_char_len();
         self.selected_hint_idx = 0;
+    }
+
+    fn should_use_plain_arrow_for_history(&self) -> bool {
+        self.input_history_cursor.is_some()
+            || (self.input.is_empty() && !self.input_history.is_empty())
     }
 }
 

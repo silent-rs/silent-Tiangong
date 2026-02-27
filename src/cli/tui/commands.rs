@@ -67,6 +67,7 @@ impl CliApp {
                 self.draft_new_session = true;
                 self.history_modal = None;
                 self.planning_modal = None;
+                self.rebuild_input_history_from_active_session();
                 self.status_message = "已打开新对话（发送首条消息后才会记录）".to_string();
                 self.input.clear();
                 self.input_cursor_char = 0;
@@ -224,6 +225,7 @@ impl CliApp {
         self.state.switch_session(&session_id);
         let auto_resumed = !had_pending_before && self.state.has_pending_turn();
         self.draft_new_session = false;
+        self.rebuild_input_history_from_active_session();
         self.follow_conversation_bottom = true;
         self.history_modal = None;
         self.status_message = if auto_resumed {
