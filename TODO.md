@@ -1,6 +1,6 @@
 # TODO - 天工 RFC 0002（CLI Agent）任务清单
 
-> 最后更新：2026-02-14
+> 最后更新：2026-02-27
 > 主线 RFC：`docs/rfc/0002-cli-agent-roadmap.md`
 > 暂停 RFC：`docs/rfc/0001-tiangong-desktop-agent-roadmap.md`
 > 参考：`PLAN.md`
@@ -47,6 +47,7 @@
 
 - [x] 统一工具调用记录结构（名称、参数、耗时、退出码、摘要）
 - [x] 具备读能力：目录浏览、文件读取、代码检索
+- [x] 读能力子项：目录树查询（`tree_dir`，支持 `max_depth` 深度限制）
 - [x] 具备写能力：补丁应用、定点替换、文件创建
 - [x] 写能力子项：文件创建/覆盖（`write_file`）
 - [x] 写能力子项：定点替换（`replace_in_file`）
@@ -113,6 +114,8 @@
 - [ ] 执行失败重试策略（可配置）
 - [ ] 计划回退与修正策略
 - [ ] 长任务阶段反馈与可观测性增强
+- [x] CLI 主工作区改为对话+计划分栏（3:1），右侧常驻展示 plan 与 step
+- [x] planning/execution/final response 的 LLM 输出统一入对话栏展示
 
 ### D2 安全与审计
 

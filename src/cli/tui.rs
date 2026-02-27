@@ -12,6 +12,7 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 
 use crate::core::app_state::TiangongState;
 use crate::core::runtime::RunStatus;
@@ -24,6 +25,8 @@ mod transcript;
 const TICK_RATE: Duration = Duration::from_millis(60);
 const CONVERSATION_SCROLL_PAGE_STEP: u16 = 16;
 const CONVERSATION_SCROLL_MOUSE_STEP: u16 = 3;
+const PLAN_SCROLL_PAGE_STEP: u16 = 12;
+const PLAN_SCROLL_MOUSE_STEP: u16 = 2;
 
 type CliTerminal = Terminal<CrosstermBackend<Stdout>>;
 
@@ -57,6 +60,10 @@ struct CliApp {
     conversation_scroll: u16,
     max_conversation_scroll: u16,
     follow_conversation_bottom: bool,
+    conversation_panel_area: Option<Rect>,
+    plan_scroll: u16,
+    max_plan_scroll: u16,
+    plan_panel_area: Option<Rect>,
     was_pending_turn: bool,
     should_quit: bool,
 }
@@ -78,6 +85,10 @@ impl CliApp {
             conversation_scroll: 0,
             max_conversation_scroll: 0,
             follow_conversation_bottom: true,
+            conversation_panel_area: None,
+            plan_scroll: 0,
+            max_plan_scroll: 0,
+            plan_panel_area: None,
             was_pending_turn: false,
             should_quit: false,
         }
@@ -164,6 +175,18 @@ impl CliApp {
             }
             KeyCode::Left => self.move_input_cursor_left(),
             KeyCode::Right => self.move_input_cursor_right(),
+            KeyCode::PageUp if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.scroll_plan_up(PLAN_SCROLL_PAGE_STEP)
+            }
+            KeyCode::PageDown if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.scroll_plan_down(PLAN_SCROLL_PAGE_STEP)
+            }
+            KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.scroll_plan_to_top()
+            }
+            KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.scroll_plan_to_bottom()
+            }
             KeyCode::PageUp => self.scroll_conversation_up(CONVERSATION_SCROLL_PAGE_STEP),
             KeyCode::PageDown => self.scroll_conversation_down(CONVERSATION_SCROLL_PAGE_STEP),
             KeyCode::Home => self.scroll_conversation_to_top(),
@@ -198,9 +221,23 @@ impl CliApp {
             return;
         }
         match mouse.kind {
-            MouseEventKind::ScrollUp => self.scroll_conversation_up(CONVERSATION_SCROLL_MOUSE_STEP),
+            MouseEventKind::ScrollUp => {
+                if mouse.modifiers.contains(KeyModifiers::CONTROL)
+                    || self.is_mouse_over_plan_panel(mouse.column, mouse.row)
+                {
+                    self.scroll_plan_up(PLAN_SCROLL_MOUSE_STEP);
+                } else {
+                    self.scroll_conversation_up(CONVERSATION_SCROLL_MOUSE_STEP);
+                }
+            }
             MouseEventKind::ScrollDown => {
-                self.scroll_conversation_down(CONVERSATION_SCROLL_MOUSE_STEP)
+                if mouse.modifiers.contains(KeyModifiers::CONTROL)
+                    || self.is_mouse_over_plan_panel(mouse.column, mouse.row)
+                {
+                    self.scroll_plan_down(PLAN_SCROLL_MOUSE_STEP);
+                } else {
+                    self.scroll_conversation_down(CONVERSATION_SCROLL_MOUSE_STEP);
+                }
             }
             _ => {}
         }
@@ -287,6 +324,32 @@ impl CliApp {
     fn scroll_conversation_to_bottom(&mut self) {
         self.conversation_scroll = self.max_conversation_scroll;
         self.follow_conversation_bottom = true;
+    }
+
+    fn scroll_plan_up(&mut self, lines: u16) {
+        self.plan_scroll = self.plan_scroll.saturating_sub(lines);
+    }
+
+    fn scroll_plan_down(&mut self, lines: u16) {
+        self.plan_scroll = self
+            .plan_scroll
+            .saturating_add(lines)
+            .min(self.max_plan_scroll);
+    }
+
+    fn scroll_plan_to_top(&mut self) {
+        self.plan_scroll = 0;
+    }
+
+    fn scroll_plan_to_bottom(&mut self) {
+        self.plan_scroll = self.max_plan_scroll;
+    }
+
+    fn is_mouse_over_plan_panel(&self, column: u16, row: u16) -> bool {
+        let Some(area) = self.plan_panel_area else {
+            return false;
+        };
+        point_in_rect(column, row, area)
     }
 
     fn move_input_cursor_left(&mut self) {
@@ -414,6 +477,12 @@ impl CliApp {
         self.input_cursor_char = self.input_char_len();
         self.selected_hint_idx = 0;
     }
+}
+
+fn point_in_rect(column: u16, row: u16, area: Rect) -> bool {
+    let x_end = area.x.saturating_add(area.width);
+    let y_end = area.y.saturating_add(area.height);
+    column >= area.x && column < x_end && row >= area.y && row < y_end
 }
 
 #[derive(Debug, Clone, Default)]

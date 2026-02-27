@@ -13,6 +13,7 @@
 - 主界面交互规则：输入以 `/` 开头且命令提示可见时，`↑/↓` 用于命令项选择；普通输入时 `Shift+↑/↓` 切换输入历史，`↑/↓` 仅用于输入框光标移动；鼠标滚轮用于对话区滚动。
 - CLI 需提供 `/planing` 弹窗（与“切换会话”弹窗交互风格一致）查看当前 planning 列表。
 - 状态栏需支持复合阶段显示（如 `planning + executing`），并展示当前执行中的 plan/step（含序号与进度）。
+- CLI 主工作区采用左右分栏，左侧对话区与右侧 plan 区固定为 `3:1` 布局；右侧需常驻展示当前任务的 plan 与 step 状态。
 - 同一会话内，plan 需保持完整历史：新增输入只追加新 plan，不清理已完成 plan，不自动调整历史顺序；未完成（pending）plan 允许用户手动调序与删改。
 - planning 的删除与调序仅在 `/planing` 弹窗内完成，且只允许操作未开始（pending）plan 事项。
 - planning 列表中的已完成 plan 事项需以删除线样式显示。
@@ -29,7 +30,7 @@
 - 工具执行需支持结构化记录（工具名、参数、耗时、退出码、摘要）。
 - 基础文件读写改能力（`read_file` / `write_file` / `replace_in_file` / `apply_patch`）需优先通过 `function call` 驱动执行。
 - 工具能力至少包含：
-  - 读：`list_dir`、`read_file`、代码检索。
+  - 读：`list_dir`、`tree_dir`（支持 `max_depth` 深度限制）、`read_file`、代码检索。
   - 写：`write_file`、`replace_in_file`、`apply_patch`。
   - 命令：统一使用受控 `run_command`（支持 `cmd=bash,args=["-lc","..."]`），默认强制超时。
 - 工具与文件写入必须限制在工作区边界内，不允许越界访问。
@@ -43,6 +44,7 @@
 - 统一配置结构需覆盖 Model/Skills/MCP/Agent，并支持本地恢复。
 - CLI 必须提供配置入口，至少支持配置查看、更新和校验，并在更新后即时生效。
 - 模型适配需支持 BigModel `thinking` 参数透传，并正确解析/持久化 `reasoning_content`（与正文区分）。
+- 所有 LLM 调用输出（planning / execution / final response）均需进入对话栏可见范围，不允许仅在内部状态保存。
 - `async-openai` 允许暂时使用本地 fork 版本，以承载上述兼容字段能力。
 
 ### Should

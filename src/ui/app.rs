@@ -432,8 +432,8 @@ pub fn run() -> anyhow::Result<()> {
     App::new(main_window)
         .with_window("provider-settings", settings_window)
         .with_state(TiangongState::load_or_default())
-        .styles_from_css(
-            include_str!("style.css"),
+        .styles_from_css_layers(
+            &[components::default_css(), include_str!("style.css")],
             source::RuntimeStyleOverride::Auto {
                 file_name: "src/ui/style.css",
             },

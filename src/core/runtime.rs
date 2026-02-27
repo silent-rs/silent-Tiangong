@@ -12,7 +12,7 @@ use crate::core::model::{
     FunctionToolSpec, ModelClient, ModelFunctionCall, ModelRequest, ModelResponse,
     ModelStreamChunk, SingleProviderClient, TokenUsage,
 };
-use crate::core::planner::{PlanStep, PlanStepStatus, TaskPlan, build_plan_with_agent};
+use crate::core::planner::{PlanStep, PlanStepStatus, TaskPlan, build_plan_with_agent_with_trace};
 use crate::core::session::{Message, Session, now_text};
 use crate::core::tool::{
     LocalToolExecutor, ToolCall, ToolExecutionRecord, ToolExecutor, ToolName, ToolResult,
@@ -86,6 +86,14 @@ pub struct VerifyExecutionRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct LlmOutputRecord {
+    pub stage: String,
+    pub content: String,
+    pub reasoning_content: String,
+    pub tool_calls: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct RuntimeEngine {
     client: SingleProviderClient,
     tool_executor: LocalToolExecutor,
@@ -116,45 +124,75 @@ impl RuntimeEngine {
         )
     }
 
-    pub fn execute_turn_with_streaming<F, P>(
+    pub fn execute_turn_with_streaming<F, P, L>(
         &self,
         session: &Session,
         user_input: &str,
         mut on_plan_ready: P,
         mut on_chunk: F,
+        mut on_llm_output: L,
     ) -> Result<TurnExecution>
     where
         P: FnMut(&TaskPlan),
         F: FnMut(&ModelStreamChunk),
+        L: FnMut(&LlmOutputRecord),
     {
-        let mut plan = build_plan_with_agent(
+        let (mut plan, planning_output) = build_plan_with_agent_with_trace(
             &self.client,
             session,
             user_input,
             &self.agent_config,
             self.context_limit,
         );
+        if !planning_output.content.trim().is_empty()
+            || !planning_output.reasoning_content.trim().is_empty()
+        {
+            let output = LlmOutputRecord {
+                stage: "planning-agent".to_string(),
+                content: planning_output.content,
+                reasoning_content: planning_output.reasoning_content,
+                tool_calls: Vec::new(),
+            };
+            on_llm_output(&output);
+        }
         on_plan_ready(&plan);
         let context = session.recent_messages(self.context_limit);
         let mut tool_results = Vec::new();
 
         let mcp_context = collect_mcp_context(user_input, &self.agent_config.mcp);
-        let mut prompt = user_input.to_string();
+        let mut execution_input = user_input.to_string();
         if !mcp_context.is_empty() {
-            prompt.push_str("\n\nMCP上下文：\n");
+            execution_input.push_str("\n\nMCP上下文：\n");
             for item in &mcp_context {
-                prompt.push_str("- ");
-                prompt.push_str(item);
-                prompt.push('\n');
+                execution_input.push_str("- ");
+                execution_input.push_str(item);
+                execution_input.push('\n');
             }
         }
+        self.execute_plan_steps_with_execution_agent(
+            &mut plan,
+            session,
+            &execution_input,
+            &context,
+            &mut tool_results,
+            &mut on_llm_output,
+            &mut on_plan_ready,
+        )?;
+        let verify_commands = recommend_verify_commands(user_input);
+        let verify_records = run_verify_commands(&verify_commands);
 
+        let reply_prompt = build_grounded_response_prompt(
+            user_input,
+            &plan,
+            &tool_results,
+            &verify_records,
+            &mcp_context,
+        );
         let req = ModelRequest {
             session_title: session.title.clone(),
-            user_input: prompt,
+            user_input: reply_prompt,
             context: context.clone(),
         };
-
         let ModelResponse {
             text,
             reasoning_content,
@@ -200,17 +238,6 @@ impl RuntimeEngine {
             }
             resp
         };
-        self.execute_plan_steps_with_execution_agent(
-            &mut plan,
-            session,
-            user_input,
-            &text,
-            &context,
-            &mut tool_results,
-            &mut on_plan_ready,
-        )?;
-        let verify_commands = recommend_verify_commands(user_input);
-        let verify_records = run_verify_commands(&verify_commands);
 
         let tool_result_summary = summarize_tool_results(&tool_results);
         let tool_execution = tool_results
@@ -236,18 +263,19 @@ impl RuntimeEngine {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn execute_plan_steps_with_execution_agent<P>(
+    fn execute_plan_steps_with_execution_agent<P, L>(
         &self,
         plan: &mut TaskPlan,
         session: &Session,
         user_input: &str,
-        assistant_text: &str,
         context: &[Message],
         tool_results: &mut Vec<ToolResult>,
+        on_llm_output: &mut L,
         on_plan_ready: &mut P,
     ) -> Result<()>
     where
         P: FnMut(&TaskPlan),
+        L: FnMut(&LlmOutputRecord),
     {
         let mut previous_plan_summaries = Vec::new();
 
@@ -274,13 +302,13 @@ impl RuntimeEngine {
                 match self.execute_single_plan_step_with_execution_agent(
                     session,
                     user_input,
-                    assistant_text,
                     context,
                     plan,
                     &current_plan_name,
                     &step,
                     &previous_plan_summaries,
                     tool_results,
+                    on_llm_output,
                 ) {
                     Ok(report) => {
                         mark_step_status(plan, plan_idx, step_idx, PlanStepStatus::Completed);
@@ -324,19 +352,18 @@ impl RuntimeEngine {
         &self,
         session: &Session,
         user_input: &str,
-        assistant_text: &str,
         context: &[Message],
         plan: &TaskPlan,
         plan_name: &str,
         step: &PlanStep,
         previous_plan_summaries: &[String],
         tool_results: &mut Vec<ToolResult>,
+        on_llm_output: &mut impl FnMut(&LlmOutputRecord),
     ) -> Result<PlanStepExecutionReport> {
         let request = ModelRequest {
             session_title: format!("{} · execution-agent", session.title),
             user_input: build_step_execution_prompt(
                 user_input,
-                assistant_text,
                 plan,
                 plan_name,
                 step,
@@ -347,6 +374,23 @@ impl RuntimeEngine {
         let response = self
             .client
             .complete_with_functions(&request, &basic_file_function_tools())?;
+        let llm_tool_calls = response
+            .tool_calls
+            .iter()
+            .map(|call| call.name.clone())
+            .collect::<Vec<_>>();
+        if !response.text.trim().is_empty()
+            || !response.reasoning_content.trim().is_empty()
+            || !llm_tool_calls.is_empty()
+        {
+            let output = LlmOutputRecord {
+                stage: format!("execution-agent::{plan_name}::{}", step.name),
+                content: response.text.clone(),
+                reasoning_content: response.reasoning_content.clone(),
+                tool_calls: llm_tool_calls,
+            };
+            on_llm_output(&output);
+        }
         let _ = (
             response.text.as_str(),
             response.reasoning_content.as_str(),
@@ -379,22 +423,23 @@ impl RuntimeEngine {
                 return Err(anyhow!("{}", build_tool_failure_error(&result)));
             }
         }
-        if !step_completed && executed_tools.is_empty() {
+        if !step_completed {
+            let tool_hint = if executed_tools.is_empty() {
+                "未调用任何工具".to_string()
+            } else {
+                format!("已调用工具：{}", executed_tools.join(","))
+            };
             return Err(anyhow!(
-                "执行智能体未显式提交步骤完成信号（mark_step_completed）：step={} {}",
+                "执行智能体未显式提交步骤完成信号（mark_step_completed）：step={} {}；{}",
                 step.name,
-                step.description
+                step.description,
+                tool_hint
             ));
         }
         let tool_summary = if executed_tools.is_empty() {
-            "未调用外部工具".to_string()
-        } else if step_completed {
-            format!("工具成功：{}", executed_tools.join(","))
+            "步骤完成：未调用外部工具".to_string()
         } else {
-            format!(
-                "工具成功：{}；未显式调用 mark_step_completed，已按执行成功处理",
-                executed_tools.join(",")
-            )
+            format!("步骤完成：工具成功：{}", executed_tools.join(","))
         };
         Ok(PlanStepExecutionReport {
             step_name: step.name.clone(),
@@ -547,7 +592,6 @@ fn contains_any(text: &str, keywords: &[&str]) -> bool {
 
 fn build_step_execution_prompt(
     user_input: &str,
-    assistant_text: &str,
     plan: &TaskPlan,
     plan_name: &str,
     step: &PlanStep,
@@ -576,9 +620,6 @@ fn build_step_execution_prompt(
 
 用户输入：
 {user_input}
-
-模型本轮回答（可作为上下文）：
-{assistant_text}
 
 当前 plan：
 {plan_name}
@@ -627,6 +668,142 @@ fn format_plan_snapshot(plan: &TaskPlan) -> String {
     lines.join("\n")
 }
 
+fn build_grounded_response_prompt(
+    user_input: &str,
+    plan: &TaskPlan,
+    tool_results: &[ToolResult],
+    verify_records: &[VerifyExecutionRecord],
+    mcp_context: &[String],
+) -> String {
+    let plan_snapshot = format_plan_snapshot(plan);
+    let tool_evidence = format_tool_evidence(tool_results);
+    let verify_summary = format_verify_evidence(verify_records);
+    let mcp_summary = if mcp_context.is_empty() {
+        "无".to_string()
+    } else {
+        mcp_context.join(" | ")
+    };
+    format!(
+        r#"你是执行结果汇总助手。请严格基于“执行证据”回答用户，不得编造目录、文件、命令输出或技术栈。
+
+要求：
+1. 只能使用下方证据中的事实；若证据不足，明确说“未查询到”或“无法确认”。
+2. 若存在失败步骤，必须先说明失败点与影响，再给出当前可确认信息。
+3. 不要把推测写成确定事实。
+4. 直接回答用户问题，语言简洁。
+
+用户原始问题：
+{user_input}
+
+MCP上下文：
+{mcp_summary}
+
+计划执行快照：
+{plan_snapshot}
+
+工具执行证据：
+{tool_evidence}
+
+验证命令结果：
+{verify_summary}"#
+    )
+}
+
+fn format_tool_evidence(tool_results: &[ToolResult]) -> String {
+    if tool_results.is_empty() {
+        return "无工具执行记录".to_string();
+    }
+
+    tool_results
+        .iter()
+        .enumerate()
+        .map(|(idx, result)| {
+            let output_hint = build_output_preview(&result.stderr, &result.stdout, 12);
+            format!(
+                "{}. ok={} | exit_code={} | summary={} | output={}",
+                idx + 1,
+                result.ok,
+                result.exit_code,
+                result.summary,
+                output_hint
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_verify_evidence(records: &[VerifyExecutionRecord]) -> String {
+    if records.is_empty() {
+        return "无验证命令".to_string();
+    }
+
+    records
+        .iter()
+        .enumerate()
+        .map(|(idx, record)| {
+            let output_hint = build_output_preview(&record.stderr, &record.stdout, 6);
+            format!(
+                "{}. ok={} | exit_code={} | cmd={} | summary={} | output={}",
+                idx + 1,
+                record.ok,
+                record.exit_code,
+                record.command,
+                record.summary,
+                output_hint
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn build_output_preview(stderr: &str, stdout: &str, max_lines: usize) -> String {
+    let stderr_preview = preview_non_empty_lines(stderr, 4);
+    if stderr_preview != "无可用输出" {
+        return format!("stderr: {stderr_preview}");
+    }
+    let stdout_preview = preview_non_empty_lines(stdout, max_lines);
+    format!("stdout: {stdout_preview}")
+}
+
+fn preview_non_empty_lines(text: &str, max_lines: usize) -> String {
+    if max_lines == 0 {
+        return "无可用输出".to_string();
+    }
+
+    const MAX_LINE_CHARS: usize = 180;
+    let mut shown = Vec::new();
+    let mut total = 0usize;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        total += 1;
+        if shown.len() < max_lines {
+            shown.push(truncate_chars(trimmed, MAX_LINE_CHARS));
+        }
+    }
+
+    if shown.is_empty() {
+        return "无可用输出".to_string();
+    }
+    if total > shown.len() {
+        shown.push(format!("...(省略 {} 行)", total - shown.len()));
+    }
+    shown.join(" | ")
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let preview = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{preview}...")
+    } else {
+        preview
+    }
+}
+
 fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
     vec![
         FunctionToolSpec {
@@ -636,6 +813,23 @@ fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "目录路径，默认当前目录" }
+                },
+                "required": []
+            }),
+        },
+        FunctionToolSpec {
+            name: "tree_dir".to_string(),
+            description: "按目录树格式列出目录，支持通过 max_depth 限制遍历深度".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "目录路径，默认当前目录" },
+                    "max_depth": {
+                        "type": "integer",
+                        "description": "遍历最大深度，建议 1-4，默认 2，最大 8",
+                        "minimum": 0,
+                        "maximum": 8
+                    }
                 },
                 "required": []
             }),
@@ -730,6 +924,32 @@ fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<ToolCall> {
             args.push(path);
             Ok(ToolCall {
                 name: ToolName::ListDir,
+                args,
+            })
+        }
+        "tree_dir" => {
+            let path = call
+                .arguments
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(".")
+                .to_string();
+            let max_depth = call
+                .arguments
+                .get("max_depth")
+                .and_then(serde_json::Value::as_u64)
+                .map(|value| value.to_string())
+                .or_else(|| {
+                    call.arguments
+                        .get("max_depth")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string)
+                })
+                .unwrap_or_else(|| "2".to_string());
+            args.push(path);
+            args.push(max_depth);
+            Ok(ToolCall {
+                name: ToolName::TreeDir,
                 args,
             })
         }

@@ -15,7 +15,14 @@ impl CliApp {
             .split(area);
 
         self.render_status_panel(frame, sections[0]);
-        self.render_conversation_panel(frame, sections[1]);
+        let content_sections = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Ratio(3, 4), Constraint::Ratio(1, 4)])
+            .split(sections[1]);
+        self.conversation_panel_area = Some(content_sections[0]);
+        self.plan_panel_area = Some(content_sections[1]);
+        self.render_conversation_panel(frame, content_sections[0]);
+        self.render_plan_panel(frame, content_sections[1]);
         self.render_input_panel(frame, sections[2]);
 
         let cursor = self.input_cursor_position(sections[2]);

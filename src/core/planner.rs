@@ -60,6 +60,12 @@ pub struct TaskPlan {
     pub revisions: Vec<PlanRevision>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct PlanningLlmOutput {
+    pub content: String,
+    pub reasoning_content: String,
+}
+
 impl PlanItem {
     pub fn refresh_status(&mut self) {
         let has_failed = self
@@ -206,6 +212,7 @@ pub fn build_minimal_plan(user_input: &str, agent_config: &AgentConfig) -> TaskP
     plan
 }
 
+#[allow(dead_code)]
 pub fn build_plan_with_agent(
     client: &impl ModelClient,
     session: &Session,
@@ -213,8 +220,18 @@ pub fn build_plan_with_agent(
     agent_config: &AgentConfig,
     context_limit: usize,
 ) -> TaskPlan {
+    build_plan_with_agent_with_trace(client, session, user_input, agent_config, context_limit).0
+}
+
+pub fn build_plan_with_agent_with_trace(
+    client: &impl ModelClient,
+    session: &Session,
+    user_input: &str,
+    agent_config: &AgentConfig,
+    context_limit: usize,
+) -> (TaskPlan, PlanningLlmOutput) {
     match build_plan_with_agent_inner(client, session, user_input, agent_config, context_limit) {
-        Ok(plan) => plan,
+        Ok((plan, llm_output)) => (plan, llm_output),
         Err(err) => {
             let mut fallback = build_minimal_plan(user_input, agent_config);
             fallback.revise(
@@ -223,7 +240,11 @@ pub fn build_plan_with_agent(
                 "planing 智能体不可用，已回退为最小计划".to_string(),
             );
             fallback.ensure_risk("planing 智能体不可用，计划细节可能不足".to_string());
-            fallback
+            let llm_output = PlanningLlmOutput {
+                content: format!("planning-agent 调用失败，已回退最小计划：{err}"),
+                reasoning_content: String::new(),
+            };
+            (fallback, llm_output)
         }
     }
 }
@@ -234,7 +255,7 @@ fn build_plan_with_agent_inner(
     user_input: &str,
     agent_config: &AgentConfig,
     context_limit: usize,
-) -> Result<TaskPlan> {
+) -> Result<(TaskPlan, PlanningLlmOutput)> {
     let input_list = collect_user_input_list(session, user_input, context_limit);
     let request = ModelRequest {
         session_title: format!("{} · planing-agent", session.title),
@@ -334,16 +355,22 @@ fn build_plan_with_agent_inner(
         risks
     };
 
-    Ok(TaskPlan {
-        id: new_id(),
-        objective,
-        summary,
-        plans,
-        risks,
-        skill_hints: build_skill_hints(user_input, &agent_config.skills),
-        mcp_hints: build_mcp_hints(user_input, &agent_config.mcp),
-        revisions: Vec::new(),
-    })
+    Ok((
+        TaskPlan {
+            id: new_id(),
+            objective,
+            summary,
+            plans,
+            risks,
+            skill_hints: build_skill_hints(user_input, &agent_config.skills),
+            mcp_hints: build_mcp_hints(user_input, &agent_config.mcp),
+            revisions: Vec::new(),
+        },
+        PlanningLlmOutput {
+            content: response.text,
+            reasoning_content: response.reasoning_content,
+        },
+    ))
 }
 
 #[derive(Debug, Deserialize, Clone)]

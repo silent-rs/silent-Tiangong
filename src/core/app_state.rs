@@ -14,7 +14,7 @@ use crate::core::agent_config::AgentConfig;
 use crate::core::model::{ModelProviderConfig, ModelStreamChunk, SingleProviderClient};
 use crate::core::planner::{PlanStepStatus, TaskPlan};
 use crate::core::runtime::{
-    RunSnapshot, RunStatus, RuntimeEngine, TurnExecution, VerifyExecutionRecord,
+    LlmOutputRecord, RunSnapshot, RunStatus, RuntimeEngine, TurnExecution, VerifyExecutionRecord,
 };
 use crate::core::session::{Message, MessageRole, Session, SessionTaskPlan, now_text};
 use crate::core::tool::ToolExecutionRecord;
@@ -56,6 +56,7 @@ struct LoadedState {
 #[derive(Debug)]
 enum TurnEvent {
     PlanReady(TaskPlan),
+    LlmOutput(LlmOutputRecord),
     Chunk(ModelStreamChunk),
     Completed(Box<TurnExecution>),
     Failed(String),
@@ -364,6 +365,9 @@ impl TiangongState {
             match event {
                 TurnEvent::PlanReady(plan) => {
                     self.mark_pending_turn_executing(&plan);
+                }
+                TurnEvent::LlmOutput(output) => {
+                    self.append_pending_turn_llm_output(&output);
                 }
                 TurnEvent::Chunk(delta) => {
                     self.apply_assistant_delta(&delta);
@@ -802,6 +806,7 @@ impl TiangongState {
         thread::spawn(move || {
             let chunk_tx = tx.clone();
             let plan_tx = tx.clone();
+            let llm_tx = tx.clone();
             let result = runtime.execute_turn_with_streaming(
                 &session_snapshot,
                 &worker_input,
@@ -810,6 +815,9 @@ impl TiangongState {
                 },
                 |delta| {
                     let _ = chunk_tx.send(TurnEvent::Chunk(delta.clone()));
+                },
+                |output| {
+                    let _ = llm_tx.send(TurnEvent::LlmOutput(output.clone()));
                 },
             );
 
@@ -866,6 +874,25 @@ impl TiangongState {
         if let Some(message) = self.find_message_mut(&session_id, &assistant_message_id) {
             message.content.push_str(&delta.content);
             message.reasoning_content.push_str(&delta.reasoning_content);
+        }
+    }
+
+    fn append_pending_turn_llm_output(&mut self, output: &LlmOutputRecord) {
+        let Some(session_id) = self
+            .pending_turn
+            .as_ref()
+            .map(|pending| pending.session_id.clone())
+        else {
+            return;
+        };
+
+        if let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
+            session.append_message(MessageRole::System, format_llm_output_message(output));
+            let _ = self.persist_session_and_app(&session_id);
         }
     }
 
@@ -1537,6 +1564,36 @@ fn format_plan_snapshot(plan: &TaskPlan) -> String {
         mcp_hints,
         revisions
     )
+}
+
+fn format_llm_output_message(output: &LlmOutputRecord) -> String {
+    let mut lines = vec![format!("LLM 输出 [{}]", output.stage)];
+    if !output.tool_calls.is_empty() {
+        lines.push(format!("tool_calls: {}", output.tool_calls.join(", ")));
+    }
+    if !output.reasoning_content.trim().is_empty() {
+        lines.push(format!(
+            "reasoning:\n{}",
+            truncate_text_by_chars(output.reasoning_content.trim(), 1200)
+        ));
+    }
+    if !output.content.trim().is_empty() {
+        lines.push(format!(
+            "content:\n{}",
+            truncate_text_by_chars(output.content.trim(), 1200)
+        ));
+    }
+    lines.join("\n")
+}
+
+fn truncate_text_by_chars(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let preview = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{preview}...")
+    } else {
+        preview
+    }
 }
 
 fn workspace_change_overview() -> Option<String> {
