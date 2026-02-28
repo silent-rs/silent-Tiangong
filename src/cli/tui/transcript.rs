@@ -131,7 +131,13 @@ fn build_collapsed_thinking_line(thinking: &str, style: Style) -> Line<'static> 
 
 fn append_system_message_lines(target: &mut Vec<Line<'static>>, message: &Message) {
     if let Some((title, detail_markdown)) = parse_tool_event_markdown(message.content.as_str()) {
-        let collapsed_detail_markdown = collapse_tool_output_blocks(detail_markdown.as_str(), 5);
+        let write_file_compacted = if title.contains("write_file") {
+            collapse_write_file_command_region(detail_markdown.as_str())
+        } else {
+            detail_markdown
+        };
+        let collapsed_detail_markdown =
+            collapse_tool_output_blocks(write_file_compacted.as_str(), 5);
         let title_style = Style::default()
             .fg(Color::LightGreen)
             .add_modifier(Modifier::BOLD);
@@ -309,6 +315,70 @@ fn collapse_tool_output_blocks(detail_markdown: &str, max_lines: usize) -> Strin
             idx += 1;
         }
     }
+    out.join("\n")
+}
+
+fn collapse_write_file_command_region(detail_markdown: &str) -> String {
+    let source_lines = detail_markdown.lines().collect::<Vec<_>>();
+    if source_lines.is_empty() {
+        return String::new();
+    }
+    let Some(cmd_idx) = source_lines
+        .iter()
+        .position(|line| line.starts_with("命令:"))
+    else {
+        return detail_markdown.to_string();
+    };
+
+    let end_idx = source_lines
+        .iter()
+        .enumerate()
+        .skip(cmd_idx + 1)
+        .find_map(|(idx, line)| {
+            let trimmed = line.trim_start();
+            (trimmed.starts_with("ok=")
+                || trimmed.starts_with("summary:")
+                || trimmed.starts_with("stdout:")
+                || trimmed.starts_with("stderr:")
+                || trimmed.starts_with("```"))
+            .then_some(idx)
+        })
+        .unwrap_or(source_lines.len());
+
+    let command_region = source_lines[cmd_idx..end_idx].join("\n");
+    if command_region.contains("content=...(") && end_idx == cmd_idx + 1 {
+        return detail_markdown.to_string();
+    }
+
+    let first = source_lines[cmd_idx]
+        .trim_start_matches("命令:")
+        .trim()
+        .to_string();
+    let path = first
+        .split_whitespace()
+        .next()
+        .map(|item| truncate_chars(item, 120))
+        .unwrap_or_default();
+    let replacement = if path.is_empty() {
+        "命令: content=...".to_string()
+    } else {
+        format!("命令: path={path} content=...")
+    };
+
+    let mut out = Vec::new();
+    out.extend(
+        source_lines
+            .iter()
+            .take(cmd_idx)
+            .map(|line| line.to_string()),
+    );
+    out.push(replacement);
+    out.extend(
+        source_lines
+            .iter()
+            .skip(end_idx)
+            .map(|line| line.to_string()),
+    );
     out.join("\n")
 }
 

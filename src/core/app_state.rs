@@ -1770,7 +1770,36 @@ fn format_tool_command(record: &ToolExecutionRecord) -> Option<String> {
         return Some(format!("{cmd} {}", rest.join(" ")));
     }
 
+    if record.tool_name == "write_file" {
+        let path = args.first().cloned().unwrap_or_default();
+        let content_bytes = args.get(1).map(|content| content.len()).unwrap_or(0usize);
+        let append = args.get(2).cloned().unwrap_or_else(|| "false".to_string());
+        return Some(format!(
+            "path={} content=...({content_bytes} bytes) append={append}",
+            single_line_ellipsis(path.as_str(), 120)
+        ));
+    }
+
     Some(args.join(" "))
+}
+
+fn single_line_ellipsis(text: &str, max_chars: usize) -> String {
+    let normalized = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if normalized.is_empty() {
+        return String::new();
+    }
+    let mut chars = normalized.chars();
+    let preview = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{preview}...")
+    } else {
+        preview
+    }
 }
 
 fn workspace_change_overview() -> Option<String> {
