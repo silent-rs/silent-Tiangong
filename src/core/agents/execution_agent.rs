@@ -102,24 +102,23 @@ pub fn execute_single_plan_step_with_execution_agent(
         }
     }
 
-    if !step_completed {
-        let tool_hint = if executed_tools.is_empty() {
-            "未调用任何工具".to_string()
+    let tool_summary = if step_completed {
+        if executed_tools.is_empty() {
+            "步骤完成：未调用外部工具".to_string()
         } else {
-            format!("已调用工具：{}", executed_tools.join(","))
-        };
+            format!("步骤完成：工具成功：{}", executed_tools.join(","))
+        }
+    } else if executed_tools.is_empty() {
         return Err(anyhow!(
-            "执行智能体未显式提交步骤完成信号（mark_step_completed）：step={} {}；{}",
+            "执行智能体未显式提交步骤完成信号（mark_step_completed）：step={} {}；未调用任何工具",
             step.name,
             step.description,
-            tool_hint
         ));
-    }
-
-    let tool_summary = if executed_tools.is_empty() {
-        "步骤完成：未调用外部工具".to_string()
     } else {
-        format!("步骤完成：工具成功：{}", executed_tools.join(","))
+        format!(
+            "步骤完成：工具成功：{}；未显式调用 mark_step_completed，已按执行成功处理",
+            executed_tools.join(",")
+        )
     };
 
     Ok(ExecutionStepResult {
