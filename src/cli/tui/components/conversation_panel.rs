@@ -14,7 +14,11 @@ impl CliApp {
     ) {
         let conversation_inner_width = area.width.saturating_sub(2).max(1);
         let messages = self.active_messages_for_view();
-        let transcript = format_transcript(&messages, conversation_inner_width);
+        let transcript = format_transcript(
+            &messages,
+            conversation_inner_width,
+            self.state.has_pending_turn(),
+        );
         let logical_line_count = Paragraph::new(transcript.clone())
             .wrap(Wrap { trim: false })
             .line_count(conversation_inner_width)

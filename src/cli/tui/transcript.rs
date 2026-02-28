@@ -4,17 +4,28 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::core::session::{Message, MessageRole};
 
-pub(super) fn format_transcript(messages: &[Message], content_width: u16) -> Text<'static> {
+pub(super) fn format_transcript(
+    messages: &[Message],
+    content_width: u16,
+    has_pending_turn: bool,
+) -> Text<'static> {
     if messages.is_empty() {
         return Text::raw("开始新对话吧。");
     }
 
+    let pending_assistant_idx = active_assistant_message_index(messages, has_pending_turn);
     let mut lines = Vec::new();
-    for message in messages {
+    for (idx, message) in messages.iter().enumerate() {
         match message.role {
             MessageRole::User => append_user_message_lines(&mut lines, message),
             MessageRole::Assistant => {
-                append_assistant_message_lines(&mut lines, message, content_width);
+                let collapse_thinking = pending_assistant_idx != Some(idx);
+                append_assistant_message_lines(
+                    &mut lines,
+                    message,
+                    content_width,
+                    collapse_thinking,
+                );
             }
             MessageRole::System => append_system_message_lines(&mut lines, message),
         }
@@ -48,6 +59,7 @@ fn append_assistant_message_lines(
     target: &mut Vec<Line<'static>>,
     message: &Message,
     content_width: u16,
+    collapse_thinking: bool,
 ) {
     let title_style = Style::default()
         .fg(Color::White)
@@ -61,17 +73,21 @@ fn append_assistant_message_lines(
         .add_modifier(Modifier::ITALIC);
 
     if !thinking.trim().is_empty() {
-        target.push(build_thinking_block_line(
-            "  [思考]",
-            thinking_style,
-            content_width,
-        ));
-        append_thinking_markdown_block(target, thinking, thinking_style, content_width);
-        target.push(build_thinking_block_line(
-            "  [/思考]",
-            thinking_style,
-            content_width,
-        ));
+        if collapse_thinking {
+            target.push(build_collapsed_thinking_line(thinking, thinking_style));
+        } else {
+            target.push(build_thinking_block_line(
+                "  [思考]",
+                thinking_style,
+                content_width,
+            ));
+            append_thinking_markdown_block(target, thinking, thinking_style, content_width);
+            target.push(build_thinking_block_line(
+                "  [/思考]",
+                thinking_style,
+                content_width,
+            ));
+        }
     }
 
     if content.trim().is_empty() {
@@ -86,35 +102,64 @@ fn append_assistant_message_lines(
     }
 }
 
+fn active_assistant_message_index(messages: &[Message], has_pending_turn: bool) -> Option<usize> {
+    if !has_pending_turn {
+        return None;
+    }
+    messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(idx, message)| (message.role == MessageRole::Assistant).then_some(idx))
+}
+
+fn build_collapsed_thinking_line(thinking: &str, style: Style) -> Line<'static> {
+    let line_count = thinking.lines().count();
+    let char_count = thinking.chars().count();
+    let preview = thinking
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| truncate_chars(line.trim(), 72))
+        .unwrap_or_default();
+    let summary = if preview.is_empty() {
+        format!("  [思考已收起：{line_count} 行，{char_count} 字]")
+    } else {
+        format!("  [思考已收起：{line_count} 行，{char_count} 字] {preview}")
+    };
+    Line::from(Span::styled(summary, style))
+}
+
 fn append_system_message_lines(target: &mut Vec<Line<'static>>, message: &Message) {
     if let Some((title, detail_markdown)) = parse_tool_event_markdown(message.content.as_str()) {
+        let collapsed_detail_markdown = collapse_tool_output_blocks(detail_markdown.as_str(), 5);
         let title_style = Style::default()
             .fg(Color::LightGreen)
             .add_modifier(Modifier::BOLD);
         target.push(build_event_title_line(title.as_str(), title_style));
-        if detail_markdown.trim().is_empty() {
+        if collapsed_detail_markdown.trim().is_empty() {
             target.push(build_event_detail_line(
                 "无输出",
                 Style::default().fg(Color::Gray),
             ));
         } else {
-            append_markdown_lines_with_prefix(target, detail_markdown.as_str(), "  ");
+            append_markdown_lines_with_prefix(target, collapsed_detail_markdown.as_str(), "  ");
         }
         return;
     }
 
     if let Some((title, detail_markdown)) = parse_llm_event_markdown(message.content.as_str()) {
+        let collapsed_detail_markdown = collapse_llm_reasoning_block(detail_markdown.as_str());
         let title_style = Style::default()
             .fg(Color::LightGreen)
             .add_modifier(Modifier::BOLD);
         target.push(build_event_title_line(title.as_str(), title_style));
-        if detail_markdown.trim().is_empty() {
+        if collapsed_detail_markdown.trim().is_empty() {
             target.push(build_event_detail_line(
                 "无输出",
                 Style::default().fg(Color::Gray),
             ));
         } else {
-            append_markdown_lines_with_prefix(target, detail_markdown.as_str(), "  ");
+            append_markdown_lines_with_prefix(target, collapsed_detail_markdown.as_str(), "  ");
         }
         return;
     }
@@ -208,6 +253,111 @@ fn parse_llm_event_markdown(content: &str) -> Option<(String, String)> {
     let stage = parse_llm_stage(header)?;
     let body = lines.collect::<Vec<_>>().join("\n");
     Some((format_stage_title(&stage), body))
+}
+
+fn collapse_tool_output_blocks(detail_markdown: &str, max_lines: usize) -> String {
+    let source_lines = detail_markdown.lines().collect::<Vec<_>>();
+    if source_lines.is_empty() {
+        return String::new();
+    }
+
+    let mut out = Vec::new();
+    let mut idx = 0usize;
+    while idx < source_lines.len() {
+        let line = source_lines[idx];
+        let tag = line.trim();
+        if tag != "stdout:" && tag != "stderr:" {
+            out.push(line.to_string());
+            idx += 1;
+            continue;
+        }
+
+        out.push(line.to_string());
+        idx += 1;
+        if idx >= source_lines.len() {
+            break;
+        }
+        if !source_lines[idx].trim().starts_with("```") {
+            continue;
+        }
+
+        let fence = source_lines[idx].to_string();
+        out.push(fence);
+        idx += 1;
+
+        let start = idx;
+        while idx < source_lines.len() {
+            if source_lines[idx].trim().starts_with("```") {
+                break;
+            }
+            idx += 1;
+        }
+        let block_lines = &source_lines[start..idx];
+        if block_lines.len() <= max_lines {
+            out.extend(block_lines.iter().map(|line| line.to_string()));
+        } else {
+            out.extend(
+                block_lines
+                    .iter()
+                    .take(max_lines)
+                    .map(|line| line.to_string()),
+            );
+            out.push(format!("...(省略 {} 行)", block_lines.len() - max_lines));
+        }
+        if idx < source_lines.len() {
+            out.push(source_lines[idx].to_string());
+            idx += 1;
+        }
+    }
+    out.join("\n")
+}
+
+fn collapse_llm_reasoning_block(detail_markdown: &str) -> String {
+    let source_lines = detail_markdown.lines().collect::<Vec<_>>();
+    if source_lines.is_empty() {
+        return String::new();
+    }
+
+    let mut out = Vec::new();
+    let mut idx = 0usize;
+    while idx < source_lines.len() {
+        let line = source_lines[idx];
+        if line.trim() != "reasoning:" {
+            out.push(line.to_string());
+            idx += 1;
+            continue;
+        }
+
+        out.push(line.to_string());
+        idx += 1;
+        let start = idx;
+        while idx < source_lines.len() {
+            if source_lines[idx].trim() == "content:" {
+                break;
+            }
+            idx += 1;
+        }
+        let reasoning_lines = &source_lines[start..idx];
+        let reasoning_text = reasoning_lines.join("\n");
+        let line_count = reasoning_lines.len();
+        let char_count = reasoning_text.chars().count();
+        let preview = reasoning_lines
+            .iter()
+            .find_map(|item| {
+                let trimmed = item.trim();
+                (!trimmed.is_empty()).then_some(trimmed)
+            })
+            .map(|text| truncate_chars(text, 72))
+            .unwrap_or_default();
+        if preview.is_empty() {
+            out.push(format!("[思考已收起：{line_count} 行，{char_count} 字]"));
+        } else {
+            out.push(format!(
+                "[思考已收起：{line_count} 行，{char_count} 字] {preview}"
+            ));
+        }
+    }
+    out.join("\n")
 }
 
 fn parse_plan_execution_summary_markdown(content: &str) -> Option<String> {

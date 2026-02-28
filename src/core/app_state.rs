@@ -1688,16 +1688,18 @@ fn format_tool_trace_message(result: &ToolResult) -> String {
     let Some(record) = result.execution.as_ref() else {
         let mut lines = vec!["工具执行 [unknown]".to_string()];
         lines.push(format!("summary: {}", result.summary));
-        if !result.stdout.trim().is_empty() {
+        let stdout_text = clip_tool_output_lines(result.stdout.as_str(), 5);
+        let stderr_text = clip_tool_output_lines(result.stderr.as_str(), 5);
+        if !stdout_text.trim().is_empty() {
             lines.push("stdout:".to_string());
             lines.push("```text".to_string());
-            lines.push(result.stdout.clone());
+            lines.push(stdout_text);
             lines.push("```".to_string());
         }
-        if !result.stderr.trim().is_empty() {
+        if !stderr_text.trim().is_empty() {
             lines.push("stderr:".to_string());
             lines.push("```text".to_string());
-            lines.push(result.stderr.clone());
+            lines.push(stderr_text);
             lines.push("```".to_string());
         }
         return lines.join("\n");
@@ -1712,19 +1714,35 @@ fn format_tool_trace_message(result: &ToolResult) -> String {
         result.ok, result.exit_code, record.duration_ms
     ));
     lines.push(format!("summary: {}", result.summary));
-    if !result.stdout.trim().is_empty() {
+    let stdout_text = clip_tool_output_lines(result.stdout.as_str(), 5);
+    let stderr_text = clip_tool_output_lines(result.stderr.as_str(), 5);
+    if !stdout_text.trim().is_empty() {
         lines.push("stdout:".to_string());
         lines.push("```text".to_string());
-        lines.push(result.stdout.clone());
+        lines.push(stdout_text);
         lines.push("```".to_string());
     }
-    if !result.stderr.trim().is_empty() {
+    if !stderr_text.trim().is_empty() {
         lines.push("stderr:".to_string());
         lines.push("```text".to_string());
-        lines.push(result.stderr.clone());
+        lines.push(stderr_text);
         lines.push("```".to_string());
     }
     lines.join("\n")
+}
+
+fn clip_tool_output_lines(text: &str, max_lines: usize) -> String {
+    let lines = text.lines().collect::<Vec<_>>();
+    if lines.len() <= max_lines {
+        return text.to_string();
+    }
+    let kept = lines
+        .iter()
+        .take(max_lines)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{kept}\n...(省略 {} 行)", lines.len() - max_lines)
 }
 
 fn format_tool_command(record: &ToolExecutionRecord) -> Option<String> {
