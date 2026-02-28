@@ -18,5 +18,6 @@ futures-util = "0.3"
 ratatui = { version = "0.28", features = ["unstable-rendered-line-info"] }
 crossterm = "0.28"
 unicode-width = "0.2"
+diffy = "0.4"
 
 [workspace]

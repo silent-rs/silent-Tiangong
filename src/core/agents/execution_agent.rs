@@ -212,9 +212,11 @@ fn build_step_execution_prompt(
 约束：
 1. 只围绕“当前步骤”执行，不要改写 plan，不要新增步骤。
 2. 需要文件/命令操作时，必须调用可用工具完成。
-3. 完成步骤时，必须调用 `mark_step_completed` 函数作为完成信号。
-4. 若调用了工具，`mark_step_completed` 必须在所有工具调用成功后再调用。
-5. 不要输出冗长解释，聚焦执行结果。
+3. 优先使用 `search_code` 与 `read_file` 先定位再修改，避免盲改文件。
+4. 使用 `apply_patch` 时优先采用 Codex 风格补丁（*** Begin Patch ... *** End Patch）。
+5. 完成步骤时，必须调用 `mark_step_completed` 函数作为完成信号。
+6. 若调用了工具，`mark_step_completed` 必须在所有工具调用成功后再调用。
+7. 不要输出冗长解释，聚焦执行结果。
 
 用户输入：
 {user_input}
@@ -280,6 +282,18 @@ fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
             }),
         },
         FunctionToolSpec {
+            name: "search_code".to_string(),
+            description: "在目录中检索文本（优先使用 rg）".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "检索文本或正则模式" },
+                    "path": { "type": "string", "description": "目标目录或文件路径，默认当前目录" }
+                },
+                "required": ["pattern"]
+            }),
+        },
+        FunctionToolSpec {
             name: "write_file".to_string(),
             description: "创建或覆盖文件内容".to_string(),
             parameters: serde_json::json!({
@@ -322,7 +336,7 @@ fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
         },
         FunctionToolSpec {
             name: "apply_patch".to_string(),
-            description: "对文件应用补丁文本".to_string(),
+            description: "对文件应用补丁文本，支持 Codex 风格补丁（*** Begin Patch ... *** End Patch）".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -417,6 +431,26 @@ fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<ToolCall> {
             args.push(content);
             Ok(ToolCall {
                 name: ToolName::WriteFile,
+                args,
+            })
+        }
+        "search_code" => {
+            let pattern = call
+                .arguments
+                .get("pattern")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let path = call
+                .arguments
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(".")
+                .to_string();
+            args.push(pattern);
+            args.push(path);
+            Ok(ToolCall {
+                name: ToolName::SearchCode,
                 args,
             })
         }

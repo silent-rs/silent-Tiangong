@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::thread;
@@ -261,13 +260,6 @@ fn is_allowed_bash_head_command(cmd: &str) -> bool {
         cmd,
         "echo" | "pwd" | "ls" | "cat" | "head" | "tail" | "wc" | "rg" | "grep" | "cargo" | "git"
     )
-}
-
-pub(super) fn write_temp_patch_file(patch: &str) -> Result<PathBuf> {
-    let path = std::env::temp_dir().join(format!("tiangong-{}.patch", scru128::new()));
-    fs::write(&path, patch.as_bytes())
-        .with_context(|| format!("写入临时补丁文件失败：{}", path.display()))?;
-    Ok(path)
 }
 
 pub(super) fn command_timeout_ms() -> u64 {
