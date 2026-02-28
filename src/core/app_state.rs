@@ -17,7 +17,7 @@ use crate::core::runtime::{
     LlmOutputRecord, RunSnapshot, RunStatus, RuntimeEngine, TurnExecution, VerifyExecutionRecord,
 };
 use crate::core::session::{Message, MessageRole, Session, SessionTaskPlan, now_text};
-use crate::core::tool::ToolExecutionRecord;
+use crate::core::tool::{ToolExecutionRecord, ToolResult};
 
 const DEFAULT_SESSION_TITLE: &str = "默认会话";
 const DEFAULT_CONTEXT_LIMIT: usize = 16;
@@ -57,6 +57,8 @@ struct LoadedState {
 enum TurnEvent {
     PlanReady(TaskPlan),
     LlmOutput(LlmOutputRecord),
+    ToolExecution(ToolResult),
+    PlanExecutionSummary(String),
     Chunk(ModelStreamChunk),
     Completed(Box<TurnExecution>),
     Failed(String),
@@ -66,7 +68,7 @@ enum TurnEvent {
 struct PendingTurn {
     session_id: String,
     task_id: String,
-    assistant_message_id: String,
+    assistant_message_id: Option<String>,
     started_at: Instant,
     rx: Receiver<TurnEvent>,
 }
@@ -273,11 +275,13 @@ impl TiangongState {
             .iter_mut()
             .find(|session| session.id == pending.session_id)
         {
-            if let Some(position) = session.messages.iter().position(|msg| {
-                msg.id == pending.assistant_message_id
-                    && msg.content.trim().is_empty()
-                    && msg.reasoning_content.trim().is_empty()
-            }) {
+            if let Some(assistant_message_id) = pending.assistant_message_id.as_deref()
+                && let Some(position) = session.messages.iter().position(|msg| {
+                    msg.id == assistant_message_id
+                        && msg.content.trim().is_empty()
+                        && msg.reasoning_content.trim().is_empty()
+                })
+            {
                 session.messages.remove(position);
                 session.updated_at = now_text();
             }
@@ -368,6 +372,12 @@ impl TiangongState {
                 }
                 TurnEvent::LlmOutput(output) => {
                     self.append_pending_turn_llm_output(&output);
+                }
+                TurnEvent::ToolExecution(result) => {
+                    self.append_pending_turn_tool_execution(&result);
+                }
+                TurnEvent::PlanExecutionSummary(summary) => {
+                    self.append_pending_turn_plan_execution_summary(summary.as_str());
                 }
                 TurnEvent::Chunk(delta) => {
                     self.apply_assistant_delta(&delta);
@@ -769,16 +779,10 @@ impl TiangongState {
             .last()
             .map(|msg| msg.id.clone())
             .ok_or_else(|| anyhow!("创建用户消息失败"))?;
-        self.sessions[active_idx].append_message(MessageRole::Assistant, String::new());
-        let assistant_message_id = self.sessions[active_idx]
-            .messages
-            .last()
-            .map(|msg| msg.id.clone())
-            .ok_or_else(|| anyhow!("创建助手消息占位失败"))?;
         self.sessions[active_idx].start_task(
             task_id.clone(),
             user_message_id,
-            assistant_message_id.clone(),
+            String::new(),
             input.clone(),
         );
 
@@ -807,6 +811,8 @@ impl TiangongState {
             let chunk_tx = tx.clone();
             let plan_tx = tx.clone();
             let llm_tx = tx.clone();
+            let tool_tx = tx.clone();
+            let plan_summary_tx = tx.clone();
             let result = runtime.execute_turn_with_streaming(
                 &session_snapshot,
                 &worker_input,
@@ -818,6 +824,13 @@ impl TiangongState {
                 },
                 |output| {
                     let _ = llm_tx.send(TurnEvent::LlmOutput(output.clone()));
+                },
+                |tool_result| {
+                    let _ = tool_tx.send(TurnEvent::ToolExecution(tool_result.clone()));
+                },
+                |summary| {
+                    let _ =
+                        plan_summary_tx.send(TurnEvent::PlanExecutionSummary(summary.to_string()));
                 },
             );
 
@@ -836,7 +849,7 @@ impl TiangongState {
         self.pending_turn = Some(PendingTurn {
             session_id,
             task_id,
-            assistant_message_id,
+            assistant_message_id: None,
             started_at: Instant::now(),
             rx,
         });
@@ -862,12 +875,8 @@ impl TiangongState {
             return;
         }
 
-        let Some((session_id, assistant_message_id)) = self.pending_turn.as_ref().map(|pending| {
-            (
-                pending.session_id.clone(),
-                pending.assistant_message_id.clone(),
-            )
-        }) else {
+        let Some((session_id, assistant_message_id)) = self.ensure_pending_turn_assistant_message()
+        else {
             return;
         };
 
@@ -894,6 +903,88 @@ impl TiangongState {
             session.append_message(MessageRole::System, format_llm_output_message(output));
             let _ = self.persist_session_and_app(&session_id);
         }
+    }
+
+    fn append_pending_turn_tool_execution(&mut self, result: &ToolResult) {
+        let Some(session_id) = self
+            .pending_turn
+            .as_ref()
+            .map(|pending| pending.session_id.clone())
+        else {
+            return;
+        };
+
+        if let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
+            session.append_message(MessageRole::System, format_tool_trace_message(result));
+            let _ = self.persist_session_and_app(&session_id);
+        }
+    }
+
+    fn append_pending_turn_plan_execution_summary(&mut self, summary: &str) {
+        let Some(session_id) = self
+            .pending_turn
+            .as_ref()
+            .map(|pending| pending.session_id.clone())
+        else {
+            return;
+        };
+        let summary = summary.trim();
+        if summary.is_empty() {
+            return;
+        }
+
+        if let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
+            session.append_message(MessageRole::System, format!("Plan 执行总结\n{summary}"));
+            let _ = self.persist_session_and_app(&session_id);
+        }
+    }
+
+    fn ensure_pending_turn_assistant_message(&mut self) -> Option<(String, String)> {
+        let (session_id, task_id, existing_message_id) =
+            self.pending_turn.as_ref().map(|pending| {
+                (
+                    pending.session_id.clone(),
+                    pending.task_id.clone(),
+                    pending.assistant_message_id.clone(),
+                )
+            })?;
+
+        if let Some(message_id) = existing_message_id {
+            return Some((session_id, message_id));
+        }
+
+        let assistant_message_id = {
+            let session = self
+                .sessions
+                .iter_mut()
+                .find(|session| session.id == session_id)?;
+            session.append_message(MessageRole::Assistant, String::new());
+            session.messages.last().map(|msg| msg.id.clone())?
+        };
+
+        if let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
+            session.bind_task_assistant_message_id(&task_id, assistant_message_id.clone());
+        }
+        if let Some(pending) = self.pending_turn.as_mut()
+            && pending.session_id == session_id
+            && pending.task_id == task_id
+        {
+            pending.assistant_message_id = Some(assistant_message_id.clone());
+        }
+
+        Some((session_id, assistant_message_id))
     }
 
     fn mark_pending_turn_executing(&mut self, plan: &TaskPlan) {
@@ -945,19 +1036,27 @@ impl TiangongState {
             return;
         };
 
-        if let Some(message) = self.find_message_mut(&session_id, &assistant_message_id) {
+        let mut final_assistant_message_id = assistant_message_id;
+        let mut updated_existing_message = false;
+        if let Some(message_id) = final_assistant_message_id.as_deref()
+            && let Some(message) = self.find_message_mut(&session_id, message_id)
+        {
             message.content = exec.assistant_message.clone();
             message.reasoning_content = exec.assistant_reasoning_content.clone();
-        } else if let Some(session) = self
-            .sessions
-            .iter_mut()
-            .find(|session| session.id == session_id)
+            updated_existing_message = true;
+        }
+        if (final_assistant_message_id.is_none() || !updated_existing_message)
+            && let Some(session) = self
+                .sessions
+                .iter_mut()
+                .find(|session| session.id == session_id)
         {
             session.append_message_with_reasoning(
                 MessageRole::Assistant,
                 exec.assistant_message.clone(),
                 exec.assistant_reasoning_content.clone(),
             );
+            final_assistant_message_id = session.messages.last().map(|message| message.id.clone());
         }
 
         let base_result = format!(
@@ -989,6 +1088,9 @@ impl TiangongState {
             .iter_mut()
             .find(|session| session.id == session_id)
         {
+            if let Some(message_id) = final_assistant_message_id.clone() {
+                session.bind_task_assistant_message_id(&task_id, message_id);
+            }
             session.sync_task_plans(&task_id, &exec.plan.plans);
             session.complete_task(
                 &task_id,
@@ -1049,11 +1151,13 @@ impl TiangongState {
             .iter_mut()
             .find(|session| session.id == session_id)
         {
-            if let Some(position) = session.messages.iter().position(|msg| {
-                msg.id == assistant_message_id
-                    && msg.content.trim().is_empty()
-                    && msg.reasoning_content.trim().is_empty()
-            }) {
+            if let Some(assistant_message_id) = assistant_message_id.as_deref()
+                && let Some(position) = session.messages.iter().position(|msg| {
+                    msg.id == assistant_message_id
+                        && msg.content.trim().is_empty()
+                        && msg.reasoning_content.trim().is_empty()
+                })
+            {
                 session.messages.remove(position);
                 session.updated_at = now_text();
             }
@@ -1572,28 +1676,83 @@ fn format_llm_output_message(output: &LlmOutputRecord) -> String {
         lines.push(format!("tool_calls: {}", output.tool_calls.join(", ")));
     }
     if !output.reasoning_content.trim().is_empty() {
-        lines.push(format!(
-            "reasoning:\n{}",
-            truncate_text_by_chars(output.reasoning_content.trim(), 1200)
-        ));
+        lines.push(format!("reasoning:\n{}", output.reasoning_content.trim()));
     }
     if !output.content.trim().is_empty() {
-        lines.push(format!(
-            "content:\n{}",
-            truncate_text_by_chars(output.content.trim(), 1200)
-        ));
+        lines.push(format!("content:\n{}", output.content.trim()));
     }
     lines.join("\n")
 }
 
-fn truncate_text_by_chars(text: &str, max_chars: usize) -> String {
-    let mut chars = text.chars();
-    let preview = chars.by_ref().take(max_chars).collect::<String>();
-    if chars.next().is_some() {
-        format!("{preview}...")
-    } else {
-        preview
+fn format_tool_trace_message(result: &ToolResult) -> String {
+    let Some(record) = result.execution.as_ref() else {
+        let mut lines = vec!["工具执行 [unknown]".to_string()];
+        lines.push(format!("summary: {}", result.summary));
+        if !result.stdout.trim().is_empty() {
+            lines.push("stdout:".to_string());
+            lines.push("```text".to_string());
+            lines.push(result.stdout.clone());
+            lines.push("```".to_string());
+        }
+        if !result.stderr.trim().is_empty() {
+            lines.push("stderr:".to_string());
+            lines.push("```text".to_string());
+            lines.push(result.stderr.clone());
+            lines.push("```".to_string());
+        }
+        return lines.join("\n");
+    };
+
+    let mut lines = vec![format!("工具执行 [{}]", record.tool_name)];
+    if let Some(command) = format_tool_command(record) {
+        lines.push(format!("命令: {command}"));
     }
+    lines.push(format!(
+        "ok={} exit_code={} duration_ms={}",
+        result.ok, result.exit_code, record.duration_ms
+    ));
+    lines.push(format!("summary: {}", result.summary));
+    if !result.stdout.trim().is_empty() {
+        lines.push("stdout:".to_string());
+        lines.push("```text".to_string());
+        lines.push(result.stdout.clone());
+        lines.push("```".to_string());
+    }
+    if !result.stderr.trim().is_empty() {
+        lines.push("stderr:".to_string());
+        lines.push("```text".to_string());
+        lines.push(result.stderr.clone());
+        lines.push("```".to_string());
+    }
+    lines.join("\n")
+}
+
+fn format_tool_command(record: &ToolExecutionRecord) -> Option<String> {
+    let args = record
+        .args
+        .iter()
+        .filter(|arg| !arg.starts_with("__tiangong_cwd="))
+        .cloned()
+        .collect::<Vec<_>>();
+    if args.is_empty() {
+        return None;
+    }
+
+    if record.tool_name == "run_command" {
+        if args.first().map(String::as_str) == Some("__tiangong_shell__") {
+            let script = args.get(1).cloned().unwrap_or_default();
+            let shell = args.get(2).cloned().unwrap_or_else(|| "auto".to_string());
+            return Some(format!("shell={shell} script={script}"));
+        }
+        let cmd = args.first().cloned().unwrap_or_default();
+        let rest = args.into_iter().skip(1).collect::<Vec<_>>();
+        if rest.is_empty() {
+            return Some(cmd);
+        }
+        return Some(format!("{cmd} {}", rest.join(" ")));
+    }
+
+    Some(args.join(" "))
 }
 
 fn workspace_change_overview() -> Option<String> {

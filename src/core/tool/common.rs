@@ -24,7 +24,32 @@ fn allowed_roots() -> Result<Vec<PathBuf>> {
     Ok(roots)
 }
 
+pub(super) fn resolve_effective_cwd(raw: Option<&str>) -> Result<PathBuf> {
+    let root = workspace_root()?;
+    let value = raw.unwrap_or(".").trim();
+    if value.is_empty() {
+        return root
+            .canonicalize()
+            .with_context(|| format!("解析工作目录失败：{}", root.display()));
+    }
+    let cwd = resolve_path_from_base(value, &root)?;
+    if !cwd.is_dir() {
+        return Err(anyhow!("workdir 不是目录：{}", cwd.display()));
+    }
+    Ok(cwd)
+}
+
 pub(super) fn resolve_workspace_path(raw: &str) -> Result<PathBuf> {
+    let base = workspace_root()?;
+    resolve_path_from_base(raw, &base)
+}
+
+pub(super) fn resolve_workspace_write_path(raw: &str) -> Result<PathBuf> {
+    let base = workspace_root()?;
+    resolve_write_path_from_base(raw, &base)
+}
+
+pub(super) fn resolve_path_from_base(raw: &str, base: &Path) -> Result<PathBuf> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err(anyhow!("路径参数不能为空"));
@@ -35,8 +60,7 @@ pub(super) fn resolve_workspace_path(raw: &str) -> Result<PathBuf> {
         ));
     }
 
-    let root = workspace_root()?;
-    let candidate = resolve_path_candidate(raw, &root);
+    let candidate = resolve_path_candidate(raw, base);
     let canonical = candidate
         .canonicalize()
         .with_context(|| format!("解析路径失败：{}", candidate.display()))?;
@@ -51,7 +75,7 @@ pub(super) fn resolve_workspace_path(raw: &str) -> Result<PathBuf> {
     Ok(canonical)
 }
 
-pub(super) fn resolve_workspace_write_path(raw: &str) -> Result<PathBuf> {
+pub(super) fn resolve_write_path_from_base(raw: &str, base: &Path) -> Result<PathBuf> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err(anyhow!("路径参数不能为空"));
@@ -62,12 +86,11 @@ pub(super) fn resolve_workspace_write_path(raw: &str) -> Result<PathBuf> {
         ));
     }
 
-    let root = workspace_root()?;
-    let candidate = resolve_path_candidate(raw, &root);
+    let candidate = resolve_path_candidate(raw, base);
     let mut anchor = candidate
         .parent()
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| root.clone());
+        .unwrap_or_else(|| base.to_path_buf());
     while !anchor.exists() {
         let Some(next) = anchor.parent().map(Path::to_path_buf) else {
             return Err(anyhow!("无法定位可写目录：{}", candidate.display()));
@@ -88,12 +111,12 @@ pub(super) fn resolve_workspace_write_path(raw: &str) -> Result<PathBuf> {
     Ok(candidate)
 }
 
-fn resolve_path_candidate(raw: &str, workspace: &Path) -> PathBuf {
+fn resolve_path_candidate(raw: &str, base: &Path) -> PathBuf {
     let path = PathBuf::from(raw);
     if path.is_absolute() {
         path
     } else {
-        workspace.join(path)
+        base.join(path)
     }
 }
 
@@ -101,12 +124,15 @@ fn is_path_in_allowed_roots(path: &Path, roots: &[PathBuf]) -> bool {
     roots.iter().any(|root| path.starts_with(root))
 }
 
-pub(super) fn validate_command_args_in_allowed_roots(cmd: &str, args: &[String]) -> Result<()> {
+pub(super) fn validate_command_args_in_allowed_roots(
+    cmd: &str,
+    args: &[String],
+    base_dir: &Path,
+) -> Result<()> {
     if matches!(cmd, "echo" | "pwd") {
         return Ok(());
     }
 
-    let workspace = workspace_root()?;
     let roots = allowed_roots()?;
     let mut skip_next_value = false;
     for arg in args {
@@ -125,7 +151,7 @@ pub(super) fn validate_command_args_in_allowed_roots(cmd: &str, args: &[String])
         if !argument_may_be_path(cmd, raw) {
             continue;
         }
-        ensure_command_arg_path_allowed(raw, &workspace, &roots)?;
+        ensure_command_arg_path_allowed(raw, base_dir, &roots)?;
     }
     Ok(())
 }
@@ -139,7 +165,7 @@ fn option_requires_value(cmd: &str, option: &str) -> bool {
 
 fn argument_may_be_path(cmd: &str, raw: &str) -> bool {
     match cmd {
-        "ls" | "cat" | "wc" => true,
+        "ls" | "cat" | "wc" | "rg" | "grep" => true,
         "head" | "tail" => !raw
             .chars()
             .all(|ch| ch.is_ascii_digit() || ch == '+' || ch == '-'),
@@ -147,14 +173,14 @@ fn argument_may_be_path(cmd: &str, raw: &str) -> bool {
     }
 }
 
-fn ensure_command_arg_path_allowed(raw: &str, workspace: &Path, roots: &[PathBuf]) -> Result<()> {
+fn ensure_command_arg_path_allowed(raw: &str, base_dir: &Path, roots: &[PathBuf]) -> Result<()> {
     if raw.starts_with('~') {
         return Err(anyhow!(
             "命令参数路径不允许使用 home 目录：{raw}；仅允许当前目录与临时目录"
         ));
     }
 
-    let candidate = resolve_path_candidate(raw, workspace);
+    let candidate = resolve_path_candidate(raw, base_dir);
     let anchor = if candidate.exists() {
         candidate
     } else {
@@ -204,13 +230,40 @@ pub(super) fn display_rel_path(path: &Path) -> String {
 }
 
 pub(super) fn is_allowed_command(cmd: &str) -> bool {
-    matches!(cmd, "echo" | "pwd" | "ls" | "cat" | "head" | "tail" | "wc")
+    matches!(
+        cmd,
+        "echo"
+            | "pwd"
+            | "ls"
+            | "cat"
+            | "head"
+            | "tail"
+            | "wc"
+            | "rg"
+            | "grep"
+            | "cargo"
+            | "git"
+            | "bash"
+            | "sh"
+            | "powershell"
+            | "pwsh"
+    )
 }
 
-pub(super) fn validate_bash_args(args: &[String]) -> Result<()> {
-    if args.len() != 2 || args.first().map(String::as_str) != Some("-lc") {
+pub(super) fn validate_shell_command_args(
+    shell_cmd: &str,
+    args: &[String],
+    base_dir: &Path,
+) -> Result<()> {
+    let (expected_flag, flag_label) = match shell_cmd {
+        "bash" => ("-lc", "bash -lc"),
+        "sh" => ("-c", "sh -c"),
+        "powershell" | "pwsh" => ("-Command", "powershell -Command"),
+        _ => return Err(anyhow!("不支持的 shell 命令：{shell_cmd}")),
+    };
+    if args.len() != 2 || args.first().map(String::as_str) != Some(expected_flag) {
         return Err(anyhow!(
-            "bash 仅允许以 -lc 单脚本形式执行：run_command(cmd=bash,args=[\"-lc\",\"<script>\"])"
+            "{shell_cmd} 仅允许 {flag_label} 单脚本形式：run_shell(script=...) 或 run_command(cmd={shell_cmd},args=[\"{expected_flag}\",\"<script>\"])"
         ));
     }
     let script = args
@@ -219,20 +272,21 @@ pub(super) fn validate_bash_args(args: &[String]) -> Result<()> {
         .map(str::trim)
         .unwrap_or_default();
     if script.is_empty() {
-        return Err(anyhow!("bash 脚本不能为空"));
+        return Err(anyhow!("{shell_cmd} 脚本不能为空"));
     }
-    validate_bash_script(script)
+    validate_shell_script(script, base_dir)
 }
 
-fn validate_bash_script(script: &str) -> Result<()> {
+fn validate_shell_script(script: &str, base_dir: &Path) -> Result<()> {
     let lowered = script.to_ascii_lowercase();
-    if contains_forbidden_bash_tokens(&lowered) {
-        return Err(anyhow!("bash 脚本包含不允许的高风险控制符或命令"));
+    if contains_forbidden_shell_tokens(&lowered) {
+        return Err(anyhow!("shell 脚本包含不允许的高风险控制符或命令"));
     }
 
-    let cmd = extract_bash_head_command(script).ok_or_else(|| anyhow!("无法识别 bash 命令"))?;
-    if !is_allowed_bash_head_command(cmd) {
-        return Err(anyhow!("bash 脚本首命令不在允许列表：{cmd}"));
+    let cmd =
+        extract_shell_head_command(script).ok_or_else(|| anyhow!("无法识别 shell 脚本命令"))?;
+    if !is_allowed_shell_head_command(cmd) {
+        return Err(anyhow!("shell 脚本首命令不在允许列表：{cmd}"));
     }
 
     let args = script
@@ -240,10 +294,10 @@ fn validate_bash_script(script: &str) -> Result<()> {
         .skip(1)
         .map(ToString::to_string)
         .collect::<Vec<_>>();
-    validate_command_args_in_allowed_roots(cmd, &args)
+    validate_command_args_in_allowed_roots(cmd, &args, base_dir)
 }
 
-fn contains_forbidden_bash_tokens(script: &str) -> bool {
+fn contains_forbidden_shell_tokens(script: &str) -> bool {
     const FORBIDDEN: [&str; 17] = [
         "&&", "||", ";", "|", ">", "<", "`", "$(", "sudo ", " rm -", "mv /", "chmod -r", "chown ",
         "shutdown", "reboot", "poweroff", "mkfs",
@@ -251,15 +305,74 @@ fn contains_forbidden_bash_tokens(script: &str) -> bool {
     FORBIDDEN.iter().any(|token| script.contains(token))
 }
 
-fn extract_bash_head_command(script: &str) -> Option<&str> {
+fn extract_shell_head_command(script: &str) -> Option<&str> {
     script.split_whitespace().next()
 }
 
-fn is_allowed_bash_head_command(cmd: &str) -> bool {
+fn is_allowed_shell_head_command(cmd: &str) -> bool {
     matches!(
         cmd,
         "echo" | "pwd" | "ls" | "cat" | "head" | "tail" | "wc" | "rg" | "grep" | "cargo" | "git"
     )
+}
+
+pub(super) fn derive_shell_exec_args(
+    script: &str,
+    shell: Option<&str>,
+) -> Result<(String, Vec<String>)> {
+    let shell = shell
+        .unwrap_or("auto")
+        .trim()
+        .to_ascii_lowercase()
+        .replace(' ', "");
+    let selected = match shell.as_str() {
+        "" | "auto" => {
+            if cfg!(target_os = "windows") {
+                "powershell"
+            } else {
+                "bash"
+            }
+        }
+        "bash" => "bash",
+        "sh" => "sh",
+        "powershell" => "powershell",
+        "pwsh" => "pwsh",
+        other => return Err(anyhow!("不支持的 shell 类型：{other}")),
+    };
+
+    let args = match selected {
+        "bash" => vec!["-lc".to_string(), script.to_string()],
+        "sh" => vec!["-c".to_string(), script.to_string()],
+        "powershell" | "pwsh" => vec!["-Command".to_string(), script.to_string()],
+        _ => return Err(anyhow!("不支持的 shell 类型：{selected}")),
+    };
+    Ok((selected.to_string(), args))
+}
+
+pub(super) fn command_env_allowlist() -> Vec<(String, String)> {
+    const ALLOWED: [&str; 13] = [
+        "PATH",
+        "HOME",
+        "USER",
+        "SHELL",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "LANG",
+        "LC_ALL",
+        "TERM",
+        "SystemRoot",
+        "ComSpec",
+        "PATHEXT",
+    ];
+    ALLOWED
+        .iter()
+        .filter_map(|name| {
+            std::env::var(name)
+                .ok()
+                .map(|value| ((*name).to_string(), value))
+        })
+        .collect::<Vec<_>>()
 }
 
 pub(super) fn command_timeout_ms() -> u64 {

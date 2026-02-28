@@ -7,6 +7,9 @@ use crate::core::planner::{PlanStep, PlanStepStatus, TaskPlan};
 use crate::core::session::{Message, Session};
 use crate::core::tool::{LocalToolExecutor, ToolCall, ToolExecutor, ToolName, ToolResult};
 
+const INTERNAL_SHELL_CMD: &str = "__tiangong_shell__";
+const INTERNAL_CWD_PREFIX: &str = "__tiangong_cwd=";
+
 #[derive(Debug, Clone)]
 pub struct ExecutionLlmOutput {
     pub content: String,
@@ -213,7 +216,7 @@ fn build_step_execution_prompt(
 1. 只围绕“当前步骤”执行，不要改写 plan，不要新增步骤。
 2. 需要文件/命令操作时，必须调用可用工具完成。
 3. 优先使用 `search_code` 与 `read_file` 先定位再修改，避免盲改文件。
-4. 使用 `apply_patch` 时优先采用 Codex 风格补丁（*** Begin Patch ... *** End Patch）。
+4. 使用 `apply_patch` 时仅使用天工补丁路线（unified diff，含 ---/+++/@@）。
 5. 完成步骤时，必须调用 `mark_step_completed` 函数作为完成信号。
 6. 若调用了工具，`mark_step_completed` 必须在所有工具调用成功后再调用。
 7. 不要输出冗长解释，聚焦执行结果。
@@ -272,11 +275,13 @@ fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
         },
         FunctionToolSpec {
             name: "read_file".to_string(),
-            description: "读取文件内容".to_string(),
+            description: "读取文件内容，支持按行范围读取".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "文件路径" }
+                    "path": { "type": "string", "description": "文件路径" },
+                    "start_line": { "type": "integer", "description": "起始行（从 1 开始，默认 1）", "minimum": 1 },
+                    "max_lines": { "type": "integer", "description": "最大读取行数（默认 200，最大 2000）", "minimum": 1, "maximum": 2000 }
                 },
                 "required": ["path"]
             }),
@@ -295,52 +300,71 @@ fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
         },
         FunctionToolSpec {
             name: "write_file".to_string(),
-            description: "创建或覆盖文件内容".to_string(),
+            description: "写入文件内容（支持覆盖或追加）".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "文件路径" },
-                    "content": { "type": "string", "description": "要写入的完整内容" }
+                    "content": { "type": "string", "description": "要写入的内容" },
+                    "append": { "type": "boolean", "description": "是否追加写入，默认 false（覆盖）" }
                 },
                 "required": ["path", "content"]
             }),
         },
         FunctionToolSpec {
             name: "replace_in_file".to_string(),
-            description: "在文件中将旧文本替换为新文本".to_string(),
+            description: "在文件中将旧文本替换为新文本，默认仅允许单点替换".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "文件路径" },
                     "old": { "type": "string", "description": "待替换的旧文本" },
-                    "new": { "type": "string", "description": "替换后的新文本" }
+                    "new": { "type": "string", "description": "替换后的新文本" },
+                    "replace_all": { "type": "boolean", "description": "是否替换全部命中，默认 false" },
+                    "expected_count": { "type": "integer", "description": "预期命中数量（可选）", "minimum": 1 }
                 },
                 "required": ["path", "old", "new"]
             }),
         },
         FunctionToolSpec {
             name: "run_command".to_string(),
-            description: "执行受控命令，参数为命令名与参数数组。bash 请使用 cmd=bash,args=[\"-lc\",\"<script>\"]".to_string(),
+            description: "执行受控命令，支持 cwd。shell 脚本建议使用 run_shell".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "cmd": { "type": "string", "description": "命令名，例如 ls/cat/echo/pwd/bash" },
+                    "cmd": { "type": "string", "description": "命令名，例如 ls/cat/echo/pwd/rg/cargo/git" },
                     "args": {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "命令参数列表"
-                    }
+                    },
+                    "cwd": { "type": "string", "description": "命令工作目录（可选，默认当前工作目录）" }
                 },
                 "required": ["cmd"]
             }),
         },
         FunctionToolSpec {
-            name: "apply_patch".to_string(),
-            description: "对文件应用补丁文本，支持 Codex 风格补丁（*** Begin Patch ... *** End Patch）".to_string(),
+            name: "run_shell".to_string(),
+            description: "执行 shell 脚本，自动派生 bash/sh/powershell 参数".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "patch": { "type": "string", "description": "补丁内容文本" }
+                    "script": { "type": "string", "description": "shell 脚本文本" },
+                    "shell": { "type": "string", "description": "shell 类型：auto/bash/sh/powershell/pwsh，默认 auto" },
+                    "cwd": { "type": "string", "description": "命令工作目录（可选）" }
+                },
+                "required": ["script"]
+            }),
+        },
+        FunctionToolSpec {
+            name: "apply_patch".to_string(),
+            description: "对文件应用补丁文本，仅支持 unified diff（---/+++/@@）".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "patch": { "type": "string", "description": "补丁内容文本（unified diff）" },
+                    "verify": { "type": "boolean", "description": "是否仅校验不落盘（dry-run）" },
+                    "workdir": { "type": "string", "description": "补丁工作目录（可选，默认当前工作目录）" }
                 },
                 "required": ["patch"]
             }),
@@ -408,7 +432,34 @@ fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<ToolCall> {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_string();
+            if let Some(start_line) = call
+                .arguments
+                .get("start_line")
+                .and_then(number_or_string_to_text)
+            {
+                args.push(path.clone());
+                args.push(start_line);
+                if let Some(max_lines) = call
+                    .arguments
+                    .get("max_lines")
+                    .and_then(number_or_string_to_text)
+                {
+                    args.push(max_lines);
+                }
+                return Ok(ToolCall {
+                    name: ToolName::ReadFile,
+                    args,
+                });
+            }
             args.push(path);
+            if let Some(max_lines) = call
+                .arguments
+                .get("max_lines")
+                .and_then(number_or_string_to_text)
+            {
+                args.push("1".to_string());
+                args.push(max_lines);
+            }
             Ok(ToolCall {
                 name: ToolName::ReadFile,
                 args,
@@ -429,6 +480,13 @@ fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<ToolCall> {
                 .to_string();
             args.push(path);
             args.push(content);
+            if let Some(append) = call
+                .arguments
+                .get("append")
+                .and_then(bool_or_string_to_text)
+            {
+                args.push(append);
+            }
             Ok(ToolCall {
                 name: ToolName::WriteFile,
                 args,
@@ -476,6 +534,23 @@ fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<ToolCall> {
             args.push(path);
             args.push(old);
             args.push(new);
+            if let Some(replace_all) = call
+                .arguments
+                .get("replace_all")
+                .and_then(bool_or_string_to_text)
+            {
+                args.push(replace_all);
+            }
+            if let Some(expected_count) = call
+                .arguments
+                .get("expected_count")
+                .and_then(number_or_string_to_text)
+            {
+                if args.len() == 3 {
+                    args.push("false".to_string());
+                }
+                args.push(expected_count);
+            }
             Ok(ToolCall {
                 name: ToolName::ReplaceInFile,
                 args,
@@ -500,6 +575,45 @@ fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<ToolCall> {
                         .map(ToString::to_string),
                 );
             }
+            if let Some(cwd) = call
+                .arguments
+                .get("cwd")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+            {
+                args.push(format!("{INTERNAL_CWD_PREFIX}{cwd}"));
+            }
+            Ok(ToolCall {
+                name: ToolName::RunCommand,
+                args,
+            })
+        }
+        "run_shell" => {
+            let script = call
+                .arguments
+                .get("script")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let shell = call
+                .arguments
+                .get("shell")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("auto")
+                .to_string();
+            args.push(INTERNAL_SHELL_CMD.to_string());
+            args.push(script);
+            args.push(shell);
+            if let Some(cwd) = call
+                .arguments
+                .get("cwd")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+            {
+                args.push(format!("{INTERNAL_CWD_PREFIX}{cwd}"));
+            }
             Ok(ToolCall {
                 name: ToolName::RunCommand,
                 args,
@@ -512,9 +626,9 @@ fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<ToolCall> {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            args.push("bash".to_string());
-            args.push("-lc".to_string());
+            args.push(INTERNAL_SHELL_CMD.to_string());
             args.push(script);
+            args.push("bash".to_string());
             Ok(ToolCall {
                 name: ToolName::RunCommand,
                 args,
@@ -528,6 +642,25 @@ fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<ToolCall> {
                 .unwrap_or_default()
                 .to_string();
             args.push(patch);
+            if let Some(verify) = call
+                .arguments
+                .get("verify")
+                .and_then(bool_or_string_to_text)
+            {
+                args.push(verify);
+            }
+            if let Some(workdir) = call
+                .arguments
+                .get("workdir")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+            {
+                if args.len() == 1 {
+                    args.push("false".to_string());
+                }
+                args.push(workdir.to_string());
+            }
             Ok(ToolCall {
                 name: ToolName::ApplyPatch,
                 args,
@@ -536,4 +669,19 @@ fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<ToolCall> {
         _ => Err(anyhow!("未知函数调用：{}", call.name)),
     }?;
     Ok(tool_call)
+}
+
+fn number_or_string_to_text(value: &serde_json::Value) -> Option<String> {
+    value
+        .as_u64()
+        .map(|v| v.to_string())
+        .or_else(|| value.as_i64().map(|v| v.to_string()))
+        .or_else(|| value.as_str().map(ToString::to_string))
+}
+
+fn bool_or_string_to_text(value: &serde_json::Value) -> Option<String> {
+    value
+        .as_bool()
+        .map(|v| v.to_string())
+        .or_else(|| value.as_str().map(ToString::to_string))
 }

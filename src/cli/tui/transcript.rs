@@ -11,66 +11,287 @@ pub(super) fn format_transcript(messages: &[Message], content_width: u16) -> Tex
 
     let mut lines = Vec::new();
     for message in messages {
-        let role = match message.role {
-            MessageRole::User => "你",
-            MessageRole::Assistant => "天工",
-            MessageRole::System => "系统",
-        };
-        let content = message.content.trim_end();
-        let display_content = if content.trim().is_empty() {
-            "..."
-        } else {
-            content
-        };
-        let user_style = Style::default()
-            .fg(Color::LightCyan)
-            .add_modifier(Modifier::BOLD);
-        let thinking_style = Style::default()
-            .fg(Color::Rgb(196, 214, 235))
-            .add_modifier(Modifier::ITALIC);
-
-        if message.role == MessageRole::User {
-            let mut parts = display_content.lines();
-            let first = parts.next().unwrap_or_default();
-            lines.push(Line::from(Span::styled(
-                format!(" {role}: {first} "),
-                user_style,
-            )));
-            for part in parts {
-                lines.push(Line::from(Span::styled(format!("   {part} "), user_style)));
+        match message.role {
+            MessageRole::User => append_user_message_lines(&mut lines, message),
+            MessageRole::Assistant => {
+                append_assistant_message_lines(&mut lines, message, content_width);
             }
-        } else {
-            if message.role == MessageRole::Assistant
-                && !message.reasoning_content.trim().is_empty()
-            {
-                lines.push(Line::from(Span::raw(format!("{role}:"))));
-                lines.push(build_thinking_block_line(
-                    "   [思考]",
-                    thinking_style,
-                    content_width,
-                ));
-                append_thinking_markdown_block(
-                    &mut lines,
-                    message.reasoning_content.trim_end(),
-                    thinking_style,
-                    content_width,
-                );
-                lines.push(build_thinking_block_line(
-                    "   [/思考]",
-                    thinking_style,
-                    content_width,
-                ));
-                if !content.trim().is_empty() {
-                    append_markdown_lines_with_prefix(&mut lines, content, "   ");
-                }
-                lines.push(Line::default());
-                continue;
-            }
-            append_markdown_lines_with_role(&mut lines, role, display_content);
+            MessageRole::System => append_system_message_lines(&mut lines, message),
         }
         lines.push(Line::default());
     }
     Text::from(lines)
+}
+
+#[derive(Debug, Clone)]
+struct SystemEvent {
+    title: String,
+    details: Vec<String>,
+}
+
+fn append_user_message_lines(target: &mut Vec<Line<'static>>, message: &Message) {
+    let title_style = Style::default()
+        .fg(Color::LightCyan)
+        .add_modifier(Modifier::BOLD);
+    target.push(build_event_title_line("你", title_style));
+
+    let content = message.content.trim_end();
+    let display_content = if content.trim().is_empty() {
+        "..."
+    } else {
+        content
+    };
+    append_markdown_lines_with_prefix(target, display_content, "  ");
+}
+
+fn append_assistant_message_lines(
+    target: &mut Vec<Line<'static>>,
+    message: &Message,
+    content_width: u16,
+) {
+    let title_style = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    target.push(build_event_title_line("天工", title_style));
+
+    let content = message.content.trim_end();
+    let thinking = message.reasoning_content.trim_end();
+    let thinking_style = Style::default()
+        .fg(Color::Rgb(196, 214, 235))
+        .add_modifier(Modifier::ITALIC);
+
+    if !thinking.trim().is_empty() {
+        target.push(build_thinking_block_line(
+            "  [思考]",
+            thinking_style,
+            content_width,
+        ));
+        append_thinking_markdown_block(target, thinking, thinking_style, content_width);
+        target.push(build_thinking_block_line(
+            "  [/思考]",
+            thinking_style,
+            content_width,
+        ));
+    }
+
+    if content.trim().is_empty() {
+        if thinking.trim().is_empty() {
+            target.push(build_event_detail_line(
+                "...",
+                Style::default().fg(Color::Gray),
+            ));
+        }
+    } else {
+        append_markdown_lines_with_prefix(target, content, "  ");
+    }
+}
+
+fn append_system_message_lines(target: &mut Vec<Line<'static>>, message: &Message) {
+    if let Some((title, detail_markdown)) = parse_tool_event_markdown(message.content.as_str()) {
+        let title_style = Style::default()
+            .fg(Color::LightGreen)
+            .add_modifier(Modifier::BOLD);
+        target.push(build_event_title_line(title.as_str(), title_style));
+        if detail_markdown.trim().is_empty() {
+            target.push(build_event_detail_line(
+                "无输出",
+                Style::default().fg(Color::Gray),
+            ));
+        } else {
+            append_markdown_lines_with_prefix(target, detail_markdown.as_str(), "  ");
+        }
+        return;
+    }
+
+    if let Some((title, detail_markdown)) = parse_llm_event_markdown(message.content.as_str()) {
+        let title_style = Style::default()
+            .fg(Color::LightGreen)
+            .add_modifier(Modifier::BOLD);
+        target.push(build_event_title_line(title.as_str(), title_style));
+        if detail_markdown.trim().is_empty() {
+            target.push(build_event_detail_line(
+                "无输出",
+                Style::default().fg(Color::Gray),
+            ));
+        } else {
+            append_markdown_lines_with_prefix(target, detail_markdown.as_str(), "  ");
+        }
+        return;
+    }
+
+    if let Some(detail_markdown) = parse_plan_execution_summary_markdown(message.content.as_str()) {
+        let title_style = Style::default()
+            .fg(Color::LightGreen)
+            .add_modifier(Modifier::BOLD);
+        target.push(build_event_title_line("Plan 执行总结", title_style));
+        if detail_markdown.trim().is_empty() {
+            target.push(build_event_detail_line(
+                "无输出",
+                Style::default().fg(Color::Gray),
+            ));
+        } else {
+            append_markdown_lines_with_prefix(target, detail_markdown.as_str(), "  ");
+        }
+        return;
+    }
+
+    let event = parse_system_event(message.content.as_str());
+    let title_style = Style::default()
+        .fg(Color::LightGreen)
+        .add_modifier(Modifier::BOLD);
+    target.push(build_event_title_line(event.title.as_str(), title_style));
+
+    let detail_style = Style::default().fg(Color::Gray);
+    if event.details.is_empty() {
+        target.push(build_event_detail_line("无摘要", detail_style));
+        return;
+    }
+    for detail in event.details {
+        target.push(build_event_detail_line(detail.as_str(), detail_style));
+    }
+}
+
+fn parse_system_event(content: &str) -> SystemEvent {
+    let text = content.trim();
+    if text.is_empty() {
+        return SystemEvent {
+            title: "系统事件".to_string(),
+            details: vec!["无内容".to_string()],
+        };
+    }
+
+    if let Some(stage) = text.lines().next().and_then(parse_llm_stage) {
+        let mut details = Vec::new();
+        if let Some(tool_calls) =
+            extract_prefixed_line_value(text, "tool_calls:").filter(|value| !value.is_empty())
+        {
+            details.push(format!("工具调用：{tool_calls}"));
+        }
+        if let Some(preview) = extract_llm_content_preview(text) {
+            details.push(format!("摘要：{preview}"));
+        }
+        return SystemEvent {
+            title: format_stage_title(&stage),
+            details,
+        };
+    }
+
+    let summary = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| truncate_chars(line.trim(), 140))
+        .unwrap_or_else(|| "无内容".to_string());
+    SystemEvent {
+        title: "系统".to_string(),
+        details: vec![summary],
+    }
+}
+
+fn parse_tool_event_markdown(content: &str) -> Option<(String, String)> {
+    let mut lines = content.lines();
+    let header = lines.next()?.trim();
+    if !header.starts_with("工具执行 [") {
+        return None;
+    }
+
+    let start = header.find('[')? + 1;
+    let rest = &header[start..];
+    let end = rest.find(']')?;
+    let tool_name = &rest[..end];
+    let body = lines.collect::<Vec<_>>().join("\n");
+    Some((format_tool_event_title(tool_name, &body), body))
+}
+
+fn parse_llm_event_markdown(content: &str) -> Option<(String, String)> {
+    let mut lines = content.lines();
+    let header = lines.next()?.trim();
+    let stage = parse_llm_stage(header)?;
+    let body = lines.collect::<Vec<_>>().join("\n");
+    Some((format_stage_title(&stage), body))
+}
+
+fn parse_plan_execution_summary_markdown(content: &str) -> Option<String> {
+    let mut lines = content.lines();
+    let header = lines.next()?.trim();
+    if header != "Plan 执行总结" {
+        return None;
+    }
+    Some(lines.collect::<Vec<_>>().join("\n"))
+}
+
+fn format_tool_event_title(tool_name: &str, body: &str) -> String {
+    if tool_name == "run_command"
+        && let Some(command) = body
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("命令: "))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    {
+        return format!("Bash({})", truncate_chars(command, 64));
+    }
+    format!("工具执行 · {tool_name}")
+}
+
+fn parse_llm_stage(first_line: &str) -> Option<String> {
+    if !first_line.starts_with("LLM 输出 [") {
+        return None;
+    }
+    let start = first_line.find('[')? + 1;
+    let rest = &first_line[start..];
+    let end = rest.find(']')?;
+    Some(rest[..end].to_string())
+}
+
+fn extract_prefixed_line_value(content: &str, prefix: &str) -> Option<String> {
+    content
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix(prefix).map(str::trim))
+        .map(ToString::to_string)
+}
+
+fn extract_llm_content_preview(content: &str) -> Option<String> {
+    let mut in_content = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if in_content {
+            if trimmed.is_empty() {
+                continue;
+            }
+            return Some(truncate_chars(trimmed, 160));
+        }
+        if trimmed == "content:" {
+            in_content = true;
+        }
+    }
+    None
+}
+
+fn format_stage_title(stage: &str) -> String {
+    if stage == "planning-agent" {
+        return "Planning".to_string();
+    }
+    if let Some(stripped) = stage.strip_prefix("execution-agent::") {
+        let mut parts = stripped.splitn(2, "::");
+        let plan = parts.next().unwrap_or("执行");
+        let step = parts.next().unwrap_or("步骤");
+        return format!("执行 · {plan} · {step}");
+    }
+    format!("LLM · {stage}")
+}
+
+fn build_event_title_line(title: &str, style: Style) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("● ".to_string(), style),
+        Span::styled(title.to_string(), style),
+    ])
+}
+
+fn build_event_detail_line(detail: &str, style: Style) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("  └ ".to_string(), style),
+        Span::styled(detail.to_string(), style),
+    ])
 }
 
 fn build_thinking_block_line(content: &str, style: Style, content_width: u16) -> Line<'static> {
@@ -214,20 +435,6 @@ fn push_char_to_styled_spans(target: &mut Vec<Span<'static>>, ch: char, style: S
         return;
     }
     target.push(Span::styled(ch.to_string(), style));
-}
-
-fn append_markdown_lines_with_role(target: &mut Vec<Line<'static>>, role: &str, markdown: &str) {
-    let mut lines = markdown_to_owned_lines(markdown);
-    if lines.is_empty() {
-        target.push(Line::from(Span::raw(format!("{role}:"))));
-        return;
-    }
-
-    let first = lines.remove(0);
-    target.push(prefix_line(first, &format!("{role}: ")));
-    for line in lines {
-        target.push(prefix_line(line, "   "));
-    }
 }
 
 fn append_markdown_lines_with_prefix(
@@ -382,6 +589,16 @@ fn parse_ordered_list_item(line: &str) -> Option<(usize, &str)> {
     }
     let number = line[..digit_end].parse::<usize>().ok()?;
     Some((number, &suffix[2..]))
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let preview = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{preview}...")
+    } else {
+        preview
+    }
 }
 
 fn parse_inline_markdown(line: &str, base_style: Style) -> Vec<Span<'static>> {

@@ -18,6 +18,8 @@
 - planning 的删除与调序仅在 `/planing` 弹窗内完成，且只允许操作未开始（pending）plan 事项。
 - planning 列表中的已完成 plan 事项需以删除线样式显示。
 - CLI 对话输出需支持 Markdown 轻量渲染（至少覆盖标题、粗体、列表、代码块），提升终端可读性。
+- 会话区输出形态需对齐 Claude 风格：将工具调用、命令执行、文件操作等过程以事件流条目展示（标题 + 关键摘要），避免长段原始中间态文本直接铺满对话区。
+- 会话执行过程中，每次工具/命令执行及其输出结果（stdout/stderr）都需实时写入对话区可见范围；全部步骤结束后再输出最终总结。
 - CLI 层仅承载 TUI 与交互适配代码；智能体能力统一沉淀在 `src/core/agents/`，运行编排能力在 `src/core/runtime.rs`，两者职责清晰分层并供 UI 与 CLI 复用。
 - 建立最小执行链路：输入 -> 规划 -> 执行 -> 输出。
 - 规划阶段需内置 planing 智能体（Planning Agent），优先由模型生成结构化计划。
@@ -33,6 +35,16 @@
   - 读：`list_dir`、`tree_dir`（支持 `max_depth` 深度限制）、`read_file`、代码检索。
   - 写：`write_file`、`replace_in_file`、`apply_patch`。
   - 命令：统一使用受控 `run_command`（支持 `cmd=bash,args=["-lc","..."]`），默认强制超时。
+- `read_file` 需支持分段读取（`start_line` / `max_lines`）并返回行号，便于精确定位后再修改。
+- `write_file` 需支持覆盖与追加两种写入模式；覆盖写入需采用原子落盘策略（临时文件 + rename）。
+- `replace_in_file` 需支持 `replace_all` 开关，默认只允许单点替换，避免误改。
+- `apply_patch` 仅支持天工补丁路线（unified diff，`---/+++/@@`），不支持 Codex 风格补丁文本。
+- `apply_patch` 需支持 `verify`（dry-run）模式：只校验不落盘，并输出可审阅的结构化变更预览。
+- `apply_patch` 失败需带错误分类：解析失败 / 路径越界 / 内容不匹配 / 写入失败。
+- `apply_patch` 需支持显式 `workdir`，统一计算 `effective_cwd`，并将补丁相对路径到绝对路径的转换结果纳入执行输出。
+- `run_command` 需对齐 `tokio::process::Command` 执行链路，默认 `env_clear` 后按 allowlist 注入环境变量。
+- 命令执行需支持跨平台 shell 参数派生（`bash -lc` / `sh -c` / `powershell -Command`）。
+- `patch` 与 `command` 的路径解析需复用统一标准化流程（相对路径 -> 绝对路径 -> 工作区边界校验）。
 - 工具与文件写入必须限制在工作区边界内，不允许越界访问。
 - 每轮输出需包含改动文件概览、差异摘要与执行结论（完成/未完成/风险）。
 - 会话数据本地持久化到用户目录（Unix: `~/.tiangong/sessions/`，Windows: `%USERPROFILE%\\.tiangong\\sessions\\`），应用配置持久化到对应的 `app.json`。

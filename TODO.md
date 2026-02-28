@@ -129,27 +129,27 @@
 
 ### E1 Patch 引擎能力补齐
 
-- [ ] `apply_patch` 增加 dry-run / verify 模式，先输出变更预览再执行落盘
-- [ ] `apply_patch` 输出结构化变更结果（新增/删除/修改/移动数量 + 文件清单）
-- [ ] `apply_patch` 完善 hunk 校验失败诊断（定位到文件与上下文片段）
-- [ ] `apply_patch` 统一失败分类（解析失败/路径越界/内容不匹配/写入失败）
-- [ ] 评估并逐步收敛 `git apply` 回退依赖，保障无 git 场景可用
+- [x] `apply_patch` 增加 dry-run / verify 模式，先输出变更预览再执行落盘
+- [x] `apply_patch` 输出结构化变更结果（新增/删除/修改/移动数量 + 文件清单）
+- [x] `apply_patch` 完善 hunk 校验失败诊断（定位到文件与上下文片段）
+- [x] `apply_patch` 统一失败分类（解析失败/路径越界/内容不匹配/写入失败）
+- [x] 评估并逐步收敛 `git apply` 回退依赖，保障无 git 场景可用
 
 ### E2 文件读写工具精细化
 
-- [ ] `read_file` 支持按行范围读取（`start_line` / `max_lines`）与行号输出
-- [ ] `write_file` 支持 append 模式与原子写入（临时文件 + rename）
-- [ ] `replace_in_file` 增加 `replace_all` 开关与命中数量保护（防止误替换）
-- [ ] `execution_agent` 的函数 schema 与 tool 实现参数逐项对齐并补充校验
+- [x] `read_file` 支持按行范围读取（`start_line` / `max_lines`）与行号输出
+- [x] `write_file` 支持 append 模式与原子写入（临时文件 + rename）
+- [x] `replace_in_file` 增加 `replace_all` 开关与命中数量保护（防止误替换）
+- [x] `execution_agent` 的函数 schema 与 tool 实现参数逐项对齐并补充校验
 
 ### E3 命令执行链路对齐
 
-- [ ] `run_command` 执行内核对齐为 `tokio::process::Command`
-- [ ] `run_command` 增加 `env_clear + env_allowlist` 注入策略
-- [ ] 命令执行参数派生补齐跨平台策略（bash/sh/powershell）
+- [x] `run_command` 执行内核对齐为 `tokio::process::Command`
+- [x] `run_command` 增加 `env_clear + env_allowlist` 注入策略
+- [x] 命令执行参数派生补齐跨平台策略（bash/sh/powershell）
 
 ### E4 路径解析与工作目录
 
-- [ ] `apply_patch` 支持显式 `workdir` 并统一生成 `effective_cwd`
-- [ ] patch 与 command 共用路径标准化流程（绝对路径转换、边界校验、错误文案）
-- [ ] 补丁相对路径到绝对路径的转换结果纳入执行记录，便于审计与排障
+- [x] `apply_patch` 支持显式 `workdir` 并统一生成 `effective_cwd`
+- [x] patch 与 command 共用路径标准化流程（绝对路径转换、边界校验、错误文案）
+- [x] 补丁相对路径到绝对路径的转换结果纳入执行记录，便于审计与排障

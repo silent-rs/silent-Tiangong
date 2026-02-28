@@ -167,6 +167,19 @@ impl Session {
         self.updated_at = now_text();
     }
 
+    pub fn bind_task_assistant_message_id(&mut self, task_id: &str, assistant_message_id: String) {
+        let Some(record) = self
+            .task_records
+            .iter_mut()
+            .find(|record| record.task_id == task_id)
+        else {
+            return;
+        };
+        record.assistant_message_id = assistant_message_id;
+        record.updated_at = now_text();
+        self.updated_at = now_text();
+    }
+
     pub fn sync_task_plans(&mut self, task_id: &str, plans: &[PlanItem]) {
         for plan in plans {
             let now = now_text();

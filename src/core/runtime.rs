@@ -114,18 +114,23 @@ impl RuntimeEngine {
         )
     }
 
-    pub fn execute_turn_with_streaming<F, P, L>(
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_turn_with_streaming<F, P, L, T, S>(
         &self,
         session: &Session,
         user_input: &str,
         mut on_plan_ready: P,
         mut on_chunk: F,
         mut on_llm_output: L,
+        mut on_tool_result: T,
+        mut on_plan_execution_summary: S,
     ) -> Result<TurnExecution>
     where
         P: FnMut(&TaskPlan),
         F: FnMut(&ModelStreamChunk),
         L: FnMut(&LlmOutputRecord),
+        T: FnMut(&ToolResult),
+        S: FnMut(&str),
     {
         let (mut plan, planning_output) = planning_agent::build_plan_with_agent_with_trace(
             &self.client,
@@ -166,6 +171,8 @@ impl RuntimeEngine {
             &context,
             &mut tool_results,
             &mut on_llm_output,
+            &mut on_tool_result,
+            &mut on_plan_execution_summary,
             &mut on_plan_ready,
         )?;
         let verify_commands = recommend_verify_commands(user_input);
@@ -253,7 +260,7 @@ impl RuntimeEngine {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn execute_plan_steps_with_execution_agent<P, L>(
+    fn execute_plan_steps_with_execution_agent<P, L, T, S>(
         &self,
         plan: &mut TaskPlan,
         session: &Session,
@@ -261,11 +268,15 @@ impl RuntimeEngine {
         context: &[Message],
         tool_results: &mut Vec<ToolResult>,
         on_llm_output: &mut L,
+        on_tool_result: &mut T,
+        on_plan_execution_summary: &mut S,
         on_plan_ready: &mut P,
     ) -> Result<()>
     where
         P: FnMut(&TaskPlan),
         L: FnMut(&LlmOutputRecord),
+        T: FnMut(&ToolResult),
+        S: FnMut(&str),
     {
         let mut previous_plan_summaries = Vec::new();
 
@@ -289,7 +300,8 @@ impl RuntimeEngine {
                 }
 
                 let step = plan.plans[plan_idx].execution_steps[step_idx].clone();
-                match execution_agent::execute_single_plan_step_with_execution_agent(
+                let tool_results_before = tool_results.len();
+                let step_result = execution_agent::execute_single_plan_step_with_execution_agent(
                     &self.client,
                     &self.tool_executor,
                     session,
@@ -300,7 +312,11 @@ impl RuntimeEngine {
                     &step,
                     &previous_plan_summaries,
                     tool_results,
-                ) {
+                );
+                for item in tool_results.iter().skip(tool_results_before) {
+                    on_tool_result(item);
+                }
+                match step_result {
                     Ok(step_result) => {
                         if let Some(output) = step_result.llm_output {
                             let record = LlmOutputRecord {
@@ -342,6 +358,7 @@ impl RuntimeEngine {
                 let summary = summarize_plan_execution(item.name.as_str(), &reports);
                 item.execution_summary = Some(summary.clone());
                 item.refresh_status();
+                on_plan_execution_summary(summary.as_str());
                 previous_plan_summaries.push(summary);
             }
             plan.refresh_plan_statuses();
