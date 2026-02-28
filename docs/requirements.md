@@ -18,7 +18,7 @@
 - planning 的删除与调序仅在 `/planing` 弹窗内完成，且只允许操作未开始（pending）plan 事项。
 - planning 列表中的已完成 plan 事项需以删除线样式显示。
 - CLI 对话输出需支持 Markdown 轻量渲染（至少覆盖标题、粗体、列表、代码块），提升终端可读性。
-- CLI 层仅承载 TUI 与交互适配代码；智能体能力统一沉淀在 `src/core/`，供 UI 与 CLI 复用。
+- CLI 层仅承载 TUI 与交互适配代码；智能体能力统一沉淀在 `src/core/agents/`，运行编排能力在 `src/core/runtime.rs`，两者职责清晰分层并供 UI 与 CLI 复用。
 - 建立最小执行链路：输入 -> 规划 -> 执行 -> 输出。
 - 规划阶段需内置 planing 智能体（Planning Agent），优先由模型生成结构化计划。
 - 规划结果至少包含：目标、`plan` 事项列表、每个 `plan` 的独立执行步骤列表、风险。
