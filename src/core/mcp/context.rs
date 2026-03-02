@@ -1,63 +1,7 @@
-use anyhow::{Result, anyhow};
-
 use crate::core::agent_config::{McpConfig, McpServerConfig};
 
-#[derive(Debug, Clone)]
-pub struct McpResourceMeta {
-    pub server: String,
-    pub uri: String,
-}
-
-pub trait McpClient {
-    fn list_resources(&self, server: &McpServerConfig) -> Vec<McpResourceMeta>;
-    fn read_resource(&self, server: &McpServerConfig, resource: &McpResourceMeta)
-    -> Result<String>;
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct LocalMcpClient;
-
-impl McpClient for LocalMcpClient {
-    fn list_resources(&self, server: &McpServerConfig) -> Vec<McpResourceMeta> {
-        if !server.enabled {
-            return Vec::new();
-        }
-
-        server
-            .tags
-            .iter()
-            .map(|tag| McpResourceMeta {
-                server: server.name.clone(),
-                uri: format!("mcp://{}/{}", server.name, tag),
-            })
-            .collect()
-    }
-
-    fn read_resource(
-        &self,
-        server: &McpServerConfig,
-        resource: &McpResourceMeta,
-    ) -> Result<String> {
-        if !server.enabled {
-            return Err(anyhow!("MCP server 未启用：{}", server.name));
-        }
-        Ok(format!(
-            "resource={} from_server={} command={} args={}",
-            resource.uri,
-            server.name,
-            if server.command.trim().is_empty() {
-                "(empty)"
-            } else {
-                server.command.trim()
-            },
-            if server.args.is_empty() {
-                "(none)".to_string()
-            } else {
-                server.args.join(" ")
-            }
-        ))
-    }
-}
+use super::client::{LocalMcpClient, McpClient};
+use super::util::{format_mcp_record, truncate_text};
 
 pub fn build_mcp_hints(user_input: &str, config: &McpConfig) -> Vec<String> {
     let client = LocalMcpClient;
@@ -78,24 +22,40 @@ fn build_mcp_hints_with_client(
         return vec![format_mcp_record("skipped", "all", "mcp disabled or empty")];
     }
 
-    let mut hints = Vec::new();
+    let selected = matched_servers(user_input, config);
+    if selected.is_empty() {
+        return vec![format_mcp_record("skipped", "all", "no matched server")];
+    }
 
-    for server in matched_servers(user_input, config) {
-        let resources = client.list_resources(server);
-        let sample = resources
-            .first()
-            .map(|item| format!("{}@{}", item.server, item.uri))
-            .unwrap_or_else(|| "none".to_string());
-        hints.push(format_mcp_record(
-            "ok",
-            &server.name,
-            &format!(
-                "timeout_ms={},resources={},sample={}",
-                config.timeout_ms,
-                resources.len(),
-                sample
-            ),
-        ));
+    let mut hints = Vec::new();
+    for server in selected {
+        match client.list_resources(server, config.timeout_ms) {
+            Ok(resources) => {
+                let sample = resources
+                    .first()
+                    .map(|item| format!("{}@{}", item.server, item.uri))
+                    .unwrap_or_else(|| "none".to_string());
+                hints.push(format_mcp_record(
+                    "ok",
+                    &server.name,
+                    &format!(
+                        "timeout_ms={},resources={},sample={}",
+                        config.timeout_ms,
+                        resources.len(),
+                        sample
+                    ),
+                ));
+            }
+            Err(err) => hints.push(format_mcp_record(
+                "error",
+                &server.name,
+                &format!(
+                    "timeout_ms={},action=list,error={}",
+                    config.timeout_ms,
+                    truncate_text(&err.to_string(), 160)
+                ),
+            )),
+        }
     }
 
     hints
@@ -114,13 +74,26 @@ fn collect_mcp_context_with_client(
     let mut context = Vec::new();
 
     for server in matched_servers(user_input, config) {
-        let resources = client.list_resources(server);
+        let resources = match client.list_resources(server, config.timeout_ms) {
+            Ok(resources) => resources,
+            Err(err) => {
+                context.push(format_mcp_record(
+                    "error",
+                    &server.name,
+                    &format!("action=list,error={}", truncate_text(&err.to_string(), 160)),
+                ));
+                if context.len() >= MAX_CONTEXT_ITEMS {
+                    return context;
+                }
+                continue;
+            }
+        };
         if resources.is_empty() {
             continue;
         }
 
         for resource in resources {
-            let line = match client.read_resource(server, &resource) {
+            let line = match client.read_resource(server, &resource, config.timeout_ms) {
                 Ok(content) => format_mcp_record(
                     "ok",
                     &server.name,
@@ -133,7 +106,11 @@ fn collect_mcp_context_with_client(
                 Err(err) => format_mcp_record(
                     "error",
                     &server.name,
-                    &format!("uri={},error={}", resource.uri, err),
+                    &format!(
+                        "uri={},error={}",
+                        resource.uri,
+                        truncate_text(&err.to_string(), 160)
+                    ),
                 ),
             };
             context.push(line);
@@ -146,7 +123,10 @@ fn collect_mcp_context_with_client(
     context
 }
 
-fn matched_servers<'a>(user_input: &'a str, config: &'a McpConfig) -> Vec<&'a McpServerConfig> {
+pub(super) fn matched_servers<'a>(
+    user_input: &'a str,
+    config: &'a McpConfig,
+) -> Vec<&'a McpServerConfig> {
     let input = user_input.to_ascii_lowercase();
     let mut servers = Vec::new();
 
@@ -181,16 +161,4 @@ fn matched_servers<'a>(user_input: &'a str, config: &'a McpConfig) -> Vec<&'a Mc
     }
 
     servers
-}
-
-fn format_mcp_record(status: &str, server: &str, detail: &str) -> String {
-    format!("mcp|{status}|server={server}|detail={detail}")
-}
-
-fn truncate_text(text: &str, max_chars: usize) -> String {
-    let mut out = text.chars().take(max_chars).collect::<String>();
-    if text.chars().count() > max_chars {
-        out.push_str("...");
-    }
-    out
 }

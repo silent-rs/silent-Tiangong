@@ -10,7 +10,8 @@ use std::time::Instant;
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-use crate::core::agent_config::AgentConfig;
+use crate::core::agent_config::{AgentConfig, McpServerConfig};
+use crate::core::mcp::{summarize_mcp_servers, validate_mcp_config};
 use crate::core::model::{ModelProviderConfig, ModelStreamChunk, SingleProviderClient};
 use crate::core::planner::{PlanStepStatus, TaskPlan};
 use crate::core::runtime::{
@@ -546,6 +547,105 @@ impl TiangongState {
         validate_agent_config(&self.agent_config)
     }
 
+    pub fn mcp_server_summary(&self, name_filter: Option<&str>) -> String {
+        summarize_mcp_servers(&self.agent_config.mcp.servers, name_filter)
+    }
+
+    pub fn register_mcp_server(
+        &mut self,
+        name: &str,
+        command: &str,
+        args: Vec<String>,
+        tags: Vec<String>,
+        enabled: bool,
+    ) -> Result<String> {
+        let name = name.trim();
+        let command = command.trim();
+        if name.is_empty() {
+            return Err(anyhow!("MCP server 名称不能为空"));
+        }
+        if self
+            .agent_config
+            .mcp
+            .servers
+            .iter()
+            .any(|server| server.name == name)
+        {
+            return Err(anyhow!("MCP server 已存在：{name}"));
+        }
+
+        let tags = tags
+            .into_iter()
+            .map(|tag| tag.trim().to_string())
+            .filter(|tag| !tag.is_empty())
+            .collect::<Vec<_>>();
+        let args = args
+            .into_iter()
+            .map(|arg| arg.trim().to_string())
+            .filter(|arg| !arg.is_empty())
+            .collect::<Vec<_>>();
+
+        if command.is_empty() && tags.is_empty() {
+            return Err(anyhow!("MCP server 需至少配置 command 或 tags"));
+        }
+
+        self.agent_config.mcp.servers.push(McpServerConfig {
+            name: name.to_string(),
+            command: command.to_string(),
+            args,
+            enabled,
+            tags,
+        });
+        validate_agent_config(&self.agent_config)?;
+        self.rebuild_runtime_for_agent_config();
+        self.persist_app_only()?;
+        Ok(format!("MCP server 已注册：{name}"))
+    }
+
+    pub fn remove_mcp_server(&mut self, name: &str) -> Result<String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(anyhow!("MCP server 名称不能为空"));
+        }
+
+        let before = self.agent_config.mcp.servers.len();
+        self.agent_config
+            .mcp
+            .servers
+            .retain(|server| server.name != name);
+        if self.agent_config.mcp.servers.len() == before {
+            return Err(anyhow!("未找到 MCP server：{name}"));
+        }
+
+        validate_agent_config(&self.agent_config)?;
+        self.rebuild_runtime_for_agent_config();
+        self.persist_app_only()?;
+        Ok(format!("MCP server 已删除：{name}"))
+    }
+
+    pub fn set_mcp_server_enabled(&mut self, name: &str, enabled: bool) -> Result<String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(anyhow!("MCP server 名称不能为空"));
+        }
+
+        let Some(server) = self
+            .agent_config
+            .mcp
+            .servers
+            .iter_mut()
+            .find(|server| server.name == name)
+        else {
+            return Err(anyhow!("未找到 MCP server：{name}"));
+        };
+        server.enabled = enabled;
+
+        validate_agent_config(&self.agent_config)?;
+        self.rebuild_runtime_for_agent_config();
+        self.persist_app_only()?;
+        Ok(format!("MCP server 状态已更新：{name} enabled={enabled}"))
+    }
+
     pub fn update_agent_config_entry(&mut self, key: &str, value: &str) -> Result<String> {
         let key = key.trim();
         let value = value.trim();
@@ -603,14 +703,18 @@ impl TiangongState {
 
         validate_agent_config(&self.agent_config)?;
 
+        self.rebuild_runtime_for_agent_config();
+        self.persist_app_only()?;
+
+        Ok(format!("配置已更新：{key}={updated_value}"))
+    }
+
+    fn rebuild_runtime_for_agent_config(&mut self) {
         self.runtime = RuntimeEngine::new(
             SingleProviderClient::new(self.model_config.clone()),
             DEFAULT_CONTEXT_LIMIT,
             self.agent_config.clone(),
         );
-        self.persist_app_only()?;
-
-        Ok(format!("配置已更新：{key}={updated_value}"))
     }
 
     pub fn select_model(&mut self, model: &str) -> Result<()> {
@@ -2025,17 +2129,7 @@ fn validate_agent_config(config: &AgentConfig) -> Result<()> {
     if config.skills.max_matches == 0 {
         return Err(anyhow!("skills.max_matches 必须大于 0"));
     }
-    if config.mcp.timeout_ms == 0 {
-        return Err(anyhow!("mcp.timeout_ms 必须大于 0"));
-    }
-    if let Some(server) = config
-        .mcp
-        .servers
-        .iter()
-        .find(|server| server.name.trim().is_empty())
-    {
-        return Err(anyhow!("mcp.servers 包含空名称配置：{:?}", server));
-    }
+    validate_mcp_config(&config.mcp)?;
     Ok(())
 }
 

@@ -98,6 +98,9 @@ impl CliApp {
             _ if command == "/model" || command.starts_with("/model ") => {
                 self.handle_model_command(command)
             }
+            _ if command == "/mcp" || command.starts_with("/mcp ") => {
+                self.handle_mcp_command(command)
+            }
             _ if command == "/config" || command.starts_with("/config ") => {
                 self.handle_config_command(command)
             }
@@ -199,6 +202,65 @@ impl CliApp {
 
         Err(anyhow!(
             "不支持的 /config 命令。可用：/config show、/config validate、/config set <key> <value>"
+        ))
+    }
+
+    fn handle_mcp_command(&mut self, command: &str) -> Result<()> {
+        let args = command.trim_start_matches("/mcp").trim();
+        if args.is_empty() || args == "list" {
+            self.status_message = format!("MCP servers：{}", self.state.mcp_server_summary(None));
+            return Ok(());
+        }
+
+        if let Some(name) = args.strip_prefix("show ") {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err(anyhow!("缺少 MCP server 名称，示例：/mcp show browser"));
+            }
+            self.status_message = format!(
+                "MCP server 详情：{}",
+                self.state.mcp_server_summary(Some(name))
+            );
+            return Ok(());
+        }
+
+        if let Some(name) = args
+            .strip_prefix("remove ")
+            .or_else(|| args.strip_prefix("delete "))
+            .or_else(|| args.strip_prefix("del "))
+        {
+            let message = self.state.remove_mcp_server(name.trim())?;
+            self.status_message = message;
+            return Ok(());
+        }
+
+        if let Some(name) = args.strip_prefix("enable ") {
+            let message = self.state.set_mcp_server_enabled(name.trim(), true)?;
+            self.status_message = message;
+            return Ok(());
+        }
+
+        if let Some(name) = args.strip_prefix("disable ") {
+            let message = self.state.set_mcp_server_enabled(name.trim(), false)?;
+            self.status_message = message;
+            return Ok(());
+        }
+
+        if let Some(raw_add) = args.strip_prefix("add ") {
+            let parsed = parse_mcp_add_args(raw_add)?;
+            let message = self.state.register_mcp_server(
+                &parsed.name,
+                &parsed.command,
+                parsed.command_args,
+                parsed.tags,
+                parsed.enabled,
+            )?;
+            self.status_message = message;
+            return Ok(());
+        }
+
+        Err(anyhow!(
+            "不支持的 /mcp 命令。可用：/mcp list、/mcp show <name>、/mcp add <name> <command> [args...] [--tags a,b] [--disabled]、/mcp remove <name>、/mcp enable <name>、/mcp disable <name>"
         ))
     }
 
@@ -504,6 +566,9 @@ impl CliApp {
         if raw == "/model" || raw.starts_with("/model ") {
             return self.model_command_hints(raw);
         }
+        if raw == "/mcp" || raw.starts_with("/mcp ") {
+            return self.mcp_command_hints(raw);
+        }
         if raw == "/config" || raw.starts_with("/config ") {
             return self.config_command_hints(raw);
         }
@@ -512,6 +577,7 @@ impl CliApp {
             CommandHint::new("/cancel", "取消当前执行中的任务"),
             CommandHint::new("/planing", "打开 planning 列表弹窗"),
             CommandHint::new("/model", "切换模型或查看可选模型"),
+            CommandHint::new("/mcp", "注册和管理 MCP server"),
             CommandHint::new("/config", "查看或更新 Agent 配置"),
             CommandHint::new("/sessions", "切换会话"),
             CommandHint::new("/new", "新建会话"),
@@ -563,7 +629,101 @@ impl CliApp {
         hints
     }
 
+    fn mcp_command_hints(&self, raw: &str) -> Vec<CommandHint> {
+        let mut hints = vec![
+            CommandHint::new("/mcp list", "查看全部 MCP server"),
+            CommandHint::new("/mcp show browser", "查看单个 MCP server 详情"),
+            CommandHint::new(
+                "/mcp add browser npx -y @modelcontextprotocol/server-browser --tags web,browser",
+                "注册 MCP server（可附加命令参数）",
+            ),
+            CommandHint::new("/mcp remove browser", "删除 MCP server"),
+            CommandHint::new("/mcp enable browser", "启用 MCP server"),
+            CommandHint::new("/mcp disable browser", "禁用 MCP server"),
+        ];
+
+        if raw != "/mcp" {
+            hints.retain(|hint| hint.command.starts_with(raw));
+        }
+        if hints.is_empty() {
+            hints.push(CommandHint::new_note(
+                "/mcp add <name> <command> [args...]",
+                "可选：--tags tag1,tag2、--disabled",
+            ));
+        }
+
+        hints
+    }
+
     pub(super) fn is_command_palette_active(&self) -> bool {
         !self.command_hints().is_empty()
     }
+}
+
+struct ParsedMcpAddArgs {
+    name: String,
+    command: String,
+    command_args: Vec<String>,
+    tags: Vec<String>,
+    enabled: bool,
+}
+
+fn parse_mcp_add_args(raw: &str) -> Result<ParsedMcpAddArgs> {
+    let tokens = raw.split_whitespace().collect::<Vec<_>>();
+    if tokens.len() < 2 {
+        return Err(anyhow!(
+            "参数不足，示例：/mcp add browser npx -y @modelcontextprotocol/server-browser --tags web,browser"
+        ));
+    }
+
+    let name = tokens[0].trim();
+    if name.is_empty() {
+        return Err(anyhow!("MCP server 名称不能为空"));
+    }
+
+    let mut enabled = true;
+    let mut tags = Vec::new();
+    let mut non_flag_tokens = Vec::new();
+    let mut idx = 1usize;
+    while idx < tokens.len() {
+        match tokens[idx] {
+            "--disabled" => {
+                enabled = false;
+                idx += 1;
+            }
+            "--enabled" => {
+                enabled = true;
+                idx += 1;
+            }
+            "--tags" => {
+                let value = tokens
+                    .get(idx + 1)
+                    .ok_or_else(|| anyhow!("--tags 缺少参数，示例：--tags web,browser"))?;
+                tags.extend(
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|tag| !tag.is_empty())
+                        .map(ToString::to_string),
+                );
+                idx += 2;
+            }
+            token => {
+                non_flag_tokens.push(token.to_string());
+                idx += 1;
+            }
+        }
+    }
+
+    let Some(command) = non_flag_tokens.first().cloned() else {
+        return Err(anyhow!("缺少 command，示例：/mcp add browser npx ..."));
+    };
+    let command_args = non_flag_tokens.into_iter().skip(1).collect::<Vec<_>>();
+    Ok(ParsedMcpAddArgs {
+        name: name.to_string(),
+        command,
+        command_args,
+        tags,
+        enabled,
+    })
 }
