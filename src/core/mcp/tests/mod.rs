@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::core::agent_config::{McpConfig, McpServerConfig};
 
-use super::client::{LocalMcpClient, McpClient, McpResourceMeta};
+use super::client::{LocalMcpClient, McpClient};
 use super::config::{summarize_mcp_servers, validate_mcp_config};
 use super::context::matched_servers;
 use super::{build_mcp_hints, collect_mcp_context};
@@ -153,26 +153,54 @@ fn create_script(content: &str) -> TempScript {
 
 #[cfg(unix)]
 #[test]
-fn local_mcp_client_command_mode_supports_list_and_read() {
+fn local_mcp_client_stdio_mode_supports_list_and_read() {
     let script = create_script(
         r#"#!/usr/bin/env bash
 set -euo pipefail
-action="${1:-}"
-if [ "$action" = "list-resources" ]; then
-  echo '{"resources":[{"uri":"mcp://demo/first"},{"uri":"mcp://demo/second"}]}'
-  exit 0
-fi
-if [ "$action" = "read-resource" ]; then
-  uri="${2:-}"
-  if [ "$uri" = "mcp://demo/first" ]; then
-    echo '{"content":"hello-from-first"}'
-    exit 0
+
+send_msg() {
+  local body="$1"
+  printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body"
+}
+
+while true; do
+  IFS= read -r header || exit 0
+  header="${header%$'\r'}"
+  [ -z "$header" ] && continue
+
+  case "$header" in
+    Content-Length:*) len="${header#Content-Length: }" ;;
+    *) echo "unexpected header: $header" >&2; exit 8 ;;
+  esac
+
+  IFS= read -r _blank || exit 0
+  payload="$(dd bs=1 count="$len" status=none 2>/dev/null)"
+
+  if [[ "$payload" == *'"method":"initialize"'* ]]; then
+    send_msg '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-05","capabilities":{"resources":{}},"serverInfo":{"name":"demo","version":"1.0.0"}}}'
+    continue
   fi
-  echo "read failed" >&2
-  exit 5
-fi
-echo "unknown action" >&2
-exit 9
+
+  if [[ "$payload" == *'"method":"notifications/initialized"'* ]]; then
+    continue
+  fi
+
+  if [[ "$payload" == *'"method":"resources/list"'* ]]; then
+    send_msg '{"jsonrpc":"2.0","id":2,"result":{"resources":[{"uri":"mcp://demo/first"},{"uri":"mcp://demo/second"}]}}'
+    continue
+  fi
+
+  if [[ "$payload" == *'"method":"resources/read"'* && "$payload" == *'mcp://demo/first'* ]]; then
+    send_msg '{"jsonrpc":"2.0","id":2,"result":{"contents":[{"uri":"mcp://demo/first","text":"hello-from-first"}]}}'
+    continue
+  fi
+
+  if [[ "$payload" == *'"method":"resources/read"'* ]]; then
+    send_msg '{"jsonrpc":"2.0","id":2,"error":{"code":-32002,"message":"read failed"}}'
+    continue
+  fi
+
+done
 "#,
     );
 
@@ -202,12 +230,32 @@ exit 9
 
 #[cfg(unix)]
 #[test]
-fn local_mcp_client_command_mode_respects_timeout() {
+fn local_mcp_client_stdio_mode_respects_timeout() {
     let script = create_script(
         r#"#!/usr/bin/env bash
 set -euo pipefail
-sleep 2
-echo '{"resources":[{"uri":"mcp://demo/slow"}]}'
+
+send_msg() {
+  local body="$1"
+  printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body"
+}
+
+while true; do
+  IFS= read -r header || exit 0
+  header="${header%$'\r'}"
+  [ -z "$header" ] && continue
+  [[ "$header" == Content-Length:* ]] || exit 0
+  len="${header#Content-Length: }"
+  IFS= read -r _blank || exit 0
+  payload="$(dd bs=1 count="$len" status=none 2>/dev/null)"
+
+  if [[ "$payload" == *'"method":"initialize"'* ]]; then
+    sleep 2
+    send_msg '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-05","capabilities":{},"serverInfo":{"name":"slow","version":"1.0.0"}}}'
+    continue
+  fi
+
+done
 "#,
     );
 
@@ -227,111 +275,56 @@ echo '{"resources":[{"uri":"mcp://demo/slow"}]}'
 }
 
 #[cfg(unix)]
-struct TempDir {
-    path: PathBuf,
-}
-
-#[cfg(unix)]
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
-#[cfg(unix)]
-fn create_temp_dir() -> TempDir {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let path = std::env::temp_dir().join(format!("tiangong-mcp-dir-{nonce}"));
-    fs::create_dir_all(&path).expect("create test dir");
-    TempDir { path }
-}
-
-#[cfg(unix)]
 #[test]
-fn local_mcp_client_filesystem_adapter_supports_list_and_read() {
-    let temp = create_temp_dir();
-    let child = temp.path.join("sample.txt");
-    fs::write(&child, "hello adapter").expect("write sample file");
+fn collect_mcp_context_uses_stdio_mcp_server() {
+    let script = create_script(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
 
-    let client = LocalMcpClient;
-    let server = McpServerConfig {
-        name: "fs-adapter".to_string(),
-        command: "npx".to_string(),
-        args: vec![
-            "-y".to_string(),
-            "@modelcontextprotocol/server-filesystem".to_string(),
-            temp.path.to_string_lossy().to_string(),
-        ],
-        enabled: true,
-        tags: vec!["filesystem".to_string()],
-    };
-
-    let resources = client
-        .list_resources(&server, 1000)
-        .expect("list resources with filesystem adapter");
-    assert!(!resources.is_empty());
-    assert!(resources[0].uri.starts_with("file://"));
-
-    let content = client
-        .read_resource(&server, &resources[0], 1000)
-        .expect("read resource with filesystem adapter");
-    assert!(content.contains("directory="));
-    assert!(content.contains("sample.txt"));
+send_msg() {
+  local body="$1"
+  printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body"
 }
 
-#[cfg(unix)]
-#[test]
-fn local_mcp_client_filesystem_adapter_rejects_outside_root() {
-    let root = create_temp_dir();
-    let outside = create_temp_dir();
-    let outside_file = outside.path.join("outside.txt");
-    fs::write(&outside_file, "outside").expect("write outside file");
+while true; do
+  IFS= read -r header || exit 0
+  header="${header%$'\r'}"
+  [ -z "$header" ] && continue
+  [[ "$header" == Content-Length:* ]] || exit 0
+  len="${header#Content-Length: }"
+  IFS= read -r _blank || exit 0
+  payload="$(dd bs=1 count="$len" status=none 2>/dev/null)"
 
-    let client = LocalMcpClient;
-    let server = McpServerConfig {
-        name: "fs-adapter".to_string(),
-        command: "npx".to_string(),
-        args: vec![
-            "-y".to_string(),
-            "@modelcontextprotocol/server-filesystem".to_string(),
-            root.path.to_string_lossy().to_string(),
-        ],
-        enabled: true,
-        tags: vec!["filesystem".to_string()],
-    };
+  if [[ "$payload" == *'"method":"initialize"'* ]]; then
+    send_msg '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-05","capabilities":{"resources":{}},"serverInfo":{"name":"public-fs-test","version":"1.0.0"}}}'
+    continue
+  fi
 
-    let resource = McpResourceMeta {
-        server: "fs-adapter".to_string(),
-        uri: format!("file://{}", outside_file.display()),
-    };
-    let result = client.read_resource(&server, &resource, 1000);
-    assert!(result.is_err());
-    let detail = result.err().map(|err| err.to_string()).unwrap_or_default();
-    assert!(detail.contains("越界"));
-}
+  if [[ "$payload" == *'"method":"notifications/initialized"'* ]]; then
+    continue
+  fi
 
-#[cfg(unix)]
-#[test]
-fn collect_mcp_context_uses_filesystem_adapter() {
-    let temp = create_temp_dir();
-    fs::write(temp.path.join("chain.txt"), "chain").expect("write chain file");
+  if [[ "$payload" == *'"method":"resources/list"'* ]]; then
+    send_msg '{"jsonrpc":"2.0","id":2,"result":{"resources":[{"uri":"mcp://public-fs-test/chain"}]}}'
+    continue
+  fi
+
+  if [[ "$payload" == *'"method":"resources/read"'* ]]; then
+    send_msg '{"jsonrpc":"2.0","id":2,"result":{"contents":[{"uri":"mcp://public-fs-test/chain","text":"chain.txt"}]}}'
+    continue
+  fi
+
+done
+"#,
+    );
 
     let config = McpConfig {
         enabled: true,
         timeout_ms: 1000,
         servers: vec![McpServerConfig {
             name: "public-fs-test".to_string(),
-            command: "npx".to_string(),
-            args: vec![
-                "-y".to_string(),
-                "@modelcontextprotocol/server-filesystem".to_string(),
-                temp.path.to_string_lossy().to_string(),
-            ],
+            command: script.path.to_string_lossy().to_string(),
+            args: Vec::new(),
             enabled: true,
             tags: vec!["filesystem".to_string()],
         }],
