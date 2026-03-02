@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 
 use crate::core::planner::PlanStepStatus;
 
-use super::{CliApp, CommandHint};
+use super::{CliApp, CommandHint, McpModalState};
 
 impl CliApp {
     pub(super) fn submit_input(&mut self) -> Result<()> {
@@ -67,6 +67,7 @@ impl CliApp {
                 self.draft_new_session = true;
                 self.history_modal = None;
                 self.planning_modal = None;
+                self.mcp_modal = None;
                 self.rebuild_input_history_from_active_session();
                 self.status_message = "已打开新对话（发送首条消息后才会记录）".to_string();
                 self.input.clear();
@@ -130,6 +131,7 @@ impl CliApp {
     fn handle_history_command(&mut self, command: &str) -> Result<()> {
         let query = command.trim_start_matches("/sessions").trim();
         self.planning_modal = None;
+        self.mcp_modal = None;
         self.history_modal = Some(super::HistoryModalState {
             query: query.to_string(),
             selected_idx: 0,
@@ -154,6 +156,7 @@ impl CliApp {
         }
 
         self.history_modal = None;
+        self.mcp_modal = None;
         self.planning_modal = Some(super::PlanningModalState::default());
         self.clamp_planning_modal_selection();
         if let Some(first_pending_row) = self.plan_row_by_pending_index(1)
@@ -206,62 +209,18 @@ impl CliApp {
     }
 
     fn handle_mcp_command(&mut self, command: &str) -> Result<()> {
-        let args = command.trim_start_matches("/mcp").trim();
-        if args.is_empty() || args == "list" {
-            self.status_message = format!("MCP servers：{}", self.state.mcp_server_summary(None));
-            return Ok(());
-        }
-
-        if let Some(name) = args.strip_prefix("show ") {
-            let name = name.trim();
-            if name.is_empty() {
-                return Err(anyhow!("缺少 MCP server 名称，示例：/mcp show browser"));
-            }
-            self.status_message = format!(
-                "MCP server 详情：{}",
-                self.state.mcp_server_summary(Some(name))
-            );
-            return Ok(());
-        }
-
-        if let Some(name) = args
-            .strip_prefix("remove ")
-            .or_else(|| args.strip_prefix("delete "))
-            .or_else(|| args.strip_prefix("del "))
-        {
-            let message = self.state.remove_mcp_server(name.trim())?;
-            self.status_message = message;
-            return Ok(());
-        }
-
-        if let Some(name) = args.strip_prefix("enable ") {
-            let message = self.state.set_mcp_server_enabled(name.trim(), true)?;
-            self.status_message = message;
-            return Ok(());
-        }
-
-        if let Some(name) = args.strip_prefix("disable ") {
-            let message = self.state.set_mcp_server_enabled(name.trim(), false)?;
-            self.status_message = message;
-            return Ok(());
-        }
-
-        if let Some(raw_add) = args.strip_prefix("add ") {
-            let parsed = parse_mcp_add_args(raw_add)?;
-            let message = self.state.register_mcp_server(
-                &parsed.name,
-                &parsed.command,
-                parsed.command_args,
-                parsed.tags,
-                parsed.enabled,
-            )?;
-            self.status_message = message;
-            return Ok(());
-        }
-
-        Err(anyhow!(
-            "不支持的 /mcp 命令。可用：/mcp list、/mcp show <name>、/mcp add <name> <command> [args...] [--tags a,b] [--disabled]、/mcp remove <name>、/mcp enable <name>、/mcp disable <name>"
-        ))
+        let query = command.trim_start_matches("/mcp").trim();
+        self.history_modal = None;
+        self.planning_modal = None;
+        self.mcp_modal = Some(McpModalState {
+            query: query.to_string(),
+            selected_idx: 0,
+            add_input: None,
+        });
+        self.clamp_mcp_modal_selection();
+        self.status_message =
+            "MCP 管理已打开（空格启/禁用 Backspace删除 Delete删筛选字 A新增 Esc关闭）".to_string();
+        Ok(())
     }
 
     pub(super) fn confirm_history_modal_selection(&mut self) -> Result<()> {
@@ -471,6 +430,214 @@ impl CliApp {
         None
     }
 
+    pub(super) fn move_mcp_modal_selection(&mut self, step: i32) {
+        let Some((query, current_idx)) = self
+            .mcp_modal
+            .as_ref()
+            .map(|modal| (modal.query.clone(), modal.selected_idx))
+        else {
+            return;
+        };
+        let matched = self.mcp_match_indices(&query);
+        if matched.is_empty() {
+            if let Some(modal) = self.mcp_modal.as_mut() {
+                modal.selected_idx = 0;
+            }
+            return;
+        }
+
+        let current = current_idx.min(matched.len() - 1) as i32;
+        let next = (current + step).clamp(0, matched.len() as i32 - 1);
+        if let Some(modal) = self.mcp_modal.as_mut() {
+            modal.selected_idx = next as usize;
+        }
+    }
+
+    pub(super) fn move_mcp_modal_to_edge(&mut self, to_start: bool) {
+        let Some(query) = self.mcp_modal.as_ref().map(|modal| modal.query.clone()) else {
+            return;
+        };
+        let matched = self.mcp_match_indices(&query);
+        if matched.is_empty() {
+            if let Some(modal) = self.mcp_modal.as_mut() {
+                modal.selected_idx = 0;
+            }
+            return;
+        }
+        if let Some(modal) = self.mcp_modal.as_mut() {
+            modal.selected_idx = if to_start { 0 } else { matched.len() - 1 };
+        }
+    }
+
+    pub(super) fn enter_mcp_modal_add_mode(&mut self) {
+        if let Some(modal) = self.mcp_modal.as_mut() {
+            modal.add_input = Some(String::new());
+        }
+    }
+
+    pub(super) fn cancel_mcp_modal_add_mode(&mut self) {
+        if let Some(modal) = self.mcp_modal.as_mut() {
+            modal.add_input = None;
+        }
+    }
+
+    pub(super) fn push_mcp_modal_query_char(&mut self, ch: char) {
+        if let Some(modal) = self.mcp_modal.as_mut() {
+            modal.query.push(ch);
+            modal.selected_idx = 0;
+        }
+    }
+
+    pub(super) fn backspace_mcp_modal_query(&mut self) {
+        if let Some(modal) = self.mcp_modal.as_mut() {
+            modal.query.pop();
+            modal.selected_idx = 0;
+        }
+    }
+
+    pub(super) fn push_mcp_modal_add_input_char(&mut self, ch: char) {
+        if let Some(modal) = self.mcp_modal.as_mut()
+            && let Some(add_input) = modal.add_input.as_mut()
+        {
+            add_input.push(ch);
+        }
+    }
+
+    pub(super) fn backspace_mcp_modal_add_input(&mut self) {
+        if let Some(modal) = self.mcp_modal.as_mut()
+            && let Some(add_input) = modal.add_input.as_mut()
+        {
+            add_input.pop();
+        }
+    }
+
+    pub(super) fn confirm_mcp_modal_add(&mut self) -> Result<()> {
+        let raw_input = self
+            .mcp_modal
+            .as_ref()
+            .and_then(|modal| modal.add_input.clone())
+            .unwrap_or_default();
+        let parsed = parse_mcp_add_args(raw_input.trim())?;
+        let name = parsed.name.clone();
+        let message = self.state.register_mcp_server(
+            &parsed.name,
+            &parsed.command,
+            parsed.command_args,
+            parsed.tags,
+            parsed.enabled,
+        )?;
+        if let Some(modal) = self.mcp_modal.as_mut() {
+            modal.add_input = None;
+            modal.query.clear();
+        }
+        self.focus_mcp_modal_server(&name);
+        self.status_message = message;
+        Ok(())
+    }
+
+    pub(super) fn remove_selected_mcp_server(&mut self) -> Result<()> {
+        let Some(server_name) = self.selected_mcp_server_name() else {
+            self.status_message = "未选中 MCP server".to_string();
+            return Ok(());
+        };
+        let message = self.state.remove_mcp_server(&server_name)?;
+        self.clamp_mcp_modal_selection();
+        self.status_message = message;
+        Ok(())
+    }
+
+    pub(super) fn set_selected_mcp_server_enabled(&mut self, enabled: bool) -> Result<()> {
+        let Some(server_name) = self.selected_mcp_server_name() else {
+            self.status_message = "未选中 MCP server".to_string();
+            return Ok(());
+        };
+        let message = self.state.set_mcp_server_enabled(&server_name, enabled)?;
+        self.clamp_mcp_modal_selection();
+        self.status_message = message;
+        Ok(())
+    }
+
+    pub(super) fn toggle_selected_mcp_server_enabled(&mut self) -> Result<()> {
+        let Some(server_name) = self.selected_mcp_server_name() else {
+            self.status_message = "未选中 MCP server".to_string();
+            return Ok(());
+        };
+        let Some(current_enabled) = self
+            .state
+            .mcp_servers()
+            .iter()
+            .find(|server| server.name == server_name)
+            .map(|server| server.enabled)
+        else {
+            self.status_message = "未找到选中的 MCP server".to_string();
+            return Ok(());
+        };
+        self.set_selected_mcp_server_enabled(!current_enabled)
+    }
+
+    pub(super) fn mcp_match_indices(&self, query: &str) -> Vec<usize> {
+        let query = query.trim();
+        self.state
+            .mcp_servers()
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, server)| {
+                let index_text = (idx + 1).to_string();
+                let matched = query.is_empty()
+                    || index_text.starts_with(query)
+                    || server.name.contains(query)
+                    || server.command.contains(query)
+                    || server.tags.iter().any(|tag| tag.contains(query));
+                matched.then_some(idx)
+            })
+            .collect()
+    }
+
+    fn selected_mcp_server_name(&self) -> Option<String> {
+        let modal = self.mcp_modal.as_ref()?;
+        let matched = self.mcp_match_indices(&modal.query);
+        let idx = *matched.get(modal.selected_idx.min(matched.len().saturating_sub(1)))?;
+        self.state
+            .mcp_servers()
+            .get(idx)
+            .map(|server| server.name.clone())
+    }
+
+    fn clamp_mcp_modal_selection(&mut self) {
+        let Some((query, selected_idx)) = self
+            .mcp_modal
+            .as_ref()
+            .map(|modal| (modal.query.clone(), modal.selected_idx))
+        else {
+            return;
+        };
+        let total = self.mcp_match_indices(&query).len();
+        if let Some(modal) = self.mcp_modal.as_mut() {
+            modal.selected_idx = if total == 0 {
+                0
+            } else {
+                selected_idx.min(total - 1)
+            };
+        }
+    }
+
+    fn focus_mcp_modal_server(&mut self, server_name: &str) {
+        let Some(query) = self.mcp_modal.as_ref().map(|modal| modal.query.clone()) else {
+            return;
+        };
+        let matched = self.mcp_match_indices(&query);
+        if let Some(position) = matched
+            .iter()
+            .position(|idx| self.state.mcp_servers()[*idx].name == server_name)
+        {
+            if let Some(modal) = self.mcp_modal.as_mut() {
+                modal.selected_idx = position;
+            }
+        } else {
+            self.clamp_mcp_modal_selection();
+        }
+    }
+
     pub(super) fn history_match_indices(&self, query: &str) -> Vec<usize> {
         let query = query.trim();
         self.state
@@ -631,15 +798,12 @@ impl CliApp {
 
     fn mcp_command_hints(&self, raw: &str) -> Vec<CommandHint> {
         let mut hints = vec![
-            CommandHint::new("/mcp list", "查看全部 MCP server"),
-            CommandHint::new("/mcp show browser", "查看单个 MCP server 详情"),
-            CommandHint::new(
-                "/mcp add browser npx -y @modelcontextprotocol/server-browser --tags web,browser",
-                "注册 MCP server（可附加命令参数）",
+            CommandHint::new("/mcp", "打开 MCP 管理弹窗"),
+            CommandHint::new("/mcp browser", "打开弹窗并按关键词筛选"),
+            CommandHint::new_note(
+                "弹窗内快捷键",
+                "空格启/禁用 Backspace删除 Delete删筛选字 A新增 Esc关闭",
             ),
-            CommandHint::new("/mcp remove browser", "删除 MCP server"),
-            CommandHint::new("/mcp enable browser", "启用 MCP server"),
-            CommandHint::new("/mcp disable browser", "禁用 MCP server"),
         ];
 
         if raw != "/mcp" {
@@ -647,8 +811,8 @@ impl CliApp {
         }
         if hints.is_empty() {
             hints.push(CommandHint::new_note(
-                "/mcp add <name> <command> [args...]",
-                "可选：--tags tag1,tag2、--disabled",
+                "/mcp <关键词>",
+                "打开 MCP 管理弹窗并筛选目标 server",
             ));
         }
 
@@ -672,7 +836,7 @@ fn parse_mcp_add_args(raw: &str) -> Result<ParsedMcpAddArgs> {
     let tokens = raw.split_whitespace().collect::<Vec<_>>();
     if tokens.len() < 2 {
         return Err(anyhow!(
-            "参数不足，示例：/mcp add browser npx -y @modelcontextprotocol/server-browser --tags web,browser"
+            "参数不足，示例：browser npx -y @modelcontextprotocol/server-browser --tags web,browser"
         ));
     }
 
@@ -716,7 +880,7 @@ fn parse_mcp_add_args(raw: &str) -> Result<ParsedMcpAddArgs> {
     }
 
     let Some(command) = non_flag_tokens.first().cloned() else {
-        return Err(anyhow!("缺少 command，示例：/mcp add browser npx ..."));
+        return Err(anyhow!("缺少 command，示例：browser npx ..."));
     };
     let command_args = non_flag_tokens.into_iter().skip(1).collect::<Vec<_>>();
     Ok(ParsedMcpAddArgs {

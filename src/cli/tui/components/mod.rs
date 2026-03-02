@@ -1,6 +1,7 @@
 mod conversation_panel;
 mod history_dialog;
 mod input_panel;
+mod mcp_dialog;
 mod model_selector;
 mod plan_panel;
 mod planning_dialog;

@@ -58,6 +58,7 @@ struct CliApp {
     selected_hint_idx: usize,
     history_modal: Option<HistoryModalState>,
     planning_modal: Option<PlanningModalState>,
+    mcp_modal: Option<McpModalState>,
     draft_new_session: bool,
     conversation_scroll: u16,
     max_conversation_scroll: u16,
@@ -83,6 +84,7 @@ impl CliApp {
             selected_hint_idx: 0,
             history_modal: None,
             planning_modal: None,
+            mcp_modal: None,
             draft_new_session: false,
             conversation_scroll: 0,
             max_conversation_scroll: 0,
@@ -147,6 +149,9 @@ impl CliApp {
         }
         if self.planning_modal.is_some() {
             return self.handle_planning_modal_key(key);
+        }
+        if self.mcp_modal.is_some() {
+            return self.handle_mcp_modal_key(key);
         }
 
         match key.code {
@@ -225,7 +230,8 @@ impl CliApp {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
-        if self.history_modal.is_some() || self.planning_modal.is_some() {
+        if self.history_modal.is_some() || self.planning_modal.is_some() || self.mcp_modal.is_some()
+        {
             return;
         }
         match mouse.kind {
@@ -303,6 +309,64 @@ impl CliApp {
             }
             KeyCode::Char('j') | KeyCode::Char('J') => {
                 self.move_selected_pending_planning_step(false)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_mcp_modal_key(&mut self, key: KeyEvent) -> Result<()> {
+        let is_adding = self
+            .mcp_modal
+            .as_ref()
+            .is_some_and(|modal| modal.add_input.is_some());
+
+        match key.code {
+            KeyCode::Esc => {
+                if is_adding {
+                    self.cancel_mcp_modal_add_mode();
+                    self.status_message = "已取消新增 MCP server".to_string();
+                } else {
+                    self.mcp_modal = None;
+                    self.status_message = "已关闭 MCP 管理".to_string();
+                }
+            }
+            KeyCode::Enter => {
+                if is_adding {
+                    self.confirm_mcp_modal_add()?;
+                }
+            }
+            KeyCode::Up if !is_adding => self.move_mcp_modal_selection(-1),
+            KeyCode::Down if !is_adding => self.move_mcp_modal_selection(1),
+            KeyCode::PageUp if !is_adding => self.move_mcp_modal_selection(-8),
+            KeyCode::PageDown if !is_adding => self.move_mcp_modal_selection(8),
+            KeyCode::Home if !is_adding => self.move_mcp_modal_to_edge(true),
+            KeyCode::End if !is_adding => self.move_mcp_modal_to_edge(false),
+            KeyCode::Backspace => {
+                if is_adding {
+                    self.backspace_mcp_modal_add_input();
+                } else {
+                    self.remove_selected_mcp_server()?;
+                }
+            }
+            KeyCode::Delete if !is_adding => self.backspace_mcp_modal_query(),
+            KeyCode::Char('a') | KeyCode::Char('A') if !is_adding => {
+                self.enter_mcp_modal_add_mode();
+                self.status_message =
+                    "请输入新增参数：<name> <command> [args...] [--tags tag1,tag2] [--disabled]"
+                        .to_string();
+            }
+            KeyCode::Char(' ') if !is_adding => {
+                self.toggle_selected_mcp_server_enabled()?;
+            }
+            KeyCode::Char(ch) => {
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+                    if is_adding {
+                        self.push_mcp_modal_add_input_char(ch);
+                    } else {
+                        self.push_mcp_modal_query_char(ch);
+                    }
+                }
             }
             _ => {}
         }
@@ -545,6 +609,13 @@ struct HistoryModalState {
 #[derive(Debug, Clone, Default)]
 struct PlanningModalState {
     selected_idx: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+struct McpModalState {
+    query: String,
+    selected_idx: usize,
+    add_input: Option<String>,
 }
 
 struct CommandHint {

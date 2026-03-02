@@ -551,6 +551,10 @@ impl TiangongState {
         summarize_mcp_servers(&self.agent_config.mcp.servers, name_filter)
     }
 
+    pub fn mcp_servers(&self) -> &[McpServerConfig] {
+        &self.agent_config.mcp.servers
+    }
+
     pub fn register_mcp_server(
         &mut self,
         name: &str,
