@@ -1,3 +1,5 @@
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -10,6 +12,9 @@ use tokio::time::timeout;
 use crate::core::agent_config::McpServerConfig;
 
 use super::util::truncate_text;
+
+const FILESYSTEM_MCP_PACKAGE: &str = "@modelcontextprotocol/server-filesystem";
+const FILE_URI_PREFIX: &str = "file://";
 
 #[derive(Debug, Clone)]
 pub struct McpResourceMeta {
@@ -62,6 +67,10 @@ impl McpClient for LocalMcpClient {
                 .collect());
         }
 
+        if let Some(roots) = filesystem_roots_from_server(server) {
+            return list_filesystem_resources(server, &roots);
+        }
+
         let output = run_mcp_command(server, timeout_ms, "list-resources", None)?;
         parse_resource_list_output(server, &output)
     }
@@ -90,9 +99,136 @@ impl McpClient for LocalMcpClient {
             ));
         }
 
+        if let Some(roots) = filesystem_roots_from_server(server) {
+            return read_filesystem_resource(server, resource, &roots);
+        }
+
         let output = run_mcp_command(server, timeout_ms, "read-resource", Some(&resource.uri))?;
         Ok(parse_read_resource_output(&output))
     }
+}
+
+fn filesystem_roots_from_server(server: &McpServerConfig) -> Option<Vec<PathBuf>> {
+    let command = server.command.trim().to_ascii_lowercase();
+    if command != "npx" && command != "npx.cmd" {
+        return None;
+    }
+
+    let pkg_idx = server
+        .args
+        .iter()
+        .position(|arg| arg.trim() == FILESYSTEM_MCP_PACKAGE)?;
+
+    let cwd = std::env::current_dir().ok();
+    let mut roots = Vec::new();
+    for raw in server.args.iter().skip(pkg_idx + 1) {
+        let raw = raw.trim();
+        if raw.is_empty() || raw.starts_with('-') {
+            continue;
+        }
+        let candidate = PathBuf::from(raw);
+        let resolved = if candidate.is_absolute() {
+            candidate
+        } else if let Some(base) = cwd.as_ref() {
+            base.join(candidate)
+        } else {
+            candidate
+        };
+        let canonical = resolved.canonicalize().unwrap_or(resolved);
+        if !roots.iter().any(|root| root == &canonical) {
+            roots.push(canonical);
+        }
+    }
+
+    if roots.is_empty() { None } else { Some(roots) }
+}
+
+fn list_filesystem_resources(
+    server: &McpServerConfig,
+    roots: &[PathBuf],
+) -> Result<Vec<McpResourceMeta>> {
+    let mut resources = Vec::new();
+    for root in roots {
+        if !root.exists() {
+            continue;
+        }
+        resources.push(McpResourceMeta {
+            server: server.name.clone(),
+            uri: format!("{}{}", FILE_URI_PREFIX, root.display()),
+        });
+    }
+
+    if resources.is_empty() {
+        return Err(anyhow!(
+            "MCP filesystem server 无可用根目录：{}",
+            server.name
+        ));
+    }
+    Ok(resources)
+}
+
+fn read_filesystem_resource(
+    server: &McpServerConfig,
+    resource: &McpResourceMeta,
+    roots: &[PathBuf],
+) -> Result<String> {
+    let raw_path = resource
+        .uri
+        .strip_prefix(FILE_URI_PREFIX)
+        .unwrap_or(resource.uri.as_str());
+    let path = PathBuf::from(raw_path);
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("MCP filesystem 资源不存在：{}", path.display()))?;
+
+    if !is_path_under_roots(&canonical, roots) {
+        return Err(anyhow!(
+            "MCP filesystem 资源越界：{}（server={}）",
+            canonical.display(),
+            server.name
+        ));
+    }
+
+    if canonical.is_dir() {
+        summarize_dir(&canonical)
+    } else {
+        summarize_file(&canonical)
+    }
+}
+
+fn is_path_under_roots(path: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| path.starts_with(root))
+}
+
+fn summarize_dir(path: &Path) -> Result<String> {
+    let mut entries = fs::read_dir(path)
+        .with_context(|| format!("读取目录失败：{}", path.display()))?
+        .filter_map(|item| item.ok())
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+
+    const MAX_ENTRIES: usize = 24;
+    let mut lines = vec![format!("directory={}", path.display())];
+    for entry in entries.iter().take(MAX_ENTRIES) {
+        let entry_path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let marker = if entry_path.is_dir() { "dir" } else { "file" };
+        lines.push(format!("[{marker}] {name}"));
+    }
+    if entries.len() > MAX_ENTRIES {
+        lines.push(format!("... ({} more)", entries.len() - MAX_ENTRIES));
+    }
+    Ok(lines.join("\n"))
+}
+
+fn summarize_file(path: &Path) -> Result<String> {
+    let bytes = fs::read(path).with_context(|| format!("读取文件失败：{}", path.display()))?;
+    let content = String::from_utf8_lossy(&bytes);
+    Ok(format!(
+        "file={}\ncontent={}",
+        path.display(),
+        truncate_text(&content, 400)
+    ))
 }
 
 fn run_mcp_command(

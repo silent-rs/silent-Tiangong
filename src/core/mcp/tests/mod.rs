@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::core::agent_config::{McpConfig, McpServerConfig};
 
-use super::client::{LocalMcpClient, McpClient};
+use super::client::{LocalMcpClient, McpClient, McpResourceMeta};
 use super::config::{summarize_mcp_servers, validate_mcp_config};
 use super::context::matched_servers;
 use super::{build_mcp_hints, collect_mcp_context};
@@ -224,4 +224,121 @@ echo '{"resources":[{"uri":"mcp://demo/slow"}]}'
     assert!(result.is_err());
     let detail = result.err().map(|err| err.to_string()).unwrap_or_default();
     assert!(detail.contains("超时"));
+}
+
+#[cfg(unix)]
+struct TempDir {
+    path: PathBuf,
+}
+
+#[cfg(unix)]
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+#[cfg(unix)]
+fn create_temp_dir() -> TempDir {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let path = std::env::temp_dir().join(format!("tiangong-mcp-dir-{nonce}"));
+    fs::create_dir_all(&path).expect("create test dir");
+    TempDir { path }
+}
+
+#[cfg(unix)]
+#[test]
+fn local_mcp_client_filesystem_adapter_supports_list_and_read() {
+    let temp = create_temp_dir();
+    let child = temp.path.join("sample.txt");
+    fs::write(&child, "hello adapter").expect("write sample file");
+
+    let client = LocalMcpClient;
+    let server = McpServerConfig {
+        name: "fs-adapter".to_string(),
+        command: "npx".to_string(),
+        args: vec![
+            "-y".to_string(),
+            "@modelcontextprotocol/server-filesystem".to_string(),
+            temp.path.to_string_lossy().to_string(),
+        ],
+        enabled: true,
+        tags: vec!["filesystem".to_string()],
+    };
+
+    let resources = client
+        .list_resources(&server, 1000)
+        .expect("list resources with filesystem adapter");
+    assert!(!resources.is_empty());
+    assert!(resources[0].uri.starts_with("file://"));
+
+    let content = client
+        .read_resource(&server, &resources[0], 1000)
+        .expect("read resource with filesystem adapter");
+    assert!(content.contains("directory="));
+    assert!(content.contains("sample.txt"));
+}
+
+#[cfg(unix)]
+#[test]
+fn local_mcp_client_filesystem_adapter_rejects_outside_root() {
+    let root = create_temp_dir();
+    let outside = create_temp_dir();
+    let outside_file = outside.path.join("outside.txt");
+    fs::write(&outside_file, "outside").expect("write outside file");
+
+    let client = LocalMcpClient;
+    let server = McpServerConfig {
+        name: "fs-adapter".to_string(),
+        command: "npx".to_string(),
+        args: vec![
+            "-y".to_string(),
+            "@modelcontextprotocol/server-filesystem".to_string(),
+            root.path.to_string_lossy().to_string(),
+        ],
+        enabled: true,
+        tags: vec!["filesystem".to_string()],
+    };
+
+    let resource = McpResourceMeta {
+        server: "fs-adapter".to_string(),
+        uri: format!("file://{}", outside_file.display()),
+    };
+    let result = client.read_resource(&server, &resource, 1000);
+    assert!(result.is_err());
+    let detail = result.err().map(|err| err.to_string()).unwrap_or_default();
+    assert!(detail.contains("越界"));
+}
+
+#[cfg(unix)]
+#[test]
+fn collect_mcp_context_uses_filesystem_adapter() {
+    let temp = create_temp_dir();
+    fs::write(temp.path.join("chain.txt"), "chain").expect("write chain file");
+
+    let config = McpConfig {
+        enabled: true,
+        timeout_ms: 1000,
+        servers: vec![McpServerConfig {
+            name: "public-fs-test".to_string(),
+            command: "npx".to_string(),
+            args: vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-filesystem".to_string(),
+                temp.path.to_string_lossy().to_string(),
+            ],
+            enabled: true,
+            tags: vec!["filesystem".to_string()],
+        }],
+    };
+
+    let context = collect_mcp_context("请使用 filesystem mcp 查看目录", &config);
+    assert!(!context.is_empty());
+    assert!(context[0].contains("mcp|ok|server=public-fs-test"));
+    assert!(context.iter().any(|item| item.contains("chain.txt")));
 }

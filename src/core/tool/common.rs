@@ -21,6 +21,14 @@ fn allowed_roots() -> Result<Vec<PathBuf>> {
     if !roots.iter().any(|root| root == &temp_canonical) {
         roots.push(temp_canonical);
     }
+    #[cfg(unix)]
+    for alias in ["/tmp", "/private/tmp"] {
+        let path = PathBuf::from(alias);
+        let canonical = path.canonicalize().unwrap_or(path);
+        if !roots.iter().any(|root| root == &canonical) {
+            roots.push(canonical);
+        }
+    }
     Ok(roots)
 }
 
