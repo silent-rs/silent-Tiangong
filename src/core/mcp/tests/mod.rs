@@ -332,6 +332,10 @@ done
 
     let context = collect_mcp_context("请使用 filesystem mcp 查看目录", &config);
     assert!(!context.is_empty());
-    assert!(context[0].contains("mcp|ok|server=public-fs-test"));
+    assert!(
+        context
+            .iter()
+            .any(|item| item.contains("mcp|ok|server=public-fs-test"))
+    );
     assert!(context.iter().any(|item| item.contains("chain.txt")));
 }

@@ -1,5 +1,6 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
+use serde_json::Value;
 use unicode_width::UnicodeWidthChar;
 
 use crate::core::session::{Message, MessageRole};
@@ -153,8 +154,15 @@ fn append_system_message_lines(target: &mut Vec<Line<'static>>, message: &Messag
         return;
     }
 
-    if let Some((title, detail_markdown)) = parse_llm_event_markdown(message.content.as_str()) {
-        let collapsed_detail_markdown = collapse_llm_reasoning_block(detail_markdown.as_str());
+    if let Some((stage, title, detail_markdown)) =
+        parse_llm_event_markdown(message.content.as_str())
+    {
+        let collapsed_reasoning = collapse_llm_reasoning_block(detail_markdown.as_str());
+        let collapsed_detail_markdown = if stage == "planning-agent" {
+            collapse_planning_content_block(collapsed_reasoning.as_str())
+        } else {
+            collapsed_reasoning
+        };
         let title_style = Style::default()
             .fg(Color::LightGreen)
             .add_modifier(Modifier::BOLD);
@@ -171,17 +179,18 @@ fn append_system_message_lines(target: &mut Vec<Line<'static>>, message: &Messag
     }
 
     if let Some(detail_markdown) = parse_plan_execution_summary_markdown(message.content.as_str()) {
+        let compact_detail_markdown = collapse_plan_execution_summary_markdown(&detail_markdown);
         let title_style = Style::default()
             .fg(Color::LightGreen)
             .add_modifier(Modifier::BOLD);
         target.push(build_event_title_line("Plan 执行总结", title_style));
-        if detail_markdown.trim().is_empty() {
+        if compact_detail_markdown.trim().is_empty() {
             target.push(build_event_detail_line(
                 "无输出",
                 Style::default().fg(Color::Gray),
             ));
         } else {
-            append_markdown_lines_with_prefix(target, detail_markdown.as_str(), "  ");
+            append_markdown_lines_with_prefix(target, compact_detail_markdown.as_str(), "  ");
         }
         return;
     }
@@ -253,12 +262,12 @@ fn parse_tool_event_markdown(content: &str) -> Option<(String, String)> {
     Some((format_tool_event_title(tool_name, &body), body))
 }
 
-fn parse_llm_event_markdown(content: &str) -> Option<(String, String)> {
+fn parse_llm_event_markdown(content: &str) -> Option<(String, String, String)> {
     let mut lines = content.lines();
     let header = lines.next()?.trim();
     let stage = parse_llm_stage(header)?;
     let body = lines.collect::<Vec<_>>().join("\n");
-    Some((format_stage_title(&stage), body))
+    Some((stage.clone(), format_stage_title(&stage), body))
 }
 
 fn collapse_tool_output_blocks(detail_markdown: &str, max_lines: usize) -> String {
@@ -426,6 +435,154 @@ fn collapse_llm_reasoning_block(detail_markdown: &str) -> String {
                 "[思考已收起：{line_count} 行，{char_count} 字] {preview}"
             ));
         }
+    }
+    out.join("\n")
+}
+
+fn collapse_planning_content_block(detail_markdown: &str) -> String {
+    let source_lines = detail_markdown.lines().collect::<Vec<_>>();
+    if source_lines.is_empty() {
+        return String::new();
+    }
+
+    let Some(content_idx) = source_lines
+        .iter()
+        .position(|line| line.trim() == "content:")
+    else {
+        return detail_markdown.to_string();
+    };
+
+    let content_lines = &source_lines[content_idx + 1..];
+    let content_text = content_lines.join("\n").trim().to_string();
+
+    let mut out = source_lines
+        .iter()
+        .take(content_idx + 1)
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+
+    if content_text.is_empty() {
+        out.push("[计划内容为空]".to_string());
+        return out.join("\n");
+    }
+
+    let line_count = content_lines.len();
+    let char_count = content_text.chars().count();
+    let preview = summarize_planning_content_preview(&content_text);
+    if preview.is_empty() {
+        out.push(format!(
+            "[计划内容已收起：{line_count} 行，{char_count} 字]"
+        ));
+    } else {
+        out.push(format!(
+            "[计划内容已收起：{line_count} 行，{char_count} 字] {preview}"
+        ));
+    }
+    out.join("\n")
+}
+
+fn summarize_planning_content_preview(content: &str) -> String {
+    if let Some(parsed) = parse_planning_json(content) {
+        let objective = parsed
+            .get("objective")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("目标={}", truncate_chars(value, 28)));
+        let summary = parsed
+            .get("summary")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("摘要={}", truncate_chars(value, 32)));
+        let plans = parsed
+            .get("plans")
+            .and_then(Value::as_array)
+            .map(|items| items.as_slice())
+            .unwrap_or(&[]);
+        let plan_count = plans.len();
+        let step_count = plans
+            .iter()
+            .map(|plan| {
+                plan.get("execution_steps")
+                    .and_then(Value::as_array)
+                    .map(|steps| steps.len())
+                    .unwrap_or(0)
+            })
+            .sum::<usize>();
+        let risk_count = parsed
+            .get("risks")
+            .and_then(Value::as_array)
+            .map(|items| items.len())
+            .unwrap_or(0);
+
+        let mut parts = Vec::new();
+        if let Some(objective) = objective {
+            parts.push(objective);
+        }
+        if let Some(summary) = summary {
+            parts.push(summary);
+        }
+        if plan_count > 0 {
+            parts.push(format!("plans={plan_count}"));
+        }
+        if step_count > 0 {
+            parts.push(format!("steps={step_count}"));
+        }
+        if risk_count > 0 {
+            parts.push(format!("risks={risk_count}"));
+        }
+        if !parts.is_empty() {
+            return parts.join("，");
+        }
+    }
+
+    content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| truncate_chars(line, 72))
+        .unwrap_or_default()
+}
+
+fn parse_planning_json(content: &str) -> Option<Value> {
+    let trimmed = content.trim();
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed)
+        && value.is_object()
+    {
+        return Some(value);
+    }
+
+    let start = trimmed.find('{')?;
+    let end = trimmed.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    serde_json::from_str::<Value>(&trimmed[start..=end])
+        .ok()
+        .filter(Value::is_object)
+}
+
+fn collapse_plan_execution_summary_markdown(detail_markdown: &str) -> String {
+    let source_lines = detail_markdown
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if source_lines.is_empty() {
+        return String::new();
+    }
+
+    const MAX_DETAIL_LINES: usize = 4;
+    let mut out = Vec::new();
+    out.push(truncate_chars(source_lines[0], 160));
+
+    let details = source_lines.iter().skip(1).collect::<Vec<_>>();
+    for line in details.iter().take(MAX_DETAIL_LINES) {
+        out.push(truncate_chars(line, 160));
+    }
+    if details.len() > MAX_DETAIL_LINES {
+        out.push(format!("...(省略 {} 行)", details.len() - MAX_DETAIL_LINES));
     }
     out.join("\n")
 }
