@@ -103,10 +103,16 @@ impl CliApp {
                     } else {
                         "disabled"
                     };
+                    let transport = match server.resolved_transport() {
+                        crate::core::agent_config::ResolvedMcpTransport::Stdio => "stdio",
+                        crate::core::agent_config::ResolvedMcpTransport::Http => "http",
+                        crate::core::agent_config::ResolvedMcpTransport::Metadata => "metadata",
+                    };
                     let text = format!(
-                        "{marker}{:>2}. {} · {} · tags={}",
+                        "{marker}{:>2}. {} · {} · {} · tags={}",
                         server_idx + 1,
                         server.name,
+                        transport,
                         status,
                         if server.tags.is_empty() {
                             "(none)".to_string()
@@ -161,11 +167,32 @@ impl CliApp {
                 Line::from(vec![
                     Span::styled("command: ", Style::default().fg(Color::Gray)),
                     Span::styled(
-                        if server.command.trim().is_empty() {
+                        if server.command_text().is_empty() {
                             "(empty)".to_string()
                         } else {
                             server.command.clone()
                         },
+                        Style::default().fg(Color::Cyan),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled("transport: ", Style::default().fg(Color::Gray)),
+                    Span::styled(
+                        match server.resolved_transport() {
+                            crate::core::agent_config::ResolvedMcpTransport::Stdio => "stdio",
+                            crate::core::agent_config::ResolvedMcpTransport::Http => "http",
+                            crate::core::agent_config::ResolvedMcpTransport::Metadata => "metadata",
+                        },
+                        Style::default().fg(Color::Yellow),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled("endpoint: ", Style::default().fg(Color::Gray)),
+                    Span::styled(
+                        server
+                            .resolved_http_endpoint()
+                            .unwrap_or("(none)")
+                            .to_string(),
                         Style::default().fg(Color::Cyan),
                     ),
                 ]),
@@ -177,6 +204,38 @@ impl CliApp {
                         } else {
                             server.args.join(" ")
                         },
+                        Style::default().fg(Color::White),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled("auth: ", Style::default().fg(Color::Gray)),
+                    Span::styled(
+                        if server.auth_header.trim().is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            "(set)".to_string()
+                        },
+                        Style::default().fg(Color::White),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled("headers: ", Style::default().fg(Color::Gray)),
+                    Span::styled(
+                        server.headers.len().to_string(),
+                        Style::default().fg(Color::White),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled("env: ", Style::default().fg(Color::Gray)),
+                    Span::styled(
+                        server.env.len().to_string(),
+                        Style::default().fg(Color::White),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled("cwd: ", Style::default().fg(Color::Gray)),
+                    Span::styled(
+                        server.cwd_text().unwrap_or("(none)").to_string(),
                         Style::default().fg(Color::White),
                     ),
                 ]),

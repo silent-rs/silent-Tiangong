@@ -140,6 +140,12 @@ pub(super) fn matched_servers<'a>(
                 .map(|tag| tag.to_ascii_lowercase())
                 .any(|tag| !tag.is_empty() && input.contains(&tag));
         }
+        if !matched {
+            matched = server
+                .resolved_http_endpoint()
+                .map(|endpoint| input.contains(&endpoint.to_ascii_lowercase()))
+                .unwrap_or(false);
+        }
 
         if !matched
             && (input.contains("网页") || input.contains("浏览器") || input.contains("页面"))

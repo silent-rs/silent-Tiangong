@@ -1,6 +1,6 @@
 # TODO - 天工 RFC 0002（CLI Agent）任务清单
 
-> 最后更新：2026-03-02
+> 最后更新：2026-03-03
 > 主线 RFC：`docs/rfc/0002-cli-agent-roadmap.md`
 > 暂停 RFC：`docs/rfc/0001-tiangong-desktop-agent-roadmap.md`
 > 参考：`PLAN.md`
@@ -70,6 +70,7 @@
 - [x] 打通 Agent 执行链路中的 MCP 资源读取能力（作为上下文输入）
 - [x] 统一 Skills/MCP 的执行记录与失败回传格式
 - [x] MCP 本地执行改为标准 `stdio` JSON-RPC 协议（移除包名特判）
+- [x] 支持 HTTP 协议 MCP 对接（JSON-RPC over HTTP）
 
 ---
 

@@ -353,7 +353,7 @@ impl CliApp {
             KeyCode::Char('a') | KeyCode::Char('A') if !is_adding => {
                 self.enter_mcp_modal_add_mode();
                 self.status_message =
-                    "请输入新增参数：<name> <command> [args...] [--tags tag1,tag2] [--disabled]"
+                    "请输入新增参数：<name> <command> [args...] [--tags t1,t2] [--transport auto|stdio|http] [--endpoint url] [--auth-header token] [--header k=v] [--env k=v] [--cwd path] [--disabled]"
                         .to_string();
             }
             KeyCode::Char(' ') if !is_adding => {

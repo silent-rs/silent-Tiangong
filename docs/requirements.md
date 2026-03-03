@@ -59,6 +59,7 @@
 - 统一配置结构需覆盖 Model/Skills/MCP/Agent，并支持本地恢复。
 - CLI 必须提供配置入口，至少支持配置查看、更新和校验，并在更新后即时生效。
 - 本地 MCP server 连接必须采用标准 MCP `stdio` JSON-RPC 生命周期（`initialize`、`notifications/initialized`、`resources/list`、`resources/read`），不允许依赖特定包名做协议特判。
+- 需支持远程 MCP 的 HTTP 对接能力（JSON-RPC over HTTP），并与本地 `stdio` 模式并存。
 - 模型适配需支持 BigModel `thinking` 参数透传，并正确解析/持久化 `reasoning_content`（与正文区分）。
 - 所有 LLM 调用输出（planning / execution / final response）均需进入对话栏可见范围，不允许仅在内部状态保存。
 - `async-openai` 允许暂时使用本地 fork 版本，以承载上述兼容字段能力。

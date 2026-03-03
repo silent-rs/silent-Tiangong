@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,8 +10,8 @@ use std::time::Instant;
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-use crate::core::agent_config::{AgentConfig, McpServerConfig};
-use crate::core::mcp::{summarize_mcp_servers, validate_mcp_config};
+use crate::core::agent_config::{AgentConfig, McpServerConfig, McpTransportMode};
+use crate::core::mcp::{describe_mcp_servers, summarize_mcp_servers, validate_mcp_config};
 use crate::core::model::{ModelProviderConfig, ModelStreamChunk, SingleProviderClient};
 use crate::core::planner::{PlanStepStatus, TaskPlan};
 use crate::core::runtime::{
@@ -52,6 +52,16 @@ struct LoadedState {
     model_config: Option<ModelProviderConfig>,
     model_list: Vec<String>,
     agent_config: Option<AgentConfig>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RegisterMcpServerOptions {
+    pub transport: Option<McpTransportMode>,
+    pub endpoint: Option<String>,
+    pub auth_header: Option<String>,
+    pub headers: Vec<(String, String)>,
+    pub env: Vec<(String, String)>,
+    pub cwd: Option<String>,
 }
 
 #[derive(Debug)]
@@ -551,6 +561,10 @@ impl TiangongState {
         summarize_mcp_servers(&self.agent_config.mcp.servers, name_filter)
     }
 
+    pub fn mcp_server_detail(&self, name_filter: Option<&str>) -> String {
+        describe_mcp_servers(&self.agent_config.mcp.servers, name_filter)
+    }
+
     pub fn mcp_servers(&self) -> &[McpServerConfig] {
         &self.agent_config.mcp.servers
     }
@@ -562,6 +576,7 @@ impl TiangongState {
         args: Vec<String>,
         tags: Vec<String>,
         enabled: bool,
+        options: RegisterMcpServerOptions,
     ) -> Result<String> {
         let name = name.trim();
         let command = command.trim();
@@ -588,15 +603,58 @@ impl TiangongState {
             .map(|arg| arg.trim().to_string())
             .filter(|arg| !arg.is_empty())
             .collect::<Vec<_>>();
+        let transport = options.transport.unwrap_or_default();
+        let endpoint = options.endpoint.unwrap_or_default().trim().to_string();
+        let auth_header = options.auth_header.unwrap_or_default().trim().to_string();
+        let cwd = options.cwd.unwrap_or_default().trim().to_string();
 
-        if command.is_empty() && tags.is_empty() {
-            return Err(anyhow!("MCP server 需至少配置 command 或 tags"));
+        let headers = options
+            .headers
+            .into_iter()
+            .filter_map(|(key, value)| {
+                let key = key.trim().to_string();
+                let value = value.trim().to_string();
+                if key.is_empty() || value.is_empty() {
+                    None
+                } else {
+                    Some((key, value))
+                }
+            })
+            .fold(BTreeMap::new(), |mut map, (key, value)| {
+                map.insert(key, value);
+                map
+            });
+        let env = options
+            .env
+            .into_iter()
+            .filter_map(|(key, value)| {
+                let key = key.trim().to_string();
+                let value = value.trim().to_string();
+                if key.is_empty() || value.is_empty() {
+                    None
+                } else {
+                    Some((key, value))
+                }
+            })
+            .fold(BTreeMap::new(), |mut map, (key, value)| {
+                map.insert(key, value);
+                map
+            });
+
+        if command.is_empty() && endpoint.is_empty() && tags.is_empty() {
+            return Err(anyhow!("MCP server 需至少配置 command、endpoint 或 tags"));
         }
 
         self.agent_config.mcp.servers.push(McpServerConfig {
             name: name.to_string(),
+            transport,
             command: command.to_string(),
             args,
+            endpoint,
+            auth_header,
+            headers,
+            env,
+            cwd,
             enabled,
             tags,
         });

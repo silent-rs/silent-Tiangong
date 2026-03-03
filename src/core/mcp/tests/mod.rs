@@ -1,18 +1,24 @@
 use std::fs;
 use std::path::PathBuf;
 
-use crate::core::agent_config::{McpConfig, McpServerConfig};
+use crate::core::agent_config::{McpConfig, McpServerConfig, McpTransportMode};
 
 use super::client::{LocalMcpClient, McpClient};
-use super::config::{summarize_mcp_servers, validate_mcp_config};
+use super::config::{describe_mcp_servers, summarize_mcp_servers, validate_mcp_config};
 use super::context::matched_servers;
 use super::{build_mcp_hints, collect_mcp_context};
 
 fn server(name: &str, command: &str, tags: &[&str]) -> McpServerConfig {
     McpServerConfig {
         name: name.to_string(),
+        transport: McpTransportMode::Auto,
         command: command.to_string(),
         args: Vec::new(),
+        endpoint: String::new(),
+        auth_header: String::new(),
+        headers: Default::default(),
+        env: Default::default(),
+        cwd: String::new(),
         enabled: true,
         tags: tags.iter().map(|item| item.to_string()).collect(),
     }
@@ -101,8 +107,19 @@ fn build_mcp_hints_surfaces_command_failure() {
 fn summarize_mcp_servers_works() {
     let summary =
         summarize_mcp_servers(&[server("demo", "npx", &["web", "browser"])], Some("demo"));
-    assert!(summary.contains("name=demo"));
-    assert!(summary.contains("command=npx"));
+    assert!(summary.contains("demo"));
+    assert!(summary.contains("\u{1b}[32m"));
+    assert!(!summary.contains("command"));
+}
+
+#[test]
+fn describe_mcp_servers_works() {
+    let detail = describe_mcp_servers(&[server("demo", "npx", &["web"])], Some("demo"));
+    assert!(detail.contains("mcp name: demo"));
+    assert!(detail.contains("\u{1b}[32m"));
+    assert!(!detail.contains("1. demo"));
+    assert!(detail.contains("command: npx"));
+    assert!(detail.contains("transport: stdio"));
 }
 
 #[test]
@@ -112,10 +129,62 @@ fn validate_mcp_config_rejects_invalid_server() {
         timeout_ms: 500,
         servers: vec![McpServerConfig {
             name: "bad".to_string(),
+            transport: McpTransportMode::Auto,
             command: String::new(),
             args: Vec::new(),
+            endpoint: String::new(),
+            auth_header: String::new(),
+            headers: Default::default(),
+            env: Default::default(),
+            cwd: String::new(),
             enabled: true,
             tags: Vec::new(),
+        }],
+    };
+    let result = validate_mcp_config(&config);
+    assert!(result.is_err());
+}
+
+#[test]
+fn validate_mcp_config_accepts_http_server_with_endpoint() {
+    let config = McpConfig {
+        enabled: true,
+        timeout_ms: 500,
+        servers: vec![McpServerConfig {
+            name: "remote".to_string(),
+            transport: McpTransportMode::Http,
+            command: String::new(),
+            args: Vec::new(),
+            endpoint: "https://example.com/mcp".to_string(),
+            auth_header: "token".to_string(),
+            headers: Default::default(),
+            env: Default::default(),
+            cwd: String::new(),
+            enabled: true,
+            tags: vec!["remote".to_string()],
+        }],
+    };
+    let result = validate_mcp_config(&config);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn validate_mcp_config_rejects_http_server_with_args() {
+    let config = McpConfig {
+        enabled: true,
+        timeout_ms: 500,
+        servers: vec![McpServerConfig {
+            name: "remote".to_string(),
+            transport: McpTransportMode::Http,
+            command: "https://example.com/mcp".to_string(),
+            args: vec!["--bad".to_string()],
+            endpoint: String::new(),
+            auth_header: String::new(),
+            headers: Default::default(),
+            env: Default::default(),
+            cwd: String::new(),
+            enabled: true,
+            tags: vec!["remote".to_string()],
         }],
     };
     let result = validate_mcp_config(&config);
@@ -159,25 +228,27 @@ fn local_mcp_client_stdio_mode_supports_list_and_read() {
 set -euo pipefail
 
 send_msg() {
-  local body="$1"
-  printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body"
+  printf '%s\n' "$1"
+}
+
+extract_id() {
+  local payload="$1"
+  local id
+  id="$(printf '%s' "$payload" | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)"
+  if [ -z "$id" ]; then
+    id=1
+  fi
+  printf '%s' "$id"
 }
 
 while true; do
-  IFS= read -r header || exit 0
-  header="${header%$'\r'}"
-  [ -z "$header" ] && continue
-
-  case "$header" in
-    Content-Length:*) len="${header#Content-Length: }" ;;
-    *) echo "unexpected header: $header" >&2; exit 8 ;;
-  esac
-
-  IFS= read -r _blank || exit 0
-  payload="$(dd bs=1 count="$len" status=none 2>/dev/null)"
+  IFS= read -r payload || exit 0
+  payload="${payload%$'\r'}"
+  [ -z "$payload" ] && continue
+  req_id="$(extract_id "$payload")"
 
   if [[ "$payload" == *'"method":"initialize"'* ]]; then
-    send_msg '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-05","capabilities":{"resources":{}},"serverInfo":{"name":"demo","version":"1.0.0"}}}'
+    send_msg "{\"jsonrpc\":\"2.0\",\"id\":${req_id},\"result\":{\"protocolVersion\":\"2025-11-05\",\"capabilities\":{\"resources\":{}},\"serverInfo\":{\"name\":\"demo\",\"version\":\"1.0.0\"}}}"
     continue
   fi
 
@@ -186,17 +257,17 @@ while true; do
   fi
 
   if [[ "$payload" == *'"method":"resources/list"'* ]]; then
-    send_msg '{"jsonrpc":"2.0","id":2,"result":{"resources":[{"uri":"mcp://demo/first"},{"uri":"mcp://demo/second"}]}}'
+    send_msg "{\"jsonrpc\":\"2.0\",\"id\":${req_id},\"result\":{\"resources\":[{\"uri\":\"mcp://demo/first\",\"name\":\"first\"},{\"uri\":\"mcp://demo/second\",\"name\":\"second\"}]}}"
     continue
   fi
 
   if [[ "$payload" == *'"method":"resources/read"'* && "$payload" == *'mcp://demo/first'* ]]; then
-    send_msg '{"jsonrpc":"2.0","id":2,"result":{"contents":[{"uri":"mcp://demo/first","text":"hello-from-first"}]}}'
+    send_msg "{\"jsonrpc\":\"2.0\",\"id\":${req_id},\"result\":{\"contents\":[{\"uri\":\"mcp://demo/first\",\"text\":\"hello-from-first\"}]}}"
     continue
   fi
 
   if [[ "$payload" == *'"method":"resources/read"'* ]]; then
-    send_msg '{"jsonrpc":"2.0","id":2,"error":{"code":-32002,"message":"read failed"}}'
+    send_msg "{\"jsonrpc\":\"2.0\",\"id\":${req_id},\"error\":{\"code\":-32002,\"message\":\"read failed\"}}"
     continue
   fi
 
@@ -207,8 +278,14 @@ done
     let client = LocalMcpClient;
     let server = McpServerConfig {
         name: "demo".to_string(),
+        transport: McpTransportMode::Auto,
         command: script.path.to_string_lossy().to_string(),
         args: Vec::new(),
+        endpoint: String::new(),
+        auth_header: String::new(),
+        headers: Default::default(),
+        env: Default::default(),
+        cwd: String::new(),
         enabled: true,
         tags: vec!["demo".to_string()],
     };
@@ -236,22 +313,28 @@ fn local_mcp_client_stdio_mode_respects_timeout() {
 set -euo pipefail
 
 send_msg() {
-  local body="$1"
-  printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body"
+  printf '%s\n' "$1"
+}
+
+extract_id() {
+  local payload="$1"
+  local id
+  id="$(printf '%s' "$payload" | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)"
+  if [ -z "$id" ]; then
+    id=1
+  fi
+  printf '%s' "$id"
 }
 
 while true; do
-  IFS= read -r header || exit 0
-  header="${header%$'\r'}"
-  [ -z "$header" ] && continue
-  [[ "$header" == Content-Length:* ]] || exit 0
-  len="${header#Content-Length: }"
-  IFS= read -r _blank || exit 0
-  payload="$(dd bs=1 count="$len" status=none 2>/dev/null)"
+  IFS= read -r payload || exit 0
+  payload="${payload%$'\r'}"
+  [ -z "$payload" ] && continue
+  req_id="$(extract_id "$payload")"
 
   if [[ "$payload" == *'"method":"initialize"'* ]]; then
     sleep 2
-    send_msg '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-05","capabilities":{},"serverInfo":{"name":"slow","version":"1.0.0"}}}'
+    send_msg "{\"jsonrpc\":\"2.0\",\"id\":${req_id},\"result\":{\"protocolVersion\":\"2025-11-05\",\"capabilities\":{},\"serverInfo\":{\"name\":\"slow\",\"version\":\"1.0.0\"}}}"
     continue
   fi
 
@@ -262,8 +345,14 @@ done
     let client = LocalMcpClient;
     let server = McpServerConfig {
         name: "slow".to_string(),
+        transport: McpTransportMode::Auto,
         command: script.path.to_string_lossy().to_string(),
         args: Vec::new(),
+        endpoint: String::new(),
+        auth_header: String::new(),
+        headers: Default::default(),
+        env: Default::default(),
+        cwd: String::new(),
         enabled: true,
         tags: vec!["slow".to_string()],
     };
@@ -282,21 +371,27 @@ fn collect_mcp_context_uses_stdio_mcp_server() {
 set -euo pipefail
 
 send_msg() {
-  local body="$1"
-  printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body"
+  printf '%s\n' "$1"
+}
+
+extract_id() {
+  local payload="$1"
+  local id
+  id="$(printf '%s' "$payload" | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)"
+  if [ -z "$id" ]; then
+    id=1
+  fi
+  printf '%s' "$id"
 }
 
 while true; do
-  IFS= read -r header || exit 0
-  header="${header%$'\r'}"
-  [ -z "$header" ] && continue
-  [[ "$header" == Content-Length:* ]] || exit 0
-  len="${header#Content-Length: }"
-  IFS= read -r _blank || exit 0
-  payload="$(dd bs=1 count="$len" status=none 2>/dev/null)"
+  IFS= read -r payload || exit 0
+  payload="${payload%$'\r'}"
+  [ -z "$payload" ] && continue
+  req_id="$(extract_id "$payload")"
 
   if [[ "$payload" == *'"method":"initialize"'* ]]; then
-    send_msg '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-05","capabilities":{"resources":{}},"serverInfo":{"name":"public-fs-test","version":"1.0.0"}}}'
+    send_msg "{\"jsonrpc\":\"2.0\",\"id\":${req_id},\"result\":{\"protocolVersion\":\"2025-11-05\",\"capabilities\":{\"resources\":{}},\"serverInfo\":{\"name\":\"public-fs-test\",\"version\":\"1.0.0\"}}}"
     continue
   fi
 
@@ -305,12 +400,12 @@ while true; do
   fi
 
   if [[ "$payload" == *'"method":"resources/list"'* ]]; then
-    send_msg '{"jsonrpc":"2.0","id":2,"result":{"resources":[{"uri":"mcp://public-fs-test/chain"}]}}'
+    send_msg "{\"jsonrpc\":\"2.0\",\"id\":${req_id},\"result\":{\"resources\":[{\"uri\":\"mcp://public-fs-test/chain\",\"name\":\"chain\"}]}}"
     continue
   fi
 
   if [[ "$payload" == *'"method":"resources/read"'* ]]; then
-    send_msg '{"jsonrpc":"2.0","id":2,"result":{"contents":[{"uri":"mcp://public-fs-test/chain","text":"chain.txt"}]}}'
+    send_msg "{\"jsonrpc\":\"2.0\",\"id\":${req_id},\"result\":{\"contents\":[{\"uri\":\"mcp://public-fs-test/chain\",\"text\":\"chain.txt\"}]}}"
     continue
   fi
 
@@ -323,8 +418,14 @@ done
         timeout_ms: 1000,
         servers: vec![McpServerConfig {
             name: "public-fs-test".to_string(),
+            transport: McpTransportMode::Auto,
             command: script.path.to_string_lossy().to_string(),
             args: Vec::new(),
+            endpoint: String::new(),
+            auth_header: String::new(),
+            headers: Default::default(),
+            env: Default::default(),
+            cwd: String::new(),
             enabled: true,
             tags: vec!["filesystem".to_string()],
         }],

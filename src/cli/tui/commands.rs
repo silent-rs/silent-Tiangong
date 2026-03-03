@@ -1,5 +1,7 @@
 use anyhow::{Result, anyhow};
 
+use crate::core::agent_config::McpTransportMode;
+use crate::core::app_state::RegisterMcpServerOptions;
 use crate::core::planner::PlanStepStatus;
 
 use super::{CliApp, CommandHint, McpModalState};
@@ -525,6 +527,14 @@ impl CliApp {
             parsed.command_args,
             parsed.tags,
             parsed.enabled,
+            RegisterMcpServerOptions {
+                transport: parsed.transport,
+                endpoint: parsed.endpoint,
+                auth_header: parsed.auth_header,
+                headers: parsed.headers,
+                env: parsed.env,
+                cwd: parsed.cwd,
+            },
         )?;
         if let Some(modal) = self.mcp_modal.as_mut() {
             modal.add_input = None;
@@ -587,6 +597,7 @@ impl CliApp {
                     || index_text.starts_with(query)
                     || server.name.contains(query)
                     || server.command.contains(query)
+                    || server.endpoint.contains(query)
                     || server.tags.iter().any(|tag| tag.contains(query));
                 matched.then_some(idx)
             })
@@ -801,6 +812,14 @@ impl CliApp {
             CommandHint::new("/mcp", "打开 MCP 管理弹窗"),
             CommandHint::new("/mcp browser", "打开弹窗并按关键词筛选"),
             CommandHint::new_note(
+                "新增示例（stdio）",
+                "browser npx -y @modelcontextprotocol/server-filesystem --tags fs",
+            ),
+            CommandHint::new_note(
+                "新增示例（http）",
+                "remote https://example.com/mcp --transport http --auth-header token",
+            ),
+            CommandHint::new_note(
                 "弹窗内快捷键",
                 "空格启/禁用 Backspace删除 Delete删筛选字 A新增 Esc关闭",
             ),
@@ -830,13 +849,19 @@ struct ParsedMcpAddArgs {
     command_args: Vec<String>,
     tags: Vec<String>,
     enabled: bool,
+    transport: Option<McpTransportMode>,
+    endpoint: Option<String>,
+    auth_header: Option<String>,
+    headers: Vec<(String, String)>,
+    env: Vec<(String, String)>,
+    cwd: Option<String>,
 }
 
 fn parse_mcp_add_args(raw: &str) -> Result<ParsedMcpAddArgs> {
     let tokens = raw.split_whitespace().collect::<Vec<_>>();
-    if tokens.len() < 2 {
+    if tokens.is_empty() {
         return Err(anyhow!(
-            "参数不足，示例：browser npx -y @modelcontextprotocol/server-browser --tags web,browser"
+            "参数不足，示例：browser npx -y @modelcontextprotocol/server-browser --tags web,browser 或 remote --transport http --endpoint https://example.com/mcp"
         ));
     }
 
@@ -847,6 +872,12 @@ fn parse_mcp_add_args(raw: &str) -> Result<ParsedMcpAddArgs> {
 
     let mut enabled = true;
     let mut tags = Vec::new();
+    let mut transport = None;
+    let mut endpoint = None;
+    let mut auth_header = None;
+    let mut headers = Vec::new();
+    let mut env = Vec::new();
+    let mut cwd = None;
     let mut non_flag_tokens = Vec::new();
     let mut idx = 1usize;
     while idx < tokens.len() {
@@ -872,6 +903,48 @@ fn parse_mcp_add_args(raw: &str) -> Result<ParsedMcpAddArgs> {
                 );
                 idx += 2;
             }
+            "--transport" => {
+                let value = tokens
+                    .get(idx + 1)
+                    .ok_or_else(|| anyhow!("--transport 缺少参数，可选：auto|stdio|http"))?;
+                transport = Some(parse_transport(value)?);
+                idx += 2;
+            }
+            "--endpoint" => {
+                let value = tokens
+                    .get(idx + 1)
+                    .ok_or_else(|| anyhow!("--endpoint 缺少参数"))?;
+                endpoint = Some(value.trim().to_string());
+                idx += 2;
+            }
+            "--auth-header" => {
+                let value = tokens
+                    .get(idx + 1)
+                    .ok_or_else(|| anyhow!("--auth-header 缺少参数"))?;
+                auth_header = Some(value.trim().to_string());
+                idx += 2;
+            }
+            "--header" => {
+                let value = tokens
+                    .get(idx + 1)
+                    .ok_or_else(|| anyhow!("--header 缺少参数，示例：--header X-Tenant=demo"))?;
+                headers.push(parse_key_value(value, "--header")?);
+                idx += 2;
+            }
+            "--env" => {
+                let value = tokens
+                    .get(idx + 1)
+                    .ok_or_else(|| anyhow!("--env 缺少参数，示例：--env NODE_ENV=production"))?;
+                env.push(parse_key_value(value, "--env")?);
+                idx += 2;
+            }
+            "--cwd" => {
+                let value = tokens
+                    .get(idx + 1)
+                    .ok_or_else(|| anyhow!("--cwd 缺少参数"))?;
+                cwd = Some(value.trim().to_string());
+                idx += 2;
+            }
             token => {
                 non_flag_tokens.push(token.to_string());
                 idx += 1;
@@ -879,9 +952,7 @@ fn parse_mcp_add_args(raw: &str) -> Result<ParsedMcpAddArgs> {
         }
     }
 
-    let Some(command) = non_flag_tokens.first().cloned() else {
-        return Err(anyhow!("缺少 command，示例：browser npx ..."));
-    };
+    let command = non_flag_tokens.first().cloned().unwrap_or_default();
     let command_args = non_flag_tokens.into_iter().skip(1).collect::<Vec<_>>();
     Ok(ParsedMcpAddArgs {
         name: name.to_string(),
@@ -889,5 +960,32 @@ fn parse_mcp_add_args(raw: &str) -> Result<ParsedMcpAddArgs> {
         command_args,
         tags,
         enabled,
+        transport,
+        endpoint,
+        auth_header,
+        headers,
+        env,
+        cwd,
     })
+}
+
+fn parse_transport(raw: &str) -> Result<McpTransportMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(McpTransportMode::Auto),
+        "stdio" => Ok(McpTransportMode::Stdio),
+        "http" => Ok(McpTransportMode::Http),
+        _ => Err(anyhow!("--transport 仅支持 auto|stdio|http")),
+    }
+}
+
+fn parse_key_value(raw: &str, flag: &str) -> Result<(String, String)> {
+    let (key, value) = raw
+        .split_once('=')
+        .ok_or_else(|| anyhow!("{flag} 参数格式错误，需 key=value：{raw}"))?;
+    let key = key.trim();
+    let value = value.trim();
+    if key.is_empty() || value.is_empty() {
+        return Err(anyhow!("{flag} 参数格式错误，key/value 不能为空：{raw}"));
+    }
+    Ok((key.to_string(), value.to_string()))
 }

@@ -1,23 +1,21 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use http::{HeaderName, HeaderValue};
+use rmcp::model::{PaginatedRequestParams, ReadResourceRequestParams};
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use rmcp::transport::{ConfigureCommandExt, StreamableHttpClientTransport, TokioChildProcess};
+use rmcp::{Peer, RoleClient, ServiceExt};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::Command;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::time::timeout;
 
-use crate::core::agent_config::McpServerConfig;
+use crate::core::agent_config::{McpServerConfig, ResolvedMcpTransport};
 
-use super::util::truncate_text;
-
-const MCP_PROTOCOL_VERSION: &str = "2025-11-05";
-const MCP_CLIENT_NAME: &str = "tiangong";
 const MAX_LIST_PAGES: usize = 8;
-const INIT_REQUEST_ID: u64 = 1;
-const METHOD_REQUEST_ID: u64 = 2;
 
 #[derive(Debug, Clone)]
 pub struct McpResourceMeta {
@@ -52,7 +50,7 @@ impl McpClient for LocalMcpClient {
             return Ok(Vec::new());
         }
 
-        if server.command.trim().is_empty() {
+        if matches!(server.resolved_transport(), ResolvedMcpTransport::Metadata) {
             return Ok(server
                 .tags
                 .iter()
@@ -70,7 +68,7 @@ impl McpClient for LocalMcpClient {
                 .collect());
         }
 
-        list_resources_via_stdio(server, timeout_ms)
+        list_resources_via_rmcp(server, timeout_ms)
     }
 
     fn read_resource(
@@ -83,9 +81,9 @@ impl McpClient for LocalMcpClient {
             return Err(anyhow!("MCP server 未启用：{}", server.name));
         }
 
-        if server.command.trim().is_empty() {
+        if matches!(server.resolved_transport(), ResolvedMcpTransport::Metadata) {
             return Ok(format!(
-                "resource={} from_server={} command={} args={}",
+                "resource={} from_server={} transport=metadata command={} args={}",
                 resource.uri,
                 server.name,
                 "(empty)",
@@ -107,7 +105,7 @@ impl McpClient for LocalMcpClient {
     }
 }
 
-fn list_resources_via_stdio(
+fn list_resources_via_rmcp(
     server: &McpServerConfig,
     timeout_ms: u64,
 ) -> Result<Vec<McpResourceMeta>> {
@@ -150,9 +148,20 @@ fn run_mcp_request(
     method: &str,
     params: Option<Value>,
 ) -> Result<Value> {
-    let command = server.command.trim();
-    if command.is_empty() {
-        return Err(anyhow!("MCP server command 为空：{}", server.name));
+    match server.resolved_transport() {
+        ResolvedMcpTransport::Metadata => {
+            return Err(anyhow!("MCP server 未配置可连接传输：{}", server.name));
+        }
+        ResolvedMcpTransport::Stdio => {
+            if server.command_text().is_empty() {
+                return Err(anyhow!("MCP server command 为空：{}", server.name));
+            }
+        }
+        ResolvedMcpTransport::Http => {
+            if server.resolved_http_endpoint().is_none() {
+                return Err(anyhow!("HTTP MCP server endpoint 为空：{}", server.name));
+            }
+        }
     }
 
     let runtime = TokioRuntimeBuilder::new_current_thread()
@@ -190,15 +199,32 @@ async fn run_mcp_request_async(
     method: &str,
     params: Option<Value>,
 ) -> Result<Value> {
-    let command = server.command.trim();
-    let mut cmd = Command::new(command);
-    cmd.kill_on_drop(true)
-        .args(&server.args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    match server.resolved_transport() {
+        ResolvedMcpTransport::Http => run_http_mcp_request_async(server, method, params).await,
+        ResolvedMcpTransport::Stdio => run_stdio_mcp_request_async(server, method, params).await,
+        ResolvedMcpTransport::Metadata => {
+            Err(anyhow!("MCP server 未配置可连接传输：{}", server.name))
+        }
+    }
+}
 
-    let mut child = cmd.spawn().with_context(|| {
+async fn run_stdio_mcp_request_async(
+    server: &McpServerConfig,
+    method: &str,
+    params: Option<Value>,
+) -> Result<Value> {
+    let command = server.command_text();
+    let transport = TokioChildProcess::new(Command::new(command).configure(|cmd| {
+        cmd.args(&server.args);
+        cmd.stderr(Stdio::null());
+        if let Some(cwd) = server.cwd_text() {
+            cmd.current_dir(cwd);
+        }
+        for (key, value) in &server.env {
+            cmd.env(key, value);
+        }
+    }))
+    .with_context(|| {
         format!(
             "MCP进程启动失败：server={} command={} args={}",
             server.name,
@@ -211,252 +237,115 @@ async fn run_mcp_request_async(
         )
     })?;
 
-    let mut stdin = child.stdin.take().context("MCP进程 stdin 管道不可用")?;
-    let stdout = child.stdout.take().context("MCP进程 stdout 管道不可用")?;
-    let stderr = child.stderr.take().context("MCP进程 stderr 管道不可用")?;
+    let service = ()
+        .serve(transport)
+        .await
+        .with_context(|| format!("MCP握手失败：server={} command={}", server.name, command))?;
 
-    let stderr_task = tokio::spawn(async move {
-        let mut stderr = BufReader::new(stderr);
-        let mut buffer = String::new();
-        let _ = stderr.read_to_string(&mut buffer).await;
-        buffer
-    });
-
-    let mut stdout = BufReader::new(stdout);
-
-    let request_result = async {
-        send_jsonrpc_request(
-            &mut stdin,
-            INIT_REQUEST_ID,
-            "initialize",
-            Some(json!({
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": {
-                    "name": MCP_CLIENT_NAME,
-                    "version": env!("CARGO_PKG_VERSION")
-                }
-            })),
-        )
-        .await?;
-        let _ = read_jsonrpc_result(&mut stdout, INIT_REQUEST_ID).await?;
-
-        send_jsonrpc_notification(&mut stdin, "notifications/initialized", Some(json!({}))).await?;
-
-        send_jsonrpc_request(&mut stdin, METHOD_REQUEST_ID, method, params).await?;
-        read_jsonrpc_result(&mut stdout, METHOD_REQUEST_ID).await
-    }
-    .await;
-
-    drop(stdin);
-    shutdown_child(&mut child).await;
-
-    let stderr = stderr_task.await.unwrap_or_default();
-    match request_result {
-        Ok(result) => Ok(result),
-        Err(err) => {
-            let stderr = stderr.trim();
-            if stderr.is_empty() {
-                Err(err)
-            } else {
-                Err(anyhow!("{}; stderr={}", err, truncate_text(stderr, 200)))
-            }
-        }
-    }
+    let response = dispatch_mcp_request(service.peer(), method, params).await;
+    let _ = service.cancel().await;
+    response
 }
 
-async fn shutdown_child(child: &mut Child) {
-    if matches!(child.try_wait(), Ok(Some(_))) {
-        return;
-    }
-    let _ = child.start_kill();
-    let _ = child.wait().await;
-}
-
-async fn send_jsonrpc_request(
-    stdin: &mut ChildStdin,
-    id: u64,
+async fn run_http_mcp_request_async(
+    server: &McpServerConfig,
     method: &str,
     params: Option<Value>,
-) -> Result<()> {
-    let mut message = json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": method,
-    });
-    if let Some(params) = params
-        && let Some(object) = message.as_object_mut()
-    {
-        object.insert("params".to_string(), params);
-    }
-    send_jsonrpc_message(stdin, &message).await
-}
-
-async fn send_jsonrpc_notification(
-    stdin: &mut ChildStdin,
-    method: &str,
-    params: Option<Value>,
-) -> Result<()> {
-    let mut message = json!({
-        "jsonrpc": "2.0",
-        "method": method,
-    });
-    if let Some(params) = params
-        && let Some(object) = message.as_object_mut()
-    {
-        object.insert("params".to_string(), params);
-    }
-    send_jsonrpc_message(stdin, &message).await
-}
-
-async fn send_jsonrpc_message(stdin: &mut ChildStdin, message: &Value) -> Result<()> {
-    let payload = serde_json::to_vec(message).context("序列化 MCP JSON-RPC 消息失败")?;
-    let header = format!("Content-Length: {}\r\n\r\n", payload.len());
-    stdin
-        .write_all(header.as_bytes())
-        .await
-        .context("写入 MCP 消息头失败")?;
-    stdin
-        .write_all(&payload)
-        .await
-        .context("写入 MCP 消息体失败")?;
-    stdin.flush().await.context("刷新 MCP stdin 失败")?;
-    Ok(())
-}
-
-async fn read_jsonrpc_result(
-    stdout: &mut BufReader<ChildStdout>,
-    expected_id: u64,
 ) -> Result<Value> {
-    loop {
-        let message = read_jsonrpc_message(stdout).await?;
-        let object = match message.as_object() {
-            Some(object) => object,
-            None => continue,
-        };
+    if !server.args.is_empty() {
+        return Err(anyhow!(
+            "HTTP MCP server 不支持 args 参数：server={} args={}",
+            server.name,
+            server.args.join(" ")
+        ));
+    }
+    let endpoint = server
+        .resolved_http_endpoint()
+        .ok_or_else(|| anyhow!("HTTP MCP server endpoint 为空：{}", server.name))?;
+    let mut transport_config = StreamableHttpClientTransportConfig::with_uri(endpoint.to_string());
+    let auth_header = server.auth_header.trim();
+    if !auth_header.is_empty() {
+        transport_config = transport_config.auth_header(auth_header.to_string());
+    }
+    if !server.headers.is_empty() {
+        transport_config = transport_config.custom_headers(parse_http_headers(server)?);
+    }
+    let transport = StreamableHttpClientTransport::from_config(transport_config);
+    let service = ().serve(transport).await.with_context(|| {
+        format!(
+            "HTTP MCP握手失败：server={} endpoint={}",
+            server.name, endpoint
+        )
+    })?;
 
-        let Some(id) = object.get("id") else {
-            continue;
-        };
-        if !matches_request_id(id, expected_id) {
-            continue;
-        }
+    let response = dispatch_mcp_request(service.peer(), method, params).await;
+    let _ = service.cancel().await;
+    response
+}
 
-        if let Some(error) = object.get("error") {
-            return Err(anyhow!("MCP响应错误：{}", format_jsonrpc_error(error)));
-        }
+fn parse_http_headers(server: &McpServerConfig) -> Result<HashMap<HeaderName, HeaderValue>> {
+    let mut headers = HashMap::new();
+    for (key, value) in &server.headers {
+        let header_name = HeaderName::from_bytes(key.trim().as_bytes())
+            .with_context(|| format!("HTTP header 名称无效：server={} key={key}", server.name))?;
+        let header_value = HeaderValue::from_str(value.trim()).with_context(|| {
+            format!(
+                "HTTP header 值无效：server={} key={} value={}",
+                server.name, key, value
+            )
+        })?;
+        headers.insert(header_name, header_value);
+    }
+    Ok(headers)
+}
 
-        if let Some(result) = object.get("result") {
-            return Ok(result.clone());
-        }
-
-        return Err(anyhow!("MCP响应缺少 result 字段"));
+async fn dispatch_mcp_request(
+    peer: &Peer<RoleClient>,
+    method: &str,
+    params: Option<Value>,
+) -> Result<Value> {
+    match method {
+        "resources/list" => request_resources_list(peer, params).await,
+        "resources/read" => request_resources_read(peer, params).await,
+        _ => Err(anyhow!("不支持的 MCP 方法：{method}")),
     }
 }
 
-fn matches_request_id(id: &Value, expected_id: u64) -> bool {
-    match id {
-        Value::Number(number) => number.as_u64() == Some(expected_id),
-        Value::String(text) => text.parse::<u64>().ok() == Some(expected_id),
-        _ => false,
-    }
+async fn request_resources_list(peer: &Peer<RoleClient>, params: Option<Value>) -> Result<Value> {
+    let cursor = params
+        .as_ref()
+        .and_then(|params| params.get("cursor"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|cursor| !cursor.is_empty())
+        .map(ToString::to_string);
+    let request = cursor.map(|cursor| PaginatedRequestParams {
+        meta: None,
+        cursor: Some(cursor),
+    });
+
+    let response = peer
+        .list_resources(request)
+        .await
+        .context("调用 MCP resources/list 失败")?;
+    serde_json::to_value(response).context("序列化 MCP resources/list 响应失败")
 }
 
-async fn read_jsonrpc_message(stdout: &mut BufReader<ChildStdout>) -> Result<Value> {
-    loop {
-        let mut line = String::new();
-        let read = stdout
-            .read_line(&mut line)
-            .await
-            .context("读取 MCP 响应失败")?;
-        if read == 0 {
-            return Err(anyhow!("MCP stdout 已关闭"));
-        }
+async fn request_resources_read(peer: &Peer<RoleClient>, params: Option<Value>) -> Result<Value> {
+    let uri = params
+        .as_ref()
+        .and_then(|params| params.get("uri"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|uri| !uri.is_empty())
+        .ok_or_else(|| anyhow!("MCP resources/read 缺少 uri 参数"))?
+        .to_string();
 
-        let line = line.trim_end_matches(['\r', '\n']).trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        if line.starts_with('{') || line.starts_with('[') {
-            return parse_json_message(line);
-        }
-
-        let mut content_length = parse_content_length_header(line);
-        let mut has_headers = line.contains(':');
-
-        loop {
-            let mut header_line = String::new();
-            let read = stdout
-                .read_line(&mut header_line)
-                .await
-                .context("读取 MCP 响应头失败")?;
-            if read == 0 {
-                return Err(anyhow!("MCP 响应头提前结束"));
-            }
-
-            let header_line = header_line.trim_end_matches(['\r', '\n']);
-            if header_line.is_empty() {
-                break;
-            }
-
-            has_headers = true;
-            if let Some(length) = parse_content_length_header(header_line) {
-                content_length = Some(length);
-            }
-        }
-
-        if let Some(content_length) = content_length {
-            let mut payload = vec![0_u8; content_length];
-            stdout
-                .read_exact(&mut payload)
-                .await
-                .context("读取 MCP 响应体失败")?;
-            let payload = String::from_utf8(payload).context("MCP 响应体不是 UTF-8")?;
-            return parse_json_message(payload.trim());
-        }
-
-        if has_headers {
-            return Err(anyhow!("MCP 响应头缺少 Content-Length"));
-        }
-
-        return parse_json_message(line);
-    }
-}
-
-fn parse_content_length_header(line: &str) -> Option<usize> {
-    let (name, value) = line.split_once(':')?;
-    if name.trim().eq_ignore_ascii_case("Content-Length") {
-        return value.trim().parse::<usize>().ok();
-    }
-    None
-}
-
-fn parse_json_message(payload: &str) -> Result<Value> {
-    serde_json::from_str::<Value>(payload)
-        .with_context(|| format!("解析 MCP JSON 消息失败：{}", truncate_text(payload, 200)))
-}
-
-fn format_jsonrpc_error(error: &Value) -> String {
-    if let Value::Object(error) = error {
-        let code = error
-            .get("code")
-            .and_then(Value::as_i64)
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        let message = error
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("(empty)")
-            .trim();
-        let data = error
-            .get("data")
-            .map(|value| truncate_text(&value.to_string(), 120))
-            .unwrap_or_else(|| "(none)".to_string());
-        return format!("code={} message={} data={}", code, message, data);
-    }
-
-    truncate_text(&error.to_string(), 200)
+    let response = peer
+        .read_resource(ReadResourceRequestParams { meta: None, uri })
+        .await
+        .context("调用 MCP resources/read 失败")?;
+    serde_json::to_value(response).context("序列化 MCP resources/read 响应失败")
 }
 
 fn parse_resource_page(server_name: &str, value: &Value) -> (Vec<McpResourceMeta>, Option<String>) {
