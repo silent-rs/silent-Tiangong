@@ -1,85 +1,56 @@
 # 天工需求整理
 
 ## 文档目的
-用于对齐天工当前阶段（RFC 0002）的开发边界，作为 `PLAN.md`、`TODO.md` 与实现代码的一致性基线。
+用于对齐天工当前阶段（RFC 0003）的开发边界，作为 `PLAN.md`、`TODO.md` 与实现代码的一致性基线。
 
-## 当前范围（RFC 0002：CLI Agent 主线）
+## 已有基线能力（承接 RFC 0002）
+
+以下能力视为当前稳定基线，不在本轮重做：
+
+- `tiangong` 默认保持桌面 UI 入口，CLI 入口为 `tiangong cli`。
+- CLI 具备任务闭环：输入 -> planning -> executing -> final response。
+- MCP 已支持本地 `stdio` 与远程 HTTP（JSON-RPC over HTTP）并存。
+- Agent 配置已支持查看、更新、校验与即时生效。
+- Skills 已支持本地扫描、索引与按任务意图匹配。
+
+## 当前范围（RFC 0003：Skill 能力管理）
 
 ### Must
-- `tiangong` 默认保持桌面 UI 入口，不改变现有默认行为。
-- 提供 CLI Agent 入口 `tiangong cli`。
-- `main` 命令参数解析需使用 `clap` 实现，统一子命令与帮助输出行为。
-- CLI 交互界面使用 `ratatui`，支持连续多轮任务执行与会话恢复。
-- 主界面交互规则：输入以 `/` 开头且命令提示可见时，`↑/↓` 用于命令项选择；普通输入时 `Shift+↑/↓` 切换输入历史；当输入框为空且存在历史时，`↑/↓` 直接切换输入历史；其他普通输入场景下 `↑/↓` 用于输入框光标移动；鼠标滚轮用于对话区滚动。
-- CLI 需提供 `/planing` 弹窗（与“切换会话”弹窗交互风格一致）查看当前 planning 列表。
-- 状态栏需支持复合阶段显示（如 `planning + executing`），并展示当前执行中的 plan/step（含序号与进度）。
-- CLI 主工作区采用左右分栏，左侧对话区与右侧 plan 区固定为 `3:1` 布局；右侧需常驻展示当前任务的 plan 与 step 状态。
-- 同一会话内，plan 需保持完整历史：新增输入只追加新 plan，不清理已完成 plan，不自动调整历史顺序；未完成（pending）plan 允许用户手动调序与删改。
-- planning 的删除与调序仅在 `/planing` 弹窗内完成，且只允许操作未开始（pending）plan 事项。
-- planning 列表中的已完成 plan 事项需以删除线样式显示。
-- CLI 对话输出需支持 Markdown 轻量渲染（至少覆盖标题、粗体、列表、代码块），提升终端可读性。
-- 会话区输出形态需对齐 Claude 风格：将工具调用、命令执行、文件操作等过程以事件流条目展示（标题 + 关键摘要），避免长段原始中间态文本直接铺满对话区。
-- 会话执行过程中，每次工具/命令执行及其输出结果（stdout/stderr）都需实时写入对话区可见范围；全部步骤结束后再输出最终总结。
-- 会话区中 thinking（assistant 最终消息与 LLM 输出中的 reasoning）在完成后需默认收缩显示，仅保留精简摘要，降低长文本导致的滚动性能问题。
-- 会话区中工具输出展示时，stdout/stderr 最多显示 5 行；超出部分折叠为省略提示。
-- 会话区中 `write_file` 工具的参数回显需强制收缩为单行摘要，使用 `...` 省略正文内容，避免写入文本原文进入会话。
-- CLI 层仅承载 TUI 与交互适配代码；智能体能力统一沉淀在 `src/core/agents/`，运行编排能力在 `src/core/runtime.rs`，两者职责清晰分层并供 UI 与 CLI 复用。
-- 建立最小执行链路：输入 -> 规划 -> 执行 -> 输出。
-- 规划阶段需内置 planing 智能体（Planning Agent），优先由模型生成结构化计划。
-- 规划结果至少包含：目标、`plan` 事项列表、每个 `plan` 的独立执行步骤列表、风险。
-- `plan` 的每个 `execution step` 必须由执行智能体逐步驱动执行；仅在步骤执行成功后才允许标记为完成。
-- 当某个 `execution step` 执行失败时：该步骤标记为 `failed`，同一 `plan` 中后续未执行步骤标记为 `ignored`，并汇总该 `plan` 执行结果后继续执行下一个 `plan`。
-- `plan` 的调整仅允许在规划模型阶段完成（由用户新输入触发）；执行阶段不允许基于工具结果自动扩增或改写 `plan`。
-- 允许用户多次输入形成“连续输入列表”，规划模型需基于该列表进行增量规划并输出调整后的有序 `plan`。
-- `plan` 仅表达待办事项，不承载验证命令或验证结论；验证链路在运行时独立执行。
-- 工具执行需支持结构化记录（工具名、参数、耗时、退出码、摘要）。
-- 基础文件读写改能力（`read_file` / `write_file` / `replace_in_file` / `apply_patch`）需优先通过 `function call` 驱动执行。
-- 工具能力至少包含：
-  - 读：`list_dir`、`tree_dir`（支持 `max_depth` 深度限制）、`read_file`、代码检索。
-  - 写：`write_file`、`replace_in_file`、`apply_patch`。
-  - 命令：统一使用受控 `run_command`（支持 `cmd=bash,args=["-lc","..."]`），默认强制超时。
-- `read_file` 需支持分段读取（`start_line` / `max_lines`）并返回行号，便于精确定位后再修改。
-- `write_file` 需支持覆盖与追加两种写入模式；覆盖写入需采用原子落盘策略（临时文件 + rename）。
-- `replace_in_file` 需支持 `replace_all` 开关，默认只允许单点替换，避免误改。
-- `apply_patch` 仅支持天工补丁路线（unified diff，`---/+++/@@`），不支持 Codex 风格补丁文本。
-- `apply_patch` 需支持 `verify`（dry-run）模式：只校验不落盘，并输出可审阅的结构化变更预览。
-- `apply_patch` 失败需带错误分类：解析失败 / 路径越界 / 内容不匹配 / 写入失败。
-- `apply_patch` 需支持显式 `workdir`，统一计算 `effective_cwd`，并将补丁相对路径到绝对路径的转换结果纳入执行输出。
-- `run_command` 需对齐 `tokio::process::Command` 执行链路，默认 `env_clear` 后按 allowlist 注入环境变量。
-- 命令执行需支持跨平台 shell 参数派生（`bash -lc` / `sh -c` / `powershell -Command`）。
-- `patch` 与 `command` 的路径解析需复用统一标准化流程（相对路径 -> 绝对路径 -> 工作区边界校验）。
-- 工具与文件写入必须限制在工作区边界内，不允许越界访问。
-- 每轮输出需包含改动文件概览、差异摘要与执行结论（完成/未完成/风险）。
-- 会话数据本地持久化到用户目录（Unix: `~/.tiangong/sessions/`，Windows: `%USERPROFILE%\\.tiangong\\sessions\\`），应用配置持久化到对应的 `app.json`。
-- CLI 需提供 `/sessions` 命令用于“切换会话”。
-- 当用户切换会话时，如果该会话存在未完成（pending）的当前任务 plan 事项，系统需自动继续执行该 plan。
-- 应用启动后，若当前激活会话存在未完成（pending）的当前任务 plan 事项，系统需自动继续执行该 plan。
-- MVP 阶段运行时不自动迁移项目目录内旧 `.tiangong/` 数据。
-- 会话文件名必须使用 `scru128`（如 `<scru128>.json`）。
-- 统一配置结构需覆盖 Model/Skills/MCP/Agent，并支持本地恢复。
-- CLI 必须提供配置入口，至少支持配置查看、更新和校验，并在更新后即时生效。
-- 本地 MCP server 连接必须采用标准 MCP `stdio` JSON-RPC 生命周期（`initialize`、`notifications/initialized`、`resources/list`、`resources/read`），不允许依赖特定包名做协议特判。
-- 需支持远程 MCP 的 HTTP 对接能力（JSON-RPC over HTTP），并与本地 `stdio` 模式并存。
-- 模型适配需支持 BigModel `thinking` 参数透传，并正确解析/持久化 `reasoning_content`（与正文区分）。
-- 所有 LLM 调用输出（planning / execution / final response）均需进入对话栏可见范围，不允许仅在内部状态保存。
-- `async-openai` 允许暂时使用本地 fork 版本，以承载上述兼容字段能力。
+
+- Skill 管理方式必须与 MCP 管理一致：支持查看、筛选、启停、增删、校验、持久化。
+- CLI 必须提供 `/skill` 管理入口，交互风格对齐 `/mcp` 管理弹窗。
+- Skill 必须支持本地安装、启用、停用、卸载、列表、详情展示。
+- Skill 依赖 MCP 时，必须通过受控安装器生成托管 MCP server 配置，不允许 Skill 注入任意 `command/args`。
+- Skill 依赖 MCP 的命名与映射必须可追踪：`skill::<skill_id>::<mcp_id>`。
+- Skill 卸载时必须仅移除其托管 MCP 配置；共享依赖需基于引用计数处理。
+- Skill/MCP 管理操作必须统一结构化执行记录与失败回传格式，便于审计与排障。
+- 配置与锁文件必须统一写入用户目录 `~/.tiangong`，不得引入并行存储根。
+- 必须新增并维护 `skills-lock.json`、`mcp-lock.json`，保证与 `app.json` 一致。
+- 安装流程必须具备事务与回滚：任一步骤失败后回滚增量变更并输出错误分类。
+- 安装前必须输出权限摘要（`fs_read/fs_write/cmd_exec/net`）与依赖摘要，并要求用户确认。
+- 文件/命令/网络权限必须默认最小化：
+  - 文件访问需 canonicalize 且受工作区边界约束。
+  - 命令执行仅允许白名单命令，禁止 `bash -c` 等复合注入模式。
+  - 网络默认 deny，首期仅允许显式 MCP HTTP endpoint。
 
 ### Should
-- 当 planing 智能体不可用或返回非法结构时，自动回退到最小计划策略并记录原因。
-- 自动推荐并执行验证命令（Rust 优先 `cargo check` / `cargo clippy`），失败返回可操作摘要。
-- 验证能力与 `plan` 解耦：验证失败不应作为 `plan` 事项描述的一部分。
-- 支持 Skills 本地扫描、索引与按任务意图匹配。
-- 定义 MCP 客户端抽象（连接、资源发现、资源读取、错误处理）。
-- 将 MCP 资源读取结果接入执行链路，作为模型上下文输入。
-- 统一 Skills/MCP 的执行记录与失败回传格式，便于审计与排障。
+
+- 支持 Git 源安装 Skill（在本地源稳定后交付）。
+- 支持非交互命令：`tiangong skill list/install/remove/enable/disable/validate`。
+- 支持 Skill 包 `skill.toml` 与 `SKILL.md` 双格式兼容（缺失 `skill.toml` 时降级解析）。
 
 ### 非目标（当前阶段不做）
-- 多模型供应商并行路由。
-- 分布式执行与远程 Worker。
-- 全量插件生态与复杂插件市场能力。
+
+- 商业化支付与计费体系。
+- 评分/推荐/排行榜。
+- GUI Web Market。
+- 去中心化分发与 P2P 镜像网络。
+- 复杂组织级权限与审核系统。
 
 ## 参考
+
 - `README.md`
 - `PLAN.md`
 - `TODO.md`
 - `docs/rfc/0002-cli-agent-roadmap.md`
+- `docs/rfc/0003-skill-market.md`
