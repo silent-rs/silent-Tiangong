@@ -40,6 +40,7 @@
 - 支持 Skill 包 `skill.toml` 与 `SKILL.md` 双格式兼容（缺失 `skill.toml` 时降级解析）。
 - 支持外部 Skill 快速转换为天工 Skill（`--convert` 自动补齐 `SKILL.md/skill.toml`）。
 - `--convert` 必须优先使用天工内置智能体 + 大模型进行辅助转换；模型不可用或生成失败时回退固定规则转换。
+- `--convert` 转换结束后必须自动清理 `~/.tiangong/skills/imported` 中对应的转换中间目录，避免残留。
 - 支持 Skill 初始化命令（`/skill init`）快速生成天工兼容脚手架（`SKILL.md`、`skill.toml`）。
 
 ### 非目标（当前阶段不做）

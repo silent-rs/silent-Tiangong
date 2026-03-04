@@ -46,6 +46,7 @@
 - [ ] 实现 `list_skill` / `describe_skill`
 - [x] 支持外部 Skill 快速转换安装（`--convert` 自动补齐 `SKILL.md/skill.toml`）
 - [x] 转换链路接入智能体辅助（模型优先，规则回退）
+- [x] 转换完成后自动清理 `~/.tiangong/skills/imported` 中间目录
 - [x] 支持 Skill 初始化命令（`/skill init` 生成 SKILL.md 与 skill.toml）
 
 依赖：B1、B2

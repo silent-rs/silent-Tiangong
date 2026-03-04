@@ -99,14 +99,14 @@ impl CliApp {
                     let is_selected = list_start + offset == selected;
                     let marker = if is_selected { "› " } else { "  " };
                     let status = if skill.enabled { "enabled" } else { "disabled" };
-                    let text = format!(
-                        "{marker}{:>2}. {} · {} · {}",
-                        skill_idx + 1,
-                        skill.id,
-                        skill.version,
-                        status,
-                    );
                     if is_selected {
+                        let text = format!(
+                            "{marker}{:>2}. {} · {} · {}",
+                            skill_idx + 1,
+                            skill.id,
+                            skill.version,
+                            status,
+                        );
                         Line::from(Span::styled(
                             text,
                             Style::default()
@@ -114,10 +114,25 @@ impl CliApp {
                                 .bg(Color::Cyan)
                                 .add_modifier(Modifier::BOLD),
                         ))
-                    } else if skill.enabled {
-                        Line::from(Span::styled(text, Style::default().fg(Color::White)))
                     } else {
-                        Line::from(Span::styled(text, Style::default().fg(Color::DarkGray)))
+                        let base_style = if skill.enabled {
+                            Style::default().fg(Color::White)
+                        } else {
+                            Style::default().fg(Color::DarkGray)
+                        };
+                        let status_style = if skill.enabled {
+                            Style::default().fg(Color::Green)
+                        } else {
+                            Style::default().fg(Color::Red)
+                        };
+                        Line::from(vec![
+                            Span::styled(format!("{marker}{:>2}. ", skill_idx + 1), base_style),
+                            Span::styled(skill.id.clone(), base_style),
+                            Span::styled(" · ", base_style),
+                            Span::styled(skill.version.clone(), base_style),
+                            Span::styled(" · ", base_style),
+                            Span::styled(status, status_style),
+                        ])
                     }
                 })
                 .collect::<Vec<_>>()
@@ -146,9 +161,9 @@ impl CliApp {
                     Span::styled(skill.version.clone(), Style::default().fg(Color::White)),
                 ]),
                 Line::from(vec![
-                    Span::styled("enabled: ", Style::default().fg(Color::Gray)),
+                    Span::styled("status: ", Style::default().fg(Color::Gray)),
                     Span::styled(
-                        skill.enabled.to_string(),
+                        if skill.enabled { "enabled" } else { "disabled" },
                         if skill.enabled {
                             Style::default().fg(Color::Green)
                         } else {

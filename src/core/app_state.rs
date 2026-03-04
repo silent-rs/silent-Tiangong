@@ -22,7 +22,8 @@ use crate::core::runtime::{
 };
 use crate::core::session::{Message, MessageRole, Session, SessionTaskPlan, now_text};
 use crate::core::skill::{
-    init_tiangong_skill_scaffold, load_skill_from_local_dir, prepare_skill_source_for_install,
+    analyze_external_skill, init_tiangong_skill_scaffold, load_skill_from_local_dir,
+    prepare_skill_source_for_install,
 };
 use crate::core::tool::{ToolExecutionRecord, ToolResult};
 
@@ -70,6 +71,13 @@ pub struct RegisterMcpServerOptions {
     pub cwd: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct SkillInstallInspection {
+    pub dependencies: Vec<String>,
+    pub env_vars: Vec<String>,
+    pub missing_env_vars: Vec<String>,
+}
+
 #[derive(Debug)]
 enum TurnEvent {
     PlanReady(TaskPlan),
@@ -104,6 +112,29 @@ struct McpDependencyLockRecord {
     path: String,
     ref_count: usize,
     installed_at: String,
+}
+
+#[derive(Debug)]
+struct ScopedDirCleanup {
+    dir: Option<PathBuf>,
+}
+
+impl ScopedDirCleanup {
+    fn new(dir: Option<PathBuf>) -> Self {
+        Self { dir }
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.dir.is_some()
+    }
+}
+
+impl Drop for ScopedDirCleanup {
+    fn drop(&mut self) {
+        if let Some(dir) = self.dir.take() {
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -621,24 +652,50 @@ impl TiangongState {
         self.install_local_skill_with_options(path, enabled, false)
     }
 
+    pub fn inspect_skill_install_requirements(
+        &self,
+        path: &str,
+        convert_external: bool,
+    ) -> Result<SkillInstallInspection> {
+        let source_path = self.resolve_skill_source_path(path)?;
+        if !convert_external {
+            return Ok(SkillInstallInspection::default());
+        }
+        let analysis = analyze_external_skill(&source_path)?;
+        let missing_env_vars = analysis
+            .env_vars
+            .iter()
+            .filter(|key| std::env::var_os(key.as_str()).is_none())
+            .cloned()
+            .collect::<Vec<_>>();
+        Ok(SkillInstallInspection {
+            dependencies: analysis.dependencies,
+            env_vars: analysis.env_vars,
+            missing_env_vars,
+        })
+    }
+
     pub fn install_local_skill_with_options(
         &mut self,
         path: &str,
         enabled: bool,
         convert_external: bool,
     ) -> Result<String> {
+        self.install_local_skill_with_options_and_inputs(path, enabled, convert_external, &[])
+    }
+
+    pub fn install_local_skill_with_options_and_inputs(
+        &mut self,
+        path: &str,
+        enabled: bool,
+        convert_external: bool,
+        convert_env_values: &[(String, String)],
+    ) -> Result<String> {
         let path = path.trim();
         if path.is_empty() {
             return Err(anyhow!("skill 路径不能为空"));
         }
-        let source_path =
-            fs::canonicalize(path).with_context(|| format!("解析 skill 路径失败：{path}"))?;
-        if !self.is_allowed_skill_source_path(&source_path)? {
-            return Err(anyhow!(
-                "skill 路径越界：{}，仅允许工作区、skills.dirs 或 ~/.codex/skills 目录",
-                source_path.display()
-            ));
-        }
+        let source_path = self.resolve_skill_source_path(path)?;
 
         let mut pre_conversion_notes = Vec::new();
         let llm_artifacts = if convert_external {
@@ -673,7 +730,13 @@ impl TiangongState {
             &source_path,
             convert_external,
             llm_artifacts.as_ref(),
+            convert_env_values,
         )?;
+        let stage_cleanup = ScopedDirCleanup::new(converted_stage_cleanup_dir(
+            &prepared_source.install_path,
+            prepared_source.converted,
+        ));
+        let stage_cleanup_enabled = stage_cleanup.is_enabled();
         if !pre_conversion_notes.is_empty() {
             let mut merged_notes = pre_conversion_notes;
             merged_notes.extend(prepared_source.conversion_notes);
@@ -726,6 +789,11 @@ impl TiangongState {
             skill.id, skill.version, skill.enabled
         );
         if prepared_source.converted {
+            if stage_cleanup_enabled {
+                prepared_source
+                    .conversion_notes
+                    .push("转换中间目录已自动清理".to_string());
+            }
             let details = if prepared_source.conversion_notes.is_empty() {
                 "已执行外部 skill 转换".to_string()
             } else {
@@ -750,13 +818,16 @@ impl TiangongState {
         else {
             return Err(anyhow!("未找到 skill：{id}"));
         };
-        let removed = self.agent_config.skills.installed.remove(remove_idx);
+        let removed = self.agent_config.skills.installed[remove_idx].clone();
 
         let install_root = default_skills_storage_dir_path().join("installed");
         let source_path = PathBuf::from(removed.source.value.trim());
         if source_path.starts_with(&install_root) && source_path.exists() {
-            let _ = fs::remove_dir_all(&source_path);
+            fs::remove_dir_all(&source_path)
+                .with_context(|| format!("删除 skill 安装目录失败：{}", source_path.display()))?;
+            cleanup_empty_skill_install_dirs(&source_path, &install_root)?;
         }
+        self.agent_config.skills.installed.remove(remove_idx);
 
         validate_agent_config(&self.agent_config)?;
         self.rebuild_runtime_for_agent_config();
@@ -785,6 +856,22 @@ impl TiangongState {
         self.persist_app_only()?;
         self.sync_skill_locks()?;
         Ok(format!("skill 状态已更新：{id} enabled={enabled}"))
+    }
+
+    fn resolve_skill_source_path(&self, raw_path: &str) -> Result<PathBuf> {
+        let path = raw_path.trim();
+        if path.is_empty() {
+            return Err(anyhow!("skill 路径不能为空"));
+        }
+        let source_path =
+            fs::canonicalize(path).with_context(|| format!("解析 skill 路径失败：{path}"))?;
+        if !self.is_allowed_skill_source_path(&source_path)? {
+            return Err(anyhow!(
+                "skill 路径越界：{}，仅允许工作区、skills.dirs 或 ~/.codex/skills 目录",
+                source_path.display()
+            ));
+        }
+        Ok(source_path)
     }
 
     fn is_allowed_skill_source_path(&self, source_path: &Path) -> Result<bool> {
@@ -1989,6 +2076,35 @@ impl TiangongState {
     }
 }
 
+fn cleanup_empty_skill_install_dirs(removed_path: &Path, install_root: &Path) -> Result<()> {
+    let mut current = removed_path.parent().map(Path::to_path_buf);
+    while let Some(dir) = current {
+        if dir == install_root || !dir.starts_with(install_root) {
+            break;
+        }
+        let mut entries =
+            fs::read_dir(&dir).with_context(|| format!("读取目录失败：{}", dir.display()))?;
+        if entries.next().is_some() {
+            break;
+        }
+        fs::remove_dir(&dir).with_context(|| format!("删除空目录失败：{}", dir.display()))?;
+        current = dir.parent().map(Path::to_path_buf);
+    }
+    Ok(())
+}
+
+fn converted_stage_cleanup_dir(install_path: &Path, converted: bool) -> Option<PathBuf> {
+    if !converted {
+        return None;
+    }
+    let imported_root = default_skills_storage_dir_path().join("imported");
+    if install_path.starts_with(&imported_root) {
+        Some(install_path.to_path_buf())
+    } else {
+        None
+    }
+}
+
 fn default_storage_root() -> PathBuf {
     user_storage_root()
 }
@@ -2633,6 +2749,11 @@ mod tests {
             .cloned()
             .expect("安装后应可在配置中找到 skill");
         let installed_path = PathBuf::from(installed.source.value.clone());
+        let installed_skill_root = fake_home
+            .join(".tiangong")
+            .join("skills")
+            .join("installed")
+            .join(&skill_id);
         let expected_prefix = fake_home
             .join(".tiangong")
             .join("skills")
@@ -2655,6 +2776,7 @@ mod tests {
 
         state.remove_skill(&skill_id)?;
         assert!(!installed_path.exists());
+        assert!(!installed_skill_root.exists());
 
         std::env::set_current_dir(previous_cwd)?;
         match previous_home {

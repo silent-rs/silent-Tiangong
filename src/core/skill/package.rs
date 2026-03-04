@@ -9,6 +9,8 @@ use crate::core::agent_config::{
 };
 use crate::core::session::now_text;
 
+use super::analysis::{SkillConversionAnalysis, analyze_external_skill};
+
 #[derive(Debug, Clone)]
 pub struct PreparedSkillSource {
     pub install_path: PathBuf,
@@ -26,6 +28,7 @@ pub fn prepare_skill_source_for_install(
     path: &Path,
     convert_external: bool,
     llm_artifacts: Option<&SkillConversionArtifacts>,
+    convert_env_values: &[(String, String)],
 ) -> Result<PreparedSkillSource> {
     let canonical = fs::canonicalize(path)
         .with_context(|| format!("skill 目录不存在或不可访问：{}", path.display()))?;
@@ -39,6 +42,8 @@ pub fn prepare_skill_source_for_install(
             conversion_notes: Vec::new(),
         });
     }
+
+    let analysis = analyze_external_skill(&canonical)?;
 
     let source_has_skill_md = canonical.join("SKILL.md").exists();
     let source_has_skill_toml = canonical.join("skill.toml").exists();
@@ -74,6 +79,13 @@ pub fn prepare_skill_source_for_install(
     })?;
 
     let mut conversion_notes = Vec::new();
+    if !analysis.dependencies.is_empty() {
+        conversion_notes.push(format!("检测到依赖 {} 项", analysis.dependencies.len()));
+    }
+    if !analysis.env_vars.is_empty() {
+        conversion_notes.push(format!("检测到环境变量 {} 项", analysis.env_vars.len()));
+    }
+
     let stage_skill_md = stage_dir.join("SKILL.md");
     if !stage_skill_md.exists()
         && let Some(raw) = llm_artifacts.and_then(|item| item.skill_md.as_deref())
@@ -144,6 +156,19 @@ pub fn prepare_skill_source_for_install(
         })?;
         conversion_notes.push("生成 skill.toml".to_string());
     }
+
+    append_conversion_analysis_to_skill_md(
+        &stage_skill_md,
+        &analysis,
+        convert_env_values,
+        &mut conversion_notes,
+    )?;
+    write_env_helper_files(
+        &stage_dir,
+        &analysis,
+        convert_env_values,
+        &mut conversion_notes,
+    )?;
 
     Ok(PreparedSkillSource {
         install_path: stage_dir,
@@ -401,6 +426,108 @@ fn build_generated_skill_markdown(raw: &str, root: &Path) -> String {
     } else {
         format!("# {fallback_name}\n\n{body}\n")
     }
+}
+
+fn append_conversion_analysis_to_skill_md(
+    skill_md_path: &Path,
+    analysis: &SkillConversionAnalysis,
+    convert_env_values: &[(String, String)],
+    conversion_notes: &mut Vec<String>,
+) -> Result<()> {
+    if analysis.dependencies.is_empty() && analysis.env_vars.is_empty() {
+        return Ok(());
+    }
+    let raw = fs::read_to_string(skill_md_path)
+        .with_context(|| format!("读取 SKILL.md 失败：{}", skill_md_path.display()))?;
+    let marker = "## 天工转换分析";
+    if raw.contains(marker) {
+        return Ok(());
+    }
+
+    let mut section = String::new();
+    section.push_str("\n\n");
+    section.push_str(marker);
+    section.push_str("\n\n");
+    if !analysis.dependencies.is_empty() {
+        section.push_str("### 检测到的依赖\n");
+        for dep in &analysis.dependencies {
+            section.push_str("- `");
+            section.push_str(dep);
+            section.push_str("`\n");
+        }
+        section.push('\n');
+    }
+    if !analysis.env_vars.is_empty() {
+        section.push_str("### 检测到的环境变量\n");
+        for key in &analysis.env_vars {
+            section.push_str("- `");
+            section.push_str(key);
+            section.push_str("`\n");
+        }
+        section.push('\n');
+    }
+    if !convert_env_values.is_empty() {
+        section.push_str("### 安装时已提供环境变量\n");
+        for (key, _value) in convert_env_values {
+            section.push_str("- `");
+            section.push_str(key);
+            section.push_str("`\n");
+        }
+        section.push('\n');
+    }
+    section.push_str("以上信息由转换器自动分析，仅供安装时排查与补全配置。\n");
+
+    let merged = format!("{}{}", raw.trim_end(), section);
+    fs::write(skill_md_path, merged)
+        .with_context(|| format!("写入转换增强 SKILL.md 失败：{}", skill_md_path.display()))?;
+    conversion_notes.push("已将依赖与环境变量分析写入 SKILL.md".to_string());
+    Ok(())
+}
+
+fn write_env_helper_files(
+    stage_dir: &Path,
+    analysis: &SkillConversionAnalysis,
+    convert_env_values: &[(String, String)],
+    conversion_notes: &mut Vec<String>,
+) -> Result<()> {
+    if !analysis.env_vars.is_empty() {
+        let env_example = stage_dir.join(".env.example");
+        if !env_example.exists() {
+            let content = analysis
+                .env_vars
+                .iter()
+                .map(|key| format!("{key}="))
+                .collect::<Vec<_>>()
+                .join("\n");
+            fs::write(&env_example, format!("{content}\n"))
+                .with_context(|| format!("写入 .env.example 失败：{}", env_example.display()))?;
+            conversion_notes.push("生成 .env.example".to_string());
+        }
+    }
+
+    if convert_env_values.is_empty() {
+        return Ok(());
+    }
+    let env_local = stage_dir.join(".env.local");
+    let content = convert_env_values
+        .iter()
+        .filter_map(|(key, value)| {
+            let key = key.trim();
+            let value = value.trim();
+            if key.is_empty() || value.is_empty() {
+                None
+            } else {
+                Some(format!("{key}={}", value.replace('\n', "\\n")))
+            }
+        })
+        .collect::<Vec<_>>();
+    if content.is_empty() {
+        return Ok(());
+    }
+    fs::write(&env_local, format!("{}\n", content.join("\n")))
+        .with_context(|| format!("写入 .env.local 失败：{}", env_local.display()))?;
+    conversion_notes.push(format!("写入 .env.local（{} 项）", content.len()));
+    Ok(())
 }
 
 fn normalize_generated_skill_markdown(raw: &str, root: &Path) -> String {

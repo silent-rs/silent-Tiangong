@@ -1,5 +1,9 @@
+use std::io::{self, IsTerminal, Write};
+
+use anyhow::Result;
+
 use crate::core::agent_config::InstalledSkillConfig;
-use crate::core::app_state::TiangongState;
+use crate::core::app_state::{SkillInstallInspection, TiangongState};
 
 use super::args::{SkillArgs, SkillSubcommand};
 
@@ -30,7 +34,13 @@ pub(super) fn run_skill_command(args: SkillArgs) -> anyhow::Result<()> {
             enabled,
             convert,
         } => {
-            let msg = state.install_local_skill_with_options(&path, enabled, convert)?;
+            let convert_env_values = collect_conversion_env_inputs(&state, &path, convert)?;
+            let msg = state.install_local_skill_with_options_and_inputs(
+                &path,
+                enabled,
+                convert,
+                &convert_env_values,
+            )?;
             println!("{msg}");
         }
         SkillSubcommand::Remove { id } => {
@@ -53,6 +63,65 @@ pub(super) fn run_skill_command(args: SkillArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn collect_conversion_env_inputs(
+    state: &TiangongState,
+    path: &str,
+    convert: bool,
+) -> Result<Vec<(String, String)>> {
+    if !convert {
+        return Ok(Vec::new());
+    }
+    let inspection = state.inspect_skill_install_requirements(path, true)?;
+    print_conversion_inspection(&inspection);
+    if inspection.missing_env_vars.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !io::stdin().is_terminal() {
+        println!("当前非交互终端，已跳过环境变量输入步骤。");
+        return Ok(Vec::new());
+    }
+
+    println!("请补充转换所需的环境变量（回车留空表示跳过）：");
+    let mut values = Vec::new();
+    for key in &inspection.missing_env_vars {
+        print!("{key} = ");
+        io::stdout().flush()?;
+        let mut line = String::new();
+        io::stdin().read_line(&mut line)?;
+        let value = line.trim().to_string();
+        if value.is_empty() {
+            continue;
+        }
+        values.push((key.clone(), value));
+    }
+    if values.is_empty() {
+        println!("未录入新的环境变量，转换将继续执行。");
+    } else {
+        println!("已录入 {} 个环境变量。", values.len());
+    }
+    Ok(values)
+}
+
+fn print_conversion_inspection(inspection: &SkillInstallInspection) {
+    if !inspection.dependencies.is_empty() {
+        println!("转换分析：检测到依赖");
+        for dep in &inspection.dependencies {
+            println!("- {dep}");
+        }
+    }
+    if !inspection.env_vars.is_empty() {
+        println!("转换分析：检测到环境变量");
+        for key in &inspection.env_vars {
+            let state = if inspection.missing_env_vars.contains(key) {
+                "missing"
+            } else {
+                "present"
+            };
+            println!("- {key} ({state})");
+        }
+    }
+}
+
 fn summarize_skills(skills: &[InstalledSkillConfig]) -> String {
     if skills.is_empty() {
         return "无已安装 skill".to_string();
@@ -65,9 +134,13 @@ fn summarize_skills(skills: &[InstalledSkillConfig]) -> String {
         skills.len() - enabled
     )];
     for item in skills {
-        let status = if item.enabled { "enabled" } else { "disabled" };
+        let marker = if item.enabled {
+            "\x1b[32m●\x1b[0m"
+        } else {
+            "\x1b[31m●\x1b[0m"
+        };
         lines.push(format!(
-            "- [{status}] {}@{} source={}:{}",
+            "{marker} {}@{} source={}:{}",
             item.id, item.version, item.source.kind, item.source.value
         ));
     }
@@ -84,7 +157,11 @@ fn describe_skills(skills: &[InstalledSkillConfig], id_filter: Option<&str>) -> 
             continue;
         }
         count += 1;
-        let status = if item.enabled { "enabled" } else { "disabled" };
+        let status = if item.enabled {
+            "\x1b[32m● enabled\x1b[0m"
+        } else {
+            "\x1b[31m● disabled\x1b[0m"
+        };
         lines.push(format!("id={}", item.id));
         lines.push(format!("name={}", item.name));
         lines.push(format!("version={}", item.version));
