@@ -4,7 +4,7 @@ use crate::core::agent_config::McpTransportMode;
 use crate::core::app_state::RegisterMcpServerOptions;
 use crate::core::planner::PlanStepStatus;
 
-use super::{CliApp, CommandHint, McpModalState};
+use super::{CliApp, CommandHint, McpModalState, SkillModalState};
 
 impl CliApp {
     pub(super) fn submit_input(&mut self) -> Result<()> {
@@ -70,6 +70,7 @@ impl CliApp {
                 self.history_modal = None;
                 self.planning_modal = None;
                 self.mcp_modal = None;
+                self.skill_modal = None;
                 self.rebuild_input_history_from_active_session();
                 self.status_message = "已打开新对话（发送首条消息后才会记录）".to_string();
                 self.input.clear();
@@ -104,6 +105,9 @@ impl CliApp {
             _ if command == "/mcp" || command.starts_with("/mcp ") => {
                 self.handle_mcp_command(command)
             }
+            _ if command == "/skill" || command.starts_with("/skill ") => {
+                self.handle_skill_command(command)
+            }
             _ if command == "/config" || command.starts_with("/config ") => {
                 self.handle_config_command(command)
             }
@@ -134,6 +138,7 @@ impl CliApp {
         let query = command.trim_start_matches("/sessions").trim();
         self.planning_modal = None;
         self.mcp_modal = None;
+        self.skill_modal = None;
         self.history_modal = Some(super::HistoryModalState {
             query: query.to_string(),
             selected_idx: 0,
@@ -159,6 +164,7 @@ impl CliApp {
 
         self.history_modal = None;
         self.mcp_modal = None;
+        self.skill_modal = None;
         self.planning_modal = Some(super::PlanningModalState::default());
         self.clamp_planning_modal_selection();
         if let Some(first_pending_row) = self.plan_row_by_pending_index(1)
@@ -214,6 +220,7 @@ impl CliApp {
         let query = command.trim_start_matches("/mcp").trim();
         self.history_modal = None;
         self.planning_modal = None;
+        self.skill_modal = None;
         self.mcp_modal = Some(McpModalState {
             query: query.to_string(),
             selected_idx: 0,
@@ -222,6 +229,44 @@ impl CliApp {
         self.clamp_mcp_modal_selection();
         self.status_message =
             "MCP 管理已打开（空格启/禁用 Backspace删除 Delete删筛选字 A新增 Esc关闭）".to_string();
+        Ok(())
+    }
+
+    fn handle_skill_command(&mut self, command: &str) -> Result<()> {
+        let query = command.trim_start_matches("/skill").trim();
+        if query == "init" || query.starts_with("init ") {
+            let init_args = if query == "init" {
+                ""
+            } else {
+                query.trim_start_matches("init").trim()
+            };
+            let parsed = parse_skill_init_args(init_args)?;
+            let message = self.state.init_skill_scaffold(
+                &parsed.path,
+                parsed.name.as_deref(),
+                parsed.id.as_deref(),
+                parsed.force,
+            )?;
+            self.history_modal = None;
+            self.planning_modal = None;
+            self.mcp_modal = None;
+            self.skill_modal = None;
+            self.status_message = message;
+            return Ok(());
+        }
+
+        self.history_modal = None;
+        self.planning_modal = None;
+        self.mcp_modal = None;
+        self.skill_modal = Some(SkillModalState {
+            query: query.to_string(),
+            selected_idx: 0,
+            add_input: None,
+        });
+        self.clamp_skill_modal_selection();
+        self.status_message =
+            "Skill 管理已打开（空格启/禁用 Backspace删除 Delete删筛选字 A新增 Esc关闭）"
+                .to_string();
         Ok(())
     }
 
@@ -649,6 +694,224 @@ impl CliApp {
         }
     }
 
+    pub(super) fn move_skill_modal_selection(&mut self, step: i32) {
+        let Some((query, current_idx)) = self
+            .skill_modal
+            .as_ref()
+            .map(|modal| (modal.query.clone(), modal.selected_idx))
+        else {
+            return;
+        };
+        let matched = self.skill_match_indices(&query);
+        if matched.is_empty() {
+            if let Some(modal) = self.skill_modal.as_mut() {
+                modal.selected_idx = 0;
+            }
+            return;
+        }
+
+        let current = current_idx.min(matched.len() - 1) as i32;
+        let next = (current + step).clamp(0, matched.len() as i32 - 1);
+        if let Some(modal) = self.skill_modal.as_mut() {
+            modal.selected_idx = next as usize;
+        }
+    }
+
+    pub(super) fn move_skill_modal_to_edge(&mut self, to_start: bool) {
+        let Some(query) = self.skill_modal.as_ref().map(|modal| modal.query.clone()) else {
+            return;
+        };
+        let matched = self.skill_match_indices(&query);
+        if matched.is_empty() {
+            if let Some(modal) = self.skill_modal.as_mut() {
+                modal.selected_idx = 0;
+            }
+            return;
+        }
+        if let Some(modal) = self.skill_modal.as_mut() {
+            modal.selected_idx = if to_start { 0 } else { matched.len() - 1 };
+        }
+    }
+
+    pub(super) fn enter_skill_modal_add_mode(&mut self) {
+        if let Some(modal) = self.skill_modal.as_mut() {
+            modal.add_input = Some(String::new());
+        }
+    }
+
+    pub(super) fn cancel_skill_modal_add_mode(&mut self) {
+        if let Some(modal) = self.skill_modal.as_mut() {
+            modal.add_input = None;
+        }
+    }
+
+    pub(super) fn push_skill_modal_query_char(&mut self, ch: char) {
+        if let Some(modal) = self.skill_modal.as_mut() {
+            modal.query.push(ch);
+            modal.selected_idx = 0;
+        }
+    }
+
+    pub(super) fn backspace_skill_modal_query(&mut self) {
+        if let Some(modal) = self.skill_modal.as_mut() {
+            modal.query.pop();
+            modal.selected_idx = 0;
+        }
+    }
+
+    pub(super) fn push_skill_modal_add_input_char(&mut self, ch: char) {
+        if let Some(modal) = self.skill_modal.as_mut()
+            && let Some(add_input) = modal.add_input.as_mut()
+        {
+            add_input.push(ch);
+        }
+    }
+
+    pub(super) fn backspace_skill_modal_add_input(&mut self) {
+        if let Some(modal) = self.skill_modal.as_mut()
+            && let Some(add_input) = modal.add_input.as_mut()
+        {
+            add_input.pop();
+        }
+    }
+
+    pub(super) fn confirm_skill_modal_add(&mut self) -> Result<()> {
+        let raw_input = self
+            .skill_modal
+            .as_ref()
+            .and_then(|modal| modal.add_input.clone())
+            .unwrap_or_default();
+        let parsed = parse_skill_add_args(raw_input.trim())?;
+        let message = if parsed.convert {
+            self.state
+                .install_local_skill_with_options(&parsed.path, parsed.enabled, true)?
+        } else {
+            self.state
+                .install_local_skill(&parsed.path, parsed.enabled)?
+        };
+        let skill_id = self
+            .state
+            .installed_skills()
+            .last()
+            .map(|skill| skill.id.clone())
+            .unwrap_or_default();
+        if let Some(modal) = self.skill_modal.as_mut() {
+            modal.add_input = None;
+            modal.query.clear();
+        }
+        if !skill_id.is_empty() {
+            self.focus_skill_modal(&skill_id);
+        } else {
+            self.clamp_skill_modal_selection();
+        }
+        self.status_message = message;
+        Ok(())
+    }
+
+    pub(super) fn remove_selected_skill(&mut self) -> Result<()> {
+        let Some(skill_id) = self.selected_skill_id() else {
+            self.status_message = "未选中 skill".to_string();
+            return Ok(());
+        };
+        let message = self.state.remove_skill(&skill_id)?;
+        self.clamp_skill_modal_selection();
+        self.status_message = message;
+        Ok(())
+    }
+
+    pub(super) fn set_selected_skill_enabled(&mut self, enabled: bool) -> Result<()> {
+        let Some(skill_id) = self.selected_skill_id() else {
+            self.status_message = "未选中 skill".to_string();
+            return Ok(());
+        };
+        let message = self.state.set_skill_enabled(&skill_id, enabled)?;
+        self.clamp_skill_modal_selection();
+        self.status_message = message;
+        Ok(())
+    }
+
+    pub(super) fn toggle_selected_skill_enabled(&mut self) -> Result<()> {
+        let Some(skill_id) = self.selected_skill_id() else {
+            self.status_message = "未选中 skill".to_string();
+            return Ok(());
+        };
+        let Some(current_enabled) = self
+            .state
+            .installed_skills()
+            .iter()
+            .find(|skill| skill.id == skill_id)
+            .map(|skill| skill.enabled)
+        else {
+            self.status_message = "未找到选中的 skill".to_string();
+            return Ok(());
+        };
+        self.set_selected_skill_enabled(!current_enabled)
+    }
+
+    pub(super) fn skill_match_indices(&self, query: &str) -> Vec<usize> {
+        let query = query.trim();
+        self.state
+            .installed_skills()
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, skill)| {
+                let index_text = (idx + 1).to_string();
+                let matched = query.is_empty()
+                    || index_text.starts_with(query)
+                    || skill.id.contains(query)
+                    || skill.name.contains(query)
+                    || skill.version.contains(query)
+                    || skill.source.value.contains(query);
+                matched.then_some(idx)
+            })
+            .collect()
+    }
+
+    fn selected_skill_id(&self) -> Option<String> {
+        let modal = self.skill_modal.as_ref()?;
+        let matched = self.skill_match_indices(&modal.query);
+        let idx = *matched.get(modal.selected_idx.min(matched.len().saturating_sub(1)))?;
+        self.state
+            .installed_skills()
+            .get(idx)
+            .map(|skill| skill.id.clone())
+    }
+
+    fn clamp_skill_modal_selection(&mut self) {
+        let Some((query, selected_idx)) = self
+            .skill_modal
+            .as_ref()
+            .map(|modal| (modal.query.clone(), modal.selected_idx))
+        else {
+            return;
+        };
+        let total = self.skill_match_indices(&query).len();
+        if let Some(modal) = self.skill_modal.as_mut() {
+            modal.selected_idx = if total == 0 {
+                0
+            } else {
+                selected_idx.min(total - 1)
+            };
+        }
+    }
+
+    fn focus_skill_modal(&mut self, skill_id: &str) {
+        let Some(query) = self.skill_modal.as_ref().map(|modal| modal.query.clone()) else {
+            return;
+        };
+        let matched = self.skill_match_indices(&query);
+        if let Some(position) = matched
+            .iter()
+            .position(|idx| self.state.installed_skills()[*idx].id == skill_id)
+        {
+            if let Some(modal) = self.skill_modal.as_mut() {
+                modal.selected_idx = position;
+            }
+        } else {
+            self.clamp_skill_modal_selection();
+        }
+    }
+
     pub(super) fn history_match_indices(&self, query: &str) -> Vec<usize> {
         let query = query.trim();
         self.state
@@ -747,6 +1010,9 @@ impl CliApp {
         if raw == "/mcp" || raw.starts_with("/mcp ") {
             return self.mcp_command_hints(raw);
         }
+        if raw == "/skill" || raw.starts_with("/skill ") {
+            return self.skill_command_hints(raw);
+        }
         if raw == "/config" || raw.starts_with("/config ") {
             return self.config_command_hints(raw);
         }
@@ -756,6 +1022,7 @@ impl CliApp {
             CommandHint::new("/planing", "打开 planning 列表弹窗"),
             CommandHint::new("/model", "切换模型或查看可选模型"),
             CommandHint::new("/mcp", "注册和管理 MCP server"),
+            CommandHint::new("/skill", "安装和管理 Skill"),
             CommandHint::new("/config", "查看或更新 Agent 配置"),
             CommandHint::new("/sessions", "切换会话"),
             CommandHint::new("/new", "新建会话"),
@@ -838,6 +1105,47 @@ impl CliApp {
         hints
     }
 
+    fn skill_command_hints(&self, raw: &str) -> Vec<CommandHint> {
+        if raw.starts_with("/skill init") {
+            return vec![
+                CommandHint::new(
+                    "/skill init ./my-skill",
+                    "初始化 Skill 脚手架（SKILL.md/skill.toml）",
+                ),
+                CommandHint::new_note(
+                    "带参数示例",
+                    "/skill init ./my-skill --name MySkill --id my-skill --force",
+                ),
+            ];
+        }
+
+        let mut hints = vec![
+            CommandHint::new("/skill", "打开 Skill 管理弹窗"),
+            CommandHint::new("/skill fs", "打开弹窗并按关键词筛选"),
+            CommandHint::new(
+                "/skill init ./my-skill",
+                "初始化 Skill 脚手架（SKILL.md/skill.toml）",
+            ),
+            CommandHint::new_note("新增示例", "/path/to/skill [--disabled] [--convert]"),
+            CommandHint::new_note(
+                "弹窗内快捷键",
+                "空格启/禁用 Backspace删除 Delete删筛选字 A新增 Esc关闭",
+            ),
+        ];
+
+        if raw != "/skill" {
+            hints.retain(|hint| hint.command.starts_with(raw));
+        }
+        if hints.is_empty() {
+            hints.push(CommandHint::new_note(
+                "/skill <关键词>",
+                "打开 Skill 管理弹窗并筛选目标 skill",
+            ));
+        }
+
+        hints
+    }
+
     pub(super) fn is_command_palette_active(&self) -> bool {
         !self.command_hints().is_empty()
     }
@@ -855,6 +1163,19 @@ struct ParsedMcpAddArgs {
     headers: Vec<(String, String)>,
     env: Vec<(String, String)>,
     cwd: Option<String>,
+}
+
+struct ParsedSkillAddArgs {
+    path: String,
+    enabled: bool,
+    convert: bool,
+}
+
+struct ParsedSkillInitArgs {
+    path: String,
+    name: Option<String>,
+    id: Option<String>,
+    force: bool,
 }
 
 fn parse_mcp_add_args(raw: &str) -> Result<ParsedMcpAddArgs> {
@@ -966,6 +1287,99 @@ fn parse_mcp_add_args(raw: &str) -> Result<ParsedMcpAddArgs> {
         headers,
         env,
         cwd,
+    })
+}
+
+fn parse_skill_add_args(raw: &str) -> Result<ParsedSkillAddArgs> {
+    let tokens = raw.split_whitespace().collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return Err(anyhow!(
+            "参数不足，示例：/path/to/skill 或 /path/to/skill --disabled --convert"
+        ));
+    }
+
+    let path = tokens[0].trim();
+    if path.is_empty() {
+        return Err(anyhow!("skill 路径不能为空"));
+    }
+    let mut enabled = true;
+    let mut convert = false;
+    for token in tokens.iter().skip(1) {
+        match *token {
+            "--disabled" => enabled = false,
+            "--enabled" => enabled = true,
+            "--convert" => convert = true,
+            other => {
+                return Err(anyhow!(
+                    "不支持的参数：{other}，仅支持 --enabled/--disabled/--convert"
+                ));
+            }
+        }
+    }
+
+    Ok(ParsedSkillAddArgs {
+        path: path.to_string(),
+        enabled,
+        convert,
+    })
+}
+
+fn parse_skill_init_args(raw: &str) -> Result<ParsedSkillInitArgs> {
+    let tokens = raw.split_whitespace().collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return Err(anyhow!(
+            "参数不足，示例：/skill init ./my-skill [--name MySkill] [--id my-skill] [--force]"
+        ));
+    }
+
+    let path = tokens[0].trim();
+    if path.is_empty() {
+        return Err(anyhow!("skill 初始化目录不能为空"));
+    }
+
+    let mut name = None;
+    let mut id = None;
+    let mut force = false;
+    let mut idx = 1usize;
+    while idx < tokens.len() {
+        match tokens[idx] {
+            "--name" => {
+                let value = tokens
+                    .get(idx + 1)
+                    .ok_or_else(|| anyhow!("--name 缺少参数"))?;
+                let value = value.trim();
+                if value.is_empty() {
+                    return Err(anyhow!("--name 不能为空"));
+                }
+                name = Some(value.to_string());
+                idx += 2;
+            }
+            "--id" => {
+                let value = tokens
+                    .get(idx + 1)
+                    .ok_or_else(|| anyhow!("--id 缺少参数"))?;
+                let value = value.trim();
+                if value.is_empty() {
+                    return Err(anyhow!("--id 不能为空"));
+                }
+                id = Some(value.to_string());
+                idx += 2;
+            }
+            "--force" => {
+                force = true;
+                idx += 1;
+            }
+            other => {
+                return Err(anyhow!("不支持的参数：{other}，仅支持 --name/--id/--force"));
+            }
+        }
+    }
+
+    Ok(ParsedSkillInitArgs {
+        path: path.to_string(),
+        name,
+        id,
+        force,
     })
 }
 

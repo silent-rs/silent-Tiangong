@@ -206,12 +206,7 @@ impl Drop for TempScript {
 #[cfg(unix)]
 fn create_script(content: &str) -> TempScript {
     use std::os::unix::fs::PermissionsExt;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
+    let nonce = scru128::new();
     let path = std::env::temp_dir().join(format!("tiangong-mcp-{nonce}.sh"));
     fs::write(&path, content).expect("write test script");
     let mut perms = fs::metadata(&path).expect("stat test script").permissions();

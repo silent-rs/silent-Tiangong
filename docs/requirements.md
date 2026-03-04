@@ -38,6 +38,9 @@
 - 支持 Git 源安装 Skill（在本地源稳定后交付）。
 - 支持非交互命令：`tiangong skill list/install/remove/enable/disable/validate`。
 - 支持 Skill 包 `skill.toml` 与 `SKILL.md` 双格式兼容（缺失 `skill.toml` 时降级解析）。
+- 支持外部 Skill 快速转换为天工 Skill（`--convert` 自动补齐 `SKILL.md/skill.toml`）。
+- `--convert` 必须优先使用天工内置智能体 + 大模型进行辅助转换；模型不可用或生成失败时回退固定规则转换。
+- 支持 Skill 初始化命令（`/skill init`）快速生成天工兼容脚手架（`SKILL.md`、`skill.toml`）。
 
 ### 非目标（当前阶段不做）
 

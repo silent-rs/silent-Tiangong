@@ -5,4 +5,5 @@ mod mcp_dialog;
 mod model_selector;
 mod plan_panel;
 mod planning_dialog;
+mod skill_dialog;
 mod status_panel;

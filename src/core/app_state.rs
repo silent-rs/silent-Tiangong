@@ -10,7 +10,10 @@ use std::time::Instant;
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-use crate::core::agent_config::{AgentConfig, McpServerConfig, McpTransportMode};
+use crate::core::agent_config::{
+    AgentConfig, InstalledSkillConfig, McpServerConfig, McpTransportMode,
+};
+use crate::core::agents::skill_convert_agent::convert_external_skill_with_agent;
 use crate::core::mcp::{describe_mcp_servers, summarize_mcp_servers, validate_mcp_config};
 use crate::core::model::{ModelProviderConfig, ModelStreamChunk, SingleProviderClient};
 use crate::core::planner::{PlanStepStatus, TaskPlan};
@@ -18,6 +21,9 @@ use crate::core::runtime::{
     LlmOutputRecord, RunSnapshot, RunStatus, RuntimeEngine, TurnExecution, VerifyExecutionRecord,
 };
 use crate::core::session::{Message, MessageRole, Session, SessionTaskPlan, now_text};
+use crate::core::skill::{
+    init_tiangong_skill_scaffold, load_skill_from_local_dir, prepare_skill_source_for_install,
+};
 use crate::core::tool::{ToolExecutionRecord, ToolResult};
 
 const DEFAULT_SESSION_TITLE: &str = "默认会话";
@@ -82,6 +88,22 @@ struct PendingTurn {
     assistant_message_id: Option<String>,
     started_at: Instant,
     rx: Receiver<TurnEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct SkillsLockRecord {
+    version: String,
+    enabled: bool,
+    source: String,
+    installed_at: String,
+    managed_mcp_servers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct McpDependencyLockRecord {
+    path: String,
+    ref_count: usize,
+    installed_at: String,
 }
 
 #[derive(Debug)]
@@ -196,6 +218,7 @@ impl TiangongState {
             state.run.last_error = None;
         }
         state.run.updated_at = now_text();
+        let _ = state.sync_skill_locks();
 
         state
     }
@@ -543,10 +566,11 @@ impl TiangongState {
 
     pub fn agent_config_summary(&self) -> String {
         format!(
-            "skills.enabled={}, skills.max_matches={}, skills.dirs={}, mcp.enabled={}, mcp.timeout_ms={}, mcp.servers={}",
+            "skills.enabled={}, skills.max_matches={}, skills.dirs={}, skills.installed={}, mcp.enabled={}, mcp.timeout_ms={}, mcp.servers={}",
             self.agent_config.skills.enabled,
             self.agent_config.skills.max_matches,
             self.agent_config.skills.dirs.len(),
+            self.agent_config.skills.installed.len(),
             self.agent_config.mcp.enabled,
             self.agent_config.mcp.timeout_ms,
             self.agent_config.mcp.servers.len()
@@ -567,6 +591,236 @@ impl TiangongState {
 
     pub fn mcp_servers(&self) -> &[McpServerConfig] {
         &self.agent_config.mcp.servers
+    }
+
+    pub fn installed_skills(&self) -> &[InstalledSkillConfig] {
+        &self.agent_config.skills.installed
+    }
+
+    pub fn init_skill_scaffold(
+        &self,
+        path: &str,
+        name: Option<&str>,
+        id: Option<&str>,
+        force: bool,
+    ) -> Result<String> {
+        let path = path.trim();
+        if path.is_empty() {
+            return Err(anyhow!("skill 初始化目录不能为空"));
+        }
+        let result = init_tiangong_skill_scaffold(Path::new(path), name, id, force)?;
+        Ok(format!(
+            "skill 初始化完成：id={} name={} path={}",
+            result.skill_id,
+            result.skill_name,
+            result.dir.display()
+        ))
+    }
+
+    pub fn install_local_skill(&mut self, path: &str, enabled: bool) -> Result<String> {
+        self.install_local_skill_with_options(path, enabled, false)
+    }
+
+    pub fn install_local_skill_with_options(
+        &mut self,
+        path: &str,
+        enabled: bool,
+        convert_external: bool,
+    ) -> Result<String> {
+        let path = path.trim();
+        if path.is_empty() {
+            return Err(anyhow!("skill 路径不能为空"));
+        }
+        let source_path =
+            fs::canonicalize(path).with_context(|| format!("解析 skill 路径失败：{path}"))?;
+        if !self.is_allowed_skill_source_path(&source_path)? {
+            return Err(anyhow!(
+                "skill 路径越界：{}，仅允许工作区、skills.dirs 或 ~/.codex/skills 目录",
+                source_path.display()
+            ));
+        }
+
+        let mut pre_conversion_notes = Vec::new();
+        let llm_artifacts = if convert_external {
+            let need_skill_md = !source_path.join("SKILL.md").exists();
+            let need_skill_toml = !source_path.join("skill.toml").exists();
+            if need_skill_md || need_skill_toml {
+                let model_client = SingleProviderClient::new(self.model_config.clone());
+                match convert_external_skill_with_agent(
+                    &model_client,
+                    &source_path,
+                    need_skill_md,
+                    need_skill_toml,
+                ) {
+                    Ok(artifacts) => {
+                        pre_conversion_notes.push("已调用模型辅助转换".to_string());
+                        Some(artifacts)
+                    }
+                    Err(err) => {
+                        pre_conversion_notes
+                            .push(format!("模型辅助转换失败，已回退规则转换：{err}"));
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let mut prepared_source = prepare_skill_source_for_install(
+            &source_path,
+            convert_external,
+            llm_artifacts.as_ref(),
+        )?;
+        if !pre_conversion_notes.is_empty() {
+            let mut merged_notes = pre_conversion_notes;
+            merged_notes.extend(prepared_source.conversion_notes);
+            prepared_source.conversion_notes = merged_notes;
+        }
+        let mut skill = load_skill_from_local_dir(&prepared_source.install_path)?;
+
+        if self
+            .agent_config
+            .skills
+            .installed
+            .iter()
+            .any(|item| item.id == skill.id)
+        {
+            return Err(anyhow!("skill 已存在：{}", skill.id));
+        }
+
+        let installed_dir = default_skills_storage_dir_path()
+            .join("installed")
+            .join(&skill.id)
+            .join(&skill.version);
+        if installed_dir.exists() {
+            return Err(anyhow!(
+                "skill 已存在同版本目录：{}",
+                installed_dir.display()
+            ));
+        }
+        if let Some(parent) = installed_dir.parent() {
+            ensure_dir(parent)?;
+        }
+        copy_dir_recursive(&prepared_source.install_path, &installed_dir).with_context(|| {
+            format!(
+                "复制 skill 到安装目录失败：{} -> {}",
+                prepared_source.install_path.display(),
+                installed_dir.display()
+            )
+        })?;
+
+        skill.source.kind = "local".to_string();
+        skill.source.value = installed_dir.display().to_string();
+        skill.enabled = enabled;
+
+        self.agent_config.skills.installed.push(skill.clone());
+        validate_agent_config(&self.agent_config)?;
+        self.rebuild_runtime_for_agent_config();
+        self.persist_app_only()?;
+        self.sync_skill_locks()?;
+        let mut message = format!(
+            "skill 已安装：{}@{} enabled={}",
+            skill.id, skill.version, skill.enabled
+        );
+        if prepared_source.converted {
+            let details = if prepared_source.conversion_notes.is_empty() {
+                "已执行外部 skill 转换".to_string()
+            } else {
+                prepared_source.conversion_notes.join("，")
+            };
+            message.push_str(&format!("（{details}）"));
+        }
+        Ok(message)
+    }
+
+    pub fn remove_skill(&mut self, id: &str) -> Result<String> {
+        let id = id.trim();
+        if id.is_empty() {
+            return Err(anyhow!("skill id 不能为空"));
+        }
+        let Some(remove_idx) = self
+            .agent_config
+            .skills
+            .installed
+            .iter()
+            .position(|item| item.id == id)
+        else {
+            return Err(anyhow!("未找到 skill：{id}"));
+        };
+        let removed = self.agent_config.skills.installed.remove(remove_idx);
+
+        let install_root = default_skills_storage_dir_path().join("installed");
+        let source_path = PathBuf::from(removed.source.value.trim());
+        if source_path.starts_with(&install_root) && source_path.exists() {
+            let _ = fs::remove_dir_all(&source_path);
+        }
+
+        validate_agent_config(&self.agent_config)?;
+        self.rebuild_runtime_for_agent_config();
+        self.persist_app_only()?;
+        self.sync_skill_locks()?;
+        Ok(format!("skill 已删除：{id}"))
+    }
+
+    pub fn set_skill_enabled(&mut self, id: &str, enabled: bool) -> Result<String> {
+        let id = id.trim();
+        if id.is_empty() {
+            return Err(anyhow!("skill id 不能为空"));
+        }
+        let Some(skill) = self
+            .agent_config
+            .skills
+            .installed
+            .iter_mut()
+            .find(|item| item.id == id)
+        else {
+            return Err(anyhow!("未找到 skill：{id}"));
+        };
+        skill.enabled = enabled;
+        validate_agent_config(&self.agent_config)?;
+        self.rebuild_runtime_for_agent_config();
+        self.persist_app_only()?;
+        self.sync_skill_locks()?;
+        Ok(format!("skill 状态已更新：{id} enabled={enabled}"))
+    }
+
+    fn is_allowed_skill_source_path(&self, source_path: &Path) -> Result<bool> {
+        let workspace = std::env::current_dir()
+            .context("读取当前工作目录失败")?
+            .canonicalize()
+            .context("解析当前工作目录失败")?;
+        if source_path.starts_with(&workspace) {
+            return Ok(true);
+        }
+
+        let mut allowed_roots = self
+            .agent_config
+            .skills
+            .dirs
+            .iter()
+            .map(|raw| raw.trim())
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+
+        if let Ok(codex_home) = std::env::var("CODEX_HOME") {
+            let trimmed = codex_home.trim();
+            if !trimmed.is_empty() {
+                allowed_roots.push(PathBuf::from(trimmed).join("skills"));
+            }
+        }
+
+        if let Some(home) = user_home_dir() {
+            allowed_roots.push(home.join(".codex").join("skills"));
+        }
+
+        Ok(allowed_roots
+            .into_iter()
+            .filter_map(|path| fs::canonicalize(path).ok())
+            .any(|path| source_path.starts_with(path)))
     }
 
     pub fn register_mcp_server(
@@ -1405,7 +1659,64 @@ impl TiangongState {
         };
         let content = serde_json::to_string_pretty(&payload).context("序列化应用存储失败")?;
         fs::write(&self.app_storage_path, content)
-            .with_context(|| format!("写入应用存储失败：{}", self.app_storage_path.display()))
+            .with_context(|| format!("写入应用存储失败：{}", self.app_storage_path.display()))?;
+        self.sync_skill_locks()
+    }
+
+    fn sync_skill_locks(&self) -> Result<()> {
+        let skills_dir = default_skills_storage_dir_path();
+        ensure_dir(&skills_dir)?;
+
+        let mut skills_lock = BTreeMap::<String, SkillsLockRecord>::new();
+        for skill in &self.agent_config.skills.installed {
+            let source = format!("{}:{}", skill.source.kind, skill.source.value);
+            skills_lock.insert(
+                skill.id.clone(),
+                SkillsLockRecord {
+                    version: skill.version.clone(),
+                    enabled: skill.enabled,
+                    source,
+                    installed_at: skill.installed_at.clone(),
+                    managed_mcp_servers: skill.managed_mcp_servers.clone(),
+                },
+            );
+        }
+
+        let mut mcp_lock = BTreeMap::<String, McpDependencyLockRecord>::new();
+        for skill in &self.agent_config.skills.installed {
+            for requires_mcp in &skill.requires_mcp {
+                let package = requires_mcp.package.trim();
+                if package.is_empty() {
+                    continue;
+                }
+                let version = requires_mcp.version.trim();
+                let key = if version.is_empty() {
+                    package.to_string()
+                } else {
+                    format!("{package}@{version}")
+                };
+                let entry = mcp_lock
+                    .entry(key)
+                    .or_insert_with(|| McpDependencyLockRecord {
+                        path: String::new(),
+                        ref_count: 0,
+                        installed_at: skill.installed_at.clone(),
+                    });
+                entry.ref_count += 1;
+            }
+        }
+
+        let skills_lock_path = default_skills_lock_path();
+        let mcp_lock_path = default_mcp_lock_path();
+        let skills_content =
+            serde_json::to_string_pretty(&skills_lock).context("序列化 skills-lock 失败")?;
+        let mcp_content =
+            serde_json::to_string_pretty(&mcp_lock).context("序列化 mcp-lock 失败")?;
+        fs::write(&skills_lock_path, skills_content)
+            .with_context(|| format!("写入 skills-lock 失败：{}", skills_lock_path.display()))?;
+        fs::write(&mcp_lock_path, mcp_content)
+            .with_context(|| format!("写入 mcp-lock 失败：{}", mcp_lock_path.display()))?;
+        Ok(())
     }
 
     fn remove_session_file(&self, session_id: &str) -> Result<()> {
@@ -1694,6 +2005,18 @@ fn default_legacy_storage_path() -> PathBuf {
     default_storage_root().join("sessions.json")
 }
 
+fn default_skills_storage_dir_path() -> PathBuf {
+    default_storage_root().join("skills")
+}
+
+fn default_skills_lock_path() -> PathBuf {
+    default_skills_storage_dir_path().join("skills-lock.json")
+}
+
+fn default_mcp_lock_path() -> PathBuf {
+    default_skills_storage_dir_path().join("mcp-lock.json")
+}
+
 fn user_storage_root() -> PathBuf {
     user_home_dir()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
@@ -1735,6 +2058,36 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
 
 fn ensure_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path).with_context(|| format!("创建目录失败：{}", path.display()))
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    if !src.is_dir() {
+        return Err(anyhow!("复制目录失败，源不是目录：{}", src.display()));
+    }
+    ensure_dir(dst)?;
+    for entry in fs::read_dir(src).with_context(|| format!("读取目录失败：{}", src.display()))?
+    {
+        let entry = entry.with_context(|| format!("读取目录项失败：{}", src.display()))?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("读取目录项类型失败：{}", src_path.display()))?;
+        if file_type.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+            continue;
+        }
+        if file_type.is_file() {
+            fs::copy(&src_path, &dst_path).with_context(|| {
+                format!(
+                    "复制文件失败：{} -> {}",
+                    src_path.display(),
+                    dst_path.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn canonical_scru128_id(raw: &str) -> Option<String> {
@@ -2191,6 +2544,16 @@ fn validate_agent_config(config: &AgentConfig) -> Result<()> {
     if config.skills.max_matches == 0 {
         return Err(anyhow!("skills.max_matches 必须大于 0"));
     }
+    let mut seen_skill_ids = HashSet::new();
+    for skill in &config.skills.installed {
+        let id = skill.id.trim();
+        if id.is_empty() {
+            return Err(anyhow!("skills.installed 包含空 id"));
+        }
+        if !seen_skill_ids.insert(id.to_string()) {
+            return Err(anyhow!("skills.installed 存在重复 id：{id}"));
+        }
+    }
     validate_mcp_config(&config.mcp)?;
     Ok(())
 }
@@ -2215,4 +2578,96 @@ fn parse_list_value(raw: &str) -> Vec<String> {
         .filter(|item| !item.is_empty())
         .map(ToString::to_string)
         .collect::<Vec<_>>()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use anyhow::Result;
+
+    use super::TiangongState;
+    use crate::core::skill::build_skill_hints;
+
+    #[test]
+    fn install_skill_saves_into_user_skills_dir_and_recognizable() -> Result<()> {
+        let nonce = scru128::new().to_string();
+        let temp_root = std::env::temp_dir().join(format!("tiangong-skill-install-{nonce}"));
+        let fake_home = temp_root.join("home");
+        let workspace = temp_root.join("workspace");
+        let source_dir = workspace.join("demo-skill-src");
+        fs::create_dir_all(&source_dir)?;
+        fs::create_dir_all(&fake_home)?;
+
+        let skill_id = format!("demo-skill-{nonce}");
+        let skill_md = source_dir.join("SKILL.md");
+        let skill_toml = source_dir.join("skill.toml");
+        fs::write(
+            &skill_md,
+            "# Demo Skill\n用于测试安装行为是否写入 ~/.tiangong/skills。\n",
+        )?;
+        fs::write(
+            &skill_toml,
+            format!(
+                "id = \"{skill_id}\"\nname = \"Demo Skill\"\nversion = \"0.1.0\"\nentry = \"SKILL.md\"\n\n[source]\ntype = \"local\"\nvalue = \"{}\"\n\n[requires]\nmcp = []\n\n[permissions]\nfs_read = [\"./**\"]\nfs_write = []\ncmd_exec = []\nnet = []\n",
+                source_dir.display()
+            ),
+        )?;
+
+        let previous_home = std::env::var_os("HOME");
+        let previous_cwd = std::env::current_dir()?;
+        // SAFETY: test runs in single thread and restores env after assertion path.
+        unsafe { std::env::set_var("HOME", &fake_home) };
+        std::env::set_current_dir(&workspace)?;
+
+        let mut state = TiangongState::load_or_default();
+        let install_message =
+            state.install_local_skill(source_dir.to_str().unwrap_or_default(), true)?;
+        assert!(install_message.contains("skill 已安装"));
+
+        let installed = state
+            .installed_skills()
+            .iter()
+            .find(|skill| skill.id == skill_id)
+            .cloned()
+            .expect("安装后应可在配置中找到 skill");
+        let installed_path = PathBuf::from(installed.source.value.clone());
+        let expected_prefix = fake_home
+            .join(".tiangong")
+            .join("skills")
+            .join("installed")
+            .join(&skill_id)
+            .join("0.1.0");
+        assert!(installed_path.starts_with(&expected_prefix));
+        assert!(installed_path.join("SKILL.md").exists());
+        assert!(fake_home.join(".tiangong").join("app.json").exists());
+        assert!(
+            fake_home
+                .join(".tiangong")
+                .join("skills")
+                .join("skills-lock.json")
+                .exists()
+        );
+
+        let hints = build_skill_hints("demo skill", &state.agent_config.skills);
+        assert!(hints.iter().any(|item| item.contains(&skill_id)));
+
+        state.remove_skill(&skill_id)?;
+        assert!(!installed_path.exists());
+
+        std::env::set_current_dir(previous_cwd)?;
+        match previous_home {
+            Some(home) => {
+                // SAFETY: test cleanup for process env variable.
+                unsafe { std::env::set_var("HOME", home) };
+            }
+            None => {
+                // SAFETY: test cleanup for process env variable.
+                unsafe { std::env::remove_var("HOME") };
+            }
+        }
+        let _ = fs::remove_dir_all(temp_root);
+        Ok(())
+    }
 }

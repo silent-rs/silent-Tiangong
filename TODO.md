@@ -20,9 +20,9 @@
 
 ### B1 Skill 配置模型扩展
 
-- [ ] 在 `AgentConfig` 中新增 Skill 安装态字段（installed/source/enabled/managed_mcp）
-- [ ] 定义 `skill.toml` 的最小解析结构与校验规则
-- [ ] 保持 `SKILL.md` 兼容降级路径（缺 `skill.toml` 时可加载）
+- [x] 在 `AgentConfig` 中新增 Skill 安装态字段（installed/source/enabled/managed_mcp）
+- [x] 定义 `skill.toml` 的最小解析结构与校验规则
+- [x] 保持 `SKILL.md` 兼容降级路径（缺 `skill.toml` 时可加载）
 
 依赖：无
 
@@ -40,10 +40,13 @@
 
 ### C1 SkillManager 核心能力
 
-- [ ] 实现 `install_skill`（本地目录）
-- [ ] 实现 `remove_skill`
-- [ ] 实现 `set_skill_enabled`
+- [x] 实现 `install_skill`（本地目录）
+- [x] 实现 `remove_skill`
+- [x] 实现 `set_skill_enabled`
 - [ ] 实现 `list_skill` / `describe_skill`
+- [x] 支持外部 Skill 快速转换安装（`--convert` 自动补齐 `SKILL.md/skill.toml`）
+- [x] 转换链路接入智能体辅助（模型优先，规则回退）
+- [x] 支持 Skill 初始化命令（`/skill init` 生成 SKILL.md 与 skill.toml）
 
 依赖：B1、B2
 
@@ -69,16 +72,17 @@
 
 ### D1 命令入口
 
-- [ ] 新增 `/skill` 命令（支持 `/skill <query>`）
-- [ ] 补充命令提示与帮助文本
+- [x] 新增 `/skill` 命令（支持 `/skill <query>`）
+- [x] 补充命令提示与帮助文本
+- [x] 新增主入口 `tiangong skill` 子命令（list/show/init/install/remove/enable/disable/validate）
 
 依赖：C1
 
 ### D2 Skill 管理弹窗
 
-- [ ] 新增 Skill 弹窗组件（布局与 `/mcp` 风格一致）
-- [ ] 支持筛选、上下选择、详情展示、启停、删除、新增
-- [ ] 状态栏反馈统一为结构化文案
+- [x] 新增 Skill 弹窗组件（布局与 `/mcp` 风格一致）
+- [x] 支持筛选、上下选择、详情展示、启停、删除、新增
+- [x] 状态栏反馈统一为结构化文案
 
 依赖：D1、C1
 

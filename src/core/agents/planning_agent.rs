@@ -6,7 +6,7 @@ use crate::core::mcp::build_mcp_hints;
 use crate::core::model::{ModelClient, ModelRequest};
 use crate::core::planner::{PlanItem, PlanStep, PlanStepStatus, TaskPlan};
 use crate::core::session::{MessageRole, Session};
-use crate::core::skills::build_skill_hints;
+use crate::core::skill::build_skill_hints;
 
 #[derive(Debug, Clone, Default)]
 pub struct PlanningLlmOutput {
