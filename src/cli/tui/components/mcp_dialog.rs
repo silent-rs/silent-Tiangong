@@ -28,11 +28,7 @@ impl CliApp {
             modal.selected_idx.min(matched.len() - 1)
         };
 
-        let mut constraints = vec![
-            Constraint::Length(3),
-            Constraint::Min(5),
-            Constraint::Min(4),
-        ];
+        let mut constraints = vec![Constraint::Length(3), Constraint::Min(10)];
         if modal.add_input.is_some() {
             constraints.push(Constraint::Length(4));
         } else {
@@ -43,6 +39,10 @@ impl CliApp {
             .direction(Direction::Vertical)
             .constraints(constraints)
             .split(modal_rect);
+        let content_sections = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(46), Constraint::Percentage(54)])
+            .split(sections[1]);
 
         frame.render_widget(Clear, modal_rect);
         frame.render_widget(
@@ -80,7 +80,7 @@ impl CliApp {
         .block(Block::default().borders(Borders::ALL).title("概览"));
         frame.render_widget(overview, sections[0]);
 
-        let list_capacity = sections[1].height.saturating_sub(2) as usize;
+        let list_capacity = content_sections[0].height.saturating_sub(2) as usize;
         let list_start = selected.saturating_sub(list_capacity / 2);
 
         let lines = if matched.is_empty() {
@@ -143,11 +143,33 @@ impl CliApp {
                     .borders(Borders::ALL)
                     .title("MCP server 列表"),
             ),
-            sections[1],
+            content_sections[0],
         );
 
         let detail_lines = if let Some(server_idx) = matched.get(selected) {
             let server = &self.state.mcp_servers()[*server_idx];
+            let cached_tools = self.state.mcp_server_cached_tools(&server.name);
+            let (tools_text, tools_style) = match cached_tools {
+                Some(tools) if tools.is_empty() => {
+                    ("(none)".to_string(), Style::default().fg(Color::DarkGray))
+                }
+                Some(tools) => {
+                    let mut text = tools
+                        .iter()
+                        .take(6)
+                        .map(|tool| tool.compact_signature())
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    if tools.len() > 6 {
+                        text.push_str(&format!(" ...(+{})", tools.len() - 6));
+                    }
+                    (text, Style::default().fg(Color::White))
+                }
+                None => (
+                    "(loading, wait a moment)".to_string(),
+                    Style::default().fg(Color::Yellow),
+                ),
+            };
             vec![
                 Line::from(vec![
                     Span::styled("name: ", Style::default().fg(Color::Gray)),
@@ -250,6 +272,10 @@ impl CliApp {
                         Style::default().fg(Color::White),
                     ),
                 ]),
+                Line::from(vec![
+                    Span::styled("tools: ", Style::default().fg(Color::Gray)),
+                    Span::styled(tools_text, tools_style),
+                ]),
             ]
         } else {
             vec![Line::from(Span::styled(
@@ -262,7 +288,7 @@ impl CliApp {
             Paragraph::new(detail_lines)
                 .wrap(Wrap { trim: false })
                 .block(Block::default().borders(Borders::ALL).title("详情")),
-            sections[2],
+            content_sections[1],
         );
 
         if let Some(add_input) = modal.add_input.as_ref() {
@@ -274,7 +300,7 @@ impl CliApp {
                             .borders(Borders::ALL)
                             .title("新增（Enter提交 Esc取消）"),
                     ),
-                sections[3],
+                sections[2],
             );
         } else {
             frame.render_widget(
@@ -283,7 +309,7 @@ impl CliApp {
                 )
                 .style(Style::default().fg(Color::Gray))
                 .block(Block::default().borders(Borders::ALL).title("操作")),
-                sections[3],
+                sections[2],
             );
         }
     }

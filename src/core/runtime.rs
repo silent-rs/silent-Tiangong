@@ -11,7 +11,6 @@ use crate::core::agents::execution_agent::{self, DynamicPlanStep, ExecutionStepR
 use crate::core::agents::planning_agent;
 use crate::core::agents::response_agent;
 pub use crate::core::agents::response_agent::VerifyExecutionRecord;
-use crate::core::mcp::collect_mcp_context;
 use crate::core::model::{
     ModelClient, ModelRequest, ModelResponse, ModelStreamChunk, SingleProviderClient, TokenUsage,
 };
@@ -155,21 +154,10 @@ impl RuntimeEngine {
         on_plan_ready(&plan);
         let context = session.recent_messages(self.context_limit);
         let mut tool_results = Vec::new();
-
-        let mcp_context = collect_mcp_context(user_input, &self.agent_config.mcp);
-        let mut execution_input = user_input.to_string();
-        if !mcp_context.is_empty() {
-            execution_input.push_str("\n\nMCP上下文：\n");
-            for item in &mcp_context {
-                execution_input.push_str("- ");
-                execution_input.push_str(item);
-                execution_input.push('\n');
-            }
-        }
         self.execute_plan_steps_with_execution_agent(
             &mut plan,
             session,
-            &execution_input,
+            user_input,
             &context,
             &mut tool_results,
             &mut on_llm_output,
@@ -185,7 +173,7 @@ impl RuntimeEngine {
             &plan,
             &tool_results,
             &verify_records,
-            &mcp_context,
+            &[],
         );
         let req = ModelRequest {
             session_title: session.title.clone(),
@@ -307,6 +295,7 @@ impl RuntimeEngine {
                 let step_result = execution_agent::execute_single_plan_step_with_execution_agent(
                     &self.client,
                     &self.tool_executor,
+                    &self.agent_config.mcp,
                     session,
                     user_input,
                     context,

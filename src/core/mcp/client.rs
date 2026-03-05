@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use http::{HeaderName, HeaderValue};
-use rmcp::model::{PaginatedRequestParams, ReadResourceRequestParams};
+use rmcp::model::{
+    CallToolRequestParams, JsonObject, PaginatedRequestParams, ReadResourceRequestParams,
+};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::{ConfigureCommandExt, StreamableHttpClientTransport, TokioChildProcess};
 use rmcp::{Peer, RoleClient, ServiceExt};
@@ -18,12 +20,83 @@ use crate::core::agent_config::{McpServerConfig, ResolvedMcpTransport};
 const MAX_LIST_PAGES: usize = 8;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct McpResourceMeta {
-    pub server: String,
     pub uri: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct McpToolMeta {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub input_schema: Value,
+    #[serde(default)]
+    pub argument_summaries: Vec<McpToolArgumentSummary>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct McpToolArgumentSummary {
+    pub name: String,
+    pub type_name: String,
+    pub required: bool,
+    pub description: String,
+    pub default_value: String,
+    pub enum_values: Vec<String>,
+}
+
+impl McpToolMeta {
+    pub fn compact_signature(&self) -> String {
+        if self.argument_summaries.is_empty() {
+            return format!("{}()", self.name);
+        }
+        let args = self
+            .argument_summaries
+            .iter()
+            .map(|arg| {
+                let required_flag = if arg.required { "*" } else { "" };
+                if arg.type_name.is_empty() {
+                    format!("{}{}", arg.name, required_flag)
+                } else {
+                    format!("{}{}:{}", arg.name, required_flag, arg.type_name)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{}({})", self.name, args)
+    }
+
+    pub fn argument_brief(&self, max_items: usize) -> String {
+        if self.argument_summaries.is_empty() || max_items == 0 {
+            return "none".to_string();
+        }
+        self.argument_summaries
+            .iter()
+            .take(max_items)
+            .map(|arg| {
+                let required_flag = if arg.required { "*" } else { "" };
+                let mut text = if arg.type_name.is_empty() {
+                    format!("{}{}", arg.name, required_flag)
+                } else {
+                    format!("{}{}:{}", arg.name, required_flag, arg.type_name)
+                };
+                if !arg.default_value.is_empty() {
+                    text.push_str(&format!("=default({})", arg.default_value));
+                }
+                if !arg.enum_values.is_empty() {
+                    text.push_str(&format!(" enum({})", arg.enum_values.join("|")));
+                }
+                text
+            })
+            .collect::<Vec<_>>()
+            .join(";")
+    }
+}
+
+#[allow(dead_code)]
 pub trait McpClient {
+    fn list_tools(&self, server: &McpServerConfig, timeout_ms: u64) -> Result<Vec<McpToolMeta>>;
     fn list_resources(
         &self,
         server: &McpServerConfig,
@@ -35,12 +108,47 @@ pub trait McpClient {
         resource: &McpResourceMeta,
         timeout_ms: u64,
     ) -> Result<String>;
+    fn call_tool(
+        &self,
+        server: &McpServerConfig,
+        tool_name: &str,
+        arguments: Value,
+        timeout_ms: u64,
+    ) -> Result<String>;
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct LocalMcpClient;
 
 impl McpClient for LocalMcpClient {
+    fn list_tools(&self, server: &McpServerConfig, timeout_ms: u64) -> Result<Vec<McpToolMeta>> {
+        if !server.enabled {
+            return Ok(Vec::new());
+        }
+
+        if matches!(server.resolved_transport(), ResolvedMcpTransport::Metadata) {
+            return Ok(server
+                .tags
+                .iter()
+                .filter_map(|tag| {
+                    let tag = tag.trim();
+                    if tag.is_empty() {
+                        None
+                    } else {
+                        Some(McpToolMeta {
+                            name: tag.to_string(),
+                            description: "metadata-tag".to_string(),
+                            input_schema: Value::Null,
+                            argument_summaries: Vec::new(),
+                        })
+                    }
+                })
+                .collect());
+        }
+
+        list_tools_via_rmcp(server, timeout_ms)
+    }
+
     fn list_resources(
         &self,
         server: &McpServerConfig,
@@ -60,7 +168,6 @@ impl McpClient for LocalMcpClient {
                         None
                     } else {
                         Some(McpResourceMeta {
-                            server: server.name.clone(),
                             uri: format!("mcp://{}/{}", server.name, tag),
                         })
                     }
@@ -103,8 +210,38 @@ impl McpClient for LocalMcpClient {
         )?;
         Ok(parse_read_resource_result(&result))
     }
+
+    fn call_tool(
+        &self,
+        server: &McpServerConfig,
+        tool_name: &str,
+        arguments: Value,
+        timeout_ms: u64,
+    ) -> Result<String> {
+        if !server.enabled {
+            return Err(anyhow!("MCP server 未启用：{}", server.name));
+        }
+        if matches!(server.resolved_transport(), ResolvedMcpTransport::Metadata) {
+            return Err(anyhow!(
+                "MCP metadata server 不支持 tools/call：{}",
+                server.name
+            ));
+        }
+
+        let result = run_mcp_request(
+            server,
+            timeout_ms,
+            "tools/call",
+            Some(json!({
+                "name": tool_name,
+                "arguments": arguments,
+            })),
+        )?;
+        parse_call_tool_result(&result)
+    }
 }
 
+#[allow(dead_code)]
 fn list_resources_via_rmcp(
     server: &McpServerConfig,
     timeout_ms: u64,
@@ -140,6 +277,40 @@ fn list_resources_via_rmcp(
     }
 
     Ok(resources)
+}
+
+fn list_tools_via_rmcp(server: &McpServerConfig, timeout_ms: u64) -> Result<Vec<McpToolMeta>> {
+    let mut tools = Vec::new();
+    let mut seen = HashSet::new();
+    let mut cursor: Option<String> = None;
+
+    for _ in 0..MAX_LIST_PAGES {
+        let params = cursor.as_ref().map(|cursor| json!({ "cursor": cursor }));
+        let result = run_mcp_request(server, timeout_ms, "tools/list", params)?;
+        let (page, next_cursor) = parse_tool_page(&server.name, &result);
+        for tool in page {
+            if seen.insert(tool.name.clone()) {
+                tools.push(tool);
+            }
+        }
+
+        if let Some(next_cursor) = next_cursor {
+            cursor = Some(next_cursor);
+            continue;
+        }
+        cursor = None;
+        break;
+    }
+
+    if cursor.is_some() {
+        return Err(anyhow!(
+            "MCP 工具分页超过上限：server={} max_pages={}",
+            server.name,
+            MAX_LIST_PAGES
+        ));
+    }
+
+    Ok(tools)
 }
 
 fn run_mcp_request(
@@ -214,9 +385,8 @@ async fn run_stdio_mcp_request_async(
     params: Option<Value>,
 ) -> Result<Value> {
     let command = server.command_text();
-    let transport = TokioChildProcess::new(Command::new(command).configure(|cmd| {
+    let (transport, _stderr) = TokioChildProcess::builder(Command::new(command).configure(|cmd| {
         cmd.args(&server.args);
-        cmd.stderr(Stdio::null());
         if let Some(cwd) = server.cwd_text() {
             cmd.current_dir(cwd);
         }
@@ -224,6 +394,8 @@ async fn run_stdio_mcp_request_async(
             cmd.env(key, value);
         }
     }))
+    .stderr(Stdio::null())
+    .spawn()
     .with_context(|| {
         format!(
             "MCP进程启动失败：server={} command={} args={}",
@@ -305,10 +477,32 @@ async fn dispatch_mcp_request(
     params: Option<Value>,
 ) -> Result<Value> {
     match method {
+        "tools/list" => request_tools_list(peer, params).await,
+        "tools/call" => request_tools_call(peer, params).await,
         "resources/list" => request_resources_list(peer, params).await,
         "resources/read" => request_resources_read(peer, params).await,
         _ => Err(anyhow!("不支持的 MCP 方法：{method}")),
     }
+}
+
+async fn request_tools_list(peer: &Peer<RoleClient>, params: Option<Value>) -> Result<Value> {
+    let cursor = params
+        .as_ref()
+        .and_then(|params| params.get("cursor"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|cursor| !cursor.is_empty())
+        .map(ToString::to_string);
+    let request = cursor.map(|cursor| PaginatedRequestParams {
+        meta: None,
+        cursor: Some(cursor),
+    });
+
+    let response = peer
+        .list_tools(request)
+        .await
+        .context("调用 MCP tools/list 失败")?;
+    serde_json::to_value(response).context("序列化 MCP tools/list 响应失败")
 }
 
 async fn request_resources_list(peer: &Peer<RoleClient>, params: Option<Value>) -> Result<Value> {
@@ -348,32 +542,66 @@ async fn request_resources_read(peer: &Peer<RoleClient>, params: Option<Value>) 
     serde_json::to_value(response).context("序列化 MCP resources/read 响应失败")
 }
 
-fn parse_resource_page(server_name: &str, value: &Value) -> (Vec<McpResourceMeta>, Option<String>) {
+async fn request_tools_call(peer: &Peer<RoleClient>, params: Option<Value>) -> Result<Value> {
+    let params = params.unwrap_or_else(|| json!({}));
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| anyhow!("MCP tools/call 缺少 name 参数"))?
+        .to_string();
+    let arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let arguments = if arguments.is_null() {
+        None
+    } else {
+        match arguments {
+            Value::Object(_) => Some(
+                serde_json::from_value::<JsonObject>(arguments)
+                    .context("MCP tools/call arguments 必须是对象")?,
+            ),
+            _ => return Err(anyhow!("MCP tools/call arguments 必须是对象")),
+        }
+    };
+    let response = peer
+        .call_tool(CallToolRequestParams {
+            meta: None,
+            name: name.into(),
+            arguments,
+            task: None,
+        })
+        .await
+        .context("调用 MCP tools/call 失败")?;
+    serde_json::to_value(response).context("序列化 MCP tools/call 响应失败")
+}
+
+#[allow(dead_code)]
+fn parse_resource_page(
+    _server_name: &str,
+    value: &Value,
+) -> (Vec<McpResourceMeta>, Option<String>) {
     match value {
         Value::Array(items) => (
             items
                 .iter()
                 .filter_map(parse_resource_uri)
-                .map(|uri| McpResourceMeta {
-                    server: server_name.to_string(),
-                    uri,
-                })
+                .map(|uri| McpResourceMeta { uri })
                 .collect(),
             None,
         ),
         Value::Object(map) => {
             let mut resources = map
                 .get("resources")
-                .map(|resources| parse_resource_page(server_name, resources).0)
+                .map(|resources| parse_resource_page(_server_name, resources).0)
                 .unwrap_or_default();
 
             if resources.is_empty()
                 && let Some(uri) = parse_resource_uri(value)
             {
-                resources.push(McpResourceMeta {
-                    server: server_name.to_string(),
-                    uri,
-                });
+                resources.push(McpResourceMeta { uri });
             }
 
             let next_cursor = map
@@ -390,6 +618,171 @@ fn parse_resource_page(server_name: &str, value: &Value) -> (Vec<McpResourceMeta
     }
 }
 
+fn parse_tool_page(server_name: &str, value: &Value) -> (Vec<McpToolMeta>, Option<String>) {
+    match value {
+        Value::Array(items) => (
+            items
+                .iter()
+                .filter_map(|item| parse_tool_item(server_name, item))
+                .collect(),
+            None,
+        ),
+        Value::Object(map) => {
+            let mut tools = map
+                .get("tools")
+                .map(|tools| parse_tool_page(server_name, tools).0)
+                .unwrap_or_default();
+
+            if tools.is_empty()
+                && let Some(tool) = parse_tool_item(server_name, value)
+            {
+                tools.push(tool);
+            }
+
+            let next_cursor = map
+                .get("nextCursor")
+                .and_then(Value::as_str)
+                .or_else(|| map.get("next_cursor").and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(ToString::to_string);
+
+            (tools, next_cursor)
+        }
+        _ => (Vec::new(), None),
+    }
+}
+
+fn parse_tool_item(_server_name: &str, value: &Value) -> Option<McpToolMeta> {
+    match value {
+        Value::String(name) => {
+            let name = name.trim();
+            if name.is_empty() {
+                None
+            } else {
+                Some(McpToolMeta {
+                    name: name.to_string(),
+                    description: String::new(),
+                    input_schema: Value::Null,
+                    argument_summaries: Vec::new(),
+                })
+            }
+        }
+        Value::Object(map) => {
+            let name = map
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|item| !item.is_empty())?;
+            let description = map
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string();
+            let input_schema = map
+                .get("inputSchema")
+                .or_else(|| map.get("input_schema"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            Some(McpToolMeta {
+                name: name.to_string(),
+                description,
+                argument_summaries: parse_tool_argument_summaries(&input_schema),
+                input_schema,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn parse_tool_argument_summaries(input_schema: &Value) -> Vec<McpToolArgumentSummary> {
+    let Value::Object(schema) = input_schema else {
+        return Vec::new();
+    };
+    let required_set = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(ToString::to_string)
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+
+    let mut output = Vec::new();
+    for (name, prop) in properties {
+        let prop_obj = prop.as_object();
+        let type_name = prop_obj
+            .and_then(|obj| obj.get("type"))
+            .map(parse_schema_type_name)
+            .unwrap_or_default();
+        let description = prop_obj
+            .and_then(|obj| obj.get("description"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string();
+        let default_value = prop_obj
+            .and_then(|obj| obj.get("default"))
+            .map(compact_json)
+            .unwrap_or_default();
+        let enum_values = prop_obj
+            .and_then(|obj| obj.get("enum"))
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .map(compact_json)
+                    .filter(|item| !item.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        output.push(McpToolArgumentSummary {
+            name: name.to_string(),
+            type_name,
+            required: required_set.contains(name),
+            description,
+            default_value,
+            enum_values,
+        });
+    }
+    output.sort_by(|a, b| a.name.cmp(&b.name));
+    output
+}
+
+fn parse_schema_type_name(value: &Value) -> String {
+    match value {
+        Value::String(name) => name.trim().to_string(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .collect::<Vec<_>>()
+            .join("|"),
+        _ => String::new(),
+    }
+}
+
+fn compact_json(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(v) => v.to_string(),
+        Value::Number(v) => v.to_string(),
+        Value::String(v) => v.to_string(),
+        _ => serde_json::to_string(value).unwrap_or_default(),
+    }
+}
+
+#[allow(dead_code)]
 fn parse_resource_uri(value: &Value) -> Option<String> {
     match value {
         Value::String(uri) => {
@@ -417,6 +810,7 @@ fn parse_resource_uri(value: &Value) -> Option<String> {
     }
 }
 
+#[allow(dead_code)]
 fn parse_read_resource_result(result: &Value) -> String {
     if let Some(content) = parse_content_from_json(result) {
         return content;
@@ -425,6 +819,33 @@ fn parse_read_resource_result(result: &Value) -> String {
     result.to_string()
 }
 
+fn parse_call_tool_result(result: &Value) -> Result<String> {
+    let is_error = result
+        .get("isError")
+        .and_then(Value::as_bool)
+        .or_else(|| result.get("is_error").and_then(Value::as_bool))
+        .unwrap_or(false);
+
+    if let Some(value) = result
+        .get("structuredContent")
+        .or_else(|| result.get("structured_content"))
+    {
+        if is_error {
+            return Err(anyhow!("MCP tools/call 返回错误：{}", compact_json(value)));
+        }
+        return Ok(compact_json(value));
+    }
+
+    let content = result.get("content").cloned().unwrap_or(Value::Null);
+    let parsed = parse_content_from_json(&content).unwrap_or_else(|| compact_json(&content));
+    if is_error {
+        Err(anyhow!("MCP tools/call 返回错误：{}", parsed))
+    } else {
+        Ok(parsed)
+    }
+}
+
+#[allow(dead_code)]
 fn parse_content_from_json(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => Some(text.trim().to_string()).filter(|text| !text.is_empty()),

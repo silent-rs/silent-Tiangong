@@ -19,13 +19,28 @@
 
 - Skill 管理方式必须与 MCP 管理一致：支持查看、筛选、启停、增删、校验、持久化。
 - CLI 必须提供 `/skill` 管理入口，交互风格对齐 `/mcp` 管理弹窗。
+- MCP 管理必须支持 JSON 导入：`tiangong mcp add --json '<json>'`。
+- JSON 导入必须支持两类输入：单个 MCP server 对象、`mcpServers` 映射对象。
+- JSON 导入必须采用确定性映射规则完成字段转换，不依赖大模型推断。
+- JSON 导入必须在落盘前执行 MCP 配置校验（含 transport/endpoint/args/env/cwd 约束）并返回可定位错误。
+- JSON 导入遇到同名 server 默认拒绝写入并返回冲突提示（除非显式指定覆盖策略）。
+- 启动阶段必须对已启用 MCP server 进行能力预热，至少拉取 `tools/list` 与 `resources/list` 并建立内存索引。
+- MCP 能力数据必须支持持久化缓存，至少包含每个 server 的 `tools` 列表，并落盘到 `~/.tiangong`。
+- MCP `tools` 缓存必须保存完整元数据（至少 `name`、`description`、`inputSchema`、参数必填信息与类型摘要），不能仅保存工具名列表。
+- `mcp-tools-cache.json` 不再维护 `keywords` 字段；缓存与对话侧仅基于启用 server 的 tools 元数据。
+- 启动后必须按固定周期刷新已启用 MCP server 的能力缓存（含 `tools/list`），刷新失败需保留最近一次可用缓存并记录错误。
+- 对话阶段必须将“已启用 MCP server 的 tools 元数据”直接注入 system prompt，不再依赖“先匹配 server 再筛选 tools”的链路。
 - Skill 必须支持本地安装、启用、停用、卸载、列表、详情展示。
 - Skill 依赖 MCP 时，必须通过受控安装器生成托管 MCP server 配置，不允许 Skill 注入任意 `command/args`。
 - Skill 依赖 MCP 的命名与映射必须可追踪：`skill::<skill_id>::<mcp_id>`。
 - Skill 卸载时必须仅移除其托管 MCP 配置；共享依赖需基于引用计数处理。
 - Skill/MCP 管理操作必须统一结构化执行记录与失败回传格式，便于审计与排障。
 - 配置与锁文件必须统一写入用户目录 `~/.tiangong`，不得引入并行存储根。
-- 必须新增并维护 `skills-lock.json`、`mcp-lock.json`，保证与 `app.json` 一致。
+- MCP 与 Skill 必须拆分为独立配置文件，不得继续混存于 `app.json`：
+  - `mcp` 配置写入 `~/.tiangong/mcp.json`
+  - `skills` 配置写入 `~/.tiangong/skills.json`
+- `app.json` 仅保留会话/模型/UI 等应用状态，不再承载 `mcp` 与 `skills` 配置。
+- 必须新增并维护 `skills-lock.json`、`mcp-lock.json`，并与 `mcp.json`、`skills.json` 保持一致。
 - 安装流程必须具备事务与回滚：任一步骤失败后回滚增量变更并输出错误分类。
 - 安装前必须输出权限摘要（`fs_read/fs_write/cmd_exec/net`）与依赖摘要，并要求用户确认。
 - 文件/命令/网络权限必须默认最小化：
@@ -37,6 +52,8 @@
 
 - 支持 Git 源安装 Skill（在本地源稳定后交付）。
 - 支持非交互命令：`tiangong skill list/install/remove/enable/disable/validate`。
+- MCP JSON 导入应支持文件输入：`tiangong mcp add --json-file <path>`，避免命令行转义复杂度。
+- MCP 能力缓存缺失时应支持启动后异步兜底刷新并回填，不阻塞主对话流程。
 - 支持 Skill 包 `skill.toml` 与 `SKILL.md` 双格式兼容（缺失 `skill.toml` 时降级解析）。
 - 支持外部 Skill 快速转换为天工 Skill（`--convert` 自动补齐 `SKILL.md/skill.toml`）。
 - `--convert` 必须优先使用天工内置智能体 + 大模型进行辅助转换；模型不可用或生成失败时回退固定规则转换。

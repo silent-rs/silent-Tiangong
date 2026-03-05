@@ -11,10 +11,14 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use crate::core::agent_config::{
-    AgentConfig, InstalledSkillConfig, McpServerConfig, McpTransportMode,
+    AgentConfig, InstalledSkillConfig, McpConfig, McpServerConfig, McpTransportMode, SkillsConfig,
 };
 use crate::core::agents::skill_convert_agent::convert_external_skill_with_agent;
-use crate::core::mcp::{describe_mcp_servers, summarize_mcp_servers, validate_mcp_config};
+use crate::core::mcp::{
+    McpToolMeta, cached_server_tools, configure_mcp_capability_scheduler, describe_mcp_servers,
+    load_mcp_capabilities_cache, refresh_mcp_capabilities_async, summarize_mcp_servers,
+    validate_mcp_config,
+};
 use crate::core::model::{ModelProviderConfig, ModelStreamChunk, SingleProviderClient};
 use crate::core::planner::{PlanStepStatus, TaskPlan};
 use crate::core::runtime::{
@@ -29,6 +33,7 @@ use crate::core::tool::{ToolExecutionRecord, ToolResult};
 
 const DEFAULT_SESSION_TITLE: &str = "默认会话";
 const DEFAULT_CONTEXT_LIMIT: usize = 16;
+const MCP_CAPABILITY_REFRESH_INTERVAL_SECS: u64 = 300;
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct PersistedAppState {
@@ -153,6 +158,9 @@ pub struct TiangongState {
     pub run: RunSnapshot,
     pending_turn: Option<PendingTurn>,
     app_storage_path: PathBuf,
+    skills_config_path: PathBuf,
+    mcp_config_path: PathBuf,
+    mcp_capability_cache_path: PathBuf,
     sessions_dir_path: PathBuf,
     runtime: RuntimeEngine,
 }
@@ -166,6 +174,9 @@ impl Default for TiangongState {
 impl TiangongState {
     pub fn load_or_default() -> Self {
         let app_storage_path = default_app_storage_path();
+        let skills_config_path = default_skills_config_path();
+        let mcp_config_path = default_mcp_config_path();
+        let mcp_capability_cache_path = default_mcp_capability_cache_path();
         let sessions_dir_path = default_sessions_dir_path();
         let default_model_config = ModelProviderConfig::from_env();
         let default_agent_config = AgentConfig::default();
@@ -190,6 +201,9 @@ impl TiangongState {
             run: RunSnapshot::default(),
             pending_turn: None,
             app_storage_path,
+            skills_config_path,
+            mcp_config_path,
+            mcp_capability_cache_path,
             sessions_dir_path,
             runtime,
         };
@@ -199,6 +213,9 @@ impl TiangongState {
         } else if let Ok(Some(legacy_loaded)) = state.load_from_legacy_disk() {
             state.apply_loaded_state(legacy_loaded);
             let _ = state.persist_to_disk();
+        }
+        if !state.skills_config_path.exists() || !state.mcp_config_path.exists() {
+            let _ = state.persist_app_only();
         }
 
         if state.sessions.is_empty() {
@@ -250,6 +267,13 @@ impl TiangongState {
         }
         state.run.updated_at = now_text();
         let _ = state.sync_skill_locks();
+        let _ = load_mcp_capabilities_cache(&state.mcp_capability_cache_path);
+        configure_mcp_capability_scheduler(
+            state.agent_config.mcp.clone(),
+            state.mcp_capability_cache_path.clone(),
+            MCP_CAPABILITY_REFRESH_INTERVAL_SECS,
+        );
+        refresh_mcp_capabilities_async(state.agent_config.mcp.clone());
 
         state
     }
@@ -622,6 +646,10 @@ impl TiangongState {
 
     pub fn mcp_servers(&self) -> &[McpServerConfig] {
         &self.agent_config.mcp.servers
+    }
+
+    pub fn mcp_server_cached_tools(&self, name: &str) -> Option<Vec<McpToolMeta>> {
+        cached_server_tools(name)
     }
 
     pub fn installed_skills(&self) -> &[InstalledSkillConfig] {
@@ -1118,6 +1146,12 @@ impl TiangongState {
             DEFAULT_CONTEXT_LIMIT,
             self.agent_config.clone(),
         );
+        configure_mcp_capability_scheduler(
+            self.agent_config.mcp.clone(),
+            self.mcp_capability_cache_path.clone(),
+            MCP_CAPABILITY_REFRESH_INTERVAL_SECS,
+        );
+        refresh_mcp_capabilities_async(self.agent_config.mcp.clone());
     }
 
     pub fn select_model(&mut self, model: &str) -> Result<()> {
@@ -1770,12 +1804,31 @@ impl TiangongState {
             active_session_id: self.active_session_id.clone(),
             model_config: Some(self.model_config.clone()),
             model_list: self.settings_model_list.clone(),
-            agent_config: Some(self.agent_config.clone()),
+            agent_config: None,
         };
         let content = serde_json::to_string_pretty(&payload).context("序列化应用存储失败")?;
         fs::write(&self.app_storage_path, content)
             .with_context(|| format!("写入应用存储失败：{}", self.app_storage_path.display()))?;
+        self.persist_agent_configs()?;
         self.sync_skill_locks()
+    }
+
+    fn persist_agent_configs(&self) -> Result<()> {
+        ensure_parent_dir(&self.skills_config_path)?;
+        ensure_parent_dir(&self.mcp_config_path)?;
+        let skills_content = serde_json::to_string_pretty(&self.agent_config.skills)
+            .context("序列化 skills 配置失败")?;
+        let mcp_content =
+            serde_json::to_string_pretty(&self.agent_config.mcp).context("序列化 mcp 配置失败")?;
+        fs::write(&self.skills_config_path, skills_content).with_context(|| {
+            format!(
+                "写入 skills 配置失败：{}",
+                self.skills_config_path.display()
+            )
+        })?;
+        fs::write(&self.mcp_config_path, mcp_content)
+            .with_context(|| format!("写入 mcp 配置失败：{}", self.mcp_config_path.display()))?;
+        Ok(())
     }
 
     fn sync_skill_locks(&self) -> Result<()> {
@@ -1910,6 +1963,8 @@ impl TiangongState {
                 return Ok(None);
             }
 
+            let agent_config = self.load_agent_config_with_fallback(None)?;
+
             let mut sessions = Vec::new();
             for session_id in &session_ids {
                 if let Some(session) = self.load_session_from_disk(session_id)? {
@@ -1922,7 +1977,7 @@ impl TiangongState {
                 active_session_id: session_ids.first().cloned().unwrap_or_default(),
                 model_config: None,
                 model_list: Vec::new(),
-                agent_config: None,
+                agent_config,
             }));
         }
 
@@ -1945,14 +2000,64 @@ impl TiangongState {
         } else {
             session_ids.first().cloned().unwrap_or_default()
         };
+        let agent_config = self.load_agent_config_with_fallback(persisted.agent_config)?;
 
         Ok(Some(LoadedState {
             sessions,
             active_session_id,
             model_config: persisted.model_config,
             model_list: persisted.model_list,
-            agent_config: persisted.agent_config,
+            agent_config,
         }))
+    }
+
+    fn load_agent_config_with_fallback(
+        &self,
+        legacy_agent_config: Option<AgentConfig>,
+    ) -> Result<Option<AgentConfig>> {
+        let skills = self.load_skills_config_from_disk()?;
+        let mcp = self.load_mcp_config_from_disk()?;
+        if skills.is_none() && mcp.is_none() {
+            return Ok(legacy_agent_config);
+        }
+        let mut agent_config = legacy_agent_config.unwrap_or_default();
+        if let Some(skills) = skills {
+            agent_config.skills = skills;
+        }
+        if let Some(mcp) = mcp {
+            agent_config.mcp = mcp;
+        }
+        Ok(Some(agent_config))
+    }
+
+    fn load_skills_config_from_disk(&self) -> Result<Option<SkillsConfig>> {
+        if !self.skills_config_path.exists() {
+            return Ok(None);
+        }
+        let content = fs::read_to_string(&self.skills_config_path).with_context(|| {
+            format!(
+                "读取 skills 配置失败：{}",
+                self.skills_config_path.display()
+            )
+        })?;
+        let config: SkillsConfig = serde_json::from_str(&content).with_context(|| {
+            format!(
+                "解析 skills 配置失败：{}",
+                self.skills_config_path.display()
+            )
+        })?;
+        Ok(Some(config))
+    }
+
+    fn load_mcp_config_from_disk(&self) -> Result<Option<McpConfig>> {
+        if !self.mcp_config_path.exists() {
+            return Ok(None);
+        }
+        let content = fs::read_to_string(&self.mcp_config_path)
+            .with_context(|| format!("读取 mcp 配置失败：{}", self.mcp_config_path.display()))?;
+        let config: McpConfig = serde_json::from_str(&content)
+            .with_context(|| format!("解析 mcp 配置失败：{}", self.mcp_config_path.display()))?;
+        Ok(Some(config))
     }
 
     fn load_from_legacy_disk(&self) -> Result<Option<LoadedState>> {
@@ -2064,11 +2169,13 @@ impl TiangongState {
             active_session_id: self.active_session_id.clone(),
             model_config: Some(self.model_config.clone()),
             model_list: self.settings_model_list.clone(),
-            agent_config: Some(self.agent_config.clone()),
+            agent_config: None,
         };
         let content = serde_json::to_string_pretty(&payload).context("序列化应用存储失败")?;
         fs::write(&self.app_storage_path, content)
-            .with_context(|| format!("写入应用存储失败：{}", self.app_storage_path.display()))
+            .with_context(|| format!("写入应用存储失败：{}", self.app_storage_path.display()))?;
+        self.persist_agent_configs()?;
+        self.sync_skill_locks()
     }
 
     fn normalize_sessions_for_storage(&mut self) {
@@ -2139,6 +2246,18 @@ fn default_storage_root() -> PathBuf {
 
 fn default_app_storage_path() -> PathBuf {
     default_storage_root().join("app.json")
+}
+
+fn default_skills_config_path() -> PathBuf {
+    default_storage_root().join("skills.json")
+}
+
+fn default_mcp_config_path() -> PathBuf {
+    default_storage_root().join("mcp.json")
+}
+
+fn default_mcp_capability_cache_path() -> PathBuf {
+    default_storage_root().join("mcp-tools-cache.json")
 }
 
 fn default_sessions_dir_path() -> PathBuf {
@@ -2791,6 +2910,8 @@ mod tests {
         assert!(installed_path.starts_with(&expected_prefix));
         assert!(installed_path.join("SKILL.md").exists());
         assert!(fake_home.join(".tiangong").join("app.json").exists());
+        assert!(fake_home.join(".tiangong").join("skills.json").exists());
+        assert!(fake_home.join(".tiangong").join("mcp.json").exists());
         assert!(
             fake_home
                 .join(".tiangong")

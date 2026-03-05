@@ -1075,34 +1075,11 @@ impl CliApp {
     }
 
     fn mcp_command_hints(&self, raw: &str) -> Vec<CommandHint> {
-        let mut hints = vec![
-            CommandHint::new("/mcp", "打开 MCP 管理弹窗"),
-            CommandHint::new("/mcp browser", "打开弹窗并按关键词筛选"),
-            CommandHint::new_note(
-                "新增示例（stdio）",
-                "browser npx -y @modelcontextprotocol/server-filesystem --tags fs",
-            ),
-            CommandHint::new_note(
-                "新增示例（http）",
-                "remote https://example.com/mcp --transport http --auth-header token",
-            ),
-            CommandHint::new_note(
-                "弹窗内快捷键",
-                "空格启/禁用 Backspace删除 Delete删筛选字 A新增 Esc关闭",
-            ),
-        ];
-
-        if raw != "/mcp" {
-            hints.retain(|hint| hint.command.starts_with(raw));
+        if raw == "/mcp" {
+            vec![CommandHint::new("/mcp", "打开 MCP 管理弹窗")]
+        } else {
+            Vec::new()
         }
-        if hints.is_empty() {
-            hints.push(CommandHint::new_note(
-                "/mcp <关键词>",
-                "打开 MCP 管理弹窗并筛选目标 server",
-            ));
-        }
-
-        hints
     }
 
     fn skill_command_hints(&self, raw: &str) -> Vec<CommandHint> {

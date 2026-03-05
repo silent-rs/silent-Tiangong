@@ -5,7 +5,6 @@ use crate::core::agent_config::{McpConfig, McpServerConfig, McpTransportMode};
 
 use super::client::{LocalMcpClient, McpClient};
 use super::config::{describe_mcp_servers, summarize_mcp_servers, validate_mcp_config};
-use super::context::matched_servers;
 use super::{build_mcp_hints, collect_mcp_context};
 
 fn server(name: &str, command: &str, tags: &[&str]) -> McpServerConfig {
@@ -47,50 +46,42 @@ fn build_mcp_hints_returns_skipped_when_disabled() {
 }
 
 #[test]
-fn build_mcp_hints_returns_skipped_when_no_server_matched() {
-    let config = config_with_servers(vec![server("browser", "", &["网页"])]);
+fn build_mcp_hints_returns_skipped_when_no_server_enabled() {
+    let mut disabled = server("browser", "", &["网页"]);
+    disabled.enabled = false;
+    let config = config_with_servers(vec![disabled]);
     let hints = build_mcp_hints("查询订单", &config);
     assert_eq!(
         hints,
-        vec!["mcp|skipped|server=all|detail=no matched server"]
+        vec!["mcp|skipped|server=all|detail=no enabled server"]
     );
 }
 
 #[test]
-fn matched_servers_supports_keyword_rules() {
+fn build_mcp_hints_uses_enabled_servers_without_user_matching() {
     let config = config_with_servers(vec![
         server("browser-hub", "", &["网页"]),
         server("db-main", "", &["数据库"]),
-        server("ops", "", &["运维"]),
     ]);
-
-    let browser = matched_servers("请帮我看看这个页面", &config);
-    assert_eq!(browser.len(), 1);
-    assert_eq!(browser[0].name, "browser-hub");
-
-    let db = matched_servers("查询sql表结构", &config);
-    assert_eq!(db.len(), 1);
-    assert_eq!(db[0].name, "db-main");
+    let hints = build_mcp_hints("一个与标签无关的问题", &config);
+    assert_eq!(hints.len(), 2);
+    assert!(hints.iter().any(|item| item.contains("server=browser-hub")));
+    assert!(hints.iter().any(|item| item.contains("server=db-main")));
 }
 
 #[test]
-fn collect_mcp_context_limits_items() {
+fn collect_mcp_context_returns_empty_when_cache_miss() {
     let config = config_with_servers(vec![server(
         "browser",
         "",
         &["tag1", "tag2", "tag3", "tag4", "tag5"],
     )]);
     let context = collect_mcp_context("browser", &config);
-    assert_eq!(context.len(), 4);
-    assert!(
-        context
-            .iter()
-            .all(|item| item.starts_with("mcp|ok|server=browser"))
-    );
+    assert!(context.is_empty());
 }
 
 #[test]
-fn build_mcp_hints_surfaces_command_failure() {
+fn build_mcp_hints_cache_miss_does_not_block() {
     let config = config_with_servers(vec![server(
         "failing",
         "/path/does-not-exist/tiangong-mcp",
@@ -98,9 +89,8 @@ fn build_mcp_hints_surfaces_command_failure() {
     )]);
     let hints = build_mcp_hints("failing", &config);
     assert_eq!(hints.len(), 1);
-    assert!(
-        hints[0].starts_with("mcp|error|server=failing|detail=timeout_ms=500,action=list,error=")
-    );
+    assert!(hints[0].contains("mcp|ok|server=failing"));
+    assert!(hints[0].contains("source=cache-miss"));
 }
 
 #[test]
@@ -251,6 +241,11 @@ while true; do
     continue
   fi
 
+  if [[ "$payload" == *'"method":"tools/list"'* ]]; then
+    send_msg "{\"jsonrpc\":\"2.0\",\"id\":${req_id},\"result\":{\"tools\":[{\"name\":\"read_demo\",\"description\":\"read demo resource\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"keyword\":{\"type\":\"string\",\"description\":\"搜索关键词\"},\"page\":{\"type\":\"integer\",\"description\":\"页码\",\"default\":1}},\"required\":[\"keyword\"]}}]}}"
+    continue
+  fi
+
   if [[ "$payload" == *'"method":"resources/list"'* ]]; then
     send_msg "{\"jsonrpc\":\"2.0\",\"id\":${req_id},\"result\":{\"resources\":[{\"uri\":\"mcp://demo/first\",\"name\":\"first\"},{\"uri\":\"mcp://demo/second\",\"name\":\"second\"}]}}"
     continue
@@ -286,17 +281,34 @@ done
     };
 
     let resources = client
-        .list_resources(&server, 1000)
+        .list_resources(&server, 3000)
         .expect("list resources");
     assert_eq!(resources.len(), 2);
     assert_eq!(resources[0].uri, "mcp://demo/first");
+    let tools = client.list_tools(&server, 3000).expect("list tools");
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name, "read_demo");
+    assert_eq!(tools[0].argument_summaries.len(), 2);
+    assert!(
+        tools[0]
+            .argument_summaries
+            .iter()
+            .any(|arg| { arg.name == "keyword" && arg.required && arg.type_name == "string" })
+    );
+    assert!(
+        tools[0]
+            .argument_summaries
+            .iter()
+            .any(|arg| { arg.name == "page" && !arg.required && arg.default_value == "1" })
+    );
+    assert!(tools[0].compact_signature().contains("keyword*:string"));
 
     let first_content = client
-        .read_resource(&server, &resources[0], 1000)
+        .read_resource(&server, &resources[0], 3000)
         .expect("read first resource");
     assert_eq!(first_content, "hello-from-first");
 
-    let read_err = client.read_resource(&server, &resources[1], 1000);
+    let read_err = client.read_resource(&server, &resources[1], 3000);
     assert!(read_err.is_err());
 }
 
@@ -360,7 +372,7 @@ done
 
 #[cfg(unix)]
 #[test]
-fn collect_mcp_context_uses_stdio_mcp_server() {
+fn collect_mcp_context_uses_stdio_mcp_server_cache_miss() {
     let script = create_script(
         r#"#!/usr/bin/env bash
 set -euo pipefail
@@ -391,6 +403,11 @@ while true; do
   fi
 
   if [[ "$payload" == *'"method":"notifications/initialized"'* ]]; then
+    continue
+  fi
+
+  if [[ "$payload" == *'"method":"tools/list"'* ]]; then
+    send_msg "{\"jsonrpc\":\"2.0\",\"id\":${req_id},\"result\":{\"tools\":[{\"name\":\"chain_lookup\",\"description\":\"lookup chain resource\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"required\":[]}}]}}"
     continue
   fi
 
@@ -427,11 +444,5 @@ done
     };
 
     let context = collect_mcp_context("请使用 filesystem mcp 查看目录", &config);
-    assert!(!context.is_empty());
-    assert!(
-        context
-            .iter()
-            .any(|item| item.contains("mcp|ok|server=public-fs-test"))
-    );
-    assert!(context.iter().any(|item| item.contains("chain.txt")));
+    assert!(context.is_empty());
 }

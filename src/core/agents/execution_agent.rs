@@ -1,15 +1,21 @@
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 use serde_json::Value;
 
+use crate::core::agent_config::{McpConfig, McpServerConfig};
+use crate::core::mcp::{LocalMcpClient, McpClient, McpToolMeta, cached_active_tools};
 use crate::core::model::{
     FunctionToolSpec, ModelClient, ModelFunctionCall, ModelRequest, SingleProviderClient,
 };
 use crate::core::planner::{PlanStep, PlanStepStatus, TaskPlan};
 use crate::core::session::{Message, MessageRole, Session, now_text};
-use crate::core::tool::{LocalToolExecutor, ToolCall, ToolExecutor, ToolName, ToolResult};
+use crate::core::tool::{
+    LocalToolExecutor, ToolCall, ToolExecutionRecord, ToolExecutor, ToolName, ToolResult,
+};
 
 const INTERNAL_SHELL_CMD: &str = "__tiangong_shell__";
 const INTERNAL_CWD_PREFIX: &str = "__tiangong_cwd=";
@@ -49,10 +55,17 @@ struct SuccessfulBusinessResult {
     payload: Option<Value>,
 }
 
+#[derive(Debug, Clone)]
+struct McpFunctionTarget {
+    server_name: String,
+    tool_name: String,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn execute_single_plan_step_with_execution_agent(
     client: &SingleProviderClient,
     tool_executor: &LocalToolExecutor,
+    mcp_config: &McpConfig,
     session: &Session,
     user_input: &str,
     context: &[Message],
@@ -62,8 +75,15 @@ pub fn execute_single_plan_step_with_execution_agent(
     previous_plan_summaries: &[String],
     tool_results: &mut Vec<ToolResult>,
 ) -> Result<ExecutionStepResult> {
-    let step_prompt =
-        build_step_execution_prompt(user_input, plan, plan_name, step, previous_plan_summaries);
+    let (function_tools, mcp_function_targets) = execution_function_tools(mcp_config);
+    let step_prompt = build_step_execution_prompt(
+        user_input,
+        plan,
+        plan_name,
+        step,
+        previous_plan_summaries,
+        &mcp_function_targets,
+    );
     let mut loop_context = context.to_vec();
     let mut output_contents = Vec::new();
     let mut output_reasonings = Vec::new();
@@ -81,7 +101,7 @@ pub fn execute_single_plan_step_with_execution_agent(
             user_input: round_prompt,
             context: loop_context.clone(),
         };
-        let response = client.complete_with_functions(&request, &basic_file_function_tools())?;
+        let response = client.complete_with_functions(&request, &function_tools)?;
         let _ = response.usage.total_tokens;
         collect_llm_output(
             round + 1,
@@ -104,6 +124,7 @@ pub fn execute_single_plan_step_with_execution_agent(
         let mut successful_result: Option<SuccessfulBusinessResult> = None;
         let mut ignored_failed_tool = false;
         let mut round_feedback = Vec::new();
+        let mut blocking_errors = Vec::new();
         for tool_call in &response.tool_calls {
             let _function_call_id = tool_call.id.as_str();
             if tool_call.name == "mark_step_completed" {
@@ -118,8 +139,37 @@ pub fn execute_single_plan_step_with_execution_agent(
                 completion_signal = Some(parse_completion_signal(tool_call)?);
                 continue;
             }
-            let call = build_tool_call_from_function(tool_call)?;
-            let result = tool_executor.execute(&call)?;
+            let result = match (|| -> Result<ToolResult> {
+                if let Some(target) = mcp_function_targets.get(&tool_call.name) {
+                    return execute_mcp_tool_call(tool_call, target, mcp_config);
+                }
+                if let Some((target, args)) = resolve_mcp_tool_call_from_run_command(
+                    tool_call,
+                    &mcp_function_targets,
+                    mcp_config,
+                ) {
+                    return execute_mcp_tool_call_with_args(&target, args, mcp_config);
+                }
+                match build_tool_call_from_function(tool_call) {
+                    Ok(call) => tool_executor.execute(&call),
+                    Err(err) => {
+                        if let Some(target) =
+                            resolve_unique_mcp_target_by_raw_name(&tool_call.name, mcp_config)
+                        {
+                            execute_mcp_tool_call_with_args(
+                                &target,
+                                normalize_mcp_call_arguments(tool_call),
+                                mcp_config,
+                            )
+                        } else {
+                            Err(err)
+                        }
+                    }
+                }
+            })() {
+                Ok(result) => result,
+                Err(err) => build_internal_tool_error_result(&tool_call.name, &err.to_string()),
+            };
             if let Some(execution) = result.execution.as_ref() {
                 executed_tools.push(execution.tool_name.clone());
             }
@@ -137,8 +187,35 @@ pub fn execute_single_plan_step_with_execution_agent(
                     ));
                     continue;
                 }
-                return Err(anyhow!("{}", build_tool_failure_error(&result)));
+                blocking_errors.push(build_tool_failure_error(&result));
+                continue;
             }
+        }
+
+        if !blocking_errors.is_empty() {
+            if round + 1 >= MAX_EXECUTION_AGENT_ROUNDS {
+                return Err(anyhow!(
+                    "执行智能体在 {} 轮内持续工具失败：step={} {}，last_error={}",
+                    MAX_EXECUTION_AGENT_ROUNDS,
+                    step.name,
+                    step.description,
+                    blocking_errors
+                        .last()
+                        .cloned()
+                        .unwrap_or_else(|| "unknown".to_string())
+                ));
+            }
+            loop_context.push(Message {
+                id: scru128::new().to_string(),
+                role: MessageRole::System,
+                content: format!(
+                    "执行反馈：上一轮工具调用失败，请修正后继续。\n错误列表：\n{}\n要求：必须优先直接调用函数工具（尤其 MCP 工具），不要将工具名当 shell 命令。",
+                    blocking_errors.join("\n")
+                ),
+                reasoning_content: String::new(),
+                created_at: now_text(),
+            });
+            continue;
         }
 
         if let Some(completion_signal) = completion_signal {
@@ -396,12 +473,34 @@ fn extract_successful_business_result(result: &ToolResult) -> Option<SuccessfulB
         .as_ref()
         .map(|record| record.tool_name.as_str())
         .unwrap_or_default();
-    if tool_name != "run_command" {
+    let stdout = result.stdout.trim();
+    if stdout.is_empty() {
         return None;
     }
 
-    let stdout = result.stdout.trim();
-    if stdout.is_empty() {
+    if tool_name.starts_with("mcp::") {
+        if let Ok(value) = serde_json::from_str::<Value>(stdout) {
+            let compact = serde_json::to_string(&value).unwrap_or_else(|_| {
+                truncate_summary_text(stdout, SUCCESS_RESULT_PREVIEW_MAX_CHARS)
+            });
+            return Some(SuccessfulBusinessResult {
+                summary: format!(
+                    "MCP 调用返回结构化结果: {}",
+                    truncate_summary_text(&compact, SUCCESS_RESULT_PREVIEW_MAX_CHARS)
+                ),
+                payload: Some(value),
+            });
+        }
+        return Some(SuccessfulBusinessResult {
+            summary: format!(
+                "MCP 调用返回文本结果: {}",
+                truncate_summary_text(stdout, SUCCESS_RESULT_PREVIEW_MAX_CHARS)
+            ),
+            payload: None,
+        });
+    }
+
+    if tool_name != "run_command" {
         return None;
     }
 
@@ -716,6 +815,7 @@ fn build_step_execution_prompt(
     plan_name: &str,
     step: &PlanStep,
     previous_plan_summaries: &[String],
+    mcp_function_targets: &HashMap<String, McpFunctionTarget>,
 ) -> String {
     let plan_snapshot = format_plan_snapshot(plan);
     let skill_context = build_skill_context(plan);
@@ -729,6 +829,7 @@ fn build_step_execution_prompt(
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let mcp_function_names_text = format_mcp_function_name_hint(mcp_function_targets);
     format!(
         r#"你是执行智能体，负责执行当前 plan 步骤并确保结果可落地。
 
@@ -746,6 +847,8 @@ fn build_step_execution_prompt(
 10. Skill/MCP 相关环境变量已由运行时注入，不要执行 `env` / `printenv` / `set` / `grep` 等环境探测命令。
 11. 不要把管道或复合命令写进 `run_command.cmd`（如 `env | grep DINGTALK`）；需要脚本时使用 `run_shell`。
 12. 若命中 MCP，上下文已提供可用目标，优先按 MCP 上下文执行，不要用环境探测替代真实调用。
+12.1 绝对不要把 MCP 工具名当成 shell 命令写进 `run_command`（例如 `list_categories`）；应直接调用同名函数工具。
+12.2 可用 MCP 函数名列表已提供；调用时必须精确使用这些函数名。
 13. 若配置缺失，直接执行目标业务命令并根据错误回传定位问题，不要先做环境枚举。
 14. 当前步骤支持多轮执行：若本轮尚未完成，请继续调用工具；最终必须调用 `mark_step_completed` 结束该步骤。
 15. 当工具返回成功输出时，应先判断是否已满足用户请求；若仅是中间结果，调用 `mark_step_completed(continue_execution=true)` 并提供下一步。
@@ -765,15 +868,37 @@ fn build_step_execution_prompt(
 命中 Skill 上下文：
 {skill_context}
 
+当前可用 MCP 函数名：
+{mcp_function_names_text}
+
 当前步骤：
 - name: {step_name}
 - description: {step_desc}"#,
         plan_name = plan_name,
         previous_plan_result_text = previous_plan_result_text,
         skill_context = skill_context,
+        mcp_function_names_text = mcp_function_names_text,
         step_name = step.name,
         step_desc = step.description
     )
+}
+
+fn format_mcp_function_name_hint(targets: &HashMap<String, McpFunctionTarget>) -> String {
+    if targets.is_empty() {
+        return "无".to_string();
+    }
+    let mut names = targets.keys().cloned().collect::<Vec<_>>();
+    names.sort();
+    const MAX_HINT_NAMES: usize = 40;
+    let mut parts = names
+        .iter()
+        .take(MAX_HINT_NAMES)
+        .cloned()
+        .collect::<Vec<_>>();
+    if names.len() > MAX_HINT_NAMES {
+        parts.push(format!("...(省略 {} 项)", names.len() - MAX_HINT_NAMES));
+    }
+    parts.join(", ")
 }
 
 fn build_skill_context(plan: &TaskPlan) -> String {
@@ -1003,6 +1128,307 @@ fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
             }),
         },
     ]
+}
+
+fn execution_function_tools(
+    mcp_config: &McpConfig,
+) -> (Vec<FunctionToolSpec>, HashMap<String, McpFunctionTarget>) {
+    let mut tools = basic_file_function_tools();
+    let mut reserved_names = tools
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect::<HashSet<_>>();
+    let mut bindings = HashMap::new();
+
+    let active = cached_active_tools();
+    let mut tool_name_count = HashMap::<String, usize>::new();
+    for (_server, server_tools) in &active {
+        for tool in server_tools {
+            let name = tool.name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            *tool_name_count.entry(name.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    for (server_name, server_tools) in active {
+        for tool in server_tools {
+            let raw_tool_name = tool.name.trim();
+            if raw_tool_name.is_empty() {
+                continue;
+            }
+            if !mcp_config
+                .servers
+                .iter()
+                .any(|server| server.enabled && server.name == server_name)
+            {
+                continue;
+            }
+
+            let mut function_name = resolve_mcp_function_name(
+                &server_name,
+                raw_tool_name,
+                &tool_name_count,
+                &reserved_names,
+            );
+            let mut suffix = 2usize;
+            while reserved_names.contains(&function_name) {
+                function_name = format!("{}_{}", function_name, suffix);
+                suffix += 1;
+            }
+            reserved_names.insert(function_name.clone());
+
+            tools.push(function_tool_from_mcp_tool(
+                &function_name,
+                &server_name,
+                &tool,
+            ));
+            bindings.insert(
+                function_name,
+                McpFunctionTarget {
+                    server_name: server_name.clone(),
+                    tool_name: raw_tool_name.to_string(),
+                },
+            );
+        }
+    }
+
+    (tools, bindings)
+}
+
+fn resolve_mcp_function_name(
+    server_name: &str,
+    tool_name: &str,
+    tool_name_count: &HashMap<String, usize>,
+    reserved_names: &HashSet<String>,
+) -> String {
+    let count = *tool_name_count.get(tool_name).unwrap_or(&1);
+    if count == 1 && !reserved_names.contains(tool_name) {
+        return tool_name.to_string();
+    }
+    format!(
+        "mcp__{}__{}",
+        sanitize_fn_name(server_name),
+        sanitize_fn_name(tool_name)
+    )
+}
+
+fn sanitize_fn_name(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push('_');
+        }
+    }
+    let trimmed = out.trim_matches('_').to_string();
+    if trimmed.is_empty() {
+        "mcp_tool".to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn function_tool_from_mcp_tool(
+    function_name: &str,
+    server_name: &str,
+    tool: &McpToolMeta,
+) -> FunctionToolSpec {
+    FunctionToolSpec {
+        name: function_name.to_string(),
+        description: format!(
+            "MCP调用：server={} tool={} description={}",
+            server_name, tool.name, tool.description
+        ),
+        parameters: if tool.input_schema.is_object() {
+            tool.input_schema.clone()
+        } else {
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            })
+        },
+    }
+}
+
+fn execute_mcp_tool_call(
+    call: &ModelFunctionCall,
+    target: &McpFunctionTarget,
+    mcp_config: &McpConfig,
+) -> Result<ToolResult> {
+    execute_mcp_tool_call_with_args(target, normalize_mcp_call_arguments(call), mcp_config)
+}
+
+fn execute_mcp_tool_call_with_args(
+    target: &McpFunctionTarget,
+    args: Value,
+    mcp_config: &McpConfig,
+) -> Result<ToolResult> {
+    let started = Instant::now();
+    let server = find_mcp_server(mcp_config, &target.server_name).ok_or_else(|| {
+        anyhow!(
+            "MCP server 不存在或未启用：server={} tool={}",
+            target.server_name,
+            target.tool_name
+        )
+    })?;
+    let client = LocalMcpClient;
+    match client.call_tool(
+        server,
+        &target.tool_name,
+        args.clone(),
+        mcp_config.timeout_ms,
+    ) {
+        Ok(stdout) => Ok(ToolResult {
+            ok: true,
+            summary: format!(
+                "MCP工具调用成功：server={} tool={}",
+                target.server_name, target.tool_name
+            ),
+            stdout,
+            stderr: String::new(),
+            exit_code: 0,
+            execution: Some(ToolExecutionRecord {
+                tool_name: format!("mcp::{}::{}", target.server_name, target.tool_name),
+                args: vec![serde_json::to_string(&args).unwrap_or_default()],
+                duration_ms: elapsed_ms_u64(started.elapsed().as_millis()),
+                ok: true,
+                exit_code: 0,
+                summary: format!(
+                    "MCP工具调用成功：server={} tool={}",
+                    target.server_name, target.tool_name
+                ),
+            }),
+        }),
+        Err(err) => Ok(ToolResult {
+            ok: false,
+            summary: format!(
+                "MCP工具调用失败：server={} tool={} error={}",
+                target.server_name, target.tool_name, err
+            ),
+            stdout: String::new(),
+            stderr: err.to_string(),
+            exit_code: 1,
+            execution: Some(ToolExecutionRecord {
+                tool_name: format!("mcp::{}::{}", target.server_name, target.tool_name),
+                args: vec![serde_json::to_string(&args).unwrap_or_default()],
+                duration_ms: elapsed_ms_u64(started.elapsed().as_millis()),
+                ok: false,
+                exit_code: 1,
+                summary: format!(
+                    "MCP工具调用失败：server={} tool={}",
+                    target.server_name, target.tool_name
+                ),
+            }),
+        }),
+    }
+}
+
+fn build_internal_tool_error_result(tool_name: &str, error: &str) -> ToolResult {
+    let message = format!("工具路由失败：tool={} error={}", tool_name, error);
+    ToolResult {
+        ok: false,
+        summary: message.clone(),
+        stdout: String::new(),
+        stderr: error.to_string(),
+        exit_code: 1,
+        execution: Some(ToolExecutionRecord {
+            tool_name: tool_name.to_string(),
+            args: Vec::new(),
+            duration_ms: 0,
+            ok: false,
+            exit_code: 1,
+            summary: message,
+        }),
+    }
+}
+
+fn normalize_mcp_call_arguments(call: &ModelFunctionCall) -> Value {
+    if call.arguments.is_object() {
+        call.arguments.clone()
+    } else {
+        serde_json::json!({})
+    }
+}
+
+fn resolve_mcp_tool_call_from_run_command(
+    call: &ModelFunctionCall,
+    mcp_targets: &HashMap<String, McpFunctionTarget>,
+    mcp_config: &McpConfig,
+) -> Option<(McpFunctionTarget, Value)> {
+    if call.name != "run_command" {
+        return None;
+    }
+    if call
+        .arguments
+        .get("args")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+    {
+        return None;
+    }
+    if call
+        .arguments
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|text| !text.is_empty())
+    {
+        return None;
+    }
+    let raw_cmd = call
+        .arguments
+        .get("cmd")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    let mut parts = split_command_parts(raw_cmd)?;
+    if parts.len() != 1 {
+        return None;
+    }
+    let tool_name = parts.remove(0);
+    let target = mcp_targets
+        .get(&tool_name)
+        .cloned()
+        .or_else(|| resolve_unique_mcp_target_by_raw_name(&tool_name, mcp_config))?;
+    Some((target, serde_json::json!({})))
+}
+
+fn resolve_unique_mcp_target_by_raw_name(
+    tool_name: &str,
+    mcp_config: &McpConfig,
+) -> Option<McpFunctionTarget> {
+    let mut hit_server = None::<String>;
+    for (server_name, tools) in cached_active_tools() {
+        if !mcp_config
+            .servers
+            .iter()
+            .any(|server| server.enabled && server.name == server_name)
+        {
+            continue;
+        }
+        if !tools.iter().any(|tool| tool.name.trim() == tool_name) {
+            continue;
+        }
+        if hit_server.is_some() {
+            return None;
+        }
+        hit_server = Some(server_name);
+    }
+    hit_server.map(|server_name| McpFunctionTarget {
+        server_name,
+        tool_name: tool_name.to_string(),
+    })
+}
+
+fn find_mcp_server<'a>(config: &'a McpConfig, name: &str) -> Option<&'a McpServerConfig> {
+    config
+        .servers
+        .iter()
+        .find(|server| server.enabled && server.name == name)
 }
 
 #[derive(Debug, Clone)]
@@ -1416,4 +1842,8 @@ fn split_command_parts(raw: &str) -> Option<Vec<String>> {
         out.push(current);
     }
     if out.is_empty() { None } else { Some(out) }
+}
+
+fn elapsed_ms_u64(ms: u128) -> u64 {
+    u64::try_from(ms).unwrap_or(u64::MAX)
 }

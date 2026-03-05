@@ -68,10 +68,25 @@ pub(super) enum McpSubcommand {
     },
     #[command(about = "注册 MCP server")]
     Add {
-        #[arg(help = "MCP server 名称")]
-        name: String,
+        #[arg(help = "MCP server 名称（非 JSON 导入模式必填）")]
+        name: Option<String>,
         #[arg(help = "MCP server 命令（如 npx；HTTP 可直接填 endpoint）")]
         command: Option<String>,
+        #[arg(
+            long,
+            help = "通过 JSON 字符串导入（支持单对象或 {\"mcpServers\": {...}}）",
+            conflicts_with = "json_file"
+        )]
+        json: Option<String>,
+        #[arg(
+            long = "json-file",
+            value_name = "PATH",
+            help = "通过 JSON 文件导入（支持单对象或 {\"mcpServers\": {...}}）",
+            conflicts_with = "json"
+        )]
+        json_file: Option<String>,
+        #[arg(long, default_value_t = false, help = "同名 server 存在时覆盖")]
+        force: bool,
         #[arg(
             long = "arg",
             short = 'a',

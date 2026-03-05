@@ -14,6 +14,7 @@ use serde_json::{Map, Value, json};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::time::timeout;
 
+use crate::core::mcp::build_mcp_tools_system_prompt;
 use crate::core::session::{Message, MessageRole};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -502,6 +503,9 @@ fn build_openai_messages(req: &ModelRequest) -> Result<Vec<ChatCompletionRequest
         format!("当前工作目录：{}", current_working_directory_text()),
         format!("允许文件操作目录：{}", allowed_file_roots_text()),
     ];
+    if let Some(mcp_tools_prompt) = build_mcp_tools_system_prompt(24) {
+        system_texts.push(mcp_tools_prompt);
+    }
 
     for msg in &req.context {
         match msg.role {
