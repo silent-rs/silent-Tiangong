@@ -29,7 +29,7 @@
 - 安装流程必须具备事务与回滚：任一步骤失败后回滚增量变更并输出错误分类。
 - 安装前必须输出权限摘要（`fs_read/fs_write/cmd_exec/net`）与依赖摘要，并要求用户确认。
 - 文件/命令/网络权限必须默认最小化：
-  - 文件访问需 canonicalize 且受工作区边界约束。
+  - 文件访问需 canonicalize，且仅允许当前工作目录、`~/.tiangong` 与临时目录（`/tmp`）边界。
   - 命令执行仅允许白名单命令，禁止 `bash -c` 等复合注入模式。
   - 网络默认 deny，首期仅允许显式 MCP HTTP endpoint。
 
@@ -41,6 +41,12 @@
 - 支持外部 Skill 快速转换为天工 Skill（`--convert` 自动补齐 `SKILL.md/skill.toml`）。
 - `--convert` 必须优先使用天工内置智能体 + 大模型进行辅助转换；模型不可用或生成失败时回退固定规则转换。
 - `--convert` 转换结束后必须自动清理 `~/.tiangong/skills/imported` 中对应的转换中间目录，避免残留。
+- 命中 Skill 后，planning/execution 阶段必须注入 Skill 上下文（含 `SKILL.md` 关键说明），确保执行阶段可实际消费 Skill 指令。
+- Skill 依赖命令执行时，受控命令白名单需覆盖常见运行时（如 `node/npx/npm/yarn/pnpm/ts-node`），并在 Skill 目录执行时支持从 `.env.local/.env` 加载环境变量。
+- 程序运行时需汇总已启用 Skill 与 MCP 的环境配置（Skill 目录 `.env.local/.env`、MCP server `env`），统一注入受控命令执行环境，且 `cwd` 下 `.env.local/.env` 仍可按局部优先覆盖。
+- 执行阶段应采用动态 step 推进：初始计划仅保留可执行事项（plan item），每个 step 在执行后都需判断是否继续、补充或终止后续 step，避免预置 step 缺失导致误完成。
+- 会话记录应以“实际执行的 step 轨迹”为准，不应仅依赖规划阶段一次性生成的静态 step 列表。
+- 会话中的 step 记录应标注来源（`planned/dynamic`），便于追踪动态补充链路与排障。
 - 支持 Skill 初始化命令（`/skill init`）快速生成天工兼容脚手架（`SKILL.md`、`skill.toml`）。
 
 ### 非目标（当前阶段不做）

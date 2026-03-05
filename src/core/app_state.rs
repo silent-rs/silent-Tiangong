@@ -1589,6 +1589,11 @@ impl TiangongState {
             (None, Some(verify)) => format!("{base_result}; {verify}; {turn_conclusion}"),
             (None, None) => format!("{base_result}; {turn_conclusion}"),
         };
+        let has_failed_plan = exec
+            .plan
+            .plans
+            .iter()
+            .any(|item| item.status == PlanStepStatus::Failed);
         let completion_tool_result = tool_result_text.clone();
         if let Some(session) = self
             .sessions
@@ -1599,24 +1604,47 @@ impl TiangongState {
                 session.bind_task_assistant_message_id(&task_id, message_id);
             }
             session.sync_task_plans(&task_id, &exec.plan.plans);
-            session.complete_task(
-                &task_id,
-                Some(plan_snapshot.clone()),
-                completion_tool_result,
-                duration_ms,
-            );
+            if has_failed_plan {
+                session.fail_task_with_context(
+                    &task_id,
+                    "执行失败",
+                    Some("plan_failed".to_string()),
+                    duration_ms,
+                    Some(plan_snapshot.clone()),
+                    completion_tool_result,
+                );
+            } else {
+                session.complete_task(
+                    &task_id,
+                    Some(plan_snapshot.clone()),
+                    completion_tool_result,
+                    duration_ms,
+                );
+            }
         }
 
         self.run = RunSnapshot {
-            status: RunStatus::Completed,
-            summary: "执行完成".to_string(),
+            status: if has_failed_plan {
+                RunStatus::Failed
+            } else {
+                RunStatus::Completed
+            },
+            summary: if has_failed_plan {
+                "执行失败".to_string()
+            } else {
+                "执行完成".to_string()
+            },
             last_session_id: Some(session_id.clone()),
             last_task_id: Some(task_id),
             last_duration_ms: Some(duration_ms),
-            last_result: Some(result_with_workspace),
+            last_result: Some(if has_failed_plan {
+                format!("failed; {result_with_workspace}")
+            } else {
+                result_with_workspace
+            }),
             last_plan: Some(plan_snapshot),
             last_tool_result: tool_result_text,
-            last_error: None,
+            last_error: has_failed_plan.then_some("plan_failed".to_string()),
             last_usage: Some(exec.usage),
             updated_at: now_text(),
         };

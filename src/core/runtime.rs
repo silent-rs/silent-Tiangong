@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::core::agent_config::AgentConfig;
-use crate::core::agents::execution_agent::{self, ExecutionStepReport};
+use crate::core::agents::execution_agent::{self, DynamicPlanStep, ExecutionStepReport};
 use crate::core::agents::planning_agent;
 use crate::core::agents::response_agent;
 pub use crate::core::agents::response_agent::VerifyExecutionRecord;
@@ -15,9 +15,11 @@ use crate::core::mcp::collect_mcp_context;
 use crate::core::model::{
     ModelClient, ModelRequest, ModelResponse, ModelStreamChunk, SingleProviderClient, TokenUsage,
 };
-use crate::core::planner::{PlanStepStatus, TaskPlan};
+use crate::core::planner::{PlanStepSource, PlanStepStatus, TaskPlan};
 use crate::core::session::{Message, Session, now_text};
 use crate::core::tool::{LocalToolExecutor, ToolExecutionRecord, ToolResult};
+
+const MAX_DYNAMIC_STEPS_PER_PLAN: usize = 12;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -99,7 +101,7 @@ impl RuntimeEngine {
     ) -> Self {
         Self {
             client,
-            tool_executor: LocalToolExecutor,
+            tool_executor: LocalToolExecutor::from_agent_config(&agent_config),
             context_limit,
             agent_config,
         }
@@ -286,16 +288,17 @@ impl RuntimeEngine {
             }
 
             let current_plan_name = plan.plans[plan_idx].name.clone();
-            let step_count = plan.plans[plan_idx].execution_steps.len();
             let mut reports = Vec::new();
             if let Some(item) = plan.plans.get_mut(plan_idx) {
                 item.execution_summary = Some("执行中：准备执行当前 plan".to_string());
             }
             on_plan_ready(plan);
 
-            for step_idx in 0..step_count {
+            let mut step_idx = 0usize;
+            while step_idx < plan.plans[plan_idx].execution_steps.len() {
                 if plan.plans[plan_idx].execution_steps[step_idx].status != PlanStepStatus::Pending
                 {
+                    step_idx += 1;
                     continue;
                 }
 
@@ -331,7 +334,33 @@ impl RuntimeEngine {
                             on_llm_output(&record);
                         }
                         mark_step_status(plan, plan_idx, step_idx, PlanStepStatus::Completed);
-                        reports.push(step_result.report);
+                        reports.push(step_result.report.clone());
+                        if let Some(next_step) = step_result.next_step {
+                            if plan.plans[plan_idx].execution_steps.len()
+                                >= MAX_DYNAMIC_STEPS_PER_PLAN
+                            {
+                                mark_step_status(plan, plan_idx, step_idx, PlanStepStatus::Failed);
+                                reports.push(ExecutionStepReport {
+                                    step_name: step.name.clone(),
+                                    status: PlanStepStatus::Failed,
+                                    summary: format!(
+                                        "动态步骤超过上限（max={}），中止当前 plan",
+                                        MAX_DYNAMIC_STEPS_PER_PLAN
+                                    ),
+                                });
+                                let ignored =
+                                    mark_remaining_steps_ignored(plan, plan_idx, step_idx + 1);
+                                for ignored_step in ignored {
+                                    reports.push(ExecutionStepReport {
+                                        step_name: ignored_step.name,
+                                        status: PlanStepStatus::Ignored,
+                                        summary: "前置步骤失败，本步骤已忽略".to_string(),
+                                    });
+                                }
+                                break;
+                            }
+                            append_dynamic_step(plan, plan_idx, next_step);
+                        }
                     }
                     Err(err) => {
                         mark_step_status(plan, plan_idx, step_idx, PlanStepStatus::Failed);
@@ -352,6 +381,7 @@ impl RuntimeEngine {
                     }
                 }
                 on_plan_ready(plan);
+                step_idx += 1;
             }
 
             if let Some(item) = plan.plans.get_mut(plan_idx) {
@@ -400,6 +430,19 @@ fn summarize_tool_results(results: &[ToolResult]) -> Option<String> {
             .collect::<Vec<_>>()
             .join("；"),
     )
+}
+
+fn append_dynamic_step(plan: &mut TaskPlan, plan_idx: usize, next_step: DynamicPlanStep) {
+    let Some(item) = plan.plans.get_mut(plan_idx) else {
+        return;
+    };
+    item.execution_steps.push(crate::core::planner::PlanStep {
+        id: scru128::new().to_string(),
+        name: next_step.name,
+        description: next_step.description,
+        status: PlanStepStatus::Pending,
+        source: PlanStepSource::Dynamic,
+    });
 }
 
 #[derive(Debug, Clone)]

@@ -18,6 +18,13 @@ fn allowed_roots() -> Result<Vec<PathBuf>> {
     let temp_canonical = temp.canonicalize().unwrap_or(temp);
 
     let mut roots = vec![workspace_canonical];
+    if let Some(home) = user_home_dir() {
+        let tiangong = home.join(".tiangong");
+        let tiangong_canonical = tiangong.canonicalize().unwrap_or(tiangong);
+        if !roots.iter().any(|root| root == &tiangong_canonical) {
+            roots.push(tiangong_canonical);
+        }
+    }
     if !roots.iter().any(|root| root == &temp_canonical) {
         roots.push(temp_canonical);
     }
@@ -62,11 +69,6 @@ pub(super) fn resolve_path_from_base(raw: &str, base: &Path) -> Result<PathBuf> 
     if raw.is_empty() {
         return Err(anyhow!("路径参数不能为空"));
     }
-    if raw.starts_with('~') {
-        return Err(anyhow!(
-            "不允许使用 home 路径：{raw}；仅允许当前目录与临时目录"
-        ));
-    }
 
     let candidate = resolve_path_candidate(raw, base);
     let canonical = candidate
@@ -76,7 +78,7 @@ pub(super) fn resolve_path_from_base(raw: &str, base: &Path) -> Result<PathBuf> 
 
     if !is_path_in_allowed_roots(&canonical, &roots) {
         return Err(anyhow!(
-            "路径越界，仅允许当前目录或临时目录：{}",
+            "路径越界，仅允许当前目录、~/.tiangong 或临时目录：{}",
             canonical.display()
         ));
     }
@@ -87,11 +89,6 @@ pub(super) fn resolve_write_path_from_base(raw: &str, base: &Path) -> Result<Pat
     let raw = raw.trim();
     if raw.is_empty() {
         return Err(anyhow!("路径参数不能为空"));
-    }
-    if raw.starts_with('~') {
-        return Err(anyhow!(
-            "不允许使用 home 路径：{raw}；仅允许当前目录与临时目录"
-        ));
     }
 
     let candidate = resolve_path_candidate(raw, base);
@@ -112,7 +109,7 @@ pub(super) fn resolve_write_path_from_base(raw: &str, base: &Path) -> Result<Pat
 
     if !is_path_in_allowed_roots(&parent_canonical, &roots) {
         return Err(anyhow!(
-            "路径越界，仅允许当前目录或临时目录：{}",
+            "路径越界，仅允许当前目录、~/.tiangong 或临时目录：{}",
             candidate.display()
         ));
     }
@@ -120,6 +117,9 @@ pub(super) fn resolve_write_path_from_base(raw: &str, base: &Path) -> Result<Pat
 }
 
 fn resolve_path_candidate(raw: &str, base: &Path) -> PathBuf {
+    if let Some(expanded) = expand_home_path(raw) {
+        return expanded;
+    }
     let path = PathBuf::from(raw);
     if path.is_absolute() {
         path
@@ -182,12 +182,6 @@ fn argument_may_be_path(cmd: &str, raw: &str) -> bool {
 }
 
 fn ensure_command_arg_path_allowed(raw: &str, base_dir: &Path, roots: &[PathBuf]) -> Result<()> {
-    if raw.starts_with('~') {
-        return Err(anyhow!(
-            "命令参数路径不允许使用 home 目录：{raw}；仅允许当前目录与临时目录"
-        ));
-    }
-
     let candidate = resolve_path_candidate(raw, base_dir);
     let anchor = if candidate.exists() {
         candidate
@@ -209,11 +203,40 @@ fn ensure_command_arg_path_allowed(raw: &str, base_dir: &Path, roots: &[PathBuf]
         .with_context(|| format!("解析命令参数路径失败：{}", anchor.display()))?;
     if !is_path_in_allowed_roots(&canonical, roots) {
         return Err(anyhow!(
-            "命令参数路径越界，仅允许当前目录或临时目录：{}",
+            "命令参数路径越界，仅允许当前目录、~/.tiangong 或临时目录：{}",
             raw
         ));
     }
     Ok(())
+}
+
+fn expand_home_path(raw: &str) -> Option<PathBuf> {
+    if raw == "~" {
+        return user_home_dir();
+    }
+    if let Some(suffix) = raw.strip_prefix("~/") {
+        return user_home_dir().map(|home| home.join(suffix));
+    }
+    None
+}
+
+fn user_home_dir() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(home));
+    }
+    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(profile));
+    }
+    let drive = std::env::var_os("HOMEDRIVE").filter(|v| !v.is_empty());
+    let path = std::env::var_os("HOMEPATH").filter(|v| !v.is_empty());
+    match (drive, path) {
+        (Some(drive), Some(path)) => {
+            let mut buf = PathBuf::from(drive);
+            buf.push(path);
+            Some(buf)
+        }
+        _ => None,
+    }
 }
 
 pub(super) fn display_rel_path(path: &Path) -> String {
@@ -251,6 +274,12 @@ pub(super) fn is_allowed_command(cmd: &str) -> bool {
             | "grep"
             | "cargo"
             | "git"
+            | "node"
+            | "npm"
+            | "npx"
+            | "yarn"
+            | "pnpm"
+            | "ts-node"
             | "bash"
             | "sh"
             | "powershell"
@@ -320,7 +349,23 @@ fn extract_shell_head_command(script: &str) -> Option<&str> {
 fn is_allowed_shell_head_command(cmd: &str) -> bool {
     matches!(
         cmd,
-        "echo" | "pwd" | "ls" | "cat" | "head" | "tail" | "wc" | "rg" | "grep" | "cargo" | "git"
+        "echo"
+            | "pwd"
+            | "ls"
+            | "cat"
+            | "head"
+            | "tail"
+            | "wc"
+            | "rg"
+            | "grep"
+            | "cargo"
+            | "git"
+            | "node"
+            | "npm"
+            | "npx"
+            | "yarn"
+            | "pnpm"
+            | "ts-node"
     )
 }
 

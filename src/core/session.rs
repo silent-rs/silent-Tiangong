@@ -1,7 +1,7 @@
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 
-use crate::core::planner::{PlanItem, PlanStepStatus};
+use crate::core::planner::{PlanItem, PlanStepSource, PlanStepStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -71,6 +71,8 @@ pub struct SessionPlanExecutionStep {
     pub name: String,
     pub description: String,
     pub status: PlanStepStatus,
+    #[serde(default)]
+    pub source: PlanStepSource,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -203,6 +205,7 @@ impl Session {
                         step_record.name = step.name.clone();
                         step_record.description = step.description.clone();
                         step_record.status = step.status;
+                        step_record.source = step.source;
                         step_record.updated_at = now.clone();
                         merged_steps.push(step_record);
                     } else {
@@ -211,6 +214,7 @@ impl Session {
                             name: step.name.clone(),
                             description: step.description.clone(),
                             status: step.status,
+                            source: step.source,
                             created_at: now.clone(),
                             updated_at: now.clone(),
                         });
@@ -233,6 +237,7 @@ impl Session {
                             name: step.name.clone(),
                             description: step.description.clone(),
                             status: step.status,
+                            source: step.source,
                             created_at: now.clone(),
                             updated_at: now.clone(),
                         })
@@ -327,6 +332,18 @@ impl Session {
         error: Option<String>,
         duration_ms: u64,
     ) {
+        self.fail_task_with_context(task_id, summary, error, duration_ms, None, None);
+    }
+
+    pub fn fail_task_with_context(
+        &mut self,
+        task_id: &str,
+        summary: impl Into<String>,
+        error: Option<String>,
+        duration_ms: u64,
+        plan_snapshot: Option<String>,
+        tool_result: Option<String>,
+    ) {
         let Some(record) = self
             .task_records
             .iter_mut()
@@ -336,6 +353,12 @@ impl Session {
         };
         record.status = SessionTaskStatus::Failed;
         record.summary = summary.into();
+        if let Some(plan_snapshot) = plan_snapshot {
+            record.plan_snapshot = Some(plan_snapshot);
+        }
+        if tool_result.is_some() {
+            record.tool_result = tool_result;
+        }
         record.error = error;
         record.duration_ms = Some(duration_ms);
         let now = now_text();

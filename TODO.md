@@ -1,6 +1,6 @@
 # TODO - 天工 RFC 0003（Skill 管理）任务清单
 
-> 最后更新：2026-03-03
+> 最后更新：2026-03-04
 > 当前主线 RFC：`docs/rfc/0003-skill-market.md`
 > 基线 RFC：`docs/rfc/0002-cli-agent-roadmap.md`
 > 参考：`PLAN.md`、`docs/requirements.md`
@@ -47,6 +47,10 @@
 - [x] 支持外部 Skill 快速转换安装（`--convert` 自动补齐 `SKILL.md/skill.toml`）
 - [x] 转换链路接入智能体辅助（模型优先，规则回退）
 - [x] 转换完成后自动清理 `~/.tiangong/skills/imported` 中间目录
+- [x] 命中 skill 后将 `SKILL.md` 关键上下文注入 planning/execution 提示词
+- [x] 扩展受控命令白名单支持 Skill 常见运行时（node/npx/npm/yarn/pnpm/ts-node）
+- [x] 在 skill 目录执行命令时自动加载 `.env.local/.env`
+- [x] 运行时汇总已启用 Skill `.env.local/.env` 与 MCP `env` 配置，并注入受控命令执行环境（`cwd` 局部配置优先覆盖）
 - [x] 支持 Skill 初始化命令（`/skill init` 生成 SKILL.md 与 skill.toml）
 
 依赖：B1、B2
@@ -66,6 +70,16 @@
 - [ ] 输出结构化错误分类（解析失败/依赖失败/配置失败/写入失败）
 
 依赖：C1、C2
+
+### C4 动态 Step 执行闭环
+
+- [x] 调整 planning 输出，减少静态 `execution_steps` 依赖（保留 plan item 主目标）
+- [x] 实现执行期动态 step 生成与推进（每步后判断继续/终止/补充下一步）
+- [x] 收敛 step 完成判定：仅目录浏览类工具成功不可直接判定业务步骤完成
+- [x] 会话持久化仅记录实际执行过的 step 轨迹，并标注动态补充来源
+- [x] 任务总状态按动态 step 聚合结果计算，避免 `task_plan failed` 与 `task_record completed` 不一致
+
+依赖：C1
 
 ---
 
@@ -96,6 +110,7 @@
 - [ ] 安装前展示权限摘要与依赖摘要
 - [ ] 增加安装确认流程（用户确认后继续）
 - [ ] 命令权限白名单与高风险模式拒绝（禁 `bash -c`）
+- [x] 工具路径边界允许当前目录、`~/.tiangong` 与 `/tmp`
 
 依赖：C1、C2
 

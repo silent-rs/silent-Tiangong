@@ -7,6 +7,8 @@ pub struct PlanStep {
     pub description: String,
     #[serde(default)]
     pub status: PlanStepStatus,
+    #[serde(default)]
+    pub source: PlanStepSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +32,14 @@ pub enum PlanStepStatus {
     Completed,
     Failed,
     Ignored,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PlanStepSource {
+    #[default]
+    Planned,
+    Dynamic,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
