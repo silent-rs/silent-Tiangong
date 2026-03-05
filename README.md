@@ -1,7 +1,7 @@
 # 🌌 Silent-Tiangong（天工）
 
 > 灵感源自《天工开物》
-> 基于河图框架构建的桌面级 AI 自动化中枢系统
+> 基于河图框架构建的 AI 自动化中枢系统（CLI 优先，GUI 暂为 feature）
 
 Silent-Tiangong 是一个面向未来的桌面端 AI 自动化引擎。
 
@@ -46,7 +46,7 @@ Silent-Tiangong 采用分层架构设计，核心引擎与河图框架解耦，�
 
 | 层级 | 模块 | 职责说明 |
 |------|------|----------|
-| 桌面层 | Desktop UI | 提供原生桌面交互界面，支持对话、任务管理、Agent 状态可视化 |
+| 桌面层 | Desktop UI（Feature） | 作为实验特性提供原生桌面交互界面，受河图框架能力成熟度影响 |
 | 核心引擎层 | Planner | 任务拆解与规划，生成 Task Graph |
 | 核心引擎层 | Agent Runtime | Agent 生命周期管理与调度执行 |
 | 核心引擎层 | Memory Layer | 上下文管理与长期记忆机制 |
@@ -152,18 +152,20 @@ Silent-Tiangong 不是简单的 ChatGPT 桌面壳。
 
 ---
 
-## 🖥 CLI 命令
+## 🚀 运行方式
 
 ```bash
-# 默认启动桌面 UI
+# 默认启动桌面 UI（当前实现）
 tiangong
 
 # CLI 模式
 tiangong cli
 
-# 桌面 UI 模式（RFC 0001 暂停迭代）
+# 桌面 UI 模式
 tiangong ui
 ```
+
+> 说明：由于当前河图框架在桌面端能力仍在迭代，GUI 在产品规划上作为阶段性 Feature 管理（此处 Feature 指功能形态，不是 Cargo 编译 Feature），当前主路径仍推荐 CLI。
 
 ---
 
