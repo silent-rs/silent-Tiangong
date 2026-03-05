@@ -21,5 +21,6 @@ crossterm = "0.28"
 unicode-width = "0.2"
 diffy = "0.4"
 http = "1"
+toml = "0.8"
 
 [workspace]

@@ -6,5 +6,5 @@ pub mod model;
 pub mod planner;
 pub mod runtime;
 pub mod session;
-pub mod skills;
+pub mod skill;
 pub mod tool;

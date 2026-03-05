@@ -1,7 +1,10 @@
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+
+use crate::core::agent_config::AgentConfig;
 
 mod apply_patch;
 mod common;
@@ -72,7 +75,9 @@ pub trait ToolExecutor {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct LocalToolExecutor;
+pub struct LocalToolExecutor {
+    runtime_env: BTreeMap<String, String>,
+}
 
 impl ToolExecutor for LocalToolExecutor {
     fn execute(&self, call: &ToolCall) -> Result<ToolResult> {
@@ -123,4 +128,14 @@ impl ToolExecutor for LocalToolExecutor {
     }
 }
 
-impl LocalToolExecutor {}
+impl LocalToolExecutor {
+    pub fn from_agent_config(agent_config: &AgentConfig) -> Self {
+        Self {
+            runtime_env: run_command::collect_runtime_env(agent_config),
+        }
+    }
+
+    pub(super) fn runtime_env(&self) -> &BTreeMap<String, String> {
+        &self.runtime_env
+    }
+}

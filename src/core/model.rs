@@ -445,7 +445,7 @@ impl ModelClient for SingleProviderClient {
             return Err(anyhow!("API_AUTH_TOKEN 不能为空，无法发起工具模型请求"));
         }
 
-        let timeout_ms = parse_timeout_ms(&self.cfg.api_timeout_ms)?;
+        let timeout_ms = parse_function_timeout_ms(&self.cfg.api_timeout_ms)?;
         let model = self.cfg.api_model.trim();
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起工具模型请求"));

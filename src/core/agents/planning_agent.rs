@@ -4,9 +4,9 @@ use serde::Deserialize;
 use crate::core::agent_config::AgentConfig;
 use crate::core::mcp::build_mcp_hints;
 use crate::core::model::{ModelClient, ModelRequest};
-use crate::core::planner::{PlanItem, PlanStep, PlanStepStatus, TaskPlan};
+use crate::core::planner::{PlanItem, PlanStep, PlanStepSource, PlanStepStatus, TaskPlan};
 use crate::core::session::{MessageRole, Session};
-use crate::core::skills::build_skill_hints;
+use crate::core::skill::build_skill_hints;
 
 #[derive(Debug, Clone, Default)]
 pub struct PlanningLlmOutput {
@@ -25,6 +25,7 @@ pub fn build_minimal_plan(user_input: &str, agent_config: &AgentConfig) -> TaskP
             name: "prepare_tool_call".to_string(),
             description: "准备工具调用参数并进入执行阶段".to_string(),
             status: PlanStepStatus::Pending,
+            source: PlanStepSource::Planned,
         }
     } else {
         PlanStep {
@@ -32,6 +33,7 @@ pub fn build_minimal_plan(user_input: &str, agent_config: &AgentConfig) -> TaskP
             name: "generate_response".to_string(),
             description: "基于上下文生成回答".to_string(),
             status: PlanStepStatus::Pending,
+            source: PlanStepSource::Planned,
         }
     };
 
@@ -121,9 +123,11 @@ fn build_plan_with_agent_inner(
     context_limit: usize,
 ) -> Result<(TaskPlan, PlanningLlmOutput)> {
     let input_list = collect_user_input_list(session, user_input, context_limit);
+    let skill_hints = build_skill_hints(user_input, &agent_config.skills);
+    let mcp_hints = build_mcp_hints(user_input, &agent_config.mcp);
     let request = ModelRequest {
         session_title: format!("{} · planing-agent", session.title),
-        user_input: build_planing_prompt(user_input, &input_list),
+        user_input: build_planing_prompt(user_input, &input_list, &skill_hints, &mcp_hints),
         context: session.recent_messages(context_limit),
     };
     let response = client
@@ -168,6 +172,7 @@ fn build_plan_with_agent_inner(
                 },
                 description,
                 status: PlanStepStatus::Pending,
+                source: PlanStepSource::Planned,
             });
         }
 
@@ -181,7 +186,11 @@ fn build_plan_with_agent_inner(
                     plan_desc.clone()
                 },
                 status: PlanStepStatus::Pending,
+                source: PlanStepSource::Planned,
             });
+        }
+        if execution_steps.len() > 1 {
+            execution_steps.truncate(1);
         }
 
         let mut item = PlanItem {
@@ -226,8 +235,8 @@ fn build_plan_with_agent_inner(
             summary,
             plans,
             risks,
-            skill_hints: build_skill_hints(user_input, &agent_config.skills),
-            mcp_hints: build_mcp_hints(user_input, &agent_config.mcp),
+            skill_hints,
+            mcp_hints,
             revisions: Vec::new(),
         },
         PlanningLlmOutput {
@@ -300,7 +309,12 @@ impl PlaningAgentOutput {
     }
 }
 
-fn build_planing_prompt(user_input: &str, input_list: &[String]) -> String {
+fn build_planing_prompt(
+    user_input: &str,
+    input_list: &[String],
+    skill_hints: &[String],
+    mcp_hints: &[String],
+) -> String {
     let input_list_text = if input_list.is_empty() {
         format!("1. {}", user_input.trim())
     } else {
@@ -310,6 +324,16 @@ fn build_planing_prompt(user_input: &str, input_list: &[String]) -> String {
             .map(|(idx, input)| format!("{}. {}", idx + 1, input))
             .collect::<Vec<_>>()
             .join("\n")
+    };
+    let skill_hints_text = if skill_hints.is_empty() {
+        "无".to_string()
+    } else {
+        skill_hints.join("；")
+    };
+    let mcp_hints_text = if mcp_hints.is_empty() {
+        "无".to_string()
+    } else {
+        mcp_hints.join("；")
     };
     format!(
         r#"你是天工内置的 planing 智能体。你的任务是只输出 JSON 格式的执行计划。
@@ -336,12 +360,24 @@ fn build_planing_prompt(user_input: &str, input_list: &[String]) -> String {
 5. plan 只描述事项，不要把验证命令或验证结论写入 plan/steps。
 6. 保持计划通用、可执行，避免空泛描述。
 7. 你会收到“用户连续输入列表”，需要基于完整列表进行增量式规划：保留仍有效事项、移除已无效事项、补充新增事项，并输出最终有序 plan。
+8. 若存在命中 Skills，plan 必须明确“优先按 Skill 指令执行”，并为后续执行阶段保留可直接落地的调用步骤（命令、目录、入参）。
+9. 若存在命中 MCP，plan 必须优先描述基于 MCP 能力的执行步骤，并写明调用目标（server/能力），不要退化为目录浏览。
+10. 对 Skill/MCP 相关步骤，不要规划 `env` / `printenv` / `set` / `grep` 等环境探测命令；运行时已注入相关环境变量，缺失配置应由业务命令错误回传。
+11. 每个 plan 的 execution_steps 只提供“起始步骤”1 条，不要在 planning 阶段穷举后续步骤；后续步骤由 execution 阶段按执行结果动态补充。
 
 用户连续输入列表（按时间顺序）：
 {input_list_text}
 
+命中 Skills：
+{skill_hints_text}
+
+命中 MCP：
+{mcp_hints_text}
+
 本轮新增输入：
-{user_input}"#
+{user_input}"#,
+        skill_hints_text = skill_hints_text,
+        mcp_hints_text = mcp_hints_text
     )
 }
 

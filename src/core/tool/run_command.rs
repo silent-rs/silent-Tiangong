@@ -1,3 +1,6 @@
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -5,6 +8,8 @@ use anyhow::{Context, Result, anyhow};
 use tokio::process::Command;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::time::timeout;
+
+use crate::core::agent_config::AgentConfig;
 
 use super::common::{
     command_env_allowlist, command_timeout_ms, derive_shell_exec_args, is_allowed_command,
@@ -15,6 +20,50 @@ use super::{LocalToolExecutor, ToolCall, ToolResult};
 
 const INTERNAL_SHELL_CMD: &str = "__tiangong_shell__";
 const INTERNAL_CWD_PREFIX: &str = "__tiangong_cwd=";
+
+pub(super) fn collect_runtime_env(agent_config: &AgentConfig) -> BTreeMap<String, String> {
+    let mut runtime_env = BTreeMap::new();
+
+    if agent_config.mcp.enabled {
+        for server in &agent_config.mcp.servers {
+            if !server.enabled {
+                continue;
+            }
+            for (key, value) in &server.env {
+                let key = key.trim();
+                if !is_valid_env_key(key) {
+                    continue;
+                }
+                runtime_env.insert(key.to_string(), value.trim().to_string());
+            }
+        }
+    }
+
+    if agent_config.skills.enabled {
+        for skill in &agent_config.skills.installed {
+            if !skill.enabled {
+                continue;
+            }
+            let source = skill.source.value.trim();
+            if source.is_empty() {
+                continue;
+            }
+            let source_path = Path::new(source);
+            let skill_dir = if source_path.is_dir() {
+                source_path
+            } else if let Some(parent) = source_path.parent() {
+                parent
+            } else {
+                continue;
+            };
+            for (key, value) in load_local_env(skill_dir) {
+                runtime_env.insert(key, value);
+            }
+        }
+    }
+
+    runtime_env
+}
 
 impl LocalToolExecutor {
     pub(super) fn run_command(&self, call: &ToolCall) -> Result<ToolResult> {
@@ -51,6 +100,8 @@ impl LocalToolExecutor {
 
         let timeout_ms = command_timeout_ms();
         let env_allowlist = command_env_allowlist();
+        let runtime_env = self.runtime_env();
+        let file_env = load_local_env(&effective_cwd);
         let runtime = TokioRuntimeBuilder::new_current_thread()
             .enable_all()
             .build()
@@ -65,6 +116,12 @@ impl LocalToolExecutor {
                 .stderr(Stdio::piped())
                 .env_clear();
             for (key, value) in &env_allowlist {
+                command.env(key, value);
+            }
+            for (key, value) in runtime_env {
+                command.env(key, value);
+            }
+            for (key, value) in &file_env {
                 command.env(key, value);
             }
             timeout(Duration::from_millis(timeout_ms), command.output()).await
@@ -117,4 +174,61 @@ fn extract_cwd_meta(args: &mut Vec<String>) -> Option<String> {
         }
     });
     cwd
+}
+
+fn load_local_env(cwd: &Path) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    for file in [".env.local", ".env"] {
+        let path = cwd.join(file);
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(raw) = fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let Some((key, value)) = trimmed.split_once('=') else {
+                continue;
+            };
+            let key = key.trim();
+            if !is_valid_env_key(key) {
+                continue;
+            }
+            let value = normalize_env_value(value.trim());
+            env.push((key.to_string(), value));
+        }
+    }
+    env
+}
+
+fn is_valid_env_key(key: &str) -> bool {
+    if key.is_empty() {
+        return false;
+    }
+    for (idx, ch) in key.chars().enumerate() {
+        if idx == 0 && !(ch.is_ascii_alphabetic() || ch == '_') {
+            return false;
+        }
+        if !(ch.is_ascii_alphanumeric() || ch == '_') {
+            return false;
+        }
+    }
+    true
+}
+
+fn normalize_env_value(raw: &str) -> String {
+    let mut value = raw.trim().to_string();
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        let first = bytes[0] as char;
+        let last = bytes[value.len() - 1] as char;
+        if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+            value = value[1..value.len() - 1].to_string();
+        }
+    }
+    value
 }

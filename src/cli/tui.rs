@@ -59,6 +59,7 @@ struct CliApp {
     history_modal: Option<HistoryModalState>,
     planning_modal: Option<PlanningModalState>,
     mcp_modal: Option<McpModalState>,
+    skill_modal: Option<SkillModalState>,
     draft_new_session: bool,
     conversation_scroll: u16,
     max_conversation_scroll: u16,
@@ -85,6 +86,7 @@ impl CliApp {
             history_modal: None,
             planning_modal: None,
             mcp_modal: None,
+            skill_modal: None,
             draft_new_session: false,
             conversation_scroll: 0,
             max_conversation_scroll: 0,
@@ -152,6 +154,9 @@ impl CliApp {
         }
         if self.mcp_modal.is_some() {
             return self.handle_mcp_modal_key(key);
+        }
+        if self.skill_modal.is_some() {
+            return self.handle_skill_modal_key(key);
         }
 
         match key.code {
@@ -230,7 +235,10 @@ impl CliApp {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
-        if self.history_modal.is_some() || self.planning_modal.is_some() || self.mcp_modal.is_some()
+        if self.history_modal.is_some()
+            || self.planning_modal.is_some()
+            || self.mcp_modal.is_some()
+            || self.skill_modal.is_some()
         {
             return;
         }
@@ -365,6 +373,62 @@ impl CliApp {
                         self.push_mcp_modal_add_input_char(ch);
                     } else {
                         self.push_mcp_modal_query_char(ch);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_skill_modal_key(&mut self, key: KeyEvent) -> Result<()> {
+        let is_adding = self
+            .skill_modal
+            .as_ref()
+            .is_some_and(|modal| modal.add_input.is_some());
+
+        match key.code {
+            KeyCode::Esc => {
+                if is_adding {
+                    self.cancel_skill_modal_add_mode();
+                    self.status_message = "已取消新增 skill".to_string();
+                } else {
+                    self.skill_modal = None;
+                    self.status_message = "已关闭 Skill 管理".to_string();
+                }
+            }
+            KeyCode::Enter => {
+                if is_adding {
+                    self.confirm_skill_modal_add()?;
+                }
+            }
+            KeyCode::Up if !is_adding => self.move_skill_modal_selection(-1),
+            KeyCode::Down if !is_adding => self.move_skill_modal_selection(1),
+            KeyCode::PageUp if !is_adding => self.move_skill_modal_selection(-8),
+            KeyCode::PageDown if !is_adding => self.move_skill_modal_selection(8),
+            KeyCode::Home if !is_adding => self.move_skill_modal_to_edge(true),
+            KeyCode::End if !is_adding => self.move_skill_modal_to_edge(false),
+            KeyCode::Backspace => {
+                if is_adding {
+                    self.backspace_skill_modal_add_input();
+                } else {
+                    self.remove_selected_skill()?;
+                }
+            }
+            KeyCode::Delete if !is_adding => self.backspace_skill_modal_query(),
+            KeyCode::Char('a') | KeyCode::Char('A') if !is_adding => {
+                self.enter_skill_modal_add_mode();
+                self.status_message = "请输入新增参数：<path> [--disabled]".to_string();
+            }
+            KeyCode::Char(' ') if !is_adding => {
+                self.toggle_selected_skill_enabled()?;
+            }
+            KeyCode::Char(ch) => {
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+                    if is_adding {
+                        self.push_skill_modal_add_input_char(ch);
+                    } else {
+                        self.push_skill_modal_query_char(ch);
                     }
                 }
             }
@@ -613,6 +677,13 @@ struct PlanningModalState {
 
 #[derive(Debug, Clone, Default)]
 struct McpModalState {
+    query: String,
+    selected_idx: usize,
+    add_input: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SkillModalState {
     query: String,
     selected_idx: usize,
     add_input: Option<String>,
