@@ -60,6 +60,7 @@
 - `--convert` 转换结束后必须自动清理 `~/.tiangong/skills/imported` 中对应的转换中间目录，避免残留。
 - 命中 Skill 后，planning/execution 阶段必须注入 Skill 上下文（含 `SKILL.md` 关键说明），确保执行阶段可实际消费 Skill 指令。
 - Skill 依赖命令执行时，受控命令白名单需覆盖常见运行时（如 `node/npx/npm/yarn/pnpm/ts-node`），并在 Skill 目录执行时支持从 `.env.local/.env` 加载环境变量。
+- 执行架构必须区分“智能体决策”和“执行器编排”：`agents` 仅负责 planning/execution/response 等智能体推理，计划推进、结果归一化、验证执行等执行器逻辑需沉淀到独立 `execution` 领域模块，为后续基于配置文件的智能体装配与替换提供稳定边界。
 - 程序运行时需汇总已启用 Skill 与 MCP 的环境配置（Skill 目录 `.env.local/.env`、MCP server `env`），统一注入受控命令执行环境，且 `cwd` 下 `.env.local/.env` 仍可按局部优先覆盖。
 - 执行阶段应采用动态 step 推进：初始计划仅保留可执行事项（plan item），每个 step 在执行后都需判断是否继续、补充或终止后续 step，避免预置 step 缺失导致误完成。
 - 会话记录应以“实际执行的 step 轨迹”为准，不应仅依赖规划阶段一次性生成的静态 step 列表。

@@ -81,6 +81,14 @@
 
 依赖：C1
 
+### C5 Execution 领域解耦
+
+- [ ] 拆分 `core/execution` 领域，承接 plan 执行推进、结果归一化与验证执行逻辑
+- [ ] `execution_agent` 仅保留智能体决策循环，不再直接承载执行器辅助逻辑
+- [ ] `runtime` 改为装配 `planning/execution/response` 智能体与 `execution` 执行器，形成稳定边界，为后续 agent 配置化做准备
+
+依赖：C4
+
 ---
 
 ## D. M1 CLI/TUI 管理入口（对齐 MCP）

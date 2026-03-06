@@ -1,6 +1,7 @@
 pub mod agent_config;
 pub mod agents;
 pub mod app_state;
+pub mod execution;
 pub mod mcp;
 pub mod model;
 pub mod planner;
