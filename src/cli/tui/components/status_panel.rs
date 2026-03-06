@@ -13,7 +13,7 @@ impl CliApp {
         let title = self.active_session_title_for_view().to_string();
         let plans = self.state.active_task_plans();
         let phase_tags = collect_phase_tags(
-            self.state.run.status,
+            self.state.run_snapshot().status,
             self.state.has_pending_turn(),
             !plans.is_empty(),
         );

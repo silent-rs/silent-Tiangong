@@ -18,7 +18,7 @@ impl CliApp {
         } else {
             self.state.active_task_plans()
         };
-        let plans = if let Some(task_id) = self.state.run.last_task_id.as_ref() {
+        let plans = if let Some(task_id) = self.state.run_snapshot().last_task_id.as_ref() {
             let filtered = all_plans
                 .iter()
                 .filter(|plan| plan.task_id == *task_id)

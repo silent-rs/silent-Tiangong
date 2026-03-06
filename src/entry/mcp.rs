@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::core::agent_config::{McpConfig, McpServerConfig, McpTransportMode};
-use crate::core::app_state::{RegisterMcpServerOptions, TiangongState};
+use crate::core::app_state::{RegisterMcpServerOptions, RegisterMcpServerRequest, TiangongState};
 use crate::core::mcp::validate_mcp_config;
 
 use super::args::{McpArgs, McpSubcommand};
@@ -72,13 +72,13 @@ pub(super) fn run_mcp_command(args: McpArgs) -> anyhow::Result<()> {
                 {
                     let _ = state.remove_mcp_server(&name)?;
                 }
-                let msg = state.register_mcp_server(
-                    &name,
-                    &command,
+                let msg = state.register_mcp_server(RegisterMcpServerRequest {
+                    name,
+                    command,
                     args,
                     tags,
                     enabled,
-                    RegisterMcpServerOptions {
+                    options: RegisterMcpServerOptions {
                         transport: transport.map(Into::into),
                         endpoint,
                         auth_header,
@@ -86,7 +86,7 @@ pub(super) fn run_mcp_command(args: McpArgs) -> anyhow::Result<()> {
                         env,
                         cwd,
                     },
-                )?;
+                })?;
                 println!("{msg}");
             }
         }
@@ -400,14 +400,14 @@ fn import_mcp_servers(
             msgs.push(msg);
         }
 
-        let msg = state.register_mcp_server(
-            &server.name,
-            &server.command,
-            server.args,
-            server.tags,
-            server.enabled,
-            server.options,
-        )?;
+        let msg = state.register_mcp_server(RegisterMcpServerRequest {
+            name: server.name,
+            command: server.command,
+            args: server.args,
+            tags: server.tags,
+            enabled: server.enabled,
+            options: server.options,
+        })?;
         msgs.push(msg);
     }
 

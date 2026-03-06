@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 
 use crate::core::agent_config::McpTransportMode;
-use crate::core::app_state::RegisterMcpServerOptions;
+use crate::core::app_state::{RegisterMcpServerOptions, RegisterMcpServerRequest};
 use crate::core::planner::PlanStepStatus;
 
 use super::{CliApp, CommandHint, McpModalState, SkillModalState};
@@ -566,13 +566,13 @@ impl CliApp {
             .unwrap_or_default();
         let parsed = parse_mcp_add_args(raw_input.trim())?;
         let name = parsed.name.clone();
-        let message = self.state.register_mcp_server(
-            &parsed.name,
-            &parsed.command,
-            parsed.command_args,
-            parsed.tags,
-            parsed.enabled,
-            RegisterMcpServerOptions {
+        let message = self.state.register_mcp_server(RegisterMcpServerRequest {
+            name: parsed.name.clone(),
+            command: parsed.command,
+            args: parsed.command_args,
+            tags: parsed.tags,
+            enabled: parsed.enabled,
+            options: RegisterMcpServerOptions {
                 transport: parsed.transport,
                 endpoint: parsed.endpoint,
                 auth_header: parsed.auth_header,
@@ -580,7 +580,7 @@ impl CliApp {
                 env: parsed.env,
                 cwd: parsed.cwd,
             },
-        )?;
+        })?;
         if let Some(modal) = self.mcp_modal.as_mut() {
             modal.add_input = None;
             modal.query.clear();

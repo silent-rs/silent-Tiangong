@@ -122,14 +122,14 @@ impl CliApp {
     fn sync_status_after_poll(&mut self) {
         let is_pending = self.state.has_pending_turn();
         if self.was_pending_turn && !is_pending {
-            match self.state.run.status {
+            match self.state.run_snapshot().status {
                 RunStatus::Completed => {
                     self.status_message = "本轮对话已完成".to_string();
                 }
                 RunStatus::Failed => {
                     self.status_message = self
                         .state
-                        .run
+                        .run_snapshot()
                         .last_error
                         .clone()
                         .unwrap_or_else(|| "本轮对话执行失败".to_string());
