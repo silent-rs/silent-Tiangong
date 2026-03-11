@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::agent_config::AgentConfig;
 
-mod apply_patch;
 mod common;
 mod list_dir;
 mod read_file;
@@ -15,6 +14,9 @@ mod run_command;
 mod search_code;
 mod tree_dir;
 mod write_file;
+
+#[cfg(feature = "diffy")]
+mod apply_patch;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ToolName {
@@ -25,6 +27,7 @@ pub enum ToolName {
     SearchCode,
     WriteFile,
     ReplaceInFile,
+    #[cfg(feature = "diffy")]
     ApplyPatch,
 }
 
@@ -38,6 +41,7 @@ impl ToolName {
             Self::SearchCode => "search_code",
             Self::WriteFile => "write_file",
             Self::ReplaceInFile => "replace_in_file",
+            #[cfg(feature = "diffy")]
             Self::ApplyPatch => "apply_patch",
         }
     }
@@ -90,6 +94,7 @@ impl ToolExecutor for LocalToolExecutor {
             ToolName::SearchCode => self.search_code(call),
             ToolName::WriteFile => self.write_file(call),
             ToolName::ReplaceInFile => self.replace_in_file(call),
+            #[cfg(feature = "diffy")]
             ToolName::ApplyPatch => self.apply_patch(call),
         };
         let duration_ms = common::elapsed_ms_u64(started.elapsed().as_millis());

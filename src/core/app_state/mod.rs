@@ -3,6 +3,8 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::Instant;
@@ -31,12 +33,12 @@ use crate::core::skill::{
 };
 use crate::core::tool::{ToolExecutionRecord, ToolResult};
 
-mod facade;
+pub mod facade;
 mod formatting;
 mod repository;
 mod services;
 mod store;
-mod support;
+pub mod support;
 #[cfg(test)]
 mod tests;
 
@@ -89,6 +91,10 @@ pub struct SkillInstallInspection {
 pub struct TiangongState {
     store: AppStore,
     services: AppServices,
+    /// 后台标题生成线程的句柄
+    title_generation_thread: Option<thread::JoinHandle<()>>,
+    /// 用于通知后台线程退出的标志
+    shutdown_flag: Arc<AtomicBool>,
 }
 
 impl Default for TiangongState {
@@ -97,6 +103,7 @@ impl Default for TiangongState {
     }
 }
 
+#[allow(dead_code)]
 impl TiangongState {
     pub fn input_draft(&self) -> &str {
         &self.store.session.input_draft
@@ -104,5 +111,17 @@ impl TiangongState {
 
     pub fn run_snapshot(&self) -> &RunSnapshot {
         &self.store.runtime.run
+    }
+}
+
+impl Drop for TiangongState {
+    fn drop(&mut self) {
+        // 设置 shutdown 标志，通知后台线程退出
+        self.shutdown_flag.store(true, Ordering::SeqCst);
+
+        // 等待后台线程退出（最多等待 2 秒）
+        if let Some(handle) = self.title_generation_thread.take() {
+            let _ = handle.join();
+        }
     }
 }

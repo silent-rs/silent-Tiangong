@@ -1,5 +1,6 @@
 use super::super::super::*;
 
+#[allow(dead_code)]
 impl TiangongState {
     pub fn create_session(&mut self) {
         let title = format!("会话 {}", self.store.session.sessions.len() + 1);

@@ -417,6 +417,7 @@ pub(crate) fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<
                 args,
             })
         }
+        #[cfg(feature = "diffy")]
         "apply_patch" => {
             let patch = call
                 .arguments
@@ -449,6 +450,10 @@ pub(crate) fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<
                 args,
             })
         }
+        #[cfg(not(feature = "diffy"))]
+        "apply_patch" => Err(anyhow!(
+            "apply_patch 工具未启用，请使用 --features diffy 编译"
+        )),
         _ => Err(anyhow!("未知函数调用：{}", call.name)),
     }?;
     Ok(tool_call)

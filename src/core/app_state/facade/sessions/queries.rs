@@ -1,5 +1,6 @@
 use super::super::super::*;
 
+#[allow(dead_code)]
 impl TiangongState {
     pub fn sessions(&self) -> &[Session] {
         &self.store.session.sessions

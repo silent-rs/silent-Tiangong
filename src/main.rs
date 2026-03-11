@@ -1,8 +1,17 @@
-mod cli;
 mod core;
 mod entry;
+mod logging;
+
+#[cfg(feature = "cli")]
+mod cli;
+
+#[cfg(feature = "tui")]
 mod ui;
 
 fn main() -> anyhow::Result<()> {
+    // 初始化日志系统
+    // _guard 需要保持存活，否则日志不会刷新
+    let _guard = logging::init_logging()?;
+
     entry::run()
 }
