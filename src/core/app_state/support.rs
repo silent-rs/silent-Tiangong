@@ -37,6 +37,12 @@ pub(in crate::core::app_state) enum TurnEvent {
     LlmOutput(LlmOutputRecord),
     ToolExecution(ToolResult),
     PlanExecutionSummary(String),
+    /// 阶段性流式 thinking，直接追加到对应 stage 的系统消息中
+    StageThinking {
+        stage: String,
+        delta: ModelStreamChunk,
+    },
+    /// 响应阶段的流式输出，追加到 assistant 消息中
     Chunk(ModelStreamChunk),
     Completed(Box<TurnExecution>),
     Failed(String),
@@ -47,6 +53,8 @@ pub(in crate::core::app_state) struct PendingTurn {
     pub(in crate::core::app_state) session_id: String,
     pub(in crate::core::app_state) task_id: String,
     pub(in crate::core::app_state) assistant_message_id: Option<String>,
+    /// 当前 stage thinking 对应的系统消息 ID，用于流式追加
+    pub(in crate::core::app_state) stage_thinking_message_id: Option<String>,
     pub(in crate::core::app_state) started_at: Instant,
     pub(in crate::core::app_state) rx: Receiver<TurnEvent>,
 }

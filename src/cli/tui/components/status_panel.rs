@@ -21,6 +21,20 @@ impl CliApp {
         let focus = format_focus_text(&plans);
         let error_text = format_error_text(&plans);
 
+        let active_session = self.state.active_session();
+        let last_usage = self.state.run_snapshot().last_usage.clone();
+        // 会话累计 = 已完成任务累计 + 当前执行中的实时消耗
+        let session_usage = {
+            let mut total = active_session.map(|s| s.total_usage()).unwrap_or_default();
+            // 如果有正在执行的任务，其 usage 尚未写入 task_record，从 RunSnapshot 补充
+            if self.state.has_pending_turn()
+                && let Some(ref current) = last_usage
+            {
+                total.accumulate(current);
+            }
+            total
+        };
+
         let mut phase_line_spans = vec![Span::styled("阶段: ", Style::default().fg(Color::Gray))];
         for (idx, tag) in phase_tags.iter().enumerate() {
             if idx > 0 {
@@ -71,6 +85,32 @@ impl CliApp {
                 Span::styled("当前: ", Style::default().fg(Color::Gray)),
                 Span::styled(focus.text, Style::default().fg(focus.color)),
             ]),
+            {
+                let mut spans = vec![Span::styled("Token: ", Style::default().fg(Color::Gray))];
+                if session_usage.total_tokens > 0 {
+                    spans.push(Span::styled(
+                        format!(
+                            "会话 in:{} out:{} total:{}",
+                            session_usage.prompt_tokens,
+                            session_usage.completion_tokens,
+                            session_usage.total_tokens,
+                        ),
+                        Style::default().fg(Color::Cyan),
+                    ));
+                } else {
+                    spans.push(Span::styled("会话 0", Style::default().fg(Color::DarkGray)));
+                }
+                if let Some(ref last) = last_usage {
+                    spans.push(Span::styled(
+                        format!(
+                            "  本轮 in:{} out:{} total:{}",
+                            last.prompt_tokens, last.completion_tokens, last.total_tokens,
+                        ),
+                        Style::default().fg(Color::Green),
+                    ));
+                }
+                Line::from(spans)
+            },
             Line::from(Span::styled(
                 self.status_message.as_str(),
                 Style::default().fg(Color::Gray),

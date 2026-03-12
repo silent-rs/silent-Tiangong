@@ -22,6 +22,73 @@ impl AppTurnService {
         }
     }
 
+    /// 将 stage thinking 流式 delta 追加到对应 stage 的系统消息中。
+    /// 首个 chunk 会创建系统消息并记录其 ID，后续 chunk 直接追加。
+    pub(in crate::core::app_state) fn apply_stage_thinking_delta(
+        self,
+        state: &mut TiangongState,
+        stage: &str,
+        delta: &ModelStreamChunk,
+    ) {
+        if delta.content.is_empty() && delta.reasoning_content.is_empty() {
+            return;
+        }
+
+        let Some(session_id) = state
+            .store
+            .runtime
+            .pending_turn
+            .as_ref()
+            .map(|pending| pending.session_id.clone())
+        else {
+            return;
+        };
+
+        // 检查是否已有该 stage 的系统消息
+        let existing_msg_id = state
+            .store
+            .runtime
+            .pending_turn
+            .as_ref()
+            .and_then(|pending| pending.stage_thinking_message_id.clone());
+
+        if let Some(msg_id) = existing_msg_id {
+            // 追加到已有消息
+            if let Some(session) = state
+                .store
+                .session
+                .sessions
+                .iter_mut()
+                .find(|session| session.id == session_id)
+                && let Some(message) = session.messages.iter_mut().find(|m| m.id == msg_id)
+            {
+                message.reasoning_content.push_str(&delta.reasoning_content);
+                message.content.push_str(&delta.content);
+            }
+        } else {
+            // 创建新的系统消息，以 LLM 输出格式开头，方便 transcript 渲染识别
+            // 末尾换行确保 header 独占一行，后续 delta.content 追加后不会破坏 parse_llm_event_markdown 的解析
+            let initial_content = format!("LLM 输出 [{}]\n", stage);
+            if let Some(session) = state
+                .store
+                .session
+                .sessions
+                .iter_mut()
+                .find(|session| session.id == session_id)
+            {
+                session.append_message(MessageRole::System, initial_content);
+                if let Some(new_msg) = session.messages.last_mut() {
+                    new_msg.reasoning_content.push_str(&delta.reasoning_content);
+                    new_msg.content.push_str(&delta.content);
+                    let new_msg_id = new_msg.id.clone();
+                    if let Some(pending) = state.store.runtime.pending_turn.as_mut() {
+                        pending.stage_thinking_message_id = Some(new_msg_id);
+                    }
+                }
+            }
+        }
+    }
+
     pub(in crate::core::app_state) fn append_pending_turn_llm_output(
         self,
         state: &mut TiangongState,
@@ -37,6 +104,14 @@ impl AppTurnService {
             return;
         };
 
+        // 获取并清除 stage_thinking_message_id
+        let stage_msg_id = state
+            .store
+            .runtime
+            .pending_turn
+            .as_mut()
+            .and_then(|pending| pending.stage_thinking_message_id.take());
+
         if let Some(session) = state
             .store
             .session
@@ -44,7 +119,21 @@ impl AppTurnService {
             .iter_mut()
             .find(|session| session.id == session_id)
         {
-            session.append_message(MessageRole::System, format_llm_output_message(output));
+            if let Some(msg_id) = stage_msg_id {
+                // 已有 stage thinking 系统消息，更新为最终格式化内容
+                if let Some(message) = session.messages.iter_mut().find(|m| m.id == msg_id) {
+                    message.content = format_llm_output_message(output);
+                    // reasoning_content 保留在独立字段供 TUI 渲染，不混入 content 避免重复提交给 LLM
+                    message.reasoning_content = output.reasoning_content.clone();
+                }
+            } else {
+                // 没有 stage thinking 消息（可能是非流式模式），创建新的系统消息
+                session.append_message_with_reasoning(
+                    MessageRole::System,
+                    format_llm_output_message(output),
+                    output.reasoning_content.clone(),
+                );
+            }
             let _ = state.persist_session_and_app(&session_id);
         }
     }
@@ -159,15 +248,22 @@ impl AppTurnService {
         state: &mut TiangongState,
         plan: &TaskPlan,
     ) {
-        let Some((session_id, task_id)) = state
-            .store
-            .runtime
-            .pending_turn
-            .as_ref()
-            .map(|pending| (pending.session_id.clone(), pending.task_id.clone()))
+        let Some((session_id, task_id, assistant_message_id)) =
+            state.store.runtime.pending_turn.as_ref().map(|pending| {
+                (
+                    pending.session_id.clone(),
+                    pending.task_id.clone(),
+                    pending.assistant_message_id.clone(),
+                )
+            })
         else {
             return;
         };
+
+        // 清除 stage thinking 消息 ID，执行阶段会创建新的 stage 消息
+        if let Some(pending) = state.store.runtime.pending_turn.as_mut() {
+            pending.stage_thinking_message_id = None;
+        }
 
         if let Some(session) = state
             .store
@@ -176,6 +272,14 @@ impl AppTurnService {
             .iter_mut()
             .find(|session| session.id == session_id)
         {
+            // 规划阶段的流式输出已写入系统消息（而非 assistant 消息），
+            // 进入执行阶段后清空 assistant 消息（如果有残留），避免与最终响应内容混在一起。
+            if let Some(msg_id) = assistant_message_id.as_deref()
+                && let Some(message) = session.messages.iter_mut().find(|m| m.id == msg_id)
+            {
+                message.content.clear();
+                message.reasoning_content.clear();
+            }
             session.mark_task_executing(&task_id, Some(format_plan_snapshot(plan)));
             session.sync_task_plans(&task_id, &plan.plans);
         }

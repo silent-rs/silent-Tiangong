@@ -157,16 +157,48 @@ fn append_system_message_lines(target: &mut Vec<Line<'static>>, message: &Messag
     if let Some((stage, title, detail_markdown)) =
         parse_llm_event_markdown(message.content.as_str())
     {
+        let title_style = Style::default()
+            .fg(Color::LightGreen)
+            .add_modifier(Modifier::BOLD);
+        target.push(build_event_title_line(title.as_str(), title_style));
+
+        // 流式阶段判定：reasoning_content 非空 或 body 不含最终格式化标记（reasoning:/content:/tool_calls:）
+        let streaming_reasoning = message.reasoning_content.trim();
+        let is_streaming =
+            !streaming_reasoning.is_empty() || is_stage_thinking_in_progress(&detail_markdown);
+        if is_streaming {
+            let thinking_style = Style::default()
+                .fg(Color::Rgb(196, 214, 235))
+                .add_modifier(Modifier::ITALIC);
+            if !streaming_reasoning.is_empty() {
+                append_styled_markdown_lines_with_prefix(
+                    target,
+                    streaming_reasoning,
+                    "  ",
+                    thinking_style,
+                );
+            }
+            // 如果还有 content 部分（流式 content delta），也展示
+            let streaming_content = detail_markdown.trim();
+            if !streaming_content.is_empty() {
+                append_markdown_lines_with_prefix(target, streaming_content, "  ");
+            }
+            if streaming_reasoning.is_empty() && detail_markdown.trim().is_empty() {
+                target.push(build_event_detail_line(
+                    "...",
+                    Style::default().fg(Color::Gray),
+                ));
+            }
+            return;
+        }
+
+        // 最终态：使用已有的折叠逻辑
         let collapsed_reasoning = collapse_llm_reasoning_block(detail_markdown.as_str());
         let collapsed_detail_markdown = if stage == "planning-agent" {
             collapse_planning_content_block(collapsed_reasoning.as_str())
         } else {
             collapsed_reasoning
         };
-        let title_style = Style::default()
-            .fg(Color::LightGreen)
-            .add_modifier(Modifier::BOLD);
-        target.push(build_event_title_line(title.as_str(), title_style));
         if collapsed_detail_markdown.trim().is_empty() {
             target.push(build_event_detail_line(
                 "无输出",
@@ -563,6 +595,19 @@ fn parse_planning_json(content: &str) -> Option<Value> {
         .filter(Value::is_object)
 }
 
+/// 判断 LLM 输出系统消息是否处于流式阶段（尚未被最终格式化内容替换）。
+/// 最终格式化内容由 `format_llm_output_message` 生成，包含 `reasoning:` / `content:` / `tool_calls:` 标记。
+/// 如果 body 不含这些标记，说明还在流式追加中。
+fn is_stage_thinking_in_progress(detail_markdown: &str) -> bool {
+    let trimmed = detail_markdown.trim();
+    if trimmed.is_empty() {
+        // body 为空表示刚创建，还在等待第一个 content delta
+        return true;
+    }
+    // 最终格式化内容至少会包含 "reasoning:" 或 "content:" 标记之一
+    !trimmed.contains("reasoning:") && !trimmed.contains("content:")
+}
+
 fn collapse_plan_execution_summary_markdown(detail_markdown: &str) -> String {
     let source_lines = detail_markdown
         .lines()
@@ -821,6 +866,18 @@ fn append_markdown_lines_with_prefix(
 ) {
     for line in markdown_to_owned_lines(markdown) {
         target.push(prefix_line(line, prefix));
+    }
+}
+
+fn append_styled_markdown_lines_with_prefix(
+    target: &mut Vec<Line<'static>>,
+    markdown: &str,
+    prefix: &str,
+    style: Style,
+) {
+    for line in markdown.split('\n') {
+        let content = format!("{prefix}{line}");
+        target.push(Line::from(Span::styled(content, style)));
     }
 }
 

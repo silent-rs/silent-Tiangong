@@ -224,20 +224,22 @@ impl AppTurnService {
             }
             session.sync_task_plans(&task_id, &exec.plan.plans);
             if has_failed_plan {
-                session.fail_task_with_context(
+                session.fail_task_with_context_and_usage(
                     &task_id,
                     "执行失败",
                     Some("plan_failed".to_string()),
                     duration_ms,
                     Some(plan_snapshot.clone()),
                     completion_tool_result,
+                    Some(exec.usage.clone()),
                 );
             } else {
-                session.complete_task(
+                session.complete_task_with_usage(
                     &task_id,
                     Some(plan_snapshot.clone()),
                     completion_tool_result,
                     duration_ms,
+                    Some(exec.usage.clone()),
                 );
             }
 

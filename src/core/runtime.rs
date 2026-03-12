@@ -111,7 +111,7 @@ impl RuntimeEngine {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn execute_turn_with_streaming<F, P, L, T, S>(
+    pub fn execute_turn_with_streaming<F, P, L, T, S, G>(
         &self,
         session: &Session,
         user_input: &str,
@@ -120,6 +120,7 @@ impl RuntimeEngine {
         mut on_llm_output: L,
         mut on_tool_result: T,
         mut on_plan_execution_summary: S,
+        mut on_stage_thinking: G,
     ) -> Result<TurnExecution>
     where
         P: FnMut(&TaskPlan),
@@ -127,26 +128,38 @@ impl RuntimeEngine {
         L: FnMut(&LlmOutputRecord),
         T: FnMut(&ToolResult),
         S: FnMut(&str),
+        G: FnMut(&str, &ModelStreamChunk),
     {
+        // 累计 token 用量
+        let mut accumulated_usage = TokenUsage::default();
+
+        // 规划阶段：流式 thinking 通过 on_stage_thinking 输出到系统消息（"● Planning" 下方）
         let (mut plan, planning_output) = planning_agent::build_plan_with_agent_with_trace(
             &self.client,
             session,
             user_input,
             &self.agent_config,
             self.context_limit,
+            &mut |delta: &ModelStreamChunk| {
+                on_stage_thinking("planning-agent", delta);
+            },
         );
+        accumulated_usage.accumulate(&planning_output.usage);
+        on_plan_ready(&plan);
+        // 当规划输出有实质内容或有 token 消耗时，补充/更新系统消息记录规划结果
         if !planning_output.content.trim().is_empty()
             || !planning_output.reasoning_content.trim().is_empty()
+            || planning_output.usage.total_tokens > 0
         {
             let output = LlmOutputRecord {
                 stage: "planning-agent".to_string(),
                 content: planning_output.content,
                 reasoning_content: planning_output.reasoning_content,
                 tool_calls: Vec::new(),
+                usage: planning_output.usage,
             };
             on_llm_output(&output);
         }
-        on_plan_ready(&plan);
         let context = session.recent_messages(self.context_limit);
         let mut tool_results = Vec::new();
         execute_plan_with_execution_agent(
@@ -162,6 +175,8 @@ impl RuntimeEngine {
             &mut on_tool_result,
             &mut on_plan_execution_summary,
             &mut on_plan_ready,
+            &mut on_stage_thinking,
+            &mut accumulated_usage,
         )?;
         let verify_commands = recommend_verify_commands(user_input);
         let verify_records = run_verify_commands(&verify_commands);
@@ -224,6 +239,9 @@ impl RuntimeEngine {
             resp
         };
 
+        // 累加响应阶段的 token 用量
+        accumulated_usage.accumulate(&usage);
+
         let tool_result_summary = summarize_tool_results(&tool_results);
         let tool_execution = tool_results
             .into_iter()
@@ -239,7 +257,7 @@ impl RuntimeEngine {
             verify_records,
             output_mode,
             output_chunk_count,
-            usage,
+            usage: accumulated_usage,
         })
     }
 

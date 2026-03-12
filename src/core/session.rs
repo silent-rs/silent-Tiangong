@@ -1,6 +1,7 @@
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 
+use crate::core::model::TokenUsage;
 use crate::core::planner::{PlanItem, PlanStepSource, PlanStepStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +67,9 @@ pub struct SessionTaskRecord {
     pub finished_at: Option<String>,
     #[serde(default)]
     pub duration_ms: Option<u64>,
+    /// 本次任务所有 LLM 调用的累计 token 用量
+    #[serde(default)]
+    pub usage: Option<TokenUsage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,6 +156,7 @@ impl Session {
             updated_at: now,
             finished_at: None,
             duration_ms: None,
+            usage: None,
         });
         self.updated_at = now_text();
     }
@@ -301,12 +306,24 @@ impl Session {
             .collect()
     }
 
+    #[allow(dead_code)]
     pub fn complete_task(
         &mut self,
         task_id: &str,
         plan_snapshot: Option<String>,
         tool_result: Option<String>,
         duration_ms: u64,
+    ) {
+        self.complete_task_with_usage(task_id, plan_snapshot, tool_result, duration_ms, None);
+    }
+
+    pub fn complete_task_with_usage(
+        &mut self,
+        task_id: &str,
+        plan_snapshot: Option<String>,
+        tool_result: Option<String>,
+        duration_ms: u64,
+        usage: Option<TokenUsage>,
     ) {
         let Some(record) = self
             .task_records
@@ -323,6 +340,7 @@ impl Session {
         record.tool_result = tool_result;
         record.error = None;
         record.duration_ms = Some(duration_ms);
+        record.usage = usage;
         let now = now_text();
         record.updated_at = now.clone();
         record.finished_at = Some(now);
@@ -348,6 +366,28 @@ impl Session {
         plan_snapshot: Option<String>,
         tool_result: Option<String>,
     ) {
+        self.fail_task_with_context_and_usage(
+            task_id,
+            summary,
+            error,
+            duration_ms,
+            plan_snapshot,
+            tool_result,
+            None,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn fail_task_with_context_and_usage(
+        &mut self,
+        task_id: &str,
+        summary: impl Into<String>,
+        error: Option<String>,
+        duration_ms: u64,
+        plan_snapshot: Option<String>,
+        tool_result: Option<String>,
+        usage: Option<TokenUsage>,
+    ) {
         let Some(record) = self
             .task_records
             .iter_mut()
@@ -365,6 +405,7 @@ impl Session {
         }
         record.error = error;
         record.duration_ms = Some(duration_ms);
+        record.usage = usage;
         let now = now_text();
         record.updated_at = now.clone();
         record.finished_at = Some(now);
@@ -391,6 +432,17 @@ impl Session {
             self.updated_at = now_text();
         }
         recovered
+    }
+
+    /// 计算当前会话所有任务的累计 token 用量
+    pub fn total_usage(&self) -> TokenUsage {
+        let mut total = TokenUsage::default();
+        for record in &self.task_records {
+            if let Some(usage) = &record.usage {
+                total.accumulate(usage);
+            }
+        }
+        total
     }
 
     pub fn recent_messages(&self, limit: usize) -> Vec<Message> {

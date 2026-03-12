@@ -1,3 +1,4 @@
+use crate::core::model::TokenUsage;
 use crate::core::planner::PlanStepStatus;
 
 #[derive(Debug, Clone)]
@@ -5,6 +6,7 @@ pub struct ExecutionLlmOutput {
     pub content: String,
     pub reasoning_content: String,
     pub tool_calls: Vec<String>,
+    pub usage: TokenUsage,
 }
 
 #[derive(Debug, Clone)]
@@ -33,4 +35,5 @@ pub struct LlmOutputRecord {
     pub content: String,
     pub reasoning_content: String,
     pub tool_calls: Vec<String>,
+    pub usage: TokenUsage,
 }
