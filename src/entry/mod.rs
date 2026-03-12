@@ -22,43 +22,26 @@ pub fn run() -> anyhow::Result<()> {
         }
     };
 
-    // 先处理明确的命令
-    match &args.command {
-        Some(MainCommand::Mcp(_)) | Some(MainCommand::Skill(_)) => match args.command {
-            Some(MainCommand::Mcp(args)) => return mcp::run_mcp_command(args),
-            Some(MainCommand::Skill(args)) => return skill::run_skill_command(args),
-            _ => unreachable!(),
-        },
+    match args.command {
+        Some(MainCommand::Mcp(args)) => mcp::run_mcp_command(args),
+        Some(MainCommand::Skill(args)) => skill::run_skill_command(args),
         #[cfg(feature = "cli")]
         Some(MainCommand::Cli) => {
-            return crate::cli::run_cli();
+            // CLI 模块在此 worktree 中不可用
+            // 如需使用 CLI，请切换到主分支
+            Err(anyhow::anyhow!("CLI 模式在当前版本中不可用"))
         }
         #[cfg(not(feature = "cli"))]
         Some(MainCommand::Cli) => {
-            return Err(anyhow::anyhow!(
-                "CLI 模式未启用，请使用 --features cli 编译"
-            ));
+            Err(anyhow::anyhow!("CLI 模式未启用，请使用 --features cli 编译"))
         }
-        _ => {}
+        #[cfg(feature = "tui")]
+        None | Some(MainCommand::Ui) => {
+            Err(anyhow::anyhow!("TUI 模式暂未在此版本中实现"))
+        }
+        #[cfg(not(feature = "tui"))]
+        None | Some(MainCommand::Ui) => {
+            Err(anyhow::anyhow!("UI 模式未启用，请使用 --features tui 编译"))
+        }
     }
-
-    // 处理 UI 模式（None 或 Some(MainCommand::Ui)）
-    run_ui_mode()
-}
-
-#[cfg(feature = "tui")]
-fn run_ui_mode() -> anyhow::Result<()> {
-    crate::ui::run()
-}
-
-#[cfg(all(not(feature = "tui"), feature = "cli"))]
-fn run_ui_mode() -> anyhow::Result<()> {
-    crate::cli::run_cli()
-}
-
-#[cfg(all(not(feature = "tui"), not(feature = "cli")))]
-fn run_ui_mode() -> anyhow::Result<()> {
-    Err(anyhow::anyhow!(
-        "UI 模式未启用，请使用 --features tui 或 --features cli 编译"
-    ))
 }

@@ -1,115 +1,6 @@
 use super::*;
 
-/// 生成降级标题（当模型生成失败时使用）
-fn generate_fallback_title(messages: &[Message]) -> String {
-    use crate::core::session::MessageRole;
-    use chrono::Local;
-
-    // 尝试从对话中提取关键词
-    let user_content: String = messages
-        .iter()
-        .filter(|msg| msg.role == MessageRole::User)
-        .map(|msg| msg.content.trim())
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    // 如果用户输入很短，直接截取作为标题
-    if user_content.len() <= 10 {
-        user_content
-    } else {
-        // 用户输入较长，使用日期
-        format!("对话 {}", Local::now().format("%m-%d"))
-    }
-}
-
 impl AppTurnService {
-    /// 生成会话标题（用于首次对话后自动命名，基于整个会话内容）
-    fn generate_session_title(state: &TiangongState, messages: &[Message]) -> Option<String> {
-        use crate::core::session::MessageRole;
-        use tracing::{info, warn};
-
-        if messages.is_empty() {
-            return None;
-        }
-
-        // 构建对话摘要
-        let conversation_summary: String = messages
-            .iter()
-            .filter(|msg| {
-                // 只包含用户和助手的对话消息，排除系统消息
-                matches!(msg.role, MessageRole::User | MessageRole::Assistant)
-            })
-            .map(|msg| {
-                let role = match msg.role {
-                    MessageRole::User => "用户",
-                    MessageRole::Assistant => "助手",
-                    _ => "",
-                };
-                format!("{}: {}", role, msg.content.trim())
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        if conversation_summary.is_empty() {
-            return None;
-        }
-
-        // 改进的 Prompt（更明确的要求）
-        let prompt = format!(
-            "你是会话标题生成助手。根据以下对话内容生成一个简洁的标题。
-
-要求：
-1. 标题长度：2-10个汉字
-2. 直接返回标题文本，不要任何解释、引号或额外文字
-3. 如果对话内容简单（如问候），可以用关键词作为标题
-4. 标题要能概括对话的主要内容
-
-示例：
-- 对话关于Python编程 -> 'Python脚本开发'
-- 对话问候 -> '新对话'
-- 对话故事创作 -> '故事创作'
-
-对话内容：
-{}",
-            conversation_summary
-        );
-
-        match state.services.runtime.complete_lite(&prompt) {
-            Ok(title) => {
-                let title = title.trim().to_string();
-
-                // 改进的验证逻辑（更宽松）
-                if title.is_empty() {
-                    warn!(
-                        conversation_summary = %conversation_summary[..100],
-                        "轻量级模型返回空字符串，使用降级策略"
-                    );
-                    // 降级策略：使用默认标题
-                    Some(generate_fallback_title(messages))
-                } else if title.len() > 20 {
-                    // 如果标题太长，截取前10个字符
-                    let truncated: String = title.chars().take(10).collect();
-                    info!(
-                        original_title = %title,
-                        truncated_title = %truncated,
-                        "标题过长，已截取"
-                    );
-                    Some(truncated)
-                } else {
-                    Some(title)
-                }
-            }
-            Err(err) => {
-                warn!(
-                    error = %err,
-                    "轻量级模型请求失败，使用降级策略"
-                );
-                // 降级策略：使用默认标题
-                Some(generate_fallback_title(messages))
-            }
-        }
-    }
-
     pub(in crate::core::app_state) fn finish_pending_turn_success(
         self,
         state: &mut TiangongState,
@@ -182,36 +73,6 @@ impl AppTurnService {
             .iter()
             .any(|item| item.status == PlanStepStatus::Failed);
         let completion_tool_result = tool_result_text.clone();
-
-        // 在修改会话前，先收集生成标题所需的信息
-        let (should_generate_title, session_messages) = state
-            .store
-            .session
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
-            .map(|session| {
-                // 统计 user 消息数量（排除 system 和 assistant 消息）
-                let user_message_count = session
-                    .messages
-                    .iter()
-                    .filter(|msg| msg.role == MessageRole::User)
-                    .count();
-                (
-                    // 只有当 user 消息数为 1 且标题还未生成过时才生成
-                    user_message_count == 1 && !session.title_generated,
-                    session.messages.clone(),
-                )
-            })
-            .unwrap_or((false, Vec::new()));
-
-        // 尝试生成标题（在修改会话之前）
-        let generated_title = if should_generate_title {
-            Self::generate_session_title(state, &session_messages)
-        } else {
-            None
-        };
-
         if let Some(session) = state
             .store
             .session
@@ -239,15 +100,6 @@ impl AppTurnService {
                     completion_tool_result,
                     duration_ms,
                 );
-            }
-
-            // 应用生成的标题（静默后台行为）
-            if let Some(new_title) = generated_title {
-                session.title = new_title.clone();
-                session.title_generated = true;
-                session.updated_at = now_text();
-                // 同步更新草稿
-                state.store.session.session_title_draft = new_title;
             }
         }
 

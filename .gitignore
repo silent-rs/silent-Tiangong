@@ -5,3 +5,5 @@ output/
 openspec
 .claude
 .tmp/
+frontend/dist
+frontend/node_modules

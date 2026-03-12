@@ -1,7 +1,5 @@
 use super::*;
-use tracing::error;
 
-#[allow(dead_code)]
 impl AppRepository {
     pub(in crate::core::app_state) fn persist_session(
         &self,
@@ -22,15 +20,6 @@ impl AppRepository {
             .with_context(|| format!("序列化会话失败：{session_id}"))?;
         fs::write(&session_path, content)
             .with_context(|| format!("写入会话文件失败：{}", session_path.display()))
-            .map_err(|err| {
-                error!(
-                    session_id = %session_id,
-                    path = %session_path.display(),
-                    error = %err,
-                    "写入会话文件失败"
-                );
-                err
-            })
     }
 
     pub(in crate::core::app_state) fn persist_app_only(&self, store: &AppStore) -> Result<()> {

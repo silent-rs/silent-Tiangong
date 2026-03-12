@@ -5,15 +5,14 @@ use async_openai::Client as OpenAIClient;
 use async_openai::config::OpenAIConfig;
 use async_openai::types::chat::{
     ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
-    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs, ChatThinking,
-    ChatThinkingType, CreateChatCompletionRequestArgs, CreateChatCompletionResponse,
+    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
+    CreateChatCompletionRequestArgs,
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::time::timeout;
-use tracing::error as tracing_error;
 
 use crate::core::mcp::build_mcp_tools_system_prompt;
 use crate::core::session::{Message, MessageRole};
@@ -79,9 +78,6 @@ pub struct ModelProviderConfig {
     pub api_timeout_ms: String,
     #[serde(rename = "API_MODEL", default = "default_api_model")]
     pub api_model: String,
-    /// 轻量级模型，用于简单任务如会话名称生成
-    #[serde(rename = "API_LITE_MODEL", default)]
-    pub api_lite_model: String,
 }
 
 impl ModelProviderConfig {
@@ -92,27 +88,14 @@ impl ModelProviderConfig {
         let api_timeout_ms =
             std::env::var("API_TIMEOUT_MS").unwrap_or_else(|_| default_api_timeout_ms());
         let api_model = std::env::var("API_MODEL").unwrap_or_else(|_| default_api_model());
-        let api_lite_model = std::env::var("API_LITE_MODEL").unwrap_or_default();
         Self {
             api_auth_token,
             api_base_url,
             api_timeout_ms,
             api_model,
-            api_lite_model,
         }
     }
 
-    /// 获取实际使用的轻量级模型，如果未配置则返回主模型
-    pub fn lite_model(&self) -> &str {
-        let lite = self.api_lite_model.trim();
-        if lite.is_empty() {
-            &self.api_model
-        } else {
-            lite
-        }
-    }
-
-    #[allow(dead_code)]
     pub fn masked_auth_token(&self) -> String {
         if self.api_auth_token.trim().is_empty() {
             "(empty)".to_string()
@@ -152,7 +135,6 @@ impl SingleProviderClient {
         Self { cfg }
     }
 
-    #[allow(dead_code)]
     pub fn list_models(cfg: &ModelProviderConfig) -> Result<Vec<String>> {
         let token = cfg.api_auth_token.trim();
         if token.is_empty() {
@@ -342,135 +324,6 @@ impl SingleProviderClient {
             });
         }
         Ok(fallback_resp)
-    }
-
-    /// 使用轻量级模型完成简单任务（如会话名称生成）
-    /// 如果未配置轻量级模型，则使用主模型
-    /// 该方法使用更短的超时时间和较低温度以获得更确定的结果
-    pub fn complete_lite(&self, prompt: &str) -> Result<String> {
-        use tracing::{info, warn};
-
-        let token = self.cfg.api_auth_token.trim();
-        if token.is_empty() {
-            return Err(anyhow!("API_AUTH_TOKEN 不能为空，无法发起轻量级模型请求"));
-        }
-
-        // 轻量级任务使用更短的超时（30 秒）
-        let timeout_ms = 30_000u64;
-        // lite_model() 会自动回退到主模型
-        let model = self.cfg.lite_model().trim();
-        if model.is_empty() {
-            return Err(anyhow!("API_MODEL 不能为空，无法发起轻量级模型请求"));
-        }
-
-        info!(
-            model = %model,
-            lite_model_config = %self.cfg.api_lite_model,
-            timeout_ms = timeout_ms,
-            prompt_length = prompt.len(),
-            "开始调用轻量级模型"
-        );
-
-        let api_base = normalize_api_base(&self.cfg.api_base_url)?;
-
-        let messages = vec![
-            ChatCompletionRequestSystemMessageArgs::default()
-                .content(
-                    "你是会话标题生成助手。根据用户输入生成简洁的标题，要求：\
-                    1. 标题不超过10个汉字\
-                    2. 直接返回标题，不要任何解释或额外文字\
-                    3. 标题要概括性强，简洁明了",
-                )
-                .build()
-                .context("构建 system 消息失败")?
-                .into(),
-            ChatCompletionRequestUserMessageArgs::default()
-                .content(prompt.to_string())
-                .build()
-                .context("构建 user 消息失败")?
-                .into(),
-        ];
-
-        let mut request_args_binding = CreateChatCompletionRequestArgs::default();
-        let request = request_args_binding
-            .model(model.to_string())
-            .messages(messages)
-            .max_tokens(30u16)
-            .temperature(0.3f32)
-            .stream(false)
-            .thinking(ChatThinking {
-                r#type: Some(ChatThinkingType::Disabled),
-                clear_thinking: None,
-            })
-            .build()
-            .context("构建轻量级请求失败")?;
-
-        let config = OpenAIConfig::new()
-            .with_api_key(token.to_string())
-            .with_api_base(api_base);
-        let client = OpenAIClient::with_config(config);
-
-        let runtime = TokioRuntimeBuilder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("初始化异步运行时失败")?;
-
-        let response = runtime.block_on(async {
-            timeout(
-                Duration::from_millis(timeout_ms),
-                client
-                    .chat()
-                    .create_byot::<_, CreateChatCompletionResponse>(request),
-            )
-            .await
-        });
-
-        let resp = match response {
-            Ok(Ok(resp)) => resp,
-            Ok(Err(err)) => {
-                let hint = build_sdk_error_hint(&err.to_string());
-                tracing_error!(
-                    model = %model,
-                    error = %err,
-                    timeout_ms = %timeout_ms,
-                    "轻量级模型请求失败",
-                );
-                return Err(anyhow!("轻量级模型请求失败：{err}{hint}"));
-            }
-            Err(_) => {
-                tracing_error!(
-                    model = %model,
-                    timeout_ms = %timeout_ms,
-                    "轻量级模型请求超时",
-                );
-                return Err(anyhow!("轻量级模型请求超时：{timeout_ms}ms"));
-            }
-        };
-
-        let text = resp
-            .choices
-            .first()
-            .and_then(|choice| choice.message.content.as_deref())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-
-        if text.is_empty() {
-            warn!(
-                model = %model,
-                response = ?resp,
-                "轻量级模型返回空响应",
-            );
-        } else {
-            info!(
-                model = %model,
-                response_length = text.len(),
-                response_preview = %text.chars().take(20).collect::<String>(),
-                "轻量级模型返回成功",
-            );
-        }
-
-        Ok(text)
     }
 }
 

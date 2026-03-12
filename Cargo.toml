@@ -15,8 +15,6 @@ path = "src/main.rs"
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 clap = { version = "4", features = ["derive"] }
-hetu = { git = "ssh://git@github.com/silent-rs/silent-hetu.git" }
-components = { package = "hetu-components", git = "ssh://git@github.com/silent-rs/silent-hetu.git" }
 scru128 = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

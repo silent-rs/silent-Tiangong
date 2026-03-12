@@ -1,0 +1,40 @@
+[package]
+name = "tiangong-app"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+# Empty workspace to make src-tauri independent from parent workspace
+
+[dependencies]
+# 引用主项目核心库
+# 包名是 tiangong，但库名是 tiangong_core
+tiangong_core = { path = "..", package = "tiangong" }
+
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+scru128 = "3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-openai = { git = "https://github.com/silent-rs/async-openai", branch = "main", package = "async-openai", features = ["byot", "chat-completion", "model"] }
+tokio = { version = "1", features = ["rt", "time", "process", "io-util", "sync"] }
+rmcp = { version = "0.17.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+futures-util = "0.3"
+http = "1"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tracing-appender = "0.2"
+
+# Tauri 相关依赖
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-shell = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[features]
+default = []
+cli = []

@@ -91,19 +91,19 @@ impl Drop for ScopedDirCleanup {
 }
 
 #[derive(Debug)]
-pub(in crate::core::app_state) struct AppPaths {
-    pub(in crate::core::app_state) app_storage_path: PathBuf,
-    pub(in crate::core::app_state) skills_config_path: PathBuf,
-    pub(in crate::core::app_state) mcp_config_path: PathBuf,
-    pub(in crate::core::app_state) mcp_capability_cache_path: PathBuf,
-    pub(in crate::core::app_state) sessions_dir_path: PathBuf,
+pub struct AppPaths {
+    pub app_storage_path: PathBuf,
+    pub skills_config_path: PathBuf,
+    pub mcp_config_path: PathBuf,
+    pub mcp_capability_cache_path: PathBuf,
+    pub sessions_dir_path: PathBuf,
 }
 
 #[derive(Debug)]
-pub(in crate::core::app_state) struct AppServices {
-    pub(in crate::core::app_state) skill_service: AppSkillService,
-    pub(in crate::core::app_state) mcp_service: AppMcpService,
-    pub(in crate::core::app_state) repository: AppRepository,
-    pub(in crate::core::app_state) runtime: RuntimeEngine,
-    pub(in crate::core::app_state) turn_service: AppTurnService,
+pub struct AppServices {
+    pub skill_service: AppSkillService,
+    pub mcp_service: AppMcpService,
+    pub repository: AppRepository,
+    pub runtime: RuntimeEngine,
+    pub turn_service: AppTurnService,
 }

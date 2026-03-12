@@ -105,11 +105,6 @@ impl RuntimeEngine {
         )
     }
 
-    /// 使用轻量级模型完成简单任务（如会话名称生成）
-    pub fn complete_lite(&self, prompt: &str) -> Result<String> {
-        self.client.complete_lite(prompt)
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn execute_turn_with_streaming<F, P, L, T, S>(
         &self,

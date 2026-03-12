@@ -1,7 +1,6 @@
 use super::super::repository::*;
 use super::super::*;
 
-#[allow(dead_code)]
 impl TiangongState {
     pub(in crate::core::app_state) fn persist_session_and_app(
         &mut self,
