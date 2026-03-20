@@ -4,10 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-**Silent-Tiangong（天工）** 是基于 Hetu 框架的桌面级 AI 自动化中枢系统，实现"可对话、可规划、可执行、可扩展、可治理"的 Agent 能力闭环。
+**Silent-Tiangong（天工）** 是全功能可扩展的 GUI + CLI + Server 个人智能终端平台，实现"可对话、可规划、可执行、可扩展、可治理、可远程"的 Agent 能力闭环。支持通过 Connector 接入各类 IM 通道远程调度，并具备图片/视频等多媒体生成能力。
 
 - **语言**: Rust (edition 2024)
-- **框架**: Hetu (GUI) + ratatui (TUI)
+- **架构**: Cargo workspace 多 crate
+- **前端**: Tauri + React (GUI) / ratatui (TUI)
+- **Server**: silent (HTTP/WS)
 - **许可**: Apache License 2.0
 - **存储位置**: `~/.tiangong/`
 
@@ -151,16 +153,17 @@ fn load_session(&self, id: &str) -> Result<Session> {
 }
 ```
 
-## 当前开发阶段（RFC 0003）
+## 当前开发阶段（RFC 0004 - 全栈平台重构）
 
-**当前增量主线**：`docs/rfc/0003-skill-market.md`
+**当前主线**：`docs/rfc/0004-full-stack-agent-platform.md`
 
-核心目标：交付"与 MCP 一致"的 Skill 生命周期管理与依赖托管能力。
+核心目标：将天工从单 crate 桌面应用重构为 Workspace 多 crate 全栈平台，支持 GUI + CLI + Server + Connector 多模式运行。
 
 关键文档：
 - `PLAN.md` - 项目总体规划和里程碑
 - `TODO.md` - 基于 PLAN 的当前阶段任务列表
 - `docs/requirements.md` - 需求边界与 Must/Should/非目标
+- `docs/rfc/0004-full-stack-agent-platform.md` - 全栈平台架构 RFC
 - `docs/core-architecture.md` - 核心架构详细说明
 - `docs/app-state-redesign.md` - app_state 重构设计稿
 
@@ -172,12 +175,13 @@ fn load_session(&self, id: &str) -> Result<Session> {
 | `serde` / `serde_json` | 序列化 |
 | `chrono` | 时间处理（本地时间） |
 | `scru128` | ID 生成（必须使用） |
-| `hetu` | UI 框架 |
-| `components` (hetu-components) | UI 组件库 |
 | `async-openai` | OpenAI API 客户端（fork 版本） |
 | `tokio` | 异步运行时 |
 | `rmcp` | MCP 客户端 |
 | `ratatui` | TUI 框架 |
+| `silent` | HTTP/WS Server 框架 |
+| `teloxide` | Telegram Bot SDK |
+| `serenity` | Discord Bot SDK |
 
 ## 环境变量
 

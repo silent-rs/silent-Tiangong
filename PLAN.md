@@ -1,18 +1,18 @@
 # 天工项目规划（PLAN）
 
 ## 愿景
-构建一个基于 Hetu 的桌面智能中枢系统，实现“可对话、可规划、可执行、可扩展、可治理”的 Agent 能力闭环。
+构建一个全功能可扩展的 GUI + CLI + Server 个人智能终端平台，实现"可对话、可规划、可执行、可扩展、可治理、可远程"的 Agent 能力闭环。通过 Connector 机制接入各类 IM 通道，支持图片/视频等多媒体生成，打造个人 AI 中枢。
 
 ## 总体目标
-- 产品目标：从桌面对话入口演进为系统级自动化执行平台。
-- 架构目标：保持 UI、核心引擎、模型层、Skill/MCP 层解耦。
-- 安全目标：在工具执行与扩展能力链路落实最小权限、审计与可追踪。
-- 工程目标：采用小步迭代，按 Phase 分期交付可运行版本。
+- 产品目标：从桌面对话工具演进为全栈个人智能终端（本地 + 远程 + 多通道）。
+- 架构目标：Workspace 多 crate 分离，核心引擎、前端、Server、Connector、媒体生成各自独立。
+- 安全目标：Server 模式默认安全（本地绑定、Token 认证），Connector 鉴权白名单制。
+- 工程目标：按 Phase 增量交付，每个 Phase 保证功能不回退。
 
-## 当前执行策略（2026-03-03）
-- 基线主线：`docs/rfc/0002-cli-agent-roadmap.md`（已形成 CLI Agent 可用闭环）。
-- 当前增量主线：`docs/rfc/0003-skill-market.md`（先做 Skill 管理能力，不做复杂市场化能力）。
-- 当前目标：交付“与 MCP 一致”的 Skill 生命周期管理与依赖托管能力。
+## 当前执行策略（2026-03-20）
+- 架构 RFC：`docs/rfc/0004-full-stack-agent-platform.md`
+- 前置基线：Phase 1（CLI Agent）已达成，Phase 2（Skill 管理）部分完成。
+- 当前目标：完成 Workspace 拆分，为后续 Server/Connector/Media 能力打基础。
 
 ## 里程碑
 
@@ -21,29 +21,54 @@
 - 最小任务执行链路可跑通（输入 -> 规划 -> 执行 -> 反馈）。
 - MCP 本地/远程接入可用。
 
-### Phase 2（Skill 管理 MVP，进行中）
+### Phase 2（Skill 管理 MVP，部分完成）
 - Skill 支持安装、启停、卸载、列表、详情。
 - `/skill` 管理交互对齐 `/mcp`。
-- Skill -> MCP 依赖映射自动化与托管。
-- `app.json` / `skills-lock.json` / `mcp-lock.json` 一致性与回滚保障。
+- 动态 Step 执行闭环。
+- 待完成：锁文件、MCP 托管映射、事务回滚、审计。
 
-### Phase 3（Skill 来源扩展）
-- Git 源 Skill 安装能力。
-- 非交互 `tiangong skill ...` 子命令。
-- 远程 registry 只读索引与下载。
+### Phase 3（Workspace 拆分与核心抽离）— **当前阶段**
+- 单 crate → Cargo workspace 多 crate。
+- `tiangong-core`：核心引擎独立（无 UI 依赖）。
+- `tiangong-cli`：CLI/TUI 前端独立。
+- `tiangong-gui`：桌面 GUI 前端独立（Tauri + React）。
+- 主二进制统一入口分发。
+- 确保现有功能不回退。
 
-### Phase 4（系统自动化与治理）
-- 审计能力增强（落盘、检索、追踪）。
-- 高风险命令拦截与确认策略完善。
-- 执行稳定性提升（失败重试、恢复策略）。
+### Phase 4（Server 模式）
+- `tiangong-server`：HTTP REST + WebSocket API。
+- 对话、会话管理、Skill/MCP 管理 API。
+- API Token 认证与访问控制。
+- `tiangong server` 命令启动，支持 `-d` / `--daemon` 后台运行。
+- `tiangong server stop` 停止后台运行的 Server。
+- Server 启动时自动加载并启动已启用的 Connector。
 
-### Phase 5（生态扩展）
-- 可选的签名验证与审核机制。
-- 企业私有源与离线镜像能力。
-- 在安全前提下逐步评估市场化能力。
+### Phase 5（Gateway 与事件总线）
+- 事件总线（EventBus）实现层间解耦。
+- Gateway 统一消息路由。
+- 统一消息模型（IncomingMessage / OutgoingMessage）。
+
+### Phase 6（Connector 框架与 IM 接入）
+- `tiangong-connector`：Connector trait 定义。
+- 首批适配器：Telegram、Discord、飞书/Lark、Webhook。
+- Connector 配置管理与热插拔。
+- 后续扩展：钉钉、Slack 等。
+
+### Phase 7（多媒体生成能力）
+- `tiangong-media`：图片/视频生成框架。
+- 图片生成后端：OpenAI DALL-E / GPT-Image、Flux。
+- 视频生成后端：Sora、Kling。
+- Agent 层集成 MediaAgent。
+
+### Phase 8（生产化与完善）
+- 日志与监控完善。
+- 配置热重载。
+- TLS、安全加固、Docker 部署支持。
 
 ## 参考文档
 - 项目说明：`README.md`
+- RFC 0001：`docs/rfc/0001-tiangong-desktop-agent-roadmap.md`
 - RFC 0002：`docs/rfc/0002-cli-agent-roadmap.md`
 - RFC 0003：`docs/rfc/0003-skill-market.md`
+- RFC 0004：`docs/rfc/0004-full-stack-agent-platform.md`（全栈平台架构）
 - 需求基线：`docs/requirements.md`
