@@ -59,6 +59,7 @@ fn ensure_pending_turn_assistant_message_creates_and_binds_message() -> Result<(
             session_id: session_id.clone(),
             task_id: task_id.clone(),
             assistant_message_id: None,
+            stage_thinking_message_id: None,
             started_at: Instant::now(),
             rx,
         });

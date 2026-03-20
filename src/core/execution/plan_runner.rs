@@ -3,7 +3,7 @@ use anyhow::Result;
 use crate::core::agent_config::McpConfig;
 use crate::core::execution::step_executor::execute_single_plan_step_with_execution_agent;
 use crate::core::execution::{DynamicPlanStep, ExecutionStepReport, LlmOutputRecord};
-use crate::core::model::SingleProviderClient;
+use crate::core::model::{SingleProviderClient, TokenUsage};
 use crate::core::planner::{PlanStepSource, PlanStepStatus, TaskPlan};
 use crate::core::session::{Message, Session};
 use crate::core::tool::{LocalToolExecutor, ToolResult};
@@ -11,7 +11,7 @@ use crate::core::tool::{LocalToolExecutor, ToolResult};
 const MAX_DYNAMIC_STEPS_PER_PLAN: usize = 12;
 
 #[allow(clippy::too_many_arguments)]
-pub fn execute_plan_with_execution_agent<P, L, T, S>(
+pub fn execute_plan_with_execution_agent<P, L, T, S, G>(
     client: &SingleProviderClient,
     tool_executor: &LocalToolExecutor,
     mcp_config: &McpConfig,
@@ -24,12 +24,15 @@ pub fn execute_plan_with_execution_agent<P, L, T, S>(
     on_tool_result: &mut T,
     on_plan_execution_summary: &mut S,
     on_plan_ready: &mut P,
+    on_stage_thinking: &mut G,
+    accumulated_usage: &mut TokenUsage,
 ) -> Result<()>
 where
     P: FnMut(&TaskPlan),
     L: FnMut(&LlmOutputRecord),
     T: FnMut(&ToolResult),
     S: FnMut(&str),
+    G: FnMut(&str, &crate::core::model::ModelStreamChunk),
 {
     let mut previous_plan_summaries = Vec::new();
 
@@ -54,6 +57,7 @@ where
 
             let step = plan.plans[plan_idx].execution_steps[step_idx].clone();
             let tool_results_before = tool_results.len();
+            let stage_name = format!("execution-agent::{}::{}", current_plan_name, step.name);
             let step_result = execute_single_plan_step_with_execution_agent(
                 client,
                 tool_executor,
@@ -66,6 +70,9 @@ where
                 &step,
                 &previous_plan_summaries,
                 tool_results,
+                &mut |delta: &crate::core::model::ModelStreamChunk| {
+                    on_stage_thinking(&stage_name, delta);
+                },
             );
             for item in tool_results.iter().skip(tool_results_before) {
                 on_tool_result(item);
@@ -73,11 +80,13 @@ where
             match step_result {
                 Ok(step_result) => {
                     if let Some(output) = step_result.llm_output {
+                        accumulated_usage.accumulate(&output.usage);
                         let record = LlmOutputRecord {
                             stage: format!("execution-agent::{current_plan_name}::{}", step.name),
                             content: output.content,
                             reasoning_content: output.reasoning_content,
                             tool_calls: output.tool_calls,
+                            usage: output.usage,
                         };
                         on_llm_output(&record);
                     }

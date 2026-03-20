@@ -67,6 +67,7 @@ impl AppTurnService {
             let llm_tx = tx.clone();
             let tool_tx = tx.clone();
             let plan_summary_tx = tx.clone();
+            let stage_thinking_tx = tx.clone();
             let result = runtime.execute_turn_with_streaming(
                 &session_snapshot,
                 &worker_input,
@@ -86,6 +87,12 @@ impl AppTurnService {
                     let _ =
                         plan_summary_tx.send(TurnEvent::PlanExecutionSummary(summary.to_string()));
                 },
+                |stage: &str, delta: &ModelStreamChunk| {
+                    let _ = stage_thinking_tx.send(TurnEvent::StageThinking {
+                        stage: stage.to_string(),
+                        delta: delta.clone(),
+                    });
+                },
             );
 
             match result {
@@ -104,6 +111,7 @@ impl AppTurnService {
             session_id,
             task_id,
             assistant_message_id: None,
+            stage_thinking_message_id: None,
             started_at: Instant::now(),
             rx,
         });

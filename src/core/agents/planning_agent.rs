@@ -3,15 +3,17 @@ use serde::Deserialize;
 
 use crate::core::agent_config::AgentConfig;
 use crate::core::mcp::build_mcp_hints;
-use crate::core::model::{ModelClient, ModelRequest};
+use crate::core::model::{ModelClient, ModelRequest, ModelStreamChunk, TokenUsage};
 use crate::core::planner::{PlanItem, PlanStep, PlanStepSource, PlanStepStatus, TaskPlan};
 use crate::core::session::{MessageRole, Session};
 use crate::core::skill::build_skill_hints;
 
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct PlanningLlmOutput {
     pub content: String,
     pub reasoning_content: String,
+    pub usage: TokenUsage,
 }
 
 pub fn build_minimal_plan(user_input: &str, agent_config: &AgentConfig) -> TaskPlan {
@@ -85,8 +87,17 @@ pub fn build_plan_with_agent(
     user_input: &str,
     agent_config: &AgentConfig,
     context_limit: usize,
+    on_delta: &mut dyn FnMut(&ModelStreamChunk),
 ) -> TaskPlan {
-    build_plan_with_agent_with_trace(client, session, user_input, agent_config, context_limit).0
+    build_plan_with_agent_with_trace(
+        client,
+        session,
+        user_input,
+        agent_config,
+        context_limit,
+        on_delta,
+    )
+    .0
 }
 
 pub fn build_plan_with_agent_with_trace(
@@ -95,8 +106,16 @@ pub fn build_plan_with_agent_with_trace(
     user_input: &str,
     agent_config: &AgentConfig,
     context_limit: usize,
+    on_delta: &mut dyn FnMut(&ModelStreamChunk),
 ) -> (TaskPlan, PlanningLlmOutput) {
-    match build_plan_with_agent_inner(client, session, user_input, agent_config, context_limit) {
+    match build_plan_with_agent_inner(
+        client,
+        session,
+        user_input,
+        agent_config,
+        context_limit,
+        on_delta,
+    ) {
         Ok((plan, llm_output)) => (plan, llm_output),
         Err(err) => {
             let mut fallback = build_minimal_plan(user_input, agent_config);
@@ -109,6 +128,7 @@ pub fn build_plan_with_agent_with_trace(
             let llm_output = PlanningLlmOutput {
                 content: format!("planning-agent 调用失败，已回退最小计划：{err}"),
                 reasoning_content: String::new(),
+                usage: TokenUsage::default(),
             };
             (fallback, llm_output)
         }
@@ -121,6 +141,7 @@ fn build_plan_with_agent_inner(
     user_input: &str,
     agent_config: &AgentConfig,
     context_limit: usize,
+    on_delta: &mut dyn FnMut(&ModelStreamChunk),
 ) -> Result<(TaskPlan, PlanningLlmOutput)> {
     let input_list = collect_user_input_list(session, user_input, context_limit);
     let skill_hints = build_skill_hints(user_input, &agent_config.skills);
@@ -131,7 +152,7 @@ fn build_plan_with_agent_inner(
         context: session.recent_messages(context_limit),
     };
     let response = client
-        .complete(&request)
+        .complete_stream(&request, on_delta)
         .context("planing 智能体调用失败")?;
     let parsed = parse_planing_output(&response.text).with_context(|| {
         let preview = response.text.chars().take(160).collect::<String>();
@@ -242,6 +263,7 @@ fn build_plan_with_agent_inner(
         PlanningLlmOutput {
             content: response.text,
             reasoning_content: response.reasoning_content,
+            usage: response.usage,
         },
     ))
 }

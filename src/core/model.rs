@@ -24,6 +24,15 @@ pub struct TokenUsage {
     pub total_tokens: usize,
 }
 
+impl TokenUsage {
+    /// 累加另一个 TokenUsage 到自身
+    pub fn accumulate(&mut self, other: &TokenUsage) {
+        self.prompt_tokens += other.prompt_tokens;
+        self.completion_tokens += other.completion_tokens;
+        self.total_tokens += other.total_tokens;
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelRequest {
     pub session_title: String,
@@ -110,6 +119,27 @@ pub trait ModelClient {
     fn api_timeout_ms(&self) -> &str;
     fn api_model(&self) -> &str;
     fn complete(&self, req: &ModelRequest) -> Result<ModelResponse>;
+    /// 流式调用，通过 on_delta 实时回调每个 chunk（thinking + content）
+    fn complete_stream(
+        &self,
+        req: &ModelRequest,
+        on_delta: &mut dyn FnMut(&ModelStreamChunk),
+    ) -> Result<ModelResponse> {
+        let resp = self.complete(req)?;
+        if !resp.reasoning_content.is_empty() {
+            on_delta(&ModelStreamChunk {
+                content: String::new(),
+                reasoning_content: resp.reasoning_content.clone(),
+            });
+        }
+        if !resp.text.is_empty() {
+            on_delta(&ModelStreamChunk {
+                content: resp.text.clone(),
+                reasoning_content: String::new(),
+            });
+        }
+        Ok(resp)
+    }
     fn complete_with_functions(
         &self,
         req: &ModelRequest,
@@ -122,6 +152,22 @@ pub trait ModelClient {
             usage: resp.usage,
             tool_calls: Vec::new(),
         })
+    }
+    /// 流式函数调用，通过 on_delta 实时回调 thinking chunk
+    fn complete_with_functions_stream(
+        &self,
+        req: &ModelRequest,
+        functions: &[FunctionToolSpec],
+        on_delta: &mut dyn FnMut(&ModelStreamChunk),
+    ) -> Result<ModelFunctionResponse> {
+        let resp = self.complete_with_functions(req, functions)?;
+        if !resp.reasoning_content.is_empty() {
+            on_delta(&ModelStreamChunk {
+                content: String::new(),
+                reasoning_content: resp.reasoning_content.clone(),
+            });
+        }
+        Ok(resp)
     }
 }
 
@@ -210,6 +256,7 @@ impl SingleProviderClient {
         let mut request_json = serde_json::to_value(&request).context("序列化流式请求失败")?;
         inject_temperature_config(&mut request_json);
         inject_thinking_config(&mut request_json);
+        inject_stream_usage_option(&mut request_json);
 
         let runtime = TokioRuntimeBuilder::new_current_thread()
             .enable_all()
@@ -226,6 +273,7 @@ impl SingleProviderClient {
                 let mut reasoning_content = String::new();
                 let mut chunks = 0usize;
                 let mut has_think_output = false;
+                let mut stream_usage = (0usize, 0usize, 0usize); // (prompt, completion, total)
 
                 while let Some(item) = stream.next().await {
                     let payload = match item {
@@ -239,6 +287,20 @@ impl SingleProviderClient {
                             return Err(err);
                         }
                     };
+
+                    // 提取流式最后 chunk 中的 usage 数据
+                    if let Some(usage) = payload.get("usage") {
+                        if let Some(v) = usage.get("prompt_tokens").and_then(Value::as_u64) {
+                            stream_usage.0 = v as usize;
+                        }
+                        if let Some(v) = usage.get("completion_tokens").and_then(Value::as_u64) {
+                            stream_usage.1 = v as usize;
+                        }
+                        if let Some(v) = usage.get("total_tokens").and_then(Value::as_u64) {
+                            stream_usage.2 = v as usize;
+                        }
+                    }
+
                     if let Some(choices) = payload.get("choices").and_then(Value::as_array) {
                         for choice in choices {
                             let delta = choice.get("delta").unwrap_or(&Value::Null);
@@ -275,11 +337,15 @@ impl SingleProviderClient {
                     }
                 }
 
-                Ok::<(String, String, usize, bool), async_openai::error::OpenAIError>((
+                Ok::<
+                    (String, String, usize, bool, (usize, usize, usize)),
+                    async_openai::error::OpenAIError,
+                >((
                     content,
                     reasoning_content,
                     chunks,
                     has_think_output,
+                    stream_usage,
                 ))
             })
             .await
@@ -291,14 +357,20 @@ impl SingleProviderClient {
             Err(_) => None,
         };
 
-        if let Some((text, reasoning_content, chunks, has_think_output)) = byot_outcome {
+        if let Some((text, reasoning_content, chunks, has_think_output, stream_usage)) =
+            byot_outcome
+        {
             let text = text.trim().to_string();
             let reasoning_content = reasoning_content.trim().to_string();
             if (!text.is_empty() || !reasoning_content.is_empty()) && chunks > 0 {
                 return Ok(ModelResponse {
                     text,
                     reasoning_content,
-                    usage: TokenUsage::default(),
+                    usage: TokenUsage {
+                        prompt_tokens: stream_usage.0,
+                        completion_tokens: stream_usage.1,
+                        total_tokens: stream_usage.2,
+                    },
                     output_mode: if has_think_output {
                         "stream-think".to_string()
                     } else {
@@ -325,6 +397,337 @@ impl SingleProviderClient {
         }
         Ok(fallback_resp)
     }
+
+    /// 流式函数调用：实时输出 thinking，同时累积 tool_calls
+    pub fn complete_with_functions_stream_impl(
+        &self,
+        req: &ModelRequest,
+        functions: &[FunctionToolSpec],
+        on_delta: &mut dyn FnMut(&ModelStreamChunk),
+    ) -> Result<ModelFunctionResponse> {
+        let token = self.cfg.api_auth_token.trim();
+        if token.is_empty() {
+            return Err(anyhow!("API_AUTH_TOKEN 不能为空，无法发起流式工具模型请求"));
+        }
+
+        let timeout_ms = parse_function_timeout_ms(&self.cfg.api_timeout_ms)?;
+        let model = self.cfg.api_model.trim();
+        if model.is_empty() {
+            return Err(anyhow!("API_MODEL 不能为空，无法发起流式工具模型请求"));
+        }
+
+        let api_base = normalize_api_base(&self.cfg.api_base_url)?;
+        let messages = build_openai_messages(req)?;
+        let mut request_args_binding = CreateChatCompletionRequestArgs::default();
+        let request_args = request_args_binding
+            .model(model.to_string())
+            .messages(messages);
+        let mut request = request_args
+            .build()
+            .context("构建流式 function call 请求失败")?;
+        request.stream = Some(true);
+
+        let config = OpenAIConfig::new()
+            .with_api_key(token.to_string())
+            .with_api_base(api_base);
+        let client = OpenAIClient::with_config(config);
+        let mut request_json = serde_json::to_value(&request).context("序列化请求失败")?;
+        inject_temperature_config(&mut request_json);
+        inject_thinking_config(&mut request_json);
+        inject_stream_usage_option(&mut request_json);
+        inject_function_tools(&mut request_json, functions);
+
+        let runtime = TokioRuntimeBuilder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("初始化异步运行时失败")?;
+
+        let response = runtime.block_on(async {
+            timeout(Duration::from_millis(timeout_ms), async {
+                let mut stream = client
+                    .chat()
+                    .create_stream_byot::<_, Value>(request_json)
+                    .await?;
+
+                let mut content = String::new();
+                let mut reasoning_content = String::new();
+                // tool_calls 按 index 累积：index -> (id, name, arguments)
+                let mut tool_calls_map: std::collections::BTreeMap<u64, (String, String, String)> =
+                    std::collections::BTreeMap::new();
+                let mut stream_usage = (0usize, 0usize, 0usize);
+
+                while let Some(item) = stream.next().await {
+                    let payload = match item {
+                        Ok(payload) => payload,
+                        Err(err) => {
+                            if let async_openai::error::OpenAIError::JSONDeserialize(_, raw) = &err
+                                && should_skip_stream_payload(raw)
+                            {
+                                continue;
+                            }
+                            return Err(err);
+                        }
+                    };
+
+                    // 提取流式最后 chunk 中的 usage 数据
+                    if let Some(usage) = payload.get("usage") {
+                        if let Some(v) = usage.get("prompt_tokens").and_then(Value::as_u64) {
+                            stream_usage.0 = v as usize;
+                        }
+                        if let Some(v) = usage.get("completion_tokens").and_then(Value::as_u64) {
+                            stream_usage.1 = v as usize;
+                        }
+                        if let Some(v) = usage.get("total_tokens").and_then(Value::as_u64) {
+                            stream_usage.2 = v as usize;
+                        }
+                    }
+
+                    if let Some(choices) = payload.get("choices").and_then(Value::as_array) {
+                        for choice in choices {
+                            let delta = choice.get("delta").unwrap_or(&Value::Null);
+
+                            // 流式输出 reasoning_content
+                            let think_delta = extract_delta_text(delta, "reasoning_content");
+                            if !think_delta.is_empty() {
+                                reasoning_content.push_str(&think_delta);
+                                on_delta(&ModelStreamChunk {
+                                    content: String::new(),
+                                    reasoning_content: think_delta,
+                                });
+                            }
+
+                            // 累积 content
+                            let content_delta = extract_delta_text(delta, "content");
+                            if !content_delta.is_empty() {
+                                content.push_str(&content_delta);
+                            }
+
+                            // 累积 tool_calls
+                            if let Some(tool_calls) =
+                                delta.get("tool_calls").and_then(Value::as_array)
+                            {
+                                for tc in tool_calls {
+                                    let index =
+                                        tc.get("index").and_then(Value::as_u64).unwrap_or(0);
+                                    let entry = tool_calls_map.entry(index).or_insert_with(|| {
+                                        (String::new(), String::new(), String::new())
+                                    });
+                                    if let Some(id) = tc.get("id").and_then(Value::as_str) {
+                                        entry.0 = id.to_string();
+                                    }
+                                    if let Some(func) = tc.get("function") {
+                                        if let Some(name) = func.get("name").and_then(Value::as_str)
+                                        {
+                                            entry.1 = name.to_string();
+                                        }
+                                        if let Some(args) =
+                                            func.get("arguments").and_then(Value::as_str)
+                                        {
+                                            entry.2.push_str(args);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Ok::<_, async_openai::error::OpenAIError>((
+                    content,
+                    reasoning_content,
+                    tool_calls_map,
+                    stream_usage,
+                ))
+            })
+            .await
+        });
+
+        match response {
+            Ok(Ok((text, reasoning, tool_calls_map, stream_usage))) => {
+                let tool_calls = tool_calls_map
+                    .into_values()
+                    .filter(|(_, name, _)| !name.is_empty())
+                    .map(|(id, name, args)| {
+                        let arguments = serde_json::from_str::<Value>(&args)
+                            .ok()
+                            .filter(|v| v.is_object())
+                            .unwrap_or_else(|| Value::Object(Map::new()));
+                        ModelFunctionCall {
+                            id,
+                            name,
+                            arguments,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                let text = text.trim().to_string();
+                let reasoning_content = reasoning.trim().to_string();
+
+                if text.is_empty() && reasoning_content.is_empty() && tool_calls.is_empty() {
+                    // 流式路径未获取到有效内容，回退到非流式
+                    let fallback = self.complete_with_functions(req, functions)?;
+                    if !fallback.reasoning_content.is_empty() {
+                        on_delta(&ModelStreamChunk {
+                            content: String::new(),
+                            reasoning_content: fallback.reasoning_content.clone(),
+                        });
+                    }
+                    return Ok(fallback);
+                }
+
+                Ok(ModelFunctionResponse {
+                    text,
+                    reasoning_content,
+                    usage: TokenUsage {
+                        prompt_tokens: stream_usage.0,
+                        completion_tokens: stream_usage.1,
+                        total_tokens: stream_usage.2,
+                    },
+                    tool_calls,
+                })
+            }
+            _ => {
+                // 流式失败，回退到非流式
+                let fallback = self.complete_with_functions(req, functions)?;
+                if !fallback.reasoning_content.is_empty() {
+                    on_delta(&ModelStreamChunk {
+                        content: String::new(),
+                        reasoning_content: fallback.reasoning_content.clone(),
+                    });
+                }
+                Ok(fallback)
+            }
+        }
+    }
+
+    /// 使用轻量级模型完成简单任务（如会话名称生成）
+    /// 如果未配置轻量级模型，则使用主模型
+    /// 该方法使用更短的超时时间和较低温度以获得更确定的结果
+    pub fn complete_lite(&self, prompt: &str) -> Result<String> {
+        use tracing::{info, warn};
+
+        let token = self.cfg.api_auth_token.trim();
+        if token.is_empty() {
+            return Err(anyhow!("API_AUTH_TOKEN 不能为空，无法发起轻量级模型请求"));
+        }
+
+        // 轻量级任务使用更短的超时（30 秒）
+        let timeout_ms = 30_000u64;
+        // lite_model() 会自动回退到主模型
+        let model = self.cfg.lite_model().trim();
+        if model.is_empty() {
+            return Err(anyhow!("API_MODEL 不能为空，无法发起轻量级模型请求"));
+        }
+
+        info!(
+            model = %model,
+            lite_model_config = %self.cfg.api_lite_model,
+            timeout_ms = timeout_ms,
+            prompt_length = prompt.len(),
+            "开始调用轻量级模型"
+        );
+
+        let api_base = normalize_api_base(&self.cfg.api_base_url)?;
+
+        let messages = vec![
+            ChatCompletionRequestSystemMessageArgs::default()
+                .content(
+                    "你是会话标题生成助手。根据用户输入生成简洁的标题，要求：\
+                    1. 标题不超过10个汉字\
+                    2. 直接返回标题，不要任何解释或额外文字\
+                    3. 标题要概括性强，简洁明了",
+                )
+                .build()
+                .context("构建 system 消息失败")?
+                .into(),
+            ChatCompletionRequestUserMessageArgs::default()
+                .content(prompt.to_string())
+                .build()
+                .context("构建 user 消息失败")?
+                .into(),
+        ];
+
+        let mut request_args_binding = CreateChatCompletionRequestArgs::default();
+        let request = request_args_binding
+            .model(model.to_string())
+            .messages(messages)
+            .max_tokens(30u16)
+            .temperature(0.3f32)
+            .stream(false)
+            .thinking(ChatThinking {
+                r#type: Some(ChatThinkingType::Disabled),
+                clear_thinking: None,
+            })
+            .build()
+            .context("构建轻量级请求失败")?;
+
+        let config = OpenAIConfig::new()
+            .with_api_key(token.to_string())
+            .with_api_base(api_base);
+        let client = OpenAIClient::with_config(config);
+
+        let runtime = TokioRuntimeBuilder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("初始化异步运行时失败")?;
+
+        let response = runtime.block_on(async {
+            timeout(
+                Duration::from_millis(timeout_ms),
+                client
+                    .chat()
+                    .create_byot::<_, CreateChatCompletionResponse>(request),
+            )
+            .await
+        });
+
+        let resp = match response {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(err)) => {
+                let hint = build_sdk_error_hint(&err.to_string());
+                tracing_error!(
+                    model = %model,
+                    error = %err,
+                    timeout_ms = %timeout_ms,
+                    "轻量级模型请求失败",
+                );
+                return Err(anyhow!("轻量级模型请求失败：{err}{hint}"));
+            }
+            Err(_) => {
+                tracing_error!(
+                    model = %model,
+                    timeout_ms = %timeout_ms,
+                    "轻量级模型请求超时",
+                );
+                return Err(anyhow!("轻量级模型请求超时：{timeout_ms}ms"));
+            }
+        };
+
+        let text = resp
+            .choices
+            .first()
+            .and_then(|choice| choice.message.content.as_deref())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        if text.is_empty() {
+            warn!(
+                model = %model,
+                response = ?resp,
+                "轻量级模型返回空响应",
+            );
+        } else {
+            info!(
+                model = %model,
+                response_length = text.len(),
+                response_preview = %text.chars().take(20).collect::<String>(),
+                "轻量级模型返回成功",
+            );
+        }
+
+        Ok(text)
+    }
 }
 
 impl ModelClient for SingleProviderClient {
@@ -338,6 +741,14 @@ impl ModelClient for SingleProviderClient {
 
     fn api_model(&self) -> &str {
         &self.cfg.api_model
+    }
+
+    fn complete_stream(
+        &self,
+        req: &ModelRequest,
+        on_delta: &mut dyn FnMut(&ModelStreamChunk),
+    ) -> Result<ModelResponse> {
+        self.complete_stream_with_callback(req, on_delta)
     }
 
     fn complete(&self, req: &ModelRequest) -> Result<ModelResponse> {
@@ -492,6 +903,39 @@ impl ModelClient for SingleProviderClient {
                 Err(anyhow!("OpenAI SDK 工具调用请求失败：{err}{hint}"))
             }
             Err(_) => Err(anyhow!("工具调用请求超时：{timeout_ms}ms")),
+        }
+    }
+
+    fn complete_with_functions_stream(
+        &self,
+        req: &ModelRequest,
+        functions: &[FunctionToolSpec],
+        on_delta: &mut dyn FnMut(&ModelStreamChunk),
+    ) -> Result<ModelFunctionResponse> {
+        if use_stream_mode() {
+            match self.complete_with_functions_stream_impl(req, functions, on_delta) {
+                Ok(resp) => Ok(resp),
+                Err(_) => {
+                    // 流式失败，回退到非流式
+                    let resp = self.complete_with_functions(req, functions)?;
+                    if !resp.reasoning_content.is_empty() {
+                        on_delta(&ModelStreamChunk {
+                            content: String::new(),
+                            reasoning_content: resp.reasoning_content.clone(),
+                        });
+                    }
+                    Ok(resp)
+                }
+            }
+        } else {
+            let resp = self.complete_with_functions(req, functions)?;
+            if !resp.reasoning_content.is_empty() {
+                on_delta(&ModelStreamChunk {
+                    content: String::new(),
+                    reasoning_content: resp.reasoning_content.clone(),
+                });
+            }
+            Ok(resp)
         }
     }
 }
@@ -674,6 +1118,14 @@ fn clear_thinking() -> bool {
     }
 }
 
+/// 注入 stream_options.include_usage = true，使流式响应最后一个 chunk 返回 usage 数据
+fn inject_stream_usage_option(payload: &mut Value) {
+    let Some(obj) = payload.as_object_mut() else {
+        return;
+    };
+    obj.insert("stream_options".to_string(), json!({"include_usage": true}));
+}
+
 fn inject_temperature_config(payload: &mut Value) {
     let Some(temp) = configured_temperature_number() else {
         return;
@@ -721,6 +1173,16 @@ fn configured_max_tokens() -> Option<u16> {
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
         .and_then(|v| v.parse::<u16>().ok())
+}
+
+fn use_stream_mode() -> bool {
+    match std::env::var("API_STREAM") {
+        Ok(raw) => {
+            let normalized = raw.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "0" | "false" | "off" | "no")
+        }
+        Err(_) => true,
+    }
 }
 
 fn default_api_auth_token() -> String {

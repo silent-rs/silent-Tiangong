@@ -2,7 +2,10 @@ use anyhow::{Result, anyhow};
 use serde_json::Value;
 
 use crate::core::execution::SuccessfulBusinessResult;
-use crate::core::model::{ModelClient, ModelFunctionCall, ModelRequest, SingleProviderClient};
+use crate::core::model::{
+    ModelClient, ModelFunctionCall, ModelRequest, ModelStreamChunk, SingleProviderClient,
+    TokenUsage,
+};
 use crate::core::planner::PlanStep;
 use crate::core::session::{Message, Session};
 #[allow(clippy::too_many_arguments)]
@@ -15,6 +18,8 @@ pub(crate) fn infer_completion_signal_with_llm(
     step: &PlanStep,
     successful_result: &SuccessfulBusinessResult,
     round_feedback: &[String],
+    on_chunk: &mut dyn FnMut(&ModelStreamChunk),
+    accumulated_usage: &mut TokenUsage,
 ) -> Result<CompletionSignal> {
     let result_payload = successful_result
         .payload
@@ -69,7 +74,8 @@ pub(crate) fn infer_completion_signal_with_llm(
         user_input: prompt,
         context: context.to_vec(),
     };
-    let response = client.complete(&request)?;
+    let response = client.complete_stream(&request, on_chunk)?;
+    accumulated_usage.accumulate(&response.usage);
     let payload = parse_json_object_from_text(&response.text)?;
     parse_completion_signal_from_json(&payload, successful_result.summary.as_str())
 }
@@ -85,6 +91,8 @@ pub(crate) fn review_completion_signal_with_llm(
     successful_result: &SuccessfulBusinessResult,
     round_feedback: &[String],
     proposed_signal: &CompletionSignal,
+    on_chunk: &mut dyn FnMut(&ModelStreamChunk),
+    accumulated_usage: &mut TokenUsage,
 ) -> Result<CompletionSignal> {
     let result_payload = successful_result
         .payload
@@ -146,7 +154,8 @@ pub(crate) fn review_completion_signal_with_llm(
         user_input: prompt,
         context: context.to_vec(),
     };
-    let response = client.complete(&request)?;
+    let response = client.complete_stream(&request, on_chunk)?;
+    accumulated_usage.accumulate(&response.usage);
     let payload = parse_json_object_from_text(&response.text)?;
     parse_completion_signal_from_json(&payload, proposed_signal.result.as_str())
 }

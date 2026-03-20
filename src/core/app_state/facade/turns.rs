@@ -27,6 +27,15 @@ impl TiangongState {
         service.apply_assistant_delta(self, delta)
     }
 
+    pub(in crate::core::app_state) fn apply_stage_thinking_delta(
+        &mut self,
+        stage: &str,
+        delta: &ModelStreamChunk,
+    ) {
+        let service = self.services.turn_service;
+        service.apply_stage_thinking_delta(self, stage, delta)
+    }
+
     pub(in crate::core::app_state) fn append_pending_turn_llm_output(
         &mut self,
         output: &LlmOutputRecord,

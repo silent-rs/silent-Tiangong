@@ -6,7 +6,9 @@ use crate::core::execution::{
     build_aggregated_llm_output, build_tool_failure_error, collect_llm_output,
     extract_successful_business_result, runtime_message, summarize_round_tool_feedback,
 };
-use crate::core::model::{ModelClient, ModelRequest, SingleProviderClient};
+use crate::core::model::{
+    ModelClient, ModelRequest, ModelStreamChunk, SingleProviderClient, TokenUsage,
+};
 use crate::core::planner::{PlanStep, PlanStepStatus, TaskPlan};
 use crate::core::session::{Message, MessageRole, Session, now_text};
 use crate::core::tool::{LocalToolExecutor, ToolExecutor, ToolResult};
@@ -38,6 +40,7 @@ pub fn execute_single_plan_step_with_execution_agent(
     step: &PlanStep,
     previous_plan_summaries: &[String],
     tool_results: &mut Vec<ToolResult>,
+    on_chunk: &mut dyn FnMut(&ModelStreamChunk),
 ) -> Result<ExecutionStepResult> {
     let (function_tools, mcp_function_targets) = execution_function_tools(mcp_config);
     let step_prompt = build_step_execution_prompt(
@@ -53,6 +56,7 @@ pub fn execute_single_plan_step_with_execution_agent(
     let mut output_reasonings = Vec::new();
     let mut output_tool_calls = Vec::new();
     let mut executed_tools = Vec::new();
+    let mut step_usage = TokenUsage::default();
 
     for round in 0..MAX_EXECUTION_AGENT_ROUNDS {
         let round_prompt = if round == 0 {
@@ -65,7 +69,8 @@ pub fn execute_single_plan_step_with_execution_agent(
             user_input: round_prompt,
             context: loop_context.clone(),
         };
-        let response = client.complete_with_functions(&request, &function_tools)?;
+        let response =
+            client.complete_with_functions_stream(&request, &function_tools, on_chunk)?;
         let _ = response.usage.total_tokens;
         collect_llm_output(
             round + 1,
@@ -73,6 +78,7 @@ pub fn execute_single_plan_step_with_execution_agent(
             &mut output_contents,
             &mut output_reasonings,
             &mut output_tool_calls,
+            &mut step_usage,
         );
 
         if response.tool_calls.is_empty() {
@@ -211,8 +217,12 @@ pub fn execute_single_plan_step_with_execution_agent(
             }
             let tool_summary = format!("步骤完成：{}", summary_parts.join("；"));
 
-            let llm_output =
-                build_aggregated_llm_output(output_contents, output_reasonings, output_tool_calls);
+            let llm_output = build_aggregated_llm_output(
+                output_contents,
+                output_reasonings,
+                output_tool_calls,
+                step_usage.clone(),
+            );
 
             return Ok(ExecutionStepResult {
                 llm_output,
@@ -240,6 +250,8 @@ pub fn execute_single_plan_step_with_execution_agent(
                 step,
                 &successful_result,
                 &round_feedback,
+                on_chunk,
+                &mut step_usage,
             )?;
             if !auto_signal.continue_execution {
                 auto_signal = review_completion_signal_with_llm(
@@ -252,6 +264,8 @@ pub fn execute_single_plan_step_with_execution_agent(
                     &successful_result,
                     &round_feedback,
                     &auto_signal,
+                    on_chunk,
+                    &mut step_usage,
                 )?;
             }
             let mut summary_parts = Vec::new();
@@ -278,8 +292,12 @@ pub fn execute_single_plan_step_with_execution_agent(
             summary_parts.push("auto_decision=llm".to_string());
             let tool_summary = format!("步骤完成（LLM决策收敛）：{}", summary_parts.join("；"));
 
-            let llm_output =
-                build_aggregated_llm_output(output_contents, output_reasonings, output_tool_calls);
+            let llm_output = build_aggregated_llm_output(
+                output_contents,
+                output_reasonings,
+                output_tool_calls,
+                step_usage.clone(),
+            );
 
             return Ok(ExecutionStepResult {
                 llm_output,

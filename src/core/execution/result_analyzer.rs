@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use crate::core::execution::ExecutionLlmOutput;
-use crate::core::model::ModelFunctionResponse;
+use crate::core::model::{ModelFunctionResponse, TokenUsage};
 use crate::core::tool::ToolResult;
 
 const SUCCESS_RESULT_PREVIEW_MAX_CHARS: usize = 500;
@@ -40,7 +40,9 @@ pub(crate) fn collect_llm_output(
     output_contents: &mut Vec<String>,
     output_reasonings: &mut Vec<String>,
     output_tool_calls: &mut Vec<String>,
+    accumulated_usage: &mut TokenUsage,
 ) {
+    accumulated_usage.accumulate(&response.usage);
     let text = response.text.trim();
     if !text.is_empty() {
         output_contents.push(format!("[round {round}] {text}"));
@@ -60,14 +62,20 @@ pub(crate) fn build_aggregated_llm_output(
     output_contents: Vec<String>,
     output_reasonings: Vec<String>,
     output_tool_calls: Vec<String>,
+    usage: TokenUsage,
 ) -> Option<ExecutionLlmOutput> {
-    if output_contents.is_empty() && output_reasonings.is_empty() && output_tool_calls.is_empty() {
+    if output_contents.is_empty()
+        && output_reasonings.is_empty()
+        && output_tool_calls.is_empty()
+        && usage.total_tokens == 0
+    {
         return None;
     }
     Some(ExecutionLlmOutput {
         content: output_contents.join("\n"),
         reasoning_content: output_reasonings.join("\n"),
         tool_calls: output_tool_calls,
+        usage,
     })
 }
 

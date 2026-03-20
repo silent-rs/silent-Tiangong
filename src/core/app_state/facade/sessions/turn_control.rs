@@ -123,6 +123,14 @@ impl TiangongState {
                     self.mark_pending_turn_executing(&plan);
                 }
                 TurnEvent::LlmOutput(output) => {
+                    // 实时累加 token 用量到 RunSnapshot，使状态面板能展示执行中的消耗
+                    if output.usage.total_tokens > 0 {
+                        let run = &mut self.store.runtime.run;
+                        match run.last_usage.as_mut() {
+                            Some(existing) => existing.accumulate(&output.usage),
+                            None => run.last_usage = Some(output.usage.clone()),
+                        }
+                    }
                     self.append_pending_turn_llm_output(&output);
                 }
                 TurnEvent::ToolExecution(result) => {
@@ -130,6 +138,9 @@ impl TiangongState {
                 }
                 TurnEvent::PlanExecutionSummary(summary) => {
                     self.append_pending_turn_plan_execution_summary(summary.as_str());
+                }
+                TurnEvent::StageThinking { stage, delta } => {
+                    self.apply_stage_thinking_delta(&stage, &delta);
                 }
                 TurnEvent::Chunk(delta) => {
                     self.apply_assistant_delta(&delta);

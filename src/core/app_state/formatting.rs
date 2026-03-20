@@ -86,12 +86,17 @@ pub(super) fn format_plan_snapshot(plan: &TaskPlan) -> String {
 
 pub(super) fn format_llm_output_message(output: &LlmOutputRecord) -> String {
     let mut lines = vec![format!("LLM 输出 [{}]", output.stage)];
+    if output.usage.total_tokens > 0 {
+        lines.push(format!(
+            "tokens: prompt={}, completion={}, total={}",
+            output.usage.prompt_tokens, output.usage.completion_tokens, output.usage.total_tokens
+        ));
+    }
     if !output.tool_calls.is_empty() {
         lines.push(format!("tool_calls: {}", output.tool_calls.join(", ")));
     }
-    if !output.reasoning_content.trim().is_empty() {
-        lines.push(format!("reasoning:\n{}", output.reasoning_content.trim()));
-    }
+    // reasoning_content 不写入系统消息的 content，避免作为上下文重复提交给 LLM
+    // thinking 内容仅通过 message.reasoning_content 字段保留用于 TUI 展示
     if !output.content.trim().is_empty() {
         lines.push(format!("content:\n{}", output.content.trim()));
     }
