@@ -1,6 +1,5 @@
 use super::super::super::*;
 
-#[allow(dead_code)]
 impl TiangongState {
     pub fn report_run_failed(&mut self, summary: impl Into<String>, error: impl Into<String>) {
         self.replace_run_snapshot(RunStatus::Failed, summary, Some(error.into()));

@@ -1,0 +1,164 @@
+import { useEffect, useState, useRef } from 'react';
+import ReactMarkdown from 'react-markdown';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import type { ReactNode } from 'react';
+
+import { ThinkingBlock } from './ThinkingBlock';
+
+interface TypingMessageProps {
+  content: string;
+  reasoningContent?: string; // 思考过程内容
+  speed?: number; // 打字速度（每分钟字符数）
+  onComplete?: () => void;
+}
+
+export function TypingMessage({ content, reasoningContent, speed = 300, onComplete }: TypingMessageProps) {
+  const [displayedContent, setDisplayedContent] = useState('');
+  const [isComplete, setIsComplete] = useState(false);
+  const intervalRef = useRef<number | null>(null);
+  const currentIndexRef = useRef(0);
+
+  useEffect(() => {
+    // 重置状态
+    setDisplayedContent('');
+    setIsComplete(false);
+    currentIndexRef.current = 0;
+
+    // 如果内容为空，直接完成
+    if (!content) {
+      setIsComplete(true);
+      onComplete?.();
+      return;
+    }
+
+    // 计算每次更新的字符数
+    const charsPerUpdate = Math.max(1, Math.floor(speed / 60)); // 每秒更新 60 次
+
+    // 清除之前的 interval
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+    }
+
+    // 启动打字机效果
+    intervalRef.current = setInterval(() => {
+      const currentIndex = currentIndexRef.current;
+
+      if (currentIndex >= content.length) {
+        // 完成
+        setIsComplete(true);
+        if (intervalRef.current) {
+          clearInterval(intervalRef.current);
+          intervalRef.current = null;
+        }
+        onComplete?.();
+        return;
+      }
+
+      // 计算本次要显示的字符数
+      const nextIndex = Math.min(currentIndex + charsPerUpdate, content.length);
+      const newContent = content.slice(0, nextIndex);
+
+      setDisplayedContent(newContent);
+      currentIndexRef.current = nextIndex;
+    }, 1000 / 60); // 60 FPS
+
+    return () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+    };
+  }, [content, speed, onComplete]);
+
+  // Markdown 渲染器
+  const MarkdownComponents = {
+    code({ className, children, ...props }: any) {
+      const match = /language-(\w+)/.exec(className || '');
+      const hasLanguage = match && match[1];
+      return hasLanguage ? (
+        (SyntaxHighlighter as any)(
+          {
+            style: vscDarkPlus,
+            language: match[1],
+            PreTag: "div",
+            className: "rounded-md text-sm",
+            customStyle: {
+              background: '#1E1E1E',
+              padding: '16px',
+              borderRadius: '8px',
+              margin: '8px 0',
+            },
+          },
+          String(children).replace(/\n$/, '')
+        )
+      ) : (
+        <code
+          className="bg-[#2D2D30] text-[#E9E9E9] px-1.5 py-0.5 rounded text-sm font-mono"
+          {...props}
+        >
+          {children}
+        </code>
+      );
+    },
+    p({ children }: { children: ReactNode }) {
+      return <p className="mb-3 last:mb-0 leading-7">{children}</p>;
+    },
+    ul({ children }: { children: ReactNode }) {
+      return <ul className="list-disc list-inside mb-3 space-y-1.5">{children}</ul>;
+    },
+    ol({ children }: { children: ReactNode }) {
+      return <ol className="list-decimal list-inside mb-3 space-y-1.5">{children}</ol>;
+    },
+    h1({ children }: { children: ReactNode }) {
+      return <h1 className="text-xl font-bold mb-4 mt-6 first:mt-0">{children}</h1>;
+    },
+    h2({ children }: { children: ReactNode }) {
+      return <h2 className="text-lg font-bold mb-3 mt-5 first:mt-0">{children}</h2>;
+    },
+    h3({ children }: { children: ReactNode }) {
+      return <h3 className="text-base font-bold mb-2 mt-4 first:mt-0">{children}</h3>;
+    },
+    blockquote({ children }: { children: ReactNode }) {
+      return (
+        <blockquote className="border-l-4 border-[#10A37F] pl-4 py-2 my-3 text-[#CCCCCC] italic">
+          {children}
+        </blockquote>
+      );
+    },
+    strong({ children }: { children: ReactNode }) {
+      return <strong className="font-bold text-white">{children}</strong>;
+    },
+    a({ href, children }: { href: string; children: ReactNode }) {
+      return (
+        <a
+          href={href}
+          className="text-[#10A37F] hover:text-[#0D8A6A] underline"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          {children}
+        </a>
+      );
+    },
+  };
+
+  return (
+    <div>
+      {/* 正常输出 - 打字机效果 */}
+      <div className="prose prose-invert prose-sm max-w-none">
+        <ReactMarkdown components={MarkdownComponents as any}>
+          {displayedContent}
+        </ReactMarkdown>
+        {!isComplete && (
+          <span className="inline-block w-2 h-4 bg-[#10A37F] ml-1 animate-pulse" />
+        )}
+      </div>
+
+      {/* 思考过程 - 仅在完成时显示 */}
+      {isComplete && reasoningContent && (
+        <ThinkingBlock content={reasoningContent} defaultExpanded={false} />
+      )}
+    </div>
+  );
+}

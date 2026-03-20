@@ -5,15 +5,14 @@ use async_openai::Client as OpenAIClient;
 use async_openai::config::OpenAIConfig;
 use async_openai::types::chat::{
     ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
-    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs, ChatThinking,
-    ChatThinkingType, CreateChatCompletionRequestArgs, CreateChatCompletionResponse,
+    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
+    CreateChatCompletionRequestArgs,
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::time::timeout;
-use tracing::error as tracing_error;
 
 use crate::core::mcp::build_mcp_tools_system_prompt;
 use crate::core::session::{Message, MessageRole};
@@ -88,9 +87,6 @@ pub struct ModelProviderConfig {
     pub api_timeout_ms: String,
     #[serde(rename = "API_MODEL", default = "default_api_model")]
     pub api_model: String,
-    /// 轻量级模型，用于简单任务如会话名称生成
-    #[serde(rename = "API_LITE_MODEL", default)]
-    pub api_lite_model: String,
 }
 
 impl ModelProviderConfig {
@@ -101,27 +97,14 @@ impl ModelProviderConfig {
         let api_timeout_ms =
             std::env::var("API_TIMEOUT_MS").unwrap_or_else(|_| default_api_timeout_ms());
         let api_model = std::env::var("API_MODEL").unwrap_or_else(|_| default_api_model());
-        let api_lite_model = std::env::var("API_LITE_MODEL").unwrap_or_default();
         Self {
             api_auth_token,
             api_base_url,
             api_timeout_ms,
             api_model,
-            api_lite_model,
         }
     }
 
-    /// 获取实际使用的轻量级模型，如果未配置则返回主模型
-    pub fn lite_model(&self) -> &str {
-        let lite = self.api_lite_model.trim();
-        if lite.is_empty() {
-            &self.api_model
-        } else {
-            lite
-        }
-    }
-
-    #[allow(dead_code)]
     pub fn masked_auth_token(&self) -> String {
         if self.api_auth_token.trim().is_empty() {
             "(empty)".to_string()
@@ -198,7 +181,6 @@ impl SingleProviderClient {
         Self { cfg }
     }
 
-    #[allow(dead_code)]
     pub fn list_models(cfg: &ModelProviderConfig) -> Result<Vec<String>> {
         let token = cfg.api_auth_token.trim();
         if token.is_empty() {

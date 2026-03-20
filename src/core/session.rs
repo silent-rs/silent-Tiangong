@@ -33,9 +33,6 @@ pub struct Session {
     pub task_plans: Vec<SessionTaskPlan>,
     pub created_at: String,
     pub updated_at: String,
-    /// 标识会话标题是否已经自动生成过
-    #[serde(default)]
-    pub title_generated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,7 +107,6 @@ impl Session {
             task_plans: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
-            title_generated: false,
         }
     }
 

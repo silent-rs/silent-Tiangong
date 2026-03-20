@@ -1,6 +1,5 @@
 use super::super::*;
 
-#[allow(dead_code)]
 impl TiangongState {
     pub fn settings_api_base_url_draft(&self) -> &str {
         &self.store.provider.settings_api_base_url_draft
@@ -100,7 +99,6 @@ impl TiangongState {
                 .settings_api_model_draft
                 .trim()
                 .to_string(),
-            api_lite_model: String::new(),
         };
 
         let models = SingleProviderClient::list_models(&draft_config)?;
@@ -163,7 +161,6 @@ impl TiangongState {
             api_base_url: api_base_url.to_string(),
             api_timeout_ms: api_timeout_ms.to_string(),
             api_model: api_model.to_string(),
-            api_lite_model: String::new(),
         };
         self.store.provider.settings_model_list = normalize_model_list(
             self.store.provider.settings_model_list.clone(),

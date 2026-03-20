@@ -1,7 +1,7 @@
-use anyhow::Result;
 use std::path::PathBuf;
+use anyhow::Result;
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 /// 日志文件前缀
 const LOG_FILE_PREFIX: &str = "tiangong-error";
@@ -35,7 +35,7 @@ pub fn init_logging() -> Result<WorkerGuard> {
                 .with_target(true) // 包含目标模块
                 .with_thread_ids(false) // 不包含线程 ID
                 .with_file(true) // 包含文件名
-                .with_line_number(true), // 包含行号
+                .with_line_number(true) // 包含行号
         )
         .init();
 
