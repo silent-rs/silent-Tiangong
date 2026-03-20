@@ -28,9 +28,11 @@
 - 模型配置必须独立为 `models.json`，采用 Provider 与 Model 分离设计。
 - Provider 层只定义连接信息（`base_url`、`api_key`、`timeout_ms`），可被多个模型共享。
 - Model 层引用 Provider，声明实际模型 ID 和能力列表（`capabilities`），携带专属参数（`options`）。
-- 能力类型包括：`chat`（常规对话/推理）、`multimodal`（多模态理解）、`image_generation`（图片生成）、`video_generation`（视频生成）。
+- 能力类型包括：`chat`（常规对话/推理）、`multimodal`（多模态理解）、`image_generation`（图片生成）、`video_generation`（视频生成）、`stt`（语音识别）、`tts`（语音合成）。
 - 一个模型可声明多种能力（如 gpt-4o 同时支持 chat 和 multimodal）。
 - 必须通过 `routing` 表为每种能力指定默认使用的模型。
+- `chat` 为基础必选能力，routing 中未配置 `chat` 时程序必须在所有模式（GUI/CLI/Server）下持续提示用户完成模型设置，在设置完成前不执行对话任务。
+- 其余能力（multimodal/image_generation/video_generation/stt/tts）未在 routing 中配置时视为关闭，对应功能不可用但不影响其他功能正常运行。
 - `api_key` 必须支持环境变量引用（`${ENV_VAR}` 语法），避免明文存储。
 
 #### Server 模式
@@ -50,11 +52,15 @@
 - Connector 必须支持配置化管理（启停、凭据配置、白名单）。
 - 通过 Connector 接收的消息必须走与本地 CLI 相同的 Agent 执行链路。
 
-#### 多媒体生成
-- 必须支持图片生成能力，至少接入一个后端（OpenAI DALL-E / GPT-Image）。
-- 必须支持视频生成能力，至少接入一个后端。
+#### 多媒体能力
+- 必须支持图片生成能力，至少实现一个后端适配（OpenAI DALL-E / GPT-Image）；models.json 中未配置 `image_generation` routing 时该功能自动关闭。
+- 必须支持视频生成能力，至少实现一个后端适配；未配置 routing 时自动关闭。
+- 必须支持语音识别（STT）能力，至少实现 OpenAI Whisper 适配；未配置 routing 时自动关闭。
+- 必须支持语音合成（TTS）能力，至少实现 OpenAI TTS 适配；未配置 routing 时自动关闭。
 - 媒体生成必须采用异步任务模型，支持状态查询。
 - 生成的媒体文件必须可通过 Connector 发送到 IM 通道。
+- Connector 接收到语音消息时，必须支持自动调用 STT 转为文字后交给 Agent 处理。
+- Agent 响应时应支持可选的 TTS 输出，将文本回复转为语音发送。
 
 ### Should
 
@@ -76,7 +82,6 @@
 - 多用户权限与租户隔离。
 - 商业化计费。
 - P2P 分发与去中心化网络。
-- 语音 I/O（语音识别/合成）。
 
 ## 参考
 

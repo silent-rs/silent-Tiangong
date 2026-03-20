@@ -61,7 +61,7 @@
 │     ├─ Tool (本地工具：文件、命令、搜索)                      │
 │     ├─ MCP (Model Context Protocol 客户端)                   │
 │     ├─ Skill (Skill 生命周期管理)                            │
-│     ├─ MediaGen (图片/视频生成)                              │
+│     ├─ MediaGen (图片/视频生成/语音识别/语音合成)             │
 │     └─ Connector (IM 通道适配器)                             │
 └─────────────────────────────────────────────────────────────┘
                             ↕
@@ -105,12 +105,14 @@ tiangong/
 │   │       ├── skill/            # Skill 管理
 │   │       └── event/            # 事件总线
 │   │
-│   ├── tiangong-media/           # 多媒体生成能力
+│   ├── tiangong-media/           # 多媒体能力
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
-│   │       ├── image/            # 图片生成（DALL-E / SD / Flux 等）
-│   │       └── video/            # 视频生成（Sora / Runway / Kling 等）
+│   │       ├── image/            # 图片生成（DALL-E / Flux 等）
+│   │       ├── video/            # 视频生成（Sora / Kling 等）
+│   │       ├── stt/              # 语音识别（Whisper 等）
+│   │       └── tts/              # 语音合成（OpenAI TTS / ElevenLabs 等）
 │   │
 │   ├── tiangong-gateway/         # 网关层
 │   │   ├── Cargo.toml
@@ -267,6 +269,9 @@ DELETE /api/v1/sessions/:id             # 删除会话
 
 POST   /api/v1/media/image/generate     # 图片生成
 POST   /api/v1/media/video/generate     # 视频生成
+POST   /api/v1/media/stt                # 语音识别（上传音频 -> 文本）
+POST   /api/v1/media/tts                # 语音合成（文本 -> 音频）
+GET    /api/v1/media/tts/voices         # 可用音色列表
 GET    /api/v1/media/tasks/:id          # 查询生成任务状态
 
 GET    /api/v1/skills                   # Skill 列表
@@ -348,6 +353,69 @@ pub struct VideoGenRequest {
 - Kling（可灵）
 - Pika
 
+#### 语音识别（STT）
+
+通过统一的 `SpeechRecognizer` trait 支持多后端：
+
+```rust
+#[async_trait]
+pub trait SpeechRecognizer: Send + Sync {
+    fn name(&self) -> &str;
+    async fn transcribe(&self, request: TranscribeRequest) -> Result<TranscribeResponse>;
+}
+
+pub struct TranscribeRequest {
+    pub audio: Vec<u8>,              // 音频数据
+    pub mime_type: String,           // audio/wav, audio/mp3, audio/ogg 等
+    pub language: Option<String>,    // 语言提示（如 "zh", "en"）
+    pub model: Option<String>,
+}
+
+pub struct TranscribeResponse {
+    pub text: String,
+    pub language: Option<String>,    // 检测到的语言
+    pub duration: Option<f64>,       // 音频时长（秒）
+}
+```
+
+计划支持的后端：
+- OpenAI Whisper API
+- 本地 Whisper 模型
+- 讯飞语音识别
+
+#### 语音合成（TTS）
+
+通过统一的 `SpeechSynthesizer` trait 支持多后端：
+
+```rust
+#[async_trait]
+pub trait SpeechSynthesizer: Send + Sync {
+    fn name(&self) -> &str;
+    async fn synthesize(&self, request: SynthesizeRequest) -> Result<SynthesizeResponse>;
+    /// 列出可用的音色
+    async fn list_voices(&self) -> Result<Vec<VoiceInfo>>;
+}
+
+pub struct SynthesizeRequest {
+    pub text: String,
+    pub voice: Option<String>,       // 音色 ID
+    pub speed: Option<f64>,          // 语速（0.5~2.0）
+    pub model: Option<String>,
+    pub output_format: Option<String>, // mp3, wav, opus 等
+}
+
+pub struct SynthesizeResponse {
+    pub audio: Vec<u8>,
+    pub mime_type: String,
+    pub duration: Option<f64>,
+}
+```
+
+计划支持的后端：
+- OpenAI TTS
+- ElevenLabs
+- 讯飞语音合成
+
 ### 事件总线
 
 引入轻量事件总线实现各层解耦通信：
@@ -385,7 +453,7 @@ pub enum TiangongEvent {
 ```
 ~/.tiangong/
 ├── app.json                # 应用主配置（会话/UI 状态）
-├── models.json             # 模型配置（常规/多模态/图片生成/视频生成）
+├── models.json             # 模型配置（对话/多模态/图片/视频/STT/TTS）
 ├── server.json             # Server 模式配置（端口/认证/CORS）
 ├── server.pid              # Server 后台运行时的 PID 文件（自动生成）
 ├── connectors.json         # Connector 配置（各通道凭据与开关）
@@ -456,6 +524,18 @@ pub enum TiangongEvent {
       "model": "kling-v1",
       "capabilities": ["video_generation"],
       "options": { "duration": 5, "resolution": "1080p" }
+    },
+    "whisper-1": {
+      "provider": "openai",
+      "model": "whisper-1",
+      "capabilities": ["stt"],
+      "options": { "language": null }
+    },
+    "tts-1-hd": {
+      "provider": "openai",
+      "model": "tts-1-hd",
+      "capabilities": ["tts"],
+      "options": { "voice": "alloy", "speed": 1.0, "output_format": "mp3" }
     }
   },
 
@@ -463,7 +543,9 @@ pub enum TiangongEvent {
     "chat": "gpt-4o",
     "multimodal": "gpt-4o",
     "image_generation": "dall-e-3",
-    "video_generation": "kling-v1"
+    "video_generation": "kling-v1",
+    "stt": "whisper-1",
+    "tts": "tts-1-hd"
   }
 }
 ```
@@ -474,7 +556,8 @@ pub enum TiangongEvent {
 - **按用途路由**：`routing` 表为每种用途指定默认模型，简洁明了
 - **专属参数**：`options` 为 JSON 对象，各类模型携带各自专属参数，不混杂
 - **环境变量**：`api_key` 支持 `${ENV_VAR}` 语法引用环境变量，避免明文存储
-- **易扩展**：新增能力类型（如 `audio_generation`）只需添加模型条目 + routing 条目，无需修改结构
+- **易扩展**：新增能力类型只需添加模型条目 + routing 条目，无需修改结构
+- **按需启用**：routing 中未配置的能力类型视为关闭，对应功能不可用但不影响其他功能正常运行。`chat` 为基础必选能力，未配置时程序持续提示用户完成设置
 
 **模型配置数据结构**：
 
@@ -486,6 +569,8 @@ pub struct ModelsConfig {
     /// 模型定义（name -> config）
     pub models: HashMap<String, ModelConfig>,
     /// 按用途路由（capability -> model name）
+    /// chat 为必选能力，未配置时程序持续提示用户设置
+    /// 其余能力未配置则自动关闭
     pub routing: HashMap<ModelCapability, String>,
 }
 
@@ -521,6 +606,10 @@ pub enum ModelCapability {
     ImageGeneration,
     /// 视频生成
     VideoGeneration,
+    /// 语音识别
+    Stt,
+    /// 语音合成
+    Tts,
 }
 ```
 
@@ -599,16 +688,19 @@ pub enum ModelCapability {
 6. Connector 配置管理与热插拔
 7. 后续可扩展：钉钉/Slack 等
 
-### Phase E：多媒体生成能力
+### Phase E：多媒体能力
 
-**目标**：集成图片和视频生成能力
+**目标**：集成图片生成、视频生成、语音识别与语音合成能力
 
 1. 新建 `crates/tiangong-media`
-2. 定义 ImageGenerator / VideoGenerator trait
+2. 定义 ImageGenerator / VideoGenerator / SpeechRecognizer / SpeechSynthesizer trait
 3. 接入 OpenAI DALL-E / GPT-Image 图片生成
 4. 接入视频生成后端（Sora/Kling）
-5. 媒体任务管理与状态追踪
-6. Agent 层集成 MediaAgent，支持对话中触发生成
+5. 接入 OpenAI Whisper 语音识别
+6. 接入 OpenAI TTS 语音合成
+7. 媒体任务管理与状态追踪
+8. Agent 层集成 MediaAgent，支持对话中触发多媒体能力
+9. Connector 层支持语音消息自动转文字后交给 Agent 处理
 
 ### Phase F：生产化与完善
 

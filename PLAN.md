@@ -54,11 +54,14 @@
 - Connector 配置管理与热插拔。
 - 后续扩展：钉钉、Slack 等。
 
-### Phase 7（多媒体生成能力）
-- `tiangong-media`：图片/视频生成框架。
+### Phase 7（多媒体能力）
+- `tiangong-media`：图片/视频生成 + 语音识别/合成框架。
 - 图片生成后端：OpenAI DALL-E / GPT-Image、Flux。
 - 视频生成后端：Sora、Kling。
+- 语音识别后端：OpenAI Whisper、讯飞。
+- 语音合成后端：OpenAI TTS、ElevenLabs。
 - Agent 层集成 MediaAgent。
+- Connector 支持语音消息自动转文字。
 
 ### Phase 8（生产化与完善）
 - 日志与监控完善。

@@ -94,11 +94,14 @@
 - [ ] 实现飞书/Lark Connector
 - [ ] 实现 Webhook Connector
 
-### Phase 7：多媒体生成
+### Phase 7：多媒体能力
 - [ ] 新建 `crates/tiangong-media`
 - [ ] 图片生成（DALL-E / GPT-Image）
 - [ ] 视频生成（Sora / Kling）
+- [ ] 语音识别（OpenAI Whisper）
+- [ ] 语音合成（OpenAI TTS）
 - [ ] MediaAgent 集成
+- [ ] Connector 语音消息自动转文字
 
 ### Phase 8：生产化与完善
 - [ ] Docker 部署支持
