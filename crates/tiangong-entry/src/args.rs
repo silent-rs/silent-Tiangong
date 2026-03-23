@@ -21,10 +21,36 @@ pub(crate) enum MainCommand {
     Ui,
     #[command(about = "启动 CLI 模式")]
     Cli,
+    #[command(about = "启动 Server 模式")]
+    Server(ServerArgs),
     #[command(about = "MCP 配置管理")]
     Mcp(McpArgs),
     #[command(about = "Skill 配置管理")]
     Skill(SkillArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ServerArgs {
+    #[command(subcommand)]
+    pub(crate) command: Option<ServerSubcommand>,
+    /// 监听地址
+    #[arg(long, default_value = "127.0.0.1")]
+    pub(crate) host: String,
+    /// 监听端口
+    #[arg(long, default_value_t = 8080)]
+    pub(crate) port: u16,
+    /// API 认证 Token
+    #[arg(long, help = "API 认证 Token")]
+    pub(crate) token: Option<String>,
+    /// 后台运行
+    #[arg(short, long, help = "后台运行")]
+    pub(crate) daemon: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ServerSubcommand {
+    #[command(about = "停止后台 Server")]
+    Stop,
 }
 
 #[derive(Debug, Args)]

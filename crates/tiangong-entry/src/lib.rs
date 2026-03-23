@@ -1,5 +1,6 @@
 mod args;
 mod mcp;
+mod server;
 mod skill;
 
 use clap::Parser;
@@ -23,6 +24,7 @@ pub fn run() -> anyhow::Result<()> {
     };
 
     match args.command {
+        Some(MainCommand::Server(args)) => server::run_server_command(args),
         Some(MainCommand::Mcp(args)) => mcp::run_mcp_command(args),
         Some(MainCommand::Skill(args)) => skill::run_skill_command(args),
         Some(MainCommand::Cli) => tiangong_cli::run_cli(),

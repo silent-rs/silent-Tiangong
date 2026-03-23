@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 tiangong-core = { path = "../tiangong-core" }
 tiangong-cli = { path = "../tiangong-cli" }
+tiangong-server = { path = "../tiangong-server" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
