@@ -31,6 +31,51 @@ impl ConnectorManager {
                 self.connectors
                     .insert(config.name.clone(), Box::new(connector));
             }
+            #[cfg(feature = "telegram")]
+            ConnectorType::Telegram => {
+                let bot_token = config
+                    .settings
+                    .get("bot_token")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("Telegram connector 缺少 bot_token 配置"))?
+                    .to_string();
+                let connector =
+                    crate::telegram::TelegramConnector::new(config.name.clone(), bot_token);
+                self.connectors
+                    .insert(config.name.clone(), Box::new(connector));
+            }
+            #[cfg(feature = "discord")]
+            ConnectorType::Discord => {
+                let bot_token = config
+                    .settings
+                    .get("bot_token")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("Discord connector 缺少 bot_token 配置"))?
+                    .to_string();
+                let connector =
+                    crate::discord::DiscordConnector::new(config.name.clone(), bot_token);
+                self.connectors
+                    .insert(config.name.clone(), Box::new(connector));
+            }
+            #[cfg(feature = "lark")]
+            ConnectorType::Lark => {
+                let app_id = config
+                    .settings
+                    .get("app_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("Lark connector 缺少 app_id 配置"))?
+                    .to_string();
+                let app_secret = config
+                    .settings
+                    .get("app_secret")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("Lark connector 缺少 app_secret 配置"))?
+                    .to_string();
+                let connector =
+                    crate::lark::LarkConnector::new(config.name.clone(), app_id, app_secret);
+                self.connectors
+                    .insert(config.name.clone(), Box::new(connector));
+            }
             _ => {
                 tracing::warn!(connector = %config.name, "Connector 类型暂未实现");
             }

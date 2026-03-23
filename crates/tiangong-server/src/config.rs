@@ -3,6 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use tiangong_connector::config::ConnectorConfig;
 
 /// Server 模式配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +65,43 @@ impl ServerConfig {
             Some(token) if token.trim().is_empty() => "(空)".to_string(),
             Some(token) if token.len() <= 4 => "****".to_string(),
             Some(token) => format!("{}****", &token[..4]),
+        }
+    }
+}
+
+/// Connector 配置文件结构
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorsFile {
+    pub connectors: Vec<ConnectorConfig>,
+}
+
+/// Connector 配置文件路径: ~/.tiangong/connectors.json
+fn connectors_file_path() -> PathBuf {
+    user_home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".tiangong")
+        .join("connectors.json")
+}
+
+/// 从 ~/.tiangong/connectors.json 加载 Connector 配置
+/// 文件不存在时返回空列表
+pub fn load_connectors_config() -> Vec<ConnectorConfig> {
+    let path = connectors_file_path();
+    if !path.exists() {
+        tracing::info!("Connector 配置文件不存在: {}", path.display());
+        return Vec::new();
+    }
+    match fs::read_to_string(&path) {
+        Ok(content) => match serde_json::from_str::<ConnectorsFile>(&content) {
+            Ok(file) => file.connectors,
+            Err(e) => {
+                tracing::warn!("解析 Connector 配置失败: {e}");
+                Vec::new()
+            }
+        },
+        Err(e) => {
+            tracing::warn!("读取 Connector 配置文件失败: {e}");
+            Vec::new()
         }
     }
 }
