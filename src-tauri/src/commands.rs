@@ -1,14 +1,14 @@
 use crate::app::TiangongApp;
 use crate::types::*;
-use tauri::{AppHandle, Emitter, Manager, State, Window};
 use std::thread;
 use std::time::Duration;
+use tauri::{AppHandle, Emitter, Manager, State, Window};
 
 // ============================================================================
 // 辅助函数：构建完整的 RunSnapshot
 // ============================================================================
 
-fn build_full_snapshot(core_state: &tiangong_core::core::app_state::TiangongState) -> RunSnapshot {
+fn build_full_snapshot(core_state: &tiangong_core::app_state::TiangongState) -> RunSnapshot {
     let core_snapshot = core_state.run_snapshot();
     let input_draft = core_state.input_draft().to_string();
 
@@ -68,9 +68,7 @@ pub fn switch_session(session_id: String, state: State<TiangongApp>) -> Result<(
 /// 删除当前会话
 #[tauri::command]
 pub fn delete_session(state: State<TiangongApp>) -> Result<(), String> {
-    state.with_state(|core_state| {
-        core_state.delete_active_session()
-    })
+    state.with_state(|core_state| core_state.delete_active_session())
 }
 
 /// 更新会话标题
@@ -105,9 +103,10 @@ pub fn send_message(
     thread::spawn(move || {
         loop {
             // 获取当前完整状态快照
-            if let Ok(snapshot) = app_clone.state::<TiangongApp>().with_state_read(|s| {
-                Ok(build_full_snapshot(s))
-            }) {
+            if let Ok(snapshot) = app_clone
+                .state::<TiangongApp>()
+                .with_state_read(|s| Ok(build_full_snapshot(s)))
+            {
                 let is_idle = snapshot.status == "idle"
                     || snapshot.status == "completed"
                     || snapshot.status == "failed";
@@ -131,25 +130,19 @@ pub fn send_message(
 /// 取消当前执行
 #[tauri::command]
 pub fn cancel_turn(state: State<TiangongApp>) -> Result<bool, String> {
-    state.with_state(|core_state| {
-        core_state.cancel_pending_turn()
-    })
+    state.with_state(|core_state| core_state.cancel_pending_turn())
 }
 
 /// 获取运行状态快照
 #[tauri::command]
 pub fn get_run_snapshot(state: State<TiangongApp>) -> Result<RunSnapshot, String> {
-    state.with_state_read(|core_state| {
-        Ok(build_full_snapshot(core_state))
-    })
+    state.with_state_read(|core_state| Ok(build_full_snapshot(core_state)))
 }
 
 /// 获取输入草稿
 #[tauri::command]
 pub fn get_input_draft(state: State<TiangongApp>) -> Result<String, String> {
-    state.with_state_read(|core_state| {
-        Ok(core_state.input_draft().to_string())
-    })
+    state.with_state_read(|core_state| Ok(core_state.input_draft().to_string()))
 }
 
 /// 设置输入草稿
@@ -186,15 +179,12 @@ pub fn register_mcp_server(
     env: Option<std::collections::HashMap<String, String>>,
     state: State<TiangongApp>,
 ) -> Result<String, String> {
-    use tiangong_core::core::app_state::RegisterMcpServerOptions;
-    use tiangong_core::core::app_state::RegisterMcpServerRequest;
+    use tiangong_core::app_state::RegisterMcpServerOptions;
+    use tiangong_core::app_state::RegisterMcpServerRequest;
 
     state.with_state(|core_state| {
         // 转换 env HashMap 为 Vec<(String, String)>
-        let env_vec = env
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
+        let env_vec = env.unwrap_or_default().into_iter().collect();
 
         let request = RegisterMcpServerRequest {
             name: name.clone(),
@@ -214,9 +204,7 @@ pub fn register_mcp_server(
 /// 移除 MCP 服务器
 #[tauri::command]
 pub fn remove_mcp_server(name: String, state: State<TiangongApp>) -> Result<String, String> {
-    state.with_state(|core_state| {
-        core_state.remove_mcp_server(&name)
-    })
+    state.with_state(|core_state| core_state.remove_mcp_server(&name))
 }
 
 /// 设置 MCP 服务器启用状态
@@ -226,9 +214,7 @@ pub fn set_mcp_server_enabled(
     enabled: bool,
     state: State<TiangongApp>,
 ) -> Result<String, String> {
-    state.with_state(|core_state| {
-        core_state.set_mcp_server_enabled(&name, enabled)
-    })
+    state.with_state(|core_state| core_state.set_mcp_server_enabled(&name, enabled))
 }
 
 // ============================================================================
@@ -250,17 +236,13 @@ pub fn get_skills(state: State<TiangongApp>) -> Result<Vec<Skill>, String> {
 /// 安装 Skill
 #[tauri::command]
 pub fn install_skill(path: String, state: State<TiangongApp>) -> Result<String, String> {
-    state.with_state(|core_state| {
-        core_state.install_local_skill(&path, true)
-    })
+    state.with_state(|core_state| core_state.install_local_skill(&path, true))
 }
 
 /// 移除 Skill
 #[tauri::command]
 pub fn remove_skill(id: String, state: State<TiangongApp>) -> Result<String, String> {
-    state.with_state(|core_state| {
-        core_state.remove_skill(&id)
-    })
+    state.with_state(|core_state| core_state.remove_skill(&id))
 }
 
 /// 设置 Skill 启用状态
@@ -270,9 +252,7 @@ pub fn set_skill_enabled(
     enabled: bool,
     state: State<TiangongApp>,
 ) -> Result<String, String> {
-    state.with_state(|core_state| {
-        core_state.set_skill_enabled(&id, enabled)
-    })
+    state.with_state(|core_state| core_state.set_skill_enabled(&id, enabled))
 }
 
 // ============================================================================
@@ -325,9 +305,7 @@ pub fn set_model_config(
 /// 获取模型列表
 #[tauri::command]
 pub fn get_model_list(state: State<TiangongApp>) -> Result<Vec<String>, String> {
-    state.with_state_read(|core_state| {
-        Ok(core_state.model_list().to_vec())
-    })
+    state.with_state_read(|core_state| Ok(core_state.model_list().to_vec()))
 }
 
 /// 获取提供者列表（简化版，返回当前配置的提供者）
@@ -345,11 +323,14 @@ pub fn get_providers(state: State<TiangongApp>) -> Result<Vec<Provider>, String>
             } else {
                 Some(config.api_base_url.clone())
             },
-            models: models.into_iter().map(|name| Model {
-                id: name.clone(),
-                name,
-                provider_id: "default".to_string(),
-            }).collect(),
+            models: models
+                .into_iter()
+                .map(|name| Model {
+                    id: name.clone(),
+                    name,
+                    provider_id: "default".to_string(),
+                })
+                .collect(),
         };
 
         Ok(vec![provider])

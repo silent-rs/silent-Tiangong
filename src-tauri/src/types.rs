@@ -12,7 +12,7 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn from_core(core_session: &tiangong_core::core::session::Session) -> Self {
+    pub fn from_core(core_session: &tiangong_core::session::Session) -> Self {
         Self {
             id: core_session.id.clone(),
             title: core_session.title.clone(),
@@ -34,7 +34,7 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn from_core(core_msg: &tiangong_core::core::session::Message) -> Self {
+    pub fn from_core(core_msg: &tiangong_core::session::Message) -> Self {
         Self {
             id: core_msg.id.clone(),
             role: format!("{:?}", core_msg.role),
@@ -72,7 +72,7 @@ pub struct RunSnapshot {
 
 impl RunSnapshot {
     pub fn from_core_with_session(
-        core_snapshot: &tiangong_core::core::runtime::RunSnapshot,
+        core_snapshot: &tiangong_core::runtime::RunSnapshot,
         messages: Vec<Message>,
         input_draft: String,
         current_plan: Option<TaskPlan>,
@@ -108,7 +108,7 @@ pub struct TaskPlan {
 }
 
 impl TaskPlan {
-    pub fn from_core(core_plan: &tiangong_core::core::planner::TaskPlan) -> Self {
+    pub fn from_core(core_plan: &tiangong_core::planner::TaskPlan) -> Self {
         Self {
             id: core_plan.id.clone(),
             objective: core_plan.objective.clone(),
@@ -120,7 +120,7 @@ impl TaskPlan {
         }
     }
 
-    pub fn from_session_task_plan(session_plan: &tiangong_core::core::session::SessionTaskPlan) -> Self {
+    pub fn from_session_task_plan(session_plan: &tiangong_core::session::SessionTaskPlan) -> Self {
         Self {
             id: session_plan.id.clone(),
             objective: session_plan.name.clone(),
@@ -146,16 +146,20 @@ pub struct PlanItem {
 }
 
 impl PlanItem {
-    pub fn from_core(core_item: &tiangong_core::core::planner::PlanItem) -> Self {
+    pub fn from_core(core_item: &tiangong_core::planner::PlanItem) -> Self {
         Self {
             id: core_item.id.clone(),
             description: core_item.description.clone(),
             status: format!("{:?}", core_item.status),
-            steps: core_item.execution_steps.iter().map(PlanStep::from_core).collect(),
+            steps: core_item
+                .execution_steps
+                .iter()
+                .map(PlanStep::from_core)
+                .collect(),
         }
     }
 
-    pub fn from_session_step(step: &tiangong_core::core::session::SessionPlanExecutionStep) -> Self {
+    pub fn from_session_step(step: &tiangong_core::session::SessionPlanExecutionStep) -> Self {
         Self {
             id: step.id.clone(),
             description: step.description.clone(),
@@ -174,7 +178,7 @@ pub struct PlanStep {
 }
 
 impl PlanStep {
-    pub fn from_core(core_step: &tiangong_core::core::planner::PlanStep) -> Self {
+    pub fn from_core(core_step: &tiangong_core::planner::PlanStep) -> Self {
         Self {
             id: core_step.id.clone(),
             description: core_step.description.clone(),
@@ -195,7 +199,7 @@ pub struct McpServer {
 }
 
 impl McpServer {
-    pub fn from_core(core_server: &tiangong_core::core::agent_config::McpServerConfig) -> Self {
+    pub fn from_core(core_server: &tiangong_core::agent_config::McpServerConfig) -> Self {
         Self {
             name: core_server.name.clone(),
             command: core_server.command.clone(),
@@ -221,7 +225,7 @@ pub struct Skill {
 }
 
 impl Skill {
-    pub fn from_core(core_skill: &tiangong_core::core::agent_config::InstalledSkillConfig) -> Self {
+    pub fn from_core(core_skill: &tiangong_core::agent_config::InstalledSkillConfig) -> Self {
         Self {
             id: core_skill.id.clone(),
             name: core_skill.name.clone(),

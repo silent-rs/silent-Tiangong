@@ -940,9 +940,9 @@ dependencies = [
 
 [[package]]
 name = "instability"
-version = "0.3.11"
+version = "0.3.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "357b7205c6cd18dd2c86ed312d1e70add149aea98e7ef72b9fdf0270e555c11d"
+checksum = "5eb2d60ef19920a3a9193c3e371f726ec1dafc045dac788d0fb3704272458971"
 dependencies = [
  "darling 0.23.0",
  "indoc",
@@ -1415,7 +1415,7 @@ dependencies = [
  "strum_macros",
  "unicode-segmentation",
  "unicode-truncate",
- "unicode-width 0.1.14",
+ "unicode-width",
 ]
 
 [[package]]
@@ -1987,14 +1987,40 @@ name = "tiangong"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "tiangong-entry",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "tiangong-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossterm",
+ "ratatui",
+ "tiangong-core",
+]
+
+[[package]]
+name = "tiangong-connector"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tiangong-core",
+]
+
+[[package]]
+name = "tiangong-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "async-openai",
  "chrono",
- "clap",
- "crossterm",
  "diffy",
  "futures-util",
  "http",
- "ratatui",
  "rmcp",
  "scru128",
  "serde",
@@ -2002,9 +2028,42 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "unicode-width 0.2.2",
+]
+
+[[package]]
+name = "tiangong-entry"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "tiangong-cli",
+ "tiangong-core",
+]
+
+[[package]]
+name = "tiangong-gateway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tiangong-core",
+]
+
+[[package]]
+name = "tiangong-media"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tiangong-core",
+]
+
+[[package]]
+name = "tiangong-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tiangong-core",
 ]
 
 [[package]]
@@ -2328,7 +2387,7 @@ checksum = "b3644627a5af5fa321c95b9b235a72fd24cd29c648c2c379431e6628655627bf"
 dependencies = [
  "itertools",
  "unicode-segmentation",
- "unicode-width 0.1.14",
+ "unicode-width",
 ]
 
 [[package]]
@@ -2336,12 +2395,6 @@ name = "unicode-width"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
-
-[[package]]
-name = "unicode-width"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 
 [[package]]
 name = "untrusted"

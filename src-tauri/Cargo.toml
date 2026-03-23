@@ -7,9 +7,8 @@ edition = "2021"
 # Empty workspace to make src-tauri independent from parent workspace
 
 [dependencies]
-# 引用主项目核心库
-# 包名是 tiangong，但库名是 tiangong_core
-tiangong_core = { path = "..", package = "tiangong" }
+# 引用核心库 crate
+tiangong_core = { path = "../crates/tiangong-core", package = "tiangong-core" }
 
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
