@@ -76,11 +76,11 @@
 ### Phase 4：Server 模式（已完成 ✅）
 - [x] 新建 `crates/tiangong-server`
 - [x] 实现 REST API（/chat /sessions /mcp /skills /health /shutdown）
-- [ ] 实现 WebSocket 流式通信（待 Phase 5 EventBus 后实现）
+- [x] 实现 WebSocket 流式通信（/api/v1/ws，EventBus 事件推送）
 - [x] API Token 认证（Bearer Token）
 - [x] `-d` / `--daemon` 后台运行支持（PID 文件管理）
 - [x] `tiangong server stop` 停止后台 Server
-- [ ] Server 启动时自动加载已启用 Connector（待 Phase 6 后实现）
+- [x] Server 启动时自动加载已启用 Connector（connectors.json）
 
 ### Phase 5：Gateway 与事件总线（已完成 ✅）
 - [x] 实现 EventBus（tokio broadcast，会话/Agent/Connector/系统事件）
@@ -92,9 +92,9 @@
 - [x] 实现 Webhook Connector（最小实现）
 - [x] ConnectorManager（注册/启停/健康检查）
 - [x] ConnectorConfig/ConnectorType（Webhook/Telegram/Discord/Lark）
-- [ ] 实现 Telegram Connector（待实际接入）
-- [ ] 实现 Discord Connector（待实际接入）
-- [ ] 实现飞书/Lark Connector（待实际接入）
+- [x] 实现 Telegram Connector（teloxide，feature gate `telegram`）
+- [x] 实现 Discord Connector（serenity，feature gate `discord`）
+- [x] 实现飞书/Lark Connector（reqwest HTTP API，feature gate `lark`）
 
 ### Phase 7：多媒体能力（框架已完成 ✅）
 - [x] ImageGenerator trait + 请求/响应类型
@@ -102,12 +102,12 @@
 - [x] SpeechRecognizer trait（STT）
 - [x] SpeechSynthesizer trait（TTS）+ VoiceInfo
 - [x] MediaTask 异步任务管理类型
-- [ ] 图片生成后端实现（DALL-E / GPT-Image / Flux）
-- [ ] 视频生成后端实现（Sora / Kling）
-- [ ] 语音识别后端实现（OpenAI Whisper）
-- [ ] 语音合成后端实现（OpenAI TTS）
-- [ ] MediaAgent 集成到核心引擎
-- [ ] Connector 语音消息自动转文字
+- [x] 图片生成后端实现（OpenAI DALL-E / GPT-Image，reqwest）
+- [x] 视频生成占位（StubVideoGenerator，待 Sora/Kling API 稳定后接入）
+- [x] 语音识别后端实现（OpenAI Whisper，multipart 上传）
+- [x] 语音合成后端实现（OpenAI TTS，6 个预定义音色）
+- [x] MediaAgent 聚合器（builder 模式，能力检查）
+- [ ] Connector 语音消息自动转文字（需 Gateway 层集成）
 
 ### Phase 8：生产化与完善（已完成 ✅）
 - [x] 日志分级（支持 `TIANGONG_LOG` 环境变量按模块调级别）
