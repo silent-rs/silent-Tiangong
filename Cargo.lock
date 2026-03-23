@@ -2250,7 +2250,13 @@ name = "tiangong-connector"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "serde",
+ "serde_json",
  "tiangong-core",
+ "tiangong-gateway",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2290,7 +2296,14 @@ name = "tiangong-gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "chrono",
+ "scru128",
+ "serde",
+ "serde_json",
  "tiangong-core",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

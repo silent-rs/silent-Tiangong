@@ -5,4 +5,10 @@ edition = "2024"
 
 [dependencies]
 tiangong-core = { path = "../tiangong-core" }
+tiangong-gateway = { path = "../tiangong-gateway" }
 anyhow = "1"
+tokio = { version = "1", features = ["sync", "rt"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+async-trait = "0.1"

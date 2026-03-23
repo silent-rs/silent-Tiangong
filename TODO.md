@@ -73,14 +73,14 @@
 
 ## 后续阶段（待展开）
 
-### Phase 4：Server 模式
-- [ ] 新建 `crates/tiangong-server`
-- [ ] 实现 REST API（对话、会话管理）
-- [ ] 实现 WebSocket 流式通信
-- [ ] API Token 认证
-- [ ] `-d` / `--daemon` 后台运行支持（PID 文件管理）
-- [ ] `tiangong server stop` 停止后台 Server
-- [ ] Server 启动时自动加载已启用 Connector
+### Phase 4：Server 模式（已完成 ✅）
+- [x] 新建 `crates/tiangong-server`
+- [x] 实现 REST API（/chat /sessions /mcp /skills /health /shutdown）
+- [ ] 实现 WebSocket 流式通信（待 Phase 5 EventBus 后实现）
+- [x] API Token 认证（Bearer Token）
+- [x] `-d` / `--daemon` 后台运行支持（PID 文件管理）
+- [x] `tiangong server stop` 停止后台 Server
+- [ ] Server 启动时自动加载已启用 Connector（待 Phase 6 后实现）
 
 ### Phase 5：Gateway 与事件总线
 - [ ] 实现 EventBus（tokio broadcast）
