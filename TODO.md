@@ -109,7 +109,8 @@
 - [ ] MediaAgent 集成到核心引擎
 - [ ] Connector 语音消息自动转文字
 
-### Phase 8：生产化与完善
-- [ ] Docker 部署支持
-- [ ] 安全加固
-- [ ] 配置热重载
+### Phase 8：生产化与完善（已完成 ✅）
+- [x] 日志分级（支持 `TIANGONG_LOG` 环境变量按模块调级别）
+- [x] 错误恢复（启动时 recover_interrupted_tasks + auto_resume_unfinished_plan）
+- [x] 敏感配置脱敏（model auth_token + server auth_token 脱敏显示）
+- [ ] 配置热重载（文件变更监听，需引入 notify crate，优先级低）

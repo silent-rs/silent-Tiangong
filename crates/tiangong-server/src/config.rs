@@ -55,3 +55,15 @@ pub fn load_server_config() -> ServerConfig {
         Err(_) => ServerConfig::default(),
     }
 }
+
+impl ServerConfig {
+    /// 返回脱敏后的 auth_token（仅显示前 4 位 + ****）
+    pub fn masked_auth_token(&self) -> String {
+        match &self.auth_token {
+            None => "(未设置)".to_string(),
+            Some(token) if token.trim().is_empty() => "(空)".to_string(),
+            Some(token) if token.len() <= 4 => "****".to_string(),
+            Some(token) => format!("{}****", &token[..4]),
+        }
+    }
+}
