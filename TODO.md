@@ -82,25 +82,31 @@
 - [x] `tiangong server stop` 停止后台 Server
 - [ ] Server 启动时自动加载已启用 Connector（待 Phase 6 后实现）
 
-### Phase 5：Gateway 与事件总线
-- [ ] 实现 EventBus（tokio broadcast）
-- [ ] 实现 Gateway 消息路由
-- [ ] 统一消息模型
+### Phase 5：Gateway 与事件总线（已完成 ✅）
+- [x] 实现 EventBus（tokio broadcast，会话/Agent/Connector/系统事件）
+- [x] 实现 Gateway 消息路由（MessageRouter）
+- [x] 统一消息模型（IncomingMessage/OutgoingMessage/MessageContent）
 
-### Phase 6：Connector 框架
-- [ ] 定义 Connector trait
-- [ ] 实现 Telegram Connector
-- [ ] 实现 Discord Connector
-- [ ] 实现飞书/Lark Connector
-- [ ] 实现 Webhook Connector
+### Phase 6：Connector 框架（已完成 ✅）
+- [x] 定义 Connector trait（async start/stop/send_message/health_check）
+- [x] 实现 Webhook Connector（最小实现）
+- [x] ConnectorManager（注册/启停/健康检查）
+- [x] ConnectorConfig/ConnectorType（Webhook/Telegram/Discord/Lark）
+- [ ] 实现 Telegram Connector（待实际接入）
+- [ ] 实现 Discord Connector（待实际接入）
+- [ ] 实现飞书/Lark Connector（待实际接入）
 
-### Phase 7：多媒体能力
-- [ ] 新建 `crates/tiangong-media`
-- [ ] 图片生成（DALL-E / GPT-Image）
-- [ ] 视频生成（Sora / Kling）
-- [ ] 语音识别（OpenAI Whisper）
-- [ ] 语音合成（OpenAI TTS）
-- [ ] MediaAgent 集成
+### Phase 7：多媒体能力（框架已完成 ✅）
+- [x] ImageGenerator trait + 请求/响应类型
+- [x] VideoGenerator trait + 异步任务类型
+- [x] SpeechRecognizer trait（STT）
+- [x] SpeechSynthesizer trait（TTS）+ VoiceInfo
+- [x] MediaTask 异步任务管理类型
+- [ ] 图片生成后端实现（DALL-E / GPT-Image / Flux）
+- [ ] 视频生成后端实现（Sora / Kling）
+- [ ] 语音识别后端实现（OpenAI Whisper）
+- [ ] 语音合成后端实现（OpenAI TTS）
+- [ ] MediaAgent 集成到核心引擎
 - [ ] Connector 语音消息自动转文字
 
 ### Phase 8：生产化与完善

@@ -1,1 +1,5 @@
-// tiangong-media: 多媒体能力（空骨架）
+pub mod image;
+pub mod stt;
+pub mod task;
+pub mod tts;
+pub mod video;

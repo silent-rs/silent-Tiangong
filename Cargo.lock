@@ -2311,7 +2311,10 @@ name = "tiangong-media"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "tiangong-core",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]
