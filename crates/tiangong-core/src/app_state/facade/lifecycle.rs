@@ -1,3 +1,5 @@
+use crate::models_config::ModelsConfig;
+
 use super::super::*;
 
 impl TiangongState {
@@ -15,6 +17,13 @@ impl TiangongState {
             default_agent_config.clone(),
         );
 
+        // 加载新版 ModelsConfig，如果不存在但旧配置有效则自动迁移
+        let mut models_config = ModelsConfig::load();
+        if models_config.is_empty() && !default_model_config.api_auth_token.is_empty() {
+            models_config = ModelsConfig::from_legacy(&default_model_config);
+            let _ = models_config.save();
+        }
+
         let mut state = Self {
             store: AppStore {
                 session: SessionState {
@@ -25,6 +34,7 @@ impl TiangongState {
                 },
                 provider: ProviderState {
                     model_config: default_model_config.clone(),
+                    models_config,
                     settings_api_auth_token_draft: default_model_config.api_auth_token.clone(),
                     settings_api_base_url_draft: default_model_config.api_base_url.clone(),
                     settings_api_timeout_ms_draft: default_model_config.api_timeout_ms.clone(),

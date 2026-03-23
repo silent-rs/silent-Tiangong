@@ -3,12 +3,12 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
-import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Power, Loader2, Globe, Link, Image } from 'lucide-react';
+import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Power, Loader2, Globe, Link, Edit2 } from 'lucide-react';
 import { api } from '@/api/tauri';
-import type { ModelConfig, McpServer, Skill, ServerConfig, ConnectorInfo, MediaConfig } from '@/api/tauri';
+import type { ModelConfig, McpServer, Skill, ServerConfig, ConnectorInfo, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo } from '@/api/tauri';
 import { useToast } from './Toast';
 
-type TabType = 'llm' | 'mcp' | 'skill' | 'server' | 'connector' | 'media';
+type TabType = 'llm' | 'mcp' | 'skill' | 'server' | 'connector';
 
 export function SettingsDialog() {
   const [open, setOpen] = useState(false);
@@ -88,17 +88,6 @@ export function SettingsDialog() {
               <Link className="w-4 h-4 inline mr-2" />
               Connectors
             </button>
-            <button
-              className={`px-4 py-2 text-sm font-medium transition-colors ${
-                activeTab === 'media'
-                  ? 'text-[#10A37F] border-b-2 border-[#10A37F]'
-                  : 'text-[#CCCCCC] hover:text-white'
-              }`}
-              onClick={() => setActiveTab('media')}
-            >
-              <Image className="w-4 h-4 inline mr-2" />
-              多媒体
-            </button>
           </div>
 
           {/* 标签页内容 */}
@@ -108,7 +97,6 @@ export function SettingsDialog() {
             {activeTab === 'skill' && <SkillSettings />}
             {activeTab === 'server' && <ServerSettings />}
             {activeTab === 'connector' && <ConnectorSettings />}
-            {activeTab === 'media' && <MediaSettings />}
           </div>
         </DialogContent>
       </Dialog>
@@ -117,10 +105,699 @@ export function SettingsDialog() {
 }
 
 // ============================================================================
-// LLM 设置组件
+// LLM 设置组件（三层架构：Providers / Models / Routing）
 // ============================================================================
 
+type LLMSubTab = 'providers' | 'models' | 'routing' | 'legacy';
+
 function LLMSettings({ onClose }: { onClose: () => void }) {
+  const [subTab, setSubTab] = useState<LLMSubTab>('providers');
+  const [modelsConfig, setModelsConfig] = useState<ModelsConfigView>({
+    providers: {},
+    models: {},
+    routing: {},
+  });
+  const [originalConfig, setOriginalConfig] = useState<ModelsConfigView>({
+    providers: {},
+    models: {},
+    routing: {},
+  });
+  const [capabilities, setCapabilities] = useState<ModelCapabilityInfo[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const { showSuccess, showError } = useToast();
+
+  const loadConfig = async () => {
+    setIsLoading(true);
+    try {
+      const [cfg, caps] = await Promise.all([
+        api.getModelsConfig(),
+        api.getModelCapabilities(),
+      ]);
+      setModelsConfig(cfg);
+      setOriginalConfig(JSON.parse(JSON.stringify(cfg)));
+      setCapabilities(caps);
+    } catch (error) {
+      console.error('加载配置失败:', error);
+      showError('加载失败', '无法加载模型配置，请重试');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadConfig();
+  }, []);
+
+  const handleSave = async () => {
+    setIsSaving(true);
+    try {
+      await api.setModelsConfig(modelsConfig);
+      setOriginalConfig(JSON.parse(JSON.stringify(modelsConfig)));
+      showSuccess('保存成功', '模型配置已更新');
+    } catch (error) {
+      console.error('保存配置失败:', error);
+      showError('保存失败', '无法保存模型配置，请重试');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleCancel = () => {
+    setModelsConfig(JSON.parse(JSON.stringify(originalConfig)));
+    onClose();
+  };
+
+  const hasChanges = JSON.stringify(modelsConfig) !== JSON.stringify(originalConfig);
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-8">
+        <Loader2 className="w-6 h-6 animate-spin text-[#10A37F] mr-2" />
+        <span className="text-sm text-[#858585]">加载配置中...</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-4 space-y-4">
+      {/* 子标签页 */}
+      <div className="flex gap-2">
+        {(['providers', 'models', 'routing', 'legacy'] as LLMSubTab[]).map((tab) => (
+          <button
+            key={tab}
+            className={`px-3 py-1.5 text-xs rounded-md transition-colors ${
+              subTab === tab
+                ? 'bg-[#10A37F]/20 text-[#10A37F] border border-[#10A37F]/40'
+                : 'bg-[#1E1E1E] text-[#858585] hover:text-white border border-[#3C3C3C]'
+            }`}
+            onClick={() => setSubTab(tab)}
+          >
+            {tab === 'providers' && 'Providers'}
+            {tab === 'models' && 'Models'}
+            {tab === 'routing' && 'Routing'}
+            {tab === 'legacy' && '旧版配置'}
+          </button>
+        ))}
+      </div>
+
+      {/* 子区域内容 */}
+      {subTab === 'providers' && (
+        <ProvidersSection config={modelsConfig} onChange={setModelsConfig} />
+      )}
+      {subTab === 'models' && (
+        <ModelsSection config={modelsConfig} onChange={setModelsConfig} capabilities={capabilities} />
+      )}
+      {subTab === 'routing' && (
+        <RoutingSection config={modelsConfig} onChange={setModelsConfig} capabilities={capabilities} />
+      )}
+      {subTab === 'legacy' && (
+        <LegacyLLMSettings onClose={onClose} />
+      )}
+
+      {/* 保存/取消按钮（非旧版模式） */}
+      {subTab !== 'legacy' && (
+        <div className="flex justify-end gap-2 pt-4 border-t border-[#3C3C3C]">
+          <Button
+            variant="ghost"
+            className="text-[#CCCCCC] hover:text-white hover:bg-[#2A2D2E]"
+            onClick={handleCancel}
+            disabled={isSaving}
+          >
+            取消
+          </Button>
+          <Button
+            className="bg-[#10A37F] hover:bg-[#0D8A6A]"
+            onClick={handleSave}
+            disabled={isSaving || !hasChanges}
+          >
+            {isSaving ? (
+              <>
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                保存中...
+              </>
+            ) : (
+              '保存'
+            )}
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Providers 子区域
+// ---------------------------------------------------------------------------
+
+function ProvidersSection({
+  config,
+  onChange,
+}: {
+  config: ModelsConfigView;
+  onChange: (c: ModelsConfigView) => void;
+}) {
+  const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [showAdd, setShowAdd] = useState(false);
+  const [newKey, setNewKey] = useState('');
+  const [draft, setDraft] = useState<ProviderConfigView>({
+    base_url: '',
+    api_key: '',
+    timeout_ms: 60000,
+  });
+  const [showApiKey, setShowApiKey] = useState(false);
+
+  const providerKeys = Object.keys(config.providers);
+
+  const startEdit = (key: string) => {
+    setEditingKey(key);
+    setDraft({ ...config.providers[key] });
+    setShowApiKey(false);
+  };
+
+  const saveEdit = () => {
+    if (!editingKey) return;
+    const next = { ...config };
+    next.providers = { ...next.providers, [editingKey]: { ...draft } };
+    onChange(next);
+    setEditingKey(null);
+  };
+
+  const addProvider = () => {
+    if (!newKey.trim()) return;
+    const next = { ...config };
+    next.providers = { ...next.providers, [newKey.trim()]: { ...draft } };
+    onChange(next);
+    setShowAdd(false);
+    setNewKey('');
+    setDraft({ base_url: '', api_key: '', timeout_ms: 60000 });
+  };
+
+  const removeProvider = (key: string) => {
+    const next = { ...config };
+    const { [key]: _, ...rest } = next.providers;
+    next.providers = rest;
+    onChange(next);
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <h4 className="text-sm font-medium text-[#CCCCCC]">Providers (连接配置)</h4>
+        <Button
+          size="sm"
+          className="bg-[#10A37F] hover:bg-[#0D8A6A] text-xs h-7"
+          onClick={() => {
+            setShowAdd(true);
+            setDraft({ base_url: '', api_key: '', timeout_ms: 60000 });
+            setNewKey('');
+            setShowApiKey(false);
+          }}
+        >
+          <Plus className="w-3 h-3 mr-1" />
+          添加
+        </Button>
+      </div>
+
+      {providerKeys.length === 0 && !showAdd && (
+        <div className="text-center text-[#858585] py-6 text-sm">暂无 Provider 配置</div>
+      )}
+
+      <div className="space-y-2">
+        {providerKeys.map((key) => (
+          <div key={key} className="bg-[#1E1E1E] border border-[#3C3C3C] rounded-lg p-3">
+            {editingKey === key ? (
+              <ProviderForm
+                providerKey={key}
+                draft={draft}
+                setDraft={setDraft}
+                showApiKey={showApiKey}
+                setShowApiKey={setShowApiKey}
+                onSave={saveEdit}
+                onCancel={() => setEditingKey(null)}
+              />
+            ) : (
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="font-medium text-sm">{key}</span>
+                  <div className="text-xs text-[#858585] mt-1">
+                    {config.providers[key].base_url || '(未设置 URL)'}
+                  </div>
+                </div>
+                <div className="flex items-center gap-1">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="hover:bg-[#2A2D2E] h-7 w-7"
+                    onClick={() => startEdit(key)}
+                    title="编辑"
+                  >
+                    <Edit2 className="w-3.5 h-3.5 text-[#858585]" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="hover:bg-red-500/20 hover:text-red-400 h-7 w-7"
+                    onClick={() => removeProvider(key)}
+                    title="删除"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+
+        {/* 添加新 Provider */}
+        {showAdd && (
+          <div className="bg-[#1E1E1E] border border-[#10A37F]/40 rounded-lg p-3">
+            <div className="space-y-3">
+              <div>
+                <Label className="text-xs">Provider 名称</Label>
+                <Input
+                  value={newKey}
+                  onChange={(e) => setNewKey(e.target.value)}
+                  className="bg-[#252526] border-[#3C3C3C] text-white text-sm h-8"
+                  placeholder="例如: openai, anthropic"
+                />
+              </div>
+              <ProviderForm
+                draft={draft}
+                setDraft={setDraft}
+                showApiKey={showApiKey}
+                setShowApiKey={setShowApiKey}
+                onSave={addProvider}
+                onCancel={() => setShowAdd(false)}
+                saveLabel="添加"
+              />
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ProviderForm({
+  providerKey,
+  draft,
+  setDraft,
+  showApiKey,
+  setShowApiKey,
+  onSave,
+  onCancel,
+  saveLabel = '保存',
+}: {
+  providerKey?: string;
+  draft: ProviderConfigView;
+  setDraft: (d: ProviderConfigView) => void;
+  showApiKey: boolean;
+  setShowApiKey: (v: boolean) => void;
+  onSave: () => void;
+  onCancel: () => void;
+  saveLabel?: string;
+}) {
+  return (
+    <div className="space-y-2">
+      {providerKey && (
+        <div className="text-xs text-[#858585] mb-1">编辑: {providerKey}</div>
+      )}
+      <div>
+        <Label className="text-xs">Base URL</Label>
+        <Input
+          value={draft.base_url}
+          onChange={(e) => setDraft({ ...draft, base_url: e.target.value })}
+          className="bg-[#252526] border-[#3C3C3C] text-white text-sm h-8"
+          placeholder="https://api.openai.com/v1"
+        />
+      </div>
+      <div>
+        <Label className="text-xs">API Key</Label>
+        <div className="relative">
+          <Input
+            type={showApiKey ? 'text' : 'password'}
+            value={draft.api_key}
+            onChange={(e) => setDraft({ ...draft, api_key: e.target.value })}
+            className="bg-[#252526] border-[#3C3C3C] text-white text-sm h-8 pr-8"
+            placeholder="sk-... 或 ${ENV_VAR}"
+          />
+          <button
+            type="button"
+            onClick={() => setShowApiKey(!showApiKey)}
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-[#858585] hover:text-white"
+          >
+            {showApiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+          </button>
+        </div>
+        <p className="text-xs text-[#858585] mt-1">支持 {'${ENV_VAR}'} 引用环境变量</p>
+      </div>
+      <div>
+        <Label className="text-xs">超时 (毫秒)</Label>
+        <Input
+          type="number"
+          value={draft.timeout_ms}
+          onChange={(e) => setDraft({ ...draft, timeout_ms: parseInt(e.target.value) || 60000 })}
+          className="bg-[#252526] border-[#3C3C3C] text-white text-sm h-8"
+          placeholder="60000"
+        />
+      </div>
+      <div className="flex justify-end gap-2 pt-1">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="text-[#CCCCCC] hover:text-white hover:bg-[#2A2D2E] text-xs h-7"
+          onClick={onCancel}
+        >
+          取消
+        </Button>
+        <Button
+          size="sm"
+          className="bg-[#10A37F] hover:bg-[#0D8A6A] text-xs h-7"
+          onClick={onSave}
+        >
+          {saveLabel}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Models 子区域
+// ---------------------------------------------------------------------------
+
+function ModelsSection({
+  config,
+  onChange,
+  capabilities,
+}: {
+  config: ModelsConfigView;
+  onChange: (c: ModelsConfigView) => void;
+  capabilities: ModelCapabilityInfo[];
+}) {
+  const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [showAdd, setShowAdd] = useState(false);
+  const [newKey, setNewKey] = useState('');
+  const [draft, setDraft] = useState<ModelEntryView>({
+    provider: '',
+    model: '',
+    capabilities: [],
+    options: {},
+  });
+
+  const modelKeys = Object.keys(config.models);
+  const providerKeys = Object.keys(config.providers);
+
+  const startEdit = (key: string) => {
+    setEditingKey(key);
+    setDraft({ ...config.models[key] });
+  };
+
+  const saveEdit = () => {
+    if (!editingKey) return;
+    const next = { ...config };
+    next.models = { ...next.models, [editingKey]: { ...draft } };
+    onChange(next);
+    setEditingKey(null);
+  };
+
+  const addModel = () => {
+    if (!newKey.trim()) return;
+    const next = { ...config };
+    next.models = { ...next.models, [newKey.trim()]: { ...draft } };
+    onChange(next);
+    setShowAdd(false);
+    setNewKey('');
+    setDraft({ provider: '', model: '', capabilities: [], options: {} });
+  };
+
+  const removeModel = (key: string) => {
+    const next = { ...config };
+    const { [key]: _, ...rest } = next.models;
+    next.models = rest;
+    // 清理 routing 中引用此 model 的条目
+    const newRouting = { ...next.routing };
+    for (const [cap, modelName] of Object.entries(newRouting)) {
+      if (modelName === key) {
+        delete newRouting[cap];
+      }
+    }
+    next.routing = newRouting;
+    onChange(next);
+  };
+
+  const toggleCapability = (cap: string) => {
+    if (draft.capabilities.includes(cap)) {
+      setDraft({ ...draft, capabilities: draft.capabilities.filter((c) => c !== cap) });
+    } else {
+      setDraft({ ...draft, capabilities: [...draft.capabilities, cap] });
+    }
+  };
+
+  const renderModelForm = (onSave: () => void, onCancel: () => void, label = '保存') => (
+    <div className="space-y-2">
+      <div>
+        <Label className="text-xs">Provider</Label>
+        <select
+          value={draft.provider}
+          onChange={(e) => setDraft({ ...draft, provider: e.target.value })}
+          className="w-full bg-[#252526] border border-[#3C3C3C] text-white text-sm h-8 rounded px-2"
+        >
+          <option value="">-- 选择 Provider --</option>
+          {providerKeys.map((pk) => (
+            <option key={pk} value={pk}>{pk}</option>
+          ))}
+        </select>
+      </div>
+      <div>
+        <Label className="text-xs">模型名称</Label>
+        <Input
+          value={draft.model}
+          onChange={(e) => setDraft({ ...draft, model: e.target.value })}
+          className="bg-[#252526] border-[#3C3C3C] text-white text-sm h-8"
+          placeholder="gpt-4o, claude-3-opus, ..."
+        />
+      </div>
+      <div>
+        <Label className="text-xs">能力</Label>
+        <div className="flex flex-wrap gap-1.5 mt-1">
+          {capabilities.map((cap) => (
+            <button
+              key={cap.key}
+              className={`px-2 py-0.5 text-xs rounded border transition-colors ${
+                draft.capabilities.includes(cap.key)
+                  ? 'bg-[#10A37F]/20 text-[#10A37F] border-[#10A37F]/40'
+                  : 'bg-[#1E1E1E] text-[#858585] border-[#3C3C3C] hover:text-white'
+              }`}
+              onClick={() => toggleCapability(cap.key)}
+            >
+              {cap.display_name}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="flex justify-end gap-2 pt-1">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="text-[#CCCCCC] hover:text-white hover:bg-[#2A2D2E] text-xs h-7"
+          onClick={onCancel}
+        >
+          取消
+        </Button>
+        <Button
+          size="sm"
+          className="bg-[#10A37F] hover:bg-[#0D8A6A] text-xs h-7"
+          onClick={onSave}
+          disabled={!draft.provider || !draft.model}
+        >
+          {label}
+        </Button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <h4 className="text-sm font-medium text-[#CCCCCC]">Models (模型定义)</h4>
+        <Button
+          size="sm"
+          className="bg-[#10A37F] hover:bg-[#0D8A6A] text-xs h-7"
+          onClick={() => {
+            setShowAdd(true);
+            setDraft({ provider: providerKeys[0] || '', model: '', capabilities: [], options: {} });
+            setNewKey('');
+          }}
+        >
+          <Plus className="w-3 h-3 mr-1" />
+          添加
+        </Button>
+      </div>
+
+      {modelKeys.length === 0 && !showAdd && (
+        <div className="text-center text-[#858585] py-6 text-sm">暂无模型定义</div>
+      )}
+
+      <div className="space-y-2">
+        {modelKeys.map((key) => {
+          const m = config.models[key];
+          return (
+            <div key={key} className="bg-[#1E1E1E] border border-[#3C3C3C] rounded-lg p-3">
+              {editingKey === key ? (
+                renderModelForm(saveEdit, () => setEditingKey(null))
+              ) : (
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-sm">{key}</span>
+                      <span className="text-xs text-[#858585]">({m.provider})</span>
+                    </div>
+                    <div className="text-xs text-[#858585] mt-1">{m.model}</div>
+                    <div className="flex gap-1 mt-1">
+                      {m.capabilities.map((cap) => {
+                        const capInfo = capabilities.find((c) => c.key === cap);
+                        return (
+                          <span
+                            key={cap}
+                            className="px-1.5 py-0.5 text-xs rounded bg-[#10A37F]/10 text-[#10A37F]"
+                          >
+                            {capInfo?.display_name || cap}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="hover:bg-[#2A2D2E] h-7 w-7"
+                      onClick={() => startEdit(key)}
+                      title="编辑"
+                    >
+                      <Edit2 className="w-3.5 h-3.5 text-[#858585]" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="hover:bg-red-500/20 hover:text-red-400 h-7 w-7"
+                      onClick={() => removeModel(key)}
+                      title="删除"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {showAdd && (
+          <div className="bg-[#1E1E1E] border border-[#10A37F]/40 rounded-lg p-3">
+            <div className="space-y-3">
+              <div>
+                <Label className="text-xs">模型标识名 (唯一 key)</Label>
+                <Input
+                  value={newKey}
+                  onChange={(e) => setNewKey(e.target.value)}
+                  className="bg-[#252526] border-[#3C3C3C] text-white text-sm h-8"
+                  placeholder="例如: gpt-4o-chat"
+                />
+              </div>
+              {renderModelForm(addModel, () => setShowAdd(false), '添加')}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Routing 子区域
+// ---------------------------------------------------------------------------
+
+function RoutingSection({
+  config,
+  onChange,
+  capabilities,
+}: {
+  config: ModelsConfigView;
+  onChange: (c: ModelsConfigView) => void;
+  capabilities: ModelCapabilityInfo[];
+}) {
+  const modelKeys = Object.keys(config.models);
+
+  const setRoute = (capKey: string, modelName: string) => {
+    const next = { ...config };
+    const newRouting = { ...next.routing };
+    if (modelName === '') {
+      delete newRouting[capKey];
+    } else {
+      newRouting[capKey] = modelName;
+    }
+    next.routing = newRouting;
+    onChange(next);
+  };
+
+  return (
+    <div>
+      <div className="mb-3">
+        <h4 className="text-sm font-medium text-[#CCCCCC]">Routing (能力路由)</h4>
+        <p className="text-xs text-[#858585] mt-1">
+          为每种能力选择对应的模型，多媒体（图片/视频/STT/TTS）也通过此处配置
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        {capabilities.map((cap) => (
+          <div
+            key={cap.key}
+            className="bg-[#1E1E1E] border border-[#3C3C3C] rounded-lg p-3 flex items-center justify-between"
+          >
+            <div className="flex-1">
+              <span className="text-sm font-medium">{cap.display_name}</span>
+              <span className="text-xs text-[#858585] ml-2">({cap.key})</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <select
+                value={config.routing[cap.key] || ''}
+                onChange={(e) => setRoute(cap.key, e.target.value)}
+                className="bg-[#252526] border border-[#3C3C3C] text-white text-sm h-8 rounded px-2 min-w-[180px]"
+              >
+                <option value="">-- 未配置 --</option>
+                {modelKeys
+                  .filter((mk) => {
+                    // 只显示声明了对应能力的模型，或者如果没有声明任何能力则也显示
+                    const m = config.models[mk];
+                    return m.capabilities.length === 0 || m.capabilities.includes(cap.key);
+                  })
+                  .map((mk) => (
+                    <option key={mk} value={mk}>{mk}</option>
+                  ))}
+              </select>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {modelKeys.length === 0 && (
+        <p className="text-xs text-[#858585] mt-3">
+          请先在 Models 标签页中添加模型定义，然后回来配置路由
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 旧版 LLM 配置（向后兼容）
+// ---------------------------------------------------------------------------
+
+function LegacyLLMSettings({ onClose }: { onClose: () => void }) {
   const [showToken, setShowToken] = useState(false);
   const [config, setConfig] = useState<ModelConfig>({
     api_auth_token: '',
@@ -181,7 +858,11 @@ function LLMSettings({ onClose }: { onClose: () => void }) {
   );
 
   return (
-    <div className="space-y-4 p-4">
+    <div className="space-y-4">
+      <p className="text-xs text-[#858585] bg-[#1E1E1E] p-2 rounded border border-[#3C3C3C]">
+        旧版单 Provider 配置，用于向后兼容。建议迁移到 Providers / Models / Routing 三层架构。
+      </p>
+
       {isLoading && (
         <div className="flex items-center justify-center py-8">
           <Loader2 className="w-6 h-6 animate-spin text-[#10A37F] mr-2" />
@@ -191,7 +872,6 @@ function LLMSettings({ onClose }: { onClose: () => void }) {
 
       {!isLoading && (
         <>
-          {/* API Auth Token */}
           <div className="space-y-2">
             <Label htmlFor="token">API Token</Label>
             <div className="relative">
@@ -214,7 +894,6 @@ function LLMSettings({ onClose }: { onClose: () => void }) {
             </div>
           </div>
 
-          {/* API Base URL */}
           <div className="space-y-2">
             <Label htmlFor="baseUrl">Base URL</Label>
             <Input
@@ -227,7 +906,6 @@ function LLMSettings({ onClose }: { onClose: () => void }) {
             />
           </div>
 
-          {/* API Timeout */}
           <div className="space-y-2">
             <Label htmlFor="timeout">超时时间 (毫秒)</Label>
             <Input
@@ -241,7 +919,6 @@ function LLMSettings({ onClose }: { onClose: () => void }) {
             />
           </div>
 
-          {/* API Model */}
           <div className="space-y-2">
             <Label htmlFor="model">模型名称</Label>
             <Input
@@ -254,7 +931,6 @@ function LLMSettings({ onClose }: { onClose: () => void }) {
             />
           </div>
 
-          {/* 按钮 */}
           <div className="flex justify-end gap-2 pt-4">
             <Button
               variant="ghost"
@@ -281,7 +957,6 @@ function LLMSettings({ onClose }: { onClose: () => void }) {
           </div>
         </>
       )}
-
     </div>
   );
 }
@@ -903,95 +1578,6 @@ function ConnectorSettings() {
               </div>
             </div>
           ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ============================================================================
-// 多媒体设置组件
-// ============================================================================
-
-function MediaSettings() {
-  const [config, setConfig] = useState<MediaConfig>({
-    image_api_configured: false,
-    stt_api_configured: false,
-    tts_api_configured: false,
-  });
-  const [isLoading, setIsLoading] = useState(false);
-  const { showError } = useToast();
-
-  const loadConfig = async () => {
-    setIsLoading(true);
-    try {
-      const cfg = await api.getMediaConfig();
-      setConfig(cfg);
-    } catch (error) {
-      console.error('加载多媒体配置失败:', error);
-      showError('加载失败', '无法加载多媒体配置');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadConfig();
-  }, []);
-
-  const StatusBadge = ({ configured }: { configured: boolean }) => (
-    <span className={`px-2 py-0.5 text-xs rounded ${
-      configured
-        ? 'bg-[#10A37F]/20 text-[#10A37F]'
-        : 'bg-[#3C3C3C] text-[#858585]'
-    }`}>
-      {configured ? '已配置' : '未配置'}
-    </span>
-  );
-
-  return (
-    <div className="p-4">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-lg font-medium">多媒体能力</h3>
-      </div>
-
-      {isLoading ? (
-        <div className="text-center text-[#858585] py-8">加载中...</div>
-      ) : (
-        <div className="space-y-3">
-          <div className="bg-[#1E1E1E] border border-[#3C3C3C] rounded-lg p-4 flex items-center justify-between">
-            <div>
-              <div className="font-medium">图片生成</div>
-              <div className="text-sm text-[#858585] mt-1">
-                支持 DALL-E / GPT-Image 等图片生成后端
-              </div>
-            </div>
-            <StatusBadge configured={config.image_api_configured} />
-          </div>
-
-          <div className="bg-[#1E1E1E] border border-[#3C3C3C] rounded-lg p-4 flex items-center justify-between">
-            <div>
-              <div className="font-medium">语音识别 (STT)</div>
-              <div className="text-sm text-[#858585] mt-1">
-                支持 OpenAI Whisper 等语音识别后端
-              </div>
-            </div>
-            <StatusBadge configured={config.stt_api_configured} />
-          </div>
-
-          <div className="bg-[#1E1E1E] border border-[#3C3C3C] rounded-lg p-4 flex items-center justify-between">
-            <div>
-              <div className="font-medium">语音合成 (TTS)</div>
-              <div className="text-sm text-[#858585] mt-1">
-                支持 OpenAI TTS 等语音合成后端
-              </div>
-            </div>
-            <StatusBadge configured={config.tts_api_configured} />
-          </div>
-
-          <p className="text-xs text-[#858585] mt-4">
-            多媒体 API Key 通过环境变量（TIANGONG_IMAGE_API_KEY / TIANGONG_STT_API_KEY / TIANGONG_TTS_API_KEY）或 ~/.tiangong/media.json 配置文件设置。
-          </p>
         </div>
       )}
     </div>

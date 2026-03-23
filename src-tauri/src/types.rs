@@ -299,3 +299,153 @@ pub struct MediaConfigView {
     pub stt_api_configured: bool,
     pub tts_api_configured: bool,
 }
+
+// ============================================================================
+// 新版模型配置类型（Provider + Model + Routing 三层架构）
+// ============================================================================
+
+/// 模型能力（前端使用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelCapabilityInfo {
+    pub key: String,
+    pub display_name: String,
+}
+
+/// Provider 连接配置（前端使用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderConfigView {
+    pub base_url: String,
+    pub api_key: String,
+    pub timeout_ms: u64,
+}
+
+/// 单个模型配置（前端使用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelEntryView {
+    pub provider: String,
+    pub model: String,
+    pub capabilities: Vec<String>,
+    pub options: serde_json::Value,
+}
+
+/// 完整的三层模型配置（前端使用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelsConfigView {
+    pub providers: HashMap<String, ProviderConfigView>,
+    pub models: HashMap<String, ModelEntryView>,
+    pub routing: HashMap<String, String>,
+}
+
+impl ModelsConfigView {
+    pub fn from_core(config: &tiangong_core::models_config::ModelsConfig) -> Self {
+        let providers = config
+            .providers
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    ProviderConfigView {
+                        base_url: v.base_url.clone(),
+                        api_key: v.api_key.clone(),
+                        timeout_ms: v.timeout_ms,
+                    },
+                )
+            })
+            .collect();
+
+        let models = config
+            .models
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    ModelEntryView {
+                        provider: v.provider.clone(),
+                        model: v.model.clone(),
+                        capabilities: v
+                            .capabilities
+                            .iter()
+                            .map(|c| serde_json::to_value(c).unwrap_or_default())
+                            .map(|v| v.as_str().unwrap_or_default().to_string())
+                            .collect(),
+                        options: v.options.clone(),
+                    },
+                )
+            })
+            .collect();
+
+        let routing = config
+            .routing
+            .iter()
+            .map(|(k, v)| {
+                let key = serde_json::to_value(k).unwrap_or_default();
+                (key.as_str().unwrap_or_default().to_string(), v.clone())
+            })
+            .collect();
+
+        Self {
+            providers,
+            models,
+            routing,
+        }
+    }
+
+    pub fn to_core(&self) -> tiangong_core::models_config::ModelsConfig {
+        use tiangong_core::models_config::{ModelCapability, ModelEntry, ModelsConfig, ProviderConfig};
+
+        let providers = self
+            .providers
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    ProviderConfig {
+                        base_url: v.base_url.clone(),
+                        api_key: v.api_key.clone(),
+                        timeout_ms: v.timeout_ms,
+                    },
+                )
+            })
+            .collect();
+
+        let models = self
+            .models
+            .iter()
+            .map(|(k, v)| {
+                let capabilities: Vec<ModelCapability> = v
+                    .capabilities
+                    .iter()
+                    .filter_map(|c| {
+                        let json_str = format!("\"{}\"", c);
+                        serde_json::from_str(&json_str).ok()
+                    })
+                    .collect();
+                (
+                    k.clone(),
+                    ModelEntry {
+                        provider: v.provider.clone(),
+                        model: v.model.clone(),
+                        capabilities,
+                        options: v.options.clone(),
+                    },
+                )
+            })
+            .collect();
+
+        let routing = self
+            .routing
+            .iter()
+            .filter_map(|(k, v)| {
+                let json_str = format!("\"{}\"", k);
+                let cap: ModelCapability = serde_json::from_str(&json_str).ok()?;
+                Some((cap, v.clone()))
+            })
+            .collect();
+
+        ModelsConfig {
+            providers,
+            models,
+            routing,
+        }
+    }
+}

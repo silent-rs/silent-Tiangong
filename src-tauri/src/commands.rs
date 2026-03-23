@@ -444,6 +444,48 @@ pub fn set_connector_enabled(name: String, enabled: bool) -> Result<String, Stri
 }
 
 // ============================================================================
+// 新版模型配置（Provider + Model + Routing 三层架构）
+// ============================================================================
+
+/// 获取新版模型配置
+#[tauri::command]
+pub fn get_models_config(state: State<TiangongApp>) -> Result<ModelsConfigView, String> {
+    state.with_state_read(|core_state| {
+        Ok(ModelsConfigView::from_core(core_state.models_config()))
+    })
+}
+
+/// 设置新版模型配置
+#[tauri::command]
+pub fn set_models_config(
+    config: ModelsConfigView,
+    state: State<TiangongApp>,
+) -> Result<(), String> {
+    state.with_state(|core_state| {
+        let core_config = config.to_core();
+        core_state.update_models_config(core_config)
+    })
+}
+
+/// 获取所有可用的模型能力列表
+#[tauri::command]
+pub fn get_model_capabilities() -> Result<Vec<ModelCapabilityInfo>, String> {
+    use tiangong_core::models_config::ModelCapability;
+
+    let caps = ModelCapability::all()
+        .iter()
+        .map(|c| {
+            let key = serde_json::to_value(c).unwrap_or_default();
+            ModelCapabilityInfo {
+                key: key.as_str().unwrap_or_default().to_string(),
+                display_name: c.display_name().to_string(),
+            }
+        })
+        .collect();
+    Ok(caps)
+}
+
+// ============================================================================
 // 多媒体配置
 // ============================================================================
 

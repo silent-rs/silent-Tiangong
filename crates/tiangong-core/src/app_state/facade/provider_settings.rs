@@ -135,6 +135,16 @@ impl TiangongState {
             self.store.provider.model_config.api_model.clone();
     }
 
+    /// 更新新版 ModelsConfig 并持久化到 models.json
+    pub fn update_models_config(
+        &mut self,
+        new_config: crate::models_config::ModelsConfig,
+    ) -> Result<()> {
+        new_config.save()?;
+        self.store.provider.models_config = new_config;
+        Ok(())
+    }
+
     pub fn save_provider_settings(&mut self) -> Result<()> {
         let api_auth_token = self.store.provider.settings_api_auth_token_draft.trim();
         let api_base_url = self.store.provider.settings_api_base_url_draft.trim();

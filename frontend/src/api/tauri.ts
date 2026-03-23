@@ -107,6 +107,32 @@ export interface MediaConfig {
   tts_api_configured: boolean;
 }
 
+// 新版模型配置（Provider + Model + Routing 三层架构）
+
+export interface ProviderConfigView {
+  base_url: string;
+  api_key: string;
+  timeout_ms: number;
+}
+
+export interface ModelEntryView {
+  provider: string;
+  model: string;
+  capabilities: string[];
+  options: Record<string, unknown>;
+}
+
+export interface ModelsConfigView {
+  providers: Record<string, ProviderConfigView>;
+  models: Record<string, ModelEntryView>;
+  routing: Record<string, string>;
+}
+
+export interface ModelCapabilityInfo {
+  key: string;
+  display_name: string;
+}
+
 // ============================================================================
 // API 方法
 // ============================================================================
@@ -212,6 +238,18 @@ export const api = {
 
   setConnectorEnabled: (name: string, enabled: boolean): Promise<string> =>
     invoke('set_connector_enabled', { name, enabled }),
+
+  // ----------------------------------------------------------------
+  // 新版模型配置（Provider + Model + Routing）
+  // ----------------------------------------------------------------
+  getModelsConfig: (): Promise<ModelsConfigView> =>
+    invoke('get_models_config'),
+
+  setModelsConfig: (config: ModelsConfigView): Promise<void> =>
+    invoke('set_models_config', { config }),
+
+  getModelCapabilities: (): Promise<ModelCapabilityInfo[]> =>
+    invoke('get_model_capabilities'),
 
   // ----------------------------------------------------------------
   // 多媒体配置

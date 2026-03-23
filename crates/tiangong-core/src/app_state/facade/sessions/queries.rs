@@ -40,6 +40,10 @@ impl TiangongState {
         &self.store.provider.model_config
     }
 
+    pub fn models_config(&self) -> &crate::models_config::ModelsConfig {
+        &self.store.provider.models_config
+    }
+
     pub fn settings_api_auth_token_draft(&self) -> &str {
         &self.store.provider.settings_api_auth_token_draft
     }
