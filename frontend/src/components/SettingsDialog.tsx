@@ -5,7 +5,7 @@ import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Power, Loader2, Globe, Link, Edit2 } from 'lucide-react';
 import { api } from '@/api/tauri';
-import type { ModelConfig, McpServer, Skill, ServerConfig, ConnectorInfo, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo } from '@/api/tauri';
+import type { McpServer, Skill, ServerConfig, ConnectorInfo, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo } from '@/api/tauri';
 import { useToast } from './Toast';
 
 type TabType = 'llm' | 'mcp' | 'skill' | 'server' | 'connector';
@@ -108,7 +108,7 @@ export function SettingsDialog() {
 // LLM 设置组件（三层架构：Providers / Models / Routing）
 // ============================================================================
 
-type LLMSubTab = 'providers' | 'models' | 'routing' | 'legacy';
+type LLMSubTab = 'providers' | 'models' | 'routing';
 
 function LLMSettings({ onClose }: { onClose: () => void }) {
   const [subTab, setSubTab] = useState<LLMSubTab>('providers');
@@ -183,7 +183,7 @@ function LLMSettings({ onClose }: { onClose: () => void }) {
     <div className="p-4 space-y-4">
       {/* 子标签页 */}
       <div className="flex gap-2">
-        {(['providers', 'models', 'routing', 'legacy'] as LLMSubTab[]).map((tab) => (
+        {(['providers', 'models', 'routing'] as LLMSubTab[]).map((tab) => (
           <button
             key={tab}
             className={`px-3 py-1.5 text-xs rounded-md transition-colors ${
@@ -196,7 +196,6 @@ function LLMSettings({ onClose }: { onClose: () => void }) {
             {tab === 'providers' && 'Providers'}
             {tab === 'models' && 'Models'}
             {tab === 'routing' && 'Routing'}
-            {tab === 'legacy' && '旧版配置'}
           </button>
         ))}
       </div>
@@ -211,13 +210,9 @@ function LLMSettings({ onClose }: { onClose: () => void }) {
       {subTab === 'routing' && (
         <RoutingSection config={modelsConfig} onChange={setModelsConfig} capabilities={capabilities} />
       )}
-      {subTab === 'legacy' && (
-        <LegacyLLMSettings onClose={onClose} />
-      )}
 
-      {/* 保存/取消按钮（非旧版模式） */}
-      {subTab !== 'legacy' && (
-        <div className="flex justify-end gap-2 pt-4 border-t border-[#3C3C3C]">
+      {/* 保存/取消按钮 */}
+      <div className="flex justify-end gap-2 pt-4 border-t border-[#3C3C3C]">
           <Button
             variant="ghost"
             className="text-[#CCCCCC] hover:text-white hover:bg-[#2A2D2E]"
@@ -241,7 +236,6 @@ function LLMSettings({ onClose }: { onClose: () => void }) {
             )}
           </Button>
         </div>
-      )}
     </div>
   );
 }
@@ -788,174 +782,6 @@ function RoutingSection({
         <p className="text-xs text-[#858585] mt-3">
           请先在 Models 标签页中添加模型定义，然后回来配置路由
         </p>
-      )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// 旧版 LLM 配置（向后兼容）
-// ---------------------------------------------------------------------------
-
-function LegacyLLMSettings({ onClose }: { onClose: () => void }) {
-  const [showToken, setShowToken] = useState(false);
-  const [config, setConfig] = useState<ModelConfig>({
-    api_auth_token: '',
-    api_base_url: '',
-    api_timeout_ms: '',
-    api_model: '',
-  });
-  const [originalConfig, setOriginalConfig] = useState<ModelConfig>({ ...config });
-  const [isSaving, setIsSaving] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const { showSuccess, showError } = useToast();
-
-  const loadConfig = async () => {
-    setIsLoading(true);
-    try {
-      const cfg = await api.get_model_config();
-      setConfig(cfg);
-      setOriginalConfig(cfg);
-    } catch (error) {
-      console.error('加载配置失败:', error);
-      showError('加载失败', '无法加载 LLM 配置，请重试');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadConfig();
-  }, []);
-
-  const handleSave = async () => {
-    setIsSaving(true);
-    try {
-      await api.set_model_config(
-        config.api_auth_token || undefined,
-        config.api_base_url || undefined,
-        config.api_timeout_ms || undefined,
-        config.api_model || undefined,
-      );
-      setOriginalConfig({ ...config });
-      showSuccess('保存成功', 'LLM 配置已更新');
-      onClose();
-    } catch (error) {
-      console.error('保存配置失败:', error);
-      showError('保存失败', '无法保存 LLM 配置，请重试');
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const handleCancel = () => {
-    setConfig({ ...originalConfig });
-    onClose();
-  };
-
-  const hasChanges = Object.keys(config).some(
-    key => config[key as keyof typeof config] !== originalConfig[key as keyof typeof originalConfig]
-  );
-
-  return (
-    <div className="space-y-4">
-      <p className="text-xs text-[#858585] bg-[#1E1E1E] p-2 rounded border border-[#3C3C3C]">
-        旧版单 Provider 配置，用于向后兼容。建议迁移到 Providers / Models / Routing 三层架构。
-      </p>
-
-      {isLoading && (
-        <div className="flex items-center justify-center py-8">
-          <Loader2 className="w-6 h-6 animate-spin text-[#10A37F] mr-2" />
-          <span className="text-sm text-[#858585]">加载配置中...</span>
-        </div>
-      )}
-
-      {!isLoading && (
-        <>
-          <div className="space-y-2">
-            <Label htmlFor="token">API Token</Label>
-            <div className="relative">
-              <Input
-                id="token"
-                type={showToken ? 'text' : 'password'}
-                value={config.api_auth_token}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setConfig({ ...config, api_auth_token: e.target.value })}
-                className="bg-[#1E1E1E] border-[#3C3C3C] text-white pr-10"
-                placeholder="sk-..."
-                disabled={isSaving}
-              />
-              <button
-                type="button"
-                onClick={() => setShowToken(!showToken)}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-[#858585] hover:text-white"
-              >
-                {showToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-              </button>
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="baseUrl">Base URL</Label>
-            <Input
-              id="baseUrl"
-              value={config.api_base_url}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setConfig({ ...config, api_base_url: e.target.value })}
-              className="bg-[#1E1E1E] border-[#3C3C3C] text-white"
-              placeholder="https://api.openai.com/v1"
-              disabled={isSaving}
-            />
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="timeout">超时时间 (毫秒)</Label>
-            <Input
-              id="timeout"
-              type="number"
-              value={config.api_timeout_ms}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setConfig({ ...config, api_timeout_ms: e.target.value })}
-              className="bg-[#1E1E1E] border-[#3C3C3C] text-white"
-              placeholder="60000"
-              disabled={isSaving}
-            />
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="model">模型名称</Label>
-            <Input
-              id="model"
-              value={config.api_model}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setConfig({ ...config, api_model: e.target.value })}
-              className="bg-[#1E1E1E] border-[#3C3C3C] text-white"
-              placeholder="gpt-4"
-              disabled={isSaving}
-            />
-          </div>
-
-          <div className="flex justify-end gap-2 pt-4">
-            <Button
-              variant="ghost"
-              className="text-[#CCCCCC] hover:text-white hover:bg-[#2A2D2E]"
-              onClick={handleCancel}
-              disabled={isSaving}
-            >
-              取消
-            </Button>
-            <Button
-              className="bg-[#10A37F] hover:bg-[#0D8A6A]"
-              onClick={handleSave}
-              disabled={isSaving || !hasChanges}
-            >
-              {isSaving ? (
-                <>
-                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                  保存中...
-                </>
-              ) : (
-                '保存'
-              )}
-            </Button>
-          </div>
-        </>
       )}
     </div>
   );

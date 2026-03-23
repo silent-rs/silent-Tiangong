@@ -27,8 +27,7 @@ impl AppRepository {
 
         let payload = PersistedAppState {
             active_session_id: store.session.active_session_id.clone(),
-            model_config: Some(store.provider.model_config.clone()),
-            model_list: store.provider.settings_model_list.clone(),
+            model_list: store.provider.model_list.clone(),
             agent_config: None,
         };
         let content = serde_json::to_string_pretty(&payload).context("序列化应用存储失败")?;
@@ -70,8 +69,7 @@ impl AppRepository {
 
         let payload = PersistedAppState {
             active_session_id: store.session.active_session_id.clone(),
-            model_config: Some(store.provider.model_config.clone()),
-            model_list: store.provider.settings_model_list.clone(),
+            model_list: store.provider.model_list.clone(),
             agent_config: None,
         };
         let content = serde_json::to_string_pretty(&payload).context("序列化应用存储失败")?;

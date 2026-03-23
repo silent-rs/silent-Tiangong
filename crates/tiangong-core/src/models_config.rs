@@ -147,8 +147,8 @@ impl ModelsConfig {
             fs::create_dir_all(parent)
                 .with_context(|| format!("创建目录失败：{}", parent.display()))?;
         }
-        let content = serde_json::to_string_pretty(self)
-            .with_context(|| "序列化 ModelsConfig 失败")?;
+        let content =
+            serde_json::to_string_pretty(self).with_context(|| "序列化 ModelsConfig 失败")?;
         fs::write(&path, content)
             .with_context(|| format!("写入 models.json 失败：{}", path.display()))?;
         Ok(())
@@ -244,5 +244,20 @@ impl ModelsConfig {
     /// 检查配置是否为空（无 provider 也无 model）
     pub fn is_empty(&self) -> bool {
         self.providers.is_empty() && self.models.is_empty()
+    }
+
+    /// 从 chat routing 生成 ModelProviderConfig（内部用于构建 SingleProviderClient）
+    pub fn to_chat_provider_config(&self) -> ModelProviderConfig {
+        if let Some(resolved) = self.resolve_for_capability(ModelCapability::Chat) {
+            ModelProviderConfig {
+                api_auth_token: resolved.api_key,
+                api_base_url: resolved.base_url,
+                api_timeout_ms: resolved.timeout_ms.to_string(),
+                api_model: resolved.model,
+                api_lite_model: String::new(),
+            }
+        } else {
+            ModelProviderConfig::from_env()
+        }
     }
 }

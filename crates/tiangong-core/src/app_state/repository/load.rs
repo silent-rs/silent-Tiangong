@@ -19,7 +19,6 @@ impl AppRepository {
             return Ok(Some(LoadedState {
                 sessions,
                 active_session_id: session_ids.first().cloned().unwrap_or_default(),
-                model_config: None,
                 model_list: Vec::new(),
                 agent_config,
             }));
@@ -53,7 +52,6 @@ impl AppRepository {
         Ok(Some(LoadedState {
             sessions,
             active_session_id,
-            model_config: persisted.model_config,
             model_list: persisted.model_list,
             agent_config,
         }))
@@ -73,7 +71,6 @@ impl AppRepository {
         Ok(Some(LoadedState {
             sessions: persisted.sessions,
             active_session_id: persisted.active_session_id,
-            model_config: persisted.model_config,
             model_list: persisted.model_list,
             agent_config: None,
         }))

@@ -30,18 +30,14 @@ fn main() {
             tiangong_app::commands::install_skill,
             tiangong_app::commands::remove_skill,
             tiangong_app::commands::set_skill_enabled,
-            tiangong_app::commands::get_model_config,
-            tiangong_app::commands::set_model_config,
-            tiangong_app::commands::get_model_list,
-            tiangong_app::commands::get_providers,
             tiangong_app::commands::get_server_config,
             tiangong_app::commands::set_server_config,
             tiangong_app::commands::get_connectors,
             tiangong_app::commands::set_connector_enabled,
-            tiangong_app::commands::get_media_config,
             tiangong_app::commands::get_models_config,
             tiangong_app::commands::set_models_config,
             tiangong_app::commands::get_model_capabilities,
+            tiangong_app::commands::get_model_list,
         ])
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())

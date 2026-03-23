@@ -2,8 +2,10 @@ use super::super::*;
 
 impl TiangongState {
     pub(in crate::app_state) fn rebuild_runtime_from_current_config(&mut self) {
+        let config = self.store.provider.models_config.to_chat_provider_config();
+        self.store.provider.model_config = config.clone();
         self.services.runtime = RuntimeEngine::new(
-            SingleProviderClient::new(self.store.provider.model_config.clone()),
+            SingleProviderClient::new(config),
             DEFAULT_CONTEXT_LIMIT,
             self.store.agent.agent_config.clone(),
         );

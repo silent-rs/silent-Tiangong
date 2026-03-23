@@ -257,88 +257,6 @@ pub fn set_skill_enabled(
 }
 
 // ============================================================================
-// 模型提供者
-// ============================================================================
-
-/// 获取模型配置
-#[tauri::command]
-pub fn get_model_config(state: State<TiangongApp>) -> Result<ModelConfig, String> {
-    state.with_state_read(|core_state| {
-        let config = core_state.model_config();
-        Ok(ModelConfig {
-            api_auth_token: config.api_auth_token.clone(),
-            api_base_url: config.api_base_url.clone(),
-            api_timeout_ms: config.api_timeout_ms.clone(),
-            api_model: config.api_model.clone(),
-        })
-    })
-}
-
-/// 设置模型配置
-#[tauri::command]
-pub fn set_model_config(
-    api_auth_token: Option<String>,
-    api_base_url: Option<String>,
-    api_timeout_ms: Option<String>,
-    api_model: Option<String>,
-    state: State<TiangongApp>,
-) -> Result<(), String> {
-    state.with_state(|core_state| {
-        // 更新各个配置项
-        if let Some(token) = api_auth_token {
-            core_state.update_settings_api_auth_token_draft(token);
-        }
-        if let Some(base_url) = api_base_url {
-            core_state.update_settings_api_base_url_draft(base_url);
-        }
-        if let Some(timeout) = api_timeout_ms {
-            core_state.update_settings_api_timeout_ms_draft(timeout);
-        }
-        if let Some(model) = api_model {
-            core_state.update_settings_api_model_draft(model);
-        }
-
-        // 保存配置
-        core_state.save_provider_settings()
-    })
-}
-
-/// 获取模型列表
-#[tauri::command]
-pub fn get_model_list(state: State<TiangongApp>) -> Result<Vec<String>, String> {
-    state.with_state_read(|core_state| Ok(core_state.model_list().to_vec()))
-}
-
-/// 获取提供者列表（简化版，返回当前配置的提供者）
-#[tauri::command]
-pub fn get_providers(state: State<TiangongApp>) -> Result<Vec<Provider>, String> {
-    state.with_state_read(|core_state| {
-        let config = core_state.model_config();
-        let models = core_state.model_list().to_vec();
-
-        let provider = Provider {
-            id: "default".to_string(),
-            name: core_state.provider_label(),
-            base_url: if config.api_base_url.is_empty() {
-                None
-            } else {
-                Some(config.api_base_url.clone())
-            },
-            models: models
-                .into_iter()
-                .map(|name| Model {
-                    id: name.clone(),
-                    name,
-                    provider_id: "default".to_string(),
-                })
-                .collect(),
-        };
-
-        Ok(vec![provider])
-    })
-}
-
-// ============================================================================
 // Server 管理
 // ============================================================================
 
@@ -444,10 +362,10 @@ pub fn set_connector_enabled(name: String, enabled: bool) -> Result<String, Stri
 }
 
 // ============================================================================
-// 新版模型配置（Provider + Model + Routing 三层架构）
+// 模型配置（Provider + Model + Routing 三层架构）
 // ============================================================================
 
-/// 获取新版模型配置
+/// 获取模型配置
 #[tauri::command]
 pub fn get_models_config(state: State<TiangongApp>) -> Result<ModelsConfigView, String> {
     state.with_state_read(|core_state| {
@@ -455,7 +373,7 @@ pub fn get_models_config(state: State<TiangongApp>) -> Result<ModelsConfigView, 
     })
 }
 
-/// 设置新版模型配置
+/// 设置模型配置
 #[tauri::command]
 pub fn set_models_config(
     config: ModelsConfigView,
@@ -463,7 +381,7 @@ pub fn set_models_config(
 ) -> Result<(), String> {
     state.with_state(|core_state| {
         let core_config = config.to_core();
-        core_state.update_models_config(core_config)
+        core_state.save_models_config(core_config)
     })
 }
 
@@ -485,52 +403,8 @@ pub fn get_model_capabilities() -> Result<Vec<ModelCapabilityInfo>, String> {
     Ok(caps)
 }
 
-// ============================================================================
-// 多媒体配置
-// ============================================================================
-
-/// 获取多媒体配置状态（检查各后端 API key 是否已配置）
+/// 获取模型列表
 #[tauri::command]
-pub fn get_media_config() -> Result<MediaConfigView, String> {
-    // 从 ~/.tiangong/media.json 或环境变量中检查是否配置了 API key
-    let media_config = load_media_config_file();
-
-    let image_api_configured = !media_config.image_api_key.is_empty()
-        || std::env::var("TIANGONG_IMAGE_API_KEY").is_ok();
-    let stt_api_configured =
-        !media_config.stt_api_key.is_empty() || std::env::var("TIANGONG_STT_API_KEY").is_ok();
-    let tts_api_configured =
-        !media_config.tts_api_key.is_empty() || std::env::var("TIANGONG_TTS_API_KEY").is_ok();
-
-    Ok(MediaConfigView {
-        image_api_configured,
-        stt_api_configured,
-        tts_api_configured,
-    })
-}
-
-/// 内部媒体配置文件结构
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-struct MediaConfigFile {
-    #[serde(default)]
-    image_api_key: String,
-    #[serde(default)]
-    stt_api_key: String,
-    #[serde(default)]
-    tts_api_key: String,
-}
-
-/// 从 ~/.tiangong/media.json 加载媒体配置
-fn load_media_config_file() -> MediaConfigFile {
-    let path = user_home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".tiangong")
-        .join("media.json");
-    if !path.exists() {
-        return MediaConfigFile::default();
-    }
-    match std::fs::read_to_string(&path) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-        Err(_) => MediaConfigFile::default(),
-    }
+pub fn get_model_list(state: State<TiangongApp>) -> Result<Vec<String>, String> {
+    state.with_state_read(|core_state| Ok(core_state.model_list().to_vec()))
 }

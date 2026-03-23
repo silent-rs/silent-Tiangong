@@ -69,8 +69,9 @@ impl AppSkillService {
             let need_skill_md = !source_path.join("SKILL.md").exists();
             let need_skill_toml = !source_path.join("skill.toml").exists();
             if need_skill_md || need_skill_toml {
-                let model_client =
-                    SingleProviderClient::new(state.store.provider.model_config.clone());
+                let model_client = SingleProviderClient::new(
+                    state.store.provider.models_config.to_chat_provider_config(),
+                );
                 match convert_external_skill_with_agent(
                     &model_client,
                     &source_path,

@@ -36,16 +36,8 @@ impl TiangongState {
         self.services.runtime.provider_label()
     }
 
-    pub fn model_config(&self) -> &ModelProviderConfig {
-        &self.store.provider.model_config
-    }
-
     pub fn models_config(&self) -> &crate::models_config::ModelsConfig {
         &self.store.provider.models_config
-    }
-
-    pub fn settings_api_auth_token_draft(&self) -> &str {
-        &self.store.provider.settings_api_auth_token_draft
     }
 
     pub fn session_title_draft(&self) -> &str {

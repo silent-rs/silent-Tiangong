@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { api, Session, Message, RunSnapshot, McpServer, Skill, Provider, TaskPlan } from '../api/tauri';
+import { api, Session, Message, RunSnapshot, McpServer, Skill, TaskPlan } from '../api/tauri';
 
 interface AppState {
   // 状态
@@ -11,7 +11,6 @@ interface AppState {
   inputContent: string;
   mcpServers: McpServer[] | null;
   skills: Skill[] | null;
-  providers: Provider[] | null;
 
   // 流式消息状态
   streamingMessageId: string | null;
@@ -35,7 +34,6 @@ interface AppState {
 
   loadMcpServers: () => Promise<void>;
   loadSkills: () => Promise<void>;
-  loadProviders: () => Promise<void>;
 
   // 内部方法
   updateFromSnapshot: (snapshot: RunSnapshot) => void;
@@ -51,7 +49,6 @@ export const useStore = create<AppState>((set, get) => ({
   inputContent: '',
   mcpServers: null,
   skills: null,
-  providers: null,
   streamingMessageId: null,
   streamingContent: '',
   streamingReasoningContent: '',
@@ -187,16 +184,6 @@ export const useStore = create<AppState>((set, get) => ({
       set({ skills });
     } catch (error) {
       console.error('加载 Skills 失败:', error);
-    }
-  },
-
-  // 加载模型提供者
-  loadProviders: async () => {
-    try {
-      const providers = await api.getProviders();
-      set({ providers });
-    } catch (error) {
-      console.error('加载模型提供者失败:', error);
     }
   },
 

@@ -68,26 +68,6 @@ export interface Skill {
   source_type: string;
 }
 
-export interface Provider {
-  id: string;
-  name: string;
-  base_url?: string;
-  models: Model[];
-}
-
-export interface Model {
-  id: string;
-  name: string;
-  provider_id: string;
-}
-
-export interface ModelConfig {
-  api_auth_token: string;
-  api_base_url: string;
-  api_timeout_ms: string;
-  api_model: string;
-}
-
 export interface ServerConfig {
   host: string;
   port: number;
@@ -101,13 +81,7 @@ export interface ConnectorInfo {
   enabled: boolean;
 }
 
-export interface MediaConfig {
-  image_api_configured: boolean;
-  stt_api_configured: boolean;
-  tts_api_configured: boolean;
-}
-
-// 新版模型配置（Provider + Model + Routing 三层架构）
+// 模型配置（Provider + Model + Routing 三层架构）
 
 export interface ProviderConfigView {
   base_url: string;
@@ -205,23 +179,6 @@ export const api = {
     invoke('set_skill_enabled', { id, enabled }),
 
   // ----------------------------------------------------------------
-  // 模型提供者
-  // ----------------------------------------------------------------
-  getProviders: (): Promise<Provider[]> =>
-    invoke('get_providers'),
-
-  get_model_config: (): Promise<ModelConfig> =>
-    invoke('get_model_config'),
-
-  set_model_config: (
-    api_auth_token?: string,
-    api_base_url?: string,
-    api_timeout_ms?: string,
-    api_model?: string,
-  ): Promise<void> =>
-    invoke('set_model_config', { api_auth_token, api_base_url, api_timeout_ms, api_model }),
-
-  // ----------------------------------------------------------------
   // Server 管理
   // ----------------------------------------------------------------
   getServerConfig: (): Promise<ServerConfig> =>
@@ -240,7 +197,7 @@ export const api = {
     invoke('set_connector_enabled', { name, enabled }),
 
   // ----------------------------------------------------------------
-  // 新版模型配置（Provider + Model + Routing）
+  // 模型配置（Provider + Model + Routing）
   // ----------------------------------------------------------------
   getModelsConfig: (): Promise<ModelsConfigView> =>
     invoke('get_models_config'),
@@ -251,11 +208,8 @@ export const api = {
   getModelCapabilities: (): Promise<ModelCapabilityInfo[]> =>
     invoke('get_model_capabilities'),
 
-  // ----------------------------------------------------------------
-  // 多媒体配置
-  // ----------------------------------------------------------------
-  getMediaConfig: (): Promise<MediaConfig> =>
-    invoke('get_media_config'),
+  getModelList: (): Promise<string[]> =>
+    invoke('get_model_list'),
 
   // ----------------------------------------------------------------
   // 事件监听

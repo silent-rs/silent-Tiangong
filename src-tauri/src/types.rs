@@ -240,31 +240,6 @@ impl Skill {
     }
 }
 
-/// 模型提供者配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Provider {
-    pub id: String,
-    pub name: String,
-    pub base_url: Option<String>,
-    pub models: Vec<Model>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Model {
-    pub id: String,
-    pub name: String,
-    pub provider_id: String,
-}
-
-/// 模型配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelConfig {
-    pub api_auth_token: String,
-    pub api_base_url: String,
-    pub api_timeout_ms: String,
-    pub api_model: String,
-}
-
 /// Server 配置（前端使用）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfigView {
@@ -290,14 +265,6 @@ impl ConnectorInfo {
             enabled: config.enabled,
         }
     }
-}
-
-/// 多媒体配置状态（前端使用）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MediaConfigView {
-    pub image_api_configured: bool,
-    pub stt_api_configured: bool,
-    pub tts_api_configured: bool,
 }
 
 // ============================================================================

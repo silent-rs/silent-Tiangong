@@ -9,20 +9,27 @@ impl TiangongState {
         let mcp_config_path = default_mcp_config_path();
         let mcp_capability_cache_path = default_mcp_capability_cache_path();
         let sessions_dir_path = default_sessions_dir_path();
-        let default_model_config = ModelProviderConfig::from_env();
         let default_agent_config = AgentConfig::default();
+
+        // ModelsConfig 为主配置源
+        let mut models_config = ModelsConfig::load();
+        if models_config.is_empty() {
+            // 从环境变量生成默认 ModelsConfig
+            let env_config = ModelProviderConfig::from_env();
+            if !env_config.api_auth_token.is_empty() {
+                models_config = ModelsConfig::from_legacy(&env_config);
+                let _ = models_config.save();
+            }
+        }
+
+        // 从 models_config 生成内部 ModelProviderConfig
+        let model_config = models_config.to_chat_provider_config();
+
         let runtime = RuntimeEngine::new(
-            SingleProviderClient::new(default_model_config.clone()),
+            SingleProviderClient::new(model_config.clone()),
             DEFAULT_CONTEXT_LIMIT,
             default_agent_config.clone(),
         );
-
-        // 加载新版 ModelsConfig，如果不存在但旧配置有效则自动迁移
-        let mut models_config = ModelsConfig::load();
-        if models_config.is_empty() && !default_model_config.api_auth_token.is_empty() {
-            models_config = ModelsConfig::from_legacy(&default_model_config);
-            let _ = models_config.save();
-        }
 
         let mut state = Self {
             store: AppStore {
@@ -33,13 +40,9 @@ impl TiangongState {
                     input_draft: String::new(),
                 },
                 provider: ProviderState {
-                    model_config: default_model_config.clone(),
                     models_config,
-                    settings_api_auth_token_draft: default_model_config.api_auth_token.clone(),
-                    settings_api_base_url_draft: default_model_config.api_base_url.clone(),
-                    settings_api_timeout_ms_draft: default_model_config.api_timeout_ms.clone(),
-                    settings_api_model_draft: default_model_config.api_model.clone(),
-                    settings_model_list: Vec::new(),
+                    model_config,
+                    model_list: Vec::new(),
                 },
                 agent: AgentState {
                     agent_config: default_agent_config,
@@ -104,20 +107,12 @@ impl TiangongState {
                 .unwrap_or_default();
         }
 
-        state.store.provider.settings_api_auth_token_draft =
-            state.store.provider.model_config.api_auth_token.clone();
-        state.store.provider.settings_api_base_url_draft =
-            state.store.provider.model_config.api_base_url.clone();
-        state.store.provider.settings_api_timeout_ms_draft =
-            state.store.provider.model_config.api_timeout_ms.clone();
-        state.store.provider.settings_api_model_draft =
-            state.store.provider.model_config.api_model.clone();
         state.store.session.session_title_draft = state
             .active_session()
             .map(|session| session.title.clone())
             .unwrap_or_else(|| DEFAULT_SESSION_TITLE.to_string());
-        state.store.provider.settings_model_list = normalize_model_list(
-            state.store.provider.settings_model_list.clone(),
+        state.store.provider.model_list = normalize_model_list(
+            state.store.provider.model_list.clone(),
             &state.store.provider.model_config.api_model,
         );
 
@@ -164,13 +159,9 @@ impl TiangongState {
     fn apply_loaded_state(&mut self, loaded: LoadedState) {
         self.store.session.sessions = loaded.sessions;
         self.store.session.active_session_id = loaded.active_session_id;
-        self.store.provider.settings_model_list = loaded.model_list;
+        self.store.provider.model_list = loaded.model_list;
         if let Some(agent_config) = loaded.agent_config {
             self.store.agent.agent_config = agent_config;
-        }
-        if let Some(model_config) = loaded.model_config {
-            self.store.provider.model_config = model_config;
-            self.rebuild_runtime_from_current_config();
         }
     }
 

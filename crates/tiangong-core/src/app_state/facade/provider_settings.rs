@@ -1,24 +1,8 @@
 use super::super::*;
 
 impl TiangongState {
-    pub fn settings_api_base_url_draft(&self) -> &str {
-        &self.store.provider.settings_api_base_url_draft
-    }
-
-    pub fn settings_api_timeout_ms_draft(&self) -> &str {
-        &self.store.provider.settings_api_timeout_ms_draft
-    }
-
-    pub fn settings_api_model_draft(&self) -> &str {
-        &self.store.provider.settings_api_model_draft
-    }
-
-    pub fn settings_model_list(&self) -> &[String] {
-        &self.store.provider.settings_model_list
-    }
-
     pub fn model_list(&self) -> &[String] {
-        &self.store.provider.settings_model_list
+        &self.store.provider.model_list
     }
 
     pub fn current_model(&self) -> &str {
@@ -31,10 +15,18 @@ impl TiangongState {
             return Err(anyhow!("API_MODEL 不能为空"));
         }
 
-        self.store.provider.model_config.api_model = api_model.to_string();
-        self.store.provider.settings_api_model_draft = api_model.to_string();
-        self.store.provider.settings_model_list = normalize_model_list(
-            self.store.provider.settings_model_list.clone(),
+        // 更新 routing 中的 chat 模型
+        self.store.provider.models_config.routing.insert(
+            crate::models_config::ModelCapability::Chat,
+            api_model.to_string(),
+        );
+        let _ = self.store.provider.models_config.save();
+
+        // 重新生成内部 model_config
+        self.store.provider.model_config =
+            self.store.provider.models_config.to_chat_provider_config();
+        self.store.provider.model_list = normalize_model_list(
+            self.store.provider.model_list.clone(),
             &self.store.provider.model_config.api_model,
         );
         self.rebuild_runtime_from_current_config();
@@ -46,138 +38,51 @@ impl TiangongState {
         self.persist_app_only()
     }
 
-    pub fn open_provider_settings(&mut self) {
-        self.store.provider.settings_api_auth_token_draft =
-            self.store.provider.model_config.api_auth_token.clone();
-        self.store.provider.settings_api_base_url_draft =
-            self.store.provider.model_config.api_base_url.clone();
-        self.store.provider.settings_api_timeout_ms_draft =
-            self.store.provider.model_config.api_timeout_ms.clone();
-        self.store.provider.settings_api_model_draft =
-            self.store.provider.model_config.api_model.clone();
-    }
-
-    pub fn update_settings_api_auth_token_draft(&mut self, value: String) {
-        self.store.provider.settings_api_auth_token_draft = value;
-    }
-
-    pub fn update_settings_api_base_url_draft(&mut self, value: String) {
-        self.store.provider.settings_api_base_url_draft = value;
-    }
-
-    pub fn update_settings_api_timeout_ms_draft(&mut self, value: String) {
-        self.store.provider.settings_api_timeout_ms_draft = value;
-    }
-
-    pub fn update_settings_api_model_draft(&mut self, value: String) {
-        self.store.provider.settings_api_model_draft = value;
-    }
-
     pub fn refresh_model_list(&mut self) -> Result<usize> {
-        let draft_config = ModelProviderConfig {
-            api_auth_token: self
-                .store
-                .provider
-                .settings_api_auth_token_draft
-                .trim()
-                .to_string(),
-            api_base_url: self
-                .store
-                .provider
-                .settings_api_base_url_draft
-                .trim()
-                .to_string(),
-            api_timeout_ms: self
-                .store
-                .provider
-                .settings_api_timeout_ms_draft
-                .trim()
-                .to_string(),
-            api_model: self
-                .store
-                .provider
-                .settings_api_model_draft
-                .trim()
-                .to_string(),
-            api_lite_model: String::new(),
-        };
+        let config = self.store.provider.models_config.to_chat_provider_config();
+        let models = SingleProviderClient::list_models(&config)?;
+        self.store.provider.model_list = models;
 
-        let models = SingleProviderClient::list_models(&draft_config)?;
-        self.store.provider.settings_model_list = models;
-        let draft_model = self.store.provider.settings_api_model_draft.trim();
-        let need_fill_default = draft_model.is_empty()
-            || !self
-                .store
+        let current = self
+            .store
+            .provider
+            .model_config
+            .api_model
+            .trim()
+            .to_string();
+        let need_fill_default =
+            current.is_empty() || !self.store.provider.model_list.iter().any(|m| m == &current);
+        if need_fill_default
+            && let Some(first) = self.store.provider.model_list.first()
+        {
+            // 自动选择第一个模型
+            self.store
                 .provider
-                .settings_model_list
-                .iter()
-                .any(|m| m == draft_model);
-        if need_fill_default && let Some(first) = self.store.provider.settings_model_list.first() {
-            self.store.provider.settings_api_model_draft = first.clone();
+                .models_config
+                .routing
+                .insert(crate::models_config::ModelCapability::Chat, first.clone());
+            let _ = self.store.provider.models_config.save();
+            self.store.provider.model_config =
+                self.store.provider.models_config.to_chat_provider_config();
         }
-        self.store.provider.settings_model_list = normalize_model_list(
-            self.store.provider.settings_model_list.clone(),
-            self.store.provider.settings_api_model_draft.trim(),
+        self.store.provider.model_list = normalize_model_list(
+            self.store.provider.model_list.clone(),
+            self.store.provider.model_config.api_model.trim(),
         );
         self.persist_app_only()?;
 
-        Ok(self.store.provider.settings_model_list.len())
+        Ok(self.store.provider.model_list.len())
     }
 
-    pub fn discard_provider_settings(&mut self) {
-        self.store.provider.settings_api_auth_token_draft =
-            self.store.provider.model_config.api_auth_token.clone();
-        self.store.provider.settings_api_base_url_draft =
-            self.store.provider.model_config.api_base_url.clone();
-        self.store.provider.settings_api_timeout_ms_draft =
-            self.store.provider.model_config.api_timeout_ms.clone();
-        self.store.provider.settings_api_model_draft =
-            self.store.provider.model_config.api_model.clone();
-    }
-
-    /// 更新新版 ModelsConfig 并持久化到 models.json
-    pub fn update_models_config(
+    /// 更新新版 ModelsConfig 并持久化到 models.json，同时同步内部状态
+    pub fn save_models_config(
         &mut self,
         new_config: crate::models_config::ModelsConfig,
     ) -> Result<()> {
         new_config.save()?;
         self.store.provider.models_config = new_config;
-        Ok(())
-    }
-
-    pub fn save_provider_settings(&mut self) -> Result<()> {
-        let api_auth_token = self.store.provider.settings_api_auth_token_draft.trim();
-        let api_base_url = self.store.provider.settings_api_base_url_draft.trim();
-        let api_timeout_ms = self.store.provider.settings_api_timeout_ms_draft.trim();
-        let api_model = self.store.provider.settings_api_model_draft.trim();
-
-        if api_auth_token.is_empty() {
-            return Err(anyhow!("API_AUTH_TOKEN 不能为空"));
-        }
-        if api_base_url.is_empty() {
-            return Err(anyhow!("API_BASE_URL 不能为空"));
-        }
-        if api_timeout_ms.is_empty() {
-            return Err(anyhow!("API_TIMEOUT_MS 不能为空"));
-        }
-        if api_timeout_ms.parse::<u64>().is_err() {
-            return Err(anyhow!("API_TIMEOUT_MS 必须是毫秒数值"));
-        }
-        if api_model.is_empty() {
-            return Err(anyhow!("API_MODEL 不能为空"));
-        }
-
-        self.store.provider.model_config = ModelProviderConfig {
-            api_auth_token: api_auth_token.to_string(),
-            api_base_url: api_base_url.to_string(),
-            api_timeout_ms: api_timeout_ms.to_string(),
-            api_model: api_model.to_string(),
-            api_lite_model: self.store.provider.model_config.api_lite_model.clone(),
-        };
-        self.store.provider.settings_model_list = normalize_model_list(
-            self.store.provider.settings_model_list.clone(),
-            &self.store.provider.model_config.api_model,
-        );
+        self.store.provider.model_config =
+            self.store.provider.models_config.to_chat_provider_config();
         self.rebuild_runtime_from_current_config();
         self.replace_run_snapshot(
             RunStatus::Idle,

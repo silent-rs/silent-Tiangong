@@ -9,9 +9,7 @@ use crate::agent_config::{McpServerConfig, SkillMcpRequirementConfig};
 #[test]
 fn repository_persist_to_disk_round_trips_split_configs_and_sessions() -> Result<()> {
     with_isolated_state("tiangong-repository-roundtrip", |paths, state| {
-        state.store.provider.model_config.api_model = "glm-test".to_string();
-        state.store.provider.settings_model_list =
-            vec!["glm-test".to_string(), "glm-4.7".to_string()];
+        state.store.provider.model_list = vec!["glm-test".to_string(), "glm-4.7".to_string()];
         state.store.agent.agent_config.skills.max_matches = 9;
         state.store.agent.agent_config.skills.dirs = vec![paths.workspace.display().to_string()];
         state.store.agent.agent_config.mcp.timeout_ms = 23_000;
@@ -49,13 +47,6 @@ fn repository_persist_to_disk_round_trips_split_configs_and_sessions() -> Result
 
         assert_eq!(loaded.active_session_id, session.id);
         assert_eq!(loaded.sessions.len(), state.store.session.sessions.len());
-        assert_eq!(
-            loaded
-                .model_config
-                .as_ref()
-                .map(|cfg| cfg.api_model.as_str()),
-            Some("glm-test")
-        );
         assert_eq!(
             loaded.model_list.first().map(String::as_str),
             Some("glm-test")
