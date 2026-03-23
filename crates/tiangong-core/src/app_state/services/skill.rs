@@ -1,4 +1,6 @@
 use super::super::*;
+use crate::app_state::audit;
+use crate::app_state::support::InstallRollbackGuard;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AppSkillService;
@@ -142,6 +144,7 @@ impl AppSkillService {
                 installed_dir.display()
             )
         })?;
+        let rollback_guard = InstallRollbackGuard::new(installed_dir.clone());
 
         skill.source.kind = "local".to_string();
         skill.source.value = installed_dir.display().to_string();
@@ -175,6 +178,13 @@ impl AppSkillService {
             };
             message.push_str(&format!("（{details}）"));
         }
+        rollback_guard.commit();
+        audit::append_audit_log(&audit::AuditEntry::new(
+            "skill.install",
+            &skill.id,
+            &message,
+            true,
+        ));
         Ok(message)
     }
 
@@ -215,10 +225,37 @@ impl AppSkillService {
             .installed
             .remove(remove_idx);
 
+        // 清理该 skill 托管的 MCP server（引用计数为 0 时移除）
+        for mcp_id in &removed.managed_mcp_servers {
+            let still_referenced = state
+                .store
+                .agent
+                .agent_config
+                .skills
+                .installed
+                .iter()
+                .any(|s| s.managed_mcp_servers.contains(mcp_id));
+            if !still_referenced {
+                state
+                    .store
+                    .agent
+                    .agent_config
+                    .mcp
+                    .servers
+                    .retain(|server| server.name != *mcp_id);
+            }
+        }
+
         validate_agent_config(&state.store.agent.agent_config)?;
         state.rebuild_runtime_for_agent_config();
         state.persist_app_only()?;
         state.sync_skill_locks()?;
+        audit::append_audit_log(&audit::AuditEntry::new(
+            "skill.remove",
+            id,
+            &format!("skill 已删除：{id}"),
+            true,
+        ));
         Ok(format!("skill 已删除：{id}"))
     }
 
@@ -248,6 +285,12 @@ impl AppSkillService {
         state.rebuild_runtime_for_agent_config();
         state.persist_app_only()?;
         state.sync_skill_locks()?;
+        audit::append_audit_log(&audit::AuditEntry::new(
+            "skill.toggle",
+            id,
+            &format!("enabled={enabled}"),
+            true,
+        ));
         Ok(format!("skill 状态已更新：{id} enabled={enabled}"))
     }
 

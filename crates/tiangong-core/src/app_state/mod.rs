@@ -31,6 +31,7 @@ use crate::skill::{
 };
 use crate::tool::{ToolExecutionRecord, ToolResult};
 
+pub(crate) mod audit;
 mod facade;
 mod formatting;
 mod repository;

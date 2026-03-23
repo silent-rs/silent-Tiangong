@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::app_state::audit;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AppMcpService;
@@ -114,6 +115,12 @@ impl AppMcpService {
         validate_agent_config(&state.store.agent.agent_config)?;
         state.rebuild_runtime_for_agent_config();
         state.persist_app_only()?;
+        audit::append_audit_log(&audit::AuditEntry::new(
+            "mcp.register",
+            name,
+            &format!("MCP server 已注册：{name}"),
+            true,
+        ));
         Ok(format!("MCP server 已注册：{name}"))
     }
 
@@ -142,6 +149,12 @@ impl AppMcpService {
         validate_agent_config(&state.store.agent.agent_config)?;
         state.rebuild_runtime_for_agent_config();
         state.persist_app_only()?;
+        audit::append_audit_log(&audit::AuditEntry::new(
+            "mcp.remove",
+            name,
+            &format!("MCP server 已删除：{name}"),
+            true,
+        ));
         Ok(format!("MCP server 已删除：{name}"))
     }
 
@@ -172,6 +185,12 @@ impl AppMcpService {
         validate_agent_config(&state.store.agent.agent_config)?;
         state.rebuild_runtime_for_agent_config();
         state.persist_app_only()?;
+        audit::append_audit_log(&audit::AuditEntry::new(
+            "mcp.toggle",
+            name,
+            &format!("enabled={enabled}"),
+            true,
+        ));
         Ok(format!("MCP server 状态已更新：{name} enabled={enabled}"))
     }
 

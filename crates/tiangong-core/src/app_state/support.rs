@@ -115,3 +115,39 @@ pub struct AppServices {
     pub runtime: RuntimeEngine,
     pub turn_service: AppTurnService,
 }
+
+#[derive(Debug)]
+pub(in crate::app_state) struct InstallRollbackGuard {
+    dir: Option<PathBuf>,
+}
+
+impl InstallRollbackGuard {
+    pub(in crate::app_state) fn new(dir: PathBuf) -> Self {
+        Self { dir: Some(dir) }
+    }
+
+    pub(in crate::app_state) fn commit(mut self) {
+        self.dir = None;
+    }
+}
+
+impl Drop for InstallRollbackGuard {
+    fn drop(&mut self) {
+        if let Some(dir) = self.dir.take() {
+            let _ = std::fs::remove_dir_all(&dir);
+            // 清理空父目录
+            let mut current = dir.parent().map(std::path::Path::to_path_buf);
+            while let Some(p) = current {
+                if std::fs::read_dir(&p)
+                    .ok()
+                    .and_then(|mut d| d.next())
+                    .is_some()
+                {
+                    break;
+                }
+                let _ = std::fs::remove_dir(&p);
+                current = p.parent().map(std::path::Path::to_path_buf);
+            }
+        }
+    }
+}
