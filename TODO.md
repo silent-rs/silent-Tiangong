@@ -107,10 +107,10 @@
 - [x] 语音识别后端实现（OpenAI Whisper，multipart 上传）
 - [x] 语音合成后端实现（OpenAI TTS，6 个预定义音色）
 - [x] MediaAgent 聚合器（builder 模式，能力检查）
-- [ ] Connector 语音消息自动转文字（需 Gateway 层集成）
+- [x] Connector 语音消息自动转文字（Gateway MessageRouter 自动 STT）
 
 ### Phase 8：生产化与完善（已完成 ✅）
 - [x] 日志分级（支持 `TIANGONG_LOG` 环境变量按模块调级别）
 - [x] 错误恢复（启动时 recover_interrupted_tasks + auto_resume_unfinished_plan）
 - [x] 敏感配置脱敏（model auth_token + server auth_token 脱敏显示）
-- [ ] 配置热重载（文件变更监听，需引入 notify crate，优先级低）
+- [x] 配置热重载（ConfigWatcher 轮询文件修改时间 + Notify 通知）

@@ -3188,10 +3188,12 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "reqwest 0.12.28",
  "scru128",
  "serde",
  "serde_json",
  "tiangong-core",
+ "tiangong-media",
  "tokio",
  "tracing",
 ]
