@@ -88,6 +88,25 @@ export interface ModelConfig {
   api_model: string;
 }
 
+export interface ServerConfig {
+  host: string;
+  port: number;
+  auth_token_masked: string;
+  running: boolean;
+}
+
+export interface ConnectorInfo {
+  name: string;
+  connector_type: string;
+  enabled: boolean;
+}
+
+export interface MediaConfig {
+  image_api_configured: boolean;
+  stt_api_configured: boolean;
+  tts_api_configured: boolean;
+}
+
 // ============================================================================
 // API 方法
 // ============================================================================
@@ -175,6 +194,30 @@ export const api = {
     api_model?: string,
   ): Promise<void> =>
     invoke('set_model_config', { api_auth_token, api_base_url, api_timeout_ms, api_model }),
+
+  // ----------------------------------------------------------------
+  // Server 管理
+  // ----------------------------------------------------------------
+  getServerConfig: (): Promise<ServerConfig> =>
+    invoke('get_server_config'),
+
+  setServerConfig: (host: string, port: number, authToken?: string): Promise<string> =>
+    invoke('set_server_config', { host, port, authToken }),
+
+  // ----------------------------------------------------------------
+  // Connector 管理
+  // ----------------------------------------------------------------
+  getConnectors: (): Promise<ConnectorInfo[]> =>
+    invoke('get_connectors'),
+
+  setConnectorEnabled: (name: string, enabled: boolean): Promise<string> =>
+    invoke('set_connector_enabled', { name, enabled }),
+
+  // ----------------------------------------------------------------
+  // 多媒体配置
+  // ----------------------------------------------------------------
+  getMediaConfig: (): Promise<MediaConfig> =>
+    invoke('get_media_config'),
 
   // ----------------------------------------------------------------
   // 事件监听

@@ -3,12 +3,12 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
-import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Power, Loader2 } from 'lucide-react';
+import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Power, Loader2, Globe, Link, Image } from 'lucide-react';
 import { api } from '@/api/tauri';
-import type { ModelConfig, McpServer, Skill } from '@/api/tauri';
+import type { ModelConfig, McpServer, Skill, ServerConfig, ConnectorInfo, MediaConfig } from '@/api/tauri';
 import { useToast } from './Toast';
 
-type TabType = 'llm' | 'mcp' | 'skill';
+type TabType = 'llm' | 'mcp' | 'skill' | 'server' | 'connector' | 'media';
 
 export function SettingsDialog() {
   const [open, setOpen] = useState(false);
@@ -66,6 +66,39 @@ export function SettingsDialog() {
               <Puzzle className="w-4 h-4 inline mr-2" />
               Skills
             </button>
+            <button
+              className={`px-4 py-2 text-sm font-medium transition-colors ${
+                activeTab === 'server'
+                  ? 'text-[#10A37F] border-b-2 border-[#10A37F]'
+                  : 'text-[#CCCCCC] hover:text-white'
+              }`}
+              onClick={() => setActiveTab('server')}
+            >
+              <Globe className="w-4 h-4 inline mr-2" />
+              Server
+            </button>
+            <button
+              className={`px-4 py-2 text-sm font-medium transition-colors ${
+                activeTab === 'connector'
+                  ? 'text-[#10A37F] border-b-2 border-[#10A37F]'
+                  : 'text-[#CCCCCC] hover:text-white'
+              }`}
+              onClick={() => setActiveTab('connector')}
+            >
+              <Link className="w-4 h-4 inline mr-2" />
+              Connectors
+            </button>
+            <button
+              className={`px-4 py-2 text-sm font-medium transition-colors ${
+                activeTab === 'media'
+                  ? 'text-[#10A37F] border-b-2 border-[#10A37F]'
+                  : 'text-[#CCCCCC] hover:text-white'
+              }`}
+              onClick={() => setActiveTab('media')}
+            >
+              <Image className="w-4 h-4 inline mr-2" />
+              多媒体
+            </button>
           </div>
 
           {/* 标签页内容 */}
@@ -73,6 +106,9 @@ export function SettingsDialog() {
             {activeTab === 'llm' && <LLMSettings onClose={() => setOpen(false)} />}
             {activeTab === 'mcp' && <McpSettings />}
             {activeTab === 'skill' && <SkillSettings />}
+            {activeTab === 'server' && <ServerSettings />}
+            {activeTab === 'connector' && <ConnectorSettings />}
+            {activeTab === 'media' && <MediaSettings />}
           </div>
         </DialogContent>
       </Dialog>
@@ -630,6 +666,332 @@ function SkillSettings() {
               </Button>
             </div>
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Server 设置组件
+// ============================================================================
+
+function ServerSettings() {
+  const [config, setConfig] = useState<ServerConfig>({
+    host: '127.0.0.1',
+    port: 8080,
+    auth_token_masked: '',
+    running: false,
+  });
+  const [editHost, setEditHost] = useState('');
+  const [editPort, setEditPort] = useState('8080');
+  const [editAuthToken, setEditAuthToken] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const { showSuccess, showError } = useToast();
+
+  const loadConfig = async () => {
+    setIsLoading(true);
+    try {
+      const cfg = await api.getServerConfig();
+      setConfig(cfg);
+      setEditHost(cfg.host);
+      setEditPort(String(cfg.port));
+      setEditAuthToken('');
+    } catch (error) {
+      console.error('加载 Server 配置失败:', error);
+      showError('加载失败', '无法加载 Server 配置');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadConfig();
+  }, []);
+
+  const handleSave = async () => {
+    setIsSaving(true);
+    try {
+      const port = parseInt(editPort, 10);
+      if (isNaN(port) || port < 1 || port > 65535) {
+        showError('端口无效', '请输入 1-65535 之间的端口号');
+        return;
+      }
+      const authToken = editAuthToken.trim() || undefined;
+      await api.setServerConfig(editHost, port, authToken);
+      showSuccess('保存成功', 'Server 配置已更新');
+      loadConfig();
+    } catch (error) {
+      console.error('保存 Server 配置失败:', error);
+      showError('保存失败', '无法保存 Server 配置');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4 p-4">
+      {isLoading ? (
+        <div className="flex items-center justify-center py-8">
+          <Loader2 className="w-6 h-6 animate-spin text-[#10A37F] mr-2" />
+          <span className="text-sm text-[#858585]">加载配置中...</span>
+        </div>
+      ) : (
+        <>
+          {/* 运行状态 */}
+          <div className="flex items-center gap-2 mb-4">
+            <span className="text-sm text-[#858585]">状态：</span>
+            <span className={`px-2 py-0.5 text-xs rounded ${
+              config.running
+                ? 'bg-[#10A37F]/20 text-[#10A37F]'
+                : 'bg-[#3C3C3C] text-[#858585]'
+            }`}>
+              {config.running ? '运行中' : '未运行'}
+            </span>
+          </div>
+
+          {/* Host */}
+          <div className="space-y-2">
+            <Label htmlFor="serverHost">监听地址</Label>
+            <Input
+              id="serverHost"
+              value={editHost}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditHost(e.target.value)}
+              className="bg-[#1E1E1E] border-[#3C3C3C] text-white"
+              placeholder="127.0.0.1"
+              disabled={isSaving}
+            />
+          </div>
+
+          {/* Port */}
+          <div className="space-y-2">
+            <Label htmlFor="serverPort">端口</Label>
+            <Input
+              id="serverPort"
+              type="number"
+              value={editPort}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditPort(e.target.value)}
+              className="bg-[#1E1E1E] border-[#3C3C3C] text-white"
+              placeholder="8080"
+              disabled={isSaving}
+            />
+          </div>
+
+          {/* Auth Token */}
+          <div className="space-y-2">
+            <Label htmlFor="serverAuthToken">认证 Token</Label>
+            <Input
+              id="serverAuthToken"
+              type="password"
+              value={editAuthToken}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditAuthToken(e.target.value)}
+              className="bg-[#1E1E1E] border-[#3C3C3C] text-white"
+              placeholder={config.auth_token_masked || '留空表示不鉴权'}
+              disabled={isSaving}
+            />
+            <p className="text-xs text-[#858585]">
+              当前: {config.auth_token_masked}（留空则保持不变）
+            </p>
+          </div>
+
+          {/* 保存按钮 */}
+          <div className="flex justify-end gap-2 pt-4">
+            <Button
+              className="bg-[#10A37F] hover:bg-[#0D8A6A]"
+              onClick={handleSave}
+              disabled={isSaving}
+            >
+              {isSaving ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  保存中...
+                </>
+              ) : (
+                '保存'
+              )}
+            </Button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Connector 设置组件
+// ============================================================================
+
+function ConnectorSettings() {
+  const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const { showSuccess, showError } = useToast();
+
+  const loadConnectors = async () => {
+    setIsLoading(true);
+    try {
+      const data = await api.getConnectors();
+      setConnectors(data);
+    } catch (error) {
+      console.error('加载 Connector 列表失败:', error);
+      showError('加载失败', '无法加载 Connector 列表');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadConnectors();
+  }, []);
+
+  const handleToggleEnabled = async (name: string, enabled: boolean) => {
+    try {
+      await api.setConnectorEnabled(name, enabled);
+      showSuccess('状态更新', `Connector "${name}" 已${enabled ? '启用' : '禁用'}`);
+      loadConnectors();
+    } catch (error) {
+      console.error('切换 Connector 状态失败:', error);
+      showError('操作失败', '无法更新 Connector 状态');
+    }
+  };
+
+  return (
+    <div className="p-4">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-lg font-medium">Connectors</h3>
+      </div>
+
+      {isLoading ? (
+        <div className="text-center text-[#858585] py-8">加载中...</div>
+      ) : connectors.length === 0 ? (
+        <div className="text-center text-[#858585] py-8">
+          <p>暂无已配置的 Connector</p>
+          <p className="text-xs mt-2">请在 ~/.tiangong/connectors.json 中添加配置</p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {connectors.map((connector) => (
+            <div
+              key={connector.name}
+              className="bg-[#1E1E1E] border border-[#3C3C3C] rounded-lg p-4 flex items-center justify-between"
+            >
+              <div className="flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="font-medium">{connector.name}</span>
+                  <span className="px-2 py-0.5 text-xs rounded bg-[#3C3C3C] text-[#858585]">
+                    {connector.connector_type}
+                  </span>
+                  <span className={`px-2 py-0.5 text-xs rounded ${
+                    connector.enabled
+                      ? 'bg-[#10A37F]/20 text-[#10A37F]'
+                      : 'bg-[#3C3C3C] text-[#858585]'
+                  }`}>
+                    {connector.enabled ? '已启用' : '已禁用'}
+                  </span>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="hover:bg-[#2A2D2E]"
+                  onClick={() => handleToggleEnabled(connector.name, !connector.enabled)}
+                  title={connector.enabled ? '禁用' : '启用'}
+                >
+                  <Power className={`w-4 h-4 ${connector.enabled ? 'text-[#10A37F]' : 'text-[#858585]'}`} />
+                </Button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// 多媒体设置组件
+// ============================================================================
+
+function MediaSettings() {
+  const [config, setConfig] = useState<MediaConfig>({
+    image_api_configured: false,
+    stt_api_configured: false,
+    tts_api_configured: false,
+  });
+  const [isLoading, setIsLoading] = useState(false);
+  const { showError } = useToast();
+
+  const loadConfig = async () => {
+    setIsLoading(true);
+    try {
+      const cfg = await api.getMediaConfig();
+      setConfig(cfg);
+    } catch (error) {
+      console.error('加载多媒体配置失败:', error);
+      showError('加载失败', '无法加载多媒体配置');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadConfig();
+  }, []);
+
+  const StatusBadge = ({ configured }: { configured: boolean }) => (
+    <span className={`px-2 py-0.5 text-xs rounded ${
+      configured
+        ? 'bg-[#10A37F]/20 text-[#10A37F]'
+        : 'bg-[#3C3C3C] text-[#858585]'
+    }`}>
+      {configured ? '已配置' : '未配置'}
+    </span>
+  );
+
+  return (
+    <div className="p-4">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-lg font-medium">多媒体能力</h3>
+      </div>
+
+      {isLoading ? (
+        <div className="text-center text-[#858585] py-8">加载中...</div>
+      ) : (
+        <div className="space-y-3">
+          <div className="bg-[#1E1E1E] border border-[#3C3C3C] rounded-lg p-4 flex items-center justify-between">
+            <div>
+              <div className="font-medium">图片生成</div>
+              <div className="text-sm text-[#858585] mt-1">
+                支持 DALL-E / GPT-Image 等图片生成后端
+              </div>
+            </div>
+            <StatusBadge configured={config.image_api_configured} />
+          </div>
+
+          <div className="bg-[#1E1E1E] border border-[#3C3C3C] rounded-lg p-4 flex items-center justify-between">
+            <div>
+              <div className="font-medium">语音识别 (STT)</div>
+              <div className="text-sm text-[#858585] mt-1">
+                支持 OpenAI Whisper 等语音识别后端
+              </div>
+            </div>
+            <StatusBadge configured={config.stt_api_configured} />
+          </div>
+
+          <div className="bg-[#1E1E1E] border border-[#3C3C3C] rounded-lg p-4 flex items-center justify-between">
+            <div>
+              <div className="font-medium">语音合成 (TTS)</div>
+              <div className="text-sm text-[#858585] mt-1">
+                支持 OpenAI TTS 等语音合成后端
+              </div>
+            </div>
+            <StatusBadge configured={config.tts_api_configured} />
+          </div>
+
+          <p className="text-xs text-[#858585] mt-4">
+            多媒体 API Key 通过环境变量（TIANGONG_IMAGE_API_KEY / TIANGONG_STT_API_KEY / TIANGONG_TTS_API_KEY）或 ~/.tiangong/media.json 配置文件设置。
+          </p>
         </div>
       )}
     </div>

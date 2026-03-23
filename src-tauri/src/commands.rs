@@ -1,5 +1,6 @@
 use crate::app::TiangongApp;
 use crate::types::*;
+use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State, Window};
@@ -335,4 +336,159 @@ pub fn get_providers(state: State<TiangongApp>) -> Result<Vec<Provider>, String>
 
         Ok(vec![provider])
     })
+}
+
+// ============================================================================
+// Server 管理
+// ============================================================================
+
+/// 获取 Server 配置
+#[tauri::command]
+pub fn get_server_config() -> Result<ServerConfigView, String> {
+    let config = tiangong_server::config::load_server_config();
+    let running = is_server_running();
+    let auth_token_masked = config.masked_auth_token();
+    Ok(ServerConfigView {
+        host: config.host,
+        port: config.port,
+        auth_token_masked,
+        running,
+    })
+}
+
+/// 设置 Server 配置
+#[tauri::command]
+pub fn set_server_config(
+    host: String,
+    port: u16,
+    auth_token: Option<String>,
+) -> Result<String, String> {
+    let config = tiangong_server::config::ServerConfig {
+        host,
+        port,
+        auth_token,
+    };
+    tiangong_server::config::save_server_config(&config).map_err(|e| e.to_string())?;
+    Ok("Server 配置已保存".to_string())
+}
+
+/// 检查 Server 是否在运行（通过 PID 文件判断）
+fn is_server_running() -> bool {
+    let pid_path = user_home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".tiangong")
+        .join("server.pid");
+    if !pid_path.exists() {
+        return false;
+    }
+    match std::fs::read_to_string(&pid_path) {
+        Ok(pid_str) => {
+            if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                // 检查进程是否存在
+                #[cfg(unix)]
+                {
+                    use std::process::Command;
+                    Command::new("kill")
+                        .arg("-0")
+                        .arg(pid.to_string())
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false)
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = pid;
+                    false
+                }
+            } else {
+                false
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+/// 获取用户 home 目录
+fn user_home_dir() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(home));
+    }
+    if let Some(profile) =
+        std::env::var_os("USERPROFILE").filter(|v| v != std::ffi::OsStr::new(""))
+    {
+        return Some(PathBuf::from(profile));
+    }
+    None
+}
+
+// ============================================================================
+// Connector 管理
+// ============================================================================
+
+/// 获取 Connector 列表
+#[tauri::command]
+pub fn get_connectors() -> Result<Vec<ConnectorInfo>, String> {
+    let configs = tiangong_server::config::load_connectors_config();
+    Ok(configs.iter().map(ConnectorInfo::from_config).collect())
+}
+
+/// 设置 Connector 启用状态
+#[tauri::command]
+pub fn set_connector_enabled(name: String, enabled: bool) -> Result<String, String> {
+    tiangong_server::config::set_connector_enabled(&name, enabled).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "Connector \"{}\" 已{}",
+        name,
+        if enabled { "启用" } else { "禁用" }
+    ))
+}
+
+// ============================================================================
+// 多媒体配置
+// ============================================================================
+
+/// 获取多媒体配置状态（检查各后端 API key 是否已配置）
+#[tauri::command]
+pub fn get_media_config() -> Result<MediaConfigView, String> {
+    // 从 ~/.tiangong/media.json 或环境变量中检查是否配置了 API key
+    let media_config = load_media_config_file();
+
+    let image_api_configured = !media_config.image_api_key.is_empty()
+        || std::env::var("TIANGONG_IMAGE_API_KEY").is_ok();
+    let stt_api_configured =
+        !media_config.stt_api_key.is_empty() || std::env::var("TIANGONG_STT_API_KEY").is_ok();
+    let tts_api_configured =
+        !media_config.tts_api_key.is_empty() || std::env::var("TIANGONG_TTS_API_KEY").is_ok();
+
+    Ok(MediaConfigView {
+        image_api_configured,
+        stt_api_configured,
+        tts_api_configured,
+    })
+}
+
+/// 内部媒体配置文件结构
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct MediaConfigFile {
+    #[serde(default)]
+    image_api_key: String,
+    #[serde(default)]
+    stt_api_key: String,
+    #[serde(default)]
+    tts_api_key: String,
+}
+
+/// 从 ~/.tiangong/media.json 加载媒体配置
+fn load_media_config_file() -> MediaConfigFile {
+    let path = user_home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".tiangong")
+        .join("media.json");
+    if !path.exists() {
+        return MediaConfigFile::default();
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => MediaConfigFile::default(),
+    }
 }

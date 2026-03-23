@@ -57,6 +57,17 @@ pub fn load_server_config() -> ServerConfig {
     }
 }
 
+/// 保存 Server 配置到 ~/.tiangong/server.json
+pub fn save_server_config(config: &ServerConfig) -> anyhow::Result<()> {
+    let path = config_file_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let content = serde_json::to_string_pretty(config)?;
+    fs::write(&path, content)?;
+    Ok(())
+}
+
 impl ServerConfig {
     /// 返回脱敏后的 auth_token（仅显示前 4 位 + ****）
     pub fn masked_auth_token(&self) -> String {
@@ -103,5 +114,33 @@ pub fn load_connectors_config() -> Vec<ConnectorConfig> {
             tracing::warn!("读取 Connector 配置文件失败: {e}");
             Vec::new()
         }
+    }
+}
+
+/// 保存 Connector 配置到 ~/.tiangong/connectors.json
+pub fn save_connectors_config(connectors: &[ConnectorConfig]) -> anyhow::Result<()> {
+    let path = connectors_file_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = ConnectorsFile {
+        connectors: connectors.to_vec(),
+    };
+    let content = serde_json::to_string_pretty(&file)?;
+    fs::write(&path, content)?;
+    Ok(())
+}
+
+/// 设置指定 Connector 的启用状态并保存
+pub fn set_connector_enabled(name: &str, enabled: bool) -> anyhow::Result<()> {
+    let mut connectors = load_connectors_config();
+    let found = connectors.iter_mut().find(|c| c.name == name);
+    match found {
+        Some(c) => {
+            c.enabled = enabled;
+            save_connectors_config(&connectors)?;
+            Ok(())
+        }
+        None => Err(anyhow::anyhow!("未找到 Connector: {name}")),
     }
 }

@@ -264,3 +264,38 @@ pub struct ModelConfig {
     pub api_timeout_ms: String,
     pub api_model: String,
 }
+
+/// Server 配置（前端使用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerConfigView {
+    pub host: String,
+    pub port: u16,
+    pub auth_token_masked: String,
+    pub running: bool,
+}
+
+/// Connector 信息（前端使用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorInfo {
+    pub name: String,
+    pub connector_type: String,
+    pub enabled: bool,
+}
+
+impl ConnectorInfo {
+    pub fn from_config(config: &tiangong_connector::config::ConnectorConfig) -> Self {
+        Self {
+            name: config.name.clone(),
+            connector_type: format!("{:?}", config.connector_type),
+            enabled: config.enabled,
+        }
+    }
+}
+
+/// 多媒体配置状态（前端使用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaConfigView {
+    pub image_api_configured: bool,
+    pub stt_api_configured: bool,
+    pub tts_api_configured: bool,
+}

@@ -9,6 +9,9 @@ edition = "2021"
 [dependencies]
 # 引用核心库 crate
 tiangong_core = { path = "../crates/tiangong-core", package = "tiangong-core" }
+tiangong_server = { path = "../crates/tiangong-server", package = "tiangong-server" }
+tiangong_connector = { path = "../crates/tiangong-connector", package = "tiangong-connector" }
+tiangong_media = { path = "../crates/tiangong-media", package = "tiangong-media" }
 
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
