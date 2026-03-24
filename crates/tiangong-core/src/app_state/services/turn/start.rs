@@ -23,6 +23,29 @@ impl AppTurnService {
         }
         let active_idx = state.ensure_active_session_index();
         let session_id = state.store.session.sessions[active_idx].id.clone();
+
+        // 首次发消息时，立即用用户输入截断作为临时标题（LLM 完成后会精炼）
+        {
+            let session = &mut state.store.session.sessions[active_idx];
+            let is_default_title = session.title == "新对话"
+                || session.title.starts_with("会话 ")
+                || session.title == "默认会话";
+            if is_default_title && session.messages.is_empty() {
+                let trimmed_input = input.trim();
+                let temp_title: String = trimmed_input.chars().take(30).collect();
+                let temp_title = if trimmed_input.chars().count() > 30 {
+                    format!("{}...", temp_title)
+                } else {
+                    temp_title
+                };
+                if !temp_title.is_empty() {
+                    session.title = temp_title.clone();
+                    session.updated_at = now_text();
+                    state.store.session.session_title_draft = temp_title;
+                }
+            }
+        }
+
         let task_id = new_scru128_string();
         state.store.session.sessions[active_idx].append_message(MessageRole::User, input.clone());
         let user_message_id = state.store.session.sessions[active_idx]

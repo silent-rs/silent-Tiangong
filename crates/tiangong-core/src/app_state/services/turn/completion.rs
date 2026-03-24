@@ -131,7 +131,7 @@ impl AppTurnService {
             updated_at: now_text(),
         };
 
-        // 首次对话完成后自动生成标题（如果标题仍为默认格式）
+        // 首次对话完成后自动生成标题（首次对话或标题仍为默认格式）
         if let Some(session) = state
             .store
             .session
@@ -139,8 +139,16 @@ impl AppTurnService {
             .iter()
             .find(|s| s.id == session_id)
         {
-            let is_default_title = session.title.starts_with("会话 ") || session.title == "默认会话";
-            if is_default_title {
+            let is_default_title = session.title == "新对话"
+                || session.title.starts_with("会话 ")
+                || session.title == "默认会话";
+            let is_first_turn = session
+                .messages
+                .iter()
+                .filter(|m| m.role == MessageRole::User)
+                .count()
+                == 1;
+            if is_default_title || is_first_turn {
                 let user_input_for_title = session
                     .messages
                     .iter()

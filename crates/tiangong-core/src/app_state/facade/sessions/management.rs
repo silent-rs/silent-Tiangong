@@ -2,8 +2,7 @@ use super::super::super::*;
 
 impl TiangongState {
     pub fn create_session(&mut self) {
-        let title = format!("会话 {}", self.store.session.sessions.len() + 1);
-        let session = Session::new(title);
+        let session = Session::new("新对话");
         self.store.session.active_session_id = session.id.clone();
         self.store.session.session_title_draft = session.title.clone();
         self.store.session.sessions.push(session);
