@@ -12,6 +12,12 @@ interface AppState {
   mcpServers: McpServer[] | null;
   skills: Skill[] | null;
 
+  // 草稿模式
+  isDraft: boolean;
+
+  // 多会话运行状态 (session_id -> status)
+  sessionRunStatuses: Record<string, string>;
+
   // 流式消息状态
   streamingMessageId: string | null;
   streamingContent: string;
@@ -23,7 +29,7 @@ interface AppState {
 
   // 操作
   loadSessions: () => Promise<void>;
-  createSession: () => Promise<void>;
+  createSession: () => void;
   switchSession: (id: string) => Promise<void>;
   deleteSession: () => Promise<void>;
 
@@ -49,6 +55,8 @@ export const useStore = create<AppState>((set, get) => ({
   inputContent: '',
   mcpServers: null,
   skills: null,
+  isDraft: false,
+  sessionRunStatuses: {},
   streamingMessageId: null,
   streamingContent: '',
   streamingReasoningContent: '',
@@ -62,9 +70,9 @@ export const useStore = create<AppState>((set, get) => ({
       const sessions = await api.getSessions();
       set({ sessions, isLoadingSessions: false });
 
-      // 如果有会话但没有活动会话，设置第一个为活动会话
-      const { activeSessionId } = get();
-      if (!activeSessionId && sessions.length > 0) {
+      // 如果有会话但没有活动会话且不在草稿模式，设置第一个为活动会话
+      const { activeSessionId, isDraft } = get();
+      if (!activeSessionId && !isDraft && sessions.length > 0) {
         const firstSession = sessions[0];
         set({ activeSessionId: firstSession.id });
       }
@@ -74,21 +82,19 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
-  // 创建新会话
-  createSession: async () => {
-    try {
-      const session = await api.createSession();
-      set(state => ({
-        sessions: [session, ...state.sessions],
-        activeSessionId: session.id,
-        messages: [],
-        inputContent: '',
-        runStatus: 'idle',
-        currentPlan: undefined,
-      }));
-    } catch (error) {
-      console.error('创建会话失败:', error);
-    }
+  // 创建新会话 — 纯前端草稿模式，不立即调后端
+  createSession: () => {
+    set({
+      isDraft: true,
+      activeSessionId: null,
+      messages: [],
+      inputContent: '',
+      runStatus: 'idle',
+      currentPlan: undefined,
+      streamingMessageId: null,
+      streamingContent: '',
+      streamingReasoningContent: '',
+    });
   },
 
   // 切换会话
@@ -97,11 +103,15 @@ export const useStore = create<AppState>((set, get) => ({
       await api.switchSession(id);
       const snapshot = await api.getRunSnapshot();
       set({
+        isDraft: false,
         activeSessionId: id,
         messages: snapshot.messages,
         inputContent: snapshot.input_draft,
         runStatus: snapshot.status,
         currentPlan: snapshot.current_plan,
+        streamingMessageId: null,
+        streamingContent: '',
+        streamingReasoningContent: '',
       });
     } catch (error) {
       console.error('切换会话失败:', error);
@@ -117,6 +127,7 @@ export const useStore = create<AppState>((set, get) => ({
 
       set({
         sessions,
+        isDraft: false,
         activeSessionId: snapshot.messages.length > 0 ? snapshot.messages[0].id : null,
         messages: snapshot.messages,
         inputContent: snapshot.input_draft,
@@ -129,10 +140,28 @@ export const useStore = create<AppState>((set, get) => ({
 
   // 发送消息
   sendMessage: async (content: string) => {
-    const { runStatus } = get();
-    if (runStatus !== 'idle') {
-      console.warn('当前有任务正在执行，请等待完成或取消');
-      return;
+    const { isDraft, activeSessionId, sessionRunStatuses } = get();
+
+    // 草稿模式时先创建后端会话
+    if (isDraft) {
+      try {
+        const session = await api.createSession();
+        set(state => ({
+          sessions: [session, ...state.sessions],
+          activeSessionId: session.id,
+          isDraft: false,
+        }));
+      } catch (error) {
+        console.error('创建会话失败:', error);
+        return;
+      }
+    } else {
+      // 非草稿模式下检查当前会话是否正在执行
+      const currentId = activeSessionId;
+      if (currentId && sessionRunStatuses[currentId]) {
+        console.warn('当前会话有任务正在执行，请等待完成或取消');
+        return;
+      }
     }
 
     set({ inputContent: '', isSending: true });
@@ -165,8 +194,10 @@ export const useStore = create<AppState>((set, get) => ({
   // 设置输入内容
   setInputContent: (content: string) => {
     set({ inputContent: content });
-    // 同时同步到后端
-    api.setInputDraft(content).catch(console.error);
+    // 草稿模式下不同步到后端
+    if (!get().isDraft) {
+      api.setInputDraft(content).catch(console.error);
+    }
   },
 
   // 加载 MCP 服务器
@@ -191,6 +222,41 @@ export const useStore = create<AppState>((set, get) => ({
 
   // 从快照更新状态
   updateFromSnapshot: (snapshot: RunSnapshot) => {
+    const { activeSessionId, isDraft, sessionRunStatuses: prevStatuses } = get();
+    const pendingIds = snapshot.pending_session_ids || [];
+
+    // 基于 pending_session_ids 构建新的运行状态表
+    const newStatuses: Record<string, string> = {};
+    for (const sid of pendingIds) {
+      // 如果全局 last_session_id 匹配，用精确状态；否则标记为 executing
+      if (snapshot.last_session_id === sid) {
+        newStatuses[sid] = snapshot.status !== 'idle' ? snapshot.status : 'executing';
+      } else {
+        newStatuses[sid] = prevStatuses[sid] || 'executing';
+      }
+    }
+
+    // 检测刚完成的后台会话并发送通知
+    for (const sid of Object.keys(prevStatuses)) {
+      if (!newStatuses[sid] && sid !== activeSessionId) {
+        // 该会话刚从运行中变为完成
+        const session = get().sessions.find(s => s.id === sid);
+        const title = session?.title || '对话';
+        if ('Notification' in window && Notification.permission === 'granted') {
+          new Notification('天工 - 任务完成', { body: `「${title}」执行完成` });
+        } else if ('Notification' in window && Notification.permission !== 'denied') {
+          Notification.requestPermission();
+        }
+      }
+    }
+
+    set({ sessionRunStatuses: newStatuses });
+
+    // 草稿模式或不是当前查看的会话 → 不更新消息/流式内容
+    if (isDraft || (snapshot.last_session_id && snapshot.last_session_id !== activeSessionId)) {
+      return;
+    }
+
     const { messages: oldMessages, streamingMessageId: oldStreamingId } = get();
     const newMessages = snapshot.messages;
 

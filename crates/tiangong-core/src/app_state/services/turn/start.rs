@@ -15,13 +15,19 @@ impl AppTurnService {
         state: &mut TiangongState,
         input: String,
     ) -> Result<bool> {
-        if state.store.runtime.pending_turn.is_some() {
-            return Ok(false);
-        }
         if input.trim().is_empty() {
             return Ok(false);
         }
         let active_idx = state.ensure_active_session_index();
+        let session_id_check = state.store.session.sessions[active_idx].id.clone();
+        if state
+            .store
+            .runtime
+            .pending_turns
+            .contains_key(&session_id_check)
+        {
+            return Ok(false);
+        }
         let session_id = state.store.session.sessions[active_idx].id.clone();
 
         // 首次发消息时，立即用用户输入截断作为临时标题（LLM 完成后会精炼）
@@ -127,14 +133,17 @@ impl AppTurnService {
             }
         });
 
-        state.store.runtime.pending_turn = Some(PendingTurn {
-            session_id,
-            task_id,
-            assistant_message_id: None,
-            stage_thinking_message_id: None,
-            started_at: Instant::now(),
-            rx,
-        });
+        state.store.runtime.pending_turns.insert(
+            session_id.clone(),
+            PendingTurn {
+                session_id,
+                task_id,
+                assistant_message_id: None,
+                stage_thinking_message_id: None,
+                started_at: Instant::now(),
+                rx,
+            },
+        );
 
         Ok(true)
     }
@@ -142,9 +151,10 @@ impl AppTurnService {
     pub(in crate::app_state) fn try_recv_turn_event(
         self,
         state: &mut TiangongState,
+        session_id: &str,
         disconnected: &mut bool,
     ) -> Option<TurnEvent> {
-        let pending = state.store.runtime.pending_turn.as_ref()?;
+        let pending = state.store.runtime.pending_turns.get(session_id)?;
 
         match pending.rx.try_recv() {
             Ok(event) => Some(event),

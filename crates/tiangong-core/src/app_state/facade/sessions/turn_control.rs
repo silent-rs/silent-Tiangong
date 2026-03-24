@@ -10,7 +10,12 @@ impl TiangongState {
     }
 
     pub fn cancel_pending_turn(&mut self) -> Result<bool> {
-        let Some(pending) = self.store.runtime.pending_turn.take() else {
+        let active_id = self.store.session.active_session_id.clone();
+        self.cancel_pending_turn_for(&active_id)
+    }
+
+    pub fn cancel_pending_turn_for(&mut self, session_id: &str) -> Result<bool> {
+        let Some(pending) = self.store.runtime.pending_turns.remove(session_id) else {
             return Ok(false);
         };
 
@@ -113,56 +118,75 @@ impl TiangongState {
         Ok(moved)
     }
 
-    pub fn poll_pending_turn(&mut self) {
-        let mut should_clear = false;
-        let mut disconnected = false;
+    /// 轮询所有 pending_turns，处理每个会话的事件
+    pub fn poll_pending_turns(&mut self) {
+        // 收集所有 pending session_id
+        let session_ids: Vec<String> = self.store.runtime.pending_turns.keys().cloned().collect();
+        let mut sessions_to_clear: Vec<String> = Vec::new();
 
-        while let Some(event) = self.try_recv_turn_event(&mut disconnected) {
-            match event {
-                TurnEvent::PlanReady(plan) => {
-                    self.mark_pending_turn_executing(&plan);
-                }
-                TurnEvent::LlmOutput(output) => {
-                    // 实时累加 token 用量到 RunSnapshot，使状态面板能展示执行中的消耗
-                    if output.usage.total_tokens > 0 {
-                        let run = &mut self.store.runtime.run;
-                        match run.last_usage.as_mut() {
-                            Some(existing) => existing.accumulate(&output.usage),
-                            None => run.last_usage = Some(output.usage.clone()),
-                        }
+        for session_id in session_ids {
+            let mut should_clear = false;
+            let mut disconnected = false;
+
+            while let Some(event) = self.try_recv_turn_event(&session_id, &mut disconnected) {
+                match event {
+                    TurnEvent::PlanReady(plan) => {
+                        self.mark_pending_turn_executing(&session_id, &plan);
                     }
-                    self.append_pending_turn_llm_output(&output);
+                    TurnEvent::LlmOutput(output) => {
+                        // 实时累加 token 用量到 RunSnapshot，使状态面板能展示执行中的消耗
+                        if output.usage.total_tokens > 0 {
+                            let run = &mut self.store.runtime.run;
+                            match run.last_usage.as_mut() {
+                                Some(existing) => existing.accumulate(&output.usage),
+                                None => run.last_usage = Some(output.usage.clone()),
+                            }
+                        }
+                        self.append_pending_turn_llm_output(&session_id, &output);
+                    }
+                    TurnEvent::ToolExecution(result) => {
+                        self.append_pending_turn_tool_execution(&session_id, &result);
+                    }
+                    TurnEvent::PlanExecutionSummary(summary) => {
+                        self.append_pending_turn_plan_execution_summary(
+                            &session_id,
+                            summary.as_str(),
+                        );
+                    }
+                    TurnEvent::StageThinking { stage, delta } => {
+                        self.apply_stage_thinking_delta(&session_id, &stage, &delta);
+                    }
+                    TurnEvent::Chunk(delta) => {
+                        self.apply_assistant_delta(&session_id, &delta);
+                    }
+                    TurnEvent::Completed(exec) => {
+                        self.finish_pending_turn_success(&session_id, *exec);
+                        should_clear = true;
+                    }
+                    TurnEvent::Failed(err_msg) => {
+                        self.finish_pending_turn_error(&session_id, &err_msg);
+                        should_clear = true;
+                    }
                 }
-                TurnEvent::ToolExecution(result) => {
-                    self.append_pending_turn_tool_execution(&result);
-                }
-                TurnEvent::PlanExecutionSummary(summary) => {
-                    self.append_pending_turn_plan_execution_summary(summary.as_str());
-                }
-                TurnEvent::StageThinking { stage, delta } => {
-                    self.apply_stage_thinking_delta(&stage, &delta);
-                }
-                TurnEvent::Chunk(delta) => {
-                    self.apply_assistant_delta(&delta);
-                }
-                TurnEvent::Completed(exec) => {
-                    self.finish_pending_turn_success(*exec);
-                    should_clear = true;
-                }
-                TurnEvent::Failed(err_msg) => {
-                    self.finish_pending_turn_error(&err_msg);
-                    should_clear = true;
-                }
+            }
+
+            if disconnected && !should_clear {
+                self.finish_pending_turn_error(&session_id, "执行中断：后台任务通道已关闭");
+                should_clear = true;
+            }
+
+            if should_clear {
+                sessions_to_clear.push(session_id);
             }
         }
 
-        if disconnected && !should_clear {
-            self.finish_pending_turn_error("执行中断：后台任务通道已关闭");
-            should_clear = true;
+        for session_id in sessions_to_clear {
+            self.store.runtime.pending_turns.remove(&session_id);
         }
+    }
 
-        if should_clear {
-            self.store.runtime.pending_turn = None;
-        }
+    /// 兼容旧调用：轮询所有 pending turns
+    pub fn poll_pending_turn(&mut self) {
+        self.poll_pending_turns();
     }
 }

@@ -23,9 +23,11 @@ export interface Message {
 
 export interface RunSnapshot {
   status: string;
+  last_session_id?: string;
   current_plan?: TaskPlan;
   messages: Message[];
   input_draft: string;
+  pending_session_ids: string[];
 }
 
 export interface TaskPlan {
@@ -66,6 +68,13 @@ export interface Skill {
   description?: string;
   enabled: boolean;
   source_type: string;
+}
+
+export interface McpHealthStatus {
+  name: string;
+  healthy: boolean;
+  tool_count: number;
+  last_error?: string;
 }
 
 export interface ServerConfig {
@@ -153,6 +162,9 @@ export const api = {
   // ----------------------------------------------------------------
   getMcpServers: (): Promise<McpServer[]> =>
     invoke('get_mcp_servers'),
+
+  getMcpHealth: (): Promise<McpHealthStatus[]> =>
+    invoke('get_mcp_health'),
 
   registerMcpServer: (name: string, command: string, args: string[], env?: Record<string, string>): Promise<string> =>
     invoke('register_mcp_server', { name, command, args, env }),

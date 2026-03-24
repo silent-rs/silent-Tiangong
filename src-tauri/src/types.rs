@@ -68,6 +68,8 @@ pub struct RunSnapshot {
     pub input_draft: String,
     /// 前端需要：当前执行计划
     pub current_plan: Option<TaskPlan>,
+    /// 前端需要：当前正在执行的会话 ID 列表
+    pub pending_session_ids: Vec<String>,
 }
 
 impl RunSnapshot {
@@ -76,6 +78,7 @@ impl RunSnapshot {
         messages: Vec<Message>,
         input_draft: String,
         current_plan: Option<TaskPlan>,
+        pending_session_ids: Vec<String>,
     ) -> Self {
         Self {
             status: format!("{:?}", core_snapshot.status).to_lowercase(),
@@ -91,6 +94,7 @@ impl RunSnapshot {
             messages,
             input_draft,
             current_plan,
+            pending_session_ids,
         }
     }
 }

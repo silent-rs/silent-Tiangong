@@ -11,6 +11,11 @@ export function MainApp() {
   const unlistenRef = useRef<UnlistenFn | null>(null);
 
   useEffect(() => {
+    // 请求通知权限
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+
     loadSessions();
 
     const setupListener = async () => {

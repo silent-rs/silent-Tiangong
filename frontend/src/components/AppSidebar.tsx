@@ -10,6 +10,8 @@ export function AppSidebar() {
   const {
     sessions,
     activeSessionId,
+    isDraft,
+    sessionRunStatuses,
     createSession,
     switchSession,
     deleteSession,
@@ -53,23 +55,28 @@ export function AppSidebar() {
               [...sessions]
                 .filter((s) => s.message_count > 0 || s.id === activeSessionId)
                 .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
-                .map((session) => (
+                .map((session) => {
+                const isRunning = !!sessionRunStatuses[session.id];
+                return (
                 <button
                   key={session.id}
                   className={`w-full text-left px-3 py-2 rounded-md text-sm flex items-center gap-2 group transition-colors ${
-                    activeSessionId === session.id
+                    !isDraft && activeSessionId === session.id
                       ? 'bg-sidebar-accent text-sidebar-accent-foreground'
                       : 'text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
                   }`}
                   onClick={() => {
-                    if (session.id !== activeSessionId) {
+                    if (session.id !== activeSessionId || isDraft) {
                       switchSession(session.id);
                     }
                   }}
                 >
                   <MessageSquare className="w-4 h-4 shrink-0" />
                   <span className="flex-1 truncate">{session.title || '新对话'}</span>
-                  {activeSessionId === session.id && (
+                  {isRunning && (
+                    <span className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse shrink-0" />
+                  )}
+                  {!isDraft && activeSessionId === session.id && (
                     <button
                       className="opacity-0 group-hover:opacity-100 hover:text-destructive transition-opacity"
                       onClick={(e) => {
@@ -81,7 +88,8 @@ export function AppSidebar() {
                     </button>
                   )}
                 </button>
-              ))
+                );
+              })
             )}
           </div>
         </ScrollArea>

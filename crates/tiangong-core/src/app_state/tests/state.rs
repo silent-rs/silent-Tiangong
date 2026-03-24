@@ -55,18 +55,21 @@ fn ensure_pending_turn_assistant_message_creates_and_binds_message() -> Result<(
         );
 
         let (_tx, rx) = mpsc::channel();
-        state.store.runtime.pending_turn = Some(PendingTurn {
-            session_id: session_id.clone(),
-            task_id: task_id.clone(),
-            assistant_message_id: None,
-            stage_thinking_message_id: None,
-            started_at: Instant::now(),
-            rx,
-        });
+        state.store.runtime.pending_turns.insert(
+            session_id.clone(),
+            PendingTurn {
+                session_id: session_id.clone(),
+                task_id: task_id.clone(),
+                assistant_message_id: None,
+                stage_thinking_message_id: None,
+                started_at: Instant::now(),
+                rx,
+            },
+        );
 
         let service = state.services.turn_service;
         let (bound_session_id, assistant_message_id) = service
-            .ensure_pending_turn_assistant_message(state)
+            .ensure_pending_turn_assistant_message(state, &session_id)
             .expect("应创建 assistant message");
 
         assert_eq!(bound_session_id, session_id);
@@ -74,8 +77,8 @@ fn ensure_pending_turn_assistant_message_creates_and_binds_message() -> Result<(
             state
                 .store
                 .runtime
-                .pending_turn
-                .as_ref()
+                .pending_turns
+                .get(&session_id)
                 .and_then(|pending| pending.assistant_message_id.as_ref())
                 .map(String::as_str),
             Some(assistant_message_id.as_str())

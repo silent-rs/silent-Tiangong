@@ -4,10 +4,11 @@ impl AppTurnService {
     pub(in crate::app_state) fn finish_pending_turn_success(
         self,
         state: &mut TiangongState,
+        session_id: &str,
         exec: TurnExecution,
     ) {
-        let Some((session_id, task_id, assistant_message_id, started_at)) =
-            state.store.runtime.pending_turn.as_ref().map(|pending| {
+        let Some((sid, task_id, assistant_message_id, started_at)) =
+            state.store.runtime.pending_turns.get(session_id).map(|pending| {
                 (
                     pending.session_id.clone(),
                     pending.task_id.clone(),
@@ -22,7 +23,7 @@ impl AppTurnService {
         let mut final_assistant_message_id = assistant_message_id;
         let mut updated_existing_message = false;
         if let Some(message_id) = final_assistant_message_id.as_deref()
-            && let Some(message) = self.find_message_mut(state, &session_id, message_id)
+            && let Some(message) = self.find_message_mut(state, &sid, message_id)
         {
             message.content = exec.assistant_message.clone();
             message.reasoning_content = exec.assistant_reasoning_content.clone();
@@ -34,7 +35,7 @@ impl AppTurnService {
                 .session
                 .sessions
                 .iter_mut()
-                .find(|session| session.id == session_id)
+                .find(|session| session.id == sid)
         {
             session.append_message_with_reasoning(
                 MessageRole::Assistant,
@@ -78,7 +79,7 @@ impl AppTurnService {
             .session
             .sessions
             .iter_mut()
-            .find(|session| session.id == session_id)
+            .find(|session| session.id == sid)
         {
             if let Some(message_id) = final_assistant_message_id.clone() {
                 session.bind_task_assistant_message_id(&task_id, message_id);
@@ -116,7 +117,7 @@ impl AppTurnService {
             } else {
                 "执行完成".to_string()
             },
-            last_session_id: Some(session_id.clone()),
+            last_session_id: Some(sid.clone()),
             last_task_id: Some(task_id),
             last_duration_ms: Some(duration_ms),
             last_result: Some(if has_failed_plan {
@@ -137,7 +138,7 @@ impl AppTurnService {
             .session
             .sessions
             .iter()
-            .find(|s| s.id == session_id)
+            .find(|s| s.id == sid)
         {
             let is_default_title = session.title == "新对话"
                 || session.title.starts_with("会话 ")
@@ -167,7 +168,7 @@ impl AppTurnService {
                                 .session
                                 .sessions
                                 .iter_mut()
-                                .find(|s| s.id == session_id)
+                                .find(|s| s.id == sid)
                         {
                             session_mut.title = clean_title.clone();
                             session_mut.updated_at = now_text();
@@ -178,7 +179,7 @@ impl AppTurnService {
             }
         }
 
-        if let Err(err) = state.persist_session_and_app(&session_id) {
+        if let Err(err) = state.persist_session_and_app(&sid) {
             state.store.runtime.run = RunSnapshot {
                 status: RunStatus::Failed,
                 summary: "会话持久化失败".to_string(),
@@ -198,10 +199,11 @@ impl AppTurnService {
     pub(in crate::app_state) fn finish_pending_turn_error(
         self,
         state: &mut TiangongState,
+        session_id: &str,
         err_msg: &str,
     ) {
-        let Some((session_id, task_id, assistant_message_id, started_at)) =
-            state.store.runtime.pending_turn.as_ref().map(|pending| {
+        let Some((sid, task_id, assistant_message_id, started_at)) =
+            state.store.runtime.pending_turns.get(session_id).map(|pending| {
                 (
                     pending.session_id.clone(),
                     pending.task_id.clone(),
@@ -219,7 +221,7 @@ impl AppTurnService {
             .session
             .sessions
             .iter_mut()
-            .find(|session| session.id == session_id)
+            .find(|session| session.id == sid)
         {
             if let Some(assistant_message_id) = assistant_message_id.as_deref()
                 && let Some(position) = session.messages.iter().position(|msg| {
@@ -238,7 +240,7 @@ impl AppTurnService {
         state.store.runtime.run = RunSnapshot {
             status: RunStatus::Failed,
             summary: "执行失败".to_string(),
-            last_session_id: Some(session_id.clone()),
+            last_session_id: Some(sid.clone()),
             last_task_id: Some(task_id),
             last_duration_ms: Some(duration_ms),
             last_result: Some("failed".to_string()),
@@ -249,7 +251,7 @@ impl AppTurnService {
             updated_at: now_text(),
         };
 
-        if let Err(err) = state.persist_session_and_app(&session_id) {
+        if let Err(err) = state.persist_session_and_app(&sid) {
             state.store.runtime.run = RunSnapshot {
                 status: RunStatus::Failed,
                 summary: "会话持久化失败".to_string(),

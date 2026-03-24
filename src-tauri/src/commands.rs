@@ -10,12 +10,21 @@ use tauri::{AppHandle, Emitter, Manager, State, Window};
 // ============================================================================
 
 fn build_full_snapshot(core_state: &tiangong_core::app_state::TiangongState) -> RunSnapshot {
+    build_session_snapshot(core_state, core_state.active_session_id())
+}
+
+fn build_session_snapshot(
+    core_state: &tiangong_core::app_state::TiangongState,
+    session_id: &str,
+) -> RunSnapshot {
     let core_snapshot = core_state.run_snapshot();
     let input_draft = core_state.input_draft().to_string();
 
-    // 获取当前活动的会话消息
+    // 获取指定会话的消息
     let messages: Vec<Message> = core_state
-        .active_session()
+        .sessions()
+        .iter()
+        .find(|s| s.id == session_id)
         .map(|s| s.messages.iter().map(Message::from_core).collect())
         .unwrap_or_default();
 
@@ -25,7 +34,32 @@ fn build_full_snapshot(core_state: &tiangong_core::app_state::TiangongState) -> 
         .first()
         .map(TaskPlan::from_session_task_plan);
 
-    RunSnapshot::from_core_with_session(core_snapshot, messages, input_draft, current_plan)
+    let pending_session_ids = core_state.pending_session_ids();
+
+    let mut snapshot = RunSnapshot::from_core_with_session(
+        core_snapshot,
+        messages,
+        input_draft,
+        current_plan,
+        pending_session_ids,
+    );
+
+    // 按 session 修正 status：如果该 session 没有 pending_turn，状态应为 idle
+    if core_state.has_pending_turn_for(session_id) {
+        // 该 session 正在运行，但全局 RunSnapshot 可能被其他 session 的事件覆盖
+        // 如果 last_session_id 不匹配，给一个合理的默认状态
+        if snapshot.last_session_id.as_deref() != Some(session_id) {
+            snapshot.status = "executing".to_string();
+            snapshot.summary = "正在执行中".to_string();
+        }
+    } else {
+        // 该 session 没有在运行
+        snapshot.status = "idle".to_string();
+        // 保留 summary 供历史查看，但清除执行中相关的字段
+        snapshot.current_plan = None;
+    }
+
+    snapshot
 }
 
 // ============================================================================
@@ -93,6 +127,10 @@ pub fn send_message(
     _window: Window,
     state: State<TiangongApp>,
 ) -> Result<(), String> {
+    // 记录发送时的 session_id
+    let session_id = state
+        .with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))?;
+
     // 设置输入草稿并发送
     state.with_state(|core_state| {
         core_state.update_draft(content);
@@ -101,53 +139,58 @@ pub fn send_message(
 
     // 启动后台任务监听事件并推送到前端
     let app_clone = app.clone();
+    let poll_session_id = session_id.clone();
     thread::spawn(move || {
         loop {
-            // 先消费 channel 中的事件，更新内部状态
+            // 先消费 channel 中的事件，更新内部状态（轮询所有 pending turns）
             let _ = app_clone
                 .state::<TiangongApp>()
                 .with_state(|core_state| {
-                    core_state.poll_pending_turn();
+                    core_state.poll_pending_turns();
                     Ok(())
                 });
 
-            // 获取当前完整状态快照
+            // 获取当前活动会话的完整状态快照
             if let Ok(snapshot) = app_clone
                 .state::<TiangongApp>()
                 .with_state_read(|s| Ok(build_full_snapshot(s)))
             {
-                let is_idle = snapshot.status == "idle"
-                    || snapshot.status == "completed"
-                    || snapshot.status == "failed";
-
                 // 每次轮询都发送快照，确保消息内容变化也能同步
                 let _ = app_clone.emit("run_snapshot", &snapshot);
+            }
 
-                // 如果状态已结束，重置为 idle 并停止轮询
-                if is_idle {
-                    if snapshot.status == "completed" || snapshot.status == "failed" {
-                        let _ = app_clone
-                            .state::<TiangongApp>()
-                            .with_state(|core_state| {
-                                core_state.report_run_idle(
-                                    if snapshot.status == "completed" {
-                                        format!("模型供应商：{}", core_state.provider_label())
-                                    } else {
-                                        "执行失败".to_string()
-                                    }
-                                );
-                                Ok(())
-                            });
-                        // 发送最终的 idle 快照
-                        if let Ok(final_snapshot) = app_clone
-                            .state::<TiangongApp>()
-                            .with_state_read(|s| Ok(build_full_snapshot(s)))
-                        {
-                            let _ = app_clone.emit("run_snapshot", &final_snapshot);
+            // 检查本次 send 对应的会话是否已完成
+            let session_done = app_clone
+                .state::<TiangongApp>()
+                .with_state_read(|core_state| {
+                    Ok(!core_state.has_pending_turn_for(&poll_session_id))
+                })
+                .unwrap_or(true);
+
+            if session_done {
+                // 重置为 idle
+                let _ = app_clone
+                    .state::<TiangongApp>()
+                    .with_state(|core_state| {
+                        let status_str = format!("{:?}", core_state.run_snapshot().status).to_lowercase();
+                        if status_str == "completed" {
+                            core_state.report_run_idle(format!(
+                                "模型供应商：{}",
+                                core_state.provider_label()
+                            ));
+                        } else if status_str == "failed" {
+                            core_state.report_run_idle("执行失败");
                         }
-                    }
-                    break;
+                        Ok(())
+                    });
+                // 发送最终的 idle 快照
+                if let Ok(final_snapshot) = app_clone
+                    .state::<TiangongApp>()
+                    .with_state_read(|s| Ok(build_full_snapshot(s)))
+                {
+                    let _ = app_clone.emit("run_snapshot", &final_snapshot);
                 }
+                break;
             }
 
             thread::sleep(Duration::from_millis(200));
@@ -198,6 +241,16 @@ pub fn get_mcp_servers(state: State<TiangongApp>) -> Result<Vec<McpServer>, Stri
             .map(McpServer::from_core)
             .collect())
     })
+}
+
+/// 获取 MCP 服务器健康状态
+#[tauri::command]
+pub fn get_mcp_health() -> Result<Vec<serde_json::Value>, String> {
+    let statuses = tiangong_core::mcp::mcp_server_health_statuses();
+    statuses
+        .into_iter()
+        .map(|s| serde_json::to_value(s).map_err(|e| e.to_string()))
+        .collect()
 }
 
 /// 注册 MCP 服务器

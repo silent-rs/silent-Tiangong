@@ -50,7 +50,7 @@ impl TiangongState {
                 },
                 runtime: RuntimeState {
                     run: RunSnapshot::default(),
-                    pending_turn: None,
+                    pending_turns: HashMap::new(),
                 },
             },
             services: AppServices {
@@ -163,6 +163,8 @@ impl TiangongState {
         self.store.provider.model_list = loaded.model_list;
         if let Some(agent_config) = loaded.agent_config {
             self.store.agent.agent_config = agent_config;
+            // agent_config 变更后需重建 runtime，否则 runtime 持有默认空 MCP 配置
+            self.rebuild_runtime_from_current_config();
         }
     }
 

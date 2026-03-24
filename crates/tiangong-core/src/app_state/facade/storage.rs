@@ -65,7 +65,13 @@ impl TiangongState {
     pub(in crate::app_state) fn try_auto_resume_unfinished_plan_for_active_session(
         &mut self,
     ) -> Result<bool> {
-        if self.store.runtime.pending_turn.is_some() {
+        let active_id_check = self.store.session.active_session_id.clone();
+        if self
+            .store
+            .runtime
+            .pending_turns
+            .contains_key(&active_id_check)
+        {
             return Ok(false);
         }
 

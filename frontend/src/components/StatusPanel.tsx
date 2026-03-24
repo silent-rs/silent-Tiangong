@@ -17,7 +17,7 @@ import {
 const appWindow = getCurrentWindow();
 
 export function StatusPanel() {
-  const { runStatus, activeSessionId, sessions, loadSessions, createSession } = useStore();
+  const { runStatus, activeSessionId, isDraft, sessionRunStatuses, sessions, loadSessions, createSession } = useStore();
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
@@ -25,8 +25,13 @@ export function StatusPanel() {
 
   const { theme, setTheme } = useTheme();
   const { toggleSidebar, open: sidebarOpen } = useSidebar();
-  const activeSession = sessions.find((s) => s.id === activeSessionId);
-  const currentTitle = activeSession?.title || '新对话';
+  const activeSession = isDraft ? null : sessions.find((s) => s.id === activeSessionId);
+  const currentTitle = isDraft ? '新对话' : (activeSession?.title || '新对话');
+
+  // 当前会话的运行状态
+  const currentRunStatus = isDraft
+    ? 'idle'
+    : (activeSessionId && sessionRunStatuses[activeSessionId]) || runStatus;
 
   const cycleTheme = () => {
     const next = theme === 'dark' ? 'light' : theme === 'light' ? 'system' : 'dark';
@@ -83,7 +88,7 @@ export function StatusPanel() {
   };
 
   const getStatusColor = () => {
-    switch (runStatus) {
+    switch (currentRunStatus) {
       case 'planning':
       case 'executing':
         return 'text-yellow-500';
@@ -96,7 +101,7 @@ export function StatusPanel() {
   };
 
   const getStatusText = () => {
-    switch (runStatus) {
+    switch (currentRunStatus) {
       case 'planning':
         return '计划中';
       case 'executing':
@@ -148,8 +153,10 @@ export function StatusPanel() {
         <Breadcrumb>
           <BreadcrumbList>
             <BreadcrumbItem>
-              {activeSession && (
-                isEditing ? (
+              {(isDraft || activeSession) && (
+                isDraft ? (
+                  <BreadcrumbPage>新对话</BreadcrumbPage>
+                ) : isEditing ? (
                   <input
                     ref={inputRef}
                     value={editValue}
@@ -184,7 +191,7 @@ export function StatusPanel() {
           <ThemeIcon className="w-4 h-4" />
         </button>
         <div className="flex items-center gap-2">
-          <Circle className={`w-2 h-2 ${getStatusColor()} ${runStatus !== 'idle' ? 'animate-pulse' : 'fill-current'}`} />
+          <Circle className={`w-2 h-2 ${getStatusColor()} ${currentRunStatus !== 'idle' ? 'animate-pulse' : 'fill-current'}`} />
           <span className="text-sm text-muted-foreground">{getStatusText()}</span>
         </div>
       </div>

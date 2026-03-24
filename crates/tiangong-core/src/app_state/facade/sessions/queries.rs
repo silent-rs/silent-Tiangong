@@ -25,7 +25,15 @@ impl TiangongState {
     }
 
     pub fn has_pending_turn(&self) -> bool {
-        self.store.runtime.pending_turn.is_some()
+        !self.store.runtime.pending_turns.is_empty()
+    }
+
+    pub fn has_pending_turn_for(&self, session_id: &str) -> bool {
+        self.store.runtime.pending_turns.contains_key(session_id)
+    }
+
+    pub fn pending_session_ids(&self) -> Vec<String> {
+        self.store.runtime.pending_turns.keys().cloned().collect()
     }
 
     pub fn update_draft(&mut self, value: String) {

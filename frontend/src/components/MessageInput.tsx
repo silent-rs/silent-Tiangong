@@ -5,11 +5,15 @@ import { Button } from './ui/button';
 import { Send, Square } from 'lucide-react';
 
 export function MessageInput() {
-  const { inputContent, setInputContent, sendMessage, cancelTurn, runStatus } = useStore();
+  const { inputContent, setInputContent, sendMessage, cancelTurn, runStatus, isDraft, activeSessionId, sessionRunStatuses } = useStore();
   const [isComposing, setIsComposing] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const isIdle = runStatus === 'idle';
+  // 当前会话是否空闲：草稿模式一定空闲，否则检查 per-session 状态
+  const currentSessionStatus = isDraft
+    ? 'idle'
+    : (activeSessionId && sessionRunStatuses[activeSessionId]) || runStatus;
+  const isIdle = currentSessionStatus === 'idle';
   const canSend = isIdle && inputContent.trim().length > 0;
 
   // 自动调整文本框高度
@@ -82,9 +86,9 @@ export function MessageInput() {
             {!isIdle && (
               <span className="flex items-center gap-1">
                 <span className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse" />
-                {runStatus === 'planning' && '正在制定计划...'}
-                {runStatus === 'executing' && '正在执行任务...'}
-                {runStatus === 'responding' && '正在生成回复...'}
+                {currentSessionStatus === 'planning' && '正在制定计划...'}
+                {currentSessionStatus === 'executing' && '正在执行任务...'}
+                {currentSessionStatus === 'responding' && '正在生成回复...'}
               </span>
             )}
           </span>
