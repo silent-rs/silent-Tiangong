@@ -17,6 +17,7 @@ http = "1"
 toml = "0.8"
 tracing = "0.1"
 diffy = { version = "0.4", optional = true }
+tiangong-media = { path = "../tiangong-media" }
 
 [features]
 default = ["diffy"]

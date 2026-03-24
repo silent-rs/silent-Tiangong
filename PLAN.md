@@ -68,6 +68,16 @@
 - 配置热重载。
 - TLS、安全加固、Docker 部署支持。
 
+### Phase 9（模型配置重构与多媒体集成）— **当前阶段**
+- `ModelsConfig` 替换 `ModelProviderConfig` 为唯一模型配置源。
+- Provider + Model + Routing 三层架构。
+- GUI 全面升级为 shadcn/ui dashboard 风格，支持暗/亮主题。
+- 意图分类快速路径：简单对话跳过 planning，减少 token 消耗。
+- 多媒体能力通过 Routing 集成到执行引擎：
+  - 图片生成作为内置工具，调用 routing 中配置的 image_generation 模型。
+  - 语音合成/识别作为内置工具，调用 routing 中配置的 tts/stt 模型。
+- MediaAgent 从 ModelsConfig routing 自动初始化。
+
 ## 参考文档
 - 项目说明：`README.md`
 - RFC 0001：`docs/rfc/0001-tiangong-desktop-agent-roadmap.md`

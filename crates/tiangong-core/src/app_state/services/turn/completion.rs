@@ -153,18 +153,17 @@ impl AppTurnService {
                     );
                     if let Ok(title) = client.complete_lite(&user_input_for_title) {
                         let clean_title = title.trim().trim_matches('"').to_string();
-                        if !clean_title.is_empty() {
-                            if let Some(session_mut) = state
+                        if !clean_title.is_empty()
+                            && let Some(session_mut) = state
                                 .store
                                 .session
                                 .sessions
                                 .iter_mut()
                                 .find(|s| s.id == session_id)
-                            {
-                                session_mut.title = clean_title.clone();
-                                session_mut.updated_at = now_text();
-                                state.store.session.session_title_draft = clean_title;
-                            }
+                        {
+                            session_mut.title = clean_title.clone();
+                            session_mut.updated_at = now_text();
+                            state.store.session.session_title_draft = clean_title;
                         }
                     }
                 }

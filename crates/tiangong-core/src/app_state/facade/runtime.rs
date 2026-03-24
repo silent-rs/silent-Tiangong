@@ -8,7 +8,8 @@ impl TiangongState {
             SingleProviderClient::new(config),
             DEFAULT_CONTEXT_LIMIT,
             self.store.agent.agent_config.clone(),
-        );
+        )
+        .with_models_config(self.store.provider.models_config.clone());
     }
 
     pub(in crate::app_state) fn replace_run_snapshot(

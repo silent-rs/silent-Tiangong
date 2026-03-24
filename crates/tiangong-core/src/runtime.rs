@@ -12,6 +12,8 @@ use crate::execution::{
 use crate::model::{
     ModelClient, ModelRequest, ModelResponse, ModelStreamChunk, SingleProviderClient, TokenUsage,
 };
+use crate::models_config::{ModelCapability, ModelsConfig};
+use tiangong_media::image::ImageGenerator;
 use crate::planner::TaskPlan;
 use crate::session::{Session, now_text};
 use crate::tool::{LocalToolExecutor, ToolExecutionRecord, ToolResult};
@@ -80,6 +82,7 @@ pub struct RuntimeEngine {
     tool_executor: LocalToolExecutor,
     context_limit: usize,
     agent_config: AgentConfig,
+    models_config: ModelsConfig,
 }
 
 impl RuntimeEngine {
@@ -93,7 +96,13 @@ impl RuntimeEngine {
             tool_executor: LocalToolExecutor::from_agent_config(&agent_config),
             context_limit,
             agent_config,
+            models_config: ModelsConfig::default(),
         }
+    }
+
+    pub fn with_models_config(mut self, config: ModelsConfig) -> Self {
+        self.models_config = config;
+        self
     }
 
     pub fn provider_label(&self) -> String {
@@ -134,6 +143,16 @@ impl RuntimeEngine {
             user_input,
             &mut on_chunk,
             &mut on_stage_thinking,
+            &mut accumulated_usage,
+        )? {
+            return Ok(exec);
+        }
+
+        // 图片生成检测：如果用户请求生成图片且配置了 image_generation routing
+        if let Some(exec) = self.try_image_generation(
+            session,
+            user_input,
+            &mut on_chunk,
             &mut accumulated_usage,
         )? {
             return Ok(exec);
@@ -369,6 +388,168 @@ impl RuntimeEngine {
             verify_records: Vec::new(),
             output_mode,
             output_chunk_count,
+            usage: accumulated_usage.clone(),
+        }))
+    }
+
+    /// 图片生成快速路径
+    ///
+    /// 检测用户输入是否为图片生成请求，如果是且配置了 image_generation routing，
+    /// 直接调用图片生成 API，跳过 planning + execution。
+    fn try_image_generation(
+        &self,
+        _session: &Session,
+        user_input: &str,
+        on_chunk: &mut dyn FnMut(&ModelStreamChunk),
+        accumulated_usage: &mut TokenUsage,
+    ) -> Result<Option<TurnExecution>> {
+        // 简单关键词检测是否为图片生成请求
+        let image_keywords = ["生成图片", "画一", "画个", "生成一张", "生成一幅", "画图",
+            "generate image", "draw", "create image", "生成图", "帮我画", "图片生成"];
+        let is_image_request = image_keywords.iter().any(|kw| user_input.contains(kw));
+        if !is_image_request {
+            return Ok(None);
+        }
+
+        // 检查是否配置了 image_generation routing
+        let resolved = match self.models_config.resolve_for_capability(ModelCapability::ImageGeneration) {
+            Some(r) => r,
+            None => return Ok(None), // 未配置，走正常流程
+        };
+
+        // 提取生成 prompt（去掉前缀指令词）
+        let prompt = user_input.to_string();
+
+        // 调用图片生成 API
+        let generator = tiangong_media::openai_image::OpenAIImageGenerator::new(
+            resolved.api_key.clone(),
+            resolved.base_url.trim_end_matches('/').to_string(),
+            resolved.model.clone(),
+        );
+
+        let request = tiangong_media::image::ImageGenRequest {
+            prompt: prompt.clone(),
+            negative_prompt: None,
+            width: 1024,
+            height: 1024,
+            model: Some(resolved.model.clone()),
+            style: None,
+            num_images: 1,
+        };
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| anyhow::anyhow!("初始化异步运行时失败：{e}"))?;
+
+        let result = runtime.block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(120),
+                generator.generate(request),
+            ).await
+        });
+
+        let response = match result {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(err)) => {
+                // 图片生成失败，回退给 chat 模型处理
+                let error_msg = format!("图片生成失败：{err}");
+                on_chunk(&ModelStreamChunk {
+                    content: error_msg.clone(),
+                    reasoning_content: String::new(),
+                });
+                let plan = TaskPlan {
+                    id: scru128::new().to_string(),
+                    objective: "图片生成".to_string(),
+                    summary: format!("尝试生成图片但失败：{err}"),
+                    plans: Vec::new(),
+                    risks: Vec::new(),
+                    skill_hints: Vec::new(),
+                    mcp_hints: Vec::new(),
+                    revisions: Vec::new(),
+                };
+                return Ok(Some(TurnExecution {
+                    assistant_message: error_msg,
+                    assistant_reasoning_content: String::new(),
+                    plan,
+                    tool_result_summary: None,
+                    tool_execution: None,
+                    verify_records: Vec::new(),
+                    output_mode: "sync".to_string(),
+                    output_chunk_count: 1,
+                    usage: accumulated_usage.clone(),
+                }));
+            }
+            Err(_) => {
+                let error_msg = "图片生成超时（120秒）".to_string();
+                on_chunk(&ModelStreamChunk {
+                    content: error_msg.clone(),
+                    reasoning_content: String::new(),
+                });
+                let plan = TaskPlan {
+                    id: scru128::new().to_string(),
+                    objective: "图片生成".to_string(),
+                    summary: "图片生成超时".to_string(),
+                    plans: Vec::new(),
+                    risks: Vec::new(),
+                    skill_hints: Vec::new(),
+                    mcp_hints: Vec::new(),
+                    revisions: Vec::new(),
+                };
+                return Ok(Some(TurnExecution {
+                    assistant_message: error_msg,
+                    assistant_reasoning_content: String::new(),
+                    plan,
+                    tool_result_summary: None,
+                    tool_execution: None,
+                    verify_records: Vec::new(),
+                    output_mode: "sync".to_string(),
+                    output_chunk_count: 1,
+                    usage: accumulated_usage.clone(),
+                }));
+            }
+        };
+
+        // 构建回复：包含图片 URL 或 base64
+        let mut reply_parts = Vec::new();
+        reply_parts.push(format!("已为您生成图片（模型：{}）：\n", resolved.model));
+        for (i, img) in response.images.iter().enumerate() {
+            if let Some(url) = &img.url {
+                reply_parts.push(format!("![生成的图片 {}]({})\n", i + 1, url));
+            } else if let Some(b64) = &img.b64_data {
+                reply_parts.push(format!("![生成的图片 {}](data:image/png;base64,{})\n", i + 1, b64));
+            }
+            if let Some(revised) = &img.revised_prompt {
+                reply_parts.push(format!("优化后的提示词：{}\n", revised));
+            }
+        }
+        let reply = reply_parts.join("");
+
+        on_chunk(&ModelStreamChunk {
+            content: reply.clone(),
+            reasoning_content: String::new(),
+        });
+
+        let plan = TaskPlan {
+            id: scru128::new().to_string(),
+            objective: "图片生成".to_string(),
+            summary: format!("使用 {} 生成图片", resolved.model),
+            plans: Vec::new(),
+            risks: Vec::new(),
+            skill_hints: Vec::new(),
+            mcp_hints: Vec::new(),
+            revisions: Vec::new(),
+        };
+
+        Ok(Some(TurnExecution {
+            assistant_message: reply,
+            assistant_reasoning_content: String::new(),
+            plan,
+            tool_result_summary: None,
+            tool_execution: None,
+            verify_records: Vec::new(),
+            output_mode: "stream".to_string(),
+            output_chunk_count: 1,
             usage: accumulated_usage.clone(),
         }))
     }

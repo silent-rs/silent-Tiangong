@@ -3163,6 +3163,7 @@ dependencies = [
  "scru128",
  "serde",
  "serde_json",
+ "tiangong-media",
  "tokio",
  "toml",
  "tracing",

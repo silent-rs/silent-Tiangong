@@ -114,3 +114,58 @@
 - [x] 错误恢复（启动时 recover_interrupted_tasks + auto_resume_unfinished_plan）
 - [x] 敏感配置脱敏（model auth_token + server auth_token 脱敏显示）
 - [x] 配置热重载（ConfigWatcher 轮询文件修改时间 + Notify 通知）
+
+---
+
+## Phase 9：模型配置重构与多媒体集成 — **当前阶段**
+
+### A. 模型配置重构（已完成 ✅）
+- [x] ModelsConfig 替换 ModelProviderConfig 为唯一模型配置源
+- [x] Provider + Model + Routing 三层架构
+- [x] ModelsConfig.to_chat_provider_config() 自动生成内部配置
+- [x] 移除旧版 draft 字段和 legacy API
+- [x] 设置页面自动保存（debounce 500ms）
+- [x] 选择 Provider 后可获取模型列表快速配置
+- [x] 模型标识名自动生成
+
+### B. GUI 升级（已完成 ✅）
+- [x] shadcn/ui dashboard 风格重构（Sidebar + Header + Tabs + Card + Select）
+- [x] 暗/亮/跟随系统主题切换
+- [x] macOS 红绿灯对齐（trafficLightPosition）
+- [x] 消息展示优化（系统消息分组折叠、间距缩减、文字对比度）
+- [x] 输入框嵌入式发送按钮
+- [x] 会话标题 LLM 自动生成
+- [x] 空会话过滤 + 会话列表按更新时间倒序
+
+### C. 执行优化（已完成 ✅）
+- [x] 意图分类快速路径：简单对话跳过 planning + execution
+- [x] poll_pending_turn 修复（消息回复链路）
+- [x] 完成后状态重置为 idle
+
+### D. 多媒体能力集成到执行引擎（进行中）
+
+#### D1. 图片生成集成
+- [ ] RuntimeEngine 从 ModelsConfig routing 初始化 MediaAgent
+  - 读取 `routing[ImageGeneration]` 解析 provider + model
+  - 构建 `OpenAiImageBackend` 并注入 `MediaAgent`
+- [ ] 注册 `generate_image` 为内置工具函数
+  - 在 `execution_tool_agent.rs` 中添加函数定义（prompt, width?, height?, style?）
+  - 在 `LocalToolExecutor` 中添加处理分支
+- [ ] 工具执行：调用 `MediaAgent.generate_image()` 并返回图片 URL/base64
+- [ ] 前端消息中渲染图片（识别 URL 或 base64 并显示 `<img>`）
+
+#### D2. 语音合成/识别集成
+- [ ] 读取 `routing[Tts]` 初始化 TTS 后端
+- [ ] 读取 `routing[Stt]` 初始化 STT 后端
+- [ ] 注册 `text_to_speech` / `speech_to_text` 为内置工具
+
+#### D3. 视频生成集成
+- [ ] 读取 `routing[VideoGeneration]` 初始化视频生成后端
+- [ ] 注册 `generate_video` 为内置工具（异步任务模式）
+
+### E. 验证
+- [ ] `cargo check --workspace` 通过
+- [ ] `cargo clippy --workspace --all-targets --tests --benches -- -D warnings` 通过
+- [ ] `cargo nextest run --workspace --no-tests pass` 通过
+- [ ] GUI 图片生成端到端可用
+- [ ] 暗/亮主题下图片正常显示
