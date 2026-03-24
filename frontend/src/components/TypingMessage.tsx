@@ -1,10 +1,12 @@
 import { useEffect, useState, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import type { ReactNode } from 'react';
 
 import { ThinkingBlock } from './ThinkingBlock';
+import { parseInlineThinking } from '@/utils/parseThinking';
 
 interface TypingMessageProps {
   content: string;
@@ -151,19 +153,40 @@ export function TypingMessage({ content, reasoningContent, speed = 300, onComple
         </a>
       );
     },
+    table({ children }: { children: ReactNode }) {
+      return (
+        <div className="my-3 overflow-x-auto">
+          <table className="min-w-full border-collapse border border-border text-sm">
+            {children}
+          </table>
+        </div>
+      );
+    },
+    thead({ children }: { children: ReactNode }) {
+      return <thead className="bg-muted/50">{children}</thead>;
+    },
+    th({ children }: { children: ReactNode }) {
+      return <th className="border border-border px-3 py-1.5 text-left font-semibold">{children}</th>;
+    },
+    td({ children }: { children: ReactNode }) {
+      return <td className="border border-border px-3 py-1.5">{children}</td>;
+    },
   };
+
+  const parsed = parseInlineThinking(displayedContent);
+  const thinkingContent = reasoningContent || parsed.thinking;
 
   return (
     <div>
       {/* 思考过程 - 实时显示在顶部 */}
-      {reasoningContent && (
-        <ThinkingBlock content={reasoningContent} defaultExpanded={false} />
+      {thinkingContent && (
+        <ThinkingBlock content={thinkingContent} defaultExpanded={false} />
       )}
 
       {/* 正常输出 - 打字机效果 */}
       <div className="prose prose-invert prose-sm max-w-none">
-        <ReactMarkdown components={MarkdownComponents as any}>
-          {displayedContent}
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={MarkdownComponents as any}>
+          {parsed.content}
         </ReactMarkdown>
         {!isComplete && (
           <span className="inline-block w-2 h-4 bg-[#10A37F] ml-1 animate-pulse" />

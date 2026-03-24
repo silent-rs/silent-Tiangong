@@ -2,10 +2,12 @@ import { useStore } from '@/store/useStore';
 import { ScrollArea } from './ui/scroll-area';
 import { User, Bot, Loader2, ChevronRight, ChevronDown, Terminal, Cpu, FileText } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { TypingMessage } from './TypingMessage';
 import { ThinkingBlock } from './ThinkingBlock';
+import { parseInlineThinking } from '@/utils/parseThinking';
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
@@ -107,6 +109,24 @@ export function MessageList() {
         </a>
       );
     },
+    table({ children }: { children: ReactNode }) {
+      return (
+        <div className="my-3 overflow-x-auto">
+          <table className="min-w-full border-collapse border border-border text-sm">
+            {children}
+          </table>
+        </div>
+      );
+    },
+    thead({ children }: { children: ReactNode }) {
+      return <thead className="bg-muted/50">{children}</thead>;
+    },
+    th({ children }: { children: ReactNode }) {
+      return <th className="border border-border px-3 py-1.5 text-left font-semibold">{children}</th>;
+    },
+    td({ children }: { children: ReactNode }) {
+      return <td className="border border-border px-3 py-1.5">{children}</td>;
+    },
   };
 
   return (
@@ -162,14 +182,22 @@ export function MessageList() {
                           />
                         ) : (
                           <div>
-                            {message.reasoning_content && (
-                              <ThinkingBlock content={message.reasoning_content} defaultExpanded={false} />
-                            )}
-                            <div className="prose prose-sm max-w-none text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
-                              <ReactMarkdown components={MarkdownComponents as any}>
-                                {message.content}
-                              </ReactMarkdown>
-                            </div>
+                            {(() => {
+                              const parsed = parseInlineThinking(message.content);
+                              const thinkingContent = message.reasoning_content || parsed.thinking;
+                              return (
+                                <>
+                                  {thinkingContent && (
+                                    <ThinkingBlock content={thinkingContent} defaultExpanded={false} />
+                                  )}
+                                  <div className="prose prose-sm max-w-none text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
+                                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={MarkdownComponents as any}>
+                                      {parsed.content}
+                                    </ReactMarkdown>
+                                  </div>
+                                </>
+                              );
+                            })()}
                           </div>
                         )}
                       </>
