@@ -18,12 +18,22 @@ export function TypingMessage({ content, reasoningContent, speed = 300, onComple
   const [isComplete, setIsComplete] = useState(false);
   const intervalRef = useRef<number | null>(null);
   const currentIndexRef = useRef(0);
+  const prevContentRef = useRef('');
 
   useEffect(() => {
-    // 重置状态
-    setDisplayedContent('');
-    setIsComplete(false);
-    currentIndexRef.current = 0;
+    // 判断内容是否只是在增长（流式追加）
+    const isAppending = content.startsWith(prevContentRef.current) && prevContentRef.current.length > 0;
+    prevContentRef.current = content;
+
+    if (!isAppending) {
+      // 内容完全不同，重置
+      setDisplayedContent('');
+      setIsComplete(false);
+      currentIndexRef.current = 0;
+    } else {
+      // 内容是追加的，保持当前进度，取消完成状态
+      setIsComplete(false);
+    }
 
     // 如果内容为空，直接完成
     if (!content) {
@@ -145,6 +155,11 @@ export function TypingMessage({ content, reasoningContent, speed = 300, onComple
 
   return (
     <div>
+      {/* 思考过程 - 实时显示在顶部 */}
+      {reasoningContent && (
+        <ThinkingBlock content={reasoningContent} defaultExpanded={false} />
+      )}
+
       {/* 正常输出 - 打字机效果 */}
       <div className="prose prose-invert prose-sm max-w-none">
         <ReactMarkdown components={MarkdownComponents as any}>
@@ -154,11 +169,6 @@ export function TypingMessage({ content, reasoningContent, speed = 300, onComple
           <span className="inline-block w-2 h-4 bg-[#10A37F] ml-1 animate-pulse" />
         )}
       </div>
-
-      {/* 思考过程 - 仅在完成时显示 */}
-      {isComplete && reasoningContent && (
-        <ThinkingBlock content={reasoningContent} defaultExpanded={false} />
-      )}
     </div>
   );
 }
