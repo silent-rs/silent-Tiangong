@@ -475,53 +475,35 @@ impl RuntimeEngine {
 
         let result = runtime.block_on(async {
             let client = reqwest::Client::new();
-
-            // 尝试两种端点格式
-            let endpoints = vec![
-                format!("{}/image_generation", base_url),    // MiniMax 格式
-                format!("{}/images/generations", base_url),  // OpenAI 格式
-            ];
+            let endpoint = format!("{}/image_generation", base_url);
 
             let body = serde_json::json!({
                 "model": model,
                 "prompt": prompt,
             });
 
-            let mut last_err = String::new();
-            for endpoint in &endpoints {
-                tracing::info!(endpoint = %endpoint, "图片生成：尝试端点");
-                let resp = match tokio::time::timeout(
-                    std::time::Duration::from_secs(120),
-                    client.post(endpoint)
-                        .header("Authorization", format!("Bearer {}", api_key))
-                        .header("Content-Type", "application/json")
-                        .json(&body)
-                        .send(),
-                ).await {
-                    Ok(Ok(r)) => r,
-                    Ok(Err(e)) => { last_err = e.to_string(); continue; }
-                    Err(_) => { last_err = "请求超时（120秒）".to_string(); continue; }
-                };
+            tracing::info!(endpoint = %endpoint, "图片生成：调用端点");
+            let resp = match tokio::time::timeout(
+                std::time::Duration::from_secs(120),
+                client.post(&endpoint)
+                    .header("Authorization", format!("Bearer {}", api_key))
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .send(),
+            ).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => return Err(anyhow::anyhow!("请求失败：{e}")),
+                Err(_) => return Err(anyhow::anyhow!("请求超时（120秒）")),
+            };
 
-                let status = resp.status();
-                let resp_text = resp.text().await.unwrap_or_default();
+            let status = resp.status();
+            let resp_text = resp.text().await.unwrap_or_default();
 
-                if status.is_success() {
-                    return Ok(resp_text);
-                }
-
-                // 404 说明端点不对，尝试下一个
-                if status.as_u16() == 404 {
-                    tracing::info!(endpoint = %endpoint, "图片生成：端点 404，尝试下一个");
-                    last_err = format!("{}: 404", endpoint);
-                    continue;
-                }
-
-                // 其他错误直接返回
-                last_err = format!("HTTP {} - {}", status, resp_text);
-                break;
+            if status.is_success() {
+                Ok(resp_text)
+            } else {
+                Err(anyhow::anyhow!("HTTP {} - {}", status, resp_text))
             }
-            Err(anyhow::anyhow!("图片生成 API 调用失败：{}", last_err))
         });
 
         let mut build_error_exec = |msg: String| -> TurnExecution {
@@ -552,45 +534,45 @@ impl RuntimeEngine {
 
         tracing::info!("图片生成：API 调用成功");
 
-        // 解析响应：兼容 OpenAI（data[].url/b64_json）和 MiniMax（data.image_base64/image_url）
+        // 解析响应
         let resp_json: serde_json::Value = serde_json::from_str(&resp_text)
             .unwrap_or_else(|_| serde_json::json!({}));
 
         let mut reply_parts = vec![format!("已为您生成图片（模型：{}）：\n", model)];
 
-        // OpenAI 格式：{ "data": [{ "url": "...", "b64_json": "..." }] }
-        if let Some(data_arr) = resp_json.get("data").and_then(|d| d.as_array()) {
-            for (i, item) in data_arr.iter().enumerate() {
-                if let Some(url) = item.get("url").and_then(|v| v.as_str()) {
-                    reply_parts.push(format!("![生成的图片 {}]({})\n", i + 1, url));
-                } else if let Some(b64) = item.get("b64_json").and_then(|v| v.as_str()) {
-                    reply_parts.push(format!("![生成的图片 {}](data:image/png;base64,{})\n", i + 1, b64));
-                }
-                if let Some(revised) = item.get("revised_prompt").and_then(|v| v.as_str()) {
-                    reply_parts.push(format!("优化后的提示词：{}\n", revised));
-                }
-            }
-        }
-        // MiniMax 格式：{ "data": { "image_base64": ["..."], "image_url": ["..."] } }
-        else if let Some(data_obj) = resp_json.get("data").and_then(|d| d.as_object()) {
-            if let Some(urls) = data_obj.get("image_url").and_then(|v| v.as_array()) {
-                for (i, url) in urls.iter().enumerate() {
-                    if let Some(u) = url.as_str().filter(|s| !s.is_empty()) {
-                        reply_parts.push(format!("![生成的图片 {}]({})\n", i + 1, u));
+        if let Some(data) = resp_json.get("data") {
+            // 数组格式：{ "data": [{ "url": "..." }] }
+            if let Some(arr) = data.as_array() {
+                for (i, item) in arr.iter().enumerate() {
+                    if let Some(url) = item.get("url").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                        reply_parts.push(format!("![生成的图片 {}]({})\n", i + 1, url));
+                    }
+                    if let Some(b64) = item.get("b64_json").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                        reply_parts.push(format!("![生成的图片 {}](data:image/png;base64,{})\n", i + 1, b64));
                     }
                 }
             }
-            if let Some(b64s) = data_obj.get("image_base64").and_then(|v| v.as_array()) {
-                for (i, b64) in b64s.iter().enumerate() {
-                    if let Some(s) = b64.as_str().filter(|s| !s.is_empty()) {
-                        reply_parts.push(format!("![生成的图片 {}](data:image/png;base64,{})\n", i + 1, s));
+            // 对象格式：{ "data": { "image_url": ["..."], "image_base64": ["..."] } }
+            else if let Some(obj) = data.as_object() {
+                if let Some(urls) = obj.get("image_url").and_then(|v| v.as_array()) {
+                    for (i, url) in urls.iter().enumerate() {
+                        if let Some(u) = url.as_str().filter(|s| !s.is_empty()) {
+                            reply_parts.push(format!("![生成的图片 {}]({})\n", i + 1, u));
+                        }
+                    }
+                }
+                if let Some(b64s) = obj.get("image_base64").and_then(|v| v.as_array()) {
+                    for (i, b64) in b64s.iter().enumerate() {
+                        if let Some(s) = b64.as_str().filter(|s| !s.is_empty()) {
+                            reply_parts.push(format!("![生成的图片 {}](data:image/png;base64,{})\n", i + 1, s));
+                        }
                     }
                 }
             }
         }
 
         if reply_parts.len() <= 1 {
-            tracing::warn!(response = %resp_text.chars().take(200).collect::<String>(), "图片生成：响应中未找到图片数据");
+            tracing::warn!(response = %resp_text.chars().take(500).collect::<String>(), "图片生成：响应中未找到图片数据");
             reply_parts.push("图片生成完成，但未能提取图片数据。\n".to_string());
         }
 
