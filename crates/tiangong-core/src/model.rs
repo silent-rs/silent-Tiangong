@@ -204,29 +204,50 @@ impl SingleProviderClient {
         let timeout_ms = parse_timeout_ms(&cfg.api_timeout_ms)?;
         let api_base = normalize_api_base(&cfg.api_base_url)?;
 
-        let config = OpenAIConfig::new()
-            .with_api_key(token.to_string())
-            .with_api_base(api_base);
-        let client = OpenAIClient::with_config(config);
-        let runtime = TokioRuntimeBuilder::new_current_thread()
-            .enable_all()
+        // 直接发 HTTP 请求而非使用 SDK 的 models().list()，
+        // 因为部分 API 供应商（如 DeepSeek）返回的模型对象缺少 `created` 等字段，
+        // SDK 的严格反序列化会失败。
+        let url = format!("{api_base}/models");
+        let http_client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_millis(timeout_ms))
             .build()
-            .context("初始化异步运行时失败")?;
+            .context("创建 HTTP 客户端失败")?;
 
-        let result = runtime.block_on(async {
-            timeout(Duration::from_millis(timeout_ms), client.models().list()).await
-        });
+        let resp = http_client
+            .get(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .with_context(|| format!("请求模型列表失败：{url}"))?;
 
-        let response = match result {
-            Ok(Ok(resp)) => resp,
-            Ok(Err(err)) => {
-                let hint = build_sdk_error_hint(&err.to_string());
-                return Err(anyhow!("更新模型列表失败：{err}{hint}"));
-            }
-            Err(_) => return Err(anyhow!("更新模型列表超时：{timeout_ms}ms")),
-        };
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().unwrap_or_default();
+            return Err(anyhow!(
+                "获取模型列表失败：HTTP {status}，响应：{body}"
+            ));
+        }
 
-        let mut models = response.data.into_iter().map(|m| m.id).collect::<Vec<_>>();
+        let body = resp
+            .text()
+            .context("读取模型列表响应失败")?;
+
+        // 宽松反序列化：只需要 id 字段
+        #[derive(serde::Deserialize)]
+        struct ModelEntry {
+            id: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct ModelsResponse {
+            data: Vec<ModelEntry>,
+        }
+
+        let parsed: ModelsResponse = serde_json::from_str(&body).with_context(|| {
+            format!(
+                "failed to deserialize api response: {body}"
+            )
+        })?;
+
+        let mut models = parsed.data.into_iter().map(|m| m.id).collect::<Vec<_>>();
         models.sort();
         models.dedup();
         Ok(models)
