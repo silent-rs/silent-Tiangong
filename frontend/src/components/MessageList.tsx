@@ -46,12 +46,14 @@ export function MessageList() {
             style: vscDarkPlus,
             language: match[1],
             PreTag: "div",
-            className: "rounded-md text-sm",
+            className: "rounded-md text-sm !bg-background border border-border",
             customStyle: {
-              background: '#1E1E1E',
               padding: '16px',
               borderRadius: '8px',
               margin: '8px 0',
+            },
+            codeTagProps: {
+              style: {},
             },
           },
           String(children).replace(/\n$/, '')
@@ -85,19 +87,19 @@ export function MessageList() {
     },
     blockquote({ children }: { children: ReactNode }) {
       return (
-        <blockquote className="border-l-4 border-[#10A37F] pl-4 py-2 my-3 text-[#CCCCCC] italic">
+        <blockquote className="border-l-4 border-accent-foreground/30 pl-4 py-2 my-3 text-foreground/80 italic">
           {children}
         </blockquote>
       );
     },
     strong({ children }: { children: ReactNode }) {
-      return <strong className="font-bold text-primary-foreground">{children}</strong>;
+      return <strong className="font-bold text-foreground">{children}</strong>;
     },
     a({ href, children }: { href: string; children: ReactNode }) {
       return (
         <a
           href={href}
-          className="text-primary hover:text-[#0D8A6A] underline"
+          className="text-blue-400 hover:text-blue-300 underline"
           target="_blank"
           rel="noopener noreferrer"
         >
@@ -163,7 +165,7 @@ export function MessageList() {
                             {message.reasoning_content && (
                               <ThinkingBlock content={message.reasoning_content} defaultExpanded={false} />
                             )}
-                            <div className="prose prose-sm max-w-none prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground">
+                            <div className="prose prose-sm max-w-none text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
                               <ReactMarkdown components={MarkdownComponents as any}>
                                 {message.content}
                               </ReactMarkdown>
