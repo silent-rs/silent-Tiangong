@@ -29,7 +29,8 @@ impl TiangongState {
             SingleProviderClient::new(model_config.clone()),
             DEFAULT_CONTEXT_LIMIT,
             default_agent_config.clone(),
-        );
+        )
+        .with_models_config(models_config.clone());
 
         let mut state = Self {
             store: AppStore {
