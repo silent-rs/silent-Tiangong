@@ -212,10 +212,25 @@ impl RuntimeEngine {
             &verify_records,
             &[],
         );
+        // response 阶段上下文：过滤掉执行阶段产生的 System 消息（工具 trace、LLM 输出记录等），
+        // 这些内容已通过 tool_evidence 摘要化传入 prompt，避免弱模型直接复制原始 trace。
+        let response_context: Vec<_> = context
+            .iter()
+            .filter(|msg| {
+                if msg.role != crate::session::MessageRole::System {
+                    return true;
+                }
+                let c = msg.content.as_str();
+                !(c.starts_with("工具执行")
+                    || c.starts_with("LLM 输出")
+                    || c.starts_with("Plan 执行总结"))
+            })
+            .cloned()
+            .collect();
         let req = ModelRequest {
             session_title: session.title.clone(),
             user_input: reply_prompt,
-            context: context.clone(),
+            context: response_context,
         };
         let ModelResponse {
             text,
@@ -272,8 +287,10 @@ impl RuntimeEngine {
             .filter_map(|result| result.execution)
             .next_back();
 
+        let cleaned_text = strip_tool_traces_from_response(&text);
+
         Ok(TurnExecution {
-            assistant_message: text,
+            assistant_message: cleaned_text,
             assistant_reasoning_content: reasoning_content,
             plan,
             tool_result_summary,
@@ -585,4 +602,78 @@ fn use_stream_mode() -> bool {
         }
         Err(_) => true,
     }
+}
+
+/// 清理 LLM 响应中混入的工具执行 trace 文本。
+///
+/// 部分模型在 response 阶段会将 tool evidence 以原始 trace 格式复述到回答中，
+/// 形如 "工具执行 [xxx]\n命令: ...\nok=... exit_code=... duration_ms=...\nsummary: ...\nstdout:\n..."
+/// 这些内容应只存在于 System 消息中，不应出现在 assistant 回复里。
+pub(crate) fn strip_tool_traces_from_response(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut in_trace_block = false;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+
+        // 检测工具 trace 块的起始行
+        if trimmed.starts_with("工具执行") && trimmed.contains('[') && trimmed.contains(']') {
+            in_trace_block = true;
+            continue;
+        }
+
+        if in_trace_block {
+            // trace 块内的特征行：跳过
+            if trimmed.starts_with("命令:")
+                || trimmed.starts_with("ok=")
+                || trimmed.starts_with("summary:")
+                || trimmed.starts_with("tool=")
+                || trimmed.starts_with("stdout:")
+                || trimmed.starts_with("stderr:")
+                || (trimmed.starts_with("duration_ms="))
+                || (trimmed.starts_with("exit_code="))
+                || (trimmed.contains("ok=") && trimmed.contains("exit_code="))
+            {
+                continue;
+            }
+            // 空行也跳过（trace 块末尾的空行）
+            if trimmed.is_empty() {
+                continue;
+            }
+            // 非 trace 特征行，trace 块结束
+            in_trace_block = false;
+            result.push_str(line);
+            result.push('\n');
+            continue;
+        }
+
+        // 单行 trace 格式：整行包含工具执行关键字
+        if trimmed.contains("工具执行")
+            && trimmed.contains('[')
+            && (trimmed.contains("ok=") || trimmed.contains("exit_code="))
+        {
+            continue;
+        }
+
+        result.push_str(line);
+        result.push('\n');
+    }
+
+    // 清理多余连续空行
+    let mut cleaned = String::with_capacity(result.len());
+    let mut prev_empty = false;
+    for line in result.lines() {
+        if line.trim().is_empty() {
+            if !prev_empty {
+                cleaned.push('\n');
+            }
+            prev_empty = true;
+        } else {
+            cleaned.push_str(line);
+            cleaned.push('\n');
+            prev_empty = false;
+        }
+    }
+
+    cleaned.trim().to_string()
 }

@@ -1,24 +1,33 @@
 use super::*;
+use crate::runtime::strip_tool_traces_from_response;
 
 impl AppTurnService {
     pub(in crate::app_state) fn apply_assistant_delta(
         self,
         state: &mut TiangongState,
+        session_id: &str,
         delta: &ModelStreamChunk,
     ) {
         if delta.content.is_empty() && delta.reasoning_content.is_empty() {
             return;
         }
 
-        let Some((session_id, assistant_message_id)) =
-            self.ensure_pending_turn_assistant_message(state)
+        let Some((sid, assistant_message_id)) =
+            self.ensure_pending_turn_assistant_message(state, session_id)
         else {
             return;
         };
 
-        if let Some(message) = self.find_message_mut(state, &session_id, &assistant_message_id) {
+        if let Some(message) = self.find_message_mut(state, &sid, &assistant_message_id) {
             message.content.push_str(&delta.content);
             message.reasoning_content.push_str(&delta.reasoning_content);
+
+            // 实时清理流式累积内容中混入的工具 trace，
+            // 避免前端轮询时看到脏数据
+            let cleaned = strip_tool_traces_from_response(&message.content);
+            if cleaned.len() != message.content.len() {
+                message.content = cleaned;
+            }
         }
     }
 
@@ -27,6 +36,7 @@ impl AppTurnService {
     pub(in crate::app_state) fn apply_stage_thinking_delta(
         self,
         state: &mut TiangongState,
+        session_id: &str,
         stage: &str,
         delta: &ModelStreamChunk,
     ) {
@@ -34,11 +44,11 @@ impl AppTurnService {
             return;
         }
 
-        let Some(session_id) = state
+        let Some(sid) = state
             .store
             .runtime
-            .pending_turn
-            .as_ref()
+            .pending_turns
+            .get(session_id)
             .map(|pending| pending.session_id.clone())
         else {
             return;
@@ -48,8 +58,8 @@ impl AppTurnService {
         let existing_msg_id = state
             .store
             .runtime
-            .pending_turn
-            .as_ref()
+            .pending_turns
+            .get(session_id)
             .and_then(|pending| pending.stage_thinking_message_id.clone());
 
         if let Some(msg_id) = existing_msg_id {
@@ -59,7 +69,7 @@ impl AppTurnService {
                 .session
                 .sessions
                 .iter_mut()
-                .find(|session| session.id == session_id)
+                .find(|session| session.id == sid)
                 && let Some(message) = session.messages.iter_mut().find(|m| m.id == msg_id)
             {
                 message.reasoning_content.push_str(&delta.reasoning_content);
@@ -74,14 +84,14 @@ impl AppTurnService {
                 .session
                 .sessions
                 .iter_mut()
-                .find(|session| session.id == session_id)
+                .find(|session| session.id == sid)
             {
                 session.append_message(MessageRole::System, initial_content);
                 if let Some(new_msg) = session.messages.last_mut() {
                     new_msg.reasoning_content.push_str(&delta.reasoning_content);
                     new_msg.content.push_str(&delta.content);
                     let new_msg_id = new_msg.id.clone();
-                    if let Some(pending) = state.store.runtime.pending_turn.as_mut() {
+                    if let Some(pending) = state.store.runtime.pending_turns.get_mut(session_id) {
                         pending.stage_thinking_message_id = Some(new_msg_id);
                     }
                 }
@@ -92,13 +102,14 @@ impl AppTurnService {
     pub(in crate::app_state) fn append_pending_turn_llm_output(
         self,
         state: &mut TiangongState,
+        session_id: &str,
         output: &LlmOutputRecord,
     ) {
-        let Some(session_id) = state
+        let Some(sid) = state
             .store
             .runtime
-            .pending_turn
-            .as_ref()
+            .pending_turns
+            .get(session_id)
             .map(|pending| pending.session_id.clone())
         else {
             return;
@@ -108,8 +119,8 @@ impl AppTurnService {
         let stage_msg_id = state
             .store
             .runtime
-            .pending_turn
-            .as_mut()
+            .pending_turns
+            .get_mut(session_id)
             .and_then(|pending| pending.stage_thinking_message_id.take());
 
         if let Some(session) = state
@@ -117,7 +128,7 @@ impl AppTurnService {
             .session
             .sessions
             .iter_mut()
-            .find(|session| session.id == session_id)
+            .find(|session| session.id == sid)
         {
             if let Some(msg_id) = stage_msg_id {
                 // 已有 stage thinking 系统消息，更新为最终格式化内容
@@ -134,20 +145,21 @@ impl AppTurnService {
                     output.reasoning_content.clone(),
                 );
             }
-            let _ = state.persist_session_and_app(&session_id);
+            let _ = state.persist_session_and_app(&sid);
         }
     }
 
     pub(in crate::app_state) fn append_pending_turn_tool_execution(
         self,
         state: &mut TiangongState,
+        session_id: &str,
         result: &ToolResult,
     ) {
-        let Some(session_id) = state
+        let Some(sid) = state
             .store
             .runtime
-            .pending_turn
-            .as_ref()
+            .pending_turns
+            .get(session_id)
             .map(|pending| pending.session_id.clone())
         else {
             return;
@@ -158,23 +170,24 @@ impl AppTurnService {
             .session
             .sessions
             .iter_mut()
-            .find(|session| session.id == session_id)
+            .find(|session| session.id == sid)
         {
             session.append_message(MessageRole::System, format_tool_trace_message(result));
-            let _ = state.persist_session_and_app(&session_id);
+            let _ = state.persist_session_and_app(&sid);
         }
     }
 
     pub(in crate::app_state) fn append_pending_turn_plan_execution_summary(
         self,
         state: &mut TiangongState,
+        session_id: &str,
         summary: &str,
     ) {
-        let Some(session_id) = state
+        let Some(sid) = state
             .store
             .runtime
-            .pending_turn
-            .as_ref()
+            .pending_turns
+            .get(session_id)
             .map(|pending| pending.session_id.clone())
         else {
             return;
@@ -189,19 +202,20 @@ impl AppTurnService {
             .session
             .sessions
             .iter_mut()
-            .find(|session| session.id == session_id)
+            .find(|session| session.id == sid)
         {
             session.append_message(MessageRole::System, format!("Plan 执行总结\n{summary}"));
-            let _ = state.persist_session_and_app(&session_id);
+            let _ = state.persist_session_and_app(&sid);
         }
     }
 
     pub(in crate::app_state) fn ensure_pending_turn_assistant_message(
         self,
         state: &mut TiangongState,
+        session_id: &str,
     ) -> Option<(String, String)> {
-        let (session_id, task_id, existing_message_id) =
-            state.store.runtime.pending_turn.as_ref().map(|pending| {
+        let (sid, task_id, existing_message_id) =
+            state.store.runtime.pending_turns.get(session_id).map(|pending| {
                 (
                     pending.session_id.clone(),
                     pending.task_id.clone(),
@@ -210,7 +224,7 @@ impl AppTurnService {
             })?;
 
         if let Some(message_id) = existing_message_id {
-            return Some((session_id, message_id));
+            return Some((sid, message_id));
         }
 
         let assistant_message_id = {
@@ -219,7 +233,7 @@ impl AppTurnService {
                 .session
                 .sessions
                 .iter_mut()
-                .find(|session| session.id == session_id)?;
+                .find(|session| session.id == sid)?;
             session.append_message(MessageRole::Assistant, String::new());
             session.messages.last().map(|msg| msg.id.clone())?
         };
@@ -229,27 +243,28 @@ impl AppTurnService {
             .session
             .sessions
             .iter_mut()
-            .find(|session| session.id == session_id)
+            .find(|session| session.id == sid)
         {
             session.bind_task_assistant_message_id(&task_id, assistant_message_id.clone());
         }
-        if let Some(pending) = state.store.runtime.pending_turn.as_mut()
-            && pending.session_id == session_id
+        if let Some(pending) = state.store.runtime.pending_turns.get_mut(session_id)
+            && pending.session_id == sid
             && pending.task_id == task_id
         {
             pending.assistant_message_id = Some(assistant_message_id.clone());
         }
 
-        Some((session_id, assistant_message_id))
+        Some((sid, assistant_message_id))
     }
 
     pub(in crate::app_state) fn mark_pending_turn_executing(
         self,
         state: &mut TiangongState,
+        session_id: &str,
         plan: &TaskPlan,
     ) {
-        let Some((session_id, task_id, assistant_message_id)) =
-            state.store.runtime.pending_turn.as_ref().map(|pending| {
+        let Some((sid, task_id, assistant_message_id)) =
+            state.store.runtime.pending_turns.get(session_id).map(|pending| {
                 (
                     pending.session_id.clone(),
                     pending.task_id.clone(),
@@ -261,7 +276,7 @@ impl AppTurnService {
         };
 
         // 清除 stage thinking 消息 ID，执行阶段会创建新的 stage 消息
-        if let Some(pending) = state.store.runtime.pending_turn.as_mut() {
+        if let Some(pending) = state.store.runtime.pending_turns.get_mut(session_id) {
             pending.stage_thinking_message_id = None;
         }
 
@@ -270,7 +285,7 @@ impl AppTurnService {
             .session
             .sessions
             .iter_mut()
-            .find(|session| session.id == session_id)
+            .find(|session| session.id == sid)
         {
             // 规划阶段的流式输出已写入系统消息（而非 assistant 消息），
             // 进入执行阶段后清空 assistant 消息（如果有残留），避免与最终响应内容混在一起。
@@ -287,7 +302,7 @@ impl AppTurnService {
         state.store.runtime.run = RunSnapshot {
             status: RunStatus::Executing,
             summary: "正在流式调用模型".to_string(),
-            last_session_id: Some(session_id.clone()),
+            last_session_id: Some(sid.clone()),
             last_task_id: Some(task_id),
             last_duration_ms: None,
             last_result: None,
@@ -298,6 +313,6 @@ impl AppTurnService {
             updated_at: now_text(),
         };
 
-        let _ = state.persist_session_and_app(&session_id);
+        let _ = state.persist_session_and_app(&sid);
     }
 }
