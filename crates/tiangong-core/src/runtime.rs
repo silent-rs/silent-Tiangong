@@ -137,25 +137,24 @@ impl RuntimeEngine {
         // 累计 token 用量
         let mut accumulated_usage = TokenUsage::default();
 
-        // 意图分类：判断是否需要 planning
-        if let Some(exec) = self.try_simple_chat(
-            session,
-            user_input,
-            &mut on_chunk,
-            &mut on_stage_thinking,
-            &mut accumulated_usage,
-        )? {
-            return Ok(exec);
-        }
-
-        // 图片生成检测：如果用户请求生成图片且配置了 image_generation routing
-        if let Some(exec) = self.try_image_generation(
-            session,
-            user_input,
-            &mut on_chunk,
-            &mut accumulated_usage,
-        )? {
-            return Ok(exec);
+        // 统一意图分类：一次 LLM 调用判断请求类型
+        let intent = self.classify_intent(session, user_input, &mut accumulated_usage);
+        match intent.as_str() {
+            "SIMPLE" => {
+                if let Some(exec) = self.handle_simple_chat(
+                    session, user_input, &mut on_chunk, &mut accumulated_usage,
+                )? {
+                    return Ok(exec);
+                }
+            }
+            "IMAGE" => {
+                if let Some(exec) = self.handle_image_generation(
+                    user_input, &mut on_chunk, &mut accumulated_usage,
+                )? {
+                    return Ok(exec);
+                }
+            }
+            _ => {} // COMPLEX 或分类失败，继续走完整 planning 流程
         }
 
         // 规划阶段：流式 thinking 通过 on_stage_thinking 输出到系统消息（"● Planning" 下方）
@@ -286,44 +285,61 @@ impl RuntimeEngine {
         })
     }
 
-    /// 意图分类 + 简单对话快速回复
+    /// 统一意图分类：一次 LLM 调用判断请求类型
     ///
-    /// 用轻量 LLM 调用判断用户输入是否为简单对话（问候、闲聊、知识问答等）。
-    /// 如果是，直接生成回复并返回 Some(TurnExecution)，跳过 planning + execution。
-    /// 如果需要工具/执行，返回 None，继续走完整流程。
-    fn try_simple_chat(
+    /// 根据已配置的能力路由动态生成分类选项，返回意图标签。
+    fn classify_intent(
+        &self,
+        session: &Session,
+        user_input: &str,
+        accumulated_usage: &mut TokenUsage,
+    ) -> String {
+        // 构建可用能力列表
+        let mut capabilities = vec![
+            "SIMPLE - 简单对话（问候、闲聊、知识问答、翻译、解释概念等不需要执行工具或命令的请求）",
+            "COMPLEX - 复杂任务（需要执行工具、命令、代码操作、文件读写等）",
+        ];
+        if self.models_config.resolve_for_capability(ModelCapability::ImageGeneration).is_some() {
+            capabilities.push("IMAGE - 图片生成请求（用户要求生成、绘制、创作图片）");
+        }
+
+        let options = capabilities.join("\n");
+        let classify_prompt = format!(
+            "判断以下用户输入属于哪种类型，只回复对应的标签（如 SIMPLE、IMAGE、COMPLEX），不要解释。\n\n\
+            可选类型：\n{options}\n\n\
+            用户输入：{user_input}"
+        );
+
+        let classify_req = ModelRequest {
+            session_title: format!("{} · intent-classify", session.title),
+            user_input: classify_prompt,
+            context: Vec::new(),
+        };
+
+        match self.client.complete(&classify_req) {
+            Ok(resp) => {
+                accumulated_usage.accumulate(&resp.usage);
+                let text = resp.text.trim().to_uppercase();
+                if text.contains("SIMPLE") {
+                    "SIMPLE".to_string()
+                } else if text.contains("IMAGE") {
+                    "IMAGE".to_string()
+                } else {
+                    "COMPLEX".to_string()
+                }
+            }
+            Err(_) => "COMPLEX".to_string(), // 分类失败走完整流程
+        }
+    }
+
+    /// 简单对话快速回复
+    fn handle_simple_chat(
         &self,
         session: &Session,
         user_input: &str,
         on_chunk: &mut dyn FnMut(&ModelStreamChunk),
-        _on_stage_thinking: &mut dyn FnMut(&str, &ModelStreamChunk),
         accumulated_usage: &mut TokenUsage,
     ) -> Result<Option<TurnExecution>> {
-        // 构建意图分类 prompt
-        let classify_prompt = format!(
-            "判断以下用户输入是否为【简单对话】（问候、闲聊、知识问答、翻译、解释概念等不需要执行工具或命令的请求）。\n\
-            只回复 SIMPLE 或 COMPLEX，不要解释。\n\n\
-            用户输入：{user_input}"
-        );
-        let classify_req = ModelRequest {
-            session_title: format!("{} · intent-classify", session.title),
-            user_input: classify_prompt,
-            context: Vec::new(), // 分类不需要历史上下文
-        };
-        let classify_resp = self.client.complete(&classify_req);
-        let is_simple = match &classify_resp {
-            Ok(resp) => {
-                accumulated_usage.accumulate(&resp.usage);
-                resp.text.trim().to_uppercase().contains("SIMPLE")
-            }
-            Err(_) => false, // 分类失败则走完整流程
-        };
-
-        if !is_simple {
-            return Ok(None);
-        }
-
-        // 简单对话：直接用对话模式回复
         let context = session.recent_messages(self.context_limit);
         let req = ModelRequest {
             session_title: session.title.clone(),
@@ -367,7 +383,6 @@ impl RuntimeEngine {
 
         accumulated_usage.accumulate(&usage);
 
-        // 构建空的 plan（标记为简单对话）
         let plan = TaskPlan {
             id: scru128::new().to_string(),
             objective: "简单对话".to_string(),
@@ -393,31 +408,17 @@ impl RuntimeEngine {
     }
 
     /// 图片生成快速路径
-    ///
-    /// 检测用户输入是否为图片生成请求，如果是且配置了 image_generation routing，
-    /// 直接调用图片生成 API，跳过 planning + execution。
-    fn try_image_generation(
+    fn handle_image_generation(
         &self,
-        _session: &Session,
         user_input: &str,
         on_chunk: &mut dyn FnMut(&ModelStreamChunk),
         accumulated_usage: &mut TokenUsage,
     ) -> Result<Option<TurnExecution>> {
-        // 简单关键词检测是否为图片生成请求
-        let image_keywords = ["生成图片", "画一", "画个", "生成一张", "生成一幅", "画图",
-            "generate image", "draw", "create image", "生成图", "帮我画", "图片生成"];
-        let is_image_request = image_keywords.iter().any(|kw| user_input.contains(kw));
-        if !is_image_request {
-            return Ok(None);
-        }
-
-        // 检查是否配置了 image_generation routing
         let resolved = match self.models_config.resolve_for_capability(ModelCapability::ImageGeneration) {
             Some(r) => r,
-            None => return Ok(None), // 未配置，走正常流程
+            None => return Ok(None),
         };
 
-        // 提取生成 prompt（去掉前缀指令词）
         let prompt = user_input.to_string();
 
         // 调用图片生成 API
