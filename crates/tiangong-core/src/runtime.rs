@@ -287,26 +287,36 @@ impl RuntimeEngine {
 
     /// 统一意图分类：一次 LLM 调用判断请求类型
     ///
-    /// 根据已配置的能力路由动态生成分类选项，返回意图标签。
+    /// 根据 ModelsConfig 中已配置的能力路由自动加载分类选项。
     fn classify_intent(
         &self,
         session: &Session,
         user_input: &str,
         accumulated_usage: &mut TokenUsage,
     ) -> String {
-        // 构建可用能力列表
-        let mut capabilities = vec![
-            "SIMPLE - 简单对话（问候、闲聊、知识问答、翻译、解释概念等不需要执行工具或命令的请求）",
-            "COMPLEX - 复杂任务（需要执行工具、命令、代码操作、文件读写等）",
+        // 固定选项：简单对话 + 复杂任务
+        let mut options = vec![
+            format!("SIMPLE - {}", ModelCapability::Chat.intent_description()),
+            "COMPLEX - 复杂任务（需要执行工具、命令、代码操作、文件读写等）".to_string(),
         ];
-        if self.models_config.resolve_for_capability(ModelCapability::ImageGeneration).is_some() {
-            capabilities.push("IMAGE - 图片生成请求（用户要求生成、绘制、创作图片）");
+
+        // 动态加载：遍历所有多媒体能力，已配置 routing 的自动加入
+        let mut active_labels = Vec::new();
+        for cap in ModelCapability::media_capabilities() {
+            if self.models_config.resolve_for_capability(*cap).is_some() {
+                let label = cap.intent_label();
+                options.push(format!("{} - {}", label, cap.intent_description()));
+                active_labels.push(label.to_string());
+            }
         }
 
-        let options = capabilities.join("\n");
+        let all_labels: Vec<&str> = options.iter().map(|o| o.split(" - ").next().unwrap_or("")).collect();
+        let labels_hint = all_labels.join("、");
+        let options_text = options.join("\n");
+
         let classify_prompt = format!(
-            "判断以下用户输入属于哪种类型，只回复对应的标签（如 SIMPLE、IMAGE、COMPLEX），不要解释。\n\n\
-            可选类型：\n{options}\n\n\
+            "判断以下用户输入属于哪种类型，只回复对应的标签（{labels_hint} 之一），不要解释。\n\n\
+            可选类型：\n{options_text}\n\n\
             用户输入：{user_input}"
         );
 
@@ -320,15 +330,19 @@ impl RuntimeEngine {
             Ok(resp) => {
                 accumulated_usage.accumulate(&resp.usage);
                 let text = resp.text.trim().to_uppercase();
+                // 按优先级匹配：先检查多媒体能力标签，再检查 SIMPLE，最后 COMPLEX
+                for label in &active_labels {
+                    if text.contains(label.as_str()) {
+                        return label.clone();
+                    }
+                }
                 if text.contains("SIMPLE") {
                     "SIMPLE".to_string()
-                } else if text.contains("IMAGE") {
-                    "IMAGE".to_string()
                 } else {
                     "COMPLEX".to_string()
                 }
             }
-            Err(_) => "COMPLEX".to_string(), // 分类失败走完整流程
+            Err(_) => "COMPLEX".to_string(),
         }
     }
 

@@ -48,6 +48,41 @@ impl ModelCapability {
             ModelCapability::Tts => "语音合成",
         }
     }
+
+    /// 返回用于意图分类的标签（大写英文）
+    pub fn intent_label(&self) -> &'static str {
+        match self {
+            ModelCapability::Chat => "SIMPLE",
+            ModelCapability::Multimodal => "MULTIMODAL",
+            ModelCapability::ImageGeneration => "IMAGE",
+            ModelCapability::VideoGeneration => "VIDEO",
+            ModelCapability::Stt => "STT",
+            ModelCapability::Tts => "TTS",
+        }
+    }
+
+    /// 返回意图分类的描述
+    pub fn intent_description(&self) -> &'static str {
+        match self {
+            ModelCapability::Chat => "简单对话（问候、闲聊、知识问答、翻译、解释概念等不需要执行工具或命令的请求）",
+            ModelCapability::Multimodal => "多模态请求（需要理解图片、音频等多种输入形式）",
+            ModelCapability::ImageGeneration => "图片生成请求（用户要求生成、绘制、创作图片）",
+            ModelCapability::VideoGeneration => "视频生成请求（用户要求生成、制作视频）",
+            ModelCapability::Stt => "语音识别请求（用户要求将语音/音频转为文字）",
+            ModelCapability::Tts => "语音合成请求（用户要求将文字转为语音/朗读）",
+        }
+    }
+
+    /// 除 Chat 外的多媒体能力列表（用于意图分类的动态加载）
+    pub fn media_capabilities() -> &'static [ModelCapability] {
+        &[
+            ModelCapability::ImageGeneration,
+            ModelCapability::VideoGeneration,
+            ModelCapability::Stt,
+            ModelCapability::Tts,
+            ModelCapability::Multimodal,
+        ]
+    }
 }
 
 /// Provider 连接配置
