@@ -32,17 +32,16 @@ export function SettingsDialog() {
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-4xl max-h-[80vh] overflow-hidden flex flex-col">
+          {/* 保存状态 - absolute 定位到关闭按钮左侧 */}
+          <span className={`absolute right-12 top-[18px] text-xs flex items-center transition-opacity ${saveStatus === 'idle' ? 'opacity-0' : 'opacity-100'} ${saveStatus === 'error' ? 'text-destructive' : 'text-muted-foreground'}`}>
+            {saveStatus === 'saving' && (
+              <><Loader2 className="w-3 h-3 mr-1 animate-spin" />保存中...</>
+            )}
+            {(saveStatus === 'saved' || saveStatus === 'idle') && '已自动保存'}
+            {saveStatus === 'error' && '保存失败'}
+          </span>
           <DialogHeader>
-            <div className="flex items-center justify-between pr-6">
-              <DialogTitle>系统设置</DialogTitle>
-              <span className={`text-xs flex items-center transition-opacity ${saveStatus === 'idle' ? 'opacity-0' : 'opacity-100'} ${saveStatus === 'error' ? 'text-destructive' : 'text-muted-foreground'}`}>
-                {saveStatus === 'saving' && (
-                  <><Loader2 className="w-3 h-3 mr-1 animate-spin" />保存中...</>
-                )}
-                {(saveStatus === 'saved' || saveStatus === 'idle') && '已自动保存'}
-                {saveStatus === 'error' && '保存失败'}
-              </span>
-            </div>
+            <DialogTitle>系统设置</DialogTitle>
           </DialogHeader>
 
           <Tabs defaultValue="llm" className="flex-1 overflow-hidden flex flex-col">

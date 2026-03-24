@@ -103,6 +103,14 @@ pub fn send_message(
     let app_clone = app.clone();
     thread::spawn(move || {
         loop {
+            // 先消费 channel 中的事件，更新内部状态
+            let _ = app_clone
+                .state::<TiangongApp>()
+                .with_state(|core_state| {
+                    core_state.poll_pending_turn();
+                    Ok(())
+                });
+
             // 获取当前完整状态快照
             if let Ok(snapshot) = app_clone
                 .state::<TiangongApp>()
@@ -115,8 +123,29 @@ pub fn send_message(
                 // 每次轮询都发送快照，确保消息内容变化也能同步
                 let _ = app_clone.emit("run_snapshot", &snapshot);
 
-                // 如果状态已结束，停止轮询
+                // 如果状态已结束，重置为 idle 并停止轮询
                 if is_idle {
+                    if snapshot.status == "completed" || snapshot.status == "failed" {
+                        let _ = app_clone
+                            .state::<TiangongApp>()
+                            .with_state(|core_state| {
+                                core_state.report_run_idle(
+                                    if snapshot.status == "completed" {
+                                        format!("模型供应商：{}", core_state.provider_label())
+                                    } else {
+                                        "执行失败".to_string()
+                                    }
+                                );
+                                Ok(())
+                            });
+                        // 发送最终的 idle 快照
+                        if let Ok(final_snapshot) = app_clone
+                            .state::<TiangongApp>()
+                            .with_state_read(|s| Ok(build_full_snapshot(s)))
+                        {
+                            let _ = app_clone.emit("run_snapshot", &final_snapshot);
+                        }
+                    }
                     break;
                 }
             }
