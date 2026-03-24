@@ -128,6 +128,17 @@ impl RuntimeEngine {
         // 累计 token 用量
         let mut accumulated_usage = TokenUsage::default();
 
+        // 意图分类：判断是否需要 planning
+        if let Some(exec) = self.try_simple_chat(
+            session,
+            user_input,
+            &mut on_chunk,
+            &mut on_stage_thinking,
+            &mut accumulated_usage,
+        )? {
+            return Ok(exec);
+        }
+
         // 规划阶段：流式 thinking 通过 on_stage_thinking 输出到系统消息（"● Planning" 下方）
         let (mut plan, planning_output) = planning_agent::build_plan_with_agent_with_trace(
             &self.client,
@@ -254,6 +265,112 @@ impl RuntimeEngine {
             output_chunk_count,
             usage: accumulated_usage,
         })
+    }
+
+    /// 意图分类 + 简单对话快速回复
+    ///
+    /// 用轻量 LLM 调用判断用户输入是否为简单对话（问候、闲聊、知识问答等）。
+    /// 如果是，直接生成回复并返回 Some(TurnExecution)，跳过 planning + execution。
+    /// 如果需要工具/执行，返回 None，继续走完整流程。
+    fn try_simple_chat(
+        &self,
+        session: &Session,
+        user_input: &str,
+        on_chunk: &mut dyn FnMut(&ModelStreamChunk),
+        _on_stage_thinking: &mut dyn FnMut(&str, &ModelStreamChunk),
+        accumulated_usage: &mut TokenUsage,
+    ) -> Result<Option<TurnExecution>> {
+        // 构建意图分类 prompt
+        let classify_prompt = format!(
+            "判断以下用户输入是否为【简单对话】（问候、闲聊、知识问答、翻译、解释概念等不需要执行工具或命令的请求）。\n\
+            只回复 SIMPLE 或 COMPLEX，不要解释。\n\n\
+            用户输入：{user_input}"
+        );
+        let classify_req = ModelRequest {
+            session_title: format!("{} · intent-classify", session.title),
+            user_input: classify_prompt,
+            context: Vec::new(), // 分类不需要历史上下文
+        };
+        let classify_resp = self.client.complete(&classify_req);
+        let is_simple = match &classify_resp {
+            Ok(resp) => {
+                accumulated_usage.accumulate(&resp.usage);
+                resp.text.trim().to_uppercase().contains("SIMPLE")
+            }
+            Err(_) => false, // 分类失败则走完整流程
+        };
+
+        if !is_simple {
+            return Ok(None);
+        }
+
+        // 简单对话：直接用对话模式回复
+        let context = session.recent_messages(self.context_limit);
+        let req = ModelRequest {
+            session_title: session.title.clone(),
+            user_input: user_input.to_string(),
+            context,
+        };
+
+        let ModelResponse {
+            text,
+            reasoning_content,
+            usage,
+            output_mode,
+            output_chunk_count,
+        } = if use_stream_mode() {
+            match self
+                .client
+                .complete_stream_with_callback(&req, |delta| on_chunk(delta))
+            {
+                Ok(resp) => resp,
+                Err(_) => {
+                    let resp = self.client.complete(&req)?;
+                    if !resp.text.is_empty() {
+                        on_chunk(&ModelStreamChunk {
+                            content: resp.text.clone(),
+                            reasoning_content: resp.reasoning_content.clone(),
+                        });
+                    }
+                    resp
+                }
+            }
+        } else {
+            let resp = self.client.complete(&req)?;
+            if !resp.text.is_empty() {
+                on_chunk(&ModelStreamChunk {
+                    content: resp.text.clone(),
+                    reasoning_content: resp.reasoning_content.clone(),
+                });
+            }
+            resp
+        };
+
+        accumulated_usage.accumulate(&usage);
+
+        // 构建空的 plan（标记为简单对话）
+        let plan = TaskPlan {
+            id: scru128::new().to_string(),
+            objective: "简单对话".to_string(),
+            summary: format!("直接回复用户输入：{}", user_input),
+            plans: Vec::new(),
+            risks: Vec::new(),
+            skill_hints: Vec::new(),
+            mcp_hints: Vec::new(),
+            revisions: Vec::new(),
+        };
+
+        Ok(Some(TurnExecution {
+            assistant_message: text,
+            assistant_reasoning_content: reasoning_content,
+            plan,
+            tool_result_summary: None,
+            tool_execution: None,
+            verify_records: Vec::new(),
+            output_mode,
+            output_chunk_count,
+            usage: accumulated_usage.clone(),
+        }))
     }
 
     pub fn fallback_error_message(err: &anyhow::Error) -> String {

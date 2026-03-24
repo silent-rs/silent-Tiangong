@@ -65,7 +65,7 @@ const DialogContent = React.forwardRef<
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="fixed inset-0 bg-black/50" onClick={() => context.onOpenChange(false)} />
+      <div className="fixed inset-0 bg-black/50" />
       <div
         ref={ref}
         className={cn(
@@ -74,6 +74,13 @@ const DialogContent = React.forwardRef<
         )}
         {...props}
       >
+        <button
+          className="absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+          onClick={() => context.onOpenChange(false)}
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+          <span className="sr-only">关闭</span>
+        </button>
         {children}
       </div>
     </div>

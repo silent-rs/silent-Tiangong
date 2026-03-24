@@ -1,11 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Badge } from './ui/badge';
 import { Card, CardContent } from './ui/card';
-import { Separator } from './ui/separator';
 import { Switch } from './ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
@@ -60,7 +59,7 @@ export function SettingsDialog() {
 
             <div className="flex-1 overflow-y-auto">
               <TabsContent value="llm">
-                <LLMSettings onClose={() => setOpen(false)} />
+                <LLMSettings />
               </TabsContent>
               <TabsContent value="mcp">
                 <McpSettings />
@@ -88,22 +87,18 @@ export function SettingsDialog() {
 
 type LLMSubTab = 'providers' | 'models' | 'routing';
 
-function LLMSettings({ onClose }: { onClose: () => void }) {
+function LLMSettings() {
   const [subTab, setSubTab] = useState<LLMSubTab>('providers');
   const [modelsConfig, setModelsConfig] = useState<ModelsConfigView>({
     providers: {},
     models: {},
     routing: {},
   });
-  const [originalConfig, setOriginalConfig] = useState<ModelsConfigView>({
-    providers: {},
-    models: {},
-    routing: {},
-  });
   const [capabilities, setCapabilities] = useState<ModelCapabilityInfo[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
-  const { showSuccess, showError } = useToast();
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const { showError } = useToast();
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadConfig = async () => {
     setIsLoading(true);
@@ -113,7 +108,6 @@ function LLMSettings({ onClose }: { onClose: () => void }) {
         api.getModelCapabilities(),
       ]);
       setModelsConfig(cfg);
-      setOriginalConfig(JSON.parse(JSON.stringify(cfg)));
       setCapabilities(caps);
     } catch (error) {
       console.error('加载配置失败:', error);
@@ -127,26 +121,40 @@ function LLMSettings({ onClose }: { onClose: () => void }) {
     loadConfig();
   }, []);
 
-  const handleSave = async () => {
-    setIsSaving(true);
+  // 自动保存：配置变更时 debounce 500ms 后保存到后端
+  const autoSave = useCallback(async (config: ModelsConfigView) => {
+    setSaveStatus('saving');
     try {
-      await api.setModelsConfig(modelsConfig);
-      setOriginalConfig(JSON.parse(JSON.stringify(modelsConfig)));
-      showSuccess('保存成功', '模型配置已更新');
+      await api.setModelsConfig(config);
+      setSaveStatus('saved');
+      // 2 秒后恢复 idle
+      setTimeout(() => setSaveStatus('idle'), 2000);
     } catch (error) {
-      console.error('保存配置失败:', error);
-      showError('保存失败', '无法保存模型配置，请重试');
-    } finally {
-      setIsSaving(false);
+      console.error('自动保存失败:', error);
+      setSaveStatus('error');
+      showError('保存失败', '无法保存模型配置');
     }
-  };
+  }, [showError]);
 
-  const handleCancel = () => {
-    setModelsConfig(JSON.parse(JSON.stringify(originalConfig)));
-    onClose();
-  };
+  const handleChange = useCallback((newConfig: ModelsConfigView) => {
+    setModelsConfig(newConfig);
+    // debounce 自动保存
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+    }
+    saveTimerRef.current = setTimeout(() => {
+      autoSave(newConfig);
+    }, 500);
+  }, [autoSave]);
 
-  const hasChanges = JSON.stringify(modelsConfig) !== JSON.stringify(originalConfig);
+  // 清理 timer
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+      }
+    };
+  }, []);
 
   if (isLoading) {
     return (
@@ -168,33 +176,26 @@ function LLMSettings({ onClose }: { onClose: () => void }) {
         </TabsList>
 
         <TabsContent value="providers">
-          <ProvidersSection config={modelsConfig} onChange={setModelsConfig} />
+          <ProvidersSection config={modelsConfig} onChange={handleChange} />
         </TabsContent>
         <TabsContent value="models">
-          <ModelsSection config={modelsConfig} onChange={setModelsConfig} capabilities={capabilities} />
+          <ModelsSection config={modelsConfig} onChange={handleChange} capabilities={capabilities} />
         </TabsContent>
         <TabsContent value="routing">
-          <RoutingSection config={modelsConfig} onChange={setModelsConfig} capabilities={capabilities} />
+          <RoutingSection config={modelsConfig} onChange={handleChange} capabilities={capabilities} />
         </TabsContent>
       </Tabs>
 
-      {/* 保存/取消按钮 */}
-      <Separator />
-      <div className="flex justify-end gap-2">
-        <Button variant="ghost" onClick={handleCancel} disabled={isSaving}>
-          取消
-        </Button>
-        <Button onClick={handleSave} disabled={isSaving || !hasChanges}>
-          {isSaving ? (
-            <>
-              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-              保存中...
-            </>
-          ) : (
-            '保存'
+      {/* 保存状态指示 */}
+      {saveStatus !== 'idle' && (
+        <div className="flex items-center justify-end text-xs text-muted-foreground">
+          {saveStatus === 'saving' && (
+            <><Loader2 className="w-3 h-3 mr-1 animate-spin" />保存中...</>
           )}
-        </Button>
-      </div>
+          {saveStatus === 'saved' && '已自动保存'}
+          {saveStatus === 'error' && <span className="text-destructive">保存失败</span>}
+        </div>
+      )}
     </div>
   );
 }
@@ -430,20 +431,49 @@ function ModelsSection({
 }) {
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
-  const [newKey, setNewKey] = useState('');
   const [draft, setDraft] = useState<ModelEntryView>({
     provider: '',
     model: '',
     capabilities: [],
     options: {},
   });
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [isFetchingModels, setIsFetchingModels] = useState(false);
+  const { showError } = useToast();
 
   const modelKeys = Object.keys(config.models);
   const providerKeys = Object.keys(config.providers);
 
+  const fetchModelsForProvider = async (providerKey: string) => {
+    const provider = config.providers[providerKey];
+    if (!provider?.base_url || !provider?.api_key) {
+      showError('配置不完整', '请先在 Providers 中配置 Base URL 和 API Key');
+      return;
+    }
+    setIsFetchingModels(true);
+    try {
+      const models = await api.fetchProviderModels(
+        provider.base_url,
+        provider.api_key,
+        provider.timeout_ms,
+      );
+      if (models.length === 0) {
+        showError('无可用模型', '该 Provider 未返回任何模型，请检查 API 配置');
+      }
+      setAvailableModels(models);
+    } catch (error) {
+      console.error('获取模型列表失败:', error);
+      showError('获取失败', `无法获取模型列表：${error}`);
+      setAvailableModels([]);
+    } finally {
+      setIsFetchingModels(false);
+    }
+  };
+
   const startEdit = (key: string) => {
     setEditingKey(key);
     setDraft({ ...config.models[key] });
+    setAvailableModels([]);
   };
 
   const saveEdit = () => {
@@ -455,13 +485,18 @@ function ModelsSection({
   };
 
   const addModel = () => {
-    if (!newKey.trim()) return;
+    if (!draft.model.trim()) return;
+    // 用模型名称作为 key，如果已存在则加 provider 前缀
+    let key = draft.model.trim();
+    if (config.models[key]) {
+      key = `${draft.provider}-${key}`;
+    }
     const next = { ...config };
-    next.models = { ...next.models, [newKey.trim()]: { ...draft } };
+    next.models = { ...next.models, [key]: { ...draft } };
     onChange(next);
     setShowAdd(false);
-    setNewKey('');
     setDraft({ provider: '', model: '', capabilities: [], options: {} });
+    setAvailableModels([]);
   };
 
   const removeModel = (key: string) => {
@@ -490,7 +525,13 @@ function ModelsSection({
     <div className="space-y-2">
       <div>
         <Label className="text-xs">Provider</Label>
-        <Select value={draft.provider} onValueChange={(v) => setDraft({ ...draft, provider: v })}>
+        <Select
+          value={draft.provider}
+          onValueChange={(v) => {
+            setDraft({ ...draft, provider: v, model: '' });
+            setAvailableModels([]);
+          }}
+        >
           <SelectTrigger className="h-8 text-sm">
             <SelectValue placeholder="-- 选择 Provider --" />
           </SelectTrigger>
@@ -502,13 +543,46 @@ function ModelsSection({
         </Select>
       </div>
       <div>
-        <Label className="text-xs">模型名称</Label>
-        <Input
-          value={draft.model}
-          onChange={(e) => setDraft({ ...draft, model: e.target.value })}
-          className="text-sm h-8"
-          placeholder="gpt-4o, claude-3-opus, ..."
-        />
+        <div className="flex items-center justify-between">
+          <Label className="text-xs">模型名称</Label>
+          {draft.provider && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-5 text-xs px-2"
+              onClick={() => fetchModelsForProvider(draft.provider)}
+              disabled={isFetchingModels}
+            >
+              {isFetchingModels ? (
+                <>
+                  <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                  获取中...
+                </>
+              ) : (
+                '获取模型列表'
+              )}
+            </Button>
+          )}
+        </div>
+        {availableModels.length > 0 ? (
+          <Select value={draft.model} onValueChange={(v) => setDraft({ ...draft, model: v })}>
+            <SelectTrigger className="h-8 text-sm">
+              <SelectValue placeholder="-- 选择模型 --" />
+            </SelectTrigger>
+            <SelectContent>
+              {availableModels.map((m) => (
+                <SelectItem key={m} value={m}>{m}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ) : (
+          <Input
+            value={draft.model}
+            onChange={(e) => setDraft({ ...draft, model: e.target.value })}
+            className="text-sm h-8"
+            placeholder="gpt-4o, claude-3-opus, ..."
+          />
+        )}
       </div>
       <div>
         <Label className="text-xs">能力</Label>
@@ -548,7 +622,7 @@ function ModelsSection({
           onClick={() => {
             setShowAdd(true);
             setDraft({ provider: providerKeys[0] || '', model: '', capabilities: [], options: {} });
-            setNewKey('');
+            setAvailableModels([]);
           }}
         >
           <Plus className="w-3 h-3 mr-1" />
@@ -604,17 +678,8 @@ function ModelsSection({
 
         {showAdd && (
           <Card className="border-primary/40">
-            <CardContent className="p-3 space-y-3">
-              <div>
-                <Label className="text-xs">模型标识名 (唯一 key)</Label>
-                <Input
-                  value={newKey}
-                  onChange={(e) => setNewKey(e.target.value)}
-                  className="text-sm h-8"
-                  placeholder="例如: gpt-4o-chat"
-                />
-              </div>
-              {renderModelForm(addModel, () => setShowAdd(false), '添加')}
+            <CardContent className="p-3">
+              {renderModelForm(addModel, () => { setShowAdd(false); setAvailableModels([]); }, '添加')}
             </CardContent>
           </Card>
         )}

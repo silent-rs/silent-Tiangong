@@ -408,3 +408,24 @@ pub fn get_model_capabilities() -> Result<Vec<ModelCapabilityInfo>, String> {
 pub fn get_model_list(state: State<TiangongApp>) -> Result<Vec<String>, String> {
     state.with_state_read(|core_state| Ok(core_state.model_list().to_vec()))
 }
+
+/// 根据 provider 配置获取该 provider 的可用模型列表
+#[tauri::command]
+pub fn fetch_provider_models(
+    base_url: String,
+    api_key: String,
+    timeout_ms: Option<u64>,
+) -> Result<Vec<String>, String> {
+    use tiangong_core::model::{ModelProviderConfig, SingleProviderClient};
+    use tiangong_core::models_config::ModelsConfig;
+
+    let resolved_key = ModelsConfig::resolve_api_key(&api_key);
+    let config = ModelProviderConfig {
+        api_auth_token: resolved_key,
+        api_base_url: base_url,
+        api_timeout_ms: timeout_ms.unwrap_or(60_000).to_string(),
+        api_model: String::new(),
+        api_lite_model: String::new(),
+    };
+    SingleProviderClient::list_models(&config).map_err(|e| e.to_string())
+}

@@ -211,6 +211,9 @@ export const api = {
   getModelList: (): Promise<string[]> =>
     invoke('get_model_list'),
 
+  fetchProviderModels: (baseUrl: string, apiKey: string, timeoutMs?: number): Promise<string[]> =>
+    invoke('fetch_provider_models', { baseUrl, apiKey, timeoutMs }),
+
   // ----------------------------------------------------------------
   // 事件监听
   // ----------------------------------------------------------------
