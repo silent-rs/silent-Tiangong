@@ -152,6 +152,8 @@ export const useStore = create<AppState>((set, get) => ({
       const cancelled = await api.cancelTurn();
       if (cancelled) {
         set({ runStatus: 'idle', isSending: false });
+        // 刷新会话列表
+        api.getSessions().then((sessions) => set({ sessions })).catch(console.error);
       }
       return cancelled;
     } catch (error) {
@@ -228,14 +230,24 @@ export const useStore = create<AppState>((set, get) => ({
       streamingReasoningContent = '';
     }
 
+    const { runStatus: prevStatus } = get();
+    const newStatus = snapshot.status;
+
     set({
       messages: newMessages,
-      runStatus: snapshot.status,
+      runStatus: newStatus,
       currentPlan: snapshot.current_plan,
-      isSending: snapshot.status !== 'idle',
+      isSending: newStatus !== 'idle',
       streamingMessageId: streamingId,
       streamingContent,
       streamingReasoningContent,
     });
+
+    // 状态变为 idle 时刷新会话列表（更新 message_count、标题等）
+    if (newStatus === 'idle' && prevStatus !== 'idle') {
+      api.getSessions().then((sessions) => {
+        set({ sessions });
+      }).catch(console.error);
+    }
   },
 }));
