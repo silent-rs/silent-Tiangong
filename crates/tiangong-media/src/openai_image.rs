@@ -85,7 +85,7 @@ impl ImageGenerator for OpenAIImageGenerator {
 
         debug!("OpenAI 图片生成请求: {:?}", body);
 
-        let url = format!("{}/v1/images/generations", self.api_base);
+        let url = format!("{}/images/generations", self.api_base.trim_end_matches('/'));
         let resp = self
             .client
             .post(&url)
@@ -122,7 +122,7 @@ impl ImageGenerator for OpenAIImageGenerator {
     }
 
     async fn edit(&self, request: ImageEditRequest) -> Result<ImageGenResponse> {
-        let url = format!("{}/v1/images/edits", self.api_base);
+        let url = format!("{}/images/edits", self.api_base.trim_end_matches('/'));
         let model = request.model.unwrap_or_else(|| self.model.clone());
 
         let image_part = reqwest::multipart::Part::bytes(request.image)

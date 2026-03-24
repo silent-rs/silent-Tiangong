@@ -452,21 +452,7 @@ impl RuntimeEngine {
         };
 
         let model = resolved.model.clone();
-
-        // 去掉 base_url 末尾的版本路径（/v1 等），OpenAIImageGenerator 内部会拼 /v1/images/generations
-        let api_base = {
-            let trimmed = resolved.base_url.trim_end_matches('/');
-            if let Some(pos) = trimmed.rfind('/') {
-                let suffix = &trimmed[pos + 1..];
-                if suffix.starts_with('v') && suffix[1..].chars().all(|c| c.is_ascii_digit()) {
-                    trimmed[..pos].to_string()
-                } else {
-                    trimmed.to_string()
-                }
-            } else {
-                trimmed.to_string()
-            }
-        };
+        let api_base = resolved.base_url.clone();
 
         tracing::info!(
             model = %model,
