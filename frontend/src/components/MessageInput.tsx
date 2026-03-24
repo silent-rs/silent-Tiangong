@@ -10,6 +10,7 @@ export function MessageInput() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const isIdle = runStatus === 'idle';
+  const canSend = isIdle && inputContent.trim().length > 0;
 
   // 自动调整文本框高度
   useEffect(() => {
@@ -28,7 +29,7 @@ export function MessageInput() {
   };
 
   const handleSend = () => {
-    if (inputContent.trim() && isIdle) {
+    if (canSend) {
       sendMessage(inputContent);
     }
   };
@@ -38,53 +39,49 @@ export function MessageInput() {
   };
 
   return (
-    <div className="p-4 border-t border-[#3C3C3C] bg-[#1E1E1E]">
+    <div className="p-4 border-t bg-background">
       <div className="max-w-3xl mx-auto">
-        <div className="flex gap-2 items-end">
-          <div className="flex-1 relative">
-            <Textarea
-              ref={textareaRef}
-              value={inputContent}
-              onChange={(e) => setInputContent(e.target.value)}
-              onKeyDown={handleKeyDown}
-              onCompositionStart={() => setIsComposing(true)}
-              onCompositionEnd={() => setIsComposing(false)}
-              placeholder={
-                isIdle
-                  ? '输入消息... (Enter 发送, Shift+Enter 换行)'
-                  : '正在执行中...'
-              }
-              className="min-h-[60px] max-h-[200px] bg-[#2D2D30] border-[#3C3C3C] text-white placeholder:text-[#858585] resize-none pr-12"
-              disabled={!isIdle}
-            />
-            {/* 字符计数 */}
-            {inputContent.length > 0 && (
-              <div className="absolute bottom-2 right-2 text-xs text-[#858585]">
-                {inputContent.length}
-              </div>
-            )}
-          </div>
+        <div className="relative">
+          <Textarea
+            ref={textareaRef}
+            value={inputContent}
+            onChange={(e) => setInputContent(e.target.value)}
+            onKeyDown={handleKeyDown}
+            onCompositionStart={() => setIsComposing(true)}
+            onCompositionEnd={() => setIsComposing(false)}
+            placeholder={
+              isIdle
+                ? '输入消息... (Enter 发送, Shift+Enter 换行)'
+                : '正在执行中...'
+            }
+            className="min-h-[60px] max-h-[200px] resize-none pr-14 bg-muted/50 focus-visible:ring-ring"
+            disabled={!isIdle}
+          />
+          {/* 发送/取消按钮 - 嵌在输入框内右下角 */}
           <Button
             onClick={isIdle ? handleSend : handleCancel}
-            disabled={isIdle && !inputContent.trim()}
-            className={`self-end h-[60px] w-[60px] ${
-              isIdle
-                ? 'bg-[#10A37F] hover:bg-[#0D8A6A]'
-                : 'bg-[#F44336] hover:bg-[#D32F2F]'
+            disabled={isIdle && !canSend}
+            size="icon"
+            className={`absolute right-2 bottom-2 h-8 w-8 rounded-md ${
+              !isIdle
+                ? 'bg-destructive hover:bg-destructive/90 text-destructive-foreground'
+                : canSend
+                  ? 'bg-green-600 hover:bg-green-700 text-white'
+                  : 'bg-muted text-muted-foreground'
             }`}
           >
             {isIdle ? (
-              <Send className="w-5 h-5" />
+              <Send className="w-4 h-4" />
             ) : (
-              <Square className="w-5 h-5" />
+              <Square className="w-4 h-4" />
             )}
           </Button>
         </div>
-        <div className="mt-2 flex items-center justify-between text-xs text-[#858585]">
+        <div className="mt-1.5 flex items-center justify-between text-xs text-muted-foreground">
           <span>
             {!isIdle && (
               <span className="flex items-center gap-1">
-                <span className="w-2 h-2 rounded-full bg-[#FFC107] animate-pulse" />
+                <span className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse" />
                 {runStatus === 'planning' && '正在制定计划...'}
                 {runStatus === 'executing' && '正在执行任务...'}
                 {runStatus === 'responding' && '正在生成回复...'}

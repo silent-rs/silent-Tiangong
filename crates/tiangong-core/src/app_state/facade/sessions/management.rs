@@ -6,9 +6,10 @@ impl TiangongState {
         let session = Session::new(title);
         self.store.session.active_session_id = session.id.clone();
         self.store.session.session_title_draft = session.title.clone();
-        let session_id = session.id.clone();
         self.store.session.sessions.push(session);
-        let _ = self.persist_session_and_app(&session_id);
+        // 仅更新 app.json 中的 active_session_id，不持久化空会话文件
+        // 会话文件将在用户发送第一条消息时自动持久化
+        let _ = self.persist_app_only();
     }
 
     pub fn switch_session(&mut self, session_id: &str) {

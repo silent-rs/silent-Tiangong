@@ -68,7 +68,7 @@ export function MessageList() {
         )
       ) : (
         <code
-          className="bg-[#2D2D30] text-[#E9E9E9] px-1.5 py-0.5 rounded text-sm font-mono"
+          className="bg-muted text-foreground px-1.5 py-0.5 rounded text-sm font-mono"
           {...props}
         >
           {children}
@@ -101,13 +101,13 @@ export function MessageList() {
       );
     },
     strong({ children }: { children: ReactNode }) {
-      return <strong className="font-bold text-white">{children}</strong>;
+      return <strong className="font-bold text-primary-foreground">{children}</strong>;
     },
     a({ href, children }: { href: string; children: ReactNode }) {
       return (
         <a
           href={href}
-          className="text-[#10A37F] hover:text-[#0D8A6A] underline"
+          className="text-primary hover:text-[#0D8A6A] underline"
           target="_blank"
           rel="noopener noreferrer"
         >
@@ -123,11 +123,11 @@ export function MessageList() {
         <div className="max-w-3xl mx-auto space-y-6">
           {messages.length === 0 && !isThinking ? (
             <div className="flex flex-col items-center justify-center h-full text-center py-20">
-              <div className="w-16 h-16 rounded-full bg-[#10A37F] flex items-center justify-center mb-4">
-                <Bot className="w-8 h-8 text-white" />
+              <div className="w-16 h-16 rounded-full bg-primary flex items-center justify-center mb-4">
+                <Bot className="w-8 h-8 text-primary-foreground" />
               </div>
-              <h2 className="text-xl font-medium text-white mb-2">欢迎使用天工</h2>
-              <p className="text-[#858585] text-sm">我可以帮助您完成各种编程任务</p>
+              <h2 className="text-xl font-medium text-foreground mb-2">欢迎使用天工</h2>
+              <p className="text-muted-foreground text-sm">我可以帮助您完成各种编程任务</p>
             </div>
           ) : (
             messages.map((message) => {
@@ -143,20 +143,20 @@ export function MessageList() {
                   }`}
                 >
                   {isAssistant && (
-                    <div className="w-8 h-8 rounded bg-[#10A37F] flex items-center justify-center flex-shrink-0">
-                      <Bot className="w-5 h-5 text-white" />
+                    <div className="w-8 h-8 rounded bg-primary flex items-center justify-center flex-shrink-0">
+                      <Bot className="w-5 h-5 text-primary-foreground" />
                     </div>
                   )}
                   <div
                     className={`rounded-lg px-4 py-2.5 max-w-[80%] ${
                       isUser
-                        ? 'bg-[#10A37F] text-white'
-                        : 'bg-[#2D2D30] text-[#F3F4F6]'
+                        ? 'bg-primary text-primary-foreground'
+                        : 'bg-muted text-foreground'
                     }`}
                   >
                     {/* 角色标签（仅在助手消息时显示） */}
                     {isAssistant && !isStreaming && (
-                      <div className="text-xs text-[#10A37F] font-medium mb-2">
+                      <div className="text-xs text-primary font-medium mb-2">
                         {getRoleDisplayName(message.role)}
                       </div>
                     )}
@@ -191,7 +191,7 @@ export function MessageList() {
                   </div>
                   {isUser && (
                     <div className="w-8 h-8 rounded bg-[#6B7280] flex items-center justify-center flex-shrink-0">
-                      <User className="w-5 h-5 text-white" />
+                      <User className="w-5 h-5 text-primary-foreground" />
                     </div>
                   )}
                 </div>
@@ -202,10 +202,10 @@ export function MessageList() {
           {/* 思考中/执行中指示器（仅在没有流式消息时显示） */}
           {isThinking && !streamingMessageId && (
             <div className="flex gap-3 justify-start">
-              <div className="w-8 h-8 rounded bg-[#10A37F] flex items-center justify-center flex-shrink-0">
-                <Bot className="w-5 h-5 text-white" />
+              <div className="w-8 h-8 rounded bg-primary flex items-center justify-center flex-shrink-0">
+                <Bot className="w-5 h-5 text-primary-foreground" />
               </div>
-              <div className="bg-[#2D2D30] text-[#F3F4F6] rounded-lg px-4 py-2.5">
+              <div className="bg-muted text-foreground rounded-lg px-4 py-2.5">
                 <div className="flex items-center gap-2">
                   <Loader2 className="w-4 h-4 animate-spin" />
                   <span className="text-sm">

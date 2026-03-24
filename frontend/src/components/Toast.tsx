@@ -140,18 +140,18 @@ function ToastItem({ toast, onRemove }: { toast: Toast; onRemove: (id: string) =
 
   return (
     <div
-      className={`bg-[#252526] border-l-4 ${getBorderColor()} rounded-lg shadow-lg p-4 flex items-start gap-3 animate-slide-in`}
+      className={`bg-popover border-l-4 ${getBorderColor()} rounded-lg shadow-lg p-4 flex items-start gap-3 animate-slide-in`}
     >
       {getIcon()}
       <div className="flex-1 min-w-0">
-        <h4 className="text-sm font-medium text-white">{toast.title}</h4>
+        <h4 className="text-sm font-medium text-foreground">{toast.title}</h4>
         {toast.message && (
-          <p className="text-sm text-[#CCCCCC] mt-1 break-words">{toast.message}</p>
+          <p className="text-sm text-muted-foreground mt-1 break-words">{toast.message}</p>
         )}
       </div>
       <button
         onClick={() => onRemove(toast.id)}
-        className="flex-shrink-0 text-[#858585] hover:text-white transition-colors"
+        className="flex-shrink-0 text-muted-foreground hover:text-foreground transition-colors"
       >
         <X className="w-4 h-4" />
       </button>

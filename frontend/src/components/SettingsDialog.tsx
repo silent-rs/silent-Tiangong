@@ -3,22 +3,25 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
-import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Power, Loader2, Globe, Link, Edit2 } from 'lucide-react';
+import { Badge } from './ui/badge';
+import { Card, CardContent } from './ui/card';
+import { Separator } from './ui/separator';
+import { Switch } from './ui/switch';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
+import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Link, Edit2 } from 'lucide-react';
 import { api } from '@/api/tauri';
 import type { McpServer, Skill, ServerConfig, ConnectorInfo, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo } from '@/api/tauri';
 import { useToast } from './Toast';
 
-type TabType = 'llm' | 'mcp' | 'skill' | 'server' | 'connector';
-
 export function SettingsDialog() {
   const [open, setOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<TabType>('llm');
 
   return (
     <>
       <Button
         variant="ghost"
-        className="w-full justify-start text-[#CCCCCC] hover:bg-[#2A2D2E] hover:text-white"
+        className="w-full justify-start"
         onClick={() => setOpen(true)}
       >
         <Settings className="w-4 h-4 mr-2" />
@@ -26,78 +29,53 @@ export function SettingsDialog() {
       </Button>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="bg-[#252526] border-[#3C3C3C] text-white max-w-4xl max-h-[80vh] overflow-hidden flex flex-col">
+        <DialogContent className="max-w-4xl max-h-[80vh] overflow-hidden flex flex-col">
           <DialogHeader>
             <DialogTitle>系统设置</DialogTitle>
           </DialogHeader>
 
-          {/* 标签页导航 */}
-          <div className="flex gap-1 border-b border-[#3C3C3C]">
-            <button
-              className={`px-4 py-2 text-sm font-medium transition-colors ${
-                activeTab === 'llm'
-                  ? 'text-[#10A37F] border-b-2 border-[#10A37F]'
-                  : 'text-[#CCCCCC] hover:text-white'
-              }`}
-              onClick={() => setActiveTab('llm')}
-            >
-              <Settings className="w-4 h-4 inline mr-2" />
-              LLM 配置
-            </button>
-            <button
-              className={`px-4 py-2 text-sm font-medium transition-colors ${
-                activeTab === 'mcp'
-                  ? 'text-[#10A37F] border-b-2 border-[#10A37F]'
-                  : 'text-[#CCCCCC] hover:text-white'
-              }`}
-              onClick={() => setActiveTab('mcp')}
-            >
-              <Server className="w-4 h-4 inline mr-2" />
-              MCP 服务器
-            </button>
-            <button
-              className={`px-4 py-2 text-sm font-medium transition-colors ${
-                activeTab === 'skill'
-                  ? 'text-[#10A37F] border-b-2 border-[#10A37F]'
-                  : 'text-[#CCCCCC] hover:text-white'
-              }`}
-              onClick={() => setActiveTab('skill')}
-            >
-              <Puzzle className="w-4 h-4 inline mr-2" />
-              Skills
-            </button>
-            <button
-              className={`px-4 py-2 text-sm font-medium transition-colors ${
-                activeTab === 'server'
-                  ? 'text-[#10A37F] border-b-2 border-[#10A37F]'
-                  : 'text-[#CCCCCC] hover:text-white'
-              }`}
-              onClick={() => setActiveTab('server')}
-            >
-              <Globe className="w-4 h-4 inline mr-2" />
-              Server
-            </button>
-            <button
-              className={`px-4 py-2 text-sm font-medium transition-colors ${
-                activeTab === 'connector'
-                  ? 'text-[#10A37F] border-b-2 border-[#10A37F]'
-                  : 'text-[#CCCCCC] hover:text-white'
-              }`}
-              onClick={() => setActiveTab('connector')}
-            >
-              <Link className="w-4 h-4 inline mr-2" />
-              Connectors
-            </button>
-          </div>
+          <Tabs defaultValue="llm" className="flex-1 overflow-hidden flex flex-col">
+            <TabsList className="w-full justify-start">
+              <TabsTrigger value="llm">
+                <Settings className="w-4 h-4 mr-2" />
+                LLM 配置
+              </TabsTrigger>
+              <TabsTrigger value="mcp">
+                <Server className="w-4 h-4 mr-2" />
+                MCP 服务器
+              </TabsTrigger>
+              <TabsTrigger value="skill">
+                <Puzzle className="w-4 h-4 mr-2" />
+                Skills
+              </TabsTrigger>
+              <TabsTrigger value="server">
+                <Globe className="w-4 h-4 mr-2" />
+                Server
+              </TabsTrigger>
+              <TabsTrigger value="connector">
+                <Link className="w-4 h-4 mr-2" />
+                Connectors
+              </TabsTrigger>
+            </TabsList>
 
-          {/* 标签页内容 */}
-          <div className="flex-1 overflow-y-auto">
-            {activeTab === 'llm' && <LLMSettings onClose={() => setOpen(false)} />}
-            {activeTab === 'mcp' && <McpSettings />}
-            {activeTab === 'skill' && <SkillSettings />}
-            {activeTab === 'server' && <ServerSettings />}
-            {activeTab === 'connector' && <ConnectorSettings />}
-          </div>
+            <div className="flex-1 overflow-y-auto">
+              <TabsContent value="llm">
+                <LLMSettings onClose={() => setOpen(false)} />
+              </TabsContent>
+              <TabsContent value="mcp">
+                <McpSettings />
+              </TabsContent>
+              <TabsContent value="skill">
+                <SkillSettings />
+              </TabsContent>
+              <TabsContent value="server">
+                <ServerSettings />
+              </TabsContent>
+              <TabsContent value="connector">
+                <ConnectorSettings />
+              </TabsContent>
+            </div>
+          </Tabs>
         </DialogContent>
       </Dialog>
     </>
@@ -173,8 +151,8 @@ function LLMSettings({ onClose }: { onClose: () => void }) {
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-8">
-        <Loader2 className="w-6 h-6 animate-spin text-[#10A37F] mr-2" />
-        <span className="text-sm text-[#858585]">加载配置中...</span>
+        <Loader2 className="w-6 h-6 animate-spin text-primary mr-2" />
+        <span className="text-sm text-muted-foreground">加载配置中...</span>
       </div>
     );
   }
@@ -182,60 +160,41 @@ function LLMSettings({ onClose }: { onClose: () => void }) {
   return (
     <div className="p-4 space-y-4">
       {/* 子标签页 */}
-      <div className="flex gap-2">
-        {(['providers', 'models', 'routing'] as LLMSubTab[]).map((tab) => (
-          <button
-            key={tab}
-            className={`px-3 py-1.5 text-xs rounded-md transition-colors ${
-              subTab === tab
-                ? 'bg-[#10A37F]/20 text-[#10A37F] border border-[#10A37F]/40'
-                : 'bg-[#1E1E1E] text-[#858585] hover:text-white border border-[#3C3C3C]'
-            }`}
-            onClick={() => setSubTab(tab)}
-          >
-            {tab === 'providers' && 'Providers'}
-            {tab === 'models' && 'Models'}
-            {tab === 'routing' && 'Routing'}
-          </button>
-        ))}
-      </div>
+      <Tabs value={subTab} onValueChange={(v) => setSubTab(v as LLMSubTab)}>
+        <TabsList>
+          <TabsTrigger value="providers">Providers</TabsTrigger>
+          <TabsTrigger value="models">Models</TabsTrigger>
+          <TabsTrigger value="routing">Routing</TabsTrigger>
+        </TabsList>
 
-      {/* 子区域内容 */}
-      {subTab === 'providers' && (
-        <ProvidersSection config={modelsConfig} onChange={setModelsConfig} />
-      )}
-      {subTab === 'models' && (
-        <ModelsSection config={modelsConfig} onChange={setModelsConfig} capabilities={capabilities} />
-      )}
-      {subTab === 'routing' && (
-        <RoutingSection config={modelsConfig} onChange={setModelsConfig} capabilities={capabilities} />
-      )}
+        <TabsContent value="providers">
+          <ProvidersSection config={modelsConfig} onChange={setModelsConfig} />
+        </TabsContent>
+        <TabsContent value="models">
+          <ModelsSection config={modelsConfig} onChange={setModelsConfig} capabilities={capabilities} />
+        </TabsContent>
+        <TabsContent value="routing">
+          <RoutingSection config={modelsConfig} onChange={setModelsConfig} capabilities={capabilities} />
+        </TabsContent>
+      </Tabs>
 
       {/* 保存/取消按钮 */}
-      <div className="flex justify-end gap-2 pt-4 border-t border-[#3C3C3C]">
-          <Button
-            variant="ghost"
-            className="text-[#CCCCCC] hover:text-white hover:bg-[#2A2D2E]"
-            onClick={handleCancel}
-            disabled={isSaving}
-          >
-            取消
-          </Button>
-          <Button
-            className="bg-[#10A37F] hover:bg-[#0D8A6A]"
-            onClick={handleSave}
-            disabled={isSaving || !hasChanges}
-          >
-            {isSaving ? (
-              <>
-                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                保存中...
-              </>
-            ) : (
-              '保存'
-            )}
-          </Button>
-        </div>
+      <Separator />
+      <div className="flex justify-end gap-2">
+        <Button variant="ghost" onClick={handleCancel} disabled={isSaving}>
+          取消
+        </Button>
+        <Button onClick={handleSave} disabled={isSaving || !hasChanges}>
+          {isSaving ? (
+            <>
+              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              保存中...
+            </>
+          ) : (
+            '保存'
+          )}
+        </Button>
+      </div>
     </div>
   );
 }
@@ -297,10 +256,9 @@ function ProvidersSection({
   return (
     <div>
       <div className="flex items-center justify-between mb-3">
-        <h4 className="text-sm font-medium text-[#CCCCCC]">Providers (连接配置)</h4>
+        <h4 className="text-sm font-medium text-muted-foreground">Providers (连接配置)</h4>
         <Button
           size="sm"
-          className="bg-[#10A37F] hover:bg-[#0D8A6A] text-xs h-7"
           onClick={() => {
             setShowAdd(true);
             setDraft({ base_url: '', api_key: '', timeout_ms: 60000 });
@@ -314,65 +272,54 @@ function ProvidersSection({
       </div>
 
       {providerKeys.length === 0 && !showAdd && (
-        <div className="text-center text-[#858585] py-6 text-sm">暂无 Provider 配置</div>
+        <div className="text-center text-muted-foreground py-6 text-sm">暂无 Provider 配置</div>
       )}
 
       <div className="space-y-2">
         {providerKeys.map((key) => (
-          <div key={key} className="bg-[#1E1E1E] border border-[#3C3C3C] rounded-lg p-3">
-            {editingKey === key ? (
-              <ProviderForm
-                providerKey={key}
-                draft={draft}
-                setDraft={setDraft}
-                showApiKey={showApiKey}
-                setShowApiKey={setShowApiKey}
-                onSave={saveEdit}
-                onCancel={() => setEditingKey(null)}
-              />
-            ) : (
-              <div className="flex items-center justify-between">
-                <div>
-                  <span className="font-medium text-sm">{key}</span>
-                  <div className="text-xs text-[#858585] mt-1">
-                    {config.providers[key].base_url || '(未设置 URL)'}
+          <Card key={key}>
+            <CardContent className="p-3">
+              {editingKey === key ? (
+                <ProviderForm
+                  providerKey={key}
+                  draft={draft}
+                  setDraft={setDraft}
+                  showApiKey={showApiKey}
+                  setShowApiKey={setShowApiKey}
+                  onSave={saveEdit}
+                  onCancel={() => setEditingKey(null)}
+                />
+              ) : (
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="font-medium text-sm">{key}</span>
+                    <div className="text-xs text-muted-foreground mt-1">
+                      {config.providers[key].base_url || '(未设置 URL)'}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => startEdit(key)} title="编辑">
+                      <Edit2 className="w-3.5 h-3.5" />
+                    </Button>
+                    <Button variant="ghost" size="icon" className="h-7 w-7 hover:bg-destructive/20 hover:text-destructive" onClick={() => removeProvider(key)} title="删除">
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </Button>
                   </div>
                 </div>
-                <div className="flex items-center gap-1">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="hover:bg-[#2A2D2E] h-7 w-7"
-                    onClick={() => startEdit(key)}
-                    title="编辑"
-                  >
-                    <Edit2 className="w-3.5 h-3.5 text-[#858585]" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="hover:bg-red-500/20 hover:text-red-400 h-7 w-7"
-                    onClick={() => removeProvider(key)}
-                    title="删除"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </Button>
-                </div>
-              </div>
-            )}
-          </div>
+              )}
+            </CardContent>
+          </Card>
         ))}
 
-        {/* 添加新 Provider */}
         {showAdd && (
-          <div className="bg-[#1E1E1E] border border-[#10A37F]/40 rounded-lg p-3">
-            <div className="space-y-3">
+          <Card className="border-primary/40">
+            <CardContent className="p-3 space-y-3">
               <div>
                 <Label className="text-xs">Provider 名称</Label>
                 <Input
                   value={newKey}
                   onChange={(e) => setNewKey(e.target.value)}
-                  className="bg-[#252526] border-[#3C3C3C] text-white text-sm h-8"
+                  className="text-sm h-8"
                   placeholder="例如: openai, anthropic"
                 />
               </div>
@@ -385,8 +332,8 @@ function ProvidersSection({
                 onCancel={() => setShowAdd(false)}
                 saveLabel="添加"
               />
-            </div>
-          </div>
+            </CardContent>
+          </Card>
         )}
       </div>
     </div>
@@ -415,14 +362,14 @@ function ProviderForm({
   return (
     <div className="space-y-2">
       {providerKey && (
-        <div className="text-xs text-[#858585] mb-1">编辑: {providerKey}</div>
+        <div className="text-xs text-muted-foreground mb-1">编辑: {providerKey}</div>
       )}
       <div>
         <Label className="text-xs">Base URL</Label>
         <Input
           value={draft.base_url}
           onChange={(e) => setDraft({ ...draft, base_url: e.target.value })}
-          className="bg-[#252526] border-[#3C3C3C] text-white text-sm h-8"
+          className="text-sm h-8"
           placeholder="https://api.openai.com/v1"
         />
       </div>
@@ -433,18 +380,18 @@ function ProviderForm({
             type={showApiKey ? 'text' : 'password'}
             value={draft.api_key}
             onChange={(e) => setDraft({ ...draft, api_key: e.target.value })}
-            className="bg-[#252526] border-[#3C3C3C] text-white text-sm h-8 pr-8"
+            className="text-sm h-8 pr-8"
             placeholder="sk-... 或 ${ENV_VAR}"
           />
           <button
             type="button"
             onClick={() => setShowApiKey(!showApiKey)}
-            className="absolute right-2 top-1/2 -translate-y-1/2 text-[#858585] hover:text-white"
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
           >
             {showApiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
           </button>
         </div>
-        <p className="text-xs text-[#858585] mt-1">支持 {'${ENV_VAR}'} 引用环境变量</p>
+        <p className="text-xs text-muted-foreground mt-1">支持 {'${ENV_VAR}'} 引用环境变量</p>
       </div>
       <div>
         <Label className="text-xs">超时 (毫秒)</Label>
@@ -452,24 +399,15 @@ function ProviderForm({
           type="number"
           value={draft.timeout_ms}
           onChange={(e) => setDraft({ ...draft, timeout_ms: parseInt(e.target.value) || 60000 })}
-          className="bg-[#252526] border-[#3C3C3C] text-white text-sm h-8"
+          className="text-sm h-8"
           placeholder="60000"
         />
       </div>
       <div className="flex justify-end gap-2 pt-1">
-        <Button
-          variant="ghost"
-          size="sm"
-          className="text-[#CCCCCC] hover:text-white hover:bg-[#2A2D2E] text-xs h-7"
-          onClick={onCancel}
-        >
+        <Button variant="ghost" size="sm" onClick={onCancel}>
           取消
         </Button>
-        <Button
-          size="sm"
-          className="bg-[#10A37F] hover:bg-[#0D8A6A] text-xs h-7"
-          onClick={onSave}
-        >
+        <Button size="sm" onClick={onSave}>
           {saveLabel}
         </Button>
       </div>
@@ -530,7 +468,6 @@ function ModelsSection({
     const next = { ...config };
     const { [key]: _, ...rest } = next.models;
     next.models = rest;
-    // 清理 routing 中引用此 model 的条目
     const newRouting = { ...next.routing };
     for (const [cap, modelName] of Object.entries(newRouting)) {
       if (modelName === key) {
@@ -553,23 +490,23 @@ function ModelsSection({
     <div className="space-y-2">
       <div>
         <Label className="text-xs">Provider</Label>
-        <select
-          value={draft.provider}
-          onChange={(e) => setDraft({ ...draft, provider: e.target.value })}
-          className="w-full bg-[#252526] border border-[#3C3C3C] text-white text-sm h-8 rounded px-2"
-        >
-          <option value="">-- 选择 Provider --</option>
-          {providerKeys.map((pk) => (
-            <option key={pk} value={pk}>{pk}</option>
-          ))}
-        </select>
+        <Select value={draft.provider} onValueChange={(v) => setDraft({ ...draft, provider: v })}>
+          <SelectTrigger className="h-8 text-sm">
+            <SelectValue placeholder="-- 选择 Provider --" />
+          </SelectTrigger>
+          <SelectContent>
+            {providerKeys.map((pk) => (
+              <SelectItem key={pk} value={pk}>{pk}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
       <div>
         <Label className="text-xs">模型名称</Label>
         <Input
           value={draft.model}
           onChange={(e) => setDraft({ ...draft, model: e.target.value })}
-          className="bg-[#252526] border-[#3C3C3C] text-white text-sm h-8"
+          className="text-sm h-8"
           placeholder="gpt-4o, claude-3-opus, ..."
         />
       </div>
@@ -581,8 +518,8 @@ function ModelsSection({
               key={cap.key}
               className={`px-2 py-0.5 text-xs rounded border transition-colors ${
                 draft.capabilities.includes(cap.key)
-                  ? 'bg-[#10A37F]/20 text-[#10A37F] border-[#10A37F]/40'
-                  : 'bg-[#1E1E1E] text-[#858585] border-[#3C3C3C] hover:text-white'
+                  ? 'bg-primary/20 text-primary border-primary/40'
+                  : 'bg-secondary text-muted-foreground border-border hover:text-foreground'
               }`}
               onClick={() => toggleCapability(cap.key)}
             >
@@ -592,20 +529,10 @@ function ModelsSection({
         </div>
       </div>
       <div className="flex justify-end gap-2 pt-1">
-        <Button
-          variant="ghost"
-          size="sm"
-          className="text-[#CCCCCC] hover:text-white hover:bg-[#2A2D2E] text-xs h-7"
-          onClick={onCancel}
-        >
+        <Button variant="ghost" size="sm" onClick={onCancel}>
           取消
         </Button>
-        <Button
-          size="sm"
-          className="bg-[#10A37F] hover:bg-[#0D8A6A] text-xs h-7"
-          onClick={onSave}
-          disabled={!draft.provider || !draft.model}
-        >
+        <Button size="sm" onClick={onSave} disabled={!draft.provider || !draft.model}>
           {label}
         </Button>
       </div>
@@ -615,10 +542,9 @@ function ModelsSection({
   return (
     <div>
       <div className="flex items-center justify-between mb-3">
-        <h4 className="text-sm font-medium text-[#CCCCCC]">Models (模型定义)</h4>
+        <h4 className="text-sm font-medium text-muted-foreground">Models (模型定义)</h4>
         <Button
           size="sm"
-          className="bg-[#10A37F] hover:bg-[#0D8A6A] text-xs h-7"
           onClick={() => {
             setShowAdd(true);
             setDraft({ provider: providerKeys[0] || '', model: '', capabilities: [], options: {} });
@@ -631,79 +557,66 @@ function ModelsSection({
       </div>
 
       {modelKeys.length === 0 && !showAdd && (
-        <div className="text-center text-[#858585] py-6 text-sm">暂无模型定义</div>
+        <div className="text-center text-muted-foreground py-6 text-sm">暂无模型定义</div>
       )}
 
       <div className="space-y-2">
         {modelKeys.map((key) => {
           const m = config.models[key];
           return (
-            <div key={key} className="bg-[#1E1E1E] border border-[#3C3C3C] rounded-lg p-3">
-              {editingKey === key ? (
-                renderModelForm(saveEdit, () => setEditingKey(null))
-              ) : (
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium text-sm">{key}</span>
-                      <span className="text-xs text-[#858585]">({m.provider})</span>
+            <Card key={key}>
+              <CardContent className="p-3">
+                {editingKey === key ? (
+                  renderModelForm(saveEdit, () => setEditingKey(null))
+                ) : (
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-sm">{key}</span>
+                        <span className="text-xs text-muted-foreground">({m.provider})</span>
+                      </div>
+                      <div className="text-xs text-muted-foreground mt-1">{m.model}</div>
+                      <div className="flex gap-1 mt-1">
+                        {m.capabilities.map((cap) => {
+                          const capInfo = capabilities.find((c) => c.key === cap);
+                          return (
+                            <Badge key={cap} variant="secondary" className="text-xs">
+                              {capInfo?.display_name || cap}
+                            </Badge>
+                          );
+                        })}
+                      </div>
                     </div>
-                    <div className="text-xs text-[#858585] mt-1">{m.model}</div>
-                    <div className="flex gap-1 mt-1">
-                      {m.capabilities.map((cap) => {
-                        const capInfo = capabilities.find((c) => c.key === cap);
-                        return (
-                          <span
-                            key={cap}
-                            className="px-1.5 py-0.5 text-xs rounded bg-[#10A37F]/10 text-[#10A37F]"
-                          >
-                            {capInfo?.display_name || cap}
-                          </span>
-                        );
-                      })}
+                    <div className="flex items-center gap-1">
+                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => startEdit(key)} title="编辑">
+                        <Edit2 className="w-3.5 h-3.5" />
+                      </Button>
+                      <Button variant="ghost" size="icon" className="h-7 w-7 hover:bg-destructive/20 hover:text-destructive" onClick={() => removeModel(key)} title="删除">
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </Button>
                     </div>
                   </div>
-                  <div className="flex items-center gap-1">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="hover:bg-[#2A2D2E] h-7 w-7"
-                      onClick={() => startEdit(key)}
-                      title="编辑"
-                    >
-                      <Edit2 className="w-3.5 h-3.5 text-[#858585]" />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="hover:bg-red-500/20 hover:text-red-400 h-7 w-7"
-                      onClick={() => removeModel(key)}
-                      title="删除"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </Button>
-                  </div>
-                </div>
-              )}
-            </div>
+                )}
+              </CardContent>
+            </Card>
           );
         })}
 
         {showAdd && (
-          <div className="bg-[#1E1E1E] border border-[#10A37F]/40 rounded-lg p-3">
-            <div className="space-y-3">
+          <Card className="border-primary/40">
+            <CardContent className="p-3 space-y-3">
               <div>
                 <Label className="text-xs">模型标识名 (唯一 key)</Label>
                 <Input
                   value={newKey}
                   onChange={(e) => setNewKey(e.target.value)}
-                  className="bg-[#252526] border-[#3C3C3C] text-white text-sm h-8"
+                  className="text-sm h-8"
                   placeholder="例如: gpt-4o-chat"
                 />
               </div>
               {renderModelForm(addModel, () => setShowAdd(false), '添加')}
-            </div>
-          </div>
+            </CardContent>
+          </Card>
         )}
       </div>
     </div>
@@ -728,7 +641,7 @@ function RoutingSection({
   const setRoute = (capKey: string, modelName: string) => {
     const next = { ...config };
     const newRouting = { ...next.routing };
-    if (modelName === '') {
+    if (modelName === '__none__') {
       delete newRouting[capKey];
     } else {
       newRouting[capKey] = modelName;
@@ -740,46 +653,48 @@ function RoutingSection({
   return (
     <div>
       <div className="mb-3">
-        <h4 className="text-sm font-medium text-[#CCCCCC]">Routing (能力路由)</h4>
-        <p className="text-xs text-[#858585] mt-1">
+        <h4 className="text-sm font-medium text-muted-foreground">Routing (能力路由)</h4>
+        <p className="text-xs text-muted-foreground mt-1">
           为每种能力选择对应的模型，多媒体（图片/视频/STT/TTS）也通过此处配置
         </p>
       </div>
 
       <div className="space-y-2">
         {capabilities.map((cap) => (
-          <div
-            key={cap.key}
-            className="bg-[#1E1E1E] border border-[#3C3C3C] rounded-lg p-3 flex items-center justify-between"
-          >
-            <div className="flex-1">
-              <span className="text-sm font-medium">{cap.display_name}</span>
-              <span className="text-xs text-[#858585] ml-2">({cap.key})</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <select
-                value={config.routing[cap.key] || ''}
-                onChange={(e) => setRoute(cap.key, e.target.value)}
-                className="bg-[#252526] border border-[#3C3C3C] text-white text-sm h-8 rounded px-2 min-w-[180px]"
-              >
-                <option value="">-- 未配置 --</option>
-                {modelKeys
-                  .filter((mk) => {
-                    // 只显示声明了对应能力的模型，或者如果没有声明任何能力则也显示
-                    const m = config.models[mk];
-                    return m.capabilities.length === 0 || m.capabilities.includes(cap.key);
-                  })
-                  .map((mk) => (
-                    <option key={mk} value={mk}>{mk}</option>
-                  ))}
-              </select>
-            </div>
-          </div>
+          <Card key={cap.key}>
+            <CardContent className="p-3">
+              <div className="flex items-center gap-4">
+                <div className="w-28 shrink-0">
+                  <div className="text-sm font-medium leading-tight">{cap.display_name}</div>
+                  <div className="text-xs text-muted-foreground">({cap.key})</div>
+                </div>
+                <Select
+                  value={config.routing[cap.key] || '__none__'}
+                  onValueChange={(v) => setRoute(cap.key, v)}
+                >
+                  <SelectTrigger className="h-8 text-sm flex-1">
+                    <SelectValue placeholder="-- 未配置 --" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">-- 未配置 --</SelectItem>
+                    {modelKeys
+                      .filter((mk) => {
+                        const m = config.models[mk];
+                        return m.capabilities.length === 0 || m.capabilities.includes(cap.key);
+                      })
+                      .map((mk) => (
+                        <SelectItem key={mk} value={mk}>{mk}</SelectItem>
+                      ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </CardContent>
+          </Card>
         ))}
       </div>
 
       {modelKeys.length === 0 && (
-        <p className="text-xs text-[#858585] mt-3">
+        <p className="text-xs text-muted-foreground mt-3">
           请先在 Models 标签页中添加模型定义，然后回来配置路由
         </p>
       )}
@@ -868,63 +783,49 @@ function McpSettings() {
     <div className="p-4">
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-lg font-medium">MCP 服务器</h3>
-        <Button
-          size="sm"
-          className="bg-[#10A37F] hover:bg-[#0D8A6A]"
-          onClick={() => setShowAddDialog(true)}
-        >
+        <Button size="sm" onClick={() => setShowAddDialog(true)}>
           <Plus className="w-4 h-4 mr-2" />
           添加服务器
         </Button>
       </div>
 
       {isLoading ? (
-        <div className="text-center text-[#858585] py-8">加载中...</div>
+        <div className="text-center text-muted-foreground py-8">加载中...</div>
       ) : servers.length === 0 ? (
-        <div className="text-center text-[#858585] py-8">暂无 MCP 服务器</div>
+        <div className="text-center text-muted-foreground py-8">暂无 MCP 服务器</div>
       ) : (
         <div className="space-y-2">
           {servers.map((server) => (
-            <div
-              key={server.name}
-              className="bg-[#1E1E1E] border border-[#3C3C3C] rounded-lg p-4 flex items-center justify-between"
-            >
-              <div className="flex-1">
+            <Card key={server.name}>
+              <CardContent className="p-4 flex items-center justify-between">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">{server.name}</span>
+                    <Badge variant={server.enabled ? 'default' : 'secondary'}>
+                      {server.enabled ? '已启用' : '已禁用'}
+                    </Badge>
+                  </div>
+                  <div className="text-sm text-muted-foreground mt-1">
+                    {server.command} {server.args.join(' ')}
+                  </div>
+                </div>
                 <div className="flex items-center gap-2">
-                  <span className="font-medium">{server.name}</span>
-                  <span className={`px-2 py-0.5 text-xs rounded ${
-                    server.enabled
-                      ? 'bg-[#10A37F]/20 text-[#10A37F]'
-                      : 'bg-[#3C3C3C] text-[#858585]'
-                  }`}>
-                    {server.enabled ? '已启用' : '已禁用'}
-                  </span>
+                  <Switch
+                    checked={server.enabled}
+                    onCheckedChange={(checked) => handleToggleEnabled(server.name, checked)}
+                  />
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="hover:bg-destructive/20 hover:text-destructive"
+                    onClick={() => handleRemoveServer(server.name)}
+                    title="删除"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </Button>
                 </div>
-                <div className="text-sm text-[#858585] mt-1">
-                  {server.command} {server.args.join(' ')}
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="hover:bg-[#2A2D2E]"
-                  onClick={() => handleToggleEnabled(server.name, !server.enabled)}
-                  title={server.enabled ? '禁用' : '启用'}
-                >
-                  <Power className={`w-4 h-4 ${server.enabled ? 'text-[#10A37F]' : 'text-[#858585]'}`} />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="hover:bg-red-500/20 hover:text-red-400"
-                  onClick={() => handleRemoveServer(server.name)}
-                  title="删除"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </Button>
-              </div>
-            </div>
+              </CardContent>
+            </Card>
           ))}
         </div>
       )}
@@ -932,67 +833,57 @@ function McpSettings() {
       {/* 添加服务器对话框 */}
       {showAddDialog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="bg-[#252526] border border-[#3C3C3C] rounded-lg p-6 max-w-md w-full mx-4">
-            <h3 className="text-lg font-medium mb-4">添加 MCP 服务器</h3>
-            <div className="space-y-4">
-              <div>
-                <Label htmlFor="serverName">名称</Label>
-                <Input
-                  id="serverName"
-                  value={newServer.name}
-                  onChange={(e) => setNewServer({ ...newServer, name: e.target.value })}
-                  className="bg-[#1E1E1E] border-[#3C3C3C] text-white"
-                  placeholder="my-mcp-server"
-                />
+          <Card className="max-w-md w-full mx-4">
+            <CardContent className="p-6">
+              <h3 className="text-lg font-medium mb-4">添加 MCP 服务器</h3>
+              <div className="space-y-4">
+                <div>
+                  <Label htmlFor="serverName">名称</Label>
+                  <Input
+                    id="serverName"
+                    value={newServer.name}
+                    onChange={(e) => setNewServer({ ...newServer, name: e.target.value })}
+                    placeholder="my-mcp-server"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="serverCommand">命令</Label>
+                  <Input
+                    id="serverCommand"
+                    value={newServer.command}
+                    onChange={(e) => setNewServer({ ...newServer, command: e.target.value })}
+                    placeholder="npx"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="serverArgs">参数（空格分隔）</Label>
+                  <Input
+                    id="serverArgs"
+                    value={newServer.args}
+                    onChange={(e) => setNewServer({ ...newServer, args: e.target.value })}
+                    placeholder="-y @modelcontextprotocol/server-filesystem"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="serverEnv">环境变量（逗号分隔，格式：KEY=VALUE）</Label>
+                  <Input
+                    id="serverEnv"
+                    value={newServer.env}
+                    onChange={(e) => setNewServer({ ...newServer, env: e.target.value })}
+                    placeholder="PATH=/usr/bin,NODE_ENV=production"
+                  />
+                </div>
               </div>
-              <div>
-                <Label htmlFor="serverCommand">命令</Label>
-                <Input
-                  id="serverCommand"
-                  value={newServer.command}
-                  onChange={(e) => setNewServer({ ...newServer, command: e.target.value })}
-                  className="bg-[#1E1E1E] border-[#3C3C3C] text-white"
-                  placeholder="npx"
-                />
+              <div className="flex justify-end gap-2 mt-6">
+                <Button variant="ghost" onClick={() => setShowAddDialog(false)}>
+                  取消
+                </Button>
+                <Button onClick={handleAddServer} disabled={!newServer.name || !newServer.command}>
+                  添加
+                </Button>
               </div>
-              <div>
-                <Label htmlFor="serverArgs">参数（空格分隔）</Label>
-                <Input
-                  id="serverArgs"
-                  value={newServer.args}
-                  onChange={(e) => setNewServer({ ...newServer, args: e.target.value })}
-                  className="bg-[#1E1E1E] border-[#3C3C3C] text-white"
-                  placeholder="-y @modelcontextprotocol/server-filesystem"
-                />
-              </div>
-              <div>
-                <Label htmlFor="serverEnv">环境变量（逗号分隔，格式：KEY=VALUE）</Label>
-                <Input
-                  id="serverEnv"
-                  value={newServer.env}
-                  onChange={(e) => setNewServer({ ...newServer, env: e.target.value })}
-                  className="bg-[#1E1E1E] border-[#3C3C3C] text-white"
-                  placeholder="PATH=/usr/bin,NODE_ENV=production"
-                />
-              </div>
-            </div>
-            <div className="flex justify-end gap-2 mt-6">
-              <Button
-                variant="ghost"
-                className="text-[#CCCCCC] hover:text-white hover:bg-[#2A2D2E]"
-                onClick={() => setShowAddDialog(false)}
-              >
-                取消
-              </Button>
-              <Button
-                className="bg-[#10A37F] hover:bg-[#0D8A6A]"
-                onClick={handleAddServer}
-                disabled={!newServer.name || !newServer.command}
-              >
-                添加
-              </Button>
-            </div>
-          </div>
+            </CardContent>
+          </Card>
         </div>
       )}
     </div>
@@ -1066,66 +957,50 @@ function SkillSettings() {
     <div className="p-4">
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-lg font-medium">Skills</h3>
-        <Button
-          size="sm"
-          className="bg-[#10A37F] hover:bg-[#0D8A6A]"
-          onClick={() => setShowInstallDialog(true)}
-        >
+        <Button size="sm" onClick={() => setShowInstallDialog(true)}>
           <Plus className="w-4 h-4 mr-2" />
           安装 Skill
         </Button>
       </div>
 
       {isLoading ? (
-        <div className="text-center text-[#858585] py-8">加载中...</div>
+        <div className="text-center text-muted-foreground py-8">加载中...</div>
       ) : skills.length === 0 ? (
-        <div className="text-center text-[#858585] py-8">暂无已安装的 Skills</div>
+        <div className="text-center text-muted-foreground py-8">暂无已安装的 Skills</div>
       ) : (
         <div className="space-y-2">
           {skills.map((skill) => (
-            <div
-              key={skill.id}
-              className="bg-[#1E1E1E] border border-[#3C3C3C] rounded-lg p-4 flex items-center justify-between"
-            >
-              <div className="flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="font-medium">{skill.name}</span>
-                  <span className={`px-2 py-0.5 text-xs rounded ${
-                    skill.enabled
-                      ? 'bg-[#10A37F]/20 text-[#10A37F]'
-                      : 'bg-[#3C3C3C] text-[#858585]'
-                  }`}>
-                    {skill.enabled ? '已启用' : '已禁用'}
-                  </span>
-                  <span className="px-2 py-0.5 text-xs rounded bg-[#3C3C3C] text-[#858585]">
-                    {skill.source_type}
-                  </span>
+            <Card key={skill.id}>
+              <CardContent className="p-4 flex items-center justify-between">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">{skill.name}</span>
+                    <Badge variant={skill.enabled ? 'default' : 'secondary'}>
+                      {skill.enabled ? '已启用' : '已禁用'}
+                    </Badge>
+                    <Badge variant="outline">{skill.source_type}</Badge>
+                  </div>
+                  {skill.description && (
+                    <div className="text-sm text-muted-foreground mt-1">{skill.description}</div>
+                  )}
                 </div>
-                {skill.description && (
-                  <div className="text-sm text-[#858585] mt-1">{skill.description}</div>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="hover:bg-[#2A2D2E]"
-                  onClick={() => handleToggleEnabled(skill.id, !skill.enabled)}
-                  title={skill.enabled ? '禁用' : '启用'}
-                >
-                  <Power className={`w-4 h-4 ${skill.enabled ? 'text-[#10A37F]' : 'text-[#858585]'}`} />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="hover:bg-red-500/20 hover:text-red-400"
-                  onClick={() => handleRemoveSkill(skill.id)}
-                  title="删除"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </Button>
-              </div>
-            </div>
+                <div className="flex items-center gap-2">
+                  <Switch
+                    checked={skill.enabled}
+                    onCheckedChange={(checked) => handleToggleEnabled(skill.id, checked)}
+                  />
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="hover:bg-destructive/20 hover:text-destructive"
+                    onClick={() => handleRemoveSkill(skill.id)}
+                    title="删除"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
           ))}
         </div>
       )}
@@ -1133,40 +1008,33 @@ function SkillSettings() {
       {/* 安装 Skill 对话框 */}
       {showInstallDialog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="bg-[#252526] border border-[#3C3C3C] rounded-lg p-6 max-w-md w-full mx-4">
-            <h3 className="text-lg font-medium mb-4">安装 Skill</h3>
-            <div className="space-y-4">
-              <div>
-                <Label htmlFor="skillPath">Skill 路径</Label>
-                <Input
-                  id="skillPath"
-                  value={installPath}
-                  onChange={(e) => setInstallPath(e.target.value)}
-                  className="bg-[#1E1E1E] border-[#3C3C3C] text-white"
-                  placeholder="/path/to/skill"
-                />
-                <p className="text-xs text-[#858585] mt-2">
-                  请输入包含 SKILL.md 的目录路径
-                </p>
+          <Card className="max-w-md w-full mx-4">
+            <CardContent className="p-6">
+              <h3 className="text-lg font-medium mb-4">安装 Skill</h3>
+              <div className="space-y-4">
+                <div>
+                  <Label htmlFor="skillPath">Skill 路径</Label>
+                  <Input
+                    id="skillPath"
+                    value={installPath}
+                    onChange={(e) => setInstallPath(e.target.value)}
+                    placeholder="/path/to/skill"
+                  />
+                  <p className="text-xs text-muted-foreground mt-2">
+                    请输入包含 SKILL.md 的目录路径
+                  </p>
+                </div>
               </div>
-            </div>
-            <div className="flex justify-end gap-2 mt-6">
-              <Button
-                variant="ghost"
-                className="text-[#CCCCCC] hover:text-white hover:bg-[#2A2D2E]"
-                onClick={() => setShowInstallDialog(false)}
-              >
-                取消
-              </Button>
-              <Button
-                className="bg-[#10A37F] hover:bg-[#0D8A6A]"
-                onClick={handleInstallSkill}
-                disabled={!installPath}
-              >
-                安装
-              </Button>
-            </div>
-          </div>
+              <div className="flex justify-end gap-2 mt-6">
+                <Button variant="ghost" onClick={() => setShowInstallDialog(false)}>
+                  取消
+                </Button>
+                <Button onClick={handleInstallSkill} disabled={!installPath}>
+                  安装
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
         </div>
       )}
     </div>
@@ -1235,37 +1103,30 @@ function ServerSettings() {
     <div className="space-y-4 p-4">
       {isLoading ? (
         <div className="flex items-center justify-center py-8">
-          <Loader2 className="w-6 h-6 animate-spin text-[#10A37F] mr-2" />
-          <span className="text-sm text-[#858585]">加载配置中...</span>
+          <Loader2 className="w-6 h-6 animate-spin text-primary mr-2" />
+          <span className="text-sm text-muted-foreground">加载配置中...</span>
         </div>
       ) : (
         <>
           {/* 运行状态 */}
           <div className="flex items-center gap-2 mb-4">
-            <span className="text-sm text-[#858585]">状态：</span>
-            <span className={`px-2 py-0.5 text-xs rounded ${
-              config.running
-                ? 'bg-[#10A37F]/20 text-[#10A37F]'
-                : 'bg-[#3C3C3C] text-[#858585]'
-            }`}>
+            <span className="text-sm text-muted-foreground">状态：</span>
+            <Badge variant={config.running ? 'default' : 'secondary'}>
               {config.running ? '运行中' : '未运行'}
-            </span>
+            </Badge>
           </div>
 
-          {/* Host */}
           <div className="space-y-2">
             <Label htmlFor="serverHost">监听地址</Label>
             <Input
               id="serverHost"
               value={editHost}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditHost(e.target.value)}
-              className="bg-[#1E1E1E] border-[#3C3C3C] text-white"
               placeholder="127.0.0.1"
               disabled={isSaving}
             />
           </div>
 
-          {/* Port */}
           <div className="space-y-2">
             <Label htmlFor="serverPort">端口</Label>
             <Input
@@ -1273,13 +1134,11 @@ function ServerSettings() {
               type="number"
               value={editPort}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditPort(e.target.value)}
-              className="bg-[#1E1E1E] border-[#3C3C3C] text-white"
               placeholder="8080"
               disabled={isSaving}
             />
           </div>
 
-          {/* Auth Token */}
           <div className="space-y-2">
             <Label htmlFor="serverAuthToken">认证 Token</Label>
             <Input
@@ -1287,22 +1146,16 @@ function ServerSettings() {
               type="password"
               value={editAuthToken}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditAuthToken(e.target.value)}
-              className="bg-[#1E1E1E] border-[#3C3C3C] text-white"
               placeholder={config.auth_token_masked || '留空表示不鉴权'}
               disabled={isSaving}
             />
-            <p className="text-xs text-[#858585]">
+            <p className="text-xs text-muted-foreground">
               当前: {config.auth_token_masked}（留空则保持不变）
             </p>
           </div>
 
-          {/* 保存按钮 */}
           <div className="flex justify-end gap-2 pt-4">
-            <Button
-              className="bg-[#10A37F] hover:bg-[#0D8A6A]"
-              onClick={handleSave}
-              disabled={isSaving}
-            >
+            <Button onClick={handleSave} disabled={isSaving}>
               {isSaving ? (
                 <>
                   <Loader2 className="w-4 h-4 mr-2 animate-spin" />
@@ -1363,46 +1216,32 @@ function ConnectorSettings() {
       </div>
 
       {isLoading ? (
-        <div className="text-center text-[#858585] py-8">加载中...</div>
+        <div className="text-center text-muted-foreground py-8">加载中...</div>
       ) : connectors.length === 0 ? (
-        <div className="text-center text-[#858585] py-8">
+        <div className="text-center text-muted-foreground py-8">
           <p>暂无已配置的 Connector</p>
           <p className="text-xs mt-2">请在 ~/.tiangong/connectors.json 中添加配置</p>
         </div>
       ) : (
         <div className="space-y-2">
           {connectors.map((connector) => (
-            <div
-              key={connector.name}
-              className="bg-[#1E1E1E] border border-[#3C3C3C] rounded-lg p-4 flex items-center justify-between"
-            >
-              <div className="flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="font-medium">{connector.name}</span>
-                  <span className="px-2 py-0.5 text-xs rounded bg-[#3C3C3C] text-[#858585]">
-                    {connector.connector_type}
-                  </span>
-                  <span className={`px-2 py-0.5 text-xs rounded ${
-                    connector.enabled
-                      ? 'bg-[#10A37F]/20 text-[#10A37F]'
-                      : 'bg-[#3C3C3C] text-[#858585]'
-                  }`}>
-                    {connector.enabled ? '已启用' : '已禁用'}
-                  </span>
+            <Card key={connector.name}>
+              <CardContent className="p-4 flex items-center justify-between">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">{connector.name}</span>
+                    <Badge variant="outline">{connector.connector_type}</Badge>
+                    <Badge variant={connector.enabled ? 'default' : 'secondary'}>
+                      {connector.enabled ? '已启用' : '已禁用'}
+                    </Badge>
+                  </div>
                 </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="hover:bg-[#2A2D2E]"
-                  onClick={() => handleToggleEnabled(connector.name, !connector.enabled)}
-                  title={connector.enabled ? '禁用' : '启用'}
-                >
-                  <Power className={`w-4 h-4 ${connector.enabled ? 'text-[#10A37F]' : 'text-[#858585]'}`} />
-                </Button>
-              </div>
-            </div>
+                <Switch
+                  checked={connector.enabled}
+                  onCheckedChange={(checked) => handleToggleEnabled(connector.name, checked)}
+                />
+              </CardContent>
+            </Card>
           ))}
         </div>
       )}

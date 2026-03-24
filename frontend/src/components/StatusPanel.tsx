@@ -2,19 +2,38 @@ import { useState, useRef, useEffect, KeyboardEvent } from 'react';
 import { useStore } from '@/store/useStore';
 import { api } from '@/api/tauri';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { Circle } from 'lucide-react';
+import { Circle, Sun, Moon, Monitor, PanelLeft, SquarePen } from 'lucide-react';
+import { useTheme } from '@/hooks/useTheme';
+import { Separator } from './ui/separator';
+import { useSidebar } from './ui/sidebar';
+import { Button } from './ui/button';
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbList,
+  BreadcrumbPage,
+} from './ui/breadcrumb';
 
 const appWindow = getCurrentWindow();
 
 export function StatusPanel() {
-  const { runStatus, activeSessionId, sessions, loadSessions } = useStore();
+  const { runStatus, activeSessionId, sessions, loadSessions, createSession } = useStore();
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
   const savingRef = useRef(false);
 
+  const { theme, setTheme } = useTheme();
+  const { toggleSidebar, open: sidebarOpen } = useSidebar();
   const activeSession = sessions.find((s) => s.id === activeSessionId);
   const currentTitle = activeSession?.title || '新对话';
+
+  const cycleTheme = () => {
+    const next = theme === 'dark' ? 'light' : theme === 'light' ? 'system' : 'dark';
+    setTheme(next);
+  };
+  const ThemeIcon = theme === 'dark' ? Moon : theme === 'light' ? Sun : Monitor;
+  const themeLabel = theme === 'dark' ? '深色模式' : theme === 'light' ? '浅色模式' : '跟随系统';
 
   useEffect(() => {
     if (isEditing && inputRef.current) {
@@ -67,13 +86,12 @@ export function StatusPanel() {
     switch (runStatus) {
       case 'planning':
       case 'executing':
-        return 'text-[#FFC107]';
+        return 'text-yellow-500';
       case 'failed':
-        return 'text-[#F44336]';
+        return 'text-destructive';
       case 'completed':
-        return 'text-[#4CAF50]';
       default:
-        return 'text-[#4CAF50]';
+        return 'text-green-500';
     }
   };
 
@@ -93,43 +111,83 @@ export function StatusPanel() {
   };
 
   return (
-    <div
-      className="h-10 border-b border-[#3C3C3C] bg-[#1E1E1E] flex items-center px-4 justify-between select-none"
+    <header
+      className="flex h-12 shrink-0 items-center gap-2 border-b pr-4 select-none"
+      style={{ paddingLeft: '80px' }}
       onMouseDown={(e) => {
-        // 排除交互元素
         const tag = (e.target as HTMLElement).tagName;
         if (tag === 'INPUT' || tag === 'BUTTON') return;
         if ((e.target as HTMLElement).closest('[data-no-drag]')) return;
         appWindow.startDragging();
       }}
     >
-      <div className="flex items-center gap-3">
-        {activeSession && (
-          isEditing ? (
-            <input
-              ref={inputRef}
-              value={editValue}
-              onChange={(e) => setEditValue(e.target.value)}
-              onBlur={saveTitle}
-              onKeyDown={handleKeyDown}
-              className="text-sm text-[#CCCCCC] bg-transparent border-b border-[#10A37F] outline-none max-w-[300px] py-0.5"
-            />
-          ) : (
-            <span
-              data-no-drag
-              className="text-sm text-[#CCCCCC] truncate max-w-[300px] cursor-pointer hover:text-white"
-              onClick={startEditing}
-              title="点击编辑标题"
-            >
-              {currentTitle}
-            </span>
-          )
-        )}
-      </div>
       <div className="flex items-center gap-2">
-        <Circle className={`w-2 h-2 ${getStatusColor()} ${runStatus !== 'idle' ? 'animate-pulse' : 'fill-current'}`} />
-        <span className="text-sm text-[#858585]">{getStatusText()}</span>
+        <Button
+          data-no-drag
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7"
+          onClick={toggleSidebar}
+        >
+          <PanelLeft className="h-4 w-4" />
+          <span className="sr-only">切换侧边栏</span>
+        </Button>
+        {!sidebarOpen && (
+          <Button
+            data-no-drag
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            onClick={() => createSession()}
+            title="新对话"
+          >
+            <SquarePen className="h-4 w-4" />
+          </Button>
+        )}
+        <Separator orientation="vertical" className="mr-2 h-4" />
+        <Breadcrumb>
+          <BreadcrumbList>
+            <BreadcrumbItem>
+              {activeSession && (
+                isEditing ? (
+                  <input
+                    ref={inputRef}
+                    value={editValue}
+                    onChange={(e) => setEditValue(e.target.value)}
+                    onBlur={saveTitle}
+                    onKeyDown={handleKeyDown}
+                    className="text-sm text-foreground bg-transparent border-b border-primary outline-none max-w-[300px] py-0.5"
+                  />
+                ) : (
+                  <BreadcrumbPage
+                    data-no-drag
+                    className="cursor-pointer hover:text-foreground"
+                    onClick={startEditing}
+                    title="点击编辑标题"
+                  >
+                    {currentTitle}
+                  </BreadcrumbPage>
+                )
+              )}
+            </BreadcrumbItem>
+          </BreadcrumbList>
+        </Breadcrumb>
       </div>
-    </div>
+
+      <div className="ml-auto flex items-center gap-3">
+        <button
+          data-no-drag
+          onClick={cycleTheme}
+          className="text-muted-foreground hover:text-foreground transition-colors"
+          title={themeLabel}
+        >
+          <ThemeIcon className="w-4 h-4" />
+        </button>
+        <div className="flex items-center gap-2">
+          <Circle className={`w-2 h-2 ${getStatusColor()} ${runStatus !== 'idle' ? 'animate-pulse' : 'fill-current'}`} />
+          <span className="text-sm text-muted-foreground">{getStatusText()}</span>
+        </div>
+      </div>
+    </header>
   );
 }

@@ -1,7 +1,8 @@
 import { useEffect, useRef } from 'react';
 import { useStore } from '@/store/useStore';
 import { api } from '@/api/tauri';
-import { Sidebar } from '@/components/Sidebar';
+import { AppSidebar } from '@/components/AppSidebar';
+import { SidebarProvider } from '@/components/ui/sidebar';
 import { LazyMessageList, LazyMessageInput, LazyPlanPanel, LazyStatusPanel } from '@/components/LazyComponents';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 
@@ -10,10 +11,8 @@ export function MainApp() {
   const unlistenRef = useRef<UnlistenFn | null>(null);
 
   useEffect(() => {
-    // 加载会话列表
     loadSessions();
 
-    // 监听运行状态更新
     const setupListener = async () => {
       const unlisten = await api.onRunSnapshot((snapshot) => {
         updateFromSnapshot(snapshot);
@@ -23,7 +22,6 @@ export function MainApp() {
 
     setupListener();
 
-    // 初始获取状态
     api.getRunSnapshot().then((snapshot) => {
       updateFromSnapshot(snapshot);
     }).catch(console.error);
@@ -34,24 +32,30 @@ export function MainApp() {
   }, []);
 
   return (
-    <div className="flex h-screen bg-[#1E1E1E] text-white overflow-hidden">
-      {/* 侧边栏 */}
-      <Sidebar />
-
-      {/* 主内容区 */}
-      <div className="flex-1 flex flex-col min-w-0">
-        {/* 顶部状态栏 */}
+    <SidebarProvider>
+      <div className="flex flex-col h-screen w-full overflow-hidden">
+        {/* 顶部 Header — 横跨全宽，固定在最顶部 */}
         <LazyStatusPanel />
 
-        {/* 计划面板（执行时显示） */}
-        <LazyPlanPanel />
+        {/* 下方区域：Sidebar + 主内容 */}
+        <div className="flex flex-1 min-h-0">
+          <AppSidebar />
 
-        {/* 消息列表 */}
-        <LazyMessageList />
+          {/* 主内容区 */}
+          <main className="flex flex-1 flex-col min-w-0 bg-background">
+            {/* 计划面板（执行时显示） */}
+            <LazyPlanPanel />
 
-        {/* 输入框 */}
-        <LazyMessageInput />
+            {/* 消息列表 */}
+            <div className="flex-1 overflow-hidden">
+              <LazyMessageList />
+            </div>
+
+            {/* 输入框 */}
+            <LazyMessageInput />
+          </main>
+        </div>
       </div>
-    </div>
+    </SidebarProvider>
   );
 }

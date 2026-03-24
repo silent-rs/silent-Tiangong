@@ -4,6 +4,55 @@
 
 @layer base {
   :root {
+    /* 亮色主题 */
+    --background: 0 0% 100%;
+    --foreground: 222.2 47.4% 11.2%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 47.4% 11.2%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 47.4% 11.2%;
+
+    --primary: 222.2 47.4% 11.2%;
+    --primary-foreground: 210 40% 98%;
+
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 222.2 47.4% 11.2%;
+
+    --radius: 0.5rem;
+
+    /* 状态颜色 */
+    --status-success: 142 76% 36%;
+    --status-warning: 38 92% 50%;
+    --status-error: 0 84% 60%;
+    --status-info: 199 89% 48%;
+
+    /* 侧边栏 */
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 240 5.9% 10%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 4.8% 95.9%;
+    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+
+  .dark {
     /* 深色主题配色（参考 Codex） */
     --background: 224 71% 4%;
     --foreground: 213 31% 91%;
@@ -33,13 +82,21 @@
     --input: 216 34% 17%;
     --ring: 216 34% 17%;
 
-    --radius: 0.5rem;
-
     /* 状态颜色 */
     --status-success: 142 76% 36%;
     --status-warning: 38 92% 50%;
     --status-error: 0 84% 60%;
     --status-info: 199 89% 48%;
+
+    /* 侧边栏 */
+    --sidebar-background: 240 5.9% 10%;
+    --sidebar-foreground: 240 4.8% 95.9%;
+    --sidebar-primary: 224.3 76.3% 48%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 240 3.7% 15.9%;
+    --sidebar-accent-foreground: 240 4.8% 95.9%;
+    --sidebar-border: 240 3.7% 15.9%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
   }
 }
 
@@ -80,7 +137,7 @@
 /* 代码块样式 */
 @layer components {
   .prose pre {
-    @apply bg-[#1E1E1E] rounded-lg p-4 overflow-x-auto;
+    @apply bg-muted rounded-lg p-4 overflow-x-auto;
   }
 
   .prose code {
@@ -88,7 +145,7 @@
   }
 
   .prose code:not(pre code) {
-    @apply bg-[#2D2D30] px-1.5 py-0.5 rounded text-[#E9E9E9];
+    @apply bg-muted px-1.5 py-0.5 rounded;
   }
 
   .prose pre code {
