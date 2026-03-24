@@ -50,7 +50,10 @@ export function AppSidebar() {
             ) : sessions.length === 0 ? (
               <div className="px-3 py-2 text-sm text-muted-foreground">暂无对话</div>
             ) : (
-              [...sessions].sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map((session) => (
+              [...sessions]
+                .filter((s) => s.message_count > 0 || s.id === activeSessionId)
+                .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+                .map((session) => (
                 <button
                   key={session.id}
                   className={`w-full text-left px-3 py-2 rounded-md text-sm flex items-center gap-2 group transition-colors ${

@@ -131,6 +131,46 @@ impl AppTurnService {
             updated_at: now_text(),
         };
 
+        // 首次对话完成后自动生成标题（如果标题仍为默认格式）
+        if let Some(session) = state
+            .store
+            .session
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+        {
+            let is_default_title = session.title.starts_with("会话 ") || session.title == "默认会话";
+            if is_default_title {
+                let user_input_for_title = session
+                    .messages
+                    .iter()
+                    .find(|m| m.role == MessageRole::User)
+                    .map(|m| m.content.clone())
+                    .unwrap_or_default();
+                if !user_input_for_title.is_empty() {
+                    let client = SingleProviderClient::new(
+                        state.store.provider.models_config.to_chat_provider_config(),
+                    );
+                    if let Ok(title) = client.complete_lite(&user_input_for_title) {
+                        let clean_title = title.trim().trim_matches('"').to_string();
+                        if !clean_title.is_empty() {
+                            if let Some(session_mut) = state
+                                .store
+                                .session
+                                .sessions
+                                .iter_mut()
+                                .find(|s| s.id == session_id)
+                            {
+                                session_mut.title = clean_title.clone();
+                                session_mut.updated_at = now_text();
+                                state.store.session.session_title_draft = clean_title;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if let Err(err) = state.persist_session_and_app(&session_id) {
             state.store.runtime.run = RunSnapshot {
                 status: RunStatus::Failed,
