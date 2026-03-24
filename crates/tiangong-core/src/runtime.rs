@@ -13,6 +13,7 @@ use crate::model::{
     ModelClient, ModelRequest, ModelResponse, ModelStreamChunk, SingleProviderClient, TokenUsage,
 };
 use crate::models_config::{ModelCapability, ModelsConfig};
+use tiangong_media::image::ImageGenerator;
 use crate::planner::TaskPlan;
 use crate::session::{Session, now_text};
 use crate::tool::{LocalToolExecutor, ToolExecutionRecord, ToolResult};
@@ -450,18 +451,45 @@ impl RuntimeEngine {
             }
         };
 
-        tracing::info!(
-            model = %resolved.model,
-            base_url = %resolved.base_url,
-            "图片生成：开始调用 API"
-        );
-
-        let prompt = user_input.to_string();
-        let api_key = resolved.api_key.clone();
-        let base_url = resolved.base_url.trim_end_matches('/').to_string();
         let model = resolved.model.clone();
 
-        // 通用图片生成 API 调用（兼容 OpenAI 和 MiniMax 等 /v1/images/generations 或 /v1/image_generation）
+        // 去掉 base_url 末尾的版本路径（/v1 等），OpenAIImageGenerator 内部会拼 /v1/images/generations
+        let api_base = {
+            let trimmed = resolved.base_url.trim_end_matches('/');
+            if let Some(pos) = trimmed.rfind('/') {
+                let suffix = &trimmed[pos + 1..];
+                if suffix.starts_with('v') && suffix[1..].chars().all(|c| c.is_ascii_digit()) {
+                    trimmed[..pos].to_string()
+                } else {
+                    trimmed.to_string()
+                }
+            } else {
+                trimmed.to_string()
+            }
+        };
+
+        tracing::info!(
+            model = %model,
+            api_base = %api_base,
+            "图片生成：开始调用 OpenAI 兼容 API"
+        );
+
+        let generator = tiangong_media::openai_image::OpenAIImageGenerator::new(
+            resolved.api_key.clone(),
+            api_base,
+            model.clone(),
+        );
+
+        let request = tiangong_media::image::ImageGenRequest {
+            prompt: user_input.to_string(),
+            negative_prompt: None,
+            width: 1024,
+            height: 1024,
+            model: Some(model.clone()),
+            style: None,
+            num_images: 1,
+        };
+
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -474,39 +502,13 @@ impl RuntimeEngine {
         };
 
         let result = runtime.block_on(async {
-            let client = reqwest::Client::new();
-            let endpoint = format!("{}/image_generation", base_url);
-
-            let body = serde_json::json!({
-                "model": model,
-                "prompt": prompt,
-            });
-
-            tracing::info!(endpoint = %endpoint, "图片生成：调用端点");
-            let resp = match tokio::time::timeout(
+            tokio::time::timeout(
                 std::time::Duration::from_secs(120),
-                client.post(&endpoint)
-                    .header("Authorization", format!("Bearer {}", api_key))
-                    .header("Content-Type", "application/json")
-                    .json(&body)
-                    .send(),
-            ).await {
-                Ok(Ok(r)) => r,
-                Ok(Err(e)) => return Err(anyhow::anyhow!("请求失败：{e}")),
-                Err(_) => return Err(anyhow::anyhow!("请求超时（120秒）")),
-            };
-
-            let status = resp.status();
-            let resp_text = resp.text().await.unwrap_or_default();
-
-            if status.is_success() {
-                Ok(resp_text)
-            } else {
-                Err(anyhow::anyhow!("HTTP {} - {}", status, resp_text))
-            }
+                generator.generate(request),
+            ).await
         });
 
-        let mut build_error_exec = |msg: String| -> TurnExecution {
+        let build_error_exec = |on_chunk: &mut dyn FnMut(&ModelStreamChunk), msg: String, usage: &TokenUsage| -> TurnExecution {
             on_chunk(&ModelStreamChunk { content: msg.clone(), reasoning_content: String::new() });
             TurnExecution {
                 assistant_message: msg.clone(),
@@ -520,62 +522,39 @@ impl RuntimeEngine {
                 },
                 tool_result_summary: None, tool_execution: None,
                 verify_records: Vec::new(), output_mode: "sync".to_string(),
-                output_chunk_count: 1, usage: accumulated_usage.clone(),
+                output_chunk_count: 1, usage: usage.clone(),
             }
         };
 
-        let resp_text = match result {
-            Ok(text) => text,
-            Err(err) => {
-                tracing::error!(%err, "图片生成：所有端点均失败");
-                return Ok(Some(build_error_exec(format!("图片生成失败：{err}"))));
+        let response = match result {
+            Ok(Ok(resp)) => {
+                tracing::info!(image_count = resp.images.len(), "图片生成：API 调用成功");
+                resp
+            }
+            Ok(Err(err)) => {
+                tracing::error!(%err, "图片生成：API 调用失败");
+                return Ok(Some(build_error_exec(on_chunk, format!("图片生成失败：{err}"), accumulated_usage)));
+            }
+            Err(_) => {
+                tracing::error!("图片生成：请求超时");
+                return Ok(Some(build_error_exec(on_chunk, "图片生成超时（120秒）".to_string(), accumulated_usage)));
             }
         };
-
-        tracing::info!("图片生成：API 调用成功");
-
-        // 解析响应
-        let resp_json: serde_json::Value = serde_json::from_str(&resp_text)
-            .unwrap_or_else(|_| serde_json::json!({}));
 
         let mut reply_parts = vec![format!("已为您生成图片（模型：{}）：\n", model)];
-
-        if let Some(data) = resp_json.get("data") {
-            // 数组格式：{ "data": [{ "url": "..." }] }
-            if let Some(arr) = data.as_array() {
-                for (i, item) in arr.iter().enumerate() {
-                    if let Some(url) = item.get("url").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
-                        reply_parts.push(format!("![生成的图片 {}]({})\n", i + 1, url));
-                    }
-                    if let Some(b64) = item.get("b64_json").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
-                        reply_parts.push(format!("![生成的图片 {}](data:image/png;base64,{})\n", i + 1, b64));
-                    }
-                }
+        for (i, img) in response.images.iter().enumerate() {
+            if let Some(url) = &img.url {
+                reply_parts.push(format!("![生成的图片 {}]({})\n", i + 1, url));
+            } else if let Some(b64) = &img.b64_data {
+                reply_parts.push(format!("![生成的图片 {}](data:image/png;base64,{})\n", i + 1, b64));
             }
-            // 对象格式：{ "data": { "image_url": ["..."], "image_base64": ["..."] } }
-            else if let Some(obj) = data.as_object() {
-                if let Some(urls) = obj.get("image_url").and_then(|v| v.as_array()) {
-                    for (i, url) in urls.iter().enumerate() {
-                        if let Some(u) = url.as_str().filter(|s| !s.is_empty()) {
-                            reply_parts.push(format!("![生成的图片 {}]({})\n", i + 1, u));
-                        }
-                    }
-                }
-                if let Some(b64s) = obj.get("image_base64").and_then(|v| v.as_array()) {
-                    for (i, b64) in b64s.iter().enumerate() {
-                        if let Some(s) = b64.as_str().filter(|s| !s.is_empty()) {
-                            reply_parts.push(format!("![生成的图片 {}](data:image/png;base64,{})\n", i + 1, s));
-                        }
-                    }
-                }
+            if let Some(revised) = &img.revised_prompt {
+                reply_parts.push(format!("优化后的提示词：{}\n", revised));
             }
         }
-
         if reply_parts.len() <= 1 {
-            tracing::warn!(response = %resp_text.chars().take(500).collect::<String>(), "图片生成：响应中未找到图片数据");
             reply_parts.push("图片生成完成，但未能提取图片数据。\n".to_string());
         }
-
         let reply = reply_parts.join("");
 
         on_chunk(&ModelStreamChunk {
