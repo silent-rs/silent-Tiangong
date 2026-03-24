@@ -446,3 +446,35 @@ done
     let context = collect_mcp_context("请使用 filesystem mcp 查看目录", &config);
     assert!(context.is_empty());
 }
+
+#[test]
+#[ignore] // 需要真实网络环境，验证后删除
+fn test_http_mcp_rmcp_connect() {
+    let server = McpServerConfig {
+        name: "model_share_platform".to_string(),
+        transport: McpTransportMode::Http,
+        command: String::new(),
+        args: Vec::new(),
+        endpoint: "http://192.168.10.239:10000/api/model_share_platform/mcp?token=mcp_03fp2e1velczlth6f4hm8gqpv".to_string(),
+        auth_header: String::new(),
+        headers: Default::default(),
+        env: Default::default(),
+        cwd: String::new(),
+        enabled: true,
+        tags: Vec::new(),
+    };
+    let client = LocalMcpClient;
+    match client.list_tools(&server, 15000) {
+        Ok(tools) => {
+            println!("list_tools 成功，工具数量: {}", tools.len());
+            for tool in &tools {
+                println!("  - {}", tool.name);
+            }
+            assert!(!tools.is_empty(), "工具列表不应为空");
+        }
+        Err(e) => {
+            println!("list_tools 失败: {e:#}");
+            panic!("rmcp HTTP 连接失败: {e:#}");
+        }
+    }
+}

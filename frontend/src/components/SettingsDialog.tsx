@@ -176,25 +176,35 @@ function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Save
 
   return (
     <div className="p-4 space-y-4">
-      {/* 子标签页 */}
-      <Tabs value={subTab} onValueChange={(v) => setSubTab(v as LLMSubTab)}>
-        <TabsList>
-          <TabsTrigger value="providers">Providers</TabsTrigger>
-          <TabsTrigger value="models">Models</TabsTrigger>
-          <TabsTrigger value="routing">Routing</TabsTrigger>
-        </TabsList>
+      {/* 子标签栏 — 固定不动 */}
+      <div className="flex gap-1">
+        {(['providers', 'models', 'routing'] as const).map((tab) => (
+          <button
+            key={tab}
+            className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+              subTab === tab
+                ? 'bg-primary text-primary-foreground'
+                : 'bg-muted text-muted-foreground hover:text-foreground'
+            }`}
+            onClick={() => setSubTab(tab)}
+          >
+            {tab === 'providers' ? 'Providers' : tab === 'models' ? 'Models' : 'Routing'}
+          </button>
+        ))}
+      </div>
 
-        <TabsContent value="providers">
+      {/* 内容区域 */}
+      <div>
+        {subTab === 'providers' && (
           <ProvidersSection config={modelsConfig} onChange={handleChange} />
-        </TabsContent>
-        <TabsContent value="models">
+        )}
+        {subTab === 'models' && (
           <ModelsSection config={modelsConfig} onChange={handleChange} capabilities={capabilities} />
-        </TabsContent>
-        <TabsContent value="routing">
+        )}
+        {subTab === 'routing' && (
           <RoutingSection config={modelsConfig} onChange={handleChange} capabilities={capabilities} />
-        </TabsContent>
-      </Tabs>
-
+        )}
+      </div>
     </div>
   );
 }
@@ -210,8 +220,8 @@ function ProvidersSection({
   config: ModelsConfigView;
   onChange: (c: ModelsConfigView) => void;
 }) {
-  const [editingKey, setEditingKey] = useState<string | null>(null);
-  const [showAdd, setShowAdd] = useState(false);
+  const [modalMode, setModalMode] = useState<'add' | 'edit' | null>(null);
+  const [editingKey, setEditingKey] = useState<string>('');
   const [newKey, setNewKey] = useState('');
   const [draft, setDraft] = useState<ProviderConfigView>({
     base_url: '',
@@ -222,18 +232,41 @@ function ProvidersSection({
 
   const providerKeys = Object.keys(config.providers);
 
-  const startEdit = (key: string) => {
+  const openAdd = () => {
+    setModalMode('add');
+    setDraft({ base_url: '', api_key: '', timeout_ms: 60000 });
+    setNewKey('');
+    setShowApiKey(false);
+  };
+
+  const openEdit = (key: string) => {
+    setModalMode('edit');
     setEditingKey(key);
+    setNewKey(key);
     setDraft({ ...config.providers[key] });
     setShowApiKey(false);
   };
 
   const saveEdit = () => {
-    if (!editingKey) return;
+    if (!editingKey || !newKey.trim()) return;
     const next = { ...config };
-    next.providers = { ...next.providers, [editingKey]: { ...draft } };
+    const trimmedKey = newKey.trim();
+    if (trimmedKey !== editingKey) {
+      // 名称变了：删除旧 key，用新 key 保存，更新 models 中的 provider 引用
+      const { [editingKey]: _, ...restProviders } = next.providers;
+      next.providers = { ...restProviders, [trimmedKey]: { ...draft } };
+      const newModels = { ...next.models };
+      for (const [mk, mv] of Object.entries(newModels)) {
+        if (mv.provider === editingKey) {
+          newModels[mk] = { ...mv, provider: trimmedKey };
+        }
+      }
+      next.models = newModels;
+    } else {
+      next.providers = { ...next.providers, [editingKey]: { ...draft } };
+    }
     onChange(next);
-    setEditingKey(null);
+    setModalMode(null);
   };
 
   const addProvider = () => {
@@ -241,9 +274,7 @@ function ProvidersSection({
     const next = { ...config };
     next.providers = { ...next.providers, [newKey.trim()]: { ...draft } };
     onChange(next);
-    setShowAdd(false);
-    setNewKey('');
-    setDraft({ base_url: '', api_key: '', timeout_ms: 60000 });
+    setModalMode(null);
   };
 
   const removeProvider = (key: string) => {
@@ -257,91 +288,74 @@ function ProvidersSection({
     <div>
       <div className="flex items-center justify-between mb-3">
         <h4 className="text-sm font-medium text-muted-foreground">Providers (连接配置)</h4>
-        <Button
-          size="sm"
-          onClick={() => {
-            setShowAdd(true);
-            setDraft({ base_url: '', api_key: '', timeout_ms: 60000 });
-            setNewKey('');
-            setShowApiKey(false);
-          }}
-        >
+        <Button size="sm" onClick={openAdd}>
           <Plus className="w-3 h-3 mr-1" />
           添加
         </Button>
       </div>
 
-      {providerKeys.length === 0 && !showAdd && (
+      {providerKeys.length === 0 && (
         <div className="text-center text-muted-foreground py-6 text-sm">暂无 Provider 配置</div>
       )}
 
-      <div className="space-y-2">
+      <div className="space-y-2 max-h-[calc(80vh-280px)] overflow-y-auto">
         {providerKeys.map((key) => (
           <Card key={key}>
             <CardContent className="p-3">
-              {editingKey === key ? (
-                <ProviderForm
-                  providerKey={key}
-                  draft={draft}
-                  setDraft={setDraft}
-                  showApiKey={showApiKey}
-                  setShowApiKey={setShowApiKey}
-                  onSave={saveEdit}
-                  onCancel={() => setEditingKey(null)}
-                />
-              ) : (
-                <div className="flex items-center justify-between">
-                  <div>
-                    <span className="font-medium text-sm">{key}</span>
-                    <div className="text-xs text-muted-foreground mt-1">
-                      {config.providers[key].base_url || '(未设置 URL)'}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => startEdit(key)} title="编辑">
-                      <Edit2 className="w-3.5 h-3.5" />
-                    </Button>
-                    <Button variant="ghost" size="icon" className="h-7 w-7 hover:bg-destructive/20 hover:text-destructive" onClick={() => removeProvider(key)} title="删除">
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </Button>
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="font-medium text-sm">{key}</span>
+                  <div className="text-xs text-muted-foreground mt-1">
+                    {config.providers[key].base_url || '(未设置 URL)'}
                   </div>
                 </div>
-              )}
+                <div className="flex items-center gap-1">
+                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit(key)} title="编辑">
+                    <Edit2 className="w-3.5 h-3.5" />
+                  </Button>
+                  <Button variant="ghost" size="icon" className="h-7 w-7 hover:bg-destructive/20 hover:text-destructive" onClick={() => removeProvider(key)} title="删除">
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </Button>
+                </div>
+              </div>
             </CardContent>
           </Card>
         ))}
-
-        {showAdd && (
-          <Card className="border-primary/40">
-            <CardContent className="p-3 space-y-3">
-              <div>
-                <Label className="text-xs">Provider 名称</Label>
-                <Input
-                  value={newKey}
-                  onChange={(e) => setNewKey(e.target.value)}
-                  className="text-sm h-8"
-                  placeholder="例如: openai, anthropic"
-                />
-              </div>
-              <ProviderForm
-                draft={draft}
-                setDraft={setDraft}
-                showApiKey={showApiKey}
-                setShowApiKey={setShowApiKey}
-                onSave={addProvider}
-                onCancel={() => setShowAdd(false)}
-                saveLabel="添加"
-              />
-            </CardContent>
-          </Card>
-        )}
       </div>
+
+      {/* Provider 添加/编辑 Modal */}
+      <Dialog open={modalMode !== null} onOpenChange={(v) => !v && setModalMode(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{modalMode === 'add' ? '添加 Provider' : `编辑 Provider: ${editingKey}`}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 pt-2">
+            <div>
+              <Label className="text-xs">Provider 名称</Label>
+              <Input
+                value={newKey}
+                onChange={(e) => setNewKey(e.target.value)}
+                className="text-sm h-8"
+                placeholder="例如: openai, anthropic"
+              />
+            </div>
+            <ProviderForm
+              draft={draft}
+              setDraft={setDraft}
+              showApiKey={showApiKey}
+              setShowApiKey={setShowApiKey}
+              onSave={modalMode === 'add' ? addProvider : saveEdit}
+              onCancel={() => setModalMode(null)}
+              saveLabel={modalMode === 'add' ? '添加' : '保存'}
+            />
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
 
 function ProviderForm({
-  providerKey,
   draft,
   setDraft,
   showApiKey,
@@ -350,7 +364,6 @@ function ProviderForm({
   onCancel,
   saveLabel = '保存',
 }: {
-  providerKey?: string;
   draft: ProviderConfigView;
   setDraft: (d: ProviderConfigView) => void;
   showApiKey: boolean;
@@ -361,9 +374,6 @@ function ProviderForm({
 }) {
   return (
     <div className="space-y-2">
-      {providerKey && (
-        <div className="text-xs text-muted-foreground mb-1">编辑: {providerKey}</div>
-      )}
       <div>
         <Label className="text-xs">Base URL</Label>
         <Input
@@ -428,8 +438,8 @@ function ModelsSection({
   onChange: (c: ModelsConfigView) => void;
   capabilities: ModelCapabilityInfo[];
 }) {
-  const [editingKey, setEditingKey] = useState<string | null>(null);
-  const [showAdd, setShowAdd] = useState(false);
+  const [modalMode, setModalMode] = useState<'add' | 'edit' | null>(null);
+  const [editingKey, setEditingKey] = useState<string>('');
   const [draft, setDraft] = useState<ModelEntryView>({
     provider: '',
     model: '',
@@ -469,7 +479,14 @@ function ModelsSection({
     }
   };
 
-  const startEdit = (key: string) => {
+  const openAdd = () => {
+    setModalMode('add');
+    setDraft({ provider: providerKeys[0] || '', model: '', capabilities: [], options: {} });
+    setAvailableModels([]);
+  };
+
+  const openEdit = (key: string) => {
+    setModalMode('edit');
     setEditingKey(key);
     setDraft({ ...config.models[key] });
     setAvailableModels([]);
@@ -480,12 +497,11 @@ function ModelsSection({
     const next = { ...config };
     next.models = { ...next.models, [editingKey]: { ...draft } };
     onChange(next);
-    setEditingKey(null);
+    setModalMode(null);
   };
 
   const addModel = () => {
     if (!draft.model.trim()) return;
-    // 用模型名称作为 key，如果已存在则加 provider 前缀
     let key = draft.model.trim();
     if (config.models[key]) {
       key = `${draft.provider}-${key}`;
@@ -493,9 +509,7 @@ function ModelsSection({
     const next = { ...config };
     next.models = { ...next.models, [key]: { ...draft } };
     onChange(next);
-    setShowAdd(false);
-    setDraft({ provider: '', model: '', capabilities: [], options: {} });
-    setAvailableModels([]);
+    setModalMode(null);
   };
 
   const removeModel = (key: string) => {
@@ -521,7 +535,7 @@ function ModelsSection({
   };
 
   const renderModelForm = (onSave: () => void, onCancel: () => void, label = '保存') => (
-    <div className="space-y-2">
+    <div className="space-y-3">
       <div>
         <Label className="text-xs">Provider</Label>
         <Select
@@ -616,73 +630,70 @@ function ModelsSection({
     <div>
       <div className="flex items-center justify-between mb-3">
         <h4 className="text-sm font-medium text-muted-foreground">Models (模型定义)</h4>
-        <Button
-          size="sm"
-          onClick={() => {
-            setShowAdd(true);
-            setDraft({ provider: providerKeys[0] || '', model: '', capabilities: [], options: {} });
-            setAvailableModels([]);
-          }}
-        >
+        <Button size="sm" onClick={openAdd}>
           <Plus className="w-3 h-3 mr-1" />
           添加
         </Button>
       </div>
 
-      {modelKeys.length === 0 && !showAdd && (
+      {modelKeys.length === 0 && (
         <div className="text-center text-muted-foreground py-6 text-sm">暂无模型定义</div>
       )}
 
-      <div className="space-y-2">
+      <div className="space-y-2 max-h-[calc(80vh-280px)] overflow-y-auto">
         {modelKeys.map((key) => {
           const m = config.models[key];
           return (
             <Card key={key}>
               <CardContent className="p-3">
-                {editingKey === key ? (
-                  renderModelForm(saveEdit, () => setEditingKey(null))
-                ) : (
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium text-sm">{key}</span>
-                        <span className="text-xs text-muted-foreground">({m.provider})</span>
-                      </div>
-                      <div className="text-xs text-muted-foreground mt-1">{m.model}</div>
-                      <div className="flex gap-1 mt-1">
-                        {m.capabilities.map((cap) => {
-                          const capInfo = capabilities.find((c) => c.key === cap);
-                          return (
-                            <Badge key={cap} variant="secondary" className="text-xs">
-                              {capInfo?.display_name || cap}
-                            </Badge>
-                          );
-                        })}
-                      </div>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-sm">{key}</span>
+                      <span className="text-xs text-muted-foreground">({m.provider})</span>
                     </div>
-                    <div className="flex items-center gap-1">
-                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => startEdit(key)} title="编辑">
-                        <Edit2 className="w-3.5 h-3.5" />
-                      </Button>
-                      <Button variant="ghost" size="icon" className="h-7 w-7 hover:bg-destructive/20 hover:text-destructive" onClick={() => removeModel(key)} title="删除">
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </Button>
+                    <div className="text-xs text-muted-foreground mt-1">{m.model}</div>
+                    <div className="flex gap-1 mt-1">
+                      {m.capabilities.map((cap) => {
+                        const capInfo = capabilities.find((c) => c.key === cap);
+                        return (
+                          <Badge key={cap} variant="secondary" className="text-xs">
+                            {capInfo?.display_name || cap}
+                          </Badge>
+                        );
+                      })}
                     </div>
                   </div>
-                )}
+                  <div className="flex items-center gap-1">
+                    <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit(key)} title="编辑">
+                      <Edit2 className="w-3.5 h-3.5" />
+                    </Button>
+                    <Button variant="ghost" size="icon" className="h-7 w-7 hover:bg-destructive/20 hover:text-destructive" onClick={() => removeModel(key)} title="删除">
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </Button>
+                  </div>
+                </div>
               </CardContent>
             </Card>
           );
         })}
-
-        {showAdd && (
-          <Card className="border-primary/40">
-            <CardContent className="p-3">
-              {renderModelForm(addModel, () => { setShowAdd(false); setAvailableModels([]); }, '添加')}
-            </CardContent>
-          </Card>
-        )}
       </div>
+
+      {/* Model 添加/编辑 Modal */}
+      <Dialog open={modalMode !== null} onOpenChange={(v) => { if (!v) { setModalMode(null); setAvailableModels([]); } }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{modalMode === 'add' ? '添加模型' : `编辑模型: ${editingKey}`}</DialogTitle>
+          </DialogHeader>
+          <div className="pt-2">
+            {renderModelForm(
+              modalMode === 'add' ? addModel : saveEdit,
+              () => { setModalMode(null); setAvailableModels([]); },
+              modalMode === 'add' ? '添加' : '保存',
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -723,7 +734,7 @@ function RoutingSection({
         </p>
       </div>
 
-      <div className="space-y-2">
+      <div className="space-y-2 max-h-[calc(80vh-280px)] overflow-y-auto">
         {capabilities.map((cap) => (
           <Card key={cap.key}>
             <CardContent className="p-3">
@@ -772,6 +783,7 @@ function RoutingSection({
 
 function McpSettings() {
   const [servers, setServers] = useState<McpServer[]>([]);
+  const [healthMap, setHealthMap] = useState<Record<string, { healthy: boolean; tool_count: number; last_error?: string }>>({});
   const [isLoading, setIsLoading] = useState(false);
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [newServer, setNewServer] = useState({
@@ -785,8 +797,16 @@ function McpSettings() {
   const loadServers = async () => {
     setIsLoading(true);
     try {
-      const data = await api.getMcpServers();
+      const [data, health] = await Promise.all([
+        api.getMcpServers(),
+        api.getMcpHealth(),
+      ]);
       setServers(data);
+      const map: typeof healthMap = {};
+      for (const s of health) {
+        map[s.name] = { healthy: s.healthy, tool_count: s.tool_count, last_error: s.last_error };
+      }
+      setHealthMap(map);
     } catch (error) {
       console.error('加载 MCP 服务器失败:', error);
       showError('加载失败', '无法加载 MCP 服务器列表');
@@ -859,21 +879,35 @@ function McpSettings() {
         <div className="text-center text-muted-foreground py-8">暂无 MCP 服务器</div>
       ) : (
         <div className="space-y-2">
-          {servers.map((server) => (
+          {servers.map((server) => {
+            const health = healthMap[server.name];
+            const isHealthy = health?.healthy ?? true;
+            const hasHealth = health !== undefined;
+            return (
             <Card key={server.name}>
               <CardContent className="p-4 flex items-center justify-between">
-                <div className="flex-1">
-                  <div className="flex items-center gap-2">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-medium">{server.name}</span>
                     <Badge variant={server.enabled ? 'default' : 'secondary'}>
                       {server.enabled ? '已启用' : '已禁用'}
                     </Badge>
+                    {server.enabled && hasHealth && (
+                      <Badge variant={isHealthy ? 'outline' : 'destructive'} className="text-xs">
+                        {isHealthy ? `健康 (${health.tool_count} 工具)` : '不可达'}
+                      </Badge>
+                    )}
                   </div>
-                  <div className="text-sm text-muted-foreground mt-1">
+                  <div className="text-sm text-muted-foreground mt-1 truncate">
                     {server.command} {server.args.join(' ')}
                   </div>
+                  {server.enabled && hasHealth && !isHealthy && health.last_error && (
+                    <div className="text-xs text-destructive mt-1 truncate" title={health.last_error}>
+                      {health.last_error}
+                    </div>
+                  )}
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 shrink-0">
                   <Switch
                     checked={server.enabled}
                     onCheckedChange={(checked) => handleToggleEnabled(server.name, checked)}
@@ -890,7 +924,8 @@ function McpSettings() {
                 </div>
               </CardContent>
             </Card>
-          ))}
+            );
+          })}
         </div>
       )}
 

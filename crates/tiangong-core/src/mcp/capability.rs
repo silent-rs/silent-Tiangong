@@ -18,6 +18,14 @@ const MIN_REFRESH_INTERVAL_SECS: u64 = 60;
 struct McpServerCapability {
     #[serde(default, deserialize_with = "deserialize_tools_compat")]
     tools: Vec<McpToolMeta>,
+    #[serde(default = "default_healthy")]
+    healthy: bool,
+    #[serde(default)]
+    last_error: Option<String>,
+}
+
+fn default_healthy() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -131,19 +139,43 @@ pub fn refresh_mcp_capabilities_async(config: McpConfig) {
 }
 
 pub fn refresh_mcp_capabilities(config: &McpConfig) {
-    let mut map = BTreeMap::new();
-    for server in config.servers.iter().filter(|server| server.enabled) {
-        let capability = probe_server_capability(server, config.timeout_ms);
-        map.insert(server.name.clone(), capability);
-    }
     if let Ok(mut guard) = capability_index().write() {
-        *guard = map;
+        for server in config.servers.iter().filter(|server| server.enabled) {
+            let capability = probe_server_capability(server, config.timeout_ms);
+            if !capability.healthy {
+                // 探测失败：更新健康状态和错误信息，但保留已有工具缓存
+                if let Some(existing) = guard.get_mut(&server.name) {
+                    existing.healthy = false;
+                    existing.last_error = capability.last_error;
+                    tracing::warn!(
+                        "MCP 探测失败，标记为不健康并保留工具缓存：server={}（缓存 {} 个工具）",
+                        server.name,
+                        existing.tools.len()
+                    );
+                } else {
+                    guard.insert(server.name.clone(), capability);
+                }
+                continue;
+            }
+            guard.insert(server.name.clone(), capability);
+        }
+        // 清理已移除或禁用的服务器
+        let active_names: std::collections::HashSet<_> = config
+            .servers
+            .iter()
+            .filter(|s| s.enabled)
+            .map(|s| s.name.clone())
+            .collect();
+        guard.retain(|name, _| active_names.contains(name));
     }
 }
 
 pub fn cached_server_tools(server_name: &str) -> Option<Vec<McpToolMeta>> {
     let guard = capability_index().read().ok()?;
-    guard.get(server_name).map(|entry| entry.tools.clone())
+    guard
+        .get(server_name)
+        .filter(|entry| entry.healthy)
+        .map(|entry| entry.tools.clone())
 }
 
 pub fn cached_active_tools() -> Vec<(String, Vec<McpToolMeta>)> {
@@ -152,10 +184,37 @@ pub fn cached_active_tools() -> Vec<(String, Vec<McpToolMeta>)> {
         .map(|guard| {
             guard
                 .iter()
+                .filter(|(_, capability)| capability.healthy)
                 .map(|(name, capability)| (name.clone(), capability.tools.clone()))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default()
+}
+
+/// 获取所有 MCP 服务器的健康状态（供前端展示）
+pub fn mcp_server_health_statuses() -> Vec<McpServerHealthStatus> {
+    capability_index()
+        .read()
+        .map(|guard| {
+            guard
+                .iter()
+                .map(|(name, cap)| McpServerHealthStatus {
+                    name: name.clone(),
+                    healthy: cap.healthy,
+                    tool_count: cap.tools.len(),
+                    last_error: cap.last_error.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct McpServerHealthStatus {
+    pub name: String,
+    pub healthy: bool,
+    pub tool_count: usize,
+    pub last_error: Option<String>,
 }
 
 pub fn build_mcp_tools_system_prompt(max_tools_per_server: usize) -> Option<String> {
@@ -188,9 +247,30 @@ pub fn build_mcp_tools_system_prompt(max_tools_per_server: usize) -> Option<Stri
 
 fn probe_server_capability(server: &McpServerConfig, timeout_ms: u64) -> McpServerCapability {
     let client = LocalMcpClient;
-    let raw_tools = client.list_tools(server, timeout_ms).unwrap_or_default();
-    let tools = dedup_tools(&raw_tools);
-    McpServerCapability { tools }
+    match client.list_tools(server, timeout_ms) {
+        Ok(tools) => {
+            let tools = dedup_tools(&tools);
+            McpServerCapability {
+                healthy: true,
+                tools,
+                last_error: None,
+            }
+        }
+        Err(err) => {
+            let err_msg = err.to_string();
+            tracing::warn!(
+                "MCP 探测失败：server={} transport={:?} error={}",
+                server.name,
+                server.resolved_transport(),
+                err_msg
+            );
+            McpServerCapability {
+                healthy: false,
+                tools: Vec::new(),
+                last_error: Some(err_msg),
+            }
+        }
+    }
 }
 
 fn dedup_tools(items: &[McpToolMeta]) -> Vec<McpToolMeta> {
