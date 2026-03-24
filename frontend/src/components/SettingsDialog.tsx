@@ -13,8 +13,11 @@ import { api } from '@/api/tauri';
 import type { McpServer, Skill, ServerConfig, ConnectorInfo, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo } from '@/api/tauri';
 import { useToast } from './Toast';
 
+type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
+
 export function SettingsDialog() {
   const [open, setOpen] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
 
   return (
     <>
@@ -29,8 +32,17 @@ export function SettingsDialog() {
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-4xl max-h-[80vh] overflow-hidden flex flex-col">
-          <DialogHeader>
+          <DialogHeader className="flex flex-row items-center justify-between pr-8">
             <DialogTitle>系统设置</DialogTitle>
+            {saveStatus !== 'idle' && (
+              <span className="text-xs text-muted-foreground flex items-center">
+                {saveStatus === 'saving' && (
+                  <><Loader2 className="w-3 h-3 mr-1 animate-spin" />保存中...</>
+                )}
+                {saveStatus === 'saved' && '已自动保存'}
+                {saveStatus === 'error' && <span className="text-destructive">保存失败</span>}
+              </span>
+            )}
           </DialogHeader>
 
           <Tabs defaultValue="llm" className="flex-1 overflow-hidden flex flex-col">
@@ -59,7 +71,7 @@ export function SettingsDialog() {
 
             <div className="flex-1 overflow-y-auto">
               <TabsContent value="llm">
-                <LLMSettings />
+                <LLMSettings onSaveStatusChange={setSaveStatus} />
               </TabsContent>
               <TabsContent value="mcp">
                 <McpSettings />
@@ -87,7 +99,7 @@ export function SettingsDialog() {
 
 type LLMSubTab = 'providers' | 'models' | 'routing';
 
-function LLMSettings() {
+function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: SaveStatus) => void }) {
   const [subTab, setSubTab] = useState<LLMSubTab>('providers');
   const [modelsConfig, setModelsConfig] = useState<ModelsConfigView>({
     providers: {},
@@ -96,7 +108,6 @@ function LLMSettings() {
   });
   const [capabilities, setCapabilities] = useState<ModelCapabilityInfo[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const { showError } = useToast();
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -123,18 +134,17 @@ function LLMSettings() {
 
   // 自动保存：配置变更时 debounce 500ms 后保存到后端
   const autoSave = useCallback(async (config: ModelsConfigView) => {
-    setSaveStatus('saving');
+    onSaveStatusChange('saving');
     try {
       await api.setModelsConfig(config);
-      setSaveStatus('saved');
-      // 2 秒后恢复 idle
-      setTimeout(() => setSaveStatus('idle'), 2000);
+      onSaveStatusChange('saved');
+      setTimeout(() => onSaveStatusChange('idle'), 2000);
     } catch (error) {
       console.error('自动保存失败:', error);
-      setSaveStatus('error');
+      onSaveStatusChange('error');
       showError('保存失败', '无法保存模型配置');
     }
-  }, [showError]);
+  }, [showError, onSaveStatusChange]);
 
   const handleChange = useCallback((newConfig: ModelsConfigView) => {
     setModelsConfig(newConfig);
@@ -186,16 +196,6 @@ function LLMSettings() {
         </TabsContent>
       </Tabs>
 
-      {/* 保存状态指示 */}
-      {saveStatus !== 'idle' && (
-        <div className="flex items-center justify-end text-xs text-muted-foreground">
-          {saveStatus === 'saving' && (
-            <><Loader2 className="w-3 h-3 mr-1 animate-spin" />保存中...</>
-          )}
-          {saveStatus === 'saved' && '已自动保存'}
-          {saveStatus === 'error' && <span className="text-destructive">保存失败</span>}
-        </div>
-      )}
     </div>
   );
 }
