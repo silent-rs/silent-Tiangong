@@ -37,8 +37,10 @@ impl OpenAIImageGenerator {
 struct ImageGenBody {
     model: String,
     prompt: String,
-    n: u32,
-    size: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    n: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     style: Option<String>,
 }
@@ -74,12 +76,15 @@ impl ImageGenerator for OpenAIImageGenerator {
     }
 
     async fn generate(&self, request: ImageGenRequest) -> Result<ImageGenResponse> {
-        let size = format!("{}x{}", request.width, request.height);
         let body = ImageGenBody {
             model: request.model.unwrap_or_else(|| self.model.clone()),
             prompt: request.prompt,
-            n: request.num_images,
-            size,
+            n: if request.num_images > 1 { Some(request.num_images) } else { None },
+            size: if request.width > 0 && request.height > 0 {
+                Some(format!("{}x{}", request.width, request.height))
+            } else {
+                None
+            },
             style: request.style,
         };
 

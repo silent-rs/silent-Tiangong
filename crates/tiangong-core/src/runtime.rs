@@ -469,8 +469,8 @@ impl RuntimeEngine {
         let request = tiangong_media::image::ImageGenRequest {
             prompt: user_input.to_string(),
             negative_prompt: None,
-            width: 1024,
-            height: 1024,
+            width: 0,  // 使用 API 默认尺寸
+            height: 0,
             model: Some(model.clone()),
             style: None,
             num_images: 1,
