@@ -227,6 +227,23 @@ pub fn set_input_draft(content: String, state: State<TiangongApp>) -> Result<(),
     })
 }
 
+/// 获取活动会话的工作目录
+#[tauri::command]
+pub fn get_session_cwd(state: State<TiangongApp>) -> Result<String, String> {
+    state.with_state_read(|core_state| Ok(core_state.active_session_cwd().to_string()))
+}
+
+/// 设置活动会话的工作目录
+#[tauri::command]
+pub fn set_session_cwd(cwd: String, state: State<TiangongApp>) -> Result<(), String> {
+    // 验证路径存在且是目录
+    let path = std::path::Path::new(&cwd);
+    if !path.is_dir() {
+        return Err(format!("路径不存在或不是目录：{cwd}"));
+    }
+    state.with_state(|core_state| core_state.update_active_session_cwd(cwd))
+}
+
 // ============================================================================
 // MCP 管理
 // ============================================================================

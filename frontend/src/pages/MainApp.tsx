@@ -3,7 +3,7 @@ import { useStore } from '@/store/useStore';
 import { api } from '@/api/tauri';
 import { AppSidebar } from '@/components/AppSidebar';
 import { SidebarProvider } from '@/components/ui/sidebar';
-import { LazyMessageList, LazyMessageInput, LazyPlanPanel, LazyStatusPanel } from '@/components/LazyComponents';
+import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components/LazyComponents';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 
 export function MainApp() {
@@ -31,6 +31,11 @@ export function MainApp() {
       updateFromSnapshot(snapshot);
     }).catch(console.error);
 
+    // 加载初始工作目录
+    api.getSessionCwd().then((cwd) => {
+      useStore.setState({ sessionCwd: cwd });
+    }).catch(console.error);
+
     return () => {
       unlistenRef.current?.();
     };
@@ -48,9 +53,6 @@ export function MainApp() {
 
           {/* 主内容区 */}
           <main className="flex flex-1 flex-col min-w-0 bg-background">
-            {/* 计划面板（执行时显示） */}
-            <LazyPlanPanel />
-
             {/* 消息列表 */}
             <div className="flex-1 overflow-hidden">
               <LazyMessageList />

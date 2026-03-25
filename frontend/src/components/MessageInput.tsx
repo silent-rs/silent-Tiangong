@@ -2,10 +2,11 @@ import { useState, KeyboardEvent, useEffect, useRef } from 'react';
 import { useStore } from '@/store/useStore';
 import { Textarea } from './ui/textarea';
 import { Button } from './ui/button';
-import { Send, Square } from 'lucide-react';
+import { Send, Square, FolderOpen } from 'lucide-react';
+import { open } from '@tauri-apps/plugin-dialog';
 
 export function MessageInput() {
-  const { inputContent, setInputContent, sendMessage, cancelTurn, runStatus, isDraft, activeSessionId, sessionRunStatuses } = useStore();
+  const { inputContent, setInputContent, sendMessage, cancelTurn, runStatus, isDraft, activeSessionId, sessionRunStatuses, sessionCwd, setSessionCwd } = useStore();
   const [isComposing, setIsComposing] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -41,6 +42,27 @@ export function MessageInput() {
   const handleCancel = () => {
     cancelTurn();
   };
+
+  const handleChangeCwd = async () => {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        defaultPath: sessionCwd || undefined,
+        title: '选择工作目录',
+      });
+      if (selected && typeof selected === 'string') {
+        await setSessionCwd(selected);
+      }
+    } catch (error) {
+      console.error('选择目录失败:', error);
+    }
+  };
+
+  // 显示简短路径（只取最后两段）
+  const displayCwd = sessionCwd
+    ? sessionCwd.split('/').filter(Boolean).slice(-2).join('/')
+    : '';
 
   return (
     <div className="p-4 border-t bg-background">
@@ -82,14 +104,23 @@ export function MessageInput() {
           </Button>
         </div>
         <div className="mt-1.5 flex items-center justify-between text-xs text-muted-foreground">
-          <span>
-            {!isIdle && (
+          <span className="flex items-center gap-1 min-w-0">
+            {!isIdle ? (
               <span className="flex items-center gap-1">
                 <span className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse" />
                 {currentSessionStatus === 'planning' && '正在制定计划...'}
                 {currentSessionStatus === 'executing' && '正在执行任务...'}
                 {currentSessionStatus === 'responding' && '正在生成回复...'}
               </span>
+            ) : (
+              <button
+                onClick={handleChangeCwd}
+                className="flex items-center gap-1 hover:text-foreground transition-colors truncate max-w-[300px]"
+                title={sessionCwd || '点击设置工作目录'}
+              >
+                <FolderOpen className="w-3 h-3 shrink-0" />
+                <span className="truncate">{displayCwd || '设置工作目录'}</span>
+              </button>
             )}
           </span>
           <span>Shift+Enter 换行</span>

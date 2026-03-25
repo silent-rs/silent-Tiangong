@@ -22,6 +22,8 @@ fn main() {
             tiangong_app::commands::get_run_snapshot,
             tiangong_app::commands::get_input_draft,
             tiangong_app::commands::set_input_draft,
+            tiangong_app::commands::get_session_cwd,
+            tiangong_app::commands::set_session_cwd,
             tiangong_app::commands::get_mcp_servers,
             tiangong_app::commands::get_mcp_health,
             tiangong_app::commands::register_mcp_server,

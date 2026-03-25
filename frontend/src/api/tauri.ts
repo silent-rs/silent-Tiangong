@@ -157,6 +157,12 @@ export const api = {
   setInputDraft: (content: string): Promise<void> =>
     invoke('set_input_draft', { content }),
 
+  getSessionCwd: (): Promise<string> =>
+    invoke('get_session_cwd'),
+
+  setSessionCwd: (cwd: string): Promise<void> =>
+    invoke('set_session_cwd', { cwd }),
+
   // ----------------------------------------------------------------
   // MCP 管理
   // ----------------------------------------------------------------

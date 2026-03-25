@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::agent_config::AgentConfig;
 
 mod common;
+pub use common::set_session_cwd;
 mod list_dir;
 mod read_file;
 mod replace_in_file;

@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::thread;
@@ -5,8 +6,26 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 
+thread_local! {
+    /// 当前执行的会话工作目录，由 RuntimeEngine 在执行前设置
+    static SESSION_CWD: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+/// 设置当前线程的会话工作目录
+pub fn set_session_cwd(cwd: Option<PathBuf>) {
+    SESSION_CWD.with(|cell| *cell.borrow_mut() = cwd);
+}
+
 pub(super) fn workspace_root() -> Result<PathBuf> {
-    std::env::current_dir().context("读取当前工作目录失败")
+    // 优先使用会话级工作目录，回退到进程工作目录
+    SESSION_CWD.with(|cell| {
+        if let Some(ref cwd) = *cell.borrow()
+            && cwd.is_dir()
+        {
+            return Ok(cwd.clone());
+        }
+        std::env::current_dir().context("读取当前工作目录失败")
+    })
 }
 
 fn allowed_roots() -> Result<Vec<PathBuf>> {
