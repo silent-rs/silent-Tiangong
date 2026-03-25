@@ -433,10 +433,9 @@ function SystemMessageGroup({ messages, defaultExpanded = false }: { messages: M
                   )}
                 </button>
 
-                {/* Round 展开内容 */}
+                {/* Round 展开内容：只显示工具执行和其他，LLM 输出已由 round 标题代表 */}
                 {roundExpanded && (
                   <div className="ml-5 mt-0.5 space-y-0.5">
-                    {round.llm && renderItem(round.llm)}
                     {round.tools.map((t) => renderItem(t))}
                     {round.others.map((o) => renderItem(o))}
                   </div>
