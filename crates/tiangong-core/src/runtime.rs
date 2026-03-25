@@ -115,12 +115,12 @@ impl RuntimeEngine {
         &self,
         session: &Session,
         user_input: &str,
-        mut on_plan_ready: P,
+        mut _on_plan_ready: P,
         mut on_chunk: F,
         mut on_llm_output: L,
         mut on_tool_result: T,
         mut on_plan_execution_summary: S,
-        mut on_stage_thinking: G,
+        mut _on_stage_thinking: G,
     ) -> Result<TurnExecution>
     where
         P: FnMut(&TaskPlan),
@@ -186,7 +186,7 @@ impl RuntimeEngine {
             mcp_hints: Vec::new(),
             revisions: Vec::new(),
         };
-        on_plan_ready(&plan);
+        _on_plan_ready(&plan);
 
         // ReAct 循环
         let mut tool_results: Vec<ToolResult> = Vec::new();
@@ -214,33 +214,26 @@ impl RuntimeEngine {
                 },
             };
 
-            // 调用 LLM（带工具定义）
+            // 调用 LLM（带工具定义），流式输出直接推送到 assistant 消息
             let response = self.client.complete_with_functions_stream(
                 &req,
                 &function_tools,
                 &mut |delta: &ModelStreamChunk| {
-                    on_stage_thinking(&stage, delta);
+                    on_chunk(delta);
                 },
             )?;
 
             accumulated_usage.accumulate(&response.usage);
+            total_output_chunks += 1;
 
             // 没有工具调用 → agent 决定直接回复，结束循环
             if response.tool_calls.is_empty() {
                 final_text = response.text;
                 final_reasoning = response.reasoning_content;
-                // 将最终回复通过 chunk 流式发送
-                if !final_text.is_empty() {
-                    on_chunk(&ModelStreamChunk {
-                        content: final_text.clone(),
-                        reasoning_content: final_reasoning.clone(),
-                    });
-                    total_output_chunks += 1;
-                }
                 break;
             }
 
-            // 有工具调用 → 记录 LLM 输出并执行工具
+            // 有工具调用 → 记录到执行过程
             let tool_call_names: Vec<String> = response
                 .tool_calls
                 .iter()
