@@ -225,21 +225,6 @@ impl RuntimeEngine {
 
             accumulated_usage.accumulate(&response.usage);
 
-            // 记录 LLM 输出
-            let tool_call_names: Vec<String> = response
-                .tool_calls
-                .iter()
-                .map(|tc| tc.name.clone())
-                .collect();
-            let output = LlmOutputRecord {
-                stage: stage.clone(),
-                content: response.text.clone(),
-                reasoning_content: response.reasoning_content.clone(),
-                tool_calls: tool_call_names.clone(),
-                usage: response.usage.clone(),
-            };
-            on_llm_output(&output);
-
             // 没有工具调用 → agent 决定直接回复，结束循环
             if response.tool_calls.is_empty() {
                 final_text = response.text;
@@ -255,7 +240,21 @@ impl RuntimeEngine {
                 break;
             }
 
-            // 有工具调用 → 执行工具，收集结果
+            // 有工具调用 → 记录 LLM 输出并执行工具
+            let tool_call_names: Vec<String> = response
+                .tool_calls
+                .iter()
+                .map(|tc| tc.name.clone())
+                .collect();
+            let output = LlmOutputRecord {
+                stage: stage.clone(),
+                content: response.text.clone(),
+                reasoning_content: response.reasoning_content.clone(),
+                tool_calls: tool_call_names.clone(),
+                usage: response.usage.clone(),
+            };
+            on_llm_output(&output);
+
             let mut round_feedback_parts: Vec<String> = Vec::new();
 
             // 记录 assistant 的工具调用意图到 loop_messages
@@ -339,13 +338,18 @@ impl RuntimeEngine {
             total_output_chunks += 1;
         }
 
-        // 执行汇总
-        let summary = format!(
-            "ReAct 完成：{} 轮，{} 次工具调用",
-            loop_messages.iter().filter(|m| m.role == MessageRole::Assistant).count(),
-            tool_results.len()
-        );
-        on_plan_execution_summary(&summary);
+        // 有工具调用时才输出执行汇总
+        if !tool_results.is_empty() {
+            let summary = format!(
+                "执行完成：{} 轮，{} 次工具调用",
+                loop_messages
+                    .iter()
+                    .filter(|m| m.role == MessageRole::Assistant)
+                    .count(),
+                tool_results.len()
+            );
+            on_plan_execution_summary(&summary);
+        }
 
         let tool_result_summary = if tool_results.is_empty() {
             None
