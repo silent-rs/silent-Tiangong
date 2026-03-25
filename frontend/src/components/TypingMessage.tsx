@@ -114,22 +114,25 @@ export function TypingMessage({ content, reasoningContent, speed = 300, onComple
       );
     },
     p({ children }: { children: ReactNode }) {
-      return <p className="mb-3 last:mb-0 leading-7">{children}</p>;
+      return <p className="mb-2 last:mb-0 leading-6">{children}</p>;
     },
     ul({ children }: { children: ReactNode }) {
-      return <ul className="list-disc list-inside mb-3 space-y-1.5">{children}</ul>;
+      return <ul className="list-disc pl-5 mb-2 space-y-1 [&_p]:mb-0 [&_p]:inline">{children}</ul>;
     },
     ol({ children }: { children: ReactNode }) {
-      return <ol className="list-decimal list-inside mb-3 space-y-1.5">{children}</ol>;
+      return <ol className="list-decimal pl-5 mb-2 space-y-1 [&_p]:mb-0 [&_p]:inline">{children}</ol>;
+    },
+    li({ children }: { children: ReactNode }) {
+      return <li className="leading-6">{children}</li>;
     },
     h1({ children }: { children: ReactNode }) {
-      return <h1 className="text-xl font-bold mb-4 mt-6 first:mt-0">{children}</h1>;
+      return <h1 className="text-lg font-bold mb-3 mt-5 first:mt-0">{children}</h1>;
     },
     h2({ children }: { children: ReactNode }) {
-      return <h2 className="text-lg font-bold mb-3 mt-5 first:mt-0">{children}</h2>;
+      return <h2 className="text-base font-bold mb-2 mt-4 first:mt-0">{children}</h2>;
     },
     h3({ children }: { children: ReactNode }) {
-      return <h3 className="text-base font-bold mb-2 mt-4 first:mt-0">{children}</h3>;
+      return <h3 className="text-sm font-bold mb-2 mt-3 first:mt-0">{children}</h3>;
     },
     blockquote({ children }: { children: ReactNode }) {
       return (
@@ -184,7 +187,7 @@ export function TypingMessage({ content, reasoningContent, speed = 300, onComple
       )}
 
       {/* 正常输出 - 打字机效果 */}
-      <div className="prose prose-invert prose-sm max-w-none">
+      <div className="prose prose-invert prose-sm max-w-none text-[13px]">
         <ReactMarkdown remarkPlugins={[remarkGfm]} components={MarkdownComponents as any}>
           {parsed.content}
         </ReactMarkdown>
