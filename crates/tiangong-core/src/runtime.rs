@@ -12,8 +12,7 @@ use crate::execution::{
 use crate::model::{
     ModelClient, ModelRequest, ModelResponse, ModelStreamChunk, SingleProviderClient, TokenUsage,
 };
-use crate::models_config::{ModelCapability, ModelsConfig};
-use tiangong_media::image::ImageGenerator;
+use crate::models_config::ModelsConfig;
 use crate::planner::TaskPlan;
 use crate::session::{Session, now_text};
 use crate::tool::{LocalToolExecutor, ToolExecutionRecord, ToolResult};
@@ -134,30 +133,22 @@ impl RuntimeEngine {
         S: FnMut(&str),
         G: FnMut(&str, &ModelStreamChunk),
     {
+        // 设置当前线程的会话级工作目录
+        let session_cwd = if session.cwd.is_empty() {
+            None
+        } else {
+            let p = std::path::PathBuf::from(&session.cwd);
+            if p.is_dir() { Some(p) } else { None }
+        };
+        crate::tool::set_session_cwd(session_cwd);
+
         // 累计 token 用量
         let mut accumulated_usage = TokenUsage::default();
 
-        // 统一意图分类：一次 LLM 调用判断请求类型
-        let intent = self.classify_intent(session, user_input, &mut accumulated_usage);
-        match intent.as_str() {
-            "SIMPLE" => {
-                if let Some(exec) = self.handle_simple_chat(
-                    session, user_input, &mut on_chunk, &mut accumulated_usage,
-                )? {
-                    return Ok(exec);
-                }
-            }
-            "IMAGE" => {
-                if let Some(exec) = self.handle_image_generation(
-                    user_input, &mut on_chunk, &mut accumulated_usage,
-                )? {
-                    return Ok(exec);
-                }
-            }
-            _ => {} // COMPLEX 或分类失败，继续走完整 planning 流程
-        }
+        // 统一流程：所有请求直接进入 planning → execution → response
+        // planning agent 自行判断是否需要工具调用，无需预分类
 
-        // 规划阶段：流式 thinking 通过 on_stage_thinking 输出到系统消息（"● Planning" 下方）
+        // 规划阶段：流式 thinking 通过 on_stage_thinking 输出到系统消息
         let (mut plan, planning_output) = planning_agent::build_plan_with_agent_with_trace(
             &self.client,
             session,
@@ -184,8 +175,32 @@ impl RuntimeEngine {
             };
             on_llm_output(&output);
         }
-        let context = session.recent_messages(self.context_limit);
+        // 构建上下文：先过滤掉执行阶段的 System 消息，再截取最近 N 条
+        // 避免大量 System 消息占满 context 窗口挤掉用户/助手的真实对话
+        let conversation_context: Vec<_> = session
+            .messages
+            .iter()
+            .filter(|msg| {
+                if msg.role != crate::session::MessageRole::System {
+                    return true;
+                }
+                let c = msg.content.as_str();
+                !(c.starts_with("工具执行")
+                    || c.starts_with("LLM 输出")
+                    || c.starts_with("Plan 执行总结")
+                    || c.starts_with("检测到")
+                    || c.starts_with("执行已取消"))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let context_start = conversation_context
+            .len()
+            .saturating_sub(self.context_limit);
+        let context = conversation_context[context_start..].to_vec();
+
         let mut tool_results = Vec::new();
+
+        // 执行阶段
         execute_plan_with_execution_agent(
             &self.client,
             &self.tool_executor,
@@ -205,6 +220,7 @@ impl RuntimeEngine {
         let verify_commands = recommend_verify_commands(user_input);
         let verify_records = run_verify_commands(&verify_commands);
 
+        // response 阶段
         let reply_prompt = response_agent::build_grounded_response_prompt(
             user_input,
             &plan,
@@ -212,25 +228,11 @@ impl RuntimeEngine {
             &verify_records,
             &[],
         );
-        // response 阶段上下文：过滤掉执行阶段产生的 System 消息（工具 trace、LLM 输出记录等），
-        // 这些内容已通过 tool_evidence 摘要化传入 prompt，避免弱模型直接复制原始 trace。
-        let response_context: Vec<_> = context
-            .iter()
-            .filter(|msg| {
-                if msg.role != crate::session::MessageRole::System {
-                    return true;
-                }
-                let c = msg.content.as_str();
-                !(c.starts_with("工具执行")
-                    || c.starts_with("LLM 输出")
-                    || c.starts_with("Plan 执行总结"))
-            })
-            .cloned()
-            .collect();
+
         let req = ModelRequest {
             session_title: session.title.clone(),
             user_input: reply_prompt,
-            context: response_context,
+            context: context.clone(),
         };
         let ModelResponse {
             text,
@@ -300,293 +302,6 @@ impl RuntimeEngine {
             output_chunk_count,
             usage: accumulated_usage,
         })
-    }
-
-    /// 统一意图分类：一次 LLM 调用判断请求类型
-    ///
-    /// 根据 ModelsConfig 中已配置的能力路由自动加载分类选项。
-    fn classify_intent(
-        &self,
-        session: &Session,
-        user_input: &str,
-        accumulated_usage: &mut TokenUsage,
-    ) -> String {
-        // 固定选项：简单对话 + 复杂任务
-        let mut options = vec![
-            format!("SIMPLE - {}", ModelCapability::Chat.intent_description()),
-            "COMPLEX - 复杂任务（需要执行工具、命令、代码操作、文件读写等）".to_string(),
-        ];
-
-        // 动态加载：遍历所有多媒体能力，已配置 routing 的自动加入
-        let mut active_labels = Vec::new();
-        for cap in ModelCapability::media_capabilities() {
-            if self.models_config.resolve_for_capability(*cap).is_some() {
-                let label = cap.intent_label();
-                options.push(format!("{} - {}", label, cap.intent_description()));
-                active_labels.push(label.to_string());
-            }
-        }
-
-        let all_labels: Vec<&str> = options.iter().map(|o| o.split(" - ").next().unwrap_or("")).collect();
-        let labels_hint = all_labels.join("、");
-        let options_text = options.join("\n");
-
-        let classify_prompt = format!(
-            "判断以下用户输入属于哪种类型，只回复对应的标签（{labels_hint} 之一），不要解释。\n\n\
-            可选类型：\n{options_text}\n\n\
-            用户输入：{user_input}"
-        );
-
-        tracing::info!(
-            active_labels = ?active_labels,
-            options_count = options.len(),
-            "意图分类：可用选项 [{labels_hint}]"
-        );
-
-        let classify_req = ModelRequest {
-            session_title: format!("{} · intent-classify", session.title),
-            user_input: classify_prompt,
-            context: Vec::new(),
-        };
-
-        match self.client.complete(&classify_req) {
-            Ok(resp) => {
-                accumulated_usage.accumulate(&resp.usage);
-                let text = resp.text.trim().to_uppercase();
-                // 按优先级匹配：先检查多媒体能力标签，再检查 SIMPLE，最后 COMPLEX
-                let mut result = "COMPLEX".to_string();
-                for label in &active_labels {
-                    if text.contains(label.as_str()) {
-                        result = label.clone();
-                        break;
-                    }
-                }
-                if result == "COMPLEX" && text.contains("SIMPLE") {
-                    result = "SIMPLE".to_string();
-                }
-                tracing::info!(
-                    llm_response = %resp.text.trim(),
-                    classified_as = %result,
-                    "意图分类结果"
-                );
-                result
-            }
-            Err(err) => {
-                tracing::warn!(%err, "意图分类调用失败，回退 COMPLEX");
-                "COMPLEX".to_string()
-            }
-        }
-    }
-
-    /// 简单对话快速回复
-    fn handle_simple_chat(
-        &self,
-        session: &Session,
-        user_input: &str,
-        on_chunk: &mut dyn FnMut(&ModelStreamChunk),
-        accumulated_usage: &mut TokenUsage,
-    ) -> Result<Option<TurnExecution>> {
-        let context = session.recent_messages(self.context_limit);
-        let req = ModelRequest {
-            session_title: session.title.clone(),
-            user_input: user_input.to_string(),
-            context,
-        };
-
-        let ModelResponse {
-            text,
-            reasoning_content,
-            usage,
-            output_mode,
-            output_chunk_count,
-        } = if use_stream_mode() {
-            match self
-                .client
-                .complete_stream_with_callback(&req, |delta| on_chunk(delta))
-            {
-                Ok(resp) => resp,
-                Err(_) => {
-                    let resp = self.client.complete(&req)?;
-                    if !resp.text.is_empty() {
-                        on_chunk(&ModelStreamChunk {
-                            content: resp.text.clone(),
-                            reasoning_content: resp.reasoning_content.clone(),
-                        });
-                    }
-                    resp
-                }
-            }
-        } else {
-            let resp = self.client.complete(&req)?;
-            if !resp.text.is_empty() {
-                on_chunk(&ModelStreamChunk {
-                    content: resp.text.clone(),
-                    reasoning_content: resp.reasoning_content.clone(),
-                });
-            }
-            resp
-        };
-
-        accumulated_usage.accumulate(&usage);
-
-        let plan = TaskPlan {
-            id: scru128::new().to_string(),
-            objective: "简单对话".to_string(),
-            summary: format!("直接回复用户输入：{}", user_input),
-            plans: Vec::new(),
-            risks: Vec::new(),
-            skill_hints: Vec::new(),
-            mcp_hints: Vec::new(),
-            revisions: Vec::new(),
-        };
-
-        Ok(Some(TurnExecution {
-            assistant_message: text,
-            assistant_reasoning_content: reasoning_content,
-            plan,
-            tool_result_summary: None,
-            tool_execution: None,
-            verify_records: Vec::new(),
-            output_mode,
-            output_chunk_count,
-            usage: accumulated_usage.clone(),
-        }))
-    }
-
-    /// 图片生成快速路径
-    fn handle_image_generation(
-        &self,
-        user_input: &str,
-        on_chunk: &mut dyn FnMut(&ModelStreamChunk),
-        accumulated_usage: &mut TokenUsage,
-    ) -> Result<Option<TurnExecution>> {
-        let resolved = match self.models_config.resolve_for_capability(ModelCapability::ImageGeneration) {
-            Some(r) => r,
-            None => {
-                tracing::warn!("图片生成：routing 中未配置 ImageGeneration，跳过");
-                return Ok(None);
-            }
-        };
-
-        let model = resolved.model.clone();
-        let api_base = resolved.base_url.clone();
-
-        tracing::info!(
-            model = %model,
-            api_base = %api_base,
-            "图片生成：开始调用 OpenAI 兼容 API"
-        );
-
-        let generator = tiangong_media::openai_image::OpenAIImageGenerator::new(
-            resolved.api_key.clone(),
-            api_base,
-            model.clone(),
-        );
-
-        let request = tiangong_media::image::ImageGenRequest {
-            prompt: user_input.to_string(),
-            negative_prompt: None,
-            width: 0,  // 使用 API 默认尺寸
-            height: 0,
-            model: Some(model.clone()),
-            style: None,
-            num_images: 1,
-        };
-
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                tracing::error!(%e, "图片生成：创建 tokio runtime 失败");
-                return Err(anyhow::anyhow!("初始化异步运行时失败：{e}"));
-            }
-        };
-
-        let result = runtime.block_on(async {
-            tokio::time::timeout(
-                std::time::Duration::from_secs(120),
-                generator.generate(request),
-            ).await
-        });
-
-        let build_error_exec = |on_chunk: &mut dyn FnMut(&ModelStreamChunk), msg: String, usage: &TokenUsage| -> TurnExecution {
-            on_chunk(&ModelStreamChunk { content: msg.clone(), reasoning_content: String::new() });
-            TurnExecution {
-                assistant_message: msg.clone(),
-                assistant_reasoning_content: String::new(),
-                plan: TaskPlan {
-                    id: scru128::new().to_string(),
-                    objective: "图片生成".to_string(),
-                    summary: msg,
-                    plans: Vec::new(), risks: Vec::new(), skill_hints: Vec::new(),
-                    mcp_hints: Vec::new(), revisions: Vec::new(),
-                },
-                tool_result_summary: None, tool_execution: None,
-                verify_records: Vec::new(), output_mode: "sync".to_string(),
-                output_chunk_count: 1, usage: usage.clone(),
-            }
-        };
-
-        let response = match result {
-            Ok(Ok(resp)) => {
-                tracing::info!(image_count = resp.images.len(), "图片生成：API 调用成功");
-                resp
-            }
-            Ok(Err(err)) => {
-                tracing::error!(%err, "图片生成：API 调用失败");
-                return Ok(Some(build_error_exec(on_chunk, format!("图片生成失败：{err}"), accumulated_usage)));
-            }
-            Err(_) => {
-                tracing::error!("图片生成：请求超时");
-                return Ok(Some(build_error_exec(on_chunk, "图片生成超时（120秒）".to_string(), accumulated_usage)));
-            }
-        };
-
-        let mut reply_parts = vec![format!("已为您生成图片（模型：{}）：\n", model)];
-        for (i, img) in response.images.iter().enumerate() {
-            if let Some(url) = &img.url {
-                reply_parts.push(format!("![生成的图片 {}]({})\n", i + 1, url));
-            } else if let Some(b64) = &img.b64_data {
-                reply_parts.push(format!("![生成的图片 {}](data:image/png;base64,{})\n", i + 1, b64));
-            }
-            if let Some(revised) = &img.revised_prompt {
-                reply_parts.push(format!("优化后的提示词：{}\n", revised));
-            }
-        }
-        if reply_parts.len() <= 1 {
-            reply_parts.push("图片生成完成，但未能提取图片数据。\n".to_string());
-        }
-        let reply = reply_parts.join("");
-
-        on_chunk(&ModelStreamChunk {
-            content: reply.clone(),
-            reasoning_content: String::new(),
-        });
-
-        let plan = TaskPlan {
-            id: scru128::new().to_string(),
-            objective: "图片生成".to_string(),
-            summary: format!("使用 {} 生成图片", resolved.model),
-            plans: Vec::new(),
-            risks: Vec::new(),
-            skill_hints: Vec::new(),
-            mcp_hints: Vec::new(),
-            revisions: Vec::new(),
-        };
-
-        Ok(Some(TurnExecution {
-            assistant_message: reply,
-            assistant_reasoning_content: String::new(),
-            plan,
-            tool_result_summary: None,
-            tool_execution: None,
-            verify_records: Vec::new(),
-            output_mode: "stream".to_string(),
-            output_chunk_count: 1,
-            usage: accumulated_usage.clone(),
-        }))
     }
 
     pub fn fallback_error_message(err: &anyhow::Error) -> String {

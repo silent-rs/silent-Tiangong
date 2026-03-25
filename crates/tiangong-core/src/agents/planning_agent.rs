@@ -377,7 +377,7 @@ fn build_planing_prompt(
   ],
   "risks": ["string"]
 }}
-3. plans 至少 1 条，按执行优先级排序；允许根据业务依赖调整顺序。
+3. plans 至少 1 条，按执行优先级排序。即使是简单问答也要生成 plan，描述如何回答。
 4. 每个 plan 的 execution_steps 至少 1 条，按该 plan 的执行顺序排列。
 5. plan 只描述事项，不要把验证命令或验证结论写入 plan/steps。
 6. 保持计划通用、可执行，避免空泛描述。

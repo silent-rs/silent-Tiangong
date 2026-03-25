@@ -142,10 +142,13 @@ export function MessageList() {
               <p className="text-muted-foreground text-sm">我可以帮助您完成各种编程任务</p>
             </div>
           ) : (
-            groupMessages(messages).map((group) => {
-              // 系统消息组：折叠展示
+            groupMessages(messages).map((group, groupIdx, allGroups) => {
+              // 系统消息组
               if (group.type === 'system') {
-                return <SystemMessageGroup key={group.key} messages={group.messages} />;
+                // 最后一组系统消息且正在执行时默认展开
+                const isLastGroup = groupIdx === allGroups.length - 1;
+                const isActive = isLastGroup && isThinking;
+                return <SystemMessageGroup key={group.key} messages={group.messages} defaultExpanded={isActive} />;
               }
 
               const message = group.messages[0];
@@ -280,8 +283,12 @@ function groupMessages(messages: MessageGroup['messages']): MessageGroup[] {
 // 系统消息组：可整体折叠/展开
 // ---------------------------------------------------------------------------
 
-function SystemMessageGroup({ messages }: { messages: MessageGroup['messages'] }) {
-  const [groupExpanded, setGroupExpanded] = useState(false);
+function SystemMessageGroup({ messages, defaultExpanded = false }: { messages: MessageGroup['messages']; defaultExpanded?: boolean }) {
+  const [userToggled, setUserToggled] = useState(false);
+  // 未被用户手动操作过时跟随 defaultExpanded（执行中展开，完成后收缩）
+  const groupExpanded = userToggled ? !defaultExpanded : defaultExpanded;
+
+  const handleToggle = () => setUserToggled(prev => !prev);
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
 
   const toggleItem = (id: string) => {
@@ -309,7 +316,7 @@ function SystemMessageGroup({ messages }: { messages: MessageGroup['messages'] }
       {/* 组标题 */}
       <button
         className="w-full flex items-center gap-2 px-3 py-1 rounded-md text-xs text-muted-foreground hover:bg-muted/50 transition-colors text-left"
-        onClick={() => setGroupExpanded(!groupExpanded)}
+        onClick={handleToggle}
       >
         {groupExpanded ? (
           <ChevronDown className="w-3 h-3 shrink-0" />
