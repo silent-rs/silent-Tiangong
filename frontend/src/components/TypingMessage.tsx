@@ -85,28 +85,33 @@ export function TypingMessage({ content, reasoningContent, speed = 300, onComple
 
   // Markdown 渲染器
   const MarkdownComponents = {
-    code({ className, children, ...props }: any) {
+    pre({ children }: any) {
+      return <>{children}</>;
+    },
+    code({ className, children, node, ...props }: any) {
       const match = /language-(\w+)/.exec(className || '');
-      const hasLanguage = match && match[1];
-      return hasLanguage ? (
+      const isBlock = match || (node?.position && String(children).includes('\n'));
+      return isBlock ? (
         (SyntaxHighlighter as any)(
           {
             style: vscDarkPlus,
-            language: match[1],
+            language: match?.[1] || 'text',
             PreTag: "div",
-            className: "rounded-md text-sm",
+            className: "rounded-md text-xs !bg-background border border-border",
             customStyle: {
-              background: '#1E1E1E',
-              padding: '16px',
-              borderRadius: '8px',
-              margin: '8px 0',
+              padding: '12px',
+              borderRadius: '6px',
+              margin: '6px 0',
+            },
+            codeTagProps: {
+              style: {},
             },
           },
           String(children).replace(/\n$/, '')
         )
       ) : (
         <code
-          className="bg-[#2D2D30] text-[#E9E9E9] px-1.5 py-0.5 rounded text-sm font-mono"
+          className="bg-muted text-foreground px-1 py-0.5 rounded text-xs font-mono"
           {...props}
         >
           {children}

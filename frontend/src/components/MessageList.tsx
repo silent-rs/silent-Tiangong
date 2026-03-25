@@ -39,20 +39,26 @@ export function MessageList() {
 
   // Markdown 渲染器（用于非流式消息）
   const MarkdownComponents = {
-    code({ className, children, ...props }: any) {
+    pre({ children }: any) {
+      // ReactMarkdown v9: 代码块渲染为 <pre><code className="language-xxx">
+      // 直接透传 children（已经是 <code> 元素，由下面的 code 组件处理）
+      return <>{children}</>;
+    },
+    code({ className, children, node, ...props }: any) {
       const match = /language-(\w+)/.exec(className || '');
-      const hasLanguage = match && match[1];
-      return hasLanguage ? (
+      // 判断是否为代码块：有语言标记，或者父节点是 <pre>
+      const isBlock = match || (node?.position && node?.children?.length === 1 && String(children).includes('\n'));
+      return isBlock ? (
         (SyntaxHighlighter as any)(
           {
             style: vscDarkPlus,
-            language: match[1],
+            language: match?.[1] || 'text',
             PreTag: "div",
-            className: "rounded-md text-sm !bg-background border border-border",
+            className: "rounded-md text-xs !bg-background border border-border",
             customStyle: {
-              padding: '16px',
-              borderRadius: '8px',
-              margin: '8px 0',
+              padding: '12px',
+              borderRadius: '6px',
+              margin: '6px 0',
             },
             codeTagProps: {
               style: {},
@@ -62,7 +68,7 @@ export function MessageList() {
         )
       ) : (
         <code
-          className="bg-muted text-foreground px-1.5 py-0.5 rounded text-sm font-mono"
+          className="bg-muted text-foreground px-1 py-0.5 rounded text-xs font-mono"
           {...props}
         >
           {children}
