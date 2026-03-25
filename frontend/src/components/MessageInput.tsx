@@ -27,7 +27,7 @@ export function MessageInput() {
   }, [inputContent]);
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey && !isComposing) {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !isComposing) {
       e.preventDefault();
       handleSend();
     }
@@ -77,7 +77,7 @@ export function MessageInput() {
             onCompositionEnd={() => setIsComposing(false)}
             placeholder={
               isIdle
-                ? '输入消息... (Enter 发送, Shift+Enter 换行)'
+                ? '输入消息... (⌘+Enter 发送)'
                 : '正在执行中...'
             }
             className="min-h-[60px] max-h-[200px] resize-none pr-14 bg-muted/50 focus-visible:ring-ring"
@@ -113,7 +113,7 @@ export function MessageInput() {
             <FolderOpen className="w-3 h-3 shrink-0" />
             <span className="truncate">{displayCwd || '设置工作目录'}</span>
           </button>
-          <span>Shift+Enter 换行</span>
+          <span>⌘+Enter 发送</span>
         </div>
       </div>
     </div>
