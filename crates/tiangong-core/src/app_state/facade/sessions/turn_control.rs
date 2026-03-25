@@ -119,7 +119,10 @@ impl TiangongState {
     }
 
     /// 轮询所有 pending_turns，处理每个会话的事件
+    /// 每次最多处理 MAX_EVENTS_PER_POLL 个事件，防止长时间持锁阻塞其他操作
     pub fn poll_pending_turns(&mut self) {
+        const MAX_EVENTS_PER_POLL: usize = 5;
+
         // 收集所有 pending session_id
         let session_ids: Vec<String> = self.store.runtime.pending_turns.keys().cloned().collect();
         let mut sessions_to_clear: Vec<String> = Vec::new();
@@ -127,8 +130,13 @@ impl TiangongState {
         for session_id in session_ids {
             let mut should_clear = false;
             let mut disconnected = false;
+            let mut events_processed = 0usize;
 
-            while let Some(event) = self.try_recv_turn_event(&session_id, &mut disconnected) {
+            while events_processed < MAX_EVENTS_PER_POLL {
+                let Some(event) = self.try_recv_turn_event(&session_id, &mut disconnected) else {
+                    break;
+                };
+                events_processed += 1;
                 match event {
                     TurnEvent::PlanReady(plan) => {
                         self.mark_pending_turn_executing(&session_id, &plan);
