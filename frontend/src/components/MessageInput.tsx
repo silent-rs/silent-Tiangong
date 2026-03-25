@@ -104,23 +104,15 @@ export function MessageInput() {
           </Button>
         </div>
         <div className="mt-1.5 flex items-center justify-between text-xs text-muted-foreground">
-          <span className="flex items-center gap-1 min-w-0">
-            {!isIdle ? (
-              <span className="flex items-center gap-1">
-                <span className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse" />
-                {currentSessionStatus === 'executing' && '正在处理...'}
-              </span>
-            ) : (
-              <button
-                onClick={handleChangeCwd}
-                className="flex items-center gap-1 hover:text-foreground transition-colors truncate max-w-[300px]"
-                title={sessionCwd || '点击设置工作目录'}
-              >
-                <FolderOpen className="w-3 h-3 shrink-0" />
-                <span className="truncate">{displayCwd || '设置工作目录'}</span>
-              </button>
-            )}
-          </span>
+          <button
+            onClick={handleChangeCwd}
+            disabled={!isIdle}
+            className="flex items-center gap-1 hover:text-foreground transition-colors truncate max-w-[300px] disabled:opacity-50 disabled:cursor-default disabled:hover:text-muted-foreground"
+            title={sessionCwd || '点击设置工作目录'}
+          >
+            <FolderOpen className="w-3 h-3 shrink-0" />
+            <span className="truncate">{displayCwd || '设置工作目录'}</span>
+          </button>
           <span>Shift+Enter 换行</span>
         </div>
       </div>

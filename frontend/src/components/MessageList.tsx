@@ -291,6 +291,24 @@ interface RoundGroup {
   others: MessageGroup['messages'];
 }
 
+/** 从 LLM 输出系统消息中提取 thinking 内容作为 round 标题 */
+function extractThinkingFromLlm(content: string): string {
+  // 格式: "LLM 输出 [...]\ntokens: ...\ntool_calls: ...\ncontent:\n实际内容"
+  const lines = content.split('\n');
+  const contentIdx = lines.findIndex((l) => l.startsWith('content:'));
+  if (contentIdx >= 0 && contentIdx + 1 < lines.length) {
+    const thinking = lines
+      .slice(contentIdx + 1)
+      .join(' ')
+      .trim();
+    if (thinking) return thinking;
+  }
+  // fallback: 直接取 reasoning_content 或工具调用信息
+  const toolMatch = content.match(/tool_calls:\s*(.+)/);
+  if (toolMatch) return `调用 ${toolMatch[1]}`;
+  return '思考中...';
+}
+
 /** 将系统消息按 round 分组：LLM 输出 [react-round-N] + 后续工具执行归为一组 */
 function groupByRound(messages: MessageGroup['messages']): RoundGroup[] {
   const rounds: RoundGroup[] = [];
@@ -299,15 +317,13 @@ function groupByRound(messages: MessageGroup['messages']): RoundGroup[] {
   for (const msg of messages) {
     if (msg.content.startsWith('LLM 输出')) {
       if (current) rounds.push(current);
-      const match = msg.content.match(/\[(.+?)\]/);
-      const label = match ? match[1] : 'LLM';
-      current = { key: msg.id, label, llm: msg, tools: [], others: [] };
+      const thinking = extractThinkingFromLlm(msg.content);
+      current = { key: msg.id, label: thinking, llm: msg, tools: [], others: [] };
     } else if (current && (msg.content.includes('exit_code') || msg.content.includes('tool_name:'))) {
       current.tools.push(msg);
     } else if (current) {
       current.others.push(msg);
     } else {
-      // 没有 LLM 开头的消息，独立成组
       if (!current) {
         current = { key: msg.id, label: '执行', llm: null, tools: [], others: [msg] };
       }
@@ -317,10 +333,7 @@ function groupByRound(messages: MessageGroup['messages']): RoundGroup[] {
   return rounds;
 }
 
-function SystemMessageGroup({ messages, defaultExpanded = false }: { messages: MessageGroup['messages']; defaultExpanded?: boolean }) {
-  const [userToggled, setUserToggled] = useState(false);
-  const groupExpanded = userToggled ? !defaultExpanded : defaultExpanded;
-  const handleToggle = () => setUserToggled(prev => !prev);
+function SystemMessageGroup({ messages }: { messages: MessageGroup['messages']; defaultExpanded?: boolean }) {
   const [expandedRounds, setExpandedRounds] = useState<Set<string>>(new Set());
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
 
@@ -343,15 +356,6 @@ function SystemMessageGroup({ messages, defaultExpanded = false }: { messages: M
   };
 
   const rounds = groupByRound(messages);
-  const toolCount = messages.filter((m) => m.content.includes('tool_name:') || m.content.includes('exit_code')).length;
-  const llmCount = rounds.filter((r) => r.llm).length;
-  const otherCount = messages.length - toolCount - llmCount;
-
-  const parts = [];
-  if (llmCount > 0) parts.push(`${llmCount} 次 LLM`);
-  if (toolCount > 0) parts.push(`${toolCount} 次工具调用`);
-  if (otherCount > 0) parts.push(`${otherCount} 条其他`);
-  const summaryText = parts.join('，');
 
   const renderItem = (msg: MessageGroup['messages'][0]) => {
     const meta = getSystemMessageMeta(msg.content);
@@ -384,67 +388,50 @@ function SystemMessageGroup({ messages, defaultExpanded = false }: { messages: M
     );
   };
 
+  // 截断 thinking 文本
+  const truncLabel = (text: string, max: number) =>
+    text.length > max ? text.slice(0, max) + '...' : text;
+
   return (
-    <div className="max-w-3xl">
-      {/* 组标题 */}
-      <button
-        className="w-full flex items-center gap-2 px-3 py-1 rounded-md text-xs text-muted-foreground hover:bg-muted/50 transition-colors text-left"
-        onClick={handleToggle}
-      >
-        {groupExpanded ? (
-          <ChevronDown className="w-3 h-3 shrink-0" />
-        ) : (
-          <ChevronRight className="w-3 h-3 shrink-0" />
-        )}
-        <Terminal className="w-3 h-3 shrink-0" />
-        <span className="font-medium">执行过程</span>
-        <span className="opacity-60">({summaryText}，共 {messages.length} 条)</span>
-      </button>
+    <div className="max-w-3xl space-y-0.5">
+      {rounds.map((round) => {
+        const roundExpanded = expandedRounds.has(round.key);
+        const toolSummary = round.tools.map((t) =>
+          t.content.includes('ok=true') ? 'OK' : 'FAIL'
+        );
+        const toolBrief = round.tools.length > 0
+          ? `${round.tools.length} 次调用 (${toolSummary.join(', ')})`
+          : '';
 
-      {/* 展开后按 round 分组显示 */}
-      {groupExpanded && (
-        <div className="ml-5 mt-1 space-y-0.5">
-          {rounds.map((round) => {
-            const roundExpanded = expandedRounds.has(round.key);
-            const toolSummary = round.tools.map((t) => {
-              const ok = t.content.includes('ok=true');
-              return ok ? 'OK' : 'FAIL';
-            });
-            const toolBrief = round.tools.length > 0
-              ? ` · ${round.tools.length} 工具 (${toolSummary.join(', ')})`
-              : '';
+        return (
+          <div key={round.key}>
+            {/* Round 标题：thinking 内容 + 工具摘要 */}
+            <button
+              className="w-full flex items-center gap-2 px-3 py-1 rounded-md text-xs text-muted-foreground hover:bg-muted/50 transition-colors text-left"
+              onClick={() => toggleRound(round.key)}
+            >
+              {roundExpanded ? (
+                <ChevronDown className="w-3 h-3 shrink-0" />
+              ) : (
+                <ChevronRight className="w-3 h-3 shrink-0" />
+              )}
+              <Cpu className="w-3 h-3 shrink-0" />
+              <span className="truncate">{truncLabel(round.label, 60)}</span>
+              {!roundExpanded && toolBrief && (
+                <span className="shrink-0 opacity-60">{toolBrief}</span>
+              )}
+            </button>
 
-            return (
-              <div key={round.key}>
-                {/* Round 标题 */}
-                <button
-                  className="w-full flex items-center gap-2 px-2 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 transition-colors text-left"
-                  onClick={() => toggleRound(round.key)}
-                >
-                  {roundExpanded ? (
-                    <ChevronDown className="w-3 h-3 shrink-0" />
-                  ) : (
-                    <ChevronRight className="w-3 h-3 shrink-0" />
-                  )}
-                  <Cpu className="w-3 h-3 shrink-0" />
-                  <span className="font-medium">{round.label}</span>
-                  {!roundExpanded && (
-                    <span className="truncate opacity-60">{toolBrief}</span>
-                  )}
-                </button>
-
-                {/* Round 展开内容：只显示工具执行和其他，LLM 输出已由 round 标题代表 */}
-                {roundExpanded && (
-                  <div className="ml-5 mt-0.5 space-y-0.5">
-                    {round.tools.map((t) => renderItem(t))}
-                    {round.others.map((o) => renderItem(o))}
-                  </div>
-                )}
+            {/* 展开：工具调用详情 */}
+            {roundExpanded && (
+              <div className="ml-7 mt-0.5 space-y-0.5">
+                {round.tools.map((t) => renderItem(t))}
+                {round.others.map((o) => renderItem(o))}
               </div>
-            );
-          })}
-        </div>
-      )}
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
