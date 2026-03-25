@@ -1,25 +1,26 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::agent_config::AgentConfig;
-use crate::agents::planning_agent;
-use crate::agents::response_agent;
-pub use crate::agents::response_agent::VerifyExecutionRecord;
-use crate::execution::{
-    execute_plan_with_execution_agent, recommend_verify_commands, run_verify_commands,
-    summarize_tool_results,
+use crate::agent_config::{AgentConfig, McpConfig};
+use crate::agents::execution_mcp_agent::{
+    McpFunctionTarget, execution_function_tools, execute_mcp_tool_call,
+    resolve_mcp_tool_call_from_run_command,
 };
+use crate::agents::execution_tool_agent::build_tool_call_from_function;
 use crate::model::{
-    ModelClient, ModelRequest, ModelResponse, ModelStreamChunk, SingleProviderClient, TokenUsage,
+    ModelClient, ModelFunctionCall, ModelRequest, ModelStreamChunk, SingleProviderClient, TokenUsage,
 };
 use crate::models_config::ModelsConfig;
 use crate::planner::TaskPlan;
-use crate::session::{Session, now_text};
-use crate::tool::{LocalToolExecutor, ToolExecutionRecord, ToolResult};
+use crate::session::{Message, MessageRole, Session, now_text};
+use crate::tool::{LocalToolExecutor, ToolExecutionRecord, ToolExecutor, ToolResult};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RunStatus {
+    #[default]
     Idle,
     Planning,
     Executing,
@@ -27,7 +28,8 @@ pub enum RunStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunSnapshot {
     pub status: RunStatus,
     pub summary: String,
@@ -42,23 +44,16 @@ pub struct RunSnapshot {
     pub updated_at: String,
 }
 
-impl Default for RunSnapshot {
-    fn default() -> Self {
-        Self {
-            status: RunStatus::Idle,
-            summary: "系统就绪".to_string(),
-            last_session_id: None,
-            last_task_id: None,
-            last_duration_ms: None,
-            last_result: None,
-            last_plan: None,
-            last_tool_result: None,
-            last_error: None,
-            last_usage: None,
-            updated_at: now_text(),
-        }
-    }
+#[derive(Debug, Clone)]
+pub struct LlmOutputRecord {
+    pub stage: String,
+    pub content: String,
+    pub reasoning_content: String,
+    pub tool_calls: Vec<String>,
+    pub usage: TokenUsage,
 }
+
+pub use crate::agents::response_agent::VerifyExecutionRecord;
 
 #[derive(Debug, Clone)]
 pub struct TurnExecution {
@@ -73,7 +68,8 @@ pub struct TurnExecution {
     pub usage: TokenUsage,
 }
 
-pub use crate::execution::LlmOutputRecord;
+/// ReAct 循环的最大迭代次数
+const MAX_REACT_ROUNDS: usize = 20;
 
 #[derive(Debug, Clone)]
 pub struct RuntimeEngine {
@@ -113,6 +109,7 @@ impl RuntimeEngine {
         )
     }
 
+    /// ReAct 单循环执行：思考 → 工具调用 → 观察 → ... → 最终回复
     #[allow(clippy::too_many_arguments)]
     pub fn execute_turn_with_streaming<F, P, L, T, S, G>(
         &self,
@@ -142,46 +139,14 @@ impl RuntimeEngine {
         };
         crate::tool::set_session_cwd(session_cwd);
 
-        // 累计 token 用量
         let mut accumulated_usage = TokenUsage::default();
 
-        // 统一流程：所有请求直接进入 planning → execution → response
-        // planning agent 自行判断是否需要工具调用，无需预分类
-
-        // 规划阶段：流式 thinking 通过 on_stage_thinking 输出到系统消息
-        let (mut plan, planning_output) = planning_agent::build_plan_with_agent_with_trace(
-            &self.client,
-            session,
-            user_input,
-            &self.agent_config,
-            self.context_limit,
-            &mut |delta: &ModelStreamChunk| {
-                on_stage_thinking("planning-agent", delta);
-            },
-        );
-        accumulated_usage.accumulate(&planning_output.usage);
-        on_plan_ready(&plan);
-        // 当规划输出有实质内容或有 token 消耗时，补充/更新系统消息记录规划结果
-        if !planning_output.content.trim().is_empty()
-            || !planning_output.reasoning_content.trim().is_empty()
-            || planning_output.usage.total_tokens > 0
-        {
-            let output = LlmOutputRecord {
-                stage: "planning-agent".to_string(),
-                content: planning_output.content,
-                reasoning_content: planning_output.reasoning_content,
-                tool_calls: Vec::new(),
-                usage: planning_output.usage,
-            };
-            on_llm_output(&output);
-        }
-        // 构建上下文：先过滤掉执行阶段的 System 消息，再截取最近 N 条
-        // 避免大量 System 消息占满 context 窗口挤掉用户/助手的真实对话
+        // 构建对话上下文：过滤掉执行阶段的 System 消息，保留纯对话
         let conversation_context: Vec<_> = session
             .messages
             .iter()
             .filter(|msg| {
-                if msg.role != crate::session::MessageRole::System {
+                if msg.role != MessageRole::System {
                     return true;
                 }
                 let c = msg.content.as_str();
@@ -198,115 +163,306 @@ impl RuntimeEngine {
             .saturating_sub(self.context_limit);
         let context = conversation_context[context_start..].to_vec();
 
-        let mut tool_results = Vec::new();
+        // 准备工具定义
+        let (function_tools, mcp_targets) =
+            execution_function_tools(&self.agent_config.mcp);
+        // 去掉 mark_step_completed 工具，ReAct 模式不需要手动完成信号
+        let function_tools: Vec<_> = function_tools
+            .into_iter()
+            .filter(|t| t.name != "mark_step_completed")
+            .collect();
 
-        // 执行阶段
-        execute_plan_with_execution_agent(
-            &self.client,
-            &self.tool_executor,
-            &self.agent_config.mcp,
-            &mut plan,
-            session,
-            user_input,
-            &context,
-            &mut tool_results,
-            &mut on_llm_output,
-            &mut on_tool_result,
-            &mut on_plan_execution_summary,
-            &mut on_plan_ready,
-            &mut on_stage_thinking,
-            &mut accumulated_usage,
-        )?;
-        let verify_commands = recommend_verify_commands(user_input);
-        let verify_records = run_verify_commands(&verify_commands);
+        // 构建系统 prompt
+        let system_prompt = build_react_system_prompt(user_input);
 
-        // response 阶段
-        let reply_prompt = response_agent::build_grounded_response_prompt(
-            user_input,
-            &plan,
-            &tool_results,
-            &verify_records,
-            &[],
-        );
-
-        let req = ModelRequest {
-            session_title: session.title.clone(),
-            user_input: reply_prompt,
-            context: context.clone(),
+        // 构建空 plan（兼容现有 TurnExecution 结构）
+        let plan = TaskPlan {
+            id: scru128::new().to_string(),
+            objective: user_input.chars().take(50).collect::<String>(),
+            summary: String::new(),
+            plans: Vec::new(),
+            risks: Vec::new(),
+            skill_hints: Vec::new(),
+            mcp_hints: Vec::new(),
+            revisions: Vec::new(),
         };
-        let ModelResponse {
-            text,
-            reasoning_content,
-            usage,
-            output_mode,
-            output_chunk_count,
-        } = if use_stream_mode() {
-            match self
-                .client
-                .complete_stream_with_callback(&req, |delta| on_chunk(delta))
-            {
-                Ok(resp) => resp,
-                Err(_) => {
-                    let resp = self.client.complete(&req)?;
-                    if !resp.reasoning_content.is_empty() {
-                        on_chunk(&ModelStreamChunk {
-                            content: String::new(),
-                            reasoning_content: resp.reasoning_content.clone(),
-                        });
-                    }
-                    if !resp.text.is_empty() {
-                        on_chunk(&ModelStreamChunk {
-                            content: resp.text.clone(),
-                            reasoning_content: String::new(),
-                        });
-                    }
-                    resp
+        on_plan_ready(&plan);
+
+        // ReAct 循环
+        let mut tool_results: Vec<ToolResult> = Vec::new();
+        let mut loop_messages: Vec<Message> = Vec::new();
+        let mut final_text = String::new();
+        let mut final_reasoning = String::new();
+        let mut total_output_chunks = 0usize;
+
+        for round in 0..MAX_REACT_ROUNDS {
+            let stage = format!("react-round-{}", round + 1);
+
+            // 构建本轮请求
+            let req = ModelRequest {
+                session_title: session.title.clone(),
+                user_input: if round == 0 {
+                    system_prompt.clone()
+                } else {
+                    // 后续轮次：发送工具执行结果，让 agent 继续
+                    "根据上面的工具执行结果继续处理。如果已经收集到足够信息，直接给出最终回复，不要再调用工具。".to_string()
+                },
+                context: {
+                    let mut ctx = context.clone();
+                    ctx.extend(loop_messages.clone());
+                    ctx
+                },
+            };
+
+            // 调用 LLM（带工具定义）
+            let response = self.client.complete_with_functions_stream(
+                &req,
+                &function_tools,
+                &mut |delta: &ModelStreamChunk| {
+                    on_stage_thinking(&stage, delta);
+                },
+            )?;
+
+            accumulated_usage.accumulate(&response.usage);
+
+            // 记录 LLM 输出
+            let tool_call_names: Vec<String> = response
+                .tool_calls
+                .iter()
+                .map(|tc| tc.name.clone())
+                .collect();
+            let output = LlmOutputRecord {
+                stage: stage.clone(),
+                content: response.text.clone(),
+                reasoning_content: response.reasoning_content.clone(),
+                tool_calls: tool_call_names.clone(),
+                usage: response.usage.clone(),
+            };
+            on_llm_output(&output);
+
+            // 没有工具调用 → agent 决定直接回复，结束循环
+            if response.tool_calls.is_empty() {
+                final_text = response.text;
+                final_reasoning = response.reasoning_content;
+                // 将最终回复通过 chunk 流式发送
+                if !final_text.is_empty() {
+                    on_chunk(&ModelStreamChunk {
+                        content: final_text.clone(),
+                        reasoning_content: final_reasoning.clone(),
+                    });
+                    total_output_chunks += 1;
                 }
+                break;
             }
+
+            // 有工具调用 → 执行工具，收集结果
+            let mut round_feedback_parts: Vec<String> = Vec::new();
+
+            // 记录 assistant 的工具调用意图到 loop_messages
+            let assistant_text = if response.text.is_empty() {
+                format!("[调用工具: {}]", tool_call_names.join(", "))
+            } else {
+                response.text.clone()
+            };
+            loop_messages.push(Message {
+                id: scru128::new().to_string(),
+                role: MessageRole::Assistant,
+                content: assistant_text,
+                reasoning_content: response.reasoning_content.clone(),
+                created_at: now_text(),
+            });
+
+            for call in &response.tool_calls {
+                let result = self.execute_tool_call(
+                    call,
+                    &mcp_targets,
+                    &self.agent_config.mcp,
+                );
+
+                on_tool_result(&result);
+                tool_results.push(result.clone());
+
+                // 构建反馈信息
+                let feedback = format!(
+                    "工具 {} 执行{}：{}",
+                    call.name,
+                    if result.ok { "成功" } else { "失败" },
+                    if result.stdout.len() > 2000 {
+                        format!("{}...(截断)", &result.stdout[..2000])
+                    } else if result.stdout.is_empty() {
+                        result.summary.clone()
+                    } else {
+                        result.stdout.clone()
+                    }
+                );
+                round_feedback_parts.push(feedback);
+            }
+
+            // 将工具执行结果作为 system message 加入 loop_messages
+            let feedback_text = round_feedback_parts.join("\n\n");
+            loop_messages.push(Message {
+                id: scru128::new().to_string(),
+                role: MessageRole::System,
+                content: feedback_text,
+                reasoning_content: String::new(),
+                created_at: now_text(),
+            });
+        }
+
+        // 如果循环结束仍未产生最终回复（达到 MAX_REACT_ROUNDS），做最后一次无工具调用
+        if final_text.is_empty() {
+            let req = ModelRequest {
+                session_title: session.title.clone(),
+                user_input: "请基于以上所有工具执行结果，直接给出最终回复。".to_string(),
+                context: {
+                    let mut ctx = context.clone();
+                    ctx.extend(loop_messages.clone());
+                    ctx
+                },
+            };
+            let resp = if use_stream_mode() {
+                self.client
+                    .complete_stream_with_callback(&req, |delta| on_chunk(delta))?
+            } else {
+                let r = self.client.complete(&req)?;
+                if !r.text.is_empty() {
+                    on_chunk(&ModelStreamChunk {
+                        content: r.text.clone(),
+                        reasoning_content: r.reasoning_content.clone(),
+                    });
+                }
+                r
+            };
+            accumulated_usage.accumulate(&resp.usage);
+            final_text = resp.text;
+            final_reasoning = resp.reasoning_content;
+            total_output_chunks += 1;
+        }
+
+        // 执行汇总
+        let summary = format!(
+            "ReAct 完成：{} 轮，{} 次工具调用",
+            loop_messages.iter().filter(|m| m.role == MessageRole::Assistant).count(),
+            tool_results.len()
+        );
+        on_plan_execution_summary(&summary);
+
+        let tool_result_summary = if tool_results.is_empty() {
+            None
         } else {
-            let resp = self.client.complete(&req)?;
-            if !resp.reasoning_content.is_empty() {
-                on_chunk(&ModelStreamChunk {
-                    content: String::new(),
-                    reasoning_content: resp.reasoning_content.clone(),
-                });
-            }
-            if !resp.text.is_empty() {
-                on_chunk(&ModelStreamChunk {
-                    content: resp.text.clone(),
-                    reasoning_content: String::new(),
-                });
-            }
-            resp
+            Some(format!(
+                "{} 次工具调用，{} 成功，{} 失败",
+                tool_results.len(),
+                tool_results.iter().filter(|r| r.ok).count(),
+                tool_results.iter().filter(|r| !r.ok).count(),
+            ))
         };
-
-        // 累加响应阶段的 token 用量
-        accumulated_usage.accumulate(&usage);
-
-        let tool_result_summary = summarize_tool_results(&tool_results);
         let tool_execution = tool_results
             .into_iter()
-            .filter_map(|result| result.execution)
+            .filter_map(|r| r.execution)
             .next_back();
 
-        let cleaned_text = strip_tool_traces_from_response(&text);
+        let cleaned_text = strip_tool_traces_from_response(&final_text);
 
         Ok(TurnExecution {
             assistant_message: cleaned_text,
-            assistant_reasoning_content: reasoning_content,
+            assistant_reasoning_content: final_reasoning,
             plan,
             tool_result_summary,
             tool_execution,
-            verify_records,
-            output_mode,
-            output_chunk_count,
+            verify_records: Vec::new(),
+            output_mode: "stream".to_string(),
+            output_chunk_count: total_output_chunks,
             usage: accumulated_usage,
         })
+    }
+
+    /// 执行单个工具调用（本地工具或 MCP 工具）
+    fn execute_tool_call(
+        &self,
+        call: &ModelFunctionCall,
+        mcp_targets: &HashMap<String, McpFunctionTarget>,
+        mcp_config: &McpConfig,
+    ) -> ToolResult {
+        // 检查是否是 MCP 工具
+        if let Some(target) = mcp_targets.get(&call.name) {
+            return match execute_mcp_tool_call(call, target, mcp_config) {
+                Ok(result) => result,
+                Err(err) => ToolResult {
+                    ok: false,
+                    summary: format!("MCP工具调用失败：{err}"),
+                    stdout: String::new(),
+                    stderr: err.to_string(),
+                    exit_code: 1,
+                    execution: None,
+                },
+            };
+        }
+
+        // 检查 run_command 是否误用了 MCP 工具名
+        if (call.name == "run_command" || call.name == "run_shell")
+            && let Some((target, args)) =
+                resolve_mcp_tool_call_from_run_command(call, mcp_targets, mcp_config)
+        {
+            return match crate::agents::execution_mcp_agent::execute_mcp_tool_call_with_args(
+                &target, args, mcp_config,
+            ) {
+                Ok(result) => result,
+                Err(err) => ToolResult {
+                    ok: false,
+                    summary: format!("MCP工具调用失败：{err}"),
+                    stdout: String::new(),
+                    stderr: err.to_string(),
+                    exit_code: 1,
+                    execution: None,
+                },
+            };
+        }
+
+        // 本地工具
+        match build_tool_call_from_function(call) {
+            Ok(tool_call) => match self.tool_executor.execute(&tool_call) {
+                Ok(result) => result,
+                Err(err) => ToolResult {
+                    ok: false,
+                    summary: format!("工具执行失败：{err}"),
+                    stdout: String::new(),
+                    stderr: err.to_string(),
+                    exit_code: 1,
+                    execution: None,
+                },
+            },
+            Err(err) => ToolResult {
+                ok: false,
+                summary: format!("工具调用解析失败：{err}"),
+                stdout: String::new(),
+                stderr: err.to_string(),
+                exit_code: 1,
+                execution: None,
+            },
+        }
     }
 
     pub fn fallback_error_message(err: &anyhow::Error) -> String {
         format!("执行失败：{err}")
     }
+}
+
+/// 构建 ReAct agent 的系统 prompt
+fn build_react_system_prompt(user_input: &str) -> String {
+    format!(
+"你是天工智能助手。你可以直接回答用户问题，也可以使用工具来完成任务。
+
+规则：
+1. 如果能直接回答（闲聊、知识问答等），直接回复，不要调用工具。
+2. 如果需要文件操作、代码搜索、命令执行等，调用对应的工具。
+3. 每次工具调用后会收到执行结果，根据结果决定下一步：继续调用工具或给出最终回复。
+4. 回复时语言简洁，直接回答问题，不要说\"让我查看\"之类的过渡语。
+5. 不要在回复中包含工具调用的原始痕迹（如 ok=、exit_code= 等元数据）。
+
+用户输入：
+{user_input}"
+    )
 }
 
 fn use_stream_mode() -> bool {
@@ -319,11 +475,7 @@ fn use_stream_mode() -> bool {
     }
 }
 
-/// 清理 LLM 响应中混入的工具执行 trace 文本。
-///
-/// 部分模型在 response 阶段会将 tool evidence 以原始 trace 格式复述到回答中，
-/// 形如 "工具执行 [xxx]\n命令: ...\nok=... exit_code=... duration_ms=...\nsummary: ...\nstdout:\n..."
-/// 这些内容应只存在于 System 消息中，不应出现在 assistant 回复里。
+/// 清理 LLM 响应中混入的工具执行 trace 文本
 pub(crate) fn strip_tool_traces_from_response(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut in_trace_block = false;
@@ -331,38 +483,33 @@ pub(crate) fn strip_tool_traces_from_response(text: &str) -> String {
     for line in text.lines() {
         let trimmed = line.trim();
 
-        // 检测工具 trace 块的起始行
         if trimmed.starts_with("工具执行") && trimmed.contains('[') && trimmed.contains(']') {
             in_trace_block = true;
             continue;
         }
 
         if in_trace_block {
-            // trace 块内的特征行：跳过
             if trimmed.starts_with("命令:")
                 || trimmed.starts_with("ok=")
                 || trimmed.starts_with("summary:")
                 || trimmed.starts_with("tool=")
                 || trimmed.starts_with("stdout:")
                 || trimmed.starts_with("stderr:")
-                || (trimmed.starts_with("duration_ms="))
-                || (trimmed.starts_with("exit_code="))
+                || trimmed.starts_with("duration_ms=")
+                || trimmed.starts_with("exit_code=")
                 || (trimmed.contains("ok=") && trimmed.contains("exit_code="))
             {
                 continue;
             }
-            // 空行也跳过（trace 块末尾的空行）
             if trimmed.is_empty() {
                 continue;
             }
-            // 非 trace 特征行，trace 块结束
             in_trace_block = false;
             result.push_str(line);
             result.push('\n');
             continue;
         }
 
-        // 单行 trace 格式：整行包含工具执行关键字
         if trimmed.contains("工具执行")
             && trimmed.contains('[')
             && (trimmed.contains("ok=") || trimmed.contains("exit_code="))
@@ -374,7 +521,6 @@ pub(crate) fn strip_tool_traces_from_response(text: &str) -> String {
         result.push('\n');
     }
 
-    // 清理多余连续空行
     let mut cleaned = String::with_capacity(result.len());
     let mut prev_empty = false;
     for line in result.lines() {
