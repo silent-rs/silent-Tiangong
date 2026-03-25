@@ -283,13 +283,55 @@ function groupMessages(messages: MessageGroup['messages']): MessageGroup[] {
 // 系统消息组：可整体折叠/展开
 // ---------------------------------------------------------------------------
 
+interface RoundGroup {
+  key: string;
+  label: string;
+  llm: MessageGroup['messages'][0] | null;
+  tools: MessageGroup['messages'];
+  others: MessageGroup['messages'];
+}
+
+/** 将系统消息按 round 分组：LLM 输出 [react-round-N] + 后续工具执行归为一组 */
+function groupByRound(messages: MessageGroup['messages']): RoundGroup[] {
+  const rounds: RoundGroup[] = [];
+  let current: RoundGroup | null = null;
+
+  for (const msg of messages) {
+    if (msg.content.startsWith('LLM 输出')) {
+      if (current) rounds.push(current);
+      const match = msg.content.match(/\[(.+?)\]/);
+      const label = match ? match[1] : 'LLM';
+      current = { key: msg.id, label, llm: msg, tools: [], others: [] };
+    } else if (current && (msg.content.includes('exit_code') || msg.content.includes('tool_name:'))) {
+      current.tools.push(msg);
+    } else if (current) {
+      current.others.push(msg);
+    } else {
+      // 没有 LLM 开头的消息，独立成组
+      if (!current) {
+        current = { key: msg.id, label: '执行', llm: null, tools: [], others: [msg] };
+      }
+    }
+  }
+  if (current) rounds.push(current);
+  return rounds;
+}
+
 function SystemMessageGroup({ messages, defaultExpanded = false }: { messages: MessageGroup['messages']; defaultExpanded?: boolean }) {
   const [userToggled, setUserToggled] = useState(false);
-  // 未被用户手动操作过时跟随 defaultExpanded（执行中展开，完成后收缩）
   const groupExpanded = userToggled ? !defaultExpanded : defaultExpanded;
-
   const handleToggle = () => setUserToggled(prev => !prev);
+  const [expandedRounds, setExpandedRounds] = useState<Set<string>>(new Set());
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
+
+  const toggleRound = (key: string) => {
+    setExpandedRounds((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
 
   const toggleItem = (id: string) => {
     setExpandedItems((prev) => {
@@ -300,9 +342,9 @@ function SystemMessageGroup({ messages, defaultExpanded = false }: { messages: M
     });
   };
 
-  // 统计各类型数量
+  const rounds = groupByRound(messages);
   const toolCount = messages.filter((m) => m.content.includes('tool_name:') || m.content.includes('exit_code')).length;
-  const llmCount = messages.filter((m) => m.content.startsWith('LLM 输出')).length;
+  const llmCount = rounds.filter((r) => r.llm).length;
   const otherCount = messages.length - toolCount - llmCount;
 
   const parts = [];
@@ -310,6 +352,37 @@ function SystemMessageGroup({ messages, defaultExpanded = false }: { messages: M
   if (toolCount > 0) parts.push(`${toolCount} 次工具调用`);
   if (otherCount > 0) parts.push(`${otherCount} 条其他`);
   const summaryText = parts.join('，');
+
+  const renderItem = (msg: MessageGroup['messages'][0]) => {
+    const meta = getSystemMessageMeta(msg.content);
+    const itemExpanded = expandedItems.has(msg.id);
+    return (
+      <div key={msg.id}>
+        <button
+          className="w-full flex items-center gap-2 px-2 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 transition-colors text-left"
+          onClick={() => toggleItem(msg.id)}
+        >
+          {itemExpanded ? (
+            <ChevronDown className="w-3 h-3 shrink-0" />
+          ) : (
+            <ChevronRight className="w-3 h-3 shrink-0" />
+          )}
+          <meta.icon className="w-3 h-3 shrink-0" />
+          <span className="font-medium">{meta.label}</span>
+          {!itemExpanded && (
+            <span className="truncate opacity-60">{meta.summary}</span>
+          )}
+        </button>
+        {itemExpanded && (
+          <div className="ml-5 mt-0.5 px-3 py-2 rounded-md bg-muted/30 border border-border/50">
+            <pre className="text-xs text-muted-foreground whitespace-pre-wrap break-words font-mono leading-relaxed">
+              {msg.content}
+            </pre>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="max-w-3xl">
@@ -328,35 +401,44 @@ function SystemMessageGroup({ messages, defaultExpanded = false }: { messages: M
         <span className="opacity-60">({summaryText}，共 {messages.length} 条)</span>
       </button>
 
-      {/* 展开后显示每条系统消息 */}
+      {/* 展开后按 round 分组显示 */}
       {groupExpanded && (
         <div className="ml-5 mt-1 space-y-0.5">
-          {messages.map((msg) => {
-            const meta = getSystemMessageMeta(msg.content);
-            const itemExpanded = expandedItems.has(msg.id);
+          {rounds.map((round) => {
+            const roundExpanded = expandedRounds.has(round.key);
+            const toolSummary = round.tools.map((t) => {
+              const ok = t.content.includes('ok=true');
+              return ok ? 'OK' : 'FAIL';
+            });
+            const toolBrief = round.tools.length > 0
+              ? ` · ${round.tools.length} 工具 (${toolSummary.join(', ')})`
+              : '';
 
             return (
-              <div key={msg.id}>
+              <div key={round.key}>
+                {/* Round 标题 */}
                 <button
                   className="w-full flex items-center gap-2 px-2 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 transition-colors text-left"
-                  onClick={() => toggleItem(msg.id)}
+                  onClick={() => toggleRound(round.key)}
                 >
-                  {itemExpanded ? (
+                  {roundExpanded ? (
                     <ChevronDown className="w-3 h-3 shrink-0" />
                   ) : (
                     <ChevronRight className="w-3 h-3 shrink-0" />
                   )}
-                  <meta.icon className="w-3 h-3 shrink-0" />
-                  <span className="font-medium">{meta.label}</span>
-                  {!itemExpanded && (
-                    <span className="truncate opacity-60">{meta.summary}</span>
+                  <Cpu className="w-3 h-3 shrink-0" />
+                  <span className="font-medium">{round.label}</span>
+                  {!roundExpanded && (
+                    <span className="truncate opacity-60">{toolBrief}</span>
                   )}
                 </button>
-                {itemExpanded && (
-                  <div className="ml-5 mt-0.5 px-3 py-2 rounded-md bg-muted/30 border border-border/50">
-                    <pre className="text-xs text-muted-foreground whitespace-pre-wrap break-words font-mono leading-relaxed">
-                      {msg.content}
-                    </pre>
+
+                {/* Round 展开内容 */}
+                {roundExpanded && (
+                  <div className="ml-5 mt-0.5 space-y-0.5">
+                    {round.llm && renderItem(round.llm)}
+                    {round.tools.map((t) => renderItem(t))}
+                    {round.others.map((o) => renderItem(o))}
                   </div>
                 )}
               </div>
