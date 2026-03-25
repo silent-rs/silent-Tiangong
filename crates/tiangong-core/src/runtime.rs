@@ -119,7 +119,7 @@ impl RuntimeEngine {
         mut on_chunk: F,
         mut on_llm_output: L,
         mut on_tool_result: T,
-        mut on_plan_execution_summary: S,
+        mut _on_plan_execution_summary: S,
         mut _on_stage_thinking: G,
     ) -> Result<TurnExecution>
     where
@@ -337,19 +337,6 @@ impl RuntimeEngine {
             final_text = resp.text;
             final_reasoning = resp.reasoning_content;
             total_output_chunks += 1;
-        }
-
-        // 有工具调用时才输出执行汇总
-        if !tool_results.is_empty() {
-            let summary = format!(
-                "执行完成：{} 轮，{} 次工具调用",
-                loop_messages
-                    .iter()
-                    .filter(|m| m.role == MessageRole::Assistant)
-                    .count(),
-                tool_results.len()
-            );
-            on_plan_execution_summary(&summary);
         }
 
         let tool_result_summary = if tool_results.is_empty() {
