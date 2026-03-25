@@ -214,26 +214,34 @@ impl RuntimeEngine {
                 },
             };
 
-            // 调用 LLM（带工具定义），流式输出直接推送到 assistant 消息
+            // 调用 LLM（带工具定义）
+            // 中间轮次不流式到 assistant 消息，只有最终回复才流式推送
             let response = self.client.complete_with_functions_stream(
                 &req,
                 &function_tools,
-                &mut |delta: &ModelStreamChunk| {
-                    on_chunk(delta);
+                &mut |_delta: &ModelStreamChunk| {
+                    // 暂不推送，等确定是否有工具调用后再决定
                 },
             )?;
 
             accumulated_usage.accumulate(&response.usage);
-            total_output_chunks += 1;
 
-            // 没有工具调用 → agent 决定直接回复，结束循环
+            // 没有工具调用 → 最终回复，流式推送到 assistant 消息
             if response.tool_calls.is_empty() {
-                final_text = response.text;
-                final_reasoning = response.reasoning_content;
+                final_text = response.text.clone();
+                final_reasoning = response.reasoning_content.clone();
+                // 一次性推送完整回复内容
+                if !final_text.is_empty() || !final_reasoning.is_empty() {
+                    on_chunk(&ModelStreamChunk {
+                        content: final_text.clone(),
+                        reasoning_content: final_reasoning.clone(),
+                    });
+                    total_output_chunks += 1;
+                }
                 break;
             }
 
-            // 有工具调用 → 记录到执行过程
+            // 有工具调用 → 记录到执行过程（作为系统消息，按时间顺序排列）
             let tool_call_names: Vec<String> = response
                 .tool_calls
                 .iter()
