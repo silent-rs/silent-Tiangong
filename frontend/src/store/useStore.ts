@@ -183,7 +183,8 @@ export const useStore = create<AppState>((set, get) => ({
 
     try {
       await api.sendMessage(content);
-      set({ runStatus: 'executing' });
+      // 消息已提交到后端，释放发送锁，允许用户切换对话等操作
+      set({ runStatus: 'executing', isSending: false });
     } catch (error) {
       console.error('发送消息失败:', error);
       set({ inputContent: content, isSending: false });
@@ -296,10 +297,7 @@ export const useStore = create<AppState>((set, get) => ({
     const effectiveStatus = (prevStatus === 'idle' && !prevSending && snapshotStatus !== 'idle')
       ? 'idle'
       : snapshotStatus;
-    set({
-      runStatus: effectiveStatus,
-      isSending: effectiveStatus !== 'idle',
-    });
+    set({ runStatus: effectiveStatus });
 
     // 草稿模式或不是当前查看的会话 → 不更新消息/流式内容
     if (isDraft || (snapshot.last_session_id && snapshot.last_session_id !== activeSessionId)) {
