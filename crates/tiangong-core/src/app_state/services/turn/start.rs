@@ -67,8 +67,8 @@ impl AppTurnService {
         );
 
         state.store.runtime.run = RunSnapshot {
-            status: RunStatus::Planning,
-            summary: "正在生成执行计划".to_string(),
+            status: RunStatus::Executing,
+            summary: "正在处理".to_string(),
             last_session_id: Some(session_id.clone()),
             last_task_id: Some(task_id.clone()),
             last_duration_ms: None,

@@ -103,13 +103,12 @@ export function StatusPanel() {
   const getStatusText = () => {
     switch (currentRunStatus) {
       case 'planning':
-        return '计划中';
       case 'executing':
-        return '执行中';
+        return '处理中';
       case 'completed':
         return '已完成';
       case 'failed':
-        return '执行失败';
+        return '失败';
       default:
         return '就绪';
     }

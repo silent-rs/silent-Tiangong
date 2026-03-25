@@ -108,9 +108,7 @@ export function MessageInput() {
             {!isIdle ? (
               <span className="flex items-center gap-1">
                 <span className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse" />
-                {currentSessionStatus === 'planning' && '正在制定计划...'}
-                {currentSessionStatus === 'executing' && '正在执行任务...'}
-                {currentSessionStatus === 'responding' && '正在生成回复...'}
+                {currentSessionStatus === 'executing' && '正在处理...'}
               </span>
             ) : (
               <button

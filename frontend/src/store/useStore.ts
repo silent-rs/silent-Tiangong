@@ -183,7 +183,7 @@ export const useStore = create<AppState>((set, get) => ({
 
     try {
       await api.sendMessage(content);
-      set({ runStatus: 'planning' });
+      set({ runStatus: 'executing' });
     } catch (error) {
       console.error('发送消息失败:', error);
       set({ inputContent: content, isSending: false });
