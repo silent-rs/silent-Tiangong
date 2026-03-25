@@ -142,11 +142,11 @@ pub fn send_message(
     let poll_session_id = session_id.clone();
     thread::spawn(move || {
         loop {
-            // 先消费 channel 中的事件，更新内部状态（轮询所有 pending turns）
+            // 只轮询本次发送的 session 的事件
             let _ = app_clone
                 .state::<TiangongApp>()
                 .with_state(|core_state| {
-                    core_state.poll_pending_turns();
+                    core_state.poll_pending_turn_for(&poll_session_id);
                     Ok(())
                 });
 
