@@ -142,37 +142,23 @@ pub fn send_message(
     let poll_session_id = session_id.clone();
     thread::spawn(move || {
         loop {
-            // 只轮询本次发送的 session 的事件
-            let _ = app_clone
+            // 单次持锁：轮询事件 + 构建快照 + 检查完成状态
+            let poll_result = app_clone
                 .state::<TiangongApp>()
                 .with_state(|core_state| {
+                    // 1. 轮询本次 session 的事件
                     core_state.poll_pending_turn_for(&poll_session_id);
-                    Ok(())
-                });
 
-            // 获取当前活动会话的完整状态快照
-            if let Ok(snapshot) = app_clone
-                .state::<TiangongApp>()
-                .with_state_read(|s| Ok(build_full_snapshot(s)))
-            {
-                // 每次轮询都发送快照，确保消息内容变化也能同步
-                let _ = app_clone.emit("run_snapshot", &snapshot);
-            }
+                    // 2. 构建快照
+                    let snapshot = build_full_snapshot(core_state);
 
-            // 检查本次 send 对应的会话是否已完成
-            let session_done = app_clone
-                .state::<TiangongApp>()
-                .with_state_read(|core_state| {
-                    Ok(!core_state.has_pending_turn_for(&poll_session_id))
-                })
-                .unwrap_or(true);
+                    // 3. 检查是否完成
+                    let done = !core_state.has_pending_turn_for(&poll_session_id);
 
-            if session_done {
-                // 重置为 idle
-                let _ = app_clone
-                    .state::<TiangongApp>()
-                    .with_state(|core_state| {
-                        let status_str = format!("{:?}", core_state.run_snapshot().status).to_lowercase();
+                    // 4. 完成后重置为 idle
+                    if done {
+                        let status_str =
+                            format!("{:?}", core_state.run_snapshot().status).to_lowercase();
                         if status_str == "completed" {
                             core_state.report_run_idle(format!(
                                 "模型供应商：{}",
@@ -181,16 +167,27 @@ pub fn send_message(
                         } else if status_str == "failed" {
                             core_state.report_run_idle("执行失败");
                         }
-                        Ok(())
-                    });
-                // 发送最终的 idle 快照
-                if let Ok(final_snapshot) = app_clone
-                    .state::<TiangongApp>()
-                    .with_state_read(|s| Ok(build_full_snapshot(s)))
-                {
-                    let _ = app_clone.emit("run_snapshot", &final_snapshot);
+                    }
+
+                    Ok((snapshot, done))
+                });
+
+            match poll_result {
+                Ok((snapshot, done)) => {
+                    let _ = app_clone.emit("run_snapshot", &snapshot);
+
+                    if done {
+                        // 发送最终 idle 快照
+                        if let Ok(final_snapshot) = app_clone
+                            .state::<TiangongApp>()
+                            .with_state_read(|s| Ok(build_full_snapshot(s)))
+                        {
+                            let _ = app_clone.emit("run_snapshot", &final_snapshot);
+                        }
+                        break;
+                    }
                 }
-                break;
+                Err(_) => break,
             }
 
             thread::sleep(Duration::from_millis(200));
