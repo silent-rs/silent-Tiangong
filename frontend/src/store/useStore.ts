@@ -288,6 +288,19 @@ export const useStore = create<AppState>((set, get) => ({
 
     set({ sessionRunStatuses: newStatuses });
 
+    // 始终同步当前活动会话的 runStatus（基于 snapshot.status）
+    // snapshot.status 已由后端 build_session_snapshot 按 session 修正
+    const { runStatus: prevStatus, isSending: prevSending } = get();
+    const snapshotStatus = snapshot.status;
+    // 防止取消后被旧快照覆盖
+    const effectiveStatus = (prevStatus === 'idle' && !prevSending && snapshotStatus !== 'idle')
+      ? 'idle'
+      : snapshotStatus;
+    set({
+      runStatus: effectiveStatus,
+      isSending: effectiveStatus !== 'idle',
+    });
+
     // 草稿模式或不是当前查看的会话 → 不更新消息/流式内容
     if (isDraft || (snapshot.last_session_id && snapshot.last_session_id !== activeSessionId)) {
       return;
@@ -332,26 +345,16 @@ export const useStore = create<AppState>((set, get) => ({
       streamingReasoningContent = '';
     }
 
-    const { runStatus: prevStatus, isSending: prevSending } = get();
-    const newStatus = snapshot.status;
-
-    // 防止取消后被轮询线程的旧快照覆盖回执行中状态
-    const effectiveStatus = (prevStatus === 'idle' && !prevSending && newStatus !== 'idle')
-      ? 'idle'
-      : newStatus;
-
     set({
       messages: newMessages,
-      runStatus: effectiveStatus,
       currentPlan: snapshot.current_plan,
-      isSending: effectiveStatus !== 'idle',
       streamingMessageId: streamingId,
       streamingContent,
       streamingReasoningContent,
     });
 
     // 状态变为 idle 时刷新会话列表（更新 message_count、标题等）
-    if (newStatus === 'idle' && prevStatus !== 'idle') {
+    if (effectiveStatus === 'idle' && prevStatus !== 'idle') {
       api.getSessions().then((sessions) => {
         set({ sessions });
       }).catch(console.error);
