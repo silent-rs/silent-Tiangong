@@ -640,7 +640,6 @@ fn build_react_system_prompt(
     agent_config: &AgentConfig,
 ) -> String {
     use crate::models_config::ModelCapability;
-    use crate::skill::build_skill_hints;
 
     // 构建多媒体能力提示
     let mut media_hints = Vec::new();
@@ -662,35 +661,29 @@ fn build_react_system_prompt(
         )
     };
 
-    // 构建已安装 skill 提示
-    let skill_hints = build_skill_hints(user_input, &agent_config.skills);
-    let skills_section = if skill_hints.is_empty()
-        || skill_hints.iter().all(|h| h.contains("skipped"))
-    {
+    // 构建已安装 skill 提示——始终注入所有已启用 skill，让 agent 自行判断
+    let mut skill_contents = Vec::new();
+    for skill in &agent_config.skills.installed {
+        if !skill.enabled {
+            continue;
+        }
+        let skill_dir = &skill.source.value;
+        let skill_md = std::path::Path::new(skill_dir).join(&skill.entry);
+        if let Ok(content) = std::fs::read_to_string(&skill_md) {
+            let resolved = content.replace("{skill_dir}", skill_dir);
+            skill_contents.push(format!(
+                "### Skill: {} ({})\n{}",
+                skill.name, skill.id, resolved.trim()
+            ));
+        }
+    }
+    let skills_section = if skill_contents.is_empty() {
         String::new()
     } else {
-        // 读取匹配 skill 的 SKILL.md 完整内容
-        let mut skill_contents = Vec::new();
-        for skill in &agent_config.skills.installed {
-            if !skill.enabled {
-                continue;
-            }
-            let skill_dir = &skill.source.value;
-            let skill_md = std::path::Path::new(skill_dir).join(&skill.entry);
-            if let Ok(content) = std::fs::read_to_string(&skill_md) {
-                // 替换 {skill_dir} 占位符为实际路径
-                let resolved = content.replace("{skill_dir}", skill_dir);
-                skill_contents.push(format!(
-                    "### Skill: {} ({})\n{}",
-                    skill.name, skill.id, resolved.trim()
-                ));
-            }
-        }
-        if skill_contents.is_empty() {
-            String::new()
-        } else {
-            format!("\n\n已安装的 Skills（优先使用 run_command 调用）：\n{}", skill_contents.join("\n\n"))
-        }
+        format!(
+            "\n\n已安装的 Skills（用户请求匹配时优先通过 run_command 调用）：\n{}",
+            skill_contents.join("\n\n")
+        )
     };
 
     format!(
