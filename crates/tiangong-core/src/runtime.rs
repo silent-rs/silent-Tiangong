@@ -194,6 +194,21 @@ impl RuntimeEngine {
         }
         // 视频生成暂通过 skill 机制处理，不注入内置工具
 
+        // 注入 get_skill_detail 工具（已安装 skill 时可用）
+        if self.agent_config.skills.installed.iter().any(|s| s.enabled) {
+            function_tools.push(FunctionToolSpec {
+                name: "get_skill_detail".to_string(),
+                description: "获取已安装 Skill 的完整使用说明，返回 SKILL.md 内容和调用命令".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "skill_id": { "type": "string", "description": "Skill ID（从已安装列表中选择）" }
+                    },
+                    "required": ["skill_id"]
+                }),
+            });
+        }
+
         // 构建系统 prompt
         let system_prompt =
             build_react_system_prompt(user_input, &self.models_config, &self.agent_config);
@@ -399,6 +414,11 @@ impl RuntimeEngine {
         mcp_targets: &HashMap<String, McpFunctionTarget>,
         mcp_config: &McpConfig,
     ) -> ToolResult {
+        // Skill 详情查询
+        if call.name == "get_skill_detail" {
+            return self.handle_get_skill_detail(call);
+        }
+
         // 多媒体生成工具
         if call.name == "generate_image" {
             return self.handle_media_generation(call, ModelCapability::ImageGeneration);
@@ -456,6 +476,57 @@ impl RuntimeEngine {
                 summary: format!("工具调用解析失败：{err}"),
                 stdout: String::new(),
                 stderr: err.to_string(),
+                exit_code: 1,
+                execution: None,
+            },
+        }
+    }
+
+    /// 获取 skill 完整说明
+    fn handle_get_skill_detail(&self, call: &ModelFunctionCall) -> ToolResult {
+        let skill_id = call
+            .arguments
+            .get("skill_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let skill = self
+            .agent_config
+            .skills
+            .installed
+            .iter()
+            .find(|s| s.id == skill_id && s.enabled);
+
+        let Some(skill) = skill else {
+            return ToolResult {
+                ok: false,
+                summary: format!("未找到 skill：{skill_id}"),
+                stdout: String::new(),
+                stderr: format!("可用的 skill：{}", self.agent_config.skills.installed.iter().filter(|s| s.enabled).map(|s| s.id.as_str()).collect::<Vec<_>>().join(", ")),
+                exit_code: 1,
+                execution: None,
+            };
+        };
+
+        let skill_dir = &skill.source.value;
+        let skill_md = std::path::Path::new(skill_dir).join(&skill.entry);
+        match std::fs::read_to_string(&skill_md) {
+            Ok(content) => {
+                let resolved = content.replace("{skill_dir}", skill_dir);
+                ToolResult {
+                    ok: true,
+                    summary: format!("Skill {} 的使用说明", skill.name),
+                    stdout: resolved,
+                    stderr: String::new(),
+                    exit_code: 0,
+                    execution: None,
+                }
+            }
+            Err(e) => ToolResult {
+                ok: false,
+                summary: format!("读取 skill 说明失败：{e}"),
+                stdout: String::new(),
+                stderr: e.to_string(),
                 exit_code: 1,
                 execution: None,
             },
@@ -661,28 +732,25 @@ fn build_react_system_prompt(
         )
     };
 
-    // 构建已安装 skill 提示——始终注入所有已启用 skill，让 agent 自行判断
-    let mut skill_contents = Vec::new();
+    // 构建已安装 skill 摘要（仅名称+描述，不注入完整 SKILL.md）
+    let mut skill_summaries = Vec::new();
     for skill in &agent_config.skills.installed {
         if !skill.enabled {
             continue;
         }
-        let skill_dir = &skill.source.value;
-        let skill_md = std::path::Path::new(skill_dir).join(&skill.entry);
-        if let Ok(content) = std::fs::read_to_string(&skill_md) {
-            let resolved = content.replace("{skill_dir}", skill_dir);
-            skill_contents.push(format!(
-                "### Skill: {} ({})\n{}",
-                skill.name, skill.id, resolved.trim()
-            ));
-        }
+        skill_summaries.push(format!(
+            "- {} (id={}): {}",
+            skill.name,
+            skill.id,
+            if skill.description.is_empty() { "无描述" } else { &skill.description }
+        ));
     }
-    let skills_section = if skill_contents.is_empty() {
+    let skills_section = if skill_summaries.is_empty() {
         String::new()
     } else {
         format!(
-            "\n\n已安装的 Skills（用户请求匹配时优先通过 run_command 调用）：\n{}",
-            skill_contents.join("\n\n")
+            "\n\n已安装的 Skills（使用前先调用 get_skill_detail 获取完整说明）：\n{}",
+            skill_summaries.join("\n")
         )
     };
 
