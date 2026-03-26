@@ -244,6 +244,14 @@ impl Skill {
     }
 }
 
+/// Skill 安装前检查结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillInspection {
+    pub env_vars: Vec<String>,
+    pub missing_env_vars: Vec<String>,
+    pub dependencies: Vec<String>,
+}
+
 /// Server 配置（前端使用）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfigView {

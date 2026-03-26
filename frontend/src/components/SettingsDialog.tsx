@@ -998,6 +998,12 @@ function SkillSettings() {
   const [isLoading, setIsLoading] = useState(false);
   const [showInstallDialog, setShowInstallDialog] = useState(false);
   const [installPath, setInstallPath] = useState('');
+  const [isInstalling, setIsInstalling] = useState(false);
+  // env 配置
+  const [showEnvDialog, setShowEnvDialog] = useState(false);
+  const [envVars, setEnvVars] = useState<string[]>([]);
+  const [envValues, setEnvValues] = useState<Record<string, string>>({});
+  const [pendingInstallPath, setPendingInstallPath] = useState('');
   const { showSuccess, showError } = useToast();
 
   const loadSkills = async () => {
@@ -1018,15 +1024,63 @@ function SkillSettings() {
   }, []);
 
   const handleInstallSkill = async () => {
+    const path = installPath.trim();
+    if (!path) return;
+    setIsInstalling(true);
+
     try {
-      await api.installSkill(installPath);
+      // 先检查是否需要配置环境变量
+      const inspection = await api.inspectSkill(path);
+      if (inspection.env_vars.length > 0) {
+        // 有环境变量需求，弹出配置 modal
+        setPendingInstallPath(path);
+        setEnvVars(inspection.env_vars);
+        const initial: Record<string, string> = {};
+        for (const v of inspection.env_vars) {
+          initial[v] = '';
+        }
+        setEnvValues(initial);
+        setShowInstallDialog(false);
+        setShowEnvDialog(true);
+        setIsInstalling(false);
+        return;
+      }
+
+      // 无 env 需求，直接安装
+      await api.installSkill(path);
       setInstallPath('');
       setShowInstallDialog(false);
       showSuccess('安装成功', 'Skill 已成功安装');
       loadSkills();
     } catch (error) {
       console.error('安装 Skill 失败:', error);
-      showError('安装失败', '无法安装 Skill，请检查路径');
+      showError('安装失败', `${error}`);
+    } finally {
+      setIsInstalling(false);
+    }
+  };
+
+  const handleInstallWithEnv = async () => {
+    setIsInstalling(true);
+    try {
+      // 只传入非空的 env 值
+      const pairs: [string, string][] = Object.entries(envValues)
+        .filter(([, v]) => v.trim() !== '')
+        .map(([k, v]) => [k, v.trim()]);
+
+      await api.installSkill(pendingInstallPath, pairs.length > 0 ? pairs : undefined);
+      setShowEnvDialog(false);
+      setInstallPath('');
+      setPendingInstallPath('');
+      setEnvVars([]);
+      setEnvValues({});
+      showSuccess('安装成功', 'Skill 已成功安装');
+      loadSkills();
+    } catch (error) {
+      console.error('安装 Skill 失败:', error);
+      showError('安装失败', `${error}`);
+    } finally {
+      setIsInstalling(false);
     }
   };
 
@@ -1112,15 +1166,38 @@ function SkillSettings() {
               <h3 className="text-lg font-medium mb-4">安装 Skill</h3>
               <div className="space-y-4">
                 <div>
-                  <Label htmlFor="skillPath">Skill 路径</Label>
-                  <Input
-                    id="skillPath"
-                    value={installPath}
-                    onChange={(e) => setInstallPath(e.target.value)}
-                    placeholder="/path/to/skill"
-                  />
+                  <Label>选择 Skill 压缩包或目录</Label>
+                  <div className="flex gap-2 mt-2">
+                    <Input
+                      value={installPath}
+                      onChange={(e) => setInstallPath(e.target.value)}
+                      placeholder="路径或拖入 .zip 文件"
+                      className="flex-1"
+                    />
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={async () => {
+                        try {
+                          const { open } = await import('@tauri-apps/plugin-dialog');
+                          const selected = await open({
+                            multiple: false,
+                            filters: [{ name: 'Skill', extensions: ['zip'] }],
+                            title: '选择 Skill 压缩包',
+                          });
+                          if (selected && typeof selected === 'string') {
+                            setInstallPath(selected);
+                          }
+                        } catch (e) {
+                          console.error('文件选择失败:', e);
+                        }
+                      }}
+                    >
+                      选择文件
+                    </Button>
+                  </div>
                   <p className="text-xs text-muted-foreground mt-2">
-                    输入目录路径或 .zip 压缩包路径
+                    支持 .zip 压缩包或包含 SKILL.md 的目录
                   </p>
                 </div>
               </div>
@@ -1128,8 +1205,52 @@ function SkillSettings() {
                 <Button variant="ghost" onClick={() => setShowInstallDialog(false)}>
                   取消
                 </Button>
-                <Button onClick={handleInstallSkill} disabled={!installPath}>
-                  安装
+                <Button onClick={handleInstallSkill} disabled={!installPath.trim() || isInstalling}>
+                  {isInstalling ? '安装中...' : '安装'}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/* 环境变量配置对话框 */}
+      {showEnvDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <Card className="max-w-md w-full mx-4">
+            <CardContent className="p-6">
+              <h3 className="text-lg font-medium mb-2">配置环境变量</h3>
+              <p className="text-xs text-muted-foreground mb-4">
+                该 Skill 需要以下环境变量，未填写的项将跳过
+              </p>
+              <div className="space-y-3">
+                {envVars.map((key) => (
+                  <div key={key}>
+                    <Label className="text-xs font-mono">{key}</Label>
+                    <Input
+                      type="password"
+                      value={envValues[key] || ''}
+                      onChange={(e) =>
+                        setEnvValues((prev) => ({ ...prev, [key]: e.target.value }))
+                      }
+                      placeholder={`输入 ${key} 的值（可选）`}
+                      className="text-sm h-8 mt-1"
+                    />
+                  </div>
+                ))}
+              </div>
+              <div className="flex justify-end gap-2 mt-6">
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    setShowEnvDialog(false);
+                    setShowInstallDialog(true);
+                  }}
+                >
+                  返回
+                </Button>
+                <Button onClick={handleInstallWithEnv} disabled={isInstalling}>
+                  {isInstalling ? '安装中...' : '确认安装'}
                 </Button>
               </div>
             </CardContent>

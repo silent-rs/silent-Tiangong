@@ -330,10 +330,30 @@ pub fn get_skills(state: State<TiangongApp>) -> Result<Vec<Skill>, String> {
     })
 }
 
-/// 安装 Skill
+/// 检查 Skill 安装需求（返回需要配置的环境变量列表）
 #[tauri::command]
-pub fn install_skill(path: String, state: State<TiangongApp>) -> Result<String, String> {
-    state.with_state(|core_state| core_state.install_local_skill(&path, true))
+pub fn inspect_skill(path: String, state: State<TiangongApp>) -> Result<SkillInspection, String> {
+    state.with_state_read(|core_state| {
+        let inspection = core_state.inspect_skill_install_requirements(&path, true)?;
+        Ok(SkillInspection {
+            env_vars: inspection.env_vars,
+            missing_env_vars: inspection.missing_env_vars,
+            dependencies: inspection.dependencies,
+        })
+    })
+}
+
+/// 安装 Skill（支持传入环境变量配置）
+#[tauri::command]
+pub fn install_skill(
+    path: String,
+    env_values: Option<Vec<(String, String)>>,
+    state: State<TiangongApp>,
+) -> Result<String, String> {
+    state.with_state(|core_state| {
+        let env = env_values.unwrap_or_default();
+        core_state.install_local_skill_with_options_and_inputs(&path, true, true, &env)
+    })
 }
 
 /// 移除 Skill
