@@ -316,11 +316,21 @@ impl AppSkillService {
         state: &TiangongState,
         source_path: &Path,
     ) -> Result<bool> {
+        // 进程工作目录
         let workspace = std::env::current_dir()
             .context("读取当前工作目录失败")?
             .canonicalize()
             .context("解析当前工作目录失败")?;
         if source_path.starts_with(&workspace) {
+            return Ok(true);
+        }
+
+        // 会话级工作目录（用户通过 GUI 设置的 cwd）
+        let session_cwd = state.active_session_cwd();
+        if !session_cwd.is_empty()
+            && let Ok(cwd) = fs::canonicalize(session_cwd)
+            && source_path.starts_with(&cwd)
+        {
             return Ok(true);
         }
 
@@ -345,6 +355,7 @@ impl AppSkillService {
 
         if let Some(home) = user_home_dir() {
             allowed_roots.push(home.join(".codex").join("skills"));
+            allowed_roots.push(home.join(".tiangong").join("skills"));
         }
 
         Ok(allowed_roots
