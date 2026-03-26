@@ -321,6 +321,9 @@ pub(super) fn is_allowed_command(cmd: &str) -> bool {
             | "uv"
             | "uvx"
             | "sea-orm-cli"
+            // 网络工具
+            | "curl"
+            | "wget"
             // Shell
             | "bash"
             | "sh"
@@ -377,9 +380,10 @@ fn validate_shell_script(script: &str, base_dir: &Path) -> Result<()> {
 }
 
 fn contains_forbidden_shell_tokens(script: &str) -> bool {
-    const FORBIDDEN: [&str; 17] = [
-        "&&", "||", ";", "|", ">", "<", "`", "$(", "sudo ", " rm -", "mv /", "chmod -r", "chown ",
+    const FORBIDDEN: [&str; 8] = [
+        "sudo ", "chmod -r", "chown ",
         "shutdown", "reboot", "poweroff", "mkfs",
+        "dd if=",
     ];
     FORBIDDEN.iter().any(|token| script.contains(token))
 }
@@ -389,26 +393,8 @@ fn extract_shell_head_command(script: &str) -> Option<&str> {
 }
 
 fn is_allowed_shell_head_command(cmd: &str) -> bool {
-    matches!(
-        cmd,
-        "echo"
-            | "pwd"
-            | "ls"
-            | "cat"
-            | "head"
-            | "tail"
-            | "wc"
-            | "rg"
-            | "grep"
-            | "cargo"
-            | "git"
-            | "node"
-            | "npm"
-            | "npx"
-            | "yarn"
-            | "pnpm"
-            | "ts-node"
-    )
+    // shell 脚本首命令白名单（与 is_allowed_command 保持一致）
+    is_allowed_command(cmd) || matches!(cmd, "cd" | "curl" | "wget" | "tar" | "unzip" | "test" | "[")
 }
 
 pub(super) fn derive_shell_exec_args(

@@ -6,7 +6,7 @@ openspec
 .claude
 .tmp/
 frontend/dist
-frontend/node_modules
-skills
 .env
 .env.local
+*.zip
+node_modules

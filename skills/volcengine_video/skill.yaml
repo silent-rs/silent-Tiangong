@@ -1,0 +1,66 @@
+# 火山方舟视频生成 Skill
+# 使用字节跳动火山方舟（Volcengine Ark）平台的视频生成模型
+
+name: volcengine_video
+version: 1.0.0
+description: 使用火山方舟平台的 Doubao-Seedance 等模型生成视频
+
+# 触发关键词
+trigger_keywords:
+  - 生成视频
+  - 制作视频
+  - 创建视频
+  - 视频生成
+  - 做个视频
+  - 拍个视频
+  - generate video
+  - create video
+  - make video
+
+# 参数定义
+parameters:
+  prompt:
+    type: string
+    description: 视频内容描述
+    required: true
+
+  model:
+    type: string
+    description: 模型名称
+    default: doubao-seedance-1-0-pro-fast-251015
+
+# 执行配置（pipx run 自动处理依赖）
+command:
+  type: script
+  executable: pipx
+  script_path: ./skills/volcengine_video/generate.py
+  args_template: run ./skills/volcengine_video/generate.py --prompt "{{prompt}}" --model "{{model}}"
+
+# 错误处理
+error_handling:
+  retry_count: 1
+  retry_delay: 5000
+  fallback_message: "视频生成失败，请检查 API 配置和网络连接。"
+
+# 使用示例
+examples:
+  - input: "帮我生成一个乌鸦喝水的动画视频"
+    parameters:
+      prompt: "A crow drinking water from a bottle by dropping pebbles into it, animated style"
+
+  - input: "做一个日落延时视频"
+    parameters:
+      prompt: "Time-lapse of a beautiful sunset over the ocean, cinematic"
+
+# 元数据
+metadata:
+  author: TianGong Team
+  created_at: 2026-03-26
+  tags:
+    - video
+    - generation
+    - volcengine
+    - ark
+    - doubao
+  category: media
+  priority: normal

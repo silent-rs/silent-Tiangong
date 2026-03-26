@@ -1,0 +1,240 @@
+# Skill 生成器
+# 该技能用于快速创建新的 skill 模板
+
+name: skill_generator
+version: 1.0.0
+description: 自动生成新的 skill 模板文件，包括配置文件、执行脚本和文档
+
+# 触发关键词
+trigger_keywords:
+  - 创建skill
+  - 新建skill
+  - 生成skill
+  - create skill
+  - new skill
+  - generate skill
+  - skill模板
+
+# 参数定义
+parameters:
+  skill_name:
+    type: string
+    description: 新skill的名称（使用英文，小写，下划线分隔）
+    required: true
+    pattern: "^[a-z][a-z0-9_]*$"
+    
+  skill_type:
+    type: string
+    description: skill类型
+    required: true
+    default: script
+    enum:
+      - script      # 脚本执行类型
+      - http        # HTTP API调用类型
+      - hybrid      # 混合类型
+    
+  description:
+    type: string
+    description: skill的功能描述
+    required: true
+    
+  author:
+    type: string
+    description: 作者名称
+    required: false
+    default: "Anonymous"
+    
+  language:
+    type: string
+    description: 实现语言
+    required: false
+    default: python
+    enum:
+      - python
+      - node
+      - bash
+      - rust
+      
+  output_dir:
+    type: string
+    description: 输出目录路径
+    required: false
+    default: "./skills"
+
+# 执行配置
+command:
+  type: script
+  executable: python3
+  script: generator.py
+  timeout: 60000
+  
+# 模板配置
+templates:
+  skill_yaml: |
+    # {{skill_name}} Skill
+    name: {{skill_name}}
+    version: 1.0.0
+    description: {{description}}
+    
+    trigger_keywords:
+      - {{skill_name}}
+      
+    parameters:
+      # TODO: 添加参数定义
+      
+    command:
+      type: {{skill_type}}
+      # TODO: 添加执行配置
+      
+  script_python: |
+    #!/usr/bin/env python3
+    """
+    {{description}}
+    """
+    
+    import argparse
+    import json
+    import sys
+    from typing import Dict, Any
+    
+    
+    def execute(**kwargs) -> Dict[str, Any]:
+        """
+        执行skill的主函数
+        """
+        # TODO: 实现主要逻辑
+        result = {
+            "success": True,
+            "message": "Skill executed successfully",
+            "data": kwargs
+        }
+        return result
+    
+    
+    def main():
+        parser = argparse.ArgumentParser(description="{{description}}")
+        # TODO: 添加命令行参数
+        parser.add_argument("--param1", help="参数1说明")
+        
+        args = parser.parse_args()
+        
+        # 执行并输出结果
+        result = execute(**vars(args))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    
+    
+    if __name__ == "__main__":
+        main()
+        
+  script_node: |
+    #!/usr/bin/env node
+    /**
+     * {{description}}
+     */
+    
+    const args = require('minimist')(process.argv.slice(2));
+    
+    async function execute(params) {
+        // TODO: 实现主要逻辑
+        return {
+            success: true,
+            message: 'Skill executed successfully',
+            data: params
+        };
+    }
+    
+    (async () => {
+        const result = await execute(args);
+        console.log(JSON.stringify(result, null, 2));
+    })();
+    
+  readme: |
+    # {{skill_name}}
+    
+    {{description}}
+    
+    ## 功能特性
+    
+    - TODO: 列出主要功能
+    
+    ## 安装
+    
+    ```bash
+    # TODO: 添加安装说明
+    ```
+    
+    ## 使用方法
+    
+    ```bash
+    # TODO: 添加使用示例
+    ```
+    
+    ## 参数说明
+    
+    | 参数 | 类型 | 必填 | 说明 |
+    |------|------|------|------|
+    | TODO | -    | -    | -    |
+    
+    ## 示例
+    
+    ### 示例 1
+    ```bash
+    # TODO: 添加具体示例
+    ```
+    
+    ## 注意事项
+    
+    - TODO: 添加注意事项
+    
+    ## 作者
+    
+    {{author}}
+    
+    ## 许可证
+    
+    MIT
+
+# 验证规则
+validation:
+  skill_name:
+    - must be lowercase
+    - use underscores for spaces
+    - start with letter
+    - no special characters
+    
+  description:
+    - minimum 10 characters
+    - clear and concise
+
+# 使用示例
+examples:
+  - input: "创建一个天气查询的skill"
+    parameters:
+      skill_name: "weather_query"
+      skill_type: "http"
+      description: "查询指定城市的天气信息"
+      author: "User"
+      language: "python"
+    output:
+      - skills/weather_query/skill.yaml
+      - skills/weather_query/weather_query.py
+      - skills/weather_query/README.md
+      
+  - input: "生成一个文件处理skill"
+    parameters:
+      skill_name: "file_processor"
+      skill_type: "script"
+      description: "批量处理文件，支持重命名、转换等操作"
+      language: "python"
+
+# 元数据
+metadata:
+  category: developer_tools
+  tags:
+    - meta
+    - generator
+    - template
+    - automation
+  requires:
+    - python3
+    - jinja2 (optional, for advanced templating)

@@ -1,0 +1,62 @@
+# 创建 Skill 的 Skill
+
+name: create_skill
+version: 1.0.0
+description: 通过交互式问答帮助用户快速创建一个新的 Skill，支持自定义触发词、参数定义、执行命令等
+
+trigger_keywords:
+  - 创建skill
+  - 新建技能
+  - 创建新技能
+  - 新增skill
+  - 创建自定义skill
+
+parameters:
+  skill_name:
+    type: string
+    description: Skill 名称（英文， kebab-case）
+    required: true
+    
+  skill_description:
+    type: string
+    description: Skill 功能描述
+    required: true
+    
+  trigger_keywords:
+    type: string
+    description: 触发关键词列表（用逗号分隔）
+    required: true
+    
+  command_type:
+    type: string
+    description: 命令类型
+    default: http
+    enum:
+      - http
+      - exec
+      - script
+      
+  primary_command:
+    type: string
+    description: 主要执行命令或脚本名
+    required: true
+
+output_format: |
+  已为你创建 Skill: {{skill_name}}
+  
+  📁 目录结构:
+  skills/{{skill_name}}/
+  ├── skill.yaml      # Skill 元数据配置
+  ├── run.py          # 执行脚本模板
+  └── README.md       # 使用说明
+  
+  请根据实际需求编辑相应文件。
+
+generation_prompt: |
+  请为用户创建一个新的 Skill 目录和相关文件。用户会提供：
+  1. Skill 名称（英文）
+  2. 功能描述
+  3. 触发关键词
+  4. 执行命令或脚本类型
+  
+  根据用户提供的信息，生成完整的 skill.yaml、run.py 和 README.md 文件。
