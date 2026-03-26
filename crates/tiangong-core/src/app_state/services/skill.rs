@@ -33,19 +33,55 @@ impl AppSkillService {
         convert_external: bool,
     ) -> Result<SkillInstallInspection> {
         let source_path = self.resolve_skill_source_path(state, path)?;
-        if !convert_external {
-            return Ok(SkillInstallInspection::default());
+
+        // 从 skill.toml 中读取显式声明的环境变量
+        let mut env_vars = Vec::new();
+        let skill_toml_path = source_path.join("skill.toml");
+        if let Ok(raw) = fs::read_to_string(&skill_toml_path) {
+            #[derive(serde::Deserialize, Default)]
+            struct TomlEnvCheck {
+                #[serde(default)]
+                requires: TomlRequires,
+            }
+            #[derive(serde::Deserialize, Default)]
+            struct TomlRequires {
+                #[serde(default)]
+                env: Vec<String>,
+            }
+            if let Ok(parsed) = toml::from_str::<TomlEnvCheck>(&raw) {
+                env_vars.extend(parsed.requires.env);
+            }
         }
-        let analysis = analyze_external_skill(&source_path)?;
-        let missing_env_vars = analysis
-            .env_vars
+
+        // 代码扫描检测额外的环境变量
+        if convert_external {
+            let analysis = analyze_external_skill(&source_path)?;
+            for v in analysis.env_vars {
+                if !env_vars.contains(&v) {
+                    env_vars.push(v);
+                }
+            }
+            // 合并依赖信息
+            let missing_env_vars = env_vars
+                .iter()
+                .filter(|key| std::env::var_os(key.as_str()).is_none())
+                .cloned()
+                .collect::<Vec<_>>();
+            return Ok(SkillInstallInspection {
+                dependencies: analysis.dependencies,
+                env_vars,
+                missing_env_vars,
+            });
+        }
+
+        let missing_env_vars = env_vars
             .iter()
             .filter(|key| std::env::var_os(key.as_str()).is_none())
             .cloned()
             .collect::<Vec<_>>();
         Ok(SkillInstallInspection {
-            dependencies: analysis.dependencies,
-            env_vars: analysis.env_vars,
+            dependencies: Vec::new(),
+            env_vars,
             missing_env_vars,
         })
     }

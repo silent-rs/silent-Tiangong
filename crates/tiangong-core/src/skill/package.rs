@@ -367,6 +367,9 @@ struct SkillTomlSource {
 struct SkillTomlRequires {
     #[serde(default)]
     mcp: Vec<SkillMcpRequirementConfig>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    env: Vec<String>,
 }
 
 fn locate_external_markdown_entry(root: &Path) -> Option<PathBuf> {
