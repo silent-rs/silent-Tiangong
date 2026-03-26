@@ -8,3 +8,5 @@ openspec
 frontend/dist
 frontend/node_modules
 skills
+.env
+.env.local
