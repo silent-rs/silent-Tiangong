@@ -347,11 +347,15 @@ pub fn inspect_skill(path: String, state: State<TiangongApp>) -> Result<SkillIns
 #[tauri::command]
 pub fn install_skill(
     path: String,
-    env_values: Option<Vec<(String, String)>>,
+    env_values: Option<std::collections::HashMap<String, String>>,
     state: State<TiangongApp>,
 ) -> Result<String, String> {
     state.with_state(|core_state| {
-        let env = env_values.unwrap_or_default();
+        let env: Vec<(String, String)> = env_values
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, v)| !v.trim().is_empty())
+            .collect();
         core_state.install_local_skill_with_options_and_inputs(&path, true, true, &env)
     })
 }

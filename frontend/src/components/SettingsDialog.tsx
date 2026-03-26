@@ -1063,12 +1063,13 @@ function SkillSettings() {
   const handleInstallWithEnv = async () => {
     setIsInstalling(true);
     try {
-      // 只传入非空的 env 值
-      const pairs: [string, string][] = Object.entries(envValues)
-        .filter(([, v]) => v.trim() !== '')
-        .map(([k, v]) => [k, v.trim()]);
+      // 构建非空的 env 键值对
+      const envMap: Record<string, string> = {};
+      for (const [k, v] of Object.entries(envValues)) {
+        if (v.trim()) envMap[k] = v.trim();
+      }
 
-      await api.installSkill(pendingInstallPath, pairs.length > 0 ? pairs : undefined);
+      await api.installSkill(pendingInstallPath, Object.keys(envMap).length > 0 ? envMap : undefined);
       setShowEnvDialog(false);
       setInstallPath('');
       setPendingInstallPath('');

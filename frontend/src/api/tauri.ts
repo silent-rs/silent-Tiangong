@@ -190,7 +190,7 @@ export const api = {
   inspectSkill: (path: string): Promise<{ env_vars: string[]; missing_env_vars: string[]; dependencies: string[] }> =>
     invoke('inspect_skill', { path }),
 
-  installSkill: (path: string, envValues?: [string, string][]): Promise<string> =>
+  installSkill: (path: string, envValues?: Record<string, string>): Promise<string> =>
     invoke('install_skill', { path, envValues }),
 
   removeSkill: (id: string): Promise<string> =>
