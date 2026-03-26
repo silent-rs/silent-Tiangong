@@ -181,6 +181,23 @@ impl AppSkillService {
                 installed_dir.display()
             )
         })?;
+
+        // 写入 .env.local（在安装目录中，而非 stage 目录）
+        if !convert_env_values.is_empty() {
+            let env_lines: Vec<String> = convert_env_values
+                .iter()
+                .filter(|(k, v)| !k.trim().is_empty() && !v.trim().is_empty())
+                .map(|(k, v)| format!("{}={}", k.trim(), v.trim().replace('\n', "\\n")))
+                .collect();
+            if !env_lines.is_empty() {
+                let env_path = installed_dir.join(".env.local");
+                fs::write(&env_path, format!("{}\n", env_lines.join("\n")))
+                    .with_context(|| {
+                        format!("写入 .env.local 失败：{}", env_path.display())
+                    })?;
+            }
+        }
+
         let rollback_guard = InstallRollbackGuard::new(installed_dir.clone());
 
         skill.source.kind = "local".to_string();
