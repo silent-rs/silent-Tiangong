@@ -195,7 +195,8 @@ impl RuntimeEngine {
         // 视频生成暂通过 skill 机制处理，不注入内置工具
 
         // 构建系统 prompt
-        let system_prompt = build_react_system_prompt(user_input, &self.models_config);
+        let system_prompt =
+            build_react_system_prompt(user_input, &self.models_config, &self.agent_config);
 
         // 构建空 plan（兼容现有 TurnExecution 结构）
         let plan = TaskPlan {
@@ -633,15 +634,20 @@ impl RuntimeEngine {
 }
 
 /// 构建 ReAct agent 的系统 prompt
-fn build_react_system_prompt(user_input: &str, models_config: &ModelsConfig) -> String {
+fn build_react_system_prompt(
+    user_input: &str,
+    models_config: &ModelsConfig,
+    agent_config: &AgentConfig,
+) -> String {
     use crate::models_config::ModelCapability;
+    use crate::skill::build_skill_hints;
 
     // 构建多媒体能力提示
     let mut media_hints = Vec::new();
     for cap in ModelCapability::media_capabilities() {
         if let Some(resolved) = models_config.resolve_for_capability(*cap) {
             media_hints.push(format!(
-                "- {}：已配置（模型：{}），可通过 run_command 调用对应 API",
+                "- {}：已配置（模型：{}）",
                 cap.display_name(),
                 resolved.model
             ));
@@ -651,9 +657,40 @@ fn build_react_system_prompt(user_input: &str, models_config: &ModelsConfig) -> 
         String::new()
     } else {
         format!(
-            "\n\n已配置的多媒体能力（用户请求时应优先使用）：\n{}",
+            "\n\n已配置的多媒体能力：\n{}",
             media_hints.join("\n")
         )
+    };
+
+    // 构建已安装 skill 提示
+    let skill_hints = build_skill_hints(user_input, &agent_config.skills);
+    let skills_section = if skill_hints.is_empty()
+        || skill_hints.iter().all(|h| h.contains("skipped"))
+    {
+        String::new()
+    } else {
+        // 读取匹配 skill 的 SKILL.md 完整内容
+        let mut skill_contents = Vec::new();
+        for skill in &agent_config.skills.installed {
+            if !skill.enabled {
+                continue;
+            }
+            let skill_dir = &skill.source.value;
+            let skill_md = std::path::Path::new(skill_dir).join(&skill.entry);
+            if let Ok(content) = std::fs::read_to_string(&skill_md) {
+                // 替换 {skill_dir} 占位符为实际路径
+                let resolved = content.replace("{skill_dir}", skill_dir);
+                skill_contents.push(format!(
+                    "### Skill: {} ({})\n{}",
+                    skill.name, skill.id, resolved.trim()
+                ));
+            }
+        }
+        if skill_contents.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n已安装的 Skills（优先使用 run_command 调用）：\n{}", skill_contents.join("\n\n"))
+        }
     };
 
     format!(
@@ -666,7 +703,8 @@ fn build_react_system_prompt(user_input: &str, models_config: &ModelsConfig) -> 
 4. 回复时语言简洁，直接回答问题，不要说\"让我查看\"之类的过渡语。
 5. 不要在回复中包含工具调用的原始痕迹（如 ok=、exit_code= 等元数据）。
 6. 回复使用 Markdown 格式：代码和命令用代码块（```语言 ... ```）包裹，使用标题、列表等结构化排版。
-7. 工具调用失败时必须如实告知用户失败原因，绝对不能虚构成功结果。{media_section}
+7. 工具调用失败时必须如实告知用户失败原因，绝对不能虚构成功结果。
+8. 如果已安装的 Skill 能处理用户请求，优先通过 run_command 调用 Skill 脚本。{media_section}{skills_section}
 
 用户输入：
 {user_input}"
