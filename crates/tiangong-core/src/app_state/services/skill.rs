@@ -295,72 +295,97 @@ impl AppSkillService {
         Ok(format!("skill 状态已更新：{id} enabled={enabled}"))
     }
 
-    fn resolve_skill_source_path(self, state: &TiangongState, raw_path: &str) -> Result<PathBuf> {
+    fn resolve_skill_source_path(self, _state: &TiangongState, raw_path: &str) -> Result<PathBuf> {
         let path = raw_path.trim();
         if path.is_empty() {
             return Err(anyhow!("skill 路径不能为空"));
         }
+
+        let source = Path::new(path);
+
+        // 支持 zip 压缩包：解压到 ~/.tiangong/skills/imported/ 后使用解压目录
+        if source.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("zip")) {
+            let source_path = fs::canonicalize(source)
+                .with_context(|| format!("解析 skill 压缩包路径失败：{path}"))?;
+            return Self::extract_skill_zip(&source_path);
+        }
+
+        // 普通目录
         let source_path =
             fs::canonicalize(path).with_context(|| format!("解析 skill 路径失败：{path}"))?;
-        if !self.is_allowed_skill_source_path(state, &source_path)? {
-            return Err(anyhow!(
-                "skill 路径越界：{}，仅允许工作区、skills.dirs 或 ~/.codex/skills 目录",
-                source_path.display()
-            ));
+        if !source_path.is_dir() {
+            return Err(anyhow!("skill 路径不是目录：{}", source_path.display()));
         }
         Ok(source_path)
     }
 
-    fn is_allowed_skill_source_path(
-        self,
-        state: &TiangongState,
-        source_path: &Path,
-    ) -> Result<bool> {
-        // 进程工作目录
-        let workspace = std::env::current_dir()
-            .context("读取当前工作目录失败")?
-            .canonicalize()
-            .context("解析当前工作目录失败")?;
-        if source_path.starts_with(&workspace) {
-            return Ok(true);
+    /// 解压 skill zip 包到 ~/.tiangong/skills/imported/
+    fn extract_skill_zip(zip_path: &Path) -> Result<PathBuf> {
+        use std::io;
+
+        let file = fs::File::open(zip_path)
+            .with_context(|| format!("打开 skill 压缩包失败：{}", zip_path.display()))?;
+        let mut archive = zip::ZipArchive::new(io::BufReader::new(file))
+            .with_context(|| format!("读取 zip 文件失败：{}", zip_path.display()))?;
+
+        // 解压目标：~/.tiangong/skills/imported/<zip名称>/
+        let zip_stem = zip_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("skill");
+        let import_dir = default_skills_storage_dir_path()
+            .join("imported")
+            .join(zip_stem);
+
+        // 如果已存在先删除
+        if import_dir.exists() {
+            fs::remove_dir_all(&import_dir)
+                .with_context(|| format!("清理旧导入目录失败：{}", import_dir.display()))?;
         }
+        fs::create_dir_all(&import_dir)
+            .with_context(|| format!("创建导入目录失败：{}", import_dir.display()))?;
 
-        // 会话级工作目录（用户通过 GUI 设置的 cwd）
-        let session_cwd = state.active_session_cwd();
-        if !session_cwd.is_empty()
-            && let Ok(cwd) = fs::canonicalize(session_cwd)
-            && source_path.starts_with(&cwd)
-        {
-            return Ok(true);
-        }
+        // 解压所有文件
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i)?;
+            let entry_path = match entry.enclosed_name() {
+                Some(p) => p.to_owned(),
+                None => continue,
+            };
 
-        let mut allowed_roots = state
-            .store
-            .agent
-            .agent_config
-            .skills
-            .dirs
-            .iter()
-            .map(|raw: &String| raw.trim())
-            .filter(|value: &&str| !value.is_empty())
-            .map(PathBuf::from)
-            .collect::<Vec<_>>();
+            // 跳过 __MACOSX 等隐藏目录
+            if entry_path
+                .components()
+                .any(|c| c.as_os_str().to_string_lossy().starts_with("__"))
+            {
+                continue;
+            }
 
-        if let Ok(codex_home) = std::env::var("CODEX_HOME") {
-            let trimmed = codex_home.trim();
-            if !trimmed.is_empty() {
-                allowed_roots.push(PathBuf::from(trimmed).join("skills"));
+            let target = import_dir.join(&entry_path);
+
+            if entry.is_dir() {
+                fs::create_dir_all(&target)?;
+            } else {
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                let mut out = fs::File::create(&target)?;
+                io::copy(&mut entry, &mut out)?;
             }
         }
 
-        if let Some(home) = user_home_dir() {
-            allowed_roots.push(home.join(".codex").join("skills"));
-            allowed_roots.push(home.join(".tiangong").join("skills"));
+        // 检查解压后的目录结构：如果 zip 内只有一个子目录，使用该子目录
+        let entries: Vec<_> = fs::read_dir(&import_dir)?
+            .filter_map(|e| e.ok())
+            .collect();
+        if entries.len() == 1 && entries[0].file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            let inner = entries[0].path();
+            if inner.join("SKILL.md").exists() || inner.join("skill.toml").exists() {
+                return Ok(inner);
+            }
         }
 
-        Ok(allowed_roots
-            .into_iter()
-            .filter_map(|path| fs::canonicalize(path).ok())
-            .any(|path| source_path.starts_with(path)))
+        Ok(import_dir)
     }
+
 }

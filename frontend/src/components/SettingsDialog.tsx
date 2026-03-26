@@ -1120,7 +1120,7 @@ function SkillSettings() {
                     placeholder="/path/to/skill"
                   />
                   <p className="text-xs text-muted-foreground mt-2">
-                    请输入包含 SKILL.md 的目录路径
+                    输入目录路径或 .zip 压缩包路径
                   </p>
                 </div>
               </div>
