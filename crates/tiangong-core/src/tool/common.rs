@@ -282,6 +282,7 @@ pub(super) fn display_rel_path(path: &Path) -> String {
 pub(super) fn is_allowed_command(cmd: &str) -> bool {
     matches!(
         cmd,
+        // 基础命令
         "echo"
             | "pwd"
             | "ls"
@@ -291,6 +292,19 @@ pub(super) fn is_allowed_command(cmd: &str) -> bool {
             | "wc"
             | "rg"
             | "grep"
+            | "find"
+            | "which"
+            | "env"
+            | "printenv"
+            // 文件操作
+            | "cp"
+            | "mv"
+            | "rm"
+            | "mkdir"
+            | "touch"
+            | "chmod"
+            | "ln"
+            // 开发工具
             | "cargo"
             | "git"
             | "node"
@@ -299,6 +313,12 @@ pub(super) fn is_allowed_command(cmd: &str) -> bool {
             | "yarn"
             | "pnpm"
             | "ts-node"
+            | "python"
+            | "python3"
+            | "pip"
+            | "pip3"
+            | "sea-orm-cli"
+            // Shell
             | "bash"
             | "sh"
             | "powershell"
