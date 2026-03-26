@@ -12,7 +12,8 @@ use crate::agents::execution_tool_agent::build_tool_call_from_function;
 use crate::model::{
     ModelClient, ModelFunctionCall, ModelRequest, ModelStreamChunk, SingleProviderClient, TokenUsage,
 };
-use crate::models_config::ModelsConfig;
+use crate::model::FunctionToolSpec;
+use crate::models_config::{ModelCapability, ModelsConfig};
 use crate::planner::TaskPlan;
 use crate::session::{Message, MessageRole, Session, now_text};
 use crate::tool::{LocalToolExecutor, ToolExecutionRecord, ToolExecutor, ToolResult};
@@ -167,13 +168,41 @@ impl RuntimeEngine {
         let (function_tools, mcp_targets) =
             execution_function_tools(&self.agent_config.mcp);
         // 去掉 mark_step_completed 工具，ReAct 模式不需要手动完成信号
-        let function_tools: Vec<_> = function_tools
+        let mut function_tools: Vec<_> = function_tools
             .into_iter()
             .filter(|t| t.name != "mark_step_completed")
             .collect();
 
+        // 注入已配置的多媒体能力为工具
+        if self.models_config.resolve_for_capability(ModelCapability::ImageGeneration).is_some() {
+            function_tools.push(FunctionToolSpec {
+                name: "generate_image".to_string(),
+                description: "根据文字描述生成图片。返回生成的图片 URL 或 base64 数据。".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "prompt": { "type": "string", "description": "图片描述（英文效果更好）" }
+                    },
+                    "required": ["prompt"]
+                }),
+            });
+        }
+        if self.models_config.resolve_for_capability(ModelCapability::VideoGeneration).is_some() {
+            function_tools.push(FunctionToolSpec {
+                name: "generate_video".to_string(),
+                description: "根据文字描述生成视频。返回生成的视频 URL。".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "prompt": { "type": "string", "description": "视频内容描述（英文效果更好）" }
+                    },
+                    "required": ["prompt"]
+                }),
+            });
+        }
+
         // 构建系统 prompt
-        let system_prompt = build_react_system_prompt(user_input);
+        let system_prompt = build_react_system_prompt(user_input, &self.models_config);
 
         // 构建空 plan（兼容现有 TurnExecution 结构）
         let plan = TaskPlan {
@@ -369,13 +398,21 @@ impl RuntimeEngine {
         })
     }
 
-    /// 执行单个工具调用（本地工具或 MCP 工具）
+    /// 执行单个工具调用（本地工具、MCP 工具或多媒体生成）
     fn execute_tool_call(
         &self,
         call: &ModelFunctionCall,
         mcp_targets: &HashMap<String, McpFunctionTarget>,
         mcp_config: &McpConfig,
     ) -> ToolResult {
+        // 多媒体生成工具
+        if call.name == "generate_image" {
+            return self.handle_media_generation(call, ModelCapability::ImageGeneration);
+        }
+        if call.name == "generate_video" {
+            return self.handle_media_generation(call, ModelCapability::VideoGeneration);
+        }
+
         // 检查是否是 MCP 工具
         if let Some(target) = mcp_targets.get(&call.name) {
             return match execute_mcp_tool_call(call, target, mcp_config) {
@@ -435,13 +472,214 @@ impl RuntimeEngine {
         }
     }
 
+    /// 处理多媒体生成工具调用（图片/视频）
+    fn handle_media_generation(
+        &self,
+        call: &ModelFunctionCall,
+        capability: ModelCapability,
+    ) -> ToolResult {
+        let prompt = call
+            .arguments
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        if prompt.is_empty() {
+            return ToolResult {
+                ok: false,
+                summary: "缺少 prompt 参数".to_string(),
+                stdout: String::new(),
+                stderr: "prompt 不能为空".to_string(),
+                exit_code: 1,
+                execution: None,
+            };
+        }
+
+        let resolved = match self.models_config.resolve_for_capability(capability) {
+            Some(r) => r,
+            None => {
+                return ToolResult {
+                    ok: false,
+                    summary: format!("{}能力未配置", capability.display_name()),
+                    stdout: String::new(),
+                    stderr: "请在设置中配置对应的模型和路由".to_string(),
+                    exit_code: 1,
+                    execution: None,
+                };
+            }
+        };
+
+        let started = std::time::Instant::now();
+        let tool_name = call.name.clone();
+
+        // 使用 OpenAI 兼容 API 生成
+        match capability {
+            ModelCapability::ImageGeneration => {
+                use tiangong_media::image::ImageGenerator;
+                let generator = tiangong_media::openai_image::OpenAIImageGenerator::new(
+                    resolved.api_key.clone(),
+                    resolved.base_url.clone(),
+                    resolved.model.clone(),
+                );
+                let request = tiangong_media::image::ImageGenRequest {
+                    prompt,
+                    negative_prompt: None,
+                    width: 0,
+                    height: 0,
+                    model: Some(resolved.model.clone()),
+                    style: None,
+                    num_images: 1,
+                };
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        return ToolResult {
+                            ok: false,
+                            summary: format!("运行时初始化失败：{e}"),
+                            stdout: String::new(),
+                            stderr: e.to_string(),
+                            exit_code: 1,
+                            execution: None,
+                        };
+                    }
+                };
+                let result = runtime.block_on(async {
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(120),
+                        generator.generate(request),
+                    )
+                    .await
+                });
+                let duration_ms = started.elapsed().as_millis() as u64;
+                match result {
+                    Ok(Ok(resp)) => {
+                        let mut parts = Vec::new();
+                        for (i, img) in resp.images.iter().enumerate() {
+                            if let Some(url) = &img.url {
+                                parts.push(format!("![图片 {}]({})", i + 1, url));
+                            } else if let Some(b64) = &img.b64_data {
+                                parts.push(format!(
+                                    "![图片 {}](data:image/png;base64,{})",
+                                    i + 1,
+                                    b64
+                                ));
+                            }
+                        }
+                        let output = parts.join("\n");
+                        ToolResult {
+                            ok: true,
+                            summary: format!("图片生成成功（模型：{}）", resolved.model),
+                            stdout: output,
+                            stderr: String::new(),
+                            exit_code: 0,
+                            execution: Some(ToolExecutionRecord {
+                                tool_name,
+                                args: vec![],
+                                duration_ms,
+                                ok: true,
+                                exit_code: 0,
+                                summary: format!("图片生成成功（模型：{}）", resolved.model),
+                            }),
+                        }
+                    }
+                    Ok(Err(e)) => ToolResult {
+                        ok: false,
+                        summary: format!("图片生成失败：{e}"),
+                        stdout: String::new(),
+                        stderr: e.to_string(),
+                        exit_code: 1,
+                        execution: Some(ToolExecutionRecord {
+                            tool_name,
+                            args: vec![],
+                            duration_ms,
+                            ok: false,
+                            exit_code: 1,
+                            summary: format!("图片生成失败：{e}"),
+                        }),
+                    },
+                    Err(_) => ToolResult {
+                        ok: false,
+                        summary: "图片生成超时（120秒）".to_string(),
+                        stdout: String::new(),
+                        stderr: "timeout".to_string(),
+                        exit_code: 1,
+                        execution: Some(ToolExecutionRecord {
+                            tool_name,
+                            args: vec![],
+                            duration_ms,
+                            ok: false,
+                            exit_code: 1,
+                            summary: "图片生成超时".to_string(),
+                        }),
+                    },
+                }
+            }
+            ModelCapability::VideoGeneration => {
+                // 视频生成：通过 OpenAI 兼容 API 调用
+                // TODO: 实现视频生成 API 调用
+                ToolResult {
+                    ok: false,
+                    summary: "视频生成功能开发中".to_string(),
+                    stdout: String::new(),
+                    stderr: format!(
+                        "视频生成已配置模型 {}，但 API 调用尚未实现",
+                        resolved.model
+                    ),
+                    exit_code: 1,
+                    execution: Some(ToolExecutionRecord {
+                        tool_name,
+                        args: vec![],
+                        duration_ms: 0,
+                        ok: false,
+                        exit_code: 1,
+                        summary: "视频生成功能开发中".to_string(),
+                    }),
+                }
+            }
+            _ => ToolResult {
+                ok: false,
+                summary: format!("不支持的多媒体能力：{}", capability.display_name()),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 1,
+                execution: None,
+            },
+        }
+    }
+
     pub fn fallback_error_message(err: &anyhow::Error) -> String {
         format!("执行失败：{err}")
     }
 }
 
 /// 构建 ReAct agent 的系统 prompt
-fn build_react_system_prompt(user_input: &str) -> String {
+fn build_react_system_prompt(user_input: &str, models_config: &ModelsConfig) -> String {
+    use crate::models_config::ModelCapability;
+
+    // 构建多媒体能力提示
+    let mut media_hints = Vec::new();
+    for cap in ModelCapability::media_capabilities() {
+        if let Some(resolved) = models_config.resolve_for_capability(*cap) {
+            media_hints.push(format!(
+                "- {}：已配置（模型：{}），可通过 run_command 调用对应 API",
+                cap.display_name(),
+                resolved.model
+            ));
+        }
+    }
+    let media_section = if media_hints.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\n已配置的多媒体能力（用户请求时应优先使用）：\n{}",
+            media_hints.join("\n")
+        )
+    };
+
     format!(
 "你是天工智能助手。你可以直接回答用户问题，也可以使用工具来完成任务。
 
@@ -452,7 +690,7 @@ fn build_react_system_prompt(user_input: &str) -> String {
 4. 回复时语言简洁，直接回答问题，不要说\"让我查看\"之类的过渡语。
 5. 不要在回复中包含工具调用的原始痕迹（如 ok=、exit_code= 等元数据）。
 6. 回复使用 Markdown 格式：代码和命令用代码块（```语言 ... ```）包裹，使用标题、列表等结构化排版。
-7. 工具调用失败时必须如实告知用户失败原因，绝对不能虚构成功结果。
+7. 工具调用失败时必须如实告知用户失败原因，绝对不能虚构成功结果。{media_section}
 
 用户输入：
 {user_input}"
