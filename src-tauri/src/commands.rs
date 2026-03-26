@@ -366,6 +366,56 @@ pub fn remove_skill(id: String, state: State<TiangongApp>) -> Result<String, Str
     state.with_state(|core_state| core_state.remove_skill(&id))
 }
 
+/// 获取 Skill 的环境变量
+#[tauri::command]
+pub fn get_skill_env(id: String, state: State<TiangongApp>) -> Result<std::collections::HashMap<String, String>, String> {
+    state.with_state_read(|core_state| {
+        let skill = core_state.installed_skills()
+            .iter()
+            .find(|s| s.id == id)
+            .ok_or_else(|| anyhow::anyhow!("未找到 skill：{id}"))?;
+        let env_path = std::path::Path::new(&skill.source.value).join(".env.local");
+        let mut env = std::collections::HashMap::new();
+        if let Ok(content) = std::fs::read_to_string(&env_path) {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') { continue; }
+                if let Some((k, v)) = line.split_once('=') {
+                    env.insert(k.trim().to_string(), v.trim().to_string());
+                }
+            }
+        }
+        Ok(env)
+    })
+}
+
+/// 设置 Skill 的环境变量
+#[tauri::command]
+pub fn set_skill_env(
+    id: String,
+    env: std::collections::HashMap<String, String>,
+    state: State<TiangongApp>,
+) -> Result<(), String> {
+    state.with_state_read(|core_state| {
+        let skill = core_state.installed_skills()
+            .iter()
+            .find(|s| s.id == id)
+            .ok_or_else(|| anyhow::anyhow!("未找到 skill：{id}"))?;
+        let env_path = std::path::Path::new(&skill.source.value).join(".env.local");
+        let lines: Vec<String> = env.iter()
+            .filter(|(k, v)| !k.trim().is_empty() && !v.trim().is_empty())
+            .map(|(k, v)| format!("{}={}", k.trim(), v.trim()))
+            .collect();
+        if lines.is_empty() {
+            let _ = std::fs::remove_file(&env_path);
+        } else {
+            std::fs::write(&env_path, format!("{}\n", lines.join("\n")))
+                .map_err(|e| anyhow::anyhow!("写入 .env.local 失败：{e}"))?;
+        }
+        Ok(())
+    })
+}
+
 /// 设置 Skill 启用状态
 #[tauri::command]
 pub fn set_skill_enabled(

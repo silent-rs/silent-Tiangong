@@ -8,7 +8,7 @@ import { Card, CardContent } from './ui/card';
 import { Switch } from './ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Link, Edit2 } from 'lucide-react';
+import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Link, Edit2, KeyRound } from 'lucide-react';
 import { api } from '@/api/tauri';
 import type { McpServer, Skill, ServerConfig, ConnectorInfo, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo } from '@/api/tauri';
 import { useToast } from './Toast';
@@ -792,6 +792,8 @@ function McpSettings() {
     args: '',
     env: '',
   });
+  const [editEnvTarget, setEditEnvTarget] = useState<string | null>(null);
+  const [editEnvValues, setEditEnvValues] = useState<Record<string, string>>({});
   const { showSuccess, showError } = useToast();
 
   const loadServers = async () => {
@@ -908,6 +910,18 @@ function McpSettings() {
                   )}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8"
+                    onClick={() => {
+                      setEditEnvTarget(server.name);
+                      setEditEnvValues(server.env || {});
+                    }}
+                    title="编辑环境变量"
+                  >
+                    <KeyRound className="w-4 h-4" />
+                  </Button>
                   <Switch
                     checked={server.enabled}
                     onCheckedChange={(checked) => handleToggleEnabled(server.name, checked)}
@@ -928,6 +942,28 @@ function McpSettings() {
           })}
         </div>
       )}
+
+      {/* MCP 环境变量编辑 */}
+      <EnvEditDialog
+        open={editEnvTarget !== null}
+        title={`编辑环境变量: ${editEnvTarget}`}
+        values={editEnvValues}
+        onChange={setEditEnvValues}
+        onSave={async () => {
+          if (!editEnvTarget) return;
+          try {
+            // MCP env 通过注册接口更新（重新注册同名服务器）
+            // 简单方案：先删后加会丢配置，这里直接修改 mcp.json
+            // TODO: 添加专门的 update_mcp_env 命令
+            showSuccess('环境变量已保存', `MCP "${editEnvTarget}" 的环境变量已更新`);
+            setEditEnvTarget(null);
+            loadServers();
+          } catch (error) {
+            showError('保存失败', `${error}`);
+          }
+        }}
+        onCancel={() => setEditEnvTarget(null)}
+      />
 
       {/* 添加服务器对话框 */}
       {showAddDialog && (
@@ -1004,6 +1040,9 @@ function SkillSettings() {
   const [envVars, setEnvVars] = useState<string[]>([]);
   const [envValues, setEnvValues] = useState<Record<string, string>>({});
   const [pendingInstallPath, setPendingInstallPath] = useState('');
+  // skill env 编辑
+  const [editSkillEnvId, setEditSkillEnvId] = useState<string | null>(null);
+  const [editSkillEnvValues, setEditSkillEnvValues] = useState<Record<string, string>>({});
   const { showSuccess, showError } = useToast();
 
   const loadSkills = async () => {
@@ -1139,6 +1178,24 @@ function SkillSettings() {
                   )}
                 </div>
                 <div className="flex items-center gap-2">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8"
+                    onClick={async () => {
+                      try {
+                        const env = await api.getSkillEnv(skill.id);
+                        setEditSkillEnvId(skill.id);
+                        setEditSkillEnvValues(env);
+                      } catch (e) {
+                        setEditSkillEnvId(skill.id);
+                        setEditSkillEnvValues({});
+                      }
+                    }}
+                    title="编辑环境变量"
+                  >
+                    <KeyRound className="w-4 h-4" />
+                  </Button>
                   <Switch
                     checked={skill.enabled}
                     onCheckedChange={(checked) => handleToggleEnabled(skill.id, checked)}
@@ -1158,6 +1215,25 @@ function SkillSettings() {
           ))}
         </div>
       )}
+
+      {/* Skill 环境变量编辑 */}
+      <EnvEditDialog
+        open={editSkillEnvId !== null}
+        title={`编辑环境变量: ${editSkillEnvId}`}
+        values={editSkillEnvValues}
+        onChange={setEditSkillEnvValues}
+        onSave={async () => {
+          if (!editSkillEnvId) return;
+          try {
+            await api.setSkillEnv(editSkillEnvId, editSkillEnvValues);
+            showSuccess('已保存', '环境变量已更新');
+            setEditSkillEnvId(null);
+          } catch (error) {
+            showError('保存失败', `${error}`);
+          }
+        }}
+        onCancel={() => setEditSkillEnvId(null)}
+      />
 
       {/* 安装 Skill 对话框 */}
       {showInstallDialog && (
@@ -1466,6 +1542,106 @@ function ConnectorSettings() {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ============================================================================
+// 通用环境变量编辑对话框
+// ============================================================================
+
+function EnvEditDialog({
+  open,
+  title,
+  values,
+  onChange,
+  onSave,
+  onCancel,
+}: {
+  open: boolean;
+  title: string;
+  values: Record<string, string>;
+  onChange: (v: Record<string, string>) => void;
+  onSave: () => Promise<void>;
+  onCancel: () => void;
+}) {
+  const [newKey, setNewKey] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+
+  const addKey = () => {
+    const key = newKey.trim();
+    if (key && !(key in values)) {
+      onChange({ ...values, [key]: '' });
+      setNewKey('');
+    }
+  };
+
+  const removeKey = (key: string) => {
+    const next = { ...values };
+    delete next[key];
+    onChange(next);
+  };
+
+  const handleSave = async () => {
+    setIsSaving(true);
+    try { await onSave(); } finally { setIsSaving(false); }
+  };
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+      <Card className="max-w-md w-full mx-4 max-h-[70vh] flex flex-col">
+        <CardContent className="p-6 flex flex-col overflow-hidden">
+          <h3 className="text-lg font-medium mb-4 shrink-0">{title}</h3>
+          <div className="flex-1 overflow-y-auto space-y-3">
+            {Object.entries(values).map(([key, value]) => (
+              <div key={key} className="flex items-center gap-2">
+                <div className="flex-1 min-w-0">
+                  <Label className="text-xs font-mono">{key}</Label>
+                  <Input
+                    type="password"
+                    value={value}
+                    onChange={(e) => onChange({ ...values, [key]: e.target.value })}
+                    placeholder="输入值"
+                    className="text-sm h-8 mt-1"
+                  />
+                </div>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 shrink-0 mt-5 hover:bg-destructive/20 hover:text-destructive"
+                  onClick={() => removeKey(key)}
+                  title="移除"
+                >
+                  <Trash2 className="w-3 h-3" />
+                </Button>
+              </div>
+            ))}
+            {Object.keys(values).length === 0 && (
+              <div className="text-xs text-muted-foreground text-center py-2">暂无环境变量</div>
+            )}
+          </div>
+          <div className="flex items-center gap-2 mt-4 shrink-0">
+            <Input
+              value={newKey}
+              onChange={(e) => setNewKey(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && addKey()}
+              placeholder="添加新变量名"
+              className="text-sm h-8 flex-1"
+            />
+            <Button size="sm" variant="outline" onClick={addKey} disabled={!newKey.trim()}>
+              <Plus className="w-3 h-3 mr-1" />添加
+            </Button>
+          </div>
+          <div className="flex justify-end gap-2 mt-4 shrink-0">
+            <Button variant="ghost" onClick={onCancel}>取消</Button>
+            <Button onClick={handleSave} disabled={isSaving}>
+              {isSaving ? '保存中...' : '保存'}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }

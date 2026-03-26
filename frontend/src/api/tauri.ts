@@ -196,6 +196,12 @@ export const api = {
   removeSkill: (id: string): Promise<string> =>
     invoke('remove_skill', { id }),
 
+  getSkillEnv: (id: string): Promise<Record<string, string>> =>
+    invoke('get_skill_env', { id }),
+
+  setSkillEnv: (id: string, env: Record<string, string>): Promise<void> =>
+    invoke('set_skill_env', { id, env }),
+
   setSkillEnabled: (id: string, enabled: boolean): Promise<string> =>
     invoke('set_skill_enabled', { id, enabled }),
 

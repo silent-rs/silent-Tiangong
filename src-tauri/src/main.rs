@@ -32,6 +32,8 @@ fn main() {
             tiangong_app::commands::get_skills,
             tiangong_app::commands::inspect_skill,
             tiangong_app::commands::install_skill,
+            tiangong_app::commands::get_skill_env,
+            tiangong_app::commands::set_skill_env,
             tiangong_app::commands::remove_skill,
             tiangong_app::commands::set_skill_enabled,
             tiangong_app::commands::get_server_config,
