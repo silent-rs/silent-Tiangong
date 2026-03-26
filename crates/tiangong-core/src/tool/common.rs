@@ -317,6 +317,8 @@ pub(super) fn is_allowed_command(cmd: &str) -> bool {
             | "python3"
             | "pip"
             | "pip3"
+            | "pipx"
+            | "uv"
             | "sea-orm-cli"
             // Shell
             | "bash"
