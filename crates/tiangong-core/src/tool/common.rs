@@ -319,6 +319,7 @@ pub(super) fn is_allowed_command(cmd: &str) -> bool {
             | "pip3"
             | "pipx"
             | "uv"
+            | "uvx"
             | "sea-orm-cli"
             // Shell
             | "bash"
