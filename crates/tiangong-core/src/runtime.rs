@@ -625,25 +625,148 @@ impl RuntimeEngine {
                 }
             }
             ModelCapability::VideoGeneration => {
-                // 视频生成：通过 OpenAI 兼容 API 调用
-                // TODO: 实现视频生成 API 调用
-                ToolResult {
-                    ok: false,
-                    summary: "视频生成功能开发中".to_string(),
-                    stdout: String::new(),
-                    stderr: format!(
-                        "视频生成已配置模型 {}，但 API 调用尚未实现",
-                        resolved.model
-                    ),
-                    exit_code: 1,
-                    execution: Some(ToolExecutionRecord {
-                        tool_name,
-                        args: vec![],
-                        duration_ms: 0,
+                use tiangong_media::openai_video::OpenAIVideoGenerator;
+                use tiangong_media::video::{VideoGenStatus, VideoGenerator};
+
+                let generator = OpenAIVideoGenerator::new(
+                    resolved.api_key.clone(),
+                    resolved.base_url.clone(),
+                    resolved.model.clone(),
+                );
+                let request = tiangong_media::video::VideoGenRequest {
+                    prompt,
+                    duration: None,
+                    resolution: None,
+                    model: Some(resolved.model.clone()),
+                    reference_image: None,
+                };
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        return ToolResult {
+                            ok: false,
+                            summary: format!("运行时初始化失败：{e}"),
+                            stdout: String::new(),
+                            stderr: e.to_string(),
+                            exit_code: 1,
+                            execution: None,
+                        };
+                    }
+                };
+
+                // 提交任务
+                let task = match runtime.block_on(async {
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        generator.generate(request),
+                    )
+                    .await
+                }) {
+                    Ok(Ok(t)) => t,
+                    Ok(Err(e)) => {
+                        let duration_ms = started.elapsed().as_millis() as u64;
+                        return ToolResult {
+                            ok: false,
+                            summary: format!("视频生成提交失败：{e}"),
+                            stdout: String::new(),
+                            stderr: e.to_string(),
+                            exit_code: 1,
+                            execution: Some(ToolExecutionRecord {
+                                tool_name, args: vec![], duration_ms,
+                                ok: false, exit_code: 1,
+                                summary: format!("视频生成提交失败：{e}"),
+                            }),
+                        };
+                    }
+                    Err(_) => {
+                        let duration_ms = started.elapsed().as_millis() as u64;
+                        return ToolResult {
+                            ok: false,
+                            summary: "视频生成提交超时".to_string(),
+                            stdout: String::new(),
+                            stderr: "timeout".to_string(),
+                            exit_code: 1,
+                            execution: Some(ToolExecutionRecord {
+                                tool_name, args: vec![], duration_ms,
+                                ok: false, exit_code: 1,
+                                summary: "视频生成提交超时".to_string(),
+                            }),
+                        };
+                    }
+                };
+
+                // 同步返回的情况
+                if let VideoGenStatus::Completed { video_url, .. } = &task.status {
+                    let duration_ms = started.elapsed().as_millis() as u64;
+                    return ToolResult {
+                        ok: true,
+                        summary: format!("视频生成成功（模型：{}）", resolved.model),
+                        stdout: format!("[视频链接]({})", video_url),
+                        stderr: String::new(),
+                        exit_code: 0,
+                        execution: Some(ToolExecutionRecord {
+                            tool_name, args: vec![], duration_ms,
+                            ok: true, exit_code: 0,
+                            summary: format!("视频生成成功（模型：{}）", resolved.model),
+                        }),
+                    };
+                }
+
+                // 异步轮询（最多 5 分钟）
+                let task_id = task.task_id;
+                let poll_result = runtime.block_on(async {
+                    let deadline =
+                        tokio::time::Instant::now() + tokio::time::Duration::from_secs(300);
+                    loop {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                        if tokio::time::Instant::now() > deadline {
+                            return Err(anyhow::anyhow!("视频生成超时（5分钟）"));
+                        }
+                        match generator.query_status(&task_id).await {
+                            Ok(VideoGenStatus::Completed { video_url, .. }) => {
+                                return Ok(video_url);
+                            }
+                            Ok(VideoGenStatus::Failed { error }) => {
+                                return Err(anyhow::anyhow!("视频生成失败：{error}"));
+                            }
+                            Ok(_) => continue,
+                            Err(e) => {
+                                tracing::warn!(%e, "视频状态查询出错，继续轮询");
+                                continue;
+                            }
+                        }
+                    }
+                });
+
+                let duration_ms = started.elapsed().as_millis() as u64;
+                match poll_result {
+                    Ok(video_url) => ToolResult {
+                        ok: true,
+                        summary: format!("视频生成成功（模型：{}）", resolved.model),
+                        stdout: format!("[视频链接]({})", video_url),
+                        stderr: String::new(),
+                        exit_code: 0,
+                        execution: Some(ToolExecutionRecord {
+                            tool_name, args: vec![], duration_ms,
+                            ok: true, exit_code: 0,
+                            summary: format!("视频生成成功（模型：{}）", resolved.model),
+                        }),
+                    },
+                    Err(e) => ToolResult {
                         ok: false,
+                        summary: format!("视频生成失败：{e}"),
+                        stdout: String::new(),
+                        stderr: e.to_string(),
                         exit_code: 1,
-                        summary: "视频生成功能开发中".to_string(),
-                    }),
+                        execution: Some(ToolExecutionRecord {
+                            tool_name, args: vec![], duration_ms,
+                            ok: false, exit_code: 1,
+                            summary: format!("视频生成失败：{e}"),
+                        }),
+                    },
                 }
             }
             _ => ToolResult {
