@@ -174,6 +174,12 @@ impl RuntimeEngine {
             .collect();
 
         // 注入已配置的多媒体能力为工具
+        tracing::info!(
+            has_image = self.models_config.resolve_for_capability(ModelCapability::ImageGeneration).is_some(),
+            has_video = self.models_config.resolve_for_capability(ModelCapability::VideoGeneration).is_some(),
+            routing_keys = ?self.models_config.routing.keys().collect::<Vec<_>>(),
+            "多媒体能力检查"
+        );
         if self.models_config.resolve_for_capability(ModelCapability::ImageGeneration).is_some() {
             function_tools.push(FunctionToolSpec {
                 name: "generate_image".to_string(),
