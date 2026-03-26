@@ -72,7 +72,13 @@ impl VideoGenerator for OpenAIVideoGenerator {
     }
 
     async fn generate(&self, request: VideoGenRequest) -> Result<VideoGenTask> {
-        let url = format!("{}/v1/video/generations", self.api_base.trim_end_matches('/'));
+        // api_base 通常已包含 /v1，直接拼接 /video/generations
+        let base = self.api_base.trim_end_matches('/');
+        let url = if base.ends_with("/v1") || base.ends_with("/v1/") {
+            format!("{}/video/generations", base.trim_end_matches('/'))
+        } else {
+            format!("{}/v1/video/generations", base)
+        };
 
         let body = VideoGenBody {
             model: request.model.unwrap_or_else(|| self.model.clone()),
@@ -137,11 +143,12 @@ impl VideoGenerator for OpenAIVideoGenerator {
     }
 
     async fn query_status(&self, task_id: &str) -> Result<VideoGenStatus> {
-        let url = format!(
-            "{}/v1/video/generations/{}",
-            self.api_base.trim_end_matches('/'),
-            task_id
-        );
+        let base = self.api_base.trim_end_matches('/');
+        let url = if base.ends_with("/v1") || base.ends_with("/v1/") {
+            format!("{}/video/generations/{}", base.trim_end_matches('/'), task_id)
+        } else {
+            format!("{}/v1/video/generations/{}", base, task_id)
+        };
 
         let resp = self
             .client
