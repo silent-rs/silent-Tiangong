@@ -76,6 +76,7 @@ export interface McpHealthStatus {
   healthy: boolean;
   tool_count: number;
   last_error?: string;
+  server_version?: string;
 }
 
 export interface ServerConfig {

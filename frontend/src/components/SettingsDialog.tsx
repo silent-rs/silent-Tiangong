@@ -783,7 +783,7 @@ function RoutingSection({
 
 function McpSettings() {
   const [servers, setServers] = useState<McpServer[]>([]);
-  const [healthMap, setHealthMap] = useState<Record<string, { healthy: boolean; tool_count: number; last_error?: string }>>({});
+  const [healthMap, setHealthMap] = useState<Record<string, { healthy: boolean; tool_count: number; last_error?: string; server_version?: string }>>({});
   const [isLoading, setIsLoading] = useState(false);
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [newServer, setNewServer] = useState({
@@ -806,7 +806,7 @@ function McpSettings() {
       setServers(data);
       const map: typeof healthMap = {};
       for (const s of health) {
-        map[s.name] = { healthy: s.healthy, tool_count: s.tool_count, last_error: s.last_error };
+        map[s.name] = { healthy: s.healthy, tool_count: s.tool_count, last_error: s.last_error, server_version: s.server_version };
       }
       setHealthMap(map);
     } catch (error) {
@@ -898,6 +898,9 @@ function McpSettings() {
                       <Badge variant={isHealthy ? 'outline' : 'destructive'} className="text-xs">
                         {isHealthy ? `健康 (${health.tool_count} 工具)` : '不可达'}
                       </Badge>
+                    )}
+                    {health?.server_version && (
+                      <Badge variant="outline" className="text-xs">v{health.server_version}</Badge>
                     )}
                   </div>
                   <div className="text-sm text-muted-foreground mt-1 truncate">

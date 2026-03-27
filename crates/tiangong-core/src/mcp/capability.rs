@@ -22,6 +22,8 @@ struct McpServerCapability {
     healthy: bool,
     #[serde(default)]
     last_error: Option<String>,
+    #[serde(default)]
+    server_version: Option<String>,
 }
 
 fn default_healthy() -> bool {
@@ -203,6 +205,7 @@ pub fn mcp_server_health_statuses() -> Vec<McpServerHealthStatus> {
                     healthy: cap.healthy,
                     tool_count: cap.tools.len(),
                     last_error: cap.last_error.clone(),
+                    server_version: cap.server_version.clone(),
                 })
                 .collect()
         })
@@ -215,6 +218,7 @@ pub struct McpServerHealthStatus {
     pub healthy: bool,
     pub tool_count: usize,
     pub last_error: Option<String>,
+    pub server_version: Option<String>,
 }
 
 pub fn build_mcp_tools_system_prompt(max_tools_per_server: usize) -> Option<String> {
@@ -250,10 +254,12 @@ fn probe_server_capability(server: &McpServerConfig, timeout_ms: u64) -> McpServ
     match client.list_tools(server, timeout_ms) {
         Ok(tools) => {
             let tools = dedup_tools(&tools);
+            let server_version = super::client::get_cached_server_version(&server.name);
             McpServerCapability {
                 healthy: true,
                 tools,
                 last_error: None,
+                server_version,
             }
         }
         Err(err) => {
@@ -268,6 +274,7 @@ fn probe_server_capability(server: &McpServerConfig, timeout_ms: u64) -> McpServ
                 healthy: false,
                 tools: Vec::new(),
                 last_error: Some(err_msg),
+                server_version: None,
             }
         }
     }

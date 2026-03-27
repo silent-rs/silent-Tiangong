@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
+use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -115,6 +116,26 @@ pub trait McpClient {
         arguments: Value,
         timeout_ms: u64,
     ) -> Result<String>;
+}
+
+// MCP server 版本信息全局缓存
+static MCP_SERVER_VERSIONS: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
+
+fn server_version_cache() -> &'static RwLock<HashMap<String, String>> {
+    MCP_SERVER_VERSIONS.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn cache_server_version(name: &str, version: &str) {
+    if let Ok(mut guard) = server_version_cache().write() {
+        guard.insert(name.to_string(), version.to_string());
+    }
+}
+
+pub fn get_cached_server_version(name: &str) -> Option<String> {
+    server_version_cache()
+        .read()
+        .ok()
+        .and_then(|guard| guard.get(name).cloned())
 }
 
 #[derive(Debug, Clone, Default)]
@@ -414,6 +435,11 @@ async fn run_stdio_mcp_request_async(
         .await
         .with_context(|| format!("MCP握手失败：server={} command={}", server.name, command))?;
 
+    // 缓存 server 版本信息
+    if let Some(info) = service.peer_info() {
+        cache_server_version(&server.name, &info.server_info.version);
+    }
+
     let response = dispatch_mcp_request(service.peer(), method, params).await;
     let _ = service.cancel().await;
     response
@@ -449,6 +475,10 @@ async fn run_http_mcp_request_async(
             server.name, endpoint
         )
     })?;
+
+    if let Some(info) = service.peer_info() {
+        cache_server_version(&server.name, &info.server_info.version);
+    }
 
     let response = dispatch_mcp_request(service.peer(), method, params).await;
     let _ = service.cancel().await;
