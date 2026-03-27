@@ -372,8 +372,17 @@ fn validate_shell_script(script: &str, base_dir: &Path) -> Result<()> {
         if sub.is_empty() {
             continue;
         }
-        // 跳过管道后面的部分（管道右侧通常是过滤/处理命令，不涉及路径）
+        // 跳过注释行和 shebang
+        if sub.starts_with('#') {
+            continue;
+        }
+        // 跳过管道后面的部分
         let sub = sub.split('|').next().unwrap_or(sub).trim();
+        if sub.is_empty() {
+            continue;
+        }
+        // 去掉末尾的后台符 &
+        let sub = sub.trim_end_matches('&').trim();
         if sub.is_empty() {
             continue;
         }
@@ -425,7 +434,7 @@ fn validate_shell_script(script: &str, base_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// 按 &&、||、; 分割 shell 命令
+/// 按 &&、||、;、换行 分割 shell 命令
 fn split_shell_commands(script: &str) -> Vec<String> {
     let mut commands = Vec::new();
     let mut current = String::new();
@@ -453,7 +462,7 @@ fn split_shell_commands(script: &str) -> Vec<String> {
                 commands.push(current.clone());
                 current.clear();
             }
-            ';' if !in_single_quote && !in_double_quote => {
+            ';' | '\n' if !in_single_quote && !in_double_quote => {
                 commands.push(current.clone());
                 current.clear();
             }
@@ -481,7 +490,8 @@ fn extract_shell_head_command(script: &str) -> Option<&str> {
 
 fn is_allowed_shell_head_command(cmd: &str) -> bool {
     // shell 脚本首命令白名单（与 is_allowed_command 保持一致）
-    is_allowed_command(cmd) || matches!(cmd, "cd" | "curl" | "wget" | "tar" | "unzip" | "test" | "[")
+    is_allowed_command(cmd)
+        || matches!(cmd, "cd" | "curl" | "wget" | "tar" | "unzip" | "test" | "[" | "nohup" | "screen" | "tmux" | "for" | "while" | "if")
 }
 
 pub(super) fn derive_shell_exec_args(
