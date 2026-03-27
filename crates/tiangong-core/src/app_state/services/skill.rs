@@ -173,6 +173,15 @@ impl AppSkillService {
                     }
                 }
             }
+            // 清理旧版本目录
+            let old_dir = std::path::Path::new(&existing.source.value);
+            if old_dir.exists() {
+                let _ = fs::remove_dir_all(old_dir);
+                // 如果父目录（skill id 目录）为空也清理
+                if let Some(parent) = old_dir.parent() {
+                    let _ = fs::remove_dir(parent); // 只在空目录时成功
+                }
+            }
             // 移除旧版本注册信息（允许重新安装/更新）
             state
                 .store

@@ -1,12 +1,12 @@
 id = "volcengine-video"
 name = "火山方舟视频生成"
-version = "1.0.0"
+version = "1.1.0"
 entry = "SKILL.md"
 
 [source]
 type = "local"
 
 [requires]
-env = ["ARK_API_KEY", "ARK_BASE_URL"]
+env = ["ARK_API_KEY", "ARK_BASE_URL", "ARK_MODEL"]
 
 [permissions]
