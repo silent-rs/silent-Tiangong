@@ -40,16 +40,14 @@ export function MessageList() {
   // Markdown 渲染器（用于非流式消息）
   const MarkdownComponents = {
     pre({ children }: any) {
-      // ReactMarkdown v9: 代码块渲染为 <pre><code className="language-xxx">
-      // 直接透传 children（已经是 <code> 元素，由下面的 code 组件处理）
-      return <>{children}</>;
-    },
-    code({ className, children, ...props }: any) {
-      const match = /language-(\w+)/.exec(className || '');
-      // 判断是否为代码块：有语言标记，或内容含换行（行内代码不会有换行）
-      const isBlock = match || String(children).includes('\n');
-      return isBlock ? (
-        (SyntaxHighlighter as any)(
+      // ReactMarkdown v9: 代码块渲染为 <pre><code>
+      // 提取 code 元素的 props 直接渲染 SyntaxHighlighter
+      const codeEl = children?.props ? children : null;
+      if (codeEl) {
+        const className = codeEl.props?.className || '';
+        const match = /language-(\w+)/.exec(className);
+        const codeContent = String(codeEl.props?.children || '').replace(/\n$/, '');
+        return (SyntaxHighlighter as any)(
           {
             style: vscDarkPlus,
             language: match?.[1] || 'text',
@@ -60,13 +58,16 @@ export function MessageList() {
               borderRadius: '6px',
               margin: '6px 0',
             },
-            codeTagProps: {
-              style: {},
-            },
+            codeTagProps: { style: {} },
           },
-          String(children).replace(/\n$/, '')
-        )
-      ) : (
+          codeContent,
+        );
+      }
+      return <pre>{children}</pre>;
+    },
+    code({ className, children, ...props }: any) {
+      // 行内代码
+      return (
         <code
           className="bg-muted text-foreground px-1 py-0.5 rounded text-xs font-mono"
           {...props}
