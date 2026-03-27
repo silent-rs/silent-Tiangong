@@ -138,7 +138,7 @@ impl RuntimeEngine {
             let p = std::path::PathBuf::from(&session.cwd);
             if p.is_dir() { Some(p) } else { None }
         };
-        crate::tool::set_session_cwd(session_cwd);
+        crate::tool::set_session_cwd(session_cwd.clone());
 
         let mut accumulated_usage = TokenUsage::default();
 
@@ -208,6 +208,71 @@ impl RuntimeEngine {
                 }),
             });
         }
+
+        // 后台任务管理工具
+        function_tools.push(FunctionToolSpec {
+            name: "spawn_task".to_string(),
+            description: "在后台启动长时间运行的命令，立即返回 task_id。适用于编译、下载、视频生成等耗时操作。".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "任务名称（用于显示）" },
+                    "cmd": { "type": "string", "description": "命令名" },
+                    "args": { "type": "array", "items": { "type": "string" }, "description": "命令参数" },
+                    "cwd": { "type": "string", "description": "工作目录（可选）" }
+                },
+                "required": ["name", "cmd"]
+            }),
+        });
+        function_tools.push(FunctionToolSpec {
+            name: "query_task".to_string(),
+            description: "查询后台任务的状态和输出结果".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "任务 ID" }
+                },
+                "required": ["task_id"]
+            }),
+        });
+        function_tools.push(FunctionToolSpec {
+            name: "list_tasks".to_string(),
+            description: "列出所有后台任务及其状态".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        });
+        function_tools.push(FunctionToolSpec {
+            name: "cancel_task".to_string(),
+            description: "取消一个正在运行的后台任务".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "任务 ID" }
+                },
+                "required": ["task_id"]
+            }),
+        });
+        function_tools.push(FunctionToolSpec {
+            name: "wait_tasks".to_string(),
+            description: "等待多个后台任务全部完成（spawn+join 模式）。适用于先用 spawn_task 启动多个并行任务，然后一次性等待所有结果。".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "要等待的任务 ID 列表"
+                    },
+                    "timeout_ms": {
+                        "type": "integer",
+                        "description": "超时毫秒数，0 表示无限等待（默认 0）"
+                    }
+                },
+                "required": ["task_ids"]
+            }),
+        });
 
         // 构建系统 prompt
         let system_prompt =
@@ -324,7 +389,10 @@ impl RuntimeEngine {
                             let mcp_targets = &mcp_targets;
                             let mcp_config = &self.agent_config.mcp;
                             let name = call.name.clone();
+                            // 捕获会话 CWD，传递到子线程
+                            let thread_cwd = session_cwd.clone();
                             scope.spawn(move || {
+                                crate::tool::set_session_cwd(thread_cwd);
                                 let result = self.execute_tool_call(call, mcp_targets, mcp_config);
                                 (name, result)
                             })
@@ -438,13 +506,17 @@ impl RuntimeEngine {
         })
     }
 
-    /// 执行单个工具调用（本地工具、MCP 工具或多媒体生成）
+    /// 执行单个工具调用（本地工具、MCP 工具、多媒体生成或后台任务）
     fn execute_tool_call(
         &self,
         call: &ModelFunctionCall,
         mcp_targets: &HashMap<String, McpFunctionTarget>,
         mcp_config: &McpConfig,
     ) -> ToolResult {
+        // 后台任务管理
+        if let Some(result) = self.handle_background_task(call) {
+            return result;
+        }
         // Skill 详情查询
         if call.name == "get_skill_detail" {
             return self.handle_get_skill_detail(call);
@@ -510,6 +582,154 @@ impl RuntimeEngine {
                 exit_code: 1,
                 execution: None,
             },
+        }
+    }
+
+    /// 处理后台任务工具调用
+    fn handle_background_task(&self, call: &ModelFunctionCall) -> Option<ToolResult> {
+        use crate::tool::background_task::{task_registry, TaskStatus};
+
+        match call.name.as_str() {
+            "spawn_task" => {
+                let name = call.arguments.get("name").and_then(|v| v.as_str()).unwrap_or("task").to_string();
+                let cmd = call.arguments.get("cmd").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let args: Vec<String> = call.arguments.get("args")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(String::from).collect())
+                    .unwrap_or_default();
+                let cwd = call.arguments.get("cwd").and_then(|v| v.as_str()).map(String::from);
+
+                if cmd.is_empty() {
+                    return Some(ToolResult {
+                        ok: false, summary: "缺少 cmd 参数".to_string(),
+                        stdout: String::new(), stderr: String::new(), exit_code: 1, execution: None,
+                    });
+                }
+
+                let env = self.tool_executor.runtime_env().iter()
+                    .map(|(k, v)| (k.clone(), v.clone())).collect();
+
+                match task_registry().lock() {
+                    Ok(mut reg) => match reg.spawn(name, cmd, args, cwd, env) {
+                        Ok(task_id) => Some(ToolResult {
+                            ok: true,
+                            summary: format!("后台任务已启动，task_id={task_id}"),
+                            stdout: serde_json::json!({"task_id": task_id}).to_string(),
+                            stderr: String::new(), exit_code: 0, execution: None,
+                        }),
+                        Err(e) => Some(ToolResult {
+                            ok: false, summary: format!("启动后台任务失败：{e}"),
+                            stdout: String::new(), stderr: e, exit_code: 1, execution: None,
+                        }),
+                    },
+                    Err(e) => Some(ToolResult {
+                        ok: false, summary: format!("任务注册表锁失败：{e}"),
+                        stdout: String::new(), stderr: e.to_string(), exit_code: 1, execution: None,
+                    }),
+                }
+            }
+            "query_task" => {
+                let task_id = call.arguments.get("task_id").and_then(|v| v.as_str()).unwrap_or_default();
+                match task_registry().lock() {
+                    Ok(mut reg) => match reg.query(task_id) {
+                        Some(info) => {
+                            let status_text = match &info.status {
+                                TaskStatus::Running => "running".to_string(),
+                                TaskStatus::Completed { exit_code } => format!("completed (exit_code={exit_code})"),
+                                TaskStatus::Failed { error } => format!("failed: {error}"),
+                                TaskStatus::Cancelled => "cancelled".to_string(),
+                            };
+                            Some(ToolResult {
+                                ok: true,
+                                summary: format!("任务 {} 状态：{}", info.name, status_text),
+                                stdout: serde_json::to_string_pretty(&info).unwrap_or_default(),
+                                stderr: String::new(), exit_code: 0, execution: None,
+                            })
+                        }
+                        None => Some(ToolResult {
+                            ok: false, summary: format!("未找到任务：{task_id}"),
+                            stdout: String::new(), stderr: String::new(), exit_code: 1, execution: None,
+                        }),
+                    },
+                    Err(e) => Some(ToolResult {
+                        ok: false, summary: e.to_string(),
+                        stdout: String::new(), stderr: String::new(), exit_code: 1, execution: None,
+                    }),
+                }
+            }
+            "list_tasks" => {
+                match task_registry().lock() {
+                    Ok(mut reg) => {
+                        let tasks = reg.list();
+                        Some(ToolResult {
+                            ok: true,
+                            summary: format!("{} 个后台任务", tasks.len()),
+                            stdout: serde_json::to_string_pretty(&tasks).unwrap_or_default(),
+                            stderr: String::new(), exit_code: 0, execution: None,
+                        })
+                    }
+                    Err(e) => Some(ToolResult {
+                        ok: false, summary: e.to_string(),
+                        stdout: String::new(), stderr: String::new(), exit_code: 1, execution: None,
+                    }),
+                }
+            }
+            "cancel_task" => {
+                let task_id = call.arguments.get("task_id").and_then(|v| v.as_str()).unwrap_or_default();
+                match task_registry().lock() {
+                    Ok(mut reg) => match reg.cancel(task_id) {
+                        Some(info) => Some(ToolResult {
+                            ok: true,
+                            summary: format!("任务 {} 已取消", info.name),
+                            stdout: serde_json::to_string_pretty(&info).unwrap_or_default(),
+                            stderr: String::new(), exit_code: 0, execution: None,
+                        }),
+                        None => Some(ToolResult {
+                            ok: false, summary: format!("未找到任务：{task_id}"),
+                            stdout: String::new(), stderr: String::new(), exit_code: 1, execution: None,
+                        }),
+                    },
+                    Err(e) => Some(ToolResult {
+                        ok: false, summary: e.to_string(),
+                        stdout: String::new(), stderr: String::new(), exit_code: 1, execution: None,
+                    }),
+                }
+            }
+            "wait_tasks" => {
+                let task_ids: Vec<String> = call.arguments.get("task_ids")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(String::from).collect())
+                    .unwrap_or_default();
+                let timeout_ms = call.arguments.get("timeout_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+
+                if task_ids.is_empty() {
+                    return Some(ToolResult {
+                        ok: false, summary: "缺少 task_ids 参数".to_string(),
+                        stdout: String::new(), stderr: String::new(), exit_code: 1, execution: None,
+                    });
+                }
+
+                let results = crate::tool::background_task::wait_tasks(task_ids, timeout_ms);
+                let all_ok = results.iter().all(|r| matches!(r.status, TaskStatus::Completed { exit_code } if exit_code == 0));
+                let running_count = results.iter().filter(|r| matches!(r.status, TaskStatus::Running)).count();
+                let summary = if running_count > 0 {
+                    format!("{} 个任务完成，{} 个仍在运行（超时）", results.len() - running_count, running_count)
+                } else {
+                    format!("{} 个任务全部完成", results.len())
+                };
+
+                Some(ToolResult {
+                    ok: all_ok,
+                    summary,
+                    stdout: serde_json::to_string_pretty(&results).unwrap_or_default(),
+                    stderr: String::new(),
+                    exit_code: if all_ok { 0 } else { 1 },
+                    execution: None,
+                })
+            }
+            _ => None, // 不是后台任务工具
         }
     }
 
@@ -796,7 +1016,10 @@ fn build_react_system_prompt(
 5. 不要在回复中包含工具调用的原始痕迹（如 ok=、exit_code= 等元数据）。
 6. 回复使用 Markdown 格式：代码和命令用代码块（```语言 ... ```）包裹，使用标题、列表等结构化排版。
 7. 工具调用失败时必须如实告知用户失败原因，绝对不能虚构成功结果。
-8. 如果已安装的 Skill 能处理用户请求，优先通过 run_command 调用 Skill 脚本。{media_section}{skills_section}
+8. 如果已安装的 Skill 能处理用户请求，优先通过 run_command 调用 Skill 脚本。
+9. 耗时较长的命令（编译、下载、视频生成等）使用 spawn_task 在后台执行。
+10. 多个可并行的耗时任务使用 spawn+join 模式：先多次调用 spawn_task 启动所有任务，再调用 wait_tasks 一次性等待全部完成。
+11. 独立的后台任务（不需要等待结果的）用 spawn_task 启动后直接继续，无需 wait_tasks。{media_section}{skills_section}
 
 用户输入：
 {user_input}"

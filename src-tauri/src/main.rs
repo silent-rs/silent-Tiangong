@@ -19,6 +19,8 @@ fn main() {
             tiangong_app::commands::update_session_title,
             tiangong_app::commands::send_message,
             tiangong_app::commands::cancel_turn,
+            tiangong_app::commands::get_background_tasks,
+            tiangong_app::commands::cancel_background_task,
             tiangong_app::commands::get_run_snapshot,
             tiangong_app::commands::get_input_draft,
             tiangong_app::commands::set_input_draft,

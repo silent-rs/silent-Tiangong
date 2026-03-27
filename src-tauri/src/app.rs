@@ -7,11 +7,17 @@ pub struct TiangongApp {
     pub state: Mutex<tiangong_core::app_state::TiangongState>,
 }
 
-impl TiangongApp {
-    pub fn new() -> Self {
+impl Default for TiangongApp {
+    fn default() -> Self {
         Self {
             state: Mutex::new(tiangong_core::app_state::TiangongState::load_or_default()),
         }
+    }
+}
+
+impl TiangongApp {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// 获取状态的可变引用

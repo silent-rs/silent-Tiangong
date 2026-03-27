@@ -87,7 +87,7 @@ pub fn create_session(state: State<TiangongApp>) -> Result<Session, String> {
         core_state
             .active_session()
             .map(Session::from_core)
-            .ok_or_else(|| anyhow::anyhow!("Failed to create session").into())
+            .ok_or_else(|| anyhow::anyhow!("Failed to create session"))
     })
 }
 
@@ -201,6 +201,27 @@ pub fn send_message(
 #[tauri::command]
 pub fn cancel_turn(state: State<TiangongApp>) -> Result<bool, String> {
     state.with_state(|core_state| core_state.cancel_pending_turn())
+}
+
+/// 获取后台任务列表
+#[tauri::command]
+pub fn get_background_tasks() -> Result<Vec<serde_json::Value>, String> {
+    let reg = tiangong_core::tool::background_task::task_registry();
+    let mut guard = reg.lock().map_err(|e| e.to_string())?;
+    let tasks = guard.list();
+    tasks
+        .into_iter()
+        .map(|t| serde_json::to_value(t).map_err(|e| e.to_string()))
+        .collect()
+}
+
+/// 取消后台任务
+#[tauri::command]
+pub fn cancel_background_task(task_id: String) -> Result<(), String> {
+    let reg = tiangong_core::tool::background_task::task_registry();
+    let mut guard = reg.lock().map_err(|e| e.to_string())?;
+    guard.cancel(&task_id);
+    Ok(())
 }
 
 /// 获取运行状态快照

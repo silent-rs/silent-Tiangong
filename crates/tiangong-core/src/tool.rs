@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent_config::AgentConfig;
 
+pub mod background_task;
 mod common;
 pub use common::set_session_cwd;
 mod list_dir;
