@@ -9,6 +9,8 @@ use crate::agents::execution_mcp_agent::{
     resolve_mcp_tool_call_from_run_command,
 };
 use crate::agents::execution_tool_agent::build_tool_call_from_function;
+use crate::context::compressor::compress_loop_messages;
+use crate::context::organizer::ContextOrganizer;
 use crate::model::{
     ModelClient, ModelFunctionCall, ModelRequest, ModelStreamChunk, SingleProviderClient, TokenUsage,
 };
@@ -142,27 +144,10 @@ impl RuntimeEngine {
 
         let mut accumulated_usage = TokenUsage::default();
 
-        // 构建对话上下文：过滤掉执行阶段的 System 消息，保留纯对话
-        let conversation_context: Vec<_> = session
-            .messages
-            .iter()
-            .filter(|msg| {
-                if msg.role != MessageRole::System {
-                    return true;
-                }
-                let c = msg.content.as_str();
-                !(c.starts_with("工具执行")
-                    || c.starts_with("LLM 输出")
-                    || c.starts_with("Plan 执行总结")
-                    || c.starts_with("检测到")
-                    || c.starts_with("执行已取消"))
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        let context_start = conversation_context
-            .len()
-            .saturating_sub(self.context_limit);
-        let context = conversation_context[context_start..].to_vec();
+        // 构建对话上下文：使用 ContextOrganizer 自动过滤、压缩
+        let organizer = ContextOrganizer::new(self.context_limit)
+            .with_keep_recent_turns(6);
+        let context = organizer.build_context(session, Some(&self.client))?;
 
         // 准备工具定义
         let (function_tools, mcp_targets) =
@@ -444,6 +429,22 @@ impl RuntimeEngine {
                 reasoning_content: String::new(),
                 created_at: now_text(),
             });
+
+            // 基于 API 返回的精确 prompt_tokens 判断是否需要压缩 loop_messages
+            // 当本轮输入 token 超过 context_limit 的 70% 时，压缩早期轮次
+            let prompt_tokens = response.usage.prompt_tokens;
+            if organizer.needs_compression(prompt_tokens) {
+                tracing::info!(
+                    prompt_tokens,
+                    threshold = organizer.token_threshold(),
+                    "prompt_tokens 超过阈值，压缩 loop_messages"
+                );
+                // 保留最近 3 轮完整信息
+                match compress_loop_messages(&loop_messages, 3, &self.client) {
+                    Ok(compressed) => loop_messages = compressed,
+                    Err(err) => tracing::warn!("loop_messages 压缩失败：{err}"),
+                }
+            }
         }
 
         // 如果循环结束仍未产生最终回复（达到 MAX_REACT_ROUNDS），做最后一次无工具调用

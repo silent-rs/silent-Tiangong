@@ -142,9 +142,15 @@
 - [x] poll_pending_turn 修复（消息回复链路）
 - [x] 完成后状态重置为 idle
 
-### D. 多媒体能力集成到执行引擎（进行中）
+### D. 上下文摘要压缩（已完成 ✅）
+- [x] ContextCompressor 重写：LLM 摘要优先，滑动窗口回退
+- [x] ContextOrganizer 集成到 RuntimeEngine，替代硬编码滑动窗口
+- [x] ReAct 循环内 loop_messages 累积压缩（基于 API 返回的精确 prompt_tokens 触发）
+- [x] 双重 token 判断：首次用字符估算预判，后续用 API 精确 prompt_tokens 驱动
 
-#### D1. 图片生成集成
+### E. 多媒体能力集成到执行引擎（进行中）
+
+#### E1. 图片生成集成
 - [ ] RuntimeEngine 从 ModelsConfig routing 初始化 MediaAgent
   - 读取 `routing[ImageGeneration]` 解析 provider + model
   - 构建 `OpenAiImageBackend` 并注入 `MediaAgent`
@@ -154,16 +160,16 @@
 - [ ] 工具执行：调用 `MediaAgent.generate_image()` 并返回图片 URL/base64
 - [ ] 前端消息中渲染图片（识别 URL 或 base64 并显示 `<img>`）
 
-#### D2. 语音合成/识别集成
+#### E2. 语音合成/识别集成
 - [ ] 读取 `routing[Tts]` 初始化 TTS 后端
 - [ ] 读取 `routing[Stt]` 初始化 STT 后端
 - [ ] 注册 `text_to_speech` / `speech_to_text` 为内置工具
 
-#### D3. 视频生成集成
+#### E3. 视频生成集成
 - [ ] 读取 `routing[VideoGeneration]` 初始化视频生成后端
 - [ ] 注册 `generate_video` 为内置工具（异步任务模式）
 
-### E. 验证
+### F. 验证
 - [ ] `cargo check --workspace` 通过
 - [ ] `cargo clippy --workspace --all-targets --tests --benches -- -D warnings` 通过
 - [ ] `cargo nextest run --workspace --no-tests pass` 通过
