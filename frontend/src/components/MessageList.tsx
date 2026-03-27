@@ -7,7 +7,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { TypingMessage } from './TypingMessage';
 import { ThinkingBlock } from './ThinkingBlock';
-import { parseInlineThinking } from '@/utils/parseThinking';
+
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
@@ -207,31 +207,14 @@ export function MessageList() {
                           />
                         ) : (
                           <div>
-                            {(() => {
-                              // thinking 和内容独立处理，避免互相影响
-                              let thinkingContent = message.reasoning_content || '';
-                              let displayContent = message.content;
-
-                              // 仅当 reasoning_content 为空时才解析内联 <think> 标签
-                              if (!thinkingContent && displayContent.includes('<think>')) {
-                                const parsed = parseInlineThinking(displayContent);
-                                thinkingContent = parsed.thinking;
-                                displayContent = parsed.content;
-                              }
-
-                              return (
-                                <>
-                                  {thinkingContent && (
-                                    <ThinkingBlock content={thinkingContent} defaultExpanded={false} />
-                                  )}
-                                  <div className="prose prose-sm max-w-none text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
-                                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={MarkdownComponents as any}>
-                                      {displayContent}
-                                    </ReactMarkdown>
-                                  </div>
-                                </>
-                              );
-                            })()}
+                            {message.reasoning_content && (
+                              <ThinkingBlock content={message.reasoning_content} defaultExpanded={false} />
+                            )}
+                            <div className="prose prose-sm max-w-none text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
+                              <ReactMarkdown remarkPlugins={[remarkGfm]} components={MarkdownComponents as any}>
+                                {message.content}
+                              </ReactMarkdown>
+                            </div>
                           </div>
                         )}
                       </>

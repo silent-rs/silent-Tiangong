@@ -6,7 +6,6 @@ import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import type { ReactNode } from 'react';
 
 import { ThinkingBlock } from './ThinkingBlock';
-import { parseInlineThinking } from '@/utils/parseThinking';
 
 interface TypingMessageProps {
   content: string;
@@ -193,20 +192,15 @@ export function TypingMessage({ content, reasoningContent, speed = 300, onComple
     },
   };
 
-  const parsed = parseInlineThinking(displayedContent);
-  const thinkingContent = reasoningContent || parsed.thinking;
-
   return (
     <div>
-      {/* 思考过程 - 实时显示在顶部 */}
-      {thinkingContent && (
-        <ThinkingBlock content={thinkingContent} defaultExpanded={false} />
+      {reasoningContent && (
+        <ThinkingBlock content={reasoningContent} defaultExpanded={false} />
       )}
 
-      {/* 正常输出 - 打字机效果 */}
       <div className="prose prose-invert prose-sm max-w-none text-[13px]">
         <ReactMarkdown remarkPlugins={[remarkGfm]} components={MarkdownComponents as any}>
-          {parsed.content}
+          {displayedContent}
         </ReactMarkdown>
         {!isComplete && (
           <span className="inline-block w-2 h-4 bg-[#10A37F] ml-1 animate-pulse" />
