@@ -17,7 +17,7 @@ import {
 const appWindow = getCurrentWindow();
 
 export function StatusPanel() {
-  const { runStatus, activeSessionId, isDraft, sessionRunStatuses, sessions, loadSessions, createSession } = useStore();
+  const { runStatus, runSummary, activeSessionId, isDraft, sessionRunStatuses, sessions, loadSessions, createSession } = useStore();
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
@@ -104,6 +104,11 @@ export function StatusPanel() {
     switch (currentRunStatus) {
       case 'planning':
       case 'executing':
+        // 显示具体执行内容（如"正在执行：pipx run ..."）
+        if (runSummary && runSummary !== '正在处理') {
+          const truncated = runSummary.length > 40 ? runSummary.slice(0, 40) + '...' : runSummary;
+          return truncated;
+        }
         return '处理中';
       case 'completed':
         return '已完成';

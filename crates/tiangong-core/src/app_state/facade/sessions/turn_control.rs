@@ -142,7 +142,6 @@ impl TiangongState {
                         self.mark_pending_turn_executing(&session_id, &plan);
                     }
                     TurnEvent::LlmOutput(output) => {
-                        // 实时累加 token 用量到 RunSnapshot，使状态面板能展示执行中的消耗
                         if output.usage.total_tokens > 0 {
                             let run = &mut self.store.runtime.run;
                             match run.last_usage.as_mut() {
@@ -150,7 +149,15 @@ impl TiangongState {
                                 None => run.last_usage = Some(output.usage.clone()),
                             }
                         }
+                        if !output.tool_calls.is_empty() {
+                            self.store.runtime.run.summary =
+                                format!("正在执行：{}", output.tool_calls.join(", "));
+                        }
                         self.append_pending_turn_llm_output(&session_id, &output);
+                    }
+                    TurnEvent::ToolStarted { name, summary } => {
+                        self.store.runtime.run.summary =
+                            format!("正在执行：{name} - {summary}");
                     }
                     TurnEvent::ToolExecution(result) => {
                         self.append_pending_turn_tool_execution(&session_id, &result);
@@ -222,7 +229,16 @@ impl TiangongState {
                             None => run.last_usage = Some(output.usage.clone()),
                         }
                     }
+                    // 有工具调用时更新 summary 显示即将执行的工具
+                    if !output.tool_calls.is_empty() {
+                        self.store.runtime.run.summary =
+                            format!("正在执行：{}", output.tool_calls.join(", "));
+                    }
                     self.append_pending_turn_llm_output(session_id, &output);
+                }
+                TurnEvent::ToolStarted { name, summary } => {
+                    self.store.runtime.run.summary =
+                        format!("正在执行：{name} - {summary}");
                 }
                 TurnEvent::ToolExecution(result) => {
                     self.append_pending_turn_tool_execution(session_id, &result);

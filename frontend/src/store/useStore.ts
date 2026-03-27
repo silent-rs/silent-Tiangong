@@ -7,6 +7,7 @@ interface AppState {
   activeSessionId: string | null;
   messages: Message[];
   runStatus: string;
+  runSummary: string;
   currentPlan: TaskPlan | undefined;
   inputContent: string;
   mcpServers: McpServer[] | null;
@@ -56,6 +57,7 @@ export const useStore = create<AppState>((set, get) => ({
   activeSessionId: null as string | null,
   messages: [],
   runStatus: 'idle',
+  runSummary: '',
   currentPlan: undefined,
   inputContent: '',
   mcpServers: null,
@@ -297,7 +299,7 @@ export const useStore = create<AppState>((set, get) => ({
     const effectiveStatus = (prevStatus === 'idle' && !prevSending && snapshotStatus !== 'idle')
       ? 'idle'
       : snapshotStatus;
-    set({ runStatus: effectiveStatus });
+    set({ runStatus: effectiveStatus, runSummary: snapshot.summary || '' });
 
     // 草稿模式或不是当前查看的会话 → 不更新消息/流式内容
     if (isDraft || (snapshot.last_session_id && snapshot.last_session_id !== activeSessionId)) {

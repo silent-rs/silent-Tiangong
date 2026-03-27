@@ -23,6 +23,7 @@ export interface Message {
 
 export interface RunSnapshot {
   status: string;
+  summary?: string;
   last_session_id?: string;
   current_plan?: TaskPlan;
   messages: Message[];
