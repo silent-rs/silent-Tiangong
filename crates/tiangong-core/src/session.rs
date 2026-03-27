@@ -31,6 +31,9 @@ pub struct Session {
     pub task_records: Vec<SessionTaskRecord>,
     #[serde(default)]
     pub task_plans: Vec<SessionTaskPlan>,
+    /// 会话级工作目录，工具执行时以此为根目录
+    #[serde(default)]
+    pub cwd: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -99,12 +102,16 @@ pub struct SessionTaskPlan {
 impl Session {
     pub fn new(title: impl Into<String>) -> Self {
         let now = now_text();
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
         Self {
             id: new_id(),
             title: title.into(),
             messages: Vec::new(),
             task_records: Vec::new(),
             task_plans: Vec::new(),
+            cwd,
             created_at: now.clone(),
             updated_at: now,
         }

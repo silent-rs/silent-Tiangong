@@ -32,6 +32,9 @@ pub(in crate::app_state) struct LoadedState {
 pub(in crate::app_state) enum TurnEvent {
     PlanReady(TaskPlan),
     LlmOutput(LlmOutputRecord),
+    /// 工具开始执行（用于前端显示正在执行的命令）
+    #[allow(dead_code)]
+    ToolStarted { name: String, summary: String },
     ToolExecution(ToolResult),
     PlanExecutionSummary(String),
     /// 阶段性流式 thinking，直接追加到对应 stage 的系统消息中

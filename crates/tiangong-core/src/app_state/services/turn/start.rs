@@ -67,8 +67,8 @@ impl AppTurnService {
         );
 
         state.store.runtime.run = RunSnapshot {
-            status: RunStatus::Planning,
-            summary: "正在生成执行计划".to_string(),
+            status: RunStatus::Executing,
+            summary: "正在处理".to_string(),
             last_session_id: Some(session_id.clone()),
             last_task_id: Some(task_id.clone()),
             last_duration_ms: None,
@@ -88,47 +88,93 @@ impl AppTurnService {
         let (tx, rx) = mpsc::channel::<TurnEvent>();
 
         thread::spawn(move || {
-            let chunk_tx = tx.clone();
-            let plan_tx = tx.clone();
-            let llm_tx = tx.clone();
-            let tool_tx = tx.clone();
-            let plan_summary_tx = tx.clone();
-            let stage_thinking_tx = tx.clone();
-            let result = runtime.execute_turn_with_streaming(
-                &session_snapshot,
-                &worker_input,
-                |plan| {
-                    let _ = plan_tx.send(TurnEvent::PlanReady(plan.clone()));
-                },
-                |delta| {
-                    let _ = chunk_tx.send(TurnEvent::Chunk(delta.clone()));
-                },
-                |output| {
-                    let _ = llm_tx.send(TurnEvent::LlmOutput(output.clone()));
-                },
-                |tool_result| {
-                    let _ = tool_tx.send(TurnEvent::ToolExecution(tool_result.clone()));
-                },
-                |summary| {
-                    let _ =
-                        plan_summary_tx.send(TurnEvent::PlanExecutionSummary(summary.to_string()));
-                },
-                |stage: &str, delta: &ModelStreamChunk| {
-                    let _ = stage_thinking_tx.send(TurnEvent::StageThinking {
-                        stage: stage.to_string(),
-                        delta: delta.clone(),
-                    });
-                },
-            );
+            const MAX_RETRIES: usize = 3;
+            let mut attempt = 0;
 
-            match result {
-                Ok(exec) => {
-                    let _ = tx.send(TurnEvent::Completed(Box::new(exec)));
-                }
-                Err(err) => {
-                    let _ = tx.send(TurnEvent::Failed(RuntimeEngine::fallback_error_message(
-                        &err,
-                    )));
+            loop {
+                attempt += 1;
+                let chunk_tx = tx.clone();
+                let plan_tx = tx.clone();
+                let llm_tx = tx.clone();
+                let tool_tx = tx.clone();
+                let plan_summary_tx = tx.clone();
+                let stage_thinking_tx = tx.clone();
+
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    runtime.execute_turn_with_streaming(
+                        &session_snapshot,
+                        &worker_input,
+                        |plan| {
+                            let _ = plan_tx.send(TurnEvent::PlanReady(plan.clone()));
+                        },
+                        |delta| {
+                            let _ = chunk_tx.send(TurnEvent::Chunk(delta.clone()));
+                        },
+                        |output| {
+                            let _ = llm_tx.send(TurnEvent::LlmOutput(output.clone()));
+                        },
+                        |tool_result| {
+                            let _ = tool_tx.send(TurnEvent::ToolExecution(tool_result.clone()));
+                        },
+                        |summary| {
+                            let _ = plan_summary_tx
+                                .send(TurnEvent::PlanExecutionSummary(summary.to_string()));
+                        },
+                        |stage: &str, delta: &ModelStreamChunk| {
+                            let _ = stage_thinking_tx.send(TurnEvent::StageThinking {
+                                stage: stage.to_string(),
+                                delta: delta.clone(),
+                            });
+                        },
+                    )
+                }));
+
+                match outcome {
+                    Ok(Ok(exec)) => {
+                        let _ = tx.send(TurnEvent::Completed(Box::new(exec)));
+                        break;
+                    }
+                    Ok(Err(err)) => {
+                        let msg = RuntimeEngine::fallback_error_message(&err);
+                        if attempt >= MAX_RETRIES {
+                            let _ = tx.send(TurnEvent::Failed(format!(
+                                "{msg}（已重试 {MAX_RETRIES} 次）"
+                            )));
+                            break;
+                        }
+                        // 通知前端正在重试（作为系统消息）
+                        let _ = tx.send(TurnEvent::LlmOutput(crate::runtime::LlmOutputRecord {
+                            stage: format!("retry-{attempt}"),
+                            content: format!("执行出错：{msg}，正在重试（第 {attempt}/{MAX_RETRIES} 次）..."),
+                            reasoning_content: String::new(),
+                            tool_calls: Vec::new(),
+                            usage: crate::model::TokenUsage::default(),
+                        }));
+                        thread::sleep(std::time::Duration::from_secs(2));
+                    }
+                    Err(panic_err) => {
+                        let reason = if let Some(s) = panic_err.downcast_ref::<String>() {
+                            s.clone()
+                        } else if let Some(s) = panic_err.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else {
+                            "未知原因".to_string()
+                        };
+                        if attempt >= MAX_RETRIES {
+                            let _ = tx.send(TurnEvent::Failed(format!(
+                                "内部错误：{reason}（已重试 {MAX_RETRIES} 次）"
+                            )));
+                            break;
+                        }
+                        let _ = tx.send(TurnEvent::LlmOutput(crate::runtime::LlmOutputRecord {
+                            stage: format!("retry-{attempt}"),
+                            content: format!("内部错误：{reason}，正在重试（第 {attempt}/{MAX_RETRIES} 次）..."),
+                            reasoning_content: String::new(),
+                            tool_calls: Vec::new(),
+                            usage: crate::model::TokenUsage::default(),
+                        }));
+                        thread::sleep(std::time::Duration::from_secs(2));
+                    }
                 }
             }
         });

@@ -145,7 +145,7 @@ impl AppTurnService {
                     output.reasoning_content.clone(),
                 );
             }
-            let _ = state.persist_session_and_app(&sid);
+            // 不在中间事件持久化，减少文件 I/O，完成时统一持久化
         }
     }
 
@@ -173,7 +173,7 @@ impl AppTurnService {
             .find(|session| session.id == sid)
         {
             session.append_message(MessageRole::System, format_tool_trace_message(result));
-            let _ = state.persist_session_and_app(&sid);
+            // 不在中间事件持久化，减少文件 I/O
         }
     }
 
@@ -205,7 +205,6 @@ impl AppTurnService {
             .find(|session| session.id == sid)
         {
             session.append_message(MessageRole::System, format!("Plan 执行总结\n{summary}"));
-            let _ = state.persist_session_and_app(&sid);
         }
     }
 

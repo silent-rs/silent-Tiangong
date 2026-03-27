@@ -1,18 +1,33 @@
-import { useStore } from '@/store/useStore';
-import { ScrollArea } from './ui/scroll-area';
-import { User, Bot, Loader2, ChevronRight, ChevronDown, Terminal, Cpu, FileText } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { TypingMessage } from './TypingMessage';
-import { ThinkingBlock } from './ThinkingBlock';
-import { parseInlineThinking } from '@/utils/parseThinking';
-import { useEffect, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
+import { useStore } from "@/store/useStore";
+import { ScrollArea } from "./ui/scroll-area";
+import {
+  User,
+  Bot,
+  Loader2,
+  ChevronRight,
+  ChevronDown,
+  Terminal,
+  Cpu,
+  FileText,
+} from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { TypingMessage } from "./TypingMessage";
+import { ThinkingBlock } from "./ThinkingBlock";
+
+import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 
 export function MessageList() {
-  const { messages, runStatus, streamingMessageId, streamingContent, streamingReasoningContent } = useStore();
+  const {
+    messages,
+    runStatus,
+    streamingMessageId,
+    streamingContent,
+    streamingReasoningContent,
+  } = useStore();
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevMessagesLengthRef = useRef(0);
   const prevStreamingIdRef = useRef<string | null>(null);
@@ -27,7 +42,7 @@ export function MessageList() {
     if (shouldScroll) {
       // 使用 setTimeout 确保在 DOM 更新后滚动
       setTimeout(() => {
-        scrollRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        scrollRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
       }, 100);
     }
 
@@ -35,57 +50,79 @@ export function MessageList() {
     prevStreamingIdRef.current = streamingMessageId;
   }, [messages.length, streamingMessageId]);
 
-  const isThinking = runStatus !== 'idle';
+  const isThinking = runStatus !== "idle";
 
   // Markdown 渲染器（用于非流式消息）
   const MarkdownComponents = {
-    code({ className, children, ...props }: any) {
-      const match = /language-(\w+)/.exec(className || '');
-      const hasLanguage = match && match[1];
-      return hasLanguage ? (
-        (SyntaxHighlighter as any)(
-          {
-            style: vscDarkPlus,
-            language: match[1],
-            PreTag: "div",
-            className: "rounded-md text-sm !bg-background border border-border",
-            customStyle: {
-              padding: '16px',
-              borderRadius: '8px',
-              margin: '8px 0',
-            },
-            codeTagProps: {
-              style: {},
-            },
-          },
-          String(children).replace(/\n$/, '')
-        )
+    pre({ children, ...rest }: any) {
+      return (
+        <pre
+          className="rounded-md text-xs !bg-background border border-border p-3 my-1.5 overflow-x-auto"
+          {...rest}
+        >
+          {children}
+        </pre>
+      );
+    },
+    code({ className, children, node, ...rest }: any) {
+      const match = /language-(\w+)/.exec(className || "");
+      // 判断是否是代码块：有语言标记，或者父节点是 pre
+      const isBlock = match || node?.parentNode?.tagName === "pre";
+      const CodeHighlighter = SyntaxHighlighter as any;
+      return isBlock ? (
+        <CodeHighlighter
+          style={vscDarkPlus}
+          language={match?.[1] || "text"}
+          PreTag="div"
+          className="rounded-md text-xs !bg-background"
+          customStyle={{ padding: "0", margin: "0" }}
+          codeTagProps={{ style: {} }}
+        >
+          {String(children).replace(/\n$/, "")}
+        </CodeHighlighter>
       ) : (
         <code
-          className="bg-muted text-foreground px-1.5 py-0.5 rounded text-sm font-mono"
-          {...props}
+          className="bg-muted text-foreground px-1 py-0.5 rounded text-xs font-mono"
+          {...rest}
         >
           {children}
         </code>
       );
     },
     p({ children }: { children: ReactNode }) {
-      return <p className="mb-3 last:mb-0 leading-7">{children}</p>;
+      return <p className="mb-2 last:mb-0 leading-6">{children}</p>;
     },
     ul({ children }: { children: ReactNode }) {
-      return <ul className="list-disc list-inside mb-3 space-y-1.5">{children}</ul>;
+      return (
+        <ul className="list-disc pl-5 mb-2 space-y-1 [&_p]:mb-0 [&_p]:inline">
+          {children}
+        </ul>
+      );
     },
     ol({ children }: { children: ReactNode }) {
-      return <ol className="list-decimal list-inside mb-3 space-y-1.5">{children}</ol>;
+      return (
+        <ol className="list-decimal pl-5 mb-2 space-y-1 [&_p]:mb-0 [&_p]:inline">
+          {children}
+        </ol>
+      );
+    },
+    li({ children }: { children: ReactNode }) {
+      return <li className="leading-6">{children}</li>;
     },
     h1({ children }: { children: ReactNode }) {
-      return <h1 className="text-xl font-bold mb-4 mt-6 first:mt-0">{children}</h1>;
+      return (
+        <h1 className="text-lg font-bold mb-3 mt-5 first:mt-0">{children}</h1>
+      );
     },
     h2({ children }: { children: ReactNode }) {
-      return <h2 className="text-lg font-bold mb-3 mt-5 first:mt-0">{children}</h2>;
+      return (
+        <h2 className="text-base font-bold mb-2 mt-4 first:mt-0">{children}</h2>
+      );
     },
     h3({ children }: { children: ReactNode }) {
-      return <h3 className="text-base font-bold mb-2 mt-4 first:mt-0">{children}</h3>;
+      return (
+        <h3 className="text-sm font-bold mb-2 mt-3 first:mt-0">{children}</h3>
+      );
     },
     blockquote({ children }: { children: ReactNode }) {
       return (
@@ -122,7 +159,11 @@ export function MessageList() {
       return <thead className="bg-muted/50">{children}</thead>;
     },
     th({ children }: { children: ReactNode }) {
-      return <th className="border border-border px-3 py-1.5 text-left font-semibold">{children}</th>;
+      return (
+        <th className="border border-border px-3 py-1.5 text-left font-semibold">
+          {children}
+        </th>
+      );
     },
     td({ children }: { children: ReactNode }) {
       return <td className="border border-border px-3 py-1.5">{children}</td>;
@@ -138,26 +179,39 @@ export function MessageList() {
               <div className="w-16 h-16 rounded-full bg-primary flex items-center justify-center mb-4">
                 <Bot className="w-8 h-8 text-primary-foreground" />
               </div>
-              <h2 className="text-xl font-medium text-foreground mb-2">欢迎使用天工</h2>
-              <p className="text-muted-foreground text-sm">我可以帮助您完成各种编程任务</p>
+              <h2 className="text-xl font-medium text-foreground mb-2">
+                欢迎使用天工
+              </h2>
+              <p className="text-muted-foreground text-sm">
+                我可以帮助您完成各种编程任务
+              </p>
             </div>
           ) : (
-            groupMessages(messages).map((group) => {
-              // 系统消息组：折叠展示
-              if (group.type === 'system') {
-                return <SystemMessageGroup key={group.key} messages={group.messages} />;
+            groupMessages(messages).map((group, groupIdx, allGroups) => {
+              // 系统消息组
+              if (group.type === "system") {
+                // 最后一组系统消息且正在执行时默认展开
+                const isLastGroup = groupIdx === allGroups.length - 1;
+                const isActive = isLastGroup && isThinking;
+                return (
+                  <SystemMessageGroup
+                    key={group.key}
+                    messages={group.messages}
+                    defaultExpanded={isActive}
+                  />
+                );
               }
 
               const message = group.messages[0];
               const isStreaming = message.id === streamingMessageId;
-              const isUser = message.role === 'User';
-              const isAssistant = message.role === 'Assistant';
+              const isUser = message.role === "User";
+              const isAssistant = message.role === "Assistant";
 
               return (
                 <div
                   key={group.key}
                   className={`flex gap-3 mt-3 first:mt-0 ${
-                    isUser ? 'justify-end' : 'justify-start'
+                    isUser ? "justify-end" : "justify-start"
                   }`}
                 >
                   {isAssistant && (
@@ -168,8 +222,8 @@ export function MessageList() {
                   <div
                     className={`rounded-lg px-4 py-2.5 max-w-[80%] ${
                       isUser
-                        ? 'bg-primary text-primary-foreground'
-                        : 'bg-muted text-foreground'
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-muted text-foreground"
                     }`}
                   >
                     {isAssistant ? (
@@ -182,27 +236,27 @@ export function MessageList() {
                           />
                         ) : (
                           <div>
-                            {(() => {
-                              const parsed = parseInlineThinking(message.content);
-                              const thinkingContent = message.reasoning_content || parsed.thinking;
-                              return (
-                                <>
-                                  {thinkingContent && (
-                                    <ThinkingBlock content={thinkingContent} defaultExpanded={false} />
-                                  )}
-                                  <div className="prose prose-sm max-w-none text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
-                                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={MarkdownComponents as any}>
-                                      {parsed.content}
-                                    </ReactMarkdown>
-                                  </div>
-                                </>
-                              );
-                            })()}
+                            {message.reasoning_content && (
+                              <ThinkingBlock
+                                content={message.reasoning_content}
+                                defaultExpanded={false}
+                              />
+                            )}
+                            <div className="prose prose-sm max-w-none text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
+                              <ReactMarkdown
+                                remarkPlugins={[remarkGfm]}
+                                components={MarkdownComponents as any}
+                              >
+                                {message.content}
+                              </ReactMarkdown>
+                            </div>
                           </div>
                         )}
                       </>
                     ) : (
-                      <p className="whitespace-pre-wrap text-sm">{message.content}</p>
+                      <p className="whitespace-pre-wrap text-sm">
+                        {message.content}
+                      </p>
                     )}
                   </div>
                   {isUser && (
@@ -225,9 +279,9 @@ export function MessageList() {
                 <div className="flex items-center gap-2">
                   <Loader2 className="w-4 h-4 animate-spin" />
                   <span className="text-sm">
-                    {runStatus === 'planning' && '正在制定计划...'}
-                    {runStatus === 'executing' && '正在执行任务...'}
-                    {runStatus === 'responding' && '正在生成回复...'}
+                    {runStatus === "planning" && "正在制定计划..."}
+                    {runStatus === "executing" && "正在执行任务..."}
+                    {runStatus === "responding" && "正在生成回复..."}
                   </span>
                 </div>
               </div>
@@ -248,18 +302,28 @@ export function MessageList() {
 
 interface MessageGroup {
   key: string;
-  type: 'system' | 'normal';
-  messages: { id: string; role: string; content: string; reasoning_content?: string; created_at: string }[];
+  type: "system" | "normal";
+  messages: {
+    id: string;
+    role: string;
+    content: string;
+    reasoning_content?: string;
+    created_at: string;
+  }[];
 }
 
-function groupMessages(messages: MessageGroup['messages']): MessageGroup[] {
+function groupMessages(messages: MessageGroup["messages"]): MessageGroup[] {
   const groups: MessageGroup[] = [];
   let currentSystemGroup: MessageGroup | null = null;
 
   for (const msg of messages) {
-    if (msg.role === 'System') {
+    if (msg.role === "System") {
       if (!currentSystemGroup) {
-        currentSystemGroup = { key: `sys-${msg.id}`, type: 'system', messages: [] };
+        currentSystemGroup = {
+          key: `sys-${msg.id}`,
+          type: "system",
+          messages: [],
+        };
       }
       currentSystemGroup.messages.push(msg);
     } else {
@@ -267,7 +331,7 @@ function groupMessages(messages: MessageGroup['messages']): MessageGroup[] {
         groups.push(currentSystemGroup);
         currentSystemGroup = null;
       }
-      groups.push({ key: msg.id, type: 'normal', messages: [msg] });
+      groups.push({ key: msg.id, type: "normal", messages: [msg] });
     }
   }
   if (currentSystemGroup) {
@@ -280,9 +344,88 @@ function groupMessages(messages: MessageGroup['messages']): MessageGroup[] {
 // 系统消息组：可整体折叠/展开
 // ---------------------------------------------------------------------------
 
-function SystemMessageGroup({ messages }: { messages: MessageGroup['messages'] }) {
-  const [groupExpanded, setGroupExpanded] = useState(false);
+interface RoundGroup {
+  key: string;
+  label: string;
+  llm: MessageGroup["messages"][0] | null;
+  tools: MessageGroup["messages"];
+  others: MessageGroup["messages"];
+}
+
+/** 从 LLM 输出系统消息中提取 thinking 内容作为 round 标题 */
+function extractThinkingFromLlm(content: string): string {
+  // 格式: "LLM 输出 [...]\ntokens: ...\ntool_calls: ...\ncontent:\n实际内容"
+  const lines = content.split("\n");
+  const contentIdx = lines.findIndex((l) => l.startsWith("content:"));
+  if (contentIdx >= 0 && contentIdx + 1 < lines.length) {
+    const thinking = lines
+      .slice(contentIdx + 1)
+      .join(" ")
+      .trim();
+    if (thinking) return thinking;
+  }
+  // fallback: 直接取 reasoning_content 或工具调用信息
+  const toolMatch = content.match(/tool_calls:\s*(.+)/);
+  if (toolMatch) return `调用 ${toolMatch[1]}`;
+  return "思考中...";
+}
+
+/** 将系统消息按 round 分组：LLM 输出 [react-round-N] + 后续工具执行归为一组 */
+function groupByRound(messages: MessageGroup["messages"]): RoundGroup[] {
+  const rounds: RoundGroup[] = [];
+  let current: RoundGroup | null = null;
+
+  for (const msg of messages) {
+    if (msg.content.startsWith("LLM 输出")) {
+      if (current) rounds.push(current);
+      const thinking = extractThinkingFromLlm(msg.content);
+      current = {
+        key: msg.id,
+        label: thinking,
+        llm: msg,
+        tools: [],
+        others: [],
+      };
+    } else if (
+      current &&
+      (msg.content.includes("exit_code") || msg.content.includes("tool_name:"))
+    ) {
+      current.tools.push(msg);
+    } else if (current) {
+      current.others.push(msg);
+    } else {
+      if (!current) {
+        current = {
+          key: msg.id,
+          label: "执行",
+          llm: null,
+          tools: [],
+          others: [msg],
+        };
+      }
+    }
+  }
+  if (current) rounds.push(current);
+  return rounds;
+}
+
+function SystemMessageGroup({
+  messages,
+}: {
+  messages: MessageGroup["messages"];
+  defaultExpanded?: boolean;
+}) {
+  const [expandedRounds, setExpandedRounds] = useState<Set<string>>(new Set());
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
+
+  const toggleRound = (key: string) => {
+    setExpandedRounds((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
 
   const toggleItem = (id: string) => {
     setExpandedItems((prev) => {
@@ -293,93 +436,122 @@ function SystemMessageGroup({ messages }: { messages: MessageGroup['messages'] }
     });
   };
 
-  // 统计各类型数量
-  const toolCount = messages.filter((m) => m.content.includes('tool_name:') || m.content.includes('exit_code')).length;
-  const llmCount = messages.filter((m) => m.content.startsWith('LLM 输出')).length;
-  const otherCount = messages.length - toolCount - llmCount;
+  const rounds = groupByRound(messages);
 
-  const parts = [];
-  if (llmCount > 0) parts.push(`${llmCount} 次 LLM`);
-  if (toolCount > 0) parts.push(`${toolCount} 次工具调用`);
-  if (otherCount > 0) parts.push(`${otherCount} 条其他`);
-  const summaryText = parts.join('，');
+  const renderItem = (msg: MessageGroup["messages"][0]) => {
+    const meta = getSystemMessageMeta(msg.content);
+    const itemExpanded = expandedItems.has(msg.id);
+    return (
+      <div key={msg.id}>
+        <button
+          className="w-full flex items-center gap-2 px-2 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 transition-colors text-left"
+          onClick={() => toggleItem(msg.id)}
+        >
+          {itemExpanded ? (
+            <ChevronDown className="w-3 h-3 shrink-0" />
+          ) : (
+            <ChevronRight className="w-3 h-3 shrink-0" />
+          )}
+          <meta.icon className="w-3 h-3 shrink-0" />
+          <span className="font-medium">{meta.label}</span>
+          {!itemExpanded && (
+            <span className="truncate opacity-60">{meta.summary}</span>
+          )}
+        </button>
+        {itemExpanded && (
+          <div className="ml-5 mt-0.5 px-3 py-2 rounded-md bg-muted/30 border border-border/50">
+            <pre className="text-xs text-muted-foreground whitespace-pre-wrap break-words font-mono leading-relaxed">
+              {msg.content}
+            </pre>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // 截断 thinking 文本
+  const truncLabel = (text: string, max: number) =>
+    text.length > max ? text.slice(0, max) + "..." : text;
 
   return (
-    <div className="max-w-3xl">
-      {/* 组标题 */}
-      <button
-        className="w-full flex items-center gap-2 px-3 py-1 rounded-md text-xs text-muted-foreground hover:bg-muted/50 transition-colors text-left"
-        onClick={() => setGroupExpanded(!groupExpanded)}
-      >
-        {groupExpanded ? (
-          <ChevronDown className="w-3 h-3 shrink-0" />
-        ) : (
-          <ChevronRight className="w-3 h-3 shrink-0" />
-        )}
-        <Terminal className="w-3 h-3 shrink-0" />
-        <span className="font-medium">执行过程</span>
-        <span className="opacity-60">({summaryText}，共 {messages.length} 条)</span>
-      </button>
+    <div className="max-w-3xl space-y-0.5">
+      {rounds.map((round) => {
+        const roundExpanded = expandedRounds.has(round.key);
+        const toolSummary = round.tools.map((t) =>
+          t.content.includes("ok=true") ? "OK" : "FAIL",
+        );
+        const toolBrief =
+          round.tools.length > 0
+            ? `${round.tools.length} 次调用 (${toolSummary.join(", ")})`
+            : "";
 
-      {/* 展开后显示每条系统消息 */}
-      {groupExpanded && (
-        <div className="ml-5 mt-1 space-y-0.5">
-          {messages.map((msg) => {
-            const meta = getSystemMessageMeta(msg.content);
-            const itemExpanded = expandedItems.has(msg.id);
+        return (
+          <div key={round.key}>
+            {/* Round 标题：thinking 内容 + 工具摘要 */}
+            <button
+              className="w-full flex items-center gap-2 px-3 py-1 rounded-md text-xs text-muted-foreground hover:bg-muted/50 transition-colors text-left"
+              onClick={() => toggleRound(round.key)}
+            >
+              {roundExpanded ? (
+                <ChevronDown className="w-3 h-3 shrink-0" />
+              ) : (
+                <ChevronRight className="w-3 h-3 shrink-0" />
+              )}
+              <Cpu className="w-3 h-3 shrink-0" />
+              <span className="truncate">{truncLabel(round.label, 60)}</span>
+              {!roundExpanded && toolBrief && (
+                <span className="shrink-0 opacity-60">{toolBrief}</span>
+              )}
+            </button>
 
-            return (
-              <div key={msg.id}>
-                <button
-                  className="w-full flex items-center gap-2 px-2 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 transition-colors text-left"
-                  onClick={() => toggleItem(msg.id)}
-                >
-                  {itemExpanded ? (
-                    <ChevronDown className="w-3 h-3 shrink-0" />
-                  ) : (
-                    <ChevronRight className="w-3 h-3 shrink-0" />
-                  )}
-                  <meta.icon className="w-3 h-3 shrink-0" />
-                  <span className="font-medium">{meta.label}</span>
-                  {!itemExpanded && (
-                    <span className="truncate opacity-60">{meta.summary}</span>
-                  )}
-                </button>
-                {itemExpanded && (
-                  <div className="ml-5 mt-0.5 px-3 py-2 rounded-md bg-muted/30 border border-border/50">
-                    <pre className="text-xs text-muted-foreground whitespace-pre-wrap break-words font-mono leading-relaxed">
-                      {msg.content}
-                    </pre>
-                  </div>
-                )}
+            {/* 展开：工具调用详情 */}
+            {roundExpanded && (
+              <div className="ml-7 mt-0.5 space-y-0.5">
+                {round.tools.map((t) => renderItem(t))}
+                {round.others.map((o) => renderItem(o))}
               </div>
-            );
-          })}
-        </div>
-      )}
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
 
 function getSystemMessageMeta(content: string) {
-  if (content.startsWith('LLM 输出')) {
+  if (content.startsWith("LLM 输出")) {
     const match = content.match(/^LLM 输出 \[(.+?)\]/);
-    const label = match ? match[1] : 'LLM';
-    return { icon: Cpu, label, summary: content.split('\n')[0] };
+    const label = match ? match[1] : "LLM";
+    return { icon: Cpu, label, summary: content.split("\n")[0] };
   }
-  if (content.includes('tool_name:') || content.includes('exit_code')) {
+  if (content.includes("tool_name:") || content.includes("exit_code")) {
     const nameMatch = content.match(/tool_name:\s*(\S+)/);
     const codeMatch = content.match(/exit_code=(\d+)/);
     const okMatch = content.match(/ok=(\w+)/);
     const parts = [];
     if (nameMatch) parts.push(nameMatch[1]);
     if (codeMatch) parts.push(`exit=${codeMatch[1]}`);
-    if (okMatch) parts.push(okMatch[1] === 'true' ? 'OK' : 'FAIL');
-    return { icon: Terminal, label: '工具执行', summary: parts.join(' · ') || content.split('\n')[0] };
+    if (okMatch) parts.push(okMatch[1] === "true" ? "OK" : "FAIL");
+    return {
+      icon: Terminal,
+      label: "工具执行",
+      summary: parts.join(" · ") || content.split("\n")[0],
+    };
   }
-  if (content.startsWith('Plan 执行总结') || content.includes('plan_execution_summary')) {
-    return { icon: FileText, label: 'Plan 总结', summary: content.split('\n')[0] };
+  if (
+    content.startsWith("Plan 执行总结") ||
+    content.includes("plan_execution_summary")
+  ) {
+    return {
+      icon: FileText,
+      label: "Plan 总结",
+      summary: content.split("\n")[0],
+    };
   }
-  const firstLine = content.split('\n')[0];
-  return { icon: FileText, label: '系统', summary: firstLine.length > 80 ? firstLine.slice(0, 80) + '...' : firstLine };
+  const firstLine = content.split("\n")[0];
+  return {
+    icon: FileText,
+    label: "系统",
+    summary: firstLine.length > 80 ? firstLine.slice(0, 80) + "..." : firstLine,
+  };
 }

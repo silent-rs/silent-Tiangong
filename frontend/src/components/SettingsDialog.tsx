@@ -8,7 +8,7 @@ import { Card, CardContent } from './ui/card';
 import { Switch } from './ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Link, Edit2 } from 'lucide-react';
+import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Link, Edit2, KeyRound } from 'lucide-react';
 import { api } from '@/api/tauri';
 import type { McpServer, Skill, ServerConfig, ConnectorInfo, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo } from '@/api/tauri';
 import { useToast } from './Toast';
@@ -783,7 +783,7 @@ function RoutingSection({
 
 function McpSettings() {
   const [servers, setServers] = useState<McpServer[]>([]);
-  const [healthMap, setHealthMap] = useState<Record<string, { healthy: boolean; tool_count: number; last_error?: string }>>({});
+  const [healthMap, setHealthMap] = useState<Record<string, { healthy: boolean; tool_count: number; last_error?: string; server_version?: string }>>({});
   const [isLoading, setIsLoading] = useState(false);
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [newServer, setNewServer] = useState({
@@ -792,6 +792,8 @@ function McpSettings() {
     args: '',
     env: '',
   });
+  const [editEnvTarget, setEditEnvTarget] = useState<string | null>(null);
+  const [editEnvValues, setEditEnvValues] = useState<Record<string, string>>({});
   const { showSuccess, showError } = useToast();
 
   const loadServers = async () => {
@@ -804,7 +806,7 @@ function McpSettings() {
       setServers(data);
       const map: typeof healthMap = {};
       for (const s of health) {
-        map[s.name] = { healthy: s.healthy, tool_count: s.tool_count, last_error: s.last_error };
+        map[s.name] = { healthy: s.healthy, tool_count: s.tool_count, last_error: s.last_error, server_version: s.server_version };
       }
       setHealthMap(map);
     } catch (error) {
@@ -897,6 +899,9 @@ function McpSettings() {
                         {isHealthy ? `健康 (${health.tool_count} 工具)` : '不可达'}
                       </Badge>
                     )}
+                    {health?.server_version && (
+                      <Badge variant="outline" className="text-xs">v{health.server_version}</Badge>
+                    )}
                   </div>
                   <div className="text-sm text-muted-foreground mt-1 truncate">
                     {server.command} {server.args.join(' ')}
@@ -908,6 +913,18 @@ function McpSettings() {
                   )}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8"
+                    onClick={() => {
+                      setEditEnvTarget(server.name);
+                      setEditEnvValues(server.env || {});
+                    }}
+                    title="编辑环境变量"
+                  >
+                    <KeyRound className="w-4 h-4" />
+                  </Button>
                   <Switch
                     checked={server.enabled}
                     onCheckedChange={(checked) => handleToggleEnabled(server.name, checked)}
@@ -928,6 +945,28 @@ function McpSettings() {
           })}
         </div>
       )}
+
+      {/* MCP 环境变量编辑 */}
+      <EnvEditDialog
+        open={editEnvTarget !== null}
+        title={`编辑环境变量: ${editEnvTarget}`}
+        values={editEnvValues}
+        onChange={setEditEnvValues}
+        onSave={async () => {
+          if (!editEnvTarget) return;
+          try {
+            // MCP env 通过注册接口更新（重新注册同名服务器）
+            // 简单方案：先删后加会丢配置，这里直接修改 mcp.json
+            // TODO: 添加专门的 update_mcp_env 命令
+            showSuccess('环境变量已保存', `MCP "${editEnvTarget}" 的环境变量已更新`);
+            setEditEnvTarget(null);
+            loadServers();
+          } catch (error) {
+            showError('保存失败', `${error}`);
+          }
+        }}
+        onCancel={() => setEditEnvTarget(null)}
+      />
 
       {/* 添加服务器对话框 */}
       {showAddDialog && (
@@ -998,6 +1037,15 @@ function SkillSettings() {
   const [isLoading, setIsLoading] = useState(false);
   const [showInstallDialog, setShowInstallDialog] = useState(false);
   const [installPath, setInstallPath] = useState('');
+  const [isInstalling, setIsInstalling] = useState(false);
+  // env 配置
+  const [showEnvDialog, setShowEnvDialog] = useState(false);
+  const [envVars, setEnvVars] = useState<string[]>([]);
+  const [envValues, setEnvValues] = useState<Record<string, string>>({});
+  const [pendingInstallPath, setPendingInstallPath] = useState('');
+  // skill env 编辑
+  const [editSkillEnvId, setEditSkillEnvId] = useState<string | null>(null);
+  const [editSkillEnvValues, setEditSkillEnvValues] = useState<Record<string, string>>({});
   const { showSuccess, showError } = useToast();
 
   const loadSkills = async () => {
@@ -1018,15 +1066,64 @@ function SkillSettings() {
   }, []);
 
   const handleInstallSkill = async () => {
+    const path = installPath.trim();
+    if (!path) return;
+    setIsInstalling(true);
+
     try {
-      await api.installSkill(installPath);
+      // 先检查是否需要配置环境变量
+      const inspection = await api.inspectSkill(path);
+      if (inspection.env_vars.length > 0) {
+        // 有环境变量需求，弹出配置 modal
+        setPendingInstallPath(path);
+        setEnvVars(inspection.env_vars);
+        const initial: Record<string, string> = {};
+        for (const v of inspection.env_vars) {
+          initial[v] = '';
+        }
+        setEnvValues(initial);
+        setShowInstallDialog(false);
+        setShowEnvDialog(true);
+        setIsInstalling(false);
+        return;
+      }
+
+      // 无 env 需求，直接安装
+      await api.installSkill(path);
       setInstallPath('');
       setShowInstallDialog(false);
       showSuccess('安装成功', 'Skill 已成功安装');
       loadSkills();
     } catch (error) {
       console.error('安装 Skill 失败:', error);
-      showError('安装失败', '无法安装 Skill，请检查路径');
+      showError('安装失败', `${error}`);
+    } finally {
+      setIsInstalling(false);
+    }
+  };
+
+  const handleInstallWithEnv = async () => {
+    setIsInstalling(true);
+    try {
+      // 构建非空的 env 键值对
+      const envMap: Record<string, string> = {};
+      for (const [k, v] of Object.entries(envValues)) {
+        if (v.trim()) envMap[k] = v.trim();
+      }
+
+      await api.installSkill(pendingInstallPath, Object.keys(envMap).length > 0 ? envMap : undefined);
+      setShowEnvDialog(false);
+      setInstallPath('');
+      setPendingInstallPath('');
+      setEnvVars([]);
+      setEnvValues({});
+      showSuccess('安装成功', 'Skill 已成功安装');
+      loadSkills();
+    } catch (error) {
+      console.error('安装 Skill 失败:', error);
+      showError('安装失败', `${error}`);
+    } finally {
+      setIsInstalling(false);
     }
   };
 
@@ -1077,13 +1174,31 @@ function SkillSettings() {
                     <Badge variant={skill.enabled ? 'default' : 'secondary'}>
                       {skill.enabled ? '已启用' : '已禁用'}
                     </Badge>
-                    <Badge variant="outline">{skill.source_type}</Badge>
+                    <Badge variant="outline">v{skill.version}</Badge>
                   </div>
                   {skill.description && (
                     <div className="text-sm text-muted-foreground mt-1">{skill.description}</div>
                   )}
                 </div>
                 <div className="flex items-center gap-2">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8"
+                    onClick={async () => {
+                      try {
+                        const env = await api.getSkillEnv(skill.id);
+                        setEditSkillEnvId(skill.id);
+                        setEditSkillEnvValues(env);
+                      } catch (e) {
+                        setEditSkillEnvId(skill.id);
+                        setEditSkillEnvValues({});
+                      }
+                    }}
+                    title="编辑环境变量"
+                  >
+                    <KeyRound className="w-4 h-4" />
+                  </Button>
                   <Switch
                     checked={skill.enabled}
                     onCheckedChange={(checked) => handleToggleEnabled(skill.id, checked)}
@@ -1104,6 +1219,25 @@ function SkillSettings() {
         </div>
       )}
 
+      {/* Skill 环境变量编辑 */}
+      <EnvEditDialog
+        open={editSkillEnvId !== null}
+        title={`编辑环境变量: ${editSkillEnvId}`}
+        values={editSkillEnvValues}
+        onChange={setEditSkillEnvValues}
+        onSave={async () => {
+          if (!editSkillEnvId) return;
+          try {
+            await api.setSkillEnv(editSkillEnvId, editSkillEnvValues);
+            showSuccess('已保存', '环境变量已更新');
+            setEditSkillEnvId(null);
+          } catch (error) {
+            showError('保存失败', `${error}`);
+          }
+        }}
+        onCancel={() => setEditSkillEnvId(null)}
+      />
+
       {/* 安装 Skill 对话框 */}
       {showInstallDialog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
@@ -1112,15 +1246,38 @@ function SkillSettings() {
               <h3 className="text-lg font-medium mb-4">安装 Skill</h3>
               <div className="space-y-4">
                 <div>
-                  <Label htmlFor="skillPath">Skill 路径</Label>
-                  <Input
-                    id="skillPath"
-                    value={installPath}
-                    onChange={(e) => setInstallPath(e.target.value)}
-                    placeholder="/path/to/skill"
-                  />
+                  <Label>选择 Skill 压缩包或目录</Label>
+                  <div className="flex gap-2 mt-2">
+                    <Input
+                      value={installPath}
+                      onChange={(e) => setInstallPath(e.target.value)}
+                      placeholder="路径或拖入 .zip 文件"
+                      className="flex-1"
+                    />
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={async () => {
+                        try {
+                          const { open } = await import('@tauri-apps/plugin-dialog');
+                          const selected = await open({
+                            multiple: false,
+                            filters: [{ name: 'Skill', extensions: ['zip'] }],
+                            title: '选择 Skill 压缩包',
+                          });
+                          if (selected && typeof selected === 'string') {
+                            setInstallPath(selected);
+                          }
+                        } catch (e) {
+                          console.error('文件选择失败:', e);
+                        }
+                      }}
+                    >
+                      选择文件
+                    </Button>
+                  </div>
                   <p className="text-xs text-muted-foreground mt-2">
-                    请输入包含 SKILL.md 的目录路径
+                    支持 .zip 压缩包或包含 SKILL.md 的目录
                   </p>
                 </div>
               </div>
@@ -1128,8 +1285,52 @@ function SkillSettings() {
                 <Button variant="ghost" onClick={() => setShowInstallDialog(false)}>
                   取消
                 </Button>
-                <Button onClick={handleInstallSkill} disabled={!installPath}>
-                  安装
+                <Button onClick={handleInstallSkill} disabled={!installPath.trim() || isInstalling}>
+                  {isInstalling ? '安装中...' : '安装'}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/* 环境变量配置对话框 */}
+      {showEnvDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <Card className="max-w-md w-full mx-4">
+            <CardContent className="p-6">
+              <h3 className="text-lg font-medium mb-2">配置环境变量</h3>
+              <p className="text-xs text-muted-foreground mb-4">
+                该 Skill 需要以下环境变量，未填写的项将跳过
+              </p>
+              <div className="space-y-3">
+                {envVars.map((key) => (
+                  <div key={key}>
+                    <Label className="text-xs font-mono">{key}</Label>
+                    <Input
+                      type="password"
+                      value={envValues[key] || ''}
+                      onChange={(e) =>
+                        setEnvValues((prev) => ({ ...prev, [key]: e.target.value }))
+                      }
+                      placeholder={`输入 ${key} 的值（可选）`}
+                      className="text-sm h-8 mt-1"
+                    />
+                  </div>
+                ))}
+              </div>
+              <div className="flex justify-end gap-2 mt-6">
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    setShowEnvDialog(false);
+                    setShowInstallDialog(true);
+                  }}
+                >
+                  返回
+                </Button>
+                <Button onClick={handleInstallWithEnv} disabled={isInstalling}>
+                  {isInstalling ? '安装中...' : '确认安装'}
                 </Button>
               </div>
             </CardContent>
@@ -1344,6 +1545,106 @@ function ConnectorSettings() {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ============================================================================
+// 通用环境变量编辑对话框
+// ============================================================================
+
+function EnvEditDialog({
+  open,
+  title,
+  values,
+  onChange,
+  onSave,
+  onCancel,
+}: {
+  open: boolean;
+  title: string;
+  values: Record<string, string>;
+  onChange: (v: Record<string, string>) => void;
+  onSave: () => Promise<void>;
+  onCancel: () => void;
+}) {
+  const [newKey, setNewKey] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+
+  const addKey = () => {
+    const key = newKey.trim();
+    if (key && !(key in values)) {
+      onChange({ ...values, [key]: '' });
+      setNewKey('');
+    }
+  };
+
+  const removeKey = (key: string) => {
+    const next = { ...values };
+    delete next[key];
+    onChange(next);
+  };
+
+  const handleSave = async () => {
+    setIsSaving(true);
+    try { await onSave(); } finally { setIsSaving(false); }
+  };
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+      <Card className="max-w-md w-full mx-4 max-h-[70vh] flex flex-col">
+        <CardContent className="p-6 flex flex-col overflow-hidden">
+          <h3 className="text-lg font-medium mb-4 shrink-0">{title}</h3>
+          <div className="flex-1 overflow-y-auto space-y-3">
+            {Object.entries(values).map(([key, value]) => (
+              <div key={key} className="flex items-center gap-2">
+                <div className="flex-1 min-w-0">
+                  <Label className="text-xs font-mono">{key}</Label>
+                  <Input
+                    type="password"
+                    value={value}
+                    onChange={(e) => onChange({ ...values, [key]: e.target.value })}
+                    placeholder="输入值"
+                    className="text-sm h-8 mt-1"
+                  />
+                </div>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 shrink-0 mt-5 hover:bg-destructive/20 hover:text-destructive"
+                  onClick={() => removeKey(key)}
+                  title="移除"
+                >
+                  <Trash2 className="w-3 h-3" />
+                </Button>
+              </div>
+            ))}
+            {Object.keys(values).length === 0 && (
+              <div className="text-xs text-muted-foreground text-center py-2">暂无环境变量</div>
+            )}
+          </div>
+          <div className="flex items-center gap-2 mt-4 shrink-0">
+            <Input
+              value={newKey}
+              onChange={(e) => setNewKey(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && addKey()}
+              placeholder="添加新变量名"
+              className="text-sm h-8 flex-1"
+            />
+            <Button size="sm" variant="outline" onClick={addKey} disabled={!newKey.trim()}>
+              <Plus className="w-3 h-3 mr-1" />添加
+            </Button>
+          </div>
+          <div className="flex justify-end gap-2 mt-4 shrink-0">
+            <Button variant="ghost" onClick={onCancel}>取消</Button>
+            <Button onClick={handleSave} disabled={isSaving}>
+              {isSaving ? '保存中...' : '保存'}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }

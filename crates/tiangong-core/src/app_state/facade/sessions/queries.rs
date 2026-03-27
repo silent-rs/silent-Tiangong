@@ -55,4 +55,25 @@ impl TiangongState {
     pub fn update_session_title_draft(&mut self, value: String) {
         self.store.session.session_title_draft = value;
     }
+
+    pub fn active_session_cwd(&self) -> &str {
+        self.active_session()
+            .map(|s| s.cwd.as_str())
+            .unwrap_or("")
+    }
+
+    pub fn update_active_session_cwd(&mut self, cwd: String) -> Result<()> {
+        let active_id = self.store.session.active_session_id.clone();
+        if let Some(session) = self
+            .store
+            .session
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == active_id)
+        {
+            session.cwd = cwd;
+            session.updated_at = now_text();
+        }
+        self.persist_session_and_app(&active_id)
+    }
 }

@@ -7,6 +7,7 @@ interface AppState {
   activeSessionId: string | null;
   messages: Message[];
   runStatus: string;
+  runSummary: string;
   currentPlan: TaskPlan | undefined;
   inputContent: string;
   mcpServers: McpServer[] | null;
@@ -14,6 +15,9 @@ interface AppState {
 
   // 草稿模式
   isDraft: boolean;
+
+  // 工作目录
+  sessionCwd: string;
 
   // 多会话运行状态 (session_id -> status)
   sessionRunStatuses: Record<string, string>;
@@ -38,6 +42,8 @@ interface AppState {
 
   setInputContent: (content: string) => void;
 
+  setSessionCwd: (cwd: string) => Promise<void>;
+
   loadMcpServers: () => Promise<void>;
   loadSkills: () => Promise<void>;
 
@@ -51,11 +57,13 @@ export const useStore = create<AppState>((set, get) => ({
   activeSessionId: null as string | null,
   messages: [],
   runStatus: 'idle',
+  runSummary: '',
   currentPlan: undefined,
   inputContent: '',
   mcpServers: null,
   skills: null,
   isDraft: false,
+  sessionCwd: '',
   sessionRunStatuses: {},
   streamingMessageId: null,
   streamingContent: '',
@@ -101,7 +109,10 @@ export const useStore = create<AppState>((set, get) => ({
   switchSession: async (id: string) => {
     try {
       await api.switchSession(id);
-      const snapshot = await api.getRunSnapshot();
+      const [snapshot, cwd] = await Promise.all([
+        api.getRunSnapshot(),
+        api.getSessionCwd(),
+      ]);
       set({
         isDraft: false,
         activeSessionId: id,
@@ -109,6 +120,7 @@ export const useStore = create<AppState>((set, get) => ({
         inputContent: snapshot.input_draft,
         runStatus: snapshot.status,
         currentPlan: snapshot.current_plan,
+        sessionCwd: cwd,
         streamingMessageId: null,
         streamingContent: '',
         streamingReasoningContent: '',
@@ -146,6 +158,11 @@ export const useStore = create<AppState>((set, get) => ({
     if (isDraft) {
       try {
         const session = await api.createSession();
+        // 把草稿模式下设置的 cwd 同步到新创建的会话
+        const draftCwd = get().sessionCwd;
+        if (draftCwd) {
+          await api.setSessionCwd(draftCwd).catch(console.error);
+        }
         set(state => ({
           sessions: [session, ...state.sessions],
           activeSessionId: session.id,
@@ -168,7 +185,8 @@ export const useStore = create<AppState>((set, get) => ({
 
     try {
       await api.sendMessage(content);
-      set({ runStatus: 'planning' });
+      // 消息已提交到后端，释放发送锁，允许用户切换对话等操作
+      set({ runStatus: 'executing', isSending: false });
     } catch (error) {
       console.error('发送消息失败:', error);
       set({ inputContent: content, isSending: false });
@@ -180,7 +198,14 @@ export const useStore = create<AppState>((set, get) => ({
     try {
       const cancelled = await api.cancelTurn();
       if (cancelled) {
-        set({ runStatus: 'idle', isSending: false });
+        // 立即获取最新快照确保状态一致（避免轮询线程的旧快照覆盖）
+        const snapshot = await api.getRunSnapshot();
+        set({
+          runStatus: 'idle',
+          isSending: false,
+          messages: snapshot.messages,
+          currentPlan: snapshot.current_plan,
+        });
         // 刷新会话列表
         api.getSessions().then((sessions) => set({ sessions })).catch(console.error);
       }
@@ -197,6 +222,20 @@ export const useStore = create<AppState>((set, get) => ({
     // 草稿模式下不同步到后端
     if (!get().isDraft) {
       api.setInputDraft(content).catch(console.error);
+    }
+  },
+
+  // 设置工作目录
+  setSessionCwd: async (cwd: string) => {
+    try {
+      // 草稿模式下只在前端保存，创建会话时再同步到后端
+      if (!get().isDraft) {
+        await api.setSessionCwd(cwd);
+      }
+      set({ sessionCwd: cwd });
+    } catch (error) {
+      console.error('设置工作目录失败:', error);
+      throw error;
     }
   },
 
@@ -252,6 +291,16 @@ export const useStore = create<AppState>((set, get) => ({
 
     set({ sessionRunStatuses: newStatuses });
 
+    // 始终同步当前活动会话的 runStatus（基于 snapshot.status）
+    // snapshot.status 已由后端 build_session_snapshot 按 session 修正
+    const { runStatus: prevStatus, isSending: prevSending } = get();
+    const snapshotStatus = snapshot.status;
+    // 防止取消后被旧快照覆盖
+    const effectiveStatus = (prevStatus === 'idle' && !prevSending && snapshotStatus !== 'idle')
+      ? 'idle'
+      : snapshotStatus;
+    set({ runStatus: effectiveStatus, runSummary: snapshot.summary || '' });
+
     // 草稿模式或不是当前查看的会话 → 不更新消息/流式内容
     if (isDraft || (snapshot.last_session_id && snapshot.last_session_id !== activeSessionId)) {
       return;
@@ -296,21 +345,16 @@ export const useStore = create<AppState>((set, get) => ({
       streamingReasoningContent = '';
     }
 
-    const { runStatus: prevStatus } = get();
-    const newStatus = snapshot.status;
-
     set({
       messages: newMessages,
-      runStatus: newStatus,
       currentPlan: snapshot.current_plan,
-      isSending: newStatus !== 'idle',
       streamingMessageId: streamingId,
       streamingContent,
       streamingReasoningContent,
     });
 
     // 状态变为 idle 时刷新会话列表（更新 message_count、标题等）
-    if (newStatus === 'idle' && prevStatus !== 'idle') {
+    if (effectiveStatus === 'idle' && prevStatus !== 'idle') {
       api.getSessions().then((sessions) => {
         set({ sessions });
       }).catch(console.error);

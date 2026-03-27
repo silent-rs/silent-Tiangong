@@ -223,6 +223,7 @@ impl McpServer {
 pub struct Skill {
     pub id: String,
     pub name: String,
+    pub version: String,
     pub description: Option<String>,
     pub enabled: bool,
     pub source_type: String,
@@ -233,6 +234,7 @@ impl Skill {
         Self {
             id: core_skill.id.clone(),
             name: core_skill.name.clone(),
+            version: core_skill.version.clone(),
             description: if core_skill.description.is_empty() {
                 None
             } else {
@@ -242,6 +244,14 @@ impl Skill {
             source_type: core_skill.source.kind.clone(),
         }
     }
+}
+
+/// Skill 安装前检查结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillInspection {
+    pub env_vars: Vec<String>,
+    pub missing_env_vars: Vec<String>,
+    pub dependencies: Vec<String>,
 }
 
 /// Server 配置（前端使用）

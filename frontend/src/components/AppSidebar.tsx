@@ -11,6 +11,7 @@ export function AppSidebar() {
     sessions,
     activeSessionId,
     isDraft,
+    isSending,
     sessionRunStatuses,
     createSession,
     switchSession,
@@ -37,7 +38,8 @@ export function AppSidebar() {
           <Button
             variant="ghost"
             className="w-full justify-start"
-            onClick={() => createSession()}
+            disabled={isSending}
+            onClick={() => !isSending && createSession()}
           >
             <Plus className="w-4 h-4 mr-2" />
             新对话
@@ -65,8 +67,9 @@ export function AppSidebar() {
                       ? 'bg-sidebar-accent text-sidebar-accent-foreground'
                       : 'text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
                   }`}
+                  disabled={isSending}
                   onClick={() => {
-                    if (session.id !== activeSessionId || isDraft) {
+                    if (!isSending && (session.id !== activeSessionId || isDraft)) {
                       switchSession(session.id);
                     }
                   }}

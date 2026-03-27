@@ -90,17 +90,18 @@ pub(crate) fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
         },
         FunctionToolSpec {
             name: "run_command".to_string(),
-            description: "执行受控命令，支持 cwd。shell 脚本建议使用 run_shell".to_string(),
+            description: "执行受控命令，支持 cwd 和超时设置。shell 脚本建议使用 run_shell".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "cmd": { "type": "string", "description": "命令名，例如 ls/cat/echo/pwd/rg/cargo/git/node/npx/npm/yarn/pnpm/ts-node" },
+                    "cmd": { "type": "string", "description": "命令名" },
                     "args": {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "命令参数列表"
                     },
-                    "cwd": { "type": "string", "description": "命令工作目录（可选，默认当前工作目录）" }
+                    "cwd": { "type": "string", "description": "工作目录（可选）" },
+                    "timeout": { "type": "integer", "description": "超时时间（秒），0 或不填表示不限时", "minimum": 0 }
                 },
                 "required": ["cmd"]
             }),
@@ -113,7 +114,8 @@ pub(crate) fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
                 "properties": {
                     "script": { "type": "string", "description": "shell 脚本文本" },
                     "shell": { "type": "string", "description": "shell 类型：auto/bash/sh/powershell/pwsh，默认 auto" },
-                    "cwd": { "type": "string", "description": "命令工作目录（可选）" }
+                    "cwd": { "type": "string", "description": "工作目录（可选）" },
+                    "timeout": { "type": "integer", "description": "超时时间（秒），0 或不填表示不限时", "minimum": 0 }
                 },
                 "required": ["script"]
             }),
@@ -367,6 +369,14 @@ pub(crate) fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<
             {
                 args.push(format!("{INTERNAL_CWD_PREFIX}{cwd}"));
             }
+            if let Some(timeout) = call
+                .arguments
+                .get("timeout")
+                .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                .filter(|v| *v > 0)
+            {
+                args.push(format!("__tiangong_timeout={}", timeout * 1000));
+            }
             Ok(ToolCall {
                 name: ToolName::RunCommand,
                 args,
@@ -396,6 +406,14 @@ pub(crate) fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<
                 .filter(|text| !text.is_empty())
             {
                 args.push(format!("{INTERNAL_CWD_PREFIX}{cwd}"));
+            }
+            if let Some(timeout) = call
+                .arguments
+                .get("timeout")
+                .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                .filter(|v| *v > 0)
+            {
+                args.push(format!("__tiangong_timeout={}", timeout * 1000));
             }
             Ok(ToolCall {
                 name: ToolName::RunCommand,

@@ -142,37 +142,23 @@ pub fn send_message(
     let poll_session_id = session_id.clone();
     thread::spawn(move || {
         loop {
-            // 先消费 channel 中的事件，更新内部状态（轮询所有 pending turns）
-            let _ = app_clone
+            // 单次持锁：轮询事件 + 构建快照 + 检查完成状态
+            let poll_result = app_clone
                 .state::<TiangongApp>()
                 .with_state(|core_state| {
-                    core_state.poll_pending_turns();
-                    Ok(())
-                });
+                    // 1. 轮询本次 session 的事件
+                    core_state.poll_pending_turn_for(&poll_session_id);
 
-            // 获取当前活动会话的完整状态快照
-            if let Ok(snapshot) = app_clone
-                .state::<TiangongApp>()
-                .with_state_read(|s| Ok(build_full_snapshot(s)))
-            {
-                // 每次轮询都发送快照，确保消息内容变化也能同步
-                let _ = app_clone.emit("run_snapshot", &snapshot);
-            }
+                    // 2. 构建快照
+                    let snapshot = build_full_snapshot(core_state);
 
-            // 检查本次 send 对应的会话是否已完成
-            let session_done = app_clone
-                .state::<TiangongApp>()
-                .with_state_read(|core_state| {
-                    Ok(!core_state.has_pending_turn_for(&poll_session_id))
-                })
-                .unwrap_or(true);
+                    // 3. 检查是否完成
+                    let done = !core_state.has_pending_turn_for(&poll_session_id);
 
-            if session_done {
-                // 重置为 idle
-                let _ = app_clone
-                    .state::<TiangongApp>()
-                    .with_state(|core_state| {
-                        let status_str = format!("{:?}", core_state.run_snapshot().status).to_lowercase();
+                    // 4. 完成后重置为 idle
+                    if done {
+                        let status_str =
+                            format!("{:?}", core_state.run_snapshot().status).to_lowercase();
                         if status_str == "completed" {
                             core_state.report_run_idle(format!(
                                 "模型供应商：{}",
@@ -181,16 +167,27 @@ pub fn send_message(
                         } else if status_str == "failed" {
                             core_state.report_run_idle("执行失败");
                         }
-                        Ok(())
-                    });
-                // 发送最终的 idle 快照
-                if let Ok(final_snapshot) = app_clone
-                    .state::<TiangongApp>()
-                    .with_state_read(|s| Ok(build_full_snapshot(s)))
-                {
-                    let _ = app_clone.emit("run_snapshot", &final_snapshot);
+                    }
+
+                    Ok((snapshot, done))
+                });
+
+            match poll_result {
+                Ok((snapshot, done)) => {
+                    let _ = app_clone.emit("run_snapshot", &snapshot);
+
+                    if done {
+                        // 发送最终 idle 快照
+                        if let Ok(final_snapshot) = app_clone
+                            .state::<TiangongApp>()
+                            .with_state_read(|s| Ok(build_full_snapshot(s)))
+                        {
+                            let _ = app_clone.emit("run_snapshot", &final_snapshot);
+                        }
+                        break;
+                    }
                 }
-                break;
+                Err(_) => break,
             }
 
             thread::sleep(Duration::from_millis(200));
@@ -225,6 +222,23 @@ pub fn set_input_draft(content: String, state: State<TiangongApp>) -> Result<(),
         core_state.update_draft(content);
         Ok(())
     })
+}
+
+/// 获取活动会话的工作目录
+#[tauri::command]
+pub fn get_session_cwd(state: State<TiangongApp>) -> Result<String, String> {
+    state.with_state_read(|core_state| Ok(core_state.active_session_cwd().to_string()))
+}
+
+/// 设置活动会话的工作目录
+#[tauri::command]
+pub fn set_session_cwd(cwd: String, state: State<TiangongApp>) -> Result<(), String> {
+    // 验证路径存在且是目录
+    let path = std::path::Path::new(&cwd);
+    if !path.is_dir() {
+        return Err(format!("路径不存在或不是目录：{cwd}"));
+    }
+    state.with_state(|core_state| core_state.update_active_session_cwd(cwd))
 }
 
 // ============================================================================
@@ -316,16 +330,109 @@ pub fn get_skills(state: State<TiangongApp>) -> Result<Vec<Skill>, String> {
     })
 }
 
-/// 安装 Skill
+/// 检查 Skill 安装需求（返回需要配置的环境变量列表）
 #[tauri::command]
-pub fn install_skill(path: String, state: State<TiangongApp>) -> Result<String, String> {
-    state.with_state(|core_state| core_state.install_local_skill(&path, true))
+pub fn inspect_skill(path: String, state: State<TiangongApp>) -> Result<SkillInspection, String> {
+    state.with_state_read(|core_state| {
+        let inspection = core_state.inspect_skill_install_requirements(&path, true)?;
+        Ok(SkillInspection {
+            env_vars: inspection.env_vars,
+            missing_env_vars: inspection.missing_env_vars,
+            dependencies: inspection.dependencies,
+        })
+    })
+}
+
+/// 安装 Skill（支持传入环境变量配置）
+#[tauri::command]
+pub fn install_skill(
+    path: String,
+    env_values: Option<std::collections::HashMap<String, String>>,
+    state: State<TiangongApp>,
+) -> Result<String, String> {
+    state.with_state(|core_state| {
+        let env: Vec<(String, String)> = env_values
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, v)| !v.trim().is_empty())
+            .collect();
+        core_state.install_local_skill_with_options_and_inputs(&path, true, true, &env)
+    })
 }
 
 /// 移除 Skill
 #[tauri::command]
 pub fn remove_skill(id: String, state: State<TiangongApp>) -> Result<String, String> {
     state.with_state(|core_state| core_state.remove_skill(&id))
+}
+
+/// 获取 Skill 的环境变量（合并 skill.toml 声明的 requires.env + .env.local 已有值）
+#[tauri::command]
+pub fn get_skill_env(id: String, state: State<TiangongApp>) -> Result<std::collections::HashMap<String, String>, String> {
+    state.with_state_read(|core_state| {
+        let skill = core_state.installed_skills()
+            .iter()
+            .find(|s| s.id == id)
+            .ok_or_else(|| anyhow::anyhow!("未找到 skill：{id}"))?;
+
+        let skill_dir = std::path::Path::new(&skill.source.value);
+        let mut env = std::collections::HashMap::new();
+
+        // 1. 从 skill.toml 的 requires.env 读取声明的 key（值为空）
+        let toml_path = skill_dir.join("skill.toml");
+        if let Ok(raw) = std::fs::read_to_string(&toml_path) {
+            #[derive(serde::Deserialize, Default)]
+            struct T { #[serde(default)] requires: R }
+            #[derive(serde::Deserialize, Default)]
+            struct R { #[serde(default)] env: Vec<String> }
+            if let Ok(parsed) = toml::from_str::<T>(&raw) {
+                for key in parsed.requires.env {
+                    env.insert(key, String::new());
+                }
+            }
+        }
+
+        // 2. 从 .env.local 读取已有值（覆盖空值）
+        let env_path = skill_dir.join(".env.local");
+        if let Ok(content) = std::fs::read_to_string(&env_path) {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') { continue; }
+                if let Some((k, v)) = line.split_once('=') {
+                    env.insert(k.trim().to_string(), v.trim().to_string());
+                }
+            }
+        }
+
+        Ok(env)
+    })
+}
+
+/// 设置 Skill 的环境变量
+#[tauri::command]
+pub fn set_skill_env(
+    id: String,
+    env: std::collections::HashMap<String, String>,
+    state: State<TiangongApp>,
+) -> Result<(), String> {
+    state.with_state_read(|core_state| {
+        let skill = core_state.installed_skills()
+            .iter()
+            .find(|s| s.id == id)
+            .ok_or_else(|| anyhow::anyhow!("未找到 skill：{id}"))?;
+        let env_path = std::path::Path::new(&skill.source.value).join(".env.local");
+        let lines: Vec<String> = env.iter()
+            .filter(|(k, v)| !k.trim().is_empty() && !v.trim().is_empty())
+            .map(|(k, v)| format!("{}={}", k.trim(), v.trim()))
+            .collect();
+        if lines.is_empty() {
+            let _ = std::fs::remove_file(&env_path);
+        } else {
+            std::fs::write(&env_path, format!("{}\n", lines.join("\n")))
+                .map_err(|e| anyhow::anyhow!("写入 .env.local 失败：{e}"))?;
+        }
+        Ok(())
+    })
 }
 
 /// 设置 Skill 启用状态

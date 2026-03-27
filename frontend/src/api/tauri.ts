@@ -23,6 +23,7 @@ export interface Message {
 
 export interface RunSnapshot {
   status: string;
+  summary?: string;
   last_session_id?: string;
   current_plan?: TaskPlan;
   messages: Message[];
@@ -65,6 +66,7 @@ export interface McpServer {
 export interface Skill {
   id: string;
   name: string;
+  version: string;
   description?: string;
   enabled: boolean;
   source_type: string;
@@ -75,6 +77,7 @@ export interface McpHealthStatus {
   healthy: boolean;
   tool_count: number;
   last_error?: string;
+  server_version?: string;
 }
 
 export interface ServerConfig {
@@ -157,6 +160,12 @@ export const api = {
   setInputDraft: (content: string): Promise<void> =>
     invoke('set_input_draft', { content }),
 
+  getSessionCwd: (): Promise<string> =>
+    invoke('get_session_cwd'),
+
+  setSessionCwd: (cwd: string): Promise<void> =>
+    invoke('set_session_cwd', { cwd }),
+
   // ----------------------------------------------------------------
   // MCP 管理
   // ----------------------------------------------------------------
@@ -181,11 +190,20 @@ export const api = {
   getSkills: (): Promise<Skill[]> =>
     invoke('get_skills'),
 
-  installSkill: (path: string): Promise<string> =>
-    invoke('install_skill', { path }),
+  inspectSkill: (path: string): Promise<{ env_vars: string[]; missing_env_vars: string[]; dependencies: string[] }> =>
+    invoke('inspect_skill', { path }),
+
+  installSkill: (path: string, envValues?: Record<string, string>): Promise<string> =>
+    invoke('install_skill', { path, envValues }),
 
   removeSkill: (id: string): Promise<string> =>
     invoke('remove_skill', { id }),
+
+  getSkillEnv: (id: string): Promise<Record<string, string>> =>
+    invoke('get_skill_env', { id }),
+
+  setSkillEnv: (id: string, env: Record<string, string>): Promise<void> =>
+    invoke('set_skill_env', { id, env }),
 
   setSkillEnabled: (id: string, enabled: boolean): Promise<string> =>
     invoke('set_skill_enabled', { id, enabled }),
