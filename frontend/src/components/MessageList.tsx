@@ -41,32 +41,44 @@ export function MessageList() {
   const MarkdownComponents = {
     pre({ children }: any) {
       // ReactMarkdown v9: 代码块渲染为 <pre><code>
-      // 提取 code 元素的 props 直接渲染 SyntaxHighlighter
-      const codeEl = children?.props ? children : null;
-      if (codeEl) {
-        const className = codeEl.props?.className || '';
-        const match = /language-(\w+)/.exec(className);
-        const codeContent = String(codeEl.props?.children || '').replace(/\n$/, '');
+      // 递归提取文本内容和语言标记
+      const extractText = (node: any): string => {
+        if (typeof node === 'string') return node;
+        if (Array.isArray(node)) return node.map(extractText).join('');
+        if (node?.props?.children) return extractText(node.props.children);
+        return '';
+      };
+      const extractLang = (node: any): string => {
+        if (node?.props?.className) {
+          const m = /language-(\w+)/.exec(node.props.className);
+          if (m) return m[1];
+        }
+        if (node?.props?.children?.props?.className) {
+          const m = /language-(\w+)/.exec(node.props.children.props.className);
+          if (m) return m[1];
+        }
+        return '';
+      };
+
+      const text = extractText(children).replace(/\n$/, '');
+      const lang = extractLang({ props: { children } });
+
+      if (text) {
         return (SyntaxHighlighter as any)(
           {
             style: vscDarkPlus,
-            language: match?.[1] || 'text',
+            language: lang || 'text',
             PreTag: "div",
             className: "rounded-md text-xs !bg-background border border-border",
-            customStyle: {
-              padding: '12px',
-              borderRadius: '6px',
-              margin: '6px 0',
-            },
+            customStyle: { padding: '12px', borderRadius: '6px', margin: '6px 0' },
             codeTagProps: { style: {} },
           },
-          codeContent,
+          text,
         );
       }
       return <pre>{children}</pre>;
     },
     code({ className, children, ...props }: any) {
-      // 行内代码
       return (
         <code
           className="bg-muted text-foreground px-1 py-0.5 rounded text-xs font-mono"
@@ -196,8 +208,17 @@ export function MessageList() {
                         ) : (
                           <div>
                             {(() => {
-                              const parsed = parseInlineThinking(message.content);
-                              const thinkingContent = message.reasoning_content || parsed.thinking;
+                              // thinking 和内容独立处理，避免互相影响
+                              let thinkingContent = message.reasoning_content || '';
+                              let displayContent = message.content;
+
+                              // 仅当 reasoning_content 为空时才解析内联 <think> 标签
+                              if (!thinkingContent && displayContent.includes('<think>')) {
+                                const parsed = parseInlineThinking(displayContent);
+                                thinkingContent = parsed.thinking;
+                                displayContent = parsed.content;
+                              }
+
                               return (
                                 <>
                                   {thinkingContent && (
@@ -205,7 +226,7 @@ export function MessageList() {
                                   )}
                                   <div className="prose prose-sm max-w-none text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
                                     <ReactMarkdown remarkPlugins={[remarkGfm]} components={MarkdownComponents as any}>
-                                      {parsed.content}
+                                      {displayContent}
                                     </ReactMarkdown>
                                   </div>
                                 </>

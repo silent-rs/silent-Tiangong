@@ -86,21 +86,36 @@ export function TypingMessage({ content, reasoningContent, speed = 300, onComple
   // Markdown 渲染器
   const MarkdownComponents = {
     pre({ children }: any) {
-      const codeEl = children?.props ? children : null;
-      if (codeEl) {
-        const className = codeEl.props?.className || '';
-        const match = /language-(\w+)/.exec(className);
-        const codeContent = String(codeEl.props?.children || '').replace(/\n$/, '');
+      const extractText = (node: any): string => {
+        if (typeof node === 'string') return node;
+        if (Array.isArray(node)) return node.map(extractText).join('');
+        if (node?.props?.children) return extractText(node.props.children);
+        return '';
+      };
+      const extractLang = (node: any): string => {
+        if (node?.props?.className) {
+          const m = /language-(\w+)/.exec(node.props.className);
+          if (m) return m[1];
+        }
+        if (node?.props?.children?.props?.className) {
+          const m = /language-(\w+)/.exec(node.props.children.props.className);
+          if (m) return m[1];
+        }
+        return '';
+      };
+      const text = extractText(children).replace(/\n$/, '');
+      const lang = extractLang({ props: { children } });
+      if (text) {
         return (SyntaxHighlighter as any)(
           {
             style: vscDarkPlus,
-            language: match?.[1] || 'text',
+            language: lang || 'text',
             PreTag: "div",
             className: "rounded-md text-xs !bg-background border border-border",
             customStyle: { padding: '12px', borderRadius: '6px', margin: '6px 0' },
             codeTagProps: { style: {} },
           },
-          codeContent,
+          text,
         );
       }
       return <pre>{children}</pre>;
