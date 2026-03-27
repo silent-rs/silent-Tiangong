@@ -12,7 +12,7 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn from_core(core_session: &tiangong_core::core::session::Session) -> Self {
+    pub fn from_core(core_session: &tiangong_core::session::Session) -> Self {
         Self {
             id: core_session.id.clone(),
             title: core_session.title.clone(),
@@ -34,7 +34,7 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn from_core(core_msg: &tiangong_core::core::session::Message) -> Self {
+    pub fn from_core(core_msg: &tiangong_core::session::Message) -> Self {
         Self {
             id: core_msg.id.clone(),
             role: format!("{:?}", core_msg.role),
@@ -68,14 +68,17 @@ pub struct RunSnapshot {
     pub input_draft: String,
     /// 前端需要：当前执行计划
     pub current_plan: Option<TaskPlan>,
+    /// 前端需要：当前正在执行的会话 ID 列表
+    pub pending_session_ids: Vec<String>,
 }
 
 impl RunSnapshot {
     pub fn from_core_with_session(
-        core_snapshot: &tiangong_core::core::runtime::RunSnapshot,
+        core_snapshot: &tiangong_core::runtime::RunSnapshot,
         messages: Vec<Message>,
         input_draft: String,
         current_plan: Option<TaskPlan>,
+        pending_session_ids: Vec<String>,
     ) -> Self {
         Self {
             status: format!("{:?}", core_snapshot.status).to_lowercase(),
@@ -91,6 +94,7 @@ impl RunSnapshot {
             messages,
             input_draft,
             current_plan,
+            pending_session_ids,
         }
     }
 }
@@ -108,7 +112,7 @@ pub struct TaskPlan {
 }
 
 impl TaskPlan {
-    pub fn from_core(core_plan: &tiangong_core::core::planner::TaskPlan) -> Self {
+    pub fn from_core(core_plan: &tiangong_core::planner::TaskPlan) -> Self {
         Self {
             id: core_plan.id.clone(),
             objective: core_plan.objective.clone(),
@@ -120,7 +124,7 @@ impl TaskPlan {
         }
     }
 
-    pub fn from_session_task_plan(session_plan: &tiangong_core::core::session::SessionTaskPlan) -> Self {
+    pub fn from_session_task_plan(session_plan: &tiangong_core::session::SessionTaskPlan) -> Self {
         Self {
             id: session_plan.id.clone(),
             objective: session_plan.name.clone(),
@@ -146,16 +150,20 @@ pub struct PlanItem {
 }
 
 impl PlanItem {
-    pub fn from_core(core_item: &tiangong_core::core::planner::PlanItem) -> Self {
+    pub fn from_core(core_item: &tiangong_core::planner::PlanItem) -> Self {
         Self {
             id: core_item.id.clone(),
             description: core_item.description.clone(),
             status: format!("{:?}", core_item.status),
-            steps: core_item.execution_steps.iter().map(PlanStep::from_core).collect(),
+            steps: core_item
+                .execution_steps
+                .iter()
+                .map(PlanStep::from_core)
+                .collect(),
         }
     }
 
-    pub fn from_session_step(step: &tiangong_core::core::session::SessionPlanExecutionStep) -> Self {
+    pub fn from_session_step(step: &tiangong_core::session::SessionPlanExecutionStep) -> Self {
         Self {
             id: step.id.clone(),
             description: step.description.clone(),
@@ -174,7 +182,7 @@ pub struct PlanStep {
 }
 
 impl PlanStep {
-    pub fn from_core(core_step: &tiangong_core::core::planner::PlanStep) -> Self {
+    pub fn from_core(core_step: &tiangong_core::planner::PlanStep) -> Self {
         Self {
             id: core_step.id.clone(),
             description: core_step.description.clone(),
@@ -195,7 +203,7 @@ pub struct McpServer {
 }
 
 impl McpServer {
-    pub fn from_core(core_server: &tiangong_core::core::agent_config::McpServerConfig) -> Self {
+    pub fn from_core(core_server: &tiangong_core::agent_config::McpServerConfig) -> Self {
         Self {
             name: core_server.name.clone(),
             command: core_server.command.clone(),
@@ -215,16 +223,18 @@ impl McpServer {
 pub struct Skill {
     pub id: String,
     pub name: String,
+    pub version: String,
     pub description: Option<String>,
     pub enabled: bool,
     pub source_type: String,
 }
 
 impl Skill {
-    pub fn from_core(core_skill: &tiangong_core::core::agent_config::InstalledSkillConfig) -> Self {
+    pub fn from_core(core_skill: &tiangong_core::agent_config::InstalledSkillConfig) -> Self {
         Self {
             id: core_skill.id.clone(),
             name: core_skill.name.clone(),
+            version: core_skill.version.clone(),
             description: if core_skill.description.is_empty() {
                 None
             } else {
@@ -236,27 +246,187 @@ impl Skill {
     }
 }
 
-/// 模型提供者配置
+/// Skill 安装前检查结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Provider {
-    pub id: String,
-    pub name: String,
-    pub base_url: Option<String>,
-    pub models: Vec<Model>,
+pub struct SkillInspection {
+    pub env_vars: Vec<String>,
+    pub missing_env_vars: Vec<String>,
+    pub dependencies: Vec<String>,
 }
 
+/// Server 配置（前端使用）
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Model {
-    pub id: String,
-    pub name: String,
-    pub provider_id: String,
+pub struct ServerConfigView {
+    pub host: String,
+    pub port: u16,
+    pub auth_token_masked: String,
+    pub running: bool,
 }
 
-/// 模型配置
+/// Connector 信息（前端使用）
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelConfig {
-    pub api_auth_token: String,
-    pub api_base_url: String,
-    pub api_timeout_ms: String,
-    pub api_model: String,
+pub struct ConnectorInfo {
+    pub name: String,
+    pub connector_type: String,
+    pub enabled: bool,
+}
+
+impl ConnectorInfo {
+    pub fn from_config(config: &tiangong_connector::config::ConnectorConfig) -> Self {
+        Self {
+            name: config.name.clone(),
+            connector_type: format!("{:?}", config.connector_type),
+            enabled: config.enabled,
+        }
+    }
+}
+
+// ============================================================================
+// 新版模型配置类型（Provider + Model + Routing 三层架构）
+// ============================================================================
+
+/// 模型能力（前端使用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelCapabilityInfo {
+    pub key: String,
+    pub display_name: String,
+}
+
+/// Provider 连接配置（前端使用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderConfigView {
+    pub base_url: String,
+    pub api_key: String,
+    pub timeout_ms: u64,
+}
+
+/// 单个模型配置（前端使用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelEntryView {
+    pub provider: String,
+    pub model: String,
+    pub capabilities: Vec<String>,
+    pub options: serde_json::Value,
+}
+
+/// 完整的三层模型配置（前端使用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelsConfigView {
+    pub providers: HashMap<String, ProviderConfigView>,
+    pub models: HashMap<String, ModelEntryView>,
+    pub routing: HashMap<String, String>,
+}
+
+impl ModelsConfigView {
+    pub fn from_core(config: &tiangong_core::models_config::ModelsConfig) -> Self {
+        let providers = config
+            .providers
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    ProviderConfigView {
+                        base_url: v.base_url.clone(),
+                        api_key: v.api_key.clone(),
+                        timeout_ms: v.timeout_ms,
+                    },
+                )
+            })
+            .collect();
+
+        let models = config
+            .models
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    ModelEntryView {
+                        provider: v.provider.clone(),
+                        model: v.model.clone(),
+                        capabilities: v
+                            .capabilities
+                            .iter()
+                            .map(|c| serde_json::to_value(c).unwrap_or_default())
+                            .map(|v| v.as_str().unwrap_or_default().to_string())
+                            .collect(),
+                        options: v.options.clone(),
+                    },
+                )
+            })
+            .collect();
+
+        let routing = config
+            .routing
+            .iter()
+            .map(|(k, v)| {
+                let key = serde_json::to_value(k).unwrap_or_default();
+                (key.as_str().unwrap_or_default().to_string(), v.clone())
+            })
+            .collect();
+
+        Self {
+            providers,
+            models,
+            routing,
+        }
+    }
+
+    pub fn to_core(&self) -> tiangong_core::models_config::ModelsConfig {
+        use tiangong_core::models_config::{ModelCapability, ModelEntry, ModelsConfig, ProviderConfig};
+
+        let providers = self
+            .providers
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    ProviderConfig {
+                        base_url: v.base_url.clone(),
+                        api_key: v.api_key.clone(),
+                        timeout_ms: v.timeout_ms,
+                    },
+                )
+            })
+            .collect();
+
+        let models = self
+            .models
+            .iter()
+            .map(|(k, v)| {
+                let capabilities: Vec<ModelCapability> = v
+                    .capabilities
+                    .iter()
+                    .filter_map(|c| {
+                        let json_str = format!("\"{}\"", c);
+                        serde_json::from_str(&json_str).ok()
+                    })
+                    .collect();
+                (
+                    k.clone(),
+                    ModelEntry {
+                        provider: v.provider.clone(),
+                        model: v.model.clone(),
+                        capabilities,
+                        options: v.options.clone(),
+                    },
+                )
+            })
+            .collect();
+
+        let routing = self
+            .routing
+            .iter()
+            .filter_map(|(k, v)| {
+                let json_str = format!("\"{}\"", k);
+                let cap: ModelCapability = serde_json::from_str(&json_str).ok()?;
+                Some((cap, v.clone()))
+            })
+            .collect();
+
+        ModelsConfig {
+            providers,
+            models,
+            routing,
+        }
+    }
 }

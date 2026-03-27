@@ -1,41 +1,43 @@
-use std::path::PathBuf;
 use anyhow::Result;
+use std::path::PathBuf;
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 /// 日志文件前缀
-const LOG_FILE_PREFIX: &str = "tiangong-error";
+const LOG_FILE_PREFIX: &str = "tiangong";
+
+/// 默认日志过滤规则
+const DEFAULT_LOG_FILTER: &str = "tiangong=error";
 
 /// 初始化日志系统
 ///
-/// 将 ERROR 级别的日志输出到 ~/.tiangong/logs 目录，按天分割文件
+/// 支持 `TIANGONG_LOG` 环境变量自定义日志级别，例如：
+/// - `TIANGONG_LOG=debug` — 全局 debug
+/// - `TIANGONG_LOG=tiangong_core=debug,tiangong_server=info` — 按模块分级
+/// - 未设置时默认仅记录 ERROR 到文件
+///
 /// 返回 WorkerGuard，需要在 main 函数中保持存活以确保日志刷新
 pub fn init_logging() -> Result<WorkerGuard> {
-    // 获取日志目录
     let log_dir = get_log_dir()?;
-
-    // 确保日志目录存在
     std::fs::create_dir_all(&log_dir)?;
 
-    // 使用 tracing-appender 的非阻塞写入
-    // 按天轮转：每天创建新文件
     let file_appender = tracing_appender::rolling::daily(&log_dir, LOG_FILE_PREFIX);
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
-    // 配置订阅器
-    // 仅记录 ERROR 级别的日志到文件
-    let filter = EnvFilter::new("tiangong=error");
+    // 优先使用 TIANGONG_LOG 环境变量，回退到默认
+    let filter = EnvFilter::try_from_env("TIANGONG_LOG")
+        .unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER));
 
     tracing_subscriber::registry()
         .with(filter)
         .with(
             fmt::layer()
                 .with_writer(non_blocking)
-                .with_ansi(false) // 文件输出不需要 ANSI 颜色
-                .with_target(true) // 包含目标模块
-                .with_thread_ids(false) // 不包含线程 ID
-                .with_file(true) // 包含文件名
-                .with_line_number(true) // 包含行号
+                .with_ansi(false)
+                .with_target(true)
+                .with_thread_ids(false)
+                .with_file(true)
+                .with_line_number(true),
         )
         .init();
 
@@ -44,7 +46,6 @@ pub fn init_logging() -> Result<WorkerGuard> {
 
 /// 获取日志目录路径
 fn get_log_dir() -> Result<PathBuf> {
-    // 使用标准库获取主目录
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .map_err(|_| anyhow::anyhow!("无法获取用户主目录"))?;

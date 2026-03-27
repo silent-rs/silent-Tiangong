@@ -1,0 +1,99 @@
+# 联网搜索 Skill
+# 该技能允许 AI 助手进行互联网搜索以获取最新信息
+
+name: internet_search
+version: 1.0.0
+description: 使用搜索引擎在互联网上搜索信息，获取最新的数据和资料
+
+# 触发关键词
+trigger_keywords:
+  - 联网搜索
+  - 网上搜索
+  - 搜索一下
+  - 查一下
+  - 搜一下
+  - 在线搜索
+  - internet search
+  - search online
+  - google it
+
+# 参数定义
+parameters:
+  query:
+    type: string
+    description: 搜索查询内容
+    required: true
+    
+  max_results:
+    type: integer
+    description: 返回的最大结果数量
+    default: 5
+    min: 1
+    max: 20
+    
+  language:
+    type: string
+    description: 搜索语言偏好
+    default: zh-CN
+    enum:
+      - zh-CN
+      - en-US
+      - ja-JP
+
+# 执行配置
+command:
+  type: http
+  endpoint: https://api.example.com/search
+  method: POST
+  headers:
+    Content-Type: application/json
+  timeout: 30000
+  
+# 请求模板
+request_template: |
+  {
+    "query": "{{query}}",
+    "max_results": {{max_results}},
+    "language": "{{language}}"
+  }
+
+# 响应处理
+response_parser:
+  type: json
+  result_path: results
+  fields:
+    - title
+    - url
+    - snippet
+    - published_date
+
+# 错误处理
+error_handling:
+  retry_count: 2
+  retry_delay: 1000
+  fallback_message: "抱歉，搜索服务暂时不可用，请稍后再试。"
+
+# 使用示例
+examples:
+  - input: "帮我搜索一下最新的 AI 新闻"
+    parameters:
+      query: "AI 最新新闻"
+      max_results: 5
+      
+  - input: "搜索 Python 教程"
+    parameters:
+      query: "Python 教程"
+      max_results: 10
+      language: zh-CN
+
+# 元数据
+metadata:
+  author: TianGong Team
+  created_at: 2025-01-09
+  tags:
+    - search
+    - internet
+    - web
+    - information-retrieval
+  category: information
+  priority: normal

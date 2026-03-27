@@ -1,5 +1,3 @@
-mod core;
-mod entry;
 mod logging;
 
 fn main() -> anyhow::Result<()> {
@@ -7,5 +5,5 @@ fn main() -> anyhow::Result<()> {
     // _guard 需要保持存活，否则日志不会刷新
     let _guard = logging::init_logging()?;
 
-    entry::run()
+    tiangong_entry::run()
 }

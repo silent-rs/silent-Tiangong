@@ -23,9 +23,12 @@ export interface Message {
 
 export interface RunSnapshot {
   status: string;
+  summary?: string;
+  last_session_id?: string;
   current_plan?: TaskPlan;
   messages: Message[];
   input_draft: string;
+  pending_session_ids: string[];
 }
 
 export interface TaskPlan {
@@ -63,29 +66,57 @@ export interface McpServer {
 export interface Skill {
   id: string;
   name: string;
+  version: string;
   description?: string;
   enabled: boolean;
   source_type: string;
 }
 
-export interface Provider {
-  id: string;
+export interface McpHealthStatus {
   name: string;
-  base_url?: string;
-  models: Model[];
+  healthy: boolean;
+  tool_count: number;
+  last_error?: string;
+  server_version?: string;
 }
 
-export interface Model {
-  id: string;
-  name: string;
-  provider_id: string;
+export interface ServerConfig {
+  host: string;
+  port: number;
+  auth_token_masked: string;
+  running: boolean;
 }
 
-export interface ModelConfig {
-  api_auth_token: string;
-  api_base_url: string;
-  api_timeout_ms: string;
-  api_model: string;
+export interface ConnectorInfo {
+  name: string;
+  connector_type: string;
+  enabled: boolean;
+}
+
+// 模型配置（Provider + Model + Routing 三层架构）
+
+export interface ProviderConfigView {
+  base_url: string;
+  api_key: string;
+  timeout_ms: number;
+}
+
+export interface ModelEntryView {
+  provider: string;
+  model: string;
+  capabilities: string[];
+  options: Record<string, unknown>;
+}
+
+export interface ModelsConfigView {
+  providers: Record<string, ProviderConfigView>;
+  models: Record<string, ModelEntryView>;
+  routing: Record<string, string>;
+}
+
+export interface ModelCapabilityInfo {
+  key: string;
+  display_name: string;
 }
 
 // ============================================================================
@@ -129,11 +160,20 @@ export const api = {
   setInputDraft: (content: string): Promise<void> =>
     invoke('set_input_draft', { content }),
 
+  getSessionCwd: (): Promise<string> =>
+    invoke('get_session_cwd'),
+
+  setSessionCwd: (cwd: string): Promise<void> =>
+    invoke('set_session_cwd', { cwd }),
+
   // ----------------------------------------------------------------
   // MCP 管理
   // ----------------------------------------------------------------
   getMcpServers: (): Promise<McpServer[]> =>
     invoke('get_mcp_servers'),
+
+  getMcpHealth: (): Promise<McpHealthStatus[]> =>
+    invoke('get_mcp_health'),
 
   registerMcpServer: (name: string, command: string, args: string[], env?: Record<string, string>): Promise<string> =>
     invoke('register_mcp_server', { name, command, args, env }),
@@ -150,31 +190,59 @@ export const api = {
   getSkills: (): Promise<Skill[]> =>
     invoke('get_skills'),
 
-  installSkill: (path: string): Promise<string> =>
-    invoke('install_skill', { path }),
+  inspectSkill: (path: string): Promise<{ env_vars: string[]; missing_env_vars: string[]; dependencies: string[] }> =>
+    invoke('inspect_skill', { path }),
+
+  installSkill: (path: string, envValues?: Record<string, string>): Promise<string> =>
+    invoke('install_skill', { path, envValues }),
 
   removeSkill: (id: string): Promise<string> =>
     invoke('remove_skill', { id }),
+
+  getSkillEnv: (id: string): Promise<Record<string, string>> =>
+    invoke('get_skill_env', { id }),
+
+  setSkillEnv: (id: string, env: Record<string, string>): Promise<void> =>
+    invoke('set_skill_env', { id, env }),
 
   setSkillEnabled: (id: string, enabled: boolean): Promise<string> =>
     invoke('set_skill_enabled', { id, enabled }),
 
   // ----------------------------------------------------------------
-  // 模型提供者
+  // Server 管理
   // ----------------------------------------------------------------
-  getProviders: (): Promise<Provider[]> =>
-    invoke('get_providers'),
+  getServerConfig: (): Promise<ServerConfig> =>
+    invoke('get_server_config'),
 
-  get_model_config: (): Promise<ModelConfig> =>
-    invoke('get_model_config'),
+  setServerConfig: (host: string, port: number, authToken?: string): Promise<string> =>
+    invoke('set_server_config', { host, port, authToken }),
 
-  set_model_config: (
-    api_auth_token?: string,
-    api_base_url?: string,
-    api_timeout_ms?: string,
-    api_model?: string,
-  ): Promise<void> =>
-    invoke('set_model_config', { api_auth_token, api_base_url, api_timeout_ms, api_model }),
+  // ----------------------------------------------------------------
+  // Connector 管理
+  // ----------------------------------------------------------------
+  getConnectors: (): Promise<ConnectorInfo[]> =>
+    invoke('get_connectors'),
+
+  setConnectorEnabled: (name: string, enabled: boolean): Promise<string> =>
+    invoke('set_connector_enabled', { name, enabled }),
+
+  // ----------------------------------------------------------------
+  // 模型配置（Provider + Model + Routing）
+  // ----------------------------------------------------------------
+  getModelsConfig: (): Promise<ModelsConfigView> =>
+    invoke('get_models_config'),
+
+  setModelsConfig: (config: ModelsConfigView): Promise<void> =>
+    invoke('set_models_config', { config }),
+
+  getModelCapabilities: (): Promise<ModelCapabilityInfo[]> =>
+    invoke('get_model_capabilities'),
+
+  getModelList: (): Promise<string[]> =>
+    invoke('get_model_list'),
+
+  fetchProviderModels: (baseUrl: string, apiKey: string, timeoutMs?: number): Promise<string[]> =>
+    invoke('fetch_provider_models', { baseUrl, apiKey, timeoutMs }),
 
   // ----------------------------------------------------------------
   // 事件监听

@@ -1,141 +1,171 @@
-# TODO - 天工 RFC 0003（Skill 管理）任务清单
+# TODO - 天工全栈平台重构任务清单
 
-> 最后更新：2026-03-04
-> 当前主线 RFC：`docs/rfc/0003-skill-market.md`
-> 基线 RFC：`docs/rfc/0002-cli-agent-roadmap.md`
+> 最后更新：2026-03-23
+> 当前主线 RFC：`docs/rfc/0004-full-stack-agent-platform.md`
 > 参考：`PLAN.md`、`docs/requirements.md`
 
 ---
 
-## A. 文档与范围对齐（先完成）
+## Phase 2：Skill 管理 MVP（已完成 ✅）
 
-- [x] `docs/rfc/0003-skill-market.md` 重构为可开发的 v0.2（聚焦 MVP）
-- [x] `docs/requirements.md` 对齐“Skill 管理与 MCP 一致”
-- [x] `PLAN.md` 切换当前增量主线至 RFC 0003
-- [x] `TODO.md` 拆分 RFC 0003 首批可实施任务
-
----
-
-## B. M1 数据结构与配置层
-
-### B1 Skill 配置模型扩展
-
-- [x] 在 `AgentConfig` 中新增 Skill 安装态字段（installed/source/enabled/managed_mcp）
-- [x] 定义 `skill.toml` 的最小解析结构与校验规则
-- [x] 保持 `SKILL.md` 兼容降级路径（缺 `skill.toml` 时可加载）
-
-依赖：无
-
-### B2 锁文件模型与持久化
-
-- [ ] 新增 `skills-lock.json` 读写与校验
-- [ ] 新增 `mcp-lock.json` 读写与引用计数逻辑
-- [ ] 保证 `app.json`、`skills-lock.json`、`mcp-lock.json` 一致性更新
-
-依赖：B1
+- [x] Skill 支持安装、启停、卸载、列表、详情
+- [x] `/skill` 管理交互对齐 `/mcp`
+- [x] 动态 Step 执行闭环
+- [x] Skill 锁文件（skills-lock.json / mcp-lock.json）
+- [x] MCP 托管映射（卸载 skill 时自动清理无引用的托管 MCP server）
+- [x] 事务回滚（安装失败时 RAII 自动回滚已复制文件）
+- [x] 审计日志（~/.tiangong/audit.jsonl，记录 skill/mcp 操作）
 
 ---
 
-## C. M1 Skill 生命周期管理
+## Phase 3：Workspace 拆分与核心抽离（已完成 ✅）
 
-### C1 SkillManager 核心能力
+### A. Workspace 基础结构
 
-- [x] 实现 `install_skill`（本地目录）
-- [x] 实现 `remove_skill`
-- [x] 实现 `set_skill_enabled`
-- [ ] 实现 `list_skill` / `describe_skill`
-- [x] 支持外部 Skill 快速转换安装（`--convert` 自动补齐 `SKILL.md/skill.toml`）
-- [x] 转换链路接入智能体辅助（模型优先，规则回退）
-- [x] 转换完成后自动清理 `~/.tiangong/skills/imported` 中间目录
-- [x] 命中 skill 后将 `SKILL.md` 关键上下文注入 planning/execution 提示词
-- [x] 扩展受控命令白名单支持 Skill 常见运行时（node/npx/npm/yarn/pnpm/ts-node）
-- [x] 在 skill 目录执行命令时自动加载 `.env.local/.env`
-- [x] 运行时汇总已启用 Skill `.env.local/.env` 与 MCP `env` 配置，并注入受控命令执行环境（`cwd` 局部配置优先覆盖）
-- [x] 支持 Skill 初始化命令（`/skill init` 生成 SKILL.md 与 skill.toml）
+- [x] 创建 `crates/` 目录与 workspace Cargo.toml
+- [x] 新建 `crates/tiangong-core/Cargo.toml`，迁移核心依赖
+- [x] 新建 `crates/tiangong-cli/Cargo.toml`，CLI 依赖
+- [x] 新建 `crates/tiangong-entry/Cargo.toml`，命令路由
+- [x] 调整主 `Cargo.toml` 为 workspace 根配置
+- [x] 创建空骨架 crate：tiangong-server/gateway/connector/media
 
-依赖：B1、B2
+### B. 核心引擎迁移 (tiangong-core)
 
-### C2 Skill -> MCP 托管映射
+- [x] 迁移 `src/core/*` → `crates/tiangong-core/src/`
+- [x] 路径替换 `crate::core::` → `crate::`
+- [x] 新增 `context/` 上下文管理模块（压缩器 + 组织器）
+- [x] 新增 `plugin/` 插件框架（类型 + 注册表 + 生命周期）
+- [x] 修复原有编译错误（model.rs 类型导入、lite_model、tracing 宏）
+- [x] 修复可见性问题（pub(in crate::app_state) → pub）
+- [x] 确保 `tiangong-core` 可独立编译，无 UI 依赖
 
-- [ ] 解析 `requires.mcp` 并生成托管 server 名：`skill::<skill_id>::<mcp_id>`
-- [ ] 通过受控模板生成 MCP 配置（禁止 Skill 注入任意 command/args）
-- [ ] 卸载 Skill 时移除托管 MCP 配置并维护依赖引用计数
+### C. CLI 前端 (tiangong-cli)
 
-依赖：C1
+- [x] Codex 风格 REPL（对话自然滚动，终端原生文本选择）
+- [x] 交互式输入（crossterm raw mode 行编辑、历史导航）
+- [x] `/` 命令补全 + `@` 提及补全（自动弹出竖排候选列表）
+- [x] ratatui modal 管理界面（/sessions、/mcp、/skill）
+- [x] 命令系统（/new、/model、/config、/cancel、/help）
+- [x] 草稿会话（启动不创建空会话，首次发送才记录）
 
-### C3 事务与回滚
+### D. GUI 前端（src-tauri）
 
-- [ ] 安装流程分阶段提交（解析 -> 安装依赖 -> 写锁 -> 注入配置 -> 校验）
-- [ ] 任一步骤失败后执行增量回滚
-- [ ] 输出结构化错误分类（解析失败/依赖失败/配置失败/写入失败）
+- [x] src-tauri 保持独立 Tauri workspace
+- [x] 路径更新 `tiangong_core::core::` → `tiangong_core::`
+- [x] 编译验证通过
 
-依赖：C1、C2
+### E. 主入口统一 (tiangong-entry)
 
-### C4 动态 Step 执行闭环
+- [x] 迁移 `src/entry/*` → `crates/tiangong-entry/src/`
+- [x] 路径替换 + 可见性调整
+- [x] CLI 命令恢复：`Some(MainCommand::Cli)` → `tiangong_cli::run_cli()`
 
-- [x] 调整 planning 输出，减少静态 `execution_steps` 依赖（保留 plan item 主目标）
-- [x] 实现执行期动态 step 生成与推进（每步后判断继续/终止/补充下一步）
-- [x] 收敛 step 完成判定：仅目录浏览类工具成功不可直接判定业务步骤完成
-- [x] 会话持久化仅记录实际执行过的 step 轨迹，并标注动态补充来源
-- [x] 任务总状态按动态 step 聚合结果计算，避免 `task_plan failed` 与 `task_record completed` 不一致
+### F. 验证与交付
 
-依赖：C1
-
-### C5 Execution 领域解耦
-
-- [ ] 拆分 `core/execution` 领域，承接 plan 执行推进、结果归一化与验证执行逻辑
-- [ ] `execution_agent` 仅保留智能体决策循环，不再直接承载执行器辅助逻辑
-- [ ] `runtime` 改为装配 `planning/execution/response` 智能体与 `execution` 执行器，形成稳定边界，为后续 agent 配置化做准备
-
-依赖：C4
+- [x] `cargo fmt -- --check` 通过
+- [x] `cargo check --workspace` 通过
+- [x] `cargo clippy --workspace --all-targets --tests --benches -- -D warnings` 通过
+- [x] CLI 功能可用（REPL + 命令 + modal 管理）
+- [x] src-tauri 编译通过
+- [x] 死代码清理（src/ui/、src/cli/、src/lib.rs、src/core/、src/entry/）
 
 ---
 
-## D. M1 CLI/TUI 管理入口（对齐 MCP）
+## 后续阶段（待展开）
 
-### D1 命令入口
+### Phase 4：Server 模式（已完成 ✅）
+- [x] 新建 `crates/tiangong-server`
+- [x] 实现 REST API（/chat /sessions /mcp /skills /health /shutdown）
+- [x] 实现 WebSocket 流式通信（/api/v1/ws，EventBus 事件推送）
+- [x] API Token 认证（Bearer Token）
+- [x] `-d` / `--daemon` 后台运行支持（PID 文件管理）
+- [x] `tiangong server stop` 停止后台 Server
+- [x] Server 启动时自动加载已启用 Connector（connectors.json）
 
-- [x] 新增 `/skill` 命令（支持 `/skill <query>`）
-- [x] 补充命令提示与帮助文本
-- [x] 新增主入口 `tiangong skill` 子命令（list/show/init/install/remove/enable/disable/validate）
+### Phase 5：Gateway 与事件总线（已完成 ✅）
+- [x] 实现 EventBus（tokio broadcast，会话/Agent/Connector/系统事件）
+- [x] 实现 Gateway 消息路由（MessageRouter）
+- [x] 统一消息模型（IncomingMessage/OutgoingMessage/MessageContent）
 
-依赖：C1
+### Phase 6：Connector 框架（已完成 ✅）
+- [x] 定义 Connector trait（async start/stop/send_message/health_check）
+- [x] 实现 Webhook Connector（最小实现）
+- [x] ConnectorManager（注册/启停/健康检查）
+- [x] ConnectorConfig/ConnectorType（Webhook/Telegram/Discord/Lark）
+- [x] 实现 Telegram Connector（teloxide，feature gate `telegram`）
+- [x] 实现 Discord Connector（serenity，feature gate `discord`）
+- [x] 实现飞书/Lark Connector（reqwest HTTP API，feature gate `lark`）
 
-### D2 Skill 管理弹窗
+### Phase 7：多媒体能力（框架已完成 ✅）
+- [x] ImageGenerator trait + 请求/响应类型
+- [x] VideoGenerator trait + 异步任务类型
+- [x] SpeechRecognizer trait（STT）
+- [x] SpeechSynthesizer trait（TTS）+ VoiceInfo
+- [x] MediaTask 异步任务管理类型
+- [x] 图片生成后端实现（OpenAI DALL-E / GPT-Image，reqwest）
+- [x] 视频生成占位（StubVideoGenerator，待 Sora/Kling API 稳定后接入）
+- [x] 语音识别后端实现（OpenAI Whisper，multipart 上传）
+- [x] 语音合成后端实现（OpenAI TTS，6 个预定义音色）
+- [x] MediaAgent 聚合器（builder 模式，能力检查）
+- [x] Connector 语音消息自动转文字（Gateway MessageRouter 自动 STT）
 
-- [x] 新增 Skill 弹窗组件（布局与 `/mcp` 风格一致）
-- [x] 支持筛选、上下选择、详情展示、启停、删除、新增
-- [x] 状态栏反馈统一为结构化文案
-
-依赖：D1、C1
+### Phase 8：生产化与完善（已完成 ✅）
+- [x] 日志分级（支持 `TIANGONG_LOG` 环境变量按模块调级别）
+- [x] 错误恢复（启动时 recover_interrupted_tasks + auto_resume_unfinished_plan）
+- [x] 敏感配置脱敏（model auth_token + server auth_token 脱敏显示）
+- [x] 配置热重载（ConfigWatcher 轮询文件修改时间 + Notify 通知）
 
 ---
 
-## E. M1 安全与审计
+## Phase 9：模型配置重构与多媒体集成 — **当前阶段**
 
-### E1 权限与确认
+### A. 模型配置重构（已完成 ✅）
+- [x] ModelsConfig 替换 ModelProviderConfig 为唯一模型配置源
+- [x] Provider + Model + Routing 三层架构
+- [x] ModelsConfig.to_chat_provider_config() 自动生成内部配置
+- [x] 移除旧版 draft 字段和 legacy API
+- [x] 设置页面自动保存（debounce 500ms）
+- [x] 选择 Provider 后可获取模型列表快速配置
+- [x] 模型标识名自动生成
 
-- [ ] 安装前展示权限摘要与依赖摘要
-- [ ] 增加安装确认流程（用户确认后继续）
-- [ ] 命令权限白名单与高风险模式拒绝（禁 `bash -c`）
-- [x] 工具路径边界允许当前目录、`~/.tiangong` 与 `/tmp`
+### B. GUI 升级（已完成 ✅）
+- [x] shadcn/ui dashboard 风格重构（Sidebar + Header + Tabs + Card + Select）
+- [x] 暗/亮/跟随系统主题切换
+- [x] macOS 红绿灯对齐（trafficLightPosition）
+- [x] 消息展示优化（系统消息分组折叠、间距缩减、文字对比度）
+- [x] 输入框嵌入式发送按钮
+- [x] 会话标题 LLM 自动生成
+- [x] 空会话过滤 + 会话列表按更新时间倒序
 
-依赖：C1、C2
+### C. 执行优化（已完成 ✅）
+- [x] 意图分类快速路径：简单对话跳过 planning + execution
+- [x] poll_pending_turn 修复（消息回复链路）
+- [x] 完成后状态重置为 idle
 
-### E2 审计记录
+### D. 多媒体能力集成到执行引擎（进行中）
 
-- [ ] Skill/MCP 管理事件统一结构（event_id/type/status/duration/error/time）
-- [ ] 安装/卸载/启停失败均可追踪到事件记录
+#### D1. 图片生成集成
+- [ ] RuntimeEngine 从 ModelsConfig routing 初始化 MediaAgent
+  - 读取 `routing[ImageGeneration]` 解析 provider + model
+  - 构建 `OpenAiImageBackend` 并注入 `MediaAgent`
+- [ ] 注册 `generate_image` 为内置工具函数
+  - 在 `execution_tool_agent.rs` 中添加函数定义（prompt, width?, height?, style?）
+  - 在 `LocalToolExecutor` 中添加处理分支
+- [ ] 工具执行：调用 `MediaAgent.generate_image()` 并返回图片 URL/base64
+- [ ] 前端消息中渲染图片（识别 URL 或 base64 并显示 `<img>`）
 
-依赖：C1、C2
+#### D2. 语音合成/识别集成
+- [ ] 读取 `routing[Tts]` 初始化 TTS 后端
+- [ ] 读取 `routing[Stt]` 初始化 STT 后端
+- [ ] 注册 `text_to_speech` / `speech_to_text` 为内置工具
 
----
+#### D3. 视频生成集成
+- [ ] 读取 `routing[VideoGeneration]` 初始化视频生成后端
+- [ ] 注册 `generate_video` 为内置工具（异步任务模式）
 
-## F. M1 验证与交付
-
-- [ ] 完成 `cargo fmt -- --check`
-- [ ] 完成 `cargo check --workspace`
-- [ ] 完成 `cargo clippy --workspace --all-targets --tests --benches -- -D warnings`
-- [ ] 更新 TODO 状态并准备 PR 描述
-
-依赖：B~E 全部完成
+### E. 验证
+- [ ] `cargo check --workspace` 通过
+- [ ] `cargo clippy --workspace --all-targets --tests --benches -- -D warnings` 通过
+- [ ] `cargo nextest run --workspace --no-tests pass` 通过
+- [ ] GUI 图片生成端到端可用
+- [ ] 暗/亮主题下图片正常显示

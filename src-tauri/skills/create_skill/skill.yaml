@@ -1,0 +1,77 @@
+# 创建 Skill 的 Skill
+# 该技能允许 AI 助手自动创建新的技能模块
+
+name: create_skill
+version: 1.0.0
+description: 根据用户需求自动创建新的技能模块，包含配置文件、执行脚本和文档
+
+# 触发关键词
+trigger_keywords:
+  - 创建skill
+  - 新建技能
+  - 添加技能
+  - 创建一个新的skill
+  - 我想添加一个新功能
+  - create a new skill
+
+# 参数定义
+parameters:
+  skill_name:
+    type: string
+    description: 技能名称（英文，snake_case）
+    required: true
+
+  skill_display_name:
+    type: string
+    description: 技能显示名称（中文）
+    required: true
+
+  description:
+    type: string
+    description: 技能功能描述
+    required: true
+
+  trigger_keywords:
+    type: array
+    description: 触发关键词列表
+    required: true
+
+  category:
+    type: string
+    description: 技能分类
+    default: utility
+    enum:
+      - utility
+      - search
+      - tool
+      - automation
+      - integration
+
+  execution_type:
+    type: string
+    description: 执行方式
+    default: python
+    enum:
+      - python
+      - http
+      - shell
+      - combined
+
+# 执行配置
+execution:
+  type: python
+  entry_point: create_skill.py
+  working_directory: skills/create_skill
+
+# 输出配置
+output:
+  target_directory: skills
+  files:
+    - "{skill_name}/skill.yaml"
+    - "{skill_name}/{skill_name}.py"
+    - "{skill_name}/README.md"
+
+# 错误处理
+error_handling:
+  retry_count: 0
+  fallback_message: "抱歉，创建技能失败，请检查参数是否正确。"

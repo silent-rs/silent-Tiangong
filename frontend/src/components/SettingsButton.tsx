@@ -5,25 +5,24 @@ import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Settings, Eye, EyeOff } from 'lucide-react';
 import { api } from '@/api/tauri';
-import type { ModelConfig } from '@/api/tauri';
+import type { ModelsConfigView, ProviderConfigView } from '@/api/tauri';
 
 export function SettingsButton() {
   const [open, setOpen] = useState(false);
-  const [showToken, setShowToken] = useState(false);
-  const [config, setConfig] = useState<ModelConfig>({
-    api_auth_token: '',
-    api_base_url: '',
-    api_timeout_ms: '',
-    api_model: '',
+  const [showApiKey, setShowApiKey] = useState(false);
+  const [config, setConfig] = useState<ModelsConfigView>({
+    providers: {},
+    models: {},
+    routing: {},
   });
-  const [originalConfig, setOriginalConfig] = useState<ModelConfig>({ ...config });
+  const [originalConfig, setOriginalConfig] = useState<ModelsConfigView>({ ...config });
   const [isSaving, setIsSaving] = useState(false);
 
   const loadConfig = async () => {
     try {
-      const cfg = await api.get_model_config();
+      const cfg = await api.getModelsConfig();
       setConfig(cfg);
-      setOriginalConfig(cfg);
+      setOriginalConfig(JSON.parse(JSON.stringify(cfg)));
     } catch (error) {
       console.error('加载配置失败:', error);
     }
@@ -38,13 +37,8 @@ export function SettingsButton() {
   const handleSave = async () => {
     setIsSaving(true);
     try {
-      await api.set_model_config(
-        config.api_auth_token || undefined,
-        config.api_base_url || undefined,
-        config.api_timeout_ms || undefined,
-        config.api_model || undefined,
-      );
-      setOriginalConfig({ ...config });
+      await api.setModelsConfig(config);
+      setOriginalConfig(JSON.parse(JSON.stringify(config)));
       setOpen(false);
     } catch (error) {
       console.error('保存配置失败:', error);
@@ -54,13 +48,30 @@ export function SettingsButton() {
   };
 
   const handleCancel = () => {
-    setConfig({ ...originalConfig });
+    setConfig(JSON.parse(JSON.stringify(originalConfig)));
     setOpen(false);
   };
 
-  const hasChanges = Object.keys(config).some(
-    key => config[key as keyof typeof config] !== originalConfig[key as keyof typeof originalConfig]
-  );
+  const hasChanges = JSON.stringify(config) !== JSON.stringify(originalConfig);
+
+  // 获取第一个 provider 进行快速编辑
+  const providerKeys = Object.keys(config.providers);
+  const firstKey = providerKeys[0] || 'default';
+  const firstProvider: ProviderConfigView = config.providers[firstKey] || {
+    base_url: '',
+    api_key: '',
+    timeout_ms: 60000,
+  };
+
+  const updateProvider = (updates: Partial<ProviderConfigView>) => {
+    setConfig({
+      ...config,
+      providers: {
+        ...config.providers,
+        [firstKey]: { ...firstProvider, ...updates },
+      },
+    });
+  };
 
   return (
     <>
@@ -76,70 +87,54 @@ export function SettingsButton() {
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="bg-[#252526] border-[#3C3C3C] text-white max-w-md">
           <DialogHeader>
-            <DialogTitle>LLM 配置</DialogTitle>
+            <DialogTitle>LLM 快速配置 ({firstKey})</DialogTitle>
           </DialogHeader>
 
           <div className="space-y-4">
-            {/* API Auth Token */}
             <div className="space-y-2">
-              <Label htmlFor="token">API Token</Label>
+              <Label htmlFor="apiKey">API Key</Label>
               <div className="relative">
                 <Input
-                  id="token"
-                  type={showToken ? 'text' : 'password'}
-                  value={config.api_auth_token}
-                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setConfig({ ...config, api_auth_token: e.target.value })}
+                  id="apiKey"
+                  type={showApiKey ? 'text' : 'password'}
+                  value={firstProvider.api_key}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => updateProvider({ api_key: e.target.value })}
                   className="bg-[#1E1E1E] border-[#3C3C3C] text-white pr-10"
-                  placeholder="sk-..."
+                  placeholder="sk-... 或 ${ENV_VAR}"
                 />
                 <button
                   type="button"
-                  onClick={() => setShowToken(!showToken)}
+                  onClick={() => setShowApiKey(!showApiKey)}
                   className="absolute right-2 top-1/2 -translate-y-1/2 text-[#858585] hover:text-white"
                 >
-                  {showToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
               </div>
             </div>
 
-            {/* API Base URL */}
             <div className="space-y-2">
               <Label htmlFor="baseUrl">Base URL</Label>
               <Input
                 id="baseUrl"
-                value={config.api_base_url}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setConfig({ ...config, api_base_url: e.target.value })}
+                value={firstProvider.base_url}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => updateProvider({ base_url: e.target.value })}
                 className="bg-[#1E1E1E] border-[#3C3C3C] text-white"
                 placeholder="https://api.openai.com/v1"
               />
             </div>
 
-            {/* API Timeout */}
             <div className="space-y-2">
               <Label htmlFor="timeout">超时时间 (毫秒)</Label>
               <Input
                 id="timeout"
                 type="number"
-                value={config.api_timeout_ms}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setConfig({ ...config, api_timeout_ms: e.target.value })}
+                value={firstProvider.timeout_ms}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => updateProvider({ timeout_ms: parseInt(e.target.value) || 60000 })}
                 className="bg-[#1E1E1E] border-[#3C3C3C] text-white"
                 placeholder="60000"
               />
             </div>
 
-            {/* API Model */}
-            <div className="space-y-2">
-              <Label htmlFor="model">模型名称</Label>
-              <Input
-                id="model"
-                value={config.api_model}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setConfig({ ...config, api_model: e.target.value })}
-                className="bg-[#1E1E1E] border-[#3C3C3C] text-white"
-                placeholder="gpt-4"
-              />
-            </div>
-
-            {/* 按钮 */}
             <div className="flex justify-end gap-2 pt-4">
               <Button
                 variant="ghost"

@@ -1,0 +1,17 @@
+[package]
+name = "tiangong-gateway"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tiangong-core = { path = "../tiangong-core" }
+tiangong-media = { path = "../tiangong-media" }
+anyhow = "1"
+tokio = { version = "1", features = ["sync", "rt", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+scru128 = "3"
+tracing = "0.1"
+async-trait = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

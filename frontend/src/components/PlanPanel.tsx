@@ -60,7 +60,7 @@ export function PlanPanel() {
       case 'InProgress':
         return <Loader2 className="w-4 h-4 text-[#FFC107] animate-spin" />;
       default:
-        return <Clock className="w-4 h-4 text-[#858585]" />;
+        return <Clock className="w-4 h-4 text-muted-foreground" />;
     }
   };
 
@@ -86,7 +86,7 @@ export function PlanPanel() {
       case 'InProgress':
         return 'text-[#FFC107]';
       default:
-        return 'text-[#858585]';
+        return 'text-muted-foreground';
     }
   };
 
@@ -99,19 +99,19 @@ export function PlanPanel() {
   const progressPercentage = totalSteps > 0 ? Math.round((completedSteps / totalSteps) * 100) : 0;
 
   return (
-    <div className="border-t border-[#3C3C3C] bg-[#252526]">
+    <div className="border-t border-border bg-card">
       <div className="max-w-3xl mx-auto p-4">
         {/* 头部 */}
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
             <Clock className="w-4 h-4 text-[#FFC107]" />
             <h3 className="text-sm font-medium text-white">执行计划</h3>
-            <Badge variant="outline" className="border-[#3C3C3C] text-[#CCCCCC]">
+            <Badge variant="outline" className="border-border text-muted-foreground">
               {runStatus === 'planning' ? '计划中' : '执行中'}
             </Badge>
             {/* 进度显示 */}
             {totalSteps > 0 && (
-              <span className="text-xs text-[#858585]">
+              <span className="text-xs text-muted-foreground">
                 {completedSteps}/{totalSteps} ({progressPercentage}%)
               </span>
             )}
@@ -122,7 +122,7 @@ export function PlanPanel() {
             <Button
               variant="ghost"
               size="sm"
-              className="text-xs text-[#CCCCCC] hover:text-white hover:bg-[#2A2D2E] h-7"
+              className="text-xs text-muted-foreground hover:text-white hover:bg-accent h-7"
               onClick={expandedItems.size === currentPlan.items.length ? collapseAll : expandAll}
             >
               {expandedItems.size === currentPlan.items.length ? '折叠全部' : '展开全部'}
@@ -145,14 +145,14 @@ export function PlanPanel() {
         </div>
 
         {/* 计划目标 */}
-        <div className="text-xs text-[#858585] mb-3">{currentPlan.objective}</div>
+        <div className="text-xs text-muted-foreground mb-3">{currentPlan.objective}</div>
 
         {/* 进度条 */}
         {totalSteps > 0 && (
           <div className="mb-3">
-            <div className="h-1.5 bg-[#1E1E1E] rounded-full overflow-hidden">
+            <div className="h-1.5 bg-background rounded-full overflow-hidden">
               <div
-                className="h-full bg-[#10A37F] transition-all duration-300 ease-out"
+                className="h-full bg-primary transition-all duration-300 ease-out"
                 style={{ width: `${progressPercentage}%` }}
               />
             </div>
@@ -168,22 +168,22 @@ export function PlanPanel() {
             const itemProgress = itemTotalSteps > 0 ? Math.round((itemCompletedSteps / itemTotalSteps) * 100) : 0;
 
             return (
-              <div key={item.id} className="bg-[#1E1E1E] rounded-lg border border-[#3C3C3C] overflow-hidden">
+              <div key={item.id} className="bg-background rounded-lg border border-border overflow-hidden">
                 {/* 计划项标题 */}
                 <button
-                  className="w-full px-3 py-2.5 flex items-center gap-2 text-left hover:bg-[#2A2D2E] transition-colors"
+                  className="w-full px-3 py-2.5 flex items-center gap-2 text-left hover:bg-accent transition-colors"
                   onClick={() => toggleItem(item.id)}
                 >
                   {/* 序号 */}
-                  <span className="text-xs text-[#858585] font-mono w-5 flex-shrink-0">
+                  <span className="text-xs text-muted-foreground font-mono w-5 flex-shrink-0">
                     {index + 1}.
                   </span>
 
                   {/* 展开/折叠图标 */}
                   {isExpanded ? (
-                    <ChevronDown className="w-4 h-4 text-[#858585] flex-shrink-0" />
+                    <ChevronDown className="w-4 h-4 text-muted-foreground flex-shrink-0" />
                   ) : (
-                    <ChevronRight className="w-4 h-4 text-[#858585] flex-shrink-0" />
+                    <ChevronRight className="w-4 h-4 text-muted-foreground flex-shrink-0" />
                   )}
 
                   {/* 状态图标 */}
@@ -199,7 +199,7 @@ export function PlanPanel() {
 
                   {/* 步骤进度 */}
                   {itemTotalSteps > 0 && (
-                    <span className="text-xs text-[#858585] flex-shrink-0">
+                    <span className="text-xs text-muted-foreground flex-shrink-0">
                       {itemCompletedSteps}/{itemTotalSteps}
                     </span>
                   )}
@@ -208,9 +208,9 @@ export function PlanPanel() {
                 {/* 计划项进度条 */}
                 {itemTotalSteps > 0 && (
                   <div className="px-3 pb-2">
-                    <div className="h-0.5 bg-[#252526] rounded-full overflow-hidden">
+                    <div className="h-0.5 bg-card rounded-full overflow-hidden">
                       <div
-                        className="h-full bg-[#10A37F] transition-all duration-300 ease-out"
+                        className="h-full bg-primary transition-all duration-300 ease-out"
                         style={{ width: `${itemProgress}%` }}
                       />
                     </div>
@@ -226,10 +226,10 @@ export function PlanPanel() {
                       return (
                         <div
                           key={step.id}
-                          className="group flex items-start gap-2 text-sm py-1 px-2 rounded hover:bg-[#252526] transition-colors"
+                          className="group flex items-start gap-2 text-sm py-1 px-2 rounded hover:bg-card transition-colors"
                         >
                           {/* 步骤序号 */}
-                          <span className="text-xs text-[#858585] font-mono mt-0.5 flex-shrink-0">
+                          <span className="text-xs text-muted-foreground font-mono mt-0.5 flex-shrink-0">
                             {stepIndex + 1}
                           </span>
 
@@ -238,9 +238,9 @@ export function PlanPanel() {
 
                           {/* 步骤描述 */}
                           <div className="flex-1 min-w-0">
-                            <p className="text-[#CCCCCC] break-words">{step.description}</p>
+                            <p className="text-muted-foreground break-words">{step.description}</p>
                             {step.source === 'Dynamic' && (
-                              <Badge variant="outline" className="mt-1 text-xs border-[#3C3C3C] text-[#858585]">
+                              <Badge variant="outline" className="mt-1 text-xs border-border text-muted-foreground">
                                 动态生成
                               </Badge>
                             )}
@@ -250,14 +250,14 @@ export function PlanPanel() {
                           <Button
                             variant="ghost"
                             size="icon"
-                            className="opacity-0 group-hover:opacity-100 flex-shrink-0 h-6 w-6 hover:bg-[#3C3C3C]"
+                            className="opacity-0 group-hover:opacity-100 flex-shrink-0 h-6 w-6 hover:bg-accent"
                             onClick={() => handleCopyStep(step.description, step.id)}
                             title="复制步骤内容"
                           >
                             {isCopied ? (
                               <CheckCircle className="w-3.5 h-3.5 text-[#4CAF50]" />
                             ) : (
-                              <Copy className="w-3.5 h-3.5 text-[#858585]" />
+                              <Copy className="w-3.5 h-3.5 text-muted-foreground" />
                             )}
                           </Button>
                         </div>
@@ -272,7 +272,7 @@ export function PlanPanel() {
 
         {/* 空状态 */}
         {currentPlan.items.length === 0 && (
-          <div className="text-center text-[#858585] py-8">
+          <div className="text-center text-muted-foreground py-8">
             暂无计划项
           </div>
         )}

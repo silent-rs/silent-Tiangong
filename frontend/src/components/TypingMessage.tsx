@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import type { ReactNode } from 'react';
@@ -18,12 +19,22 @@ export function TypingMessage({ content, reasoningContent, speed = 300, onComple
   const [isComplete, setIsComplete] = useState(false);
   const intervalRef = useRef<number | null>(null);
   const currentIndexRef = useRef(0);
+  const prevContentRef = useRef('');
 
   useEffect(() => {
-    // 重置状态
-    setDisplayedContent('');
-    setIsComplete(false);
-    currentIndexRef.current = 0;
+    // 判断内容是否只是在增长（流式追加）
+    const isAppending = content.startsWith(prevContentRef.current) && prevContentRef.current.length > 0;
+    prevContentRef.current = content;
+
+    if (!isAppending) {
+      // 内容完全不同，重置
+      setDisplayedContent('');
+      setIsComplete(false);
+      currentIndexRef.current = 0;
+    } else {
+      // 内容是追加的，保持当前进度，取消完成状态
+      setIsComplete(false);
+    }
 
     // 如果内容为空，直接完成
     if (!content) {
@@ -73,51 +84,54 @@ export function TypingMessage({ content, reasoningContent, speed = 300, onComple
 
   // Markdown 渲染器
   const MarkdownComponents = {
-    code({ className, children, ...props }: any) {
+    pre({ children, ...rest }: any) {
+      return (
+        <pre className="rounded-md text-xs bg-background border border-border p-3 my-1.5 overflow-x-auto" {...rest}>
+          {children}
+        </pre>
+      );
+    },
+    code({ className, children, node, ...rest }: any) {
       const match = /language-(\w+)/.exec(className || '');
-      const hasLanguage = match && match[1];
-      return hasLanguage ? (
-        (SyntaxHighlighter as any)(
-          {
-            style: vscDarkPlus,
-            language: match[1],
-            PreTag: "div",
-            className: "rounded-md text-sm",
-            customStyle: {
-              background: '#1E1E1E',
-              padding: '16px',
-              borderRadius: '8px',
-              margin: '8px 0',
-            },
-          },
-          String(children).replace(/\n$/, '')
-        )
-      ) : (
-        <code
-          className="bg-[#2D2D30] text-[#E9E9E9] px-1.5 py-0.5 rounded text-sm font-mono"
-          {...props}
+      const isBlock = match || node?.parentNode?.tagName === 'pre';
+      const CodeHighlighter = SyntaxHighlighter as any;
+      return isBlock ? (
+        <CodeHighlighter
+          style={vscDarkPlus}
+          language={match?.[1] || 'text'}
+          PreTag="div"
+          className="rounded-md text-xs !bg-background border border-border"
+          customStyle={{ padding: '12px', borderRadius: '6px', margin: '6px 0' }}
+          codeTagProps={{ style: {} }}
         >
+          {String(children).replace(/\n$/, '')}
+        </CodeHighlighter>
+      ) : (
+        <code className="bg-muted text-foreground px-1 py-0.5 rounded text-xs font-mono" {...rest}>
           {children}
         </code>
       );
     },
     p({ children }: { children: ReactNode }) {
-      return <p className="mb-3 last:mb-0 leading-7">{children}</p>;
+      return <p className="mb-2 last:mb-0 leading-6">{children}</p>;
     },
     ul({ children }: { children: ReactNode }) {
-      return <ul className="list-disc list-inside mb-3 space-y-1.5">{children}</ul>;
+      return <ul className="list-disc pl-5 mb-2 space-y-1 [&_p]:mb-0 [&_p]:inline">{children}</ul>;
     },
     ol({ children }: { children: ReactNode }) {
-      return <ol className="list-decimal list-inside mb-3 space-y-1.5">{children}</ol>;
+      return <ol className="list-decimal pl-5 mb-2 space-y-1 [&_p]:mb-0 [&_p]:inline">{children}</ol>;
+    },
+    li({ children }: { children: ReactNode }) {
+      return <li className="leading-6">{children}</li>;
     },
     h1({ children }: { children: ReactNode }) {
-      return <h1 className="text-xl font-bold mb-4 mt-6 first:mt-0">{children}</h1>;
+      return <h1 className="text-lg font-bold mb-3 mt-5 first:mt-0">{children}</h1>;
     },
     h2({ children }: { children: ReactNode }) {
-      return <h2 className="text-lg font-bold mb-3 mt-5 first:mt-0">{children}</h2>;
+      return <h2 className="text-base font-bold mb-2 mt-4 first:mt-0">{children}</h2>;
     },
     h3({ children }: { children: ReactNode }) {
-      return <h3 className="text-base font-bold mb-2 mt-4 first:mt-0">{children}</h3>;
+      return <h3 className="text-sm font-bold mb-2 mt-3 first:mt-0">{children}</h3>;
     },
     blockquote({ children }: { children: ReactNode }) {
       return (
@@ -141,24 +155,40 @@ export function TypingMessage({ content, reasoningContent, speed = 300, onComple
         </a>
       );
     },
+    table({ children }: { children: ReactNode }) {
+      return (
+        <div className="my-3 overflow-x-auto">
+          <table className="min-w-full border-collapse border border-border text-sm">
+            {children}
+          </table>
+        </div>
+      );
+    },
+    thead({ children }: { children: ReactNode }) {
+      return <thead className="bg-muted/50">{children}</thead>;
+    },
+    th({ children }: { children: ReactNode }) {
+      return <th className="border border-border px-3 py-1.5 text-left font-semibold">{children}</th>;
+    },
+    td({ children }: { children: ReactNode }) {
+      return <td className="border border-border px-3 py-1.5">{children}</td>;
+    },
   };
 
   return (
     <div>
-      {/* 正常输出 - 打字机效果 */}
-      <div className="prose prose-invert prose-sm max-w-none">
-        <ReactMarkdown components={MarkdownComponents as any}>
+      {reasoningContent && (
+        <ThinkingBlock content={reasoningContent} defaultExpanded={false} />
+      )}
+
+      <div className="prose prose-invert prose-sm max-w-none text-[13px]">
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={MarkdownComponents as any}>
           {displayedContent}
         </ReactMarkdown>
         {!isComplete && (
           <span className="inline-block w-2 h-4 bg-[#10A37F] ml-1 animate-pulse" />
         )}
       </div>
-
-      {/* 思考过程 - 仅在完成时显示 */}
-      {isComplete && reasoningContent && (
-        <ThinkingBlock content={reasoningContent} defaultExpanded={false} />
-      )}
     </div>
   );
 }

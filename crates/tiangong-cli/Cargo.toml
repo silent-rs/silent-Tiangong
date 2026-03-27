@@ -1,0 +1,10 @@
+[package]
+name = "tiangong-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tiangong-core = { path = "../tiangong-core" }
+anyhow = "1"
+crossterm = "0.28"
+ratatui = "0.28"

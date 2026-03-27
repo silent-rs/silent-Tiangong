@@ -17,7 +17,12 @@
         "height": 900,
         "resizable": true,
         "fullscreen": false,
-        "titleBarStyle": "Overlay"
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 15,
+          "y": 25
+        }
       }
     ],
     "security": {

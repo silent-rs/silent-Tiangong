@@ -4,20 +4,26 @@ use std::sync::Mutex;
 ///
 /// 持有核心的 TiangongState，通过 Mutex 实现线程安全
 pub struct TiangongApp {
-    pub state: Mutex<tiangong_core::core::app_state::TiangongState>,
+    pub state: Mutex<tiangong_core::app_state::TiangongState>,
+}
+
+impl Default for TiangongApp {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(tiangong_core::app_state::TiangongState::load_or_default()),
+        }
+    }
 }
 
 impl TiangongApp {
     pub fn new() -> Self {
-        Self {
-            state: Mutex::new(tiangong_core::core::app_state::TiangongState::load_or_default()),
-        }
+        Self::default()
     }
 
     /// 获取状态的可变引用
     pub fn with_state<F, R>(&self, f: F) -> Result<R, String>
     where
-        F: FnOnce(&mut tiangong_core::core::app_state::TiangongState) -> Result<R, anyhow::Error>,
+        F: FnOnce(&mut tiangong_core::app_state::TiangongState) -> Result<R, anyhow::Error>,
     {
         self.state
             .lock()
@@ -28,7 +34,7 @@ impl TiangongApp {
     /// 获取状态的不可变引用
     pub fn with_state_read<F, R>(&self, f: F) -> Result<R, String>
     where
-        F: FnOnce(&tiangong_core::core::app_state::TiangongState) -> Result<R, anyhow::Error>,
+        F: FnOnce(&tiangong_core::app_state::TiangongState) -> Result<R, anyhow::Error>,
     {
         self.state
             .lock()
