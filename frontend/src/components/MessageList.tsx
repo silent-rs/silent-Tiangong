@@ -41,9 +41,9 @@ export function MessageList() {
   const MarkdownComponents = {
     code({ className, children, ...rest }: any) {
       const match = /language-(\w+)/.exec(className || '');
-      const SH = SyntaxHighlighter as any;
+      const CodeHighlighter = SyntaxHighlighter as any;
       return match ? (
-        <SH
+        <CodeHighlighter
           style={vscDarkPlus}
           language={match[1]}
           PreTag="div"
@@ -53,7 +53,7 @@ export function MessageList() {
           {...rest}
         >
           {String(children).replace(/\n$/, '')}
-        </SH>
+        </CodeHighlighter>
       ) : (
         <code className={className || "bg-muted text-foreground px-1 py-0.5 rounded text-xs font-mono"} {...rest}>
           {children}
