@@ -84,6 +84,13 @@ export function TypingMessage({ content, reasoningContent, speed = 300, onComple
 
   // Markdown 渲染器
   const MarkdownComponents = {
+    pre({ children, ...rest }: any) {
+      return (
+        <pre className="rounded-md text-xs bg-background border border-border p-3 my-1.5 overflow-x-auto" {...rest}>
+          {children}
+        </pre>
+      );
+    },
     code({ className, children, ...rest }: any) {
       const match = /language-(\w+)/.exec(className || '');
       const CodeHighlighter = SyntaxHighlighter as any;
