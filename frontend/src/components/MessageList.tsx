@@ -46,23 +46,24 @@ export function MessageList() {
         </pre>
       );
     },
-    code({ className, children, ...rest }: any) {
+    code({ className, children, node, ...rest }: any) {
       const match = /language-(\w+)/.exec(className || '');
+      // 判断是否是代码块：有语言标记，或者父节点是 pre
+      const isBlock = match || node?.parentNode?.tagName === 'pre';
       const CodeHighlighter = SyntaxHighlighter as any;
-      return match ? (
+      return isBlock ? (
         <CodeHighlighter
           style={vscDarkPlus}
-          language={match[1]}
+          language={match?.[1] || 'text'}
           PreTag="div"
           className="rounded-md text-xs !bg-background border border-border"
           customStyle={{ padding: '12px', borderRadius: '6px', margin: '6px 0' }}
           codeTagProps={{ style: {} }}
-          {...rest}
         >
           {String(children).replace(/\n$/, '')}
         </CodeHighlighter>
       ) : (
-        <code className={className || "bg-muted text-foreground px-1 py-0.5 rounded text-xs font-mono"} {...rest}>
+        <code className="bg-muted text-foreground px-1 py-0.5 rounded text-xs font-mono" {...rest}>
           {children}
         </code>
       );
