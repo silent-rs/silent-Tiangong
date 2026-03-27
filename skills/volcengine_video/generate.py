@@ -208,15 +208,38 @@ def generate_video(prompt: str, model: str, max_wait: int = 300) -> dict:
     return {"ok": False, "error": f"视频生成超时（{max_wait}秒）", "task_id": task_id}
 
 
+def download_video(url: str, output_path: str) -> str:
+    """下载视频到本地"""
+    resp = requests.get(url, stream=True, timeout=120)
+    resp.raise_for_status()
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    with open(output_path, "wb") as f:
+        for chunk in resp.iter_content(chunk_size=8192):
+            f.write(chunk)
+    return os.path.abspath(output_path)
+
+
 def main():
     parser = argparse.ArgumentParser(description="火山方舟视频生成")
     parser.add_argument("--prompt", required=True, help="视频内容描述")
     parser.add_argument("--model", default="doubao-seedance-1-0-pro-fast-251015", help="模型名称或接入点 ID")
     parser.add_argument("--max-wait", type=int, default=300, help="最大等待时间（秒）")
+    parser.add_argument("--output", "-o", default="", help="下载视频到本地路径（可选）")
     args = parser.parse_args()
 
     load_env()
     result = generate_video(args.prompt, args.model, args.max_wait)
+
+    # 成功且指定了 output 路径时自动下载
+    if result.get("ok") and args.output and result.get("video_url"):
+        try:
+            local_path = download_video(result["video_url"], args.output)
+            result["local_path"] = local_path
+            print(f"视频已下载到：{local_path}", file=sys.stderr)
+        except Exception as e:
+            result["download_error"] = str(e)
+            print(f"下载失败：{e}", file=sys.stderr)
+
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
     if not result.get("ok"):
