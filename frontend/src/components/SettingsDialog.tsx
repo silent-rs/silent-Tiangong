@@ -1171,7 +1171,7 @@ function SkillSettings() {
                     <Badge variant={skill.enabled ? 'default' : 'secondary'}>
                       {skill.enabled ? '已启用' : '已禁用'}
                     </Badge>
-                    <Badge variant="outline">{skill.source_type}</Badge>
+                    <Badge variant="outline">v{skill.version}</Badge>
                   </div>
                   {skill.description && (
                     <div className="text-sm text-muted-foreground mt-1">{skill.description}</div>

@@ -65,6 +65,7 @@ export interface McpServer {
 export interface Skill {
   id: string;
   name: string;
+  version: string;
   description?: string;
   enabled: boolean;
   source_type: string;
