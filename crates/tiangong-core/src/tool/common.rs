@@ -544,12 +544,13 @@ pub(super) fn command_env_allowlist() -> Vec<(String, String)> {
 }
 
 pub(super) fn command_timeout_ms() -> u64 {
-    const DEFAULT_TIMEOUT_MS: u64 = 300_000; // 5 分钟
+    // 默认不设超时（0 表示无限等待），由 LLM 或用户手动中止
+    // 可通过 TOOL_COMMAND_TIMEOUT_MS 环境变量设置超时（毫秒）
     std::env::var("TOOL_COMMAND_TIMEOUT_MS")
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_TIMEOUT_MS)
+        .unwrap_or(0)
 }
 
 pub(super) fn execute_command_with_timeout(
@@ -557,6 +558,13 @@ pub(super) fn execute_command_with_timeout(
     timeout_ms: u64,
 ) -> Result<(Output, bool)> {
     let mut child = command.spawn().context("spawn 子进程失败")?;
+
+    // timeout_ms=0 表示不设超时
+    if timeout_ms == 0 {
+        let output = child.wait_with_output().context("读取命令输出失败")?;
+        return Ok((output, false));
+    }
+
     let timeout = Duration::from_millis(timeout_ms);
     let started = Instant::now();
 
