@@ -84,45 +84,23 @@ export function TypingMessage({ content, reasoningContent, speed = 300, onComple
 
   // Markdown 渲染器
   const MarkdownComponents = {
-    pre({ children }: any) {
-      const extractText = (node: any): string => {
-        if (typeof node === 'string') return node;
-        if (Array.isArray(node)) return node.map(extractText).join('');
-        if (node?.props?.children) return extractText(node.props.children);
-        return '';
-      };
-      const extractLang = (node: any): string => {
-        const cls = node?.props?.className || '';
-        const m = /language-(\w+)/.exec(cls);
-        if (m) return m[1];
-        if (node?.props?.children) return extractLang(node.props.children);
-        return '';
-      };
-      const text = extractText(children).replace(/\n$/, '');
-      const lang = extractLang(children);
-      if (text) {
-        const SH = SyntaxHighlighter as any;
-        return (
-          <SH
-            style={vscDarkPlus}
-            language={lang || 'text'}
-            PreTag="div"
-            className="rounded-md text-xs !bg-background border border-border"
-            customStyle={{ padding: '12px', borderRadius: '6px', margin: '6px 0' }}
-            codeTagProps={{ style: {} }}
-          >
-            {text}
-          </SH>
-        );
-      }
-      return <pre>{children}</pre>;
-    },
-    code({ children, ...props }: any) {
-      return (
-        <code
-          className="bg-muted text-foreground px-1 py-0.5 rounded text-xs font-mono"
-          {...props}
+    code({ className, children, ...rest }: any) {
+      const match = /language-(\w+)/.exec(className || '');
+      const SH = SyntaxHighlighter as any;
+      return match ? (
+        <SH
+          style={vscDarkPlus}
+          language={match[1]}
+          PreTag="div"
+          className="rounded-md text-xs !bg-background border border-border"
+          customStyle={{ padding: '12px', borderRadius: '6px', margin: '6px 0' }}
+          codeTagProps={{ style: {} }}
+          {...rest}
         >
+          {String(children).replace(/\n$/, '')}
+        </SH>
+      ) : (
+        <code className={className || "bg-muted text-foreground px-1 py-0.5 rounded text-xs font-mono"} {...rest}>
           {children}
         </code>
       );
