@@ -76,7 +76,7 @@ impl LocalToolExecutor {
         let cwd = extract_cwd_meta(&mut raw_args);
         let effective_cwd = resolve_effective_cwd(cwd.as_deref())?;
 
-        let (cmd, args) = if raw_cmd == INTERNAL_SHELL_CMD {
+        let (cmd, mut args) = if raw_cmd == INTERNAL_SHELL_CMD {
             let script = raw_args
                 .first()
                 .map(String::as_str)
@@ -89,6 +89,9 @@ impl LocalToolExecutor {
             (raw_cmd.clone(), raw_args)
         };
 
+        // 提取 LLM 指定的超时（在 validate 之前，避免被当成路径参数）
+        let timeout_ms = extract_timeout_meta(&mut args).unwrap_or_else(command_timeout_ms);
+
         if matches!(cmd.as_str(), "bash" | "sh" | "powershell" | "pwsh") {
             validate_shell_command_args(&cmd, &args, &effective_cwd)?;
         } else {
@@ -97,8 +100,6 @@ impl LocalToolExecutor {
             }
             validate_command_args_in_allowed_roots(&cmd, &args, &effective_cwd)?;
         }
-
-        let timeout_ms = command_timeout_ms();
         let env_allowlist = command_env_allowlist();
         let runtime_env = self.runtime_env();
         let file_env = load_local_env(&effective_cwd);
@@ -231,4 +232,13 @@ fn normalize_env_value(raw: &str) -> String {
         }
     }
     value
+}
+
+const INTERNAL_TIMEOUT_PREFIX: &str = "__tiangong_timeout=";
+
+/// 从参数列表中提取 __tiangong_timeout=N 元数据，返回超时毫秒数
+fn extract_timeout_meta(args: &mut Vec<String>) -> Option<u64> {
+    let idx = args.iter().position(|a| a.starts_with(INTERNAL_TIMEOUT_PREFIX))?;
+    let raw = args.remove(idx);
+    raw[INTERNAL_TIMEOUT_PREFIX.len()..].trim().parse::<u64>().ok()
 }

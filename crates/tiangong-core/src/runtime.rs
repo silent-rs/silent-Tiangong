@@ -294,8 +294,6 @@ impl RuntimeEngine {
             };
             on_llm_output(&output);
 
-            let mut round_feedback_parts: Vec<String> = Vec::new();
-
             // 记录 assistant 的工具调用意图到 loop_messages
             let assistant_text = if response.text.is_empty() {
                 format!("[调用工具: {}]", tool_call_names.join(", "))
@@ -310,20 +308,53 @@ impl RuntimeEngine {
                 created_at: now_text(),
             });
 
-            for call in &response.tool_calls {
-                let result = self.execute_tool_call(
-                    call,
-                    &mcp_targets,
-                    &self.agent_config.mcp,
-                );
+            // 并发执行所有工具调用（子线程独立处理，全部返回后继续）
+            let call_results: Vec<(String, ToolResult)> = if response.tool_calls.len() == 1 {
+                // 单个工具调用：直接执行，避免线程开销
+                let call = &response.tool_calls[0];
+                let result = self.execute_tool_call(call, &mcp_targets, &self.agent_config.mcp);
+                vec![(call.name.clone(), result)]
+            } else {
+                // 多个工具调用：并发执行
+                std::thread::scope(|scope| {
+                    let handles: Vec<_> = response
+                        .tool_calls
+                        .iter()
+                        .map(|call| {
+                            let mcp_targets = &mcp_targets;
+                            let mcp_config = &self.agent_config.mcp;
+                            let name = call.name.clone();
+                            scope.spawn(move || {
+                                let result = self.execute_tool_call(call, mcp_targets, mcp_config);
+                                (name, result)
+                            })
+                        })
+                        .collect();
 
+                    handles
+                        .into_iter()
+                        .map(|h| h.join().unwrap_or_else(|_| {
+                            ("unknown".to_string(), ToolResult {
+                                ok: false,
+                                summary: "工具执行线程 panic".to_string(),
+                                stdout: String::new(),
+                                stderr: "thread panicked".to_string(),
+                                exit_code: 1,
+                                execution: None,
+                            })
+                        }))
+                        .collect()
+                })
+            };
+
+            let mut round_feedback_parts: Vec<String> = Vec::new();
+            for (call_name, result) in call_results {
                 on_tool_result(&result);
                 tool_results.push(result.clone());
 
-                // 构建反馈信息
                 let feedback = format!(
                     "工具 {} 执行{}：{}",
-                    call.name,
+                    call_name,
                     if result.ok { "成功" } else { "失败" },
                     if result.stdout.len() > 2000 {
                         format!("{}...(截断)", &result.stdout[..2000])
