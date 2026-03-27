@@ -365,18 +365,105 @@ fn validate_shell_script(script: &str, base_dir: &Path) -> Result<()> {
         return Err(anyhow!("shell 脚本包含不允许的高风险控制符或命令"));
     }
 
-    let cmd =
-        extract_shell_head_command(script).ok_or_else(|| anyhow!("无法识别 shell 脚本命令"))?;
-    if !is_allowed_shell_head_command(cmd) {
-        return Err(anyhow!("shell 脚本首命令不在允许列表：{cmd}"));
-    }
+    // 按 &&、||、; 分割为子命令，逐个验证
+    let sub_commands = split_shell_commands(script);
+    for sub in &sub_commands {
+        let sub = sub.trim();
+        if sub.is_empty() {
+            continue;
+        }
+        // 跳过管道后面的部分（管道右侧通常是过滤/处理命令，不涉及路径）
+        let sub = sub.split('|').next().unwrap_or(sub).trim();
+        if sub.is_empty() {
+            continue;
+        }
 
-    let args = script
-        .split_whitespace()
-        .skip(1)
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    validate_command_args_in_allowed_roots(cmd, &args, base_dir)
+        let cmd = extract_shell_head_command(sub)
+            .ok_or_else(|| anyhow!("无法识别 shell 脚本命令：{sub}"))?;
+
+        // cd 不需要命令白名单检查，但路径需要在允许范围内
+        if cmd == "cd" {
+            let target = sub.split_whitespace().nth(1).unwrap_or(".");
+            let resolved = resolve_path_candidate(target, base_dir);
+            if resolved.is_absolute() {
+                let roots = allowed_roots()?;
+                if !is_path_in_allowed_roots(&resolved, &roots) {
+                    // 如果目录不存在则检查父目录
+                    if resolved.exists() || {
+                        let mut p = resolved.clone();
+                        while !p.exists() {
+                            if let Some(parent) = p.parent() {
+                                p = parent.to_path_buf();
+                            } else {
+                                break;
+                            }
+                        }
+                        !is_path_in_allowed_roots(&p, &roots)
+                    } {
+                        return Err(anyhow!(
+                            "shell 脚本 cd 目标越界：{}",
+                            target
+                        ));
+                    }
+                }
+            }
+            continue;
+        }
+
+        if !is_allowed_shell_head_command(cmd) {
+            return Err(anyhow!("shell 脚本命令不在允许列表：{cmd}"));
+        }
+
+        // 检查路径参数是否在允许范围内
+        let args: Vec<String> = sub
+            .split_whitespace()
+            .skip(1)
+            .map(ToString::to_string)
+            .collect();
+        validate_command_args_in_allowed_roots(cmd, &args, base_dir)?;
+    }
+    Ok(())
+}
+
+/// 按 &&、||、; 分割 shell 命令
+fn split_shell_commands(script: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    let mut current = String::new();
+    let mut chars = script.chars().peekable();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' if !in_double_quote => {
+                in_single_quote = !in_single_quote;
+                current.push(ch);
+            }
+            '"' if !in_single_quote => {
+                in_double_quote = !in_double_quote;
+                current.push(ch);
+            }
+            '&' if !in_single_quote && !in_double_quote && chars.peek() == Some(&'&') => {
+                chars.next(); // consume second &
+                commands.push(current.clone());
+                current.clear();
+            }
+            '|' if !in_single_quote && !in_double_quote && chars.peek() == Some(&'|') => {
+                chars.next(); // consume second |
+                commands.push(current.clone());
+                current.clear();
+            }
+            ';' if !in_single_quote && !in_double_quote => {
+                commands.push(current.clone());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.trim().is_empty() {
+        commands.push(current);
+    }
+    commands
 }
 
 fn contains_forbidden_shell_tokens(script: &str) -> bool {
