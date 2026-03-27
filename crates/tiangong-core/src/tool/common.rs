@@ -544,7 +544,7 @@ pub(super) fn command_env_allowlist() -> Vec<(String, String)> {
 }
 
 pub(super) fn command_timeout_ms() -> u64 {
-    const DEFAULT_TIMEOUT_MS: u64 = 10_000;
+    const DEFAULT_TIMEOUT_MS: u64 = 300_000; // 5 分钟
     std::env::var("TOOL_COMMAND_TIMEOUT_MS")
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok())
