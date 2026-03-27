@@ -366,7 +366,7 @@ pub fn remove_skill(id: String, state: State<TiangongApp>) -> Result<String, Str
     state.with_state(|core_state| core_state.remove_skill(&id))
 }
 
-/// 获取 Skill 的环境变量
+/// 获取 Skill 的环境变量（合并 skill.toml 声明的 requires.env + .env.local 已有值）
 #[tauri::command]
 pub fn get_skill_env(id: String, state: State<TiangongApp>) -> Result<std::collections::HashMap<String, String>, String> {
     state.with_state_read(|core_state| {
@@ -374,8 +374,26 @@ pub fn get_skill_env(id: String, state: State<TiangongApp>) -> Result<std::colle
             .iter()
             .find(|s| s.id == id)
             .ok_or_else(|| anyhow::anyhow!("未找到 skill：{id}"))?;
-        let env_path = std::path::Path::new(&skill.source.value).join(".env.local");
+
+        let skill_dir = std::path::Path::new(&skill.source.value);
         let mut env = std::collections::HashMap::new();
+
+        // 1. 从 skill.toml 的 requires.env 读取声明的 key（值为空）
+        let toml_path = skill_dir.join("skill.toml");
+        if let Ok(raw) = std::fs::read_to_string(&toml_path) {
+            #[derive(serde::Deserialize, Default)]
+            struct T { #[serde(default)] requires: R }
+            #[derive(serde::Deserialize, Default)]
+            struct R { #[serde(default)] env: Vec<String> }
+            if let Ok(parsed) = toml::from_str::<T>(&raw) {
+                for key in parsed.requires.env {
+                    env.insert(key, String::new());
+                }
+            }
+        }
+
+        // 2. 从 .env.local 读取已有值（覆盖空值）
+        let env_path = skill_dir.join(".env.local");
         if let Ok(content) = std::fs::read_to_string(&env_path) {
             for line in content.lines() {
                 let line = line.trim();
@@ -385,6 +403,7 @@ pub fn get_skill_env(id: String, state: State<TiangongApp>) -> Result<std::colle
                 }
             }
         }
+
         Ok(env)
     })
 }

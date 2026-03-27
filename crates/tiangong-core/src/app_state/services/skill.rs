@@ -149,16 +149,38 @@ impl AppSkillService {
         }
         let mut skill = load_skill_from_local_dir(&prepared_source.install_path)?;
 
-        if state
+        // 版本更新：读取旧版本的 .env.local 以便保留
+        let mut old_env: Vec<(String, String)> = Vec::new();
+        if let Some(existing) = state
             .store
             .agent
             .agent_config
             .skills
             .installed
             .iter()
-            .any(|item| item.id == skill.id)
+            .find(|item| item.id == skill.id)
         {
-            return Err(anyhow!("skill 已存在：{}", skill.id));
+            let old_env_path =
+                std::path::Path::new(&existing.source.value).join(".env.local");
+            if let Ok(content) = fs::read_to_string(&old_env_path) {
+                for line in content.lines() {
+                    let line = line.trim();
+                    if !line.is_empty()
+                        && !line.starts_with('#')
+                        && let Some((k, v)) = line.split_once('=')
+                    {
+                        old_env.push((k.trim().to_string(), v.trim().to_string()));
+                    }
+                }
+            }
+            // 移除旧版本注册信息（允许重新安装/更新）
+            state
+                .store
+                .agent
+                .agent_config
+                .skills
+                .installed
+                .retain(|item| item.id != skill.id);
         }
 
         let installed_dir = default_skills_storage_dir_path()
@@ -166,10 +188,8 @@ impl AppSkillService {
             .join(&skill.id)
             .join(&skill.version);
         if installed_dir.exists() {
-            return Err(anyhow!(
-                "skill 已存在同版本目录：{}",
-                installed_dir.display()
-            ));
+            // 版本目录已存在时覆盖安装
+            let _ = fs::remove_dir_all(&installed_dir);
         }
         if let Some(parent) = installed_dir.parent() {
             ensure_dir(parent)?;
@@ -182,19 +202,29 @@ impl AppSkillService {
             )
         })?;
 
-        // 写入 .env.local（在安装目录中，而非 stage 目录）
-        if !convert_env_values.is_empty() {
-            let env_lines: Vec<String> = convert_env_values
-                .iter()
-                .filter(|(k, v)| !k.trim().is_empty() && !v.trim().is_empty())
-                .map(|(k, v)| format!("{}={}", k.trim(), v.trim().replace('\n', "\\n")))
-                .collect();
-            if !env_lines.is_empty() {
+        // 写入 .env.local：合并旧版本 env（旧值为底，新值覆盖）
+        {
+            let mut merged: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+            // 先填入旧版本的值
+            for (k, v) in &old_env {
+                if !k.trim().is_empty() && !v.trim().is_empty() {
+                    merged.insert(k.trim().to_string(), v.trim().to_string());
+                }
+            }
+            // 新值覆盖
+            for (k, v) in convert_env_values {
+                if !k.trim().is_empty() && !v.trim().is_empty() {
+                    merged.insert(k.trim().to_string(), v.trim().replace('\n', "\\n"));
+                }
+            }
+            if !merged.is_empty() {
+                let env_lines: Vec<String> = merged
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect();
                 let env_path = installed_dir.join(".env.local");
                 fs::write(&env_path, format!("{}\n", env_lines.join("\n")))
-                    .with_context(|| {
-                        format!("写入 .env.local 失败：{}", env_path.display())
-                    })?;
+                    .with_context(|| format!("写入 .env.local 失败：{}", env_path.display()))?;
             }
         }
 
