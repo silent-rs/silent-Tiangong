@@ -88,9 +88,9 @@ export function TypingMessage({ content, reasoningContent, speed = 300, onComple
     pre({ children }: any) {
       return <>{children}</>;
     },
-    code({ className, children, node, ...props }: any) {
+    code({ className, children, ...props }: any) {
       const match = /language-(\w+)/.exec(className || '');
-      const isBlock = match || (node?.position && String(children).includes('\n'));
+      const isBlock = match || String(children).includes('\n');
       return isBlock ? (
         (SyntaxHighlighter as any)(
           {

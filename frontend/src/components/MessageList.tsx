@@ -44,10 +44,10 @@ export function MessageList() {
       // 直接透传 children（已经是 <code> 元素，由下面的 code 组件处理）
       return <>{children}</>;
     },
-    code({ className, children, node, ...props }: any) {
+    code({ className, children, ...props }: any) {
       const match = /language-(\w+)/.exec(className || '');
-      // 判断是否为代码块：有语言标记，或者父节点是 <pre>
-      const isBlock = match || (node?.position && node?.children?.length === 1 && String(children).includes('\n'));
+      // 判断是否为代码块：有语言标记，或内容含换行（行内代码不会有换行）
+      const isBlock = match || String(children).includes('\n');
       return isBlock ? (
         (SyntaxHighlighter as any)(
           {
