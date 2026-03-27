@@ -92,34 +92,32 @@ export function TypingMessage({ content, reasoningContent, speed = 300, onComple
         return '';
       };
       const extractLang = (node: any): string => {
-        if (node?.props?.className) {
-          const m = /language-(\w+)/.exec(node.props.className);
-          if (m) return m[1];
-        }
-        if (node?.props?.children?.props?.className) {
-          const m = /language-(\w+)/.exec(node.props.children.props.className);
-          if (m) return m[1];
-        }
+        const cls = node?.props?.className || '';
+        const m = /language-(\w+)/.exec(cls);
+        if (m) return m[1];
+        if (node?.props?.children) return extractLang(node.props.children);
         return '';
       };
       const text = extractText(children).replace(/\n$/, '');
-      const lang = extractLang({ props: { children } });
+      const lang = extractLang(children);
       if (text) {
-        return (SyntaxHighlighter as any)(
-          {
-            style: vscDarkPlus,
-            language: lang || 'text',
-            PreTag: "div",
-            className: "rounded-md text-xs !bg-background border border-border",
-            customStyle: { padding: '12px', borderRadius: '6px', margin: '6px 0' },
-            codeTagProps: { style: {} },
-          },
-          text,
+        const SH = SyntaxHighlighter as any;
+        return (
+          <SH
+            style={vscDarkPlus}
+            language={lang || 'text'}
+            PreTag="div"
+            className="rounded-md text-xs !bg-background border border-border"
+            customStyle={{ padding: '12px', borderRadius: '6px', margin: '6px 0' }}
+            codeTagProps={{ style: {} }}
+          >
+            {text}
+          </SH>
         );
       }
       return <pre>{children}</pre>;
     },
-    code({ className, children, ...props }: any) {
+    code({ children, ...props }: any) {
       return (
         <code
           className="bg-muted text-foreground px-1 py-0.5 rounded text-xs font-mono"
