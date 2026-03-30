@@ -120,6 +120,7 @@ impl AppTurnService {
                 let tool_tx = tx.clone();
                 let plan_summary_tx = tx.clone();
                 let stage_thinking_tx = tx.clone();
+                let mgmt_tx = tx.clone();
 
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     runtime.execute_turn_with_streaming(
@@ -146,6 +147,9 @@ impl AppTurnService {
                                 stage: stage.to_string(),
                                 delta: delta.clone(),
                             });
+                        },
+                        |cmd| {
+                            let _ = mgmt_tx.send(TurnEvent::ManagementCommand(cmd));
                         },
                     )
                 }));

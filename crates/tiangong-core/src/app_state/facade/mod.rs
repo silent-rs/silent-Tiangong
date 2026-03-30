@@ -1,4 +1,5 @@
 mod lifecycle;
+mod management;
 mod mcp_settings;
 mod provider_settings;
 mod runtime;

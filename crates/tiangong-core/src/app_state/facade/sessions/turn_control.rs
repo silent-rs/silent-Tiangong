@@ -182,6 +182,9 @@ impl TiangongState {
                         self.finish_pending_turn_error(&session_id, &err_msg);
                         should_clear = true;
                     }
+                    TurnEvent::ManagementCommand(cmd) => {
+                        self.execute_management_command(cmd);
+                    }
                 }
             }
 
@@ -259,6 +262,9 @@ impl TiangongState {
                 TurnEvent::Failed(err_msg) => {
                     self.finish_pending_turn_error(session_id, &err_msg);
                     should_clear = true;
+                }
+                TurnEvent::ManagementCommand(cmd) => {
+                    self.execute_management_command(cmd);
                 }
             }
         }

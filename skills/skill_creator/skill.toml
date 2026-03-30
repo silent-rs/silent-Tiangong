@@ -1,0 +1,12 @@
+id = "skill-creator"
+name = "Skill 创建器"
+version = "0.1.0"
+entry = "SKILL.md"
+
+[source]
+type = "local"
+
+[requires]
+env = []
+
+[permissions]

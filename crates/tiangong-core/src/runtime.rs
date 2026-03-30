@@ -4,6 +4,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::agent_config::{AgentConfig, McpConfig};
+use crate::app_state::ManagementCommand;
 use crate::agents::execution_mcp_agent::{
     McpFunctionTarget, execution_function_tools, execute_mcp_tool_call,
     resolve_mcp_tool_call_from_run_command,
@@ -114,7 +115,7 @@ impl RuntimeEngine {
 
     /// ReAct 单循环执行：思考 → 工具调用 → 观察 → ... → 最终回复
     #[allow(clippy::too_many_arguments)]
-    pub fn execute_turn_with_streaming<F, P, L, T, S, G>(
+    pub fn execute_turn_with_streaming<F, P, L, T, S, G, M>(
         &self,
         session: &Session,
         user_input: &str,
@@ -124,6 +125,7 @@ impl RuntimeEngine {
         mut on_tool_result: T,
         mut _on_plan_execution_summary: S,
         mut _on_stage_thinking: G,
+        mut on_management_cmd: M,
     ) -> Result<TurnExecution>
     where
         P: FnMut(&TaskPlan),
@@ -132,6 +134,7 @@ impl RuntimeEngine {
         T: FnMut(&ToolResult),
         S: FnMut(&str),
         G: FnMut(&str, &ModelStreamChunk),
+        M: FnMut(ManagementCommand) + Send,
     {
         // 设置当前线程的会话级工作目录
         let session_cwd = if session.cwd.is_empty() {
@@ -297,6 +300,82 @@ impl RuntimeEngine {
             }),
         });
 
+        // MCP/Skill 管理工具（始终可用）
+        function_tools.push(FunctionToolSpec {
+            name: "register_mcp_server".to_string(),
+            description: "注册一个新的 MCP 服务器。注册后服务器将自动启动并加载工具。".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "服务器名称（唯一标识）" },
+                    "command": { "type": "string", "description": "启动命令（如 uvx、npx 的完整路径）" },
+                    "args": { "type": "array", "items": { "type": "string" }, "description": "命令参数" },
+                    "env": { "type": "object", "description": "环境变量（键值对）" },
+                    "transport": { "type": "string", "description": "传输方式：stdio（默认）或 http" },
+                    "endpoint": { "type": "string", "description": "HTTP 端点 URL（transport=http 时必填）" }
+                },
+                "required": ["name", "command"]
+            }),
+        });
+        function_tools.push(FunctionToolSpec {
+            name: "remove_mcp_server".to_string(),
+            description: "移除一个已注册的 MCP 服务器".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "服务器名称" }
+                },
+                "required": ["name"]
+            }),
+        });
+        function_tools.push(FunctionToolSpec {
+            name: "set_mcp_enabled".to_string(),
+            description: "启用或禁用一个 MCP 服务器".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "服务器名称" },
+                    "enabled": { "type": "boolean", "description": "是否启用" }
+                },
+                "required": ["name", "enabled"]
+            }),
+        });
+        function_tools.push(FunctionToolSpec {
+            name: "install_skill".to_string(),
+            description: "从本地路径安装一个 Skill。路径应指向包含 skill.toml 和 SKILL.md 的目录。".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Skill 目录路径" },
+                    "enabled": { "type": "boolean", "description": "安装后是否启用（默认 true）" }
+                },
+                "required": ["path"]
+            }),
+        });
+        function_tools.push(FunctionToolSpec {
+            name: "remove_skill".to_string(),
+            description: "卸载一个已安装的 Skill".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Skill ID" }
+                },
+                "required": ["id"]
+            }),
+        });
+        function_tools.push(FunctionToolSpec {
+            name: "set_skill_enabled".to_string(),
+            description: "启用或禁用一个已安装的 Skill".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Skill ID" },
+                    "enabled": { "type": "boolean", "description": "是否启用" }
+                },
+                "required": ["id", "enabled"]
+            }),
+        });
+
         // 构建系统 prompt
         let system_prompt =
             build_react_system_prompt(user_input, &self.models_config, &self.agent_config);
@@ -397,16 +476,27 @@ impl RuntimeEngine {
             });
 
             // 并发执行所有工具调用（子线程独立处理，全部返回后继续）
-            let call_results: Vec<(String, ToolResult)> = if response.tool_calls.len() == 1 {
+            // 管理工具需要 &mut 回调，先提取处理，其余工具并发执行
+            let mut mgmt_results: Vec<(String, ToolResult)> = Vec::new();
+            let mut other_calls: Vec<&ModelFunctionCall> = Vec::new();
+            for call in &response.tool_calls {
+                if let Some(result) = Self::handle_management_tool(call, &mut on_management_cmd) {
+                    mgmt_results.push((call.name.clone(), result));
+                } else {
+                    other_calls.push(call);
+                }
+            }
+
+            let mut call_results: Vec<(String, ToolResult)> = mgmt_results;
+            if other_calls.len() == 1 {
                 // 单个工具调用：直接执行，避免线程开销
-                let call = &response.tool_calls[0];
+                let call = other_calls[0];
                 let result = self.execute_tool_call(call, &mcp_targets, &self.agent_config.mcp);
-                vec![(call.name.clone(), result)]
-            } else {
+                call_results.push((call.name.clone(), result));
+            } else if !other_calls.is_empty() {
                 // 多个工具调用：并发执行
-                std::thread::scope(|scope| {
-                    let handles: Vec<_> = response
-                        .tool_calls
+                let other_results: Vec<(String, ToolResult)> = std::thread::scope(|scope| {
+                    let handles: Vec<_> = other_calls
                         .iter()
                         .map(|call| {
                             let mcp_targets = &mcp_targets;
@@ -435,8 +525,9 @@ impl RuntimeEngine {
                             })
                         }))
                         .collect()
-                })
-            };
+                });
+                call_results.extend(other_results);
+            }
 
             let mut round_feedback_parts: Vec<String> = Vec::new();
             for (call_name, result) in call_results {
@@ -779,6 +870,86 @@ impl RuntimeEngine {
     }
 
     /// 获取 skill 完整说明
+    /// 处理 MCP/Skill 管理工具调用，返回 Some 表示已处理
+    fn handle_management_tool(
+        call: &ModelFunctionCall,
+        on_cmd: &mut impl FnMut(ManagementCommand),
+    ) -> Option<ToolResult> {
+        let cmd = match call.name.as_str() {
+            "register_mcp_server" => {
+                let name = call.arguments.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let command = call.arguments.get("command").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                if name.is_empty() || command.is_empty() {
+                    return Some(ToolResult {
+                        ok: false, summary: "name 和 command 为必填参数".to_string(),
+                        stdout: String::new(), stderr: String::new(), exit_code: 1, execution: None,
+                    });
+                }
+                let args: Vec<String> = call.arguments.get("args")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(String::from).collect())
+                    .unwrap_or_default();
+                let env: Vec<(String, String)> = call.arguments.get("env")
+                    .and_then(|v| v.as_object())
+                    .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string())).collect())
+                    .unwrap_or_default();
+                let transport = call.arguments.get("transport").and_then(|v| v.as_str()).map(String::from);
+                let endpoint = call.arguments.get("endpoint").and_then(|v| v.as_str()).map(String::from);
+                ManagementCommand::RegisterMcpServer { name, command, args, env, transport, endpoint }
+            }
+            "remove_mcp_server" => {
+                let name = call.arguments.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                ManagementCommand::RemoveMcpServer { name }
+            }
+            "set_mcp_enabled" => {
+                let name = call.arguments.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let enabled = call.arguments.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+                ManagementCommand::SetMcpServerEnabled { name, enabled }
+            }
+            "install_skill" => {
+                let path = call.arguments.get("path").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                if path.is_empty() {
+                    return Some(ToolResult {
+                        ok: false, summary: "path 为必填参数".to_string(),
+                        stdout: String::new(), stderr: String::new(), exit_code: 1, execution: None,
+                    });
+                }
+                let enabled = call.arguments.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+                ManagementCommand::InstallSkill { path, enabled }
+            }
+            "remove_skill" => {
+                let id = call.arguments.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                ManagementCommand::RemoveSkill { id }
+            }
+            "set_skill_enabled" => {
+                let id = call.arguments.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let enabled = call.arguments.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+                ManagementCommand::SetSkillEnabled { id, enabled }
+            }
+            _ => return None,
+        };
+
+        let desc = match &cmd {
+            ManagementCommand::RegisterMcpServer { name, .. } => format!("注册 MCP 服务器：{name}"),
+            ManagementCommand::RemoveMcpServer { name } => format!("移除 MCP 服务器：{name}"),
+            ManagementCommand::SetMcpServerEnabled { name, enabled } => format!("{}MCP 服务器：{name}", if *enabled { "启用" } else { "禁用" }),
+            ManagementCommand::InstallSkill { path, .. } => format!("安装 Skill：{path}"),
+            ManagementCommand::RemoveSkill { id } => format!("卸载 Skill：{id}"),
+            ManagementCommand::SetSkillEnabled { id, enabled } => format!("{}Skill：{id}", if *enabled { "启用" } else { "禁用" }),
+        };
+
+        on_cmd(cmd);
+
+        Some(ToolResult {
+            ok: true,
+            summary: format!("{desc}，操作已提交"),
+            stdout: format!("{desc}，将在当前执行完成后生效"),
+            stderr: String::new(),
+            exit_code: 0,
+            execution: None,
+        })
+    }
+
     fn handle_get_skill_detail(&self, call: &ModelFunctionCall) -> ToolResult {
         let skill_id = call
             .arguments
