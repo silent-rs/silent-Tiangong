@@ -226,9 +226,9 @@ pub fn cancel_background_task(task_id: String) -> Result<(), String> {
 
 /// 语音合成：将文本转换为音频，返回 base64 编码的音频数据
 #[tauri::command]
-pub fn synthesize_speech(
+pub async fn synthesize_speech(
     text: String,
-    state: State<TiangongApp>,
+    state: State<'_, TiangongApp>,
 ) -> Result<SpeechResult, String> {
     use tiangong_core::models_config::ModelCapability;
     use tiangong_media::tts::{SpeechSynthesizer, SynthesizeRequest};
@@ -255,18 +255,11 @@ pub fn synthesize_speech(
         output_format: Some("mp3".to_string()),
     };
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let result = runtime.block_on(async {
-        tokio::time::timeout(
-            std::time::Duration::from_secs(60),
-            synthesizer.synthesize(request),
-        )
-        .await
-    });
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        synthesizer.synthesize(request),
+    )
+    .await;
 
     match result {
         Ok(Ok(resp)) => {

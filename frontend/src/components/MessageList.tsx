@@ -67,8 +67,9 @@ function MessageActions({ text, showTts }: { text: string; showTts: boolean }) {
 
       await audio.play();
       setPlaying(true);
-    } catch (e) {
+    } catch (e: any) {
       console.error("TTS 播放失败:", e);
+      alert(`语音播放失败：${e?.message || e}`);
     } finally {
       setTtsLoading(false);
     }
