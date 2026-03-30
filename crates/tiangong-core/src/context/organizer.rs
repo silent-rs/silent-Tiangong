@@ -1,6 +1,6 @@
 use crate::context::compressor::ContextCompressor;
 use crate::model::SingleProviderClient;
-use crate::session::{Message, Session};
+use crate::session::{Message, MessageRole, Session};
 
 /// token 估算（仅用于首次调用前的预判，后续应使用 API 返回的精确值）
 ///
@@ -20,8 +20,8 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
 
 /// 上下文组织器
 ///
-/// 从 Session 消息构建 LLM 请求上下文，
-/// 自动判断是否需要压缩，替代硬编码的滑动窗口。
+/// 管理对话上下文的构建与压缩策略。
+/// 采用滚动摘要机制：摘要持久化到 Session，原始消息保持完整。
 pub struct ContextOrganizer {
     /// 模型上下文限制（token 数）
     context_limit: usize,
@@ -56,8 +56,11 @@ impl ContextOrganizer {
     }
 
     /// 基于估算判断是否需要压缩（首次调用前使用）
-    pub fn needs_compression_estimated(&self, messages: &[Message]) -> bool {
-        estimate_tokens(messages) > self.token_threshold()
+    pub fn needs_compression_estimated(&self, session: &Session) -> bool {
+        // 构建当前会发送给 LLM 的上下文，估算其 token 量
+        let context = self.compressor.build_context(session);
+        let filtered = Self::filter_execution_traces_vec(&context);
+        estimate_tokens(&filtered) > self.token_threshold()
     }
 
     /// 基于 API 返回的精确 prompt_tokens 判断是否需要压缩
@@ -65,63 +68,46 @@ impl ContextOrganizer {
         actual_prompt_tokens > self.token_threshold()
     }
 
-    /// 构建 LLM 请求上下文
+    /// 在 turn 开始前更新会话摘要（如果需要）
     ///
-    /// 过滤执行痕迹，如果估算 token 超过阈值则自动压缩。
-    /// 首次调用使用估算值；后续轮次应使用 `compress_if_needed` 基于精确值触发。
-    pub fn build_context(
+    /// 检查当前上下文是否超过阈值，如果超过则更新 session 的滚动摘要。
+    /// 摘要持久化到 session，后续 turn 不会重复压缩。
+    pub fn maybe_update_summary(
         &self,
-        session: &Session,
-        client: Option<&SingleProviderClient>,
-    ) -> anyhow::Result<Vec<Message>> {
-        let filtered = Self::filter_execution_traces(&session.messages);
-
-        if !self.needs_compression_estimated(&filtered) {
-            return Ok(filtered);
+        session: &mut Session,
+        client: &SingleProviderClient,
+    ) -> anyhow::Result<bool> {
+        if !self.needs_compression_estimated(session) {
+            return Ok(false);
         }
-
-        tracing::info!(
-            estimated_tokens = estimate_tokens(&filtered),
-            context_limit = self.context_limit,
-            threshold = %self.compression_threshold,
-            "上下文超过阈值（估算），执行压缩"
-        );
-
-        self.compressor.compress(&filtered, client)
+        self.compressor.update_summary(session, client)
     }
 
-    /// 基于 API 返回的精确 prompt_tokens 对消息进行压缩
+    /// 构建 LLM 请求上下文
     ///
-    /// 当 `actual_prompt_tokens` 超过阈值时执行压缩，返回 Some(压缩后消息)；
-    /// 未超过阈值返回 None。
-    pub fn compress_if_needed(
-        &self,
-        messages: &[Message],
-        actual_prompt_tokens: usize,
-        client: Option<&SingleProviderClient>,
-    ) -> anyhow::Result<Option<Vec<Message>>> {
-        if !self.needs_compression(actual_prompt_tokens) {
-            return Ok(None);
-        }
-
-        tracing::info!(
-            actual_prompt_tokens,
-            threshold = self.token_threshold(),
-            "上下文超过阈值（精确），执行压缩"
-        );
-
-        self.compressor.compress(messages, client).map(Some)
+    /// 从 session 的摘要 + 最近消息构建，并过滤执行痕迹。
+    pub fn build_context(&self, session: &Session) -> Vec<Message> {
+        let raw = self.compressor.build_context(session);
+        Self::filter_execution_traces_vec(&raw)
     }
 
     /// 过滤执行阶段的 System 消息，保留纯对话
     pub fn filter_execution_traces(messages: &[Message]) -> Vec<Message> {
+        Self::filter_execution_traces_vec(messages)
+    }
+
+    fn filter_execution_traces_vec(messages: &[Message]) -> Vec<Message> {
         messages
             .iter()
             .filter(|msg| {
-                if msg.role != crate::session::MessageRole::System {
+                if msg.role != MessageRole::System {
                     return true;
                 }
                 let c = msg.content.as_str();
+                // 保留摘要消息
+                if c.starts_with("[早期对话摘要]") {
+                    return true;
+                }
                 !(c.starts_with("工具执行")
                     || c.starts_with("LLM 输出")
                     || c.starts_with("Plan 执行总结")

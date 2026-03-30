@@ -1,12 +1,12 @@
 use anyhow::Result;
 
 use crate::model::{ModelClient, ModelRequest, SingleProviderClient};
-use crate::session::{Message, MessageRole, now_text};
+use crate::session::{Message, MessageRole, Session, now_text};
 
 /// 上下文压缩器
 ///
-/// 当对话历史过长时，对早期消息生成 LLM 摘要，保留最近 N 轮完整对话。
-/// 如果 LLM 摘要失败，回退到滑动窗口截断。
+/// 采用滚动摘要策略：保留最近 N 轮完整对话，对更早的消息（含旧摘要）
+/// 折叠为新摘要。摘要持久化到 Session，支持无限对话延伸。
 pub struct ContextCompressor {
     /// 保留最近的完整对话轮数
     keep_recent_turns: usize,
@@ -25,50 +25,83 @@ impl ContextCompressor {
         Self { keep_recent_turns }
     }
 
-    /// 自动压缩：优先 LLM 摘要，失败回退滑动窗口
-    pub fn compress(
+    /// 更新 session 的滚动摘要
+    ///
+    /// 如果消息数量足够多（超过 keep_recent_turns），将早期消息（含旧摘要）
+    /// 折叠为新摘要，更新 session.context_summary 和 summary_up_to。
+    ///
+    /// 返回 true 表示执行了压缩，false 表示无需压缩。
+    pub fn update_summary(
         &self,
-        messages: &[Message],
-        client: Option<&SingleProviderClient>,
-    ) -> Result<Vec<Message>> {
-        let split_point = self.find_split_point(messages);
+        session: &mut Session,
+        client: &SingleProviderClient,
+    ) -> Result<bool> {
+        let split_point = self.find_split_point(&session.messages);
         if split_point == 0 {
-            return Ok(messages.to_vec());
+            return Ok(false);
         }
 
-        if let Some(client) = client {
-            match self.compress_with_summary(messages, split_point, client) {
-                Ok(result) => return Ok(result),
-                Err(err) => {
-                    tracing::warn!("LLM 摘要压缩失败，回退到滑动窗口：{err}");
-                }
-            }
+        // 已被摘要覆盖的部分不需要重新处理
+        if split_point <= session.summary_up_to {
+            return Ok(false);
         }
 
-        Ok(messages[split_point..].to_vec())
+        // 需要新增摘要的消息范围：从上次摘要覆盖点到新分割点
+        let new_messages_start = session.summary_up_to;
+        let new_messages = &session.messages[new_messages_start..split_point];
+
+        if new_messages.is_empty() {
+            return Ok(false);
+        }
+
+        // 折叠：旧摘要 + 新溢出消息 → 新摘要
+        let summary = self.fold_summary(
+            session.context_summary.as_deref(),
+            new_messages,
+            client,
+        )?;
+
+        tracing::info!(
+            old_summary_up_to = session.summary_up_to,
+            new_summary_up_to = split_point,
+            new_messages_count = new_messages.len(),
+            summary_len = summary.len(),
+            "滚动摘要已更新"
+        );
+
+        session.context_summary = Some(summary);
+        session.summary_up_to = split_point;
+        Ok(true)
     }
 
-    /// 使用 LLM 摘要压缩早期消息
-    fn compress_with_summary(
-        &self,
-        messages: &[Message],
-        split_point: usize,
-        client: &SingleProviderClient,
-    ) -> Result<Vec<Message>> {
-        let early_messages = &messages[..split_point];
-        let recent_messages = &messages[split_point..];
+    /// 构建发送给 LLM 的上下文消息列表
+    ///
+    /// 结构：[摘要系统消息(可选)] + [最近 N 轮完整消息]
+    pub fn build_context(&self, session: &Session) -> Vec<Message> {
+        let split_point = if session.summary_up_to > 0 {
+            // 使用已有摘要覆盖点
+            session.summary_up_to
+        } else {
+            // 没有摘要时返回全部消息
+            0
+        };
 
-        let summary = self.summarize_messages(early_messages, client)?;
+        let recent_messages = &session.messages[split_point..];
+        let mut context = Vec::new();
 
-        let mut result = vec![Message {
-            id: scru128::new().to_string(),
-            role: MessageRole::System,
-            content: format!("[早期对话摘要]\n{summary}"),
-            reasoning_content: String::new(),
-            created_at: now_text(),
-        }];
-        result.extend_from_slice(recent_messages);
-        Ok(result)
+        // 注入摘要
+        if let Some(summary) = &session.context_summary {
+            context.push(Message {
+                id: scru128::new().to_string(),
+                role: MessageRole::System,
+                content: format!("[早期对话摘要]\n{summary}"),
+                reasoning_content: String::new(),
+                created_at: now_text(),
+            });
+        }
+
+        context.extend_from_slice(recent_messages);
+        context
     }
 
     /// 查找分割点：保留最近 N 轮对话（一轮 = 一次 user 消息及其后续消息）
@@ -92,37 +125,44 @@ impl ContextCompressor {
         split_point
     }
 
-    /// 使用 LLM 对消息列表生成摘要
-    fn summarize_messages(
+    /// 将旧摘要 + 新消息折叠为新摘要
+    fn fold_summary(
         &self,
-        messages: &[Message],
+        old_summary: Option<&str>,
+        new_messages: &[Message],
         client: &SingleProviderClient,
     ) -> Result<String> {
-        let mut conversation_text = String::new();
-        for msg in messages {
+        let mut input_text = String::new();
+
+        // 旧摘要作为上文
+        if let Some(summary) = old_summary {
+            input_text.push_str(&format!("[已有摘要]\n{summary}\n\n[新增对话]\n"));
+        }
+
+        // 新消息
+        for msg in new_messages {
             let role_label = match msg.role {
                 MessageRole::User => "用户",
                 MessageRole::Assistant => "助手",
                 MessageRole::System => "系统",
             };
-            // 截断过长的单条消息，避免摘要请求本身超限
             let content = if msg.content.len() > 2000 {
                 format!("{}...(已截断)", &msg.content[..2000])
             } else {
                 msg.content.clone()
             };
-            conversation_text.push_str(&format!("[{role_label}]: {content}\n"));
+            input_text.push_str(&format!("[{role_label}]: {content}\n"));
         }
 
         let prompt = format!(
-            "请将以下对话历史压缩为简洁的摘要。要求：\n\
+            "请将以下内容压缩为简洁的对话摘要。要求：\n\
              1. 保留所有关键信息、决策结论和重要数据\n\
              2. 保留用户的核心需求和偏好\n\
              3. 保留已执行的操作及其结果\n\
-             4. 去除冗余的中间过程和重复内容\n\
-             5. 摘要使用第三人称陈述\n\
+             4. 如果有已有摘要，将其与新增内容合并为统一摘要\n\
+             5. 去除冗余的中间过程和重复内容\n\
              6. 直接输出摘要内容，不要加前缀说明\n\n\
-             对话历史：\n{conversation_text}"
+             {input_text}"
         );
 
         let req = ModelRequest {
@@ -145,22 +185,20 @@ pub fn compress_loop_messages(
     client: &SingleProviderClient,
 ) -> Result<Vec<Message>> {
     // 按 Assistant+System 配对分组为"轮次"
-    let mut rounds: Vec<(usize, usize)> = Vec::new(); // (start, end) indices
+    let mut rounds: Vec<(usize, usize)> = Vec::new();
     let mut i = 0;
     while i < loop_messages.len() {
         let start = i;
-        // Assistant 消息
         if i < loop_messages.len() && loop_messages[i].role == MessageRole::Assistant {
             i += 1;
         }
-        // 后续的 System 消息（工具结果）
         while i < loop_messages.len() && loop_messages[i].role == MessageRole::System {
             i += 1;
         }
         if i > start {
             rounds.push((start, i));
         } else {
-            i += 1; // 跳过意外消息
+            i += 1;
         }
     }
 
@@ -173,7 +211,6 @@ pub fn compress_loop_messages(
     let early_messages = &loop_messages[..compress_end];
     let recent_messages = &loop_messages[compress_end..];
 
-    // 构建摘要文本
     let mut text = String::new();
     for msg in early_messages {
         let label = match msg.role {

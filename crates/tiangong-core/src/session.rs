@@ -34,6 +34,16 @@ pub struct Session {
     /// 会话级工作目录，工具执行时以此为根目录
     #[serde(default)]
     pub cwd: String,
+    /// 早期对话的滚动摘要（用于无限上下文压缩）
+    ///
+    /// 当对话历史超过模型上下文阈值时，早期消息被 LLM 压缩为摘要存储在此。
+    /// 构建 prompt 时注入为系统消息，原始 messages 保持完整供 UI 展示。
+    /// 每次压缩会将旧摘要 + 新溢出消息折叠为新摘要，支持无限延伸。
+    #[serde(default)]
+    pub context_summary: Option<String>,
+    /// 摘要覆盖到的消息索引（messages[0..summary_up_to] 已被摘要覆盖）
+    #[serde(default)]
+    pub summary_up_to: usize,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -112,6 +122,8 @@ impl Session {
             task_records: Vec::new(),
             task_plans: Vec::new(),
             cwd,
+            context_summary: None,
+            summary_up_to: 0,
             created_at: now.clone(),
             updated_at: now,
         }
