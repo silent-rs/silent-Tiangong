@@ -78,7 +78,7 @@ const MAX_REACT_ROUNDS: usize = 20;
 pub struct RuntimeEngine {
     client: SingleProviderClient,
     tool_executor: LocalToolExecutor,
-    context_limit: usize,
+    pub context_limit: usize,
     agent_config: AgentConfig,
     models_config: ModelsConfig,
 }
@@ -144,10 +144,11 @@ impl RuntimeEngine {
 
         let mut accumulated_usage = TokenUsage::default();
 
-        // 构建对话上下文：使用 ContextOrganizer 自动过滤、压缩
+        // 构建对话上下文：摘要 + 最近消息 + 过滤执行痕迹
+        // 压缩（摘要更新）已在 turn 启动前完成并持久化到 session
         let organizer = ContextOrganizer::new(self.context_limit)
             .with_keep_recent_turns(6);
-        let context = organizer.build_context(session, Some(&self.client))?;
+        let context = organizer.build_context(session);
 
         // 准备工具定义
         let (function_tools, mcp_targets) =

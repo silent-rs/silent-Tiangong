@@ -80,6 +80,27 @@ impl AppTurnService {
             updated_at: now_text(),
         };
 
+        // 在创建 snapshot 前，检查并更新滚动摘要
+        // 摘要持久化到 session，原始 messages 保持完整
+        {
+            let context_limit = state.services.runtime.context_limit;
+            let organizer =
+                crate::context::organizer::ContextOrganizer::new(context_limit)
+                    .with_keep_recent_turns(6);
+            let session = &state.store.session.sessions[active_idx];
+            if organizer.needs_compression_estimated(session) {
+                let client = SingleProviderClient::new(
+                    state.store.provider.models_config.to_chat_provider_config(),
+                );
+                let session_mut = &mut state.store.session.sessions[active_idx];
+                match organizer.maybe_update_summary(session_mut, &client) {
+                    Ok(true) => tracing::info!("滚动摘要已更新"),
+                    Ok(false) => {}
+                    Err(err) => tracing::warn!("滚动摘要更新失败：{err}"),
+                }
+            }
+        }
+
         state.persist_session_and_app(&session_id)?;
 
         let runtime = state.services.runtime.clone();
