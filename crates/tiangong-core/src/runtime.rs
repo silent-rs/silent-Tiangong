@@ -172,13 +172,50 @@ impl RuntimeEngine {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "prompt": { "type": "string", "description": "图片描述（英文效果更好）" }
+                        "prompt": { "type": "string", "description": "图片描述（英文效果更好）" },
+                        "width": { "type": "integer", "description": "图片宽度（像素，可选，0 表示默认）" },
+                        "height": { "type": "integer", "description": "图片高度（像素，可选，0 表示默认）" },
+                        "style": { "type": "string", "description": "风格（如 vivid、natural，可选）" }
                     },
                     "required": ["prompt"]
                 }),
             });
         }
         // 视频生成暂通过 skill 机制处理，不注入内置工具
+
+        // 语音合成（TTS）
+        if self.models_config.resolve_for_capability(ModelCapability::Tts).is_some() {
+            function_tools.push(FunctionToolSpec {
+                name: "text_to_speech".to_string(),
+                description: "将文本转换为语音音频文件，保存到指定路径并返回文件路径。".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "text": { "type": "string", "description": "待合成的文本" },
+                        "voice": { "type": "string", "description": "音色（如 alloy、echo、fable、onyx、nova、shimmer，可选）" },
+                        "speed": { "type": "number", "description": "语速（0.5~2.0，可选，默认 1.0）" },
+                        "output_path": { "type": "string", "description": "输出文件路径（可选，默认自动生成）" }
+                    },
+                    "required": ["text"]
+                }),
+            });
+        }
+
+        // 语音识别（STT）
+        if self.models_config.resolve_for_capability(ModelCapability::Stt).is_some() {
+            function_tools.push(FunctionToolSpec {
+                name: "speech_to_text".to_string(),
+                description: "将音频文件转录为文本。支持 mp3、wav、ogg 等格式。".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "file_path": { "type": "string", "description": "音频文件路径" },
+                        "language": { "type": "string", "description": "语言提示（如 zh、en，可选）" }
+                    },
+                    "required": ["file_path"]
+                }),
+            });
+        }
 
         // 注入 get_skill_detail 工具（已安装 skill 时可用）
         if self.agent_config.skills.installed.iter().any(|s| s.enabled) {
@@ -524,9 +561,15 @@ impl RuntimeEngine {
             return self.handle_get_skill_detail(call);
         }
 
-        // 多媒体生成工具
+        // 多媒体工具
         if call.name == "generate_image" {
             return self.handle_media_generation(call, ModelCapability::ImageGeneration);
+        }
+        if call.name == "text_to_speech" {
+            return self.handle_tts(call);
+        }
+        if call.name == "speech_to_text" {
+            return self.handle_stt(call);
         }
         // 检查是否是 MCP 工具
         if let Some(target) = mcp_targets.get(&call.name) {
@@ -836,13 +879,16 @@ impl RuntimeEngine {
                     resolved.base_url.clone(),
                     resolved.model.clone(),
                 );
+                let width = call.arguments.get("width").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                let height = call.arguments.get("height").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                let style = call.arguments.get("style").and_then(|v| v.as_str()).map(String::from);
                 let request = tiangong_media::image::ImageGenRequest {
                     prompt,
                     negative_prompt: None,
-                    width: 0,
-                    height: 0,
+                    width,
+                    height,
                     model: Some(resolved.model.clone()),
-                    style: None,
+                    style,
                     num_images: 1,
                 };
                 let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -948,6 +994,242 @@ impl RuntimeEngine {
                 stderr: String::new(),
                 exit_code: 1,
                 execution: None,
+            },
+        }
+    }
+
+    /// 处理语音合成（TTS）工具调用
+    fn handle_tts(&self, call: &ModelFunctionCall) -> ToolResult {
+        let text = call.arguments.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if text.is_empty() {
+            return ToolResult {
+                ok: false, summary: "缺少 text 参数".to_string(),
+                stdout: String::new(), stderr: "text 不能为空".to_string(),
+                exit_code: 1, execution: None,
+            };
+        }
+
+        let resolved = match self.models_config.resolve_for_capability(ModelCapability::Tts) {
+            Some(r) => r,
+            None => return ToolResult {
+                ok: false, summary: "TTS 能力未配置".to_string(),
+                stdout: String::new(), stderr: "请在设置中配置 TTS 模型路由".to_string(),
+                exit_code: 1, execution: None,
+            },
+        };
+
+        let voice = call.arguments.get("voice").and_then(|v| v.as_str()).map(String::from);
+        let speed = call.arguments.get("speed").and_then(|v| v.as_f64());
+        let output_path = call.arguments.get("output_path")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                let dir = std::path::PathBuf::from(home).join(".tiangong").join("media");
+                let _ = std::fs::create_dir_all(&dir);
+                dir.join(format!("tts_{}.mp3", scru128::new()))
+                    .to_string_lossy().to_string()
+            });
+
+        let started = std::time::Instant::now();
+        let tool_name = call.name.clone();
+
+        use tiangong_media::tts::SpeechSynthesizer;
+        let synthesizer = tiangong_media::openai_tts::OpenAITTS::new(
+            resolved.api_key.clone(),
+            resolved.base_url.clone(),
+        );
+        let request = tiangong_media::tts::SynthesizeRequest {
+            text: text.clone(),
+            voice,
+            speed,
+            model: Some(resolved.model.clone()),
+            output_format: Some("mp3".to_string()),
+        };
+
+        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(rt) => rt,
+            Err(e) => return ToolResult {
+                ok: false, summary: format!("运行时初始化失败：{e}"),
+                stdout: String::new(), stderr: e.to_string(),
+                exit_code: 1, execution: None,
+            },
+        };
+
+        let result: Result<Result<tiangong_media::tts::SynthesizeResponse, anyhow::Error>, _> = runtime.block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                synthesizer.synthesize(request),
+            ).await
+        });
+
+        let duration_ms = started.elapsed().as_millis() as u64;
+        match result {
+            Ok(Ok(resp)) => {
+                // 写入文件
+                match std::fs::write(&output_path, &resp.audio) {
+                    Ok(_) => {
+                        let duration_info = resp.duration
+                            .map(|d| format!("，时长 {:.1}s", d))
+                            .unwrap_or_default();
+                        ToolResult {
+                            ok: true,
+                            summary: format!("语音合成成功（模型：{}{}）", resolved.model, duration_info),
+                            stdout: format!("音频文件已保存到：{output_path}"),
+                            stderr: String::new(),
+                            exit_code: 0,
+                            execution: Some(ToolExecutionRecord {
+                                tool_name, args: vec![], duration_ms,
+                                ok: true, exit_code: 0,
+                                summary: format!("语音合成成功（模型：{}）", resolved.model),
+                            }),
+                        }
+                    }
+                    Err(e) => ToolResult {
+                        ok: false, summary: format!("音频文件写入失败：{e}"),
+                        stdout: String::new(), stderr: e.to_string(),
+                        exit_code: 1, execution: None,
+                    },
+                }
+            }
+            Ok(Err(e)) => ToolResult {
+                ok: false, summary: format!("语音合成失败：{e}"),
+                stdout: String::new(), stderr: e.to_string(),
+                exit_code: 1,
+                execution: Some(ToolExecutionRecord {
+                    tool_name, args: vec![], duration_ms,
+                    ok: false, exit_code: 1,
+                    summary: format!("语音合成失败：{e}"),
+                }),
+            },
+            Err(_) => ToolResult {
+                ok: false, summary: "语音合成超时（60秒）".to_string(),
+                stdout: String::new(), stderr: "timeout".to_string(),
+                exit_code: 1,
+                execution: Some(ToolExecutionRecord {
+                    tool_name, args: vec![], duration_ms,
+                    ok: false, exit_code: 1,
+                    summary: "语音合成超时".to_string(),
+                }),
+            },
+        }
+    }
+
+    /// 处理语音识别（STT）工具调用
+    fn handle_stt(&self, call: &ModelFunctionCall) -> ToolResult {
+        let file_path = call.arguments.get("file_path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if file_path.is_empty() {
+            return ToolResult {
+                ok: false, summary: "缺少 file_path 参数".to_string(),
+                stdout: String::new(), stderr: "file_path 不能为空".to_string(),
+                exit_code: 1, execution: None,
+            };
+        }
+
+        let resolved = match self.models_config.resolve_for_capability(ModelCapability::Stt) {
+            Some(r) => r,
+            None => return ToolResult {
+                ok: false, summary: "STT 能力未配置".to_string(),
+                stdout: String::new(), stderr: "请在设置中配置 STT 模型路由".to_string(),
+                exit_code: 1, execution: None,
+            },
+        };
+
+        // 读取音频文件
+        let audio_data = match std::fs::read(&file_path) {
+            Ok(data) => data,
+            Err(e) => return ToolResult {
+                ok: false, summary: format!("读取音频文件失败：{e}"),
+                stdout: String::new(), stderr: e.to_string(),
+                exit_code: 1, execution: None,
+            },
+        };
+
+        // 根据扩展名推断 MIME 类型
+        let mime_type = match std::path::Path::new(&file_path).extension().and_then(|e| e.to_str()) {
+            Some("mp3") => "audio/mpeg",
+            Some("wav") => "audio/wav",
+            Some("ogg") | Some("oga") => "audio/ogg",
+            Some("flac") => "audio/flac",
+            Some("webm") => "audio/webm",
+            Some("m4a") => "audio/mp4",
+            _ => "audio/mpeg",
+        }.to_string();
+
+        let language = call.arguments.get("language").and_then(|v| v.as_str()).map(String::from);
+
+        let started = std::time::Instant::now();
+        let tool_name = call.name.clone();
+
+        use tiangong_media::stt::SpeechRecognizer;
+        let recognizer = tiangong_media::openai_stt::OpenAIWhisper::new(
+            resolved.api_key.clone(),
+            resolved.base_url.clone(),
+        );
+        let request = tiangong_media::stt::TranscribeRequest {
+            audio: audio_data,
+            mime_type,
+            language,
+            model: Some(resolved.model.clone()),
+        };
+
+        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(rt) => rt,
+            Err(e) => return ToolResult {
+                ok: false, summary: format!("运行时初始化失败：{e}"),
+                stdout: String::new(), stderr: e.to_string(),
+                exit_code: 1, execution: None,
+            },
+        };
+
+        let result: Result<Result<tiangong_media::stt::TranscribeResponse, anyhow::Error>, _> = runtime.block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(120),
+                recognizer.transcribe(request),
+            ).await
+        });
+
+        let duration_ms = started.elapsed().as_millis() as u64;
+        match result {
+            Ok(Ok(resp)) => {
+                let lang_info = resp.language.as_deref()
+                    .map(|l| format!("，语言：{l}"))
+                    .unwrap_or_default();
+                let dur_info = resp.duration
+                    .map(|d| format!("，音频时长：{:.1}s", d))
+                    .unwrap_or_default();
+                ToolResult {
+                    ok: true,
+                    summary: format!("语音识别成功（模型：{}{}{dur_info}）", resolved.model, lang_info),
+                    stdout: resp.text,
+                    stderr: String::new(),
+                    exit_code: 0,
+                    execution: Some(ToolExecutionRecord {
+                        tool_name, args: vec![], duration_ms,
+                        ok: true, exit_code: 0,
+                        summary: format!("语音识别成功（模型：{}）", resolved.model),
+                    }),
+                }
+            }
+            Ok(Err(e)) => ToolResult {
+                ok: false, summary: format!("语音识别失败：{e}"),
+                stdout: String::new(), stderr: e.to_string(),
+                exit_code: 1,
+                execution: Some(ToolExecutionRecord {
+                    tool_name, args: vec![], duration_ms,
+                    ok: false, exit_code: 1,
+                    summary: format!("语音识别失败：{e}"),
+                }),
+            },
+            Err(_) => ToolResult {
+                ok: false, summary: "语音识别超时（120秒）".to_string(),
+                stdout: String::new(), stderr: "timeout".to_string(),
+                exit_code: 1,
+                execution: Some(ToolExecutionRecord {
+                    tool_name, args: vec![], duration_ms,
+                    ok: false, exit_code: 1,
+                    summary: "语音识别超时".to_string(),
+                }),
             },
         }
     }

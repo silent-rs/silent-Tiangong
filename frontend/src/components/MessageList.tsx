@@ -146,6 +146,32 @@ export function MessageList() {
         </a>
       );
     },
+    img({ src, alt }: { src?: string; alt?: string }) {
+      const [fullscreen, setFullscreen] = useState(false);
+      return (
+        <>
+          <img
+            src={src}
+            alt={alt || "生成的图片"}
+            className="max-w-full max-h-96 rounded-md my-2 cursor-pointer hover:opacity-90 transition-opacity"
+            loading="lazy"
+            onClick={() => setFullscreen(true)}
+          />
+          {fullscreen && (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 cursor-pointer"
+              onClick={() => setFullscreen(false)}
+            >
+              <img
+                src={src}
+                alt={alt || "生成的图片"}
+                className="max-w-[90vw] max-h-[90vh] object-contain rounded-md"
+              />
+            </div>
+          )}
+        </>
+      );
+    },
     table({ children }: { children: ReactNode }) {
       return (
         <div className="my-3 overflow-x-auto">
