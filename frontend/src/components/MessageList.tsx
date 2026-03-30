@@ -316,63 +316,66 @@ export function MessageList() {
               const isAssistant = message.role === "Assistant";
 
               return (
-                <div
-                  key={group.key}
-                  className={`flex gap-3 mt-3 first:mt-0 ${
-                    isUser ? "justify-end" : "justify-start"
-                  }`}
-                >
-                  {isAssistant && (
-                    <div className="w-8 h-8 rounded bg-primary flex items-center justify-center flex-shrink-0">
-                      <Bot className="w-5 h-5 text-primary-foreground" />
-                    </div>
-                  )}
+                <div key={group.key} className="mt-3 first:mt-0">
                   <div
-                    className={`rounded-lg px-4 py-2.5 max-w-[80%] ${
-                      isUser
-                        ? "bg-primary text-primary-foreground"
-                        : "bg-muted text-foreground"
+                    className={`flex gap-3 ${
+                      isUser ? "justify-end" : "justify-start"
                     }`}
                   >
-                    {isAssistant ? (
-                      <>
-                        {isStreaming ? (
-                          <TypingMessage
-                            content={streamingContent}
-                            reasoningContent={streamingReasoningContent}
-                            speed={300}
-                          />
-                        ) : (
-                          <div>
-                            {message.reasoning_content && (
-                              <ThinkingBlock
-                                content={message.reasoning_content}
-                                defaultExpanded={false}
-                              />
-                            )}
-                            <div className="prose prose-sm max-w-none text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
-                              <ReactMarkdown
-                                remarkPlugins={[remarkGfm]}
-                                components={MarkdownComponents as any}
-                              >
-                                {message.content}
-                              </ReactMarkdown>
+                    {isAssistant && (
+                      <div className="w-8 h-8 rounded bg-primary flex items-center justify-center flex-shrink-0">
+                        <Bot className="w-5 h-5 text-primary-foreground" />
+                      </div>
+                    )}
+                    <div
+                      className={`rounded-lg px-4 py-2.5 max-w-[80%] ${
+                        isUser
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-muted text-foreground"
+                      }`}
+                    >
+                      {isAssistant ? (
+                        <>
+                          {isStreaming ? (
+                            <TypingMessage
+                              content={streamingContent}
+                              reasoningContent={streamingReasoningContent}
+                              speed={300}
+                            />
+                          ) : (
+                            <div>
+                              {message.reasoning_content && (
+                                <ThinkingBlock
+                                  content={message.reasoning_content}
+                                  defaultExpanded={false}
+                                />
+                              )}
+                              <div className="prose prose-sm max-w-none text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
+                                <ReactMarkdown
+                                  remarkPlugins={[remarkGfm]}
+                                  components={MarkdownComponents as any}
+                                >
+                                  {message.content}
+                                </ReactMarkdown>
+                              </div>
                             </div>
-                            {message.content && (
-                              <MessageActions text={message.content} showTts={hasTts} />
-                            )}
-                          </div>
-                        )}
-                      </>
-                    ) : (
-                      <p className="whitespace-pre-wrap text-sm">
-                        {message.content}
-                      </p>
+                          )}
+                        </>
+                      ) : (
+                        <p className="whitespace-pre-wrap text-sm">
+                          {message.content}
+                        </p>
+                      )}
+                    </div>
+                    {isUser && (
+                      <div className="w-8 h-8 rounded bg-muted-foreground flex items-center justify-center flex-shrink-0">
+                        <User className="w-5 h-5 text-background" />
+                      </div>
                     )}
                   </div>
-                  {isUser && (
-                    <div className="w-8 h-8 rounded bg-muted-foreground flex items-center justify-center flex-shrink-0">
-                      <User className="w-5 h-5 text-background" />
+                  {isAssistant && !isStreaming && message.content && (
+                    <div className="pl-11">
+                      <MessageActions text={message.content} showTts={hasTts} />
                     </div>
                   )}
                 </div>
