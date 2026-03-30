@@ -245,6 +245,12 @@ export const api = {
     invoke('fetch_provider_models', { baseUrl, apiKey, timeoutMs }),
 
   // ----------------------------------------------------------------
+  // @提及补全
+  // ----------------------------------------------------------------
+  getMentionCandidates: (): Promise<{ value: string; label: string; kind: string; hint: string }[]> =>
+    invoke('get_mention_candidates'),
+
+  // ----------------------------------------------------------------
   // 语音合成
   // ----------------------------------------------------------------
   synthesizeSpeech: (text: string): Promise<{ audio_base64: string; mime_type: string }> =>

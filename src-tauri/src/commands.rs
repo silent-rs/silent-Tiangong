@@ -287,6 +287,49 @@ pub fn has_tts_capability(state: State<TiangongApp>) -> Result<bool, String> {
     })
 }
 
+/// 获取 @提及补全候选列表（已启用的 Skill 和 MCP 服务器）
+#[tauri::command]
+pub fn get_mention_candidates(state: State<TiangongApp>) -> Result<Vec<MentionCandidate>, String> {
+    state.with_state_read(|core_state| {
+        let mut candidates = Vec::new();
+
+        // 已启用的 Skill
+        for skill in core_state.installed_skills() {
+            if skill.enabled {
+                candidates.push(MentionCandidate {
+                    value: format!("@skill:{}", skill.id),
+                    label: skill.name.clone(),
+                    kind: "skill".to_string(),
+                    hint: if skill.description.is_empty() {
+                        format!("v{}", skill.version)
+                    } else {
+                        skill.description.clone()
+                    },
+                });
+            }
+        }
+
+        // 已启用的 MCP 服务器
+        let active_tools = tiangong_core::mcp::cached_active_tools();
+        for server in core_state.mcp_servers() {
+            if server.enabled {
+                let tool_count = active_tools.iter()
+                    .find(|(name, _)| name == &server.name)
+                    .map(|(_, tools)| tools.len())
+                    .unwrap_or(0);
+                candidates.push(MentionCandidate {
+                    value: format!("@mcp:{}", server.name),
+                    label: server.name.clone(),
+                    kind: "mcp".to_string(),
+                    hint: format!("{} 工具", tool_count),
+                });
+            }
+        }
+
+        Ok(candidates)
+    })
+}
+
 /// 获取运行状态快照
 #[tauri::command]
 pub fn get_run_snapshot(state: State<TiangongApp>) -> Result<RunSnapshot, String> {

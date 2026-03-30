@@ -8,6 +8,19 @@ pub struct SpeechResult {
     pub mime_type: String,
 }
 
+/// @提及候选项
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MentionCandidate {
+    /// 插入到输入框的值（如 @skill:skill-creator）
+    pub value: String,
+    /// 显示标签
+    pub label: String,
+    /// 类型（skill / mcp）
+    pub kind: String,
+    /// 简短描述
+    pub hint: String,
+}
+
 /// 会话数据（前端使用）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
