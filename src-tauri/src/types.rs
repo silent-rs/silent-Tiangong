@@ -1,6 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// 语音合成结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpeechResult {
+    pub audio_base64: String,
+    pub mime_type: String,
+}
+
 /// 会话数据（前端使用）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {

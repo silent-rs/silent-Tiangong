@@ -9,6 +9,8 @@ import {
   Terminal,
   Cpu,
   FileText,
+  Volume2,
+  Square,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -16,9 +18,73 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { TypingMessage } from "./TypingMessage";
 import { ThinkingBlock } from "./ThinkingBlock";
+import { api } from "@/api/tauri";
 
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
+
+// 全局音频实例，确保同一时间只有一个播放
+let globalAudio: HTMLAudioElement | null = null;
+
+function TtsPlayButton({ text }: { text: string }) {
+  const [playing, setPlaying] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  const handlePlay = async () => {
+    // 如果正在播放，停止
+    if (playing && globalAudio) {
+      globalAudio.pause();
+      globalAudio = null;
+      setPlaying(false);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      // 停止之前的播放
+      if (globalAudio) {
+        globalAudio.pause();
+        globalAudio = null;
+      }
+
+      const result = await api.synthesizeSpeech(text);
+      const audio = new Audio(`data:${result.mime_type};base64,${result.audio_base64}`);
+      globalAudio = audio;
+
+      audio.onended = () => {
+        setPlaying(false);
+        globalAudio = null;
+      };
+      audio.onerror = () => {
+        setPlaying(false);
+        globalAudio = null;
+      };
+
+      await audio.play();
+      setPlaying(true);
+    } catch (e) {
+      console.error("TTS 播放失败:", e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <button
+      onClick={handlePlay}
+      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:text-foreground hover:bg-muted/80 transition-colors"
+      title={playing ? "停止播放" : "朗读"}
+    >
+      {loading ? (
+        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+      ) : playing ? (
+        <Square className="w-3.5 h-3.5" />
+      ) : (
+        <Volume2 className="w-3.5 h-3.5" />
+      )}
+    </button>
+  );
+}
 
 export function MessageList() {
   const {
@@ -31,6 +97,12 @@ export function MessageList() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevMessagesLengthRef = useRef(0);
   const prevStreamingIdRef = useRef<string | null>(null);
+  const [hasTts, setHasTts] = useState(false);
+
+  // 检查 TTS 能力
+  useEffect(() => {
+    api.hasTtsCapability().then(setHasTts).catch(() => setHasTts(false));
+  }, []);
 
   // 自动滚动到底部
   useEffect(() => {
@@ -276,6 +348,11 @@ export function MessageList() {
                                 {message.content}
                               </ReactMarkdown>
                             </div>
+                            {hasTts && message.content && (
+                              <div className="flex justify-end mt-1">
+                                <TtsPlayButton text={message.content} />
+                              </div>
+                            )}
                           </div>
                         )}
                       </>

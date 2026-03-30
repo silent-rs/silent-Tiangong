@@ -14,6 +14,7 @@ tiangong_connector = { path = "../crates/tiangong-connector", package = "tiangon
 tiangong_media = { path = "../crates/tiangong-media", package = "tiangong-media" }
 
 anyhow = "1"
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 scru128 = "3"
 serde = { version = "1", features = ["derive"] }

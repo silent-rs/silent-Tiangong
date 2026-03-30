@@ -224,6 +224,76 @@ pub fn cancel_background_task(task_id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// 语音合成：将文本转换为音频，返回 base64 编码的音频数据
+#[tauri::command]
+pub fn synthesize_speech(
+    text: String,
+    state: State<TiangongApp>,
+) -> Result<SpeechResult, String> {
+    use tiangong_core::models_config::ModelCapability;
+    use tiangong_media::tts::{SpeechSynthesizer, SynthesizeRequest};
+
+    let resolved = state
+        .with_state_read(|core_state| {
+            core_state
+                .models_config()
+                .resolve_for_capability(ModelCapability::Tts)
+                .ok_or_else(|| anyhow::anyhow!("TTS 能力未配置"))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let synthesizer = tiangong_media::openai_tts::OpenAITTS::new(
+        resolved.api_key.clone(),
+        resolved.base_url.clone(),
+    );
+
+    let request = SynthesizeRequest {
+        text,
+        voice: None,
+        speed: None,
+        model: Some(resolved.model.clone()),
+        output_format: Some("mp3".to_string()),
+    };
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let result = runtime.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            synthesizer.synthesize(request),
+        )
+        .await
+    });
+
+    match result {
+        Ok(Ok(resp)) => {
+            use base64::Engine;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&resp.audio);
+            Ok(SpeechResult {
+                audio_base64: b64,
+                mime_type: resp.mime_type,
+            })
+        }
+        Ok(Err(e)) => Err(format!("语音合成失败：{e}")),
+        Err(_) => Err("语音合成超时（60秒）".to_string()),
+    }
+}
+
+/// 检查 TTS 能力是否已配置
+#[tauri::command]
+pub fn has_tts_capability(state: State<TiangongApp>) -> Result<bool, String> {
+    use tiangong_core::models_config::ModelCapability;
+    state.with_state_read(|core_state| {
+        Ok(core_state
+            .models_config()
+            .resolve_for_capability(ModelCapability::Tts)
+            .is_some())
+    })
+}
+
 /// 获取运行状态快照
 #[tauri::command]
 pub fn get_run_snapshot(state: State<TiangongApp>) -> Result<RunSnapshot, String> {

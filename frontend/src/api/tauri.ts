@@ -245,6 +245,15 @@ export const api = {
     invoke('fetch_provider_models', { baseUrl, apiKey, timeoutMs }),
 
   // ----------------------------------------------------------------
+  // 语音合成
+  // ----------------------------------------------------------------
+  synthesizeSpeech: (text: string): Promise<{ audio_base64: string; mime_type: string }> =>
+    invoke('synthesize_speech', { text }),
+
+  hasTtsCapability: (): Promise<boolean> =>
+    invoke('has_tts_capability'),
+
+  // ----------------------------------------------------------------
   // 事件监听
   // ----------------------------------------------------------------
   onRunSnapshot: (callback: (snapshot: RunSnapshot) => void) =>
