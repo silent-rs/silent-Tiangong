@@ -351,7 +351,7 @@ export function MessageList() {
                                   defaultExpanded={false}
                                 />
                               )}
-                              <div className="prose prose-sm max-w-none text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
+                              <div className="prose prose-sm max-w-none break-words text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
                                 <ReactMarkdown
                                   remarkPlugins={[remarkGfm]}
                                   components={MarkdownComponents as any}
@@ -363,7 +363,7 @@ export function MessageList() {
                           )}
                         </>
                       ) : (
-                        <p className="whitespace-pre-wrap text-sm">
+                        <p className="whitespace-pre-wrap break-words text-sm">
                           {message.content}
                         </p>
                       )}
