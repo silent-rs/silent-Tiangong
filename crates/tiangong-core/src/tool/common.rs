@@ -530,7 +530,7 @@ pub(super) fn derive_shell_exec_args(
 }
 
 pub(super) fn command_env_allowlist() -> Vec<(String, String)> {
-    const ALLOWED: [&str; 13] = [
+    const ALLOWED: [&str; 21] = [
         "PATH",
         "HOME",
         "USER",
@@ -544,6 +544,15 @@ pub(super) fn command_env_allowlist() -> Vec<(String, String)> {
         "SystemRoot",
         "ComSpec",
         "PATHEXT",
+        // 代理设置
+        "http_proxy",
+        "https_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
     ];
     ALLOWED
         .iter()
