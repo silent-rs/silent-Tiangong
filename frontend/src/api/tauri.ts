@@ -253,11 +253,20 @@ export const api = {
   // ----------------------------------------------------------------
   // 语音合成
   // ----------------------------------------------------------------
-  synthesizeSpeech: (text: string): Promise<{ audio_base64: string; mime_type: string }> =>
+  synthesizeSpeech: (text: string): Promise<{ file_path: string; mime_type: string }> =>
     invoke('synthesize_speech', { text }),
+
+  playAudioFile: (filePath: string): Promise<void> =>
+    invoke('play_audio_file', { filePath }),
+
+  stopAudio: (): Promise<void> =>
+    invoke('stop_audio'),
 
   hasTtsCapability: (): Promise<boolean> =>
     invoke('has_tts_capability'),
+
+  listTtsVoices: (): Promise<{ id: string; name: string; gender?: string }[]> =>
+    invoke('list_tts_voices'),
 
   // ----------------------------------------------------------------
   // 事件监听

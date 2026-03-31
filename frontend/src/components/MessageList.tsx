@@ -10,9 +10,11 @@ import {
   Cpu,
   FileText,
   Volume2,
+  VolumeX,
   Square,
   Copy,
   Check,
+  AudioLines,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -21,12 +23,10 @@ import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { TypingMessage } from "./TypingMessage";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { api } from "@/api/tauri";
+import { useStreamingTts } from "@/hooks/useStreamingTts";
 
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-
-// 全局音频实例，确保同一时间只有一个播放
-let globalAudio: HTMLAudioElement | null = null;
 
 function MessageActions({ text, showTts }: { text: string; showTts: boolean }) {
   const [copied, setCopied] = useState(false);
@@ -44,33 +44,32 @@ function MessageActions({ text, showTts }: { text: string; showTts: boolean }) {
   };
 
   const handleTts = async () => {
-    if (playing && globalAudio) {
-      globalAudio.pause();
-      globalAudio = null;
+    console.log("handleTts called, playing:", playing, "text length:", text.length);
+    if (playing) {
+      api.stopAudio().catch(() => {});
       setPlaying(false);
       return;
     }
 
     setTtsLoading(true);
     try {
-      if (globalAudio) {
-        globalAudio.pause();
-        globalAudio = null;
-      }
+      // 先停止可能正在播放的音频（不等待）
+      api.stopAudio().catch(() => {});
 
+      console.log("开始 TTS 合成...");
       const result = await api.synthesizeSpeech(text);
-      const audio = new Audio(`data:${result.mime_type};base64,${result.audio_base64}`);
-      globalAudio = audio;
+      console.log("TTS 合成完成，文件路径:", result.file_path);
 
-      audio.onended = () => { setPlaying(false); globalAudio = null; };
-      audio.onerror = () => { setPlaying(false); globalAudio = null; };
-
-      await audio.play();
       setPlaying(true);
+      setTtsLoading(false);
+      // 通过系统原生命令播放音频文件（afplay on macOS）
+      await api.playAudioFile(result.file_path);
+      // playAudioFile 阻塞到播放完成
+      setPlaying(false);
     } catch (e: any) {
       console.error("TTS 播放失败:", e);
       alert(`语音播放失败：${e?.message || e}`);
-    } finally {
+      setPlaying(false);
       setTtsLoading(false);
     }
   };
@@ -109,6 +108,7 @@ export function MessageList() {
   const prevMessagesLengthRef = useRef(0);
   const prevStreamingIdRef = useRef<string | null>(null);
   const [hasTts, setHasTts] = useState(false);
+  const streamingTts = useStreamingTts();
 
   // 检查 TTS 能力
   useEffect(() => {
@@ -282,6 +282,43 @@ export function MessageList() {
   return (
     <ScrollArea className="h-full">
       <div className="p-4">
+        {/* 流式 TTS 开关 */}
+        {hasTts && (
+          <div className="max-w-3xl mx-auto flex justify-end mb-2">
+            <button
+              onClick={() => {
+                if (streamingTts.enabled) {
+                  streamingTts.stop();
+                } else {
+                  streamingTts.setEnabled(true);
+                }
+              }}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs transition-colors ${
+                streamingTts.enabled
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-muted text-muted-foreground hover:text-foreground hover:bg-accent"
+              }`}
+              title={streamingTts.enabled ? "关闭自动朗读" : "开启自动朗读（边生成边朗读）"}
+            >
+              {streamingTts.enabled ? (
+                <>
+                  {streamingTts.isPlaying ? (
+                    <AudioLines className="w-3.5 h-3.5 animate-pulse" />
+                  ) : (
+                    <Volume2 className="w-3.5 h-3.5" />
+                  )}
+                  <span>自动朗读中</span>
+                  <VolumeX className="w-3 h-3 ml-0.5" />
+                </>
+              ) : (
+                <>
+                  <Volume2 className="w-3.5 h-3.5" />
+                  <span>自动朗读</span>
+                </>
+              )}
+            </button>
+          </div>
+        )}
         <div className="max-w-3xl mx-auto space-y-2">
           {messages.length === 0 && !isThinking ? (
             <div className="flex flex-col items-center justify-center h-full text-center py-20">

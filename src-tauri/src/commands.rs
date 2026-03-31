@@ -247,9 +247,16 @@ pub async fn synthesize_speech(
         resolved.base_url.clone(),
     );
 
+    // 从模型配置 options 中读取 voice 参数
+    let voice = resolved
+        .options
+        .get("voice")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     let request = SynthesizeRequest {
         text,
-        voice: None,
+        voice,
         speed: None,
         model: Some(resolved.model.clone()),
         output_format: Some("mp3".to_string()),
@@ -263,10 +270,29 @@ pub async fn synthesize_speech(
 
     match result {
         Ok(Ok(resp)) => {
-            use base64::Engine;
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&resp.audio);
+            // 将音频保存到临时文件，通过 asset 协议播放
+            let media_dir = user_home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".tiangong")
+                .join("media");
+            std::fs::create_dir_all(&media_dir)
+                .map_err(|e| format!("创建媒体目录失败：{e}"))?;
+
+            let ext = match resp.mime_type.as_str() {
+                "audio/mpeg" => "mp3",
+                "audio/wav" => "wav",
+                "audio/opus" => "opus",
+                "audio/aac" => "aac",
+                "audio/flac" => "flac",
+                _ => "mp3",
+            };
+            let file_name = format!("tts_{}.{}", scru128::new(), ext);
+            let file_path = media_dir.join(&file_name);
+            std::fs::write(&file_path, &resp.audio)
+                .map_err(|e| format!("音频文件写入失败：{e}"))?;
+
             Ok(SpeechResult {
-                audio_base64: b64,
+                file_path: file_path.to_string_lossy().to_string(),
                 mime_type: resp.mime_type,
             })
         }
@@ -285,6 +311,99 @@ pub fn has_tts_capability(state: State<TiangongApp>) -> Result<bool, String> {
             .resolve_for_capability(ModelCapability::Tts)
             .is_some())
     })
+}
+
+/// 获取 TTS 可用音色列表
+#[tauri::command]
+pub async fn list_tts_voices(
+    state: State<'_, TiangongApp>,
+) -> Result<Vec<serde_json::Value>, String> {
+    use tiangong_core::models_config::ModelCapability;
+    use tiangong_media::tts::SpeechSynthesizer;
+
+    let resolved = state
+        .with_state_read(|core_state| {
+            core_state
+                .models_config()
+                .resolve_for_capability(ModelCapability::Tts)
+                .ok_or_else(|| anyhow::anyhow!("TTS 能力未配置"))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let synthesizer = tiangong_media::openai_tts::OpenAITTS::new(
+        resolved.api_key.clone(),
+        resolved.base_url.clone(),
+    );
+
+    let voices = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        synthesizer.list_voices(),
+    )
+    .await
+    .map_err(|_| "获取音色列表超时".to_string())?
+    .map_err(|e| format!("获取音色列表失败：{e}"))?;
+
+    Ok(voices
+        .into_iter()
+        .map(|v| {
+            serde_json::json!({
+                "id": v.id,
+                "name": v.name,
+                "gender": v.gender,
+            })
+        })
+        .collect())
+}
+
+/// 播放本地音频文件（使用系统原生播放器）
+#[tauri::command]
+pub async fn play_audio_file(file_path: String) -> Result<(), String> {
+    let path = std::path::Path::new(&file_path);
+    if !path.exists() {
+        return Err(format!("音频文件不存在：{file_path}"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        tokio::process::Command::new("afplay")
+            .arg(&file_path)
+            .output()
+            .await
+            .map_err(|e| format!("播放失败：{e}"))?;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        tokio::process::Command::new("powershell")
+            .args(["-c", &format!("(New-Object Media.SoundPlayer '{}').PlaySync()", file_path)])
+            .output()
+            .await
+            .map_err(|e| format!("播放失败：{e}"))?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        tokio::process::Command::new("aplay")
+            .arg(&file_path)
+            .output()
+            .await
+            .map_err(|e| format!("播放失败：{e}"))?;
+    }
+
+    Ok(())
+}
+
+/// 停止当前正在播放的音频
+#[tauri::command]
+pub async fn stop_audio() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = tokio::process::Command::new("killall")
+            .arg("afplay")
+            .output()
+            .await;
+    }
+    Ok(())
 }
 
 /// 获取 @提及补全候选列表（已启用的 Skill 和 MCP 服务器）

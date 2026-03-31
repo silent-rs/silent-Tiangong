@@ -49,6 +49,9 @@ fn main() {
             tiangong_app::commands::fetch_provider_models,
             tiangong_app::commands::synthesize_speech,
             tiangong_app::commands::has_tts_capability,
+            tiangong_app::commands::list_tts_voices,
+            tiangong_app::commands::play_audio_file,
+            tiangong_app::commands::stop_audio,
             tiangong_app::commands::get_mention_candidates,
         ])
         .plugin(tauri_plugin_shell::init())
