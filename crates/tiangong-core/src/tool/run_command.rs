@@ -125,7 +125,12 @@ impl LocalToolExecutor {
             for (key, value) in &file_env {
                 command.env(key, value);
             }
-            timeout(Duration::from_millis(timeout_ms), command.output()).await
+            if timeout_ms > 0 {
+                timeout(Duration::from_millis(timeout_ms), command.output()).await
+            } else {
+                // timeout_ms=0 表示不设超时，直接等待完成
+                Ok(command.output().await)
+            }
         });
 
         let (output, timed_out) = match output {

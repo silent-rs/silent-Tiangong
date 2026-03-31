@@ -396,7 +396,9 @@ fn validate_shell_script(script: &str, base_dir: &Path) -> Result<()> {
             let resolved = resolve_path_candidate(target, base_dir);
             if resolved.is_absolute() {
                 let roots = allowed_roots()?;
-                if !is_path_in_allowed_roots(&resolved, &roots) {
+                // canonicalize 以解析符号链接（如 macOS 上 /tmp → /private/tmp）
+                let check_path = resolved.canonicalize().unwrap_or(resolved.clone());
+                if !is_path_in_allowed_roots(&check_path, &roots) {
                     // 如果目录不存在则检查父目录
                     if resolved.exists() || {
                         let mut p = resolved.clone();
