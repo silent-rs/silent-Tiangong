@@ -28,6 +28,24 @@ pub(in crate::app_state) struct LoadedState {
     pub(in crate::app_state) agent_config: Option<AgentConfig>,
 }
 
+/// 管理命令：由 RuntimeEngine 中的内置工具触发，主线程负责执行
+#[derive(Debug, Clone)]
+pub enum ManagementCommand {
+    RegisterMcpServer {
+        name: String,
+        command: String,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+        transport: Option<String>,
+        endpoint: Option<String>,
+    },
+    RemoveMcpServer { name: String },
+    SetMcpServerEnabled { name: String, enabled: bool },
+    InstallSkill { path: String, enabled: bool },
+    RemoveSkill { id: String },
+    SetSkillEnabled { id: String, enabled: bool },
+}
+
 #[derive(Debug)]
 pub(in crate::app_state) enum TurnEvent {
     PlanReady(TaskPlan),
@@ -46,6 +64,8 @@ pub(in crate::app_state) enum TurnEvent {
     Chunk(ModelStreamChunk),
     Completed(Box<TurnExecution>),
     Failed(String),
+    /// 管理命令：主线程处理 MCP/Skill 管理操作
+    ManagementCommand(ManagementCommand),
 }
 
 #[derive(Debug)]

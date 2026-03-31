@@ -66,7 +66,7 @@ impl SpeechRecognizer for OpenAIWhisper {
     }
 
     async fn transcribe(&self, request: TranscribeRequest) -> Result<TranscribeResponse> {
-        let url = format!("{}/v1/audio/transcriptions", self.api_base);
+        let url = format!("{}/audio/transcriptions", self.api_base.trim_end_matches('/'));
         let model = request.model.unwrap_or_else(|| "whisper-1".to_string());
         let ext = extension_from_mime(&request.mime_type);
         let filename = format!("audio.{}", ext);
@@ -119,3 +119,4 @@ impl SpeechRecognizer for OpenAIWhisper {
         })
     }
 }
+

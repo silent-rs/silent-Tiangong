@@ -224,6 +224,231 @@ pub fn cancel_background_task(task_id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// 语音合成：将文本转换为音频，返回 base64 编码的音频数据
+#[tauri::command]
+pub async fn synthesize_speech(
+    text: String,
+    state: State<'_, TiangongApp>,
+) -> Result<SpeechResult, String> {
+    use tiangong_core::models_config::ModelCapability;
+    use tiangong_media::tts::{SpeechSynthesizer, SynthesizeRequest};
+
+    let resolved = state
+        .with_state_read(|core_state| {
+            core_state
+                .models_config()
+                .resolve_for_capability(ModelCapability::Tts)
+                .ok_or_else(|| anyhow::anyhow!("TTS 能力未配置"))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let synthesizer = tiangong_media::openai_tts::OpenAITTS::new(
+        resolved.api_key.clone(),
+        resolved.base_url.clone(),
+    );
+
+    // 从模型配置 options 中读取 voice 参数
+    let voice = resolved
+        .options
+        .get("voice")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let request = SynthesizeRequest {
+        text,
+        voice,
+        speed: None,
+        model: Some(resolved.model.clone()),
+        output_format: Some("mp3".to_string()),
+    };
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        synthesizer.synthesize(request),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(resp)) => {
+            // 将音频保存到临时文件，通过 asset 协议播放
+            let media_dir = user_home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".tiangong")
+                .join("media");
+            std::fs::create_dir_all(&media_dir)
+                .map_err(|e| format!("创建媒体目录失败：{e}"))?;
+
+            let ext = match resp.mime_type.as_str() {
+                "audio/mpeg" => "mp3",
+                "audio/wav" => "wav",
+                "audio/opus" => "opus",
+                "audio/aac" => "aac",
+                "audio/flac" => "flac",
+                _ => "mp3",
+            };
+            let file_name = format!("tts_{}.{}", scru128::new(), ext);
+            let file_path = media_dir.join(&file_name);
+            std::fs::write(&file_path, &resp.audio)
+                .map_err(|e| format!("音频文件写入失败：{e}"))?;
+
+            Ok(SpeechResult {
+                file_path: file_path.to_string_lossy().to_string(),
+                mime_type: resp.mime_type,
+            })
+        }
+        Ok(Err(e)) => Err(format!("语音合成失败：{e}")),
+        Err(_) => Err("语音合成超时（60秒）".to_string()),
+    }
+}
+
+/// 检查 TTS 能力是否已配置
+#[tauri::command]
+pub fn has_tts_capability(state: State<TiangongApp>) -> Result<bool, String> {
+    use tiangong_core::models_config::ModelCapability;
+    state.with_state_read(|core_state| {
+        Ok(core_state
+            .models_config()
+            .resolve_for_capability(ModelCapability::Tts)
+            .is_some())
+    })
+}
+
+/// 获取 TTS 可用音色列表
+#[tauri::command]
+pub async fn list_tts_voices(
+    state: State<'_, TiangongApp>,
+) -> Result<Vec<serde_json::Value>, String> {
+    use tiangong_core::models_config::ModelCapability;
+    use tiangong_media::tts::SpeechSynthesizer;
+
+    let resolved = state
+        .with_state_read(|core_state| {
+            core_state
+                .models_config()
+                .resolve_for_capability(ModelCapability::Tts)
+                .ok_or_else(|| anyhow::anyhow!("TTS 能力未配置"))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let synthesizer = tiangong_media::openai_tts::OpenAITTS::new(
+        resolved.api_key.clone(),
+        resolved.base_url.clone(),
+    );
+
+    let voices = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        synthesizer.list_voices(),
+    )
+    .await
+    .map_err(|_| "获取音色列表超时".to_string())?
+    .map_err(|e| format!("获取音色列表失败：{e}"))?;
+
+    Ok(voices
+        .into_iter()
+        .map(|v| {
+            serde_json::json!({
+                "id": v.id,
+                "name": v.name,
+                "gender": v.gender,
+            })
+        })
+        .collect())
+}
+
+/// 播放本地音频文件（使用系统原生播放器）
+#[tauri::command]
+pub async fn play_audio_file(file_path: String) -> Result<(), String> {
+    let path = std::path::Path::new(&file_path);
+    if !path.exists() {
+        return Err(format!("音频文件不存在：{file_path}"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        tokio::process::Command::new("afplay")
+            .arg(&file_path)
+            .output()
+            .await
+            .map_err(|e| format!("播放失败：{e}"))?;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        tokio::process::Command::new("powershell")
+            .args(["-c", &format!("(New-Object Media.SoundPlayer '{}').PlaySync()", file_path)])
+            .output()
+            .await
+            .map_err(|e| format!("播放失败：{e}"))?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        tokio::process::Command::new("aplay")
+            .arg(&file_path)
+            .output()
+            .await
+            .map_err(|e| format!("播放失败：{e}"))?;
+    }
+
+    Ok(())
+}
+
+/// 停止当前正在播放的音频
+#[tauri::command]
+pub async fn stop_audio() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = tokio::process::Command::new("killall")
+            .arg("afplay")
+            .output()
+            .await;
+    }
+    Ok(())
+}
+
+/// 获取 @提及补全候选列表（已启用的 Skill 和 MCP 服务器）
+#[tauri::command]
+pub fn get_mention_candidates(state: State<TiangongApp>) -> Result<Vec<MentionCandidate>, String> {
+    state.with_state_read(|core_state| {
+        let mut candidates = Vec::new();
+
+        // 已启用的 Skill
+        for skill in core_state.installed_skills() {
+            if skill.enabled {
+                candidates.push(MentionCandidate {
+                    value: format!("@skill:{}", skill.id),
+                    label: skill.name.clone(),
+                    kind: "skill".to_string(),
+                    hint: if skill.description.is_empty() {
+                        format!("v{}", skill.version)
+                    } else {
+                        skill.description.clone()
+                    },
+                });
+            }
+        }
+
+        // 已启用的 MCP 服务器
+        let active_tools = tiangong_core::mcp::cached_active_tools();
+        for server in core_state.mcp_servers() {
+            if server.enabled {
+                let tool_count = active_tools.iter()
+                    .find(|(name, _)| name == &server.name)
+                    .map(|(_, tools)| tools.len())
+                    .unwrap_or(0);
+                candidates.push(MentionCandidate {
+                    value: format!("@mcp:{}", server.name),
+                    label: server.name.clone(),
+                    kind: "mcp".to_string(),
+                    hint: format!("{} 工具", tool_count),
+                });
+            }
+        }
+
+        Ok(candidates)
+    })
+}
+
 /// 获取运行状态快照
 #[tauri::command]
 pub fn get_run_snapshot(state: State<TiangongApp>) -> Result<RunSnapshot, String> {

@@ -448,6 +448,8 @@ function ModelsSection({
   });
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
+  const [ttsVoices, setTtsVoices] = useState<{ id: string; name: string; gender?: string }[]>([]);
+  const [isFetchingVoices, setIsFetchingVoices] = useState(false);
   const { showError } = useToast();
 
   const modelKeys = Object.keys(config.models);
@@ -479,10 +481,23 @@ function ModelsSection({
     }
   };
 
+  const fetchTtsVoices = async () => {
+    setIsFetchingVoices(true);
+    try {
+      const voices = await api.listTtsVoices();
+      setTtsVoices(voices);
+    } catch {
+      setTtsVoices([]);
+    } finally {
+      setIsFetchingVoices(false);
+    }
+  };
+
   const openAdd = () => {
     setModalMode('add');
     setDraft({ provider: providerKeys[0] || '', model: '', capabilities: [], options: {} });
     setAvailableModels([]);
+    setTtsVoices([]);
   };
 
   const openEdit = (key: string) => {
@@ -615,6 +630,67 @@ function ModelsSection({
           ))}
         </div>
       </div>
+      {/* TTS 模型参数 */}
+      {draft.capabilities.includes('tts') && (
+        <div>
+          <div className="flex items-center justify-between">
+            <Label className="text-xs">TTS 音色 (voice)</Label>
+            {ttsVoices.length === 0 && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-5 text-xs px-2"
+                onClick={fetchTtsVoices}
+                disabled={isFetchingVoices}
+              >
+                {isFetchingVoices ? (
+                  <>
+                    <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                    获取中...
+                  </>
+                ) : (
+                  '获取可用音色'
+                )}
+              </Button>
+            )}
+          </div>
+          {ttsVoices.length > 0 ? (
+            <Select
+              value={(draft.options?.voice as string) || '__default__'}
+              onValueChange={(v) =>
+                setDraft({
+                  ...draft,
+                  options: { ...draft.options, voice: v === '__default__' ? undefined : v },
+                })
+              }
+            >
+              <SelectTrigger className="h-8 text-sm">
+                <SelectValue placeholder="-- 使用默认音色 --" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__default__">-- 使用默认音色 --</SelectItem>
+                {ttsVoices.map((v) => (
+                  <SelectItem key={v.id} value={v.id}>
+                    {v.name}{v.gender ? ` (${v.gender})` : ''}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : (
+            <Input
+              value={(draft.options?.voice as string) || ''}
+              onChange={(e) =>
+                setDraft({
+                  ...draft,
+                  options: { ...draft.options, voice: e.target.value || undefined },
+                })
+              }
+              className="text-sm h-8"
+              placeholder="输入音色名称，如 Chinese Female"
+            />
+          )}
+        </div>
+      )}
       <div className="flex justify-end gap-2 pt-1">
         <Button variant="ghost" size="sm" onClick={onCancel}>
           取消

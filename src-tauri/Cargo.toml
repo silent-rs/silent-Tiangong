@@ -14,6 +14,7 @@ tiangong_connector = { path = "../crates/tiangong-connector", package = "tiangon
 tiangong_media = { path = "../crates/tiangong-media", package = "tiangong-media" }
 
 anyhow = "1"
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 scru128 = "3"
 serde = { version = "1", features = ["derive"] }
@@ -29,7 +30,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 tracing-appender = "0.2"
 
 # Tauri 相关依赖
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-shell = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-dialog = "2"

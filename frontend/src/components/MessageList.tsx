@@ -9,6 +9,12 @@ import {
   Terminal,
   Cpu,
   FileText,
+  Volume2,
+  VolumeX,
+  Square,
+  Copy,
+  Check,
+  AudioLines,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -16,9 +22,79 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { TypingMessage } from "./TypingMessage";
 import { ThinkingBlock } from "./ThinkingBlock";
+import { api } from "@/api/tauri";
+import { useStreamingTts } from "@/hooks/useStreamingTts";
 
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
+
+function MessageActions({ text, showTts }: { text: string; showTts: boolean }) {
+  const [copied, setCopied] = useState(false);
+  const [playing, setPlaying] = useState(false);
+  const [ttsLoading, setTtsLoading] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (e) {
+      console.error("复制失败:", e);
+    }
+  };
+
+  const handleTts = async () => {
+    console.log("handleTts called, playing:", playing, "text length:", text.length);
+    if (playing) {
+      api.stopAudio().catch(() => {});
+      setPlaying(false);
+      return;
+    }
+
+    setTtsLoading(true);
+    try {
+      // 先停止可能正在播放的音频（不等待）
+      api.stopAudio().catch(() => {});
+
+      console.log("开始 TTS 合成...");
+      const result = await api.synthesizeSpeech(text);
+      console.log("TTS 合成完成，文件路径:", result.file_path);
+
+      setPlaying(true);
+      setTtsLoading(false);
+      // 通过系统原生命令播放音频文件（afplay on macOS）
+      await api.playAudioFile(result.file_path);
+      // playAudioFile 阻塞到播放完成
+      setPlaying(false);
+    } catch (e: any) {
+      console.error("TTS 播放失败:", e);
+      alert(`语音播放失败：${e?.message || e}`);
+      setPlaying(false);
+      setTtsLoading(false);
+    }
+  };
+
+  const btnClass = "p-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors";
+
+  return (
+    <div className="flex items-center gap-0.5 mt-1">
+      <button onClick={handleCopy} className={btnClass} title={copied ? "已复制" : "复制"}>
+        {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+      </button>
+      {showTts && (
+        <button onClick={handleTts} className={btnClass} title={playing ? "停止播放" : "朗读"}>
+          {ttsLoading ? (
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          ) : playing ? (
+            <Square className="w-3.5 h-3.5" />
+          ) : (
+            <Volume2 className="w-3.5 h-3.5" />
+          )}
+        </button>
+      )}
+    </div>
+  );
+}
 
 export function MessageList() {
   const {
@@ -31,6 +107,13 @@ export function MessageList() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevMessagesLengthRef = useRef(0);
   const prevStreamingIdRef = useRef<string | null>(null);
+  const [hasTts, setHasTts] = useState(false);
+  const streamingTts = useStreamingTts();
+
+  // 检查 TTS 能力
+  useEffect(() => {
+    api.hasTtsCapability().then(setHasTts).catch(() => setHasTts(false));
+  }, []);
 
   // 自动滚动到底部
   useEffect(() => {
@@ -146,6 +229,32 @@ export function MessageList() {
         </a>
       );
     },
+    img({ src, alt }: { src?: string; alt?: string }) {
+      const [fullscreen, setFullscreen] = useState(false);
+      return (
+        <>
+          <img
+            src={src}
+            alt={alt || "生成的图片"}
+            className="max-w-full max-h-96 rounded-md my-2 cursor-pointer hover:opacity-90 transition-opacity"
+            loading="lazy"
+            onClick={() => setFullscreen(true)}
+          />
+          {fullscreen && (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 cursor-pointer"
+              onClick={() => setFullscreen(false)}
+            >
+              <img
+                src={src}
+                alt={alt || "生成的图片"}
+                className="max-w-[90vw] max-h-[90vh] object-contain rounded-md"
+              />
+            </div>
+          )}
+        </>
+      );
+    },
     table({ children }: { children: ReactNode }) {
       return (
         <div className="my-3 overflow-x-auto">
@@ -173,6 +282,43 @@ export function MessageList() {
   return (
     <ScrollArea className="h-full">
       <div className="p-4">
+        {/* 流式 TTS 开关 */}
+        {hasTts && (
+          <div className="max-w-3xl mx-auto flex justify-end mb-2">
+            <button
+              onClick={() => {
+                if (streamingTts.enabled) {
+                  streamingTts.stop();
+                } else {
+                  streamingTts.setEnabled(true);
+                }
+              }}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs transition-colors ${
+                streamingTts.enabled
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-muted text-muted-foreground hover:text-foreground hover:bg-accent"
+              }`}
+              title={streamingTts.enabled ? "关闭自动朗读" : "开启自动朗读（边生成边朗读）"}
+            >
+              {streamingTts.enabled ? (
+                <>
+                  {streamingTts.isPlaying ? (
+                    <AudioLines className="w-3.5 h-3.5 animate-pulse" />
+                  ) : (
+                    <Volume2 className="w-3.5 h-3.5" />
+                  )}
+                  <span>自动朗读中</span>
+                  <VolumeX className="w-3 h-3 ml-0.5" />
+                </>
+              ) : (
+                <>
+                  <Volume2 className="w-3.5 h-3.5" />
+                  <span>自动朗读</span>
+                </>
+              )}
+            </button>
+          </div>
+        )}
         <div className="max-w-3xl mx-auto space-y-2">
           {messages.length === 0 && !isThinking ? (
             <div className="flex flex-col items-center justify-center h-full text-center py-20">
@@ -208,60 +354,66 @@ export function MessageList() {
               const isAssistant = message.role === "Assistant";
 
               return (
-                <div
-                  key={group.key}
-                  className={`flex gap-3 mt-3 first:mt-0 ${
-                    isUser ? "justify-end" : "justify-start"
-                  }`}
-                >
-                  {isAssistant && (
-                    <div className="w-8 h-8 rounded bg-primary flex items-center justify-center flex-shrink-0">
-                      <Bot className="w-5 h-5 text-primary-foreground" />
-                    </div>
-                  )}
+                <div key={group.key} className="mt-3 first:mt-0">
                   <div
-                    className={`rounded-lg px-4 py-2.5 max-w-[80%] ${
-                      isUser
-                        ? "bg-primary text-primary-foreground"
-                        : "bg-muted text-foreground"
+                    className={`flex gap-3 ${
+                      isUser ? "justify-end" : "justify-start"
                     }`}
                   >
-                    {isAssistant ? (
-                      <>
-                        {isStreaming ? (
-                          <TypingMessage
-                            content={streamingContent}
-                            reasoningContent={streamingReasoningContent}
-                            speed={300}
-                          />
-                        ) : (
-                          <div>
-                            {message.reasoning_content && (
-                              <ThinkingBlock
-                                content={message.reasoning_content}
-                                defaultExpanded={false}
-                              />
-                            )}
-                            <div className="prose prose-sm max-w-none text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
-                              <ReactMarkdown
-                                remarkPlugins={[remarkGfm]}
-                                components={MarkdownComponents as any}
-                              >
-                                {message.content}
-                              </ReactMarkdown>
+                    {isAssistant && (
+                      <div className="w-8 h-8 rounded bg-primary flex items-center justify-center flex-shrink-0">
+                        <Bot className="w-5 h-5 text-primary-foreground" />
+                      </div>
+                    )}
+                    <div
+                      className={`rounded-lg px-4 py-2.5 max-w-[80%] ${
+                        isUser
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-muted text-foreground"
+                      }`}
+                    >
+                      {isAssistant ? (
+                        <>
+                          {isStreaming ? (
+                            <TypingMessage
+                              content={streamingContent}
+                              reasoningContent={streamingReasoningContent}
+                              speed={300}
+                            />
+                          ) : (
+                            <div>
+                              {message.reasoning_content && (
+                                <ThinkingBlock
+                                  content={message.reasoning_content}
+                                  defaultExpanded={false}
+                                />
+                              )}
+                              <div className="prose prose-sm max-w-none break-words text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
+                                <ReactMarkdown
+                                  remarkPlugins={[remarkGfm]}
+                                  components={MarkdownComponents as any}
+                                >
+                                  {message.content}
+                                </ReactMarkdown>
+                              </div>
                             </div>
-                          </div>
-                        )}
-                      </>
-                    ) : (
-                      <p className="whitespace-pre-wrap text-sm">
-                        {message.content}
-                      </p>
+                          )}
+                        </>
+                      ) : (
+                        <p className="whitespace-pre-wrap break-words text-sm">
+                          {message.content}
+                        </p>
+                      )}
+                    </div>
+                    {isUser && (
+                      <div className="w-8 h-8 rounded bg-muted-foreground flex items-center justify-center flex-shrink-0">
+                        <User className="w-5 h-5 text-background" />
+                      </div>
                     )}
                   </div>
-                  {isUser && (
-                    <div className="w-8 h-8 rounded bg-muted-foreground flex items-center justify-center flex-shrink-0">
-                      <User className="w-5 h-5 text-background" />
+                  {isAssistant && !isStreaming && message.content && (
+                    <div className="pl-11">
+                      <MessageActions text={message.content} showTts={hasTts} />
                     </div>
                   )}
                 </div>

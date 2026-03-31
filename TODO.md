@@ -148,30 +148,24 @@
 - [x] ReAct 循环内 loop_messages 累积压缩（基于 API 返回的精确 prompt_tokens 触发）
 - [x] 双重 token 判断：首次用字符估算预判，后续用 API 精确 prompt_tokens 驱动
 
-### E. 多媒体能力集成到执行引擎（进行中）
+### E. 多媒体能力集成到执行引擎（已完成 ✅）
 
 #### E1. 图片生成集成
-- [ ] RuntimeEngine 从 ModelsConfig routing 初始化 MediaAgent
-  - 读取 `routing[ImageGeneration]` 解析 provider + model
-  - 构建 `OpenAiImageBackend` 并注入 `MediaAgent`
-- [ ] 注册 `generate_image` 为内置工具函数
-  - 在 `execution_tool_agent.rs` 中添加函数定义（prompt, width?, height?, style?）
-  - 在 `LocalToolExecutor` 中添加处理分支
-- [ ] 工具执行：调用 `MediaAgent.generate_image()` 并返回图片 URL/base64
-- [ ] 前端消息中渲染图片（识别 URL 或 base64 并显示 `<img>`）
+- [x] `generate_image` 工具注入（prompt + width/height/style 可选参数）
+- [x] `handle_media_generation` 调用 OpenAI 兼容 API 生成图片
+- [x] 返回 Markdown 图片语法，前端 ReactMarkdown 自动渲染
+- [x] 前端图片最大宽度限制 + 点击全屏放大
 
 #### E2. 语音合成/识别集成
-- [ ] 读取 `routing[Tts]` 初始化 TTS 后端
-- [ ] 读取 `routing[Stt]` 初始化 STT 后端
-- [ ] 注册 `text_to_speech` / `speech_to_text` 为内置工具
+- [x] `text_to_speech` 工具注入（text + voice/speed/output_path 参数）
+- [x] 调用 OpenAI TTS 后端，音频保存到 `~/.tiangong/media/`
+- [x] `speech_to_text` 工具注入（file_path + language 参数）
+- [x] 调用 OpenAI Whisper 后端，返回转录文本
 
-#### E3. 视频生成集成
-- [ ] 读取 `routing[VideoGeneration]` 初始化视频生成后端
-- [ ] 注册 `generate_video` 为内置工具（异步任务模式）
+#### E3. 视频生成
+- [x] 视频生成通过 Skill 机制处理（无稳定 API，不内置）
 
 ### F. 验证
-- [ ] `cargo check --workspace` 通过
-- [ ] `cargo clippy --workspace --all-targets --tests --benches -- -D warnings` 通过
-- [ ] `cargo nextest run --workspace --no-tests pass` 通过
-- [ ] GUI 图片生成端到端可用
-- [ ] 暗/亮主题下图片正常显示
+- [x] `cargo check --workspace` 通过
+- [x] `cargo clippy --workspace --all-targets --tests --benches -- -D warnings` 通过
+- [x] 前端 `yarn build` 通过

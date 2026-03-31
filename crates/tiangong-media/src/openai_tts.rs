@@ -93,8 +93,8 @@ impl SpeechSynthesizer for OpenAITTS {
     }
 
     async fn synthesize(&self, request: SynthesizeRequest) -> Result<SynthesizeResponse> {
-        let url = format!("{}/v1/audio/speech", self.api_base);
-        let voice = request.voice.unwrap_or_else(|| "alloy".to_string());
+        let url = format!("{}/audio/speech", self.api_base.trim_end_matches('/'));
+        let voice = request.voice.unwrap_or_else(|| "Chinese Female".to_string());
         let model = request.model.unwrap_or_else(|| "tts-1".to_string());
         let output_format = request
             .output_format
@@ -131,6 +131,16 @@ impl SpeechSynthesizer for OpenAITTS {
         }
 
         let audio = resp.bytes().await.context("读取音频数据失败")?.to_vec();
+
+        // 防止 API 返回 200 但内容是错误 JSON（某些非标准 TTS 提供商的行为）
+        if audio.len() < 256 {
+            if let Ok(text) = std::str::from_utf8(&audio) {
+                if text.trim_start().starts_with('{') {
+                    return Err(anyhow!("TTS API 返回错误：{}", text));
+                }
+            }
+        }
+
         let mime_type = mime_for_format(&output_format).to_string();
 
         Ok(SynthesizeResponse {
@@ -141,6 +151,43 @@ impl SpeechSynthesizer for OpenAITTS {
     }
 
     async fn list_voices(&self) -> Result<Vec<VoiceInfo>> {
-        Ok(openai_voices())
+        // 尝试从 API 获取可用音色列表（VoxBox 等后端支持 /v1/voices）
+        let url = format!("{}/voices", self.api_base.trim_end_matches('/'));
+        if let Ok(resp) = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                if let Ok(body) = resp.json::<serde_json::Value>().await {
+                    if let Some(voices) = body.get("voices").and_then(|v| v.as_array()) {
+                        let list: Vec<VoiceInfo> = voices
+                            .iter()
+                            .filter_map(|v| {
+                                let name = v.as_str().unwrap_or_default().to_string();
+                                if name.is_empty() {
+                                    return None;
+                                }
+                                Some(VoiceInfo {
+                                    id: name.clone(),
+                                    name,
+                                    language: None,
+                                    gender: None,
+                                    preview_url: None,
+                                })
+                            })
+                            .collect();
+                        if !list.is_empty() {
+                            return Ok(list);
+                        }
+                    }
+                }
+            }
+        }
+        // API 不支持 /v1/voices 时返回空列表，由前端显示手动输入框
+        Ok(vec![])
     }
 }
+

@@ -1046,6 +1046,10 @@ fn allowed_file_roots_text() -> String {
     format!("{workspace}；{temp}")
 }
 
+/// 规范化 API 基础地址
+///
+/// 仅做基本清理（去空格、去尾部斜杠、去意外拼接的 /chat/completions），
+/// 不自动补充版本路径——版本由用户在 provider base_url 中指定。
 fn normalize_api_base(base_url: &str) -> Result<String> {
     let trimmed = base_url.trim();
     if trimmed.is_empty() {
@@ -1054,23 +1058,12 @@ fn normalize_api_base(base_url: &str) -> Result<String> {
 
     let cleaned = trimmed.trim_end_matches('/');
     let cleaned = cleaned.strip_suffix("/chat/completions").unwrap_or(cleaned);
-    if has_version_suffix(cleaned) {
-        return Ok(cleaned.to_string());
-    }
-    Ok(format!("{cleaned}/v1"))
-}
-
-fn has_version_suffix(base_url: &str) -> bool {
-    let suffix = base_url.rsplit('/').next().unwrap_or_default();
-    let Some(version_num) = suffix.strip_prefix('v') else {
-        return false;
-    };
-    !version_num.is_empty() && version_num.chars().all(|ch| ch.is_ascii_digit())
+    Ok(cleaned.to_string())
 }
 
 fn build_sdk_error_hint(error_text: &str) -> String {
-    if error_text.contains("/v1/chat/completions") && error_text.contains("/v") {
-        return "；请检查 API_BASE_URL，确保填写的是 OpenAI 兼容网关基地址（例如 .../v1 或 .../v4），不要重复拼接版本段".to_string();
+    if error_text.contains("/chat/completions") && error_text.contains("404") {
+        return "；请检查 API_BASE_URL 是否包含正确的版本路径（如 .../v1）".to_string();
     }
     if error_text.contains("expected struct ApiError") {
         return "；当前网关返回的错误结构非 OpenAI 标准格式，请确认 API_BASE_URL 是否为 OpenAI 兼容接口".to_string();

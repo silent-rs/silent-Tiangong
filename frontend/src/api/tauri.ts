@@ -245,6 +245,30 @@ export const api = {
     invoke('fetch_provider_models', { baseUrl, apiKey, timeoutMs }),
 
   // ----------------------------------------------------------------
+  // @提及补全
+  // ----------------------------------------------------------------
+  getMentionCandidates: (): Promise<{ value: string; label: string; kind: string; hint: string }[]> =>
+    invoke('get_mention_candidates'),
+
+  // ----------------------------------------------------------------
+  // 语音合成
+  // ----------------------------------------------------------------
+  synthesizeSpeech: (text: string): Promise<{ file_path: string; mime_type: string }> =>
+    invoke('synthesize_speech', { text }),
+
+  playAudioFile: (filePath: string): Promise<void> =>
+    invoke('play_audio_file', { filePath }),
+
+  stopAudio: (): Promise<void> =>
+    invoke('stop_audio'),
+
+  hasTtsCapability: (): Promise<boolean> =>
+    invoke('has_tts_capability'),
+
+  listTtsVoices: (): Promise<{ id: string; name: string; gender?: string }[]> =>
+    invoke('list_tts_voices'),
+
+  // ----------------------------------------------------------------
   // 事件监听
   // ----------------------------------------------------------------
   onRunSnapshot: (callback: (snapshot: RunSnapshot) => void) =>
