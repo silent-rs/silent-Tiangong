@@ -47,7 +47,7 @@ pub enum ManagementCommand {
 }
 
 #[derive(Debug)]
-pub(in crate::app_state) enum TurnEvent {
+pub enum TurnEvent {
     PlanReady(TaskPlan),
     LlmOutput(LlmOutputRecord),
     /// 工具开始执行（用于前端显示正在执行的命令）

@@ -114,44 +114,16 @@ impl AppTurnService {
 
             loop {
                 attempt += 1;
-                let chunk_tx = tx.clone();
-                let plan_tx = tx.clone();
-                let llm_tx = tx.clone();
-                let tool_tx = tx.clone();
-                let plan_summary_tx = tx.clone();
-                let stage_thinking_tx = tx.clone();
-                let mgmt_tx = tx.clone();
+                let run_tx = tx.clone();
 
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    runtime.execute_turn_with_streaming(
-                        &session_snapshot,
-                        &worker_input,
-                        |plan| {
-                            let _ = plan_tx.send(TurnEvent::PlanReady(plan.clone()));
-                        },
-                        |delta| {
-                            let _ = chunk_tx.send(TurnEvent::Chunk(delta.clone()));
-                        },
-                        |output| {
-                            let _ = llm_tx.send(TurnEvent::LlmOutput(output.clone()));
-                        },
-                        |tool_result| {
-                            let _ = tool_tx.send(TurnEvent::ToolExecution(tool_result.clone()));
-                        },
-                        |summary| {
-                            let _ = plan_summary_tx
-                                .send(TurnEvent::PlanExecutionSummary(summary.to_string()));
-                        },
-                        |stage: &str, delta: &ModelStreamChunk| {
-                            let _ = stage_thinking_tx.send(TurnEvent::StageThinking {
-                                stage: stage.to_string(),
-                                delta: delta.clone(),
-                            });
-                        },
-                        |cmd| {
-                            let _ = mgmt_tx.send(TurnEvent::ManagementCommand(cmd));
-                        },
-                    )
+                    let runner = crate::turn_runner::TurnRunner::new(
+                        runtime.clone(),
+                        session_snapshot.clone(),
+                        worker_input.clone(),
+                        run_tx,
+                    );
+                    runner.run()
                 }));
 
                 match outcome {

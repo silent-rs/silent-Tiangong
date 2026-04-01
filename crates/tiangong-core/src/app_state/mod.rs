@@ -52,8 +52,9 @@ use self::repository::{
 use self::services::{AppMcpService, AppSkillService, AppTurnService};
 use self::support::{
     LegacyPersistedState, LoadedState, McpDependencyLockRecord, PendingTurn, PersistedAppState,
-    ScopedDirCleanup, SkillsLockRecord, TurnEvent,
+    ScopedDirCleanup, SkillsLockRecord,
 };
+pub use self::support::TurnEvent;
 
 // Public re-exports for Tauri API
 pub use self::repository::AppRepository;
