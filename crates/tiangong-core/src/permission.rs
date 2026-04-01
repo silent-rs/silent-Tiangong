@@ -113,8 +113,8 @@ impl PermissionGate {
 
 // PermissionGate 的 Default 由 PermissionPolicy::default() 提供（FullTrust 模式）
 
-/// 根据工具名分类风险等级
-fn classify_tool(tool_name: &str) -> PermissionLevel {
+/// 根据工具名分类风险等级（pub(crate) 供测试访问）
+pub(crate) fn classify_tool(tool_name: &str) -> PermissionLevel {
     match tool_name {
         // 安全：只读
         "read_file" | "list_dir" | "tree_dir" | "search_code" | "get_skill_detail" => {
@@ -128,5 +128,117 @@ fn classify_tool(tool_name: &str) -> PermissionLevel {
         "apply_patch" | "spawn_task" | "cancel_task" => PermissionLevel::Critical,
         // MCP 工具和未知工具默认为关键
         _ => PermissionLevel::Critical,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_trust_approves_everything() {
+        let gate = PermissionGate::new(PermissionPolicy {
+            trust_mode: TrustMode::FullTrust,
+            ..Default::default()
+        });
+        assert!(matches!(gate.check("run_command"), PermissionDecision::Approved));
+        assert!(matches!(gate.check("apply_patch"), PermissionDecision::Approved));
+        assert!(matches!(gate.check("some_mcp_tool"), PermissionDecision::Approved));
+    }
+
+    #[test]
+    fn supervised_approves_safe_tools() {
+        let gate = PermissionGate::new(PermissionPolicy {
+            trust_mode: TrustMode::Supervised,
+            ..Default::default()
+        });
+        assert!(matches!(gate.check("read_file"), PermissionDecision::Approved));
+        assert!(matches!(gate.check("list_dir"), PermissionDecision::Approved));
+        assert!(matches!(gate.check("search_code"), PermissionDecision::Approved));
+        assert!(matches!(gate.check("write_file"), PermissionDecision::Approved));
+    }
+
+    #[test]
+    fn supervised_requires_approval_for_elevated() {
+        let gate = PermissionGate::new(PermissionPolicy {
+            trust_mode: TrustMode::Supervised,
+            ..Default::default()
+        });
+        assert!(matches!(gate.check("run_command"), PermissionDecision::NeedsApproval { .. }));
+        assert!(matches!(gate.check("run_shell"), PermissionDecision::NeedsApproval { .. }));
+        assert!(matches!(gate.check("apply_patch"), PermissionDecision::NeedsApproval { .. }));
+        assert!(matches!(gate.check("unknown_mcp_tool"), PermissionDecision::NeedsApproval { .. }));
+    }
+
+    #[test]
+    fn always_deny_overrides_trust() {
+        let gate = PermissionGate::new(PermissionPolicy {
+            trust_mode: TrustMode::Supervised,
+            always_deny: vec!["read_file".to_string()],
+            ..Default::default()
+        });
+        assert!(matches!(gate.check("read_file"), PermissionDecision::Denied { .. }));
+    }
+
+    #[test]
+    fn auto_approve_overrides_level() {
+        let gate = PermissionGate::new(PermissionPolicy {
+            trust_mode: TrustMode::Supervised,
+            auto_approve: vec!["run_command".to_string()],
+            ..Default::default()
+        });
+        assert!(matches!(gate.check("run_command"), PermissionDecision::Approved));
+    }
+
+    #[test]
+    fn deny_takes_priority_over_approve() {
+        let gate = PermissionGate::new(PermissionPolicy {
+            trust_mode: TrustMode::Supervised,
+            auto_approve: vec!["run_command".to_string()],
+            always_deny: vec!["run_command".to_string()],
+        });
+        // deny 先检查，优先于 approve
+        assert!(matches!(gate.check("run_command"), PermissionDecision::Denied { .. }));
+    }
+
+    #[test]
+    fn classify_tool_levels() {
+        assert_eq!(classify_tool("read_file"), PermissionLevel::Safe);
+        assert_eq!(classify_tool("tree_dir"), PermissionLevel::Safe);
+        assert_eq!(classify_tool("write_file"), PermissionLevel::Standard);
+        assert_eq!(classify_tool("replace_in_file"), PermissionLevel::Standard);
+        assert_eq!(classify_tool("run_command"), PermissionLevel::Elevated);
+        assert_eq!(classify_tool("apply_patch"), PermissionLevel::Critical);
+        assert_eq!(classify_tool("spawn_task"), PermissionLevel::Critical);
+        assert_eq!(classify_tool("unknown_tool"), PermissionLevel::Critical);
+    }
+
+    #[test]
+    fn default_gate_is_full_trust() {
+        let gate = PermissionGate::default();
+        assert_eq!(gate.trust_mode(), TrustMode::FullTrust);
+        assert!(matches!(gate.check("apply_patch"), PermissionDecision::Approved));
+    }
+
+    #[test]
+    fn trust_mode_serialization() {
+        let json = serde_json::to_string(&TrustMode::Supervised).unwrap();
+        assert_eq!(json, r#""supervised""#);
+        let parsed: TrustMode = serde_json::from_str(r#""full_trust""#).unwrap();
+        assert_eq!(parsed, TrustMode::FullTrust);
+    }
+
+    #[test]
+    fn policy_serialization_roundtrip() {
+        let policy = PermissionPolicy {
+            trust_mode: TrustMode::Supervised,
+            auto_approve: vec!["read_file".into()],
+            always_deny: vec!["apply_patch".into()],
+        };
+        let json = serde_json::to_string(&policy).unwrap();
+        let parsed: PermissionPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.trust_mode, TrustMode::Supervised);
+        assert_eq!(parsed.auto_approve, vec!["read_file"]);
+        assert_eq!(parsed.always_deny, vec!["apply_patch"]);
     }
 }

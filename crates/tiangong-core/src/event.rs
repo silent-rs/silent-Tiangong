@@ -94,3 +94,101 @@ impl RuntimeEvent {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_event_has_unique_id_and_timestamp() {
+        let e1 = RuntimeEvent::new(
+            RuntimeEventType::UserMessage,
+            "session-1".into(),
+            EventSource::User,
+            serde_json::json!({"text": "hello"}),
+        );
+        let e2 = RuntimeEvent::new(
+            RuntimeEventType::UserMessage,
+            "session-1".into(),
+            EventSource::User,
+            serde_json::json!({"text": "world"}),
+        );
+        assert_ne!(e1.event_id, e2.event_id);
+        assert!(!e1.created_at.is_empty());
+        assert_eq!(e1.session_id, "session-1");
+        assert!(e1.task_id.is_none());
+    }
+
+    #[test]
+    fn with_task_id_sets_field() {
+        let e = RuntimeEvent::new(
+            RuntimeEventType::TaskStarted,
+            "s1".into(),
+            EventSource::Runtime,
+            serde_json::json!({}),
+        )
+        .with_task_id("task-42".into());
+        assert_eq!(e.task_id, Some("task-42".to_string()));
+    }
+
+    #[test]
+    fn event_serialization_roundtrip() {
+        let e = RuntimeEvent::new(
+            RuntimeEventType::ToolResult,
+            "s1".into(),
+            EventSource::Tool,
+            serde_json::json!({"ok": true}),
+        )
+        .with_task_id("t1".into());
+
+        let json = serde_json::to_string(&e).unwrap();
+        let deserialized: RuntimeEvent = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.event_id, e.event_id);
+        assert_eq!(deserialized.event_type, RuntimeEventType::ToolResult);
+        assert_eq!(deserialized.source, EventSource::Tool);
+        assert_eq!(deserialized.session_id, "s1");
+        assert_eq!(deserialized.task_id, Some("t1".to_string()));
+    }
+
+    #[test]
+    fn event_type_serde_snake_case() {
+        let json = serde_json::to_string(&RuntimeEventType::UserMessage).unwrap();
+        assert_eq!(json, r#""user_message""#);
+
+        let json = serde_json::to_string(&RuntimeEventType::PermissionRequest).unwrap();
+        assert_eq!(json, r#""permission_request""#);
+
+        let parsed: RuntimeEventType = serde_json::from_str(r#""task_completed""#).unwrap();
+        assert_eq!(parsed, RuntimeEventType::TaskCompleted);
+    }
+
+    #[test]
+    fn event_source_serde_snake_case() {
+        let json = serde_json::to_string(&EventSource::Connector).unwrap();
+        assert_eq!(json, r#""connector""#);
+
+        let parsed: EventSource = serde_json::from_str(r#""permission""#).unwrap();
+        assert_eq!(parsed, EventSource::Permission);
+    }
+
+    #[test]
+    fn all_event_types_are_distinct() {
+        use std::collections::HashSet;
+        let types = [
+            RuntimeEventType::UserMessage,
+            RuntimeEventType::ToolResult,
+            RuntimeEventType::PermissionRequest,
+            RuntimeEventType::PermissionResponse,
+            RuntimeEventType::TaskStarted,
+            RuntimeEventType::TaskCompleted,
+            RuntimeEventType::TaskFailed,
+            RuntimeEventType::LlmChunk,
+            RuntimeEventType::LlmOutput,
+            RuntimeEventType::Notification,
+            RuntimeEventType::SystemSignal,
+        ];
+        let set: HashSet<_> = types.iter().collect();
+        assert_eq!(set.len(), types.len());
+    }
+}

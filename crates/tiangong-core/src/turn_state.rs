@@ -88,3 +88,88 @@ impl std::fmt::Display for TurnPhase {
         write!(f, "{}", self.display_name())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_states() {
+        assert!(TurnPhase::Completed.is_terminal());
+        assert!(TurnPhase::Cancelled.is_terminal());
+        assert!((TurnPhase::Failed { error: "err".into() }).is_terminal());
+
+        assert!(!TurnPhase::Init.is_terminal());
+        assert!(!TurnPhase::LlmCalling.is_terminal());
+        assert!(!TurnPhase::ToolExecuting.is_terminal());
+        assert!(!TurnPhase::Responding.is_terminal());
+    }
+
+    #[test]
+    fn waiting_states() {
+        let approval = TurnPhase::WaitingApproval {
+            tool_name: "run_command".into(),
+            request_id: "req-1".into(),
+        };
+        assert!(approval.is_waiting());
+
+        assert!(!TurnPhase::Init.is_waiting());
+        assert!(!TurnPhase::ToolExecuting.is_waiting());
+        assert!(!TurnPhase::Completed.is_waiting());
+    }
+
+    #[test]
+    fn display_names_non_empty() {
+        let phases = [
+            TurnPhase::Init,
+            TurnPhase::ContextAssembly,
+            TurnPhase::LlmCalling,
+            TurnPhase::ToolDispatching,
+            TurnPhase::WaitingApproval {
+                tool_name: "t".into(),
+                request_id: "r".into(),
+            },
+            TurnPhase::ToolExecuting,
+            TurnPhase::ResultProcessing,
+            TurnPhase::Responding,
+            TurnPhase::Completed,
+            TurnPhase::Failed { error: "e".into() },
+            TurnPhase::Cancelled,
+        ];
+        for phase in &phases {
+            assert!(!phase.display_name().is_empty(), "{phase:?} has empty display_name");
+            assert!(!format!("{phase}").is_empty());
+        }
+    }
+
+    #[test]
+    fn serialization_roundtrip() {
+        let phase = TurnPhase::WaitingApproval {
+            tool_name: "run_command".into(),
+            request_id: "abc-123".into(),
+        };
+        let json = serde_json::to_string(&phase).unwrap();
+        assert!(json.contains("waiting_approval"));
+        assert!(json.contains("run_command"));
+
+        let deserialized: TurnPhase = serde_json::from_str(&json).unwrap();
+        if let TurnPhase::WaitingApproval { tool_name, request_id } = deserialized {
+            assert_eq!(tool_name, "run_command");
+            assert_eq!(request_id, "abc-123");
+        } else {
+            panic!("expected WaitingApproval");
+        }
+    }
+
+    #[test]
+    fn failed_preserves_error() {
+        let phase = TurnPhase::Failed { error: "网络超时".into() };
+        let json = serde_json::to_string(&phase).unwrap();
+        let deserialized: TurnPhase = serde_json::from_str(&json).unwrap();
+        if let TurnPhase::Failed { error } = deserialized {
+            assert_eq!(error, "网络超时");
+        } else {
+            panic!("expected Failed");
+        }
+    }
+}
