@@ -146,6 +146,49 @@ impl RuntimeEngine {
         G: FnMut(&str, &ModelStreamChunk),
         M: FnMut(ManagementCommand) + Send,
     {
+        // === 快速路径：简单对话跳过工具注入，节省 token ===
+        if Self::is_simple_chat(user_input) {
+            let organizer = ContextOrganizer::new(self.context_limit)
+                .with_keep_recent_turns(6);
+            let context = organizer.build_context(session);
+
+            let req = ModelRequest {
+                session_title: session.title.clone(),
+                user_input: user_input.to_string(),
+                context,
+            };
+
+            let resp = if use_stream_mode() {
+                self.client.complete_stream_with_callback(&req, |delta| on_chunk(delta))?
+            } else {
+                let r = self.client.complete(&req)?;
+                if !r.text.is_empty() {
+                    on_chunk(&ModelStreamChunk {
+                        content: r.text.clone(),
+                        reasoning_content: r.reasoning_content.clone(),
+                    });
+                }
+                r
+            };
+
+            let cleaned = strip_tool_traces_from_response(&resp.text);
+            return Ok(TurnExecution {
+                assistant_message: cleaned,
+                assistant_reasoning_content: resp.reasoning_content,
+                plan: TaskPlan {
+                    id: scru128::new().to_string(),
+                    objective: user_input.chars().take(50).collect::<String>(),
+                    ..Default::default()
+                },
+                tool_result_summary: None,
+                tool_execution: None,
+                verify_records: Vec::new(),
+                output_mode: "stream".to_string(),
+                output_chunk_count: 1,
+                usage: resp.usage,
+            });
+        }
+
         // 设置当前线程的会话级工作目录
         let session_cwd = if session.cwd.is_empty() {
             None
@@ -1440,6 +1483,36 @@ impl RuntimeEngine {
 
     pub fn fallback_error_message(err: &anyhow::Error) -> String {
         format!("执行失败：{err}")
+    }
+
+    /// 判断用户输入是否为简单对话（不需要工具调用）
+    /// 简单对话跳过工具注入，大幅减少 prompt_tokens
+    fn is_simple_chat(input: &str) -> bool {
+        let input = input.trim();
+        // 空输入不走快速路径（避免误判）
+        if input.is_empty() {
+            return false;
+        }
+        // 包含明确工具触发关键词的不走快速路径
+        let tool_keywords = [
+            "文件", "目录", "代码", "搜索", "执行", "运行", "命令", "终端",
+            "创建", "删除", "修改", "编辑", "写入", "读取", "查看",
+            "图片", "生成图", "画", "视频", "语音", "播放", "录音",
+            "安装", "卸载", "skill", "mcp", "@",
+            "编译", "构建", "build", "deploy", "git",
+            "下载", "上传", "curl", "wget",
+        ];
+        let lower = input.to_lowercase();
+        for kw in &tool_keywords {
+            if lower.contains(kw) {
+                return false;
+            }
+        }
+        // 短输入（< 100 字符）且不包含工具关键词 → 简单对话
+        if input.len() < 100 {
+            return true;
+        }
+        false
     }
 }
 
