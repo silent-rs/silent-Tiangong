@@ -8,6 +8,7 @@ pub mod execution;
 pub mod mcp;
 pub mod model;
 pub mod models_config;
+pub mod permission;
 pub mod planner;
 pub mod plugin;
 pub mod runtime;

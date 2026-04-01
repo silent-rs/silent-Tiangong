@@ -84,6 +84,7 @@ pub struct RuntimeEngine {
     pub context_limit: usize,
     agent_config: AgentConfig,
     models_config: ModelsConfig,
+    permission_gate: crate::permission::PermissionGate,
 }
 
 impl RuntimeEngine {
@@ -92,12 +93,19 @@ impl RuntimeEngine {
         context_limit: usize,
         agent_config: AgentConfig,
     ) -> Self {
+        let permission_gate = crate::permission::PermissionGate::new(
+            crate::permission::PermissionPolicy {
+                trust_mode: agent_config.trust_mode,
+                ..Default::default()
+            },
+        );
         Self {
             client,
             tool_executor: LocalToolExecutor::from_agent_config(&agent_config),
             context_limit,
             agent_config,
             models_config: ModelsConfig::default(),
+            permission_gate,
         }
     }
 
@@ -645,6 +653,29 @@ impl RuntimeEngine {
         mcp_targets: &HashMap<String, McpFunctionTarget>,
         mcp_config: &McpConfig,
     ) -> ToolResult {
+        // 权限检查
+        use crate::permission::PermissionDecision;
+        match self.permission_gate.check(&call.name) {
+            PermissionDecision::Approved => {}
+            PermissionDecision::Denied { reason } => {
+                return ToolResult {
+                    ok: false,
+                    summary: format!("权限拒绝：{reason}"),
+                    stdout: String::new(),
+                    stderr: reason,
+                    exit_code: 1,
+                    execution: None,
+                };
+            }
+            PermissionDecision::NeedsApproval { request_id } => {
+                // Phase 3 中将改为暂停等待审批，当前在非 FullTrust 模式下记录日志并放行
+                tracing::info!(
+                    "权限审批请求 {request_id}：工具 {} 需要用户确认（当前自动放行）",
+                    call.name
+                );
+            }
+        }
+
         // 后台任务管理
         if let Some(result) = self.handle_background_task(call) {
             return result;
