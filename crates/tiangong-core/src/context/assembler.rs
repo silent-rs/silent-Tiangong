@@ -45,36 +45,30 @@ impl QueryClassifier {
             return QueryMode::ToolExecution;
         }
 
-        // 包含工具触发意图的关键词 → 工具模式
-        let lower = input.to_lowercase();
-        let tool_indicators = [
-            // 文件操作
-            "文件", "目录", "代码", "搜索", "路径",
-            // 执行操作
-            "执行", "运行", "命令", "终端", "shell",
-            // 文件修改
-            "创建", "删除", "修改", "编辑", "写入", "读取", "查看", "打开",
-            // 多媒体
-            "图片", "生成图", "画", "视频", "语音", "播放", "录音",
-            // 工具管理
-            "安装", "卸载", "skill", "mcp", "@",
-            // 开发
-            "编译", "构建", "build", "deploy", "git", "cargo", "npm", "yarn",
-            // 网络
-            "下载", "上传", "curl", "wget", "api",
+        // 反向判断：只有明确的简单闲聊/知识问答才走直接回答
+        // 其余一律走工具模式（保守策略，避免遗漏）
+        let char_count = input.chars().count();
+
+        // 超过 20 个字符的输入可能包含任务意图，走工具模式
+        if char_count > 20 {
+            return QueryMode::ToolExecution;
+        }
+
+        // 短输入（≤ 20 字符）：只有纯粹的问候/闲聊才走直接回答
+        let greeting_patterns = [
+            "你好", "hello", "hi", "hey", "嗨", "哈喽",
+            "早上好", "下午好", "晚上好", "早安", "晚安",
+            "谢谢", "感谢", "thanks", "thank you",
+            "再见", "拜拜", "bye",
         ];
-        for indicator in &tool_indicators {
-            if lower.contains(indicator) {
-                return QueryMode::ToolExecution;
+        let lower = input.to_lowercase();
+        for pattern in &greeting_patterns {
+            if lower.contains(pattern) {
+                return QueryMode::DirectAnswer;
             }
         }
 
-        // 短输入且无工具指示 → 直接回答
-        if input.chars().count() < 200 {
-            return QueryMode::DirectAnswer;
-        }
-
-        // 默认走工具模式（保守策略）
+        // 短输入但不是问候语 → 可能是简短指令，走工具模式
         QueryMode::ToolExecution
     }
 }
@@ -216,32 +210,32 @@ mod tests {
         let session = empty_session();
         assert_eq!(QueryClassifier::classify("你好", &session), QueryMode::DirectAnswer);
         assert_eq!(QueryClassifier::classify("hello", &session), QueryMode::DirectAnswer);
-        assert_eq!(QueryClassifier::classify("今天天气怎么样？", &session), QueryMode::DirectAnswer);
-        assert_eq!(QueryClassifier::classify("帮我解释一下什么是 Rust", &session), QueryMode::DirectAnswer);
+        assert_eq!(QueryClassifier::classify("Hi", &session), QueryMode::DirectAnswer);
+        assert_eq!(QueryClassifier::classify("谢谢", &session), QueryMode::DirectAnswer);
+        assert_eq!(QueryClassifier::classify("早上好", &session), QueryMode::DirectAnswer);
     }
 
     #[test]
-    fn tool_keywords_trigger_tool_mode() {
+    fn short_non_greeting_is_tool_mode() {
         let session = empty_session();
+        // 短输入但不是问候语 → 工具模式（保守策略）
+        assert_eq!(QueryClassifier::classify("分析一下项目", &session), QueryMode::ToolExecution);
+        assert_eq!(QueryClassifier::classify("看看目前的状态", &session), QueryMode::ToolExecution);
+        assert_eq!(QueryClassifier::classify("帮我看看", &session), QueryMode::ToolExecution);
+    }
+
+    #[test]
+    fn longer_input_always_tool_mode() {
+        let session = empty_session();
+        assert_eq!(QueryClassifier::classify("今天天气怎么样？明天会不会下雨？", &session), QueryMode::ToolExecution);
+        assert_eq!(QueryClassifier::classify("帮我解释一下什么是 Rust 编程语言", &session), QueryMode::ToolExecution);
         assert_eq!(QueryClassifier::classify("读取 config.toml 文件", &session), QueryMode::ToolExecution);
-        assert_eq!(QueryClassifier::classify("执行 cargo build", &session), QueryMode::ToolExecution);
-        assert_eq!(QueryClassifier::classify("搜索代码中的 TODO", &session), QueryMode::ToolExecution);
-        assert_eq!(QueryClassifier::classify("帮我生成图片", &session), QueryMode::ToolExecution);
-        assert_eq!(QueryClassifier::classify("创建一个新文件", &session), QueryMode::ToolExecution);
-        assert_eq!(QueryClassifier::classify("git status", &session), QueryMode::ToolExecution);
     }
 
     #[test]
     fn empty_input_defaults_to_tool_mode() {
         let session = empty_session();
         assert_eq!(QueryClassifier::classify("", &session), QueryMode::ToolExecution);
-    }
-
-    #[test]
-    fn long_input_without_keywords_defaults_to_tool_mode() {
-        let session = empty_session();
-        let long_input = "a".repeat(250);
-        assert_eq!(QueryClassifier::classify(&long_input, &session), QueryMode::ToolExecution);
     }
 
     #[test]
@@ -252,7 +246,6 @@ mod tests {
             tool_result: Some("some result".into()),
             ..Default::default()
         });
-        // 即使输入看起来是闲聊，有工具历史的会话也走工具模式
         assert_eq!(QueryClassifier::classify("你好", &session), QueryMode::ToolExecution);
     }
 }
