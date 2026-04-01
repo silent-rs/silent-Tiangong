@@ -2,8 +2,9 @@ import { useState, useRef, useEffect, KeyboardEvent } from 'react';
 import { useStore } from '@/store/useStore';
 import { api } from '@/api/tauri';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { Circle, Sun, Moon, Monitor, PanelLeft, SquarePen } from 'lucide-react';
+import { Circle, Sun, Moon, Monitor, PanelLeft, SquarePen, Volume2, VolumeX, AudioLines } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme';
+import { useStreamingTts } from '@/hooks/useStreamingTts';
 import { Separator } from './ui/separator';
 import { useSidebar } from './ui/sidebar';
 import { Button } from './ui/button';
@@ -25,6 +26,12 @@ export function StatusPanel() {
 
   const { theme, setTheme } = useTheme();
   const { toggleSidebar, open: sidebarOpen } = useSidebar();
+  const streamingTts = useStreamingTts();
+  const [hasTts, setHasTts] = useState(false);
+
+  useEffect(() => {
+    api.hasTtsCapability().then(setHasTts).catch(() => setHasTts(false));
+  }, []);
   const activeSession = isDraft ? null : sessions.find((s) => s.id === activeSessionId);
   const currentTitle = isDraft ? '新对话' : (activeSession?.title || '新对话');
 
@@ -186,6 +193,26 @@ export function StatusPanel() {
       </div>
 
       <div className="ml-auto flex items-center gap-3">
+        {hasTts && (
+          <button
+            data-no-drag
+            onClick={() => streamingTts.enabled ? streamingTts.stop() : streamingTts.setEnabled(true)}
+            className={`flex items-center gap-1 px-2 py-0.5 rounded text-xs transition-colors ${
+              streamingTts.enabled
+                ? 'bg-primary text-primary-foreground'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+            title={streamingTts.enabled ? '关闭自动朗读' : '开启自动朗读'}
+          >
+            {streamingTts.enabled ? (
+              streamingTts.isPlaying
+                ? <AudioLines className="w-3.5 h-3.5 animate-pulse" />
+                : <Volume2 className="w-3.5 h-3.5" />
+            ) : (
+              <VolumeX className="w-3.5 h-3.5" />
+            )}
+          </button>
+        )}
         <button
           data-no-drag
           onClick={cycleTheme}

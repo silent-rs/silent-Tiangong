@@ -313,6 +313,94 @@ pub fn has_tts_capability(state: State<TiangongApp>) -> Result<bool, String> {
     })
 }
 
+/// 检查 STT 能力是否已配置
+#[tauri::command]
+pub fn has_stt_capability(state: State<TiangongApp>) -> Result<bool, String> {
+    use tiangong_core::models_config::ModelCapability;
+    state.with_state_read(|core_state| {
+        Ok(core_state
+            .models_config()
+            .resolve_for_capability(ModelCapability::Stt)
+            .is_some())
+    })
+}
+
+/// 语音识别：将音频数据转录为文本，同时保存音频文件
+#[tauri::command]
+pub async fn transcribe_speech(
+    audio_base64: String,
+    mime_type: String,
+    state: State<'_, TiangongApp>,
+) -> Result<TranscribeResult, String> {
+    use tiangong_core::models_config::ModelCapability;
+    use tiangong_media::stt::{SpeechRecognizer, TranscribeRequest};
+
+    let resolved = state
+        .with_state_read(|core_state| {
+            core_state
+                .models_config()
+                .resolve_for_capability(ModelCapability::Stt)
+                .ok_or_else(|| anyhow::anyhow!("STT 能力未配置"))
+        })
+        .map_err(|e| e.to_string())?;
+
+    // 解码 base64 音频数据
+    use base64::Engine;
+    let audio = base64::engine::general_purpose::STANDARD
+        .decode(&audio_base64)
+        .map_err(|e| format!("音频数据解码失败：{e}"))?;
+
+    // 保存音频文件
+    let media_dir = user_home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".tiangong")
+        .join("media");
+    std::fs::create_dir_all(&media_dir)
+        .map_err(|e| format!("创建媒体目录失败：{e}"))?;
+
+    let ext = match mime_type.as_str() {
+        "audio/wav" | "audio/x-wav" => "wav",
+        "audio/mp3" | "audio/mpeg" => "mp3",
+        "audio/ogg" => "ogg",
+        "audio/webm" => "webm",
+        _ => "wav",
+    };
+    let file_name = format!("stt_{}.{}", scru128::new(), ext);
+    let file_path = media_dir.join(&file_name);
+    std::fs::write(&file_path, &audio)
+        .map_err(|e| format!("音频文件保存失败：{e}"))?;
+
+    let audio_path = file_path.to_string_lossy().to_string();
+
+    let recognizer = tiangong_media::openai_stt::OpenAIWhisper::new(
+        resolved.api_key.clone(),
+        resolved.base_url.clone(),
+    );
+
+    let request = TranscribeRequest {
+        audio,
+        mime_type,
+        language: None,
+        model: Some(resolved.model.clone()),
+    };
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        recognizer.transcribe(request),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(resp)) => Ok(TranscribeResult {
+            text: resp.text,
+            audio_path,
+            duration: resp.duration,
+        }),
+        Ok(Err(e)) => Err(format!("语音识别失败：{e}")),
+        Err(_) => Err("语音识别超时（120秒）".to_string()),
+    }
+}
+
 /// 获取 TTS 可用音色列表
 #[tauri::command]
 pub async fn list_tts_voices(
