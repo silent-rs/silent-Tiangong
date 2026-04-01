@@ -63,29 +63,6 @@ fn mime_for_format(format: &str) -> &str {
     }
 }
 
-/// OpenAI 预定义音色列表
-fn openai_voices() -> Vec<VoiceInfo> {
-    let voices = [
-        ("alloy", "Alloy", "neutral"),
-        ("echo", "Echo", "male"),
-        ("fable", "Fable", "male"),
-        ("onyx", "Onyx", "male"),
-        ("nova", "Nova", "female"),
-        ("shimmer", "Shimmer", "female"),
-    ];
-
-    voices
-        .into_iter()
-        .map(|(id, name, gender)| VoiceInfo {
-            id: id.to_string(),
-            name: name.to_string(),
-            language: None,
-            gender: Some(gender.to_string()),
-            preview_url: None,
-        })
-        .collect()
-}
-
 #[async_trait]
 impl SpeechSynthesizer for OpenAITTS {
     fn name(&self) -> &str {
@@ -133,12 +110,11 @@ impl SpeechSynthesizer for OpenAITTS {
         let audio = resp.bytes().await.context("读取音频数据失败")?.to_vec();
 
         // 防止 API 返回 200 但内容是错误 JSON（某些非标准 TTS 提供商的行为）
-        if audio.len() < 256 {
-            if let Ok(text) = std::str::from_utf8(&audio) {
-                if text.trim_start().starts_with('{') {
-                    return Err(anyhow!("TTS API 返回错误：{}", text));
-                }
-            }
+        if audio.len() < 256
+            && let Ok(text) = std::str::from_utf8(&audio)
+            && text.trim_start().starts_with('{')
+        {
+            return Err(anyhow!("TTS API 返回错误：{}", text));
         }
 
         let mime_type = mime_for_format(&output_format).to_string();
@@ -159,31 +135,28 @@ impl SpeechSynthesizer for OpenAITTS {
             .header("Authorization", format!("Bearer {}", self.api_key))
             .send()
             .await
+            && resp.status().is_success()
+            && let Ok(body) = resp.json::<serde_json::Value>().await
+            && let Some(voices) = body.get("voices").and_then(|v| v.as_array())
         {
-            if resp.status().is_success() {
-                if let Ok(body) = resp.json::<serde_json::Value>().await {
-                    if let Some(voices) = body.get("voices").and_then(|v| v.as_array()) {
-                        let list: Vec<VoiceInfo> = voices
-                            .iter()
-                            .filter_map(|v| {
-                                let name = v.as_str().unwrap_or_default().to_string();
-                                if name.is_empty() {
-                                    return None;
-                                }
-                                Some(VoiceInfo {
-                                    id: name.clone(),
-                                    name,
-                                    language: None,
-                                    gender: None,
-                                    preview_url: None,
-                                })
-                            })
-                            .collect();
-                        if !list.is_empty() {
-                            return Ok(list);
-                        }
+            let list: Vec<VoiceInfo> = voices
+                .iter()
+                .filter_map(|v| {
+                    let name = v.as_str().unwrap_or_default().to_string();
+                    if name.is_empty() {
+                        return None;
                     }
-                }
+                    Some(VoiceInfo {
+                        id: name.clone(),
+                        name,
+                        language: None,
+                        gender: None,
+                        preview_url: None,
+                    })
+                })
+                .collect();
+            if !list.is_empty() {
+                return Ok(list);
             }
         }
         // API 不支持 /v1/voices 时返回空列表，由前端显示手动输入框

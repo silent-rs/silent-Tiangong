@@ -10,11 +10,11 @@ import {
   Cpu,
   FileText,
   Volume2,
-  VolumeX,
   Square,
   Copy,
   Check,
-  AudioLines,
+  Play,
+  ChevronUp,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -23,7 +23,6 @@ import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { TypingMessage } from "./TypingMessage";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { api } from "@/api/tauri";
-import { useStreamingTts } from "@/hooks/useStreamingTts";
 
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -96,6 +95,72 @@ function MessageActions({ text, showTts }: { text: string; showTts: boolean }) {
   );
 }
 
+function VoiceBubble({ messageId, audioPath, duration, showText, content }: {
+  messageId: string;
+  audioPath: string;
+  duration?: number;
+  showText: boolean;
+  content: string;
+}) {
+  const [playing, setPlaying] = useState(false);
+  const { toggleVoiceText } = useStore();
+
+  const handlePlay = async () => {
+    if (playing) {
+      await api.stopAudio().catch(() => {});
+      setPlaying(false);
+      return;
+    }
+    setPlaying(true);
+    try {
+      await api.playAudioFile(audioPath);
+    } catch (e) {
+      console.error("播放语音失败:", e);
+    }
+    setPlaying(false);
+  };
+
+  return (
+    <div>
+      <button
+        className="flex items-center gap-2 text-sm hover:opacity-80 transition-opacity"
+        onClick={handlePlay}
+        title={playing ? "停止播放" : "点击播放语音"}
+      >
+        {playing ? (
+          <Square className="w-4 h-4 shrink-0" />
+        ) : (
+          <Play className="w-4 h-4 shrink-0 fill-current" />
+        )}
+        <div className="flex items-center gap-1">
+          <span className="inline-block w-16 h-[3px] rounded bg-foreground/40" />
+          <span className="text-xs text-muted-foreground">
+            {duration ? `${Math.round(duration)}″` : '语音'}
+          </span>
+        </div>
+      </button>
+      <div className="mt-1">
+        <button
+          className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+          onClick={() => toggleVoiceText(messageId)}
+        >
+          {showText ? (
+            <ChevronUp className="w-3 h-3 inline mr-0.5" />
+          ) : (
+            <ChevronDown className="w-3 h-3 inline mr-0.5" />
+          )}
+          {showText ? '隐藏文字' : '显示文字'}
+        </button>
+      </div>
+      {showText && (
+        <p className="whitespace-pre-wrap break-words text-sm mt-1 pt-1 border-t border-border">
+          {content}
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function MessageList() {
   const {
     messages,
@@ -103,12 +168,12 @@ export function MessageList() {
     streamingMessageId,
     streamingContent,
     streamingReasoningContent,
+    voiceMessages,
   } = useStore();
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevMessagesLengthRef = useRef(0);
   const prevStreamingIdRef = useRef<string | null>(null);
   const [hasTts, setHasTts] = useState(false);
-  const streamingTts = useStreamingTts();
 
   // 检查 TTS 能力
   useEffect(() => {
@@ -282,43 +347,6 @@ export function MessageList() {
   return (
     <ScrollArea className="h-full">
       <div className="p-4">
-        {/* 流式 TTS 开关 */}
-        {hasTts && (
-          <div className="max-w-3xl mx-auto flex justify-end mb-2">
-            <button
-              onClick={() => {
-                if (streamingTts.enabled) {
-                  streamingTts.stop();
-                } else {
-                  streamingTts.setEnabled(true);
-                }
-              }}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs transition-colors ${
-                streamingTts.enabled
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-muted text-muted-foreground hover:text-foreground hover:bg-accent"
-              }`}
-              title={streamingTts.enabled ? "关闭自动朗读" : "开启自动朗读（边生成边朗读）"}
-            >
-              {streamingTts.enabled ? (
-                <>
-                  {streamingTts.isPlaying ? (
-                    <AudioLines className="w-3.5 h-3.5 animate-pulse" />
-                  ) : (
-                    <Volume2 className="w-3.5 h-3.5" />
-                  )}
-                  <span>自动朗读中</span>
-                  <VolumeX className="w-3 h-3 ml-0.5" />
-                </>
-              ) : (
-                <>
-                  <Volume2 className="w-3.5 h-3.5" />
-                  <span>自动朗读</span>
-                </>
-              )}
-            </button>
-          </div>
-        )}
         <div className="max-w-3xl mx-auto space-y-2">
           {messages.length === 0 && !isThinking ? (
             <div className="flex flex-col items-center justify-center h-full text-center py-20">
@@ -368,7 +396,7 @@ export function MessageList() {
                     <div
                       className={`rounded-lg px-4 py-2.5 max-w-[80%] ${
                         isUser
-                          ? "bg-primary text-primary-foreground"
+                          ? "bg-accent text-foreground"
                           : "bg-muted text-foreground"
                       }`}
                     >
@@ -400,9 +428,25 @@ export function MessageList() {
                           )}
                         </>
                       ) : (
-                        <p className="whitespace-pre-wrap break-words text-sm">
-                          {message.content}
-                        </p>
+                        (() => {
+                          const voiceInfo = voiceMessages[message.id];
+                          if (voiceInfo) {
+                            return (
+                              <VoiceBubble
+                                messageId={message.id}
+                                audioPath={voiceInfo.audioPath}
+                                duration={voiceInfo.duration}
+                                showText={voiceInfo.showText}
+                                content={message.content}
+                              />
+                            );
+                          }
+                          return (
+                            <p className="whitespace-pre-wrap break-words text-sm">
+                              {message.content}
+                            </p>
+                          );
+                        })()
                       )}
                     </div>
                     {isUser && (

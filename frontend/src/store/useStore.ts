@@ -27,6 +27,11 @@ interface AppState {
   streamingContent: string;
   streamingReasoningContent: string; // 流式思考过程内容
 
+  // 语音消息映射 (消息内容 hash → 音频信息)
+  voiceMessages: Record<string, { audioPath: string; duration?: number; showText: boolean }>;
+  addVoiceMessage: (msgKey: string, audioPath: string, duration?: number) => void;
+  toggleVoiceText: (msgKey: string) => void;
+
   // 加载状态
   isLoadingSessions: boolean;
   isSending: boolean;
@@ -68,6 +73,33 @@ export const useStore = create<AppState>((set, get) => ({
   streamingMessageId: null,
   streamingContent: '',
   streamingReasoningContent: '',
+  voiceMessages: (() => {
+    try {
+      return JSON.parse(localStorage.getItem('tiangong-voice-messages') || '{}');
+    } catch { return {}; }
+  })(),
+  addVoiceMessage: (msgKey, audioPath, duration) => {
+    set((state) => {
+      const next = {
+        ...state.voiceMessages,
+        [msgKey]: { audioPath, duration, showText: false },
+      };
+      localStorage.setItem('tiangong-voice-messages', JSON.stringify(next));
+      return { voiceMessages: next };
+    });
+  },
+  toggleVoiceText: (msgKey) => {
+    set((state) => {
+      const vm = state.voiceMessages[msgKey];
+      if (!vm) return {};
+      const next = {
+        ...state.voiceMessages,
+        [msgKey]: { ...vm, showText: !vm.showText },
+      };
+      localStorage.setItem('tiangong-voice-messages', JSON.stringify(next));
+      return { voiceMessages: next };
+    });
+  },
   isLoadingSessions: false,
   isSending: false,
 
@@ -78,11 +110,10 @@ export const useStore = create<AppState>((set, get) => ({
       const sessions = await api.getSessions();
       set({ sessions, isLoadingSessions: false });
 
-      // 如果有会话但没有活动会话且不在草稿模式，设置第一个为活动会话
+      // 首次加载时默认进入新对话（草稿模式）
       const { activeSessionId, isDraft } = get();
-      if (!activeSessionId && !isDraft && sessions.length > 0) {
-        const firstSession = sessions[0];
-        set({ activeSessionId: firstSession.id });
+      if (!activeSessionId && !isDraft) {
+        set({ isDraft: true });
       }
     } catch (error) {
       console.error('加载会话失败:', error);

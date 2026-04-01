@@ -81,7 +81,7 @@ impl SpeechRecognizer for OpenAIWhisper {
             .part("model", reqwest::multipart::Part::text(model))
             .part(
                 "response_format",
-                reqwest::multipart::Part::text("verbose_json"),
+                reqwest::multipart::Part::text("json"),
             );
 
         if let Some(lang) = request.language {
@@ -109,8 +109,8 @@ impl SpeechRecognizer for OpenAIWhisper {
             return Err(anyhow!("OpenAI Whisper 转录失败 ({}): {}", status, err_msg));
         }
 
-        let whisper_resp: WhisperResponse =
-            serde_json::from_str(&resp_text).context("解析 Whisper 响应失败")?;
+        let whisper_resp: WhisperResponse = serde_json::from_str(&resp_text)
+            .with_context(|| format!("解析 Whisper 响应失败，原始响应：{}", &resp_text[..resp_text.len().min(500)]))?;
 
         Ok(TranscribeResponse {
             text: whisper_resp.text,

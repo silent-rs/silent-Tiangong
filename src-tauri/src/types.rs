@@ -8,6 +8,14 @@ pub struct SpeechResult {
     pub mime_type: String,
 }
 
+/// 语音识别结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscribeResult {
+    pub text: String,
+    pub audio_path: String,
+    pub duration: Option<f64>,
+}
+
 /// @提及候选项
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MentionCandidate {

@@ -269,6 +269,15 @@ export const api = {
     invoke('list_tts_voices'),
 
   // ----------------------------------------------------------------
+  // 语音识别
+  // ----------------------------------------------------------------
+  hasSttCapability: (): Promise<boolean> =>
+    invoke('has_stt_capability'),
+
+  transcribeSpeech: (audioBase64: string, mimeType: string): Promise<{ text: string; audio_path: string; duration?: number }> =>
+    invoke('transcribe_speech', { audioBase64, mimeType }),
+
+  // ----------------------------------------------------------------
   // 事件监听
   // ----------------------------------------------------------------
   onRunSnapshot: (callback: (snapshot: RunSnapshot) => void) =>
