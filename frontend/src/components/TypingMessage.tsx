@@ -14,73 +14,25 @@ interface TypingMessageProps {
   onComplete?: () => void;
 }
 
-export function TypingMessage({ content, reasoningContent, speed = 300, onComplete }: TypingMessageProps) {
-  const [displayedContent, setDisplayedContent] = useState('');
+export function TypingMessage({ content, reasoningContent, speed: _speed = 300, onComplete }: TypingMessageProps) {
+  // 流式模式：直接渲染到达的完整内容，不使用打字机效果
+  // 流式输出本身就是逐步到达的，无需前端额外逐字追加
   const [isComplete, setIsComplete] = useState(false);
-  const intervalRef = useRef<number | null>(null);
-  const currentIndexRef = useRef(0);
   const prevContentRef = useRef('');
 
   useEffect(() => {
-    // 判断内容是否只是在增长（流式追加）
-    const isAppending = content.startsWith(prevContentRef.current) && prevContentRef.current.length > 0;
-    prevContentRef.current = content;
-
-    if (!isAppending) {
-      // 内容完全不同，重置
-      setDisplayedContent('');
-      setIsComplete(false);
-      currentIndexRef.current = 0;
-    } else {
-      // 内容是追加的，保持当前进度，取消完成状态
-      setIsComplete(false);
-    }
-
-    // 如果内容为空，直接完成
     if (!content) {
       setIsComplete(true);
       onComplete?.();
       return;
     }
 
-    // 计算每次更新的字符数
-    const charsPerUpdate = Math.max(1, Math.floor(speed / 60)); // 每秒更新 60 次
-
-    // 清除之前的 interval
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
+    // 内容在增长 → 流式进行中
+    if (content !== prevContentRef.current) {
+      prevContentRef.current = content;
+      setIsComplete(false);
     }
-
-    // 启动打字机效果
-    intervalRef.current = setInterval(() => {
-      const currentIndex = currentIndexRef.current;
-
-      if (currentIndex >= content.length) {
-        // 完成
-        setIsComplete(true);
-        if (intervalRef.current) {
-          clearInterval(intervalRef.current);
-          intervalRef.current = null;
-        }
-        onComplete?.();
-        return;
-      }
-
-      // 计算本次要显示的字符数
-      const nextIndex = Math.min(currentIndex + charsPerUpdate, content.length);
-      const newContent = content.slice(0, nextIndex);
-
-      setDisplayedContent(newContent);
-      currentIndexRef.current = nextIndex;
-    }, 1000 / 60); // 60 FPS
-
-    return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
-    };
-  }, [content, speed, onComplete]);
+  }, [content, onComplete]);
 
   // Markdown 渲染器
   const MarkdownComponents = {
@@ -181,12 +133,12 @@ export function TypingMessage({ content, reasoningContent, speed = 300, onComple
         <ThinkingBlock content={reasoningContent} defaultExpanded={false} />
       )}
 
-      <div className="prose prose-invert prose-sm max-w-none text-[13px]">
+      <div className="prose prose-sm max-w-none text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
         <ReactMarkdown remarkPlugins={[remarkGfm]} components={MarkdownComponents as any}>
-          {displayedContent}
+          {content}
         </ReactMarkdown>
-        {!isComplete && (
-          <span className="inline-block w-2 h-4 bg-[#10A37F] ml-1 animate-pulse" />
+        {!isComplete && content.length > 0 && (
+          <span className="inline-block w-1.5 h-4 bg-primary ml-0.5 animate-pulse align-text-bottom" />
         )}
       </div>
     </div>
