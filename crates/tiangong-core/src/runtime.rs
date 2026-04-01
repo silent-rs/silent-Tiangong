@@ -11,7 +11,6 @@ use crate::agents::execution_mcp_agent::{
 };
 use crate::agents::execution_tool_agent::build_tool_call_from_function;
 use crate::context::compressor::compress_loop_messages;
-use crate::context::organizer::ContextOrganizer;
 use crate::model::{
     ModelClient, ModelFunctionCall, ModelRequest, ModelStreamChunk, SingleProviderClient, TokenUsage,
 };
@@ -157,249 +156,81 @@ impl RuntimeEngine {
 
         let mut accumulated_usage = TokenUsage::default();
 
-        // 构建对话上下文：摘要 + 最近消息 + 过滤执行痕迹
-        // 压缩（摘要更新）已在 turn 启动前完成并持久化到 session
-        let organizer = ContextOrganizer::new(self.context_limit)
-            .with_keep_recent_turns(6);
-        let context = organizer.build_context(session);
+        // 使用上下文装配器构建上下文和工具列表
+        let assembler = crate::context::assembler::ContextAssembler::new(self.context_limit);
 
-        // 准备工具定义
-        let (function_tools, mcp_targets) =
-            execution_function_tools(&self.agent_config.mcp);
-        // 去掉 mark_step_completed 工具，ReAct 模式不需要手动完成信号
-        let mut function_tools: Vec<_> = function_tools
+        // 准备全量工具定义（装配器会根据查询模式决定是否注入）
+        let (all_tools, mcp_targets) = execution_function_tools(&self.agent_config.mcp);
+        let mut all_tools: Vec<_> = all_tools
             .into_iter()
             .filter(|t| t.name != "mark_step_completed")
             .collect();
 
-        // 注入已配置的多媒体能力为工具
-        tracing::info!(
-            has_image = self.models_config.resolve_for_capability(ModelCapability::ImageGeneration).is_some(),
-            routing_keys = ?self.models_config.routing.keys().collect::<Vec<_>>(),
-            "多媒体能力检查"
-        );
-        if self.models_config.resolve_for_capability(ModelCapability::ImageGeneration).is_some() {
-            function_tools.push(FunctionToolSpec {
-                name: "generate_image".to_string(),
-                description: "根据文字描述生成图片。返回生成的图片 URL 或 base64 数据。".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "prompt": { "type": "string", "description": "图片描述（英文效果更好）" },
-                        "width": { "type": "integer", "description": "图片宽度（像素，可选，0 表示默认）" },
-                        "height": { "type": "integer", "description": "图片高度（像素，可选，0 表示默认）" },
-                        "style": { "type": "string", "description": "风格（如 vivid、natural，可选）" }
-                    },
-                    "required": ["prompt"]
-                }),
-            });
-        }
-        // 视频生成暂通过 skill 机制处理，不注入内置工具
-
-        // 语音合成（TTS）
-        if self.models_config.resolve_for_capability(ModelCapability::Tts).is_some() {
-            function_tools.push(FunctionToolSpec {
-                name: "text_to_speech".to_string(),
-                description: "将文本转换为语音音频文件，保存到指定路径并返回文件路径。".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "text": { "type": "string", "description": "待合成的文本" },
-                        "voice": { "type": "string", "description": "音色（如 alloy、echo、fable、onyx、nova、shimmer，可选）" },
-                        "speed": { "type": "number", "description": "语速（0.5~2.0，可选，默认 1.0）" },
-                        "output_path": { "type": "string", "description": "输出文件路径（可选，默认自动生成）" }
-                    },
-                    "required": ["text"]
-                }),
-            });
-        }
-
-        // 语音识别（STT）
-        if self.models_config.resolve_for_capability(ModelCapability::Stt).is_some() {
-            function_tools.push(FunctionToolSpec {
-                name: "speech_to_text".to_string(),
-                description: "将音频文件转录为文本。支持 mp3、wav、ogg 等格式。".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "file_path": { "type": "string", "description": "音频文件路径" },
-                        "language": { "type": "string", "description": "语言提示（如 zh、en，可选）" }
-                    },
-                    "required": ["file_path"]
-                }),
-            });
-        }
-
-        // 注入 get_skill_detail 工具（已安装 skill 时可用）
-        if self.agent_config.skills.installed.iter().any(|s| s.enabled) {
-            function_tools.push(FunctionToolSpec {
-                name: "get_skill_detail".to_string(),
-                description: "获取已安装 Skill 的完整使用说明，返回 SKILL.md 内容和调用命令".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "skill_id": { "type": "string", "description": "Skill ID（从已安装列表中选择）" }
-                    },
-                    "required": ["skill_id"]
-                }),
-            });
-        }
-
-        // 后台任务管理工具
-        function_tools.push(FunctionToolSpec {
-            name: "spawn_task".to_string(),
-            description: "在后台启动长时间运行的命令，立即返回 task_id。适用于编译、下载、视频生成等耗时操作。".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "任务名称（用于显示）" },
-                    "cmd": { "type": "string", "description": "命令名" },
-                    "args": { "type": "array", "items": { "type": "string" }, "description": "命令参数" },
-                    "cwd": { "type": "string", "description": "工作目录（可选）" }
-                },
-                "required": ["name", "cmd"]
-            }),
-        });
-        function_tools.push(FunctionToolSpec {
-            name: "query_task".to_string(),
-            description: "查询后台任务的状态和输出结果".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task_id": { "type": "string", "description": "任务 ID" }
-                },
-                "required": ["task_id"]
-            }),
-        });
-        function_tools.push(FunctionToolSpec {
-            name: "list_tasks".to_string(),
-            description: "列出所有后台任务及其状态".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {}
-            }),
-        });
-        function_tools.push(FunctionToolSpec {
-            name: "cancel_task".to_string(),
-            description: "取消一个正在运行的后台任务".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task_id": { "type": "string", "description": "任务 ID" }
-                },
-                "required": ["task_id"]
-            }),
-        });
-        function_tools.push(FunctionToolSpec {
-            name: "wait_tasks".to_string(),
-            description: "等待多个后台任务全部完成（spawn+join 模式）。适用于先用 spawn_task 启动多个并行任务，然后一次性等待所有结果。".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task_ids": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "要等待的任务 ID 列表"
-                    },
-                    "timeout_ms": {
-                        "type": "integer",
-                        "description": "超时毫秒数，0 表示无限等待（默认 0）"
-                    }
-                },
-                "required": ["task_ids"]
-            }),
-        });
-
-        // MCP/Skill 管理工具（始终可用）
-        function_tools.push(FunctionToolSpec {
-            name: "register_mcp_server".to_string(),
-            description: "注册一个新的 MCP 服务器。注册后服务器将自动启动并加载工具。".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "服务器名称（唯一标识）" },
-                    "command": { "type": "string", "description": "启动命令（如 uvx、npx 的完整路径）" },
-                    "args": { "type": "array", "items": { "type": "string" }, "description": "命令参数" },
-                    "env": { "type": "object", "description": "环境变量（键值对）" },
-                    "transport": { "type": "string", "description": "传输方式：stdio（默认）或 http" },
-                    "endpoint": { "type": "string", "description": "HTTP 端点 URL（transport=http 时必填）" }
-                },
-                "required": ["name", "command"]
-            }),
-        });
-        function_tools.push(FunctionToolSpec {
-            name: "remove_mcp_server".to_string(),
-            description: "移除一个已注册的 MCP 服务器".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "服务器名称" }
-                },
-                "required": ["name"]
-            }),
-        });
-        function_tools.push(FunctionToolSpec {
-            name: "set_mcp_enabled".to_string(),
-            description: "启用或禁用一个 MCP 服务器".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "服务器名称" },
-                    "enabled": { "type": "boolean", "description": "是否启用" }
-                },
-                "required": ["name", "enabled"]
-            }),
-        });
-        function_tools.push(FunctionToolSpec {
-            name: "install_skill".to_string(),
-            description: "从本地路径安装一个 Skill。路径应指向包含 skill.toml 和 SKILL.md 的目录。".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Skill 目录路径" },
-                    "enabled": { "type": "boolean", "description": "安装后是否启用（默认 true）" }
-                },
-                "required": ["path"]
-            }),
-        });
-        function_tools.push(FunctionToolSpec {
-            name: "remove_skill".to_string(),
-            description: "卸载一个已安装的 Skill".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string", "description": "Skill ID" }
-                },
-                "required": ["id"]
-            }),
-        });
-        function_tools.push(FunctionToolSpec {
-            name: "set_skill_enabled".to_string(),
-            description: "启用或禁用一个已安装的 Skill".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string", "description": "Skill ID" },
-                    "enabled": { "type": "boolean", "description": "是否启用" }
-                },
-                "required": ["id", "enabled"]
-            }),
-        });
+        // 注入增强工具（多媒体、Skill、后台任务、管理工具）
+        inject_enhanced_tools(&mut all_tools, &self.models_config, &self.agent_config);
 
         // 构建系统 prompt
-        let system_prompt =
+        let full_system_prompt =
             build_react_system_prompt(user_input, &self.models_config, &self.agent_config);
+
+        // 使用上下文装配器决定查询模式和最终工具列表
+        let assembled = assembler.assemble(
+            session,
+            user_input,
+            all_tools,
+            full_system_prompt,
+            &self.models_config,
+            &self.agent_config,
+        );
+
+        let context = assembled.messages;
+        let function_tools = assembled.tools;
+        let system_prompt = assembled.system_prompt;
+        let organizer = crate::context::organizer::ContextOrganizer::new(self.context_limit)
+            .with_keep_recent_turns(6);
+
+        // 快速路径：直接回答模式，不走 ReAct 循环
+        if assembled.mode == crate::context::assembler::QueryMode::DirectAnswer {
+            let req = ModelRequest {
+                session_title: session.title.clone(),
+                user_input: system_prompt,
+                context,
+            };
+            let resp = if use_stream_mode() {
+                self.client.complete_stream_with_callback(&req, |delta| on_chunk(delta))?
+            } else {
+                let r = self.client.complete(&req)?;
+                if !r.text.is_empty() {
+                    on_chunk(&ModelStreamChunk {
+                        content: r.text.clone(),
+                        reasoning_content: r.reasoning_content.clone(),
+                    });
+                }
+                r
+            };
+            let cleaned = strip_tool_traces_from_response(&resp.text);
+            return Ok(TurnExecution {
+                assistant_message: cleaned,
+                assistant_reasoning_content: resp.reasoning_content,
+                plan: TaskPlan {
+                    id: scru128::new().to_string(),
+                    objective: user_input.chars().take(50).collect::<String>(),
+                    ..Default::default()
+                },
+                tool_result_summary: None,
+                tool_execution: None,
+                verify_records: Vec::new(),
+                output_mode: "stream".to_string(),
+                output_chunk_count: 1,
+                usage: resp.usage,
+            });
+        }
 
         // 构建空 plan（兼容现有 TurnExecution 结构）
         let plan = TaskPlan {
             id: scru128::new().to_string(),
             objective: user_input.chars().take(50).collect::<String>(),
-            summary: String::new(),
-            plans: Vec::new(),
-            risks: Vec::new(),
-            skill_hints: Vec::new(),
-            mcp_hints: Vec::new(),
-            revisions: Vec::new(),
+            ..Default::default()
         };
         _on_plan_ready(&plan);
 
@@ -1440,6 +1271,89 @@ impl RuntimeEngine {
 
     pub fn fallback_error_message(err: &anyhow::Error) -> String {
         format!("执行失败：{err}")
+    }
+}
+
+/// 注入增强工具定义（多媒体、Skill、后台任务、MCP 管理）
+fn inject_enhanced_tools(
+    tools: &mut Vec<FunctionToolSpec>,
+    models_config: &ModelsConfig,
+    agent_config: &AgentConfig,
+) {
+    use crate::models_config::ModelCapability;
+    if models_config.resolve_for_capability(ModelCapability::ImageGeneration).is_some() {
+        tools.push(FunctionToolSpec {
+            name: "generate_image".to_string(),
+            description: "根据文字描述生成图片".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "图片描述" },
+                    "width": { "type": "integer", "description": "宽度（可选）" },
+                    "height": { "type": "integer", "description": "高度（可选）" },
+                    "style": { "type": "string", "description": "风格（可选）" }
+                },
+                "required": ["prompt"]
+            }),
+        });
+    }
+    if models_config.resolve_for_capability(ModelCapability::Tts).is_some() {
+        tools.push(FunctionToolSpec {
+            name: "text_to_speech".to_string(),
+            description: "将文本转换为语音音频文件".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string", "description": "待合成文本" },
+                    "voice": { "type": "string", "description": "音色（可选）" },
+                    "speed": { "type": "number", "description": "语速（可选）" },
+                    "output_path": { "type": "string", "description": "输出路径（可选）" }
+                },
+                "required": ["text"]
+            }),
+        });
+    }
+    if models_config.resolve_for_capability(ModelCapability::Stt).is_some() {
+        tools.push(FunctionToolSpec {
+            name: "speech_to_text".to_string(),
+            description: "将音频文件转录为文本".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": { "type": "string", "description": "音频文件路径" },
+                    "language": { "type": "string", "description": "语言提示（可选）" }
+                },
+                "required": ["file_path"]
+            }),
+        });
+    }
+    if agent_config.skills.installed.iter().any(|s| s.enabled) {
+        tools.push(FunctionToolSpec {
+            name: "get_skill_detail".to_string(),
+            description: "获取已安装 Skill 的完整使用说明".to_string(),
+            parameters: serde_json::json!({"type": "object", "properties": {"skill_id": {"type": "string"}}, "required": ["skill_id"]}),
+        });
+    }
+    // 后台任务管理
+    for spec in [
+        ("spawn_task", "在后台启动长时间运行的命令", serde_json::json!({"type":"object","properties":{"name":{"type":"string"},"cmd":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"cwd":{"type":"string"}},"required":["name","cmd"]})),
+        ("query_task", "查询后台任务状态", serde_json::json!({"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"]})),
+        ("list_tasks", "列出所有后台任务", serde_json::json!({"type":"object","properties":{}})),
+        ("cancel_task", "取消后台任务", serde_json::json!({"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"]})),
+        ("wait_tasks", "等待多个后台任务完成", serde_json::json!({"type":"object","properties":{"task_ids":{"type":"array","items":{"type":"string"}},"timeout_ms":{"type":"integer"}},"required":["task_ids"]})),
+    ] {
+        tools.push(FunctionToolSpec { name: spec.0.to_string(), description: spec.1.to_string(), parameters: spec.2 });
+    }
+    // MCP/Skill 管理
+    for spec in [
+        ("register_mcp_server", "注册 MCP 服务器", serde_json::json!({"type":"object","properties":{"name":{"type":"string"},"command":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"env":{"type":"object"},"transport":{"type":"string"},"endpoint":{"type":"string"}},"required":["name","command"]})),
+        ("remove_mcp_server", "移除 MCP 服务器", serde_json::json!({"type":"object","properties":{"name":{"type":"string"}},"required":["name"]})),
+        ("set_mcp_enabled", "启用/禁用 MCP 服务器", serde_json::json!({"type":"object","properties":{"name":{"type":"string"},"enabled":{"type":"boolean"}},"required":["name","enabled"]})),
+        ("install_skill", "安装 Skill", serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"enabled":{"type":"boolean"}},"required":["path"]})),
+        ("remove_skill", "卸载 Skill", serde_json::json!({"type":"object","properties":{"id":{"type":"string"}},"required":["id"]})),
+        ("set_skill_enabled", "启用/禁用 Skill", serde_json::json!({"type":"object","properties":{"id":{"type":"string"},"enabled":{"type":"boolean"}},"required":["id","enabled"]})),
+    ] {
+        tools.push(FunctionToolSpec { name: spec.0.to_string(), description: spec.1.to_string(), parameters: spec.2 });
     }
 }
 

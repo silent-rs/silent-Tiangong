@@ -48,16 +48,17 @@ pub struct Session {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionTaskStatus {
+    #[default]
     Planning,
     Executing,
     Completed,
     Failed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionTaskRecord {
     pub task_id: String,
     pub user_message_id: String,

@@ -50,8 +50,9 @@ pub struct PlanRevision {
     pub summary_after_revision: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TaskPlan {
+    #[serde(default)]
     pub id: String,
     pub objective: String,
     pub summary: String,
