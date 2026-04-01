@@ -21,13 +21,15 @@ use crate::planner::TaskPlan;
 use crate::session::{Message, MessageRole, Session, now_text};
 use crate::tool::{LocalToolExecutor, ToolExecutionRecord, ToolExecutor, ToolResult};
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RunStatus {
     #[default]
     Idle,
     Planning,
     Executing,
+    /// 等待用户审批（高风险工具操作）
+    WaitingApproval,
     Completed,
     Failed,
 }

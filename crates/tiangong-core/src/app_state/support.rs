@@ -79,6 +79,74 @@ pub struct PendingTurn {
     pub(in crate::app_state) rx: Receiver<TurnEvent>,
 }
 
+impl TurnEvent {
+    /// 将 TurnEvent 转换为统一的 RuntimeEvent（Phase 3 中使用）
+    #[allow(dead_code)]
+    pub(in crate::app_state) fn to_runtime_event(
+        &self,
+        session_id: &str,
+        task_id: &str,
+    ) -> crate::event::RuntimeEvent {
+        use crate::event::{EventSource, RuntimeEvent, RuntimeEventType};
+
+        let (event_type, source, payload) = match self {
+            TurnEvent::PlanReady(_) => (
+                RuntimeEventType::TaskStarted,
+                EventSource::Runtime,
+                serde_json::json!({"stage": "plan_ready"}),
+            ),
+            TurnEvent::LlmOutput(_) => (
+                RuntimeEventType::LlmOutput,
+                EventSource::Runtime,
+                serde_json::json!({"stage": "llm_output"}),
+            ),
+            TurnEvent::ToolStarted { name, summary } => (
+                RuntimeEventType::ToolResult,
+                EventSource::Tool,
+                serde_json::json!({"tool": name, "summary": summary, "status": "started"}),
+            ),
+            TurnEvent::ToolExecution(result) => (
+                RuntimeEventType::ToolResult,
+                EventSource::Tool,
+                serde_json::json!({"ok": result.ok, "summary": &result.summary}),
+            ),
+            TurnEvent::PlanExecutionSummary(s) => (
+                RuntimeEventType::TaskCompleted,
+                EventSource::Runtime,
+                serde_json::json!({"summary": s}),
+            ),
+            TurnEvent::StageThinking { stage, .. } => (
+                RuntimeEventType::LlmChunk,
+                EventSource::Runtime,
+                serde_json::json!({"stage": stage}),
+            ),
+            TurnEvent::Chunk(_) => (
+                RuntimeEventType::LlmChunk,
+                EventSource::Runtime,
+                serde_json::json!({"type": "response_chunk"}),
+            ),
+            TurnEvent::Completed(_) => (
+                RuntimeEventType::TaskCompleted,
+                EventSource::Runtime,
+                serde_json::json!({"status": "completed"}),
+            ),
+            TurnEvent::Failed(err) => (
+                RuntimeEventType::TaskFailed,
+                EventSource::Runtime,
+                serde_json::json!({"error": err}),
+            ),
+            TurnEvent::ManagementCommand(_) => (
+                RuntimeEventType::SystemSignal,
+                EventSource::Runtime,
+                serde_json::json!({"type": "management_command"}),
+            ),
+        };
+
+        RuntimeEvent::new(event_type, session_id.to_string(), source, payload)
+            .with_task_id(task_id.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(in crate::app_state) struct SkillsLockRecord {
     pub(in crate::app_state) version: String,
