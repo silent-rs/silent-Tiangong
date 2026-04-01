@@ -179,6 +179,7 @@ impl RuntimeEngine {
             user_input,
             all_tools,
             full_system_prompt,
+            &self.client,
             &self.models_config,
             &self.agent_config,
         );
