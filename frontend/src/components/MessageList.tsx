@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkBreaks from "remark-breaks";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { TypingMessage } from "./TypingMessage";
@@ -418,7 +419,7 @@ export function MessageList() {
                               )}
                               <div className="prose prose-sm max-w-none break-words text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
                                 <ReactMarkdown
-                                  remarkPlugins={[remarkGfm]}
+                                  remarkPlugins={[remarkGfm, remarkBreaks]}
                                   components={MarkdownComponents as any}
                                 >
                                   {message.content}
@@ -465,8 +466,8 @@ export function MessageList() {
             })
           )}
 
-          {/* 思考中/执行中指示器（仅在没有流式消息时显示） */}
-          {isThinking && !streamingMessageId && (
+          {/* 思考中/执行中指示器（仅在没有流式消息且没有已生成内容时显示） */}
+          {isThinking && !streamingMessageId && !streamingContent && (
             <div className="flex gap-3 justify-start">
               <div className="w-8 h-8 rounded bg-primary flex items-center justify-center flex-shrink-0">
                 <Bot className="w-5 h-5 text-primary-foreground" />
