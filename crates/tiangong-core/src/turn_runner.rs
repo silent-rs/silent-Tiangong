@@ -249,12 +249,15 @@ impl TurnRunner {
             let tool_call_names: Vec<String> =
                 response.tool_calls.iter().map(|tc| tc.name.clone()).collect();
 
-            // 中间文字输出推送给用户（如"让我查看一下..."）
+            // 中间文字通过 StageThinking 推送（不写入 assistant 消息，避免被最终回复覆盖）
             if !response.text.is_empty() {
-                let _ = self.tx.send(TurnEvent::Chunk(ModelStreamChunk {
-                    content: format!("{}\n\n", response.text),
-                    reasoning_content: response.reasoning_content.clone(),
-                }));
+                let _ = self.tx.send(TurnEvent::StageThinking {
+                    stage: format!("react-round-{}", self.round + 1),
+                    delta: ModelStreamChunk {
+                        content: response.text.clone(),
+                        reasoning_content: response.reasoning_content.clone(),
+                    },
+                });
             }
 
             let output = LlmOutputRecord {
