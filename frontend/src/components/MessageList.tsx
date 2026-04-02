@@ -474,7 +474,7 @@ export function MessageList() {
                       </div>
                     )}
                     <div
-                      className={`rounded-lg px-4 py-2.5 max-w-[80%] ${
+                      className={`rounded-lg px-4 py-2.5 max-w-[100%] ${
                         isUser
                           ? "bg-accent text-foreground"
                           : "bg-muted text-foreground"
@@ -551,7 +551,7 @@ export function MessageList() {
               <div className="w-8 h-8 rounded bg-amber-500 flex items-center justify-center flex-shrink-0">
                 <ShieldCheck className="w-5 h-5 text-white" />
               </div>
-              <div className="bg-muted text-foreground rounded-lg px-4 py-3 max-w-[80%]">
+              <div className="bg-muted text-foreground rounded-lg px-4 py-3 max-w-[100%]">
                 <div className="text-sm font-medium mb-2">需要您的确认</div>
                 <div className="text-xs text-muted-foreground mb-3">
                   {runSummary}
