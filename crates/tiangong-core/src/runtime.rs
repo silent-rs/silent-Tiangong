@@ -380,8 +380,9 @@ impl RuntimeEngine {
                     "工具 {} 执行{}：{}",
                     call_name,
                     if result.ok { "成功" } else { "失败" },
-                    if result.stdout.len() > 2000 {
-                        format!("{}...(截断)", &result.stdout[..2000])
+                    if result.stdout.chars().count() > 2000 {
+                        let truncated: String = result.stdout.chars().take(2000).collect();
+                        format!("{truncated}...(截断)")
                     } else if result.stdout.is_empty() {
                         result.summary.clone()
                     } else {
