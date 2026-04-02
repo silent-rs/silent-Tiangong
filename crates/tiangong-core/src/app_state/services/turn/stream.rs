@@ -322,7 +322,7 @@ impl AppTurnService {
         self,
         state: &mut TiangongState,
         session_id: &str,
-        _worker_id: &str,
+        worker_id: &str,
         worker_label: &str,
         delta: &ModelStreamChunk,
     ) {
@@ -350,26 +350,28 @@ impl AppTurnService {
             return;
         };
 
-        // 查找该 Worker 已有的 assistant 消息（通过内容前缀匹配）
-        let worker_prefix = format!("**⚙ {}**\n", worker_label);
+        // 使用 Worker ID 标记作为唯一匹配标识（隐藏在消息开头）
+        let worker_tag = format!("<!-- worker:{worker_id} -->");
         let existing = session.messages.iter_mut().rev().find(|m| {
-            m.role == MessageRole::Assistant && m.content.starts_with(&worker_prefix)
+            m.role == MessageRole::Assistant && m.content.starts_with(&worker_tag)
         });
 
         if let Some(msg) = existing {
-            // 追加内容
             msg.content.push_str(&delta.content);
             msg.reasoning_content.push_str(&delta.reasoning_content);
         } else {
-            // 创建新的 Worker assistant 消息
+            // 创建新的 Worker assistant 消息，带标题头
+            let header = format!(
+                "{}\n### ⚙ {}\n\n",
+                worker_tag, worker_label
+            );
             session.append_message_with_reasoning(
                 MessageRole::Assistant,
-                format!("{}{}", worker_prefix, delta.content),
+                format!("{}{}", header, delta.content),
                 delta.reasoning_content.clone(),
             );
         }
 
-        // 更新运行状态
         state.store.runtime.run.summary = format!("Worker 执行中：{worker_label}");
     }
 }
