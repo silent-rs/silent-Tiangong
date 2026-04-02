@@ -168,24 +168,25 @@ impl TaskCoordinator {
                     let worker_id = format!("worker-{}-{}", i, scru128::new());
 
                     scope.spawn(move || {
-                        // 每个 Worker 使用独立工作目录
-                        let working_dir = if session.cwd.is_empty() {
-                            None
-                        } else {
-                            let dir = format!("{}/.workers/{}", session.cwd, worker_id);
-                            Some(dir)
-                        };
-
+                        // 并行 Worker 共享会话工作目录（不创建隔离子目录，避免找不到文件）
                         let worker_context = WorkerContext {
-                            worker_id,
+                            worker_id: worker_id.clone(),
                             task_objective: task.user_input,
                             available_tools: Vec::new(),
-                            context_scope: super::types::ContextScope::TaskOnly,
-                            working_dir,
+                            context_scope: super::types::ContextScope::Full,
+                            working_dir: None, // 使用会话 cwd
                             budget: WorkerBudget::default(),
                         };
 
-                        Worker::new(worker_context, engine, session).run()
+                        tracing::info!(worker_id, "Worker 开始执行");
+                        let result = Worker::new(worker_context, engine, session).run();
+                        tracing::info!(
+                            worker_id,
+                            success = result.success,
+                            duration_ms = result.duration_ms,
+                            "Worker 执行完成"
+                        );
+                        result
                     })
                 })
                 .collect();
