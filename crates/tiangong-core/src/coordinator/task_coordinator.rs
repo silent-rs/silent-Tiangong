@@ -1,9 +1,13 @@
 //! TaskCoordinator：任务拆分、分配、汇总
 //!
-//! 判断复杂任务是否需要拆分为多个 Worker 并行执行，
-//! 汇总各 Worker 结果生成最终回复。
+//! 使用 LLM 判断是否需要多代理并行执行，
+//! 拆分子任务后分配给独立 Worker 并行执行，
+//! 汇总结果生成最终回复。
 
-use crate::model::TokenUsage;
+use std::sync::mpsc;
+
+use crate::app_state::TurnEvent;
+use crate::model::{ModelClient, ModelRequest, TokenUsage};
 use crate::runtime::RuntimeEngine;
 use crate::session::Session;
 
@@ -22,43 +26,82 @@ impl TaskCoordinator {
         Self { engine }
     }
 
-    /// 判断任务是否需要拆分为多代理
-    ///
-    /// 当前版本始终返回 false（单 Worker 模式），
-    /// 后续版本将基于任务复杂度、子任务独立性等判断。
-    pub fn should_split(&self, _task: &CoordinatorTask) -> bool {
-        // TODO: 基于以下条件判断：
-        // - 任务包含多个可并行的子目标
-        // - 子任务上下文差异明显
-        // - 需要隔离不同执行环境
-        false
+    /// 使用 LLM 判断任务是否需要拆分为多代理
+    pub fn should_split(&self, task: &CoordinatorTask) -> bool {
+        let prompt = format!(
+            "判断以下任务是否可以拆分为多个独立的子任务并行执行。\n\
+             只回答 yes 或 no。\n\
+             拆分条件：任务包含多个明确的独立子目标，且子目标之间没有依赖关系。\n\n\
+             任务：{}", task.user_input
+        );
+
+        let req = ModelRequest {
+            session_title: String::new(),
+            user_input: prompt,
+            context: Vec::new(),
+        };
+
+        match self.engine.client().complete(&req) {
+            Ok(resp) => {
+                let answer = resp.text.trim().to_lowercase();
+                let should = answer.contains("yes");
+                tracing::info!(
+                    task_input_len = task.user_input.len(),
+                    should_split = should,
+                    "多代理拆分判断"
+                );
+                should
+            }
+            Err(err) => {
+                tracing::warn!("多代理拆分判断失败，使用单 Worker: {err}");
+                false
+            }
+        }
     }
 
     /// 协调执行任务
-    pub fn coordinate(&self, task: CoordinatorTask, session: &Session) -> anyhow::Result<CoordinatorResult> {
+    pub fn coordinate(
+        &self,
+        task: CoordinatorTask,
+        session: &Session,
+        event_tx: Option<&mpsc::Sender<TurnEvent>>,
+    ) -> anyhow::Result<CoordinatorResult> {
         if !self.should_split(&task) {
-            // 单 Worker 模式（退化为当前行为）
-            return self.run_single(task, session);
+            return self.run_single(task, session, event_tx);
         }
 
-        // 多 Worker 模式（后续实现）
-        let sub_tasks = self.split_task(&task);
+        let sub_tasks = self.split_task(&task)?;
+        if sub_tasks.len() <= 1 {
+            // 拆分后只有一个子任务，退化为单 Worker
+            let single_task = sub_tasks.into_iter().next().unwrap_or(task);
+            return self.run_single(single_task, session, event_tx);
+        }
+
+        tracing::info!(sub_task_count = sub_tasks.len(), "多 Worker 并行执行");
         let results = self.run_parallel(sub_tasks, session);
-        self.merge_results(results)
+        self.merge_results(&task, results)
     }
 
     /// 单 Worker 执行（退化模式）
-    fn run_single(&self, task: CoordinatorTask, session: &Session) -> anyhow::Result<CoordinatorResult> {
+    fn run_single(
+        &self,
+        task: CoordinatorTask,
+        session: &Session,
+        event_tx: Option<&mpsc::Sender<TurnEvent>>,
+    ) -> anyhow::Result<CoordinatorResult> {
         let worker_context = WorkerContext {
             worker_id: scru128::new().to_string(),
             task_objective: task.user_input.clone(),
-            available_tools: Vec::new(), // 空 = 全部工具
+            available_tools: Vec::new(),
             context_scope: super::types::ContextScope::Full,
             working_dir: None,
             budget: WorkerBudget::default(),
         };
 
-        let worker = Worker::new(worker_context, self.engine.clone(), session.clone());
+        let mut worker = Worker::new(worker_context, self.engine.clone(), session.clone());
+        if let Some(tx) = event_tx {
+            worker = worker.with_event_tx(tx.clone());
+        }
         let result = worker.run();
 
         let total_usage = result.usage.clone();
@@ -69,49 +112,150 @@ impl TaskCoordinator {
         })
     }
 
-    /// 拆分任务为子任务（后续实现）
-    #[allow(dead_code)]
-    fn split_task(&self, _task: &CoordinatorTask) -> Vec<CoordinatorTask> {
-        // TODO: 使用 LLM 拆分任务
-        vec![]
-    }
+    /// 使用 LLM 拆分任务为子任务
+    fn split_task(&self, task: &CoordinatorTask) -> anyhow::Result<Vec<CoordinatorTask>> {
+        let prompt = format!(
+            "将以下任务拆分为可独立并行执行的子任务。\n\
+             每个子任务用一行描述，格式：`- 子任务描述`\n\
+             只列出子任务，不要额外说明。\n\n\
+             任务：{}", task.user_input
+        );
 
-    /// 并行执行多个子任务（后续实现）
-    #[allow(dead_code)]
-    fn run_parallel(&self, tasks: Vec<CoordinatorTask>, session: &Session) -> Vec<WorkerResult> {
-        // TODO: 使用 thread::scope 并行执行
-        tasks
-            .into_iter()
-            .map(|task| {
-                let worker_context = WorkerContext {
-                    worker_id: scru128::new().to_string(),
-                    task_objective: task.user_input,
-                    available_tools: Vec::new(),
-                    context_scope: super::types::ContextScope::Full,
-                    working_dir: None,
-                    budget: WorkerBudget::default(),
-                };
-                Worker::new(worker_context, self.engine.clone(), session.clone()).run()
+        let req = ModelRequest {
+            session_title: String::new(),
+            user_input: prompt,
+            context: Vec::new(),
+        };
+
+        let resp = self.engine.client().complete(&req)?;
+
+        let sub_tasks: Vec<CoordinatorTask> = resp.text
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim().trim_start_matches('-').trim();
+                if trimmed.is_empty() { return None; }
+                Some(CoordinatorTask {
+                    id: scru128::new().to_string(),
+                    objective: trimmed.to_string(),
+                    user_input: trimmed.to_string(),
+                    context: task.context.clone(),
+                })
             })
-            .collect()
+            .collect();
+
+        tracing::info!(
+            original = task.user_input.chars().take(50).collect::<String>(),
+            sub_tasks = sub_tasks.len(),
+            "任务拆分完成"
+        );
+
+        Ok(sub_tasks)
     }
 
-    /// 合并多个 Worker 结果（后续实现）
-    #[allow(dead_code)]
-    fn merge_results(&self, results: Vec<WorkerResult>) -> anyhow::Result<CoordinatorResult> {
-        let mut total_usage = TokenUsage::default();
-        let mut combined_text = String::new();
+    /// 并行执行多个子任务
+    fn run_parallel(&self, tasks: Vec<CoordinatorTask>, session: &Session) -> Vec<WorkerResult> {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = tasks
+                .into_iter()
+                .enumerate()
+                .map(|(i, task)| {
+                    let engine = self.engine.clone();
+                    let session = session.clone();
+                    let worker_id = format!("worker-{}-{}", i, scru128::new());
 
-        for result in &results {
+                    scope.spawn(move || {
+                        // 每个 Worker 使用独立工作目录
+                        let working_dir = if session.cwd.is_empty() {
+                            None
+                        } else {
+                            let dir = format!("{}/.workers/{}", session.cwd, worker_id);
+                            Some(dir)
+                        };
+
+                        let worker_context = WorkerContext {
+                            worker_id,
+                            task_objective: task.user_input,
+                            available_tools: Vec::new(),
+                            context_scope: super::types::ContextScope::TaskOnly,
+                            working_dir,
+                            budget: WorkerBudget::default(),
+                        };
+
+                        Worker::new(worker_context, engine, session).run()
+                    })
+                })
+                .collect();
+
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join().unwrap_or_else(|_| WorkerResult {
+                        worker_id: "unknown".to_string(),
+                        result_text: String::new(),
+                        success: false,
+                        error: Some("Worker 线程 panic".to_string()),
+                        usage: Default::default(),
+                        duration_ms: 0,
+                    })
+                })
+                .collect()
+        })
+    }
+
+    /// 使用 LLM 合并多个 Worker 结果
+    fn merge_results(
+        &self,
+        original_task: &CoordinatorTask,
+        results: Vec<WorkerResult>,
+    ) -> anyhow::Result<CoordinatorResult> {
+        let mut total_usage = TokenUsage::default();
+        let mut worker_outputs = String::new();
+        for (i, result) in results.iter().enumerate() {
             total_usage.accumulate(&result.usage);
             if result.success {
-                combined_text.push_str(&result.result_text);
-                combined_text.push_str("\n\n");
+                worker_outputs.push_str(&format!(
+                    "### Worker {} 结果\n{}\n\n",
+                    i + 1,
+                    result.result_text
+                ));
+            } else {
+                worker_outputs.push_str(&format!(
+                    "### Worker {} 失败\n错误：{}\n\n",
+                    i + 1,
+                    result.error.as_deref().unwrap_or("未知错误")
+                ));
             }
         }
 
+        // 使用 LLM 合成最终回复
+        let final_response = if results.len() == 1 {
+            results[0].result_text.clone()
+        } else {
+            let prompt = format!(
+                "以下是多个 Worker 并行执行的结果，请合成一个完整的最终回复。\n\
+                 原始任务：{}\n\n{}", original_task.user_input, worker_outputs
+            );
+
+            let req = ModelRequest {
+                session_title: String::new(),
+                user_input: prompt,
+                context: Vec::new(),
+            };
+
+            match self.engine.client().complete(&req) {
+                Ok(resp) => {
+                    total_usage.accumulate(&resp.usage);
+                    resp.text
+                }
+                Err(_) => {
+                    // LLM 合成失败，直接拼接
+                    worker_outputs
+                }
+            }
+        };
+
         Ok(CoordinatorResult {
-            final_response: combined_text.trim().to_string(),
+            final_response,
             worker_results: results,
             total_usage,
         })
