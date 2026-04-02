@@ -62,7 +62,9 @@ pub use self::store::{AgentState, AppStore, ProviderState, RuntimeState, Session
 pub use self::support::{AppPaths, AppServices, ManagementCommand};
 
 const DEFAULT_SESSION_TITLE: &str = "默认会话";
-const DEFAULT_CONTEXT_LIMIT: usize = 16;
+/// 默认上下文窗口大小（token 数）
+/// 大多数模型支持 8K-128K，使用 32K 作为安全默认值
+const DEFAULT_CONTEXT_LIMIT: usize = 32_768;
 const MCP_CAPABILITY_REFRESH_INTERVAL_SECS: u64 = 300;
 
 #[derive(Debug, Clone, Default)]
