@@ -322,8 +322,8 @@ impl AppTurnService {
         self,
         state: &mut TiangongState,
         session_id: &str,
-        worker_id: &str,
-        worker_label: &str,
+        _worker_id: &str,
+        _worker_label: &str,
         delta: &ModelStreamChunk,
     ) {
         if delta.content.is_empty() && delta.reasoning_content.is_empty() {
@@ -350,28 +350,26 @@ impl AppTurnService {
             return;
         };
 
-        // 使用 Worker ID 标记作为唯一匹配标识（隐藏在消息开头）
-        let worker_tag = format!("<!-- worker:{worker_id} -->");
-        let existing = session.messages.iter_mut().rev().find(|m| {
-            m.role == MessageRole::Assistant && m.content.starts_with(&worker_tag)
-        });
+        // 查找最后一条 assistant 消息（如果存在且在当前 Worker 的系统消息之后）
+        // 通过检查最后一条消息是否是 assistant 来判断
+        let last_is_assistant = session.messages.last()
+            .is_some_and(|m| m.role == MessageRole::Assistant);
 
-        if let Some(msg) = existing {
-            msg.content.push_str(&delta.content);
-            msg.reasoning_content.push_str(&delta.reasoning_content);
+        if last_is_assistant {
+            // 追加到当前 Worker 的 assistant 消息
+            if let Some(msg) = session.messages.last_mut() {
+                msg.content.push_str(&delta.content);
+                msg.reasoning_content.push_str(&delta.reasoning_content);
+            }
         } else {
-            // 创建新的 Worker assistant 消息，带标题头
-            let header = format!(
-                "{}\n### ⚙ {}\n\n",
-                worker_tag, worker_label
-            );
+            // 创建新的 assistant 消息（当前 Worker 的第一个 Chunk）
             session.append_message_with_reasoning(
                 MessageRole::Assistant,
-                format!("{}{}", header, delta.content),
+                delta.content.clone(),
                 delta.reasoning_content.clone(),
             );
         }
 
-        state.store.runtime.run.summary = format!("Worker 执行中：{worker_label}");
+        state.store.runtime.run.summary = format!("Worker 执行中：{_worker_label}");
     }
 }

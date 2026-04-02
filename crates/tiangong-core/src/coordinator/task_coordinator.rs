@@ -16,6 +16,38 @@ use super::types::{
 };
 use super::worker::Worker;
 
+/// 克隆 TurnEvent（TurnEvent 没有 derive Clone，手动处理关键变体）
+fn clone_turn_event(event: &TurnEvent) -> TurnEvent {
+    match event {
+        TurnEvent::WorkerChunk { worker_id, worker_label, delta } => TurnEvent::WorkerChunk {
+            worker_id: worker_id.clone(),
+            worker_label: worker_label.clone(),
+            delta: delta.clone(),
+        },
+        TurnEvent::WorkerEvent { worker_id, worker_label, inner } => TurnEvent::WorkerEvent {
+            worker_id: worker_id.clone(),
+            worker_label: worker_label.clone(),
+            inner: Box::new(clone_turn_event(inner)),
+        },
+        TurnEvent::LlmOutput(output) => TurnEvent::LlmOutput(output.clone()),
+        TurnEvent::ToolExecution(result) => TurnEvent::ToolExecution(result.clone()),
+        TurnEvent::Chunk(delta) => TurnEvent::Chunk(delta.clone()),
+        TurnEvent::StageThinking { stage, delta } => TurnEvent::StageThinking {
+            stage: stage.clone(),
+            delta: delta.clone(),
+        },
+        TurnEvent::PlanReady(plan) => TurnEvent::PlanReady(plan.clone()),
+        TurnEvent::PlanExecutionSummary(s) => TurnEvent::PlanExecutionSummary(s.clone()),
+        TurnEvent::Failed(s) => TurnEvent::Failed(s.clone()),
+        TurnEvent::ToolStarted { name, summary } => TurnEvent::ToolStarted {
+            name: name.clone(),
+            summary: summary.clone(),
+        },
+        // Completed/ManagementCommand/ApprovalRequest 在 Worker 中不会出现
+        _ => TurnEvent::Failed("unsupported event clone".to_string()),
+    }
+}
+
 /// 任务协调器
 pub struct TaskCoordinator {
     engine: RuntimeEngine,
@@ -156,14 +188,17 @@ impl TaskCoordinator {
         Ok(sub_tasks)
     }
 
-    /// 并行执行多个子任务
+    /// 并行执行多个子任务，完成后按 Worker 顺序回放事件
     fn run_parallel(
         &self,
         tasks: Vec<CoordinatorTask>,
         session: &Session,
         event_tx: Option<&mpsc::Sender<TurnEvent>>,
     ) -> Vec<WorkerResult> {
-        std::thread::scope(|scope| {
+        use super::worker::WorkerOutput;
+
+        // 并行执行所有 Worker，收集输出（不实时转发）
+        let outputs: Vec<WorkerOutput> = std::thread::scope(|scope| {
             let handles: Vec<_> = tasks
                 .into_iter()
                 .enumerate()
@@ -171,8 +206,6 @@ impl TaskCoordinator {
                     let engine = self.engine.clone();
                     let session = session.clone();
                     let worker_id = format!("worker-{}-{}", i, scru128::new());
-                    let tx = event_tx.cloned();
-                    let task_label = task.user_input.chars().take(30).collect::<String>();
 
                     scope.spawn(move || {
                         let worker_context = WorkerContext {
@@ -185,25 +218,17 @@ impl TaskCoordinator {
                         };
 
                         tracing::info!(worker_id, "Worker 开始执行");
-                        let mut worker = Worker::new(worker_context, engine, session)
+                        let worker = Worker::new(worker_context, engine, session)
                             .with_multi_worker_mode();
-                        if let Some(ref tx) = tx {
-                            worker = worker.with_event_tx(tx.clone());
-                        }
-                        let result = worker.run();
+                        let output = worker.run_with_output();
                         tracing::info!(
                             worker_id,
-                            success = result.success,
-                            duration_ms = result.duration_ms,
+                            success = output.result.success,
+                            duration_ms = output.result.duration_ms,
+                            events = output.events.len(),
                             "Worker 执行完成"
                         );
-                        if let Some(ref tx) = tx {
-                            let _ = tx.send(TurnEvent::WorkerCompleted {
-                                worker_id: result.worker_id.clone(),
-                                worker_label: task_label,
-                            });
-                        }
-                        result
+                        output
                     })
                 })
                 .collect();
@@ -211,17 +236,55 @@ impl TaskCoordinator {
             handles
                 .into_iter()
                 .map(|h| {
-                    h.join().unwrap_or_else(|_| WorkerResult {
-                        worker_id: "unknown".to_string(),
-                        result_text: String::new(),
-                        success: false,
-                        error: Some("Worker 线程 panic".to_string()),
-                        usage: Default::default(),
-                        duration_ms: 0,
+                    h.join().unwrap_or_else(|_| WorkerOutput {
+                        result: WorkerResult {
+                            worker_id: "unknown".to_string(),
+                            result_text: String::new(),
+                            success: false,
+                            error: Some("Worker 线程 panic".to_string()),
+                            usage: Default::default(),
+                            duration_ms: 0,
+                        },
+                        events: Vec::new(),
                     })
                 })
                 .collect()
-        })
+        });
+
+        // 按 Worker 顺序回放事件：Worker 1 全部 → Worker 2 全部 → ...
+        if let Some(tx) = event_tx {
+            for output in &outputs {
+                let label: String = output.events.iter().find_map(|e| {
+                    if let TurnEvent::WorkerChunk { worker_label, .. }
+                        | TurnEvent::WorkerEvent { worker_label, .. } = e
+                    {
+                        Some(worker_label.clone())
+                    } else {
+                        None
+                    }
+                }).unwrap_or_else(|| output.result.worker_id.clone());
+
+                // 发送 Worker 开始标记
+                let _ = tx.send(TurnEvent::WorkerStarted {
+                    worker_id: output.result.worker_id.clone(),
+                    worker_label: label.clone(),
+                });
+
+                // 按顺序回放该 Worker 的所有事件
+                for event in &output.events {
+                    // 克隆事件发送（TurnEvent 需要手动克隆关键部分）
+                    let _ = tx.send(clone_turn_event(event));
+                }
+
+                // 发送 Worker 完成
+                let _ = tx.send(TurnEvent::WorkerCompleted {
+                    worker_id: output.result.worker_id.clone(),
+                    worker_label: label,
+                });
+            }
+        }
+
+        outputs.into_iter().map(|o| o.result).collect()
     }
 
     /// 使用 LLM 合并多个 Worker 结果（流式推送合成回复）

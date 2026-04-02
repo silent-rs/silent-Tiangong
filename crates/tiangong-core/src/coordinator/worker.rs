@@ -14,6 +14,13 @@ use crate::turn_runner::TurnRunner;
 
 use super::types::{WorkerContext, WorkerResult};
 
+/// Worker 执行过程中收集的所有事件
+#[derive(Debug)]
+pub struct WorkerOutput {
+    pub result: WorkerResult,
+    pub events: Vec<TurnEvent>,
+}
+
 /// Worker 执行单元
 pub struct Worker {
     context: WorkerContext,
@@ -53,8 +60,13 @@ impl Worker {
         self
     }
 
-    /// 执行 Worker 任务
-    pub fn run(mut self) -> WorkerResult {
+    /// 执行 Worker 任务（单 Worker 模式，实时转发事件）
+    pub fn run(self) -> WorkerResult {
+        self.run_with_output().result
+    }
+
+    /// 执行 Worker 任务，返回结果和收集的事件
+    pub fn run_with_output(mut self) -> WorkerOutput {
         let started = Instant::now();
         let worker_id = self.context.worker_id.clone();
         let worker_label: String = self.context.task_objective.chars().take(30).collect();
@@ -73,42 +85,32 @@ impl Worker {
             r
         });
 
-        // 多 Worker 模式：启动事件转发线程
+        // 多 Worker 模式：收集事件到 Vec（不实时转发，由 Coordinator 顺序回放）
+        // 单 Worker 模式：实时转发所有事件
+        let collected_events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let forward_handle = if self.multi_worker_mode {
-            if let Some(main_tx) = self.event_tx.take() {
-                let wid = worker_id.clone();
-                let wlabel = worker_label.clone();
-                Some(std::thread::spawn(move || {
-                    // 发送 Worker 开始标记
-                    let _ = main_tx.send(TurnEvent::WorkerStarted {
-                        worker_id: wid.clone(),
-                        worker_label: wlabel.clone(),
-                    });
-
-                    // 多 Worker 模式：所有事件带 worker_id 转发
-                    while let Ok(event) = runner_rx.recv() {
-                        let forwarded = match event {
-                            TurnEvent::Chunk(delta) => TurnEvent::WorkerChunk {
-                                worker_id: wid.clone(),
-                                worker_label: wlabel.clone(),
-                                delta,
-                            },
-                            other => TurnEvent::WorkerEvent {
-                                worker_id: wid.clone(),
-                                worker_label: wlabel.clone(),
-                                inner: Box::new(other),
-                            },
-                        };
-                        if main_tx.send(forwarded).is_err() {
-                            break;
-                        }
-                    }
-                }))
-            } else {
-                None
-            }
+            let events = collected_events.clone();
+            let wid = worker_id.clone();
+            let wlabel = worker_label.clone();
+            Some(std::thread::spawn(move || {
+                while let Ok(event) = runner_rx.recv() {
+                    let tagged = match event {
+                        TurnEvent::Chunk(delta) => TurnEvent::WorkerChunk {
+                            worker_id: wid.clone(),
+                            worker_label: wlabel.clone(),
+                            delta,
+                        },
+                        other => TurnEvent::WorkerEvent {
+                            worker_id: wid.clone(),
+                            worker_label: wlabel.clone(),
+                            inner: Box::new(other),
+                        },
+                    };
+                    events.lock().unwrap().push(tagged);
+                }
+            }))
         } else {
-            // 单 Worker 模式：直接转发所有事件
+            // 单 Worker 模式：实时转发
             self.event_tx.take().map(|main_tx| {
                 std::thread::spawn(move || {
                     while let Ok(event) = runner_rx.recv() {
@@ -147,11 +149,16 @@ impl Worker {
             },
         };
 
-        // 等待转发线程结束
+        // 等待收集线程结束
         if let Some(handle) = forward_handle {
             let _ = handle.join();
         }
 
-        result
+        let events = std::sync::Arc::try_unwrap(collected_events)
+            .ok()
+            .and_then(|mutex| mutex.into_inner().ok())
+            .unwrap_or_default();
+
+        WorkerOutput { result, events }
     }
 }
