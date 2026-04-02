@@ -168,7 +168,9 @@ function WorkerCard({ group, isActive, MarkdownComponents }: {
   isActive: boolean;
   MarkdownComponents: any;
 }) {
-  const [collapsed, setCollapsed] = useState(false);
+  // Worker 有 assistant 回复且不在执行中时自动收缩
+  const hasResult = group.messages.some(m => m.role === "Assistant");
+  const [collapsed, setCollapsed] = useState(!isActive && hasResult);
   const workerTitle = group.messages[0]?.content?.replace("🔧 Worker: ", "") || "Worker";
   const innerMessages = group.messages.slice(1);
   const systemMsgs = innerMessages.filter(m => m.role === "System");
