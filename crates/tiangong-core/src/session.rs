@@ -81,6 +81,35 @@ pub struct SessionTaskRecord {
     /// 本次任务所有 LLM 调用的累计 token 用量
     #[serde(default)]
     pub usage: Option<TokenUsage>,
+    /// 开发阶段：记录该任务所有 LLM 调用的完整参数和响应
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub llm_calls: Vec<LlmCallRecord>,
+}
+
+/// LLM 调用完整记录（开发调试用）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LlmCallRecord {
+    /// 调用阶段（如 intent-classify, direct-answer, react-round-1）
+    pub stage: String,
+    /// 发送给 LLM 的系统/用户 prompt
+    pub prompt: String,
+    /// 上下文消息数量
+    pub context_count: usize,
+    /// 注入的工具名列表
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_names: Vec<String>,
+    /// LLM 回复文本
+    pub response_text: String,
+    /// 思考内容长度
+    #[serde(default)]
+    pub reasoning_len: usize,
+    /// LLM 发起的工具调用
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<String>,
+    /// Token 用量
+    pub usage: TokenUsage,
+    /// 调用时间戳
+    pub timestamp: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,6 +202,7 @@ impl Session {
             finished_at: None,
             duration_ms: None,
             usage: None,
+            llm_calls: Vec::new(),
         });
         self.updated_at = now_text();
     }

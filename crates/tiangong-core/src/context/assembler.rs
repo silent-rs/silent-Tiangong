@@ -28,41 +28,48 @@ pub enum QueryMode {
 pub struct QueryClassifier;
 
 impl QueryClassifier {
-    /// 使用 LLM 对用户输入进行意图分类
+    /// 使用 LLM 对用户输入进行意图分类，返回模式和可能的 LLM 调用记录
     pub fn classify(
         input: &str,
         session: &Session,
         client: &SingleProviderClient,
-    ) -> QueryMode {
+    ) -> (QueryMode, Vec<crate::session::LlmCallRecord>) {
         let input = input.trim();
 
         // 空输入走工具模式
         if input.is_empty() {
-            return QueryMode::ToolExecution;
+            return (QueryMode::ToolExecution, Vec::new());
         }
 
         // 历史中有工具调用的会话，继续使用工具
         let has_tool_history = session.task_records.iter().any(|r| r.tool_result.is_some());
         if has_tool_history {
-            return QueryMode::ToolExecution;
+            return (QueryMode::ToolExecution, Vec::new());
         }
 
         // 调用 LLM 进行意图分类
         match Self::classify_with_llm(input, client) {
-            Ok(mode) => mode,
+            Ok((mode, record)) => {
+                #[cfg(feature = "llm-debug-log")]
+                return (mode, vec![record]);
+                #[cfg(not(feature = "llm-debug-log"))]
+                {
+                    let _ = record;
+                    (mode, Vec::new())
+                }
+            }
             Err(err) => {
-                // LLM 调用失败时回退到工具模式（保守策略）
                 tracing::warn!("意图分类 LLM 调用失败，回退到工具模式: {err}");
-                QueryMode::ToolExecution
+                (QueryMode::ToolExecution, Vec::new())
             }
         }
     }
 
-    /// 调用 LLM 判断意图
+    /// 调用 LLM 判断意图，返回模式和调用记录
     fn classify_with_llm(
         input: &str,
         client: &SingleProviderClient,
-    ) -> anyhow::Result<QueryMode> {
+    ) -> anyhow::Result<(QueryMode, crate::session::LlmCallRecord)> {
         let prompt = format!(
             "判断以下用户输入是否需要使用工具（如文件操作、命令执行、代码搜索、图片生成等）。\n\
              只回答一个词：chat（纯闲聊/知识问答，不需要工具）或 tool（需要工具执行操作）。\n\n\
@@ -71,26 +78,40 @@ impl QueryClassifier {
 
         let req = ModelRequest {
             session_title: String::new(),
-            user_input: prompt,
+            user_input: prompt.clone(),
             context: Vec::new(),
         };
 
         let resp = client.complete(&req)?;
         let answer = resp.text.trim().to_lowercase();
 
+        let mode = if answer.contains("chat") {
+            QueryMode::DirectAnswer
+        } else {
+            QueryMode::ToolExecution
+        };
+
         tracing::info!(
             input_len = input.len(),
             classify_prompt_tokens = resp.usage.prompt_tokens,
             classify_completion_tokens = resp.usage.completion_tokens,
-            result = if answer.contains("chat") { "direct_answer" } else { "tool_execution" },
+            result = ?mode,
             "LLM 意图分类"
         );
 
-        if answer.contains("chat") {
-            Ok(QueryMode::DirectAnswer)
-        } else {
-            Ok(QueryMode::ToolExecution)
-        }
+        let record = crate::session::LlmCallRecord {
+            stage: "intent-classify".to_string(),
+            prompt,
+            context_count: 0,
+            tool_names: Vec::new(),
+            response_text: resp.text,
+            reasoning_len: resp.reasoning_content.len(),
+            tool_calls: Vec::new(),
+            usage: resp.usage,
+            timestamp: crate::session::now_text(),
+        };
+
+        Ok((mode, record))
     }
 }
 
@@ -104,6 +125,8 @@ pub struct AssembledContext {
     pub system_prompt: String,
     /// 使用的查询模式
     pub mode: QueryMode,
+    /// 装配过程中产生的 LLM 调用记录（如意图分类）
+    pub llm_calls: Vec<crate::session::LlmCallRecord>,
 }
 
 /// 上下文装配器
@@ -143,7 +166,7 @@ impl ContextAssembler {
         _models_config: &ModelsConfig,
         _agent_config: &AgentConfig,
     ) -> AssembledContext {
-        let mode = QueryClassifier::classify(user_input, session, client);
+        let (mode, classify_calls) = QueryClassifier::classify(user_input, session, client);
 
         // 构建对话历史
         let messages = self.organizer.build_context(session);
@@ -176,6 +199,7 @@ impl ContextAssembler {
             tools,
             system_prompt,
             mode,
+            llm_calls: classify_calls,
         }
     }
 

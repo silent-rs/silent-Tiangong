@@ -72,6 +72,8 @@ pub struct TurnExecution {
     pub output_mode: String,
     pub output_chunk_count: usize,
     pub usage: TokenUsage,
+    /// 开发阶段：所有 LLM 调用的完整记录
+    pub llm_calls: Vec<crate::session::LlmCallRecord>,
 }
 
 /// ReAct 循环的最大迭代次数
@@ -221,6 +223,27 @@ impl RuntimeEngine {
             });
 
             let cleaned = strip_tool_traces_from_response(&resp.text);
+
+            // 收集 LLM 调用记录（仅开发阶段）
+            #[cfg(feature = "llm-debug-log")]
+            let llm_calls = {
+                let mut calls = assembled.llm_calls;
+                calls.push(crate::session::LlmCallRecord {
+                    stage: "direct-answer".to_string(),
+                    prompt: system_prompt.clone(),
+                    context_count: req.context.len(),
+                    tool_names: Vec::new(),
+                    response_text: resp.text.clone(),
+                    reasoning_len: resp.reasoning_content.len(),
+                    tool_calls: Vec::new(),
+                    usage: resp.usage.clone(),
+                    timestamp: crate::session::now_text(),
+                });
+                calls
+            };
+            #[cfg(not(feature = "llm-debug-log"))]
+            let llm_calls = Vec::new();
+
             return Ok(TurnExecution {
                 assistant_message: cleaned,
                 assistant_reasoning_content: resp.reasoning_content,
@@ -236,6 +259,7 @@ impl RuntimeEngine {
                 output_mode: "stream".to_string(),
                 output_chunk_count: 1,
                 usage: resp.usage,
+                llm_calls,
             });
         }
 
@@ -478,6 +502,12 @@ impl RuntimeEngine {
 
         let cleaned_text = strip_tool_traces_from_response(&final_text);
 
+        // 收集 ReAct 路径的 LLM 调用记录（仅开发阶段）
+        #[cfg(feature = "llm-debug-log")]
+        let llm_calls = assembled.llm_calls;
+        #[cfg(not(feature = "llm-debug-log"))]
+        let llm_calls = Vec::new();
+
         Ok(TurnExecution {
             assistant_message: cleaned_text,
             assistant_reasoning_content: final_reasoning,
@@ -489,6 +519,7 @@ impl RuntimeEngine {
             output_mode: "stream".to_string(),
             output_chunk_count: total_output_chunks,
             usage: accumulated_usage,
+            llm_calls,
         })
     }
 

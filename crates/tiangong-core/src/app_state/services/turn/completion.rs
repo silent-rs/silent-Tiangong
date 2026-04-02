@@ -20,37 +20,6 @@ impl AppTurnService {
             return;
         };
 
-        // 记录 system_prompt 到会话（插入到 assistant 消息之前）
-        if !exec.system_prompt.is_empty()
-            && let Some(session) = state
-                .store
-                .session
-                .sessions
-                .iter_mut()
-                .find(|session| session.id == sid)
-        {
-            let already_has = session.messages.iter().any(|m|
-                m.role == MessageRole::System
-                && m.content.starts_with("[System Prompt]")
-            );
-            if !already_has {
-                // 找到 assistant 消息的位置，在其前面插入
-                let insert_pos = if let Some(amid) = &assistant_message_id {
-                    session.messages.iter().position(|m| m.id == *amid).unwrap_or(session.messages.len())
-                } else {
-                    session.messages.len()
-                };
-                let system_msg = Message {
-                    id: scru128::new().to_string(),
-                    role: MessageRole::System,
-                    content: format!("[System Prompt]\n{}", exec.system_prompt),
-                    reasoning_content: String::new(),
-                    created_at: crate::session::now_text(),
-                };
-                session.messages.insert(insert_pos, system_msg);
-            }
-        }
-
         let mut final_assistant_message_id = assistant_message_id;
         let mut updated_existing_message = false;
         if let Some(message_id) = final_assistant_message_id.as_deref()
@@ -134,6 +103,13 @@ impl AppTurnService {
                     duration_ms,
                     Some(exec.usage.clone()),
                 );
+            }
+
+            // 开发阶段：将 LLM 调用记录写入 task_record
+            if !exec.llm_calls.is_empty()
+                && let Some(record) = session.task_records.iter_mut().find(|r| r.task_id == task_id)
+            {
+                record.llm_calls = exec.llm_calls;
             }
         }
 
