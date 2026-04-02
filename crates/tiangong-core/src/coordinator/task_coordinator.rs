@@ -208,17 +208,22 @@ impl TaskCoordinator {
                     let worker_id = format!("worker-{}-{}", i, scru128::new());
 
                     scope.spawn(move || {
+                        // 创建干净的 Worker 会话（只保留 cwd，清空消息历史）
+                        // 避免 LLM 看到原始多任务请求后自行执行所有子任务
+                        let mut worker_session = Session::new(&task.objective);
+                        worker_session.cwd = session.cwd.clone();
+
                         let worker_context = WorkerContext {
                             worker_id: worker_id.clone(),
                             task_objective: task.user_input,
                             available_tools: Vec::new(),
-                            context_scope: super::types::ContextScope::Full,
+                            context_scope: super::types::ContextScope::TaskOnly,
                             working_dir: None,
                             budget: WorkerBudget::default(),
                         };
 
                         tracing::info!(worker_id, "Worker 开始执行");
-                        let worker = Worker::new(worker_context, engine, session)
+                        let worker = Worker::new(worker_context, engine, worker_session)
                             .with_multi_worker_mode();
                         let output = worker.run_with_output();
                         tracing::info!(
