@@ -336,7 +336,9 @@ export const useStore = create<AppState>((set, get) => ({
     set({
       runStatus: effectiveStatus,
       runSummary: snapshot.summary || '',
-      approvalRequestId: (snapshot as any).approval_request_id || null,
+      approvalRequestId: (snapshot as any).approval_request_id
+        || (snapshot as any).approvalRequestId
+        || null,
     });
 
     // 草稿模式或不是当前查看的会话 → 不更新消息/流式内容
