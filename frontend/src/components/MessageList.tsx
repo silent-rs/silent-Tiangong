@@ -18,7 +18,6 @@ import {
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import remarkBreaks from "remark-breaks";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { TypingMessage } from "./TypingMessage";
@@ -419,7 +418,7 @@ export function MessageList() {
                               )}
                               <div className="prose prose-sm max-w-none break-words text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
                                 <ReactMarkdown
-                                  remarkPlugins={[remarkGfm, remarkBreaks]}
+                                  remarkPlugins={[remarkGfm]}
                                   components={MarkdownComponents as any}
                                 >
                                   {message.content}
