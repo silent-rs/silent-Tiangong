@@ -9,6 +9,27 @@ impl TiangongState {
         self.replace_run_snapshot(RunStatus::Idle, summary, None);
     }
 
+    /// 向正在执行的 turn 追加用户消息
+    pub fn append_user_message_to_running_turn(&mut self, content: &str) -> Result<bool> {
+        let active_id = self.store.session.active_session_id.clone();
+        if let Some(pending) = self.store.runtime.pending_turns.get(&active_id) {
+            let _ = pending.control_tx.send(ControlSignal::UserMessage(content.to_string()));
+            // 在 session 中记录用户追加消息
+            if let Some(session) = self
+                .store
+                .session
+                .sessions
+                .iter_mut()
+                .find(|s| s.id == pending.session_id)
+            {
+                session.append_message(MessageRole::User, content.to_string());
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     pub fn cancel_pending_turn(&mut self) -> Result<bool> {
         let active_id = self.store.session.active_session_id.clone();
         self.cancel_pending_turn_for(&active_id)

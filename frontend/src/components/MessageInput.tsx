@@ -2,7 +2,7 @@ import { useState, KeyboardEvent, useEffect, useRef, useCallback } from 'react';
 import { useStore } from '@/store/useStore';
 import { Textarea } from './ui/textarea';
 import { Button } from './ui/button';
-import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard } from 'lucide-react';
+import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard, MessageSquarePlus } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { api } from '@/api/tauri';
 import { useAudioRecording } from '@/hooks/useAudioRecording';
@@ -44,7 +44,7 @@ export function MessageInput() {
     ? 'idle'
     : (activeSessionId && sessionRunStatuses[activeSessionId]) || runStatus;
   const isIdle = currentSessionStatus === 'idle';
-  const canSend = isIdle && inputContent.trim().length > 0;
+  const canSend = inputContent.trim().length > 0;  // 执行中也允许输入
 
   // 自动调整文本框高度
   useEffect(() => {
@@ -130,10 +130,19 @@ export function MessageInput() {
     }
   };
 
-  const handleSend = () => {
-    if (canSend) {
-      setMentionOpen(false);
+  const handleSend = async () => {
+    if (!canSend) return;
+    setMentionOpen(false);
+    if (isIdle) {
       sendMessage(inputContent);
+    } else {
+      // 执行中：追加消息到正在执行的 turn
+      try {
+        await api.appendMessage(inputContent);
+        setInputContent('');
+      } catch (e) {
+        console.error('追加消息失败:', e);
+      }
     }
   };
 
@@ -387,12 +396,11 @@ export function MessageInput() {
                 placeholder={
                   isIdle
                     ? '输入消息... (⌘+Enter 发送，@ 引用 Skill/MCP)'
-                    : '正在执行中...'
+                    : '追加指示... (⌘+Enter 发送)'
                 }
-                className="min-h-[60px] max-h-[200px] resize-none pr-14 bg-muted/50 focus-visible:ring-ring"
-                disabled={!isIdle}
+                className="min-h-[60px] max-h-[200px] resize-none pr-24 bg-muted/50 focus-visible:ring-ring"
               />
-              {/* 发送/取消按钮 */}
+              {/* 按钮区域 */}
               <div className="absolute right-2 bottom-2 flex items-center gap-1">
                 {hasStt && isIdle && (
                   <Button
@@ -405,22 +413,34 @@ export function MessageInput() {
                     <Mic className="w-4 h-4" />
                   </Button>
                 )}
+                {!isIdle && (
+                  <Button
+                    onClick={handleCancel}
+                    size="icon"
+                    variant="ghost"
+                    className="h-8 w-8 rounded-md text-destructive hover:bg-destructive/10"
+                    title="取消执行"
+                  >
+                    <Square className="w-4 h-4" />
+                  </Button>
+                )}
                 <Button
-                  onClick={isIdle ? handleSend : handleCancel}
-                  disabled={isIdle && !canSend}
+                  onClick={handleSend}
+                  disabled={!canSend}
                   size="icon"
                   className={`h-8 w-8 rounded-md ${
-                    !isIdle
-                      ? 'bg-destructive hover:bg-destructive/90 text-destructive-foreground'
-                      : canSend
+                    canSend
+                      ? isIdle
                         ? 'bg-green-600 hover:bg-green-700 text-white'
-                        : 'bg-muted text-muted-foreground'
+                        : 'bg-blue-600 hover:bg-blue-700 text-white'
+                      : 'bg-muted text-muted-foreground'
                   }`}
+                  title={isIdle ? '发送消息' : '追加指示'}
                 >
                   {isIdle ? (
                     <Send className="w-4 h-4" />
                   ) : (
-                    <Square className="w-4 h-4" />
+                    <MessageSquarePlus className="w-4 h-4" />
                   )}
                 </Button>
               </div>

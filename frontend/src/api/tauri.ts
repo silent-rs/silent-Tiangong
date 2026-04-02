@@ -151,6 +151,9 @@ export const api = {
   cancelTurn: (): Promise<boolean> =>
     invoke('cancel_turn'),
 
+  appendMessage: (content: string): Promise<boolean> =>
+    invoke('append_message', { content }),
+
   getRunSnapshot: (): Promise<RunSnapshot> =>
     invoke('get_run_snapshot'),
 
