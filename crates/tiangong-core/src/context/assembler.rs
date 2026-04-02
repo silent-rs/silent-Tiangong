@@ -158,7 +158,10 @@ impl ContextAssembler {
 
         // 根据模式调整 system_prompt
         let system_prompt = match mode {
-            QueryMode::DirectAnswer => user_input.to_string(),
+            QueryMode::DirectAnswer => format!(
+                "你是天工智能助手。请用简洁友好的方式回复用户。\
+                 回复使用 Markdown 格式。\n\n用户输入：\n{user_input}"
+            ),
             QueryMode::ToolExecution => system_prompt,
         };
 

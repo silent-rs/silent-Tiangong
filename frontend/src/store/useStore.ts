@@ -113,7 +113,7 @@ export const useStore = create<AppState>((set, get) => ({
       // 首次加载时默认进入新对话（草稿模式）
       const { activeSessionId, isDraft } = get();
       if (!activeSessionId && !isDraft) {
-        set({ isDraft: true });
+        set({ isDraft: true, sessionCwd: '' });
       }
     } catch (error) {
       console.error('加载会话失败:', error);
@@ -133,6 +133,7 @@ export const useStore = create<AppState>((set, get) => ({
       streamingMessageId: null,
       streamingContent: '',
       streamingReasoningContent: '',
+      sessionCwd: '',
     });
   },
 
