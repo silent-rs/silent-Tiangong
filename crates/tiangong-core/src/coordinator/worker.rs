@@ -18,8 +18,8 @@ pub struct Worker {
     context: WorkerContext,
     engine: RuntimeEngine,
     session: Session,
-    /// 可选：向主线程发送事件（用于实时展示 Worker 进度）
     event_tx: Option<mpsc::Sender<TurnEvent>>,
+    ctrl_rx: Option<mpsc::Receiver<ControlSignal>>,
 }
 
 impl Worker {
@@ -29,12 +29,19 @@ impl Worker {
             engine,
             session,
             event_tx: None,
+            ctrl_rx: None,
         }
     }
 
-    /// 设置事件发送器（用于向主线程转发 Worker 事件）
+    /// 设置事件发送器
     pub fn with_event_tx(mut self, tx: mpsc::Sender<TurnEvent>) -> Self {
         self.event_tx = Some(tx);
+        self
+    }
+
+    /// 设置控制信号接收器（透传用户追加消息/取消）
+    pub fn with_ctrl_rx(mut self, rx: mpsc::Receiver<ControlSignal>) -> Self {
+        self.ctrl_rx = Some(rx);
         self
     }
 
@@ -50,15 +57,19 @@ impl Worker {
             self.session.cwd = dir.clone();
         }
 
-        // 创建 channel
-        let (tx, _rx) = if let Some(ref event_tx) = self.event_tx {
-            // 复用主线程的事件通道
-            (event_tx.clone(), None)
+        // 创建/复用 channel
+        let tx = if let Some(event_tx) = self.event_tx {
+            event_tx
         } else {
-            let (t, r) = mpsc::channel();
-            (t, Some(r))
+            let (t, _r) = mpsc::channel();
+            t
         };
-        let (_ctrl_tx, ctrl_rx) = mpsc::channel::<ControlSignal>();
+        let ctrl_rx = if let Some(rx) = self.ctrl_rx {
+            rx
+        } else {
+            let (_t, r) = mpsc::channel::<ControlSignal>();
+            r
+        };
 
         let runner = TurnRunner::new(
             self.engine,

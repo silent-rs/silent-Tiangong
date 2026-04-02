@@ -4,9 +4,9 @@
 //! 拆分子任务后分配给独立 Worker 并行执行，
 //! 汇总结果生成最终回复。
 
-use std::sync::mpsc;
+use std::sync::mpsc::{self, Receiver};
 
-use crate::app_state::TurnEvent;
+use crate::app_state::{ControlSignal, TurnEvent};
 use crate::model::{ModelClient, ModelRequest, TokenUsage};
 use crate::runtime::RuntimeEngine;
 use crate::session::Session;
@@ -65,16 +65,16 @@ impl TaskCoordinator {
         task: CoordinatorTask,
         session: &Session,
         event_tx: Option<&mpsc::Sender<TurnEvent>>,
+        ctrl_rx: Option<Receiver<ControlSignal>>,
     ) -> anyhow::Result<CoordinatorResult> {
         if !self.should_split(&task) {
-            return self.run_single(task, session, event_tx);
+            return self.run_single(task, session, event_tx, ctrl_rx);
         }
 
         let sub_tasks = self.split_task(&task)?;
         if sub_tasks.len() <= 1 {
-            // 拆分后只有一个子任务，退化为单 Worker
             let single_task = sub_tasks.into_iter().next().unwrap_or(task);
-            return self.run_single(single_task, session, event_tx);
+            return self.run_single(single_task, session, event_tx, ctrl_rx);
         }
 
         tracing::info!(sub_task_count = sub_tasks.len(), "多 Worker 并行执行");
@@ -82,12 +82,13 @@ impl TaskCoordinator {
         self.merge_results(&task, results)
     }
 
-    /// 单 Worker 执行（退化模式）
+    /// 单 Worker 执行（退化模式，透传控制信号）
     fn run_single(
         &self,
         task: CoordinatorTask,
         session: &Session,
         event_tx: Option<&mpsc::Sender<TurnEvent>>,
+        ctrl_rx: Option<Receiver<ControlSignal>>,
     ) -> anyhow::Result<CoordinatorResult> {
         let worker_context = WorkerContext {
             worker_id: scru128::new().to_string(),
@@ -101,6 +102,9 @@ impl TaskCoordinator {
         let mut worker = Worker::new(worker_context, self.engine.clone(), session.clone());
         if let Some(tx) = event_tx {
             worker = worker.with_event_tx(tx.clone());
+        }
+        if let Some(rx) = ctrl_rx {
+            worker = worker.with_ctrl_rx(rx);
         }
         let result = worker.run();
 
