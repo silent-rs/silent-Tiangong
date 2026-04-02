@@ -79,20 +79,29 @@ impl Worker {
                 let wid = worker_id.clone();
                 let wlabel = worker_label.clone();
                 Some(std::thread::spawn(move || {
-                    // 多 Worker 模式：只转发 Chunk（转为 WorkerChunk），
-                    // 中间过程（LlmOutput/ToolExecution）不转发，避免混淆
+                    // 发送 Worker 开始标记
+                    let _ = main_tx.send(TurnEvent::WorkerStarted {
+                        worker_id: wid.clone(),
+                        worker_label: wlabel.clone(),
+                    });
+
+                    // 多 Worker 模式：所有事件带 worker_id 转发
                     while let Ok(event) = runner_rx.recv() {
-                        if let TurnEvent::Chunk(delta) = event {
-                            let forwarded = TurnEvent::WorkerChunk {
+                        let forwarded = match event {
+                            TurnEvent::Chunk(delta) => TurnEvent::WorkerChunk {
                                 worker_id: wid.clone(),
                                 worker_label: wlabel.clone(),
                                 delta,
-                            };
-                            if main_tx.send(forwarded).is_err() {
-                                break;
-                            }
+                            },
+                            other => TurnEvent::WorkerEvent {
+                                worker_id: wid.clone(),
+                                worker_label: wlabel.clone(),
+                                inner: Box::new(other),
+                            },
+                        };
+                        if main_tx.send(forwarded).is_err() {
+                            break;
                         }
-                        // 其他事件（LlmOutput/ToolExecution）在多 Worker 模式下不转发
                     }
                 }))
             } else {

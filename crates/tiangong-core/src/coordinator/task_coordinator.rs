@@ -201,7 +201,6 @@ impl TaskCoordinator {
                             let _ = tx.send(TurnEvent::WorkerCompleted {
                                 worker_id: result.worker_id.clone(),
                                 worker_label: task_label,
-                                result_text: result.result_text.clone(),
                             });
                         }
                         result

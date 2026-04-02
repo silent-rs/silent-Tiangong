@@ -215,15 +215,39 @@ impl TiangongState {
                     TurnEvent::StageThinking { stage, delta } => {
                         self.apply_stage_thinking_delta(&session_id, &stage, &delta);
                     }
+                    TurnEvent::WorkerStarted { worker_label, .. } => {
+                        // 创建 Worker 标题系统消息
+                        if let Some(session) = self.store.session.sessions.iter_mut()
+                            .find(|s| s.id == session_id)
+                        {
+                            session.append_message(
+                                MessageRole::System,
+                                format!("🔧 Worker: {worker_label}"),
+                            );
+                        }
+                        self.store.runtime.run.summary = format!("Worker 开始：{worker_label}");
+                    }
+                    TurnEvent::WorkerEvent { worker_label, inner, .. } => {
+                        // 转发内部事件（LlmOutput/ToolExecution 等）
+                        match *inner {
+                            TurnEvent::LlmOutput(output) => {
+                                self.append_pending_turn_llm_output(&session_id, &output);
+                            }
+                            TurnEvent::ToolExecution(result) => {
+                                self.append_pending_turn_tool_execution(&session_id, &result);
+                            }
+                            TurnEvent::StageThinking { stage, delta } => {
+                                self.apply_stage_thinking_delta(&session_id, &stage, &delta);
+                            }
+                            _ => {}
+                        }
+                        self.store.runtime.run.summary = format!("Worker 执行中：{worker_label}");
+                    }
                     TurnEvent::WorkerChunk { worker_id, worker_label, delta } => {
-                        // 为每个 Worker 创建独立的 assistant 消息
                         self.apply_worker_delta(&session_id, &worker_id, &worker_label, &delta);
                     }
-                    TurnEvent::WorkerCompleted { worker_id, worker_label, .. } => {
-                        self.store.runtime.run.summary = format!(
-                            "Worker 完成：{worker_label}"
-                        );
-                        tracing::info!(worker_id, worker_label, "Worker 完成事件已处理");
+                    TurnEvent::WorkerCompleted { worker_label, .. } => {
+                        self.store.runtime.run.summary = format!("Worker 完成：{worker_label}");
                     }
                     TurnEvent::Chunk(delta) => {
                         self.apply_assistant_delta(&session_id, &delta);
@@ -314,12 +338,32 @@ impl TiangongState {
                 TurnEvent::StageThinking { stage, delta } => {
                     self.apply_stage_thinking_delta(session_id, &stage, &delta);
                 }
+                TurnEvent::WorkerStarted { ref worker_label, .. } => {
+                    if let Some(session) = self.store.session.sessions.iter_mut().find(|s| s.id == session_id) {
+                        session.append_message(MessageRole::System, format!("🔧 Worker: {worker_label}"));
+                    }
+                    self.store.runtime.run.summary = format!("Worker 开始：{worker_label}");
+                }
+                TurnEvent::WorkerEvent { ref worker_label, inner, .. } => {
+                    match *inner {
+                        TurnEvent::LlmOutput(output) => {
+                            self.append_pending_turn_llm_output(session_id, &output);
+                        }
+                        TurnEvent::ToolExecution(result) => {
+                            self.append_pending_turn_tool_execution(session_id, &result);
+                        }
+                        TurnEvent::StageThinking { stage, delta } => {
+                            self.apply_stage_thinking_delta(session_id, &stage, &delta);
+                        }
+                        _ => {}
+                    }
+                    self.store.runtime.run.summary = format!("Worker 执行中：{worker_label}");
+                }
                 TurnEvent::WorkerChunk { worker_id, worker_label, delta } => {
                     self.apply_worker_delta(session_id, &worker_id, &worker_label, &delta);
                 }
-                TurnEvent::WorkerCompleted { worker_id, worker_label, .. } => {
+                TurnEvent::WorkerCompleted { ref worker_label, .. } => {
                     self.store.runtime.run.summary = format!("Worker 完成：{worker_label}");
-                    tracing::info!(worker_id, worker_label, "Worker 完成");
                 }
                 TurnEvent::Chunk(delta) => {
                     self.apply_assistant_delta(session_id, &delta);

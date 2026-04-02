@@ -68,6 +68,17 @@ pub enum TurnEvent {
     Failed(String),
     /// 管理命令：主线程处理 MCP/Skill 管理操作
     ManagementCommand(ManagementCommand),
+    /// Worker 开始执行
+    WorkerStarted {
+        worker_id: String,
+        worker_label: String,
+    },
+    /// Worker 中间事件（带 Worker 标识的 LlmOutput/ToolExecution）
+    WorkerEvent {
+        worker_id: String,
+        worker_label: String,
+        inner: Box<TurnEvent>,
+    },
     /// Worker 流式输出：每个 Worker 独立的 assistant 消息
     WorkerChunk {
         worker_id: String,
@@ -78,7 +89,6 @@ pub enum TurnEvent {
     WorkerCompleted {
         worker_id: String,
         worker_label: String,
-        result_text: String,
     },
     /// 权限审批请求：需要用户确认后才能执行工具
     ApprovalRequest {
@@ -174,6 +184,16 @@ impl TurnEvent {
                 RuntimeEventType::SystemSignal,
                 EventSource::Runtime,
                 serde_json::json!({"type": "management_command"}),
+            ),
+            TurnEvent::WorkerStarted { worker_id, .. } => (
+                RuntimeEventType::TaskStarted,
+                EventSource::Runtime,
+                serde_json::json!({"worker_id": worker_id, "type": "worker_started"}),
+            ),
+            TurnEvent::WorkerEvent { worker_id, .. } => (
+                RuntimeEventType::ToolResult,
+                EventSource::Runtime,
+                serde_json::json!({"worker_id": worker_id, "type": "worker_event"}),
             ),
             TurnEvent::WorkerChunk { worker_id, .. } => (
                 RuntimeEventType::LlmChunk,
