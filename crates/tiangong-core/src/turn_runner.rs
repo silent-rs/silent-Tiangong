@@ -129,13 +129,8 @@ impl TurnRunner {
                 r
             };
 
-            let _ = self.tx.send(TurnEvent::LlmOutput(LlmOutputRecord {
-                stage: "direct-answer".to_string(),
-                content: resp.text.clone(),
-                reasoning_content: resp.reasoning_content.clone(),
-                tool_calls: Vec::new(),
-                usage: resp.usage.clone(),
-            }));
+            // DirectAnswer 模式不发送 LlmOutput 事件（避免创建多余的系统消息），
+            // 回复已通过 Chunk 事件写入 assistant 消息
 
             let cleaned = strip_tool_traces_from_response(&resp.text);
 
