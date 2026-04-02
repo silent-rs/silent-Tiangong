@@ -78,7 +78,7 @@ impl TaskCoordinator {
         }
 
         tracing::info!(sub_task_count = sub_tasks.len(), "多 Worker 并行执行");
-        let results = self.run_parallel(sub_tasks, session);
+        let results = self.run_parallel(sub_tasks, session, event_tx);
         self.merge_results(&task, results)
     }
 
@@ -157,7 +157,12 @@ impl TaskCoordinator {
     }
 
     /// 并行执行多个子任务
-    fn run_parallel(&self, tasks: Vec<CoordinatorTask>, session: &Session) -> Vec<WorkerResult> {
+    fn run_parallel(
+        &self,
+        tasks: Vec<CoordinatorTask>,
+        session: &Session,
+        event_tx: Option<&mpsc::Sender<TurnEvent>>,
+    ) -> Vec<WorkerResult> {
         std::thread::scope(|scope| {
             let handles: Vec<_> = tasks
                 .into_iter()
@@ -166,20 +171,24 @@ impl TaskCoordinator {
                     let engine = self.engine.clone();
                     let session = session.clone();
                     let worker_id = format!("worker-{}-{}", i, scru128::new());
+                    let tx = event_tx.cloned();
 
                     scope.spawn(move || {
-                        // 并行 Worker 共享会话工作目录（不创建隔离子目录，避免找不到文件）
                         let worker_context = WorkerContext {
                             worker_id: worker_id.clone(),
                             task_objective: task.user_input,
                             available_tools: Vec::new(),
                             context_scope: super::types::ContextScope::Full,
-                            working_dir: None, // 使用会话 cwd
+                            working_dir: None,
                             budget: WorkerBudget::default(),
                         };
 
                         tracing::info!(worker_id, "Worker 开始执行");
-                        let result = Worker::new(worker_context, engine, session).run();
+                        let mut worker = Worker::new(worker_context, engine, session);
+                        if let Some(tx) = tx {
+                            worker = worker.with_event_tx(tx);
+                        }
+                        let result = worker.run();
                         tracing::info!(
                             worker_id,
                             success = result.success,
