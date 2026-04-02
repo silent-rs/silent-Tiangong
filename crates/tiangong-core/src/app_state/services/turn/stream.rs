@@ -22,11 +22,12 @@ impl AppTurnService {
             message.content.push_str(&delta.content);
             message.reasoning_content.push_str(&delta.reasoning_content);
 
-            // 实时清理流式累积内容中混入的工具 trace，
-            // 避免前端轮询时看到脏数据
-            let cleaned = strip_tool_traces_from_response(&message.content);
-            if cleaned.len() != message.content.len() {
-                message.content = cleaned;
+            // 仅当内容包含工具 trace 特征时才清理，避免破坏正常 Markdown 格式
+            if message.content.contains("工具执行") && message.content.contains("ok=") {
+                let cleaned = strip_tool_traces_from_response(&message.content);
+                if cleaned.len() != message.content.len() {
+                    message.content = cleaned;
+                }
             }
         }
     }
