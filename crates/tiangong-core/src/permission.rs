@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum TrustMode {
     /// 完全信任：所有工具自动放行，不弹审批
-    #[default]
     FullTrust,
     /// 监督模式：高风险操作需要用户确认
+    #[default]
     Supervised,
 }
 
