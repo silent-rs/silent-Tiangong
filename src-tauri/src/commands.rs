@@ -221,6 +221,30 @@ pub fn respond_approval(
     })
 }
 
+/// 获取当前信任模式
+#[tauri::command]
+pub fn get_trust_mode(state: State<TiangongApp>) -> Result<String, String> {
+    state.with_state_read(|core_state| {
+        let mode = core_state.agent_config().trust_mode;
+        Ok(serde_json::to_value(mode)
+            .unwrap_or_default()
+            .as_str()
+            .unwrap_or("full_trust")
+            .to_string())
+    })
+}
+
+/// 设置信任模式
+#[tauri::command]
+pub fn set_trust_mode(mode: String, state: State<TiangongApp>) -> Result<(), String> {
+    state.with_state(|core_state| {
+        let trust_mode: tiangong_core::permission::TrustMode =
+            serde_json::from_value(serde_json::Value::String(mode))
+                .map_err(|e| anyhow::anyhow!("无效的信任模式: {e}"))?;
+        core_state.set_trust_mode(trust_mode)
+    })
+}
+
 /// 获取后台任务列表
 #[tauri::command]
 pub fn get_background_tasks() -> Result<Vec<serde_json::Value>, String> {

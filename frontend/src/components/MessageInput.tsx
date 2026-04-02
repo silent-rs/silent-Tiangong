@@ -2,7 +2,7 @@ import { useState, KeyboardEvent, useEffect, useRef, useCallback } from 'react';
 import { useStore } from '@/store/useStore';
 import { Textarea } from './ui/textarea';
 import { Button } from './ui/button';
-import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard, MessageSquarePlus } from 'lucide-react';
+import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { api } from '@/api/tauri';
 import { useAudioRecording } from '@/hooks/useAudioRecording';
@@ -26,6 +26,23 @@ export function MessageInput() {
   const [mentionIndex, setMentionIndex] = useState(0);
   const [mentionStart, setMentionStart] = useState(-1);
   const mentionRef = useRef<HTMLDivElement>(null);
+
+  // 信任模式
+  const [trustMode, setTrustMode] = useState('full_trust');
+
+  useEffect(() => {
+    api.getTrustMode().then(setTrustMode).catch(() => {});
+  }, []);
+
+  const toggleTrustMode = async () => {
+    const newMode = trustMode === 'full_trust' ? 'supervised' : 'full_trust';
+    try {
+      await api.setTrustMode(newMode);
+      setTrustMode(newMode);
+    } catch (e) {
+      console.error('切换信任模式失败:', e);
+    }
+  };
 
   // STT 录音
   const [hasStt, setHasStt] = useState(false);
@@ -455,7 +472,24 @@ export function MessageInput() {
                 <FolderOpen className="w-3 h-3 shrink-0" />
                 <span className="truncate">{displayCwd || '设置工作目录'}</span>
               </button>
-              <span>⌘+Enter 发送</span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={toggleTrustMode}
+                  className={`flex items-center gap-1 transition-colors ${
+                    trustMode === 'supervised'
+                      ? 'text-amber-500 hover:text-amber-400'
+                      : 'hover:text-foreground'
+                  }`}
+                  title={trustMode === 'supervised' ? '监督模式（高风险操作需确认）' : '完全信任模式（自动执行）'}
+                >
+                  {trustMode === 'supervised' ? (
+                    <><ShieldCheck className="w-3 h-3" /><span>监督</span></>
+                  ) : (
+                    <><ShieldOff className="w-3 h-3" /><span>信任</span></>
+                  )}
+                </button>
+                <span>⌘+Enter 发送</span>
+              </div>
             </div>
           </div>
         )}

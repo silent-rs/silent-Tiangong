@@ -158,6 +158,12 @@ export const api = {
   respondApproval: (requestId: string, approved: boolean): Promise<boolean> =>
     invoke('respond_approval', { requestId, approved }),
 
+  getTrustMode: (): Promise<string> =>
+    invoke('get_trust_mode'),
+
+  setTrustMode: (mode: string): Promise<void> =>
+    invoke('set_trust_mode', { mode }),
+
   getRunSnapshot: (): Promise<RunSnapshot> =>
     invoke('get_run_snapshot'),
 
