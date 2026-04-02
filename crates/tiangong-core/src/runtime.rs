@@ -123,6 +123,8 @@ impl RuntimeEngine {
     pub fn agent_config(&self) -> &AgentConfig { &self.agent_config }
     /// 获取 ModelsConfig 引用
     pub fn models_config(&self) -> &ModelsConfig { &self.models_config }
+    /// 获取权限网关引用
+    pub fn permission_gate(&self) -> &crate::permission::PermissionGate { &self.permission_gate }
 
     pub fn provider_label(&self) -> String {
         format!(

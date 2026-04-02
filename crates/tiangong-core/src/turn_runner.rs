@@ -1,16 +1,18 @@
-//! 事件驱动状态机：自驱动 ReAct 循环 + 控制信号检查点
+//! 事件驱动状态机
 //!
-//! `TurnRunner` 将 ReAct 循环从 `RuntimeEngine` 中提取出来，
-//! 在每轮之间检查 `ControlSignal`（用户追加消息、取消等），
-//! 实现用户与 AI 智能体的协作运行。
+//! `TurnRunner` 以 `loop { match self.phase { ... } }` 驱动执行，
+//! 每个状态是独立方法，状态之间可接收控制信号（用户追加消息、取消）。
 
+use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender};
 
 use anyhow::Result;
 
+use crate::agents::execution_mcp_agent::{McpFunctionTarget, execution_function_tools};
 use crate::app_state::{ControlSignal, TurnEvent};
 use crate::context::assembler::{ContextAssembler, QueryMode};
 use crate::context::compressor::compress_loop_messages;
+use crate::context::organizer::ContextOrganizer;
 use crate::model::{
     FunctionToolSpec, ModelClient, ModelFunctionCall, ModelRequest, ModelStreamChunk, TokenUsage,
 };
@@ -23,19 +25,46 @@ use crate::session::{Message, MessageRole, Session, now_text};
 use crate::tool::ToolResult;
 use crate::turn_state::TurnPhase;
 
-/// ReAct 循环的最大迭代次数
 const MAX_ROUNDS: usize = 20;
 
-/// 状态机驱动的 Turn 执行器
+/// 事件驱动状态机 Turn 执行器
 pub struct TurnRunner {
+    // 固定配置
     engine: RuntimeEngine,
     session: Session,
     user_input: String,
     tx: Sender<TurnEvent>,
     ctrl_rx: Receiver<ControlSignal>,
+
+    // 状态
     phase: TurnPhase,
     cancelled: bool,
     pending_user_messages: Vec<String>,
+
+    // Init 阶段初始化
+    context: Vec<Message>,
+    function_tools: Vec<FunctionToolSpec>,
+    mcp_targets: HashMap<String, McpFunctionTarget>,
+    system_prompt: String,
+    organizer: Option<ContextOrganizer>,
+    session_cwd: Option<std::path::PathBuf>,
+    query_mode: QueryMode,
+    #[cfg(feature = "llm-debug-log")]
+    llm_calls: Vec<crate::session::LlmCallRecord>,
+
+    // 循环累积
+    loop_messages: Vec<Message>,
+    accumulated_usage: TokenUsage,
+    tool_results: Vec<ToolResult>,
+    round: usize,
+    total_output_chunks: usize,
+
+    // LLM 响应（待处理的工具调用）
+    pending_tool_calls: Vec<ModelFunctionCall>,
+
+    // 最终结果
+    final_text: String,
+    final_reasoning: String,
 }
 
 impl TurnRunner {
@@ -55,28 +84,68 @@ impl TurnRunner {
             phase: TurnPhase::Init,
             cancelled: false,
             pending_user_messages: Vec::new(),
+            context: Vec::new(),
+            function_tools: Vec::new(),
+            mcp_targets: HashMap::new(),
+            system_prompt: String::new(),
+            organizer: None,
+            session_cwd: None,
+            query_mode: QueryMode::ToolExecution,
+            #[cfg(feature = "llm-debug-log")]
+            llm_calls: Vec::new(),
+            loop_messages: Vec::new(),
+            accumulated_usage: TokenUsage::default(),
+            tool_results: Vec::new(),
+            round: 0,
+            total_output_chunks: 0,
+            pending_tool_calls: Vec::new(),
+            final_text: String::new(),
+            final_reasoning: String::new(),
         }
     }
 
-    /// 运行状态机直到终止
+    /// 状态机主循环
     pub fn run(mut self) -> Result<TurnExecution> {
+        loop {
+            // 每次状态转换前检查控制信号
+            self.check_control_signals();
+            if self.cancelled {
+                self.phase = TurnPhase::Cancelled;
+            }
+
+            match self.phase.clone() {
+                TurnPhase::Init => self.do_init()?,
+                TurnPhase::ContextAssembly => self.do_context_assembly(),
+                TurnPhase::LlmCalling => self.do_llm_calling()?,
+                TurnPhase::ToolDispatching => self.do_tool_dispatching(),
+                TurnPhase::WaitingApproval { .. } => {
+                    // 未来：暂停等待审批
+                    self.phase = TurnPhase::ToolExecuting;
+                }
+                TurnPhase::ToolExecuting => self.do_tool_executing(),
+                TurnPhase::ResultProcessing => self.do_result_processing(),
+                TurnPhase::Responding => return self.do_responding(),
+                TurnPhase::Completed => unreachable!(),
+                TurnPhase::Failed { error } => return Err(anyhow::anyhow!(error)),
+                TurnPhase::Cancelled => return self.build_cancelled_result(),
+            }
+        }
+    }
+
+    // ===== Init =====
+    fn do_init(&mut self) -> Result<()> {
         // 设置会话级工作目录
-        let session_cwd = if self.session.cwd.is_empty() {
+        self.session_cwd = if self.session.cwd.is_empty() {
             None
         } else {
             let p = std::path::PathBuf::from(&self.session.cwd);
             if p.is_dir() { Some(p) } else { None }
         };
-        crate::tool::set_session_cwd(session_cwd.clone());
+        crate::tool::set_session_cwd(self.session_cwd.clone());
 
         // 上下文装配
-        self.phase = TurnPhase::ContextAssembly;
         let assembler = ContextAssembler::new(self.engine.context_limit);
-
-        let (all_tools, mcp_targets) =
-            crate::agents::execution_mcp_agent::execution_function_tools(
-                &self.engine.agent_config().mcp,
-            );
+        let (all_tools, mcp_targets) = execution_function_tools(&self.engine.agent_config().mcp);
         let mut all_tools: Vec<FunctionToolSpec> = all_tools
             .into_iter()
             .filter(|t| t.name != "mark_step_completed")
@@ -99,153 +168,97 @@ impl TurnRunner {
             self.engine.agent_config(),
         );
 
-        let context = assembled.messages;
-        let function_tools = assembled.tools;
-        let system_prompt = assembled.system_prompt.clone();
-        let organizer = crate::context::organizer::ContextOrganizer::new(self.engine.context_limit)
-            .with_keep_recent_turns(6);
+        self.context = assembled.messages;
+        self.function_tools = assembled.tools;
+        self.system_prompt = assembled.system_prompt.clone();
+        self.mcp_targets = mcp_targets;
+        self.query_mode = assembled.mode;
+        self.organizer = Some(
+            ContextOrganizer::new(self.engine.context_limit).with_keep_recent_turns(6),
+        );
 
-        // === DirectAnswer 快速路径 ===
+        #[cfg(feature = "llm-debug-log")]
+        { self.llm_calls = assembled.llm_calls; }
+
+        // 根据查询模式决定下一步
         if assembled.mode == QueryMode::DirectAnswer {
+            // DirectAnswer 直接进入 LlmCalling（无工具）
             self.phase = TurnPhase::LlmCalling;
-            let req = ModelRequest {
-                session_title: self.session.title.clone(),
-                user_input: system_prompt.clone(),
-                context,
+        } else {
+            // ToolExecution 先发 PlanReady
+            let plan = crate::planner::TaskPlan {
+                id: scru128::new().to_string(),
+                objective: self.user_input.chars().take(50).collect::<String>(),
+                ..Default::default()
             };
-            let tx = self.tx.clone();
-            let resp = if use_stream_mode() {
-                self.engine.client().complete_stream_with_callback(&req, |delta| {
-                    let _ = tx.send(TurnEvent::Chunk(delta.clone()));
-                })?
-            } else {
-                let r = self.engine.client().complete(&req)?;
-                if !r.text.is_empty() {
-                    let _ = tx.send(TurnEvent::Chunk(ModelStreamChunk {
-                        content: r.text.clone(),
-                        reasoning_content: r.reasoning_content.clone(),
-                    }));
-                }
-                r
-            };
+            let _ = self.tx.send(TurnEvent::PlanReady(plan));
+            self.phase = TurnPhase::ContextAssembly;
+        }
+        Ok(())
+    }
 
-            // DirectAnswer 模式不发送 LlmOutput 事件（避免创建多余的系统消息），
-            // 回复已通过 Chunk 事件写入 assistant 消息
+    // ===== ContextAssembly =====
+    fn do_context_assembly(&mut self) {
+        // 注入用户追加消息
+        self.inject_pending_user_messages();
+        self.phase = TurnPhase::LlmCalling;
+    }
 
-            let cleaned = strip_tool_traces_from_response(&resp.text);
-
-            #[cfg(feature = "llm-debug-log")]
-            let llm_calls = {
-                let mut calls = assembled.llm_calls;
-                calls.push(crate::session::LlmCallRecord {
-                    stage: "direct-answer".to_string(),
-                    prompt: system_prompt.clone(),
-                    context_count: req.context.len(),
-                    tool_names: Vec::new(),
-                    response_text: resp.text.clone(),
-                    reasoning_len: resp.reasoning_content.len(),
-                    tool_calls: Vec::new(),
-                    usage: resp.usage.clone(),
-                    timestamp: now_text(),
-                });
-                calls
-            };
-            #[cfg(not(feature = "llm-debug-log"))]
-            let llm_calls = Vec::new();
-
-            self.phase = TurnPhase::Completed;
-            return Ok(TurnExecution {
-                assistant_message: cleaned,
-                assistant_reasoning_content: resp.reasoning_content,
-                system_prompt,
-                plan: crate::planner::TaskPlan {
-                    id: scru128::new().to_string(),
-                    objective: self.user_input.chars().take(50).collect::<String>(),
-                    ..Default::default()
-                },
-                tool_result_summary: None,
-                tool_execution: None,
-                verify_records: Vec::new(),
-                output_mode: "stream".to_string(),
-                output_chunk_count: 1,
-                usage: resp.usage,
-                llm_calls,
-            });
+    // ===== LlmCalling =====
+    fn do_llm_calling(&mut self) -> Result<()> {
+        if self.query_mode == QueryMode::DirectAnswer {
+            return self.do_llm_direct_answer();
         }
 
-        // === ReAct 循环 ===
-        self.phase = TurnPhase::LlmCalling;
-        let plan = crate::planner::TaskPlan {
-            id: scru128::new().to_string(),
-            objective: self.user_input.chars().take(50).collect::<String>(),
-            ..Default::default()
+        let req = ModelRequest {
+            session_title: self.session.title.clone(),
+            user_input: if self.round == 0 {
+                self.system_prompt.clone()
+            } else {
+                "根据上面的工具执行结果继续处理。如果已经收集到足够信息，直接给出最终回复，不要再调用工具。".to_string()
+            },
+            context: {
+                let mut ctx = self.context.clone();
+                ctx.extend(self.loop_messages.clone());
+                ctx
+            },
         };
-        let _ = self.tx.send(TurnEvent::PlanReady(plan.clone()));
 
-        let mut accumulated_usage = TokenUsage::default();
-        let mut tool_results: Vec<ToolResult> = Vec::new();
-        let mut loop_messages: Vec<Message> = Vec::new();
-        let mut final_text = String::new();
-        let mut final_reasoning = String::new();
-        let mut total_output_chunks = 0usize;
+        let response = self.engine.client().complete_with_functions_stream(
+            &req,
+            &self.function_tools,
+            &mut |_delta: &ModelStreamChunk| {},
+        )?;
 
-        for round in 0..MAX_ROUNDS {
-            // === 检查点：每轮开始前检查控制信号 ===
-            self.check_control_signals();
-            if self.cancelled {
-                self.phase = TurnPhase::Cancelled;
-                break;
-            }
+        self.accumulated_usage.accumulate(&response.usage);
 
-            // 注入用户追加消息
-            self.inject_pending_user_messages(&mut loop_messages);
-
-            let stage = format!("react-round-{}", round + 1);
-
-            // 构建本轮请求
-            let req = ModelRequest {
-                session_title: self.session.title.clone(),
-                user_input: if round == 0 {
-                    system_prompt.clone()
-                } else {
-                    "根据上面的工具执行结果继续处理。如果已经收集到足够信息，直接给出最终回复，不要再调用工具。".to_string()
-                },
-                context: {
-                    let mut ctx = context.clone();
-                    ctx.extend(loop_messages.clone());
-                    ctx
-                },
-            };
-
-            // 调用 LLM
-            self.phase = TurnPhase::LlmCalling;
-            let response = self.engine.client().complete_with_functions_stream(
-                &req,
-                &function_tools,
-                &mut |_delta: &ModelStreamChunk| {},
-            )?;
-
-            accumulated_usage.accumulate(&response.usage);
-
+        if response.tool_calls.is_empty() {
             // 无工具调用 → 最终回复
-            if response.tool_calls.is_empty() {
-                final_text = response.text.clone();
-                final_reasoning = response.reasoning_content.clone();
-                if !final_text.is_empty() || !final_reasoning.is_empty() {
-                    let _ = self.tx.send(TurnEvent::Chunk(ModelStreamChunk {
-                        content: final_text.clone(),
-                        reasoning_content: final_reasoning.clone(),
-                    }));
-                    total_output_chunks += 1;
-                }
-                self.phase = TurnPhase::Responding;
-                break;
+            self.final_text = response.text.clone();
+            self.final_reasoning = response.reasoning_content.clone();
+            if !self.final_text.is_empty() || !self.final_reasoning.is_empty() {
+                let _ = self.tx.send(TurnEvent::Chunk(ModelStreamChunk {
+                    content: self.final_text.clone(),
+                    reasoning_content: self.final_reasoning.clone(),
+                }));
+                self.total_output_chunks += 1;
+            }
+            self.phase = TurnPhase::Responding;
+        } else {
+            // 有工具调用
+            let tool_call_names: Vec<String> =
+                response.tool_calls.iter().map(|tc| tc.name.clone()).collect();
+
+            // 中间文字输出推送给用户（如"让我查看一下..."）
+            if !response.text.is_empty() {
+                let _ = self.tx.send(TurnEvent::Chunk(ModelStreamChunk {
+                    content: format!("{}\n\n", response.text),
+                    reasoning_content: response.reasoning_content.clone(),
+                }));
             }
 
-            // 有工具调用 → 记录并执行
-            let tool_call_names: Vec<String> = response.tool_calls.iter().map(|tc| tc.name.clone()).collect();
             let output = LlmOutputRecord {
-                stage: stage.clone(),
+                stage: format!("react-round-{}", self.round + 1),
                 content: response.text.clone(),
                 reasoning_content: response.reasoning_content.clone(),
                 tool_calls: tool_call_names.clone(),
@@ -253,13 +266,13 @@ impl TurnRunner {
             };
             let _ = self.tx.send(TurnEvent::LlmOutput(output));
 
-            // 记录 assistant 工具调用意图
+            // 记录 assistant 工具调用意图到 loop_messages
             let assistant_text = if response.text.is_empty() {
                 format!("[调用工具: {}]", tool_call_names.join(", "))
             } else {
                 response.text.clone()
             };
-            loop_messages.push(Message {
+            self.loop_messages.push(Message {
                 id: scru128::new().to_string(),
                 role: MessageRole::Assistant,
                 content: assistant_text,
@@ -267,89 +280,147 @@ impl TurnRunner {
                 created_at: now_text(),
             });
 
-            // 执行工具
-            self.phase = TurnPhase::ToolExecuting;
-            let call_results = Self::execute_tool_calls(
-                &self.engine,
-                &self.tx,
-                &response.tool_calls,
-                &mcp_targets,
-                &session_cwd,
+            self.pending_tool_calls = response.tool_calls;
+            self.phase = TurnPhase::ToolDispatching;
+        }
+        Ok(())
+    }
+
+    /// DirectAnswer 快速路径
+    fn do_llm_direct_answer(&mut self) -> Result<()> {
+        let req = ModelRequest {
+            session_title: self.session.title.clone(),
+            user_input: self.system_prompt.clone(),
+            context: self.context.clone(),
+        };
+        let tx = self.tx.clone();
+        let resp = if use_stream_mode() {
+            self.engine.client().complete_stream_with_callback(&req, |delta| {
+                let _ = tx.send(TurnEvent::Chunk(delta.clone()));
+            })?
+        } else {
+            let r = self.engine.client().complete(&req)?;
+            if !r.text.is_empty() {
+                let _ = tx.send(TurnEvent::Chunk(ModelStreamChunk {
+                    content: r.text.clone(),
+                    reasoning_content: r.reasoning_content.clone(),
+                }));
+            }
+            r
+        };
+
+        self.final_text = resp.text;
+        self.final_reasoning = resp.reasoning_content;
+        self.accumulated_usage = resp.usage;
+        self.total_output_chunks = 1;
+
+        #[cfg(feature = "llm-debug-log")]
+        self.llm_calls.push(crate::session::LlmCallRecord {
+            stage: "direct-answer".to_string(),
+            prompt: self.system_prompt.clone(),
+            context_count: req.context.len(),
+            tool_names: Vec::new(),
+            response_text: self.final_text.clone(),
+            reasoning_len: self.final_reasoning.len(),
+            tool_calls: Vec::new(),
+            usage: self.accumulated_usage.clone(),
+            timestamp: now_text(),
+        });
+
+        self.phase = TurnPhase::Responding;
+        Ok(())
+    }
+
+    // ===== ToolDispatching =====
+    fn do_tool_dispatching(&mut self) {
+        use crate::permission::PermissionDecision;
+        for call in &self.pending_tool_calls {
+            match self.engine.permission_gate().check(&call.name) {
+                PermissionDecision::Approved => {}
+                PermissionDecision::Denied { reason } => {
+                    tracing::warn!("权限拒绝工具 {}: {}", call.name, reason);
+                }
+                PermissionDecision::NeedsApproval { request_id } => {
+                    tracing::info!("权限审批 {request_id}: {} (自动放行)", call.name);
+                }
+            }
+        }
+        self.phase = TurnPhase::ToolExecuting;
+    }
+
+    // ===== ToolExecuting =====
+    fn do_tool_executing(&mut self) {
+        let pending_calls = std::mem::take(&mut self.pending_tool_calls);
+        let call_results = Self::execute_tool_calls_static(
+            &self.engine,
+            &self.tx,
+            &pending_calls,
+            &self.mcp_targets,
+            &self.session_cwd,
+        );
+
+        let mut round_feedback_parts: Vec<String> = Vec::new();
+        for (call_name, result) in call_results {
+            let _ = self.tx.send(TurnEvent::ToolExecution(result.clone()));
+            self.tool_results.push(result.clone());
+
+            let feedback = format!(
+                "工具 {} 执行{}：{}",
+                call_name,
+                if result.ok { "成功" } else { "失败" },
+                if result.stdout.chars().count() > 2000 {
+                    let truncated: String = result.stdout.chars().take(2000).collect();
+                    format!("{truncated}...(截断)")
+                } else if result.stdout.is_empty() {
+                    result.summary.clone()
+                } else {
+                    result.stdout.clone()
+                }
             );
+            round_feedback_parts.push(feedback);
+        }
 
-            // 收集结果
-            let mut round_feedback_parts: Vec<String> = Vec::new();
-            for (call_name, result) in call_results {
-                let _ = self.tx.send(TurnEvent::ToolExecution(result.clone()));
-                tool_results.push(result.clone());
+        self.loop_messages.push(Message {
+            id: scru128::new().to_string(),
+            role: MessageRole::System,
+            content: round_feedback_parts.join("\n\n"),
+            reasoning_content: String::new(),
+            created_at: now_text(),
+        });
 
-                let feedback = format!(
-                    "工具 {} 执行{}：{}",
-                    call_name,
-                    if result.ok { "成功" } else { "失败" },
-                    if result.stdout.chars().count() > 2000 {
-                        let truncated: String = result.stdout.chars().take(2000).collect();
-                        format!("{truncated}...(截断)")
-                    } else if result.stdout.is_empty() {
-                        result.summary.clone()
-                    } else {
-                        result.stdout.clone()
-                    }
-                );
-                round_feedback_parts.push(feedback);
-            }
+        self.phase = TurnPhase::ResultProcessing;
+    }
 
-            loop_messages.push(Message {
-                id: scru128::new().to_string(),
-                role: MessageRole::System,
-                content: round_feedback_parts.join("\n\n"),
-                reasoning_content: String::new(),
-                created_at: now_text(),
-            });
-
-            // === 检查点：工具执行完成后检查控制信号 ===
-            self.phase = TurnPhase::ResultProcessing;
-            self.check_control_signals();
-            if self.cancelled {
-                self.phase = TurnPhase::Cancelled;
-                break;
-            }
-
-            // 上下文压缩
-            let prompt_tokens = response.usage.prompt_tokens;
+    // ===== ResultProcessing =====
+    fn do_result_processing(&mut self) {
+        if let Some(organizer) = &self.organizer {
+            let prompt_tokens = self.accumulated_usage.prompt_tokens;
             if organizer.needs_compression(prompt_tokens) {
-                match compress_loop_messages(&loop_messages, 3, self.engine.client()) {
-                    Ok(compressed) => loop_messages = compressed,
+                match compress_loop_messages(&self.loop_messages, 3, self.engine.client()) {
+                    Ok(compressed) => self.loop_messages = compressed,
                     Err(err) => tracing::warn!("loop_messages 压缩失败：{err}"),
                 }
             }
         }
 
-        // 如果取消了，构建取消结果
-        if self.cancelled {
-            return Ok(TurnExecution {
-                assistant_message: "执行已取消".to_string(),
-                assistant_reasoning_content: String::new(),
-                system_prompt,
-                plan,
-                tool_result_summary: None,
-                tool_execution: None,
-                verify_records: Vec::new(),
-                output_mode: "stream".to_string(),
-                output_chunk_count: 0,
-                usage: accumulated_usage,
-                llm_calls: Vec::new(),
-            });
+        self.round += 1;
+        if self.round >= MAX_ROUNDS {
+            self.phase = TurnPhase::Responding;
+        } else {
+            self.phase = TurnPhase::ContextAssembly;
         }
+    }
 
-        // 如果循环结束仍无最终回复，做最后一次无工具调用
-        if final_text.is_empty() {
+    // ===== Responding =====
+    fn do_responding(mut self) -> Result<TurnExecution> {
+        // 如果循环结束仍无最终回复，做最后一次无工具 LLM 调用
+        if self.final_text.is_empty() && self.query_mode != QueryMode::DirectAnswer {
             let req = ModelRequest {
                 session_title: self.session.title.clone(),
                 user_input: "请基于以上所有工具执行结果，直接给出最终回复。".to_string(),
                 context: {
-                    let mut ctx = context.clone();
-                    ctx.extend(loop_messages.clone());
+                    let mut ctx = self.context.clone();
+                    ctx.extend(self.loop_messages.clone());
                     ctx
                 },
             };
@@ -368,47 +439,76 @@ impl TurnRunner {
                 }
                 r
             };
-            accumulated_usage.accumulate(&resp.usage);
-            final_text = resp.text;
-            final_reasoning = resp.reasoning_content;
-            total_output_chunks += 1;
+            self.accumulated_usage.accumulate(&resp.usage);
+            self.final_text = resp.text;
+            self.final_reasoning = resp.reasoning_content;
+            self.total_output_chunks += 1;
         }
 
-        let tool_result_summary = if tool_results.is_empty() {
+        self.build_result()
+    }
+
+    // ===== 结果构建 =====
+    fn build_result(self) -> Result<TurnExecution> {
+        let tool_result_summary = if self.tool_results.is_empty() {
             None
         } else {
             Some(format!(
                 "{} 次工具调用，{} 成功，{} 失败",
-                tool_results.len(),
-                tool_results.iter().filter(|r| r.ok).count(),
-                tool_results.iter().filter(|r| !r.ok).count(),
+                self.tool_results.len(),
+                self.tool_results.iter().filter(|r| r.ok).count(),
+                self.tool_results.iter().filter(|r| !r.ok).count(),
             ))
         };
-        let tool_execution = tool_results.into_iter().filter_map(|r| r.execution).next_back();
-        let cleaned_text = strip_tool_traces_from_response(&final_text);
+        let tool_execution = self.tool_results.into_iter().filter_map(|r| r.execution).next_back();
+        let cleaned_text = strip_tool_traces_from_response(&self.final_text);
 
         #[cfg(feature = "llm-debug-log")]
-        let llm_calls = assembled.llm_calls;
+        let llm_calls = self.llm_calls;
         #[cfg(not(feature = "llm-debug-log"))]
         let llm_calls = Vec::new();
 
-        self.phase = TurnPhase::Completed;
         Ok(TurnExecution {
             assistant_message: cleaned_text,
-            assistant_reasoning_content: final_reasoning,
-            system_prompt,
-            plan,
+            assistant_reasoning_content: self.final_reasoning,
+            system_prompt: self.system_prompt,
+            plan: crate::planner::TaskPlan {
+                id: scru128::new().to_string(),
+                objective: self.user_input.chars().take(50).collect::<String>(),
+                ..Default::default()
+            },
             tool_result_summary,
             tool_execution,
             verify_records: Vec::new(),
             output_mode: "stream".to_string(),
-            output_chunk_count: total_output_chunks,
-            usage: accumulated_usage,
+            output_chunk_count: self.total_output_chunks,
+            usage: self.accumulated_usage,
             llm_calls,
         })
     }
 
-    /// 非阻塞检查控制信号
+    fn build_cancelled_result(self) -> Result<TurnExecution> {
+        #[cfg(feature = "llm-debug-log")]
+        let llm_calls = self.llm_calls;
+        #[cfg(not(feature = "llm-debug-log"))]
+        let llm_calls = Vec::new();
+
+        Ok(TurnExecution {
+            assistant_message: "执行已取消".to_string(),
+            assistant_reasoning_content: String::new(),
+            system_prompt: self.system_prompt,
+            plan: crate::planner::TaskPlan::default(),
+            tool_result_summary: None,
+            tool_execution: None,
+            verify_records: Vec::new(),
+            output_mode: "stream".to_string(),
+            output_chunk_count: 0,
+            usage: self.accumulated_usage,
+            llm_calls,
+        })
+    }
+
+    // ===== 控制信号处理 =====
     fn check_control_signals(&mut self) {
         while let Ok(signal) = self.ctrl_rx.try_recv() {
             match signal {
@@ -420,17 +520,14 @@ impl TurnRunner {
                     tracing::info!("收到取消信号");
                     self.cancelled = true;
                 }
-                ControlSignal::PermissionResponse { .. } => {
-                    // Phase 5+ 处理
-                }
+                ControlSignal::PermissionResponse { .. } => {}
             }
         }
     }
 
-    /// 将用户追加消息注入到 loop_messages
-    fn inject_pending_user_messages(&mut self, loop_messages: &mut Vec<Message>) {
+    fn inject_pending_user_messages(&mut self) {
         for msg in self.pending_user_messages.drain(..) {
-            loop_messages.push(Message {
+            self.loop_messages.push(Message {
                 id: scru128::new().to_string(),
                 role: MessageRole::User,
                 content: format!("[用户追加指示] {msg}"),
@@ -440,15 +537,14 @@ impl TurnRunner {
         }
     }
 
-    /// 执行工具调用（管理命令通过 tx 发出，其余并发执行）
-    fn execute_tool_calls(
+    // ===== 工具执行（静态方法，避免借用冲突） =====
+    fn execute_tool_calls_static(
         engine: &RuntimeEngine,
         tx: &Sender<TurnEvent>,
         tool_calls: &[ModelFunctionCall],
-        mcp_targets: &std::collections::HashMap<String, crate::agents::execution_mcp_agent::McpFunctionTarget>,
+        mcp_targets: &HashMap<String, McpFunctionTarget>,
         session_cwd: &Option<std::path::PathBuf>,
     ) -> Vec<(String, ToolResult)> {
-        // 分离管理工具
         let mut call_results: Vec<(String, ToolResult)> = Vec::new();
         let mut other_calls: Vec<&ModelFunctionCall> = Vec::new();
 
@@ -460,7 +556,6 @@ impl TurnRunner {
             }
         }
 
-        // 执行普通工具
         if other_calls.len() == 1 {
             let call = other_calls[0];
             let result = engine.execute_tool_call(call, mcp_targets, &engine.agent_config().mcp);
