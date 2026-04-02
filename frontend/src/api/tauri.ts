@@ -275,6 +275,9 @@ export const api = {
   stopAudio: (): Promise<void> =>
     invoke('stop_audio'),
 
+  getSessionCost: (sessionId?: string): Promise<{ total_prompt_tokens: number; total_completion_tokens: number; total_tokens: number; call_count: number; tool_call_count: number }> =>
+    invoke('get_session_cost', { sessionId }),
+
   hasTtsCapability: (): Promise<boolean> =>
     invoke('has_tts_capability'),
 
