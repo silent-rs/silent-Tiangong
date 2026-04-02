@@ -20,7 +20,7 @@ impl AppTurnService {
             return;
         };
 
-        // 记录 system_prompt 到会话（在 user 消息和 assistant 回复之间）
+        // 记录 system_prompt 到会话（插入到 assistant 消息之前）
         if !exec.system_prompt.is_empty()
             && let Some(session) = state
                 .store
@@ -29,22 +29,25 @@ impl AppTurnService {
                 .iter_mut()
                 .find(|session| session.id == sid)
         {
-            // 检查是否已有该 turn 的 system prompt（避免重复记录）
-            let last_user_time = session.messages.iter()
-                .rev()
-                .find(|mm| mm.role == MessageRole::User)
-                .map(|u| u.created_at.clone())
-                .unwrap_or_default();
             let already_has = session.messages.iter().any(|m|
                 m.role == MessageRole::System
                 && m.content.starts_with("[System Prompt]")
-                && m.created_at >= last_user_time
             );
             if !already_has {
-                session.append_message(
-                    MessageRole::System,
-                    format!("[System Prompt]\n{}", exec.system_prompt),
-                );
+                // 找到 assistant 消息的位置，在其前面插入
+                let insert_pos = if let Some(amid) = &assistant_message_id {
+                    session.messages.iter().position(|m| m.id == *amid).unwrap_or(session.messages.len())
+                } else {
+                    session.messages.len()
+                };
+                let system_msg = Message {
+                    id: scru128::new().to_string(),
+                    role: MessageRole::System,
+                    content: format!("[System Prompt]\n{}", exec.system_prompt),
+                    reasoning_content: String::new(),
+                    created_at: crate::session::now_text(),
+                };
+                session.messages.insert(insert_pos, system_msg);
             }
         }
 

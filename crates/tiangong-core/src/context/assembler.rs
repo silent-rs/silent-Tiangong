@@ -78,11 +78,17 @@ impl QueryClassifier {
         let resp = client.complete(&req)?;
         let answer = resp.text.trim().to_lowercase();
 
+        tracing::info!(
+            input_len = input.len(),
+            classify_prompt_tokens = resp.usage.prompt_tokens,
+            classify_completion_tokens = resp.usage.completion_tokens,
+            result = if answer.contains("chat") { "direct_answer" } else { "tool_execution" },
+            "LLM 意图分类"
+        );
+
         if answer.contains("chat") {
-            tracing::info!(input_len = input.len(), "LLM 意图分类：直接回答");
             Ok(QueryMode::DirectAnswer)
         } else {
-            tracing::info!(input_len = input.len(), "LLM 意图分类：工具执行");
             Ok(QueryMode::ToolExecution)
         }
     }
