@@ -20,6 +20,34 @@ impl AppTurnService {
             return;
         };
 
+        // 记录 system_prompt 到会话（在 user 消息和 assistant 回复之间）
+        if !exec.system_prompt.is_empty()
+            && let Some(session) = state
+                .store
+                .session
+                .sessions
+                .iter_mut()
+                .find(|session| session.id == sid)
+        {
+            // 检查是否已有该 turn 的 system prompt（避免重复记录）
+            let last_user_time = session.messages.iter()
+                .rev()
+                .find(|mm| mm.role == MessageRole::User)
+                .map(|u| u.created_at.clone())
+                .unwrap_or_default();
+            let already_has = session.messages.iter().any(|m|
+                m.role == MessageRole::System
+                && m.content.starts_with("[System Prompt]")
+                && m.created_at >= last_user_time
+            );
+            if !already_has {
+                session.append_message(
+                    MessageRole::System,
+                    format!("[System Prompt]\n{}", exec.system_prompt),
+                );
+            }
+        }
+
         let mut final_assistant_message_id = assistant_message_id;
         let mut updated_existing_message = false;
         if let Some(message_id) = final_assistant_message_id.as_deref()

@@ -64,6 +64,7 @@ pub use crate::agents::response_agent::VerifyExecutionRecord;
 pub struct TurnExecution {
     pub assistant_message: String,
     pub assistant_reasoning_content: String,
+    pub system_prompt: String,
     pub plan: TaskPlan,
     pub tool_result_summary: Option<String>,
     pub tool_execution: Option<ToolExecutionRecord>,
@@ -194,7 +195,7 @@ impl RuntimeEngine {
         if assembled.mode == crate::context::assembler::QueryMode::DirectAnswer {
             let req = ModelRequest {
                 session_title: session.title.clone(),
-                user_input: system_prompt,
+                user_input: system_prompt.clone(),
                 context,
             };
             let resp = if use_stream_mode() {
@@ -213,6 +214,7 @@ impl RuntimeEngine {
             return Ok(TurnExecution {
                 assistant_message: cleaned,
                 assistant_reasoning_content: resp.reasoning_content,
+                system_prompt,
                 plan: TaskPlan {
                     id: scru128::new().to_string(),
                     objective: user_input.chars().take(50).collect::<String>(),
@@ -469,6 +471,7 @@ impl RuntimeEngine {
         Ok(TurnExecution {
             assistant_message: cleaned_text,
             assistant_reasoning_content: final_reasoning,
+            system_prompt,
             plan,
             tool_result_summary,
             tool_execution,
