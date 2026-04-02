@@ -118,9 +118,8 @@ impl TurnRunner {
                 TurnPhase::ContextAssembly => self.do_context_assembly(),
                 TurnPhase::LlmCalling => self.do_llm_calling()?,
                 TurnPhase::ToolDispatching => self.do_tool_dispatching(),
-                TurnPhase::WaitingApproval { .. } => {
-                    // 未来：暂停等待审批
-                    self.phase = TurnPhase::ToolExecuting;
+                TurnPhase::WaitingApproval { ref request_id, ref tool_name } => {
+                    self.do_waiting_approval(request_id.clone(), tool_name.clone());
                 }
                 TurnPhase::ToolExecuting => self.do_tool_executing(),
                 TurnPhase::ResultProcessing => self.do_result_processing(),
@@ -334,21 +333,116 @@ impl TurnRunner {
         Ok(())
     }
 
+    // ===== WaitingApproval =====
+    fn do_waiting_approval(&mut self, request_id: String, tool_name: String) {
+        // 阻塞等待审批响应（通过 ctrl_rx）
+        // 使用 recv_timeout 避免无限阻塞，每秒检查一次取消信号
+        loop {
+            match self.ctrl_rx.recv_timeout(std::time::Duration::from_secs(1)) {
+                Ok(ControlSignal::PermissionResponse { request_id: rid, approved }) => {
+                    if rid == request_id {
+                        if approved {
+                            tracing::info!("工具 {tool_name} 审批通过");
+                            self.phase = TurnPhase::ToolExecuting;
+                        } else {
+                            tracing::info!("工具 {tool_name} 审批拒绝");
+                            // 移除被拒绝的工具调用
+                            self.pending_tool_calls.retain(|c| c.name != tool_name);
+                            self.loop_messages.push(Message {
+                                id: scru128::new().to_string(),
+                                role: MessageRole::System,
+                                content: format!("工具 {tool_name} 被用户拒绝"),
+                                reasoning_content: String::new(),
+                                created_at: now_text(),
+                            });
+                            if self.pending_tool_calls.is_empty() {
+                                self.phase = TurnPhase::ContextAssembly;
+                            } else {
+                                self.phase = TurnPhase::ToolExecuting;
+                            }
+                        }
+                        return;
+                    }
+                }
+                Ok(ControlSignal::Cancel) => {
+                    self.cancelled = true;
+                    self.phase = TurnPhase::Cancelled;
+                    return;
+                }
+                Ok(ControlSignal::UserMessage(msg)) => {
+                    self.pending_user_messages.push(msg);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // 继续等待
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    // 通道断开，取消
+                    self.cancelled = true;
+                    self.phase = TurnPhase::Cancelled;
+                    return;
+                }
+            }
+        }
+    }
+
     // ===== ToolDispatching =====
     fn do_tool_dispatching(&mut self) {
         use crate::permission::PermissionDecision;
+
+        let mut denied_tools: Vec<String> = Vec::new();
+
         for call in &self.pending_tool_calls {
             match self.engine.permission_gate().check(&call.name) {
                 PermissionDecision::Approved => {}
                 PermissionDecision::Denied { reason } => {
                     tracing::warn!("权限拒绝工具 {}: {}", call.name, reason);
+                    denied_tools.push(call.name.clone());
                 }
                 PermissionDecision::NeedsApproval { request_id } => {
-                    tracing::info!("权限审批 {request_id}: {} (自动放行)", call.name);
+                    // 发送审批请求到前端
+                    let args_summary = serde_json::to_string(&call.arguments)
+                        .unwrap_or_default()
+                        .chars()
+                        .take(200)
+                        .collect::<String>();
+                    let _ = self.tx.send(TurnEvent::ApprovalRequest {
+                        request_id: request_id.clone(),
+                        tool_name: call.name.clone(),
+                        tool_args_summary: args_summary,
+                    });
+                    // 暂停在 WaitingApproval 状态，等待 ControlSignal::PermissionResponse
+                    self.phase = TurnPhase::WaitingApproval {
+                        tool_name: call.name.clone(),
+                        request_id,
+                    };
+                    return;
                 }
             }
         }
-        self.phase = TurnPhase::ToolExecuting;
+
+        // 移除被拒绝的工具调用
+        if !denied_tools.is_empty() {
+            self.pending_tool_calls.retain(|c| !denied_tools.contains(&c.name));
+            // 将拒绝信息加入 loop_messages 作为反馈
+            let denied_msg = denied_tools.iter()
+                .map(|n| format!("工具 {n} 被权限策略拒绝"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.loop_messages.push(Message {
+                id: scru128::new().to_string(),
+                role: MessageRole::System,
+                content: denied_msg,
+                reasoning_content: String::new(),
+                created_at: now_text(),
+            });
+        }
+
+        if self.pending_tool_calls.is_empty() {
+            // 所有工具被拒绝，回到 ContextAssembly 让 LLM 知道
+            self.phase = TurnPhase::ContextAssembly;
+        } else {
+            self.phase = TurnPhase::ToolExecuting;
+        }
     }
 
     // ===== ToolExecuting =====

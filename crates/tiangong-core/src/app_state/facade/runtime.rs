@@ -30,6 +30,7 @@ impl TiangongState {
             last_error,
             last_usage: self.store.runtime.run.last_usage.clone(),
             updated_at: now_text(),
+            approval_request_id: None,
         };
     }
 }

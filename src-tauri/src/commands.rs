@@ -209,6 +209,18 @@ pub fn append_message(content: String, state: State<TiangongApp>) -> Result<bool
     state.with_state(|core_state| core_state.append_user_message_to_running_turn(&content))
 }
 
+/// 响应工具审批请求
+#[tauri::command]
+pub fn respond_approval(
+    request_id: String,
+    approved: bool,
+    state: State<TiangongApp>,
+) -> Result<bool, String> {
+    state.with_state(|core_state| {
+        core_state.respond_to_approval(&request_id, approved)
+    })
+}
+
 /// 获取后台任务列表
 #[tauri::command]
 pub fn get_background_tasks() -> Result<Vec<serde_json::Value>, String> {

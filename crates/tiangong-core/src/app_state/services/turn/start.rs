@@ -78,6 +78,7 @@ impl AppTurnService {
             last_error: None,
             last_usage: None,
             updated_at: now_text(),
+            approval_request_id: None,
         };
 
         // 在创建 snapshot 前，检查并更新滚动摘要

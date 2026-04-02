@@ -51,11 +51,21 @@ pub struct Session {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionTaskStatus {
+    /// 排队等待执行
+    Queued,
     #[default]
     Planning,
     Executing,
+    /// 阻塞（等待外部依赖）
+    Blocked,
+    /// 等待用户审批
+    WaitingApproval,
+    /// 后台运行
+    Backgrounded,
     Completed,
     Failed,
+    /// 已取消
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

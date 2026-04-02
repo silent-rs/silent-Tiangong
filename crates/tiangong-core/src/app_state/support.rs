@@ -68,6 +68,12 @@ pub enum TurnEvent {
     Failed(String),
     /// 管理命令：主线程处理 MCP/Skill 管理操作
     ManagementCommand(ManagementCommand),
+    /// 权限审批请求：需要用户确认后才能执行工具
+    ApprovalRequest {
+        request_id: String,
+        tool_name: String,
+        tool_args_summary: String,
+    },
 }
 
 /// 从主线程发送到执行线程的控制信号
@@ -156,6 +162,11 @@ impl TurnEvent {
                 RuntimeEventType::SystemSignal,
                 EventSource::Runtime,
                 serde_json::json!({"type": "management_command"}),
+            ),
+            TurnEvent::ApprovalRequest { request_id, tool_name, .. } => (
+                RuntimeEventType::PermissionRequest,
+                EventSource::Permission,
+                serde_json::json!({"request_id": request_id, "tool_name": tool_name}),
             ),
         };
 

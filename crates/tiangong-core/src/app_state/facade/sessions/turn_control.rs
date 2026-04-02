@@ -9,6 +9,20 @@ impl TiangongState {
         self.replace_run_snapshot(RunStatus::Idle, summary, None);
     }
 
+    /// 响应工具审批请求
+    pub fn respond_to_approval(&mut self, request_id: &str, approved: bool) -> Result<bool> {
+        let active_id = self.store.session.active_session_id.clone();
+        if let Some(pending) = self.store.runtime.pending_turns.get(&active_id) {
+            let _ = pending.control_tx.send(ControlSignal::PermissionResponse {
+                request_id: request_id.to_string(),
+                approved,
+            });
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// 向正在执行的 turn 追加用户消息
     pub fn append_user_message_to_running_turn(&mut self, content: &str) -> Result<bool> {
         let active_id = self.store.session.active_session_id.clone();
@@ -81,6 +95,7 @@ impl TiangongState {
             last_error: Some("cancelled_by_user".to_string()),
             last_usage: None,
             updated_at: now_text(),
+            approval_request_id: None,
         };
 
         self.persist_session_and_app(&pending.session_id)?;
@@ -206,6 +221,14 @@ impl TiangongState {
                     TurnEvent::ManagementCommand(cmd) => {
                         self.execute_management_command(cmd);
                     }
+                    TurnEvent::ApprovalRequest { request_id, tool_name, tool_args_summary } => {
+                        self.store.runtime.run.status = RunStatus::WaitingApproval;
+                        self.store.runtime.run.summary = format!(
+                            "等待审批：{tool_name}（{tool_args_summary}）"
+                        );
+                        self.store.runtime.run.approval_request_id = Some(request_id.clone());
+                        tracing::info!(request_id, tool_name, "前端收到审批请求");
+                    }
                 }
             }
 
@@ -286,6 +309,11 @@ impl TiangongState {
                 }
                 TurnEvent::ManagementCommand(cmd) => {
                     self.execute_management_command(cmd);
+                }
+                TurnEvent::ApprovalRequest { request_id, tool_name, tool_args_summary } => {
+                    self.store.runtime.run.status = RunStatus::WaitingApproval;
+                    self.store.runtime.run.summary = format!("等待审批：{tool_name}（{tool_args_summary}）");
+                    self.store.runtime.run.approval_request_id = Some(request_id);
                 }
             }
         }

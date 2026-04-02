@@ -46,6 +46,8 @@ pub struct RunSnapshot {
     pub last_error: Option<String>,
     pub last_usage: Option<TokenUsage>,
     pub updated_at: String,
+    /// 等待审批的请求 ID（WaitingApproval 状态时有值）
+    pub approval_request_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]

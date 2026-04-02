@@ -311,6 +311,7 @@ impl AppTurnService {
             last_error: None,
             last_usage: None,
             updated_at: now_text(),
+            approval_request_id: None,
         };
 
         let _ = state.persist_session_and_app(&sid);

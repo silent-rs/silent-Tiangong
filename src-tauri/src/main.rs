@@ -48,6 +48,7 @@ fn main() {
             tiangong_app::commands::get_model_list,
             tiangong_app::commands::fetch_provider_models,
             tiangong_app::commands::append_message,
+            tiangong_app::commands::respond_approval,
             tiangong_app::commands::synthesize_speech,
             tiangong_app::commands::has_tts_capability,
             tiangong_app::commands::has_stt_capability,
