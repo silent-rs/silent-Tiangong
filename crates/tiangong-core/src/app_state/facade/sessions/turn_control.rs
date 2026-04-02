@@ -17,6 +17,14 @@ impl TiangongState {
                 request_id: request_id.to_string(),
                 approved,
             });
+            // 立即重置审批状态，前端下次轮询即可看到变化
+            self.store.runtime.run.status = RunStatus::Executing;
+            self.store.runtime.run.summary = if approved {
+                "审批通过，正在执行工具...".to_string()
+            } else {
+                "审批拒绝，正在重新决策...".to_string()
+            };
+            self.store.runtime.run.approval_request_id = None;
             Ok(true)
         } else {
             Ok(false)
