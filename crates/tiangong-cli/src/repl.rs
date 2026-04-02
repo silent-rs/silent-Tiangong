@@ -142,6 +142,7 @@ fn print_status_line(state: &TiangongState, draft_new: bool) {
         RunStatus::Idle => "idle",
         RunStatus::Planning => "planning",
         RunStatus::Executing => "executing",
+        RunStatus::WaitingApproval => "waiting_approval",
         RunStatus::Completed => "done",
         RunStatus::Failed => "failed",
     };

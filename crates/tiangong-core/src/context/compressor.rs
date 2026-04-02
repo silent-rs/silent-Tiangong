@@ -146,8 +146,9 @@ impl ContextCompressor {
                 MessageRole::Assistant => "助手",
                 MessageRole::System => "系统",
             };
-            let content = if msg.content.len() > 2000 {
-                format!("{}...(已截断)", &msg.content[..2000])
+            let content = if msg.content.chars().count() > 2000 {
+                let truncated: String = msg.content.chars().take(2000).collect();
+                format!("{truncated}...(已截断)")
             } else {
                 msg.content.clone()
             };
@@ -218,8 +219,9 @@ pub fn compress_loop_messages(
             MessageRole::System => "工具结果",
             MessageRole::User => "用户",
         };
-        let content = if msg.content.len() > 1000 {
-            format!("{}...(已截断)", &msg.content[..1000])
+        let content = if msg.content.chars().count() > 1000 {
+            let truncated: String = msg.content.chars().take(1000).collect();
+            format!("{truncated}...(已截断)")
         } else {
             msg.content.clone()
         };

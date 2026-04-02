@@ -29,6 +29,7 @@ export interface RunSnapshot {
   messages: Message[];
   input_draft: string;
   pending_session_ids: string[];
+  approval_request_id?: string;
 }
 
 export interface TaskPlan {
@@ -150,6 +151,18 @@ export const api = {
 
   cancelTurn: (): Promise<boolean> =>
     invoke('cancel_turn'),
+
+  appendMessage: (content: string): Promise<boolean> =>
+    invoke('append_message', { content }),
+
+  respondApproval: (requestId: string, approved: boolean): Promise<boolean> =>
+    invoke('respond_approval', { requestId, approved }),
+
+  getTrustMode: (): Promise<string> =>
+    invoke('get_trust_mode'),
+
+  setTrustMode: (mode: string): Promise<void> =>
+    invoke('set_trust_mode', { mode }),
 
   getRunSnapshot: (): Promise<RunSnapshot> =>
     invoke('get_run_snapshot'),

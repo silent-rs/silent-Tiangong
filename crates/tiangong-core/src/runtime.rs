@@ -1,33 +1,33 @@
 use std::collections::HashMap;
+use std::sync::mpsc::Sender;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::agent_config::{AgentConfig, McpConfig};
-use crate::app_state::ManagementCommand;
+use crate::app_state::{ManagementCommand, TurnEvent};
 use crate::agents::execution_mcp_agent::{
-    McpFunctionTarget, execution_function_tools, execute_mcp_tool_call,
+    McpFunctionTarget, execute_mcp_tool_call,
     resolve_mcp_tool_call_from_run_command,
 };
 use crate::agents::execution_tool_agent::build_tool_call_from_function;
-use crate::context::compressor::compress_loop_messages;
-use crate::context::organizer::ContextOrganizer;
 use crate::model::{
-    ModelClient, ModelFunctionCall, ModelRequest, ModelStreamChunk, SingleProviderClient, TokenUsage,
+    ModelClient, ModelFunctionCall, SingleProviderClient, TokenUsage,
 };
 use crate::model::FunctionToolSpec;
 use crate::models_config::{ModelCapability, ModelsConfig};
 use crate::planner::TaskPlan;
-use crate::session::{Message, MessageRole, Session, now_text};
 use crate::tool::{LocalToolExecutor, ToolExecutionRecord, ToolExecutor, ToolResult};
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RunStatus {
     #[default]
     Idle,
     Planning,
     Executing,
+    /// 等待用户审批（高风险工具操作）
+    WaitingApproval,
     Completed,
     Failed,
 }
@@ -46,6 +46,8 @@ pub struct RunSnapshot {
     pub last_error: Option<String>,
     pub last_usage: Option<TokenUsage>,
     pub updated_at: String,
+    /// 等待审批的请求 ID（WaitingApproval 状态时有值）
+    pub approval_request_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +65,7 @@ pub use crate::agents::response_agent::VerifyExecutionRecord;
 pub struct TurnExecution {
     pub assistant_message: String,
     pub assistant_reasoning_content: String,
+    pub system_prompt: String,
     pub plan: TaskPlan,
     pub tool_result_summary: Option<String>,
     pub tool_execution: Option<ToolExecutionRecord>,
@@ -70,10 +73,9 @@ pub struct TurnExecution {
     pub output_mode: String,
     pub output_chunk_count: usize,
     pub usage: TokenUsage,
+    /// 开发阶段：所有 LLM 调用的完整记录
+    pub llm_calls: Vec<crate::session::LlmCallRecord>,
 }
-
-/// ReAct 循环的最大迭代次数
-const MAX_REACT_ROUNDS: usize = 20;
 
 #[derive(Debug, Clone)]
 pub struct RuntimeEngine {
@@ -82,6 +84,7 @@ pub struct RuntimeEngine {
     pub context_limit: usize,
     agent_config: AgentConfig,
     models_config: ModelsConfig,
+    permission_gate: crate::permission::PermissionGate,
 }
 
 impl RuntimeEngine {
@@ -90,12 +93,19 @@ impl RuntimeEngine {
         context_limit: usize,
         agent_config: AgentConfig,
     ) -> Self {
+        let permission_gate = crate::permission::PermissionGate::new(
+            crate::permission::PermissionPolicy {
+                trust_mode: agent_config.trust_mode,
+                ..Default::default()
+            },
+        );
         Self {
             client,
             tool_executor: LocalToolExecutor::from_agent_config(&agent_config),
             context_limit,
             agent_config,
             models_config: ModelsConfig::default(),
+            permission_gate,
         }
     }
 
@@ -103,6 +113,15 @@ impl RuntimeEngine {
         self.models_config = config;
         self
     }
+
+    /// 获取模型客户端引用（供 TurnRunner 使用）
+    pub fn client(&self) -> &SingleProviderClient { &self.client }
+    /// 获取 AgentConfig 引用
+    pub fn agent_config(&self) -> &AgentConfig { &self.agent_config }
+    /// 获取 ModelsConfig 引用
+    pub fn models_config(&self) -> &ModelsConfig { &self.models_config }
+    /// 获取权限网关引用
+    pub fn permission_gate(&self) -> &crate::permission::PermissionGate { &self.permission_gate }
 
     pub fn provider_label(&self) -> String {
         format!(
@@ -113,536 +132,36 @@ impl RuntimeEngine {
         )
     }
 
-    /// ReAct 单循环执行：思考 → 工具调用 → 观察 → ... → 最终回复
-    #[allow(clippy::too_many_arguments)]
-    pub fn execute_turn_with_streaming<F, P, L, T, S, G, M>(
-        &self,
-        session: &Session,
-        user_input: &str,
-        mut _on_plan_ready: P,
-        mut on_chunk: F,
-        mut on_llm_output: L,
-        mut on_tool_result: T,
-        mut _on_plan_execution_summary: S,
-        mut _on_stage_thinking: G,
-        mut on_management_cmd: M,
-    ) -> Result<TurnExecution>
-    where
-        P: FnMut(&TaskPlan),
-        F: FnMut(&ModelStreamChunk),
-        L: FnMut(&LlmOutputRecord),
-        T: FnMut(&ToolResult),
-        S: FnMut(&str),
-        G: FnMut(&str, &ModelStreamChunk),
-        M: FnMut(ManagementCommand) + Send,
-    {
-        // 设置当前线程的会话级工作目录
-        let session_cwd = if session.cwd.is_empty() {
-            None
-        } else {
-            let p = std::path::PathBuf::from(&session.cwd);
-            if p.is_dir() { Some(p) } else { None }
-        };
-        crate::tool::set_session_cwd(session_cwd.clone());
-
-        let mut accumulated_usage = TokenUsage::default();
-
-        // 构建对话上下文：摘要 + 最近消息 + 过滤执行痕迹
-        // 压缩（摘要更新）已在 turn 启动前完成并持久化到 session
-        let organizer = ContextOrganizer::new(self.context_limit)
-            .with_keep_recent_turns(6);
-        let context = organizer.build_context(session);
-
-        // 准备工具定义
-        let (function_tools, mcp_targets) =
-            execution_function_tools(&self.agent_config.mcp);
-        // 去掉 mark_step_completed 工具，ReAct 模式不需要手动完成信号
-        let mut function_tools: Vec<_> = function_tools
-            .into_iter()
-            .filter(|t| t.name != "mark_step_completed")
-            .collect();
-
-        // 注入已配置的多媒体能力为工具
-        tracing::info!(
-            has_image = self.models_config.resolve_for_capability(ModelCapability::ImageGeneration).is_some(),
-            routing_keys = ?self.models_config.routing.keys().collect::<Vec<_>>(),
-            "多媒体能力检查"
-        );
-        if self.models_config.resolve_for_capability(ModelCapability::ImageGeneration).is_some() {
-            function_tools.push(FunctionToolSpec {
-                name: "generate_image".to_string(),
-                description: "根据文字描述生成图片。返回生成的图片 URL 或 base64 数据。".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "prompt": { "type": "string", "description": "图片描述（英文效果更好）" },
-                        "width": { "type": "integer", "description": "图片宽度（像素，可选，0 表示默认）" },
-                        "height": { "type": "integer", "description": "图片高度（像素，可选，0 表示默认）" },
-                        "style": { "type": "string", "description": "风格（如 vivid、natural，可选）" }
-                    },
-                    "required": ["prompt"]
-                }),
-            });
-        }
-        // 视频生成暂通过 skill 机制处理，不注入内置工具
-
-        // 语音合成（TTS）
-        if self.models_config.resolve_for_capability(ModelCapability::Tts).is_some() {
-            function_tools.push(FunctionToolSpec {
-                name: "text_to_speech".to_string(),
-                description: "将文本转换为语音音频文件，保存到指定路径并返回文件路径。".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "text": { "type": "string", "description": "待合成的文本" },
-                        "voice": { "type": "string", "description": "音色（如 alloy、echo、fable、onyx、nova、shimmer，可选）" },
-                        "speed": { "type": "number", "description": "语速（0.5~2.0，可选，默认 1.0）" },
-                        "output_path": { "type": "string", "description": "输出文件路径（可选，默认自动生成）" }
-                    },
-                    "required": ["text"]
-                }),
-            });
-        }
-
-        // 语音识别（STT）
-        if self.models_config.resolve_for_capability(ModelCapability::Stt).is_some() {
-            function_tools.push(FunctionToolSpec {
-                name: "speech_to_text".to_string(),
-                description: "将音频文件转录为文本。支持 mp3、wav、ogg 等格式。".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "file_path": { "type": "string", "description": "音频文件路径" },
-                        "language": { "type": "string", "description": "语言提示（如 zh、en，可选）" }
-                    },
-                    "required": ["file_path"]
-                }),
-            });
-        }
-
-        // 注入 get_skill_detail 工具（已安装 skill 时可用）
-        if self.agent_config.skills.installed.iter().any(|s| s.enabled) {
-            function_tools.push(FunctionToolSpec {
-                name: "get_skill_detail".to_string(),
-                description: "获取已安装 Skill 的完整使用说明，返回 SKILL.md 内容和调用命令".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "skill_id": { "type": "string", "description": "Skill ID（从已安装列表中选择）" }
-                    },
-                    "required": ["skill_id"]
-                }),
-            });
-        }
-
-        // 后台任务管理工具
-        function_tools.push(FunctionToolSpec {
-            name: "spawn_task".to_string(),
-            description: "在后台启动长时间运行的命令，立即返回 task_id。适用于编译、下载、视频生成等耗时操作。".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "任务名称（用于显示）" },
-                    "cmd": { "type": "string", "description": "命令名" },
-                    "args": { "type": "array", "items": { "type": "string" }, "description": "命令参数" },
-                    "cwd": { "type": "string", "description": "工作目录（可选）" }
-                },
-                "required": ["name", "cmd"]
-            }),
-        });
-        function_tools.push(FunctionToolSpec {
-            name: "query_task".to_string(),
-            description: "查询后台任务的状态和输出结果".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task_id": { "type": "string", "description": "任务 ID" }
-                },
-                "required": ["task_id"]
-            }),
-        });
-        function_tools.push(FunctionToolSpec {
-            name: "list_tasks".to_string(),
-            description: "列出所有后台任务及其状态".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {}
-            }),
-        });
-        function_tools.push(FunctionToolSpec {
-            name: "cancel_task".to_string(),
-            description: "取消一个正在运行的后台任务".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task_id": { "type": "string", "description": "任务 ID" }
-                },
-                "required": ["task_id"]
-            }),
-        });
-        function_tools.push(FunctionToolSpec {
-            name: "wait_tasks".to_string(),
-            description: "等待多个后台任务全部完成（spawn+join 模式）。适用于先用 spawn_task 启动多个并行任务，然后一次性等待所有结果。".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task_ids": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "要等待的任务 ID 列表"
-                    },
-                    "timeout_ms": {
-                        "type": "integer",
-                        "description": "超时毫秒数，0 表示无限等待（默认 0）"
-                    }
-                },
-                "required": ["task_ids"]
-            }),
-        });
-
-        // MCP/Skill 管理工具（始终可用）
-        function_tools.push(FunctionToolSpec {
-            name: "register_mcp_server".to_string(),
-            description: "注册一个新的 MCP 服务器。注册后服务器将自动启动并加载工具。".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "服务器名称（唯一标识）" },
-                    "command": { "type": "string", "description": "启动命令（如 uvx、npx 的完整路径）" },
-                    "args": { "type": "array", "items": { "type": "string" }, "description": "命令参数" },
-                    "env": { "type": "object", "description": "环境变量（键值对）" },
-                    "transport": { "type": "string", "description": "传输方式：stdio（默认）或 http" },
-                    "endpoint": { "type": "string", "description": "HTTP 端点 URL（transport=http 时必填）" }
-                },
-                "required": ["name", "command"]
-            }),
-        });
-        function_tools.push(FunctionToolSpec {
-            name: "remove_mcp_server".to_string(),
-            description: "移除一个已注册的 MCP 服务器".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "服务器名称" }
-                },
-                "required": ["name"]
-            }),
-        });
-        function_tools.push(FunctionToolSpec {
-            name: "set_mcp_enabled".to_string(),
-            description: "启用或禁用一个 MCP 服务器".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "服务器名称" },
-                    "enabled": { "type": "boolean", "description": "是否启用" }
-                },
-                "required": ["name", "enabled"]
-            }),
-        });
-        function_tools.push(FunctionToolSpec {
-            name: "install_skill".to_string(),
-            description: "从本地路径安装一个 Skill。路径应指向包含 skill.toml 和 SKILL.md 的目录。".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Skill 目录路径" },
-                    "enabled": { "type": "boolean", "description": "安装后是否启用（默认 true）" }
-                },
-                "required": ["path"]
-            }),
-        });
-        function_tools.push(FunctionToolSpec {
-            name: "remove_skill".to_string(),
-            description: "卸载一个已安装的 Skill".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string", "description": "Skill ID" }
-                },
-                "required": ["id"]
-            }),
-        });
-        function_tools.push(FunctionToolSpec {
-            name: "set_skill_enabled".to_string(),
-            description: "启用或禁用一个已安装的 Skill".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string", "description": "Skill ID" },
-                    "enabled": { "type": "boolean", "description": "是否启用" }
-                },
-                "required": ["id", "enabled"]
-            }),
-        });
-
-        // 构建系统 prompt
-        let system_prompt =
-            build_react_system_prompt(user_input, &self.models_config, &self.agent_config);
-
-        // 构建空 plan（兼容现有 TurnExecution 结构）
-        let plan = TaskPlan {
-            id: scru128::new().to_string(),
-            objective: user_input.chars().take(50).collect::<String>(),
-            summary: String::new(),
-            plans: Vec::new(),
-            risks: Vec::new(),
-            skill_hints: Vec::new(),
-            mcp_hints: Vec::new(),
-            revisions: Vec::new(),
-        };
-        _on_plan_ready(&plan);
-
-        // ReAct 循环
-        let mut tool_results: Vec<ToolResult> = Vec::new();
-        let mut loop_messages: Vec<Message> = Vec::new();
-        let mut final_text = String::new();
-        let mut final_reasoning = String::new();
-        let mut total_output_chunks = 0usize;
-
-        for round in 0..MAX_REACT_ROUNDS {
-            let stage = format!("react-round-{}", round + 1);
-
-            // 构建本轮请求
-            let req = ModelRequest {
-                session_title: session.title.clone(),
-                user_input: if round == 0 {
-                    system_prompt.clone()
-                } else {
-                    // 后续轮次：发送工具执行结果，让 agent 继续
-                    "根据上面的工具执行结果继续处理。如果已经收集到足够信息，直接给出最终回复，不要再调用工具。".to_string()
-                },
-                context: {
-                    let mut ctx = context.clone();
-                    ctx.extend(loop_messages.clone());
-                    ctx
-                },
-            };
-
-            // 调用 LLM（带工具定义）
-            // 中间轮次不流式到 assistant 消息，只有最终回复才流式推送
-            let response = self.client.complete_with_functions_stream(
-                &req,
-                &function_tools,
-                &mut |_delta: &ModelStreamChunk| {
-                    // 暂不推送，等确定是否有工具调用后再决定
-                },
-            )?;
-
-            accumulated_usage.accumulate(&response.usage);
-
-            // 没有工具调用 → 最终回复，流式推送到 assistant 消息
-            if response.tool_calls.is_empty() {
-                final_text = response.text.clone();
-                final_reasoning = response.reasoning_content.clone();
-                // 一次性推送完整回复内容
-                if !final_text.is_empty() || !final_reasoning.is_empty() {
-                    on_chunk(&ModelStreamChunk {
-                        content: final_text.clone(),
-                        reasoning_content: final_reasoning.clone(),
-                    });
-                    total_output_chunks += 1;
-                }
-                break;
-            }
-
-            // 有工具调用 → 记录到执行过程（作为系统消息，按时间顺序排列）
-            let tool_call_names: Vec<String> = response
-                .tool_calls
-                .iter()
-                .map(|tc| tc.name.clone())
-                .collect();
-            let output = LlmOutputRecord {
-                stage: stage.clone(),
-                content: response.text.clone(),
-                reasoning_content: response.reasoning_content.clone(),
-                tool_calls: tool_call_names.clone(),
-                usage: response.usage.clone(),
-            };
-            on_llm_output(&output);
-
-            // 记录 assistant 的工具调用意图到 loop_messages
-            let assistant_text = if response.text.is_empty() {
-                format!("[调用工具: {}]", tool_call_names.join(", "))
-            } else {
-                response.text.clone()
-            };
-            loop_messages.push(Message {
-                id: scru128::new().to_string(),
-                role: MessageRole::Assistant,
-                content: assistant_text,
-                reasoning_content: response.reasoning_content.clone(),
-                created_at: now_text(),
-            });
-
-            // 并发执行所有工具调用（子线程独立处理，全部返回后继续）
-            // 管理工具需要 &mut 回调，先提取处理，其余工具并发执行
-            let mut mgmt_results: Vec<(String, ToolResult)> = Vec::new();
-            let mut other_calls: Vec<&ModelFunctionCall> = Vec::new();
-            for call in &response.tool_calls {
-                if let Some(result) = Self::handle_management_tool(call, &mut on_management_cmd) {
-                    mgmt_results.push((call.name.clone(), result));
-                } else {
-                    other_calls.push(call);
-                }
-            }
-
-            let mut call_results: Vec<(String, ToolResult)> = mgmt_results;
-            if other_calls.len() == 1 {
-                // 单个工具调用：直接执行，避免线程开销
-                let call = other_calls[0];
-                let result = self.execute_tool_call(call, &mcp_targets, &self.agent_config.mcp);
-                call_results.push((call.name.clone(), result));
-            } else if !other_calls.is_empty() {
-                // 多个工具调用：并发执行
-                let other_results: Vec<(String, ToolResult)> = std::thread::scope(|scope| {
-                    let handles: Vec<_> = other_calls
-                        .iter()
-                        .map(|call| {
-                            let mcp_targets = &mcp_targets;
-                            let mcp_config = &self.agent_config.mcp;
-                            let name = call.name.clone();
-                            // 捕获会话 CWD，传递到子线程
-                            let thread_cwd = session_cwd.clone();
-                            scope.spawn(move || {
-                                crate::tool::set_session_cwd(thread_cwd);
-                                let result = self.execute_tool_call(call, mcp_targets, mcp_config);
-                                (name, result)
-                            })
-                        })
-                        .collect();
-
-                    handles
-                        .into_iter()
-                        .map(|h| h.join().unwrap_or_else(|_| {
-                            ("unknown".to_string(), ToolResult {
-                                ok: false,
-                                summary: "工具执行线程 panic".to_string(),
-                                stdout: String::new(),
-                                stderr: "thread panicked".to_string(),
-                                exit_code: 1,
-                                execution: None,
-                            })
-                        }))
-                        .collect()
-                });
-                call_results.extend(other_results);
-            }
-
-            let mut round_feedback_parts: Vec<String> = Vec::new();
-            for (call_name, result) in call_results {
-                on_tool_result(&result);
-                tool_results.push(result.clone());
-
-                let feedback = format!(
-                    "工具 {} 执行{}：{}",
-                    call_name,
-                    if result.ok { "成功" } else { "失败" },
-                    if result.stdout.len() > 2000 {
-                        format!("{}...(截断)", &result.stdout[..2000])
-                    } else if result.stdout.is_empty() {
-                        result.summary.clone()
-                    } else {
-                        result.stdout.clone()
-                    }
-                );
-                round_feedback_parts.push(feedback);
-            }
-
-            // 将工具执行结果作为 system message 加入 loop_messages
-            let feedback_text = round_feedback_parts.join("\n\n");
-            loop_messages.push(Message {
-                id: scru128::new().to_string(),
-                role: MessageRole::System,
-                content: feedback_text,
-                reasoning_content: String::new(),
-                created_at: now_text(),
-            });
-
-            // 基于 API 返回的精确 prompt_tokens 判断是否需要压缩 loop_messages
-            // 当本轮输入 token 超过 context_limit 的 70% 时，压缩早期轮次
-            let prompt_tokens = response.usage.prompt_tokens;
-            if organizer.needs_compression(prompt_tokens) {
-                tracing::info!(
-                    prompt_tokens,
-                    threshold = organizer.token_threshold(),
-                    "prompt_tokens 超过阈值，压缩 loop_messages"
-                );
-                // 保留最近 3 轮完整信息
-                match compress_loop_messages(&loop_messages, 3, &self.client) {
-                    Ok(compressed) => loop_messages = compressed,
-                    Err(err) => tracing::warn!("loop_messages 压缩失败：{err}"),
-                }
-            }
-        }
-
-        // 如果循环结束仍未产生最终回复（达到 MAX_REACT_ROUNDS），做最后一次无工具调用
-        if final_text.is_empty() {
-            let req = ModelRequest {
-                session_title: session.title.clone(),
-                user_input: "请基于以上所有工具执行结果，直接给出最终回复。".to_string(),
-                context: {
-                    let mut ctx = context.clone();
-                    ctx.extend(loop_messages.clone());
-                    ctx
-                },
-            };
-            let resp = if use_stream_mode() {
-                self.client
-                    .complete_stream_with_callback(&req, |delta| on_chunk(delta))?
-            } else {
-                let r = self.client.complete(&req)?;
-                if !r.text.is_empty() {
-                    on_chunk(&ModelStreamChunk {
-                        content: r.text.clone(),
-                        reasoning_content: r.reasoning_content.clone(),
-                    });
-                }
-                r
-            };
-            accumulated_usage.accumulate(&resp.usage);
-            final_text = resp.text;
-            final_reasoning = resp.reasoning_content;
-            total_output_chunks += 1;
-        }
-
-        let tool_result_summary = if tool_results.is_empty() {
-            None
-        } else {
-            Some(format!(
-                "{} 次工具调用，{} 成功，{} 失败",
-                tool_results.len(),
-                tool_results.iter().filter(|r| r.ok).count(),
-                tool_results.iter().filter(|r| !r.ok).count(),
-            ))
-        };
-        let tool_execution = tool_results
-            .into_iter()
-            .filter_map(|r| r.execution)
-            .next_back();
-
-        let cleaned_text = strip_tool_traces_from_response(&final_text);
-
-        Ok(TurnExecution {
-            assistant_message: cleaned_text,
-            assistant_reasoning_content: final_reasoning,
-            plan,
-            tool_result_summary,
-            tool_execution,
-            verify_records: Vec::new(),
-            output_mode: "stream".to_string(),
-            output_chunk_count: total_output_chunks,
-            usage: accumulated_usage,
-        })
-    }
-
     /// 执行单个工具调用（本地工具、MCP 工具、多媒体生成或后台任务）
-    fn execute_tool_call(
+    pub(crate) fn execute_tool_call(
         &self,
         call: &ModelFunctionCall,
         mcp_targets: &HashMap<String, McpFunctionTarget>,
         mcp_config: &McpConfig,
     ) -> ToolResult {
+        // 权限检查
+        use crate::permission::PermissionDecision;
+        match self.permission_gate.check(&call.name) {
+            PermissionDecision::Approved => {}
+            PermissionDecision::Denied { reason } => {
+                return ToolResult {
+                    ok: false,
+                    summary: format!("权限拒绝：{reason}"),
+                    stdout: String::new(),
+                    stderr: reason,
+                    exit_code: 1,
+                    execution: None,
+                };
+            }
+            PermissionDecision::NeedsApproval { request_id } => {
+                // Phase 3 中将改为暂停等待审批，当前在非 FullTrust 模式下记录日志并放行
+                tracing::info!(
+                    "权限审批请求 {request_id}：工具 {} 需要用户确认（当前自动放行）",
+                    call.name
+                );
+            }
+        }
+
         // 后台任务管理
         if let Some(result) = self.handle_background_task(call) {
             return result;
@@ -869,77 +388,14 @@ impl RuntimeEngine {
         }
     }
 
-    /// 获取 skill 完整说明
-    /// 处理 MCP/Skill 管理工具调用，返回 Some 表示已处理
-    fn handle_management_tool(
+    /// 处理 MCP/Skill 管理工具调用（Sender 版本，供 TurnRunner 使用）
+    pub fn handle_management_tool(
         call: &ModelFunctionCall,
-        on_cmd: &mut impl FnMut(ManagementCommand),
+        tx: &Sender<TurnEvent>,
     ) -> Option<ToolResult> {
-        let cmd = match call.name.as_str() {
-            "register_mcp_server" => {
-                let name = call.arguments.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                let command = call.arguments.get("command").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                if name.is_empty() || command.is_empty() {
-                    return Some(ToolResult {
-                        ok: false, summary: "name 和 command 为必填参数".to_string(),
-                        stdout: String::new(), stderr: String::new(), exit_code: 1, execution: None,
-                    });
-                }
-                let args: Vec<String> = call.arguments.get("args")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(String::from).collect())
-                    .unwrap_or_default();
-                let env: Vec<(String, String)> = call.arguments.get("env")
-                    .and_then(|v| v.as_object())
-                    .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string())).collect())
-                    .unwrap_or_default();
-                let transport = call.arguments.get("transport").and_then(|v| v.as_str()).map(String::from);
-                let endpoint = call.arguments.get("endpoint").and_then(|v| v.as_str()).map(String::from);
-                ManagementCommand::RegisterMcpServer { name, command, args, env, transport, endpoint }
-            }
-            "remove_mcp_server" => {
-                let name = call.arguments.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                ManagementCommand::RemoveMcpServer { name }
-            }
-            "set_mcp_enabled" => {
-                let name = call.arguments.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                let enabled = call.arguments.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
-                ManagementCommand::SetMcpServerEnabled { name, enabled }
-            }
-            "install_skill" => {
-                let path = call.arguments.get("path").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                if path.is_empty() {
-                    return Some(ToolResult {
-                        ok: false, summary: "path 为必填参数".to_string(),
-                        stdout: String::new(), stderr: String::new(), exit_code: 1, execution: None,
-                    });
-                }
-                let enabled = call.arguments.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
-                ManagementCommand::InstallSkill { path, enabled }
-            }
-            "remove_skill" => {
-                let id = call.arguments.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                ManagementCommand::RemoveSkill { id }
-            }
-            "set_skill_enabled" => {
-                let id = call.arguments.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                let enabled = call.arguments.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
-                ManagementCommand::SetSkillEnabled { id, enabled }
-            }
-            _ => return None,
-        };
-
-        let desc = match &cmd {
-            ManagementCommand::RegisterMcpServer { name, .. } => format!("注册 MCP 服务器：{name}"),
-            ManagementCommand::RemoveMcpServer { name } => format!("移除 MCP 服务器：{name}"),
-            ManagementCommand::SetMcpServerEnabled { name, enabled } => format!("{}MCP 服务器：{name}", if *enabled { "启用" } else { "禁用" }),
-            ManagementCommand::InstallSkill { path, .. } => format!("安装 Skill：{path}"),
-            ManagementCommand::RemoveSkill { id } => format!("卸载 Skill：{id}"),
-            ManagementCommand::SetSkillEnabled { id, enabled } => format!("{}Skill：{id}", if *enabled { "启用" } else { "禁用" }),
-        };
-
-        on_cmd(cmd);
-
+        let cmd = Self::parse_management_command(call)?;
+        let desc = Self::describe_management_command(&cmd);
+        let _ = tx.send(TurnEvent::ManagementCommand(cmd));
         Some(ToolResult {
             ok: true,
             summary: format!("{desc}，操作已提交"),
@@ -948,6 +404,43 @@ impl RuntimeEngine {
             exit_code: 0,
             execution: None,
         })
+    }
+
+    /// 解析管理命令
+    fn parse_management_command(call: &ModelFunctionCall) -> Option<ManagementCommand> {
+        match call.name.as_str() {
+            "register_mcp_server" => {
+                let name = call.arguments.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let command = call.arguments.get("command").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                if name.is_empty() || command.is_empty() { return None; }
+                let args: Vec<String> = call.arguments.get("args").and_then(|v| v.as_array()).map(|arr| arr.iter().filter_map(|v| v.as_str()).map(String::from).collect()).unwrap_or_default();
+                let env: Vec<(String, String)> = call.arguments.get("env").and_then(|v| v.as_object()).map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string())).collect()).unwrap_or_default();
+                let transport = call.arguments.get("transport").and_then(|v| v.as_str()).map(String::from);
+                let endpoint = call.arguments.get("endpoint").and_then(|v| v.as_str()).map(String::from);
+                Some(ManagementCommand::RegisterMcpServer { name, command, args, env, transport, endpoint })
+            }
+            "remove_mcp_server" => Some(ManagementCommand::RemoveMcpServer { name: call.arguments.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string() }),
+            "set_mcp_enabled" => Some(ManagementCommand::SetMcpServerEnabled { name: call.arguments.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(), enabled: call.arguments.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true) }),
+            "install_skill" => {
+                let path = call.arguments.get("path").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                if path.is_empty() { return None; }
+                Some(ManagementCommand::InstallSkill { path, enabled: call.arguments.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true) })
+            }
+            "remove_skill" => Some(ManagementCommand::RemoveSkill { id: call.arguments.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string() }),
+            "set_skill_enabled" => Some(ManagementCommand::SetSkillEnabled { id: call.arguments.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string(), enabled: call.arguments.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true) }),
+            _ => None,
+        }
+    }
+
+    fn describe_management_command(cmd: &ManagementCommand) -> String {
+        match cmd {
+            ManagementCommand::RegisterMcpServer { name, .. } => format!("注册 MCP 服务器：{name}"),
+            ManagementCommand::RemoveMcpServer { name } => format!("移除 MCP 服务器：{name}"),
+            ManagementCommand::SetMcpServerEnabled { name, enabled } => format!("{}MCP 服务器：{name}", if *enabled { "启用" } else { "禁用" }),
+            ManagementCommand::InstallSkill { path, .. } => format!("安装 Skill：{path}"),
+            ManagementCommand::RemoveSkill { id } => format!("卸载 Skill：{id}"),
+            ManagementCommand::SetSkillEnabled { id, enabled } => format!("{}Skill：{id}", if *enabled { "启用" } else { "禁用" }),
+        }
     }
 
     fn handle_get_skill_detail(&self, call: &ModelFunctionCall) -> ToolResult {
@@ -1410,8 +903,91 @@ impl RuntimeEngine {
     }
 }
 
+/// 注入增强工具定义（多媒体、Skill、后台任务、MCP 管理）
+pub(crate) fn inject_enhanced_tools(
+    tools: &mut Vec<FunctionToolSpec>,
+    models_config: &ModelsConfig,
+    agent_config: &AgentConfig,
+) {
+    use crate::models_config::ModelCapability;
+    if models_config.resolve_for_capability(ModelCapability::ImageGeneration).is_some() {
+        tools.push(FunctionToolSpec {
+            name: "generate_image".to_string(),
+            description: "根据文字描述生成图片".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "图片描述" },
+                    "width": { "type": "integer", "description": "宽度（可选）" },
+                    "height": { "type": "integer", "description": "高度（可选）" },
+                    "style": { "type": "string", "description": "风格（可选）" }
+                },
+                "required": ["prompt"]
+            }),
+        });
+    }
+    if models_config.resolve_for_capability(ModelCapability::Tts).is_some() {
+        tools.push(FunctionToolSpec {
+            name: "text_to_speech".to_string(),
+            description: "将文本转换为语音音频文件".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string", "description": "待合成文本" },
+                    "voice": { "type": "string", "description": "音色（可选）" },
+                    "speed": { "type": "number", "description": "语速（可选）" },
+                    "output_path": { "type": "string", "description": "输出路径（可选）" }
+                },
+                "required": ["text"]
+            }),
+        });
+    }
+    if models_config.resolve_for_capability(ModelCapability::Stt).is_some() {
+        tools.push(FunctionToolSpec {
+            name: "speech_to_text".to_string(),
+            description: "将音频文件转录为文本".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": { "type": "string", "description": "音频文件路径" },
+                    "language": { "type": "string", "description": "语言提示（可选）" }
+                },
+                "required": ["file_path"]
+            }),
+        });
+    }
+    if agent_config.skills.installed.iter().any(|s| s.enabled) {
+        tools.push(FunctionToolSpec {
+            name: "get_skill_detail".to_string(),
+            description: "获取已安装 Skill 的完整使用说明".to_string(),
+            parameters: serde_json::json!({"type": "object", "properties": {"skill_id": {"type": "string"}}, "required": ["skill_id"]}),
+        });
+    }
+    // 后台任务管理
+    for spec in [
+        ("spawn_task", "在后台启动长时间运行的命令", serde_json::json!({"type":"object","properties":{"name":{"type":"string"},"cmd":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"cwd":{"type":"string"}},"required":["name","cmd"]})),
+        ("query_task", "查询后台任务状态", serde_json::json!({"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"]})),
+        ("list_tasks", "列出所有后台任务", serde_json::json!({"type":"object","properties":{}})),
+        ("cancel_task", "取消后台任务", serde_json::json!({"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"]})),
+        ("wait_tasks", "等待多个后台任务完成", serde_json::json!({"type":"object","properties":{"task_ids":{"type":"array","items":{"type":"string"}},"timeout_ms":{"type":"integer"}},"required":["task_ids"]})),
+    ] {
+        tools.push(FunctionToolSpec { name: spec.0.to_string(), description: spec.1.to_string(), parameters: spec.2 });
+    }
+    // MCP/Skill 管理
+    for spec in [
+        ("register_mcp_server", "注册 MCP 服务器", serde_json::json!({"type":"object","properties":{"name":{"type":"string"},"command":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"env":{"type":"object"},"transport":{"type":"string"},"endpoint":{"type":"string"}},"required":["name","command"]})),
+        ("remove_mcp_server", "移除 MCP 服务器", serde_json::json!({"type":"object","properties":{"name":{"type":"string"}},"required":["name"]})),
+        ("set_mcp_enabled", "启用/禁用 MCP 服务器", serde_json::json!({"type":"object","properties":{"name":{"type":"string"},"enabled":{"type":"boolean"}},"required":["name","enabled"]})),
+        ("install_skill", "安装 Skill", serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"enabled":{"type":"boolean"}},"required":["path"]})),
+        ("remove_skill", "卸载 Skill", serde_json::json!({"type":"object","properties":{"id":{"type":"string"}},"required":["id"]})),
+        ("set_skill_enabled", "启用/禁用 Skill", serde_json::json!({"type":"object","properties":{"id":{"type":"string"},"enabled":{"type":"boolean"}},"required":["id","enabled"]})),
+    ] {
+        tools.push(FunctionToolSpec { name: spec.0.to_string(), description: spec.1.to_string(), parameters: spec.2 });
+    }
+}
+
 /// 构建 ReAct agent 的系统 prompt
-fn build_react_system_prompt(
+pub(crate) fn build_react_system_prompt(
     user_input: &str,
     models_config: &ModelsConfig,
     agent_config: &AgentConfig,
@@ -1481,7 +1057,7 @@ fn build_react_system_prompt(
     )
 }
 
-fn use_stream_mode() -> bool {
+pub(crate) fn use_stream_mode() -> bool {
     match std::env::var("API_STREAM") {
         Ok(raw) => {
             let normalized = raw.trim().to_ascii_lowercase();

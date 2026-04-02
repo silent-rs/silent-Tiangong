@@ -170,6 +170,9 @@ pub struct AgentConfig {
     pub skills: SkillsConfig,
     #[serde(default)]
     pub mcp: McpConfig,
+    /// 权限信任模式（默认完全信任）
+    #[serde(default)]
+    pub trust_mode: crate::permission::TrustMode,
 }
 
 impl Default for SkillsConfig {

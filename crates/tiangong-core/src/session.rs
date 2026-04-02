@@ -22,6 +22,19 @@ pub struct Message {
     pub created_at: String,
 }
 
+/// 会话工作目录模式
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionCwdMode {
+    /// 继承全局工作目录（桌面端默认）
+    #[default]
+    Inherit,
+    /// 隔离模式：在 ~/.tiangong/workspaces/{session_id}/ 下创建独立目录
+    Isolated,
+    /// 用户手动指定
+    Custom,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
@@ -34,6 +47,9 @@ pub struct Session {
     /// 会话级工作目录，工具执行时以此为根目录
     #[serde(default)]
     pub cwd: String,
+    /// 工作目录模式
+    #[serde(default)]
+    pub cwd_mode: SessionCwdMode,
     /// 早期对话的滚动摘要（用于无限上下文压缩）
     ///
     /// 当对话历史超过模型上下文阈值时，早期消息被 LLM 压缩为摘要存储在此。
@@ -48,16 +64,27 @@ pub struct Session {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionTaskStatus {
+    /// 排队等待执行
+    Queued,
+    #[default]
     Planning,
     Executing,
+    /// 阻塞（等待外部依赖）
+    Blocked,
+    /// 等待用户审批
+    WaitingApproval,
+    /// 后台运行
+    Backgrounded,
     Completed,
     Failed,
+    /// 已取消
+    Cancelled,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionTaskRecord {
     pub task_id: String,
     pub user_message_id: String,
@@ -80,6 +107,35 @@ pub struct SessionTaskRecord {
     /// 本次任务所有 LLM 调用的累计 token 用量
     #[serde(default)]
     pub usage: Option<TokenUsage>,
+    /// 开发阶段：记录该任务所有 LLM 调用的完整参数和响应
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub llm_calls: Vec<LlmCallRecord>,
+}
+
+/// LLM 调用完整记录（开发调试用）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LlmCallRecord {
+    /// 调用阶段（如 intent-classify, direct-answer, react-round-1）
+    pub stage: String,
+    /// 发送给 LLM 的系统/用户 prompt
+    pub prompt: String,
+    /// 上下文消息数量
+    pub context_count: usize,
+    /// 注入的工具名列表
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_names: Vec<String>,
+    /// LLM 回复文本
+    pub response_text: String,
+    /// 思考内容长度
+    #[serde(default)]
+    pub reasoning_len: usize,
+    /// LLM 发起的工具调用
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<String>,
+    /// Token 用量
+    pub usage: TokenUsage,
+    /// 调用时间戳
+    pub timestamp: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +178,35 @@ impl Session {
             task_records: Vec::new(),
             task_plans: Vec::new(),
             cwd,
+            cwd_mode: SessionCwdMode::Inherit,
+            context_summary: None,
+            summary_up_to: 0,
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+
+    /// 创建隔离模式的会话（用于 Connector 接入）
+    pub fn new_isolated(title: impl Into<String>) -> Self {
+        let id = new_id();
+        let now = now_text();
+        // 在 ~/.tiangong/workspaces/{session_id}/ 下创建独立目录
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let workspace_dir = home
+            .join(".tiangong")
+            .join("workspaces")
+            .join(&id);
+        let _ = std::fs::create_dir_all(&workspace_dir);
+        Self {
+            id,
+            title: title.into(),
+            messages: Vec::new(),
+            task_records: Vec::new(),
+            task_plans: Vec::new(),
+            cwd: workspace_dir.to_string_lossy().to_string(),
+            cwd_mode: SessionCwdMode::Isolated,
             context_summary: None,
             summary_up_to: 0,
             created_at: now.clone(),
@@ -172,6 +257,7 @@ impl Session {
             finished_at: None,
             duration_ms: None,
             usage: None,
+            llm_calls: Vec::new(),
         });
         self.updated_at = now_text();
     }

@@ -565,13 +565,12 @@ pub(super) fn command_env_allowlist() -> Vec<(String, String)> {
 }
 
 pub(super) fn command_timeout_ms() -> u64 {
-    // 默认不设超时（0 表示无限等待），由 LLM 或用户手动中止
-    // 可通过 TOOL_COMMAND_TIMEOUT_MS 环境变量设置超时（毫秒）
+    // 默认 30 秒超时，防止工具执行卡住
+    // 可通过 TOOL_COMMAND_TIMEOUT_MS 环境变量覆盖（毫秒，0 表示无限等待）
     std::env::var("TOOL_COMMAND_TIMEOUT_MS")
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(0)
+        .unwrap_or(30_000)
 }
 
 pub(super) fn execute_command_with_timeout(

@@ -15,6 +15,8 @@ import {
   Check,
   Play,
   ChevronUp,
+  ShieldCheck,
+  ShieldX,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -165,10 +167,12 @@ export function MessageList() {
   const {
     messages,
     runStatus,
+    runSummary,
     streamingMessageId,
     streamingContent,
     streamingReasoningContent,
     voiceMessages,
+    approvalRequestId,
   } = useStore();
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevMessagesLengthRef = useRef(0);
@@ -465,8 +469,48 @@ export function MessageList() {
             })
           )}
 
-          {/* 思考中/执行中指示器（仅在没有流式消息时显示） */}
-          {isThinking && !streamingMessageId && (
+          {/* 审批请求 */}
+          {runStatus === "waitingapproval" && (
+            <div className="flex gap-3 justify-start">
+              <div className="w-8 h-8 rounded bg-amber-500 flex items-center justify-center flex-shrink-0">
+                <ShieldCheck className="w-5 h-5 text-white" />
+              </div>
+              <div className="bg-muted text-foreground rounded-lg px-4 py-3 max-w-[80%]">
+                <div className="text-sm font-medium mb-2">需要您的确认</div>
+                <div className="text-xs text-muted-foreground mb-3">
+                  {runSummary}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    className="flex items-center gap-1 px-3 py-1.5 rounded-md bg-green-600 hover:bg-green-700 text-white text-xs transition-colors"
+                    onClick={() => {
+                      if (approvalRequestId) {
+                        api.respondApproval(approvalRequestId, true).catch(console.error);
+                      }
+                    }}
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5" />
+                    允许
+                  </button>
+                  <button
+                    className="flex items-center gap-1 px-3 py-1.5 rounded-md bg-destructive hover:bg-destructive/90 text-destructive-foreground text-xs transition-colors"
+                    onClick={() => {
+                      if (approvalRequestId) {
+                        api.respondApproval(approvalRequestId, false).catch(console.error);
+                      }
+                    }}
+                  >
+                    <ShieldX className="w-3.5 h-3.5" />
+                    拒绝
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 思考中/执行中指示器（仅在助手尚未回复时显示） */}
+          {isThinking && runStatus !== "waitingapproval" && !streamingMessageId && !streamingContent &&
+           !(messages.length > 0 && messages[messages.length - 1].role === "Assistant") && (
             <div className="flex gap-3 justify-start">
               <div className="w-8 h-8 rounded bg-primary flex items-center justify-center flex-shrink-0">
                 <Bot className="w-5 h-5 text-primary-foreground" />

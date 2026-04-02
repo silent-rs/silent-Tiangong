@@ -98,6 +98,8 @@ pub struct RunSnapshot {
     pub current_plan: Option<TaskPlan>,
     /// 前端需要：当前正在执行的会话 ID 列表
     pub pending_session_ids: Vec<String>,
+    /// 等待审批的请求 ID
+    pub approval_request_id: Option<String>,
 }
 
 impl RunSnapshot {
@@ -123,6 +125,7 @@ impl RunSnapshot {
             input_draft,
             current_plan,
             pending_session_ids,
+            approval_request_id: core_snapshot.approval_request_id.clone(),
         }
     }
 }

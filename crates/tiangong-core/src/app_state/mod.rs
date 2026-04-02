@@ -52,8 +52,9 @@ use self::repository::{
 use self::services::{AppMcpService, AppSkillService, AppTurnService};
 use self::support::{
     LegacyPersistedState, LoadedState, McpDependencyLockRecord, PendingTurn, PersistedAppState,
-    ScopedDirCleanup, SkillsLockRecord, TurnEvent,
+    ScopedDirCleanup, SkillsLockRecord,
 };
+pub use self::support::{ControlSignal, TurnEvent};
 
 // Public re-exports for Tauri API
 pub use self::repository::AppRepository;
@@ -110,5 +111,17 @@ impl TiangongState {
 
     pub fn run_snapshot(&self) -> &RunSnapshot {
         &self.store.runtime.run
+    }
+
+    pub fn agent_config(&self) -> &AgentConfig {
+        &self.store.agent.agent_config
+    }
+
+    pub fn set_trust_mode(&mut self, mode: crate::permission::TrustMode) -> Result<()> {
+        self.store.agent.agent_config.trust_mode = mode;
+        // 重建 RuntimeEngine 以应用新的权限策略
+        self.rebuild_runtime_from_current_config();
+        // 持久化
+        self.persist_to_disk()
     }
 }

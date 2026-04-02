@@ -203,6 +203,48 @@ pub fn cancel_turn(state: State<TiangongApp>) -> Result<bool, String> {
     state.with_state(|core_state| core_state.cancel_pending_turn())
 }
 
+/// 向正在执行的 turn 追加用户消息
+#[tauri::command]
+pub fn append_message(content: String, state: State<TiangongApp>) -> Result<bool, String> {
+    state.with_state(|core_state| core_state.append_user_message_to_running_turn(&content))
+}
+
+/// 响应工具审批请求
+#[tauri::command]
+pub fn respond_approval(
+    request_id: String,
+    approved: bool,
+    state: State<TiangongApp>,
+) -> Result<bool, String> {
+    state.with_state(|core_state| {
+        core_state.respond_to_approval(&request_id, approved)
+    })
+}
+
+/// 获取当前信任模式
+#[tauri::command]
+pub fn get_trust_mode(state: State<TiangongApp>) -> Result<String, String> {
+    state.with_state_read(|core_state| {
+        let mode = core_state.agent_config().trust_mode;
+        Ok(serde_json::to_value(mode)
+            .unwrap_or_default()
+            .as_str()
+            .unwrap_or("full_trust")
+            .to_string())
+    })
+}
+
+/// 设置信任模式
+#[tauri::command]
+pub fn set_trust_mode(mode: String, state: State<TiangongApp>) -> Result<(), String> {
+    state.with_state(|core_state| {
+        let trust_mode: tiangong_core::permission::TrustMode =
+            serde_json::from_value(serde_json::Value::String(mode))
+                .map_err(|e| anyhow::anyhow!("无效的信任模式: {e}"))?;
+        core_state.set_trust_mode(trust_mode)
+    })
+}
+
 /// 获取后台任务列表
 #[tauri::command]
 pub fn get_background_tasks() -> Result<Vec<serde_json::Value>, String> {

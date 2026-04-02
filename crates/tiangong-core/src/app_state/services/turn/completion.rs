@@ -104,6 +104,13 @@ impl AppTurnService {
                     Some(exec.usage.clone()),
                 );
             }
+
+            // 开发阶段：将 LLM 调用记录写入 task_record
+            if !exec.llm_calls.is_empty()
+                && let Some(record) = session.task_records.iter_mut().find(|r| r.task_id == task_id)
+            {
+                record.llm_calls = exec.llm_calls;
+            }
         }
 
         state.store.runtime.run = RunSnapshot {
@@ -130,6 +137,7 @@ impl AppTurnService {
             last_error: has_failed_plan.then_some("plan_failed".to_string()),
             last_usage: Some(exec.usage),
             updated_at: now_text(),
+            approval_request_id: None,
         };
 
         // 首次对话完成后自动生成标题（首次对话或标题仍为默认格式）
@@ -192,6 +200,7 @@ impl AppTurnService {
                 last_error: Some(err.to_string()),
                 last_usage: state.store.runtime.run.last_usage.clone(),
                 updated_at: now_text(),
+            approval_request_id: None,
             };
         }
     }
@@ -249,6 +258,7 @@ impl AppTurnService {
             last_error: Some(err_msg.to_string()),
             last_usage: None,
             updated_at: now_text(),
+            approval_request_id: None,
         };
 
         if let Err(err) = state.persist_session_and_app(&sid) {
@@ -264,6 +274,7 @@ impl AppTurnService {
                 last_error: Some(err.to_string()),
                 last_usage: state.store.runtime.run.last_usage.clone(),
                 updated_at: now_text(),
+            approval_request_id: None,
             };
         }
     }

@@ -1,3 +1,5 @@
+use std::sync::mpsc::Sender;
+
 use super::*;
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -47,7 +49,7 @@ pub enum ManagementCommand {
 }
 
 #[derive(Debug)]
-pub(in crate::app_state) enum TurnEvent {
+pub enum TurnEvent {
     PlanReady(TaskPlan),
     LlmOutput(LlmOutputRecord),
     /// 工具开始执行（用于前端显示正在执行的命令）
@@ -66,6 +68,24 @@ pub(in crate::app_state) enum TurnEvent {
     Failed(String),
     /// 管理命令：主线程处理 MCP/Skill 管理操作
     ManagementCommand(ManagementCommand),
+    /// 权限审批请求：需要用户确认后才能执行工具
+    ApprovalRequest {
+        request_id: String,
+        tool_name: String,
+        tool_args_summary: String,
+    },
+}
+
+/// 从主线程发送到执行线程的控制信号
+#[derive(Debug)]
+pub enum ControlSignal {
+    /// 用户追加消息（在下一个检查点注入到上下文）
+    UserMessage(String),
+    /// 用户取消执行
+    Cancel,
+    /// 权限审批响应（Phase 5+）
+    #[allow(dead_code)]
+    PermissionResponse { request_id: String, approved: bool },
 }
 
 #[derive(Debug)]
@@ -76,7 +96,83 @@ pub struct PendingTurn {
     /// 当前 stage thinking 对应的系统消息 ID，用于流式追加
     pub(in crate::app_state) stage_thinking_message_id: Option<String>,
     pub(in crate::app_state) started_at: Instant,
+    /// 从执行线程接收事件
     pub(in crate::app_state) rx: Receiver<TurnEvent>,
+    /// 向执行线程发送控制信号
+    pub control_tx: Sender<ControlSignal>,
+}
+
+impl TurnEvent {
+    /// 将 TurnEvent 转换为统一的 RuntimeEvent（Phase 3 中使用）
+    #[allow(dead_code)]
+    pub(in crate::app_state) fn to_runtime_event(
+        &self,
+        session_id: &str,
+        task_id: &str,
+    ) -> crate::event::RuntimeEvent {
+        use crate::event::{EventSource, RuntimeEvent, RuntimeEventType};
+
+        let (event_type, source, payload) = match self {
+            TurnEvent::PlanReady(_) => (
+                RuntimeEventType::TaskStarted,
+                EventSource::Runtime,
+                serde_json::json!({"stage": "plan_ready"}),
+            ),
+            TurnEvent::LlmOutput(_) => (
+                RuntimeEventType::LlmOutput,
+                EventSource::Runtime,
+                serde_json::json!({"stage": "llm_output"}),
+            ),
+            TurnEvent::ToolStarted { name, summary } => (
+                RuntimeEventType::ToolResult,
+                EventSource::Tool,
+                serde_json::json!({"tool": name, "summary": summary, "status": "started"}),
+            ),
+            TurnEvent::ToolExecution(result) => (
+                RuntimeEventType::ToolResult,
+                EventSource::Tool,
+                serde_json::json!({"ok": result.ok, "summary": &result.summary}),
+            ),
+            TurnEvent::PlanExecutionSummary(s) => (
+                RuntimeEventType::TaskCompleted,
+                EventSource::Runtime,
+                serde_json::json!({"summary": s}),
+            ),
+            TurnEvent::StageThinking { stage, .. } => (
+                RuntimeEventType::LlmChunk,
+                EventSource::Runtime,
+                serde_json::json!({"stage": stage}),
+            ),
+            TurnEvent::Chunk(_) => (
+                RuntimeEventType::LlmChunk,
+                EventSource::Runtime,
+                serde_json::json!({"type": "response_chunk"}),
+            ),
+            TurnEvent::Completed(_) => (
+                RuntimeEventType::TaskCompleted,
+                EventSource::Runtime,
+                serde_json::json!({"status": "completed"}),
+            ),
+            TurnEvent::Failed(err) => (
+                RuntimeEventType::TaskFailed,
+                EventSource::Runtime,
+                serde_json::json!({"error": err}),
+            ),
+            TurnEvent::ManagementCommand(_) => (
+                RuntimeEventType::SystemSignal,
+                EventSource::Runtime,
+                serde_json::json!({"type": "management_command"}),
+            ),
+            TurnEvent::ApprovalRequest { request_id, tool_name, .. } => (
+                RuntimeEventType::PermissionRequest,
+                EventSource::Permission,
+                serde_json::json!({"request_id": request_id, "tool_name": tool_name}),
+            ),
+        };
+
+        RuntimeEvent::new(event_type, session_id.to_string(), source, payload)
+            .with_task_id(task_id.to_string())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
