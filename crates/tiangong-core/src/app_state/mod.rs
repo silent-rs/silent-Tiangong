@@ -54,7 +54,7 @@ use self::support::{
     LegacyPersistedState, LoadedState, McpDependencyLockRecord, PendingTurn, PersistedAppState,
     ScopedDirCleanup, SkillsLockRecord,
 };
-pub use self::support::TurnEvent;
+pub use self::support::{ControlSignal, TurnEvent};
 
 // Public re-exports for Tauri API
 pub use self::repository::AppRepository;

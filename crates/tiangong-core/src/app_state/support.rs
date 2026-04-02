@@ -1,3 +1,5 @@
+use std::sync::mpsc::Sender;
+
 use super::*;
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -68,6 +70,18 @@ pub enum TurnEvent {
     ManagementCommand(ManagementCommand),
 }
 
+/// 从主线程发送到执行线程的控制信号
+#[derive(Debug)]
+pub enum ControlSignal {
+    /// 用户追加消息（在下一个检查点注入到上下文）
+    UserMessage(String),
+    /// 用户取消执行
+    Cancel,
+    /// 权限审批响应（Phase 5+）
+    #[allow(dead_code)]
+    PermissionResponse { request_id: String, approved: bool },
+}
+
 #[derive(Debug)]
 pub struct PendingTurn {
     pub(in crate::app_state) session_id: String,
@@ -76,7 +90,10 @@ pub struct PendingTurn {
     /// 当前 stage thinking 对应的系统消息 ID，用于流式追加
     pub(in crate::app_state) stage_thinking_message_id: Option<String>,
     pub(in crate::app_state) started_at: Instant,
+    /// 从执行线程接收事件
     pub(in crate::app_state) rx: Receiver<TurnEvent>,
+    /// 向执行线程发送控制信号
+    pub control_tx: Sender<ControlSignal>,
 }
 
 impl TurnEvent {

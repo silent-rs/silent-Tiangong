@@ -55,6 +55,7 @@ fn ensure_pending_turn_assistant_message_creates_and_binds_message() -> Result<(
         );
 
         let (_tx, rx) = mpsc::channel();
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel();
         state.store.runtime.pending_turns.insert(
             session_id.clone(),
             PendingTurn {
@@ -64,6 +65,7 @@ fn ensure_pending_turn_assistant_message_creates_and_binds_message() -> Result<(
                 stage_thinking_message_id: None,
                 started_at: Instant::now(),
                 rx,
+                control_tx: ctrl_tx,
             },
         );
 
