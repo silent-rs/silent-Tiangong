@@ -68,6 +68,18 @@ pub enum TurnEvent {
     Failed(String),
     /// 管理命令：主线程处理 MCP/Skill 管理操作
     ManagementCommand(ManagementCommand),
+    /// Worker 流式输出：每个 Worker 独立的 assistant 消息
+    WorkerChunk {
+        worker_id: String,
+        worker_label: String,
+        delta: ModelStreamChunk,
+    },
+    /// Worker 执行完成
+    WorkerCompleted {
+        worker_id: String,
+        worker_label: String,
+        result_text: String,
+    },
     /// 权限审批请求：需要用户确认后才能执行工具
     ApprovalRequest {
         request_id: String,
@@ -162,6 +174,16 @@ impl TurnEvent {
                 RuntimeEventType::SystemSignal,
                 EventSource::Runtime,
                 serde_json::json!({"type": "management_command"}),
+            ),
+            TurnEvent::WorkerChunk { worker_id, .. } => (
+                RuntimeEventType::LlmChunk,
+                EventSource::Runtime,
+                serde_json::json!({"worker_id": worker_id}),
+            ),
+            TurnEvent::WorkerCompleted { worker_id, .. } => (
+                RuntimeEventType::TaskCompleted,
+                EventSource::Runtime,
+                serde_json::json!({"worker_id": worker_id}),
             ),
             TurnEvent::ApprovalRequest { request_id, tool_name, .. } => (
                 RuntimeEventType::PermissionRequest,

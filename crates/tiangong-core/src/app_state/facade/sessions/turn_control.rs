@@ -215,6 +215,16 @@ impl TiangongState {
                     TurnEvent::StageThinking { stage, delta } => {
                         self.apply_stage_thinking_delta(&session_id, &stage, &delta);
                     }
+                    TurnEvent::WorkerChunk { worker_id, worker_label, delta } => {
+                        // 为每个 Worker 创建独立的 assistant 消息
+                        self.apply_worker_delta(&session_id, &worker_id, &worker_label, &delta);
+                    }
+                    TurnEvent::WorkerCompleted { worker_id, worker_label, .. } => {
+                        self.store.runtime.run.summary = format!(
+                            "Worker 完成：{worker_label}"
+                        );
+                        tracing::info!(worker_id, worker_label, "Worker 完成事件已处理");
+                    }
                     TurnEvent::Chunk(delta) => {
                         self.apply_assistant_delta(&session_id, &delta);
                     }
@@ -303,6 +313,13 @@ impl TiangongState {
                 }
                 TurnEvent::StageThinking { stage, delta } => {
                     self.apply_stage_thinking_delta(session_id, &stage, &delta);
+                }
+                TurnEvent::WorkerChunk { worker_id, worker_label, delta } => {
+                    self.apply_worker_delta(session_id, &worker_id, &worker_label, &delta);
+                }
+                TurnEvent::WorkerCompleted { worker_id, worker_label, .. } => {
+                    self.store.runtime.run.summary = format!("Worker 完成：{worker_label}");
+                    tracing::info!(worker_id, worker_label, "Worker 完成");
                 }
                 TurnEvent::Chunk(delta) => {
                     self.apply_assistant_delta(session_id, &delta);

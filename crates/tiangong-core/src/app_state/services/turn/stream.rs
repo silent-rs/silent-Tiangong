@@ -316,4 +316,60 @@ impl AppTurnService {
 
         let _ = state.persist_session_and_app(&sid);
     }
+
+    /// 为指定 Worker 创建或追加独立的 assistant 消息
+    pub(in crate::app_state) fn apply_worker_delta(
+        self,
+        state: &mut TiangongState,
+        session_id: &str,
+        _worker_id: &str,
+        worker_label: &str,
+        delta: &ModelStreamChunk,
+    ) {
+        if delta.content.is_empty() && delta.reasoning_content.is_empty() {
+            return;
+        }
+
+        let Some(sid) = state
+            .store
+            .runtime
+            .pending_turns
+            .get(session_id)
+            .map(|pending| pending.session_id.clone())
+        else {
+            return;
+        };
+
+        let Some(session) = state
+            .store
+            .session
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == sid)
+        else {
+            return;
+        };
+
+        // 查找该 Worker 已有的 assistant 消息（通过内容前缀匹配）
+        let worker_prefix = format!("**⚙ {}**\n", worker_label);
+        let existing = session.messages.iter_mut().rev().find(|m| {
+            m.role == MessageRole::Assistant && m.content.starts_with(&worker_prefix)
+        });
+
+        if let Some(msg) = existing {
+            // 追加内容
+            msg.content.push_str(&delta.content);
+            msg.reasoning_content.push_str(&delta.reasoning_content);
+        } else {
+            // 创建新的 Worker assistant 消息
+            session.append_message_with_reasoning(
+                MessageRole::Assistant,
+                format!("{}{}", worker_prefix, delta.content),
+                delta.reasoning_content.clone(),
+            );
+        }
+
+        // 更新运行状态
+        state.store.runtime.run.summary = format!("Worker 执行中：{worker_label}");
+    }
 }

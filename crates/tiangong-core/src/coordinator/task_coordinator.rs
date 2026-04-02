@@ -79,7 +79,7 @@ impl TaskCoordinator {
 
         tracing::info!(sub_task_count = sub_tasks.len(), "多 Worker 并行执行");
         let results = self.run_parallel(sub_tasks, session, event_tx);
-        self.merge_results(&task, results)
+        self.merge_results(&task, results, event_tx)
     }
 
     /// 单 Worker 执行（退化模式，透传控制信号）
@@ -172,6 +172,7 @@ impl TaskCoordinator {
                     let session = session.clone();
                     let worker_id = format!("worker-{}-{}", i, scru128::new());
                     let tx = event_tx.cloned();
+                    let task_label = task.user_input.chars().take(30).collect::<String>();
 
                     scope.spawn(move || {
                         let worker_context = WorkerContext {
@@ -184,9 +185,10 @@ impl TaskCoordinator {
                         };
 
                         tracing::info!(worker_id, "Worker 开始执行");
-                        let mut worker = Worker::new(worker_context, engine, session);
-                        if let Some(tx) = tx {
-                            worker = worker.with_event_tx(tx);
+                        let mut worker = Worker::new(worker_context, engine, session)
+                            .with_multi_worker_mode();
+                        if let Some(ref tx) = tx {
+                            worker = worker.with_event_tx(tx.clone());
                         }
                         let result = worker.run();
                         tracing::info!(
@@ -195,6 +197,13 @@ impl TaskCoordinator {
                             duration_ms = result.duration_ms,
                             "Worker 执行完成"
                         );
+                        if let Some(ref tx) = tx {
+                            let _ = tx.send(TurnEvent::WorkerCompleted {
+                                worker_id: result.worker_id.clone(),
+                                worker_label: task_label,
+                                result_text: result.result_text.clone(),
+                            });
+                        }
                         result
                     })
                 })
@@ -216,11 +225,12 @@ impl TaskCoordinator {
         })
     }
 
-    /// 使用 LLM 合并多个 Worker 结果
+    /// 使用 LLM 合并多个 Worker 结果（流式推送合成回复）
     fn merge_results(
         &self,
         original_task: &CoordinatorTask,
         results: Vec<WorkerResult>,
+        event_tx: Option<&mpsc::Sender<TurnEvent>>,
     ) -> anyhow::Result<CoordinatorResult> {
         let mut total_usage = TokenUsage::default();
         let mut worker_outputs = String::new();
@@ -241,7 +251,7 @@ impl TaskCoordinator {
             }
         }
 
-        // 使用 LLM 合成最终回复
+        // 使用 LLM 流式合成最终回复
         let final_response = if results.len() == 1 {
             results[0].result_text.clone()
         } else {
@@ -256,14 +266,25 @@ impl TaskCoordinator {
                 context: Vec::new(),
             };
 
-            match self.engine.client().complete(&req) {
-                Ok(resp) => {
-                    total_usage.accumulate(&resp.usage);
-                    resp.text
+            if let Some(tx) = event_tx {
+                // 流式合成，实时推送到前端
+                let tx_clone = tx.clone();
+                match self.engine.client().complete_stream_with_callback(&req, |delta| {
+                    let _ = tx_clone.send(TurnEvent::Chunk(delta.clone()));
+                }) {
+                    Ok(resp) => {
+                        total_usage.accumulate(&resp.usage);
+                        resp.text
+                    }
+                    Err(_) => worker_outputs,
                 }
-                Err(_) => {
-                    // LLM 合成失败，直接拼接
-                    worker_outputs
+            } else {
+                match self.engine.client().complete(&req) {
+                    Ok(resp) => {
+                        total_usage.accumulate(&resp.usage);
+                        resp.text
+                    }
+                    Err(_) => worker_outputs,
                 }
             }
         };
