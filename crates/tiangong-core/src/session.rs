@@ -22,6 +22,19 @@ pub struct Message {
     pub created_at: String,
 }
 
+/// 会话工作目录模式
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionCwdMode {
+    /// 继承全局工作目录（桌面端默认）
+    #[default]
+    Inherit,
+    /// 隔离模式：在 ~/.tiangong/workspaces/{session_id}/ 下创建独立目录
+    Isolated,
+    /// 用户手动指定
+    Custom,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
@@ -34,6 +47,9 @@ pub struct Session {
     /// 会话级工作目录，工具执行时以此为根目录
     #[serde(default)]
     pub cwd: String,
+    /// 工作目录模式
+    #[serde(default)]
+    pub cwd_mode: SessionCwdMode,
     /// 早期对话的滚动摘要（用于无限上下文压缩）
     ///
     /// 当对话历史超过模型上下文阈值时，早期消息被 LLM 压缩为摘要存储在此。
@@ -162,6 +178,35 @@ impl Session {
             task_records: Vec::new(),
             task_plans: Vec::new(),
             cwd,
+            cwd_mode: SessionCwdMode::Inherit,
+            context_summary: None,
+            summary_up_to: 0,
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+
+    /// 创建隔离模式的会话（用于 Connector 接入）
+    pub fn new_isolated(title: impl Into<String>) -> Self {
+        let id = new_id();
+        let now = now_text();
+        // 在 ~/.tiangong/workspaces/{session_id}/ 下创建独立目录
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let workspace_dir = home
+            .join(".tiangong")
+            .join("workspaces")
+            .join(&id);
+        let _ = std::fs::create_dir_all(&workspace_dir);
+        Self {
+            id,
+            title: title.into(),
+            messages: Vec::new(),
+            task_records: Vec::new(),
+            task_plans: Vec::new(),
+            cwd: workspace_dir.to_string_lossy().to_string(),
+            cwd_mode: SessionCwdMode::Isolated,
             context_summary: None,
             summary_up_to: 0,
             created_at: now.clone(),

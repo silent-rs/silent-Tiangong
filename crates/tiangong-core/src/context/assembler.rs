@@ -243,6 +243,7 @@ mod tests {
             task_records: Vec::new(),
             task_plans: Vec::new(),
             cwd: String::new(),
+            cwd_mode: Default::default(),
             context_summary: None,
             summary_up_to: 0,
             created_at: String::new(),

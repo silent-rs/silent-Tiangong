@@ -71,7 +71,12 @@ impl TiangongState {
             .iter_mut()
             .find(|s| s.id == active_id)
         {
+            // Isolated 模式不允许修改工作目录
+            if session.cwd_mode == crate::session::SessionCwdMode::Isolated {
+                return Err(anyhow::anyhow!("隔离模式会话不允许修改工作目录"));
+            }
             session.cwd = cwd;
+            session.cwd_mode = crate::session::SessionCwdMode::Custom;
             session.updated_at = now_text();
         }
         self.persist_session_and_app(&active_id)

@@ -214,10 +214,10 @@ mod tests {
     }
 
     #[test]
-    fn default_gate_is_full_trust() {
+    fn default_gate_is_supervised() {
         let gate = PermissionGate::default();
-        assert_eq!(gate.trust_mode(), TrustMode::FullTrust);
-        assert!(matches!(gate.check("apply_patch"), PermissionDecision::Approved));
+        assert_eq!(gate.trust_mode(), TrustMode::Supervised);
+        assert!(matches!(gate.check("apply_patch"), PermissionDecision::NeedsApproval { .. }));
     }
 
     #[test]
