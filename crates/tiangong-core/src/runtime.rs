@@ -210,6 +210,16 @@ impl RuntimeEngine {
                 }
                 r
             };
+
+            // 记录 LLM 调用到会话（与 ReAct 路径一致）
+            on_llm_output(&LlmOutputRecord {
+                stage: "direct-answer".to_string(),
+                content: resp.text.clone(),
+                reasoning_content: resp.reasoning_content.clone(),
+                tool_calls: Vec::new(),
+                usage: resp.usage.clone(),
+            });
+
             let cleaned = strip_tool_traces_from_response(&resp.text);
             return Ok(TurnExecution {
                 assistant_message: cleaned,
