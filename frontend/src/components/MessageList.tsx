@@ -479,14 +479,18 @@ export function MessageList() {
 
               // 系统消息组
               if (group.type === "system") {
-                // 检查该组是否是最后一个系统消息组（后面没有更多系统消息组）
-                const isLastSystemGroup = !allGroups.slice(groupIdx + 1).some(g => g.type === "system");
+                // 后面没有更多系统消息组，且后面没有 assistant 消息（避免与最终回复重复）
+                const remainingGroups = allGroups.slice(groupIdx + 1);
+                const isLastSystemGroup = !remainingGroups.some(g => g.type === "system");
+                const hasAssistantAfter = remainingGroups.some(g =>
+                  g.type === "normal" && g.messages[0]?.role === "Assistant"
+                );
                 return (
                   <SystemMessageGroup
                     key={group.key}
                     messages={group.messages}
                     defaultExpanded={isThinking}
-                    isActive={isThinking && isLastSystemGroup}
+                    isActive={isThinking && isLastSystemGroup && !hasAssistantAfter}
                   />
                 );
               }
@@ -840,33 +844,32 @@ function SystemMessageGroup({
     <div className="max-w-3xl space-y-0.5">
       {rounds.map((round, roundIdx) => {
         const isLastRound = roundIdx === rounds.length - 1;
-        // 执行中的最后一个 round：直接展示解释文本（非折叠）
-        const showExplanation = isActive && isLastRound;
+        // 提取有效解释文本（排除兜底文本）
+        const explanation = (isActive && isLastRound)
+          ? (round.label !== "思考中..." && round.label !== "执行" ? round.label : "")
+          : "";
+        const reasoning = (isActive && isLastRound)
+          ? (round.llm?.reasoning_content || "")
+          : "";
+        // 仅当有实际内容时才以非折叠方式展示
+        const showExplanation = (explanation || reasoning) && isActive && isLastRound;
 
         if (showExplanation) {
-          // 提取解释文本
-          const explanation = round.label !== "思考中..." && round.label !== "执行"
-            ? round.label : "";
-          const reasoning = round.llm?.reasoning_content || "";
-
           return (
             <div key={round.key} className="space-y-1">
-              {/* 解释文本：直接展示 */}
-              {(explanation || reasoning) && (
-                <div className="text-sm text-muted-foreground leading-relaxed">
-                  {reasoning && (
-                    <ThinkingBlock
-                      content={reasoning}
-                      defaultExpanded={false}
-                    />
-                  )}
-                  {explanation && (
-                    <div className="whitespace-pre-wrap break-words">
-                      {explanation}
-                    </div>
-                  )}
-                </div>
-              )}
+              <div className="text-sm text-muted-foreground leading-relaxed">
+                {reasoning && (
+                  <ThinkingBlock
+                    content={reasoning}
+                    defaultExpanded={false}
+                  />
+                )}
+                {explanation && (
+                  <div className="whitespace-pre-wrap break-words">
+                    {explanation}
+                  </div>
+                )}
+              </div>
               {/* 工具调用保持折叠 */}
               {round.tools.length > 0 && (
                 <div className="space-y-0.5">
