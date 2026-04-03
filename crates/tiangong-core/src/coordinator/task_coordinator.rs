@@ -11,9 +11,7 @@ use crate::model::{ModelClient, ModelRequest, TokenUsage};
 use crate::runtime::RuntimeEngine;
 use crate::session::Session;
 
-use super::types::{
-    CoordinatorResult, CoordinatorTask, WorkerBudget, WorkerContext, WorkerResult,
-};
+use super::types::{CoordinatorResult, CoordinatorTask, WorkerBudget, WorkerContext, WorkerResult};
 use super::worker::Worker;
 
 /// 任务协调器
@@ -32,7 +30,8 @@ impl TaskCoordinator {
             "判断以下任务是否可以拆分为多个独立的子任务并行执行。\n\
              只回答 yes 或 no。\n\
              拆分条件：任务包含多个明确的独立子目标，且子目标之间没有依赖关系。\n\n\
-             任务：{}", task.user_input
+             任务：{}",
+            task.user_input
         );
 
         let req = ModelRequest {
@@ -122,7 +121,8 @@ impl TaskCoordinator {
             "将以下任务拆分为可独立并行执行的子任务。\n\
              每个子任务用一行描述，格式：`- 子任务描述`\n\
              只列出子任务，不要额外说明。\n\n\
-             任务：{}", task.user_input
+             任务：{}",
+            task.user_input
         );
 
         let req = ModelRequest {
@@ -133,11 +133,14 @@ impl TaskCoordinator {
 
         let resp = self.engine.client().complete(&req)?;
 
-        let sub_tasks: Vec<CoordinatorTask> = resp.text
+        let sub_tasks: Vec<CoordinatorTask> = resp
+            .text
             .lines()
             .filter_map(|line| {
                 let trimmed = line.trim().trim_start_matches('-').trim();
-                if trimmed.is_empty() { return None; }
+                if trimmed.is_empty() {
+                    return None;
+                }
                 Some(CoordinatorTask {
                     id: scru128::new().to_string(),
                     objective: trimmed.to_string(),
@@ -266,7 +269,8 @@ impl TaskCoordinator {
         } else {
             let prompt = format!(
                 "以下是多个 Worker 并行执行的结果，请合成一个完整的最终回复。\n\
-                 原始任务：{}\n\n{}", original_task.user_input, worker_outputs
+                 原始任务：{}\n\n{}",
+                original_task.user_input, worker_outputs
             );
 
             let req = ModelRequest {
@@ -278,9 +282,12 @@ impl TaskCoordinator {
             if let Some(tx) = event_tx {
                 // 流式合成，实时推送到前端
                 let tx_clone = tx.clone();
-                match self.engine.client().complete_stream_with_callback(&req, |delta| {
-                    let _ = tx_clone.send(TurnEvent::Chunk(delta.clone()));
-                }) {
+                match self
+                    .engine
+                    .client()
+                    .complete_stream_with_callback(&req, |delta| {
+                        let _ = tx_clone.send(TurnEvent::Chunk(delta.clone()));
+                    }) {
                     Ok(resp) => {
                         total_usage.accumulate(&resp.usage);
                         resp.text

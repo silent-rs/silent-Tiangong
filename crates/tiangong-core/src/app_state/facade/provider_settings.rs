@@ -52,9 +52,7 @@ impl TiangongState {
             .to_string();
         let need_fill_default =
             current.is_empty() || !self.store.provider.model_list.iter().any(|m| m == &current);
-        if need_fill_default
-            && let Some(first) = self.store.provider.model_list.first()
-        {
+        if need_fill_default && let Some(first) = self.store.provider.model_list.first() {
             // 自动选择第一个模型
             self.store
                 .provider

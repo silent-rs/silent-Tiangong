@@ -1,5 +1,5 @@
-use super::super::super::*;
 use super::super::super::formatting::{format_llm_output_message, format_tool_trace_message};
+use super::super::super::*;
 
 impl TiangongState {
     pub fn report_run_failed(&mut self, summary: impl Into<String>, error: impl Into<String>) {
@@ -36,7 +36,9 @@ impl TiangongState {
     pub fn append_user_message_to_running_turn(&mut self, content: &str) -> Result<bool> {
         let active_id = self.store.session.active_session_id.clone();
         if let Some(pending) = self.store.runtime.pending_turns.get(&active_id) {
-            let _ = pending.control_tx.send(ControlSignal::UserMessage(content.to_string()));
+            let _ = pending
+                .control_tx
+                .send(ControlSignal::UserMessage(content.to_string()));
             // 在 session 中记录用户追加消息
             if let Some(session) = self
                 .store
@@ -201,8 +203,7 @@ impl TiangongState {
                         self.append_pending_turn_llm_output(&session_id, &output);
                     }
                     TurnEvent::ToolStarted { name, summary } => {
-                        self.store.runtime.run.summary =
-                            format!("正在执行：{name} - {summary}");
+                        self.store.runtime.run.summary = format!("正在执行：{name} - {summary}");
                     }
                     TurnEvent::ToolExecution(result) => {
                         self.append_pending_turn_tool_execution(&session_id, &result);
@@ -216,7 +217,10 @@ impl TiangongState {
                     TurnEvent::StageThinking { stage, delta } => {
                         self.apply_stage_thinking_delta(&session_id, &stage, &delta);
                     }
-                    TurnEvent::WorkerStarted { ref worker_id, ref worker_label } => {
+                    TurnEvent::WorkerStarted {
+                        ref worker_id,
+                        ref worker_label,
+                    } => {
                         // 创建带 worker_id 的系统消息
                         self.append_worker_system_message(
                             &session_id,
@@ -225,36 +229,39 @@ impl TiangongState {
                         );
                         self.store.runtime.run.summary = format!("Worker 开始：{worker_label}");
                     }
-                    TurnEvent::WorkerEvent { ref worker_id, ref worker_label, inner } => {
+                    TurnEvent::WorkerEvent {
+                        ref worker_id,
+                        ref worker_label,
+                        inner,
+                    } => {
                         // 转发内部事件，创建带 worker_id 的系统消息
                         match *inner {
                             TurnEvent::LlmOutput(output) => {
                                 let content = format_llm_output_message(&output);
-                                self.append_worker_system_message(
-                                    &session_id,
-                                    worker_id,
-                                    content,
-                                );
+                                self.append_worker_system_message(&session_id, worker_id, content);
                             }
                             TurnEvent::ToolExecution(result) => {
                                 let content = format_tool_trace_message(&result);
-                                self.append_worker_system_message(
-                                    &session_id,
-                                    worker_id,
-                                    content,
-                                );
+                                self.append_worker_system_message(&session_id, worker_id, content);
                             }
                             TurnEvent::StageThinking { delta, .. } => {
                                 // Worker 的 thinking 写入 Worker 的 assistant 消息
                                 self.apply_worker_delta(
-                                    &session_id, worker_id, worker_label, &delta,
+                                    &session_id,
+                                    worker_id,
+                                    worker_label,
+                                    &delta,
                                 );
                             }
                             _ => {}
                         }
                         self.store.runtime.run.summary = format!("Worker 执行中：{worker_label}");
                     }
-                    TurnEvent::WorkerChunk { worker_id, worker_label, delta } => {
+                    TurnEvent::WorkerChunk {
+                        worker_id,
+                        worker_label,
+                        delta,
+                    } => {
                         self.apply_worker_delta(&session_id, &worker_id, &worker_label, &delta);
                     }
                     TurnEvent::WorkerCompleted { worker_label, .. } => {
@@ -274,11 +281,14 @@ impl TiangongState {
                     TurnEvent::ManagementCommand(cmd) => {
                         self.execute_management_command(cmd);
                     }
-                    TurnEvent::ApprovalRequest { request_id, tool_name, tool_args_summary } => {
+                    TurnEvent::ApprovalRequest {
+                        request_id,
+                        tool_name,
+                        tool_args_summary,
+                    } => {
                         self.store.runtime.run.status = RunStatus::WaitingApproval;
-                        self.store.runtime.run.summary = format!(
-                            "等待审批：{tool_name}（{tool_args_summary}）"
-                        );
+                        self.store.runtime.run.summary =
+                            format!("等待审批：{tool_name}（{tool_args_summary}）");
                         self.store.runtime.run.approval_request_id = Some(request_id.clone());
                         tracing::info!(request_id, tool_name, "前端收到审批请求");
                     }
@@ -337,8 +347,7 @@ impl TiangongState {
                     self.append_pending_turn_llm_output(session_id, &output);
                 }
                 TurnEvent::ToolStarted { name, summary } => {
-                    self.store.runtime.run.summary =
-                        format!("正在执行：{name} - {summary}");
+                    self.store.runtime.run.summary = format!("正在执行：{name} - {summary}");
                 }
                 TurnEvent::ToolExecution(result) => {
                     self.append_pending_turn_tool_execution(session_id, &result);
@@ -349,7 +358,10 @@ impl TiangongState {
                 TurnEvent::StageThinking { stage, delta } => {
                     self.apply_stage_thinking_delta(session_id, &stage, &delta);
                 }
-                TurnEvent::WorkerStarted { ref worker_id, ref worker_label } => {
+                TurnEvent::WorkerStarted {
+                    ref worker_id,
+                    ref worker_label,
+                } => {
                     self.append_worker_system_message(
                         session_id,
                         worker_id,
@@ -357,38 +369,38 @@ impl TiangongState {
                     );
                     self.store.runtime.run.summary = format!("Worker 开始：{worker_label}");
                 }
-                TurnEvent::WorkerEvent { ref worker_id, ref worker_label, inner } => {
+                TurnEvent::WorkerEvent {
+                    ref worker_id,
+                    ref worker_label,
+                    inner,
+                } => {
                     match *inner {
                         TurnEvent::LlmOutput(output) => {
                             let content = format_llm_output_message(&output);
-                            self.append_worker_system_message(
-                                session_id,
-                                worker_id,
-                                content,
-                            );
+                            self.append_worker_system_message(session_id, worker_id, content);
                         }
                         TurnEvent::ToolExecution(result) => {
                             let content = format_tool_trace_message(&result);
-                            self.append_worker_system_message(
-                                session_id,
-                                worker_id,
-                                content,
-                            );
+                            self.append_worker_system_message(session_id, worker_id, content);
                         }
                         TurnEvent::StageThinking { delta, .. } => {
                             // Worker 的 thinking 写入 Worker 的 assistant 消息
-                            self.apply_worker_delta(
-                                session_id, worker_id, worker_label, &delta,
-                            );
+                            self.apply_worker_delta(session_id, worker_id, worker_label, &delta);
                         }
                         _ => {}
                     }
                     self.store.runtime.run.summary = format!("Worker 执行中：{worker_label}");
                 }
-                TurnEvent::WorkerChunk { worker_id, worker_label, delta } => {
+                TurnEvent::WorkerChunk {
+                    worker_id,
+                    worker_label,
+                    delta,
+                } => {
                     self.apply_worker_delta(session_id, &worker_id, &worker_label, &delta);
                 }
-                TurnEvent::WorkerCompleted { ref worker_label, .. } => {
+                TurnEvent::WorkerCompleted {
+                    ref worker_label, ..
+                } => {
                     self.store.runtime.run.summary = format!("Worker 完成：{worker_label}");
                 }
                 TurnEvent::Chunk(delta) => {
@@ -405,9 +417,14 @@ impl TiangongState {
                 TurnEvent::ManagementCommand(cmd) => {
                     self.execute_management_command(cmd);
                 }
-                TurnEvent::ApprovalRequest { request_id, tool_name, tool_args_summary } => {
+                TurnEvent::ApprovalRequest {
+                    request_id,
+                    tool_name,
+                    tool_args_summary,
+                } => {
                     self.store.runtime.run.status = RunStatus::WaitingApproval;
-                    self.store.runtime.run.summary = format!("等待审批：{tool_name}（{tool_args_summary}）");
+                    self.store.runtime.run.summary =
+                        format!("等待审批：{tool_name}（{tool_args_summary}）");
                     self.store.runtime.run.approval_request_id = Some(request_id);
                 }
             }

@@ -169,3 +169,28 @@
 - [x] `cargo check --workspace` 通过
 - [x] `cargo clippy --workspace --all-targets --tests --benches -- -D warnings` 通过
 - [x] 前端 `yarn build` 通过
+
+---
+
+## Phase 10：友好交互改造 — **当前阶段**
+
+### A. GUI 样式简化
+- [ ] 去掉 Assistant/User 头像图标
+- [ ] 去掉消息气泡边框和背景色
+- [ ] 调整因头像而存在的间距
+- [ ] 审批请求和思考中指示器同步去掉头像
+
+### B. GUI 解释文本独立流式展示
+- [ ] useStore 新增流式系统消息追踪状态
+- [ ] SystemMessageGroup 改造：活跃 round 以流式文本块展示（不折叠）
+- [ ] 工具调用消息保持现有折叠展示方式不变
+
+### C. CLI 实时流式展示
+- [ ] repl.rs 轮询循环从阻塞等待改为边轮询边输出增量
+- [ ] output.rs 新增流式输出函数（解释文本、工具摘要、增量输出）
+- [ ] 追踪消息增量，实现系统消息和助手消息的实时展示
+
+### D. 验证
+- [ ] `cargo check --workspace` 通过
+- [ ] `cargo clippy --workspace --all-targets --tests --benches -- -D warnings` 通过
+- [ ] 前端 `yarn build` 通过

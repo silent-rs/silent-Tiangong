@@ -1,8 +1,6 @@
 import { useStore } from "@/store/useStore";
 import { ScrollArea } from "./ui/scroll-area";
 import {
-  User,
-  Bot,
   Loader2,
   ChevronRight,
   ChevronDown,
@@ -17,6 +15,7 @@ import {
   ChevronUp,
   ShieldCheck,
   ShieldX,
+  GitBranch,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -93,6 +92,33 @@ function MessageActions({ text, showTts }: { text: string; showTts: boolean }) {
           )}
         </button>
       )}
+    </div>
+  );
+}
+
+function UserMessageActions({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (e) {
+      console.error("复制失败:", e);
+    }
+  };
+
+  const btnClass = "p-1 rounded text-muted-foreground/50 hover:text-muted-foreground hover:bg-accent transition-colors";
+
+  return (
+    <div className="flex items-center gap-0.5 mt-1">
+      <button onClick={handleCopy} className={btnClass} title={copied ? "已复制" : "复制"}>
+        {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+      </button>
+      <button className={btnClass} title="分叉（开发中）" disabled>
+        <GitBranch className="w-3.5 h-3.5" />
+      </button>
     </div>
   );
 }
@@ -228,18 +254,19 @@ function WorkerCard({ group, isActive, MarkdownComponents }: {
       {!collapsed && (
         <div className="p-2">
           {systemMsgs.length > 0 && (
-            <SystemMessageGroup
+            <AgentTurn
               messages={systemMsgs}
-              defaultExpanded={isActive}
+              streamingMessageId={null}
+              streamingContent=""
+              streamingReasoningContent=""
+              MarkdownComponents={MarkdownComponents}
+              hasTts={false}
             />
           )}
           {assistantMsgs.map((msg) => (
             <div key={msg.id} className="mt-2">
-              <div className="flex gap-3 justify-start">
-                <div className="w-8 h-8 rounded bg-primary flex items-center justify-center flex-shrink-0">
-                  <Bot className="w-5 h-5 text-primary-foreground" />
-                </div>
-                <div className="rounded-lg px-4 py-2.5 max-w-[95%] bg-muted text-foreground">
+              <div className="flex justify-start">
+                <div className="max-w-[100%] text-foreground">
                   {msg.reasoning_content && (
                     <ThinkingBlock
                       content={msg.reasoning_content}
@@ -457,7 +484,7 @@ export function MessageList() {
           {messages.length === 0 && !isThinking ? (
             <div className="flex flex-col items-center justify-center h-full text-center py-20">
               <div className="w-16 h-16 rounded-full bg-primary flex items-center justify-center mb-4">
-                <Bot className="w-8 h-8 text-primary-foreground" />
+                <Cpu className="w-8 h-8 text-primary-foreground" />
               </div>
               <h2 className="text-xl font-medium text-foreground mb-2">
                 欢迎使用天工
@@ -468,116 +495,60 @@ export function MessageList() {
             </div>
           ) : (
             groupMessages(messages).map((group, groupIdx, allGroups) => {
-              // Worker 组：外边框卡片（可收缩）
+              // Worker 组
               if (group.type === "worker") {
                 const isLastGroup = groupIdx === allGroups.length - 1;
-                const isActive = isLastGroup && isThinking;
                 return (
                   <WorkerCard
                     key={group.key}
                     group={group}
-                    isActive={isActive}
+                    isActive={isLastGroup && isThinking}
                     MarkdownComponents={MarkdownComponents}
                   />
                 );
               }
 
-              // 系统消息组
-              if (group.type === "system") {
-                // 最后一组系统消息且正在执行时默认展开
-                const isLastGroup = groupIdx === allGroups.length - 1;
-                const isActive = isLastGroup && isThinking;
+              // 智能体回合：系统消息 + assistant 消息统一展示
+              if (group.type === "agent_turn") {
                 return (
-                  <SystemMessageGroup
-                    key={group.key}
-                    messages={group.messages}
-                    defaultExpanded={isActive}
-                  />
+                  <div key={group.key} className="mt-3 first:mt-0">
+                    <AgentTurn
+                      messages={group.messages}
+                      streamingMessageId={streamingMessageId}
+                      streamingContent={streamingContent}
+                      streamingReasoningContent={streamingReasoningContent}
+                      MarkdownComponents={MarkdownComponents}
+                      hasTts={hasTts}
+                    />
+                  </div>
                 );
               }
 
+              // 用户消息
               const message = group.messages[0];
-              const isStreaming = message.id === streamingMessageId;
-              const isUser = message.role === "User";
-              const isAssistant = message.role === "Assistant";
-
+              const voiceInfo = voiceMessages[message.id];
               return (
                 <div key={group.key} className="mt-3 first:mt-0">
-                  <div
-                    className={`flex gap-3 ${
-                      isUser ? "justify-end" : "justify-start"
-                    }`}
-                  >
-                    {isAssistant && (
-                      <div className="w-8 h-8 rounded bg-primary flex items-center justify-center flex-shrink-0">
-                        <Bot className="w-5 h-5 text-primary-foreground" />
-                      </div>
-                    )}
-                    <div
-                      className={`rounded-lg px-4 py-2.5 max-w-[100%] ${
-                        isUser
-                          ? "bg-accent text-foreground"
-                          : "bg-muted text-foreground"
-                      }`}
-                    >
-                      {isAssistant ? (
-                        <>
-                          {isStreaming ? (
-                            <TypingMessage
-                              content={streamingContent}
-                              reasoningContent={streamingReasoningContent}
-                              speed={300}
-                            />
-                          ) : (
-                            <div>
-                              {message.reasoning_content && (
-                                <ThinkingBlock
-                                  content={message.reasoning_content}
-                                  defaultExpanded={false}
-                                />
-                              )}
-                              <div className="prose prose-sm max-w-none break-words text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
-                                <ReactMarkdown
-                                  remarkPlugins={[remarkGfm]}
-                                  components={MarkdownComponents as any}
-                                >
-                                  {message.content}
-                                </ReactMarkdown>
-                              </div>
-                            </div>
-                          )}
-                        </>
+                  <div className="flex justify-end">
+                    <div className="max-w-[100%] text-muted-foreground">
+                      {voiceInfo ? (
+                        <VoiceBubble
+                          messageId={message.id}
+                          audioPath={voiceInfo.audioPath}
+                          duration={voiceInfo.duration}
+                          showText={voiceInfo.showText}
+                          content={message.content}
+                        />
                       ) : (
-                        (() => {
-                          const voiceInfo = voiceMessages[message.id];
-                          if (voiceInfo) {
-                            return (
-                              <VoiceBubble
-                                messageId={message.id}
-                                audioPath={voiceInfo.audioPath}
-                                duration={voiceInfo.duration}
-                                showText={voiceInfo.showText}
-                                content={message.content}
-                              />
-                            );
-                          }
-                          return (
-                            <p className="whitespace-pre-wrap break-words text-sm">
-                              {message.content}
-                            </p>
-                          );
-                        })()
+                        <p className="whitespace-pre-wrap break-words text-sm">
+                          {message.content}
+                        </p>
                       )}
                     </div>
-                    {isUser && (
-                      <div className="w-8 h-8 rounded bg-muted-foreground flex items-center justify-center flex-shrink-0">
-                        <User className="w-5 h-5 text-background" />
-                      </div>
-                    )}
                   </div>
-                  {isAssistant && !isStreaming && message.content && (
-                    <div className="pl-11">
-                      <MessageActions text={message.content} showTts={hasTts} />
+                  {message.content && (
+                    <div className="flex justify-end">
+                      <UserMessageActions text={message.content} />
                     </div>
                   )}
                 </div>
@@ -587,11 +558,8 @@ export function MessageList() {
 
           {/* 审批请求 */}
           {runStatus === "waitingapproval" && (
-            <div className="flex gap-3 justify-start">
-              <div className="w-8 h-8 rounded bg-amber-500 flex items-center justify-center flex-shrink-0">
-                <ShieldCheck className="w-5 h-5 text-white" />
-              </div>
-              <div className="bg-muted text-foreground rounded-lg px-4 py-3 max-w-[100%]">
+            <div className="flex justify-start">
+              <div className="text-foreground max-w-[100%]">
                 <div className="text-sm font-medium mb-2">需要您的确认</div>
                 <div className="text-xs text-muted-foreground mb-3">
                   {runSummary}
@@ -627,14 +595,11 @@ export function MessageList() {
           {/* 思考中/执行中指示器（仅在助手尚未回复时显示） */}
           {isThinking && runStatus !== "waitingapproval" && !streamingMessageId && !streamingContent &&
            !(messages.length > 0 && messages[messages.length - 1].role === "Assistant") && (
-            <div className="flex gap-3 justify-start">
-              <div className="w-8 h-8 rounded bg-primary flex items-center justify-center flex-shrink-0">
-                <Bot className="w-5 h-5 text-primary-foreground" />
-              </div>
-              <div className="bg-muted text-foreground rounded-lg px-4 py-2.5">
+            <div className="flex justify-start">
+              <div className="text-foreground">
                 <div className="flex items-center gap-2">
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span className="text-sm">
+                  <span className="text-sm text-muted-foreground">
                     {runStatus === "planning" && "正在制定计划..."}
                     {runStatus === "executing" && "正在执行任务..."}
                     {runStatus === "responding" && "正在生成回复..."}
@@ -653,248 +618,245 @@ export function MessageList() {
 }
 
 // ---------------------------------------------------------------------------
-// 消息分组：连续系统消息归为一组
+// 消息分组：User 消息单独成组，其余合并为 agent_turn
 // ---------------------------------------------------------------------------
+
+interface MessageItem {
+  id: string;
+  role: string;
+  content: string;
+  reasoning_content?: string;
+  worker_id?: string;
+  created_at: string;
+}
 
 interface MessageGroup {
   key: string;
-  type: "system" | "normal" | "worker";
+  type: "user" | "agent_turn" | "worker";
   worker_id?: string;
-  messages: {
-    id: string;
-    role: string;
-    content: string;
-    reasoning_content?: string;
-    worker_id?: string;
-    created_at: string;
-  }[];
+  messages: MessageItem[];
 }
 
-function groupMessages(messages: MessageGroup["messages"]): MessageGroup[] {
+function groupMessages(messages: MessageItem[]): MessageGroup[] {
   const groups: MessageGroup[] = [];
-  // worker_id → 对应的 worker 组索引
   const workerGroupMap = new Map<string, number>();
-  let currentSystemGroup: MessageGroup | null = null;
+  let currentAgentTurn: MessageGroup | null = null;
 
   for (const msg of messages) {
     if (msg.worker_id) {
-      // 有 worker_id 的消息：按 worker_id 分组
-      if (currentSystemGroup) {
-        groups.push(currentSystemGroup);
-        currentSystemGroup = null;
-      }
-
-      const existingIdx = workerGroupMap.get(msg.worker_id);
-      if (existingIdx !== undefined) {
-        // 追加到已有的 Worker 组
-        groups[existingIdx].messages.push(msg);
+      if (currentAgentTurn) { groups.push(currentAgentTurn); currentAgentTurn = null; }
+      const idx = workerGroupMap.get(msg.worker_id);
+      if (idx !== undefined) {
+        groups[idx].messages.push(msg);
       } else {
-        // 创建新的 Worker 组
-        const idx = groups.length;
-        workerGroupMap.set(msg.worker_id, idx);
-        groups.push({
-          key: `worker-${msg.worker_id}`,
-          type: "worker",
-          worker_id: msg.worker_id,
-          messages: [msg],
-        });
+        workerGroupMap.set(msg.worker_id, groups.length);
+        groups.push({ key: `worker-${msg.worker_id}`, type: "worker", worker_id: msg.worker_id, messages: [msg] });
       }
-    } else if (msg.role === "System") {
-      if (!currentSystemGroup) {
-        currentSystemGroup = {
-          key: `sys-${msg.id}`,
-          type: "system",
-          messages: [],
-        };
-      }
-      currentSystemGroup.messages.push(msg);
+    } else if (msg.role === "User") {
+      if (currentAgentTurn) { groups.push(currentAgentTurn); currentAgentTurn = null; }
+      groups.push({ key: msg.id, type: "user", messages: [msg] });
     } else {
-      if (currentSystemGroup) {
-        groups.push(currentSystemGroup);
-        currentSystemGroup = null;
+      // System + Assistant → 合并到同一个 agent_turn
+      if (!currentAgentTurn) {
+        currentAgentTurn = { key: `turn-${msg.id}`, type: "agent_turn", messages: [] };
       }
-      groups.push({ key: msg.id, type: "normal", messages: [msg] });
+      currentAgentTurn.messages.push(msg);
     }
   }
-  if (currentSystemGroup) {
-    groups.push(currentSystemGroup);
-  }
+  if (currentAgentTurn) groups.push(currentAgentTurn);
   return groups;
 }
 
 // ---------------------------------------------------------------------------
-// 系统消息组：可整体折叠/展开
+// 从 LLM 输出系统消息中提取解释文本
 // ---------------------------------------------------------------------------
 
-interface RoundGroup {
-  key: string;
-  label: string;
-  llm: MessageGroup["messages"][0] | null;
-  tools: MessageGroup["messages"];
-  others: MessageGroup["messages"];
-}
-
-/** 从 LLM 输出系统消息中提取 thinking 内容作为 round 标题 */
-function extractThinkingFromLlm(content: string): string {
+function extractLlmExplanation(content: string): string {
   // 格式: "LLM 输出 [...]\ntokens: ...\ntool_calls: ...\ncontent:\n实际内容"
   const lines = content.split("\n");
   const contentIdx = lines.findIndex((l) => l.startsWith("content:"));
   if (contentIdx >= 0 && contentIdx + 1 < lines.length) {
-    const thinking = lines
-      .slice(contentIdx + 1)
-      .join(" ")
-      .trim();
-    if (thinking) return thinking;
+    return lines.slice(contentIdx + 1).join("\n").trim();
   }
-  // fallback: 直接取 reasoning_content 或工具调用信息
-  const toolMatch = content.match(/tool_calls:\s*(.+)/);
-  if (toolMatch) return `调用 ${toolMatch[1]}`;
-  return "思考中...";
+  return "";
 }
 
-/** 将系统消息按 round 分组：LLM 输出 [react-round-N] + 后续工具执行归为一组 */
-function groupByRound(messages: MessageGroup["messages"]): RoundGroup[] {
-  const rounds: RoundGroup[] = [];
-  let current: RoundGroup | null = null;
-
-  for (const msg of messages) {
-    if (msg.content.startsWith("LLM 输出")) {
-      if (current) rounds.push(current);
-      const thinking = extractThinkingFromLlm(msg.content);
-      current = {
-        key: msg.id,
-        label: thinking,
-        llm: msg,
-        tools: [],
-        others: [],
-      };
-    } else if (
-      current &&
-      (msg.content.includes("exit_code") || msg.content.includes("tool_name:"))
-    ) {
-      current.tools.push(msg);
-    } else if (current) {
-      current.others.push(msg);
-    } else {
-      if (!current) {
-        current = {
-          key: msg.id,
-          label: "执行",
-          llm: null,
-          tools: [],
-          others: [msg],
-        };
-      }
-    }
-  }
-  if (current) rounds.push(current);
-  return rounds;
-}
-
-function SystemMessageGroup({
+/** 统一的智能体回合渲染 — 将系统消息（事件）和 assistant 消息（回复）合并展示 */
+function AgentTurn({
   messages,
+  streamingMessageId,
+  streamingContent,
+  streamingReasoningContent: _streamingReasoningContent,
+  MarkdownComponents,
+  hasTts,
 }: {
-  messages: MessageGroup["messages"];
-  defaultExpanded?: boolean;
+  messages: MessageItem[];
+  streamingMessageId: string | null;
+  streamingContent: string;
+  streamingReasoningContent: string;
+  MarkdownComponents: any;
+  hasTts: boolean;
 }) {
-  const [expandedRounds, setExpandedRounds] = useState<Set<string>>(new Set());
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
-
-  const toggleRound = (key: string) => {
-    setExpandedRounds((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  };
+  const [collapsedToolGroups, setCollapsedToolGroups] = useState<Set<string>>(new Set());
 
   const toggleItem = (id: string) => {
     setExpandedItems((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+  const toggleToolGroup = (key: string) => {
+    setCollapsedToolGroups((prev) => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
       return next;
     });
   };
 
-  const rounds = groupByRound(messages);
+  // 将消息序列解析为渲染片段
+  type Fragment =
+    | { type: "explanation"; text: string }
+    | { type: "thinking"; content: string }
+    | { type: "tool_group"; key: string; brief: string; tools: MessageItem[] }
+    | { type: "assistant"; msg: MessageItem; isStreaming: boolean }
+    | { type: "other_system"; msg: MessageItem };
 
-  const renderItem = (msg: MessageGroup["messages"][0]) => {
-    const meta = getSystemMessageMeta(msg.content);
-    const itemExpanded = expandedItems.has(msg.id);
+  const fragments: Fragment[] = [];
+  const shownReasonings = new Set<string>();
+  let pendingTools: MessageItem[] = [];
+
+  const flushTools = () => {
+    if (pendingTools.length === 0) return;
+    const summary = pendingTools.map(t => t.content.includes("ok=true") ? "OK" : "FAIL");
+    const key = pendingTools[0].id;
+    fragments.push({
+      type: "tool_group",
+      key,
+      brief: `${pendingTools.length} 次调用 (${summary.join(", ")})`,
+      tools: [...pendingTools],
+    });
+    pendingTools = [];
+  };
+
+  for (const msg of messages) {
+    if (msg.role === "System" && msg.content.startsWith("LLM 输出")) {
+      flushTools();
+      // 提取 reasoning
+      const reasoning = msg.reasoning_content?.trim() || "";
+      if (reasoning && !shownReasonings.has(reasoning)) {
+        shownReasonings.add(reasoning);
+        fragments.push({ type: "thinking", content: reasoning });
+      }
+      // 提取解释文本
+      const explanation = extractLlmExplanation(msg.content);
+      if (explanation) {
+        fragments.push({ type: "explanation", text: explanation });
+      }
+    } else if (msg.role === "System" && (msg.content.includes("tool_name:") || msg.content.includes("exit_code"))) {
+      pendingTools.push(msg);
+    } else if (msg.role === "Assistant") {
+      flushTools();
+      const isStreaming = msg.id === streamingMessageId;
+      // 跳过与前一个 explanation 完全重复的 assistant 内容
+      const prevFrag = fragments[fragments.length - 1];
+      if (prevFrag?.type === "explanation" && prevFrag.text === msg.content.trim() && !isStreaming) {
+        // 内容重复，移除前面的 explanation，只保留 assistant
+        fragments.pop();
+      }
+      // 跳过已展示过的 reasoning
+      if (msg.reasoning_content && shownReasonings.has(msg.reasoning_content.trim())) {
+        // reasoning 已在前面的 thinking 片段中展示
+      }
+      fragments.push({ type: "assistant", msg, isStreaming });
+    } else if (msg.role === "System") {
+      flushTools();
+      fragments.push({ type: "other_system", msg });
+    }
+  }
+  flushTools();
+
+  /** 渲染工具条目 */
+  const renderToolItem = (tool: MessageItem) => {
+    const meta = getSystemMessageMeta(tool.content);
+    const expanded = expandedItems.has(tool.id);
     return (
-      <div key={msg.id}>
+      <div key={tool.id}>
         <button
           className="w-full flex items-center gap-2 px-2 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 transition-colors text-left"
-          onClick={() => toggleItem(msg.id)}
+          onClick={() => toggleItem(tool.id)}
         >
-          {itemExpanded ? (
-            <ChevronDown className="w-3 h-3 shrink-0" />
-          ) : (
-            <ChevronRight className="w-3 h-3 shrink-0" />
-          )}
+          {expanded ? <ChevronDown className="w-3 h-3 shrink-0" /> : <ChevronRight className="w-3 h-3 shrink-0" />}
           <meta.icon className="w-3 h-3 shrink-0" />
           <span className="font-medium">{meta.label}</span>
-          {!itemExpanded && (
-            <span className="truncate opacity-60">{meta.summary}</span>
-          )}
+          {!expanded && <span className="truncate opacity-60">{meta.summary}</span>}
         </button>
-        {itemExpanded && (
+        {expanded && (
           <div className="ml-5 mt-0.5 px-3 py-2 rounded-md bg-muted/30 border border-border/50">
-            <pre className="text-xs text-muted-foreground whitespace-pre-wrap break-words font-mono leading-relaxed">
-              {msg.content}
-            </pre>
+            <pre className="text-xs text-muted-foreground whitespace-pre-wrap break-words font-mono leading-relaxed">{tool.content}</pre>
           </div>
         )}
       </div>
     );
   };
 
-  // 截断 thinking 文本
-  const truncLabel = (text: string, max: number) =>
-    text.length > max ? text.slice(0, max) + "..." : text;
-
   return (
-    <div className="max-w-3xl space-y-0.5">
-      {rounds.map((round) => {
-        const roundExpanded = expandedRounds.has(round.key);
-        const toolSummary = round.tools.map((t) =>
-          t.content.includes("ok=true") ? "OK" : "FAIL",
-        );
-        const toolBrief =
-          round.tools.length > 0
-            ? `${round.tools.length} 次调用 (${toolSummary.join(", ")})`
-            : "";
-
-        return (
-          <div key={round.key}>
-            {/* Round 标题：thinking 内容 + 工具摘要 */}
-            <button
-              className="w-full flex items-center gap-2 px-3 py-1 rounded-md text-xs text-muted-foreground hover:bg-muted/50 transition-colors text-left"
-              onClick={() => toggleRound(round.key)}
-            >
-              {roundExpanded ? (
-                <ChevronDown className="w-3 h-3 shrink-0" />
+    <div className="space-y-1.5">
+      {fragments.map((frag, i) => {
+        if (frag.type === "thinking") {
+          return <ThinkingBlock key={`think-${i}`} content={frag.content} defaultExpanded={false} />;
+        }
+        if (frag.type === "explanation") {
+          return (
+            <p key={`expl-${i}`} className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap break-words">
+              {frag.text}
+            </p>
+          );
+        }
+        if (frag.type === "tool_group") {
+          const collapsed = collapsedToolGroups.has(frag.key);
+          return (
+            <div key={`tools-${frag.key}`}>
+              <button
+                className="flex items-center gap-2 px-2 py-0.5 text-xs text-muted-foreground hover:bg-muted/50 rounded transition-colors"
+                onClick={() => toggleToolGroup(frag.key)}
+              >
+                {collapsed ? <ChevronRight className="w-3 h-3 shrink-0" /> : <ChevronDown className="w-3 h-3 shrink-0" />}
+                <Cpu className="w-3 h-3 shrink-0" />
+                <span>{frag.brief}</span>
+              </button>
+              {!collapsed && <div className="ml-4 space-y-0">{frag.tools.map(t => renderToolItem(t))}</div>}
+            </div>
+          );
+        }
+        if (frag.type === "assistant") {
+          const { msg, isStreaming } = frag;
+          return (
+            <div key={msg.id} className="text-foreground">
+              {isStreaming ? (
+                <TypingMessage content={streamingContent} reasoningContent="" speed={300} />
               ) : (
-                <ChevronRight className="w-3 h-3 shrink-0" />
+                <div>
+                  <div className="prose prose-sm max-w-none break-words text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={MarkdownComponents as any}>
+                      {msg.content}
+                    </ReactMarkdown>
+                  </div>
+                </div>
               )}
-              <Cpu className="w-3 h-3 shrink-0" />
-              <span className="truncate">{truncLabel(round.label, 60)}</span>
-              {!roundExpanded && toolBrief && (
-                <span className="shrink-0 opacity-60">{toolBrief}</span>
-              )}
-            </button>
-
-            {/* 展开：工具调用详情 */}
-            {roundExpanded && (
-              <div className="ml-7 mt-0.5 space-y-0.5">
-                {round.tools.map((t) => renderItem(t))}
-                {round.others.map((o) => renderItem(o))}
-              </div>
-            )}
-          </div>
-        );
+              {!isStreaming && msg.content && <MessageActions text={msg.content} showTts={hasTts} />}
+            </div>
+          );
+        }
+        if (frag.type === "other_system") {
+          return (
+            <p key={frag.msg.id} className="text-xs text-muted-foreground">
+              {frag.msg.content.split("\n")[0]}
+            </p>
+          );
+        }
+        return null;
       })}
     </div>
   );

@@ -228,14 +228,10 @@ impl SingleProviderClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().unwrap_or_default();
-            return Err(anyhow!(
-                "获取模型列表失败：HTTP {status}，响应：{body}"
-            ));
+            return Err(anyhow!("获取模型列表失败：HTTP {status}，响应：{body}"));
         }
 
-        let body = resp
-            .text()
-            .context("读取模型列表响应失败")?;
+        let body = resp.text().context("读取模型列表响应失败")?;
 
         // 宽松反序列化：只需要 id 字段
         #[derive(serde::Deserialize)]
@@ -247,11 +243,8 @@ impl SingleProviderClient {
             data: Vec<ModelEntry>,
         }
 
-        let parsed: ModelsResponse = serde_json::from_str(&body).with_context(|| {
-            format!(
-                "failed to deserialize api response: {body}"
-            )
-        })?;
+        let parsed: ModelsResponse = serde_json::from_str(&body)
+            .with_context(|| format!("failed to deserialize api response: {body}"))?;
 
         let mut models = parsed.data.into_iter().map(|m| m.id).collect::<Vec<_>>();
         models.sort();

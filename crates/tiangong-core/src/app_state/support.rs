@@ -41,11 +41,24 @@ pub enum ManagementCommand {
         transport: Option<String>,
         endpoint: Option<String>,
     },
-    RemoveMcpServer { name: String },
-    SetMcpServerEnabled { name: String, enabled: bool },
-    InstallSkill { path: String, enabled: bool },
-    RemoveSkill { id: String },
-    SetSkillEnabled { id: String, enabled: bool },
+    RemoveMcpServer {
+        name: String,
+    },
+    SetMcpServerEnabled {
+        name: String,
+        enabled: bool,
+    },
+    InstallSkill {
+        path: String,
+        enabled: bool,
+    },
+    RemoveSkill {
+        id: String,
+    },
+    SetSkillEnabled {
+        id: String,
+        enabled: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -54,7 +67,10 @@ pub enum TurnEvent {
     LlmOutput(LlmOutputRecord),
     /// 工具开始执行（用于前端显示正在执行的命令）
     #[allow(dead_code)]
-    ToolStarted { name: String, summary: String },
+    ToolStarted {
+        name: String,
+        summary: String,
+    },
     ToolExecution(ToolResult),
     PlanExecutionSummary(String),
     /// 阶段性流式 thinking，直接追加到对应 stage 的系统消息中
@@ -207,7 +223,11 @@ impl TurnEvent {
                 EventSource::Runtime,
                 serde_json::json!({"worker_id": worker_id}),
             ),
-            TurnEvent::ApprovalRequest { request_id, tool_name, .. } => (
+            TurnEvent::ApprovalRequest {
+                request_id,
+                tool_name,
+                ..
+            } => (
                 RuntimeEventType::PermissionRequest,
                 EventSource::Permission,
                 serde_json::json!({"request_id": request_id, "tool_name": tool_name}),

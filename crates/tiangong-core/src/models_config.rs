@@ -64,7 +64,9 @@ impl ModelCapability {
     /// 返回意图分类的描述
     pub fn intent_description(&self) -> &'static str {
         match self {
-            ModelCapability::Chat => "简单对话（问候、闲聊、知识问答、翻译、解释概念等不需要执行工具或命令的请求）",
+            ModelCapability::Chat => {
+                "简单对话（问候、闲聊、知识问答、翻译、解释概念等不需要执行工具或命令的请求）"
+            }
             ModelCapability::Multimodal => "多模态请求（需要理解图片、音频等多种输入形式）",
             ModelCapability::ImageGeneration => "图片生成请求（用户要求生成、绘制、创作图片）",
             ModelCapability::VideoGeneration => "视频生成请求（用户要求生成、制作视频）",

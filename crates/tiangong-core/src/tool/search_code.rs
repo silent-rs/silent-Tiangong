@@ -3,8 +3,8 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, anyhow};
 
 use super::common::{
-    command_timeout_ms, execute_command_with_timeout, resolve_workspace_path, truncate_output,
-    workspace_root,
+    command_timeout_ms, execute_command_with_timeout, resolve_workspace_path,
+    resolve_workspace_path_trusted, truncate_output, workspace_root,
 };
 use super::{LocalToolExecutor, ToolCall, ToolResult};
 
@@ -20,7 +20,7 @@ impl LocalToolExecutor {
         }
 
         let target = call.args.get(1).map_or(".", String::as_str);
-        let full_path = resolve_workspace_path(target)?;
+        let full_path = if self.is_full_trust() { resolve_workspace_path_trusted(target)? } else { resolve_workspace_path(target)? };
         let timeout_ms = command_timeout_ms();
         let target_text = full_path.display().to_string();
 

@@ -17,9 +17,8 @@ use crate::model::{
     FunctionToolSpec, ModelClient, ModelFunctionCall, ModelRequest, ModelStreamChunk, TokenUsage,
 };
 use crate::runtime::{
-    LlmOutputRecord, RuntimeEngine, TurnExecution,
-    build_react_system_prompt, inject_enhanced_tools,
-    strip_tool_traces_from_response, use_stream_mode,
+    LlmOutputRecord, RuntimeEngine, TurnExecution, build_react_system_prompt,
+    inject_enhanced_tools, strip_tool_traces_from_response, use_stream_mode,
 };
 use crate::session::{Message, MessageRole, Session, now_text};
 use crate::tool::ToolResult;
@@ -118,7 +117,10 @@ impl TurnRunner {
                 TurnPhase::ContextAssembly => self.do_context_assembly(),
                 TurnPhase::LlmCalling => self.do_llm_calling()?,
                 TurnPhase::ToolDispatching => self.do_tool_dispatching(),
-                TurnPhase::WaitingApproval { ref request_id, ref tool_name } => {
+                TurnPhase::WaitingApproval {
+                    ref request_id,
+                    ref tool_name,
+                } => {
                     self.do_waiting_approval(request_id.clone(), tool_name.clone());
                 }
                 TurnPhase::ToolExecuting => self.do_tool_executing(),
@@ -149,7 +151,11 @@ impl TurnRunner {
             .into_iter()
             .filter(|t| t.name != "mark_step_completed")
             .collect();
-        inject_enhanced_tools(&mut all_tools, self.engine.models_config(), self.engine.agent_config());
+        inject_enhanced_tools(
+            &mut all_tools,
+            self.engine.models_config(),
+            self.engine.agent_config(),
+        );
 
         let full_system_prompt = build_react_system_prompt(
             &self.user_input,
@@ -172,12 +178,13 @@ impl TurnRunner {
         self.system_prompt = assembled.system_prompt.clone();
         self.mcp_targets = mcp_targets;
         self.query_mode = assembled.mode;
-        self.organizer = Some(
-            ContextOrganizer::new(self.engine.context_limit).with_keep_recent_turns(6),
-        );
+        self.organizer =
+            Some(ContextOrganizer::new(self.engine.context_limit).with_keep_recent_turns(6));
 
         #[cfg(feature = "llm-debug-log")]
-        { self.llm_calls = assembled.llm_calls; }
+        {
+            self.llm_calls = assembled.llm_calls;
+        }
 
         // 根据查询模式决定下一步
         if assembled.mode == QueryMode::DirectAnswer {
@@ -241,21 +248,38 @@ impl TurnRunner {
         self.accumulated_usage.accumulate(&response.usage);
 
         if response.tool_calls.is_empty() {
-            // 无工具调用 → 最终回复，一次性推送到 assistant 消息
+            // 无工具调用 → 最终回复，按段落拆分发送 Chunk 实现流式效果
             self.final_text = response.text.clone();
             self.final_reasoning = response.reasoning_content.clone();
-            if !self.final_text.is_empty() || !self.final_reasoning.is_empty() {
+            // 先发送 reasoning（如有）
+            if !self.final_reasoning.is_empty() {
                 let _ = self.tx.send(TurnEvent::Chunk(ModelStreamChunk {
-                    content: self.final_text.clone(),
+                    content: String::new(),
                     reasoning_content: self.final_reasoning.clone(),
+                }));
+            }
+            // 按段落拆分 content 发送，每段之间短暂间隔以触发前端流式检测
+            let paragraphs: Vec<&str> = self.final_text.split("\n\n").collect();
+            let mut sent = String::new();
+            for (i, para) in paragraphs.iter().enumerate() {
+                if i > 0 {
+                    sent.push_str("\n\n");
+                }
+                sent.push_str(para);
+                let _ = self.tx.send(TurnEvent::Chunk(ModelStreamChunk {
+                    content: para.to_string() + if i < paragraphs.len() - 1 { "\n\n" } else { "" },
+                    reasoning_content: String::new(),
                 }));
                 self.total_output_chunks += 1;
             }
             self.phase = TurnPhase::Responding;
         } else {
             // 有工具调用
-            let tool_call_names: Vec<String> =
-                response.tool_calls.iter().map(|tc| tc.name.clone()).collect();
+            let tool_call_names: Vec<String> = response
+                .tool_calls
+                .iter()
+                .map(|tc| tc.name.clone())
+                .collect();
 
             let output = LlmOutputRecord {
                 stage: format!("react-round-{}", self.round + 1),
@@ -296,9 +320,11 @@ impl TurnRunner {
         };
         let tx = self.tx.clone();
         let resp = if use_stream_mode() {
-            self.engine.client().complete_stream_with_callback(&req, |delta| {
-                let _ = tx.send(TurnEvent::Chunk(delta.clone()));
-            })?
+            self.engine
+                .client()
+                .complete_stream_with_callback(&req, |delta| {
+                    let _ = tx.send(TurnEvent::Chunk(delta.clone()));
+                })?
         } else {
             let r = self.engine.client().complete(&req)?;
             if !r.text.is_empty() {
@@ -338,7 +364,10 @@ impl TurnRunner {
         // 使用 recv_timeout 避免无限阻塞，每秒检查一次取消信号
         loop {
             match self.ctrl_rx.recv_timeout(std::time::Duration::from_secs(1)) {
-                Ok(ControlSignal::PermissionResponse { request_id: rid, approved }) => {
+                Ok(ControlSignal::PermissionResponse {
+                    request_id: rid,
+                    approved,
+                }) => {
                     if rid == request_id {
                         if approved {
                             tracing::info!("工具 {tool_name} 审批通过");
@@ -353,7 +382,7 @@ impl TurnRunner {
                                 content: format!("工具 {tool_name} 被用户拒绝"),
                                 reasoning_content: String::new(),
                                 worker_id: None,
-                                                created_at: now_text(),
+                                created_at: now_text(),
                             });
                             if self.pending_tool_calls.is_empty() {
                                 self.phase = TurnPhase::ContextAssembly;
@@ -422,9 +451,11 @@ impl TurnRunner {
 
         // 移除被拒绝的工具调用
         if !denied_tools.is_empty() {
-            self.pending_tool_calls.retain(|c| !denied_tools.contains(&c.name));
+            self.pending_tool_calls
+                .retain(|c| !denied_tools.contains(&c.name));
             // 将拒绝信息加入 loop_messages 作为反馈
-            let denied_msg = denied_tools.iter()
+            let denied_msg = denied_tools
+                .iter()
                 .map(|n| format!("工具 {n} 被权限策略拒绝"))
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -525,9 +556,11 @@ impl TurnRunner {
             };
             let tx = self.tx.clone();
             let resp = if use_stream_mode() {
-                self.engine.client().complete_stream_with_callback(&req, |delta| {
-                    let _ = tx.send(TurnEvent::Chunk(delta.clone()));
-                })?
+                self.engine
+                    .client()
+                    .complete_stream_with_callback(&req, |delta| {
+                        let _ = tx.send(TurnEvent::Chunk(delta.clone()));
+                    })?
             } else {
                 let r = self.engine.client().complete(&req)?;
                 if !r.text.is_empty() {
@@ -559,7 +592,11 @@ impl TurnRunner {
                 self.tool_results.iter().filter(|r| !r.ok).count(),
             ))
         };
-        let tool_execution = self.tool_results.into_iter().filter_map(|r| r.execution).next_back();
+        let tool_execution = self
+            .tool_results
+            .into_iter()
+            .filter_map(|r| r.execution)
+            .next_back();
         let cleaned_text = strip_tool_traces_from_response(&self.final_text);
 
         #[cfg(feature = "llm-debug-log")]
@@ -675,13 +712,24 @@ impl TurnRunner {
                         })
                     })
                     .collect();
-                handles.into_iter().map(|h| h.join().unwrap_or_else(|_| {
-                    ("unknown".to_string(), ToolResult {
-                        ok: false, summary: "工具执行线程 panic".to_string(),
-                        stdout: String::new(), stderr: "thread panicked".to_string(),
-                        exit_code: 1, execution: None,
+                handles
+                    .into_iter()
+                    .map(|h| {
+                        h.join().unwrap_or_else(|_| {
+                            (
+                                "unknown".to_string(),
+                                ToolResult {
+                                    ok: false,
+                                    summary: "工具执行线程 panic".to_string(),
+                                    stdout: String::new(),
+                                    stderr: "thread panicked".to_string(),
+                                    exit_code: 1,
+                                    execution: None,
+                                },
+                            )
+                        })
                     })
-                })).collect()
+                    .collect()
             });
             call_results.extend(other_results);
         }

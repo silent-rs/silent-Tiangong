@@ -44,9 +44,7 @@ pub enum ContextScope {
     /// 仅当前子任务上下文
     TaskOnly,
     /// 完全隔离（带初始上下文）
-    Isolated {
-        initial_context: Vec<Message>,
-    },
+    Isolated { initial_context: Vec<Message> },
 }
 
 /// Worker 预算上限
@@ -111,7 +109,5 @@ pub enum ExecutionEnvironment {
     /// 本地后台
     Background,
     /// 隔离环境（独立工作目录）
-    Isolated {
-        work_dir: String,
-    },
+    Isolated { work_dir: String },
 }

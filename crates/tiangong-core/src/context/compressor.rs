@@ -55,11 +55,8 @@ impl ContextCompressor {
         }
 
         // 折叠：旧摘要 + 新溢出消息 → 新摘要
-        let summary = self.fold_summary(
-            session.context_summary.as_deref(),
-            new_messages,
-            client,
-        )?;
+        let summary =
+            self.fold_summary(session.context_summary.as_deref(), new_messages, client)?;
 
         tracing::info!(
             old_summary_up_to = session.summary_up_to,

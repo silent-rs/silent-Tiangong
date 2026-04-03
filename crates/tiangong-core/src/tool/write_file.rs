@@ -2,7 +2,7 @@ use std::fs::{self, OpenOptions};
 
 use anyhow::{Context, Result, anyhow};
 
-use super::common::{display_rel_path, resolve_workspace_write_path};
+use super::common::{display_rel_path, resolve_workspace_write_path, resolve_workspace_write_path_trusted};
 use super::{LocalToolExecutor, ToolCall, ToolResult};
 
 impl LocalToolExecutor {
@@ -13,7 +13,7 @@ impl LocalToolExecutor {
             .ok_or_else(|| anyhow!("write_file 缺少路径参数"))?;
         let content = call.args.get(1).cloned().unwrap_or_default();
         let append = parse_bool_flag(call.args.get(2).map(String::as_str), false)?;
-        let full_path = resolve_workspace_write_path(path)?;
+        let full_path = if self.is_full_trust() { resolve_workspace_write_path_trusted(path)? } else { resolve_workspace_write_path(path)? };
         if let Some(parent) = full_path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("创建目录失败：{}", parent.display()))?;

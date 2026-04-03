@@ -2,7 +2,7 @@ use std::fs;
 
 use anyhow::{Context, Result, anyhow};
 
-use super::common::{display_rel_path, resolve_workspace_path, truncate_output};
+use super::common::{display_rel_path, resolve_workspace_path, resolve_workspace_path_trusted, truncate_output};
 use super::{LocalToolExecutor, ToolCall, ToolResult};
 
 const DEFAULT_START_LINE: usize = 1;
@@ -32,7 +32,11 @@ impl LocalToolExecutor {
                 MAX_MAX_LINES
             ));
         }
-        let full_path = resolve_workspace_path(path)?;
+        let full_path = if self.is_full_trust() {
+            resolve_workspace_path_trusted(path)?
+        } else {
+            resolve_workspace_path(path)?
+        };
         if !full_path.is_file() {
             return Err(anyhow!("read_file 目标不是文件：{}", full_path.display()));
         }

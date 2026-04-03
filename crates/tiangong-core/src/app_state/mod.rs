@@ -50,11 +50,11 @@ use self::repository::{
     validate_agent_config,
 };
 use self::services::{AppMcpService, AppSkillService, AppTurnService};
+pub use self::support::{ControlSignal, TurnEvent};
 use self::support::{
     LegacyPersistedState, LoadedState, McpDependencyLockRecord, PendingTurn, PersistedAppState,
     ScopedDirCleanup, SkillsLockRecord,
 };
-pub use self::support::{ControlSignal, TurnEvent};
 
 // Public re-exports for Tauri API
 pub use self::repository::AppRepository;
@@ -121,7 +121,9 @@ impl TiangongState {
 
     pub fn set_trust_mode(&mut self, mode: crate::permission::TrustMode) -> Result<()> {
         self.store.agent.agent_config.trust_mode = mode;
-        // 重建 RuntimeEngine 以应用新的权限策略
+        // 实时更新共享权限模式（运行中的任务立即生效，因为共享同一个 Arc<RwLock>）
+        self.services.runtime.permission_gate().set_trust_mode(mode);
+        // 重建 RuntimeEngine（保留共享引用，新任务也使用同一个共享状态）
         self.rebuild_runtime_from_current_config();
         // 持久化
         self.persist_to_disk()

@@ -87,8 +87,17 @@ mod tests {
 
     #[test]
     fn cost_summary_merge() {
-        let mut a = CostSummary { total_tokens: 100, call_count: 2, ..Default::default() };
-        let b = CostSummary { total_tokens: 200, call_count: 3, tool_call_count: 1, ..Default::default() };
+        let mut a = CostSummary {
+            total_tokens: 100,
+            call_count: 2,
+            ..Default::default()
+        };
+        let b = CostSummary {
+            total_tokens: 200,
+            call_count: 3,
+            tool_call_count: 1,
+            ..Default::default()
+        };
         a.merge(&b);
         assert_eq!(a.total_tokens, 300);
         assert_eq!(a.call_count, 5);

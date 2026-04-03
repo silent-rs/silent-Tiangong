@@ -2,10 +2,7 @@ use super::super::*;
 
 impl TiangongState {
     /// 执行管理命令（由 RuntimeEngine 通过 TurnEvent 触发）
-    pub(in crate::app_state) fn execute_management_command(
-        &mut self,
-        cmd: ManagementCommand,
-    ) {
+    pub(in crate::app_state) fn execute_management_command(&mut self, cmd: ManagementCommand) {
         let result = match cmd {
             ManagementCommand::RegisterMcpServer {
                 name,
@@ -35,18 +32,14 @@ impl TiangongState {
                     },
                 })
             }
-            ManagementCommand::RemoveMcpServer { name } => {
-                self.remove_mcp_server(&name)
-            }
+            ManagementCommand::RemoveMcpServer { name } => self.remove_mcp_server(&name),
             ManagementCommand::SetMcpServerEnabled { name, enabled } => {
                 self.set_mcp_server_enabled(&name, enabled)
             }
             ManagementCommand::InstallSkill { path, enabled } => {
                 self.install_local_skill(&path, enabled)
             }
-            ManagementCommand::RemoveSkill { id } => {
-                self.remove_skill(&id)
-            }
+            ManagementCommand::RemoveSkill { id } => self.remove_skill(&id),
             ManagementCommand::SetSkillEnabled { id, enabled } => {
                 self.set_skill_enabled(&id, enabled)
             }

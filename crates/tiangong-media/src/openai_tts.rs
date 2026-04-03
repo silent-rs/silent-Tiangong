@@ -71,7 +71,9 @@ impl SpeechSynthesizer for OpenAITTS {
 
     async fn synthesize(&self, request: SynthesizeRequest) -> Result<SynthesizeResponse> {
         let url = format!("{}/audio/speech", self.api_base.trim_end_matches('/'));
-        let voice = request.voice.unwrap_or_else(|| "Chinese Female".to_string());
+        let voice = request
+            .voice
+            .unwrap_or_else(|| "Chinese Female".to_string());
         let model = request.model.unwrap_or_else(|| "tts-1".to_string());
         let output_format = request
             .output_format
@@ -163,4 +165,3 @@ impl SpeechSynthesizer for OpenAITTS {
         Ok(vec![])
     }
 }
-

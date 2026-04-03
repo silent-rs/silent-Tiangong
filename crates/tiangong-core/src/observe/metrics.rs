@@ -107,7 +107,8 @@ impl MetricsCollector {
         }
 
         if result.llm_call_count > 0 {
-            result.llm_avg_duration_ms = result.llm_total_duration_ms / result.llm_call_count as u64;
+            result.llm_avg_duration_ms =
+                result.llm_total_duration_ms / result.llm_call_count as u64;
         }
 
         result
@@ -126,7 +127,9 @@ pub struct Timer {
 
 impl Timer {
     pub fn start() -> Self {
-        Self { start: Instant::now() }
+        Self {
+            start: Instant::now(),
+        }
     }
 
     pub fn elapsed_ms(&self) -> u64 {

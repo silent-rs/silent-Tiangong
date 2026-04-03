@@ -85,9 +85,8 @@ impl AppTurnService {
         // 摘要持久化到 session，原始 messages 保持完整
         {
             let context_limit = state.services.runtime.context_limit;
-            let organizer =
-                crate::context::organizer::ContextOrganizer::new(context_limit)
-                    .with_keep_recent_turns(6);
+            let organizer = crate::context::organizer::ContextOrganizer::new(context_limit)
+                .with_keep_recent_turns(6);
             let session = &state.store.session.sessions[active_idx];
             if organizer.needs_compression_estimated(session) {
                 let client = SingleProviderClient::new(
@@ -120,7 +119,8 @@ impl AppTurnService {
                     user_input: worker_input,
                     context: Vec::new(),
                 };
-                let result = coordinator.coordinate(task, &session_snapshot, Some(&tx), Some(ctrl_rx))?;
+                let result =
+                    coordinator.coordinate(task, &session_snapshot, Some(&tx), Some(ctrl_rx))?;
 
                 // 将 CoordinatorResult 转为 TurnExecution
                 Ok(crate::runtime::TurnExecution {
@@ -142,7 +142,9 @@ impl AppTurnService {
                     output_mode: "stream".to_string(),
                     output_chunk_count: 0,
                     usage: result.total_usage,
-                    llm_calls: result.worker_results.into_iter()
+                    llm_calls: result
+                        .worker_results
+                        .into_iter()
                         .flat_map(|w| w.llm_calls)
                         .collect(),
                 })

@@ -92,13 +92,16 @@ impl LocalToolExecutor {
         // 提取 LLM 指定的超时（在 validate 之前，避免被当成路径参数）
         let timeout_ms = extract_timeout_meta(&mut args).unwrap_or_else(command_timeout_ms);
 
-        if matches!(cmd.as_str(), "bash" | "sh" | "powershell" | "pwsh") {
-            validate_shell_command_args(&cmd, &args, &effective_cwd)?;
-        } else {
-            if !is_allowed_command(&cmd) {
-                return Err(anyhow!("不允许执行命令：{cmd}"));
+        // 信任模式下跳过命令白名单和路径安全检查
+        if !self.is_full_trust() {
+            if matches!(cmd.as_str(), "bash" | "sh" | "powershell" | "pwsh") {
+                validate_shell_command_args(&cmd, &args, &effective_cwd)?;
+            } else {
+                if !is_allowed_command(&cmd) {
+                    return Err(anyhow!("不允许执行命令：{cmd}"));
+                }
+                validate_command_args_in_allowed_roots(&cmd, &args, &effective_cwd)?;
             }
-            validate_command_args_in_allowed_roots(&cmd, &args, &effective_cwd)?;
         }
         let env_allowlist = command_env_allowlist();
         let runtime_env = self.runtime_env();
@@ -243,7 +246,12 @@ const INTERNAL_TIMEOUT_PREFIX: &str = "__tiangong_timeout=";
 
 /// 从参数列表中提取 __tiangong_timeout=N 元数据，返回超时毫秒数
 fn extract_timeout_meta(args: &mut Vec<String>) -> Option<u64> {
-    let idx = args.iter().position(|a| a.starts_with(INTERNAL_TIMEOUT_PREFIX))?;
+    let idx = args
+        .iter()
+        .position(|a| a.starts_with(INTERNAL_TIMEOUT_PREFIX))?;
     let raw = args.remove(idx);
-    raw[INTERNAL_TIMEOUT_PREFIX.len()..].trim().parse::<u64>().ok()
+    raw[INTERNAL_TIMEOUT_PREFIX.len()..]
+        .trim()
+        .parse::<u64>()
+        .ok()
 }

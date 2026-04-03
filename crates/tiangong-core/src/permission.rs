@@ -2,6 +2,8 @@
 //!
 //! 在工具执行前进行权限检查，支持"完全信任"和"监督"两种模式。
 
+use std::sync::{Arc, RwLock};
+
 use serde::{Deserialize, Serialize};
 
 /// 信任模式
@@ -63,20 +65,70 @@ pub struct PermissionAuditEntry {
 }
 
 /// 权限检查网关
-#[derive(Debug, Clone, Default)]
+///
+/// trust_mode 通过 `Arc<RwLock>` 共享，允许运行中的任务实时感知权限模式变更。
+#[derive(Debug, Clone)]
 pub struct PermissionGate {
     policy: PermissionPolicy,
+    /// 共享的信任模式引用，clone 后仍指向同一个 RwLock
+    shared_trust_mode: Arc<RwLock<TrustMode>>,
+}
+
+impl Default for PermissionGate {
+    fn default() -> Self {
+        let policy = PermissionPolicy::default();
+        let shared = Arc::new(RwLock::new(policy.trust_mode));
+        Self {
+            policy,
+            shared_trust_mode: shared,
+        }
+    }
 }
 
 impl PermissionGate {
     pub fn new(policy: PermissionPolicy) -> Self {
-        Self { policy }
+        let shared = Arc::new(RwLock::new(policy.trust_mode));
+        Self {
+            policy,
+            shared_trust_mode: shared,
+        }
+    }
+
+    /// 使用外部共享的信任模式创建（确保所有 clone 共享同一引用）
+    pub fn with_shared_trust_mode(policy: PermissionPolicy, shared: Arc<RwLock<TrustMode>>) -> Self {
+        // 同步初始值
+        if let Ok(mut guard) = shared.write() {
+            *guard = policy.trust_mode;
+        }
+        Self {
+            policy,
+            shared_trust_mode: shared,
+        }
+    }
+
+    /// 获取共享的信任模式引用（用于跨 RuntimeEngine 实例共享）
+    pub fn shared_trust_mode_ref(&self) -> Arc<RwLock<TrustMode>> {
+        self.shared_trust_mode.clone()
+    }
+
+    /// 实时更新信任模式（所有持有该 Gate clone 的线程立即生效）
+    pub fn set_trust_mode(&self, mode: TrustMode) {
+        if let Ok(mut guard) = self.shared_trust_mode.write() {
+            *guard = mode;
+        }
     }
 
     /// 对工具调用进行权限检查
     pub fn check(&self, tool_name: &str) -> PermissionDecision {
+        // 读取共享的信任模式（实时值）
+        let trust_mode = self
+            .shared_trust_mode
+            .read()
+            .map(|g| *g)
+            .unwrap_or(self.policy.trust_mode);
+
         // 完全信任模式：直接放行
-        if self.policy.trust_mode == TrustMode::FullTrust {
+        if trust_mode == TrustMode::FullTrust {
             return PermissionDecision::Approved;
         }
 
@@ -105,9 +157,12 @@ impl PermissionGate {
         }
     }
 
-    /// 获取当前信任模式
+    /// 获取当前信任模式（实时值）
     pub fn trust_mode(&self) -> TrustMode {
-        self.policy.trust_mode
+        self.shared_trust_mode
+            .read()
+            .map(|g| *g)
+            .unwrap_or(self.policy.trust_mode)
     }
 }
 
@@ -141,9 +196,18 @@ mod tests {
             trust_mode: TrustMode::FullTrust,
             ..Default::default()
         });
-        assert!(matches!(gate.check("run_command"), PermissionDecision::Approved));
-        assert!(matches!(gate.check("apply_patch"), PermissionDecision::Approved));
-        assert!(matches!(gate.check("some_mcp_tool"), PermissionDecision::Approved));
+        assert!(matches!(
+            gate.check("run_command"),
+            PermissionDecision::Approved
+        ));
+        assert!(matches!(
+            gate.check("apply_patch"),
+            PermissionDecision::Approved
+        ));
+        assert!(matches!(
+            gate.check("some_mcp_tool"),
+            PermissionDecision::Approved
+        ));
     }
 
     #[test]
@@ -152,10 +216,22 @@ mod tests {
             trust_mode: TrustMode::Supervised,
             ..Default::default()
         });
-        assert!(matches!(gate.check("read_file"), PermissionDecision::Approved));
-        assert!(matches!(gate.check("list_dir"), PermissionDecision::Approved));
-        assert!(matches!(gate.check("search_code"), PermissionDecision::Approved));
-        assert!(matches!(gate.check("write_file"), PermissionDecision::Approved));
+        assert!(matches!(
+            gate.check("read_file"),
+            PermissionDecision::Approved
+        ));
+        assert!(matches!(
+            gate.check("list_dir"),
+            PermissionDecision::Approved
+        ));
+        assert!(matches!(
+            gate.check("search_code"),
+            PermissionDecision::Approved
+        ));
+        assert!(matches!(
+            gate.check("write_file"),
+            PermissionDecision::Approved
+        ));
     }
 
     #[test]
@@ -164,10 +240,22 @@ mod tests {
             trust_mode: TrustMode::Supervised,
             ..Default::default()
         });
-        assert!(matches!(gate.check("run_command"), PermissionDecision::NeedsApproval { .. }));
-        assert!(matches!(gate.check("run_shell"), PermissionDecision::NeedsApproval { .. }));
-        assert!(matches!(gate.check("apply_patch"), PermissionDecision::NeedsApproval { .. }));
-        assert!(matches!(gate.check("unknown_mcp_tool"), PermissionDecision::NeedsApproval { .. }));
+        assert!(matches!(
+            gate.check("run_command"),
+            PermissionDecision::NeedsApproval { .. }
+        ));
+        assert!(matches!(
+            gate.check("run_shell"),
+            PermissionDecision::NeedsApproval { .. }
+        ));
+        assert!(matches!(
+            gate.check("apply_patch"),
+            PermissionDecision::NeedsApproval { .. }
+        ));
+        assert!(matches!(
+            gate.check("unknown_mcp_tool"),
+            PermissionDecision::NeedsApproval { .. }
+        ));
     }
 
     #[test]
@@ -177,7 +265,10 @@ mod tests {
             always_deny: vec!["read_file".to_string()],
             ..Default::default()
         });
-        assert!(matches!(gate.check("read_file"), PermissionDecision::Denied { .. }));
+        assert!(matches!(
+            gate.check("read_file"),
+            PermissionDecision::Denied { .. }
+        ));
     }
 
     #[test]
@@ -187,7 +278,10 @@ mod tests {
             auto_approve: vec!["run_command".to_string()],
             ..Default::default()
         });
-        assert!(matches!(gate.check("run_command"), PermissionDecision::Approved));
+        assert!(matches!(
+            gate.check("run_command"),
+            PermissionDecision::Approved
+        ));
     }
 
     #[test]
@@ -198,7 +292,10 @@ mod tests {
             always_deny: vec!["run_command".to_string()],
         });
         // deny 先检查，优先于 approve
-        assert!(matches!(gate.check("run_command"), PermissionDecision::Denied { .. }));
+        assert!(matches!(
+            gate.check("run_command"),
+            PermissionDecision::Denied { .. }
+        ));
     }
 
     #[test]
@@ -217,7 +314,10 @@ mod tests {
     fn default_gate_is_supervised() {
         let gate = PermissionGate::default();
         assert_eq!(gate.trust_mode(), TrustMode::Supervised);
-        assert!(matches!(gate.check("apply_patch"), PermissionDecision::NeedsApproval { .. }));
+        assert!(matches!(
+            gate.check("apply_patch"),
+            PermissionDecision::NeedsApproval { .. }
+        ));
     }
 
     #[test]
