@@ -223,23 +223,34 @@ impl TurnRunner {
             },
         };
 
-        // 流式回调：直接推送 Chunk，content 和 reasoning 均实时输出到 assistant 消息
+        // 流式回调：推送 StageThinking（中间系统消息），避免多轮时中间内容污染 assistant 消息
+        // LLM 返回后再根据是否有工具调用决定最终内容发送方式
         let tx_for_stream = self.tx.clone();
+        let round = self.round;
         let response = self.engine.client().complete_with_functions_stream(
             &req,
             &self.function_tools,
             &mut |delta: &ModelStreamChunk| {
-                let _ = tx_for_stream.send(TurnEvent::Chunk(delta.clone()));
+                let _ = tx_for_stream.send(TurnEvent::StageThinking {
+                    stage: format!("react-round-{}", round + 1),
+                    delta: delta.clone(),
+                });
             },
         )?;
 
         self.accumulated_usage.accumulate(&response.usage);
 
         if response.tool_calls.is_empty() {
-            // 无工具调用 → 最终回复（已在流式回调中逐 token 推送到前端）
+            // 无工具调用 → 最终回复，一次性推送到 assistant 消息
             self.final_text = response.text.clone();
             self.final_reasoning = response.reasoning_content.clone();
-            self.total_output_chunks += 1;
+            if !self.final_text.is_empty() || !self.final_reasoning.is_empty() {
+                let _ = self.tx.send(TurnEvent::Chunk(ModelStreamChunk {
+                    content: self.final_text.clone(),
+                    reasoning_content: self.final_reasoning.clone(),
+                }));
+                self.total_output_chunks += 1;
+            }
             self.phase = TurnPhase::Responding;
         } else {
             // 有工具调用

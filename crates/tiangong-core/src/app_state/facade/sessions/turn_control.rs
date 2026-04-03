@@ -244,8 +244,11 @@ impl TiangongState {
                                     content,
                                 );
                             }
-                            TurnEvent::StageThinking { stage, delta } => {
-                                self.apply_stage_thinking_delta(&session_id, &stage, &delta);
+                            TurnEvent::StageThinking { delta, .. } => {
+                                // Worker 的 thinking 写入 Worker 的 assistant 消息
+                                self.apply_worker_delta(
+                                    &session_id, worker_id, worker_label, &delta,
+                                );
                             }
                             _ => {}
                         }
@@ -372,8 +375,11 @@ impl TiangongState {
                                 content,
                             );
                         }
-                        TurnEvent::StageThinking { stage, delta } => {
-                            self.apply_stage_thinking_delta(session_id, &stage, &delta);
+                        TurnEvent::StageThinking { delta, .. } => {
+                            // Worker 的 thinking 写入 Worker 的 assistant 消息
+                            self.apply_worker_delta(
+                                session_id, worker_id, worker_label, &delta,
+                            );
                         }
                         _ => {}
                     }

@@ -168,16 +168,29 @@ function WorkerCard({ group, isActive, MarkdownComponents }: {
   isActive: boolean;
   MarkdownComponents: any;
 }) {
-  // Worker 有 assistant 回复且不在执行中时自动收缩
-  const hasResult = group.messages.some(m => m.role === "Assistant");
-  const [collapsed, setCollapsed] = useState(!isActive && hasResult);
   // 从 "🔧 Worker: xxx" 系统消息中提取标题
   const workerStartMsg = group.messages.find(m => m.role === "System" && m.content.startsWith("🔧 Worker:"));
   const workerTitle = workerStartMsg?.content?.replace("🔧 Worker: ", "") || "Worker";
   // 过滤掉 Worker 标题系统消息（以 "🔧 Worker:" 开头的）
   const contentMessages = group.messages.filter(m => !(m.role === "System" && m.content.startsWith("🔧 Worker:")));
   const systemMsgs = contentMessages.filter(m => m.role === "System");
-  const assistantMsgs = contentMessages.filter(m => m.role === "Assistant");
+  // 只显示有内容的 assistant 消息（content 或 reasoning_content 不为空）
+  const assistantMsgs = contentMessages.filter(m =>
+    m.role === "Assistant" && (m.content.trim().length > 0 || (m.reasoning_content?.trim().length ?? 0) > 0)
+  );
+
+  // Worker 完成后自动收缩（有 assistant 回复且不活跃时）
+  const hasResult = assistantMsgs.length > 0;
+  const [collapsed, setCollapsed] = useState(false);
+  const prevIsActiveRef = useRef(isActive);
+
+  useEffect(() => {
+    // 从活跃变为非活跃且有结果时自动收缩
+    if (prevIsActiveRef.current && !isActive && hasResult) {
+      setCollapsed(true);
+    }
+    prevIsActiveRef.current = isActive;
+  }, [isActive, hasResult]);
 
   return (
     <div className="mt-3 border border-border rounded-lg overflow-hidden">
@@ -213,6 +226,12 @@ function WorkerCard({ group, isActive, MarkdownComponents }: {
                   <Bot className="w-5 h-5 text-primary-foreground" />
                 </div>
                 <div className="rounded-lg px-4 py-2.5 max-w-[95%] bg-muted text-foreground">
+                  {msg.reasoning_content && (
+                    <ThinkingBlock
+                      content={msg.reasoning_content}
+                      defaultExpanded={false}
+                    />
+                  )}
                   <div className="prose prose-sm max-w-none break-words text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
                     <ReactMarkdown remarkPlugins={[remarkGfm]} components={MarkdownComponents as any}>
                       {msg.content}
@@ -249,12 +268,18 @@ export function MessageList() {
     api.hasTtsCapability().then(setHasTts).catch(() => setHasTts(false));
   }, []);
 
+  const isThinking = runStatus !== "idle";
+
+  // 计算消息内容总长度，用于检测内容增长
+  const totalContentLength = messages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
+
   // 自动滚动到底部
   useEffect(() => {
-    // 当消息数量增加或流式消息状态变化时，自动滚动
+    // 消息数量增加、流式状态变化、或消息内容增长（流式输出中）时自动滚动
     const shouldScroll =
       messages.length > prevMessagesLengthRef.current ||
-      streamingMessageId !== prevStreamingIdRef.current;
+      streamingMessageId !== prevStreamingIdRef.current ||
+      isThinking;
 
     if (shouldScroll) {
       // 使用 setTimeout 确保在 DOM 更新后滚动
@@ -265,9 +290,7 @@ export function MessageList() {
 
     prevMessagesLengthRef.current = messages.length;
     prevStreamingIdRef.current = streamingMessageId;
-  }, [messages.length, streamingMessageId]);
-
-  const isThinking = runStatus !== "idle";
+  }, [messages.length, streamingMessageId, totalContentLength, isThinking]);
 
   // Markdown 渲染器（用于非流式消息）
   const MarkdownComponents = {
