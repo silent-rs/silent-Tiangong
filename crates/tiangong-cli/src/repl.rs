@@ -10,6 +10,7 @@ use crate::output;
 
 const PROMPT: &str = "\x1b[1;36m› \x1b[0m";
 const DIM: &str = "\x1b[2m";
+const GREEN_BOLD: &str = "\x1b[1;32m";
 const RESET: &str = "\x1b[0m";
 
 pub fn run() -> Result<()> {
@@ -84,35 +85,135 @@ pub fn run() -> Result<()> {
             continue;
         }
 
-        // 等待并轮询结果
-        output::print_status("正在请求...");
-        loop {
-            state.poll_pending_turn();
-            if !state.has_pending_turn() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
+        // 实时流式轮询：边执行边展示中间状态
+        {
+            let mut last_msg_count = state
+                .active_session()
+                .map(|s| s.messages.len())
+                .unwrap_or(0);
+            let mut last_assistant_content_len: usize = 0;
+            let mut last_assistant_reasoning_len: usize = 0;
+            let mut in_assistant_stream = false;
+            let mut printed_header = false;
 
-        // 清除 "正在请求..." 行
-        print!("\x1b[A\x1b[2K");
+            loop {
+                state.poll_pending_turn();
 
-        // 打印结果
-        let snapshot = state.run_snapshot();
-        match snapshot.status {
-            RunStatus::Completed | RunStatus::Idle => {
-                if let Some(session) = state.active_session()
-                    && let Some(last) = session.messages.last()
-                    && last.role == MessageRole::Assistant
-                {
-                    output::print_assistant_message(last);
+                if let Some(session) = state.active_session() {
+                    let msgs = &session.messages;
+
+                    // 处理新增的消息
+                    for msg in msgs.iter().skip(last_msg_count) {
+                        match msg.role {
+                            MessageRole::System => {
+                                // 如果之前在流式输出 assistant，先换行
+                                if in_assistant_stream {
+                                    output::flush_line();
+                                    in_assistant_stream = false;
+                                }
+                                if msg.content.starts_with("LLM 输出") {
+                                    output::print_llm_explanation(&msg.content);
+                                } else if msg.content.contains("tool_name:")
+                                    || msg.content.contains("exit_code")
+                                {
+                                    output::print_tool_brief(&msg.content);
+                                }
+                                // 其他系统消息静默跳过
+                            }
+                            MessageRole::Assistant => {
+                                // 标记进入 assistant 流式输出
+                                if !printed_header {
+                                    println!("{GREEN_BOLD}助手{RESET}");
+                                    printed_header = true;
+                                }
+                                // reasoning
+                                let reasoning = msg.reasoning_content.trim();
+                                if !reasoning.is_empty() {
+                                    let summary = if reasoning.len() > 60 {
+                                        format!("{}...", &reasoning[..57])
+                                    } else {
+                                        reasoning.to_string()
+                                    };
+                                    println!("  {DIM}[思考] {summary}{RESET}");
+                                }
+                                // content
+                                if !msg.content.is_empty() {
+                                    output::print_delta(&msg.content);
+                                    in_assistant_stream = true;
+                                    last_assistant_content_len = msg.content.len();
+                                    last_assistant_reasoning_len = msg.reasoning_content.len();
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    last_msg_count = msgs.len();
+
+                    // 检查最后一条 assistant 消息内容增长（流式追加）
+                    if let Some(last) = msgs.last() {
+                        if last.role == MessageRole::Assistant {
+                            // reasoning 增量
+                            if last.reasoning_content.len() > last_assistant_reasoning_len {
+                                // reasoning 变化时仅更新追踪长度（不重复打印摘要）
+                                last_assistant_reasoning_len = last.reasoning_content.len();
+                            }
+                            // content 增量
+                            if last.content.len() > last_assistant_content_len {
+                                if !printed_header {
+                                    println!("{GREEN_BOLD}助手{RESET}");
+                                    printed_header = true;
+                                }
+                                let delta = &last.content[last_assistant_content_len..];
+                                output::print_delta(delta);
+                                in_assistant_stream = true;
+                                last_assistant_content_len = last.content.len();
+                            }
+                        }
+                        // 检查最后一条系统消息内容增长（流式 thinking）
+                        if last.role == MessageRole::System
+                            && last.content.starts_with("LLM 输出")
+                            && !last.content.contains("\ntokens:")
+                        {
+                            // 流式阶段的系统消息，内容在增长
+                            // 不做增量打印 — 该消息完成后会作为新消息被处理
+                        }
+                    }
                 }
+
+                if !state.has_pending_turn() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            RunStatus::Failed => {
+
+            // 确保最后换行
+            if in_assistant_stream {
+                output::flush_line();
+            }
+
+            // 处理失败情况
+            let snapshot = state.run_snapshot();
+            if matches!(snapshot.status, RunStatus::Failed) {
                 let err_msg = snapshot.last_error.as_deref().unwrap_or("执行失败");
                 output::print_error(err_msg);
             }
-            _ => {}
+
+            // 如果没有流式输出但有最终结果（非流式模式兜底）
+            if !printed_header {
+                match snapshot.status {
+                    RunStatus::Completed | RunStatus::Idle => {
+                        if let Some(session) = state.active_session()
+                            && let Some(last) = session.messages.last()
+                            && last.role == MessageRole::Assistant
+                        {
+                            output::print_assistant_message(last);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            println!();
         }
     }
 

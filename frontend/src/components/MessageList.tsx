@@ -1,8 +1,6 @@
 import { useStore } from "@/store/useStore";
 import { ScrollArea } from "./ui/scroll-area";
 import {
-  User,
-  Bot,
   Loader2,
   ChevronRight,
   ChevronDown,
@@ -235,11 +233,8 @@ function WorkerCard({ group, isActive, MarkdownComponents }: {
           )}
           {assistantMsgs.map((msg) => (
             <div key={msg.id} className="mt-2">
-              <div className="flex gap-3 justify-start">
-                <div className="w-8 h-8 rounded bg-primary flex items-center justify-center flex-shrink-0">
-                  <Bot className="w-5 h-5 text-primary-foreground" />
-                </div>
-                <div className="rounded-lg px-4 py-2.5 max-w-[95%] bg-muted text-foreground">
+              <div className="flex justify-start">
+                <div className="max-w-[100%] text-foreground">
                   {msg.reasoning_content && (
                     <ThinkingBlock
                       content={msg.reasoning_content}
@@ -457,7 +452,7 @@ export function MessageList() {
           {messages.length === 0 && !isThinking ? (
             <div className="flex flex-col items-center justify-center h-full text-center py-20">
               <div className="w-16 h-16 rounded-full bg-primary flex items-center justify-center mb-4">
-                <Bot className="w-8 h-8 text-primary-foreground" />
+                <Cpu className="w-8 h-8 text-primary-foreground" />
               </div>
               <h2 className="text-xl font-medium text-foreground mb-2">
                 欢迎使用天工
@@ -492,6 +487,7 @@ export function MessageList() {
                     key={group.key}
                     messages={group.messages}
                     defaultExpanded={isActive}
+                    isActive={isActive}
                   />
                 );
               }
@@ -504,20 +500,15 @@ export function MessageList() {
               return (
                 <div key={group.key} className="mt-3 first:mt-0">
                   <div
-                    className={`flex gap-3 ${
+                    className={`flex ${
                       isUser ? "justify-end" : "justify-start"
                     }`}
                   >
-                    {isAssistant && (
-                      <div className="w-8 h-8 rounded bg-primary flex items-center justify-center flex-shrink-0">
-                        <Bot className="w-5 h-5 text-primary-foreground" />
-                      </div>
-                    )}
                     <div
-                      className={`rounded-lg px-4 py-2.5 max-w-[100%] ${
+                      className={`max-w-[100%] ${
                         isUser
-                          ? "bg-accent text-foreground"
-                          : "bg-muted text-foreground"
+                          ? "text-muted-foreground"
+                          : "text-foreground"
                       }`}
                     >
                       {isAssistant ? (
@@ -569,14 +560,9 @@ export function MessageList() {
                         })()
                       )}
                     </div>
-                    {isUser && (
-                      <div className="w-8 h-8 rounded bg-muted-foreground flex items-center justify-center flex-shrink-0">
-                        <User className="w-5 h-5 text-background" />
-                      </div>
-                    )}
                   </div>
                   {isAssistant && !isStreaming && message.content && (
-                    <div className="pl-11">
+                    <div>
                       <MessageActions text={message.content} showTts={hasTts} />
                     </div>
                   )}
@@ -587,11 +573,8 @@ export function MessageList() {
 
           {/* 审批请求 */}
           {runStatus === "waitingapproval" && (
-            <div className="flex gap-3 justify-start">
-              <div className="w-8 h-8 rounded bg-amber-500 flex items-center justify-center flex-shrink-0">
-                <ShieldCheck className="w-5 h-5 text-white" />
-              </div>
-              <div className="bg-muted text-foreground rounded-lg px-4 py-3 max-w-[100%]">
+            <div className="flex justify-start">
+              <div className="text-foreground max-w-[100%]">
                 <div className="text-sm font-medium mb-2">需要您的确认</div>
                 <div className="text-xs text-muted-foreground mb-3">
                   {runSummary}
@@ -627,14 +610,11 @@ export function MessageList() {
           {/* 思考中/执行中指示器（仅在助手尚未回复时显示） */}
           {isThinking && runStatus !== "waitingapproval" && !streamingMessageId && !streamingContent &&
            !(messages.length > 0 && messages[messages.length - 1].role === "Assistant") && (
-            <div className="flex gap-3 justify-start">
-              <div className="w-8 h-8 rounded bg-primary flex items-center justify-center flex-shrink-0">
-                <Bot className="w-5 h-5 text-primary-foreground" />
-              </div>
-              <div className="bg-muted text-foreground rounded-lg px-4 py-2.5">
+            <div className="flex justify-start">
+              <div className="text-foreground">
                 <div className="flex items-center gap-2">
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span className="text-sm">
+                  <span className="text-sm text-muted-foreground">
                     {runStatus === "planning" && "正在制定计划..."}
                     {runStatus === "executing" && "正在执行任务..."}
                     {runStatus === "responding" && "正在生成回复..."}
@@ -793,10 +773,17 @@ function groupByRound(messages: MessageGroup["messages"]): RoundGroup[] {
 
 function SystemMessageGroup({
   messages,
+  isActive,
 }: {
   messages: MessageGroup["messages"];
   defaultExpanded?: boolean;
+  isActive?: boolean;
 }) {
+  const {
+    streamingSystemMessageId,
+    streamingSystemContent,
+    streamingSystemReasoningContent,
+  } = useStore();
   const [expandedRounds, setExpandedRounds] = useState<Set<string>>(new Set());
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
 
@@ -857,7 +844,42 @@ function SystemMessageGroup({
 
   return (
     <div className="max-w-3xl space-y-0.5">
-      {rounds.map((round) => {
+      {rounds.map((round, roundIdx) => {
+        const isLastRound = roundIdx === rounds.length - 1;
+        // 活跃的最后一个 round 如果有流式系统消息，以流式文本块展示
+        const isStreamingRound = isActive && isLastRound && round.llm &&
+          streamingSystemMessageId === round.llm.id;
+
+        if (isStreamingRound) {
+          return (
+            <div key={round.key} className="space-y-1">
+              {/* 流式解释文本 */}
+              {(streamingSystemContent || streamingSystemReasoningContent) && (
+                <div className="text-sm text-muted-foreground leading-relaxed">
+                  {streamingSystemReasoningContent && (
+                    <ThinkingBlock
+                      content={streamingSystemReasoningContent}
+                      defaultExpanded={true}
+                    />
+                  )}
+                  {streamingSystemContent && (
+                    <div className="whitespace-pre-wrap break-words">
+                      {streamingSystemContent}
+                      <span className="inline-block w-1.5 h-4 bg-primary ml-0.5 animate-pulse align-text-bottom" />
+                    </div>
+                  )}
+                </div>
+              )}
+              {/* 工具调用保持折叠 */}
+              {round.tools.length > 0 && (
+                <div className="space-y-0.5">
+                  {round.tools.map((t) => renderItem(t))}
+                </div>
+              )}
+            </div>
+          );
+        }
+
         const roundExpanded = expandedRounds.has(round.key);
         const toolSummary = round.tools.map((t) =>
           t.content.includes("ok=true") ? "OK" : "FAIL",

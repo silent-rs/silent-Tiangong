@@ -30,6 +30,11 @@ interface AppState {
   streamingContent: string;
   streamingReasoningContent: string; // 流式思考过程内容
 
+  // 流式系统消息追踪（执行中的解释文本）
+  streamingSystemMessageId: string | null;
+  streamingSystemContent: string;
+  streamingSystemReasoningContent: string;
+
   // 语音消息映射 (消息内容 hash → 音频信息)
   voiceMessages: Record<string, { audioPath: string; duration?: number; showText: boolean }>;
   addVoiceMessage: (msgKey: string, audioPath: string, duration?: number) => void;
@@ -79,6 +84,9 @@ export const useStore = create<AppState>((set, get) => ({
   streamingMessageId: null,
   streamingContent: '',
   streamingReasoningContent: '',
+  streamingSystemMessageId: null,
+  streamingSystemContent: '',
+  streamingSystemReasoningContent: '',
   voiceMessages: (() => {
     try {
       return JSON.parse(localStorage.getItem('tiangong-voice-messages') || '{}');
@@ -139,6 +147,9 @@ export const useStore = create<AppState>((set, get) => ({
       streamingMessageId: null,
       streamingContent: '',
       streamingReasoningContent: '',
+      streamingSystemMessageId: null,
+      streamingSystemContent: '',
+      streamingSystemReasoningContent: '',
       sessionCwd: '',
     });
   },
@@ -162,6 +173,9 @@ export const useStore = create<AppState>((set, get) => ({
         streamingMessageId: null,
         streamingContent: '',
         streamingReasoningContent: '',
+        streamingSystemMessageId: null,
+        streamingSystemContent: '',
+        streamingSystemReasoningContent: '',
       });
     } catch (error) {
       console.error('切换会话失败:', error);
@@ -391,12 +405,52 @@ export const useStore = create<AppState>((set, get) => ({
       streamingReasoningContent = '';
     }
 
+    // 检测流式系统消息（执行中的解释文本）
+    let streamingSystemId: string | null = null;
+    let streamingSystemContent = '';
+    let streamingSystemReasoningContent = '';
+
+    if (newMessages.length > 0 && effectiveStatus !== 'idle') {
+      // 从后往前找最后一条 "LLM 输出" 系统消息
+      for (let i = newMessages.length - 1; i >= 0; i--) {
+        const msg = newMessages[i];
+        if (msg.role === 'System' && msg.content.startsWith('LLM 输出')) {
+          // 判断是否还在流式阶段（没有 "tokens:" 说明还没被替换为最终格式）
+          const isStillStreaming = !msg.content.includes('\ntokens:');
+          if (isStillStreaming) {
+            // 对比旧消息检测内容增长
+            const oldMsg = oldMessages.find(m => m.id === msg.id);
+            const isGrowing = !oldMsg || oldMsg.content.length < msg.content.length
+              || (oldMsg.reasoning_content || '').length < (msg.reasoning_content || '').length;
+            if (isGrowing) {
+              streamingSystemId = msg.id;
+              // 提取首行之后的内容作为解释文本
+              const firstNewline = msg.content.indexOf('\n');
+              streamingSystemContent = firstNewline >= 0 ? msg.content.slice(firstNewline + 1) : '';
+              streamingSystemReasoningContent = msg.reasoning_content || '';
+            }
+          }
+          break;
+        }
+      }
+    }
+
+    const { streamingSystemMessageId: oldSystemStreamingId } = get();
+    if (!streamingSystemId && oldSystemStreamingId) {
+      streamingSystemId = null;
+      streamingSystemContent = '';
+      streamingSystemReasoningContent = '';
+    }
+
     set({
       messages: newMessages,
       currentPlan: snapshot.current_plan,
       streamingMessageId: streamingId,
       streamingContent,
       streamingReasoningContent,
+      streamingSystemMessageId: streamingSystemId,
+      streamingSystemContent,
+      streamingSystemReasoningContent,
     });
 
     // 状态变为 idle 时刷新会话列表（更新 message_count、标题等）
