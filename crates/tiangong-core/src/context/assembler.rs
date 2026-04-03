@@ -42,7 +42,13 @@ impl QueryClassifier {
         }
 
         // 历史中有工具调用的会话，继续使用工具
-        let has_tool_history = session.task_records.iter().any(|r| r.tool_result.is_some());
+        // 检查 task_records 中是否有工具结果，或者会话消息中是否有工具执行痕迹
+        // （取消的任务 tool_result 为 None，但消息中仍有工具执行记录）
+        let has_tool_history = session.task_records.iter().any(|r| r.tool_result.is_some())
+            || session.messages.iter().any(|m| {
+                m.role == crate::session::MessageRole::System
+                    && (m.content.contains("tool_name:") || m.content.contains("exit_code"))
+            });
         if has_tool_history {
             return (QueryMode::ToolExecution, Vec::new());
         }
