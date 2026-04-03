@@ -15,6 +15,7 @@ import {
   ChevronUp,
   ShieldCheck,
   ShieldX,
+  GitBranch,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -91,6 +92,33 @@ function MessageActions({ text, showTts }: { text: string; showTts: boolean }) {
           )}
         </button>
       )}
+    </div>
+  );
+}
+
+function UserMessageActions({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (e) {
+      console.error("复制失败:", e);
+    }
+  };
+
+  const btnClass = "p-1 rounded text-muted-foreground/50 hover:text-muted-foreground hover:bg-accent transition-colors";
+
+  return (
+    <div className="flex items-center gap-0.5 mt-1">
+      <button onClick={handleCopy} className={btnClass} title={copied ? "已复制" : "复制"}>
+        {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+      </button>
+      <button className={btnClass} title="分叉（开发中）" disabled>
+        <GitBranch className="w-3.5 h-3.5" />
+      </button>
     </div>
   );
 }
@@ -561,6 +589,11 @@ export function MessageList() {
                       <MessageActions text={message.content} showTts={hasTts} />
                     </div>
                   )}
+                  {isUser && message.content && (
+                    <div className="flex justify-end">
+                      <UserMessageActions text={message.content} />
+                    </div>
+                  )}
                 </div>
               );
             })
@@ -721,10 +754,8 @@ function extractThinkingFromLlm(content: string): string {
       .trim();
     if (thinking) return thinking;
   }
-  // fallback: 直接取 reasoning_content 或工具调用信息
-  const toolMatch = content.match(/tool_calls:\s*(.+)/);
-  if (toolMatch) return `调用 ${toolMatch[1]}`;
-  return "思考中...";
+  // 没有有效的 content 部分时返回空（不用工具列表充当解释文本）
+  return "";
 }
 
 /** 将系统消息按 round 分组：LLM 输出 [react-round-N] + 后续工具执行归为一组 */
@@ -774,6 +805,7 @@ function SystemMessageGroup({
   isActive?: boolean;
 }) {
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
+  const [collapsedTools, setCollapsedTools] = useState<Set<string>>(new Set());
 
   const toggleItem = (id: string) => {
     setExpandedItems((prev) => {
@@ -784,9 +816,18 @@ function SystemMessageGroup({
     });
   };
 
+  const toggleToolGroup = (key: string) => {
+    setCollapsedTools((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
   const rounds = groupByRound(messages);
 
-  /** 渲染单个工具执行条目（可折叠） */
+  /** 渲染单个工具执行条目（可折叠详情） */
   const renderToolItem = (msg: MessageGroup["messages"][0]) => {
     const meta = getSystemMessageMeta(msg.content);
     const itemExpanded = expandedItems.has(msg.id);
@@ -818,14 +859,19 @@ function SystemMessageGroup({
     );
   };
 
+  // 用于去重 ThinkingBlock：追踪已展示过的 reasoning 内容
+  const shownReasonings = new Set<string>();
+
   return (
     <div className="max-w-3xl space-y-1.5">
       {rounds.map((round) => {
-        // 解释文本：每个 round 都展示（排除无意义的兜底文本）
-        const explanation = round.label !== "思考中..." && round.label !== "执行"
-          ? round.label : "";
+        // 解释文本
+        const explanation = round.label || "";
         const reasoning = round.llm?.reasoning_content || "";
-        const hasExplanation = explanation || reasoning;
+        // 去重：如果该 reasoning 内容已经展示过，跳过
+        const showReasoning = reasoning && !shownReasonings.has(reasoning);
+        if (showReasoning) shownReasonings.add(reasoning);
+        const hasExplanation = explanation || showReasoning;
 
         // 工具调用摘要
         const toolSummary = round.tools.map((t) =>
@@ -835,13 +881,14 @@ function SystemMessageGroup({
           round.tools.length > 0
             ? `${round.tools.length} 次调用 (${toolSummary.join(", ")})`
             : "";
+        const isToolsCollapsed = collapsedTools.has(round.key);
 
         return (
           <div key={round.key} className="space-y-0.5">
-            {/* 解释文本：为什么要做、怎么做 */}
+            {/* 解释文本：LLM 对本轮的说明 */}
             {hasExplanation && (
               <div className="text-sm text-muted-foreground leading-relaxed">
-                {reasoning && (
+                {showReasoning && (
                   <ThinkingBlock content={reasoning} defaultExpanded={false} />
                 )}
                 {explanation && (
@@ -850,14 +897,28 @@ function SystemMessageGroup({
               </div>
             )}
 
-            {/* 工具调用及结果：做了什么、结果如何 */}
-            {toolBrief && (
-              <div className="flex items-center gap-2 px-2 py-0.5 text-xs text-muted-foreground">
-                <Cpu className="w-3 h-3 shrink-0" />
-                <span>{toolBrief}</span>
+            {/* 工具调用组：可整体折叠/展开 */}
+            {round.tools.length > 0 && (
+              <div>
+                <button
+                  className="flex items-center gap-2 px-2 py-0.5 text-xs text-muted-foreground hover:bg-muted/50 rounded transition-colors"
+                  onClick={() => toggleToolGroup(round.key)}
+                >
+                  {isToolsCollapsed ? (
+                    <ChevronRight className="w-3 h-3 shrink-0" />
+                  ) : (
+                    <ChevronDown className="w-3 h-3 shrink-0" />
+                  )}
+                  <Cpu className="w-3 h-3 shrink-0" />
+                  <span>{toolBrief}</span>
+                </button>
+                {!isToolsCollapsed && (
+                  <div className="ml-4 space-y-0">
+                    {round.tools.map((t) => renderToolItem(t))}
+                  </div>
+                )}
               </div>
             )}
-            {round.tools.map((t) => renderToolItem(t))}
             {round.others.map((o) => renderToolItem(o))}
           </div>
         );

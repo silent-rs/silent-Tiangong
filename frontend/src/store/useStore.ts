@@ -361,25 +361,28 @@ export const useStore = create<AppState>((set, get) => ({
     let streamingReasoningContent = '';
 
     if (newMessages.length > 0) {
-      const lastMessage = newMessages[newMessages.length - 1];
+      // 找最后一条 Assistant 消息（不一定是数组最后一条，可能后面还有系统消息）
+      let lastAssistant = null;
+      for (let i = newMessages.length - 1; i >= 0; i--) {
+        if (newMessages[i].role === 'Assistant' && !newMessages[i].worker_id) {
+          lastAssistant = newMessages[i];
+          break;
+        }
+      }
 
-      // 只对助手消息进行流式处理
-      if (lastMessage.role === 'Assistant') {
-        // 检查是否是新的最后一条消息
-        const isNewLastMessage = oldMessages.length === 0 ||
-          oldMessages[oldMessages.length - 1].id !== lastMessage.id;
+      if (lastAssistant) {
+        const oldAssistant = oldMessages.find(m => m.id === lastAssistant!.id);
 
-        // 检查是否是同一条消息但内容在增长
-        const isGrowing = oldMessages.length > 0 &&
-          oldMessages[oldMessages.length - 1].id === lastMessage.id &&
-          oldMessages[oldMessages.length - 1].content !== lastMessage.content &&
-          lastMessage.content.length > oldMessages[oldMessages.length - 1].content.length;
+        // 新出现的 assistant 消息或内容在增长
+        const isNew = !oldAssistant;
+        const isGrowing = oldAssistant &&
+          oldAssistant.content !== lastAssistant.content &&
+          lastAssistant.content.length > oldAssistant.content.length;
 
-        if (isNewLastMessage || isGrowing) {
-          streamingId = lastMessage.id;
-          streamingContent = lastMessage.content;
-          // 同时获取思考过程
-          streamingReasoningContent = lastMessage.reasoning_content || '';
+        if (isNew || isGrowing) {
+          streamingId = lastAssistant.id;
+          streamingContent = lastAssistant.content;
+          streamingReasoningContent = lastAssistant.reasoning_content || '';
         }
       }
     }
