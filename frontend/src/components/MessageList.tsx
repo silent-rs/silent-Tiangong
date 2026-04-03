@@ -479,15 +479,11 @@ export function MessageList() {
 
               // 系统消息组
               if (group.type === "system") {
-                // 最后一组系统消息且正在执行时默认展开
-                const isLastGroup = groupIdx === allGroups.length - 1;
-                const isActive = isLastGroup && isThinking;
                 return (
                   <SystemMessageGroup
                     key={group.key}
                     messages={group.messages}
-                    defaultExpanded={isActive}
-                    isActive={isActive}
+                    defaultExpanded={isThinking}
                   />
                 );
               }
@@ -773,11 +769,9 @@ function groupByRound(messages: MessageGroup["messages"]): RoundGroup[] {
 
 function SystemMessageGroup({
   messages,
-  isActive,
 }: {
   messages: MessageGroup["messages"];
   defaultExpanded?: boolean;
-  isActive?: boolean;
 }) {
   const {
     streamingSystemMessageId,
@@ -844,10 +838,9 @@ function SystemMessageGroup({
 
   return (
     <div className="max-w-3xl space-y-0.5">
-      {rounds.map((round, roundIdx) => {
-        const isLastRound = roundIdx === rounds.length - 1;
-        // 活跃的最后一个 round 如果有流式系统消息，以流式文本块展示
-        const isStreamingRound = isActive && isLastRound && round.llm &&
+      {rounds.map((round) => {
+        // 如果该 round 的 LLM 消息正在流式输出，以流式文本块展示
+        const isStreamingRound = round.llm &&
           streamingSystemMessageId === round.llm.id;
 
         if (isStreamingRound) {
