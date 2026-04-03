@@ -119,6 +119,22 @@ impl TiangongState {
         &self.store.agent.agent_config
     }
 
+    /// 获取当前活跃的 Worker 列表（从 pending_turns 的 worker_message_ids 提取）
+    pub fn list_active_workers(&self) -> Vec<serde_json::Value> {
+        let mut workers = Vec::new();
+        for (session_id, pending) in &self.store.runtime.pending_turns {
+            for (worker_id, msg_id) in &pending.worker_message_ids {
+                workers.push(serde_json::json!({
+                    "session_id": session_id,
+                    "worker_id": worker_id,
+                    "assistant_message_id": msg_id,
+                    "status": "executing",
+                }));
+            }
+        }
+        workers
+    }
+
     pub fn set_trust_mode(&mut self, mode: crate::permission::TrustMode) -> Result<()> {
         self.store.agent.agent_config.trust_mode = mode;
         // 实时更新共享权限模式（运行中的任务立即生效，因为共享同一个 Arc<RwLock>）

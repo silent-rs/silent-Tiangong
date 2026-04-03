@@ -266,6 +266,12 @@ pub fn get_session_cost(
     })
 }
 
+/// 获取当前活跃的 Worker 列表
+#[tauri::command]
+pub fn list_workers(state: State<TiangongApp>) -> Result<Vec<serde_json::Value>, String> {
+    state.with_state_read(|core_state| Ok(core_state.list_active_workers()))
+}
+
 /// 获取后台任务列表
 #[tauri::command]
 pub fn get_background_tasks() -> Result<Vec<serde_json::Value>, String> {

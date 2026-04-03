@@ -255,6 +255,7 @@ mod tests {
             cwd_mode: Default::default(),
             context_summary: None,
             summary_up_to: 0,
+            pending_approvals: Vec::new(),
             created_at: String::new(),
             updated_at: String::new(),
         }
