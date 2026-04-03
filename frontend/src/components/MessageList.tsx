@@ -539,12 +539,13 @@ export function MessageList() {
                           {isStreaming ? (
                             <TypingMessage
                               content={streamingContent}
-                              reasoningContent={streamingReasoningContent}
+                              reasoningContent={groupIdx === 0 ? streamingReasoningContent : ""}
                               speed={300}
                             />
                           ) : (
                             <div>
-                              {message.reasoning_content && (
+                              {/* 仅在前面没有系统消息组时展示 reasoning（避免与系统消息中的重复） */}
+                              {message.reasoning_content && groupIdx === 0 && (
                                 <ThinkingBlock
                                   content={message.reasoning_content}
                                   defaultExpanded={false}

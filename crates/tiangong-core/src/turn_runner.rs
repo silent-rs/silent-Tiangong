@@ -248,13 +248,27 @@ impl TurnRunner {
         self.accumulated_usage.accumulate(&response.usage);
 
         if response.tool_calls.is_empty() {
-            // 无工具调用 → 最终回复，一次性推送到 assistant 消息
+            // 无工具调用 → 最终回复，按段落拆分发送 Chunk 实现流式效果
             self.final_text = response.text.clone();
             self.final_reasoning = response.reasoning_content.clone();
-            if !self.final_text.is_empty() || !self.final_reasoning.is_empty() {
+            // 先发送 reasoning（如有）
+            if !self.final_reasoning.is_empty() {
                 let _ = self.tx.send(TurnEvent::Chunk(ModelStreamChunk {
-                    content: self.final_text.clone(),
+                    content: String::new(),
                     reasoning_content: self.final_reasoning.clone(),
+                }));
+            }
+            // 按段落拆分 content 发送，每段之间短暂间隔以触发前端流式检测
+            let paragraphs: Vec<&str> = self.final_text.split("\n\n").collect();
+            let mut sent = String::new();
+            for (i, para) in paragraphs.iter().enumerate() {
+                if i > 0 {
+                    sent.push_str("\n\n");
+                }
+                sent.push_str(para);
+                let _ = self.tx.send(TurnEvent::Chunk(ModelStreamChunk {
+                    content: para.to_string() + if i < paragraphs.len() - 1 { "\n\n" } else { "" },
+                    reasoning_content: String::new(),
                 }));
                 self.total_output_chunks += 1;
             }
