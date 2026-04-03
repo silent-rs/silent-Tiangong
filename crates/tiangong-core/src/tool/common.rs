@@ -78,9 +78,32 @@ pub(super) fn resolve_workspace_path(raw: &str) -> Result<PathBuf> {
     resolve_path_from_base(raw, &base)
 }
 
+/// 信任模式下的路径解析：不做越界检查
+pub(super) fn resolve_workspace_path_trusted(raw: &str) -> Result<PathBuf> {
+    let base = workspace_root()?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(anyhow!("路径参数不能为空"));
+    }
+    let candidate = resolve_path_candidate(raw, &base);
+    candidate
+        .canonicalize()
+        .with_context(|| format!("解析路径失败：{}", candidate.display()))
+}
+
 pub(super) fn resolve_workspace_write_path(raw: &str) -> Result<PathBuf> {
     let base = workspace_root()?;
     resolve_write_path_from_base(raw, &base)
+}
+
+/// 信任模式下的写入路径解析：不做越界检查
+pub(super) fn resolve_workspace_write_path_trusted(raw: &str) -> Result<PathBuf> {
+    let base = workspace_root()?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(anyhow!("路径参数不能为空"));
+    }
+    Ok(resolve_path_candidate(raw, &base))
 }
 
 pub(super) fn resolve_path_from_base(raw: &str, base: &Path) -> Result<PathBuf> {

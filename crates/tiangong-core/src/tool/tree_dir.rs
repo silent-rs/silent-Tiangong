@@ -3,7 +3,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
 
-use super::common::{display_rel_path, resolve_workspace_path, truncate_output};
+use super::common::{display_rel_path, resolve_workspace_path, resolve_workspace_path_trusted, truncate_output};
 use super::{LocalToolExecutor, ToolCall, ToolResult};
 
 const DEFAULT_TREE_MAX_DEPTH: usize = 2;
@@ -14,7 +14,7 @@ impl LocalToolExecutor {
     pub(super) fn tree_dir(&self, call: &ToolCall) -> Result<ToolResult> {
         let path = call.args.first().map_or(".", String::as_str);
         let max_depth = parse_tree_max_depth(call.args.get(1).map(String::as_str))?;
-        let full_path = resolve_workspace_path(path)?;
+        let full_path = if self.is_full_trust() { resolve_workspace_path_trusted(path)? } else { resolve_workspace_path(path)? };
         if !full_path.is_dir() {
             return Err(anyhow!("tree_dir 目标不是目录：{}", full_path.display()));
         }

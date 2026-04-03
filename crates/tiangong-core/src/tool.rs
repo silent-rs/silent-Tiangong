@@ -83,6 +83,8 @@ pub trait ToolExecutor {
 #[derive(Debug, Clone, Default)]
 pub struct LocalToolExecutor {
     runtime_env: BTreeMap<String, String>,
+    /// 共享信任模式引用，FullTrust 时跳过路径越界和命令白名单检查
+    shared_trust_mode: Option<std::sync::Arc<std::sync::RwLock<crate::permission::TrustMode>>>,
 }
 
 impl ToolExecutor for LocalToolExecutor {
@@ -139,7 +141,26 @@ impl LocalToolExecutor {
     pub fn from_agent_config(agent_config: &AgentConfig) -> Self {
         Self {
             runtime_env: run_command::collect_runtime_env(agent_config),
+            shared_trust_mode: None,
         }
+    }
+
+    /// 设置共享信任模式引用
+    pub fn with_shared_trust_mode(
+        mut self,
+        shared: std::sync::Arc<std::sync::RwLock<crate::permission::TrustMode>>,
+    ) -> Self {
+        self.shared_trust_mode = Some(shared);
+        self
+    }
+
+    /// 当前是否处于完全信任模式
+    pub(super) fn is_full_trust(&self) -> bool {
+        self.shared_trust_mode
+            .as_ref()
+            .and_then(|s| s.read().ok())
+            .map(|g| *g == crate::permission::TrustMode::FullTrust)
+            .unwrap_or(false)
     }
 
     pub(super) fn runtime_env(&self) -> &BTreeMap<String, String> {

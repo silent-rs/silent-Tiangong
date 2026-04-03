@@ -116,11 +116,12 @@ impl RuntimeEngine {
                 trust_mode: agent_config.trust_mode,
                 ..Default::default()
             },
-            shared_trust_mode,
+            shared_trust_mode.clone(),
         );
         Self {
             client,
-            tool_executor: LocalToolExecutor::from_agent_config(&agent_config),
+            tool_executor: LocalToolExecutor::from_agent_config(&agent_config)
+                .with_shared_trust_mode(shared_trust_mode),
             context_limit,
             agent_config,
             models_config: ModelsConfig::default(),
