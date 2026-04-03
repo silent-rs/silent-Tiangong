@@ -104,6 +104,30 @@ impl RuntimeEngine {
         }
     }
 
+    /// 使用共享的信任模式引用创建（确保跨 clone 实例共享同一权限状态）
+    pub fn with_shared_trust_mode(
+        client: SingleProviderClient,
+        context_limit: usize,
+        agent_config: AgentConfig,
+        shared_trust_mode: std::sync::Arc<std::sync::RwLock<crate::permission::TrustMode>>,
+    ) -> Self {
+        let permission_gate = crate::permission::PermissionGate::with_shared_trust_mode(
+            crate::permission::PermissionPolicy {
+                trust_mode: agent_config.trust_mode,
+                ..Default::default()
+            },
+            shared_trust_mode,
+        );
+        Self {
+            client,
+            tool_executor: LocalToolExecutor::from_agent_config(&agent_config),
+            context_limit,
+            agent_config,
+            models_config: ModelsConfig::default(),
+            permission_gate,
+        }
+    }
+
     pub fn with_models_config(mut self, config: ModelsConfig) -> Self {
         self.models_config = config;
         self
