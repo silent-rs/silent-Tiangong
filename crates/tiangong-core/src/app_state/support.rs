@@ -117,6 +117,8 @@ pub struct PendingTurn {
     pub(in crate::app_state) assistant_message_id: Option<String>,
     /// 当前 stage thinking 对应的系统消息 ID，用于流式追加
     pub(in crate::app_state) stage_thinking_message_id: Option<String>,
+    /// 多 Worker 模式下，worker_id → 对应 assistant 消息 ID
+    pub(in crate::app_state) worker_message_ids: std::collections::HashMap<String, String>,
     pub(in crate::app_state) started_at: Instant,
     /// 从执行线程接收事件
     pub(in crate::app_state) rx: Receiver<TurnEvent>,

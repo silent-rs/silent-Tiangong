@@ -171,10 +171,13 @@ function WorkerCard({ group, isActive, MarkdownComponents }: {
   // Worker 有 assistant 回复且不在执行中时自动收缩
   const hasResult = group.messages.some(m => m.role === "Assistant");
   const [collapsed, setCollapsed] = useState(!isActive && hasResult);
-  const workerTitle = group.messages[0]?.content?.replace("🔧 Worker: ", "") || "Worker";
-  const innerMessages = group.messages.slice(1);
-  const systemMsgs = innerMessages.filter(m => m.role === "System");
-  const assistantMsgs = innerMessages.filter(m => m.role === "Assistant");
+  // 从 "🔧 Worker: xxx" 系统消息中提取标题
+  const workerStartMsg = group.messages.find(m => m.role === "System" && m.content.startsWith("🔧 Worker:"));
+  const workerTitle = workerStartMsg?.content?.replace("🔧 Worker: ", "") || "Worker";
+  // 过滤掉 Worker 标题系统消息（以 "🔧 Worker:" 开头的）
+  const contentMessages = group.messages.filter(m => !(m.role === "System" && m.content.startsWith("🔧 Worker:")));
+  const systemMsgs = contentMessages.filter(m => m.role === "System");
+  const assistantMsgs = contentMessages.filter(m => m.role === "Assistant");
 
   return (
     <div className="mt-3 border border-border rounded-lg overflow-hidden">
@@ -619,53 +622,45 @@ export function MessageList() {
 interface MessageGroup {
   key: string;
   type: "system" | "normal" | "worker";
+  worker_id?: string;
   messages: {
     id: string;
     role: string;
     content: string;
     reasoning_content?: string;
+    worker_id?: string;
     created_at: string;
   }[];
 }
 
 function groupMessages(messages: MessageGroup["messages"]): MessageGroup[] {
   const groups: MessageGroup[] = [];
+  // worker_id → 对应的 worker 组索引
+  const workerGroupMap = new Map<string, number>();
   let currentSystemGroup: MessageGroup | null = null;
-  let currentWorkerGroup: MessageGroup | null = null;
 
   for (const msg of messages) {
-    const isWorkerStart = msg.role === "System" && msg.content.startsWith("🔧 Worker:");
-
-    if (isWorkerStart) {
-      // 结束之前的系统消息组
+    if (msg.worker_id) {
+      // 有 worker_id 的消息：按 worker_id 分组
       if (currentSystemGroup) {
-        if (currentWorkerGroup) {
-          currentWorkerGroup.messages.push(...currentSystemGroup.messages.map(m => ({...m})));
-        } else {
-          groups.push(currentSystemGroup);
-        }
+        groups.push(currentSystemGroup);
         currentSystemGroup = null;
       }
-      // 结束之前的 Worker 组
-      if (currentWorkerGroup) {
-        groups.push(currentWorkerGroup);
-      }
-      // 开始新的 Worker 组
-      currentWorkerGroup = {
-        key: `worker-${msg.id}`,
-        type: "worker",
-        messages: [msg],
-      };
-    } else if (currentWorkerGroup) {
-      // 在 Worker 组内：检查是否应该结束当前 Worker 组
-      const workerHasAssistant = currentWorkerGroup.messages.some(m => m.role === "Assistant");
-      if (msg.role === "Assistant" && workerHasAssistant) {
-        // Worker 组已有 assistant 回复，新 assistant 消息属于总结——关闭 Worker 组
-        groups.push(currentWorkerGroup);
-        currentWorkerGroup = null;
-        groups.push({ key: msg.id, type: "normal", messages: [msg] });
+
+      const existingIdx = workerGroupMap.get(msg.worker_id);
+      if (existingIdx !== undefined) {
+        // 追加到已有的 Worker 组
+        groups[existingIdx].messages.push(msg);
       } else {
-        currentWorkerGroup.messages.push(msg);
+        // 创建新的 Worker 组
+        const idx = groups.length;
+        workerGroupMap.set(msg.worker_id, idx);
+        groups.push({
+          key: `worker-${msg.worker_id}`,
+          type: "worker",
+          worker_id: msg.worker_id,
+          messages: [msg],
+        });
       }
     } else if (msg.role === "System") {
       if (!currentSystemGroup) {
@@ -683,11 +678,6 @@ function groupMessages(messages: MessageGroup["messages"]): MessageGroup[] {
       }
       groups.push({ key: msg.id, type: "normal", messages: [msg] });
     }
-  }
-  // 结束最后的 Worker 组
-  if (currentWorkerGroup) {
-    groups.push(currentWorkerGroup);
-    currentWorkerGroup = null;
   }
   if (currentSystemGroup) {
     groups.push(currentSystemGroup);

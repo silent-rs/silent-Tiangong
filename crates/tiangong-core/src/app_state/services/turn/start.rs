@@ -174,6 +174,7 @@ impl AppTurnService {
                 task_id,
                 assistant_message_id: None,
                 stage_thinking_message_id: None,
+                worker_message_ids: std::collections::HashMap::new(),
                 started_at: Instant::now(),
                 rx,
                 control_tx: ctrl_tx,

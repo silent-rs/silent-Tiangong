@@ -279,6 +279,7 @@ impl TurnRunner {
                 role: MessageRole::Assistant,
                 content: assistant_text,
                 reasoning_content: response.reasoning_content.clone(),
+                worker_id: None,
                 created_at: now_text(),
             });
 
@@ -353,7 +354,8 @@ impl TurnRunner {
                                 role: MessageRole::System,
                                 content: format!("工具 {tool_name} 被用户拒绝"),
                                 reasoning_content: String::new(),
-                                created_at: now_text(),
+                                worker_id: None,
+                                                created_at: now_text(),
                             });
                             if self.pending_tool_calls.is_empty() {
                                 self.phase = TurnPhase::ContextAssembly;
@@ -433,6 +435,7 @@ impl TurnRunner {
                 role: MessageRole::System,
                 content: denied_msg,
                 reasoning_content: String::new(),
+                worker_id: None,
                 created_at: now_text(),
             });
         }
@@ -482,6 +485,7 @@ impl TurnRunner {
             role: MessageRole::System,
             content: round_feedback_parts.join("\n\n"),
             reasoning_content: String::new(),
+            worker_id: None,
             created_at: now_text(),
         });
 
@@ -629,6 +633,7 @@ impl TurnRunner {
                 role: MessageRole::User,
                 content: format!("[用户追加指示] {msg}"),
                 reasoning_content: String::new(),
+                worker_id: None,
                 created_at: now_text(),
             });
         }

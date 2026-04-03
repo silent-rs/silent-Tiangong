@@ -181,6 +181,7 @@ pub fn execute_single_plan_step_with_execution_agent(
                     blocking_errors.join("\n")
                 ),
                 reasoning_content: String::new(),
+                worker_id: None,
                 created_at: now_text(),
             });
             continue;

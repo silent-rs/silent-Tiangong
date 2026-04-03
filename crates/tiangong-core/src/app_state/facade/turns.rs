@@ -77,6 +77,16 @@ impl TiangongState {
         service.append_pending_turn_plan_execution_summary(self, session_id, summary)
     }
 
+    pub(in crate::app_state) fn append_worker_system_message(
+        &mut self,
+        session_id: &str,
+        worker_id: &str,
+        content: String,
+    ) {
+        let service = self.services.turn_service;
+        service.append_worker_system_message(self, session_id, worker_id, content)
+    }
+
     pub(in crate::app_state) fn mark_pending_turn_executing(
         &mut self,
         session_id: &str,

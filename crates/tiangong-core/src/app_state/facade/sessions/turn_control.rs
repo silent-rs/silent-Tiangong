@@ -1,4 +1,5 @@
 use super::super::super::*;
+use super::super::super::formatting::{format_llm_output_message, format_tool_trace_message};
 
 impl TiangongState {
     pub fn report_run_failed(&mut self, summary: impl Into<String>, error: impl Into<String>) {
@@ -215,26 +216,33 @@ impl TiangongState {
                     TurnEvent::StageThinking { stage, delta } => {
                         self.apply_stage_thinking_delta(&session_id, &stage, &delta);
                     }
-                    TurnEvent::WorkerStarted { worker_label, .. } => {
-                        // 创建 Worker 标题系统消息
-                        if let Some(session) = self.store.session.sessions.iter_mut()
-                            .find(|s| s.id == session_id)
-                        {
-                            session.append_message(
-                                MessageRole::System,
-                                format!("🔧 Worker: {worker_label}"),
-                            );
-                        }
+                    TurnEvent::WorkerStarted { ref worker_id, ref worker_label } => {
+                        // 创建带 worker_id 的系统消息
+                        self.append_worker_system_message(
+                            &session_id,
+                            worker_id,
+                            format!("🔧 Worker: {worker_label}"),
+                        );
                         self.store.runtime.run.summary = format!("Worker 开始：{worker_label}");
                     }
-                    TurnEvent::WorkerEvent { worker_label, inner, .. } => {
-                        // 转发内部事件（LlmOutput/ToolExecution 等）
+                    TurnEvent::WorkerEvent { ref worker_id, ref worker_label, inner } => {
+                        // 转发内部事件，创建带 worker_id 的系统消息
                         match *inner {
                             TurnEvent::LlmOutput(output) => {
-                                self.append_pending_turn_llm_output(&session_id, &output);
+                                let content = format_llm_output_message(&output);
+                                self.append_worker_system_message(
+                                    &session_id,
+                                    worker_id,
+                                    content,
+                                );
                             }
                             TurnEvent::ToolExecution(result) => {
-                                self.append_pending_turn_tool_execution(&session_id, &result);
+                                let content = format_tool_trace_message(&result);
+                                self.append_worker_system_message(
+                                    &session_id,
+                                    worker_id,
+                                    content,
+                                );
                             }
                             TurnEvent::StageThinking { stage, delta } => {
                                 self.apply_stage_thinking_delta(&session_id, &stage, &delta);
@@ -338,19 +346,31 @@ impl TiangongState {
                 TurnEvent::StageThinking { stage, delta } => {
                     self.apply_stage_thinking_delta(session_id, &stage, &delta);
                 }
-                TurnEvent::WorkerStarted { ref worker_label, .. } => {
-                    if let Some(session) = self.store.session.sessions.iter_mut().find(|s| s.id == session_id) {
-                        session.append_message(MessageRole::System, format!("🔧 Worker: {worker_label}"));
-                    }
+                TurnEvent::WorkerStarted { ref worker_id, ref worker_label } => {
+                    self.append_worker_system_message(
+                        session_id,
+                        worker_id,
+                        format!("🔧 Worker: {worker_label}"),
+                    );
                     self.store.runtime.run.summary = format!("Worker 开始：{worker_label}");
                 }
-                TurnEvent::WorkerEvent { ref worker_label, inner, .. } => {
+                TurnEvent::WorkerEvent { ref worker_id, ref worker_label, inner } => {
                     match *inner {
                         TurnEvent::LlmOutput(output) => {
-                            self.append_pending_turn_llm_output(session_id, &output);
+                            let content = format_llm_output_message(&output);
+                            self.append_worker_system_message(
+                                session_id,
+                                worker_id,
+                                content,
+                            );
                         }
                         TurnEvent::ToolExecution(result) => {
-                            self.append_pending_turn_tool_execution(session_id, &result);
+                            let content = format_tool_trace_message(&result);
+                            self.append_worker_system_message(
+                                session_id,
+                                worker_id,
+                                content,
+                            );
                         }
                         TurnEvent::StageThinking { stage, delta } => {
                             self.apply_stage_thinking_delta(session_id, &stage, &delta);

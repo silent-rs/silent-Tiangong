@@ -58,6 +58,8 @@ pub struct Message {
     pub role: String,
     pub content: String,
     pub reasoning_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<String>,
     pub created_at: String,
 }
 
@@ -72,6 +74,7 @@ impl Message {
             } else {
                 Some(core_msg.reasoning_content.clone())
             },
+            worker_id: core_msg.worker_id.clone(),
             created_at: core_msg.created_at.clone(),
         }
     }

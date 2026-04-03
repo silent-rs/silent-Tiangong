@@ -18,6 +18,7 @@ export interface Message {
   role: string;
   content: string;
   reasoning_content?: string;
+  worker_id?: string;
   created_at: string;
 }
 

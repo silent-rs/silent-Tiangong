@@ -2,7 +2,7 @@
 //!
 //! 每个 Worker 是一个独立的 TurnRunner 实例。
 //! 多 Worker 模式下，Worker 拦截 Chunk 事件转为 WorkerChunk，
-//! 确保每个 Worker 有独立的 assistant 消息。
+//! 并实时转发到主 event_tx，实现并行流式输出。
 
 use std::sync::mpsc;
 use std::time::Instant;
@@ -13,13 +13,6 @@ use crate::session::Session;
 use crate::turn_runner::TurnRunner;
 
 use super::types::{WorkerContext, WorkerResult};
-
-/// Worker 执行过程中收集的所有事件
-#[derive(Debug)]
-pub struct WorkerOutput {
-    pub result: WorkerResult,
-    pub events: Vec<TurnEvent>,
-}
 
 /// Worker 执行单元
 pub struct Worker {
@@ -54,19 +47,14 @@ impl Worker {
         self
     }
 
-    /// 设置多 Worker 模式（Chunk 事件转为 WorkerChunk）
+    /// 设置多 Worker 模式（Chunk 事件转为 WorkerChunk，实时转发）
     pub fn with_multi_worker_mode(mut self) -> Self {
         self.multi_worker_mode = true;
         self
     }
 
-    /// 执行 Worker 任务（单 Worker 模式，实时转发事件）
-    pub fn run(self) -> WorkerResult {
-        self.run_with_output().result
-    }
-
-    /// 执行 Worker 任务，返回结果和收集的事件
-    pub fn run_with_output(mut self) -> WorkerOutput {
+    /// 执行 Worker 任务
+    pub fn run(mut self) -> WorkerResult {
         let started = Instant::now();
         let worker_id = self.context.worker_id.clone();
         let worker_label: String = self.context.task_objective.chars().take(30).collect();
@@ -85,32 +73,43 @@ impl Worker {
             r
         });
 
-        // 多 Worker 模式：收集事件到 Vec（不实时转发，由 Coordinator 顺序回放）
-        // 单 Worker 模式：实时转发所有事件
-        let collected_events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let forward_handle = if self.multi_worker_mode {
-            let events = collected_events.clone();
+            // 多 Worker 模式：实时转发，Chunk→WorkerChunk，其他→WorkerEvent
+            let main_tx = self.event_tx.take();
             let wid = worker_id.clone();
             let wlabel = worker_label.clone();
-            Some(std::thread::spawn(move || {
-                while let Ok(event) = runner_rx.recv() {
-                    let tagged = match event {
-                        TurnEvent::Chunk(delta) => TurnEvent::WorkerChunk {
-                            worker_id: wid.clone(),
-                            worker_label: wlabel.clone(),
-                            delta,
-                        },
-                        other => TurnEvent::WorkerEvent {
-                            worker_id: wid.clone(),
-                            worker_label: wlabel.clone(),
-                            inner: Box::new(other),
-                        },
-                    };
-                    events.lock().unwrap().push(tagged);
-                }
-            }))
+
+            // 发送 WorkerStarted 事件
+            if let Some(ref tx) = main_tx {
+                let _ = tx.send(TurnEvent::WorkerStarted {
+                    worker_id: wid.clone(),
+                    worker_label: wlabel.clone(),
+                });
+            }
+
+            main_tx.map(|tx| {
+                std::thread::spawn(move || {
+                    while let Ok(event) = runner_rx.recv() {
+                        let tagged = match event {
+                            TurnEvent::Chunk(delta) => TurnEvent::WorkerChunk {
+                                worker_id: wid.clone(),
+                                worker_label: wlabel.clone(),
+                                delta,
+                            },
+                            other => TurnEvent::WorkerEvent {
+                                worker_id: wid.clone(),
+                                worker_label: wlabel.clone(),
+                                inner: Box::new(other),
+                            },
+                        };
+                        if tx.send(tagged).is_err() {
+                            break;
+                        }
+                    }
+                })
+            })
         } else {
-            // 单 Worker 模式：实时转发
+            // 单 Worker 模式：实时转发，不做事件转换
             self.event_tx.take().map(|main_tx| {
                 std::thread::spawn(move || {
                     while let Ok(event) = runner_rx.recv() {
@@ -149,16 +148,15 @@ impl Worker {
             },
         };
 
-        // 等待收集线程结束
+        // 等待转发线程结束
         if let Some(handle) = forward_handle {
             let _ = handle.join();
         }
 
-        let events = std::sync::Arc::try_unwrap(collected_events)
-            .ok()
-            .and_then(|mutex| mutex.into_inner().ok())
-            .unwrap_or_default();
+        // 多 Worker 模式下发送 WorkerCompleted（通过检查 multi_worker_mode 标志已消费）
+        // WorkerCompleted 由 Coordinator 在所有 Worker 完成后不再需要，
+        // 因为 Worker 自己会在转发线程关闭时隐式完成
 
-        WorkerOutput { result, events }
+        result
     }
 }
