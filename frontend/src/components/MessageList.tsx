@@ -479,11 +479,14 @@ export function MessageList() {
 
               // 系统消息组
               if (group.type === "system") {
+                // 检查该组是否是最后一个系统消息组（后面没有更多系统消息组）
+                const isLastSystemGroup = !allGroups.slice(groupIdx + 1).some(g => g.type === "system");
                 return (
                   <SystemMessageGroup
                     key={group.key}
                     messages={group.messages}
                     defaultExpanded={isThinking}
+                    isActive={isThinking && isLastSystemGroup}
                   />
                 );
               }
@@ -769,15 +772,12 @@ function groupByRound(messages: MessageGroup["messages"]): RoundGroup[] {
 
 function SystemMessageGroup({
   messages,
+  isActive,
 }: {
   messages: MessageGroup["messages"];
   defaultExpanded?: boolean;
+  isActive?: boolean;
 }) {
-  const {
-    streamingSystemMessageId,
-    streamingSystemContent,
-    streamingSystemReasoningContent,
-  } = useStore();
   const [expandedRounds, setExpandedRounds] = useState<Set<string>>(new Set());
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
 
@@ -838,27 +838,31 @@ function SystemMessageGroup({
 
   return (
     <div className="max-w-3xl space-y-0.5">
-      {rounds.map((round) => {
-        // 如果该 round 的 LLM 消息正在流式输出，以流式文本块展示
-        const isStreamingRound = round.llm &&
-          streamingSystemMessageId === round.llm.id;
+      {rounds.map((round, roundIdx) => {
+        const isLastRound = roundIdx === rounds.length - 1;
+        // 执行中的最后一个 round：直接展示解释文本（非折叠）
+        const showExplanation = isActive && isLastRound;
 
-        if (isStreamingRound) {
+        if (showExplanation) {
+          // 提取解释文本
+          const explanation = round.label !== "思考中..." && round.label !== "执行"
+            ? round.label : "";
+          const reasoning = round.llm?.reasoning_content || "";
+
           return (
             <div key={round.key} className="space-y-1">
-              {/* 流式解释文本 */}
-              {(streamingSystemContent || streamingSystemReasoningContent) && (
+              {/* 解释文本：直接展示 */}
+              {(explanation || reasoning) && (
                 <div className="text-sm text-muted-foreground leading-relaxed">
-                  {streamingSystemReasoningContent && (
+                  {reasoning && (
                     <ThinkingBlock
-                      content={streamingSystemReasoningContent}
-                      defaultExpanded={true}
+                      content={reasoning}
+                      defaultExpanded={false}
                     />
                   )}
-                  {streamingSystemContent && (
+                  {explanation && (
                     <div className="whitespace-pre-wrap break-words">
-                      {streamingSystemContent}
-                      <span className="inline-block w-1.5 h-4 bg-primary ml-0.5 animate-pulse align-text-bottom" />
+                      {explanation}
                     </div>
                   )}
                 </div>
@@ -869,6 +873,7 @@ function SystemMessageGroup({
                   {round.tools.map((t) => renderItem(t))}
                 </div>
               )}
+              {round.others.map((o) => renderItem(o))}
             </div>
           );
         }
