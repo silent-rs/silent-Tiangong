@@ -43,9 +43,7 @@ pub enum TurnPhase {
     Completed,
 
     /// 执行失败
-    Failed {
-        error: String,
-    },
+    Failed { error: String },
 
     /// 已取消
     Cancelled,
@@ -97,7 +95,12 @@ mod tests {
     fn terminal_states() {
         assert!(TurnPhase::Completed.is_terminal());
         assert!(TurnPhase::Cancelled.is_terminal());
-        assert!((TurnPhase::Failed { error: "err".into() }).is_terminal());
+        assert!(
+            (TurnPhase::Failed {
+                error: "err".into()
+            })
+            .is_terminal()
+        );
 
         assert!(!TurnPhase::Init.is_terminal());
         assert!(!TurnPhase::LlmCalling.is_terminal());
@@ -137,7 +140,10 @@ mod tests {
             TurnPhase::Cancelled,
         ];
         for phase in &phases {
-            assert!(!phase.display_name().is_empty(), "{phase:?} has empty display_name");
+            assert!(
+                !phase.display_name().is_empty(),
+                "{phase:?} has empty display_name"
+            );
             assert!(!format!("{phase}").is_empty());
         }
     }
@@ -153,7 +159,11 @@ mod tests {
         assert!(json.contains("run_command"));
 
         let deserialized: TurnPhase = serde_json::from_str(&json).unwrap();
-        if let TurnPhase::WaitingApproval { tool_name, request_id } = deserialized {
+        if let TurnPhase::WaitingApproval {
+            tool_name,
+            request_id,
+        } = deserialized
+        {
             assert_eq!(tool_name, "run_command");
             assert_eq!(request_id, "abc-123");
         } else {
@@ -163,7 +173,9 @@ mod tests {
 
     #[test]
     fn failed_preserves_error() {
-        let phase = TurnPhase::Failed { error: "网络超时".into() };
+        let phase = TurnPhase::Failed {
+            error: "网络超时".into(),
+        };
         let json = serde_json::to_string(&phase).unwrap();
         let deserialized: TurnPhase = serde_json::from_str(&json).unwrap();
         if let TurnPhase::Failed { error } = deserialized {

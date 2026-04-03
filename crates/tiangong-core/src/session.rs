@@ -211,10 +211,7 @@ impl Session {
         let home = std::env::var_os("HOME")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let workspace_dir = home
-            .join(".tiangong")
-            .join("workspaces")
-            .join(&id);
+        let workspace_dir = home.join(".tiangong").join("workspaces").join(&id);
         let _ = std::fs::create_dir_all(&workspace_dir);
         Self {
             id,

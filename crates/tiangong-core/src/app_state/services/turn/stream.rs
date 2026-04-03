@@ -214,8 +214,12 @@ impl AppTurnService {
         state: &mut TiangongState,
         session_id: &str,
     ) -> Option<(String, String)> {
-        let (sid, task_id, existing_message_id) =
-            state.store.runtime.pending_turns.get(session_id).map(|pending| {
+        let (sid, task_id, existing_message_id) = state
+            .store
+            .runtime
+            .pending_turns
+            .get(session_id)
+            .map(|pending| {
                 (
                     pending.session_id.clone(),
                     pending.task_id.clone(),
@@ -263,8 +267,12 @@ impl AppTurnService {
         session_id: &str,
         plan: &TaskPlan,
     ) {
-        let Some((sid, task_id, assistant_message_id)) =
-            state.store.runtime.pending_turns.get(session_id).map(|pending| {
+        let Some((sid, task_id, assistant_message_id)) = state
+            .store
+            .runtime
+            .pending_turns
+            .get(session_id)
+            .map(|pending| {
                 (
                     pending.session_id.clone(),
                     pending.task_id.clone(),
@@ -372,9 +380,7 @@ impl AppTurnService {
                 // 记录消息 ID 到 pending
                 if let Some(new_msg) = session.messages.last() {
                     let new_msg_id = new_msg.id.clone();
-                    if let Some(pending) =
-                        state.store.runtime.pending_turns.get_mut(session_id)
-                    {
+                    if let Some(pending) = state.store.runtime.pending_turns.get_mut(session_id) {
                         pending
                             .worker_message_ids
                             .insert(worker_id.to_string(), new_msg_id);
@@ -411,11 +417,7 @@ impl AppTurnService {
             .iter_mut()
             .find(|s| s.id == sid)
         {
-            session.append_worker_message(
-                MessageRole::System,
-                content,
-                worker_id,
-            );
+            session.append_worker_message(MessageRole::System, content, worker_id);
         }
     }
 }

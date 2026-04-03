@@ -411,10 +411,7 @@ fn validate_shell_script(script: &str, base_dir: &Path) -> Result<()> {
                         }
                         !is_path_in_allowed_roots(&p, &roots)
                     } {
-                        return Err(anyhow!(
-                            "shell 脚本 cd 目标越界：{}",
-                            target
-                        ));
+                        return Err(anyhow!("shell 脚本 cd 目标越界：{}", target));
                     }
                 }
             }
@@ -479,9 +476,7 @@ fn split_shell_commands(script: &str) -> Vec<String> {
 
 fn contains_forbidden_shell_tokens(script: &str) -> bool {
     const FORBIDDEN: [&str; 8] = [
-        "sudo ", "chmod -r", "chown ",
-        "shutdown", "reboot", "poweroff", "mkfs",
-        "dd if=",
+        "sudo ", "chmod -r", "chown ", "shutdown", "reboot", "poweroff", "mkfs", "dd if=",
     ];
     FORBIDDEN.iter().any(|token| script.contains(token))
 }
@@ -493,7 +488,21 @@ fn extract_shell_head_command(script: &str) -> Option<&str> {
 fn is_allowed_shell_head_command(cmd: &str) -> bool {
     // shell 脚本首命令白名单（与 is_allowed_command 保持一致）
     is_allowed_command(cmd)
-        || matches!(cmd, "cd" | "curl" | "wget" | "tar" | "unzip" | "test" | "[" | "nohup" | "screen" | "tmux" | "for" | "while" | "if")
+        || matches!(
+            cmd,
+            "cd" | "curl"
+                | "wget"
+                | "tar"
+                | "unzip"
+                | "test"
+                | "["
+                | "nohup"
+                | "screen"
+                | "tmux"
+                | "for"
+                | "while"
+                | "if"
+        )
 }
 
 pub(super) fn derive_shell_exec_args(

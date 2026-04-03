@@ -66,7 +66,10 @@ impl SpeechRecognizer for OpenAIWhisper {
     }
 
     async fn transcribe(&self, request: TranscribeRequest) -> Result<TranscribeResponse> {
-        let url = format!("{}/audio/transcriptions", self.api_base.trim_end_matches('/'));
+        let url = format!(
+            "{}/audio/transcriptions",
+            self.api_base.trim_end_matches('/')
+        );
         let model = request.model.unwrap_or_else(|| "whisper-1".to_string());
         let ext = extension_from_mime(&request.mime_type);
         let filename = format!("audio.{}", ext);
@@ -79,10 +82,7 @@ impl SpeechRecognizer for OpenAIWhisper {
         let mut form = reqwest::multipart::Form::new()
             .part("file", file_part)
             .part("model", reqwest::multipart::Part::text(model))
-            .part(
-                "response_format",
-                reqwest::multipart::Part::text("json"),
-            );
+            .part("response_format", reqwest::multipart::Part::text("json"));
 
         if let Some(lang) = request.language {
             form = form.part("language", reqwest::multipart::Part::text(lang));
@@ -109,8 +109,13 @@ impl SpeechRecognizer for OpenAIWhisper {
             return Err(anyhow!("OpenAI Whisper 转录失败 ({}): {}", status, err_msg));
         }
 
-        let whisper_resp: WhisperResponse = serde_json::from_str(&resp_text)
-            .with_context(|| format!("解析 Whisper 响应失败，原始响应：{}", &resp_text[..resp_text.len().min(500)]))?;
+        let whisper_resp: WhisperResponse =
+            serde_json::from_str(&resp_text).with_context(|| {
+                format!(
+                    "解析 Whisper 响应失败，原始响应：{}",
+                    &resp_text[..resp_text.len().min(500)]
+                )
+            })?;
 
         Ok(TranscribeResponse {
             text: whisper_resp.text,
@@ -119,4 +124,3 @@ impl SpeechRecognizer for OpenAIWhisper {
         })
     }
 }
-

@@ -160,8 +160,7 @@ impl AppSkillService {
             .iter()
             .find(|item| item.id == skill.id)
         {
-            let old_env_path =
-                std::path::Path::new(&existing.source.value).join(".env.local");
+            let old_env_path = std::path::Path::new(&existing.source.value).join(".env.local");
             if let Ok(content) = fs::read_to_string(&old_env_path) {
                 for line in content.lines() {
                     let line = line.trim();
@@ -213,7 +212,8 @@ impl AppSkillService {
 
         // 写入 .env.local：合并旧版本 env（旧值为底，新值覆盖）
         {
-            let mut merged: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+            let mut merged: std::collections::BTreeMap<String, String> =
+                std::collections::BTreeMap::new();
             // 先填入旧版本的值
             for (k, v) in &old_env {
                 if !k.trim().is_empty() && !v.trim().is_empty() {
@@ -227,10 +227,8 @@ impl AppSkillService {
                 }
             }
             if !merged.is_empty() {
-                let env_lines: Vec<String> = merged
-                    .iter()
-                    .map(|(k, v)| format!("{k}={v}"))
-                    .collect();
+                let env_lines: Vec<String> =
+                    merged.iter().map(|(k, v)| format!("{k}={v}")).collect();
                 let env_path = installed_dir.join(".env.local");
                 fs::write(&env_path, format!("{}\n", env_lines.join("\n")))
                     .with_context(|| format!("写入 .env.local 失败：{}", env_path.display()))?;
@@ -396,7 +394,10 @@ impl AppSkillService {
         let source = Path::new(path);
 
         // 支持 zip 压缩包：解压到 ~/.tiangong/skills/imported/ 后使用解压目录
-        if source.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("zip")) {
+        if source
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+        {
             let source_path = fs::canonicalize(source)
                 .with_context(|| format!("解析 skill 压缩包路径失败：{path}"))?;
             return Self::extract_skill_zip(&source_path);
@@ -467,9 +468,7 @@ impl AppSkillService {
         }
 
         // 检查解压后的目录结构：如果 zip 内只有一个子目录，使用该子目录
-        let entries: Vec<_> = fs::read_dir(&import_dir)?
-            .filter_map(|e| e.ok())
-            .collect();
+        let entries: Vec<_> = fs::read_dir(&import_dir)?.filter_map(|e| e.ok()).collect();
         if entries.len() == 1 && entries[0].file_type().map(|t| t.is_dir()).unwrap_or(false) {
             let inner = entries[0].path();
             if inner.join("SKILL.md").exists() || inner.join("skill.toml").exists() {
@@ -479,5 +478,4 @@ impl AppSkillService {
 
         Ok(import_dir)
     }
-
 }

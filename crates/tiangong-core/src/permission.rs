@@ -141,9 +141,18 @@ mod tests {
             trust_mode: TrustMode::FullTrust,
             ..Default::default()
         });
-        assert!(matches!(gate.check("run_command"), PermissionDecision::Approved));
-        assert!(matches!(gate.check("apply_patch"), PermissionDecision::Approved));
-        assert!(matches!(gate.check("some_mcp_tool"), PermissionDecision::Approved));
+        assert!(matches!(
+            gate.check("run_command"),
+            PermissionDecision::Approved
+        ));
+        assert!(matches!(
+            gate.check("apply_patch"),
+            PermissionDecision::Approved
+        ));
+        assert!(matches!(
+            gate.check("some_mcp_tool"),
+            PermissionDecision::Approved
+        ));
     }
 
     #[test]
@@ -152,10 +161,22 @@ mod tests {
             trust_mode: TrustMode::Supervised,
             ..Default::default()
         });
-        assert!(matches!(gate.check("read_file"), PermissionDecision::Approved));
-        assert!(matches!(gate.check("list_dir"), PermissionDecision::Approved));
-        assert!(matches!(gate.check("search_code"), PermissionDecision::Approved));
-        assert!(matches!(gate.check("write_file"), PermissionDecision::Approved));
+        assert!(matches!(
+            gate.check("read_file"),
+            PermissionDecision::Approved
+        ));
+        assert!(matches!(
+            gate.check("list_dir"),
+            PermissionDecision::Approved
+        ));
+        assert!(matches!(
+            gate.check("search_code"),
+            PermissionDecision::Approved
+        ));
+        assert!(matches!(
+            gate.check("write_file"),
+            PermissionDecision::Approved
+        ));
     }
 
     #[test]
@@ -164,10 +185,22 @@ mod tests {
             trust_mode: TrustMode::Supervised,
             ..Default::default()
         });
-        assert!(matches!(gate.check("run_command"), PermissionDecision::NeedsApproval { .. }));
-        assert!(matches!(gate.check("run_shell"), PermissionDecision::NeedsApproval { .. }));
-        assert!(matches!(gate.check("apply_patch"), PermissionDecision::NeedsApproval { .. }));
-        assert!(matches!(gate.check("unknown_mcp_tool"), PermissionDecision::NeedsApproval { .. }));
+        assert!(matches!(
+            gate.check("run_command"),
+            PermissionDecision::NeedsApproval { .. }
+        ));
+        assert!(matches!(
+            gate.check("run_shell"),
+            PermissionDecision::NeedsApproval { .. }
+        ));
+        assert!(matches!(
+            gate.check("apply_patch"),
+            PermissionDecision::NeedsApproval { .. }
+        ));
+        assert!(matches!(
+            gate.check("unknown_mcp_tool"),
+            PermissionDecision::NeedsApproval { .. }
+        ));
     }
 
     #[test]
@@ -177,7 +210,10 @@ mod tests {
             always_deny: vec!["read_file".to_string()],
             ..Default::default()
         });
-        assert!(matches!(gate.check("read_file"), PermissionDecision::Denied { .. }));
+        assert!(matches!(
+            gate.check("read_file"),
+            PermissionDecision::Denied { .. }
+        ));
     }
 
     #[test]
@@ -187,7 +223,10 @@ mod tests {
             auto_approve: vec!["run_command".to_string()],
             ..Default::default()
         });
-        assert!(matches!(gate.check("run_command"), PermissionDecision::Approved));
+        assert!(matches!(
+            gate.check("run_command"),
+            PermissionDecision::Approved
+        ));
     }
 
     #[test]
@@ -198,7 +237,10 @@ mod tests {
             always_deny: vec!["run_command".to_string()],
         });
         // deny 先检查，优先于 approve
-        assert!(matches!(gate.check("run_command"), PermissionDecision::Denied { .. }));
+        assert!(matches!(
+            gate.check("run_command"),
+            PermissionDecision::Denied { .. }
+        ));
     }
 
     #[test]
@@ -217,7 +259,10 @@ mod tests {
     fn default_gate_is_supervised() {
         let gate = PermissionGate::default();
         assert_eq!(gate.trust_mode(), TrustMode::Supervised);
-        assert!(matches!(gate.check("apply_patch"), PermissionDecision::NeedsApproval { .. }));
+        assert!(matches!(
+            gate.check("apply_patch"),
+            PermissionDecision::NeedsApproval { .. }
+        ));
     }
 
     #[test]

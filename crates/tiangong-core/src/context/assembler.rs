@@ -180,9 +180,7 @@ impl ContextAssembler {
                 );
                 Vec::new()
             }
-            QueryMode::ToolExecution => {
-                self.select_tools(all_tools, &messages)
-            }
+            QueryMode::ToolExecution => self.select_tools(all_tools, &messages),
         };
 
         // 根据模式调整 system_prompt
@@ -220,8 +218,13 @@ impl ContextAssembler {
         );
 
         let priority_tools = [
-            "read_file", "write_file", "replace_in_file", "list_dir",
-            "run_command", "search_code", "tree_dir",
+            "read_file",
+            "write_file",
+            "replace_in_file",
+            "list_dir",
+            "run_command",
+            "search_code",
+            "tree_dir",
         ];
 
         all_tools
@@ -264,11 +267,13 @@ mod tests {
     #[test]
     fn session_with_tool_history_always_tool_mode() {
         let mut session = empty_session();
-        session.task_records.push(crate::session::SessionTaskRecord {
-            task_id: "t1".into(),
-            tool_result: Some("some result".into()),
-            ..Default::default()
-        });
+        session
+            .task_records
+            .push(crate::session::SessionTaskRecord {
+                task_id: "t1".into(),
+                tool_result: Some("some result".into()),
+                ..Default::default()
+            });
         assert!(session.task_records.iter().any(|r| r.tool_result.is_some()));
     }
 }

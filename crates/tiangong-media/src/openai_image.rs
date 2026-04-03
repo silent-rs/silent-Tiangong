@@ -79,7 +79,11 @@ impl ImageGenerator for OpenAIImageGenerator {
         let body = ImageGenBody {
             model: request.model.unwrap_or_else(|| self.model.clone()),
             prompt: request.prompt,
-            n: if request.num_images > 1 { Some(request.num_images) } else { None },
+            n: if request.num_images > 1 {
+                Some(request.num_images)
+            } else {
+                None
+            },
             size: if request.width > 0 && request.height > 0 {
                 Some(format!("{}x{}", request.width, request.height))
             } else {

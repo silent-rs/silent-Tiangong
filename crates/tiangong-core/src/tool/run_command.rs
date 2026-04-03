@@ -243,7 +243,12 @@ const INTERNAL_TIMEOUT_PREFIX: &str = "__tiangong_timeout=";
 
 /// 从参数列表中提取 __tiangong_timeout=N 元数据，返回超时毫秒数
 fn extract_timeout_meta(args: &mut Vec<String>) -> Option<u64> {
-    let idx = args.iter().position(|a| a.starts_with(INTERNAL_TIMEOUT_PREFIX))?;
+    let idx = args
+        .iter()
+        .position(|a| a.starts_with(INTERNAL_TIMEOUT_PREFIX))?;
     let raw = args.remove(idx);
-    raw[INTERNAL_TIMEOUT_PREFIX.len()..].trim().parse::<u64>().ok()
+    raw[INTERNAL_TIMEOUT_PREFIX.len()..]
+        .trim()
+        .parse::<u64>()
+        .ok()
 }

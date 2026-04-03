@@ -5,16 +5,13 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::agent_config::{AgentConfig, McpConfig};
-use crate::app_state::{ManagementCommand, TurnEvent};
 use crate::agents::execution_mcp_agent::{
-    McpFunctionTarget, execute_mcp_tool_call,
-    resolve_mcp_tool_call_from_run_command,
+    McpFunctionTarget, execute_mcp_tool_call, resolve_mcp_tool_call_from_run_command,
 };
 use crate::agents::execution_tool_agent::build_tool_call_from_function;
-use crate::model::{
-    ModelClient, ModelFunctionCall, SingleProviderClient, TokenUsage,
-};
+use crate::app_state::{ManagementCommand, TurnEvent};
 use crate::model::FunctionToolSpec;
+use crate::model::{ModelClient, ModelFunctionCall, SingleProviderClient, TokenUsage};
 use crate::models_config::{ModelCapability, ModelsConfig};
 use crate::planner::TaskPlan;
 use crate::tool::{LocalToolExecutor, ToolExecutionRecord, ToolExecutor, ToolResult};
@@ -31,7 +28,6 @@ pub enum RunStatus {
     Completed,
     Failed,
 }
-
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunSnapshot {
@@ -93,12 +89,11 @@ impl RuntimeEngine {
         context_limit: usize,
         agent_config: AgentConfig,
     ) -> Self {
-        let permission_gate = crate::permission::PermissionGate::new(
-            crate::permission::PermissionPolicy {
+        let permission_gate =
+            crate::permission::PermissionGate::new(crate::permission::PermissionPolicy {
                 trust_mode: agent_config.trust_mode,
                 ..Default::default()
-            },
-        );
+            });
         Self {
             client,
             tool_executor: LocalToolExecutor::from_agent_config(&agent_config),
@@ -115,13 +110,21 @@ impl RuntimeEngine {
     }
 
     /// 获取模型客户端引用（供 TurnRunner 使用）
-    pub fn client(&self) -> &SingleProviderClient { &self.client }
+    pub fn client(&self) -> &SingleProviderClient {
+        &self.client
+    }
     /// 获取 AgentConfig 引用
-    pub fn agent_config(&self) -> &AgentConfig { &self.agent_config }
+    pub fn agent_config(&self) -> &AgentConfig {
+        &self.agent_config
+    }
     /// 获取 ModelsConfig 引用
-    pub fn models_config(&self) -> &ModelsConfig { &self.models_config }
+    pub fn models_config(&self) -> &ModelsConfig {
+        &self.models_config
+    }
     /// 获取权限网关引用
-    pub fn permission_gate(&self) -> &crate::permission::PermissionGate { &self.permission_gate }
+    pub fn permission_gate(&self) -> &crate::permission::PermissionGate {
+        &self.permission_gate
+    }
 
     pub fn provider_label(&self) -> String {
         format!(
@@ -242,27 +245,56 @@ impl RuntimeEngine {
 
     /// 处理后台任务工具调用
     fn handle_background_task(&self, call: &ModelFunctionCall) -> Option<ToolResult> {
-        use crate::tool::background_task::{task_registry, TaskStatus};
+        use crate::tool::background_task::{TaskStatus, task_registry};
 
         match call.name.as_str() {
             "spawn_task" => {
-                let name = call.arguments.get("name").and_then(|v| v.as_str()).unwrap_or("task").to_string();
-                let cmd = call.arguments.get("cmd").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                let args: Vec<String> = call.arguments.get("args")
+                let name = call
+                    .arguments
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("task")
+                    .to_string();
+                let cmd = call
+                    .arguments
+                    .get("cmd")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let args: Vec<String> = call
+                    .arguments
+                    .get("args")
                     .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(String::from).collect())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .map(String::from)
+                            .collect()
+                    })
                     .unwrap_or_default();
-                let cwd = call.arguments.get("cwd").and_then(|v| v.as_str()).map(String::from);
+                let cwd = call
+                    .arguments
+                    .get("cwd")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
 
                 if cmd.is_empty() {
                     return Some(ToolResult {
-                        ok: false, summary: "缺少 cmd 参数".to_string(),
-                        stdout: String::new(), stderr: String::new(), exit_code: 1, execution: None,
+                        ok: false,
+                        summary: "缺少 cmd 参数".to_string(),
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        exit_code: 1,
+                        execution: None,
                     });
                 }
 
-                let env = self.tool_executor.runtime_env().iter()
-                    .map(|(k, v)| (k.clone(), v.clone())).collect();
+                let env = self
+                    .tool_executor
+                    .runtime_env()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
 
                 match task_registry().lock() {
                     Ok(mut reg) => match reg.spawn(name, cmd, args, cwd, env) {
@@ -270,27 +302,43 @@ impl RuntimeEngine {
                             ok: true,
                             summary: format!("后台任务已启动，task_id={task_id}"),
                             stdout: serde_json::json!({"task_id": task_id}).to_string(),
-                            stderr: String::new(), exit_code: 0, execution: None,
+                            stderr: String::new(),
+                            exit_code: 0,
+                            execution: None,
                         }),
                         Err(e) => Some(ToolResult {
-                            ok: false, summary: format!("启动后台任务失败：{e}"),
-                            stdout: String::new(), stderr: e, exit_code: 1, execution: None,
+                            ok: false,
+                            summary: format!("启动后台任务失败：{e}"),
+                            stdout: String::new(),
+                            stderr: e,
+                            exit_code: 1,
+                            execution: None,
                         }),
                     },
                     Err(e) => Some(ToolResult {
-                        ok: false, summary: format!("任务注册表锁失败：{e}"),
-                        stdout: String::new(), stderr: e.to_string(), exit_code: 1, execution: None,
+                        ok: false,
+                        summary: format!("任务注册表锁失败：{e}"),
+                        stdout: String::new(),
+                        stderr: e.to_string(),
+                        exit_code: 1,
+                        execution: None,
                     }),
                 }
             }
             "query_task" => {
-                let task_id = call.arguments.get("task_id").and_then(|v| v.as_str()).unwrap_or_default();
+                let task_id = call
+                    .arguments
+                    .get("task_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
                 match task_registry().lock() {
                     Ok(mut reg) => match reg.query(task_id) {
                         Some(info) => {
                             let status_text = match &info.status {
                                 TaskStatus::Running => "running".to_string(),
-                                TaskStatus::Completed { exit_code } => format!("completed (exit_code={exit_code})"),
+                                TaskStatus::Completed { exit_code } => {
+                                    format!("completed (exit_code={exit_code})")
+                                }
                                 TaskStatus::Failed { error } => format!("failed: {error}"),
                                 TaskStatus::Cancelled => "cancelled".to_string(),
                             };
@@ -298,79 +346,129 @@ impl RuntimeEngine {
                                 ok: true,
                                 summary: format!("任务 {} 状态：{}", info.name, status_text),
                                 stdout: serde_json::to_string_pretty(&info).unwrap_or_default(),
-                                stderr: String::new(), exit_code: 0, execution: None,
+                                stderr: String::new(),
+                                exit_code: 0,
+                                execution: None,
                             })
                         }
                         None => Some(ToolResult {
-                            ok: false, summary: format!("未找到任务：{task_id}"),
-                            stdout: String::new(), stderr: String::new(), exit_code: 1, execution: None,
+                            ok: false,
+                            summary: format!("未找到任务：{task_id}"),
+                            stdout: String::new(),
+                            stderr: String::new(),
+                            exit_code: 1,
+                            execution: None,
                         }),
                     },
                     Err(e) => Some(ToolResult {
-                        ok: false, summary: e.to_string(),
-                        stdout: String::new(), stderr: String::new(), exit_code: 1, execution: None,
+                        ok: false,
+                        summary: e.to_string(),
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        exit_code: 1,
+                        execution: None,
                     }),
                 }
             }
-            "list_tasks" => {
-                match task_registry().lock() {
-                    Ok(mut reg) => {
-                        let tasks = reg.list();
-                        Some(ToolResult {
-                            ok: true,
-                            summary: format!("{} 个后台任务", tasks.len()),
-                            stdout: serde_json::to_string_pretty(&tasks).unwrap_or_default(),
-                            stderr: String::new(), exit_code: 0, execution: None,
-                        })
-                    }
-                    Err(e) => Some(ToolResult {
-                        ok: false, summary: e.to_string(),
-                        stdout: String::new(), stderr: String::new(), exit_code: 1, execution: None,
-                    }),
+            "list_tasks" => match task_registry().lock() {
+                Ok(mut reg) => {
+                    let tasks = reg.list();
+                    Some(ToolResult {
+                        ok: true,
+                        summary: format!("{} 个后台任务", tasks.len()),
+                        stdout: serde_json::to_string_pretty(&tasks).unwrap_or_default(),
+                        stderr: String::new(),
+                        exit_code: 0,
+                        execution: None,
+                    })
                 }
-            }
+                Err(e) => Some(ToolResult {
+                    ok: false,
+                    summary: e.to_string(),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: 1,
+                    execution: None,
+                }),
+            },
             "cancel_task" => {
-                let task_id = call.arguments.get("task_id").and_then(|v| v.as_str()).unwrap_or_default();
+                let task_id = call
+                    .arguments
+                    .get("task_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
                 match task_registry().lock() {
                     Ok(mut reg) => match reg.cancel(task_id) {
                         Some(info) => Some(ToolResult {
                             ok: true,
                             summary: format!("任务 {} 已取消", info.name),
                             stdout: serde_json::to_string_pretty(&info).unwrap_or_default(),
-                            stderr: String::new(), exit_code: 0, execution: None,
+                            stderr: String::new(),
+                            exit_code: 0,
+                            execution: None,
                         }),
                         None => Some(ToolResult {
-                            ok: false, summary: format!("未找到任务：{task_id}"),
-                            stdout: String::new(), stderr: String::new(), exit_code: 1, execution: None,
+                            ok: false,
+                            summary: format!("未找到任务：{task_id}"),
+                            stdout: String::new(),
+                            stderr: String::new(),
+                            exit_code: 1,
+                            execution: None,
                         }),
                     },
                     Err(e) => Some(ToolResult {
-                        ok: false, summary: e.to_string(),
-                        stdout: String::new(), stderr: String::new(), exit_code: 1, execution: None,
+                        ok: false,
+                        summary: e.to_string(),
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        exit_code: 1,
+                        execution: None,
                     }),
                 }
             }
             "wait_tasks" => {
-                let task_ids: Vec<String> = call.arguments.get("task_ids")
+                let task_ids: Vec<String> = call
+                    .arguments
+                    .get("task_ids")
                     .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(String::from).collect())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .map(String::from)
+                            .collect()
+                    })
                     .unwrap_or_default();
-                let timeout_ms = call.arguments.get("timeout_ms")
+                let timeout_ms = call
+                    .arguments
+                    .get("timeout_ms")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
 
                 if task_ids.is_empty() {
                     return Some(ToolResult {
-                        ok: false, summary: "缺少 task_ids 参数".to_string(),
-                        stdout: String::new(), stderr: String::new(), exit_code: 1, execution: None,
+                        ok: false,
+                        summary: "缺少 task_ids 参数".to_string(),
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        exit_code: 1,
+                        execution: None,
                     });
                 }
 
                 let results = crate::tool::background_task::wait_tasks(task_ids, timeout_ms);
-                let all_ok = results.iter().all(|r| matches!(r.status, TaskStatus::Completed { exit_code } if exit_code == 0));
-                let running_count = results.iter().filter(|r| matches!(r.status, TaskStatus::Running)).count();
+                let all_ok = results.iter().all(
+                    |r| matches!(r.status, TaskStatus::Completed { exit_code } if exit_code == 0),
+                );
+                let running_count = results
+                    .iter()
+                    .filter(|r| matches!(r.status, TaskStatus::Running))
+                    .count();
                 let summary = if running_count > 0 {
-                    format!("{} 个任务完成，{} 个仍在运行（超时）", results.len() - running_count, running_count)
+                    format!(
+                        "{} 个任务完成，{} 个仍在运行（超时）",
+                        results.len() - running_count,
+                        running_count
+                    )
                 } else {
                     format!("{} 个任务全部完成", results.len())
                 };
@@ -410,24 +508,122 @@ impl RuntimeEngine {
     fn parse_management_command(call: &ModelFunctionCall) -> Option<ManagementCommand> {
         match call.name.as_str() {
             "register_mcp_server" => {
-                let name = call.arguments.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                let command = call.arguments.get("command").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                if name.is_empty() || command.is_empty() { return None; }
-                let args: Vec<String> = call.arguments.get("args").and_then(|v| v.as_array()).map(|arr| arr.iter().filter_map(|v| v.as_str()).map(String::from).collect()).unwrap_or_default();
-                let env: Vec<(String, String)> = call.arguments.get("env").and_then(|v| v.as_object()).map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string())).collect()).unwrap_or_default();
-                let transport = call.arguments.get("transport").and_then(|v| v.as_str()).map(String::from);
-                let endpoint = call.arguments.get("endpoint").and_then(|v| v.as_str()).map(String::from);
-                Some(ManagementCommand::RegisterMcpServer { name, command, args, env, transport, endpoint })
+                let name = call
+                    .arguments
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let command = call
+                    .arguments
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if name.is_empty() || command.is_empty() {
+                    return None;
+                }
+                let args: Vec<String> = call
+                    .arguments
+                    .get("args")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .map(String::from)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let env: Vec<(String, String)> = call
+                    .arguments
+                    .get("env")
+                    .and_then(|v| v.as_object())
+                    .map(|obj| {
+                        obj.iter()
+                            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let transport = call
+                    .arguments
+                    .get("transport")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let endpoint = call
+                    .arguments
+                    .get("endpoint")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                Some(ManagementCommand::RegisterMcpServer {
+                    name,
+                    command,
+                    args,
+                    env,
+                    transport,
+                    endpoint,
+                })
             }
-            "remove_mcp_server" => Some(ManagementCommand::RemoveMcpServer { name: call.arguments.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string() }),
-            "set_mcp_enabled" => Some(ManagementCommand::SetMcpServerEnabled { name: call.arguments.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(), enabled: call.arguments.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true) }),
+            "remove_mcp_server" => Some(ManagementCommand::RemoveMcpServer {
+                name: call
+                    .arguments
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            }),
+            "set_mcp_enabled" => Some(ManagementCommand::SetMcpServerEnabled {
+                name: call
+                    .arguments
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                enabled: call
+                    .arguments
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true),
+            }),
             "install_skill" => {
-                let path = call.arguments.get("path").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                if path.is_empty() { return None; }
-                Some(ManagementCommand::InstallSkill { path, enabled: call.arguments.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true) })
+                let path = call
+                    .arguments
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if path.is_empty() {
+                    return None;
+                }
+                Some(ManagementCommand::InstallSkill {
+                    path,
+                    enabled: call
+                        .arguments
+                        .get("enabled")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true),
+                })
             }
-            "remove_skill" => Some(ManagementCommand::RemoveSkill { id: call.arguments.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string() }),
-            "set_skill_enabled" => Some(ManagementCommand::SetSkillEnabled { id: call.arguments.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string(), enabled: call.arguments.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true) }),
+            "remove_skill" => Some(ManagementCommand::RemoveSkill {
+                id: call
+                    .arguments
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            }),
+            "set_skill_enabled" => Some(ManagementCommand::SetSkillEnabled {
+                id: call
+                    .arguments
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                enabled: call
+                    .arguments
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true),
+            }),
             _ => None,
         }
     }
@@ -436,10 +632,15 @@ impl RuntimeEngine {
         match cmd {
             ManagementCommand::RegisterMcpServer { name, .. } => format!("注册 MCP 服务器：{name}"),
             ManagementCommand::RemoveMcpServer { name } => format!("移除 MCP 服务器：{name}"),
-            ManagementCommand::SetMcpServerEnabled { name, enabled } => format!("{}MCP 服务器：{name}", if *enabled { "启用" } else { "禁用" }),
+            ManagementCommand::SetMcpServerEnabled { name, enabled } => format!(
+                "{}MCP 服务器：{name}",
+                if *enabled { "启用" } else { "禁用" }
+            ),
             ManagementCommand::InstallSkill { path, .. } => format!("安装 Skill：{path}"),
             ManagementCommand::RemoveSkill { id } => format!("卸载 Skill：{id}"),
-            ManagementCommand::SetSkillEnabled { id, enabled } => format!("{}Skill：{id}", if *enabled { "启用" } else { "禁用" }),
+            ManagementCommand::SetSkillEnabled { id, enabled } => {
+                format!("{}Skill：{id}", if *enabled { "启用" } else { "禁用" })
+            }
         }
     }
 
@@ -462,7 +663,17 @@ impl RuntimeEngine {
                 ok: false,
                 summary: format!("未找到 skill：{skill_id}"),
                 stdout: String::new(),
-                stderr: format!("可用的 skill：{}", self.agent_config.skills.installed.iter().filter(|s| s.enabled).map(|s| s.id.as_str()).collect::<Vec<_>>().join(", ")),
+                stderr: format!(
+                    "可用的 skill：{}",
+                    self.agent_config
+                        .skills
+                        .installed
+                        .iter()
+                        .filter(|s| s.enabled)
+                        .map(|s| s.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
                 exit_code: 1,
                 execution: None,
             };
@@ -543,9 +754,21 @@ impl RuntimeEngine {
                     resolved.base_url.clone(),
                     resolved.model.clone(),
                 );
-                let width = call.arguments.get("width").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                let height = call.arguments.get("height").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                let style = call.arguments.get("style").and_then(|v| v.as_str()).map(String::from);
+                let width = call
+                    .arguments
+                    .get("width")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
+                let height = call
+                    .arguments
+                    .get("height")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
+                let style = call
+                    .arguments
+                    .get("style")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
                 let request = tiangong_media::image::ImageGenRequest {
                     prompt,
                     negative_prompt: None,
@@ -664,35 +887,60 @@ impl RuntimeEngine {
 
     /// 处理语音合成（TTS）工具调用
     fn handle_tts(&self, call: &ModelFunctionCall) -> ToolResult {
-        let text = call.arguments.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let text = call
+            .arguments
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if text.is_empty() {
             return ToolResult {
-                ok: false, summary: "缺少 text 参数".to_string(),
-                stdout: String::new(), stderr: "text 不能为空".to_string(),
-                exit_code: 1, execution: None,
+                ok: false,
+                summary: "缺少 text 参数".to_string(),
+                stdout: String::new(),
+                stderr: "text 不能为空".to_string(),
+                exit_code: 1,
+                execution: None,
             };
         }
 
-        let resolved = match self.models_config.resolve_for_capability(ModelCapability::Tts) {
+        let resolved = match self
+            .models_config
+            .resolve_for_capability(ModelCapability::Tts)
+        {
             Some(r) => r,
-            None => return ToolResult {
-                ok: false, summary: "TTS 能力未配置".to_string(),
-                stdout: String::new(), stderr: "请在设置中配置 TTS 模型路由".to_string(),
-                exit_code: 1, execution: None,
-            },
+            None => {
+                return ToolResult {
+                    ok: false,
+                    summary: "TTS 能力未配置".to_string(),
+                    stdout: String::new(),
+                    stderr: "请在设置中配置 TTS 模型路由".to_string(),
+                    exit_code: 1,
+                    execution: None,
+                };
+            }
         };
 
-        let voice = call.arguments.get("voice").and_then(|v| v.as_str()).map(String::from);
+        let voice = call
+            .arguments
+            .get("voice")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         let speed = call.arguments.get("speed").and_then(|v| v.as_f64());
-        let output_path = call.arguments.get("output_path")
+        let output_path = call
+            .arguments
+            .get("output_path")
             .and_then(|v| v.as_str())
             .map(String::from)
             .unwrap_or_else(|| {
                 let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                let dir = std::path::PathBuf::from(home).join(".tiangong").join("media");
+                let dir = std::path::PathBuf::from(home)
+                    .join(".tiangong")
+                    .join("media");
                 let _ = std::fs::create_dir_all(&dir);
                 dir.join(format!("tts_{}.mp3", scru128::new()))
-                    .to_string_lossy().to_string()
+                    .to_string_lossy()
+                    .to_string()
             });
 
         let started = std::time::Instant::now();
@@ -711,21 +959,31 @@ impl RuntimeEngine {
             output_format: Some("mp3".to_string()),
         };
 
-        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
             Ok(rt) => rt,
-            Err(e) => return ToolResult {
-                ok: false, summary: format!("运行时初始化失败：{e}"),
-                stdout: String::new(), stderr: e.to_string(),
-                exit_code: 1, execution: None,
-            },
+            Err(e) => {
+                return ToolResult {
+                    ok: false,
+                    summary: format!("运行时初始化失败：{e}"),
+                    stdout: String::new(),
+                    stderr: e.to_string(),
+                    exit_code: 1,
+                    execution: None,
+                };
+            }
         };
 
-        let result: Result<Result<tiangong_media::tts::SynthesizeResponse, anyhow::Error>, _> = runtime.block_on(async {
-            tokio::time::timeout(
-                std::time::Duration::from_secs(60),
-                synthesizer.synthesize(request),
-            ).await
-        });
+        let result: Result<Result<tiangong_media::tts::SynthesizeResponse, anyhow::Error>, _> =
+            runtime.block_on(async {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(60),
+                    synthesizer.synthesize(request),
+                )
+                .await
+            });
 
         let duration_ms = started.elapsed().as_millis() as u64;
         match result {
@@ -733,46 +991,66 @@ impl RuntimeEngine {
                 // 写入文件
                 match std::fs::write(&output_path, &resp.audio) {
                     Ok(_) => {
-                        let duration_info = resp.duration
+                        let duration_info = resp
+                            .duration
                             .map(|d| format!("，时长 {:.1}s", d))
                             .unwrap_or_default();
                         ToolResult {
                             ok: true,
-                            summary: format!("语音合成成功（模型：{}{}）", resolved.model, duration_info),
+                            summary: format!(
+                                "语音合成成功（模型：{}{}）",
+                                resolved.model, duration_info
+                            ),
                             stdout: format!("音频文件已保存到：{output_path}"),
                             stderr: String::new(),
                             exit_code: 0,
                             execution: Some(ToolExecutionRecord {
-                                tool_name, args: vec![], duration_ms,
-                                ok: true, exit_code: 0,
+                                tool_name,
+                                args: vec![],
+                                duration_ms,
+                                ok: true,
+                                exit_code: 0,
                                 summary: format!("语音合成成功（模型：{}）", resolved.model),
                             }),
                         }
                     }
                     Err(e) => ToolResult {
-                        ok: false, summary: format!("音频文件写入失败：{e}"),
-                        stdout: String::new(), stderr: e.to_string(),
-                        exit_code: 1, execution: None,
+                        ok: false,
+                        summary: format!("音频文件写入失败：{e}"),
+                        stdout: String::new(),
+                        stderr: e.to_string(),
+                        exit_code: 1,
+                        execution: None,
                     },
                 }
             }
             Ok(Err(e)) => ToolResult {
-                ok: false, summary: format!("语音合成失败：{e}"),
-                stdout: String::new(), stderr: e.to_string(),
+                ok: false,
+                summary: format!("语音合成失败：{e}"),
+                stdout: String::new(),
+                stderr: e.to_string(),
                 exit_code: 1,
                 execution: Some(ToolExecutionRecord {
-                    tool_name, args: vec![], duration_ms,
-                    ok: false, exit_code: 1,
+                    tool_name,
+                    args: vec![],
+                    duration_ms,
+                    ok: false,
+                    exit_code: 1,
                     summary: format!("语音合成失败：{e}"),
                 }),
             },
             Err(_) => ToolResult {
-                ok: false, summary: "语音合成超时（60秒）".to_string(),
-                stdout: String::new(), stderr: "timeout".to_string(),
+                ok: false,
+                summary: "语音合成超时（60秒）".to_string(),
+                stdout: String::new(),
+                stderr: "timeout".to_string(),
                 exit_code: 1,
                 execution: Some(ToolExecutionRecord {
-                    tool_name, args: vec![], duration_ms,
-                    ok: false, exit_code: 1,
+                    tool_name,
+                    args: vec![],
+                    duration_ms,
+                    ok: false,
+                    exit_code: 1,
                     summary: "语音合成超时".to_string(),
                 }),
             },
@@ -781,36 +1059,60 @@ impl RuntimeEngine {
 
     /// 处理语音识别（STT）工具调用
     fn handle_stt(&self, call: &ModelFunctionCall) -> ToolResult {
-        let file_path = call.arguments.get("file_path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let file_path = call
+            .arguments
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if file_path.is_empty() {
             return ToolResult {
-                ok: false, summary: "缺少 file_path 参数".to_string(),
-                stdout: String::new(), stderr: "file_path 不能为空".to_string(),
-                exit_code: 1, execution: None,
+                ok: false,
+                summary: "缺少 file_path 参数".to_string(),
+                stdout: String::new(),
+                stderr: "file_path 不能为空".to_string(),
+                exit_code: 1,
+                execution: None,
             };
         }
 
-        let resolved = match self.models_config.resolve_for_capability(ModelCapability::Stt) {
+        let resolved = match self
+            .models_config
+            .resolve_for_capability(ModelCapability::Stt)
+        {
             Some(r) => r,
-            None => return ToolResult {
-                ok: false, summary: "STT 能力未配置".to_string(),
-                stdout: String::new(), stderr: "请在设置中配置 STT 模型路由".to_string(),
-                exit_code: 1, execution: None,
-            },
+            None => {
+                return ToolResult {
+                    ok: false,
+                    summary: "STT 能力未配置".to_string(),
+                    stdout: String::new(),
+                    stderr: "请在设置中配置 STT 模型路由".to_string(),
+                    exit_code: 1,
+                    execution: None,
+                };
+            }
         };
 
         // 读取音频文件
         let audio_data = match std::fs::read(&file_path) {
             Ok(data) => data,
-            Err(e) => return ToolResult {
-                ok: false, summary: format!("读取音频文件失败：{e}"),
-                stdout: String::new(), stderr: e.to_string(),
-                exit_code: 1, execution: None,
-            },
+            Err(e) => {
+                return ToolResult {
+                    ok: false,
+                    summary: format!("读取音频文件失败：{e}"),
+                    stdout: String::new(),
+                    stderr: e.to_string(),
+                    exit_code: 1,
+                    execution: None,
+                };
+            }
         };
 
         // 根据扩展名推断 MIME 类型
-        let mime_type = match std::path::Path::new(&file_path).extension().and_then(|e| e.to_str()) {
+        let mime_type = match std::path::Path::new(&file_path)
+            .extension()
+            .and_then(|e| e.to_str())
+        {
             Some("mp3") => "audio/mpeg",
             Some("wav") => "audio/wav",
             Some("ogg") | Some("oga") => "audio/ogg",
@@ -818,9 +1120,14 @@ impl RuntimeEngine {
             Some("webm") => "audio/webm",
             Some("m4a") => "audio/mp4",
             _ => "audio/mpeg",
-        }.to_string();
+        }
+        .to_string();
 
-        let language = call.arguments.get("language").and_then(|v| v.as_str()).map(String::from);
+        let language = call
+            .arguments
+            .get("language")
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
         let started = std::time::Instant::now();
         let tool_name = call.name.clone();
@@ -837,61 +1144,90 @@ impl RuntimeEngine {
             model: Some(resolved.model.clone()),
         };
 
-        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
             Ok(rt) => rt,
-            Err(e) => return ToolResult {
-                ok: false, summary: format!("运行时初始化失败：{e}"),
-                stdout: String::new(), stderr: e.to_string(),
-                exit_code: 1, execution: None,
-            },
+            Err(e) => {
+                return ToolResult {
+                    ok: false,
+                    summary: format!("运行时初始化失败：{e}"),
+                    stdout: String::new(),
+                    stderr: e.to_string(),
+                    exit_code: 1,
+                    execution: None,
+                };
+            }
         };
 
-        let result: Result<Result<tiangong_media::stt::TranscribeResponse, anyhow::Error>, _> = runtime.block_on(async {
-            tokio::time::timeout(
-                std::time::Duration::from_secs(120),
-                recognizer.transcribe(request),
-            ).await
-        });
+        let result: Result<Result<tiangong_media::stt::TranscribeResponse, anyhow::Error>, _> =
+            runtime.block_on(async {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(120),
+                    recognizer.transcribe(request),
+                )
+                .await
+            });
 
         let duration_ms = started.elapsed().as_millis() as u64;
         match result {
             Ok(Ok(resp)) => {
-                let lang_info = resp.language.as_deref()
+                let lang_info = resp
+                    .language
+                    .as_deref()
                     .map(|l| format!("，语言：{l}"))
                     .unwrap_or_default();
-                let dur_info = resp.duration
+                let dur_info = resp
+                    .duration
                     .map(|d| format!("，音频时长：{:.1}s", d))
                     .unwrap_or_default();
                 ToolResult {
                     ok: true,
-                    summary: format!("语音识别成功（模型：{}{}{dur_info}）", resolved.model, lang_info),
+                    summary: format!(
+                        "语音识别成功（模型：{}{}{dur_info}）",
+                        resolved.model, lang_info
+                    ),
                     stdout: resp.text,
                     stderr: String::new(),
                     exit_code: 0,
                     execution: Some(ToolExecutionRecord {
-                        tool_name, args: vec![], duration_ms,
-                        ok: true, exit_code: 0,
+                        tool_name,
+                        args: vec![],
+                        duration_ms,
+                        ok: true,
+                        exit_code: 0,
                         summary: format!("语音识别成功（模型：{}）", resolved.model),
                     }),
                 }
             }
             Ok(Err(e)) => ToolResult {
-                ok: false, summary: format!("语音识别失败：{e}"),
-                stdout: String::new(), stderr: e.to_string(),
+                ok: false,
+                summary: format!("语音识别失败：{e}"),
+                stdout: String::new(),
+                stderr: e.to_string(),
                 exit_code: 1,
                 execution: Some(ToolExecutionRecord {
-                    tool_name, args: vec![], duration_ms,
-                    ok: false, exit_code: 1,
+                    tool_name,
+                    args: vec![],
+                    duration_ms,
+                    ok: false,
+                    exit_code: 1,
                     summary: format!("语音识别失败：{e}"),
                 }),
             },
             Err(_) => ToolResult {
-                ok: false, summary: "语音识别超时（120秒）".to_string(),
-                stdout: String::new(), stderr: "timeout".to_string(),
+                ok: false,
+                summary: "语音识别超时（120秒）".to_string(),
+                stdout: String::new(),
+                stderr: "timeout".to_string(),
                 exit_code: 1,
                 execution: Some(ToolExecutionRecord {
-                    tool_name, args: vec![], duration_ms,
-                    ok: false, exit_code: 1,
+                    tool_name,
+                    args: vec![],
+                    duration_ms,
+                    ok: false,
+                    exit_code: 1,
                     summary: "语音识别超时".to_string(),
                 }),
             },
@@ -910,7 +1246,10 @@ pub(crate) fn inject_enhanced_tools(
     agent_config: &AgentConfig,
 ) {
     use crate::models_config::ModelCapability;
-    if models_config.resolve_for_capability(ModelCapability::ImageGeneration).is_some() {
+    if models_config
+        .resolve_for_capability(ModelCapability::ImageGeneration)
+        .is_some()
+    {
         tools.push(FunctionToolSpec {
             name: "generate_image".to_string(),
             description: "根据文字描述生成图片".to_string(),
@@ -926,7 +1265,10 @@ pub(crate) fn inject_enhanced_tools(
             }),
         });
     }
-    if models_config.resolve_for_capability(ModelCapability::Tts).is_some() {
+    if models_config
+        .resolve_for_capability(ModelCapability::Tts)
+        .is_some()
+    {
         tools.push(FunctionToolSpec {
             name: "text_to_speech".to_string(),
             description: "将文本转换为语音音频文件".to_string(),
@@ -942,7 +1284,10 @@ pub(crate) fn inject_enhanced_tools(
             }),
         });
     }
-    if models_config.resolve_for_capability(ModelCapability::Stt).is_some() {
+    if models_config
+        .resolve_for_capability(ModelCapability::Stt)
+        .is_some()
+    {
         tools.push(FunctionToolSpec {
             name: "speech_to_text".to_string(),
             description: "将音频文件转录为文本".to_string(),
@@ -965,24 +1310,76 @@ pub(crate) fn inject_enhanced_tools(
     }
     // 后台任务管理
     for spec in [
-        ("spawn_task", "在后台启动长时间运行的命令", serde_json::json!({"type":"object","properties":{"name":{"type":"string"},"cmd":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"cwd":{"type":"string"}},"required":["name","cmd"]})),
-        ("query_task", "查询后台任务状态", serde_json::json!({"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"]})),
-        ("list_tasks", "列出所有后台任务", serde_json::json!({"type":"object","properties":{}})),
-        ("cancel_task", "取消后台任务", serde_json::json!({"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"]})),
-        ("wait_tasks", "等待多个后台任务完成", serde_json::json!({"type":"object","properties":{"task_ids":{"type":"array","items":{"type":"string"}},"timeout_ms":{"type":"integer"}},"required":["task_ids"]})),
+        (
+            "spawn_task",
+            "在后台启动长时间运行的命令",
+            serde_json::json!({"type":"object","properties":{"name":{"type":"string"},"cmd":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"cwd":{"type":"string"}},"required":["name","cmd"]}),
+        ),
+        (
+            "query_task",
+            "查询后台任务状态",
+            serde_json::json!({"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"]}),
+        ),
+        (
+            "list_tasks",
+            "列出所有后台任务",
+            serde_json::json!({"type":"object","properties":{}}),
+        ),
+        (
+            "cancel_task",
+            "取消后台任务",
+            serde_json::json!({"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"]}),
+        ),
+        (
+            "wait_tasks",
+            "等待多个后台任务完成",
+            serde_json::json!({"type":"object","properties":{"task_ids":{"type":"array","items":{"type":"string"}},"timeout_ms":{"type":"integer"}},"required":["task_ids"]}),
+        ),
     ] {
-        tools.push(FunctionToolSpec { name: spec.0.to_string(), description: spec.1.to_string(), parameters: spec.2 });
+        tools.push(FunctionToolSpec {
+            name: spec.0.to_string(),
+            description: spec.1.to_string(),
+            parameters: spec.2,
+        });
     }
     // MCP/Skill 管理
     for spec in [
-        ("register_mcp_server", "注册 MCP 服务器", serde_json::json!({"type":"object","properties":{"name":{"type":"string"},"command":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"env":{"type":"object"},"transport":{"type":"string"},"endpoint":{"type":"string"}},"required":["name","command"]})),
-        ("remove_mcp_server", "移除 MCP 服务器", serde_json::json!({"type":"object","properties":{"name":{"type":"string"}},"required":["name"]})),
-        ("set_mcp_enabled", "启用/禁用 MCP 服务器", serde_json::json!({"type":"object","properties":{"name":{"type":"string"},"enabled":{"type":"boolean"}},"required":["name","enabled"]})),
-        ("install_skill", "安装 Skill", serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"enabled":{"type":"boolean"}},"required":["path"]})),
-        ("remove_skill", "卸载 Skill", serde_json::json!({"type":"object","properties":{"id":{"type":"string"}},"required":["id"]})),
-        ("set_skill_enabled", "启用/禁用 Skill", serde_json::json!({"type":"object","properties":{"id":{"type":"string"},"enabled":{"type":"boolean"}},"required":["id","enabled"]})),
+        (
+            "register_mcp_server",
+            "注册 MCP 服务器",
+            serde_json::json!({"type":"object","properties":{"name":{"type":"string"},"command":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"env":{"type":"object"},"transport":{"type":"string"},"endpoint":{"type":"string"}},"required":["name","command"]}),
+        ),
+        (
+            "remove_mcp_server",
+            "移除 MCP 服务器",
+            serde_json::json!({"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}),
+        ),
+        (
+            "set_mcp_enabled",
+            "启用/禁用 MCP 服务器",
+            serde_json::json!({"type":"object","properties":{"name":{"type":"string"},"enabled":{"type":"boolean"}},"required":["name","enabled"]}),
+        ),
+        (
+            "install_skill",
+            "安装 Skill",
+            serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"enabled":{"type":"boolean"}},"required":["path"]}),
+        ),
+        (
+            "remove_skill",
+            "卸载 Skill",
+            serde_json::json!({"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}),
+        ),
+        (
+            "set_skill_enabled",
+            "启用/禁用 Skill",
+            serde_json::json!({"type":"object","properties":{"id":{"type":"string"},"enabled":{"type":"boolean"}},"required":["id","enabled"]}),
+        ),
     ] {
-        tools.push(FunctionToolSpec { name: spec.0.to_string(), description: spec.1.to_string(), parameters: spec.2 });
+        tools.push(FunctionToolSpec {
+            name: spec.0.to_string(),
+            description: spec.1.to_string(),
+            parameters: spec.2,
+        });
     }
 }
 
@@ -1008,10 +1405,7 @@ pub(crate) fn build_react_system_prompt(
     let media_section = if media_hints.is_empty() {
         String::new()
     } else {
-        format!(
-            "\n\n已配置的多媒体能力：\n{}",
-            media_hints.join("\n")
-        )
+        format!("\n\n已配置的多媒体能力：\n{}", media_hints.join("\n"))
     };
 
     // 构建已安装 skill 摘要（仅名称+描述，不注入完整 SKILL.md）
@@ -1024,7 +1418,11 @@ pub(crate) fn build_react_system_prompt(
             "- {} (id={}): {}",
             skill.name,
             skill.id,
-            if skill.description.is_empty() { "无描述" } else { &skill.description }
+            if skill.description.is_empty() {
+                "无描述"
+            } else {
+                &skill.description
+            }
         ));
     }
     let skills_section = if skill_summaries.is_empty() {

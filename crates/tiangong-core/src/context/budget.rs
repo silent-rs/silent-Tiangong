@@ -32,13 +32,16 @@ impl TokenBudget {
     ///
     /// 每个工具定义约 150-300 tokens（名称、描述、参数 schema）
     pub fn estimate_tools_tokens(tools: &[FunctionToolSpec]) -> usize {
-        tools.iter().map(|t| {
-            let name_len = t.name.len();
-            let desc_len = t.description.len();
-            let params_len = t.parameters.to_string().len();
-            // 粗略估算：字符数 * 0.4（JSON schema 多为英文/符号）
-            ((name_len + desc_len + params_len) as f64 * 0.4) as usize + 20
-        }).sum()
+        tools
+            .iter()
+            .map(|t| {
+                let name_len = t.name.len();
+                let desc_len = t.description.len();
+                let params_len = t.parameters.to_string().len();
+                // 粗略估算：字符数 * 0.4（JSON schema 多为英文/符号）
+                ((name_len + desc_len + params_len) as f64 * 0.4) as usize + 20
+            })
+            .sum()
     }
 
     /// 计算在给定工具和历史消息下的剩余可用 token

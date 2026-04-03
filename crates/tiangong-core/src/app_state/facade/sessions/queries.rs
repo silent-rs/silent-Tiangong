@@ -57,9 +57,7 @@ impl TiangongState {
     }
 
     pub fn active_session_cwd(&self) -> &str {
-        self.active_session()
-            .map(|s| s.cwd.as_str())
-            .unwrap_or("")
+        self.active_session().map(|s| s.cwd.as_str()).unwrap_or("")
     }
 
     pub fn update_active_session_cwd(&mut self, cwd: String) -> Result<()> {

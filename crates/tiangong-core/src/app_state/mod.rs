@@ -50,11 +50,11 @@ use self::repository::{
     validate_agent_config,
 };
 use self::services::{AppMcpService, AppSkillService, AppTurnService};
+pub use self::support::{ControlSignal, TurnEvent};
 use self::support::{
     LegacyPersistedState, LoadedState, McpDependencyLockRecord, PendingTurn, PersistedAppState,
     ScopedDirCleanup, SkillsLockRecord,
 };
-pub use self::support::{ControlSignal, TurnEvent};
 
 // Public re-exports for Tauri API
 pub use self::repository::AppRepository;

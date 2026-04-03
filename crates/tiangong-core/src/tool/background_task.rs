@@ -115,10 +115,8 @@ impl TaskRegistry {
                     // 收集输出
                     let child = task.child.take().unwrap();
                     if let Ok(output) = child.wait_with_output() {
-                        task.stdout =
-                            String::from_utf8_lossy(&output.stdout).to_string();
-                        task.stderr =
-                            String::from_utf8_lossy(&output.stderr).to_string();
+                        task.stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                        task.stderr = String::from_utf8_lossy(&output.stderr).to_string();
                     }
                     task.status = TaskStatus::Completed {
                         exit_code: status.code().unwrap_or(-1),
@@ -184,7 +182,8 @@ impl TaskRegistry {
 
     /// 清理已完成的任务
     pub fn cleanup_completed(&mut self) {
-        self.tasks.retain(|_, t| matches!(t.status, TaskStatus::Running));
+        self.tasks
+            .retain(|_, t| matches!(t.status, TaskStatus::Running));
     }
 
     /// 收集指定任务的最新状态（内部方法，不返回 TaskInfo）
@@ -252,10 +251,7 @@ pub fn wait_tasks(task_ids: Vec<String>, timeout_ms: u64) -> Vec<TaskInfo> {
             };
             if reg.all_finished(&task_ids) {
                 // 全部完成，收集结果
-                return task_ids
-                    .iter()
-                    .filter_map(|id| reg.query(id))
-                    .collect();
+                return task_ids.iter().filter_map(|id| reg.query(id)).collect();
             }
         }
 
@@ -268,10 +264,7 @@ pub fn wait_tasks(task_ids: Vec<String>, timeout_ms: u64) -> Vec<TaskInfo> {
                 Ok(reg) => reg,
                 Err(_) => break,
             };
-            return task_ids
-                .iter()
-                .filter_map(|id| reg.query(id))
-                .collect();
+            return task_ids.iter().filter_map(|id| reg.query(id)).collect();
         }
 
         // 释放锁后短暂休眠，避免忙等

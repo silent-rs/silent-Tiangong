@@ -7,8 +7,12 @@ impl AppTurnService {
         session_id: &str,
         exec: TurnExecution,
     ) {
-        let Some((sid, task_id, assistant_message_id, started_at)) =
-            state.store.runtime.pending_turns.get(session_id).map(|pending| {
+        let Some((sid, task_id, assistant_message_id, started_at)) = state
+            .store
+            .runtime
+            .pending_turns
+            .get(session_id)
+            .map(|pending| {
                 (
                     pending.session_id.clone(),
                     pending.task_id.clone(),
@@ -101,7 +105,10 @@ impl AppTurnService {
 
             // 开发阶段：将 LLM 调用记录写入 task_record
             if !exec.llm_calls.is_empty()
-                && let Some(record) = session.task_records.iter_mut().find(|r| r.task_id == task_id)
+                && let Some(record) = session
+                    .task_records
+                    .iter_mut()
+                    .find(|r| r.task_id == task_id)
             {
                 record.llm_calls = exec.llm_calls;
             }
@@ -135,13 +142,7 @@ impl AppTurnService {
         };
 
         // 首次对话完成后自动生成标题（首次对话或标题仍为默认格式）
-        if let Some(session) = state
-            .store
-            .session
-            .sessions
-            .iter()
-            .find(|s| s.id == sid)
-        {
+        if let Some(session) = state.store.session.sessions.iter().find(|s| s.id == sid) {
             let is_default_title = session.title == "新对话"
                 || session.title.starts_with("会话 ")
                 || session.title == "默认会话";
@@ -194,7 +195,7 @@ impl AppTurnService {
                 last_error: Some(err.to_string()),
                 last_usage: state.store.runtime.run.last_usage.clone(),
                 updated_at: now_text(),
-            approval_request_id: None,
+                approval_request_id: None,
             };
         }
     }
@@ -205,8 +206,12 @@ impl AppTurnService {
         session_id: &str,
         err_msg: &str,
     ) {
-        let Some((sid, task_id, assistant_message_id, started_at)) =
-            state.store.runtime.pending_turns.get(session_id).map(|pending| {
+        let Some((sid, task_id, assistant_message_id, started_at)) = state
+            .store
+            .runtime
+            .pending_turns
+            .get(session_id)
+            .map(|pending| {
                 (
                     pending.session_id.clone(),
                     pending.task_id.clone(),
@@ -268,7 +273,7 @@ impl AppTurnService {
                 last_error: Some(err.to_string()),
                 last_usage: state.store.runtime.run.last_usage.clone(),
                 updated_at: now_text(),
-            approval_request_id: None,
+                approval_request_id: None,
             };
         }
     }

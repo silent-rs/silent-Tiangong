@@ -90,7 +90,8 @@ pub(crate) fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
         },
         FunctionToolSpec {
             name: "run_command".to_string(),
-            description: "执行受控命令，支持 cwd 和超时设置。shell 脚本建议使用 run_shell".to_string(),
+            description: "执行受控命令，支持 cwd 和超时设置。shell 脚本建议使用 run_shell"
+                .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -372,7 +373,10 @@ pub(crate) fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<
             if let Some(timeout) = call
                 .arguments
                 .get("timeout")
-                .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                .and_then(|v| {
+                    v.as_u64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                })
                 .filter(|v| *v > 0)
             {
                 args.push(format!("__tiangong_timeout={}", timeout * 1000));
@@ -410,7 +414,10 @@ pub(crate) fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<
             if let Some(timeout) = call
                 .arguments
                 .get("timeout")
-                .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                .and_then(|v| {
+                    v.as_u64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                })
                 .filter(|v| *v > 0)
             {
                 args.push(format!("__tiangong_timeout={}", timeout * 1000));
