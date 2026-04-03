@@ -142,7 +142,9 @@ impl AppTurnService {
                     output_mode: "stream".to_string(),
                     output_chunk_count: 0,
                     usage: result.total_usage,
-                    llm_calls: Vec::new(),
+                    llm_calls: result.worker_results.into_iter()
+                        .flat_map(|w| w.llm_calls)
+                        .collect(),
                 })
             }));
 

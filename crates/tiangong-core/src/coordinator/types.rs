@@ -85,6 +85,9 @@ pub struct WorkerResult {
     pub usage: TokenUsage,
     /// 执行时长（毫秒）
     pub duration_ms: u64,
+    /// LLM 调用记录（开发调试用）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub llm_calls: Vec<crate::session::LlmCallRecord>,
 }
 
 /// 协调器最终结果

@@ -225,6 +225,7 @@ impl TaskCoordinator {
                         error: Some("Worker 线程 panic".to_string()),
                         usage: Default::default(),
                         duration_ms: 0,
+                        llm_calls: Vec::new(),
                     })
                 })
                 .collect()

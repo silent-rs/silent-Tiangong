@@ -137,6 +137,7 @@ impl Worker {
                 error: None,
                 usage: exec.usage,
                 duration_ms: started.elapsed().as_millis() as u64,
+                llm_calls: exec.llm_calls,
             },
             Err(err) => WorkerResult {
                 worker_id: worker_id.clone(),
@@ -145,6 +146,7 @@ impl Worker {
                 error: Some(err.to_string()),
                 usage: Default::default(),
                 duration_ms: started.elapsed().as_millis() as u64,
+                llm_calls: Vec::new(),
             },
         };
 

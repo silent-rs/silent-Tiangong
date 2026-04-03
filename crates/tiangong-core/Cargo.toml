@@ -22,5 +22,5 @@ diffy = { version = "0.4", optional = true }
 tiangong-media = { path = "../tiangong-media" }
 
 [features]
-default = ["diffy", "llm-debug-log"]
+default = ["diffy"]
 llm-debug-log = []
