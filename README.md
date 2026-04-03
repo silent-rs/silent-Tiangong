@@ -1,174 +1,120 @@
-# 🌌 Silent-Tiangong（天工）
+# Silent-Tiangong（天工）
 
-> 灵感源自《天工开物》
-> 基于河图框架构建的 AI 自动化中枢系统（CLI 优先，GUI 暂为 feature）
+> 全功能可扩展的 GUI + CLI + Server 个人智能终端平台
 
-Silent-Tiangong 是一个面向未来的桌面端 AI 自动化引擎。
+Silent-Tiangong 是一个实现"可对话、可规划、可执行、可扩展、可治理、可远程"的 Agent 能力闭环的个人 AI 中枢。支持通过 Connector 接入各类 IM 通道远程调度，并具备图片/视频等多媒体生成能力。
 
-它不仅是一个聊天工具，而是一个：
+## 核心能力
 
-- 🧠 自主推理系统
-- 🤖 任务规划与执行引擎
-- 🔧 自动化执行平台
-- ⚙️ 系统级 Agent 编排核心
+- **智能对话** — 意图识别、多轮上下文管理、自动摘要压缩
+- **任务规划与执行** — 输入 → 规划 → 多轮执行 → 验证 → 反馈，动态 Step 推进
+- **工具调用** — 文件读写、命令执行、代码搜索、补丁应用等本地工具
+- **MCP 集成** — 标准化 MCP 协议接入外部工具（stdio / HTTP）
+- **Skill 管理** — Skill 安装、启停、卸载，按任务意图自动匹配
+- **多媒体生成** — 图片生成（OpenAI DALL-E）、语音合成/识别（TTS/STT）
+- **多通道接入** — Telegram、Discord、飞书/Lark、Webhook Connector
+- **多 Agent 协作** — Worker 并行执行、任务拆分与协调
+- **权限管理** — 监督模式（高风险操作审批）/ 信任模式（全自动执行），实时切换
 
----
+## 架构
 
-## 🧭 项目愿景
+Cargo workspace 多 crate 结构：
 
-“天工”意为自然之工、自动之工。
-
-Silent-Tiangong 的目标是：
-
-> 构建一个可自主规划、自主执行、自主扩展的桌面智能系统。
-
-它将成为 Silent 生态中的智能中枢。
-
----
-
-## ✨ 核心能力
-
-- 大模型对话能力
-- 任务拆解与规划
-- Agent 执行与调度
-- 工具调用与插件扩展
-- 系统自动化能力
-- 安全沙箱执行环境
-- 单一远程模型供应商接入
-
----
-
-## 🏗 系统架构
-
-Silent-Tiangong 采用分层架构设计，核心引擎与河图框架解耦，并通过单一远程模型供应商提供智能能力。
-
-### 分层架构说明
-
-| 层级 | 模块 | 职责说明 |
-|------|------|----------|
-| 桌面层 | Desktop UI（Feature） | 作为实验特性提供原生桌面交互界面，受河图框架能力成熟度影响 |
-| 核心引擎层 | Planner | 任务拆解与规划，生成 Task Graph |
-| 核心引擎层 | Agent Runtime | Agent 生命周期管理与调度执行 |
-| 核心引擎层 | Memory Layer | 上下文管理与长期记忆机制 |
-| 核心引擎层 | Tool Executor | 工具调用、插件执行、权限控制 |
-| 框架基础层 | 河图运行时 | 异步执行、事件驱动、资源调度 |
-| 框架基础层 | 服务与路由 | 内部模块通信与服务抽象 |
-| 框架基础层 | 插件系统 | 动态扩展能力 |
-| 模型层 | Remote Model Provider | 单一远程模型 API 接入层 |
-
----
-
-### 模型层设计（单一供应商模式）
-
-Silent-Tiangong 采用与 Codex / Claude 类似的单一远程模型供应商模式，系统仅依赖一个模型 API 提供智能能力。
-
-| 模块 | 职责 |
-|------|------|
-| Model Client | 封装远程模型 API 请求 |
-| Provider Config | API Key 管理与安全存储 |
-| Request Handler | 推理请求发送与响应解析 |
-| Error & Retry | 错误处理与重试机制 |
-| Usage Monitor | Token 使用统计与成本监控 |
-
-### 设计原则
-
-- 统一模型接口
-- 简化架构复杂度
-- 成本可控
-- 安全优先
-- 便于未来替换供应商
-
----
-
-## 🔐 安全设计
-
-Silent-Tiangong 采用多层安全机制：
-
-- API Key 本地加密存储
-- 工具执行沙箱隔离
-- 文件访问权限控制
-- 执行日志可审计
-- 最小权限原则
-
-安全是系统的第一公民。
-
----
-
-## 🧠 工作机制
-
-1. 用户输入任务
-2. Planner 拆解任务并生成执行计划
-3. Agent Runtime 调度执行
-4. Tool Executor 调用实际工具
-5. Remote Model Provider 提供智能推理
-6. 结果反馈至 UI
-
----
-
-## 🛣 开发路线图
-
-### Phase 1 —— 基础能力
-
-- 单 Agent 对话能力
-- 基础任务执行
-- 工具调用接口
-
-### Phase 2 —— 任务编排
-
-- Task Graph 支持
-- 多步骤自动执行
-- 状态管理系统
-
-### Phase 3 —— 系统自动化
-
-- 文件系统操作
-- Shell 执行沙箱
-- 权限管理系统
-
-### Phase 4 —— 扩展能力
-
-- 插件扩展机制
-- 自动化工作流模板
-- DevOps 自动化能力
-
-### Phase 5 —— 自主智能
-
-- 反思机制（Reflection）
-- 自我优化策略
-- 动态执行优化
-
----
-
-## 🧩 项目定位
-
-Silent-Tiangong 不是简单的 ChatGPT 桌面壳。
-
-它是：
-
-- 一个桌面 AI 自动化核心
-- 一个可编程的智能执行系统
-- 一个系统级 Agent 调度引擎
-- Silent 生态的智能中枢
-
----
-
-## 🚀 运行方式
-
-```bash
-# 默认启动桌面 UI（当前实现）
-tiangong
-
-# CLI 模式
-tiangong cli
-
-# 桌面 UI 模式
-tiangong ui
+```
+crates/
+  tiangong-core/       核心引擎（无 UI 依赖）
+  tiangong-cli/        CLI/TUI 前端（ratatui）
+  tiangong-entry/      统一入口与命令路由
+  tiangong-server/     HTTP REST + WebSocket Server
+  tiangong-gateway/    事件总线与消息路由
+  tiangong-connector/  IM 通道适配（Telegram/Discord/Lark/Webhook）
+  tiangong-media/      多媒体生成（图片/视频/语音）
+frontend/              桌面 GUI（React + shadcn/ui）
+src-tauri/             Tauri 桌面壳
 ```
 
-> 说明：由于当前河图框架在桌面端能力仍在迭代，GUI 在产品规划上作为阶段性 Feature 管理（此处 Feature 指功能形态，不是 Cargo 编译 Feature），当前主路径仍推荐 CLI。
+### 执行流程
 
----
+```
+用户输入 → 意图分类 → 规划（planning）→ 多轮执行（ReAct 循环）→ 验证 → 最终回复
+                         ↓                    ↓
+                    简单对话直答         工具调用 / MCP / Skill
+```
 
-## 📜 许可证
+### 交互模型
+
+执行过程按事件模型实时展示：
+
+```
+[解释] 我需要读取 Cargo.toml 查看 workspace 成员
+  [工具] read_file → OK
+[解释] 看到成员列表，现在统计代码行数
+  [工具] run_shell × 7 → OK
+[最终回复] Workspace 包含 7 个成员...
+```
+
+## 运行
+
+```bash
+# 桌面 GUI 模式（默认）
+cargo run --release
+
+# CLI 模式
+cargo run --release -- cli
+
+# Server 模式
+cargo run --release -- server
+cargo run --release -- server -d    # 后台运行
+cargo run --release -- server stop  # 停止
+```
+
+## 配置
+
+存储目录：`~/.tiangong/`
+
+```
+~/.tiangong/
+  app.json              应用主配置
+  models.json           模型配置（Provider + Model + Routing）
+  skills.json           Skill 配置
+  mcp.json              MCP 配置
+  sessions/             会话持久化
+  media/                生成的媒体文件
+```
+
+模型配置采用 Provider + Model + Routing 三层架构，`api_key` 支持 `${ENV_VAR}` 环境变量引用。
+
+## 技术栈
+
+| 领域 | 技术 |
+|------|------|
+| 语言 | Rust (edition 2024) |
+| 桌面 GUI | Tauri + React + shadcn/ui |
+| CLI/TUI | ratatui + crossterm |
+| Server | silent (HTTP/WS) |
+| 异步运行时 | tokio |
+| MCP | rmcp |
+| Telegram | teloxide |
+| Discord | serenity |
+| 序列化 | serde / serde_json |
+| ID 生成 | scru128 |
+
+## 开发
+
+```bash
+# 检查
+cargo check --workspace
+
+# Lint
+cargo clippy --workspace --all-targets -- -D warnings
+
+# 格式化
+cargo fmt
+
+# 前端构建
+cd frontend && yarn build
+```
+
+## 许可证
 
 Apache License 2.0
