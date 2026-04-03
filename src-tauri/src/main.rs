@@ -52,6 +52,7 @@ fn main() {
             tiangong_app::commands::get_trust_mode,
             tiangong_app::commands::set_trust_mode,
             tiangong_app::commands::get_session_cost,
+            tiangong_app::commands::list_workers,
             tiangong_app::commands::synthesize_speech,
             tiangong_app::commands::has_tts_capability,
             tiangong_app::commands::has_stt_capability,
