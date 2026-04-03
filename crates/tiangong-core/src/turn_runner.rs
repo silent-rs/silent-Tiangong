@@ -223,41 +223,28 @@ impl TurnRunner {
             },
         };
 
+        // 流式回调：直接推送 Chunk，content 和 reasoning 均实时输出到 assistant 消息
+        let tx_for_stream = self.tx.clone();
         let response = self.engine.client().complete_with_functions_stream(
             &req,
             &self.function_tools,
-            &mut |_delta: &ModelStreamChunk| {},
+            &mut |delta: &ModelStreamChunk| {
+                let _ = tx_for_stream.send(TurnEvent::Chunk(delta.clone()));
+            },
         )?;
 
         self.accumulated_usage.accumulate(&response.usage);
 
         if response.tool_calls.is_empty() {
-            // 无工具调用 → 最终回复
+            // 无工具调用 → 最终回复（已在流式回调中逐 token 推送到前端）
             self.final_text = response.text.clone();
             self.final_reasoning = response.reasoning_content.clone();
-            if !self.final_text.is_empty() || !self.final_reasoning.is_empty() {
-                let _ = self.tx.send(TurnEvent::Chunk(ModelStreamChunk {
-                    content: self.final_text.clone(),
-                    reasoning_content: self.final_reasoning.clone(),
-                }));
-                self.total_output_chunks += 1;
-            }
+            self.total_output_chunks += 1;
             self.phase = TurnPhase::Responding;
         } else {
             // 有工具调用
             let tool_call_names: Vec<String> =
                 response.tool_calls.iter().map(|tc| tc.name.clone()).collect();
-
-            // 中间文字通过 StageThinking 推送（不写入 assistant 消息，避免被最终回复覆盖）
-            if !response.text.is_empty() {
-                let _ = self.tx.send(TurnEvent::StageThinking {
-                    stage: format!("react-round-{}", self.round + 1),
-                    delta: ModelStreamChunk {
-                        content: response.text.clone(),
-                        reasoning_content: response.reasoning_content.clone(),
-                    },
-                });
-            }
 
             let output = LlmOutputRecord {
                 stage: format!("react-round-{}", self.round + 1),
