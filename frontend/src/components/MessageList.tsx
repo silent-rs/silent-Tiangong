@@ -477,20 +477,12 @@ export function MessageList() {
                 );
               }
 
-              // 系统消息组
+              // 系统消息组：按事件模型展示（解释 → 工具调用 → 结果）
               if (group.type === "system") {
-                // 后面没有更多系统消息组，且后面没有 assistant 消息（避免与最终回复重复）
-                const remainingGroups = allGroups.slice(groupIdx + 1);
-                const isLastSystemGroup = !remainingGroups.some(g => g.type === "system");
-                const hasAssistantAfter = remainingGroups.some(g =>
-                  g.type === "normal" && g.messages[0]?.role === "Assistant"
-                );
                 return (
                   <SystemMessageGroup
                     key={group.key}
                     messages={group.messages}
-                    defaultExpanded={isThinking}
-                    isActive={isThinking && isLastSystemGroup && !hasAssistantAfter}
                   />
                 );
               }
@@ -776,23 +768,12 @@ function groupByRound(messages: MessageGroup["messages"]): RoundGroup[] {
 
 function SystemMessageGroup({
   messages,
-  isActive,
 }: {
   messages: MessageGroup["messages"];
   defaultExpanded?: boolean;
   isActive?: boolean;
 }) {
-  const [expandedRounds, setExpandedRounds] = useState<Set<string>>(new Set());
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
-
-  const toggleRound = (key: string) => {
-    setExpandedRounds((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  };
 
   const toggleItem = (id: string) => {
     setExpandedItems((prev) => {
@@ -805,7 +786,8 @@ function SystemMessageGroup({
 
   const rounds = groupByRound(messages);
 
-  const renderItem = (msg: MessageGroup["messages"][0]) => {
+  /** 渲染单个工具执行条目（可折叠） */
+  const renderToolItem = (msg: MessageGroup["messages"][0]) => {
     const meta = getSystemMessageMeta(msg.content);
     const itemExpanded = expandedItems.has(msg.id);
     return (
@@ -836,52 +818,16 @@ function SystemMessageGroup({
     );
   };
 
-  // 截断 thinking 文本
-  const truncLabel = (text: string, max: number) =>
-    text.length > max ? text.slice(0, max) + "..." : text;
-
   return (
-    <div className="max-w-3xl space-y-0.5">
-      {rounds.map((round, roundIdx) => {
-        const isLastRound = roundIdx === rounds.length - 1;
-        // 提取有效解释文本（排除兜底文本）
-        const explanation = (isActive && isLastRound)
-          ? (round.label !== "思考中..." && round.label !== "执行" ? round.label : "")
-          : "";
-        const reasoning = (isActive && isLastRound)
-          ? (round.llm?.reasoning_content || "")
-          : "";
-        // 仅当有实际内容时才以非折叠方式展示
-        const showExplanation = (explanation || reasoning) && isActive && isLastRound;
+    <div className="max-w-3xl space-y-1.5">
+      {rounds.map((round) => {
+        // 解释文本：每个 round 都展示（排除无意义的兜底文本）
+        const explanation = round.label !== "思考中..." && round.label !== "执行"
+          ? round.label : "";
+        const reasoning = round.llm?.reasoning_content || "";
+        const hasExplanation = explanation || reasoning;
 
-        if (showExplanation) {
-          return (
-            <div key={round.key} className="space-y-1">
-              <div className="text-sm text-muted-foreground leading-relaxed">
-                {reasoning && (
-                  <ThinkingBlock
-                    content={reasoning}
-                    defaultExpanded={false}
-                  />
-                )}
-                {explanation && (
-                  <div className="whitespace-pre-wrap break-words">
-                    {explanation}
-                  </div>
-                )}
-              </div>
-              {/* 工具调用保持折叠 */}
-              {round.tools.length > 0 && (
-                <div className="space-y-0.5">
-                  {round.tools.map((t) => renderItem(t))}
-                </div>
-              )}
-              {round.others.map((o) => renderItem(o))}
-            </div>
-          );
-        }
-
-        const roundExpanded = expandedRounds.has(round.key);
+        // 工具调用摘要
         const toolSummary = round.tools.map((t) =>
           t.content.includes("ok=true") ? "OK" : "FAIL",
         );
@@ -891,31 +837,28 @@ function SystemMessageGroup({
             : "";
 
         return (
-          <div key={round.key}>
-            {/* Round 标题：thinking 内容 + 工具摘要 */}
-            <button
-              className="w-full flex items-center gap-2 px-3 py-1 rounded-md text-xs text-muted-foreground hover:bg-muted/50 transition-colors text-left"
-              onClick={() => toggleRound(round.key)}
-            >
-              {roundExpanded ? (
-                <ChevronDown className="w-3 h-3 shrink-0" />
-              ) : (
-                <ChevronRight className="w-3 h-3 shrink-0" />
-              )}
-              <Cpu className="w-3 h-3 shrink-0" />
-              <span className="truncate">{truncLabel(round.label, 60)}</span>
-              {!roundExpanded && toolBrief && (
-                <span className="shrink-0 opacity-60">{toolBrief}</span>
-              )}
-            </button>
-
-            {/* 展开：工具调用详情 */}
-            {roundExpanded && (
-              <div className="ml-7 mt-0.5 space-y-0.5">
-                {round.tools.map((t) => renderItem(t))}
-                {round.others.map((o) => renderItem(o))}
+          <div key={round.key} className="space-y-0.5">
+            {/* 解释文本：为什么要做、怎么做 */}
+            {hasExplanation && (
+              <div className="text-sm text-muted-foreground leading-relaxed">
+                {reasoning && (
+                  <ThinkingBlock content={reasoning} defaultExpanded={false} />
+                )}
+                {explanation && (
+                  <p className="whitespace-pre-wrap break-words">{explanation}</p>
+                )}
               </div>
             )}
+
+            {/* 工具调用及结果：做了什么、结果如何 */}
+            {toolBrief && (
+              <div className="flex items-center gap-2 px-2 py-0.5 text-xs text-muted-foreground">
+                <Cpu className="w-3 h-3 shrink-0" />
+                <span>{toolBrief}</span>
+              </div>
+            )}
+            {round.tools.map((t) => renderToolItem(t))}
+            {round.others.map((o) => renderToolItem(o))}
           </div>
         );
       })}
