@@ -78,7 +78,7 @@ pub(super) fn resolve_workspace_path(raw: &str) -> Result<PathBuf> {
     resolve_path_from_base(raw, &base)
 }
 
-/// 信任模式下的路径解析：不做越界检查
+/// 信任模式下的路径解析：不做越界检查，路径不存在时不报错
 pub(super) fn resolve_workspace_path_trusted(raw: &str) -> Result<PathBuf> {
     let base = workspace_root()?;
     let raw = raw.trim();
@@ -86,9 +86,8 @@ pub(super) fn resolve_workspace_path_trusted(raw: &str) -> Result<PathBuf> {
         return Err(anyhow!("路径参数不能为空"));
     }
     let candidate = resolve_path_candidate(raw, &base);
-    candidate
-        .canonicalize()
-        .with_context(|| format!("解析路径失败：{}", candidate.display()))
+    // 存在时 canonicalize 解析符号链接，不存在时直接返回
+    Ok(candidate.canonicalize().unwrap_or(candidate))
 }
 
 pub(super) fn resolve_workspace_write_path(raw: &str) -> Result<PathBuf> {
