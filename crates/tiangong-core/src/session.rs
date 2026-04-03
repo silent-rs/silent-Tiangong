@@ -19,6 +19,9 @@ pub struct Message {
     pub content: String,
     #[serde(default)]
     pub reasoning_content: String,
+    /// 多 Worker 模式下标识消息所属 Worker
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<String>,
     pub created_at: String,
 }
 
@@ -84,6 +87,17 @@ pub enum SessionTaskStatus {
     Cancelled,
 }
 
+/// Worker 执行结果记录（持久化到 SessionTaskRecord）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkerResultRecord {
+    pub worker_id: String,
+    pub worker_label: String,
+    pub success: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub duration_ms: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionTaskRecord {
     pub task_id: String,
@@ -110,6 +124,9 @@ pub struct SessionTaskRecord {
     /// 开发阶段：记录该任务所有 LLM 调用的完整参数和响应
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub llm_calls: Vec<LlmCallRecord>,
+    /// 多 Worker 模式下各 Worker 的执行结果
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worker_results: Vec<WorkerResultRecord>,
 }
 
 /// LLM 调用完整记录（开发调试用）
@@ -229,6 +246,34 @@ impl Session {
             role,
             content: content.into(),
             reasoning_content: reasoning_content.into(),
+            worker_id: None,
+            created_at: now_text(),
+        });
+        self.updated_at = now_text();
+    }
+
+    pub fn append_worker_message(
+        &mut self,
+        role: MessageRole,
+        content: impl Into<String>,
+        worker_id: &str,
+    ) {
+        self.append_worker_message_with_reasoning(role, content, String::new(), worker_id);
+    }
+
+    pub fn append_worker_message_with_reasoning(
+        &mut self,
+        role: MessageRole,
+        content: impl Into<String>,
+        reasoning_content: impl Into<String>,
+        worker_id: &str,
+    ) {
+        self.messages.push(Message {
+            id: new_id(),
+            role,
+            content: content.into(),
+            reasoning_content: reasoning_content.into(),
+            worker_id: Some(worker_id.to_string()),
             created_at: now_text(),
         });
         self.updated_at = now_text();
@@ -258,6 +303,7 @@ impl Session {
             duration_ms: None,
             usage: None,
             llm_calls: Vec::new(),
+            worker_results: Vec::new(),
         });
         self.updated_at = now_text();
     }

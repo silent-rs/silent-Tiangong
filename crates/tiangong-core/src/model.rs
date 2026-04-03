@@ -181,6 +181,12 @@ pub trait ModelClient {
                 reasoning_content: resp.reasoning_content.clone(),
             });
         }
+        if !resp.text.is_empty() {
+            on_delta(&ModelStreamChunk {
+                content: resp.text.clone(),
+                reasoning_content: String::new(),
+            });
+        }
         Ok(resp)
     }
 }
@@ -531,10 +537,14 @@ impl SingleProviderClient {
                                 });
                             }
 
-                            // 累积 content
+                            // 流式输出 content
                             let content_delta = extract_delta_text(delta, "content");
                             if !content_delta.is_empty() {
                                 content.push_str(&content_delta);
+                                on_delta(&ModelStreamChunk {
+                                    content: content_delta,
+                                    reasoning_content: String::new(),
+                                });
                             }
 
                             // 累积 tool_calls
@@ -951,12 +961,18 @@ impl ModelClient for SingleProviderClient {
             match self.complete_with_functions_stream_impl(req, functions, on_delta) {
                 Ok(resp) => Ok(resp),
                 Err(_) => {
-                    // 流式失败，回退到非流式
+                    // 流式失败，回退到非流式，一次性推送 reasoning + content
                     let resp = self.complete_with_functions(req, functions)?;
                     if !resp.reasoning_content.is_empty() {
                         on_delta(&ModelStreamChunk {
                             content: String::new(),
                             reasoning_content: resp.reasoning_content.clone(),
+                        });
+                    }
+                    if !resp.text.is_empty() {
+                        on_delta(&ModelStreamChunk {
+                            content: resp.text.clone(),
+                            reasoning_content: String::new(),
                         });
                     }
                     Ok(resp)
@@ -968,6 +984,12 @@ impl ModelClient for SingleProviderClient {
                 on_delta(&ModelStreamChunk {
                     content: String::new(),
                     reasoning_content: resp.reasoning_content.clone(),
+                });
+            }
+            if !resp.text.is_empty() {
+                on_delta(&ModelStreamChunk {
+                    content: resp.text.clone(),
+                    reasoning_content: String::new(),
                 });
             }
             Ok(resp)

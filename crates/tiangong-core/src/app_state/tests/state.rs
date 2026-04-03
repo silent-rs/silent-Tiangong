@@ -63,6 +63,7 @@ fn ensure_pending_turn_assistant_message_creates_and_binds_message() -> Result<(
                 task_id: task_id.clone(),
                 assistant_message_id: None,
                 stage_thinking_message_id: None,
+                worker_message_ids: std::collections::HashMap::new(),
                 started_at: Instant::now(),
                 rx,
                 control_tx: ctrl_tx,

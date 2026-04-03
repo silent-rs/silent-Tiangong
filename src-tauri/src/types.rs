@@ -1,6 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Token 用量摘要
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenUsageSummary {
+    pub prompt_tokens: usize,
+    pub completion_tokens: usize,
+    pub total_tokens: usize,
+}
+
 /// 语音合成结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpeechResult {
@@ -58,6 +66,8 @@ pub struct Message {
     pub role: String,
     pub content: String,
     pub reasoning_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<String>,
     pub created_at: String,
 }
 
@@ -72,6 +82,7 @@ impl Message {
             } else {
                 Some(core_msg.reasoning_content.clone())
             },
+            worker_id: core_msg.worker_id.clone(),
             created_at: core_msg.created_at.clone(),
         }
     }
@@ -89,6 +100,7 @@ pub struct RunSnapshot {
     pub last_plan: Option<String>,
     pub last_tool_result: Option<String>,
     pub last_error: Option<String>,
+    pub last_usage: Option<TokenUsageSummary>,
     pub updated_at: String,
     /// 前端需要：当前会话的消息列表
     pub messages: Vec<Message>,
@@ -120,6 +132,11 @@ impl RunSnapshot {
             last_plan: core_snapshot.last_plan.clone(),
             last_tool_result: core_snapshot.last_tool_result.clone(),
             last_error: core_snapshot.last_error.clone(),
+            last_usage: core_snapshot.last_usage.as_ref().map(|u| TokenUsageSummary {
+                prompt_tokens: u.prompt_tokens,
+                completion_tokens: u.completion_tokens,
+                total_tokens: u.total_tokens,
+            }),
             updated_at: core_snapshot.updated_at.clone(),
             messages,
             input_draft,

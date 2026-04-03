@@ -68,6 +68,28 @@ pub enum TurnEvent {
     Failed(String),
     /// 管理命令：主线程处理 MCP/Skill 管理操作
     ManagementCommand(ManagementCommand),
+    /// Worker 开始执行
+    WorkerStarted {
+        worker_id: String,
+        worker_label: String,
+    },
+    /// Worker 中间事件（带 Worker 标识的 LlmOutput/ToolExecution）
+    WorkerEvent {
+        worker_id: String,
+        worker_label: String,
+        inner: Box<TurnEvent>,
+    },
+    /// Worker 流式输出：每个 Worker 独立的 assistant 消息
+    WorkerChunk {
+        worker_id: String,
+        worker_label: String,
+        delta: ModelStreamChunk,
+    },
+    /// Worker 执行完成
+    WorkerCompleted {
+        worker_id: String,
+        worker_label: String,
+    },
     /// 权限审批请求：需要用户确认后才能执行工具
     ApprovalRequest {
         request_id: String,
@@ -95,6 +117,8 @@ pub struct PendingTurn {
     pub(in crate::app_state) assistant_message_id: Option<String>,
     /// 当前 stage thinking 对应的系统消息 ID，用于流式追加
     pub(in crate::app_state) stage_thinking_message_id: Option<String>,
+    /// 多 Worker 模式下，worker_id → 对应 assistant 消息 ID
+    pub(in crate::app_state) worker_message_ids: std::collections::HashMap<String, String>,
     pub(in crate::app_state) started_at: Instant,
     /// 从执行线程接收事件
     pub(in crate::app_state) rx: Receiver<TurnEvent>,
@@ -162,6 +186,26 @@ impl TurnEvent {
                 RuntimeEventType::SystemSignal,
                 EventSource::Runtime,
                 serde_json::json!({"type": "management_command"}),
+            ),
+            TurnEvent::WorkerStarted { worker_id, .. } => (
+                RuntimeEventType::TaskStarted,
+                EventSource::Runtime,
+                serde_json::json!({"worker_id": worker_id, "type": "worker_started"}),
+            ),
+            TurnEvent::WorkerEvent { worker_id, .. } => (
+                RuntimeEventType::ToolResult,
+                EventSource::Runtime,
+                serde_json::json!({"worker_id": worker_id, "type": "worker_event"}),
+            ),
+            TurnEvent::WorkerChunk { worker_id, .. } => (
+                RuntimeEventType::LlmChunk,
+                EventSource::Runtime,
+                serde_json::json!({"worker_id": worker_id}),
+            ),
+            TurnEvent::WorkerCompleted { worker_id, .. } => (
+                RuntimeEventType::TaskCompleted,
+                EventSource::Runtime,
+                serde_json::json!({"worker_id": worker_id}),
             ),
             TurnEvent::ApprovalRequest { request_id, tool_name, .. } => (
                 RuntimeEventType::PermissionRequest,

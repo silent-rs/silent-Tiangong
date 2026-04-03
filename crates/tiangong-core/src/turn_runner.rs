@@ -223,16 +223,25 @@ impl TurnRunner {
             },
         };
 
+        // 流式回调：推送 StageThinking（中间系统消息），避免多轮时中间内容污染 assistant 消息
+        // LLM 返回后再根据是否有工具调用决定最终内容发送方式
+        let tx_for_stream = self.tx.clone();
+        let round = self.round;
         let response = self.engine.client().complete_with_functions_stream(
             &req,
             &self.function_tools,
-            &mut |_delta: &ModelStreamChunk| {},
+            &mut |delta: &ModelStreamChunk| {
+                let _ = tx_for_stream.send(TurnEvent::StageThinking {
+                    stage: format!("react-round-{}", round + 1),
+                    delta: delta.clone(),
+                });
+            },
         )?;
 
         self.accumulated_usage.accumulate(&response.usage);
 
         if response.tool_calls.is_empty() {
-            // 无工具调用 → 最终回复
+            // 无工具调用 → 最终回复，一次性推送到 assistant 消息
             self.final_text = response.text.clone();
             self.final_reasoning = response.reasoning_content.clone();
             if !self.final_text.is_empty() || !self.final_reasoning.is_empty() {
@@ -247,17 +256,6 @@ impl TurnRunner {
             // 有工具调用
             let tool_call_names: Vec<String> =
                 response.tool_calls.iter().map(|tc| tc.name.clone()).collect();
-
-            // 中间文字通过 StageThinking 推送（不写入 assistant 消息，避免被最终回复覆盖）
-            if !response.text.is_empty() {
-                let _ = self.tx.send(TurnEvent::StageThinking {
-                    stage: format!("react-round-{}", self.round + 1),
-                    delta: ModelStreamChunk {
-                        content: response.text.clone(),
-                        reasoning_content: response.reasoning_content.clone(),
-                    },
-                });
-            }
 
             let output = LlmOutputRecord {
                 stage: format!("react-round-{}", self.round + 1),
@@ -279,6 +277,7 @@ impl TurnRunner {
                 role: MessageRole::Assistant,
                 content: assistant_text,
                 reasoning_content: response.reasoning_content.clone(),
+                worker_id: None,
                 created_at: now_text(),
             });
 
@@ -353,7 +352,8 @@ impl TurnRunner {
                                 role: MessageRole::System,
                                 content: format!("工具 {tool_name} 被用户拒绝"),
                                 reasoning_content: String::new(),
-                                created_at: now_text(),
+                                worker_id: None,
+                                                created_at: now_text(),
                             });
                             if self.pending_tool_calls.is_empty() {
                                 self.phase = TurnPhase::ContextAssembly;
@@ -433,6 +433,7 @@ impl TurnRunner {
                 role: MessageRole::System,
                 content: denied_msg,
                 reasoning_content: String::new(),
+                worker_id: None,
                 created_at: now_text(),
             });
         }
@@ -482,6 +483,7 @@ impl TurnRunner {
             role: MessageRole::System,
             content: round_feedback_parts.join("\n\n"),
             reasoning_content: String::new(),
+            worker_id: None,
             created_at: now_text(),
         });
 
@@ -629,6 +631,7 @@ impl TurnRunner {
                 role: MessageRole::User,
                 content: format!("[用户追加指示] {msg}"),
                 reasoning_content: String::new(),
+                worker_id: None,
                 created_at: now_text(),
             });
         }

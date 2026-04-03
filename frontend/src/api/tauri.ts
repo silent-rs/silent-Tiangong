@@ -18,6 +18,7 @@ export interface Message {
   role: string;
   content: string;
   reasoning_content?: string;
+  worker_id?: string;
   created_at: string;
 }
 
@@ -25,6 +26,12 @@ export interface RunSnapshot {
   status: string;
   summary?: string;
   last_session_id?: string;
+  last_duration_ms?: number;
+  last_usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
   current_plan?: TaskPlan;
   messages: Message[];
   input_draft: string;
@@ -274,6 +281,9 @@ export const api = {
 
   stopAudio: (): Promise<void> =>
     invoke('stop_audio'),
+
+  getSessionCost: (sessionId?: string): Promise<{ total_prompt_tokens: number; total_completion_tokens: number; total_tokens: number; call_count: number; tool_call_count: number }> =>
+    invoke('get_session_cost', { sessionId }),
 
   hasTtsCapability: (): Promise<boolean> =>
     invoke('has_tts_capability'),

@@ -10,3 +10,4 @@ frontend/dist
 .env.local
 *.zip
 node_modules
+src-tauri/create_skill/

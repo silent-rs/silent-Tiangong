@@ -41,3 +41,4 @@ tauri-build = { version = "2", features = [] }
 [features]
 default = []
 cli = []
+llm-debug-log = ["tiangong_core/llm-debug-log"]

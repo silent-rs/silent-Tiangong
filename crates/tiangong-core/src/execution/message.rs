@@ -6,6 +6,7 @@ pub(crate) fn runtime_message(role: MessageRole, content: impl Into<String>) -> 
         role,
         content: content.into(),
         reasoning_content: String::new(),
+        worker_id: None,
         created_at: now_text(),
     }
 }

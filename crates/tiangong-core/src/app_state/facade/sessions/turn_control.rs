@@ -1,4 +1,5 @@
 use super::super::super::*;
+use super::super::super::formatting::{format_llm_output_message, format_tool_trace_message};
 
 impl TiangongState {
     pub fn report_run_failed(&mut self, summary: impl Into<String>, error: impl Into<String>) {
@@ -215,6 +216,50 @@ impl TiangongState {
                     TurnEvent::StageThinking { stage, delta } => {
                         self.apply_stage_thinking_delta(&session_id, &stage, &delta);
                     }
+                    TurnEvent::WorkerStarted { ref worker_id, ref worker_label } => {
+                        // 创建带 worker_id 的系统消息
+                        self.append_worker_system_message(
+                            &session_id,
+                            worker_id,
+                            format!("🔧 Worker: {worker_label}"),
+                        );
+                        self.store.runtime.run.summary = format!("Worker 开始：{worker_label}");
+                    }
+                    TurnEvent::WorkerEvent { ref worker_id, ref worker_label, inner } => {
+                        // 转发内部事件，创建带 worker_id 的系统消息
+                        match *inner {
+                            TurnEvent::LlmOutput(output) => {
+                                let content = format_llm_output_message(&output);
+                                self.append_worker_system_message(
+                                    &session_id,
+                                    worker_id,
+                                    content,
+                                );
+                            }
+                            TurnEvent::ToolExecution(result) => {
+                                let content = format_tool_trace_message(&result);
+                                self.append_worker_system_message(
+                                    &session_id,
+                                    worker_id,
+                                    content,
+                                );
+                            }
+                            TurnEvent::StageThinking { delta, .. } => {
+                                // Worker 的 thinking 写入 Worker 的 assistant 消息
+                                self.apply_worker_delta(
+                                    &session_id, worker_id, worker_label, &delta,
+                                );
+                            }
+                            _ => {}
+                        }
+                        self.store.runtime.run.summary = format!("Worker 执行中：{worker_label}");
+                    }
+                    TurnEvent::WorkerChunk { worker_id, worker_label, delta } => {
+                        self.apply_worker_delta(&session_id, &worker_id, &worker_label, &delta);
+                    }
+                    TurnEvent::WorkerCompleted { worker_label, .. } => {
+                        self.store.runtime.run.summary = format!("Worker 完成：{worker_label}");
+                    }
                     TurnEvent::Chunk(delta) => {
                         self.apply_assistant_delta(&session_id, &delta);
                     }
@@ -303,6 +348,48 @@ impl TiangongState {
                 }
                 TurnEvent::StageThinking { stage, delta } => {
                     self.apply_stage_thinking_delta(session_id, &stage, &delta);
+                }
+                TurnEvent::WorkerStarted { ref worker_id, ref worker_label } => {
+                    self.append_worker_system_message(
+                        session_id,
+                        worker_id,
+                        format!("🔧 Worker: {worker_label}"),
+                    );
+                    self.store.runtime.run.summary = format!("Worker 开始：{worker_label}");
+                }
+                TurnEvent::WorkerEvent { ref worker_id, ref worker_label, inner } => {
+                    match *inner {
+                        TurnEvent::LlmOutput(output) => {
+                            let content = format_llm_output_message(&output);
+                            self.append_worker_system_message(
+                                session_id,
+                                worker_id,
+                                content,
+                            );
+                        }
+                        TurnEvent::ToolExecution(result) => {
+                            let content = format_tool_trace_message(&result);
+                            self.append_worker_system_message(
+                                session_id,
+                                worker_id,
+                                content,
+                            );
+                        }
+                        TurnEvent::StageThinking { delta, .. } => {
+                            // Worker 的 thinking 写入 Worker 的 assistant 消息
+                            self.apply_worker_delta(
+                                session_id, worker_id, worker_label, &delta,
+                            );
+                        }
+                        _ => {}
+                    }
+                    self.store.runtime.run.summary = format!("Worker 执行中：{worker_label}");
+                }
+                TurnEvent::WorkerChunk { worker_id, worker_label, delta } => {
+                    self.apply_worker_delta(session_id, &worker_id, &worker_label, &delta);
+                }
+                TurnEvent::WorkerCompleted { ref worker_label, .. } => {
+                    self.store.runtime.run.summary = format!("Worker 完成：{worker_label}");
                 }
                 TurnEvent::Chunk(delta) => {
                     self.apply_assistant_delta(session_id, &delta);

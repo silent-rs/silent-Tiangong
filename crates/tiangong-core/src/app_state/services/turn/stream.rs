@@ -316,4 +316,106 @@ impl AppTurnService {
 
         let _ = state.persist_session_and_app(&sid);
     }
+
+    /// 为指定 Worker 创建或追加独立的 assistant 消息（通过 worker_id 精确定位）
+    pub(in crate::app_state) fn apply_worker_delta(
+        self,
+        state: &mut TiangongState,
+        session_id: &str,
+        worker_id: &str,
+        worker_label: &str,
+        delta: &ModelStreamChunk,
+    ) {
+        if delta.content.is_empty() && delta.reasoning_content.is_empty() {
+            return;
+        }
+
+        // 查找该 worker_id 对应的 assistant 消息 ID
+        let (sid, existing_msg_id) = {
+            let Some(pending) = state.store.runtime.pending_turns.get(session_id) else {
+                return;
+            };
+            (
+                pending.session_id.clone(),
+                pending.worker_message_ids.get(worker_id).cloned(),
+            )
+        };
+
+        if let Some(msg_id) = existing_msg_id {
+            // 追加到已有的 Worker assistant 消息
+            if let Some(session) = state
+                .store
+                .session
+                .sessions
+                .iter_mut()
+                .find(|s| s.id == sid)
+                && let Some(msg) = session.messages.iter_mut().find(|m| m.id == msg_id)
+            {
+                msg.content.push_str(&delta.content);
+                msg.reasoning_content.push_str(&delta.reasoning_content);
+            }
+        } else {
+            // 创建新的 assistant 消息（该 Worker 的第一个 Chunk）
+            if let Some(session) = state
+                .store
+                .session
+                .sessions
+                .iter_mut()
+                .find(|s| s.id == sid)
+            {
+                session.append_worker_message_with_reasoning(
+                    MessageRole::Assistant,
+                    delta.content.clone(),
+                    delta.reasoning_content.clone(),
+                    worker_id,
+                );
+                // 记录消息 ID 到 pending
+                if let Some(new_msg) = session.messages.last() {
+                    let new_msg_id = new_msg.id.clone();
+                    if let Some(pending) =
+                        state.store.runtime.pending_turns.get_mut(session_id)
+                    {
+                        pending
+                            .worker_message_ids
+                            .insert(worker_id.to_string(), new_msg_id);
+                    }
+                }
+            }
+        }
+
+        state.store.runtime.run.summary = format!("Worker 执行中：{worker_label}");
+    }
+
+    /// 为指定 Worker 创建带 worker_id 的系统消息
+    pub(in crate::app_state) fn append_worker_system_message(
+        self,
+        state: &mut TiangongState,
+        session_id: &str,
+        worker_id: &str,
+        content: String,
+    ) {
+        let Some(sid) = state
+            .store
+            .runtime
+            .pending_turns
+            .get(session_id)
+            .map(|pending| pending.session_id.clone())
+        else {
+            return;
+        };
+
+        if let Some(session) = state
+            .store
+            .session
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == sid)
+        {
+            session.append_worker_message(
+                MessageRole::System,
+                content,
+                worker_id,
+            );
+        }
+    }
 }

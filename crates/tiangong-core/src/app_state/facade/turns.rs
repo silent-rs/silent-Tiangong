@@ -29,6 +29,17 @@ impl TiangongState {
         service.apply_assistant_delta(self, session_id, delta)
     }
 
+    pub(in crate::app_state) fn apply_worker_delta(
+        &mut self,
+        session_id: &str,
+        worker_id: &str,
+        worker_label: &str,
+        delta: &ModelStreamChunk,
+    ) {
+        let service = self.services.turn_service;
+        service.apply_worker_delta(self, session_id, worker_id, worker_label, delta)
+    }
+
     pub(in crate::app_state) fn apply_stage_thinking_delta(
         &mut self,
         session_id: &str,
@@ -64,6 +75,16 @@ impl TiangongState {
     ) {
         let service = self.services.turn_service;
         service.append_pending_turn_plan_execution_summary(self, session_id, summary)
+    }
+
+    pub(in crate::app_state) fn append_worker_system_message(
+        &mut self,
+        session_id: &str,
+        worker_id: &str,
+        content: String,
+    ) {
+        let service = self.services.turn_service;
+        service.append_worker_system_message(self, session_id, worker_id, content)
     }
 
     pub(in crate::app_state) fn mark_pending_turn_executing(

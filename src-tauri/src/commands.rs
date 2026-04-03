@@ -245,6 +245,27 @@ pub fn set_trust_mode(mode: String, state: State<TiangongApp>) -> Result<(), Str
     })
 }
 
+/// 获取会话成本统计
+#[tauri::command]
+pub fn get_session_cost(
+    session_id: Option<String>,
+    state: State<TiangongApp>,
+) -> Result<serde_json::Value, String> {
+    state.with_state_read(|core_state| {
+        let sid = session_id
+            .as_deref()
+            .unwrap_or_else(|| core_state.active_session_id());
+        let session = core_state.sessions().iter().find(|s| s.id == sid);
+        match session {
+            Some(s) => {
+                let cost = tiangong_core::observe::calculate_session_cost(&s.task_records);
+                Ok(serde_json::to_value(cost).unwrap_or_default())
+            }
+            None => Ok(serde_json::json!({})),
+        }
+    })
+}
+
 /// 获取后台任务列表
 #[tauri::command]
 pub fn get_background_tasks() -> Result<Vec<serde_json::Value>, String> {

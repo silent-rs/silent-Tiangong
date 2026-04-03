@@ -112,14 +112,40 @@ impl AppTurnService {
 
         thread::spawn(move || {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let runner = crate::turn_runner::TurnRunner::new(
-                    runtime,
-                    session_snapshot,
-                    worker_input,
-                    tx.clone(),
-                    ctrl_rx,
-                );
-                runner.run()
+                // 通过 TaskCoordinator 执行（自动判断单/多 Worker）
+                let coordinator = crate::coordinator::TaskCoordinator::new(runtime.clone());
+                let task = crate::coordinator::CoordinatorTask {
+                    id: scru128::new().to_string(),
+                    objective: worker_input.clone(),
+                    user_input: worker_input,
+                    context: Vec::new(),
+                };
+                let result = coordinator.coordinate(task, &session_snapshot, Some(&tx), Some(ctrl_rx))?;
+
+                // 将 CoordinatorResult 转为 TurnExecution
+                Ok(crate::runtime::TurnExecution {
+                    assistant_message: result.final_response,
+                    assistant_reasoning_content: String::new(),
+                    system_prompt: String::new(),
+                    plan: Default::default(),
+                    tool_result_summary: if result.worker_results.len() > 1 {
+                        Some(format!(
+                            "{} 个 Worker 并行执行，{} 成功",
+                            result.worker_results.len(),
+                            result.worker_results.iter().filter(|r| r.success).count()
+                        ))
+                    } else {
+                        None
+                    },
+                    tool_execution: None,
+                    verify_records: Vec::new(),
+                    output_mode: "stream".to_string(),
+                    output_chunk_count: 0,
+                    usage: result.total_usage,
+                    llm_calls: result.worker_results.into_iter()
+                        .flat_map(|w| w.llm_calls)
+                        .collect(),
+                })
             }));
 
             match outcome {
@@ -150,6 +176,7 @@ impl AppTurnService {
                 task_id,
                 assistant_message_id: None,
                 stage_thinking_message_id: None,
+                worker_message_ids: std::collections::HashMap::new(),
                 started_at: Instant::now(),
                 rx,
                 control_tx: ctrl_tx,

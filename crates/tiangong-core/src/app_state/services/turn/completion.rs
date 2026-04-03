@@ -20,16 +20,10 @@ impl AppTurnService {
             return;
         };
 
+        // 流式阶段已通过 Chunk 事件实时写入 assistant 消息，完成时不再覆盖
+        // 仅在没有已有 assistant 消息时（如非流式模式）创建新消息
         let mut final_assistant_message_id = assistant_message_id;
-        let mut updated_existing_message = false;
-        if let Some(message_id) = final_assistant_message_id.as_deref()
-            && let Some(message) = self.find_message_mut(state, &sid, message_id)
-        {
-            message.content = exec.assistant_message.clone();
-            message.reasoning_content = exec.assistant_reasoning_content.clone();
-            updated_existing_message = true;
-        }
-        if (final_assistant_message_id.is_none() || !updated_existing_message)
+        if final_assistant_message_id.is_none()
             && let Some(session) = state
                 .store
                 .session

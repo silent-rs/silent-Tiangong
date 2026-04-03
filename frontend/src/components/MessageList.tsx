@@ -163,6 +163,104 @@ function VoiceBubble({ messageId, audioPath, duration, showText, content }: {
   );
 }
 
+function WorkerCard({ group, isActive, MarkdownComponents }: {
+  group: MessageGroup;
+  isActive: boolean;
+  MarkdownComponents: any;
+}) {
+  // 从 "🔧 Worker: xxx" 系统消息中提取标题
+  const workerStartMsg = group.messages.find(m => m.role === "System" && m.content.startsWith("🔧 Worker:"));
+  const workerTitle = workerStartMsg?.content?.replace("🔧 Worker: ", "") || "Worker";
+  // 过滤掉 Worker 标题系统消息（以 "🔧 Worker:" 开头的）
+  const contentMessages = group.messages.filter(m => !(m.role === "System" && m.content.startsWith("🔧 Worker:")));
+  const systemMsgs = contentMessages.filter(m => m.role === "System");
+  // 只显示有内容的 assistant 消息（content 或 reasoning_content 不为空）
+  const assistantMsgs = contentMessages.filter(m =>
+    m.role === "Assistant" && (m.content.trim().length > 0 || (m.reasoning_content?.trim().length ?? 0) > 0)
+  );
+
+  // 计算 Worker 耗时（从第一条到最后一条消息的时间差）
+  const workerDuration = (() => {
+    if (group.messages.length < 2) return null;
+    const first = new Date(group.messages[0].created_at).getTime();
+    const last = new Date(group.messages[group.messages.length - 1].created_at).getTime();
+    const ms = last - first;
+    return ms > 0 ? ms : null;
+  })();
+
+  // Worker 完成后自动收缩（有 assistant 回复且不活跃时）
+  const hasResult = assistantMsgs.length > 0;
+  const [collapsed, setCollapsed] = useState(false);
+  const prevIsActiveRef = useRef(isActive);
+
+  useEffect(() => {
+    // 从活跃变为非活跃且有结果时自动收缩
+    if (prevIsActiveRef.current && !isActive && hasResult) {
+      setCollapsed(true);
+    }
+    prevIsActiveRef.current = isActive;
+  }, [isActive, hasResult]);
+
+  return (
+    <div className="mt-3 border border-border rounded-lg overflow-hidden">
+      <button
+        className="w-full px-3 py-1.5 bg-muted/50 border-b border-border flex items-center gap-2 hover:bg-muted/80 transition-colors text-left"
+        onClick={() => setCollapsed(!collapsed)}
+      >
+        {collapsed ? (
+          <ChevronRight className="w-3 h-3 text-muted-foreground" />
+        ) : (
+          <ChevronDown className="w-3 h-3 text-muted-foreground" />
+        )}
+        <Cpu className="w-3.5 h-3.5 text-muted-foreground" />
+        <span className="text-xs font-medium text-muted-foreground flex-1">{workerTitle}</span>
+        {collapsed && assistantMsgs.length > 0 && (
+          <span className="text-xs text-muted-foreground/60 truncate max-w-[200px]">
+            {assistantMsgs[assistantMsgs.length - 1].content.slice(0, 50)}...
+          </span>
+        )}
+        {hasResult && workerDuration && (
+          <span className="text-xs text-muted-foreground/50">
+            {(workerDuration / 1000).toFixed(1)}s
+          </span>
+        )}
+      </button>
+      {!collapsed && (
+        <div className="p-2">
+          {systemMsgs.length > 0 && (
+            <SystemMessageGroup
+              messages={systemMsgs}
+              defaultExpanded={isActive}
+            />
+          )}
+          {assistantMsgs.map((msg) => (
+            <div key={msg.id} className="mt-2">
+              <div className="flex gap-3 justify-start">
+                <div className="w-8 h-8 rounded bg-primary flex items-center justify-center flex-shrink-0">
+                  <Bot className="w-5 h-5 text-primary-foreground" />
+                </div>
+                <div className="rounded-lg px-4 py-2.5 max-w-[95%] bg-muted text-foreground">
+                  {msg.reasoning_content && (
+                    <ThinkingBlock
+                      content={msg.reasoning_content}
+                      defaultExpanded={false}
+                    />
+                  )}
+                  <div className="prose prose-sm max-w-none break-words text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={MarkdownComponents as any}>
+                      {msg.content}
+                    </ReactMarkdown>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function MessageList() {
   const {
     messages,
@@ -184,12 +282,18 @@ export function MessageList() {
     api.hasTtsCapability().then(setHasTts).catch(() => setHasTts(false));
   }, []);
 
+  const isThinking = runStatus !== "idle";
+
+  // 计算消息内容总长度，用于检测内容增长
+  const totalContentLength = messages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
+
   // 自动滚动到底部
   useEffect(() => {
-    // 当消息数量增加或流式消息状态变化时，自动滚动
+    // 消息数量增加、流式状态变化、或消息内容增长（流式输出中）时自动滚动
     const shouldScroll =
       messages.length > prevMessagesLengthRef.current ||
-      streamingMessageId !== prevStreamingIdRef.current;
+      streamingMessageId !== prevStreamingIdRef.current ||
+      isThinking;
 
     if (shouldScroll) {
       // 使用 setTimeout 确保在 DOM 更新后滚动
@@ -200,9 +304,7 @@ export function MessageList() {
 
     prevMessagesLengthRef.current = messages.length;
     prevStreamingIdRef.current = streamingMessageId;
-  }, [messages.length, streamingMessageId]);
-
-  const isThinking = runStatus !== "idle";
+  }, [messages.length, streamingMessageId, totalContentLength, isThinking]);
 
   // Markdown 渲染器（用于非流式消息）
   const MarkdownComponents = {
@@ -366,6 +468,20 @@ export function MessageList() {
             </div>
           ) : (
             groupMessages(messages).map((group, groupIdx, allGroups) => {
+              // Worker 组：外边框卡片（可收缩）
+              if (group.type === "worker") {
+                const isLastGroup = groupIdx === allGroups.length - 1;
+                const isActive = isLastGroup && isThinking;
+                return (
+                  <WorkerCard
+                    key={group.key}
+                    group={group}
+                    isActive={isActive}
+                    MarkdownComponents={MarkdownComponents}
+                  />
+                );
+              }
+
               // 系统消息组
               if (group.type === "system") {
                 // 最后一组系统消息且正在执行时默认展开
@@ -398,7 +514,7 @@ export function MessageList() {
                       </div>
                     )}
                     <div
-                      className={`rounded-lg px-4 py-2.5 max-w-[80%] ${
+                      className={`rounded-lg px-4 py-2.5 max-w-[100%] ${
                         isUser
                           ? "bg-accent text-foreground"
                           : "bg-muted text-foreground"
@@ -475,7 +591,7 @@ export function MessageList() {
               <div className="w-8 h-8 rounded bg-amber-500 flex items-center justify-center flex-shrink-0">
                 <ShieldCheck className="w-5 h-5 text-white" />
               </div>
-              <div className="bg-muted text-foreground rounded-lg px-4 py-3 max-w-[80%]">
+              <div className="bg-muted text-foreground rounded-lg px-4 py-3 max-w-[100%]">
                 <div className="text-sm font-medium mb-2">需要您的确认</div>
                 <div className="text-xs text-muted-foreground mb-3">
                   {runSummary}
@@ -542,22 +658,48 @@ export function MessageList() {
 
 interface MessageGroup {
   key: string;
-  type: "system" | "normal";
+  type: "system" | "normal" | "worker";
+  worker_id?: string;
   messages: {
     id: string;
     role: string;
     content: string;
     reasoning_content?: string;
+    worker_id?: string;
     created_at: string;
   }[];
 }
 
 function groupMessages(messages: MessageGroup["messages"]): MessageGroup[] {
   const groups: MessageGroup[] = [];
+  // worker_id → 对应的 worker 组索引
+  const workerGroupMap = new Map<string, number>();
   let currentSystemGroup: MessageGroup | null = null;
 
   for (const msg of messages) {
-    if (msg.role === "System") {
+    if (msg.worker_id) {
+      // 有 worker_id 的消息：按 worker_id 分组
+      if (currentSystemGroup) {
+        groups.push(currentSystemGroup);
+        currentSystemGroup = null;
+      }
+
+      const existingIdx = workerGroupMap.get(msg.worker_id);
+      if (existingIdx !== undefined) {
+        // 追加到已有的 Worker 组
+        groups[existingIdx].messages.push(msg);
+      } else {
+        // 创建新的 Worker 组
+        const idx = groups.length;
+        workerGroupMap.set(msg.worker_id, idx);
+        groups.push({
+          key: `worker-${msg.worker_id}`,
+          type: "worker",
+          worker_id: msg.worker_id,
+          messages: [msg],
+        });
+      }
+    } else if (msg.role === "System") {
       if (!currentSystemGroup) {
         currentSystemGroup = {
           key: `sys-${msg.id}`,
