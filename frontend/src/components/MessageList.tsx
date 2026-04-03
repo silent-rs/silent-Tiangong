@@ -179,6 +179,15 @@ function WorkerCard({ group, isActive, MarkdownComponents }: {
     m.role === "Assistant" && (m.content.trim().length > 0 || (m.reasoning_content?.trim().length ?? 0) > 0)
   );
 
+  // 计算 Worker 耗时（从第一条到最后一条消息的时间差）
+  const workerDuration = (() => {
+    if (group.messages.length < 2) return null;
+    const first = new Date(group.messages[0].created_at).getTime();
+    const last = new Date(group.messages[group.messages.length - 1].created_at).getTime();
+    const ms = last - first;
+    return ms > 0 ? ms : null;
+  })();
+
   // Worker 完成后自动收缩（有 assistant 回复且不活跃时）
   const hasResult = assistantMsgs.length > 0;
   const [collapsed, setCollapsed] = useState(false);
@@ -207,7 +216,12 @@ function WorkerCard({ group, isActive, MarkdownComponents }: {
         <span className="text-xs font-medium text-muted-foreground flex-1">{workerTitle}</span>
         {collapsed && assistantMsgs.length > 0 && (
           <span className="text-xs text-muted-foreground/60 truncate max-w-[200px]">
-            {assistantMsgs[0].content.slice(0, 50)}...
+            {assistantMsgs[assistantMsgs.length - 1].content.slice(0, 50)}...
+          </span>
+        )}
+        {hasResult && workerDuration && (
+          <span className="text-xs text-muted-foreground/50">
+            {(workerDuration / 1000).toFixed(1)}s
           </span>
         )}
       </button>

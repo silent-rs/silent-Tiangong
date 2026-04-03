@@ -2,7 +2,7 @@ import { useState, KeyboardEvent, useEffect, useRef, useCallback } from 'react';
 import { useStore } from '@/store/useStore';
 import { Textarea } from './ui/textarea';
 import { Button } from './ui/button';
-import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff } from 'lucide-react';
+import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { api } from '@/api/tauri';
 import { useAudioRecording } from '@/hooks/useAudioRecording';
@@ -15,7 +15,7 @@ interface MentionCandidate {
 }
 
 export function MessageInput() {
-  const { inputContent, setInputContent, sendMessage, cancelTurn, runStatus, isDraft, activeSessionId, sessionRunStatuses, sessionCwd, setSessionCwd, addVoiceMessage } = useStore();
+  const { inputContent, setInputContent, sendMessage, cancelTurn, runStatus, runSummary, isDraft, activeSessionId, sessionRunStatuses, sessionCwd, setSessionCwd, addVoiceMessage, lastDurationMs } = useStore();
   const [isComposing, setIsComposing] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -29,10 +29,24 @@ export function MessageInput() {
 
   // 信任模式
   const [trustMode, setTrustMode] = useState('full_trust');
+  // 会话 token 用量
+  const [sessionCost, setSessionCost] = useState<{ total_tokens: number } | null>(null);
+
+  const currentRunStatus = isDraft
+    ? 'idle'
+    : (activeSessionId && sessionRunStatuses[activeSessionId]) || runStatus;
 
   useEffect(() => {
     api.getTrustMode().then(setTrustMode).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (!isDraft && activeSessionId && currentRunStatus === 'idle') {
+      api.getSessionCost(activeSessionId).then(setSessionCost).catch(() => setSessionCost(null));
+    } else {
+      setSessionCost(null);
+    }
+  }, [activeSessionId, isDraft, currentRunStatus]);
 
   const toggleTrustMode = async () => {
     const newMode = trustMode === 'full_trust' ? 'supervised' : 'full_trust';
@@ -463,16 +477,35 @@ export function MessageInput() {
               </div>
             </div>
             <div className="mt-1.5 flex items-center justify-between text-xs text-muted-foreground">
-              <button
-                onClick={handleChangeCwd}
-                disabled={!isIdle}
-                className="flex items-center gap-1 hover:text-foreground transition-colors truncate max-w-[300px] disabled:opacity-50 disabled:cursor-default disabled:hover:text-muted-foreground"
-                title={sessionCwd || '点击设置工作目录'}
-              >
-                <FolderOpen className="w-3 h-3 shrink-0" />
-                <span className="truncate">{displayCwd || '设置工作目录'}</span>
-              </button>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-3 min-w-0">
+                <button
+                  onClick={handleChangeCwd}
+                  disabled={!isIdle}
+                  className="flex items-center gap-1 hover:text-foreground transition-colors truncate max-w-[300px] disabled:opacity-50 disabled:cursor-default disabled:hover:text-muted-foreground shrink-0"
+                  title={sessionCwd || '点击设置工作目录'}
+                >
+                  <FolderOpen className="w-3 h-3 shrink-0" />
+                  <span className="truncate">{displayCwd || '设置工作目录'}</span>
+                </button>
+                {currentRunStatus !== 'idle' ? (
+                  <span className="flex items-center gap-1 text-yellow-500 truncate" title={runSummary || '执行中'}>
+                    <Circle className="w-1.5 h-1.5 animate-pulse shrink-0" />
+                    <span className="truncate">{runSummary && runSummary.length > 30 ? runSummary.slice(0, 30) + '...' : (runSummary || '执行中')}</span>
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1 text-green-500">
+                    <Circle className="w-1.5 h-1.5 fill-current shrink-0" />
+                    <span>就绪</span>
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {sessionCost && sessionCost.total_tokens > 0 && (
+                  <span className="text-muted-foreground/50">
+                    {lastDurationMs ? `${(lastDurationMs / 1000).toFixed(1)}s · ` : ''}
+                    {sessionCost.total_tokens.toLocaleString()} tokens
+                  </span>
+                )}
                 <button
                   onClick={toggleTrustMode}
                   className={`flex items-center gap-1 transition-colors ${

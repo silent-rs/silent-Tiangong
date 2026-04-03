@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, KeyboardEvent } from 'react';
 import { useStore } from '@/store/useStore';
 import { api } from '@/api/tauri';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { Circle, Sun, Moon, Monitor, PanelLeft, SquarePen, Volume2, VolumeX, AudioLines } from 'lucide-react';
+import { Sun, Moon, Monitor, PanelLeft, SquarePen, Volume2, VolumeX, AudioLines } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme';
 import { useStreamingTts } from '@/hooks/useStreamingTts';
 import { Separator } from './ui/separator';
@@ -18,7 +18,7 @@ import {
 const appWindow = getCurrentWindow();
 
 export function StatusPanel() {
-  const { runStatus, runSummary, activeSessionId, isDraft, sessionRunStatuses, sessions, loadSessions, createSession } = useStore();
+  const { activeSessionId, isDraft, sessions, loadSessions, createSession } = useStore();
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
@@ -32,13 +32,11 @@ export function StatusPanel() {
   useEffect(() => {
     api.hasTtsCapability().then(setHasTts).catch(() => setHasTts(false));
   }, []);
+
   const activeSession = isDraft ? null : sessions.find((s) => s.id === activeSessionId);
   const currentTitle = isDraft ? '新对话' : (activeSession?.title || '新对话');
 
-  // 当前会话的运行状态
-  const currentRunStatus = isDraft
-    ? 'idle'
-    : (activeSessionId && sessionRunStatuses[activeSessionId]) || runStatus;
+
 
   const cycleTheme = () => {
     const next = theme === 'dark' ? 'light' : theme === 'light' ? 'system' : 'dark';
@@ -94,37 +92,6 @@ export function StatusPanel() {
     }
   };
 
-  const getStatusColor = () => {
-    switch (currentRunStatus) {
-      case 'planning':
-      case 'executing':
-        return 'text-yellow-500';
-      case 'failed':
-        return 'text-destructive';
-      case 'completed':
-      default:
-        return 'text-green-500';
-    }
-  };
-
-  const getStatusText = () => {
-    switch (currentRunStatus) {
-      case 'planning':
-      case 'executing':
-        // 显示具体执行内容（如"正在执行：pipx run ..."）
-        if (runSummary && runSummary !== '正在处理') {
-          const truncated = runSummary.length > 40 ? runSummary.slice(0, 40) + '...' : runSummary;
-          return truncated;
-        }
-        return '处理中';
-      case 'completed':
-        return '已完成';
-      case 'failed':
-        return '失败';
-      default:
-        return '就绪';
-    }
-  };
 
   return (
     <header
@@ -221,10 +188,6 @@ export function StatusPanel() {
         >
           <ThemeIcon className="w-4 h-4" />
         </button>
-        <div className="flex items-center gap-2">
-          <Circle className={`w-2 h-2 ${getStatusColor()} ${currentRunStatus !== 'idle' ? 'animate-pulse' : 'fill-current'}`} />
-          <span className="text-sm text-muted-foreground">{getStatusText()}</span>
-        </div>
       </div>
     </header>
   );

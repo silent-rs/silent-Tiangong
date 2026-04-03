@@ -26,6 +26,12 @@ export interface RunSnapshot {
   status: string;
   summary?: string;
   last_session_id?: string;
+  last_duration_ms?: number;
+  last_usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
   current_plan?: TaskPlan;
   messages: Message[];
   input_draft: string;

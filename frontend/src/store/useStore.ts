@@ -8,6 +8,8 @@ interface AppState {
   messages: Message[];
   runStatus: string;
   runSummary: string;
+  lastDurationMs: number | null;
+  lastUsage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null;
   approvalRequestId: string | null;
   currentPlan: TaskPlan | undefined;
   inputContent: string;
@@ -64,6 +66,8 @@ export const useStore = create<AppState>((set, get) => ({
   messages: [],
   runStatus: 'idle',
   runSummary: '',
+  lastDurationMs: null,
+  lastUsage: null,
   approvalRequestId: null,
   currentPlan: undefined,
   inputContent: '',
@@ -336,6 +340,8 @@ export const useStore = create<AppState>((set, get) => ({
     set({
       runStatus: effectiveStatus,
       runSummary: snapshot.summary || '',
+      lastDurationMs: snapshot.last_duration_ms ?? null,
+      lastUsage: snapshot.last_usage ?? null,
       approvalRequestId: (snapshot as any).approval_request_id
         || (snapshot as any).approvalRequestId
         || null,
