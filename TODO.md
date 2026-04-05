@@ -1,6 +1,6 @@
 # TODO - 天工全栈平台重构任务清单
 
-> 最后更新：2026-03-23
+> 最后更新：2026-04-03
 > 当前主线 RFC：`docs/rfc/0004-full-stack-agent-platform.md`
 > 参考：`PLAN.md`、`docs/requirements.md`
 
@@ -194,3 +194,101 @@
 - [ ] `cargo check --workspace` 通过
 - [ ] `cargo clippy --workspace --all-targets --tests --benches -- -D warnings` 通过
 - [ ] 前端 `yarn build` 通过
+
+---
+
+## Phase 11：架构补全 — 运行时基础设施 — **当前阶段**
+
+> 差距分析文档：`docs/architecture-gap-analysis.md`
+> 基准文档：`docs/desktop-agent-technical-architecture.md`
+
+### Phase 11-A：基础设施（高优先级）
+
+#### A1. 统一任务模型（GAP-5）
+- [ ] 新建 `src/task/mod.rs` 模块入口
+- [ ] 新建 `src/task/model.rs`：定义 `UnifiedTask` 结构和 `UnifiedTaskStatus` 枚举
+  - 状态：Queued / Running / Blocked / WaitingApproval / Backgrounded / Completed / Failed / Cancelled
+  - 字段：id / input_summary / agent_id / progress / result_location / session_id / work_dir / created_at / updated_at
+- [ ] 新建 `src/task/state_machine.rs`：状态转换验证（只允许合法转换）
+- [ ] 新建 `src/task/registry.rs`：统一任务注册表（替代 BackgroundTask 的独立 registry）
+- [ ] 迁移 `runtime.rs` 的 `RunStatus` 使用 `UnifiedTaskStatus`
+- [ ] 迁移 `tool/background_task.rs` 的 `TaskStatus` 使用 `UnifiedTaskStatus`
+- [ ] `lib.rs` 注册 `task` 模块
+- [ ] 验证：`cargo check --workspace` 通过
+
+#### A2. 查询编排层独立抽象（GAP-1 + GAP-3）
+- [ ] 新建 `src/orchestrator/mod.rs` 模块入口
+- [ ] 新建 `src/orchestrator/types.rs`：扩展 `QueryMode` 枚举
+  - DirectAnswer / SingleToolExecution / MultiStepExecution / TaskSplit / BackgroundExecution
+- [ ] 新建 `src/orchestrator/query_orchestrator.rs`：`QueryOrchestrator` 控制中心
+  - 接受事件 → 判断打断 → 路由决策
+  - LLM 分类器判断执行模式
+- [ ] 修改 `turn_runner.rs`：Init 阶段从 `QueryOrchestrator` 获取路由决策
+- [ ] 修改 `context/assembler.rs`：删除旧 `QueryMode`，使用 orchestrator 的类型
+- [ ] `lib.rs` 注册 `orchestrator` 模块
+- [ ] 验证：`cargo check --workspace` 通过
+
+### Phase 11-B：执行闭环（高优先级）
+
+#### B1. 后台任务回流与通知（GAP-6）
+- [ ] 新建 `src/task/notification.rs`：任务完成通知机制
+  - 任务完成 → 生成 `RuntimeEvent`（TaskCompleted/TaskFailed）
+  - 通过 channel 或 EventBus 发布
+- [ ] 修改 `tool/background_task.rs`：任务完成时触发通知
+- [ ] 修改 `turn_runner.rs`：支持接收后台任务完成事件，注入会话上下文
+- [ ] 验证：`cargo check --workspace` 通过
+
+#### B2. 恢复与持久化增强（GAP-9）
+- [ ] 新建 `src/task/persistence.rs`：任务状态持久化
+  - 写入：`~/.tiangong/tasks/{task_id}.json`
+  - 读取：启动时扫描恢复
+- [ ] 新建 `src/task/recovery.rs`：启动恢复逻辑
+  - Running/Backgrounded → 标记为 interrupted
+  - WaitingApproval → 恢复审批界面
+- [ ] 修改 `app_state/facade/lifecycle.rs`：启动时调用 recovery
+- [ ] 验证：`cargo check --workspace` 通过
+
+### Phase 11-C：能力增强（中优先级）
+
+#### C1. 上下文装配层增强（GAP-2）
+- [ ] 新建 `src/context/memory.rs`：用户偏好与长期记忆
+  - 从 `~/.tiangong/memory/` 加载
+  - 支持会话级 / 全局级
+- [ ] 新建 `src/context/retriever.rs`：检索接口（预留 trait）
+- [ ] 修改 `src/context/assembler.rs`：装配流程增加记忆注入步骤
+- [ ] 修改 `src/context/mod.rs`：导出新模块
+- [ ] 验证：`cargo check --workspace` 通过
+
+#### C2. 多代理 Worker 隔离增强（GAP-4）
+- [ ] 修改 `src/coordinator/types.rs`：WorkerContext 增加 allowed_tools / context_boundary / budget
+- [ ] 修改 `src/coordinator/worker.rs`：执行时限制工具集和预算
+- [ ] 修改 `src/coordinator/task_coordinator.rs`：创建 Worker 时注入隔离配置
+- [ ] 验证：`cargo check --workspace` 通过
+
+#### C3. 权限细粒度控制（GAP-7）
+- [ ] 修改 `src/permission.rs`：扩展 PermissionPolicy
+  - 新增 `PathRule`：路径级允许/拒绝规则
+  - 新增 `NetworkRule`：网络目标白名单
+- [ ] 修改 `PermissionGate::check()`：接受工具参数，检查路径和网络规则
+- [ ] 修改 `src/observe/audit.rs`：审计记录增加参数摘要
+- [ ] 验证：`cargo check --workspace` 通过
+
+#### C4. 观测与成本治理闭环（GAP-10）
+- [ ] 修改 `src/observe/cost.rs`：拆分为 RequestCost / TaskCost / SessionCost 三层
+- [ ] 新建 `src/observe/collector.rs`：统一采集入口
+- [ ] 修改 `src/observe/metrics.rs`：集成到 TurnRunner 自动采集
+- [ ] 验证：`cargo check --workspace` 通过
+
+### Phase 11-D：远程能力（低优先级）
+
+#### D1. 远程接入角色模型（GAP-8）
+- [ ] 新建 `tiangong-gateway/src/role.rs`：RemoteRole 枚举（Controller/Approver/Observer）
+- [ ] 修改 `tiangong-gateway/src/message.rs`：IncomingMessage 增加 sender_role
+- [ ] 修改 `tiangong-gateway/src/router.rs`：根据角色限制操作
+- [ ] 验证：`cargo check --workspace` 通过
+
+### Phase 11-E：最终验证
+- [ ] `cargo fmt -- --check` 通过
+- [ ] `cargo check --workspace` 通过
+- [ ] `cargo clippy --workspace --all-targets --tests --benches -- -D warnings` 通过
+- [ ] `cargo nextest run --workspace --no-tests pass` 通过

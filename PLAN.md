@@ -9,10 +9,12 @@
 - 安全目标：Server 模式默认安全（本地绑定、Token 认证），Connector 鉴权白名单制。
 - 工程目标：按 Phase 增量交付，每个 Phase 保证功能不回退。
 
-## 当前执行策略（2026-03-20）
+## 当前执行策略（2026-04-03）
 - 架构 RFC：`docs/rfc/0004-full-stack-agent-platform.md`
-- 前置基线：Phase 1（CLI Agent）已达成，Phase 2（Skill 管理）部分完成。
-- 当前目标：完成 Workspace 拆分，为后续 Server/Connector/Media 能力打基础。
+- 架构基准：`docs/desktop-agent-technical-architecture.md`
+- 差距分析：`docs/architecture-gap-analysis.md`
+- Phase 1~9 已完成，Phase 10（友好交互改造）进行中。
+- 当前目标：对照架构文档补全运行时基础设施（统一任务模型、查询编排层、后台任务回流、恢复能力）。
 
 ## 里程碑
 
@@ -68,15 +70,38 @@
 - 配置热重载。
 - TLS、安全加固、Docker 部署支持。
 
-### Phase 9（模型配置重构与多媒体集成）— **当前阶段**
+### Phase 9（模型配置重构与多媒体集成，已完成）
 - `ModelsConfig` 替换 `ModelProviderConfig` 为唯一模型配置源。
 - Provider + Model + Routing 三层架构。
 - GUI 全面升级为 shadcn/ui dashboard 风格，支持暗/亮主题。
 - 意图分类快速路径：简单对话跳过 planning，减少 token 消耗。
-- 多媒体能力通过 Routing 集成到执行引擎：
-  - 图片生成作为内置工具，调用 routing 中配置的 image_generation 模型。
-  - 语音合成/识别作为内置工具，调用 routing 中配置的 tts/stt 模型。
-- MediaAgent 从 ModelsConfig routing 自动初始化。
+- 多媒体能力通过 Routing 集成到执行引擎。
+
+### Phase 10（友好交互改造）— 进行中
+- GUI 样式简化（去头像、去气泡边框）。
+- GUI 解释文本独立流式展示。
+- CLI 实时流式展示。
+
+### Phase 11（架构补全 — 运行时基础设施）— **当前阶段**
+> 对照 `docs/desktop-agent-technical-architecture.md` 补全缺失能力
+> 差距分析：`docs/architecture-gap-analysis.md`
+
+**Phase 11-A：基础设施（高优先级）**
+- 统一任务模型：合并 RunStatus / TaskStatus 为 UnifiedTaskStatus，覆盖完整状态机。
+- 查询编排层独立抽象：新建 `orchestrator/` 模块，扩展 QueryMode 为多路由。
+
+**Phase 11-B：执行闭环（高优先级）**
+- 后台任务回流：后台任务完成 → RuntimeEvent → EventBus → 会话注入。
+- 恢复与持久化：任务状态实时持久化，启动时恢复未完成任务现场。
+
+**Phase 11-C：能力增强（中优先级）**
+- 上下文装配层增强：用户偏好/长期记忆注入，预留检索接口。
+- 多代理 Worker 隔离：独立工具集、上下文边界、预算上限。
+- 权限细粒度控制：路径级规则、网络目标限制。
+- 观测与成本治理：请求级/任务级/会话级三层成本聚合。
+
+**Phase 11-D：远程能力（低优先级）**
+- 远程接入角色模型：控制者/审批者/观察者角色区分。
 
 ## 参考文档
 - 项目说明：`README.md`
@@ -84,4 +109,6 @@
 - RFC 0002：`docs/rfc/0002-cli-agent-roadmap.md`
 - RFC 0003：`docs/rfc/0003-skill-market.md`
 - RFC 0004：`docs/rfc/0004-full-stack-agent-platform.md`（全栈平台架构）
+- 架构基准：`docs/desktop-agent-technical-architecture.md`
+- 架构差距分析：`docs/architecture-gap-analysis.md`
 - 需求基线：`docs/requirements.md`
