@@ -2,7 +2,9 @@ use std::fs;
 
 use anyhow::{Context, Result, anyhow};
 
-use super::common::{display_rel_path, resolve_workspace_write_path, resolve_workspace_write_path_trusted};
+use super::common::{
+    display_rel_path, resolve_workspace_write_path, resolve_workspace_write_path_trusted,
+};
 use super::{LocalToolExecutor, ToolCall, ToolResult};
 
 impl LocalToolExecutor {
@@ -25,7 +27,11 @@ impl LocalToolExecutor {
             return Err(anyhow!("replace_in_file old 参数不能为空"));
         }
 
-        let full_path = if self.is_full_trust() { resolve_workspace_write_path_trusted(path)? } else { resolve_workspace_write_path(path)? };
+        let full_path = if self.is_full_trust() {
+            resolve_workspace_write_path_trusted(path)?
+        } else {
+            resolve_workspace_write_path(path)?
+        };
         if !full_path.is_file() {
             return Err(anyhow!(
                 "replace_in_file 目标不是文件：{}",

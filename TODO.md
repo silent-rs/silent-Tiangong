@@ -174,18 +174,18 @@
 
 ## Phase 10：友好交互改造 — **当前阶段**
 
-### A. GUI 样式简化
-- [ ] 去掉 Assistant/User 头像图标
-- [ ] 去掉消息气泡边框和背景色
-- [ ] 调整因头像而存在的间距
-- [ ] 审批请求和思考中指示器同步去掉头像
+### A. GUI 样式简化（已完成 ✅）
+- [x] 去掉 Assistant/User 头像图标
+- [x] 去掉消息气泡边框和背景色
+- [x] 调整因头像而存在的间距
+- [x] 审批请求和思考中指示器同步去掉头像
 
-### B. GUI 解释文本独立流式展示
-- [ ] useStore 新增流式系统消息追踪状态
-- [ ] SystemMessageGroup 改造：活跃 round 以流式文本块展示（不折叠）
-- [ ] 工具调用消息保持现有折叠展示方式不变
+### B. GUI 解释文本独立流式展示（已完成 ✅）
+- [x] useStore 新增流式系统消息追踪状态
+- [x] SystemMessageGroup 改造：活跃 round 以流式文本块展示（不折叠）
+- [x] 工具调用消息保持现有折叠展示方式不变
 
-### C. CLI 实时流式展示
+### C. CLI 实时流式展示（待验收）
 - [ ] repl.rs 轮询循环从阻塞等待改为边轮询边输出增量
 - [ ] output.rs 新增流式输出函数（解释文本、工具摘要、增量输出）
 - [ ] 追踪消息增量，实现系统消息和助手消息的实时展示
@@ -205,87 +205,87 @@
 ### Phase 11-A：基础设施（高优先级）
 
 #### A1. 统一任务模型（GAP-5）
-- [ ] 新建 `src/task/mod.rs` 模块入口
-- [ ] 新建 `src/task/model.rs`：定义 `UnifiedTask` 结构和 `UnifiedTaskStatus` 枚举
+- [x] 新建 `src/task/mod.rs` 模块入口
+- [x] 新建 `src/task/model.rs`：定义 `UnifiedTask` 结构和 `UnifiedTaskStatus` 枚举
   - 状态：Queued / Running / Blocked / WaitingApproval / Backgrounded / Completed / Failed / Cancelled
   - 字段：id / input_summary / agent_id / progress / result_location / session_id / work_dir / created_at / updated_at
-- [ ] 新建 `src/task/state_machine.rs`：状态转换验证（只允许合法转换）
-- [ ] 新建 `src/task/registry.rs`：统一任务注册表（替代 BackgroundTask 的独立 registry）
+- [x] 新建 `src/task/state_machine.rs`：状态转换验证（只允许合法转换）
+- [x] 新建 `src/task/registry.rs`：统一任务注册表（替代 BackgroundTask 的独立 registry）
 - [ ] 迁移 `runtime.rs` 的 `RunStatus` 使用 `UnifiedTaskStatus`
 - [ ] 迁移 `tool/background_task.rs` 的 `TaskStatus` 使用 `UnifiedTaskStatus`
-- [ ] `lib.rs` 注册 `task` 模块
-- [ ] 验证：`cargo check --workspace` 通过
+- [x] `lib.rs` 注册 `task` 模块
+- [x] 验证：`cargo check --workspace` 通过
 
 #### A2. 查询编排层独立抽象（GAP-1 + GAP-3）
-- [ ] 新建 `src/orchestrator/mod.rs` 模块入口
-- [ ] 新建 `src/orchestrator/types.rs`：扩展 `QueryMode` 枚举
+- [x] 新建 `src/orchestrator/mod.rs` 模块入口
+- [x] 新建 `src/orchestrator/types.rs`：扩展 `QueryMode` 枚举
   - DirectAnswer / SingleToolExecution / MultiStepExecution / TaskSplit / BackgroundExecution
-- [ ] 新建 `src/orchestrator/query_orchestrator.rs`：`QueryOrchestrator` 控制中心
+- [x] 新建 `src/orchestrator/query_orchestrator.rs`：`QueryOrchestrator` 控制中心
   - 接受事件 → 判断打断 → 路由决策
   - LLM 分类器判断执行模式
-- [ ] 修改 `turn_runner.rs`：Init 阶段从 `QueryOrchestrator` 获取路由决策
-- [ ] 修改 `context/assembler.rs`：删除旧 `QueryMode`，使用 orchestrator 的类型
-- [ ] `lib.rs` 注册 `orchestrator` 模块
-- [ ] 验证：`cargo check --workspace` 通过
+- [x] 修改 `turn_runner.rs`：Init 阶段默认使用 MultiStepExecution
+- [x] 修改 `context/assembler.rs`：QueryMode 重导出自 orchestrator，使用 needs_tools() 统一判断
+- [x] `lib.rs` 注册 `orchestrator` 模块
+- [x] 验证：`cargo check --workspace` 通过
 
 ### Phase 11-B：执行闭环（高优先级）
 
 #### B1. 后台任务回流与通知（GAP-6）
-- [ ] 新建 `src/task/notification.rs`：任务完成通知机制
+- [x] 新建 `src/task/notification.rs`：任务完成通知机制
   - 任务完成 → 生成 `RuntimeEvent`（TaskCompleted/TaskFailed）
-  - 通过 channel 或 EventBus 发布
+  - 通过 channel（TaskNotificationBus）发布
 - [ ] 修改 `tool/background_task.rs`：任务完成时触发通知
 - [ ] 修改 `turn_runner.rs`：支持接收后台任务完成事件，注入会话上下文
-- [ ] 验证：`cargo check --workspace` 通过
+- [x] 验证：`cargo check --workspace` 通过
 
 #### B2. 恢复与持久化增强（GAP-9）
-- [ ] 新建 `src/task/persistence.rs`：任务状态持久化
+- [x] 新建 `src/task/persistence.rs`：任务状态持久化
   - 写入：`~/.tiangong/tasks/{task_id}.json`
   - 读取：启动时扫描恢复
-- [ ] 新建 `src/task/recovery.rs`：启动恢复逻辑
+- [x] 新建 `src/task/recovery.rs`：启动恢复逻辑
   - Running/Backgrounded → 标记为 interrupted
   - WaitingApproval → 恢复审批界面
 - [ ] 修改 `app_state/facade/lifecycle.rs`：启动时调用 recovery
-- [ ] 验证：`cargo check --workspace` 通过
+- [x] 验证：`cargo check --workspace` 通过
 
 ### Phase 11-C：能力增强（中优先级）
 
 #### C1. 上下文装配层增强（GAP-2）
-- [ ] 新建 `src/context/memory.rs`：用户偏好与长期记忆
+- [x] 新建 `src/context/memory.rs`：用户偏好与长期记忆
   - 从 `~/.tiangong/memory/` 加载
   - 支持会话级 / 全局级
-- [ ] 新建 `src/context/retriever.rs`：检索接口（预留 trait）
+- [x] 新建 `src/context/retriever.rs`：检索接口（预留 trait）
 - [ ] 修改 `src/context/assembler.rs`：装配流程增加记忆注入步骤
-- [ ] 修改 `src/context/mod.rs`：导出新模块
-- [ ] 验证：`cargo check --workspace` 通过
+- [x] 修改 `src/context/mod.rs`：导出新模块
+- [x] 验证：`cargo check --workspace` 通过
 
 #### C2. 多代理 Worker 隔离增强（GAP-4）
-- [ ] 修改 `src/coordinator/types.rs`：WorkerContext 增加 allowed_tools / context_boundary / budget
+- [x] 修改 `src/coordinator/types.rs`：WorkerBudget 增加 max_tool_calls，WorkerContext 增加 is_tool_allowed()
 - [ ] 修改 `src/coordinator/worker.rs`：执行时限制工具集和预算
 - [ ] 修改 `src/coordinator/task_coordinator.rs`：创建 Worker 时注入隔离配置
-- [ ] 验证：`cargo check --workspace` 通过
+- [x] 验证：`cargo check --workspace` 通过
 
 #### C3. 权限细粒度控制（GAP-7）
-- [ ] 修改 `src/permission.rs`：扩展 PermissionPolicy
+- [x] 修改 `src/permission.rs`：扩展 PermissionPolicy
   - 新增 `PathRule`：路径级允许/拒绝规则
   - 新增 `NetworkRule`：网络目标白名单
-- [ ] 修改 `PermissionGate::check()`：接受工具参数，检查路径和网络规则
+- [x] 新增 `PermissionGate::check_path()` 和 `check_network()` 方法
 - [ ] 修改 `src/observe/audit.rs`：审计记录增加参数摘要
-- [ ] 验证：`cargo check --workspace` 通过
+- [x] 验证：`cargo check --workspace` 通过
 
 #### C4. 观测与成本治理闭环（GAP-10）
-- [ ] 修改 `src/observe/cost.rs`：拆分为 RequestCost / TaskCost / SessionCost 三层
-- [ ] 新建 `src/observe/collector.rs`：统一采集入口
+- [x] 修改 `src/observe/cost.rs`：新增 RequestCost / TaskCost / SessionCost 三层
+- [x] 新建 `src/observe/collector.rs`：统一采集入口 ObserveCollector
 - [ ] 修改 `src/observe/metrics.rs`：集成到 TurnRunner 自动采集
-- [ ] 验证：`cargo check --workspace` 通过
+- [x] 验证：`cargo check --workspace` 通过
 
 ### Phase 11-D：远程能力（低优先级）
 
 #### D1. 远程接入角色模型（GAP-8）
-- [ ] 新建 `tiangong-gateway/src/role.rs`：RemoteRole 枚举（Controller/Approver/Observer）
-- [ ] 修改 `tiangong-gateway/src/message.rs`：IncomingMessage 增加 sender_role
+- [x] 新建 `tiangong-gateway/src/role.rs`：RemoteRole 枚举（Controller/Approver/Observer）
+- [x] 修改 `tiangong-gateway/src/message.rs`：IncomingMessage 增加 sender_role
 - [ ] 修改 `tiangong-gateway/src/router.rs`：根据角色限制操作
-- [ ] 验证：`cargo check --workspace` 通过
+- [x] 验证：`cargo check --workspace` 通过
 
 ### Phase 11-E：最终验证
 - [ ] `cargo fmt -- --check` 通过

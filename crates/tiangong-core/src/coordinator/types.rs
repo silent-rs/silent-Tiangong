@@ -54,6 +54,8 @@ pub struct WorkerBudget {
     pub max_tokens: usize,
     /// 最大 ReAct 轮次
     pub max_rounds: usize,
+    /// 最大工具调用次数
+    pub max_tool_calls: usize,
     /// 最大执行时长（秒）
     pub max_duration_secs: u64,
 }
@@ -63,8 +65,35 @@ impl Default for WorkerBudget {
         Self {
             max_tokens: 32_768,
             max_rounds: 20,
+            max_tool_calls: 50,
             max_duration_secs: 300,
         }
+    }
+}
+
+impl WorkerBudget {
+    /// 检查是否超出预算（token 维度）
+    pub fn is_token_exceeded(&self, used_tokens: usize) -> bool {
+        used_tokens >= self.max_tokens
+    }
+
+    /// 检查是否超出预算（轮次维度）
+    pub fn is_round_exceeded(&self, round: usize) -> bool {
+        round >= self.max_rounds
+    }
+
+    /// 检查是否超出预算（工具调用维度）
+    pub fn is_tool_call_exceeded(&self, tool_calls: usize) -> bool {
+        tool_calls >= self.max_tool_calls
+    }
+}
+
+impl WorkerContext {
+    /// 检查指定工具是否允许执行
+    ///
+    /// 如果 `available_tools` 为空，允许所有工具。
+    pub fn is_tool_allowed(&self, tool_name: &str) -> bool {
+        self.available_tools.is_empty() || self.available_tools.iter().any(|t| t == tool_name)
     }
 }
 

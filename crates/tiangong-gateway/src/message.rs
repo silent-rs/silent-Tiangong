@@ -1,11 +1,16 @@
 use serde::{Deserialize, Serialize};
 
+use crate::role::RemoteRole;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IncomingMessage {
     pub id: String,
     pub connector: String,
     pub channel_id: String,
     pub sender_id: String,
+    /// 发送者角色（决定可执行的操作范围）
+    #[serde(default)]
+    pub sender_role: RemoteRole,
     pub content: MessageContent,
     pub reply_to: Option<String>,
     pub timestamp: String,

@@ -11,16 +11,11 @@ use crate::session::{Message, Session};
 use super::budget::TokenBudget;
 use super::organizer::ContextOrganizer;
 
-/// 查询执行模式
+/// 查询执行模式（重导出自 orchestrator 层）
 ///
 /// 由查询编排层判断，传递给上下文装配层，决定注入哪些内容。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QueryMode {
-    /// 直接回答：不注入工具定义（简单对话、闲聊）
-    DirectAnswer,
-    /// 工具执行：注入完整工具定义
-    ToolExecution,
-}
+/// 详细定义见 `crate::orchestrator::types::QueryMode`。
+pub use crate::orchestrator::QueryMode;
 
 /// 查询意图分类器
 ///
@@ -38,7 +33,7 @@ impl QueryClassifier {
 
         // 空输入走工具模式
         if input.is_empty() {
-            return (QueryMode::ToolExecution, Vec::new());
+            return (QueryMode::MultiStepExecution, Vec::new());
         }
 
         // 历史中有工具调用的会话，继续使用工具
@@ -50,7 +45,7 @@ impl QueryClassifier {
                     && (m.content.contains("tool_name:") || m.content.contains("exit_code"))
             });
         if has_tool_history {
-            return (QueryMode::ToolExecution, Vec::new());
+            return (QueryMode::MultiStepExecution, Vec::new());
         }
 
         // 调用 LLM 进行意图分类
@@ -66,7 +61,7 @@ impl QueryClassifier {
             }
             Err(err) => {
                 tracing::warn!("意图分类 LLM 调用失败，回退到工具模式: {err}");
-                (QueryMode::ToolExecution, Vec::new())
+                (QueryMode::MultiStepExecution, Vec::new())
             }
         }
     }
@@ -94,7 +89,7 @@ impl QueryClassifier {
         let mode = if answer.contains("chat") {
             QueryMode::DirectAnswer
         } else {
-            QueryMode::ToolExecution
+            QueryMode::MultiStepExecution
         };
 
         tracing::info!(
@@ -177,25 +172,25 @@ impl ContextAssembler {
         // 构建对话历史
         let messages = self.organizer.build_context(session);
 
-        // 根据模式决定工具注入
-        let tools = match mode {
-            QueryMode::DirectAnswer => {
-                tracing::info!(
-                    input_len = user_input.len(),
-                    "快速路径：跳过工具注入（直接回答模式）"
-                );
-                Vec::new()
-            }
-            QueryMode::ToolExecution => self.select_tools(all_tools, &messages),
+        // 根据模式决定工具注入（使用 needs_tools() 统一判断）
+        let tools = if mode.needs_tools() {
+            self.select_tools(all_tools, &messages)
+        } else {
+            tracing::info!(
+                input_len = user_input.len(),
+                "快速路径：跳过工具注入（直接回答模式）"
+            );
+            Vec::new()
         };
 
         // 根据模式调整 system_prompt
-        let system_prompt = match mode {
-            QueryMode::DirectAnswer => format!(
+        let system_prompt = if mode.needs_tools() {
+            system_prompt
+        } else {
+            format!(
                 "你是天工智能助手。请用简洁友好的方式回复用户。\
                  回复使用 Markdown 格式。\n\n用户输入：\n{user_input}"
-            ),
-            QueryMode::ToolExecution => system_prompt,
+            )
         };
 
         AssembledContext {

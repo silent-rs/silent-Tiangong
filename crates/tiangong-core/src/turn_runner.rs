@@ -89,7 +89,7 @@ impl TurnRunner {
             system_prompt: String::new(),
             organizer: None,
             session_cwd: None,
-            query_mode: QueryMode::ToolExecution,
+            query_mode: QueryMode::MultiStepExecution,
             #[cfg(feature = "llm-debug-log")]
             llm_calls: Vec::new(),
             loop_messages: Vec::new(),

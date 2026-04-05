@@ -5,8 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::app_state::audit::append_audit_log;
 use crate::app_state::audit::AuditEntry;
+use crate::app_state::audit::append_audit_log;
 
 /// 审计事件类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,16 +79,17 @@ impl AuditRecord {
             .or(self.task_id.as_deref())
             .or(self.session_id.as_deref())
             .unwrap_or("-");
-        append_audit_log(&AuditEntry::new(&action, target, &self.detail, self.success));
+        append_audit_log(&AuditEntry::new(
+            &action,
+            target,
+            &self.detail,
+            self.success,
+        ));
     }
 }
 
 /// 记录权限决策
-pub fn audit_permission(
-    tool_name: &str,
-    decision: &str,
-    trust_mode: &str,
-) {
+pub fn audit_permission(tool_name: &str, decision: &str, trust_mode: &str) {
     AuditRecord::new(
         AuditEventType::PermissionDecision,
         format!("decision={decision} trust_mode={trust_mode}"),
