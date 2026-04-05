@@ -19,92 +19,18 @@ pub use crate::orchestrator::QueryMode;
 
 /// 查询意图分类器
 ///
-/// 使用 LLM 判断用户输入是否需要工具支持。
+/// 不做 LLM 分类调用，所有用户输入统一进入执行流程。
+/// 由 planning/execution 层的 LLM 在完整上下文下自行判断是否需要工具。
 pub struct QueryClassifier;
 
 impl QueryClassifier {
-    /// 使用 LLM 对用户输入进行意图分类，返回模式和可能的 LLM 调用记录
+    /// 统一返回 MultiStepExecution，由执行层自行判断
     pub fn classify(
-        input: &str,
-        session: &Session,
-        client: &SingleProviderClient,
+        _input: &str,
+        _session: &Session,
+        _client: &SingleProviderClient,
     ) -> (QueryMode, Vec<crate::session::LlmCallRecord>) {
-        let input = input.trim();
-
-        // 空输入走工具模式
-        if input.is_empty() {
-            return (QueryMode::MultiStepExecution, Vec::new());
-        }
-
-        // 历史中有工具调用的会话，继续使用工具
-        // 检查 task_records 中是否有工具结果，或者会话消息中是否有工具执行痕迹
-        // （取消的任务 tool_result 为 None，但消息中仍有工具执行记录）
-        let has_tool_history = session.task_records.iter().any(|r| r.tool_result.is_some())
-            || session.messages.iter().any(|m| {
-                m.role == crate::session::MessageRole::System
-                    && (m.content.contains("tool_name:") || m.content.contains("exit_code"))
-            });
-        if has_tool_history {
-            return (QueryMode::MultiStepExecution, Vec::new());
-        }
-
-        // 调用 LLM 进行意图分类
-        match Self::classify_with_llm(input, client) {
-            Ok((mode, record)) => {
-                #[cfg(feature = "llm-debug-log")]
-                return (mode, vec![record]);
-                #[cfg(not(feature = "llm-debug-log"))]
-                {
-                    let _ = record;
-                    (mode, Vec::new())
-                }
-            }
-            Err(err) => {
-                tracing::warn!("意图分类 LLM 调用失败，回退到工具模式: {err}");
-                (QueryMode::MultiStepExecution, Vec::new())
-            }
-        }
-    }
-
-    /// 调用 LLM 判断意图，返回模式和调用记录
-    fn classify_with_llm(
-        input: &str,
-        client: &SingleProviderClient,
-    ) -> anyhow::Result<(QueryMode, crate::session::LlmCallRecord)> {
-        let system_prompt = "判断用户输入是否需要使用工具（如文件操作、命令执行、代码搜索、图片生成等）。\
-             只回答一个词：chat（纯闲聊/知识问答，不需要工具）或 tool（需要工具执行操作）。";
-        let prompt = format!("{system_prompt}\n\n用户输入：{input}");
-
-        let resp = client.complete_classify(system_prompt, input)?;
-        let answer = resp.text.trim().to_lowercase();
-
-        let mode = if answer.contains("chat") {
-            QueryMode::DirectAnswer
-        } else {
-            QueryMode::MultiStepExecution
-        };
-
-        tracing::info!(
-            input_len = input.len(),
-            classify_prompt_tokens = resp.usage.prompt_tokens,
-            classify_completion_tokens = resp.usage.completion_tokens,
-            result = ?mode,
-            "LLM 意图分类"
-        );
-
-        let record = crate::session::LlmCallRecord {
-            stage: "intent-classify".to_string(),
-            prompt,
-            context_count: 0,
-            tool_names: Vec::new(),
-            response_text: resp.text,
-            reasoning_len: resp.reasoning_content.len(),
-            tool_calls: Vec::new(),
-            usage: resp.usage,
-            timestamp: crate::session::now_text(),
-        };
-
-        Ok((mode, record))
+        (QueryMode::MultiStepExecution, Vec::new())
     }
 }
 
