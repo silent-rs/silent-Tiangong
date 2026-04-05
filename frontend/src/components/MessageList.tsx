@@ -765,9 +765,11 @@ function AgentTurn({
         // 内容重复，移除前面的 explanation，只保留 assistant
         fragments.pop();
       }
-      // 跳过已展示过的 reasoning
-      if (msg.reasoning_content && shownReasonings.has(msg.reasoning_content.trim())) {
-        // reasoning 已在前面的 thinking 片段中展示
+      // assistant 自身携带的 reasoning（DirectAnswer 模式等无系统消息场景）
+      const assistantReasoning = msg.reasoning_content?.trim() || "";
+      if (assistantReasoning && !shownReasonings.has(assistantReasoning)) {
+        shownReasonings.add(assistantReasoning);
+        fragments.push({ type: "thinking", content: assistantReasoning });
       }
       fragments.push({ type: "assistant", msg, isStreaming });
     } else if (msg.role === "System") {
@@ -835,7 +837,7 @@ function AgentTurn({
           return (
             <div key={msg.id} className="text-foreground">
               {isStreaming ? (
-                <TypingMessage content={streamingContent} reasoningContent="" speed={300} />
+                <TypingMessage content={streamingContent} reasoningContent={_streamingReasoningContent} speed={300} />
               ) : (
                 <div>
                   <div className="prose prose-sm max-w-none break-words text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
