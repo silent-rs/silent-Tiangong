@@ -766,6 +766,103 @@ impl SingleProviderClient {
 
         Ok(text)
     }
+
+    /// 轻量级意图分类请求
+    ///
+    /// 与 `complete_lite` 类似，使用最小 system prompt，不注入 MCP 工具/工作目录等上下文，
+    /// 使用 lite 模型、短超时、低 max_tokens，关闭 thinking。
+    pub fn complete_classify(&self, system_prompt: &str, user_input: &str) -> Result<ModelResponse> {
+        let token = self.cfg.api_auth_token.trim();
+        if token.is_empty() {
+            return Err(anyhow!("API_AUTH_TOKEN 不能为空"));
+        }
+
+        let timeout_ms = 15_000u64;
+        let model = self.cfg.lite_model().trim();
+        if model.is_empty() {
+            return Err(anyhow!("API_MODEL 不能为空"));
+        }
+
+        let api_base = normalize_api_base(&self.cfg.api_base_url)?;
+
+        let messages = vec![
+            ChatCompletionRequestSystemMessageArgs::default()
+                .content(system_prompt.to_string())
+                .build()
+                .context("构建 system 消息失败")?
+                .into(),
+            ChatCompletionRequestUserMessageArgs::default()
+                .content(user_input.to_string())
+                .build()
+                .context("构建 user 消息失败")?
+                .into(),
+        ];
+
+        let mut request_args_binding = CreateChatCompletionRequestArgs::default();
+        let request = request_args_binding
+            .model(model.to_string())
+            .messages(messages)
+            .max_tokens(10u16)
+            .temperature(0.0f32)
+            .stream(false)
+            .thinking(ChatThinking {
+                r#type: Some(ChatThinkingType::Disabled),
+                clear_thinking: None,
+            })
+            .build()
+            .context("构建分类请求失败")?;
+
+        let config = OpenAIConfig::new()
+            .with_api_key(token.to_string())
+            .with_api_base(api_base);
+        let client = OpenAIClient::with_config(config);
+
+        let runtime = TokioRuntimeBuilder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("初始化异步运行时失败")?;
+
+        let response = runtime.block_on(async {
+            timeout(
+                Duration::from_millis(timeout_ms),
+                client
+                    .chat()
+                    .create_byot::<_, CreateChatCompletionResponse>(request),
+            )
+            .await
+        });
+
+        let resp = match response {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(err)) => return Err(anyhow!("意图分类请求失败：{err}")),
+            Err(_) => return Err(anyhow!("意图分类请求超时：{timeout_ms}ms")),
+        };
+
+        let text = resp
+            .choices
+            .first()
+            .and_then(|choice| choice.message.content.as_deref())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        let usage = resp
+            .usage
+            .map(|u| TokenUsage {
+                prompt_tokens: u.prompt_tokens as usize,
+                completion_tokens: u.completion_tokens as usize,
+                total_tokens: u.total_tokens as usize,
+            })
+            .unwrap_or_default();
+
+        Ok(ModelResponse {
+            text,
+            reasoning_content: String::new(),
+            usage,
+            output_mode: "classify".to_string(),
+            output_chunk_count: 0,
+        })
+    }
 }
 
 impl ModelClient for SingleProviderClient {

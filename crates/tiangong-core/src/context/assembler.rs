@@ -4,7 +4,7 @@
 //! 包括：历史消息选择、工具定义注入、环境信息注入、预算控制。
 
 use crate::agent_config::AgentConfig;
-use crate::model::{FunctionToolSpec, ModelClient, ModelRequest, SingleProviderClient};
+use crate::model::{FunctionToolSpec, SingleProviderClient};
 use crate::models_config::ModelsConfig;
 use crate::session::{Message, Session};
 
@@ -71,19 +71,11 @@ impl QueryClassifier {
         input: &str,
         client: &SingleProviderClient,
     ) -> anyhow::Result<(QueryMode, crate::session::LlmCallRecord)> {
-        let prompt = format!(
-            "判断以下用户输入是否需要使用工具（如文件操作、命令执行、代码搜索、图片生成等）。\n\
-             只回答一个词：chat（纯闲聊/知识问答，不需要工具）或 tool（需要工具执行操作）。\n\n\
-             用户输入：{input}"
-        );
+        let system_prompt = "判断用户输入是否需要使用工具（如文件操作、命令执行、代码搜索、图片生成等）。\
+             只回答一个词：chat（纯闲聊/知识问答，不需要工具）或 tool（需要工具执行操作）。";
+        let prompt = format!("{system_prompt}\n\n用户输入：{input}");
 
-        let req = ModelRequest {
-            session_title: String::new(),
-            user_input: prompt.clone(),
-            context: Vec::new(),
-        };
-
-        let resp = client.complete(&req)?;
+        let resp = client.complete_classify(system_prompt, input)?;
         let answer = resp.text.trim().to_lowercase();
 
         let mode = if answer.contains("chat") {
