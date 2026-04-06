@@ -296,6 +296,15 @@ impl EventLoopRunner {
             Ok(true)
         } else {
             // 不满足：工具调用
+            // 发送 PlanReady 让 poll 清空 assistant 消息中的流式中间内容
+            // 避免下一轮 LLM 的 Chunk 追加到旧内容后面
+            let plan = crate::planner::TaskPlan {
+                id: scru128::new().to_string(),
+                objective: last_user_input.chars().take(50).collect::<String>(),
+                ..Default::default()
+            };
+            self.emit(TurnEvent::PlanReady(plan));
+
             let tool_call_names: Vec<String> =
                 response.tool_calls.iter().map(|tc| tc.name.clone()).collect();
 
