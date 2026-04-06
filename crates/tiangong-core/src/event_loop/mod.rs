@@ -13,11 +13,9 @@ pub mod active_loops;
 pub mod cli_host;
 pub mod context;
 pub mod host;
-pub mod output;
 pub mod persistence;
 pub mod runner;
 pub mod types;
 
-pub use output::{ChannelOutput, LoopOutput, SilentOutput};
 pub use runner::EventLoopRunner;
 pub use types::{LoopEvent, LoopOutcome, LoopPhase, LoopState, SystemSignalKind};

@@ -108,21 +108,19 @@ impl AppTurnService {
         let (tx, rx) = mpsc::channel::<TurnEvent>();
         let (event_tx, event_rx) = mpsc::channel::<crate::event_loop::LoopEvent>();
 
-        // EventLoopRunner：SilentOutput（通知由 TurnEvent channel 承担）+ event_tx 完整事件流
         let output_tx = tx.clone();
         thread::spawn(move || {
             let runner = crate::event_loop::EventLoopRunner::new(
                 runtime,
                 session_snapshot,
-                Box::new(crate::event_loop::SilentOutput),
-                Some(output_tx.clone()),
+                output_tx.clone(),
                 event_rx,
             );
 
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runner.run()));
 
             match outcome {
-                Ok((crate::event_loop::LoopOutcome::Suspended(loop_state), _)) => {
+                Ok(crate::event_loop::LoopOutcome::Suspended(loop_state)) => {
                     let _ = output_tx.send(TurnEvent::Completed(Box::new(
                         crate::runtime::TurnExecution {
                             assistant_message: String::new(),
@@ -139,13 +137,13 @@ impl AppTurnService {
                         },
                     )));
                 }
-                Ok((crate::event_loop::LoopOutcome::Error(_, err), _)) => {
+                Ok(crate::event_loop::LoopOutcome::Error(_, err)) => {
                     let _ = output_tx.send(TurnEvent::Failed(err));
                 }
-                Ok((crate::event_loop::LoopOutcome::Cancelled(_), _)) => {
+                Ok(crate::event_loop::LoopOutcome::Cancelled(_)) => {
                     let _ = output_tx.send(TurnEvent::Failed("执行已取消".to_string()));
                 }
-                Ok((crate::event_loop::LoopOutcome::Shutdown(_), _)) => {}
+                Ok(crate::event_loop::LoopOutcome::Shutdown(_)) => {}
                 Err(panic_err) => {
                     let reason = if let Some(s) = panic_err.downcast_ref::<String>() {
                         s.clone()

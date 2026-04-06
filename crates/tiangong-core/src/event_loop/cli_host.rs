@@ -20,7 +20,7 @@ pub struct CliLoopHost {
     /// 输出接收端
     output_rx: Option<Receiver<TurnEvent>>,
     /// 工作线程
-    thread: Option<JoinHandle<(LoopOutcome, crate::session::Session)>>,
+    thread: Option<JoinHandle<LoopOutcome>>,
     /// 挂起的状态
     suspended_state: Option<LoopState>,
     /// 引擎
@@ -62,16 +62,14 @@ impl CliLoopHost {
                 self.engine.clone(),
                 self.session.clone(),
                 state,
-                Box::new(super::SilentOutput),
-                Some(turn_event_tx),
+                turn_event_tx,
                 event_rx,
             )
         } else {
             EventLoopRunner::new(
                 self.engine.clone(),
                 self.session.clone(),
-                Box::new(super::SilentOutput),
-                Some(turn_event_tx),
+                turn_event_tx,
                 event_rx,
             )
         };
@@ -91,7 +89,7 @@ impl CliLoopHost {
         if let Some(thread) = self.thread.take() {
             if thread.is_finished() {
                 match thread.join() {
-                    Ok((outcome, _session)) => {
+                    Ok(outcome) => {
                         self.suspended_state = Some(outcome.into_state());
                     }
                     Err(_) => {

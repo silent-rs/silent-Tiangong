@@ -1,11 +1,9 @@
 //! EventLoopRunner：事件驱动循环执行器
 //!
-//! core 内部完成完整处理链路：
-//! 事件输入 → 组织上下文 → LLM 调用 → 工具执行 → session 更新
+//! 职责：事件输入 → 组织上下文 → LLM 调用 → 工具执行 → 通过 TurnEvent channel 输出
 //!
-//! 输出两条通道：
-//! - LoopOutput 回调：简化通知（CLI 直接打印）
-//! - TurnEvent channel：完整事件流（GUI poll 兼容）
+//! 不更新 session。session 更新由消费方（poll）完成。
+//! CLI / GUI / Connector 统一消费 TurnEvent channel。
 
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
@@ -13,7 +11,6 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use anyhow::Result;
 
 use super::context::events_to_messages;
-use super::output::LoopOutput;
 use super::types::*;
 use crate::agents::execution_mcp_agent::{McpFunctionTarget, execution_function_tools};
 use crate::app_state::TurnEvent;
@@ -33,13 +30,14 @@ use crate::session::{Message, MessageRole, Session, now_text};
 const MAX_ROUNDS: usize = 20;
 
 /// 事件驱动循环执行器
+///
+/// 唯一输出通道：`Sender<TurnEvent>`
+/// CLI / GUI / Connector 统一消费此 channel。
 pub struct EventLoopRunner {
     engine: RuntimeEngine,
     session: Session,
-    /// 简化回调（CLI 直接打印）
-    output: Box<dyn LoopOutput>,
-    /// 完整事件流（GUI poll 兼容）
-    event_tx: Option<Sender<TurnEvent>>,
+    /// 唯一输出通道
+    tx: Sender<TurnEvent>,
     event_rx: Receiver<LoopEvent>,
 
     state: LoopState,
@@ -62,8 +60,7 @@ impl EventLoopRunner {
     pub fn new(
         engine: RuntimeEngine,
         session: Session,
-        output: Box<dyn LoopOutput>,
-        event_tx: Option<Sender<TurnEvent>>,
+        tx: Sender<TurnEvent>,
         event_rx: Receiver<LoopEvent>,
     ) -> Self {
         let session_id = session.id.clone();
@@ -71,8 +68,7 @@ impl EventLoopRunner {
         Self {
             engine,
             session,
-            output,
-            event_tx,
+            tx,
             event_rx,
             state: LoopState::new(session_id.clone()),
             phase: LoopPhase::Idle,
@@ -93,8 +89,7 @@ impl EventLoopRunner {
         engine: RuntimeEngine,
         session: Session,
         state: LoopState,
-        output: Box<dyn LoopOutput>,
-        event_tx: Option<Sender<TurnEvent>>,
+        tx: Sender<TurnEvent>,
         event_rx: Receiver<LoopEvent>,
     ) -> Self {
         let context_limit = engine.context_limit;
@@ -102,8 +97,7 @@ impl EventLoopRunner {
         Self {
             engine,
             session,
-            output,
-            event_tx,
+            tx,
             event_rx,
             state,
             phase: LoopPhase::Idle,
@@ -120,28 +114,16 @@ impl EventLoopRunner {
         }
     }
 
-    pub fn session(&self) -> &Session {
-        &self.session
-    }
-
-    /// 发送 TurnEvent 到 channel（如果有）
     fn emit(&self, event: TurnEvent) {
-        if let Some(ref tx) = self.event_tx {
-            let _ = tx.send(event);
-        }
+        let _ = self.tx.send(event);
     }
 
-    pub fn run(mut self) -> (LoopOutcome, Session) {
+    pub fn run(mut self) -> LoopOutcome {
         if let Err(err) = self.init_tools() {
-            self.output.on_error(&err.to_string());
             self.emit(TurnEvent::Failed(err.to_string()));
-            let session = self.session.clone();
-            return (LoopOutcome::Error(self.state, err.to_string()), session);
+            return LoopOutcome::Error(self.state, err.to_string());
         }
-
-        let outcome = self.run_loop();
-        let session = self.session.clone();
-        (outcome, session)
+        self.run_loop()
     }
 
     fn run_loop(&mut self) -> LoopOutcome {
@@ -152,7 +134,6 @@ impl EventLoopRunner {
             {
                 self.state.interrupted_phase = LoopPhase::Idle;
                 self.state.mark_suspended();
-                self.output.on_round_complete();
                 return LoopOutcome::Suspended(self.state.clone());
             }
 
@@ -175,11 +156,9 @@ impl EventLoopRunner {
                 }
             }
 
-            // 事件注入 session 和 loop_context
+            // 事件注入 loop_context（runner 自用上下文）
             let new_messages = events_to_messages(&events);
-            for msg in &new_messages {
-                self.state.loop_context.push(msg.clone());
-            }
+            self.state.loop_context.extend(new_messages);
 
             for event in &events {
                 if let LoopEvent::PermissionResponse { approved, .. } = event {
@@ -206,7 +185,6 @@ impl EventLoopRunner {
                 }
                 Ok(false) => {}
                 Err(err) => {
-                    self.output.on_error(&err.to_string());
                     self.emit(TurnEvent::Failed(err.to_string()));
                     return LoopOutcome::Error(self.state.clone(), err.to_string());
                 }
@@ -290,36 +268,13 @@ impl EventLoopRunner {
             },
         };
 
-        // 创建 assistant 消息接收流式内容
-        self.session
-            .append_message(MessageRole::Assistant, String::new());
-        let assistant_msg_idx = self.session.messages.len() - 1;
-
-        // 流式回调：更新 session + 通知外部 + 发送 TurnEvent
-        let output_ref = &self.output;
-        let event_tx_ref = &self.event_tx;
-        let messages = &mut self.session.messages;
-
+        // 流式回调：直接通过 TurnEvent channel 输出 Chunk
+        let tx = self.tx.clone();
         let response = self.engine.client().complete_with_functions_stream(
             &req,
             &self.function_tools,
             &mut |delta: &ModelStreamChunk| {
-                // 更新 session assistant 消息
-                if let Some(msg) = messages.get_mut(assistant_msg_idx) {
-                    msg.content.push_str(&delta.content);
-                    msg.reasoning_content.push_str(&delta.reasoning_content);
-                }
-                // 通知外部（CLI 打印）
-                if !delta.content.is_empty() {
-                    output_ref.on_delta(&delta.content);
-                }
-                if !delta.reasoning_content.is_empty() {
-                    output_ref.on_reasoning_delta(&delta.reasoning_content);
-                }
-                // 发送 TurnEvent（GUI poll）
-                if let Some(tx) = event_tx_ref {
-                    let _ = tx.send(TurnEvent::Chunk(delta.clone()));
-                }
+                let _ = tx.send(TurnEvent::Chunk(delta.clone()));
             },
         )?;
 
@@ -327,35 +282,30 @@ impl EventLoopRunner {
         self.state.accumulated_usage.accumulate(&response.usage);
         self.observer
             .record_llm_call(scru128::new().to_string(), &response.usage);
-        self.output.on_llm_complete(&response.usage);
 
         if response.tool_calls.is_empty() {
-            // 满足：最终回复（session 已通过流式 callback 更新完毕）
-            let output = LlmOutputRecord {
+            // 满足：最终回复（已通过 Chunk callback 流式输出）
+            self.emit(TurnEvent::LlmOutput(LlmOutputRecord {
                 stage: format!("react-round-{}", self.state.round + 1),
                 content: response.text.clone(),
                 reasoning_content: response.reasoning_content.clone(),
                 tool_calls: Vec::new(),
                 usage: response.usage.clone(),
-            };
-            self.emit(TurnEvent::LlmOutput(output));
+            }));
             self.state.round += 1;
             Ok(true)
         } else {
             // 不满足：工具调用
-            // assistant 消息中的流式中间内容保留（推理过程）
-
             let tool_call_names: Vec<String> =
                 response.tool_calls.iter().map(|tc| tc.name.clone()).collect();
 
-            let output = LlmOutputRecord {
+            self.emit(TurnEvent::LlmOutput(LlmOutputRecord {
                 stage: format!("react-round-{}", self.state.round + 1),
                 content: response.text.clone(),
                 reasoning_content: response.reasoning_content.clone(),
                 tool_calls: tool_call_names.clone(),
                 usage: response.usage.clone(),
-            };
-            self.emit(TurnEvent::LlmOutput(output));
+            }));
 
             let assistant_text = if response.text.is_empty() {
                 format!("[调用工具: {}]", tool_call_names.join(", "))
@@ -396,12 +346,11 @@ impl EventLoopRunner {
                     self.state.loop_context.push(Message {
                         id: scru128::new().to_string(),
                         role: MessageRole::System,
-                        content: msg.clone(),
+                        content: msg,
                         reasoning_content: String::new(),
                         worker_id: None,
                         created_at: now_text(),
                     });
-                    self.session.append_message(MessageRole::System, msg);
                     continue;
                 }
                 PermissionDecision::NeedsApproval { request_id } => {
@@ -410,8 +359,6 @@ impl EventLoopRunner {
                         .chars()
                         .take(200)
                         .collect::<String>();
-                    self.output
-                        .on_approval_request(&request_id, &call.name, &args_summary);
                     self.emit(TurnEvent::ApprovalRequest {
                         request_id: request_id.clone(),
                         tool_name: call.name.clone(),
@@ -426,7 +373,6 @@ impl EventLoopRunner {
                 }
             }
 
-            self.output.on_tool_start(&call.name, "");
             self.emit(TurnEvent::ToolStarted {
                 name: call.name.clone(),
                 summary: String::new(),
@@ -438,9 +384,9 @@ impl EventLoopRunner {
                 &self.engine.agent_config().mcp,
             );
 
-            self.output.on_tool_result(&call.name, &result);
             self.emit(TurnEvent::ToolExecution(result.clone()));
 
+            // 工具结果注入 loop_context（runner 自用）
             let feedback = format!(
                 "工具 {} 执行{}：{}",
                 call.name,
@@ -457,12 +403,11 @@ impl EventLoopRunner {
             self.state.loop_context.push(Message {
                 id: scru128::new().to_string(),
                 role: MessageRole::System,
-                content: feedback.clone(),
+                content: feedback,
                 reasoning_content: String::new(),
                 worker_id: None,
                 created_at: now_text(),
             });
-            self.session.append_message(MessageRole::System, feedback);
         }
 
         let prompt_tokens = self.accumulated_usage.prompt_tokens;
@@ -487,40 +432,16 @@ impl EventLoopRunner {
             },
         };
 
-        self.session
-            .append_message(MessageRole::Assistant, String::new());
-        let idx = self.session.messages.len() - 1;
-
-        let output_ref = &self.output;
-        let event_tx_ref = &self.event_tx;
-        let messages = &mut self.session.messages;
-
+        let tx = self.tx.clone();
         let resp = if use_stream_mode() {
             self.engine
                 .client()
                 .complete_stream_with_callback(&req, |delta| {
-                    if let Some(msg) = messages.get_mut(idx) {
-                        msg.content.push_str(&delta.content);
-                        msg.reasoning_content.push_str(&delta.reasoning_content);
-                    }
-                    if !delta.content.is_empty() {
-                        output_ref.on_delta(&delta.content);
-                    }
-                    if !delta.reasoning_content.is_empty() {
-                        output_ref.on_reasoning_delta(&delta.reasoning_content);
-                    }
-                    if let Some(tx) = event_tx_ref {
-                        let _ = tx.send(TurnEvent::Chunk(delta.clone()));
-                    }
+                    let _ = tx.send(TurnEvent::Chunk(delta.clone()));
                 })?
         } else {
             let r = self.engine.client().complete(&req)?;
-            if let Some(msg) = messages.get_mut(idx) {
-                msg.content = r.text.clone();
-                msg.reasoning_content = r.reasoning_content.clone();
-            }
-            output_ref.on_delta(&r.text);
-            if let Some(tx) = event_tx_ref {
+            if !r.text.is_empty() {
                 let _ = tx.send(TurnEvent::Chunk(ModelStreamChunk {
                     content: r.text.clone(),
                     reasoning_content: r.reasoning_content.clone(),
