@@ -199,11 +199,22 @@ impl TiangongState {
                         if !output.tool_calls.is_empty() {
                             self.store.runtime.run.summary =
                                 format!("正在执行：{}", output.tool_calls.join(", "));
-                            // 有工具调用：重置 assistant_message_id，
-                            // 下一轮 Chunk 创建新 assistant 消息而非追加到旧的
+                            // 有工具调用：将 Chunk 写入的 assistant 消息删除
+                            // （中间推理文本由 LlmOutput 系统消息记录）
+                            // 并重置 assistant_message_id，下一轮创建新 assistant
                             if let Some(pending) =
                                 self.store.runtime.pending_turns.get_mut(&session_id)
                             {
+                                if let Some(ref msg_id) = pending.assistant_message_id
+                                    && let Some(session) = self
+                                        .store
+                                        .session
+                                        .sessions
+                                        .iter_mut()
+                                        .find(|s| s.id == session_id)
+                                {
+                                    session.messages.retain(|m| m.id != *msg_id);
+                                }
                                 pending.assistant_message_id = None;
                                 pending.stage_thinking_message_id = None;
                             }
@@ -539,11 +550,22 @@ impl TiangongState {
                         if !output.tool_calls.is_empty() {
                             self.store.runtime.run.summary =
                                 format!("正在执行：{}", output.tool_calls.join(", "));
-                            // 有工具调用：重置 assistant_message_id，
-                            // 下一轮 Chunk 创建新 assistant 消息而非追加到旧的
+                            // 有工具调用：将 Chunk 写入的 assistant 消息删除
+                            // （中间推理文本由 LlmOutput 系统消息记录）
+                            // 并重置 assistant_message_id，下一轮创建新 assistant
                             if let Some(pending) =
                                 self.store.runtime.pending_turns.get_mut(&session_id)
                             {
+                                if let Some(ref msg_id) = pending.assistant_message_id
+                                    && let Some(session) = self
+                                        .store
+                                        .session
+                                        .sessions
+                                        .iter_mut()
+                                        .find(|s| s.id == session_id)
+                                {
+                                    session.messages.retain(|m| m.id != *msg_id);
+                                }
                                 pending.assistant_message_id = None;
                                 pending.stage_thinking_message_id = None;
                             }
