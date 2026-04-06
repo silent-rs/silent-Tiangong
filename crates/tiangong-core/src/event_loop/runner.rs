@@ -331,21 +331,7 @@ impl EventLoopRunner {
             Ok(true)
         } else {
             // 不满足：工具调用
-            // 发 PlanReady 让 poll 清空 assistant 消息中的流式中间内容
-            let plan = crate::planner::TaskPlan {
-                id: scru128::new().to_string(),
-                objective: self
-                    .state
-                    .loop_context
-                    .iter()
-                    .rev()
-                    .find(|m| m.role == MessageRole::User)
-                    .map(|m| m.content.chars().take(50).collect::<String>())
-                    .unwrap_or_default(),
-                ..Default::default()
-            };
-            let _ = self.output_tx.send(TurnEvent::PlanReady(plan));
-
+            // assistant 消息保留 LLM 的中间推理文本，不清空
             let tool_call_names: Vec<String> = response
                 .tool_calls
                 .iter()
