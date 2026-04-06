@@ -129,8 +129,9 @@ pub fn run() -> Result<()> {
                                 // reasoning
                                 let reasoning = msg.reasoning_content.trim();
                                 if !reasoning.is_empty() {
-                                    let summary = if reasoning.len() > 60 {
-                                        format!("{}...", &reasoning[..57])
+                                    let summary: String = if reasoning.chars().count() > 60 {
+                                        let truncated: String = reasoning.chars().take(57).collect();
+                                        format!("{truncated}...")
                                     } else {
                                         reasoning.to_string()
                                     };
