@@ -182,9 +182,40 @@ pub fn run() -> Result<()> {
                 }
 
                 if !state.has_pending_turn() {
+                    // 退出前最后一次 poll，确保所有事件已消费
+                    state.poll_pending_turn();
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+
+            // 退出后打印 assistant 消息中未显示的剩余内容
+            if let Some(session) = state.active_session()
+                && let Some(last) = session.messages.iter().rev().find(|m| m.role == MessageRole::Assistant)
+            {
+                    // 打印未显示的 reasoning
+                    if !printed_header && !last.reasoning_content.trim().is_empty() {
+                        println!("{GREEN_BOLD}助手{RESET}");
+                        printed_header = true;
+                        let reasoning = last.reasoning_content.trim();
+                        let summary: String = if reasoning.chars().count() > 60 {
+                            let truncated: String = reasoning.chars().take(57).collect();
+                            format!("{truncated}...")
+                        } else {
+                            reasoning.to_string()
+                        };
+                        println!("  {DIM}[思考] {summary}{RESET}");
+                    }
+                    // 打印未显示的 content
+                    if last.content.len() > last_assistant_content_len {
+                        if !printed_header {
+                            println!("{GREEN_BOLD}助手{RESET}");
+                            printed_header = true;
+                        }
+                        let delta = &last.content[last_assistant_content_len..];
+                        output::print_delta(delta);
+                        in_assistant_stream = true;
+                    }
             }
 
             // 确保最后换行
@@ -199,7 +230,7 @@ pub fn run() -> Result<()> {
                 output::print_error(err_msg);
             }
 
-            // 如果没有流式输出但有最终结果（非流式模式兜底）
+            // 如果完全没有流式输出（非流式模式兜底）
             if !printed_header {
                 match snapshot.status {
                     RunStatus::Completed | RunStatus::Idle => {
