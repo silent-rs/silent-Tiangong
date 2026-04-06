@@ -315,7 +315,7 @@ impl EventLoopRunner {
             let final_text = response.text.clone();
             let final_reasoning = response.reasoning_content.clone();
 
-            // 发送 LlmOutput
+            // 发送 LlmOutput（供 poll 写入系统消息记录）
             let output = LlmOutputRecord {
                 stage: format!("react-round-{}", self.state.round + 1),
                 content: final_text.clone(),
@@ -325,7 +325,8 @@ impl EventLoopRunner {
             };
             let _ = self.output_tx.send(TurnEvent::LlmOutput(output));
 
-            // 发送 reasoning chunk
+            // 流式发送最终回复到 assistant 消息
+            // 先发 reasoning
             if !final_reasoning.is_empty() {
                 let _ = self.output_tx.send(TurnEvent::Chunk(ModelStreamChunk {
                     content: String::new(),
@@ -333,13 +334,21 @@ impl EventLoopRunner {
                 }));
             }
 
-            // 发送 content chunks
+            // 按段落拆分 content 发送，触发前端/CLI 流式检测
             let cleaned = strip_tool_traces_from_response(&final_text);
             if !cleaned.is_empty() {
-                let _ = self.output_tx.send(TurnEvent::Chunk(ModelStreamChunk {
-                    content: cleaned,
-                    reasoning_content: String::new(),
-                }));
+                let paragraphs: Vec<&str> = cleaned.split("\n\n").collect();
+                for (i, para) in paragraphs.iter().enumerate() {
+                    let chunk = if i < paragraphs.len() - 1 {
+                        format!("{para}\n\n")
+                    } else {
+                        para.to_string()
+                    };
+                    let _ = self.output_tx.send(TurnEvent::Chunk(ModelStreamChunk {
+                        content: chunk,
+                        reasoning_content: String::new(),
+                    }));
+                }
             }
 
             self.state.round += 1;
