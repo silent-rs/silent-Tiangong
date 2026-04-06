@@ -325,8 +325,8 @@
 
 ### Phase 12-D：集成与清理
 
-- [ ] 修改 `app_state/services/turn/`：start_turn 改为 send_event
-- [ ] 修改 `app_state/facade/sessions/turn_control.rs`：poll_pending_turn 改为 poll_active_loop
-- [ ] 修改 `tiangong-cli/src/repl.rs`：使用 CliLoopHost
-- [ ] 删除 TurnRunner / QueryClassifier / ControlSignal 等旧代码
-- [ ] 验证：完整检查链通过
+- [x] 修改 `app_state/services/turn/start.rs`：用 EventLoopRunner 替代 TurnRunner/TaskCoordinator
+- [x] ControlSignal → LoopEvent 兼容层，poll 逻辑完全复用
+- [ ] 修改 `tiangong-cli/src/repl.rs`：使用 CliLoopHost（后续优化）
+- [ ] 删除 TurnRunner / QueryClassifier 等旧代码（后续清理）
+- [x] 验证：完整检查链通过
