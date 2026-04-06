@@ -292,20 +292,13 @@ impl EventLoopRunner {
         };
 
         // 流式回调：直接发 Chunk 到 assistant 消息（实时流式输出）
-        // 同时发 StageThinking 到系统消息（调试记录）
+        // LlmOutput 事件在调用完成后发送，包含完整记录
         let tx = self.output_tx.clone();
-        let round = self.state.round;
         let response = self.engine.client().complete_with_functions_stream(
             &req,
             &self.function_tools,
             &mut |delta: &ModelStreamChunk| {
-                // 实时流式到 assistant 消息
                 let _ = tx.send(TurnEvent::Chunk(delta.clone()));
-                // 同时记录到系统消息（调试用）
-                let _ = tx.send(TurnEvent::StageThinking {
-                    stage: format!("react-round-{}", round + 1),
-                    delta: delta.clone(),
-                });
             },
         )?;
 
