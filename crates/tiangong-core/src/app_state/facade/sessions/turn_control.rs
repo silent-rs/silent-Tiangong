@@ -168,7 +168,9 @@ impl TiangongState {
     /// 轮询所有 pending_turns，处理每个会话的事件
     /// 每次最多处理 MAX_EVENTS_PER_POLL 个事件，防止长时间持锁阻塞其他操作
     pub fn poll_pending_turns(&mut self) {
-        const MAX_EVENTS_PER_POLL: usize = 50;
+        /// 单次 poll 最大持锁时间（毫秒），防止阻塞 GUI 线程
+        const MAX_POLL_DURATION_MS: u128 = 10;
+        let poll_start = std::time::Instant::now();
 
         // 收集所有 pending session_id
         let session_ids: Vec<String> = self.store.runtime.pending_turns.keys().cloned().collect();
@@ -177,13 +179,11 @@ impl TiangongState {
         for session_id in session_ids {
             let mut should_clear = false;
             let mut disconnected = false;
-            let mut events_processed = 0usize;
 
-            while events_processed < MAX_EVENTS_PER_POLL {
+            while poll_start.elapsed().as_millis() < MAX_POLL_DURATION_MS {
                 let Some(event) = self.try_recv_turn_event(&session_id, &mut disconnected) else {
                     break;
                 };
-                events_processed += 1;
                 match event {
                     TurnEvent::PlanReady(plan) => {
                         self.mark_pending_turn_executing(&session_id, &plan);
@@ -312,7 +312,9 @@ impl TiangongState {
 
     /// 只轮询指定 session 的 pending turn
     pub fn poll_pending_turn_for(&mut self, session_id: &str) {
-        const MAX_EVENTS_PER_POLL: usize = 50;
+        /// 单次 poll 最大持锁时间（毫秒），防止阻塞 GUI 线程
+        const MAX_POLL_DURATION_MS: u128 = 10;
+        let poll_start = std::time::Instant::now();
 
         if !self.store.runtime.pending_turns.contains_key(session_id) {
             return;
@@ -320,13 +322,11 @@ impl TiangongState {
 
         let mut should_clear = false;
         let mut disconnected = false;
-        let mut events_processed = 0usize;
 
-        while events_processed < MAX_EVENTS_PER_POLL {
+        while poll_start.elapsed().as_millis() < MAX_POLL_DURATION_MS {
             let Some(event) = self.try_recv_turn_event(session_id, &mut disconnected) else {
                 break;
             };
-            events_processed += 1;
             match event {
                 TurnEvent::PlanReady(plan) => {
                     self.mark_pending_turn_executing(session_id, &plan);
