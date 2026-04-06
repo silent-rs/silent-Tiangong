@@ -38,6 +38,7 @@ impl TaskCoordinator {
             session_title: String::new(),
             user_input: prompt,
             context: Vec::new(),
+            assembled_system_prompt: None,
         };
 
         match self.engine.client().complete(&req) {
@@ -129,6 +130,7 @@ impl TaskCoordinator {
             session_title: String::new(),
             user_input: prompt,
             context: Vec::new(),
+            assembled_system_prompt: None,
         };
 
         let resp = self.engine.client().complete(&req)?;
@@ -285,6 +287,7 @@ impl TaskCoordinator {
                 session_title: String::new(),
                 user_input: prompt,
                 context: Vec::new(),
+            assembled_system_prompt: None,
             };
 
             if let Some(tx) = event_tx {

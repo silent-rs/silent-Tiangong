@@ -38,6 +38,26 @@ pub struct ModelRequest {
     pub session_title: String,
     pub user_input: String,
     pub context: Vec<Message>,
+    /// 已由 PromptAssembler 装配的 system prompt。
+    /// 设置此字段后 build_openai_messages 跳过自己的环境注入。
+    pub assembled_system_prompt: Option<String>,
+}
+
+impl ModelRequest {
+    /// 带 assembled_system_prompt 的构造
+    pub fn with_assembled_prompt(
+        session_title: String,
+        user_input: String,
+        context: Vec<Message>,
+        system_prompt: String,
+    ) -> Self {
+        Self {
+            session_title,
+            user_input,
+            context,
+            assembled_system_prompt: Some(system_prompt),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -992,42 +1012,80 @@ impl ModelClient for SingleProviderClient {
 
 fn build_openai_messages(req: &ModelRequest) -> Result<Vec<ChatCompletionRequestMessage>> {
     let mut messages = Vec::new();
-    let mut system_texts = vec![
-        format!("当前会话：{}", req.session_title),
-        format!("当前工作目录：{}", current_working_directory_text()),
-        format!("允许文件操作目录：{}", allowed_file_roots_text()),
-    ];
-    if let Some(mcp_tools_prompt) = build_mcp_tools_system_prompt(24) {
-        system_texts.push(mcp_tools_prompt);
-    }
 
-    for msg in &req.context {
-        match msg.role {
-            MessageRole::System => {
-                if !msg.content.trim().is_empty() {
-                    system_texts.push(msg.content.clone());
-                }
-            }
-            MessageRole::User => {
-                messages.push(
-                    ChatCompletionRequestUserMessageArgs::default()
-                        .content(msg.content.clone())
-                        .build()
-                        .context("构建 user 消息失败")?
-                        .into(),
-                );
-            }
-            MessageRole::Assistant => {
-                messages.push(
-                    ChatCompletionRequestAssistantMessageArgs::default()
-                        .content(msg.content.clone())
-                        .build()
-                        .context("构建 assistant 消息失败")?
-                        .into(),
-                );
+    // 如果已由 PromptAssembler 装配，使用装配好的 system prompt，不再自行注入环境信息
+    let system_texts = if let Some(ref assembled) = req.assembled_system_prompt {
+        let mut texts = vec![assembled.clone()];
+        // context 中的 System 消息仍然追加（attachment 等）
+        for msg in &req.context {
+            if msg.role == MessageRole::System && !msg.content.trim().is_empty() {
+                texts.push(msg.content.clone());
             }
         }
-    }
+        // context 中的 User/Assistant 消息
+        for msg in &req.context {
+            match msg.role {
+                MessageRole::User => {
+                    messages.push(
+                        ChatCompletionRequestUserMessageArgs::default()
+                            .content(msg.content.clone())
+                            .build()
+                            .context("构建 user 消息失败")?
+                            .into(),
+                    );
+                }
+                MessageRole::Assistant => {
+                    messages.push(
+                        ChatCompletionRequestAssistantMessageArgs::default()
+                            .content(msg.content.clone())
+                            .build()
+                            .context("构建 assistant 消息失败")?
+                            .into(),
+                    );
+                }
+                _ => {}
+            }
+        }
+        texts
+    } else {
+        // 旧路径：自行注入环境信息（兼容 TurnRunner / Worker）
+        let mut texts = vec![
+            format!("当前会话：{}", req.session_title),
+            format!("当前工作目录：{}", current_working_directory_text()),
+            format!("允许文件操作目录：{}", allowed_file_roots_text()),
+        ];
+        if let Some(mcp_tools_prompt) = build_mcp_tools_system_prompt(24) {
+            texts.push(mcp_tools_prompt);
+        }
+        for msg in &req.context {
+            match msg.role {
+                MessageRole::System => {
+                    if !msg.content.trim().is_empty() {
+                        texts.push(msg.content.clone());
+                    }
+                }
+                MessageRole::User => {
+                    messages.push(
+                        ChatCompletionRequestUserMessageArgs::default()
+                            .content(msg.content.clone())
+                            .build()
+                            .context("构建 user 消息失败")?
+                            .into(),
+                    );
+                }
+                MessageRole::Assistant => {
+                    messages.push(
+                        ChatCompletionRequestAssistantMessageArgs::default()
+                            .content(msg.content.clone())
+                            .build()
+                            .context("构建 assistant 消息失败")?
+                            .into(),
+                    );
+                }
+            }
+        }
+        texts
+    };
 
     messages.insert(
         0,

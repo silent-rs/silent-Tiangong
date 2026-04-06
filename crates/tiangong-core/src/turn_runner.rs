@@ -228,6 +228,7 @@ impl TurnRunner {
                 ctx.extend(self.loop_messages.clone());
                 ctx
             },
+            assembled_system_prompt: None,
         };
 
         // 流式回调：推送 StageThinking（中间系统消息），避免多轮时中间内容污染 assistant 消息
@@ -317,6 +318,7 @@ impl TurnRunner {
             session_title: self.session.title.clone(),
             user_input: self.system_prompt.clone(),
             context: self.context.clone(),
+            assembled_system_prompt: None,
         };
         let tx = self.tx.clone();
         let resp = if use_stream_mode() {
@@ -553,6 +555,7 @@ impl TurnRunner {
                     ctx.extend(self.loop_messages.clone());
                     ctx
                 },
+                assembled_system_prompt: None,
             };
             let tx = self.tx.clone();
             let resp = if use_stream_mode() {

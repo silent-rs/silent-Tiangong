@@ -257,26 +257,14 @@ impl EventLoopRunner {
         );
 
         // 构建 ModelRequest
-        // system_prompt 通过 context 中的 System 消息注入（build_openai_messages 会合并到 system）
-        // user_input 作为最后一条 user 消息
+        // 使用 assembled_system_prompt 标记：已由 PromptAssembler 完成装配
+        // build_openai_messages 检测到此标记后跳过自己的环境注入
         self.system_prompt = assembled.final_system_prompt();
-        let mut context_messages = Vec::new();
-        // 注入 system prompt 为 System 消息
-        context_messages.push(Message {
-            id: scru128::new().to_string(),
-            role: MessageRole::System,
-            content: self.system_prompt.clone(),
-            reasoning_content: String::new(),
-            worker_id: None,
-            created_at: now_text(),
-        });
-        // 追加 assembled 构建的消息
-        context_messages.extend(assembled.build_messages());
-
         let req = ModelRequest {
             session_title: self.session.title.clone(),
             user_input: assembled.user_input.clone(),
-            context: context_messages,
+            context: assembled.build_messages(),
+            assembled_system_prompt: Some(self.system_prompt.clone()),
         };
 
         // 流式回调：直接通过 TurnEvent channel 输出 Chunk
@@ -442,6 +430,7 @@ impl EventLoopRunner {
                 ctx.extend(self.state.loop_context.clone());
                 ctx
             },
+            assembled_system_prompt: None,
         };
 
         let tx = self.tx.clone();
