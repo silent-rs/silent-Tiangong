@@ -47,11 +47,7 @@ impl CliLoopHost {
     fn ensure_running(&mut self) {
         if self.handle.is_some() {
             // 检查线程是否已结束
-            if self
-                .thread
-                .as_ref()
-                .is_some_and(|t| t.is_finished())
-            {
+            if self.thread.as_ref().is_some_and(|t| t.is_finished()) {
                 self.collect_finished();
             } else {
                 return; // 仍在运行
@@ -70,7 +66,12 @@ impl CliLoopHost {
                 event_rx,
             )
         } else {
-            EventLoopRunner::new(self.engine.clone(), self.session.clone(), output_tx, event_rx)
+            EventLoopRunner::new(
+                self.engine.clone(),
+                self.session.clone(),
+                output_tx,
+                event_rx,
+            )
         };
 
         let thread = thread::spawn(move || runner.run());
@@ -151,7 +152,6 @@ impl LoopHost for CliLoopHost {
     }
 
     fn is_active(&self, session_id: &str) -> bool {
-        self.session_id == session_id
-            && (self.handle.is_some() || self.suspended_state.is_some())
+        self.session_id == session_id && (self.handle.is_some() || self.suspended_state.is_some())
     }
 }

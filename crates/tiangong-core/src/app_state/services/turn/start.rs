@@ -106,8 +106,7 @@ impl AppTurnService {
         let runtime = state.services.runtime.clone();
         let session_snapshot = state.store.session.sessions[active_idx].clone();
         let (tx, rx) = mpsc::channel::<TurnEvent>();
-        let (event_tx, event_rx) =
-            mpsc::channel::<crate::event_loop::LoopEvent>();
+        let (event_tx, event_rx) = mpsc::channel::<crate::event_loop::LoopEvent>();
 
         // 用 EventLoopRunner 替代 TurnRunner/TaskCoordinator
         let output_tx = tx.clone();
@@ -163,9 +162,7 @@ impl AppTurnService {
         });
 
         // 向 EventLoopRunner 发送初始用户消息事件
-        let _ = event_tx.send(crate::event_loop::LoopEvent::UserMessage {
-            content: input,
-        });
+        let _ = event_tx.send(crate::event_loop::LoopEvent::UserMessage { content: input });
 
         // 将 ctrl_tx 包装为兼容层（ControlSignal → LoopEvent 转发）
         let (ctrl_tx, ctrl_rx_compat) = mpsc::channel::<ControlSignal>();

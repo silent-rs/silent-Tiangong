@@ -25,10 +25,7 @@ pub enum LoopEvent {
         success: bool,
     },
     /// 权限审批响应
-    PermissionResponse {
-        request_id: String,
-        approved: bool,
-    },
+    PermissionResponse { request_id: String, approved: bool },
     /// 用户取消当前处理
     Cancel,
     /// 系统信号

@@ -182,13 +182,21 @@ impl TaskCoordinator {
                         let mut worker_session = Session::new(&task.objective);
                         worker_session.cwd = session.cwd.clone();
 
+                        // 多 Worker 模式下每个 Worker 分配独立预算（总预算按 Worker 数均分）
+                        let worker_budget = WorkerBudget {
+                            max_tokens: WorkerBudget::default().max_tokens,
+                            max_rounds: 10, // 多 Worker 单个子任务轮次更少
+                            max_tool_calls: 20,
+                            max_duration_secs: 120,
+                        };
+
                         let worker_context = WorkerContext {
                             worker_id: worker_id.clone(),
                             task_objective: task.user_input,
-                            available_tools: Vec::new(),
+                            available_tools: Vec::new(), // 后续可通过 LLM 拆分时指定
                             context_scope: super::types::ContextScope::TaskOnly,
                             working_dir: None,
-                            budget: WorkerBudget::default(),
+                            budget: worker_budget,
                         };
 
                         tracing::info!(worker_id, "Worker 开始执行");

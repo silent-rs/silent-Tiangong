@@ -75,8 +75,7 @@ pub fn loops_dir() -> PathBuf {
 /// 保存 LoopState 到磁盘
 pub fn save_loop_state(state: &LoopState) -> Result<()> {
     let dir = loops_dir();
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("创建 loops 目录失败：{}", dir.display()))?;
+    fs::create_dir_all(&dir).with_context(|| format!("创建 loops 目录失败：{}", dir.display()))?;
 
     let persisted = PersistedLoopState::from(state);
     let path = dir.join(format!("{}.json", state.session_id));
@@ -98,8 +97,8 @@ pub fn load_all_loop_states() -> Result<Vec<LoopState>> {
     }
 
     let mut states = Vec::new();
-    for entry in fs::read_dir(&dir)
-        .with_context(|| format!("读取 loops 目录失败：{}", dir.display()))?
+    for entry in
+        fs::read_dir(&dir).with_context(|| format!("读取 loops 目录失败：{}", dir.display()))?
     {
         let entry = entry?;
         let path = entry.path();

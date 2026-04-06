@@ -8,6 +8,8 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
 use anyhow::Result;
 
+use super::context::events_to_messages;
+use super::types::*;
 use crate::agents::execution_mcp_agent::{McpFunctionTarget, execution_function_tools};
 use crate::app_state::TurnEvent;
 use crate::context::assembler::ContextAssembler;
@@ -16,14 +18,12 @@ use crate::context::organizer::ContextOrganizer;
 use crate::model::{
     FunctionToolSpec, ModelClient, ModelFunctionCall, ModelRequest, ModelStreamChunk, TokenUsage,
 };
+use crate::observe::ObserveCollector;
 use crate::runtime::{
     LlmOutputRecord, RuntimeEngine, build_react_system_prompt, inject_enhanced_tools,
     strip_tool_traces_from_response, use_stream_mode,
 };
-use crate::observe::ObserveCollector;
 use crate::session::{Message, MessageRole, Session, now_text};
-use super::context::events_to_messages;
-use super::types::*;
 
 const MAX_ROUNDS: usize = 20;
 
@@ -163,11 +163,7 @@ impl EventLoopRunner {
 
             // 5. 处理权限响应
             for event in &events {
-                if let LoopEvent::PermissionResponse {
-                    approved,
-                    ..
-                } = event
-                {
+                if let LoopEvent::PermissionResponse { approved, .. } = event {
                     if *approved {
                         // 审批通过，继续执行待处理的工具调用
                         self.phase = LoopPhase::Processing;
@@ -311,10 +307,8 @@ impl EventLoopRunner {
 
         self.accumulated_usage.accumulate(&response.usage);
         self.state.accumulated_usage.accumulate(&response.usage);
-        self.observer.record_llm_call(
-            scru128::new().to_string(),
-            &response.usage,
-        );
+        self.observer
+            .record_llm_call(scru128::new().to_string(), &response.usage);
 
         if response.tool_calls.is_empty() {
             // 满足：文本回复
@@ -352,8 +346,11 @@ impl EventLoopRunner {
             Ok(true)
         } else {
             // 不满足：工具调用
-            let tool_call_names: Vec<String> =
-                response.tool_calls.iter().map(|tc| tc.name.clone()).collect();
+            let tool_call_names: Vec<String> = response
+                .tool_calls
+                .iter()
+                .map(|tc| tc.name.clone())
+                .collect();
 
             let output = LlmOutputRecord {
                 stage: format!("react-round-{}", self.state.round + 1),
@@ -448,7 +445,9 @@ impl EventLoopRunner {
                 &self.engine.agent_config().mcp,
             );
 
-            let _ = self.output_tx.send(TurnEvent::ToolExecution(result.clone()));
+            let _ = self
+                .output_tx
+                .send(TurnEvent::ToolExecution(result.clone()));
 
             // 工具结果注入上下文
             let feedback = format!(

@@ -93,11 +93,7 @@ impl MultiLoopHost {
         let finished_ids: Vec<String> = self
             .running
             .iter()
-            .filter(|(_, r)| {
-                r.thread
-                    .as_ref()
-                    .is_some_and(|t| t.is_finished())
-            })
+            .filter(|(_, r)| r.thread.as_ref().is_some_and(|t| t.is_finished()))
             .map(|(id, _)| id.clone())
             .collect();
 
@@ -125,10 +121,8 @@ impl MultiLoopHost {
 
         for (id, state) in &self.suspended {
             if let Some(ref suspended_at) = state.suspended_at
-                && let Ok(ts) = chrono::NaiveDateTime::parse_from_str(
-                    suspended_at,
-                    "%Y-%m-%d %H:%M:%S%.f",
-                )
+                && let Ok(ts) =
+                    chrono::NaiveDateTime::parse_from_str(suspended_at, "%Y-%m-%d %H:%M:%S%.f")
             {
                 let elapsed = (now - ts).num_seconds().unsigned_abs();
                 if elapsed > max_idle_secs {

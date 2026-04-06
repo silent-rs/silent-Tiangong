@@ -766,7 +766,6 @@ impl SingleProviderClient {
 
         Ok(text)
     }
-
 }
 
 impl ModelClient for SingleProviderClient {

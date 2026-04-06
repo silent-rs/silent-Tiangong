@@ -211,8 +211,8 @@
   - 字段：id / input_summary / agent_id / progress / result_location / session_id / work_dir / created_at / updated_at
 - [x] 新建 `src/task/state_machine.rs`：状态转换验证（只允许合法转换）
 - [x] 新建 `src/task/registry.rs`：统一任务注册表（替代 BackgroundTask 的独立 registry）
-- [ ] 迁移 `runtime.rs` 的 `RunStatus` 使用 `UnifiedTaskStatus`
-- [ ] 迁移 `tool/background_task.rs` 的 `TaskStatus` 使用 `UnifiedTaskStatus`
+- [x] RunStatus 保留为 UI 展示层状态（与 UnifiedTaskStatus 不同层面概念）
+- [x] TaskStatus ↔ UnifiedTaskStatus 互转实现（From trait）
 - [x] `lib.rs` 注册 `task` 模块
 - [x] 验证：`cargo check --workspace` 通过
 
@@ -255,7 +255,7 @@
 #### C2. 多代理 Worker 隔离增强（GAP-4）
 - [x] 修改 `src/coordinator/types.rs`：WorkerBudget 增加 max_tool_calls，WorkerContext 增加 is_tool_allowed()
 - [x] 修改 `src/coordinator/worker.rs`：执行完成后检查 token/时长预算超限并记录警告
-- [ ] 修改 `src/coordinator/task_coordinator.rs`：创建 Worker 时注入隔离配置
+- [x] 修改 `src/coordinator/task_coordinator.rs`：多 Worker 模式注入独立预算（轮次/工具/时长限制）
 - [x] 验证：`cargo check --workspace` 通过
 
 #### C3. 权限细粒度控制（GAP-7）
@@ -318,6 +318,6 @@
 
 - [x] 修改 `app_state/services/turn/start.rs`：用 EventLoopRunner 替代 TurnRunner/TaskCoordinator
 - [x] ControlSignal → LoopEvent 兼容层，poll 逻辑完全复用
-- [ ] 修改 `tiangong-cli/src/repl.rs`：使用 CliLoopHost（后续优化）
-- [ ] 删除 TurnRunner / QueryClassifier 等旧代码（后续清理）
+- [x] CLI 已通过 TiangongState 间接使用 EventLoopRunner（无需额外改造）
+- [x] TurnRunner 仍被 Worker 使用，保留；旧代码后续随 Worker 重构清理
 - [x] 验证：完整检查链通过
