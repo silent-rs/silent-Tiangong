@@ -15,7 +15,7 @@ interface MentionCandidate {
 }
 
 export function MessageInput() {
-  const { inputContent, setInputContent, sendMessage, cancelTurn, runStatus, runSummary, isDraft, activeSessionId, sessionRunStatuses, sessionCwd, setSessionCwd, addVoiceMessage, lastDurationMs } = useStore();
+  const { inputContent, setInputContent, sendMessage, cancelTurn, runStatus, runSummary, isDraft, activeSessionId, sessionRunStatuses, sessionCwd, setSessionCwd, addVoiceMessage, lastDurationMs, lastUsage } = useStore();
   const [isComposing, setIsComposing] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -29,8 +29,9 @@ export function MessageInput() {
 
   // 信任模式
   const [trustMode, setTrustMode] = useState('full_trust');
-  // 会话 token 用量
-  const [sessionCost, setSessionCost] = useState<{ total_tokens: number } | null>(null);
+  // 会话累计 token（idle 时从 API 加载）+ 当前轮增量（执行中从 lastUsage 取）
+  const [sessionTotalTokens, setSessionTotalTokens] = useState(0);
+  const [prevTotalTokens, setPrevTotalTokens] = useState(0);
 
   const currentRunStatus = isDraft
     ? 'idle'
@@ -40,13 +41,23 @@ export function MessageInput() {
     api.getTrustMode().then(setTrustMode).catch(() => {});
   }, []);
 
+  // idle 时从 API 加载会话累计 token
   useEffect(() => {
     if (!isDraft && activeSessionId && currentRunStatus === 'idle') {
-      api.getSessionCost(activeSessionId).then(setSessionCost).catch(() => setSessionCost(null));
-    } else {
-      setSessionCost(null);
+      api.getSessionCost(activeSessionId).then((cost) => {
+        const total = cost?.total_tokens ?? 0;
+        setSessionTotalTokens(total);
+        setPrevTotalTokens(total);
+      }).catch(() => {});
     }
   }, [activeSessionId, isDraft, currentRunStatus]);
+
+  // 执行中实时更新：会话累计 + 当前轮 lastUsage
+  useEffect(() => {
+    if (lastUsage && lastUsage.total_tokens > 0 && currentRunStatus !== 'idle') {
+      setSessionTotalTokens(prevTotalTokens + lastUsage.total_tokens);
+    }
+  }, [lastUsage, currentRunStatus, prevTotalTokens]);
 
   const toggleTrustMode = async () => {
     const newMode = trustMode === 'full_trust' ? 'supervised' : 'full_trust';
@@ -500,10 +511,13 @@ export function MessageInput() {
                 )}
               </div>
               <div className="flex items-center gap-2 shrink-0">
-                {sessionCost && sessionCost.total_tokens > 0 && (
-                  <span className="text-muted-foreground/50">
+                {sessionTotalTokens > 0 && (
+                  <span className="text-muted-foreground/50 tabular-nums">
                     {lastDurationMs ? `${(lastDurationMs / 1000).toFixed(1)}s · ` : ''}
-                    {sessionCost.total_tokens.toLocaleString()} tokens
+                    {sessionTotalTokens.toLocaleString()} tokens
+                    {lastUsage && lastUsage.total_tokens > 0 && currentRunStatus !== 'idle' && (
+                      <span className="text-blue-400 ml-1">+{lastUsage.total_tokens.toLocaleString()}</span>
+                    )}
                   </span>
                 )}
                 <button
