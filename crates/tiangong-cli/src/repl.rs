@@ -20,6 +20,7 @@ struct OutputTracker {
     last_assistant_reasoning_len: usize,
     in_assistant_stream: bool,
     printed_header: bool,
+    printed_reasoning: bool,
 }
 
 impl OutputTracker {
@@ -30,6 +31,7 @@ impl OutputTracker {
             last_assistant_reasoning_len: 0,
             in_assistant_stream: false,
             printed_header: false,
+            printed_reasoning: false,
         }
     }
 
@@ -40,6 +42,7 @@ impl OutputTracker {
         self.last_assistant_reasoning_len = 0;
         self.in_assistant_stream = false;
         self.printed_header = false;
+        self.printed_reasoning = false;
     }
 
     /// 处理 session 消息变化，打印增量内容
@@ -75,23 +78,13 @@ impl OutputTracker {
                         println!("{GREEN_BOLD}助手{RESET}");
                         self.printed_header = true;
                     }
-                    // reasoning
-                    let reasoning = msg.reasoning_content.trim();
-                    if !reasoning.is_empty() {
-                        let summary: String = if reasoning.chars().count() > 60 {
-                            let truncated: String = reasoning.chars().take(57).collect();
-                            format!("{truncated}...")
-                        } else {
-                            reasoning.to_string()
-                        };
-                        println!("  {DIM}[思考] {summary}{RESET}");
-                    }
+                    // reasoning 在流式中不打印（终端无法覆盖），等完成后由 flush_remaining 打印完整摘要
+                    self.last_assistant_reasoning_len = msg.reasoning_content.len();
                     // content
                     if !msg.content.is_empty() {
                         output::print_delta(&msg.content);
                         self.in_assistant_stream = true;
                         self.last_assistant_content_len = msg.content.len();
-                        self.last_assistant_reasoning_len = msg.reasoning_content.len();
                         had_output = true;
                     }
                 }
@@ -136,23 +129,31 @@ impl OutputTracker {
                 .rev()
                 .find(|m| m.role == MessageRole::Assistant)
         {
-            if !self.printed_header && !last.reasoning_content.trim().is_empty() {
+            if !self.printed_header {
                 println!("{GREEN_BOLD}助手{RESET}");
                 self.printed_header = true;
-                let reasoning = last.reasoning_content.trim();
-                let summary: String = if reasoning.chars().count() > 60 {
-                    let truncated: String = reasoning.chars().take(57).collect();
-                    format!("{truncated}...")
-                } else {
-                    reasoning.to_string()
-                };
-                println!("  {DIM}[思考] {summary}{RESET}");
             }
-            if last.content.len() > self.last_assistant_content_len {
-                if !self.printed_header {
-                    println!("{GREEN_BOLD}助手{RESET}");
-                    self.printed_header = true;
+            // 如果流式中正在输出 content，先换行再打印 reasoning
+            if self.in_assistant_stream {
+                output::flush_line();
+                self.in_assistant_stream = false;
+            }
+            // 打印完整 reasoning 摘要（流式中没打印过）
+            if !self.printed_reasoning {
+                let reasoning = last.reasoning_content.trim();
+                if !reasoning.is_empty() {
+                    let summary: String = if reasoning.chars().count() > 60 {
+                        let truncated: String = reasoning.chars().take(57).collect();
+                        format!("{truncated}...")
+                    } else {
+                        reasoning.to_string()
+                    };
+                    println!("  {DIM}[思考] {summary}{RESET}");
+                    self.printed_reasoning = true;
                 }
+            }
+            // 打印未输出的 content
+            if last.content.len() > self.last_assistant_content_len {
                 let delta = &last.content[self.last_assistant_content_len..];
                 output::print_delta(delta);
                 self.in_assistant_stream = true;
@@ -215,8 +216,8 @@ pub fn run() -> Result<()> {
                 ));
             }
 
-            // 短暂等待后继续循环（非阻塞）
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            // 短暂等待后继续循环
+            std::thread::sleep(std::time::Duration::from_millis(100));
             continue;
         }
 
