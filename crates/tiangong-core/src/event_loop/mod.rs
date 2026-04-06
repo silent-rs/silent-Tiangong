@@ -10,6 +10,7 @@ pub mod active_loops;
 pub mod cli_host;
 pub mod context;
 pub mod host;
+pub mod persistence;
 pub mod runner;
 pub mod types;
 

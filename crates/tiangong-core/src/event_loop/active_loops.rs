@@ -118,10 +118,49 @@ impl MultiLoopHost {
         }
     }
 
-    /// 清理长时间不活跃的挂起 loop
-    pub fn cleanup_inactive(&mut self, _max_idle_secs: u64) {
-        // TODO: 根据 suspended_at 判断超时，持久化到磁盘后移除
-        // 当前先保留所有挂起状态
+    /// 清理长时间不活跃的挂起 loop（持久化到磁盘后移除）
+    pub fn cleanup_inactive(&mut self, max_idle_secs: u64) {
+        let now = chrono::Local::now().naive_local();
+        let mut to_remove = Vec::new();
+
+        for (id, state) in &self.suspended {
+            if let Some(ref suspended_at) = state.suspended_at
+                && let Ok(ts) = chrono::NaiveDateTime::parse_from_str(
+                    suspended_at,
+                    "%Y-%m-%d %H:%M:%S%.f",
+                )
+            {
+                let elapsed = (now - ts).num_seconds().unsigned_abs();
+                if elapsed > max_idle_secs {
+                    if let Err(err) = super::persistence::save_loop_state(state) {
+                        tracing::warn!("持久化不活跃 loop {id} 失败：{err}");
+                    }
+                    to_remove.push(id.clone());
+                }
+            }
+        }
+
+        for id in to_remove {
+            self.suspended.remove(&id);
+            tracing::info!("不活跃 loop {id} 已持久化并从内存移除");
+        }
+    }
+
+    /// 从磁盘恢复持久化的 loop 状态到 suspended
+    pub fn restore_from_disk(&mut self) {
+        match super::persistence::load_all_loop_states() {
+            Ok(states) => {
+                for state in states {
+                    let id = state.session_id.clone();
+                    if !self.running.contains_key(&id) && !self.suspended.contains_key(&id) {
+                        self.suspended.insert(id, state);
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!("从磁盘恢复 LoopState 失败：{err}");
+            }
+        }
     }
 
     /// 活跃的会话数（running + suspended）
@@ -175,6 +214,13 @@ impl LoopHost for MultiLoopHost {
         // 强制移除仍在运行的（超时）
         for (id, _) in self.running.drain() {
             tracing::warn!("EventLoop {id} 关闭超时，强制终止");
+        }
+
+        // 持久化所有 suspended 状态到磁盘
+        for (id, state) in self.suspended.drain() {
+            if let Err(err) = super::persistence::save_loop_state(&state) {
+                tracing::warn!("shutdown 持久化 loop {id} 失败：{err}");
+            }
         }
     }
 
