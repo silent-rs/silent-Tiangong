@@ -267,13 +267,20 @@ impl EventLoopRunner {
             assembled_system_prompt: Some(self.system_prompt.clone()),
         };
 
-        // 流式回调：直接通过 TurnEvent channel 输出 Chunk
+        // 流式回调：先发 StageThinking（系统消息记录），不发 Chunk
+        // 原因：此时不知道 LLM 是否会返回工具调用。
+        // 如果发了 Chunk 会写入 assistant 消息，工具调用时需要删除，跨 poll 时序难控。
+        // 最终回复（无工具调用）再补发 Chunk。
         let tx = self.tx.clone();
+        let round = self.state.round;
         let response = self.engine.client().complete_with_functions_stream(
             &req,
             &self.function_tools,
             &mut |delta: &ModelStreamChunk| {
-                let _ = tx.send(TurnEvent::Chunk(delta.clone()));
+                let _ = tx.send(TurnEvent::StageThinking {
+                    stage: format!("react-round-{}", round + 1),
+                    delta: delta.clone(),
+                });
             },
         )?;
 
@@ -284,7 +291,29 @@ impl EventLoopRunner {
 
         if response.tool_calls.is_empty() {
             // 满足：最终回复
-            // content/reasoning 已通过 Chunk 写入 assistant 消息，LlmOutput 只记录元信息
+            // 流式 callback 只发了 StageThinking，现在补发 Chunk 写入 assistant 消息
+            if !response.reasoning_content.is_empty() {
+                self.emit(TurnEvent::Chunk(ModelStreamChunk {
+                    content: String::new(),
+                    reasoning_content: response.reasoning_content.clone(),
+                }));
+            }
+            if !response.text.is_empty() {
+                // 按段落拆分发送，触发前端流式检测
+                let paragraphs: Vec<&str> = response.text.split("\n\n").collect();
+                for (i, para) in paragraphs.iter().enumerate() {
+                    let chunk = if i < paragraphs.len() - 1 {
+                        format!("{para}\n\n")
+                    } else {
+                        para.to_string()
+                    };
+                    self.emit(TurnEvent::Chunk(ModelStreamChunk {
+                        content: chunk,
+                        reasoning_content: String::new(),
+                    }));
+                }
+            }
+
             self.emit(TurnEvent::LlmOutput(LlmOutputRecord {
                 stage: format!("react-round-{}", self.state.round + 1),
                 content: String::new(),
