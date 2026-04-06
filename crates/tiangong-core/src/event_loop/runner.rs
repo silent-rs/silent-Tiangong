@@ -284,11 +284,12 @@ impl EventLoopRunner {
             .record_llm_call(scru128::new().to_string(), &response.usage);
 
         if response.tool_calls.is_empty() {
-            // 满足：最终回复（已通过 Chunk callback 流式输出）
+            // 满足：最终回复
+            // content/reasoning 已通过 Chunk 写入 assistant 消息，LlmOutput 只记录元信息
             self.emit(TurnEvent::LlmOutput(LlmOutputRecord {
                 stage: format!("react-round-{}", self.state.round + 1),
-                content: response.text.clone(),
-                reasoning_content: response.reasoning_content.clone(),
+                content: String::new(),
+                reasoning_content: String::new(),
                 tool_calls: Vec::new(),
                 usage: response.usage.clone(),
             }));
