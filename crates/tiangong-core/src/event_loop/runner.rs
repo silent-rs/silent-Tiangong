@@ -49,6 +49,8 @@ pub struct EventLoopRunner {
     // 当前轮的临时状态
     pending_tool_calls: Vec<ModelFunctionCall>,
     accumulated_usage: TokenUsage,
+    /// 工具执行完后需要继续 LLM 调用
+    needs_llm_followup: bool,
 }
 
 impl EventLoopRunner {
@@ -76,6 +78,7 @@ impl EventLoopRunner {
             session_cwd: None,
             pending_tool_calls: Vec::new(),
             accumulated_usage: TokenUsage::default(),
+            needs_llm_followup: false,
         }
     }
 
@@ -103,6 +106,7 @@ impl EventLoopRunner {
             session_cwd: None,
             pending_tool_calls: Vec::new(),
             accumulated_usage: TokenUsage::default(),
+            needs_llm_followup: false,
         }
     }
 
@@ -120,8 +124,8 @@ impl EventLoopRunner {
             // 1. 收集待处理事件
             let events = self.collect_events();
 
-            // 2. 无事件且无待处理工作 → 挂起
-            if events.is_empty() && self.pending_tool_calls.is_empty() {
+            // 2. 无事件且无待处理工作且无需后续 LLM 调用 → 挂起
+            if events.is_empty() && self.pending_tool_calls.is_empty() && !self.needs_llm_followup {
                 self.state.interrupted_phase = LoopPhase::Idle;
                 self.state.mark_suspended();
                 return LoopOutcome::Suspended(self.state);
@@ -178,6 +182,7 @@ impl EventLoopRunner {
             }
 
             // 7. 组织上下文 + LLM 调用
+            self.needs_llm_followup = false;
             self.phase = LoopPhase::Processing;
             match self.call_llm() {
                 Ok(true) => {
@@ -459,6 +464,9 @@ impl EventLoopRunner {
         {
             self.state.loop_context = compressed;
         }
+
+        // 工具执行完毕，标记需要后续 LLM 调用
+        self.needs_llm_followup = true;
     }
 
     /// 超限时强制生成最终回复
