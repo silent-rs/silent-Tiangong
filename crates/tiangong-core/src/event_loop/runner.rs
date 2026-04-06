@@ -21,7 +21,7 @@ use crate::model::{
 use crate::observe::ObserveCollector;
 use crate::runtime::{
     LlmOutputRecord, RuntimeEngine, build_react_system_prompt, inject_enhanced_tools,
-    strip_tool_traces_from_response, use_stream_mode,
+    use_stream_mode,
 };
 use crate::session::{Message, MessageRole, Session, now_text};
 
@@ -291,13 +291,17 @@ impl EventLoopRunner {
             },
         };
 
-        // 流式回调：推送 StageThinking
+        // 流式回调：直接发 Chunk 到 assistant 消息（实时流式输出）
+        // 同时发 StageThinking 到系统消息（调试记录）
         let tx = self.output_tx.clone();
         let round = self.state.round;
         let response = self.engine.client().complete_with_functions_stream(
             &req,
             &self.function_tools,
             &mut |delta: &ModelStreamChunk| {
+                // 实时流式到 assistant 消息
+                let _ = tx.send(TurnEvent::Chunk(delta.clone()));
+                // 同时记录到系统消息（调试用）
                 let _ = tx.send(TurnEvent::StageThinking {
                     stage: format!("react-round-{}", round + 1),
                     delta: delta.clone(),
@@ -311,50 +315,37 @@ impl EventLoopRunner {
             .record_llm_call(scru128::new().to_string(), &response.usage);
 
         if response.tool_calls.is_empty() {
-            // 满足：文本回复
-            let final_text = response.text.clone();
-            let final_reasoning = response.reasoning_content.clone();
+            // 满足：文本回复（已通过 Chunk callback 流式发送完毕）
 
-            // 发送 LlmOutput（供 poll 写入系统消息记录）
+            // 发送 LlmOutput（供 poll 格式化系统消息记录）
             let output = LlmOutputRecord {
                 stage: format!("react-round-{}", self.state.round + 1),
-                content: final_text.clone(),
-                reasoning_content: final_reasoning.clone(),
+                content: response.text.clone(),
+                reasoning_content: response.reasoning_content.clone(),
                 tool_calls: Vec::new(),
                 usage: response.usage.clone(),
             };
             let _ = self.output_tx.send(TurnEvent::LlmOutput(output));
 
-            // 流式发送最终回复到 assistant 消息
-            // 先发 reasoning
-            if !final_reasoning.is_empty() {
-                let _ = self.output_tx.send(TurnEvent::Chunk(ModelStreamChunk {
-                    content: String::new(),
-                    reasoning_content: final_reasoning,
-                }));
-            }
-
-            // 按段落拆分 content 发送，触发前端/CLI 流式检测
-            let cleaned = strip_tool_traces_from_response(&final_text);
-            if !cleaned.is_empty() {
-                let paragraphs: Vec<&str> = cleaned.split("\n\n").collect();
-                for (i, para) in paragraphs.iter().enumerate() {
-                    let chunk = if i < paragraphs.len() - 1 {
-                        format!("{para}\n\n")
-                    } else {
-                        para.to_string()
-                    };
-                    let _ = self.output_tx.send(TurnEvent::Chunk(ModelStreamChunk {
-                        content: chunk,
-                        reasoning_content: String::new(),
-                    }));
-                }
-            }
-
             self.state.round += 1;
             Ok(true)
         } else {
             // 不满足：工具调用
+            // 发 PlanReady 让 poll 清空 assistant 消息中的流式中间内容
+            let plan = crate::planner::TaskPlan {
+                id: scru128::new().to_string(),
+                objective: self
+                    .state
+                    .loop_context
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == MessageRole::User)
+                    .map(|m| m.content.chars().take(50).collect::<String>())
+                    .unwrap_or_default(),
+                ..Default::default()
+            };
+            let _ = self.output_tx.send(TurnEvent::PlanReady(plan));
+
             let tool_call_names: Vec<String> = response
                 .tool_calls
                 .iter()
