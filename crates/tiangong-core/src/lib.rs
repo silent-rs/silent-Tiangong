@@ -15,6 +15,7 @@ pub mod orchestrator;
 pub mod permission;
 pub mod planner;
 pub mod plugin;
+pub mod prompt;
 pub mod runtime;
 pub mod session;
 pub mod skill;

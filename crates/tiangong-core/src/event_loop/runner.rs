@@ -21,10 +21,8 @@ use crate::model::{
     FunctionToolSpec, ModelClient, ModelFunctionCall, ModelRequest, ModelStreamChunk, TokenUsage,
 };
 use crate::observe::ObserveCollector;
-use crate::runtime::{
-    LlmOutputRecord, RuntimeEngine, build_react_system_prompt, inject_enhanced_tools,
-    use_stream_mode,
-};
+use crate::prompt::PromptAssembler;
+use crate::runtime::{LlmOutputRecord, RuntimeEngine, inject_enhanced_tools, use_stream_mode};
 use crate::session::{Message, MessageRole, Session, now_text};
 
 const MAX_ROUNDS: usize = 20;
@@ -241,31 +239,44 @@ impl EventLoopRunner {
             .map(|m| m.content.as_str())
             .unwrap_or("");
 
-        self.system_prompt = build_react_system_prompt(
-            last_user_input,
+        // 使用 PromptAssembler 构建分层 prompt
+        let assembler = PromptAssembler::new(self.engine.context_limit);
+        let user_input = if self.state.round == 0 {
+            last_user_input.to_string()
+        } else {
+            "根据上面的工具执行结果继续处理。如果已经收集到足够信息，直接给出最终回复，不要再调用工具。"
+                .to_string()
+        };
+        let assembled = assembler.assemble(
+            &self.session,
+            &user_input,
+            self.function_tools.clone(),
             self.engine.models_config(),
             self.engine.agent_config(),
+            &self.state.loop_context,
         );
 
-        let memory_store = crate::context::memory::MemoryStore::load_from_disk();
-        let memory_context = memory_store.format_for_context(&self.session.id);
+        // 构建 ModelRequest
+        // system_prompt 通过 context 中的 System 消息注入（build_openai_messages 会合并到 system）
+        // user_input 作为最后一条 user 消息
+        self.system_prompt = assembled.final_system_prompt();
+        let mut context_messages = Vec::new();
+        // 注入 system prompt 为 System 消息
+        context_messages.push(Message {
+            id: scru128::new().to_string(),
+            role: MessageRole::System,
+            content: self.system_prompt.clone(),
+            reasoning_content: String::new(),
+            worker_id: None,
+            created_at: now_text(),
+        });
+        // 追加 assembled 构建的消息
+        context_messages.extend(assembled.build_messages());
 
         let req = ModelRequest {
             session_title: self.session.title.clone(),
-            user_input: if self.state.round == 0 {
-                match memory_context {
-                    Some(mem) => format!("{}\n\n{}", mem, self.system_prompt),
-                    None => self.system_prompt.clone(),
-                }
-            } else {
-                "根据上面的工具执行结果继续处理。如果已经收集到足够信息，直接给出最终回复，不要再调用工具。"
-                    .to_string()
-            },
-            context: {
-                let mut ctx = self.context.clone();
-                ctx.extend(self.state.loop_context.clone());
-                ctx
-            },
+            user_input: assembled.user_input.clone(),
+            context: context_messages,
         };
 
         // 流式回调：直接通过 TurnEvent channel 输出 Chunk
