@@ -6,9 +6,15 @@
 //!
 //! 参考：`docs/rfc/0005-event-loop-runtime.md`
 
+pub mod active_loops;
+pub mod cli_host;
 pub mod context;
+pub mod host;
 pub mod runner;
 pub mod types;
 
+pub use active_loops::MultiLoopHost;
+pub use cli_host::CliLoopHost;
+pub use host::{LoopHandle, LoopHost};
 pub use runner::EventLoopRunner;
 pub use types::{LoopEvent, LoopOutcome, LoopPhase, LoopState, SystemSignalKind};
