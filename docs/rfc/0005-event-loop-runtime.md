@@ -238,6 +238,7 @@ LLM 返回无工具调用的文本回复时，视为当前轮"满足"：
 - 连续 N 轮工具调用（MAX_ROUNDS）→ 强制进入"总结"模式
 - 用户发送 Cancel → 取消当前处理，清空待处理工具调用，但**不销毁 loop 状态**
 - 长时间无事件（如 30 分钟）→ 从内存移除，状态持久化到磁盘
+- 应用退出 → 触发优雅关闭（见 §3.6）
 
 ### 3.5 上下文管理
 
@@ -252,6 +253,85 @@ LLM 返回无工具调用的文本回复时，视为当前轮"满足"：
 ```
 
 每轮 LLM 调用前，上下文装配器根据 token 预算裁剪历史。
+
+### 3.6 优雅关闭
+
+应用退出时（用户关闭窗口、`Ctrl+C`、`server stop` 等），必须将所有活跃 loop 的状态持久化到磁盘，确保下次启动可恢复。
+
+**关闭流程**：
+
+```
+应用收到退出信号
+       │
+       ▼
+ActiveLoops::shutdown_all()
+       │
+       ├── Running loop：
+       │     1. 向 event_rx 发送 LoopEvent::SystemSignal(Shutdown)
+       │     2. loop 收到后停止当前 LLM 调用（如有）
+       │     3. 保存 LoopState 到磁盘
+       │     4. 线程退出
+       │
+       ├── Suspended loop：
+       │     1. 直接将内存中的 LoopState 写磁盘
+       │     2. 从内存移除
+       │
+       └── 等待所有 Running loop 退出（超时 5 秒强制终止）
+              │
+              ▼
+         应用退出
+```
+
+**持久化内容**（`~/.tiangong/loops/{session_id}.json`）：
+
+```rust
+#[derive(Serialize, Deserialize)]
+struct PersistedLoopState {
+    /// 会话 ID
+    session_id: String,
+    /// 循环上下文（工具结果、中间消息等，不含完整历史 — 历史在 session 文件中）
+    loop_context: Vec<Message>,
+    /// 累积 token 使用量
+    accumulated_usage: TokenUsage,
+    /// 当前轮次
+    round: usize,
+    /// 待处理的工具调用（Running 被中断时可能有）
+    pending_tool_calls: Vec<PendingToolCall>,
+    /// 待处理的事件（队列中还没消费的）
+    pending_events: Vec<LoopEvent>,
+    /// loop 被中断时的阶段
+    interrupted_phase: LoopPhase,
+    /// 持久化时间
+    persisted_at: String,
+}
+```
+
+**启动恢复**：
+
+```
+应用启动
+    │
+    ▼
+扫描 ~/.tiangong/loops/*.json
+    │
+    ├── 每个文件加载为 PersistedLoopState
+    │
+    ├── interrupted_phase 为 Running（被强制中断）：
+    │     → 标记未完成的工具调用为失败
+    │     → 将中断信息作为系统消息注入 loop_context
+    │     → 放入 suspended 状态（等待用户激活）
+    │
+    ├── interrupted_phase 为 WaitingApproval：
+    │     → 恢复审批状态（等待用户激活后继续）
+    │
+    └── 其他（Suspended / Idle）：
+          → 直接放入 suspended 状态
+```
+
+**关键原则**：
+- 退出时**不丢弃任何中间状态**，宁可多写也不丢数据
+- 恢复时**不自动唤起** loop，等用户主动操作该会话时再恢复
+- 持久化文件与 session 文件独立（loop 状态是运行时临时数据，session 是持久数据）
 
 ## 4. 与现有架构的关系
 
@@ -300,11 +380,13 @@ LLM 返回无工具调用的文本回复时，视为当前轮"满足"：
 3. `start_turn` 改为 `send_event`，不再每次创建线程
 4. `poll_pending_turn` 改为 `poll_active_loop`
 
-### Phase C：不活跃清理与持久化
+### Phase C：生命周期管理与持久化
 
 1. 定期清理长时间挂起的 loop（从内存移除，状态写磁盘）
-2. 应用启动时从磁盘恢复未完成的 loop 状态
-3. 后台任务完成事件可唤起已挂起的 loop
+2. 实现 `ActiveLoops::shutdown_all()` 优雅关闭：Running → 中断保存、Suspended → 直接写盘
+3. 应用退出时注册 shutdown hook 调用 `shutdown_all()`
+4. 应用启动时扫描 `~/.tiangong/loops/` 恢复未完成的 loop 状态
+5. 后台任务完成事件可唤起已挂起的 loop
 
 ### Phase D：清理旧代码
 
@@ -319,6 +401,8 @@ LLM 返回无工具调用的文本回复时，视为当前轮"满足"：
 - **兼容性**：GUI/CLI/Server 的 poll 接口需要适配，但 `TurnEvent` 输出流不变
 - **并发**：同一会话同一时刻只有一个 Running loop，多会话可并行
 - **恢复一致性**：挂起/恢复时工具定义可能变化（MCP 热更新），恢复时需重新装配工具
+- **关闭时序**：Running loop 中 LLM 调用可能正在进行，shutdown 需等待或中断；设 5 秒超时兜底
+- **持久化幂等**：同一 loop 可能被多次持久化（挂起→写盘、退出→再写盘），以最后一次为准
 
 ## 7. 不在此 RFC 范围内
 
