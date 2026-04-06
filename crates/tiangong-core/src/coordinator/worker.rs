@@ -58,6 +58,8 @@ impl Worker {
         let started = Instant::now();
         let worker_id = self.context.worker_id.clone();
         let worker_label: String = self.context.task_objective.chars().take(30).collect();
+        let budget = self.context.budget.clone();
+        let max_duration = std::time::Duration::from_secs(budget.max_duration_secs);
 
         // 设置隔离工作目录
         if let Some(ref dir) = self.context.working_dir {
@@ -130,15 +132,34 @@ impl Worker {
         );
 
         let result = match runner.run() {
-            Ok(exec) => WorkerResult {
-                worker_id: worker_id.clone(),
-                result_text: exec.assistant_message,
-                success: true,
-                error: None,
-                usage: exec.usage,
-                duration_ms: started.elapsed().as_millis() as u64,
-                llm_calls: exec.llm_calls,
-            },
+            Ok(exec) => {
+                // 预算检查：token 超限或时长超限记录警告
+                if budget.is_token_exceeded(exec.usage.total_tokens) {
+                    tracing::warn!(
+                        worker_id = %worker_id,
+                        used = exec.usage.total_tokens,
+                        limit = budget.max_tokens,
+                        "Worker token 超出预算"
+                    );
+                }
+                if started.elapsed() > max_duration {
+                    tracing::warn!(
+                        worker_id = %worker_id,
+                        elapsed_secs = started.elapsed().as_secs(),
+                        limit_secs = budget.max_duration_secs,
+                        "Worker 执行时长超出预算"
+                    );
+                }
+                WorkerResult {
+                    worker_id: worker_id.clone(),
+                    result_text: exec.assistant_message,
+                    success: true,
+                    error: None,
+                    usage: exec.usage,
+                    duration_ms: started.elapsed().as_millis() as u64,
+                    llm_calls: exec.llm_calls,
+                }
+            }
             Err(err) => WorkerResult {
                 worker_id: worker_id.clone(),
                 result_text: String::new(),

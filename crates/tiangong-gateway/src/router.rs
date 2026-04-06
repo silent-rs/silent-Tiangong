@@ -33,8 +33,20 @@ impl MessageRouter {
 
     /// 处理入站消息：分发到 Agent 执行
     ///
-    /// 音频消息会先通过 STT 转为文字再交给 Agent
+    /// 根据发送者角色限制可执行操作，音频消息自动 STT 转文字。
     pub async fn handle_incoming(&self, msg: IncomingMessage) -> Result<OutgoingMessage> {
+        // 角色权限检查
+        if !msg.sender_role.can_send_message() {
+            let denied_text = format!(
+                "权限不足：{}角色不允许发送消息",
+                msg.sender_role.display_name()
+            );
+            return Ok(OutgoingMessage {
+                content: MessageContent::Text(denied_text),
+                reply_to: Some(msg.id.clone()),
+            });
+        }
+
         self.event_bus
             .publish(TiangongEvent::MessageReceived(msg.clone()));
 

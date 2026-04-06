@@ -138,6 +138,16 @@ impl TiangongState {
             state.store.runtime.run.last_error = None;
         }
         state.store.runtime.run.updated_at = now_text();
+        // 恢复持久化的 EventLoop 状态（仅记录日志，不自动唤起）
+        match crate::event_loop::persistence::load_all_loop_states() {
+            Ok(states) if !states.is_empty() => {
+                tracing::info!("启动恢复：发现 {} 个持久化的 EventLoop 状态", states.len());
+                // 清理持久化文件（状态已在 session 中，loop 状态为临时数据）
+                let _ = crate::event_loop::persistence::cleanup_all_loop_states();
+            }
+            _ => {}
+        }
+
         let _ = state.sync_skill_locks();
         let _ = load_mcp_capabilities_cache(
             &state.services.repository.paths().mcp_capability_cache_path,

@@ -20,6 +20,7 @@ use crate::runtime::{
     LlmOutputRecord, RuntimeEngine, build_react_system_prompt, inject_enhanced_tools,
     strip_tool_traces_from_response, use_stream_mode,
 };
+use crate::observe::ObserveCollector;
 use crate::session::{Message, MessageRole, Session, now_text};
 use super::context::events_to_messages;
 use super::types::*;
@@ -51,6 +52,8 @@ pub struct EventLoopRunner {
     accumulated_usage: TokenUsage,
     /// 工具执行完后需要继续 LLM 调用
     needs_llm_followup: bool,
+    /// 观测采集器
+    observer: ObserveCollector,
 }
 
 impl EventLoopRunner {
@@ -68,7 +71,7 @@ impl EventLoopRunner {
             session,
             output_tx,
             event_rx,
-            state: LoopState::new(session_id),
+            state: LoopState::new(session_id.clone()),
             phase: LoopPhase::Idle,
             context: Vec::new(),
             function_tools: Vec::new(),
@@ -79,6 +82,7 @@ impl EventLoopRunner {
             pending_tool_calls: Vec::new(),
             accumulated_usage: TokenUsage::default(),
             needs_llm_followup: false,
+            observer: ObserveCollector::new().with_session(session_id),
         }
     }
 
@@ -91,6 +95,7 @@ impl EventLoopRunner {
         event_rx: Receiver<LoopEvent>,
     ) -> Self {
         let context_limit = engine.context_limit;
+        let session_id = session.id.clone();
         Self {
             engine,
             session,
@@ -107,6 +112,7 @@ impl EventLoopRunner {
             pending_tool_calls: Vec::new(),
             accumulated_usage: TokenUsage::default(),
             needs_llm_followup: false,
+            observer: ObserveCollector::new().with_session(session_id),
         }
     }
 
@@ -266,10 +272,18 @@ impl EventLoopRunner {
             self.engine.agent_config(),
         );
 
+        // 注入用户偏好/长期记忆
+        let memory_store = crate::context::memory::MemoryStore::load_from_disk();
+        let memory_context = memory_store.format_for_context(&self.session.id);
+
         let req = ModelRequest {
             session_title: self.session.title.clone(),
             user_input: if self.state.round == 0 {
-                self.system_prompt.clone()
+                // 首轮：system_prompt 可能包含记忆
+                match memory_context {
+                    Some(mem) => format!("{}\n\n{}", mem, self.system_prompt),
+                    None => self.system_prompt.clone(),
+                }
             } else {
                 "根据上面的工具执行结果继续处理。如果已经收集到足够信息，直接给出最终回复，不要再调用工具。"
                     .to_string()
@@ -297,6 +311,10 @@ impl EventLoopRunner {
 
         self.accumulated_usage.accumulate(&response.usage);
         self.state.accumulated_usage.accumulate(&response.usage);
+        self.observer.record_llm_call(
+            scru128::new().to_string(),
+            &response.usage,
+        );
 
         if response.tool_calls.is_empty() {
             // 满足：文本回复

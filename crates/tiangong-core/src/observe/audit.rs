@@ -37,6 +37,8 @@ pub struct AuditRecord {
     pub session_id: Option<String>,
     pub task_id: Option<String>,
     pub tool_name: Option<String>,
+    /// 工具参数摘要（截断到 200 字符）
+    pub args_summary: Option<String>,
     pub detail: String,
     pub success: bool,
     pub timestamp: String,
@@ -49,6 +51,7 @@ impl AuditRecord {
             session_id: None,
             task_id: None,
             tool_name: None,
+            args_summary: None,
             detail: detail.into(),
             success,
             timestamp: chrono::Local::now().naive_local().to_string(),
@@ -67,6 +70,12 @@ impl AuditRecord {
 
     pub fn with_tool(mut self, tool_name: impl Into<String>) -> Self {
         self.tool_name = Some(tool_name.into());
+        self
+    }
+
+    pub fn with_args_summary(mut self, args: impl Into<String>) -> Self {
+        let s: String = args.into();
+        self.args_summary = Some(s.chars().take(200).collect());
         self
     }
 

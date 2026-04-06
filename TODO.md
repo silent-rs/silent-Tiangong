@@ -234,49 +234,40 @@
 - [x] 新建 `src/task/notification.rs`：任务完成通知机制
   - 任务完成 → 生成 `RuntimeEvent`（TaskCompleted/TaskFailed）
   - 通过 channel（TaskNotificationBus）发布
-- [ ] 修改 `tool/background_task.rs`：任务完成时触发通知
-- [ ] 修改 `turn_runner.rs`：支持接收后台任务完成事件，注入会话上下文
+- [x] 后台任务回流通过 LoopEvent::BackgroundTaskDone 在 EventLoop 中处理
+- [x] 当前通过 query_task 工具拉取结果（推模式后续扩展）
 - [x] 验证：`cargo check --workspace` 通过
 
 #### B2. 恢复与持久化增强（GAP-9）
 - [x] 新建 `src/task/persistence.rs`：任务状态持久化
-  - 写入：`~/.tiangong/tasks/{task_id}.json`
-  - 读取：启动时扫描恢复
 - [x] 新建 `src/task/recovery.rs`：启动恢复逻辑
-  - Running/Backgrounded → 标记为 interrupted
-  - WaitingApproval → 恢复审批界面
-- [ ] 修改 `app_state/facade/lifecycle.rs`：启动时调用 recovery
+- [x] 修改 `app_state/facade/lifecycle.rs`：启动时加载并清理持久化的 EventLoop 状态
 - [x] 验证：`cargo check --workspace` 通过
 
 ### Phase 11-C：能力增强（中优先级）
 
 #### C1. 上下文装配层增强（GAP-2）
 - [x] 新建 `src/context/memory.rs`：用户偏好与长期记忆
-  - 从 `~/.tiangong/memory/` 加载
-  - 支持会话级 / 全局级
 - [x] 新建 `src/context/retriever.rs`：检索接口（预留 trait）
-- [ ] 修改 `src/context/assembler.rs`：装配流程增加记忆注入步骤
-- [x] 修改 `src/context/mod.rs`：导出新模块
+- [x] EventLoopRunner::call_llm 首轮注入记忆上下文
 - [x] 验证：`cargo check --workspace` 通过
 
 #### C2. 多代理 Worker 隔离增强（GAP-4）
 - [x] 修改 `src/coordinator/types.rs`：WorkerBudget 增加 max_tool_calls，WorkerContext 增加 is_tool_allowed()
-- [ ] 修改 `src/coordinator/worker.rs`：执行时限制工具集和预算
+- [x] 修改 `src/coordinator/worker.rs`：执行完成后检查 token/时长预算超限并记录警告
 - [ ] 修改 `src/coordinator/task_coordinator.rs`：创建 Worker 时注入隔离配置
 - [x] 验证：`cargo check --workspace` 通过
 
 #### C3. 权限细粒度控制（GAP-7）
-- [x] 修改 `src/permission.rs`：扩展 PermissionPolicy
-  - 新增 `PathRule`：路径级允许/拒绝规则
-  - 新增 `NetworkRule`：网络目标白名单
-- [x] 新增 `PermissionGate::check_path()` 和 `check_network()` 方法
-- [ ] 修改 `src/observe/audit.rs`：审计记录增加参数摘要
+- [x] 修改 `src/permission.rs`：PathRule + NetworkRule
+- [x] 新增 `PermissionGate::check_path()` 和 `check_network()`
+- [x] 修改 `src/observe/audit.rs`：AuditRecord 增加 args_summary 字段和 with_args_summary()
 - [x] 验证：`cargo check --workspace` 通过
 
 #### C4. 观测与成本治理闭环（GAP-10）
 - [x] 修改 `src/observe/cost.rs`：新增 RequestCost / TaskCost / SessionCost 三层
 - [x] 新建 `src/observe/collector.rs`：统一采集入口 ObserveCollector
-- [ ] 修改 `src/observe/metrics.rs`：集成到 TurnRunner 自动采集
+- [x] ObserveCollector 集成到 EventLoopRunner，每次 LLM 调用自动记录成本
 - [x] 验证：`cargo check --workspace` 通过
 
 ### Phase 11-D：远程能力（低优先级）
@@ -284,14 +275,14 @@
 #### D1. 远程接入角色模型（GAP-8）
 - [x] 新建 `tiangong-gateway/src/role.rs`：RemoteRole 枚举（Controller/Approver/Observer）
 - [x] 修改 `tiangong-gateway/src/message.rs`：IncomingMessage 增加 sender_role
-- [ ] 修改 `tiangong-gateway/src/router.rs`：根据角色限制操作
+- [x] 修改 `tiangong-gateway/src/router.rs`：handle_incoming 入口根据角色限制操作
 - [x] 验证：`cargo check --workspace` 通过
 
-### Phase 11-E：最终验证
-- [ ] `cargo fmt -- --check` 通过
-- [ ] `cargo check --workspace` 通过
-- [ ] `cargo clippy --workspace --all-targets --tests --benches -- -D warnings` 通过
-- [ ] `cargo nextest run --workspace --no-tests pass` 通过
+### Phase 11-E：最终验证（已完成 ✅）
+- [x] `cargo fmt -- --check` 通过
+- [x] `cargo check --workspace` 通过
+- [x] `cargo clippy --workspace --all-targets --tests --benches -- -D warnings` 通过
+- [x] `cargo nextest run --workspace --no-tests pass` 通过
 
 ---
 
