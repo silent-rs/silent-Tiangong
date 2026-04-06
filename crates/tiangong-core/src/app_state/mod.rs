@@ -50,7 +50,7 @@ use self::repository::{
     validate_agent_config,
 };
 use self::services::{AppMcpService, AppSkillService, AppTurnService};
-pub use self::support::{ControlSignal, TurnEvent};
+pub use self::support::{ControlSignal, StreamEvent, TurnEvent};
 use self::support::{
     LegacyPersistedState, LoadedState, McpDependencyLockRecord, PendingTurn, PersistedAppState,
     ScopedDirCleanup, SkillsLockRecord,

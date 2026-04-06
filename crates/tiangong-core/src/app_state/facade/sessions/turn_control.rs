@@ -444,4 +444,141 @@ impl TiangongState {
     pub fn poll_pending_turn(&mut self) {
         self.poll_pending_turns();
     }
+
+    /// 轮询事件并返回精简的输出事件列表
+    ///
+    /// core 内部更新 session，同时将精简事件返回给外部用于实时展示。
+    /// CLI / GUI / Connector 直接消费返回的事件流。
+    pub fn poll_events(&mut self) -> Vec<StreamEvent> {
+        const MAX_POLL_DURATION_MS: u128 = 10;
+        let poll_start = std::time::Instant::now();
+        let mut stream_events = Vec::new();
+
+        let session_ids: Vec<String> = self.store.runtime.pending_turns.keys().cloned().collect();
+        let mut sessions_to_clear: Vec<String> = Vec::new();
+
+        for session_id in session_ids {
+            let mut should_clear = false;
+            let mut disconnected = false;
+
+            while poll_start.elapsed().as_millis() < MAX_POLL_DURATION_MS {
+                let Some(event) = self.try_recv_turn_event(&session_id, &mut disconnected) else {
+                    break;
+                };
+
+                // 转换为外部流事件
+                match &event {
+                    TurnEvent::Chunk(delta) => {
+                        if !delta.content.is_empty() {
+                            stream_events.push(StreamEvent::Delta(delta.content.clone()));
+                        }
+                        if !delta.reasoning_content.is_empty() {
+                            stream_events
+                                .push(StreamEvent::Reasoning(delta.reasoning_content.clone()));
+                        }
+                    }
+                    TurnEvent::ToolStarted { name, summary } => {
+                        stream_events.push(StreamEvent::ToolStart {
+                            name: name.clone(),
+                            summary: summary.clone(),
+                        });
+                    }
+                    TurnEvent::ToolExecution(result) => {
+                        stream_events.push(StreamEvent::ToolResult {
+                            name: result.summary.clone(),
+                            ok: result.ok,
+                            output: result.stdout.clone(),
+                        });
+                    }
+                    TurnEvent::LlmOutput(output) => {
+                        if !output.tool_calls.is_empty() {
+                            stream_events.push(StreamEvent::ToolCalls(output.tool_calls.clone()));
+                        }
+                    }
+                    TurnEvent::Completed(_) => {
+                        stream_events.push(StreamEvent::Done);
+                    }
+                    TurnEvent::Failed(err) => {
+                        stream_events.push(StreamEvent::Error(err.clone()));
+                    }
+                    TurnEvent::ApprovalRequest {
+                        request_id,
+                        tool_name,
+                        tool_args_summary,
+                    } => {
+                        stream_events.push(StreamEvent::ApprovalNeeded {
+                            request_id: request_id.clone(),
+                            tool_name: tool_name.clone(),
+                            args_summary: tool_args_summary.clone(),
+                        });
+                    }
+                    _ => {}
+                }
+
+                // core 内部处理：更新 session
+                match event {
+                    TurnEvent::PlanReady(plan) => {
+                        self.mark_pending_turn_executing(&session_id, &plan);
+                    }
+                    TurnEvent::LlmOutput(output) => {
+                        if output.usage.total_tokens > 0 {
+                            let run = &mut self.store.runtime.run;
+                            match run.last_usage.as_mut() {
+                                Some(existing) => existing.accumulate(&output.usage),
+                                None => run.last_usage = Some(output.usage.clone()),
+                            }
+                        }
+                        if !output.tool_calls.is_empty() {
+                            self.store.runtime.run.summary =
+                                format!("正在执行：{}", output.tool_calls.join(", "));
+                        }
+                        self.append_pending_turn_llm_output(&session_id, &output);
+                    }
+                    TurnEvent::ToolStarted { name, summary } => {
+                        self.store.runtime.run.summary = format!("正在执行：{name} - {summary}");
+                    }
+                    TurnEvent::ToolExecution(result) => {
+                        self.append_pending_turn_tool_execution(&session_id, &result);
+                    }
+                    TurnEvent::PlanExecutionSummary(summary) => {
+                        self.append_pending_turn_plan_execution_summary(
+                            &session_id,
+                            summary.as_str(),
+                        );
+                    }
+                    TurnEvent::StageThinking { stage, delta } => {
+                        self.apply_stage_thinking_delta(&session_id, &stage, &delta);
+                    }
+                    TurnEvent::Chunk(delta) => {
+                        self.apply_assistant_delta(&session_id, &delta);
+                    }
+                    TurnEvent::Completed(exec) => {
+                        self.finish_pending_turn_success(&session_id, *exec);
+                        should_clear = true;
+                    }
+                    TurnEvent::Failed(err_msg) => {
+                        self.finish_pending_turn_error(&session_id, &err_msg);
+                        should_clear = true;
+                    }
+                    TurnEvent::ApprovalRequest { request_id, .. } => {
+                        self.store.runtime.run.status = RunStatus::WaitingApproval;
+                        self.store.runtime.run.approval_request_id = Some(request_id);
+                    }
+                    _ => {}
+                }
+            }
+
+            if should_clear || disconnected {
+                sessions_to_clear.push(session_id);
+            }
+        }
+
+        for session_id in sessions_to_clear {
+            self.store.runtime.pending_turns.remove(&session_id);
+        }
+
+        stream_events
+    }
 }
+
+pub use crate::app_state::support::StreamEvent;
