@@ -13,18 +13,216 @@ const DIM: &str = "\x1b[2m";
 const GREEN_BOLD: &str = "\x1b[1;32m";
 const RESET: &str = "\x1b[0m";
 
+/// 会话输出追踪状态
+struct OutputTracker {
+    last_msg_count: usize,
+    last_assistant_content_len: usize,
+    last_assistant_reasoning_len: usize,
+    in_assistant_stream: bool,
+    printed_header: bool,
+}
+
+impl OutputTracker {
+    fn new(msg_count: usize) -> Self {
+        Self {
+            last_msg_count: msg_count,
+            last_assistant_content_len: 0,
+            last_assistant_reasoning_len: 0,
+            in_assistant_stream: false,
+            printed_header: false,
+        }
+    }
+
+    /// 重置追踪状态（新一轮对话开始）
+    fn reset(&mut self, msg_count: usize) {
+        self.last_msg_count = msg_count;
+        self.last_assistant_content_len = 0;
+        self.last_assistant_reasoning_len = 0;
+        self.in_assistant_stream = false;
+        self.printed_header = false;
+    }
+
+    /// 处理 session 消息变化，打印增量内容
+    /// 返回 true 表示有新内容输出
+    fn process_updates(&mut self, state: &TiangongState) -> bool {
+        let mut had_output = false;
+
+        let Some(session) = state.active_session() else {
+            return false;
+        };
+        let msgs = &session.messages;
+
+        // 处理新增的消息
+        for msg in msgs.iter().skip(self.last_msg_count) {
+            match msg.role {
+                MessageRole::System => {
+                    if self.in_assistant_stream {
+                        output::flush_line();
+                        self.in_assistant_stream = false;
+                    }
+                    if msg.content.starts_with("LLM 输出") {
+                        output::print_llm_explanation(&msg.content);
+                        had_output = true;
+                    } else if msg.content.contains("tool_name:")
+                        || msg.content.contains("exit_code")
+                    {
+                        output::print_tool_brief(&msg.content);
+                        had_output = true;
+                    }
+                }
+                MessageRole::Assistant => {
+                    if !self.printed_header {
+                        println!("{GREEN_BOLD}助手{RESET}");
+                        self.printed_header = true;
+                    }
+                    // reasoning
+                    let reasoning = msg.reasoning_content.trim();
+                    if !reasoning.is_empty() {
+                        let summary: String = if reasoning.chars().count() > 60 {
+                            let truncated: String = reasoning.chars().take(57).collect();
+                            format!("{truncated}...")
+                        } else {
+                            reasoning.to_string()
+                        };
+                        println!("  {DIM}[思考] {summary}{RESET}");
+                    }
+                    // content
+                    if !msg.content.is_empty() {
+                        output::print_delta(&msg.content);
+                        self.in_assistant_stream = true;
+                        self.last_assistant_content_len = msg.content.len();
+                        self.last_assistant_reasoning_len = msg.reasoning_content.len();
+                        had_output = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.last_msg_count = msgs.len();
+
+        // 检查最后一条 assistant 消息内容增长（流式追加）
+        if let Some(last) = msgs.last()
+            && last.role == MessageRole::Assistant
+        {
+            if last.reasoning_content.len() > self.last_assistant_reasoning_len {
+                self.last_assistant_reasoning_len = last.reasoning_content.len();
+            }
+            if last.content.len() > self.last_assistant_content_len {
+                if !self.printed_header {
+                    println!("{GREEN_BOLD}助手{RESET}");
+                    self.printed_header = true;
+                }
+                let delta = &last.content[self.last_assistant_content_len..];
+                output::print_delta(delta);
+                self.in_assistant_stream = true;
+                self.last_assistant_content_len = last.content.len();
+                had_output = true;
+            }
+        }
+
+        had_output
+    }
+
+    /// 任务完成后确保所有内容已输出
+    fn flush_remaining(&mut self, state: &TiangongState) {
+        // 最后一次 poll + 处理
+        self.process_updates(state);
+
+        // 检查 assistant 消息是否还有未输出的内容
+        if let Some(session) = state.active_session()
+            && let Some(last) = session
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m.role == MessageRole::Assistant)
+        {
+            if !self.printed_header && !last.reasoning_content.trim().is_empty() {
+                println!("{GREEN_BOLD}助手{RESET}");
+                self.printed_header = true;
+                let reasoning = last.reasoning_content.trim();
+                let summary: String = if reasoning.chars().count() > 60 {
+                    let truncated: String = reasoning.chars().take(57).collect();
+                    format!("{truncated}...")
+                } else {
+                    reasoning.to_string()
+                };
+                println!("  {DIM}[思考] {summary}{RESET}");
+            }
+            if last.content.len() > self.last_assistant_content_len {
+                if !self.printed_header {
+                    println!("{GREEN_BOLD}助手{RESET}");
+                    self.printed_header = true;
+                }
+                let delta = &last.content[self.last_assistant_content_len..];
+                output::print_delta(delta);
+                self.in_assistant_stream = true;
+            }
+        }
+
+        if self.in_assistant_stream {
+            output::flush_line();
+            self.in_assistant_stream = false;
+        }
+
+        // 兜底：完全没有流式输出
+        if !self.printed_header {
+            let snapshot = state.run_snapshot();
+            if matches!(snapshot.status, RunStatus::Completed | RunStatus::Idle)
+                && let Some(session) = state.active_session()
+                && let Some(last) = session.messages.last()
+                && last.role == MessageRole::Assistant
+            {
+                output::print_assistant_message(last);
+            }
+        }
+
+        // 错误处理
+        let snapshot = state.run_snapshot();
+        if matches!(snapshot.status, RunStatus::Failed) {
+            let err_msg = snapshot.last_error.as_deref().unwrap_or("执行失败");
+            output::print_error(err_msg);
+        }
+    }
+}
+
 pub fn run() -> Result<()> {
     let mut state = TiangongState::load_or_default();
     let mut reader = InputReader::new();
-
-    // 标记为草稿新会话，首次发送消息时才真正创建
     let mut draft_new_session = true;
+    let mut tracker = OutputTracker::new(
+        state
+            .active_session()
+            .map(|s| s.messages.len())
+            .unwrap_or(0),
+    );
 
-    // 打印欢迎
     output::print_status("天工 CLI — /help 查看命令，Ctrl+C 清空/退出");
 
     loop {
+        // 如果有活跃任务，持续 poll 直到完成或用户有新输入
+        if state.has_pending_turn() {
+            state.poll_pending_turn();
+            tracker.process_updates(&state);
+
+            if !state.has_pending_turn() {
+                // 任务刚完成：flush 剩余内容
+                tracker.flush_remaining(&state);
+                println!();
+                // 重置后等待下一个输入
+                state.report_run_idle(format!(
+                    "模型供应商：{}",
+                    state.provider_label()
+                ));
+            }
+
+            // 短暂等待后继续循环（非阻塞）
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            continue;
+        }
+
+        // 无活跃任务：显示 prompt 等待用户输入
         print_separator();
+        print_status_line(&state, draft_new_session);
 
         let input = {
             let state_ref = &state;
@@ -37,9 +235,6 @@ pub fn run() -> Result<()> {
             })?
         };
 
-        print_separator();
-        print_status_line(&state, draft_new_session);
-
         let input = match input {
             Some(line) => line,
             None => break,
@@ -51,6 +246,7 @@ pub fn run() -> Result<()> {
         }
 
         reader.push_history(trimmed);
+        print_separator();
 
         // / 命令
         if trimmed.starts_with('/') {
@@ -62,12 +258,6 @@ pub fn run() -> Result<()> {
                     continue;
                 }
             }
-        }
-
-        // 检查是否有正在进行的任务
-        if state.has_pending_turn() {
-            output::print_warn("当前请求进行中，请等待完成后再发送");
-            continue;
         }
 
         // 首次发送时才真正创建会话
@@ -85,168 +275,15 @@ pub fn run() -> Result<()> {
             continue;
         }
 
-        // 实时流式轮询：边执行边展示中间状态
-        {
-            let mut last_msg_count = state
+        // 重置追踪（新一轮对话开始，从当前消息数开始追踪）
+        tracker.reset(
+            state
                 .active_session()
                 .map(|s| s.messages.len())
-                .unwrap_or(0);
-            let mut last_assistant_content_len: usize = 0;
-            let mut last_assistant_reasoning_len: usize = 0;
-            let mut in_assistant_stream = false;
-            let mut printed_header = false;
+                .unwrap_or(0),
+        );
 
-            loop {
-                state.poll_pending_turn();
-
-                if let Some(session) = state.active_session() {
-                    let msgs = &session.messages;
-
-                    // 处理新增的消息
-                    for msg in msgs.iter().skip(last_msg_count) {
-                        match msg.role {
-                            MessageRole::System => {
-                                // 如果之前在流式输出 assistant，先换行
-                                if in_assistant_stream {
-                                    output::flush_line();
-                                    in_assistant_stream = false;
-                                }
-                                if msg.content.starts_with("LLM 输出") {
-                                    output::print_llm_explanation(&msg.content);
-                                } else if msg.content.contains("tool_name:")
-                                    || msg.content.contains("exit_code")
-                                {
-                                    output::print_tool_brief(&msg.content);
-                                }
-                                // 其他系统消息静默跳过
-                            }
-                            MessageRole::Assistant => {
-                                // 标记进入 assistant 流式输出
-                                if !printed_header {
-                                    println!("{GREEN_BOLD}助手{RESET}");
-                                    printed_header = true;
-                                }
-                                // reasoning
-                                let reasoning = msg.reasoning_content.trim();
-                                if !reasoning.is_empty() {
-                                    let summary: String = if reasoning.chars().count() > 60 {
-                                        let truncated: String = reasoning.chars().take(57).collect();
-                                        format!("{truncated}...")
-                                    } else {
-                                        reasoning.to_string()
-                                    };
-                                    println!("  {DIM}[思考] {summary}{RESET}");
-                                }
-                                // content
-                                if !msg.content.is_empty() {
-                                    output::print_delta(&msg.content);
-                                    in_assistant_stream = true;
-                                    last_assistant_content_len = msg.content.len();
-                                    last_assistant_reasoning_len = msg.reasoning_content.len();
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    last_msg_count = msgs.len();
-
-                    // 检查最后一条 assistant 消息内容增长（流式追加）
-                    if let Some(last) = msgs.last() {
-                        if last.role == MessageRole::Assistant {
-                            // reasoning 增量
-                            if last.reasoning_content.len() > last_assistant_reasoning_len {
-                                // reasoning 变化时仅更新追踪长度（不重复打印摘要）
-                                last_assistant_reasoning_len = last.reasoning_content.len();
-                            }
-                            // content 增量
-                            if last.content.len() > last_assistant_content_len {
-                                if !printed_header {
-                                    println!("{GREEN_BOLD}助手{RESET}");
-                                    printed_header = true;
-                                }
-                                let delta = &last.content[last_assistant_content_len..];
-                                output::print_delta(delta);
-                                in_assistant_stream = true;
-                                last_assistant_content_len = last.content.len();
-                            }
-                        }
-                        // 检查最后一条系统消息内容增长（流式 thinking）
-                        if last.role == MessageRole::System
-                            && last.content.starts_with("LLM 输出")
-                            && !last.content.contains("\ntokens:")
-                        {
-                            // 流式阶段的系统消息，内容在增长
-                            // 不做增量打印 — 该消息完成后会作为新消息被处理
-                        }
-                    }
-                }
-
-                if !state.has_pending_turn() {
-                    // 退出前最后一次 poll，确保所有事件已消费
-                    state.poll_pending_turn();
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-
-            // 退出后打印 assistant 消息中未显示的剩余内容
-            if let Some(session) = state.active_session()
-                && let Some(last) = session.messages.iter().rev().find(|m| m.role == MessageRole::Assistant)
-            {
-                    // 打印未显示的 reasoning
-                    if !printed_header && !last.reasoning_content.trim().is_empty() {
-                        println!("{GREEN_BOLD}助手{RESET}");
-                        printed_header = true;
-                        let reasoning = last.reasoning_content.trim();
-                        let summary: String = if reasoning.chars().count() > 60 {
-                            let truncated: String = reasoning.chars().take(57).collect();
-                            format!("{truncated}...")
-                        } else {
-                            reasoning.to_string()
-                        };
-                        println!("  {DIM}[思考] {summary}{RESET}");
-                    }
-                    // 打印未显示的 content
-                    if last.content.len() > last_assistant_content_len {
-                        if !printed_header {
-                            println!("{GREEN_BOLD}助手{RESET}");
-                            printed_header = true;
-                        }
-                        let delta = &last.content[last_assistant_content_len..];
-                        output::print_delta(delta);
-                        in_assistant_stream = true;
-                    }
-            }
-
-            // 确保最后换行
-            if in_assistant_stream {
-                output::flush_line();
-            }
-
-            // 处理失败情况
-            let snapshot = state.run_snapshot();
-            if matches!(snapshot.status, RunStatus::Failed) {
-                let err_msg = snapshot.last_error.as_deref().unwrap_or("执行失败");
-                output::print_error(err_msg);
-            }
-
-            // 如果完全没有流式输出（非流式模式兜底）
-            if !printed_header {
-                match snapshot.status {
-                    RunStatus::Completed | RunStatus::Idle => {
-                        if let Some(session) = state.active_session()
-                            && let Some(last) = session.messages.last()
-                            && last.role == MessageRole::Assistant
-                        {
-                            output::print_assistant_message(last);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-
-            println!();
-        }
+        // 不 break，回到循环顶部由 poll 分支处理
     }
 
     output::print_status("再见！");
