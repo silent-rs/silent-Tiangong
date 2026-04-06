@@ -5,6 +5,7 @@ pub mod config_watch;
 pub mod context;
 pub mod coordinator;
 pub mod event;
+pub mod event_loop;
 pub mod execution;
 pub mod mcp;
 pub mod model;

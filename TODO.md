@@ -292,3 +292,45 @@
 - [ ] `cargo check --workspace` 通过
 - [ ] `cargo clippy --workspace --all-targets --tests --benches -- -D warnings` 通过
 - [ ] `cargo nextest run --workspace --no-tests pass` 通过
+
+---
+
+## Phase 12：事件驱动循环运行时 — **当前阶段**
+
+> RFC：`docs/rfc/0005-event-loop-runtime.md`
+
+### Phase 12-A：EventLoopRunner 核心 + 挂起/恢复
+
+- [ ] 新建 `src/event_loop/mod.rs` 模块入口
+- [ ] 新建 `src/event_loop/types.rs`：LoopEvent / LoopPhase / LoopState 类型定义
+- [ ] 新建 `src/event_loop/runner.rs`：EventLoopRunner 核心循环
+  - 收集事件 → 注入上下文 → 组织上下文 → LLM 调用 → 判断满足/工具执行
+  - 无事件时挂起（保存 LoopState，释放线程）
+- [ ] 新建 `src/event_loop/context.rs`：事件到上下文的转换逻辑
+- [ ] `lib.rs` 注册 `event_loop` 模块
+- [ ] 验证：`cargo check --workspace` 通过
+
+### Phase 12-B：LoopHost trait + ActiveLoops 管理器
+
+- [ ] 新建 `src/event_loop/host.rs`：LoopHost trait（send_event / poll_output / shutdown_all）
+- [ ] 新建 `src/event_loop/active_loops.rs`：MultiLoopHost（GUI/Server 多会话管理）
+  - running / suspended 状态管理
+  - send_event 自动唤起挂起的 loop
+- [ ] 新建 `src/event_loop/cli_host.rs`：CliLoopHost（CLI 单会话）
+- [ ] 验证：`cargo check --workspace` 通过
+
+### Phase 12-C：生命周期管理与持久化
+
+- [ ] 新建 `src/event_loop/persistence.rs`：PersistedLoopState 读写
+- [ ] 实现 shutdown_all()：Running→中断保存、Suspended→写盘
+- [ ] 实现启动恢复：扫描 ~/.tiangong/loops/ 加载到 suspended
+- [ ] 实现 cleanup_inactive()：超时 loop 写盘移除
+- [ ] 验证：`cargo check --workspace` 通过
+
+### Phase 12-D：集成与清理
+
+- [ ] 修改 `app_state/services/turn/`：start_turn 改为 send_event
+- [ ] 修改 `app_state/facade/sessions/turn_control.rs`：poll_pending_turn 改为 poll_active_loop
+- [ ] 修改 `tiangong-cli/src/repl.rs`：使用 CliLoopHost
+- [ ] 删除 TurnRunner / QueryClassifier / ControlSignal 等旧代码
+- [ ] 验证：完整检查链通过

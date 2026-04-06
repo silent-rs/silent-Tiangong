@@ -103,6 +103,15 @@
 **Phase 11-D：远程能力（低优先级）**
 - 远程接入角色模型：控制者/审批者/观察者角色区分。
 
+### Phase 12（事件驱动循环运行时）— **当前阶段**
+> RFC：`docs/rfc/0005-event-loop-runtime.md`
+
+将运行时从 Turn-based 改为 Event-loop 模型：
+- Phase A：EventLoopRunner 核心 + 挂起/恢复
+- Phase B：ActiveLoops 管理器 + LoopHost trait
+- Phase C：生命周期管理、优雅关闭与持久化恢复
+- Phase D：清理旧代码（TurnRunner / QueryClassifier / ControlSignal）
+
 ## 参考文档
 - 项目说明：`README.md`
 - RFC 0001：`docs/rfc/0001-tiangong-desktop-agent-roadmap.md`
