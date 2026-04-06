@@ -199,6 +199,14 @@ impl TiangongState {
                         if !output.tool_calls.is_empty() {
                             self.store.runtime.run.summary =
                                 format!("正在执行：{}", output.tool_calls.join(", "));
+                            // 有工具调用：重置 assistant_message_id，
+                            // 下一轮 Chunk 创建新 assistant 消息而非追加到旧的
+                            if let Some(pending) =
+                                self.store.runtime.pending_turns.get_mut(&session_id)
+                            {
+                                pending.assistant_message_id = None;
+                                pending.stage_thinking_message_id = None;
+                            }
                         }
                         self.append_pending_turn_llm_output(&session_id, &output);
                     }
@@ -531,6 +539,14 @@ impl TiangongState {
                         if !output.tool_calls.is_empty() {
                             self.store.runtime.run.summary =
                                 format!("正在执行：{}", output.tool_calls.join(", "));
+                            // 有工具调用：重置 assistant_message_id，
+                            // 下一轮 Chunk 创建新 assistant 消息而非追加到旧的
+                            if let Some(pending) =
+                                self.store.runtime.pending_turns.get_mut(&session_id)
+                            {
+                                pending.assistant_message_id = None;
+                                pending.stage_thinking_message_id = None;
+                            }
                         }
                         self.append_pending_turn_llm_output(&session_id, &output);
                     }
