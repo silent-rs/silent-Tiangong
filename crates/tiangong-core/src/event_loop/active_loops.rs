@@ -23,7 +23,7 @@ struct RunningLoop {
     /// 输出接收端
     output_rx: Receiver<TurnEvent>,
     /// 工作线程
-    thread: Option<JoinHandle<LoopOutcome>>,
+    thread: Option<JoinHandle<(LoopOutcome, crate::session::Session)>>,
 }
 
 /// 多会话事件循环管理器
@@ -61,12 +61,25 @@ impl MultiLoopHost {
         let session = (self.session_provider)(session_id)?;
 
         let (event_tx, event_rx) = mpsc::channel::<LoopEvent>();
-        let (output_tx, output_rx) = mpsc::channel::<TurnEvent>();
+        let (turn_event_tx, output_rx) = mpsc::channel::<TurnEvent>();
 
         let runner = if let Some(state) = self.suspended.remove(session_id) {
-            EventLoopRunner::resume(engine, session, state, output_tx, event_rx)
+            EventLoopRunner::resume(
+                engine,
+                session,
+                state,
+                Box::new(super::SilentOutput),
+                Some(turn_event_tx),
+                event_rx,
+            )
         } else {
-            EventLoopRunner::new(engine, session, output_tx, event_rx)
+            EventLoopRunner::new(
+                engine,
+                session,
+                Box::new(super::SilentOutput),
+                Some(turn_event_tx),
+                event_rx,
+            )
         };
 
         let thread = thread::spawn(move || runner.run());
@@ -102,7 +115,7 @@ impl MultiLoopHost {
                 && let Some(thread) = running.thread.take()
             {
                 match thread.join() {
-                    Ok(outcome) => {
+                    Ok((outcome, _session)) => {
                         let state = outcome.into_state();
                         self.suspended.insert(id, state);
                     }

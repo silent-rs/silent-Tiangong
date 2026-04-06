@@ -108,21 +108,21 @@ impl AppTurnService {
         let (tx, rx) = mpsc::channel::<TurnEvent>();
         let (event_tx, event_rx) = mpsc::channel::<crate::event_loop::LoopEvent>();
 
-        // 用 EventLoopRunner 替代 TurnRunner/TaskCoordinator
+        // EventLoopRunner：SilentOutput（通知由 TurnEvent channel 承担）+ event_tx 完整事件流
         let output_tx = tx.clone();
         thread::spawn(move || {
             let runner = crate::event_loop::EventLoopRunner::new(
                 runtime,
                 session_snapshot,
-                output_tx.clone(),
+                Box::new(crate::event_loop::SilentOutput),
+                Some(output_tx.clone()),
                 event_rx,
             );
 
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runner.run()));
 
             match outcome {
-                Ok(crate::event_loop::LoopOutcome::Suspended(_)) => {
-                    // 正常挂起 — 发送 Completed 让 poll 知道本轮结束
+                Ok((crate::event_loop::LoopOutcome::Suspended(loop_state), _)) => {
                     let _ = output_tx.send(TurnEvent::Completed(Box::new(
                         crate::runtime::TurnExecution {
                             assistant_message: String::new(),
@@ -134,20 +134,18 @@ impl AppTurnService {
                             verify_records: Vec::new(),
                             output_mode: "event_loop".to_string(),
                             output_chunk_count: 0,
-                            usage: Default::default(),
+                            usage: loop_state.accumulated_usage,
                             llm_calls: Vec::new(),
                         },
                     )));
                 }
-                Ok(crate::event_loop::LoopOutcome::Error(_, err)) => {
+                Ok((crate::event_loop::LoopOutcome::Error(_, err), _)) => {
                     let _ = output_tx.send(TurnEvent::Failed(err));
                 }
-                Ok(crate::event_loop::LoopOutcome::Cancelled(_)) => {
+                Ok((crate::event_loop::LoopOutcome::Cancelled(_), _)) => {
                     let _ = output_tx.send(TurnEvent::Failed("执行已取消".to_string()));
                 }
-                Ok(crate::event_loop::LoopOutcome::Shutdown(_)) => {
-                    // 关闭信号，静默结束
-                }
+                Ok((crate::event_loop::LoopOutcome::Shutdown(_), _)) => {}
                 Err(panic_err) => {
                     let reason = if let Some(s) = panic_err.downcast_ref::<String>() {
                         s.clone()

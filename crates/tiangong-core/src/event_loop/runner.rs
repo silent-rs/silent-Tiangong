@@ -1,7 +1,11 @@
 //! EventLoopRunner：事件驱动循环执行器
 //!
-//! 替代 TurnRunner，以事件驱动方式处理用户消息、工具结果等。
-//! 无事件时自动挂起，有事件时被唤起继续执行。
+//! core 内部完成完整处理链路：
+//! 事件输入 → 组织上下文 → LLM 调用 → 工具执行 → session 更新
+//!
+//! 输出两条通道：
+//! - LoopOutput 回调：简化通知（CLI 直接打印）
+//! - TurnEvent channel：完整事件流（GUI poll 兼容）
 
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
@@ -9,6 +13,7 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use anyhow::Result;
 
 use super::context::events_to_messages;
+use super::output::LoopOutput;
 use super::types::*;
 use crate::agents::execution_mcp_agent::{McpFunctionTarget, execution_function_tools};
 use crate::app_state::TurnEvent;
@@ -29,17 +34,17 @@ const MAX_ROUNDS: usize = 20;
 
 /// 事件驱动循环执行器
 pub struct EventLoopRunner {
-    // 固定配置
     engine: RuntimeEngine,
     session: Session,
-    output_tx: Sender<TurnEvent>,
+    /// 简化回调（CLI 直接打印）
+    output: Box<dyn LoopOutput>,
+    /// 完整事件流（GUI poll 兼容）
+    event_tx: Option<Sender<TurnEvent>>,
     event_rx: Receiver<LoopEvent>,
 
-    // 运行状态
     state: LoopState,
     phase: LoopPhase,
 
-    // 初始化后的缓存（可重建）
     context: Vec<Message>,
     function_tools: Vec<FunctionToolSpec>,
     mcp_targets: HashMap<String, McpFunctionTarget>,
@@ -47,21 +52,18 @@ pub struct EventLoopRunner {
     organizer: ContextOrganizer,
     session_cwd: Option<std::path::PathBuf>,
 
-    // 当前轮的临时状态
     pending_tool_calls: Vec<ModelFunctionCall>,
     accumulated_usage: TokenUsage,
-    /// 工具执行完后需要继续 LLM 调用
     needs_llm_followup: bool,
-    /// 观测采集器
     observer: ObserveCollector,
 }
 
 impl EventLoopRunner {
-    /// 创建新的 EventLoopRunner
     pub fn new(
         engine: RuntimeEngine,
         session: Session,
-        output_tx: Sender<TurnEvent>,
+        output: Box<dyn LoopOutput>,
+        event_tx: Option<Sender<TurnEvent>>,
         event_rx: Receiver<LoopEvent>,
     ) -> Self {
         let session_id = session.id.clone();
@@ -69,7 +71,8 @@ impl EventLoopRunner {
         Self {
             engine,
             session,
-            output_tx,
+            output,
+            event_tx,
             event_rx,
             state: LoopState::new(session_id.clone()),
             phase: LoopPhase::Idle,
@@ -86,12 +89,12 @@ impl EventLoopRunner {
         }
     }
 
-    /// 从挂起状态恢复
     pub fn resume(
         engine: RuntimeEngine,
         session: Session,
         state: LoopState,
-        output_tx: Sender<TurnEvent>,
+        output: Box<dyn LoopOutput>,
+        event_tx: Option<Sender<TurnEvent>>,
         event_rx: Receiver<LoopEvent>,
     ) -> Self {
         let context_limit = engine.context_limit;
@@ -99,7 +102,8 @@ impl EventLoopRunner {
         Self {
             engine,
             session,
-            output_tx,
+            output,
+            event_tx,
             event_rx,
             state,
             phase: LoopPhase::Idle,
@@ -116,33 +120,47 @@ impl EventLoopRunner {
         }
     }
 
-    /// 主循环入口
-    ///
-    /// 执行事件循环，直到挂起、取消或收到关闭信号。
-    /// 返回 LoopOutcome 供外部决定如何处理状态。
-    pub fn run(mut self) -> LoopOutcome {
-        // 初始化工具和上下文
+    pub fn session(&self) -> &Session {
+        &self.session
+    }
+
+    /// 发送 TurnEvent 到 channel（如果有）
+    fn emit(&self, event: TurnEvent) {
+        if let Some(ref tx) = self.event_tx {
+            let _ = tx.send(event);
+        }
+    }
+
+    pub fn run(mut self) -> (LoopOutcome, Session) {
         if let Err(err) = self.init_tools() {
-            return LoopOutcome::Error(self.state, err.to_string());
+            self.output.on_error(&err.to_string());
+            self.emit(TurnEvent::Failed(err.to_string()));
+            let session = self.session.clone();
+            return (LoopOutcome::Error(self.state, err.to_string()), session);
         }
 
+        let outcome = self.run_loop();
+        let session = self.session.clone();
+        (outcome, session)
+    }
+
+    fn run_loop(&mut self) -> LoopOutcome {
         loop {
-            // 1. 收集待处理事件
             let events = self.collect_events();
 
-            // 2. 无事件且无待处理工作且无需后续 LLM 调用 → 挂起
-            if events.is_empty() && self.pending_tool_calls.is_empty() && !self.needs_llm_followup {
+            if events.is_empty() && self.pending_tool_calls.is_empty() && !self.needs_llm_followup
+            {
                 self.state.interrupted_phase = LoopPhase::Idle;
                 self.state.mark_suspended();
-                return LoopOutcome::Suspended(self.state);
+                self.output.on_round_complete();
+                return LoopOutcome::Suspended(self.state.clone());
             }
 
-            // 3. 处理控制事件（Cancel / Shutdown）
             for event in &events {
                 match event {
                     LoopEvent::Cancel => {
                         self.state.interrupted_phase = LoopPhase::Cancelled;
-                        return LoopOutcome::Cancelled(self.state);
+                        return LoopOutcome::Cancelled(self.state.clone());
                     }
                     LoopEvent::SystemSignal(SystemSignalKind::Shutdown) => {
                         self.state.interrupted_phase = self.phase.clone();
@@ -151,61 +169,52 @@ impl EventLoopRunner {
                             .iter()
                             .map(PendingToolCall::from)
                             .collect();
-                        return LoopOutcome::Shutdown(self.state);
+                        return LoopOutcome::Shutdown(self.state.clone());
                     }
                     _ => {}
                 }
             }
 
-            // 4. 将事件注入上下文
+            // 事件注入 session 和 loop_context
             let new_messages = events_to_messages(&events);
-            self.state.loop_context.extend(new_messages);
+            for msg in &new_messages {
+                self.state.loop_context.push(msg.clone());
+            }
 
-            // 5. 处理权限响应
             for event in &events {
                 if let LoopEvent::PermissionResponse { approved, .. } = event {
                     if *approved {
-                        // 审批通过，继续执行待处理的工具调用
                         self.phase = LoopPhase::Processing;
                     } else {
-                        // 审批拒绝，清空待处理工具调用
                         self.pending_tool_calls.clear();
                     }
                 }
             }
 
-            // 6. 如果有待执行的工具调用且不在等待审批，先执行
             if !self.pending_tool_calls.is_empty()
                 && !matches!(self.phase, LoopPhase::WaitingApproval { .. })
             {
                 self.execute_pending_tools();
-                // 工具结果已注入 state.loop_context，继续循环
                 continue;
             }
 
-            // 7. 组织上下文 + LLM 调用
             self.needs_llm_followup = false;
             self.phase = LoopPhase::Processing;
             match self.call_llm() {
                 Ok(true) => {
-                    // LLM 返回文本回复（满足），回到循环顶部检查后续事件
                     self.phase = LoopPhase::Idle;
                 }
-                Ok(false) => {
-                    // LLM 返回工具调用（不满足），工具调用在 pending_tool_calls
-                    // 下一轮循环会执行它们
-                }
+                Ok(false) => {}
                 Err(err) => {
-                    let _ = self.output_tx.send(TurnEvent::Failed(err.to_string()));
-                    return LoopOutcome::Error(self.state, err.to_string());
+                    self.output.on_error(&err.to_string());
+                    self.emit(TurnEvent::Failed(err.to_string()));
+                    return LoopOutcome::Error(self.state.clone(), err.to_string());
                 }
             }
         }
     }
 
-    /// 初始化工具定义和系统 prompt
     fn init_tools(&mut self) -> Result<()> {
-        // 设置会话级工作目录
         self.session_cwd = if self.session.cwd.is_empty() {
             None
         } else {
@@ -214,7 +223,6 @@ impl EventLoopRunner {
         };
         crate::tool::set_session_cwd(self.session_cwd.clone());
 
-        // 工具定义
         let (all_tools, mcp_targets) = execution_function_tools(&self.engine.agent_config().mcp);
         let mut all_tools: Vec<FunctionToolSpec> = all_tools
             .into_iter()
@@ -228,14 +236,11 @@ impl EventLoopRunner {
         self.function_tools = all_tools;
         self.mcp_targets = mcp_targets;
 
-        // 上下文
         let assembler = ContextAssembler::new(self.engine.context_limit);
         self.context = assembler.organizer().build_context(&self.session);
-
         Ok(())
     }
 
-    /// 收集所有待处理事件（非阻塞）
     fn collect_events(&self) -> Vec<LoopEvent> {
         let mut events = Vec::new();
         loop {
@@ -248,11 +253,7 @@ impl EventLoopRunner {
         events
     }
 
-    /// 调用 LLM
-    ///
-    /// 返回 Ok(true) 表示满足（文本回复），Ok(false) 表示不满足（工具调用）。
     fn call_llm(&mut self) -> Result<bool> {
-        // 构建 system prompt（每轮重建，确保包含最新用户输入）
         let last_user_input = self
             .state
             .loop_context
@@ -268,14 +269,12 @@ impl EventLoopRunner {
             self.engine.agent_config(),
         );
 
-        // 注入用户偏好/长期记忆
         let memory_store = crate::context::memory::MemoryStore::load_from_disk();
         let memory_context = memory_store.format_for_context(&self.session.id);
 
         let req = ModelRequest {
             session_title: self.session.title.clone(),
             user_input: if self.state.round == 0 {
-                // 首轮：system_prompt 可能包含记忆
                 match memory_context {
                     Some(mem) => format!("{}\n\n{}", mem, self.system_prompt),
                     None => self.system_prompt.clone(),
@@ -291,14 +290,36 @@ impl EventLoopRunner {
             },
         };
 
-        // 流式回调：直接发 Chunk 到 assistant 消息（实时流式输出）
-        // LlmOutput 事件在调用完成后发送，包含完整记录
-        let tx = self.output_tx.clone();
+        // 创建 assistant 消息接收流式内容
+        self.session
+            .append_message(MessageRole::Assistant, String::new());
+        let assistant_msg_idx = self.session.messages.len() - 1;
+
+        // 流式回调：更新 session + 通知外部 + 发送 TurnEvent
+        let output_ref = &self.output;
+        let event_tx_ref = &self.event_tx;
+        let messages = &mut self.session.messages;
+
         let response = self.engine.client().complete_with_functions_stream(
             &req,
             &self.function_tools,
             &mut |delta: &ModelStreamChunk| {
-                let _ = tx.send(TurnEvent::Chunk(delta.clone()));
+                // 更新 session assistant 消息
+                if let Some(msg) = messages.get_mut(assistant_msg_idx) {
+                    msg.content.push_str(&delta.content);
+                    msg.reasoning_content.push_str(&delta.reasoning_content);
+                }
+                // 通知外部（CLI 打印）
+                if !delta.content.is_empty() {
+                    output_ref.on_delta(&delta.content);
+                }
+                if !delta.reasoning_content.is_empty() {
+                    output_ref.on_reasoning_delta(&delta.reasoning_content);
+                }
+                // 发送 TurnEvent（GUI poll）
+                if let Some(tx) = event_tx_ref {
+                    let _ = tx.send(TurnEvent::Chunk(delta.clone()));
+                }
             },
         )?;
 
@@ -306,11 +327,10 @@ impl EventLoopRunner {
         self.state.accumulated_usage.accumulate(&response.usage);
         self.observer
             .record_llm_call(scru128::new().to_string(), &response.usage);
+        self.output.on_llm_complete(&response.usage);
 
         if response.tool_calls.is_empty() {
-            // 满足：文本回复（已通过 Chunk callback 流式发送完毕）
-
-            // 发送 LlmOutput（供 poll 格式化系统消息记录）
+            // 满足：最终回复（session 已通过流式 callback 更新完毕）
             let output = LlmOutputRecord {
                 stage: format!("react-round-{}", self.state.round + 1),
                 content: response.text.clone(),
@@ -318,18 +338,15 @@ impl EventLoopRunner {
                 tool_calls: Vec::new(),
                 usage: response.usage.clone(),
             };
-            let _ = self.output_tx.send(TurnEvent::LlmOutput(output));
-
+            self.emit(TurnEvent::LlmOutput(output));
             self.state.round += 1;
             Ok(true)
         } else {
             // 不满足：工具调用
-            // assistant 消息保留 LLM 的中间推理文本，不清空
-            let tool_call_names: Vec<String> = response
-                .tool_calls
-                .iter()
-                .map(|tc| tc.name.clone())
-                .collect();
+            // assistant 消息中的流式中间内容保留（推理过程）
+
+            let tool_call_names: Vec<String> =
+                response.tool_calls.iter().map(|tc| tc.name.clone()).collect();
 
             let output = LlmOutputRecord {
                 stage: format!("react-round-{}", self.state.round + 1),
@@ -338,9 +355,8 @@ impl EventLoopRunner {
                 tool_calls: tool_call_names.clone(),
                 usage: response.usage.clone(),
             };
-            let _ = self.output_tx.send(TurnEvent::LlmOutput(output));
+            self.emit(TurnEvent::LlmOutput(output));
 
-            // 记录 assistant 工具调用意图到 loop_context
             let assistant_text = if response.text.is_empty() {
                 format!("[调用工具: {}]", tool_call_names.join(", "))
             } else {
@@ -358,9 +374,7 @@ impl EventLoopRunner {
             self.pending_tool_calls = response.tool_calls;
             self.state.round += 1;
 
-            // 轮次限制
             if self.state.round >= MAX_ROUNDS {
-                // 超限，强制回复
                 self.force_final_response()?;
                 return Ok(true);
             }
@@ -369,40 +383,40 @@ impl EventLoopRunner {
         }
     }
 
-    /// 执行待处理的工具调用
     fn execute_pending_tools(&mut self) {
         use crate::permission::PermissionDecision;
 
         let pending = std::mem::take(&mut self.pending_tool_calls);
 
         for call in &pending {
-            // 权限检查
             match self.engine.permission_gate().check(&call.name) {
                 PermissionDecision::Approved => {}
                 PermissionDecision::Denied { reason } => {
+                    let msg = format!("权限拒绝工具 {}：{}", call.name, reason);
                     self.state.loop_context.push(Message {
                         id: scru128::new().to_string(),
                         role: MessageRole::System,
-                        content: format!("权限拒绝工具 {}：{}", call.name, reason),
+                        content: msg.clone(),
                         reasoning_content: String::new(),
                         worker_id: None,
                         created_at: now_text(),
                     });
+                    self.session.append_message(MessageRole::System, msg);
                     continue;
                 }
                 PermissionDecision::NeedsApproval { request_id } => {
-                    // 发送审批请求
                     let args_summary = serde_json::to_string(&call.arguments)
                         .unwrap_or_default()
                         .chars()
                         .take(200)
                         .collect::<String>();
-                    let _ = self.output_tx.send(TurnEvent::ApprovalRequest {
+                    self.output
+                        .on_approval_request(&request_id, &call.name, &args_summary);
+                    self.emit(TurnEvent::ApprovalRequest {
                         request_id: request_id.clone(),
                         tool_name: call.name.clone(),
                         tool_args_summary: args_summary,
                     });
-                    // 保留剩余工具调用，等待审批
                     self.pending_tool_calls = pending.clone();
                     self.phase = LoopPhase::WaitingApproval {
                         request_id,
@@ -412,8 +426,8 @@ impl EventLoopRunner {
                 }
             }
 
-            // 执行工具
-            let _ = self.output_tx.send(TurnEvent::ToolStarted {
+            self.output.on_tool_start(&call.name, "");
+            self.emit(TurnEvent::ToolStarted {
                 name: call.name.clone(),
                 summary: String::new(),
             });
@@ -424,11 +438,9 @@ impl EventLoopRunner {
                 &self.engine.agent_config().mcp,
             );
 
-            let _ = self
-                .output_tx
-                .send(TurnEvent::ToolExecution(result.clone()));
+            self.output.on_tool_result(&call.name, &result);
+            self.emit(TurnEvent::ToolExecution(result.clone()));
 
-            // 工具结果注入上下文
             let feedback = format!(
                 "工具 {} 执行{}：{}",
                 call.name,
@@ -445,14 +457,14 @@ impl EventLoopRunner {
             self.state.loop_context.push(Message {
                 id: scru128::new().to_string(),
                 role: MessageRole::System,
-                content: feedback,
+                content: feedback.clone(),
                 reasoning_content: String::new(),
                 worker_id: None,
                 created_at: now_text(),
             });
+            self.session.append_message(MessageRole::System, feedback);
         }
 
-        // 上下文压缩检查
         let prompt_tokens = self.accumulated_usage.prompt_tokens;
         if self.organizer.needs_compression(prompt_tokens)
             && let Ok(compressed) =
@@ -461,11 +473,9 @@ impl EventLoopRunner {
             self.state.loop_context = compressed;
         }
 
-        // 工具执行完毕，标记需要后续 LLM 调用
         self.needs_llm_followup = true;
     }
 
-    /// 超限时强制生成最终回复
     fn force_final_response(&mut self) -> Result<()> {
         let req = ModelRequest {
             session_title: self.session.title.clone(),
@@ -476,16 +486,41 @@ impl EventLoopRunner {
                 ctx
             },
         };
-        let tx = self.output_tx.clone();
+
+        self.session
+            .append_message(MessageRole::Assistant, String::new());
+        let idx = self.session.messages.len() - 1;
+
+        let output_ref = &self.output;
+        let event_tx_ref = &self.event_tx;
+        let messages = &mut self.session.messages;
+
         let resp = if use_stream_mode() {
             self.engine
                 .client()
                 .complete_stream_with_callback(&req, |delta| {
-                    let _ = tx.send(TurnEvent::Chunk(delta.clone()));
+                    if let Some(msg) = messages.get_mut(idx) {
+                        msg.content.push_str(&delta.content);
+                        msg.reasoning_content.push_str(&delta.reasoning_content);
+                    }
+                    if !delta.content.is_empty() {
+                        output_ref.on_delta(&delta.content);
+                    }
+                    if !delta.reasoning_content.is_empty() {
+                        output_ref.on_reasoning_delta(&delta.reasoning_content);
+                    }
+                    if let Some(tx) = event_tx_ref {
+                        let _ = tx.send(TurnEvent::Chunk(delta.clone()));
+                    }
                 })?
         } else {
             let r = self.engine.client().complete(&req)?;
-            if !r.text.is_empty() {
+            if let Some(msg) = messages.get_mut(idx) {
+                msg.content = r.text.clone();
+                msg.reasoning_content = r.reasoning_content.clone();
+            }
+            output_ref.on_delta(&r.text);
+            if let Some(tx) = event_tx_ref {
                 let _ = tx.send(TurnEvent::Chunk(ModelStreamChunk {
                     content: r.text.clone(),
                     reasoning_content: r.reasoning_content.clone(),

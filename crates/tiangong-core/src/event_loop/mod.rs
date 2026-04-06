@@ -1,8 +1,11 @@
 //! 事件驱动循环运行时
 //!
-//! 替代 Turn-based 的 `TurnRunner`，以事件驱动方式处理用户交互。
-//! 所有外部输入（用户消息、工具结果、后台任务完成等）统一为事件，
-//! 循环持续运行直到无事件时自动挂起。
+//! core 内部完成完整处理链路：
+//! 事件输入 → 组织上下文 → LLM 调用 → 工具执行 → session 更新 → 回调通知外部
+//!
+//! 外部使用方式：
+//! - CLI：直接调用 EventLoopRunner，传入打印回调
+//! - GUI：为每个会话创建 EventLoopRunner，传入 channel/emit 回调
 //!
 //! 参考：`docs/rfc/0005-event-loop-runtime.md`
 
@@ -10,12 +13,11 @@ pub mod active_loops;
 pub mod cli_host;
 pub mod context;
 pub mod host;
+pub mod output;
 pub mod persistence;
 pub mod runner;
 pub mod types;
 
-pub use active_loops::MultiLoopHost;
-pub use cli_host::CliLoopHost;
-pub use host::{LoopHandle, LoopHost};
+pub use output::{ChannelOutput, LoopOutput, SilentOutput};
 pub use runner::EventLoopRunner;
 pub use types::{LoopEvent, LoopOutcome, LoopPhase, LoopState, SystemSignalKind};
