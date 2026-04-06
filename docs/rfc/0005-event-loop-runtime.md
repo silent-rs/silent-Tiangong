@@ -238,7 +238,7 @@ LLM 返回无工具调用的文本回复时，视为当前轮"满足"：
 - 连续 N 轮工具调用（MAX_ROUNDS）→ 强制进入"总结"模式
 - 用户发送 Cancel → 取消当前处理，清空待处理工具调用，但**不销毁 loop 状态**
 - 长时间无事件（如 30 分钟）→ 从内存移除，状态持久化到磁盘
-- 应用退出 → 触发优雅关闭（见 §3.6）
+- 应用退出 → 触发优雅关闭（见 §3.7）
 
 ### 3.5 上下文管理
 
@@ -254,7 +254,89 @@ LLM 返回无工具调用的文本回复时，视为当前轮"满足"：
 
 每轮 LLM 调用前，上下文装配器根据 token 预算裁剪历史。
 
-### 3.6 优雅关闭
+### 3.6 运行模式
+
+CLI 和 GUI/Server 的会话管理方式不同，EventLoop 需要适配两种模式：
+
+#### CLI 模式：单会话
+
+```
+┌─────────────────────────────────┐
+│         CLI 进程                 │
+│                                 │
+│  ┌───────────────────────────┐  │
+│  │  EventLoopRunner（唯一）   │  │
+│  │  session: 当前会话         │  │
+│  │  event_rx ← REPL 输入     │  │
+│  │  output_tx → 终端输出      │  │
+│  └───────────────────────────┘  │
+│                                 │
+│  REPL 循环：                     │
+│    读取输入 → send_event         │
+│    poll output → 打印到终端      │
+└─────────────────────────────────┘
+```
+
+- 进程内**只有一个** EventLoopRunner，绑定当前会话
+- 不需要 `ActiveLoops` 管理器，直接持有 loop
+- `/new` 切换新会话时：挂起当前 loop → 创建新 loop
+- 进程退出 = 会话结束，挂起/持久化逻辑与 GUI 一致
+- 不存在"不活跃"问题 — CLI 进程活着就是活跃的
+
+#### GUI/Server 模式：多会话
+
+```
+┌──────────────────────────────────────────────┐
+│         GUI / Server 进程                      │
+│                                              │
+│  ┌────────────────────────────────────────┐  │
+│  │         ActiveLoops 管理器              │  │
+│  │                                        │  │
+│  │  running:                              │  │
+│  │    session-A → EventLoopRunner (线程)   │  │
+│  │                                        │  │
+│  │  suspended:                            │  │
+│  │    session-B → LoopState (仅内存)       │  │
+│  │    session-C → LoopState (仅内存)       │  │
+│  │                                        │  │
+│  └────────────────────────────────────────┘  │
+│                                              │
+│  前端/API：                                    │
+│    send_event(session_id, event)             │
+│    → ActiveLoops 自动路由                     │
+│                                              │
+│  定时器：                                      │
+│    cleanup_inactive() 清理超时会话             │
+└──────────────────────────────────────────────┘
+```
+
+- 通过 `ActiveLoops` 管理所有会话的 loop（running / suspended / stopped）
+- 用户切换会话时：前台会话的 loop 保持 running，其他自然挂起
+- 同一时刻可能有多个 running loop（多窗口 / API 并发请求）
+- 不活跃会话超时后自动 stopped，释放内存
+
+#### 统一接口
+
+无论 CLI 还是 GUI，外部调用方通过统一接口与 EventLoop 交互：
+
+```rust
+trait LoopHost {
+    /// 向会话发送事件（自动唤起挂起的 loop）
+    fn send_event(&mut self, session_id: &str, event: LoopEvent);
+    /// 轮询输出事件
+    fn poll_output(&mut self, session_id: &str) -> Vec<TurnEvent>;
+    /// 优雅关闭所有 loop
+    fn shutdown_all(&mut self);
+}
+
+/// CLI 实现：单会话，直接持有 loop
+struct CliLoopHost { loop_runner: Option<EventLoopRunner> }
+
+/// GUI/Server 实现：多会话，ActiveLoops 管理
+struct MultiLoopHost { active_loops: ActiveLoops }
+```
+
+### 3.7 优雅关闭
 
 应用退出时（用户关闭窗口、`Ctrl+C`、`server stop` 等），必须将所有活跃 loop 的状态持久化到磁盘，确保下次启动可恢复。
 
