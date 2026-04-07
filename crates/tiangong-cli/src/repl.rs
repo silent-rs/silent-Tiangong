@@ -148,7 +148,7 @@ fn process_event(
             let preview: String = output.lines().next().unwrap_or("").chars().take(80).collect();
             output::print_status(&format!("  {status} {name}: {preview}"));
         }
-        StreamEvent::ToolCalls { names } => {
+        StreamEvent::ToolCalls { names, .. } => {
             if *in_stream { output::flush_line(); *in_stream = false; }
             flush_reasoning(reasoning_buf);
             reasoning_buf.clear();

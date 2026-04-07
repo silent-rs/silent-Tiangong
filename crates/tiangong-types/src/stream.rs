@@ -22,7 +22,12 @@ pub enum StreamEvent {
         output: String,
     },
     /// LLM 决定调用工具
-    ToolCalls { names: Vec<String> },
+    ToolCalls {
+        names: Vec<String>,
+        /// 本次 LLM 调用的 token 用量
+        #[serde(skip_serializing_if = "Option::is_none")]
+        usage: Option<crate::TokenUsage>,
+    },
     /// 需要用户审批
     ApprovalNeeded {
         request_id: String,

@@ -238,11 +238,23 @@ pub fn send_message(
                             format!("工具执行 [{name}]\n{status}\n{preview}"),
                         );
                     }
-                    StreamEvent::ToolCalls { names } => {
+                    StreamEvent::ToolCalls { names, usage } => {
                         // 工具调用：重置 assistant id，下一轮创建新 assistant
                         assistant_msg_id = None;
                         core_state.store.runtime.run.summary =
                             format!("正在执行：{}", names.join(", "));
+                        // 累加 usage
+                        if let Some(u) = usage {
+                            let core_usage = tiangong_core::model::TokenUsage {
+                                prompt_tokens: u.prompt_tokens,
+                                completion_tokens: u.completion_tokens,
+                                total_tokens: u.total_tokens,
+                            };
+                            match core_state.store.runtime.run.last_usage.as_mut() {
+                                Some(existing) => existing.accumulate(&core_usage),
+                                None => core_state.store.runtime.run.last_usage = Some(core_usage),
+                            }
+                        }
                     }
                     StreamEvent::Done { ref usage } => {
                         if let Some(u) = usage {

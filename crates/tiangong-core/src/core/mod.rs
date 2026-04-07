@@ -256,7 +256,7 @@ impl ConsumerState {
                 output: result.stdout.clone(),
             }),
             TurnEvent::LlmOutput(output) if !output.tool_calls.is_empty() => {
-                Some(StreamEvent::ToolCalls { names: output.tool_calls.clone() })
+                Some(StreamEvent::ToolCalls { names: output.tool_calls.clone(), usage: Some(output.usage.clone()) })
             }
             TurnEvent::LlmOutput(output) if output.tool_calls.is_empty() => {
                 // 无 tool_calls 的 LlmOutput = 最终回复完成

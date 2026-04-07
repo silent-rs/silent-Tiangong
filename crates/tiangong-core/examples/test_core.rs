@@ -15,7 +15,7 @@ fn main() {
             Ok(event) => match &event {
                 StreamEvent::Delta { content: text } => print!("{text}"),
                 StreamEvent::Reasoning { content: _ } => print!("[R]"),
-                StreamEvent::ToolCalls { names } => println!("\n[调用] {}", names.join(",")),
+                StreamEvent::ToolCalls { names, .. } => println!("\n[调用] {}", names.join(",")),
                 StreamEvent::ToolStart { name, .. } => println!("[开始] {name}"),
                 StreamEvent::ToolResult { name, ok, .. } => println!("[结果] {name} ok={ok}"),
                 StreamEvent::Done { .. } => {

@@ -70,6 +70,7 @@ fn stream_event_serde() {
 
     let tool = StreamEvent::ToolCalls {
         names: vec!["read_file".into(), "list_dir".into()],
+        usage: None,
     };
     let json = serde_json::to_string(&tool).unwrap();
     assert!(json.contains(r#""type":"tool_calls""#));

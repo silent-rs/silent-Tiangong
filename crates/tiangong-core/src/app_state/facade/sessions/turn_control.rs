@@ -196,7 +196,7 @@ impl TiangongState {
                 output: result.stdout.clone(),
             }),
             TurnEvent::LlmOutput(output) if !output.tool_calls.is_empty() => {
-                Some(StreamEvent::ToolCalls { names: output.tool_calls.clone() })
+                Some(StreamEvent::ToolCalls { names: output.tool_calls.clone(), usage: Some(output.usage.clone()) })
             }
             TurnEvent::Completed(_) => Some(StreamEvent::Done { usage: None }),
             TurnEvent::Failed(err) => Some(StreamEvent::Error { message: err.clone() }),
