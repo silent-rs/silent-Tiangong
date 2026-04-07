@@ -126,13 +126,21 @@ impl EventLoopRunner {
 
     fn run_loop(&mut self) -> LoopOutcome {
         loop {
-            let events = self.collect_events();
+            let mut events = self.collect_events();
 
+            // 无事件且无待处理工作 → 阻塞等待下一个事件（而非挂起退出）
             if events.is_empty() && self.pending_tool_calls.is_empty() && !self.needs_llm_followup
             {
-                self.state.interrupted_phase = LoopPhase::Idle;
-                self.state.mark_suspended();
-                return LoopOutcome::Suspended(self.state.clone());
+                match self.event_rx.recv() {
+                    Ok(event) => events.push(event),
+                    Err(_) => {
+                        // channel 断开（core 被 drop 或 shutdown）
+                        self.state.interrupted_phase = LoopPhase::Idle;
+                        return LoopOutcome::Suspended(self.state.clone());
+                    }
+                }
+                // 收到一个事件后，继续非阻塞收集剩余事件
+                events.extend(self.collect_events());
             }
 
             for event in &events {
