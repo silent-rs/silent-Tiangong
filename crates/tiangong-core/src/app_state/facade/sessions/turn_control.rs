@@ -348,10 +348,18 @@ impl TiangongState {
                             None => run.last_usage = Some(output.usage.clone()),
                         }
                     }
-                    // 有工具调用时更新 summary 显示即将执行的工具
                     if !output.tool_calls.is_empty() {
                         self.store.runtime.run.summary =
                             format!("正在执行：{}", output.tool_calls.join(", "));
+                        // 有工具调用：重置 assistant_message_id
+                        // 当前 assistant 消息保留（中间推理过程）
+                        // 下一轮 Chunk 创建新 assistant 消息
+                        if let Some(pending) =
+                            self.store.runtime.pending_turns.get_mut(session_id)
+                        {
+                            pending.assistant_message_id = None;
+                            pending.stage_thinking_message_id = None;
+                        }
                     }
                     self.append_pending_turn_llm_output(session_id, &output);
                 }
