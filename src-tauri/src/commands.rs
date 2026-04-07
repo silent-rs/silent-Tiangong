@@ -44,18 +44,15 @@ fn build_session_snapshot(
     );
 
     // 按 session 修正 status：如果该 session 没有 pending_turn，状态应为 idle
-    if core_state.has_pending_turn_for(session_id) {
-        // 该 session 正在运行，但全局 RunSnapshot 可能被其他 session 的事件覆盖
-        // 如果 last_session_id 不匹配，给一个合理的默认状态
-        if snapshot.last_session_id.as_deref() != Some(session_id) {
-            snapshot.status = "executing".to_string();
-            snapshot.summary = "正在执行中".to_string();
+    // 状态由 RunSnapshot.status 直接管理，不根据 pending_turns 覆盖
+    // （TiangongCore 路径不使用 pending_turns）
+    if snapshot.status != "executing" && !core_state.has_pending_turn_for(session_id) {
+        // 旧路径兼容：没有 pending_turn 且不是 executing → idle
+        if snapshot.last_session_id.as_deref() == Some(session_id) {
+            // 当前会话，保留 status
+        } else {
+            snapshot.current_plan = None;
         }
-    } else {
-        // 该 session 没有在运行
-        snapshot.status = "idle".to_string();
-        // 保留 summary 供历史查看，但清除执行中相关的字段
-        snapshot.current_plan = None;
     }
 
     snapshot
@@ -226,17 +223,11 @@ pub fn send_message(
                         core_state.store.runtime.run.summary =
                             format!("正在执行：{name}");
                     }
-                    StreamEvent::ToolResult { name, ok, output } => {
-                        let status = if *ok { "ok=true" } else { "ok=false" };
-                        let preview = if output.chars().count() > 200 {
-                            format!("{}...", output.chars().take(200).collect::<String>())
-                        } else {
-                            output.clone()
-                        };
-                        session.append_message(
-                            tiangong_core::session::MessageRole::System,
-                            format!("工具执行 [{name}]\n{status}\n{preview}"),
-                        );
+                    StreamEvent::ToolResult { name, ok, .. } => {
+                        // 只更新 summary（工具执行记录由 into_session 提供完整数据）
+                        let status = if *ok { "✓" } else { "✗" };
+                        core_state.store.runtime.run.summary =
+                            format!("{status} {name}");
                     }
                     StreamEvent::ToolCalls { names, usage } => {
                         // 工具调用：重置 assistant id
