@@ -9,3 +9,4 @@ tiangong-types = { path = "../tiangong-types" }
 anyhow = "1"
 crossterm = "0.28"
 ratatui = "0.28"
+termimad = "0.30"
