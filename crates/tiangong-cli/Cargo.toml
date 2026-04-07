@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 tiangong-core = { path = "../tiangong-core" }
+tiangong-types = { path = "../tiangong-types" }
 anyhow = "1"
 crossterm = "0.28"
 ratatui = "0.28"

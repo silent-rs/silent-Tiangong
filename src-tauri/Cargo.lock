@@ -4781,6 +4781,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tiangong-media",
+ "tiangong-types",
  "tokio",
  "toml 0.8.2",
  "tracing",
@@ -4832,6 +4833,16 @@ dependencies = [
  "tiangong-gateway",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "tiangong-types"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "scru128",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
