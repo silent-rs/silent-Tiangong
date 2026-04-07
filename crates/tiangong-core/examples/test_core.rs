@@ -13,9 +13,9 @@ fn main() {
     loop {
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok(event) => match &event {
-                StreamEvent::Delta(text) => print!("{text}"),
-                StreamEvent::Reasoning(_) => print!("[R]"),
-                StreamEvent::ToolCalls(names) => println!("\n[调用] {}", names.join(",")),
+                StreamEvent::Delta { content: text } => print!("{text}"),
+                StreamEvent::Reasoning { content: _ } => print!("[R]"),
+                StreamEvent::ToolCalls { names } => println!("\n[调用] {}", names.join(",")),
                 StreamEvent::ToolStart { name, .. } => println!("[开始] {name}"),
                 StreamEvent::ToolResult { name, ok, .. } => println!("[结果] {name} ok={ok}"),
                 StreamEvent::Done => {
@@ -23,7 +23,7 @@ fn main() {
                     got_done = true;
                     break;
                 }
-                StreamEvent::Error(err) => {
+                StreamEvent::Error { message: err } => {
                     println!("\n=== Error: {err} ===");
                     break;
                 }
@@ -44,13 +44,13 @@ fn main() {
 
         loop {
             match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-                Ok(StreamEvent::Delta(text)) => print!("{text}"),
-                Ok(StreamEvent::Reasoning(_)) => print!("[R]"),
+                Ok(StreamEvent::Delta { content: text }) => print!("{text}"),
+                Ok(StreamEvent::Reasoning { content: _ }) => print!("[R]"),
                 Ok(StreamEvent::Done) => {
                     println!("\n=== 第二轮 Done ===");
                     break;
                 }
-                Ok(StreamEvent::Error(err)) => {
+                Ok(StreamEvent::Error { message: err }) => {
                     println!("\n=== 第二轮 Error: {err} ===");
                     break;
                 }

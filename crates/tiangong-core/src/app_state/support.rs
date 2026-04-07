@@ -114,37 +114,7 @@ pub enum TurnEvent {
     },
 }
 
-/// 精简的外部输出流事件
-///
-/// CLI / GUI / Connector 统一消费此类型。
-/// 与内部 TurnEvent 解耦，只包含展示所需的信息。
-#[derive(Debug, Clone)]
-pub enum StreamEvent {
-    /// 文本增量（assistant 回复内容）
-    Delta(String),
-    /// 思考过程增量
-    Reasoning(String),
-    /// 工具开始执行
-    ToolStart { name: String, summary: String },
-    /// 工具执行结果
-    ToolResult {
-        name: String,
-        ok: bool,
-        output: String,
-    },
-    /// LLM 决定调用工具
-    ToolCalls(Vec<String>),
-    /// 需要用户审批
-    ApprovalNeeded {
-        request_id: String,
-        tool_name: String,
-        args_summary: String,
-    },
-    /// 本轮完成
-    Done,
-    /// 执行出错
-    Error(String),
-}
+pub use tiangong_types::StreamEvent;
 
 /// 从主线程发送到执行线程的控制信号
 #[derive(Debug)]

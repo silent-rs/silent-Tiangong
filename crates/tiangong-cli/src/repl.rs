@@ -29,7 +29,7 @@ pub fn run() -> Result<()> {
 
             for event in events {
                 match event {
-                    StreamEvent::Delta(text) => {
+                    StreamEvent::Delta { content: text } => {
                         if !printed_header {
                             // 先输出缓积的 reasoning
                             flush_reasoning(&reasoning_buf);
@@ -39,7 +39,7 @@ pub fn run() -> Result<()> {
                         output::print_delta(&text);
                         in_stream = true;
                     }
-                    StreamEvent::Reasoning(text) => {
+                    StreamEvent::Reasoning { content: text } => {
                         reasoning_buf.push_str(&text);
                     }
                     StreamEvent::ToolStart { name, .. } => {
@@ -54,7 +54,7 @@ pub fn run() -> Result<()> {
                         let preview: String = out.lines().next().unwrap_or("").chars().take(80).collect();
                         output::print_status(&format!("  {status} {name}: {preview}"));
                     }
-                    StreamEvent::ToolCalls(names) => {
+                    StreamEvent::ToolCalls { names } => {
                         if in_stream {
                             output::flush_line();
                             in_stream = false;
@@ -86,7 +86,7 @@ pub fn run() -> Result<()> {
                         printed_header = false;
                         println!();
                     }
-                    StreamEvent::Error(err) => {
+                    StreamEvent::Error { message: err } => {
                         if in_stream {
                             output::flush_line();
                             in_stream = false;

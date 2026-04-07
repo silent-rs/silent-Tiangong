@@ -17,21 +17,7 @@ use tokio::time::timeout;
 use crate::mcp::build_mcp_tools_system_prompt;
 use crate::session::{Message, MessageRole};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TokenUsage {
-    pub prompt_tokens: usize,
-    pub completion_tokens: usize,
-    pub total_tokens: usize,
-}
-
-impl TokenUsage {
-    /// 累加另一个 TokenUsage 到自身
-    pub fn accumulate(&mut self, other: &TokenUsage) {
-        self.prompt_tokens += other.prompt_tokens;
-        self.completion_tokens += other.completion_tokens;
-        self.total_tokens += other.total_tokens;
-    }
-}
+pub use tiangong_types::TokenUsage;
 
 #[derive(Debug, Clone)]
 pub struct ModelRequest {

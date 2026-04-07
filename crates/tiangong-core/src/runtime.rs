@@ -16,18 +16,7 @@ use crate::models_config::{ModelCapability, ModelsConfig};
 use crate::planner::TaskPlan;
 use crate::tool::{LocalToolExecutor, ToolExecutionRecord, ToolExecutor, ToolResult};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RunStatus {
-    #[default]
-    Idle,
-    Planning,
-    Executing,
-    /// 等待用户审批（高风险工具操作）
-    WaitingApproval,
-    Completed,
-    Failed,
-}
+pub use tiangong_types::RunStatus;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunSnapshot {

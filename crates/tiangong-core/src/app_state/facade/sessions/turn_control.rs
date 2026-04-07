@@ -179,9 +179,9 @@ impl TiangongState {
         let stream_event = match &event {
             TurnEvent::Chunk(delta) => {
                 if !delta.content.is_empty() {
-                    Some(StreamEvent::Delta(delta.content.clone()))
+                    Some(StreamEvent::Delta { content: delta.content.clone() })
                 } else if !delta.reasoning_content.is_empty() {
-                    Some(StreamEvent::Reasoning(delta.reasoning_content.clone()))
+                    Some(StreamEvent::Reasoning { content: delta.reasoning_content.clone() })
                 } else {
                     None
                 }
@@ -196,10 +196,10 @@ impl TiangongState {
                 output: result.stdout.clone(),
             }),
             TurnEvent::LlmOutput(output) if !output.tool_calls.is_empty() => {
-                Some(StreamEvent::ToolCalls(output.tool_calls.clone()))
+                Some(StreamEvent::ToolCalls { names: output.tool_calls.clone() })
             }
             TurnEvent::Completed(_) => Some(StreamEvent::Done),
-            TurnEvent::Failed(err) => Some(StreamEvent::Error(err.clone())),
+            TurnEvent::Failed(err) => Some(StreamEvent::Error { message: err.clone() }),
             TurnEvent::ApprovalRequest {
                 request_id,
                 tool_name,
