@@ -355,4 +355,5 @@
 - [x] 删除旧 LoopHost/ActiveLoops/CliLoopHost（-433 行）
 - [ ] TurnRunner/ControlSignal 待 Worker 迁移后删除
 - [ ] src-tauri/types.rs DTO 转换层待前端完全迁移后删除
-- [ ] 全链路功能验证（CLI + GUI）
+- [x] GUI 全链路功能验证通过
+- [ ] CLI 交互优化（类似 codex/claude code 风格，Phase 10-C）
