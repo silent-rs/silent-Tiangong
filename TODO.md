@@ -340,11 +340,18 @@
 - [x] GUI send_message 接入 TiangongCore
 - [x] CLI 中文 panic 修复（补全 + reasoning 截断）
 
+### 类型迁移（已完成 ✅）
+
+- [x] TokenUsage → `pub use tiangong_types::TokenUsage`
+- [x] RunStatus → `pub use tiangong_types::RunStatus`
+- [x] StreamEvent → `pub use tiangong_types::StreamEvent`
+- [x] Message / MessageRole / now_text → `pub use tiangong_types::{...}`
+
 ### 待完成
 
-- [ ] core 中 Session/Message/TokenUsage 迁移到 tiangong-types
 - [ ] GUI 前端直接消费 StreamEvent（替代 run_snapshot 快照）
 - [ ] CLI 接入 TiangongCore（替代 TiangongState poll）
-- [ ] 删除旧的 TurnRunner / QueryClassifier / ControlSignal
-- [ ] 删除 src-tauri/src/types.rs 中的 DTO 转换层
-- [ ] GUI spinner/状态完整验证
+- [ ] src-tauri 依赖 tiangong-types，删除 DTO 转换层
+- [ ] 删除旧代码（TurnRunner / QueryClassifier / ControlSignal / 旧 poll 逻辑）
+- [ ] GUI spinner/状态/流式/工具调用完整验证
+- [ ] 全链路功能测试（CLI + GUI + 工具调用 + 多轮对话）
