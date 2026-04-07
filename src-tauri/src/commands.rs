@@ -127,73 +127,89 @@ pub fn send_message(
     _window: Window,
     state: State<TiangongApp>,
 ) -> Result<(), String> {
-    // 记录发送时的 session_id
-    let session_id = state
-        .with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))?;
+    use std::sync::mpsc;
+    use tiangong_core::app_state::StreamEvent;
+    use tiangong_core::core::TiangongCore;
 
-    // 设置输入草稿并发送
-    state.with_state(|core_state| {
-        core_state.update_draft(content);
-        core_state.send_current_input()
+    // 准备 session：确保有活跃会话，记录用户消息
+    let session_snapshot = state.with_state(|core_state| {
+        core_state.update_draft(content.clone());
+        let idx = core_state.ensure_active_session_index();
+        let session = core_state.sessions()[idx].clone();
+        // 记录用户消息到 TiangongState 的 session（持久化用）
+        core_state.sessions_mut()[idx]
+            .append_message(tiangong_core::session::MessageRole::User, content.clone());
+        core_state.store.session.input_draft.clear();
+        // 更新运行状态
+        core_state.store.runtime.run.status = tiangong_core::runtime::RunStatus::Executing;
+        core_state.store.runtime.run.summary = "正在处理".to_string();
+        core_state.store.runtime.run.last_session_id = Some(session.id.clone());
+        core_state.store.runtime.run.updated_at = tiangong_core::session::now_text();
+        let _ = core_state.persist_session_and_app(&session.id);
+        Ok(session)
     })?;
 
-    // 启动后台任务监听事件并推送到前端
+    // 发送初始快照（executing 状态）
+    if let Ok(snapshot) = state.with_state_read(|s| Ok(build_full_snapshot(s))) {
+        let _ = app.emit("run_snapshot", &snapshot);
+    }
+
+    // 创建 TiangongCore 并发送消息
+    let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
+    let core = TiangongCore::with_session(session_snapshot, stream_tx);
+    core.send_message(content);
+
+    // 消费 StreamEvent → 更新 TiangongState → emit 快照到前端
     let app_clone = app.clone();
-    let poll_session_id = session_id.clone();
     thread::spawn(move || {
-        loop {
-            // 单次持锁：轮询事件 + 构建快照 + 检查完成状态
-            let poll_result = app_clone
+        for event in stream_rx.iter() {
+            let is_done = matches!(event, StreamEvent::Done);
+            let is_error = matches!(event, StreamEvent::Error(_));
+
+            // 更新 TiangongState 中的 session 和快照
+            let emit_result = app_clone
                 .state::<TiangongApp>()
                 .with_state(|core_state| {
-                    // 1. 轮询本次 session 的事件
-                    core_state.poll_pending_turn_for(&poll_session_id);
-
-                    // 2. 构建快照
-                    let snapshot = build_full_snapshot(core_state);
-
-                    // 3. 检查是否完成（RunStatus 为 Completed 或 Failed）
-                    let status = core_state.run_snapshot().status;
-                    let done = matches!(
-                        status,
-                        tiangong_core::runtime::RunStatus::Completed
-                            | tiangong_core::runtime::RunStatus::Failed
-                    );
-
-                    // 4. 完成后重置为 idle
-                    if done {
-                        if matches!(status, tiangong_core::runtime::RunStatus::Completed) {
-                            core_state.report_run_idle(format!(
-                                "模型供应商：{}",
-                                core_state.provider_label()
-                            ));
-                        } else {
-                            core_state.report_run_idle("执行失败");
-                        }
+                    // 同步 TiangongCore 的 session 变化到 TiangongState
+                    // （通过 StreamEvent 间接更新，保持一致性）
+                    if is_done {
+                        core_state.report_run_idle(format!(
+                            "模型供应商：{}",
+                            core_state.provider_label()
+                        ));
+                    } else if is_error {
+                        core_state.report_run_idle("执行失败");
                     }
-
-                    Ok((snapshot, done))
+                    Ok(build_full_snapshot(core_state))
                 });
 
-            match poll_result {
-                Ok((snapshot, done)) => {
-                    let _ = app_clone.emit("run_snapshot", &snapshot);
-
-                    if done {
-                        // 发送最终 idle 快照
-                        if let Ok(final_snapshot) = app_clone
-                            .state::<TiangongApp>()
-                            .with_state_read(|s| Ok(build_full_snapshot(s)))
-                        {
-                            let _ = app_clone.emit("run_snapshot", &final_snapshot);
-                        }
-                        break;
-                    }
-                }
-                Err(_) => break,
+            if let Ok(snapshot) = emit_result {
+                let _ = app_clone.emit("run_snapshot", &snapshot);
             }
 
-            thread::sleep(Duration::from_millis(200));
+            if is_done || is_error {
+                // 完成：同步 TiangongCore 的 session 回 TiangongState
+                let session = core.into_session();
+                let sid = session.id.clone();
+                let _ = app_clone.state::<TiangongApp>().with_state(|core_state| {
+                    // 用 core 的 session 替换 TiangongState 中的
+                    if let Some(s) = core_state
+                        .store
+                        .session
+                        .sessions
+                        .iter_mut()
+                        .find(|s| s.id == sid)
+                    {
+                        *s = session;
+                    }
+                    let _ = core_state.persist_session_and_app(&sid);
+                    // 发送最终快照
+                    let final_snapshot = build_full_snapshot(core_state);
+                    let _ = app_clone.emit("run_snapshot", &final_snapshot);
+                    Ok(())
+                });
+                break;
+            }
         }
     });
 
