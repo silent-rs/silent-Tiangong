@@ -128,8 +128,8 @@ pub fn send_message(
     state: State<TiangongApp>,
 ) -> Result<(), String> {
     use std::sync::mpsc;
-    use tiangong_core::app_state::StreamEvent;
     use tiangong_core::core::TiangongCore;
+    use tiangong_types::StreamEvent;
 
     // 准备 session：确保有活跃会话，记录用户消息
     let session_snapshot = state.with_state(|core_state| {
@@ -164,7 +164,10 @@ pub fn send_message(
     thread::spawn(move || {
         for event in stream_rx.iter() {
             let is_done = matches!(event, StreamEvent::Done);
-            let is_error = matches!(event, StreamEvent::Error(_));
+            let is_error = matches!(event, StreamEvent::Error { .. });
+
+            // 直接 emit StreamEvent 给前端（JSON 序列化）
+            let _ = app_clone.emit("stream_event", &event);
 
             // 更新 TiangongState 中的 session 和快照
             let emit_result = app_clone
