@@ -321,3 +321,30 @@
 - [x] CLI 已通过 TiangongState 间接使用 EventLoopRunner（无需额外改造）
 - [x] TurnRunner 仍被 Worker 使用，保留；旧代码后续随 Worker 重构清理
 - [x] 验证：完整检查链通过
+
+---
+
+## Phase 13：TiangongCore 纯粹化 + 统一类型 — **当前阶段**
+
+### 已完成
+
+- [x] 新增 `TiangongCore`：单一对话处理核心（sender 推送模式）
+  - send_message / cancel / respond_approval / into_session
+  - 内部消费线程独占 session，统一事件循环（CoreEvent）
+  - EventLoopRunner 空闲时阻塞等待，支持持续输入
+- [x] 新增 `tiangong-types` 独立 crate
+  - Message / MessageRole / Session / TokenUsage / RunStatus / StreamEvent
+  - StreamEvent 带 serde tag JSON 序列化
+- [x] Prompt 分层装配系统（prompt/ 模块）
+- [x] poll 事件处理统一（process_turn_event）
+- [x] GUI send_message 接入 TiangongCore
+- [x] CLI 中文 panic 修复（补全 + reasoning 截断）
+
+### 待完成
+
+- [ ] core 中 Session/Message/TokenUsage 迁移到 tiangong-types
+- [ ] GUI 前端直接消费 StreamEvent（替代 run_snapshot 快照）
+- [ ] CLI 接入 TiangongCore（替代 TiangongState poll）
+- [ ] 删除旧的 TurnRunner / QueryClassifier / ControlSignal
+- [ ] 删除 src-tauri/src/types.rs 中的 DTO 转换层
+- [ ] GUI spinner/状态完整验证
