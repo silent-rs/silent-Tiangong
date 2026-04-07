@@ -2,7 +2,6 @@ use crate::app::TiangongApp;
 use crate::types::*;
 use std::path::PathBuf;
 use std::thread;
-use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 
 // ============================================================================

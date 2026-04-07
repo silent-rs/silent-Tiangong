@@ -4744,6 +4744,7 @@ dependencies = [
  "tiangong-core",
  "tiangong-media",
  "tiangong-server",
+ "tiangong-types",
  "tokio",
  "toml 0.8.2",
  "tracing",
