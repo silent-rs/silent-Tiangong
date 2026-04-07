@@ -76,4 +76,10 @@ impl TiangongApp {
         let mut cores = self.cores.lock().unwrap();
         cores.remove(session_id)
     }
+
+    /// 检查 session 是否有活跃 core
+    pub fn is_session_executing(&self, session_id: &str) -> bool {
+        let cores = self.cores.lock().unwrap();
+        cores.contains_key(session_id)
+    }
 }

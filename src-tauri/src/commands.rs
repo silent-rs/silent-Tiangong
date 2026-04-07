@@ -8,18 +8,22 @@ use tauri::{AppHandle, Emitter, Manager, State, Window};
 // 辅助函数：构建完整的 RunSnapshot
 // ============================================================================
 
-fn build_full_snapshot(core_state: &tiangong_core::app_state::TiangongState) -> RunSnapshot {
-    build_session_snapshot(core_state, core_state.active_session_id())
+fn build_full_snapshot_with_status(
+    core_state: &tiangong_core::app_state::TiangongState,
+    is_executing: bool,
+) -> RunSnapshot {
+    let sid = core_state.active_session_id();
+    build_session_snapshot(core_state, sid, is_executing)
 }
 
 fn build_session_snapshot(
     core_state: &tiangong_core::app_state::TiangongState,
     session_id: &str,
+    is_session_executing: bool,
 ) -> RunSnapshot {
     let core_snapshot = core_state.run_snapshot();
     let input_draft = core_state.input_draft().to_string();
 
-    // 获取指定会话的消息
     let messages: Vec<Message> = core_state
         .sessions()
         .iter()
@@ -27,7 +31,6 @@ fn build_session_snapshot(
         .map(|s| s.messages.iter().map(Message::from_core).collect())
         .unwrap_or_default();
 
-    // 获取当前执行的计划（从 active_task_plans 获取第一个进行中的计划）
     let current_plan = core_state
         .active_task_plans()
         .first()
@@ -43,16 +46,17 @@ fn build_session_snapshot(
         pending_session_ids,
     );
 
-    // 按 session 修正 status：如果该 session 没有 pending_turn，状态应为 idle
-    // 状态由 RunSnapshot.status 直接管理，不根据 pending_turns 覆盖
-    // （TiangongCore 路径不使用 pending_turns）
-    if snapshot.status != "executing" && !core_state.has_pending_turn_for(session_id) {
-        // 旧路径兼容：没有 pending_turn 且不是 executing → idle
-        if snapshot.last_session_id.as_deref() == Some(session_id) {
-            // 当前会话，保留 status
-        } else {
-            snapshot.current_plan = None;
+    // 按 session 独立判断状态
+    if is_session_executing {
+        // 该 session 有活跃的 TiangongCore
+        if snapshot.last_session_id.as_deref() != Some(session_id) {
+            snapshot.status = "executing".to_string();
+            snapshot.summary = "正在处理".to_string();
         }
+    } else {
+        // 该 session 没有活跃 core → idle
+        snapshot.status = "idle".to_string();
+        snapshot.current_plan = None;
     }
 
     snapshot
@@ -208,12 +212,15 @@ pub fn send_message(
                 Ok(())
             });
 
-            // emit run_snapshot（status/summary/usage 更新）
-            if let Ok(snapshot) = app_clone
-                .state::<TiangongApp>()
-                .with_state_read(|s| Ok(build_full_snapshot(s)))
+            // emit run_snapshot
             {
-                let _ = app_clone.emit("run_snapshot", &snapshot);
+                let is_exec = !is_done && !is_error;
+                if let Ok(snapshot) = app_clone
+                    .state::<TiangongApp>()
+                    .with_state_read(|s| Ok(build_full_snapshot_with_status(s, is_exec)))
+                {
+                    let _ = app_clone.emit("run_snapshot", &snapshot);
+                }
             }
 
             if is_done || is_error {
@@ -271,7 +278,7 @@ pub fn send_message(
                             }
                         }
                         let _ = core_state.persist_session_and_app(&sid);
-                        let snapshot = build_full_snapshot(core_state);
+                        let snapshot = build_full_snapshot_with_status(core_state, false);
                         let _ = app_clone.emit("run_snapshot", &snapshot);
                         let _ = app_clone.emit("sessions_updated", &());
                         Ok(())
@@ -697,7 +704,10 @@ pub fn get_mention_candidates(state: State<TiangongApp>) -> Result<Vec<MentionCa
 /// 获取运行状态快照
 #[tauri::command]
 pub fn get_run_snapshot(state: State<TiangongApp>) -> Result<RunSnapshot, String> {
-    state.with_state_read(|core_state| Ok(build_full_snapshot(core_state)))
+    let active_id = state
+        .with_state_read(|s| Ok(s.active_session_id().to_string()))?;
+    let is_exec = state.is_session_executing(&active_id);
+    state.with_state_read(|core_state| Ok(build_full_snapshot_with_status(core_state, is_exec)))
 }
 
 /// 获取输入草稿
