@@ -1,6 +1,94 @@
+//! 天工统一入口
+//!
+//! 无参数或 `ui` → 启动 GUI
+//! `cli` → CLI 模式
+//! 其他命令 → 委托给 tiangong_entry（server/mcp/skill）
+//!
+//! DMG 安装后可通过 symlink 获得 CLI 能力：
+//! ln -s /Applications/天工.app/Contents/MacOS/天工 /usr/local/bin/tiangong
+
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    // 检查第一个参数决定模式
+    let args: Vec<String> = std::env::args().collect();
+    let command = args.get(1).map(|s| s.as_str());
+
+    match command {
+        // CLI 模式
+        Some("cli") => run_cli(),
+        // 帮助
+        Some("-h") | Some("--help") => print_help(),
+        Some("-V") | Some("--version") => print_version(),
+        // 其他命令委托给 tiangong_entry（server/mcp/skill）
+        Some("server") | Some("mcp") | Some("skill") => run_entry(),
+        // 无参数或 "ui" → 启动 GUI
+        None | Some("ui") => run_gui(),
+        // 未知命令
+        Some(cmd) => {
+            eprintln!("未知命令：{cmd}");
+            print_help();
+            std::process::exit(1);
+        }
+    }
+}
+
+fn print_help() {
+    println!("天工 — 全功能个人智能终端");
+    println!();
+    println!("用法：tiangong [命令]");
+    println!();
+    println!("命令：");
+    println!("  (无)      启动桌面 GUI（默认）");
+    println!("  ui        启动桌面 GUI");
+    println!("  cli       启动 CLI 交互模式");
+    println!("  server    启动 HTTP/WS Server");
+    println!("  mcp       MCP 配置管理");
+    println!("  skill     Skill 配置管理");
+    println!();
+    println!("选项：");
+    println!("  -h, --help     显示帮助");
+    println!("  -V, --version  显示版本");
+    println!();
+    println!("CLI 安装（macOS DMG 安装后）：");
+    println!("  ln -s /Applications/天工.app/Contents/MacOS/天工 /usr/local/bin/tiangong");
+}
+
+fn print_version() {
+    println!("天工 {}", env!("CARGO_PKG_VERSION"));
+}
+
+fn run_cli() {
+    // 初始化日志
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::WARN.into()),
+        )
+        .init();
+
+    if let Err(err) = tiangong_cli::run_cli() {
+        eprintln!("CLI 错误：{err}");
+        std::process::exit(1);
+    }
+}
+
+fn run_entry() {
+    // 初始化日志
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::INFO.into()),
+        )
+        .init();
+
+    if let Err(err) = tiangong_entry::run() {
+        eprintln!("错误：{err}");
+        std::process::exit(1);
+    }
+}
+
+fn run_gui() {
     // 初始化日志
     tracing_subscriber::fmt()
         .with_env_filter(
