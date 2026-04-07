@@ -152,19 +152,22 @@ pub fn send_message(
                     // 2. 构建快照
                     let snapshot = build_full_snapshot(core_state);
 
-                    // 3. 检查是否完成
-                    let done = !core_state.has_pending_turn_for(&poll_session_id);
+                    // 3. 检查是否完成（RunStatus 为 Completed 或 Failed）
+                    let status = core_state.run_snapshot().status;
+                    let done = matches!(
+                        status,
+                        tiangong_core::runtime::RunStatus::Completed
+                            | tiangong_core::runtime::RunStatus::Failed
+                    );
 
                     // 4. 完成后重置为 idle
                     if done {
-                        let status_str =
-                            format!("{:?}", core_state.run_snapshot().status).to_lowercase();
-                        if status_str == "completed" {
+                        if matches!(status, tiangong_core::runtime::RunStatus::Completed) {
                             core_state.report_run_idle(format!(
                                 "模型供应商：{}",
                                 core_state.provider_label()
                             ));
-                        } else if status_str == "failed" {
+                        } else {
                             core_state.report_run_idle("执行失败");
                         }
                     }
