@@ -3,7 +3,9 @@
 //! 所有事件统一在消费线程中处理，session 由消费线程独占维护。
 //! 外部通过 Sender<StreamEvent> 接收输出，通过方法发送输入。
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use crate::agent_config::AgentConfig;
@@ -28,6 +30,8 @@ enum CoreEvent {
     ApprovalResponse { request_id: String, approved: bool },
     /// 取消当前执行
     Cancel,
+    /// 关闭 core
+    Shutdown,
 }
 
 /// 单一对话处理核心
@@ -35,13 +39,15 @@ pub struct TiangongCore {
     /// 向 runner 发送事件
     event_tx: Option<Sender<LoopEvent>>,
     /// 向消费线程发送事件
-    core_tx: Sender<CoreEvent>,
+    core_tx: Option<Sender<CoreEvent>>,
     /// runner 线程
     runner_thread: Option<JoinHandle<LoopOutcome>>,
     /// 消费线程（返回最终 session）
     consumer_thread: Option<JoinHandle<Session>>,
     /// 会话 ID
     session_id: String,
+    /// 是否正在处理（消费线程更新）
+    busy: Arc<AtomicBool>,
 }
 
 impl TiangongCore {
@@ -75,12 +81,15 @@ impl TiangongCore {
         let runner_thread = thread::spawn(move || runner.run());
 
         // 启动消费线程
+        let busy = Arc::new(AtomicBool::new(false));
+        let busy_for_consumer = busy.clone();
         let event_tx_for_consumer = event_tx.clone();
         let consumer_thread = thread::spawn(move || {
             let mut state = ConsumerState {
                 session,
                 event_tx: event_tx_for_consumer,
                 stream_tx,
+                busy: busy_for_consumer,
                 pending_assistant_id: None,
                 pending_thinking_id: None,
             };
@@ -96,6 +105,10 @@ impl TiangongCore {
                         }
                     }
                     CoreEvent::UserMessage(content) => {
+                        state.busy.store(true, Ordering::Relaxed);
+                        // 新一轮：重置 assistant 和 thinking ID
+                        state.pending_assistant_id = None;
+                        state.pending_thinking_id = None;
                         state
                             .session
                             .append_message(MessageRole::User, content.clone());
@@ -113,6 +126,14 @@ impl TiangongCore {
                     CoreEvent::Cancel => {
                         let _ = state.event_tx.send(LoopEvent::Cancel);
                     }
+                    CoreEvent::Shutdown => {
+                        let _ = state
+                            .event_tx
+                            .send(LoopEvent::SystemSignal(
+                                crate::event_loop::SystemSignalKind::Shutdown,
+                            ));
+                        break;
+                    }
                 }
             }
 
@@ -121,10 +142,17 @@ impl TiangongCore {
 
         Self {
             event_tx: Some(event_tx),
-            core_tx,
+            core_tx: Some(core_tx),
             runner_thread: Some(runner_thread),
             consumer_thread: Some(consumer_thread),
             session_id,
+            busy,
+        }
+    }
+
+    fn send_core_event(&self, event: CoreEvent) {
+        if let Some(ref tx) = self.core_tx {
+            let _ = tx.send(event);
         }
     }
 
@@ -149,22 +177,20 @@ impl TiangongCore {
 
     /// 发送用户消息
     pub fn send_message(&self, content: String) {
-        let _ = self.core_tx.send(CoreEvent::UserMessage(content));
+        self.send_core_event(CoreEvent::UserMessage(content));
     }
 
     /// 取消当前执行
     pub fn cancel(&self) {
-        let _ = self.core_tx.send(CoreEvent::Cancel);
+        self.send_core_event(CoreEvent::Cancel);
     }
 
     /// 响应审批
     pub fn respond_approval(&self, request_id: String, approved: bool) {
-        let _ = self
-            .core_tx
-            .send(CoreEvent::ApprovalResponse {
-                request_id,
-                approved,
-            });
+        self.send_core_event(CoreEvent::ApprovalResponse {
+            request_id,
+            approved,
+        });
     }
 
     /// 会话 ID
@@ -172,21 +198,16 @@ impl TiangongCore {
         &self.session_id
     }
 
-    /// 是否有活跃任务
+    /// 是否正在处理任务
     pub fn is_busy(&self) -> bool {
-        self.runner_thread
-            .as_ref()
-            .is_some_and(|t| !t.is_finished())
+        self.busy.load(Ordering::Relaxed)
     }
 
     /// 关闭并获取最终 session
     pub fn shutdown(mut self) -> Session {
-        // 通知 runner 关闭
-        if let Some(ref tx) = self.event_tx {
-            let _ = tx.send(LoopEvent::SystemSignal(
-                crate::event_loop::SystemSignalKind::Shutdown,
-            ));
-        }
+        // 发送 Shutdown 事件 → 消费线程 break → runner 收到 Shutdown
+        self.send_core_event(CoreEvent::Shutdown);
+        self.core_tx = None;
         self.event_tx = None;
 
         // 等待 runner 线程
@@ -194,10 +215,7 @@ impl TiangongCore {
             let _ = t.join();
         }
 
-        // core_tx drop 后消费线程会退出
-        drop(self.core_tx.clone()); // 原 core_tx 会在 self drop 时 drop
-
-        // 等待消费线程
+        // 等待消费线程返回 session
         if let Some(t) = self.consumer_thread.take() {
             match t.join() {
                 Ok(session) => return session,
@@ -226,6 +244,7 @@ struct ConsumerState {
     session: Session,
     event_tx: Sender<LoopEvent>,
     stream_tx: Sender<StreamEvent>,
+    busy: Arc<AtomicBool>,
     pending_assistant_id: Option<String>,
     pending_thinking_id: Option<String>,
 }
@@ -279,6 +298,9 @@ impl ConsumerState {
                 if !output.tool_calls.is_empty() {
                     self.pending_assistant_id = None;
                     self.pending_thinking_id = None;
+                } else {
+                    // 无工具调用 = 一轮完成
+                    self.busy.store(false, Ordering::Relaxed);
                 }
                 self.append_llm_output(&output);
             }
