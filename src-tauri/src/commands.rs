@@ -169,8 +169,6 @@ pub fn send_message(
         let sid = session_id_for_thread;
         // 追踪当前 assistant 消息 ID（流式追加用）
         let mut assistant_msg_id: Option<String> = None;
-        // 缓存 reasoning（等 Delta 到达时一起写入）
-        let mut reasoning_buf = String::new();
 
         for event in stream_rx.iter() {
             let is_done = matches!(event, StreamEvent::Done { .. });
@@ -198,29 +196,30 @@ pub fn send_message(
                                 msg.content.push_str(content);
                             }
                         } else {
-                            // 首个 Delta 创建 assistant 消息，同时写入缓存的 reasoning
                             session.append_message(
                                 tiangong_core::session::MessageRole::Assistant,
                                 String::new(),
                             );
                             if let Some(msg) = session.messages.last_mut() {
-                                if !reasoning_buf.is_empty() {
-                                    msg.reasoning_content = reasoning_buf.clone();
-                                    reasoning_buf.clear();
-                                }
                                 msg.content.push_str(content);
                                 assistant_msg_id = Some(msg.id.clone());
                             }
                         }
                     }
                     StreamEvent::Reasoning { content } => {
-                        // 缓存 reasoning，等 Delta 创建 assistant 消息时一起写入
                         if let Some(ref id) = assistant_msg_id {
                             if let Some(msg) = session.messages.iter_mut().find(|m| m.id == *id) {
                                 msg.reasoning_content.push_str(content);
                             }
                         } else {
-                            reasoning_buf.push_str(content);
+                            session.append_message(
+                                tiangong_core::session::MessageRole::Assistant,
+                                String::new(),
+                            );
+                            if let Some(msg) = session.messages.last_mut() {
+                                msg.reasoning_content.push_str(content);
+                                assistant_msg_id = Some(msg.id.clone());
+                            }
                         }
                     }
                     StreamEvent::ToolStart { name, .. } => {
@@ -240,9 +239,8 @@ pub fn send_message(
                         );
                     }
                     StreamEvent::ToolCalls { names, usage } => {
-                        // 工具调用：重置 assistant id 和 reasoning 缓存
+                        // 工具调用：重置 assistant id
                         assistant_msg_id = None;
-                        reasoning_buf.clear();
                         core_state.store.runtime.run.summary =
                             format!("正在执行：{}", names.join(", "));
                         // 累加 usage
