@@ -3,9 +3,7 @@
 //! 所有事件统一在消费线程中处理，session 由消费线程独占维护。
 //! 外部通过 Sender<StreamEvent> 接收输出，通过方法发送输入。
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use crate::agent_config::AgentConfig;
@@ -46,8 +44,6 @@ pub struct TiangongCore {
     consumer_thread: Option<JoinHandle<Session>>,
     /// 会话 ID
     session_id: String,
-    /// 是否正在处理（消费线程更新）
-    busy: Arc<AtomicBool>,
 }
 
 impl TiangongCore {
@@ -81,15 +77,12 @@ impl TiangongCore {
         let runner_thread = thread::spawn(move || runner.run());
 
         // 启动消费线程
-        let busy = Arc::new(AtomicBool::new(false));
-        let busy_for_consumer = busy.clone();
         let event_tx_for_consumer = event_tx.clone();
         let consumer_thread = thread::spawn(move || {
             let mut state = ConsumerState {
                 session,
                 event_tx: event_tx_for_consumer,
                 stream_tx,
-                busy: busy_for_consumer,
                 pending_assistant_id: None,
                 pending_thinking_id: None,
             };
@@ -105,7 +98,6 @@ impl TiangongCore {
                         }
                     }
                     CoreEvent::UserMessage(content) => {
-                        state.busy.store(true, Ordering::Relaxed);
                         // 新一轮：重置 assistant 和 thinking ID
                         state.pending_assistant_id = None;
                         state.pending_thinking_id = None;
@@ -146,7 +138,6 @@ impl TiangongCore {
             runner_thread: Some(runner_thread),
             consumer_thread: Some(consumer_thread),
             session_id,
-            busy,
         }
     }
 
@@ -198,13 +189,8 @@ impl TiangongCore {
         &self.session_id
     }
 
-    /// 是否正在处理任务
-    pub fn is_busy(&self) -> bool {
-        self.busy.load(Ordering::Relaxed)
-    }
-
-    /// 关闭并获取最终 session
-    pub fn shutdown(mut self) -> Session {
+    /// 关闭并获取最终 session（用于持久化）
+    pub fn into_session(mut self) -> Session {
         // 发送 Shutdown 事件 → 消费线程 break → runner 收到 Shutdown
         self.send_core_event(CoreEvent::Shutdown);
         self.core_tx = None;
@@ -244,7 +230,6 @@ struct ConsumerState {
     session: Session,
     event_tx: Sender<LoopEvent>,
     stream_tx: Sender<StreamEvent>,
-    busy: Arc<AtomicBool>,
     pending_assistant_id: Option<String>,
     pending_thinking_id: Option<String>,
 }
@@ -298,9 +283,6 @@ impl ConsumerState {
                 if !output.tool_calls.is_empty() {
                     self.pending_assistant_id = None;
                     self.pending_thinking_id = None;
-                } else {
-                    // 无工具调用 = 一轮完成
-                    self.busy.store(false, Ordering::Relaxed);
                 }
                 self.append_llm_output(&output);
             }

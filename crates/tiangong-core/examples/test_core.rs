@@ -36,7 +36,7 @@ fn main() {
         }
     }
 
-    println!("got_done={got_done} is_busy={}", core.is_busy());
+    println!("got_done={got_done}");
 
     if got_done {
         println!("\n=== 发送: 1+1=? ===");
@@ -64,7 +64,7 @@ fn main() {
     }
 
     println!("\n=== shutdown ===");
-    let session = core.shutdown();
+    let session = core.into_session();
     println!("消息数: {}", session.messages.len());
     for (i, m) in session.messages.iter().enumerate() {
         let preview: String = m.content.chars().take(80).collect();
