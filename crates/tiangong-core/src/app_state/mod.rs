@@ -33,7 +33,7 @@ use crate::tool::{ToolExecutionRecord, ToolResult};
 
 pub(crate) mod audit;
 mod facade;
-mod formatting;
+pub(crate) mod formatting;
 mod repository;
 mod services;
 mod store;

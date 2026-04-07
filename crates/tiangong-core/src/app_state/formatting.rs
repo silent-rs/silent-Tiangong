@@ -84,7 +84,7 @@ pub(super) fn format_plan_snapshot(plan: &TaskPlan) -> String {
     )
 }
 
-pub(super) fn format_llm_output_message(output: &LlmOutputRecord) -> String {
+pub(crate) fn format_llm_output_message(output: &LlmOutputRecord) -> String {
     let mut lines = vec![format!("LLM 输出 [{}]", output.stage)];
     if output.usage.total_tokens > 0 {
         lines.push(format!(
@@ -103,7 +103,7 @@ pub(super) fn format_llm_output_message(output: &LlmOutputRecord) -> String {
     lines.join("\n")
 }
 
-pub(super) fn format_tool_trace_message(result: &ToolResult) -> String {
+pub(crate) fn format_tool_trace_message(result: &ToolResult) -> String {
     let Some(record) = result.execution.as_ref() else {
         let mut lines = vec!["工具执行 [unknown]".to_string()];
         lines.push(format!("summary: {}", result.summary));

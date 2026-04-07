@@ -321,18 +321,7 @@ impl ConsumerState {
     }
 
     fn append_llm_output(&mut self, output: &LlmOutputRecord) {
-        let mut lines = vec![format!("LLM 输出 [{}]", output.stage)];
-        lines.push(format!(
-            "tokens: prompt={}, completion={}, total={}",
-            output.usage.prompt_tokens, output.usage.completion_tokens, output.usage.total_tokens
-        ));
-        if !output.tool_calls.is_empty() {
-            lines.push(format!("tool_calls: {}", output.tool_calls.join(", ")));
-        }
-        if !output.content.is_empty() {
-            lines.push(format!("content:\n{}", output.content));
-        }
-        let content = lines.join("\n");
+        let content = crate::app_state::formatting::format_llm_output_message(output);
 
         if let Some(ref id) = self.pending_thinking_id
             && let Some(msg) = self.session.messages.iter_mut().find(|m| m.id == *id)
@@ -351,25 +340,8 @@ impl ConsumerState {
     }
 
     fn append_tool_execution(&mut self, result: &ToolResult) {
-        let status = if result.ok { "ok=true" } else { "ok=false" };
-        let tool_name = result
-            .execution
-            .as_ref()
-            .map(|e| e.tool_name.as_str())
-            .unwrap_or("unknown");
-        let stdout_preview = if result.stdout.chars().count() > 500 {
-            let truncated: String = result.stdout.chars().take(500).collect();
-            format!("{truncated}...(截断)")
-        } else {
-            result.stdout.clone()
-        };
-        self.session.append_message(
-            MessageRole::System,
-            format!(
-                "工具执行 [{tool_name}]\n{status} exit_code={}\nsummary: {}\nstdout:\n{stdout_preview}",
-                result.exit_code, result.summary,
-            ),
-        );
+        let content = crate::app_state::formatting::format_tool_trace_message(result);
+        self.session.append_message(MessageRole::System, content);
     }
 
     fn apply_stage_thinking(&mut self, stage: &str, delta: &ModelStreamChunk) {
