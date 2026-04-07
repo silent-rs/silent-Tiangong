@@ -206,7 +206,30 @@ pub fn send_message(
                                 }
                             }
                         }
-                        StreamEvent::ToolCalls { .. } => {
+                        StreamEvent::ToolCalls { names, .. } => {
+                            // 工具调用：记录 LLM 输出系统消息 + reset assistant id
+                            session.append_message(
+                                tiangong_core::session::MessageRole::System,
+                                format!("LLM 输出\ntool_calls: {}", names.join(", ")),
+                            );
+                            assistant_msg_id = None;
+                        }
+                        StreamEvent::ToolStart { .. } => {}
+                        StreamEvent::ToolResult { name, ok, output } => {
+                            // 工具执行记录写入系统消息
+                            let status = if *ok { "ok=true" } else { "ok=false" };
+                            let preview = if output.chars().count() > 200 {
+                                format!("{}...", output.chars().take(200).collect::<String>())
+                            } else {
+                                output.clone()
+                            };
+                            session.append_message(
+                                tiangong_core::session::MessageRole::System,
+                                format!("工具执行 [{name}]\n{status} exit_code=0\nsummary: {name}\nstdout:\n{preview}"),
+                            );
+                        }
+                        StreamEvent::Done { .. } | StreamEvent::Error { .. } => {
+                            // 一轮完成：reset assistant id，下一轮创建新消息
                             assistant_msg_id = None;
                         }
                         _ => {}
