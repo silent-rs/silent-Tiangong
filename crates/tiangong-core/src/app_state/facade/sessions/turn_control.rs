@@ -233,6 +233,11 @@ impl TiangongState {
                         pending.assistant_message_id = None;
                         pending.stage_thinking_message_id = None;
                     }
+                } else {
+                    // 无工具调用 = 最终回复完成，标记为 Completed
+                    self.store.runtime.run.status = RunStatus::Completed;
+                    self.store.runtime.run.summary = "执行完成".to_string();
+                    self.store.runtime.run.updated_at = now_text();
                 }
                 self.append_pending_turn_llm_output(session_id, &output);
             }
