@@ -47,20 +47,23 @@ impl TiangongApp {
     }
 
     /// 获取或创建会话对应的 TiangongCore
-    pub fn get_or_create_core(
+    ///
+    /// 如果 core 已存在（多轮对话），直接复用。
+    /// stream_tx 只在创建新 core 时使用。
+    pub fn ensure_core(
         &self,
         session_id: &str,
         session: tiangong_core::session::Session,
         stream_tx: std::sync::mpsc::Sender<tiangong_types::StreamEvent>,
-    ) -> String {
+    ) -> (String, bool) {
         let mut cores = self.cores.lock().unwrap();
-        if !cores.contains_key(session_id) {
-            let core = TiangongCore::with_session(session, stream_tx);
-            let id = core.session_id().to_string();
-            cores.insert(id.clone(), core);
-            return id;
+        if cores.contains_key(session_id) {
+            return (session_id.to_string(), false); // 已存在，复用
         }
-        session_id.to_string()
+        let core = TiangongCore::with_session(session, stream_tx);
+        let id = core.session_id().to_string();
+        cores.insert(id.clone(), core);
+        (id, true) // 新创建
     }
 
     /// 向指定会话的 core 发送消息
@@ -71,7 +74,17 @@ impl TiangongApp {
         }
     }
 
-    /// 取回 core 的 session（消费 core）
+    /// 获取 core 的 session 快照（不消费 core）
+    pub fn get_core_session(
+        &self,
+        session_id: &str,
+    ) -> Option<tiangong_core::session::Session> {
+        // core session 在消费线程中独占，无法直接读取
+        // 只能在 into_session 时获取
+        None
+    }
+
+    /// 取回 core 的 session（消费 core，用于持久化或切换会话）
     pub fn take_core(&self, session_id: &str) -> Option<TiangongCore> {
         let mut cores = self.cores.lock().unwrap();
         cores.remove(session_id)

@@ -130,29 +130,37 @@ pub fn send_message(
     use std::sync::mpsc;
     use tiangong_types::StreamEvent;
 
-    // 准备 session：克隆后 core.send_message 会记录用户消息
+    // 准备 session
     let (session_id, session_snapshot) = state.with_state(|core_state| {
         core_state.update_draft(content.clone());
         let idx = core_state.ensure_active_session_index();
-        // 先克隆 session（不含用户消息），由 TiangongCore 内部 append
         let session = core_state.sessions()[idx].clone();
-        // 往 TiangongState session 也添加用户消息（前端 run_snapshot 显示用）
-        core_state.sessions_mut()[idx]
-            .append_message(tiangong_core::session::MessageRole::User, content.clone());
         core_state.store.session.input_draft.clear();
         // 更新运行状态
         core_state.store.runtime.run.status = tiangong_core::runtime::RunStatus::Executing;
         core_state.store.runtime.run.summary = "正在处理".to_string();
         core_state.store.runtime.run.last_session_id = Some(session.id.clone());
         core_state.store.runtime.run.updated_at = tiangong_core::session::now_text();
-        let _ = core_state.persist_session_and_app(&session.id);
         Ok((session.id.clone(), session))
     })?;
 
-    // 创建 TiangongCore 并发送消息
+    // 获取或创建 TiangongCore
     let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
-    let sid = state.get_or_create_core(&session_id, session_snapshot, stream_tx);
-    state.send_to_core(&sid, content);
+    let (sid, is_new_core) = state.ensure_core(&session_id, session_snapshot, stream_tx);
+    // 发送消息（core 内部消费线程会 append 到 core session）
+    state.send_to_core(&sid, content.clone());
+    // 同时往 TiangongState session 记录用户消息（前端 run_snapshot 显示用）
+    let _ = state.with_state(|core_state| {
+        if let Some(s) = core_state.sessions_mut().iter_mut().find(|s| s.id == sid) {
+            s.append_message(tiangong_core::session::MessageRole::User, content);
+        }
+        Ok(())
+    });
+
+    // 只在新创建 core 时启动消费线程（复用 core 时旧消费线程仍在运行）
+    if !is_new_core {
+        return Ok(());
+    }
 
     // 消费 StreamEvent：emit 给前端 + 更新 RunStatus + Done 时同步 session
     let app_clone = app.clone();
@@ -265,67 +273,43 @@ pub fn send_message(
             }
 
             if is_done || is_error {
-                // 取回 TiangongCore，获取完整 session
+                // Done：持久化当前 TiangongState session + 生成标题
+                // 不 take core（保持活跃支持多轮对话）
                 let final_sid = sid.clone();
-                if let Some(core) = app_clone.state::<TiangongApp>().take_core(&final_sid) {
-                    let final_session = core.into_session();
-                    let _ = app_clone.state::<TiangongApp>().with_state(|core_state| {
-                        // 用 core session 覆盖 TiangongState session
-                        if let Some(s) = core_state.sessions_mut().iter_mut().find(|s| s.id == final_sid)
-                        {
-                            *s = final_session;
-                        }
-                        // 生成标题
-                        let title = {
-                            let session = core_state.sessions().iter().find(|s| s.id == final_sid);
-                            if let Some(session) = session {
-                                let is_default = session.title == "新对话"
-                                    || session.title.starts_with("会话 ");
-                                if is_default {
-                                    let input = session
-                                        .messages
-                                        .iter()
-                                        .find(|m| {
-                                            m.role == tiangong_core::session::MessageRole::User
-                                        })
-                                        .map(|m| m.content.clone());
-                                    input.and_then(|i| {
-                                        let client =
-                                            tiangong_core::model::SingleProviderClient::new(
-                                                core_state
-                                                    .store
-                                                    .provider
-                                                    .models_config
-                                                    .to_chat_provider_config(),
-                                            );
-                                        client.complete_lite(&i).ok()
-                                    })
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        };
-                        if let Some(t) = title {
-                            let clean = t.trim().trim_matches('"').to_string();
-                            if !clean.is_empty() {
-                                if let Some(s) =
-                                    core_state.sessions_mut().iter_mut().find(|s| s.id == final_sid)
-                                {
-                                    s.title = clean;
-                                    s.updated_at = tiangong_core::session::now_text();
+                let _ = app_clone.state::<TiangongApp>().with_state(|core_state| {
+                    // 生成标题
+                    if let Some(session) = core_state.sessions().iter().find(|s| s.id == final_sid) {
+                        let is_default = session.title == "新对话"
+                            || session.title.starts_with("会话 ");
+                        if is_default {
+                            if let Some(input) = session
+                                .messages
+                                .iter()
+                                .find(|m| m.role == tiangong_core::session::MessageRole::User)
+                                .map(|m| m.content.clone())
+                            {
+                                let client = tiangong_core::model::SingleProviderClient::new(
+                                    core_state.store.provider.models_config.to_chat_provider_config(),
+                                );
+                                if let Ok(t) = client.complete_lite(&input) {
+                                    let clean = t.trim().trim_matches('"').to_string();
+                                    if !clean.is_empty() {
+                                        if let Some(s) = core_state.sessions_mut().iter_mut().find(|s| s.id == final_sid) {
+                                            s.title = clean;
+                                            s.updated_at = tiangong_core::session::now_text();
+                                        }
+                                    }
                                 }
                             }
                         }
-                        let _ = core_state.persist_session_and_app(&final_sid);
-                        let snapshot = build_full_snapshot_with_status(core_state, false);
-                        let _ = app_clone.emit("run_snapshot", &snapshot);
-                        let _ = app_clone.emit("sessions_updated", &());
-                        Ok(())
-                    });
-                }
-                break;
+                    }
+                    let _ = core_state.persist_session_and_app(&final_sid);
+                    let snapshot = build_full_snapshot_with_status(core_state, false);
+                    let _ = app_clone.emit("run_snapshot", &snapshot);
+                    let _ = app_clone.emit("sessions_updated", &());
+                    Ok(())
+                });
+                // 不 break — 消费线程继续运行，等待下一轮消息的 StreamEvent
             }
         }
     });
