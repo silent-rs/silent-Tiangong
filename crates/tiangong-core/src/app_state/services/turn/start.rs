@@ -105,59 +105,45 @@ impl AppTurnService {
 
         let runtime = state.services.runtime.clone();
         let session_snapshot = state.store.session.sessions[active_idx].clone();
-        let worker_input = input.clone();
         let (tx, rx) = mpsc::channel::<TurnEvent>();
-        let (ctrl_tx, ctrl_rx) = mpsc::channel::<ControlSignal>();
+        let (event_tx, event_rx) = mpsc::channel::<crate::event_loop::LoopEvent>();
 
+        let output_tx = tx.clone();
         thread::spawn(move || {
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                // 通过 TaskCoordinator 执行（自动判断单/多 Worker）
-                let coordinator = crate::coordinator::TaskCoordinator::new(runtime.clone());
-                let task = crate::coordinator::CoordinatorTask {
-                    id: scru128::new().to_string(),
-                    objective: worker_input.clone(),
-                    user_input: worker_input,
-                    context: Vec::new(),
-                };
-                let result =
-                    coordinator.coordinate(task, &session_snapshot, Some(&tx), Some(ctrl_rx))?;
+            let runner = crate::event_loop::EventLoopRunner::new(
+                runtime,
+                session_snapshot,
+                output_tx.clone(),
+                event_rx,
+            );
 
-                // 将 CoordinatorResult 转为 TurnExecution
-                Ok(crate::runtime::TurnExecution {
-                    assistant_message: result.final_response,
-                    assistant_reasoning_content: String::new(),
-                    system_prompt: String::new(),
-                    plan: Default::default(),
-                    tool_result_summary: if result.worker_results.len() > 1 {
-                        Some(format!(
-                            "{} 个 Worker 并行执行，{} 成功",
-                            result.worker_results.len(),
-                            result.worker_results.iter().filter(|r| r.success).count()
-                        ))
-                    } else {
-                        None
-                    },
-                    tool_execution: None,
-                    verify_records: Vec::new(),
-                    output_mode: "stream".to_string(),
-                    output_chunk_count: 0,
-                    usage: result.total_usage,
-                    llm_calls: result
-                        .worker_results
-                        .into_iter()
-                        .flat_map(|w| w.llm_calls)
-                        .collect(),
-                })
-            }));
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runner.run()));
 
             match outcome {
-                Ok(Ok(exec)) => {
-                    let _ = tx.send(TurnEvent::Completed(Box::new(exec)));
+                Ok(crate::event_loop::LoopOutcome::Suspended(loop_state)) => {
+                    let _ = output_tx.send(TurnEvent::Completed(Box::new(
+                        crate::runtime::TurnExecution {
+                            assistant_message: String::new(),
+                            assistant_reasoning_content: String::new(),
+                            system_prompt: String::new(),
+                            plan: Default::default(),
+                            tool_result_summary: None,
+                            tool_execution: None,
+                            verify_records: Vec::new(),
+                            output_mode: "event_loop".to_string(),
+                            output_chunk_count: 0,
+                            usage: loop_state.accumulated_usage,
+                            llm_calls: Vec::new(),
+                        },
+                    )));
                 }
-                Ok(Err(err)) => {
-                    let msg = RuntimeEngine::fallback_error_message(&err);
-                    let _ = tx.send(TurnEvent::Failed(msg));
+                Ok(crate::event_loop::LoopOutcome::Error(_, err)) => {
+                    let _ = output_tx.send(TurnEvent::Failed(err));
                 }
+                Ok(crate::event_loop::LoopOutcome::Cancelled(_)) => {
+                    let _ = output_tx.send(TurnEvent::Failed("执行已取消".to_string()));
+                }
+                Ok(crate::event_loop::LoopOutcome::Shutdown(_)) => {}
                 Err(panic_err) => {
                     let reason = if let Some(s) = panic_err.downcast_ref::<String>() {
                         s.clone()
@@ -166,10 +152,39 @@ impl AppTurnService {
                     } else {
                         "未知原因".to_string()
                     };
-                    let _ = tx.send(TurnEvent::Failed(format!("内部错误：{reason}")));
+                    let _ = output_tx.send(TurnEvent::Failed(format!("内部错误：{reason}")));
                 }
             }
         });
+
+        // 向 EventLoopRunner 发送初始用户消息事件
+        let _ = event_tx.send(crate::event_loop::LoopEvent::UserMessage { content: input });
+
+        // 将 ctrl_tx 包装为兼容层（ControlSignal → LoopEvent 转发）
+        let (ctrl_tx, ctrl_rx_compat) = mpsc::channel::<ControlSignal>();
+        {
+            let event_tx_for_compat = event_tx.clone();
+            thread::spawn(move || {
+                while let Ok(signal) = ctrl_rx_compat.recv() {
+                    let loop_event = match signal {
+                        ControlSignal::Cancel => crate::event_loop::LoopEvent::Cancel,
+                        ControlSignal::UserMessage(msg) => {
+                            crate::event_loop::LoopEvent::UserMessage { content: msg }
+                        }
+                        ControlSignal::PermissionResponse {
+                            request_id,
+                            approved,
+                        } => crate::event_loop::LoopEvent::PermissionResponse {
+                            request_id,
+                            approved,
+                        },
+                    };
+                    if event_tx_for_compat.send(loop_event).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
 
         state.store.runtime.pending_turns.insert(
             session_id.clone(),

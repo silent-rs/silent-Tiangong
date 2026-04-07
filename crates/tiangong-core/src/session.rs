@@ -1,29 +1,9 @@
-use chrono::Local;
 use serde::{Deserialize, Serialize};
 
 use crate::model::TokenUsage;
 use crate::planner::{PlanItem, PlanStepSource, PlanStepStatus};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MessageRole {
-    System,
-    User,
-    Assistant,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Message {
-    pub id: String,
-    pub role: MessageRole,
-    pub content: String,
-    #[serde(default)]
-    pub reasoning_content: String,
-    /// 多 Worker 模式下标识消息所属 Worker
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_id: Option<String>,
-    pub created_at: String,
-}
+pub use tiangong_types::{Message, MessageRole, now_text};
 
 /// 会话工作目录模式
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -611,9 +591,6 @@ impl Session {
     }
 }
 
-pub fn now_text() -> String {
-    Local::now().naive_local().to_string()
-}
 
 fn new_id() -> String {
     scru128::new().to_string()

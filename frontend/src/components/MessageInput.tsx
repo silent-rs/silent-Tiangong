@@ -15,7 +15,7 @@ interface MentionCandidate {
 }
 
 export function MessageInput() {
-  const { inputContent, setInputContent, sendMessage, cancelTurn, runStatus, runSummary, isDraft, activeSessionId, sessionRunStatuses, sessionCwd, setSessionCwd, addVoiceMessage, lastDurationMs } = useStore();
+  const { inputContent, setInputContent, sendMessage, cancelTurn, runStatus, runSummary, isDraft, activeSessionId, sessionRunStatuses, sessionCwd, setSessionCwd, addVoiceMessage, lastDurationMs, lastUsage } = useStore();
   const [isComposing, setIsComposing] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -29,8 +29,8 @@ export function MessageInput() {
 
   // 信任模式
   const [trustMode, setTrustMode] = useState('full_trust');
-  // 会话 token 用量
-  const [sessionCost, setSessionCost] = useState<{ total_tokens: number } | null>(null);
+  // 会话 token 计数
+  const [sessionTotalTokens, setSessionTotalTokens] = useState(0);
 
   const currentRunStatus = isDraft
     ? 'idle'
@@ -40,13 +40,17 @@ export function MessageInput() {
     api.getTrustMode().then(setTrustMode).catch(() => {});
   }, []);
 
+  // lastUsage 变化时更新显示（不区分 idle/executing）
   useEffect(() => {
-    if (!isDraft && activeSessionId && currentRunStatus === 'idle') {
-      api.getSessionCost(activeSessionId).then(setSessionCost).catch(() => setSessionCost(null));
-    } else {
-      setSessionCost(null);
+    if (lastUsage && lastUsage.total_tokens > 0) {
+      setSessionTotalTokens(lastUsage.total_tokens);
     }
-  }, [activeSessionId, isDraft, currentRunStatus]);
+  }, [lastUsage]);
+
+  // 切换会话时重置
+  useEffect(() => {
+    setSessionTotalTokens(0);
+  }, [activeSessionId]);
 
   const toggleTrustMode = async () => {
     const newMode = trustMode === 'full_trust' ? 'supervised' : 'full_trust';
@@ -500,10 +504,13 @@ export function MessageInput() {
                 )}
               </div>
               <div className="flex items-center gap-2 shrink-0">
-                {sessionCost && sessionCost.total_tokens > 0 && (
-                  <span className="text-muted-foreground/50">
+                {sessionTotalTokens > 0 && (
+                  <span className="text-muted-foreground/50 tabular-nums">
                     {lastDurationMs ? `${(lastDurationMs / 1000).toFixed(1)}s · ` : ''}
-                    {sessionCost.total_tokens.toLocaleString()} tokens
+                    {sessionTotalTokens.toLocaleString()} tokens
+                    {false && (
+                      <span className="text-blue-400 ml-1">placeholder</span>
+                    )}
                   </span>
                 )}
                 <button

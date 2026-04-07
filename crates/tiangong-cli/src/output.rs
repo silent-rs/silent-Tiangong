@@ -21,10 +21,14 @@ pub fn print_user_message(content: &str) {
 pub fn print_assistant_message(msg: &Message) {
     println!("{GREEN_BOLD}助手{RESET}");
 
-    // 如果有 reasoning_content，折叠显示
     let reasoning = msg.reasoning_content.trim();
     if !reasoning.is_empty() {
-        let summary = reasoning_summary(reasoning);
+        let summary: String = if reasoning.chars().count() > 80 {
+            let truncated: String = reasoning.chars().take(77).collect();
+            format!("{truncated}...")
+        } else {
+            reasoning.to_string()
+        };
         println!("  {DIM}[思考] {summary}{RESET}");
     }
 
@@ -94,57 +98,3 @@ pub fn flush_line() {
     println!();
 }
 
-/// 打印工具执行摘要（单行简洁格式）
-pub fn print_tool_brief(content: &str) {
-    // 从工具执行系统消息中提取工具名和状态
-    let name = content
-        .lines()
-        .find_map(|l| l.strip_prefix("tool_name: "))
-        .unwrap_or("tool");
-    let ok = if content.contains("ok=true") {
-        format!("{GREEN_BOLD}OK{RESET}")
-    } else {
-        format!("{RED}FAIL{RESET}")
-    };
-    println!("{DIM}  ⏺ {name} {ok}{RESET}");
-}
-
-/// 打印 LLM 输出系统消息中的解释文本（提取首行之后的内容）
-pub fn print_llm_explanation(content: &str) {
-    // LLM 输出消息格式: "LLM 输出 [react-round-N]\n内容..."
-    // 执行完成后替换为: "LLM 输出 [react-round-N]\ntokens: ...\ntool_calls: ...\ncontent:\n实际内容"
-    if content.contains("\ntokens:") {
-        // 已完成的 LLM 输出，提取 content: 后的实际内容
-        let content_idx = content.find("\ncontent:\n");
-        if let Some(idx) = content_idx {
-            let actual = content[idx + "\ncontent:\n".len()..].trim();
-            if !actual.is_empty() {
-                for line in actual.lines() {
-                    println!("{DIM}  {line}{RESET}");
-                }
-            }
-        }
-    } else {
-        // 还在流式阶段，首行是 "LLM 输出 [...]"，后续是实际内容
-        if let Some(idx) = content.find('\n') {
-            let thinking = content[idx + 1..].trim();
-            if !thinking.is_empty() {
-                for line in thinking.lines() {
-                    println!("{DIM}  {line}{RESET}");
-                }
-            }
-        }
-    }
-}
-
-/// 对 reasoning 内容生成摘要（只取前几个字）
-fn reasoning_summary(reasoning: &str) -> String {
-    let first_line = reasoning.lines().next().unwrap_or("");
-    if first_line.len() > 60 {
-        format!("{}...", &first_line[..57])
-    } else if reasoning.lines().count() > 1 {
-        format!("{first_line}...")
-    } else {
-        first_line.to_string()
-    }
-}

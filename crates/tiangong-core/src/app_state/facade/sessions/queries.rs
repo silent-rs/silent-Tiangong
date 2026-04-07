@@ -5,6 +5,10 @@ impl TiangongState {
         &self.store.session.sessions
     }
 
+    pub fn sessions_mut(&mut self) -> &mut Vec<Session> {
+        &mut self.store.session.sessions
+    }
+
     pub fn active_session_id(&self) -> &str {
         &self.store.session.active_session_id
     }

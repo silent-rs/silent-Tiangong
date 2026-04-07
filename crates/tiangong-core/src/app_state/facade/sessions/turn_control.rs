@@ -18,7 +18,6 @@ impl TiangongState {
                 request_id: request_id.to_string(),
                 approved,
             });
-            // 立即重置审批状态，前端下次轮询即可看到变化
             self.store.runtime.run.status = RunStatus::Executing;
             self.store.runtime.run.summary = if approved {
                 "审批通过，正在执行工具...".to_string()
@@ -39,7 +38,6 @@ impl TiangongState {
             let _ = pending
                 .control_tx
                 .send(ControlSignal::UserMessage(content.to_string()));
-            // 在 session 中记录用户追加消息
             if let Some(session) = self
                 .store
                 .session
@@ -165,268 +163,190 @@ impl TiangongState {
         Ok(moved)
     }
 
-    /// 轮询所有 pending_turns，处理每个会话的事件
-    /// 每次最多处理 MAX_EVENTS_PER_POLL 个事件，防止长时间持锁阻塞其他操作
-    pub fn poll_pending_turns(&mut self) {
-        const MAX_EVENTS_PER_POLL: usize = 5;
+    // ==================== 统一事件处理 ====================
 
-        // 收集所有 pending session_id
-        let session_ids: Vec<String> = self.store.runtime.pending_turns.keys().cloned().collect();
-        let mut sessions_to_clear: Vec<String> = Vec::new();
+    /// 处理单个 TurnEvent：更新 session 状态 + 生成 StreamEvent
+    ///
+    /// 返回 (should_clear_pending, Option<StreamEvent>)
+    fn process_turn_event(
+        &mut self,
+        session_id: &str,
+        event: TurnEvent,
+    ) -> (bool, Option<StreamEvent>) {
+        let mut should_clear = false;
 
-        for session_id in session_ids {
-            let mut should_clear = false;
-            let mut disconnected = false;
-            let mut events_processed = 0usize;
-
-            while events_processed < MAX_EVENTS_PER_POLL {
-                let Some(event) = self.try_recv_turn_event(&session_id, &mut disconnected) else {
-                    break;
-                };
-                events_processed += 1;
-                match event {
-                    TurnEvent::PlanReady(plan) => {
-                        self.mark_pending_turn_executing(&session_id, &plan);
-                    }
-                    TurnEvent::LlmOutput(output) => {
-                        if output.usage.total_tokens > 0 {
-                            let run = &mut self.store.runtime.run;
-                            match run.last_usage.as_mut() {
-                                Some(existing) => existing.accumulate(&output.usage),
-                                None => run.last_usage = Some(output.usage.clone()),
-                            }
-                        }
-                        if !output.tool_calls.is_empty() {
-                            self.store.runtime.run.summary =
-                                format!("正在执行：{}", output.tool_calls.join(", "));
-                        }
-                        self.append_pending_turn_llm_output(&session_id, &output);
-                    }
-                    TurnEvent::ToolStarted { name, summary } => {
-                        self.store.runtime.run.summary = format!("正在执行：{name} - {summary}");
-                    }
-                    TurnEvent::ToolExecution(result) => {
-                        self.append_pending_turn_tool_execution(&session_id, &result);
-                    }
-                    TurnEvent::PlanExecutionSummary(summary) => {
-                        self.append_pending_turn_plan_execution_summary(
-                            &session_id,
-                            summary.as_str(),
-                        );
-                    }
-                    TurnEvent::StageThinking { stage, delta } => {
-                        self.apply_stage_thinking_delta(&session_id, &stage, &delta);
-                    }
-                    TurnEvent::WorkerStarted {
-                        ref worker_id,
-                        ref worker_label,
-                    } => {
-                        // 创建带 worker_id 的系统消息
-                        self.append_worker_system_message(
-                            &session_id,
-                            worker_id,
-                            format!("🔧 Worker: {worker_label}"),
-                        );
-                        self.store.runtime.run.summary = format!("Worker 开始：{worker_label}");
-                    }
-                    TurnEvent::WorkerEvent {
-                        ref worker_id,
-                        ref worker_label,
-                        inner,
-                    } => {
-                        // 转发内部事件，创建带 worker_id 的系统消息
-                        match *inner {
-                            TurnEvent::LlmOutput(output) => {
-                                let content = format_llm_output_message(&output);
-                                self.append_worker_system_message(&session_id, worker_id, content);
-                            }
-                            TurnEvent::ToolExecution(result) => {
-                                let content = format_tool_trace_message(&result);
-                                self.append_worker_system_message(&session_id, worker_id, content);
-                            }
-                            TurnEvent::StageThinking { delta, .. } => {
-                                // Worker 的 thinking 写入 Worker 的 assistant 消息
-                                self.apply_worker_delta(
-                                    &session_id,
-                                    worker_id,
-                                    worker_label,
-                                    &delta,
-                                );
-                            }
-                            _ => {}
-                        }
-                        self.store.runtime.run.summary = format!("Worker 执行中：{worker_label}");
-                    }
-                    TurnEvent::WorkerChunk {
-                        worker_id,
-                        worker_label,
-                        delta,
-                    } => {
-                        self.apply_worker_delta(&session_id, &worker_id, &worker_label, &delta);
-                    }
-                    TurnEvent::WorkerCompleted { worker_label, .. } => {
-                        self.store.runtime.run.summary = format!("Worker 完成：{worker_label}");
-                    }
-                    TurnEvent::Chunk(delta) => {
-                        self.apply_assistant_delta(&session_id, &delta);
-                    }
-                    TurnEvent::Completed(exec) => {
-                        self.finish_pending_turn_success(&session_id, *exec);
-                        should_clear = true;
-                    }
-                    TurnEvent::Failed(err_msg) => {
-                        self.finish_pending_turn_error(&session_id, &err_msg);
-                        should_clear = true;
-                    }
-                    TurnEvent::ManagementCommand(cmd) => {
-                        self.execute_management_command(cmd);
-                    }
-                    TurnEvent::ApprovalRequest {
-                        request_id,
-                        tool_name,
-                        tool_args_summary,
-                    } => {
-                        self.store.runtime.run.status = RunStatus::WaitingApproval;
-                        self.store.runtime.run.summary =
-                            format!("等待审批：{tool_name}（{tool_args_summary}）");
-                        self.store.runtime.run.approval_request_id = Some(request_id.clone());
-                        tracing::info!(request_id, tool_name, "前端收到审批请求");
-                    }
+        // 生成外部 StreamEvent
+        let stream_event = match &event {
+            TurnEvent::Chunk(delta) => {
+                if !delta.content.is_empty() {
+                    Some(StreamEvent::Delta { content: delta.content.clone() })
+                } else if !delta.reasoning_content.is_empty() {
+                    Some(StreamEvent::Reasoning { content: delta.reasoning_content.clone() })
+                } else {
+                    None
                 }
             }
+            TurnEvent::ToolStarted { name, summary } => Some(StreamEvent::ToolStart {
+                name: name.clone(),
+                summary: summary.clone(),
+            }),
+            TurnEvent::ToolExecution(result) => Some(StreamEvent::ToolResult {
+                name: result.summary.clone(),
+                ok: result.ok,
+                output: result.stdout.clone(),
+            }),
+            TurnEvent::LlmOutput(output) if !output.tool_calls.is_empty() => {
+                Some(StreamEvent::ToolCalls { names: output.tool_calls.clone(), usage: Some(output.usage.clone()) })
+            }
+            TurnEvent::Completed(_) => Some(StreamEvent::Done { usage: None }),
+            TurnEvent::Failed(err) => Some(StreamEvent::Error { message: err.clone() }),
+            TurnEvent::ApprovalRequest {
+                request_id,
+                tool_name,
+                tool_args_summary,
+            } => Some(StreamEvent::ApprovalNeeded {
+                request_id: request_id.clone(),
+                tool_name: tool_name.clone(),
+                args_summary: tool_args_summary.clone(),
+            }),
+            _ => None,
+        };
 
-            if disconnected && !should_clear {
-                self.finish_pending_turn_error(&session_id, "执行中断：后台任务通道已关闭");
+        // core 内部处理：更新 session
+        match event {
+            TurnEvent::PlanReady(plan) => {
+                self.mark_pending_turn_executing(session_id, &plan);
+            }
+            TurnEvent::LlmOutput(output) => {
+                if output.usage.total_tokens > 0 {
+                    let run = &mut self.store.runtime.run;
+                    match run.last_usage.as_mut() {
+                        Some(existing) => existing.accumulate(&output.usage),
+                        None => run.last_usage = Some(output.usage.clone()),
+                    }
+                }
+                if !output.tool_calls.is_empty() {
+                    self.store.runtime.run.summary =
+                        format!("正在执行：{}", output.tool_calls.join(", "));
+                    // 工具调用：重置 assistant_message_id，下一轮创建新 assistant
+                    if let Some(pending) = self.store.runtime.pending_turns.get_mut(session_id) {
+                        pending.assistant_message_id = None;
+                        pending.stage_thinking_message_id = None;
+                    }
+                } else {
+                    // 无工具调用 = 最终回复完成，标记为 Completed
+                    self.store.runtime.run.status = RunStatus::Completed;
+                    self.store.runtime.run.summary = "执行完成".to_string();
+                    self.store.runtime.run.updated_at = now_text();
+                }
+                self.append_pending_turn_llm_output(session_id, &output);
+            }
+            TurnEvent::ToolStarted { name, summary } => {
+                self.store.runtime.run.summary = format!("正在执行：{name} - {summary}");
+            }
+            TurnEvent::ToolExecution(result) => {
+                self.append_pending_turn_tool_execution(session_id, &result);
+            }
+            TurnEvent::PlanExecutionSummary(summary) => {
+                self.append_pending_turn_plan_execution_summary(session_id, summary.as_str());
+            }
+            TurnEvent::StageThinking { stage, delta } => {
+                self.apply_stage_thinking_delta(session_id, &stage, &delta);
+            }
+            TurnEvent::WorkerStarted {
+                ref worker_id,
+                ref worker_label,
+            } => {
+                self.append_worker_system_message(
+                    session_id,
+                    worker_id,
+                    format!("🔧 Worker: {worker_label}"),
+                );
+                self.store.runtime.run.summary = format!("Worker 开始：{worker_label}");
+            }
+            TurnEvent::WorkerEvent {
+                ref worker_id,
+                ref worker_label,
+                inner,
+            } => {
+                match *inner {
+                    TurnEvent::LlmOutput(output) => {
+                        let content = format_llm_output_message(&output);
+                        self.append_worker_system_message(session_id, worker_id, content);
+                    }
+                    TurnEvent::ToolExecution(result) => {
+                        let content = format_tool_trace_message(&result);
+                        self.append_worker_system_message(session_id, worker_id, content);
+                    }
+                    TurnEvent::StageThinking { delta, .. } => {
+                        self.apply_worker_delta(session_id, worker_id, worker_label, &delta);
+                    }
+                    _ => {}
+                }
+                self.store.runtime.run.summary = format!("Worker 执行中：{worker_label}");
+            }
+            TurnEvent::WorkerChunk {
+                worker_id,
+                worker_label,
+                delta,
+            } => {
+                self.apply_worker_delta(session_id, &worker_id, &worker_label, &delta);
+            }
+            TurnEvent::WorkerCompleted { worker_label, .. } => {
+                self.store.runtime.run.summary = format!("Worker 完成：{worker_label}");
+            }
+            TurnEvent::Chunk(delta) => {
+                self.apply_assistant_delta(session_id, &delta);
+            }
+            TurnEvent::Completed(exec) => {
+                self.finish_pending_turn_success(session_id, *exec);
                 should_clear = true;
             }
-
-            if should_clear {
-                sessions_to_clear.push(session_id);
+            TurnEvent::Failed(err_msg) => {
+                self.finish_pending_turn_error(session_id, &err_msg);
+                should_clear = true;
+            }
+            TurnEvent::ManagementCommand(cmd) => {
+                self.execute_management_command(cmd);
+            }
+            TurnEvent::ApprovalRequest {
+                request_id,
+                tool_name,
+                tool_args_summary,
+            } => {
+                self.store.runtime.run.status = RunStatus::WaitingApproval;
+                self.store.runtime.run.summary =
+                    format!("等待审批：{tool_name}（{tool_args_summary}）");
+                self.store.runtime.run.approval_request_id = Some(request_id);
             }
         }
 
-        for session_id in sessions_to_clear {
-            self.store.runtime.pending_turns.remove(&session_id);
-        }
+        (should_clear, stream_event)
     }
 
-    /// 只轮询指定 session 的 pending turn
-    pub fn poll_pending_turn_for(&mut self, session_id: &str) {
-        const MAX_EVENTS_PER_POLL: usize = 5;
-
-        if !self.store.runtime.pending_turns.contains_key(session_id) {
-            return;
-        }
-
+    /// 轮询指定 session 的事件，返回 StreamEvent 列表
+    ///
+    /// 统一的 poll 入口：消费 TurnEvent → 更新 session → 返回 StreamEvent。
+    /// CLI / GUI / Connector 都通过此方法获取消息流。
+    fn poll_session_events(
+        &mut self,
+        session_id: &str,
+        deadline: std::time::Instant,
+    ) -> (bool, Vec<StreamEvent>) {
         let mut should_clear = false;
         let mut disconnected = false;
-        let mut events_processed = 0usize;
+        let mut stream_events = Vec::new();
 
-        while events_processed < MAX_EVENTS_PER_POLL {
+        while std::time::Instant::now() < deadline {
             let Some(event) = self.try_recv_turn_event(session_id, &mut disconnected) else {
                 break;
             };
-            events_processed += 1;
-            match event {
-                TurnEvent::PlanReady(plan) => {
-                    self.mark_pending_turn_executing(session_id, &plan);
-                }
-                TurnEvent::LlmOutput(output) => {
-                    if output.usage.total_tokens > 0 {
-                        let run = &mut self.store.runtime.run;
-                        match run.last_usage.as_mut() {
-                            Some(existing) => existing.accumulate(&output.usage),
-                            None => run.last_usage = Some(output.usage.clone()),
-                        }
-                    }
-                    // 有工具调用时更新 summary 显示即将执行的工具
-                    if !output.tool_calls.is_empty() {
-                        self.store.runtime.run.summary =
-                            format!("正在执行：{}", output.tool_calls.join(", "));
-                    }
-                    self.append_pending_turn_llm_output(session_id, &output);
-                }
-                TurnEvent::ToolStarted { name, summary } => {
-                    self.store.runtime.run.summary = format!("正在执行：{name} - {summary}");
-                }
-                TurnEvent::ToolExecution(result) => {
-                    self.append_pending_turn_tool_execution(session_id, &result);
-                }
-                TurnEvent::PlanExecutionSummary(summary) => {
-                    self.append_pending_turn_plan_execution_summary(session_id, summary.as_str());
-                }
-                TurnEvent::StageThinking { stage, delta } => {
-                    self.apply_stage_thinking_delta(session_id, &stage, &delta);
-                }
-                TurnEvent::WorkerStarted {
-                    ref worker_id,
-                    ref worker_label,
-                } => {
-                    self.append_worker_system_message(
-                        session_id,
-                        worker_id,
-                        format!("🔧 Worker: {worker_label}"),
-                    );
-                    self.store.runtime.run.summary = format!("Worker 开始：{worker_label}");
-                }
-                TurnEvent::WorkerEvent {
-                    ref worker_id,
-                    ref worker_label,
-                    inner,
-                } => {
-                    match *inner {
-                        TurnEvent::LlmOutput(output) => {
-                            let content = format_llm_output_message(&output);
-                            self.append_worker_system_message(session_id, worker_id, content);
-                        }
-                        TurnEvent::ToolExecution(result) => {
-                            let content = format_tool_trace_message(&result);
-                            self.append_worker_system_message(session_id, worker_id, content);
-                        }
-                        TurnEvent::StageThinking { delta, .. } => {
-                            // Worker 的 thinking 写入 Worker 的 assistant 消息
-                            self.apply_worker_delta(session_id, worker_id, worker_label, &delta);
-                        }
-                        _ => {}
-                    }
-                    self.store.runtime.run.summary = format!("Worker 执行中：{worker_label}");
-                }
-                TurnEvent::WorkerChunk {
-                    worker_id,
-                    worker_label,
-                    delta,
-                } => {
-                    self.apply_worker_delta(session_id, &worker_id, &worker_label, &delta);
-                }
-                TurnEvent::WorkerCompleted {
-                    ref worker_label, ..
-                } => {
-                    self.store.runtime.run.summary = format!("Worker 完成：{worker_label}");
-                }
-                TurnEvent::Chunk(delta) => {
-                    self.apply_assistant_delta(session_id, &delta);
-                }
-                TurnEvent::Completed(exec) => {
-                    self.finish_pending_turn_success(session_id, *exec);
-                    should_clear = true;
-                }
-                TurnEvent::Failed(err_msg) => {
-                    self.finish_pending_turn_error(session_id, &err_msg);
-                    should_clear = true;
-                }
-                TurnEvent::ManagementCommand(cmd) => {
-                    self.execute_management_command(cmd);
-                }
-                TurnEvent::ApprovalRequest {
-                    request_id,
-                    tool_name,
-                    tool_args_summary,
-                } => {
-                    self.store.runtime.run.status = RunStatus::WaitingApproval;
-                    self.store.runtime.run.summary =
-                        format!("等待审批：{tool_name}（{tool_args_summary}）");
-                    self.store.runtime.run.approval_request_id = Some(request_id);
-                }
+            let (clear, stream_event) = self.process_turn_event(session_id, event);
+            if clear {
+                should_clear = true;
+            }
+            if let Some(se) = stream_event {
+                stream_events.push(se);
             }
         }
 
@@ -435,13 +355,73 @@ impl TiangongState {
             should_clear = true;
         }
 
-        if should_clear {
+        (should_clear, stream_events)
+    }
+
+    // ==================== 公开 poll 接口 ====================
+
+    /// 轮询所有 pending turns（不返回 StreamEvent）
+    pub fn poll_pending_turns(&mut self) {
+        const MAX_POLL_MS: u64 = 10;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(MAX_POLL_MS);
+
+        let session_ids: Vec<String> = self.store.runtime.pending_turns.keys().cloned().collect();
+        let mut to_clear = Vec::new();
+
+        for session_id in session_ids {
+            let (clear, _) = self.poll_session_events(&session_id, deadline);
+            if clear {
+                to_clear.push(session_id);
+            }
+        }
+        for id in to_clear {
+            self.store.runtime.pending_turns.remove(&id);
+        }
+    }
+
+    /// 只轮询指定 session（不返回 StreamEvent）
+    pub fn poll_pending_turn_for(&mut self, session_id: &str) {
+        const MAX_POLL_MS: u64 = 10;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(MAX_POLL_MS);
+
+        if !self.store.runtime.pending_turns.contains_key(session_id) {
+            return;
+        }
+        let (clear, _) = self.poll_session_events(session_id, deadline);
+        if clear {
             self.store.runtime.pending_turns.remove(session_id);
         }
     }
 
-    /// 兼容旧调用：轮询所有 pending turns
+    /// 兼容旧调用
     pub fn poll_pending_turn(&mut self) {
         self.poll_pending_turns();
     }
+
+    /// 轮询所有 pending turns 并返回 StreamEvent 列表
+    ///
+    /// CLI / GUI / Connector 统一消费此接口。
+    pub fn poll_events(&mut self) -> Vec<StreamEvent> {
+        const MAX_POLL_MS: u64 = 10;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(MAX_POLL_MS);
+
+        let session_ids: Vec<String> = self.store.runtime.pending_turns.keys().cloned().collect();
+        let mut to_clear = Vec::new();
+        let mut all_events = Vec::new();
+
+        for session_id in session_ids {
+            let (clear, events) = self.poll_session_events(&session_id, deadline);
+            all_events.extend(events);
+            if clear {
+                to_clear.push(session_id);
+            }
+        }
+        for id in to_clear {
+            self.store.runtime.pending_turns.remove(&id);
+        }
+
+        all_events
+    }
 }
+
+pub use crate::app_state::support::StreamEvent;

@@ -5,8 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::app_state::audit::append_audit_log;
 use crate::app_state::audit::AuditEntry;
+use crate::app_state::audit::append_audit_log;
 
 /// 审计事件类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +37,8 @@ pub struct AuditRecord {
     pub session_id: Option<String>,
     pub task_id: Option<String>,
     pub tool_name: Option<String>,
+    /// 工具参数摘要（截断到 200 字符）
+    pub args_summary: Option<String>,
     pub detail: String,
     pub success: bool,
     pub timestamp: String,
@@ -49,6 +51,7 @@ impl AuditRecord {
             session_id: None,
             task_id: None,
             tool_name: None,
+            args_summary: None,
             detail: detail.into(),
             success,
             timestamp: chrono::Local::now().naive_local().to_string(),
@@ -70,6 +73,12 @@ impl AuditRecord {
         self
     }
 
+    pub fn with_args_summary(mut self, args: impl Into<String>) -> Self {
+        let s: String = args.into();
+        self.args_summary = Some(s.chars().take(200).collect());
+        self
+    }
+
     /// 写入审计日志（复用 app_state::audit 的 JSONL 追加机制）
     pub fn write(&self) {
         let action = format!("{:?}", self.event_type);
@@ -79,16 +88,17 @@ impl AuditRecord {
             .or(self.task_id.as_deref())
             .or(self.session_id.as_deref())
             .unwrap_or("-");
-        append_audit_log(&AuditEntry::new(&action, target, &self.detail, self.success));
+        append_audit_log(&AuditEntry::new(
+            &action,
+            target,
+            &self.detail,
+            self.success,
+        ));
     }
 }
 
 /// 记录权限决策
-pub fn audit_permission(
-    tool_name: &str,
-    decision: &str,
-    trust_mode: &str,
-) {
+pub fn audit_permission(tool_name: &str, decision: &str, trust_mode: &str) {
     AuditRecord::new(
         AuditEventType::PermissionDecision,
         format!("decision={decision} trust_mode={trust_mode}"),

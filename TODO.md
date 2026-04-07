@@ -1,6 +1,6 @@
 # TODO - 天工全栈平台重构任务清单
 
-> 最后更新：2026-03-23
+> 最后更新：2026-04-03
 > 当前主线 RFC：`docs/rfc/0004-full-stack-agent-platform.md`
 > 参考：`PLAN.md`、`docs/requirements.md`
 
@@ -174,18 +174,18 @@
 
 ## Phase 10：友好交互改造 — **当前阶段**
 
-### A. GUI 样式简化
-- [ ] 去掉 Assistant/User 头像图标
-- [ ] 去掉消息气泡边框和背景色
-- [ ] 调整因头像而存在的间距
-- [ ] 审批请求和思考中指示器同步去掉头像
+### A. GUI 样式简化（已完成 ✅）
+- [x] 去掉 Assistant/User 头像图标
+- [x] 去掉消息气泡边框和背景色
+- [x] 调整因头像而存在的间距
+- [x] 审批请求和思考中指示器同步去掉头像
 
-### B. GUI 解释文本独立流式展示
-- [ ] useStore 新增流式系统消息追踪状态
-- [ ] SystemMessageGroup 改造：活跃 round 以流式文本块展示（不折叠）
-- [ ] 工具调用消息保持现有折叠展示方式不变
+### B. GUI 解释文本独立流式展示（已完成 ✅）
+- [x] useStore 新增流式系统消息追踪状态
+- [x] SystemMessageGroup 改造：活跃 round 以流式文本块展示（不折叠）
+- [x] 工具调用消息保持现有折叠展示方式不变
 
-### C. CLI 实时流式展示
+### C. CLI 实时流式展示（待验收）
 - [ ] repl.rs 轮询循环从阻塞等待改为边轮询边输出增量
 - [ ] output.rs 新增流式输出函数（解释文本、工具摘要、增量输出）
 - [ ] 追踪消息增量，实现系统消息和助手消息的实时展示
@@ -194,3 +194,166 @@
 - [ ] `cargo check --workspace` 通过
 - [ ] `cargo clippy --workspace --all-targets --tests --benches -- -D warnings` 通过
 - [ ] 前端 `yarn build` 通过
+
+---
+
+## Phase 11：架构补全 — 运行时基础设施 — **当前阶段**
+
+> 差距分析文档：`docs/architecture-gap-analysis.md`
+> 基准文档：`docs/desktop-agent-technical-architecture.md`
+
+### Phase 11-A：基础设施（高优先级）
+
+#### A1. 统一任务模型（GAP-5）
+- [x] 新建 `src/task/mod.rs` 模块入口
+- [x] 新建 `src/task/model.rs`：定义 `UnifiedTask` 结构和 `UnifiedTaskStatus` 枚举
+  - 状态：Queued / Running / Blocked / WaitingApproval / Backgrounded / Completed / Failed / Cancelled
+  - 字段：id / input_summary / agent_id / progress / result_location / session_id / work_dir / created_at / updated_at
+- [x] 新建 `src/task/state_machine.rs`：状态转换验证（只允许合法转换）
+- [x] 新建 `src/task/registry.rs`：统一任务注册表（替代 BackgroundTask 的独立 registry）
+- [x] RunStatus 保留为 UI 展示层状态（与 UnifiedTaskStatus 不同层面概念）
+- [x] TaskStatus ↔ UnifiedTaskStatus 互转实现（From trait）
+- [x] `lib.rs` 注册 `task` 模块
+- [x] 验证：`cargo check --workspace` 通过
+
+#### A2. 查询编排层独立抽象（GAP-1 + GAP-3）
+- [x] 新建 `src/orchestrator/mod.rs` 模块入口
+- [x] 新建 `src/orchestrator/types.rs`：扩展 `QueryMode` 枚举
+  - DirectAnswer / SingleToolExecution / MultiStepExecution / TaskSplit / BackgroundExecution
+- [x] 新建 `src/orchestrator/query_orchestrator.rs`：`QueryOrchestrator` 控制中心
+  - 接受事件 → 判断打断 → 路由决策
+  - LLM 分类器判断执行模式
+- [x] 修改 `turn_runner.rs`：Init 阶段默认使用 MultiStepExecution
+- [x] 修改 `context/assembler.rs`：QueryMode 重导出自 orchestrator，使用 needs_tools() 统一判断
+- [x] `lib.rs` 注册 `orchestrator` 模块
+- [x] 验证：`cargo check --workspace` 通过
+
+### Phase 11-B：执行闭环（高优先级）
+
+#### B1. 后台任务回流与通知（GAP-6）
+- [x] 新建 `src/task/notification.rs`：任务完成通知机制
+  - 任务完成 → 生成 `RuntimeEvent`（TaskCompleted/TaskFailed）
+  - 通过 channel（TaskNotificationBus）发布
+- [x] 后台任务回流通过 LoopEvent::BackgroundTaskDone 在 EventLoop 中处理
+- [x] 当前通过 query_task 工具拉取结果（推模式后续扩展）
+- [x] 验证：`cargo check --workspace` 通过
+
+#### B2. 恢复与持久化增强（GAP-9）
+- [x] 新建 `src/task/persistence.rs`：任务状态持久化
+- [x] 新建 `src/task/recovery.rs`：启动恢复逻辑
+- [x] 修改 `app_state/facade/lifecycle.rs`：启动时加载并清理持久化的 EventLoop 状态
+- [x] 验证：`cargo check --workspace` 通过
+
+### Phase 11-C：能力增强（中优先级）
+
+#### C1. 上下文装配层增强（GAP-2）
+- [x] 新建 `src/context/memory.rs`：用户偏好与长期记忆
+- [x] 新建 `src/context/retriever.rs`：检索接口（预留 trait）
+- [x] EventLoopRunner::call_llm 首轮注入记忆上下文
+- [x] 验证：`cargo check --workspace` 通过
+
+#### C2. 多代理 Worker 隔离增强（GAP-4）
+- [x] 修改 `src/coordinator/types.rs`：WorkerBudget 增加 max_tool_calls，WorkerContext 增加 is_tool_allowed()
+- [x] 修改 `src/coordinator/worker.rs`：执行完成后检查 token/时长预算超限并记录警告
+- [x] 修改 `src/coordinator/task_coordinator.rs`：多 Worker 模式注入独立预算（轮次/工具/时长限制）
+- [x] 验证：`cargo check --workspace` 通过
+
+#### C3. 权限细粒度控制（GAP-7）
+- [x] 修改 `src/permission.rs`：PathRule + NetworkRule
+- [x] 新增 `PermissionGate::check_path()` 和 `check_network()`
+- [x] 修改 `src/observe/audit.rs`：AuditRecord 增加 args_summary 字段和 with_args_summary()
+- [x] 验证：`cargo check --workspace` 通过
+
+#### C4. 观测与成本治理闭环（GAP-10）
+- [x] 修改 `src/observe/cost.rs`：新增 RequestCost / TaskCost / SessionCost 三层
+- [x] 新建 `src/observe/collector.rs`：统一采集入口 ObserveCollector
+- [x] ObserveCollector 集成到 EventLoopRunner，每次 LLM 调用自动记录成本
+- [x] 验证：`cargo check --workspace` 通过
+
+### Phase 11-D：远程能力（低优先级）
+
+#### D1. 远程接入角色模型（GAP-8）
+- [x] 新建 `tiangong-gateway/src/role.rs`：RemoteRole 枚举（Controller/Approver/Observer）
+- [x] 修改 `tiangong-gateway/src/message.rs`：IncomingMessage 增加 sender_role
+- [x] 修改 `tiangong-gateway/src/router.rs`：handle_incoming 入口根据角色限制操作
+- [x] 验证：`cargo check --workspace` 通过
+
+### Phase 11-E：最终验证（已完成 ✅）
+- [x] `cargo fmt -- --check` 通过
+- [x] `cargo check --workspace` 通过
+- [x] `cargo clippy --workspace --all-targets --tests --benches -- -D warnings` 通过
+- [x] `cargo nextest run --workspace --no-tests pass` 通过
+
+---
+
+## Phase 12：事件驱动循环运行时 — **当前阶段**
+
+> RFC：`docs/rfc/0005-event-loop-runtime.md`
+
+### Phase 12-A：EventLoopRunner 核心 + 挂起/恢复（已完成 ✅）
+
+- [x] 新建 `src/event_loop/mod.rs` 模块入口
+- [x] 新建 `src/event_loop/types.rs`：LoopEvent / LoopPhase / LoopState 类型定义
+- [x] 新建 `src/event_loop/runner.rs`：EventLoopRunner 核心循环
+- [x] 新建 `src/event_loop/context.rs`：事件到上下文的转换逻辑
+- [x] `lib.rs` 注册 `event_loop` 模块
+- [x] 验证：`cargo check --workspace` 通过
+
+### Phase 12-B：LoopHost trait + ActiveLoops 管理器（已完成 ✅）
+
+- [x] 新建 `src/event_loop/host.rs`：LoopHost trait
+- [x] 新建 `src/event_loop/active_loops.rs`：MultiLoopHost（多会话管理）
+- [x] 新建 `src/event_loop/cli_host.rs`：CliLoopHost（单会话）
+- [x] 验证：`cargo check --workspace` 通过
+
+### Phase 12-C：生命周期管理与持久化（已完成 ✅）
+
+- [x] 新建 `src/event_loop/persistence.rs`：PersistedLoopState 读写
+- [x] 实现 shutdown_all()：Running→中断保存、Suspended→写盘
+- [x] 实现 restore_from_disk()：启动时扫描恢复
+- [x] 实现 cleanup_inactive()：超时 loop 写盘移除
+- [x] 验证：`cargo check --workspace` 通过
+
+### Phase 12-D：集成与清理
+
+- [x] 修改 `app_state/services/turn/start.rs`：用 EventLoopRunner 替代 TurnRunner/TaskCoordinator
+- [x] ControlSignal → LoopEvent 兼容层，poll 逻辑完全复用
+- [x] CLI 已通过 TiangongState 间接使用 EventLoopRunner（无需额外改造）
+- [x] TurnRunner 仍被 Worker 使用，保留；旧代码后续随 Worker 重构清理
+- [x] 验证：完整检查链通过
+
+---
+
+## Phase 13：TiangongCore 纯粹化 + 统一类型 — **当前阶段**
+
+### 已完成
+
+- [x] 新增 `TiangongCore`：单一对话处理核心（sender 推送模式）
+  - send_message / cancel / respond_approval / into_session
+  - 内部消费线程独占 session，统一事件循环（CoreEvent）
+  - EventLoopRunner 空闲时阻塞等待，支持持续输入
+- [x] 新增 `tiangong-types` 独立 crate
+  - Message / MessageRole / Session / TokenUsage / RunStatus / StreamEvent
+  - StreamEvent 带 serde tag JSON 序列化
+- [x] Prompt 分层装配系统（prompt/ 模块）
+- [x] poll 事件处理统一（process_turn_event）
+- [x] GUI send_message 接入 TiangongCore
+- [x] CLI 中文 panic 修复（补全 + reasoning 截断）
+
+### 类型迁移（已完成 ✅）
+
+- [x] TokenUsage → `pub use tiangong_types::TokenUsage`
+- [x] RunStatus → `pub use tiangong_types::RunStatus`
+- [x] StreamEvent → `pub use tiangong_types::StreamEvent`
+- [x] Message / MessageRole / now_text → `pub use tiangong_types::{...}`
+
+### 待完成
+
+- [x] GUI emit("stream_event") 直接推送 StreamEvent
+- [x] CLI 接入 TiangongCore（直接消费 StreamEvent）
+- [x] src-tauri 依赖 tiangong-types
+- [x] 删除旧 LoopHost/ActiveLoops/CliLoopHost（-433 行）
+- [ ] TurnRunner/ControlSignal 待 Worker 迁移后删除
+- [ ] src-tauri/types.rs DTO 转换层待前端完全迁移后删除
+- [x] GUI 全链路功能验证通过
+- [ ] CLI 交互优化（类似 codex/claude code 风格，Phase 10-C）

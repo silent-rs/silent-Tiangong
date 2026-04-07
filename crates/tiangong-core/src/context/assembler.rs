@@ -4,120 +4,33 @@
 //! 包括：历史消息选择、工具定义注入、环境信息注入、预算控制。
 
 use crate::agent_config::AgentConfig;
-use crate::model::{FunctionToolSpec, ModelClient, ModelRequest, SingleProviderClient};
+use crate::model::{FunctionToolSpec, SingleProviderClient};
 use crate::models_config::ModelsConfig;
 use crate::session::{Message, Session};
 
 use super::budget::TokenBudget;
 use super::organizer::ContextOrganizer;
 
-/// 查询执行模式
+/// 查询执行模式（重导出自 orchestrator 层）
 ///
 /// 由查询编排层判断，传递给上下文装配层，决定注入哪些内容。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QueryMode {
-    /// 直接回答：不注入工具定义（简单对话、闲聊）
-    DirectAnswer,
-    /// 工具执行：注入完整工具定义
-    ToolExecution,
-}
+/// 详细定义见 `crate::orchestrator::types::QueryMode`。
+pub use crate::orchestrator::QueryMode;
 
 /// 查询意图分类器
 ///
-/// 使用 LLM 判断用户输入是否需要工具支持。
+/// 不做 LLM 分类调用，所有用户输入统一进入执行流程。
+/// 由 planning/execution 层的 LLM 在完整上下文下自行判断是否需要工具。
 pub struct QueryClassifier;
 
 impl QueryClassifier {
-    /// 使用 LLM 对用户输入进行意图分类，返回模式和可能的 LLM 调用记录
+    /// 统一返回 MultiStepExecution，由执行层自行判断
     pub fn classify(
-        input: &str,
-        session: &Session,
-        client: &SingleProviderClient,
+        _input: &str,
+        _session: &Session,
+        _client: &SingleProviderClient,
     ) -> (QueryMode, Vec<crate::session::LlmCallRecord>) {
-        let input = input.trim();
-
-        // 空输入走工具模式
-        if input.is_empty() {
-            return (QueryMode::ToolExecution, Vec::new());
-        }
-
-        // 历史中有工具调用的会话，继续使用工具
-        // 检查 task_records 中是否有工具结果，或者会话消息中是否有工具执行痕迹
-        // （取消的任务 tool_result 为 None，但消息中仍有工具执行记录）
-        let has_tool_history = session.task_records.iter().any(|r| r.tool_result.is_some())
-            || session.messages.iter().any(|m| {
-                m.role == crate::session::MessageRole::System
-                    && (m.content.contains("tool_name:") || m.content.contains("exit_code"))
-            });
-        if has_tool_history {
-            return (QueryMode::ToolExecution, Vec::new());
-        }
-
-        // 调用 LLM 进行意图分类
-        match Self::classify_with_llm(input, client) {
-            Ok((mode, record)) => {
-                #[cfg(feature = "llm-debug-log")]
-                return (mode, vec![record]);
-                #[cfg(not(feature = "llm-debug-log"))]
-                {
-                    let _ = record;
-                    (mode, Vec::new())
-                }
-            }
-            Err(err) => {
-                tracing::warn!("意图分类 LLM 调用失败，回退到工具模式: {err}");
-                (QueryMode::ToolExecution, Vec::new())
-            }
-        }
-    }
-
-    /// 调用 LLM 判断意图，返回模式和调用记录
-    fn classify_with_llm(
-        input: &str,
-        client: &SingleProviderClient,
-    ) -> anyhow::Result<(QueryMode, crate::session::LlmCallRecord)> {
-        let prompt = format!(
-            "判断以下用户输入是否需要使用工具（如文件操作、命令执行、代码搜索、图片生成等）。\n\
-             只回答一个词：chat（纯闲聊/知识问答，不需要工具）或 tool（需要工具执行操作）。\n\n\
-             用户输入：{input}"
-        );
-
-        let req = ModelRequest {
-            session_title: String::new(),
-            user_input: prompt.clone(),
-            context: Vec::new(),
-        };
-
-        let resp = client.complete(&req)?;
-        let answer = resp.text.trim().to_lowercase();
-
-        let mode = if answer.contains("chat") {
-            QueryMode::DirectAnswer
-        } else {
-            QueryMode::ToolExecution
-        };
-
-        tracing::info!(
-            input_len = input.len(),
-            classify_prompt_tokens = resp.usage.prompt_tokens,
-            classify_completion_tokens = resp.usage.completion_tokens,
-            result = ?mode,
-            "LLM 意图分类"
-        );
-
-        let record = crate::session::LlmCallRecord {
-            stage: "intent-classify".to_string(),
-            prompt,
-            context_count: 0,
-            tool_names: Vec::new(),
-            response_text: resp.text,
-            reasoning_len: resp.reasoning_content.len(),
-            tool_calls: Vec::new(),
-            usage: resp.usage,
-            timestamp: crate::session::now_text(),
-        };
-
-        Ok((mode, record))
+        (QueryMode::MultiStepExecution, Vec::new())
     }
 }
 
@@ -177,25 +90,25 @@ impl ContextAssembler {
         // 构建对话历史
         let messages = self.organizer.build_context(session);
 
-        // 根据模式决定工具注入
-        let tools = match mode {
-            QueryMode::DirectAnswer => {
-                tracing::info!(
-                    input_len = user_input.len(),
-                    "快速路径：跳过工具注入（直接回答模式）"
-                );
-                Vec::new()
-            }
-            QueryMode::ToolExecution => self.select_tools(all_tools, &messages),
+        // 根据模式决定工具注入（使用 needs_tools() 统一判断）
+        let tools = if mode.needs_tools() {
+            self.select_tools(all_tools, &messages)
+        } else {
+            tracing::info!(
+                input_len = user_input.len(),
+                "快速路径：跳过工具注入（直接回答模式）"
+            );
+            Vec::new()
         };
 
         // 根据模式调整 system_prompt
-        let system_prompt = match mode {
-            QueryMode::DirectAnswer => format!(
+        let system_prompt = if mode.needs_tools() {
+            system_prompt
+        } else {
+            format!(
                 "你是天工智能助手。请用简洁友好的方式回复用户。\
                  回复使用 Markdown 格式。\n\n用户输入：\n{user_input}"
-            ),
-            QueryMode::ToolExecution => system_prompt,
+            )
         };
 
         AssembledContext {

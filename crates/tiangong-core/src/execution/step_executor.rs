@@ -66,6 +66,7 @@ pub fn execute_single_plan_step_with_execution_agent(
             session_title: format!("{} · execution-agent", session.title),
             user_input: round_prompt,
             context: loop_context.clone(),
+            assembled_system_prompt: None,
         };
         let response =
             client.complete_with_functions_stream(&request, &function_tools, on_chunk)?;

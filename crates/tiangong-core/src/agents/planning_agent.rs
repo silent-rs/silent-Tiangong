@@ -150,6 +150,7 @@ fn build_plan_with_agent_inner(
         session_title: format!("{} · planing-agent", session.title),
         user_input: build_planing_prompt(user_input, &input_list, &skill_hints, &mcp_hints),
         context: session.recent_messages(context_limit),
+            assembled_system_prompt: None,
     };
     let response = client
         .complete_stream(&request, on_delta)

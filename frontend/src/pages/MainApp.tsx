@@ -23,6 +23,18 @@ export function MainApp() {
         updateFromSnapshot(snapshot);
       });
       unlistenRef.current = unlisten;
+
+      // 监听 sessions 列表更新（标题变化等）
+      const { listen } = await import('@tauri-apps/api/event');
+      const unlistenSessions = await listen('sessions_updated', () => {
+        loadSessions();
+      });
+
+      const prevUnlisten = unlistenRef.current;
+      unlistenRef.current = () => {
+        prevUnlisten?.();
+        unlistenSessions();
+      };
     };
 
     setupListener();

@@ -1,9 +1,9 @@
 use anyhow::Result;
-use tiangong_core::app_state::TiangongState;
-use tiangong_core::runtime::RunStatus;
-use tiangong_core::session::MessageRole;
+use tiangong_core::core::TiangongCore;
+use tiangong_types::StreamEvent;
 
-use crate::commands;
+use std::sync::mpsc;
+
 use crate::completion;
 use crate::input::InputReader;
 use crate::output;
@@ -14,31 +14,40 @@ const GREEN_BOLD: &str = "\x1b[1;32m";
 const RESET: &str = "\x1b[0m";
 
 pub fn run() -> Result<()> {
-    let mut state = TiangongState::load_or_default();
+    let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
+    let core = TiangongCore::new(stream_tx);
     let mut reader = InputReader::new();
+    let mut printed_header = false;
+    let mut in_stream = false;
+    let mut reasoning_buf = String::new();
 
-    // 标记为草稿新会话，首次发送消息时才真正创建
-    let mut draft_new_session = true;
-
-    // 打印欢迎
     output::print_status("天工 CLI — /help 查看命令，Ctrl+C 清空/退出");
 
     loop {
-        print_separator();
+        // 消费待处理的 StreamEvent（非阻塞）
+        while let Ok(event) = stream_rx.try_recv() {
+            let is_terminal = matches!(event, StreamEvent::Done { .. } | StreamEvent::Error { .. });
+            process_event(&event, &mut printed_header, &mut in_stream, &mut reasoning_buf);
+            if is_terminal {
+                if in_stream { output::flush_line(); in_stream = false; }
+                printed_header = false;
+                reasoning_buf.clear();
+                println!();
+            }
+        }
 
-        let input = {
-            let state_ref = &state;
-            reader.read_line(PROMPT, |buf, cursor| {
-                if let Some((trigger, _start, prefix)) = completion::detect_trigger(buf, cursor) {
-                    completion::complete(trigger, &prefix, state_ref)
-                } else {
-                    Vec::new()
-                }
-            })?
-        };
-
+        // 显示 prompt 等待输入
         print_separator();
-        print_status_line(&state, draft_new_session);
+        print_status_line(&core);
+
+        let input = reader.read_line(PROMPT, |buf, cursor| {
+            if let Some((trigger, _start, prefix)) = completion::detect_trigger(buf, cursor) {
+                let _ = (trigger, prefix);
+                Vec::new()
+            } else {
+                Vec::new()
+            }
+        })?;
 
         let input = match input {
             Some(line) => line,
@@ -51,201 +60,125 @@ pub fn run() -> Result<()> {
         }
 
         reader.push_history(trimmed);
+        print_separator();
 
         // / 命令
         if trimmed.starts_with('/') {
-            match commands::handle_command(&mut state, trimmed, &mut draft_new_session) {
-                Ok(true) => break,
-                Ok(false) => continue,
-                Err(err) => {
-                    output::print_error(&format!("命令执行失败：{err}"));
+            match trimmed {
+                "/help" | "/h" => {
+                    output::print_status("命令：/help /cancel /quit");
+                    continue;
+                }
+                "/cancel" | "/c" => {
+                    core.cancel();
+                    output::print_status("已发送取消请求");
+                    continue;
+                }
+                "/quit" | "/q" | "/exit" => break,
+                _ => {
+                    output::print_warn(&format!("未知命令：{trimmed}"));
                     continue;
                 }
             }
         }
 
-        // 检查是否有正在进行的任务
-        if state.has_pending_turn() {
-            output::print_warn("当前请求进行中，请等待完成后再发送");
-            continue;
-        }
-
-        // 首次发送时才真正创建会话
-        if draft_new_session {
-            state.create_session();
-            draft_new_session = false;
-        }
-
-        // 发送对话
+        // 发送消息
         output::print_user_message(trimmed);
-        state.update_draft(trimmed.to_string());
+        core.send_message(trimmed.to_string());
 
-        if let Err(err) = state.send_current_input() {
-            output::print_error(&format!("发送失败：{err}"));
-            continue;
-        }
+        // 重置输出状态
+        printed_header = false;
+        in_stream = false;
+        reasoning_buf.clear();
 
-        // 实时流式轮询：边执行边展示中间状态
-        {
-            let mut last_msg_count = state
-                .active_session()
-                .map(|s| s.messages.len())
-                .unwrap_or(0);
-            let mut last_assistant_content_len: usize = 0;
-            let mut last_assistant_reasoning_len: usize = 0;
-            let mut in_assistant_stream = false;
-            let mut printed_header = false;
-
-            loop {
-                state.poll_pending_turn();
-
-                if let Some(session) = state.active_session() {
-                    let msgs = &session.messages;
-
-                    // 处理新增的消息
-                    for msg in msgs.iter().skip(last_msg_count) {
-                        match msg.role {
-                            MessageRole::System => {
-                                // 如果之前在流式输出 assistant，先换行
-                                if in_assistant_stream {
-                                    output::flush_line();
-                                    in_assistant_stream = false;
-                                }
-                                if msg.content.starts_with("LLM 输出") {
-                                    output::print_llm_explanation(&msg.content);
-                                } else if msg.content.contains("tool_name:")
-                                    || msg.content.contains("exit_code")
-                                {
-                                    output::print_tool_brief(&msg.content);
-                                }
-                                // 其他系统消息静默跳过
-                            }
-                            MessageRole::Assistant => {
-                                // 标记进入 assistant 流式输出
-                                if !printed_header {
-                                    println!("{GREEN_BOLD}助手{RESET}");
-                                    printed_header = true;
-                                }
-                                // reasoning
-                                let reasoning = msg.reasoning_content.trim();
-                                if !reasoning.is_empty() {
-                                    let summary = if reasoning.len() > 60 {
-                                        format!("{}...", &reasoning[..57])
-                                    } else {
-                                        reasoning.to_string()
-                                    };
-                                    println!("  {DIM}[思考] {summary}{RESET}");
-                                }
-                                // content
-                                if !msg.content.is_empty() {
-                                    output::print_delta(&msg.content);
-                                    in_assistant_stream = true;
-                                    last_assistant_content_len = msg.content.len();
-                                    last_assistant_reasoning_len = msg.reasoning_content.len();
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    last_msg_count = msgs.len();
-
-                    // 检查最后一条 assistant 消息内容增长（流式追加）
-                    if let Some(last) = msgs.last() {
-                        if last.role == MessageRole::Assistant {
-                            // reasoning 增量
-                            if last.reasoning_content.len() > last_assistant_reasoning_len {
-                                // reasoning 变化时仅更新追踪长度（不重复打印摘要）
-                                last_assistant_reasoning_len = last.reasoning_content.len();
-                            }
-                            // content 增量
-                            if last.content.len() > last_assistant_content_len {
-                                if !printed_header {
-                                    println!("{GREEN_BOLD}助手{RESET}");
-                                    printed_header = true;
-                                }
-                                let delta = &last.content[last_assistant_content_len..];
-                                output::print_delta(delta);
-                                in_assistant_stream = true;
-                                last_assistant_content_len = last.content.len();
-                            }
-                        }
-                        // 检查最后一条系统消息内容增长（流式 thinking）
-                        if last.role == MessageRole::System
-                            && last.content.starts_with("LLM 输出")
-                            && !last.content.contains("\ntokens:")
-                        {
-                            // 流式阶段的系统消息，内容在增长
-                            // 不做增量打印 — 该消息完成后会作为新消息被处理
-                        }
+        // 阻塞等待本轮完成
+        loop {
+            match stream_rx.recv_timeout(std::time::Duration::from_secs(300)) {
+                Ok(event) => {
+                    let is_terminal = matches!(event, StreamEvent::Done { .. } | StreamEvent::Error { .. });
+                    process_event(&event, &mut printed_header, &mut in_stream, &mut reasoning_buf);
+                    if is_terminal {
+                        if in_stream { output::flush_line(); in_stream = false; }
+                        if !reasoning_buf.is_empty() { flush_reasoning(&reasoning_buf); }
+                        printed_header = false;
+                        reasoning_buf.clear();
+                        println!();
+                        break;
                     }
                 }
-
-                if !state.has_pending_turn() {
+                Err(_) => {
+                    output::print_error("等待响应超时（300s）");
                     break;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(100));
             }
-
-            // 确保最后换行
-            if in_assistant_stream {
-                output::flush_line();
-            }
-
-            // 处理失败情况
-            let snapshot = state.run_snapshot();
-            if matches!(snapshot.status, RunStatus::Failed) {
-                let err_msg = snapshot.last_error.as_deref().unwrap_or("执行失败");
-                output::print_error(err_msg);
-            }
-
-            // 如果没有流式输出但有最终结果（非流式模式兜底）
-            if !printed_header {
-                match snapshot.status {
-                    RunStatus::Completed | RunStatus::Idle => {
-                        if let Some(session) = state.active_session()
-                            && let Some(last) = session.messages.last()
-                            && last.role == MessageRole::Assistant
-                        {
-                            output::print_assistant_message(last);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-
-            println!();
         }
     }
 
     output::print_status("再见！");
+    let _session = core.into_session();
     Ok(())
 }
 
+fn process_event(
+    event: &StreamEvent,
+    printed_header: &mut bool,
+    in_stream: &mut bool,
+    reasoning_buf: &mut String,
+) {
+    match event {
+        StreamEvent::Delta { content } => {
+            if !*printed_header {
+                flush_reasoning(reasoning_buf);
+                reasoning_buf.clear();
+                println!("{GREEN_BOLD}助手{RESET}");
+                *printed_header = true;
+            }
+            output::print_delta(content);
+            *in_stream = true;
+        }
+        StreamEvent::Reasoning { content } => {
+            reasoning_buf.push_str(content);
+        }
+        StreamEvent::ToolStart { name, .. } => {
+            if *in_stream { output::flush_line(); *in_stream = false; }
+            output::print_status(&format!("  ⚙ 执行 {name}..."));
+        }
+        StreamEvent::ToolResult { name, ok, output } => {
+            let status = if *ok { "✓" } else { "✗" };
+            let preview: String = output.lines().next().unwrap_or("").chars().take(80).collect();
+            output::print_status(&format!("  {status} {name}: {preview}"));
+        }
+        StreamEvent::ToolCalls { names, .. } => {
+            if *in_stream { output::flush_line(); *in_stream = false; }
+            flush_reasoning(reasoning_buf);
+            reasoning_buf.clear();
+            output::print_status(&format!("  {DIM}[调用工具: {}]{RESET}", names.join(", ")));
+        }
+        StreamEvent::ApprovalNeeded { tool_name, args_summary, .. } => {
+            output::print_warn(&format!("工具 {tool_name} 需要审批：{args_summary}"));
+        }
+        StreamEvent::Done { .. } | StreamEvent::Error { .. } => {}
+    }
+}
+
+fn flush_reasoning(buf: &str) {
+    let trimmed = buf.trim();
+    if trimmed.is_empty() { return; }
+    let summary: String = if trimmed.chars().count() > 80 {
+        let truncated: String = trimmed.chars().take(77).collect();
+        format!("{truncated}...")
+    } else {
+        trimmed.to_string()
+    };
+    println!("  {DIM}[思考] {summary}{RESET}");
+}
+
 fn print_separator() {
-    let width = crossterm::terminal::size()
-        .map(|(w, _)| w as usize)
-        .unwrap_or(80);
+    let width = crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(80);
     println!("{DIM}{}{RESET}", "─".repeat(width));
 }
 
-fn print_status_line(state: &TiangongState, draft_new: bool) {
-    let model = state.current_model();
-    let session_title = if draft_new {
-        "新对话"
-    } else {
-        state
-            .active_session()
-            .map(|s| s.title.as_str())
-            .unwrap_or("无会话")
-    };
-    let run_status = state.run_snapshot().status;
-    let status = match run_status {
-        RunStatus::Idle => "idle",
-        RunStatus::Planning => "planning",
-        RunStatus::Executing => "executing",
-        RunStatus::WaitingApproval => "waiting_approval",
-        RunStatus::Completed => "done",
-        RunStatus::Failed => "failed",
-    };
-    println!("{DIM}[{status}] {session_title} | {model}{RESET}");
+fn print_status_line(core: &TiangongCore) {
+    let short_id: String = core.session_id().chars().take(8).collect();
+    println!("{DIM}[{short_id}]{RESET}");
 }

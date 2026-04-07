@@ -2,7 +2,7 @@ use super::super::repository::*;
 use super::super::*;
 
 impl TiangongState {
-    pub(in crate::app_state) fn persist_session_and_app(&mut self, session_id: &str) -> Result<()> {
+    pub fn persist_session_and_app(&mut self, session_id: &str) -> Result<()> {
         self.normalize_sessions_for_storage();
         self.services
             .repository
@@ -45,7 +45,7 @@ impl TiangongState {
         self.services.repository.load_from_legacy_disk()
     }
 
-    pub(in crate::app_state) fn ensure_active_session_index(&mut self) -> usize {
+    pub fn ensure_active_session_index(&mut self) -> usize {
         if let Some(idx) = self
             .store
             .session

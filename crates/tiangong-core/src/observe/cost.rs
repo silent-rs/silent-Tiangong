@@ -45,6 +45,75 @@ impl CostSummary {
     }
 }
 
+/// 请求级成本（单次 LLM 调用）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RequestCost {
+    /// 请求标识
+    pub request_id: String,
+    /// Token 使用量
+    pub usage: TokenUsage,
+    /// 请求时间
+    pub timestamp: String,
+}
+
+/// 任务级成本（聚合多个 RequestCost）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TaskCost {
+    /// 任务 ID
+    pub task_id: String,
+    /// 该任务中所有请求的成本
+    pub requests: Vec<RequestCost>,
+    /// 聚合摘要
+    pub summary: CostSummary,
+}
+
+impl TaskCost {
+    pub fn new(task_id: String) -> Self {
+        Self {
+            task_id,
+            requests: Vec::new(),
+            summary: CostSummary::default(),
+        }
+    }
+
+    /// 记录一次请求成本
+    pub fn add_request(&mut self, request_id: String, usage: &TokenUsage) {
+        self.requests.push(RequestCost {
+            request_id,
+            usage: usage.clone(),
+            timestamp: chrono::Local::now().naive_local().to_string(),
+        });
+        self.summary.add_llm_usage(usage);
+    }
+}
+
+/// 会话级成本（聚合多个 TaskCost）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionCost {
+    /// 会话 ID
+    pub session_id: String,
+    /// 该会话中所有任务的成本
+    pub tasks: Vec<TaskCost>,
+    /// 聚合摘要
+    pub summary: CostSummary,
+}
+
+impl SessionCost {
+    pub fn new(session_id: String) -> Self {
+        Self {
+            session_id,
+            tasks: Vec::new(),
+            summary: CostSummary::default(),
+        }
+    }
+
+    /// 添加一个任务的成本
+    pub fn add_task(&mut self, task_cost: TaskCost) {
+        self.summary.merge(&task_cost.summary);
+        self.tasks.push(task_cost);
+    }
+}
+
 /// 从 Session 的 task_records 计算会话级成本
 pub fn calculate_session_cost(task_records: &[crate::session::SessionTaskRecord]) -> CostSummary {
     let mut summary = CostSummary::default();

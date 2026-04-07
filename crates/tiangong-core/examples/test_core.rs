@@ -1,0 +1,78 @@
+use std::sync::mpsc;
+use tiangong_core::app_state::StreamEvent;
+use tiangong_core::core::TiangongCore;
+
+fn main() {
+    let (tx, rx) = mpsc::channel::<StreamEvent>();
+    let core = TiangongCore::new(tx);
+
+    println!("=== 发送: 你好 ===");
+    core.send_message("你好".into());
+
+    let mut got_done = false;
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(event) => match &event {
+                StreamEvent::Delta { content: text } => print!("{text}"),
+                StreamEvent::Reasoning { content: _ } => print!("[R]"),
+                StreamEvent::ToolCalls { names, .. } => println!("\n[调用] {}", names.join(",")),
+                StreamEvent::ToolStart { name, .. } => println!("[开始] {name}"),
+                StreamEvent::ToolResult { name, ok, .. } => println!("[结果] {name} ok={ok}"),
+                StreamEvent::Done { .. } => {
+                    println!("\n=== Done ===");
+                    got_done = true;
+                    break;
+                }
+                StreamEvent::Error { message: err } => {
+                    println!("\n=== Error: {err} ===");
+                    break;
+                }
+                _ => {}
+            },
+            Err(_) => {
+                println!("\n=== 超时 ===");
+                break;
+            }
+        }
+    }
+
+    println!("got_done={got_done}");
+
+    if got_done {
+        println!("\n=== 发送: 1+1=? ===");
+        core.send_message("1+1=?".into());
+
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+                Ok(StreamEvent::Delta { content: text }) => print!("{text}"),
+                Ok(StreamEvent::Reasoning { content: _ }) => print!("[R]"),
+                Ok(StreamEvent::Done { .. }) => {
+                    println!("\n=== 第二轮 Done ===");
+                    break;
+                }
+                Ok(StreamEvent::Error { message: err }) => {
+                    println!("\n=== 第二轮 Error: {err} ===");
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    println!("\n=== 第二轮超时 ===");
+                    break;
+                }
+            }
+        }
+    }
+
+    println!("\n=== shutdown ===");
+    let session = core.into_session();
+    println!("消息数: {}", session.messages.len());
+    for (i, m) in session.messages.iter().enumerate() {
+        let preview: String = m.content.chars().take(80).collect();
+        println!(
+            "[{i}] {:?} clen={} | {}",
+            m.role,
+            m.content.len(),
+            preview.replace('\n', "\\n")
+        );
+    }
+}

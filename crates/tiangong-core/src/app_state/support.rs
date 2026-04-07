@@ -114,6 +114,8 @@ pub enum TurnEvent {
     },
 }
 
+pub use tiangong_types::StreamEvent;
+
 /// 从主线程发送到执行线程的控制信号
 #[derive(Debug)]
 pub enum ControlSignal {

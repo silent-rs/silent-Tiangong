@@ -5,7 +5,11 @@ impl TiangongState {
         let config = self.store.provider.models_config.to_chat_provider_config();
         self.store.provider.model_config = config.clone();
         // 保留旧 RuntimeEngine 的共享信任模式引用，确保运行中的任务能感知变更
-        let shared_trust_mode = self.services.runtime.permission_gate().shared_trust_mode_ref();
+        let shared_trust_mode = self
+            .services
+            .runtime
+            .permission_gate()
+            .shared_trust_mode_ref();
         self.services.runtime = RuntimeEngine::with_shared_trust_mode(
             SingleProviderClient::new(config),
             DEFAULT_CONTEXT_LIMIT,

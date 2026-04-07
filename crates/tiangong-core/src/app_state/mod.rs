@@ -33,7 +33,7 @@ use crate::tool::{ToolExecutionRecord, ToolResult};
 
 pub(crate) mod audit;
 mod facade;
-mod formatting;
+pub(crate) mod formatting;
 mod repository;
 mod services;
 mod store;
@@ -50,7 +50,7 @@ use self::repository::{
     validate_agent_config,
 };
 use self::services::{AppMcpService, AppSkillService, AppTurnService};
-pub use self::support::{ControlSignal, TurnEvent};
+pub use self::support::{ControlSignal, StreamEvent, TurnEvent};
 use self::support::{
     LegacyPersistedState, LoadedState, McpDependencyLockRecord, PendingTurn, PersistedAppState,
     ScopedDirCleanup, SkillsLockRecord,

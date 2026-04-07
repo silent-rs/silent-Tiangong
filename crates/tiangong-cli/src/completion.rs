@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::path::Path;
 
 use tiangong_core::app_state::TiangongState;
@@ -76,23 +78,31 @@ const SLASH_COMMANDS: &[SlashCommandDef] = &[
     },
 ];
 
-/// 检测输入中的补全触发点
+/// 检测输入中的补全���发点
 ///
-/// 返回 (触发类型, 触发词起始位置, 当前已输入的前缀)
+/// `cursor` 为字符偏移（非字节偏移）。
+/// 返回 (触发类型, 触发词起始位置（字符偏移）, 当��已输入的前缀)
 pub fn detect_trigger(input: &str, cursor: usize) -> Option<(CompletionTrigger, usize, String)> {
-    let before_cursor = &input[..cursor];
+    // 将字符偏移转为字节偏移，安全切片
+    let byte_cursor = input
+        .char_indices()
+        .nth(cursor)
+        .map(|(i, _)| i)
+        .unwrap_or(input.len());
+    let before_cursor = &input[..byte_cursor];
 
     // 从光标向左扫描，找到最近的触发字符
     // `@` 提及：光标前的 @word 片段
-    if let Some(at_pos) = before_cursor.rfind('@') {
-        let prefix = &before_cursor[at_pos..];
-        // @ 必须在行首或前面是空格
-        if at_pos == 0 || before_cursor.as_bytes()[at_pos - 1] == b' ' {
+    if let Some(at_byte_pos) = before_cursor.rfind('@') {
+        let prefix = &before_cursor[at_byte_pos..];
+        // @ 必须在行首或前面是空���
+        if at_byte_pos == 0 || before_cursor.as_bytes()[at_byte_pos - 1] == b' ' {
             // 确保 @ 后没有空格（在输入中间截断的提及）
             if !prefix[1..].contains(' ') {
+                let at_char_pos = before_cursor[..at_byte_pos].chars().count();
                 return Some((
                     CompletionTrigger::AtMention,
-                    at_pos,
+                    at_char_pos,
                     prefix[1..].to_string(),
                 ));
             }

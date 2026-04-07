@@ -30,6 +30,24 @@ pub enum PermissionLevel {
     Critical,
 }
 
+/// 路径级权限规则
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PathRule {
+    /// 路径模式（支持 glob，如 `/etc/**`、`~/.ssh/*`）
+    pub pattern: String,
+    /// 是否允许访问
+    pub allow: bool,
+}
+
+/// 网络目标权限规则
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkRule {
+    /// 目标模式（域名或 IP，如 `*.example.com`、`192.168.1.*`）
+    pub pattern: String,
+    /// 是否允许访问
+    pub allow: bool,
+}
+
 /// 权限策略配置
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PermissionPolicy {
@@ -42,6 +60,12 @@ pub struct PermissionPolicy {
     /// 始终拒绝的工具名列表
     #[serde(default)]
     pub always_deny: Vec<String>,
+    /// 路径级规则（按顺序匹配，首条命中生效）
+    #[serde(default)]
+    pub path_rules: Vec<PathRule>,
+    /// 网络目标规则（按顺序匹配，首条命中生效）
+    #[serde(default)]
+    pub network_rules: Vec<NetworkRule>,
 }
 
 /// 权限决策结果
@@ -95,7 +119,10 @@ impl PermissionGate {
     }
 
     /// 使用外部共享的信任模式创建（确保所有 clone 共享同一引用）
-    pub fn with_shared_trust_mode(policy: PermissionPolicy, shared: Arc<RwLock<TrustMode>>) -> Self {
+    pub fn with_shared_trust_mode(
+        policy: PermissionPolicy,
+        shared: Arc<RwLock<TrustMode>>,
+    ) -> Self {
         // 同步初始值
         if let Ok(mut guard) = shared.write() {
             *guard = policy.trust_mode;
@@ -164,9 +191,105 @@ impl PermissionGate {
             .map(|g| *g)
             .unwrap_or(self.policy.trust_mode)
     }
+
+    /// 检查路径访问权限
+    ///
+    /// 按路径规则顺序匹配，首条命中生效。
+    /// 无匹配规则时默认允许。
+    pub fn check_path(&self, path: &str) -> PermissionDecision {
+        let trust_mode = self
+            .shared_trust_mode
+            .read()
+            .map(|g| *g)
+            .unwrap_or(self.policy.trust_mode);
+
+        if trust_mode == TrustMode::FullTrust {
+            return PermissionDecision::Approved;
+        }
+
+        for rule in &self.policy.path_rules {
+            if path_matches(&rule.pattern, path) {
+                return if rule.allow {
+                    PermissionDecision::Approved
+                } else {
+                    PermissionDecision::Denied {
+                        reason: format!("路径 {path} 被规则 {} 拒绝", rule.pattern),
+                    }
+                };
+            }
+        }
+
+        PermissionDecision::Approved
+    }
+
+    /// 检查网络目标访问权限
+    ///
+    /// 按网络规则顺序匹配，首条命中生效。
+    /// 无匹配规则时默认允许。
+    pub fn check_network(&self, target: &str) -> PermissionDecision {
+        let trust_mode = self
+            .shared_trust_mode
+            .read()
+            .map(|g| *g)
+            .unwrap_or(self.policy.trust_mode);
+
+        if trust_mode == TrustMode::FullTrust {
+            return PermissionDecision::Approved;
+        }
+
+        for rule in &self.policy.network_rules {
+            if network_matches(&rule.pattern, target) {
+                return if rule.allow {
+                    PermissionDecision::Approved
+                } else {
+                    PermissionDecision::Denied {
+                        reason: format!("网络目标 {target} 被规则 {} 拒绝", rule.pattern),
+                    }
+                };
+            }
+        }
+
+        PermissionDecision::Approved
+    }
 }
 
 // PermissionGate 的 Default 由 PermissionPolicy::default() 提供（FullTrust 模式）
+
+/// 简单路径模式匹配（支持 `*` 通配符和 `**` 递归匹配）
+fn path_matches(pattern: &str, path: &str) -> bool {
+    if pattern == path {
+        return true;
+    }
+    // /** 匹配任意子路径
+    if let Some(prefix) = pattern.strip_suffix("/**") {
+        return path.starts_with(prefix);
+    }
+    // /* 匹配单层
+    if let Some(prefix) = pattern.strip_suffix("/*")
+        && let Some(rest) = path.strip_prefix(prefix)
+    {
+        return rest.starts_with('/') && !rest[1..].contains('/');
+    }
+    false
+}
+
+/// 简单网络模式匹配（支持 `*` 通配符）
+fn network_matches(pattern: &str, target: &str) -> bool {
+    if pattern == target {
+        return true;
+    }
+    // *.example.com 匹配 sub.example.com
+    if let Some(suffix) = pattern.strip_prefix('*') {
+        return target.ends_with(suffix) && target.len() > suffix.len();
+    }
+    // 192.168.1.* 匹配 192.168.1.100
+    if let Some(prefix) = pattern.strip_suffix(".*")
+        && let Some(rest) = target.strip_prefix(prefix)
+    {
+        return rest.starts_with('.');
+    }
+    false
+}
 
 /// 根据工具名分类风险等级（pub(crate) 供测试访问）
 pub(crate) fn classify_tool(tool_name: &str) -> PermissionLevel {
@@ -290,6 +413,7 @@ mod tests {
             trust_mode: TrustMode::Supervised,
             auto_approve: vec!["run_command".to_string()],
             always_deny: vec!["run_command".to_string()],
+            ..Default::default()
         });
         // deny 先检查，优先于 approve
         assert!(matches!(
@@ -334,11 +458,109 @@ mod tests {
             trust_mode: TrustMode::Supervised,
             auto_approve: vec!["read_file".into()],
             always_deny: vec!["apply_patch".into()],
+            ..Default::default()
         };
         let json = serde_json::to_string(&policy).unwrap();
         let parsed: PermissionPolicy = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.trust_mode, TrustMode::Supervised);
         assert_eq!(parsed.auto_approve, vec!["read_file"]);
         assert_eq!(parsed.always_deny, vec!["apply_patch"]);
+    }
+
+    #[test]
+    fn path_rule_deny() {
+        let gate = PermissionGate::new(PermissionPolicy {
+            trust_mode: TrustMode::Supervised,
+            path_rules: vec![PathRule {
+                pattern: "/etc/**".into(),
+                allow: false,
+            }],
+            ..Default::default()
+        });
+        assert!(matches!(
+            gate.check_path("/etc/passwd"),
+            PermissionDecision::Denied { .. }
+        ));
+        assert!(matches!(
+            gate.check_path("/home/user/file.txt"),
+            PermissionDecision::Approved
+        ));
+    }
+
+    #[test]
+    fn path_rule_single_level() {
+        let gate = PermissionGate::new(PermissionPolicy {
+            trust_mode: TrustMode::Supervised,
+            path_rules: vec![PathRule {
+                pattern: "/tmp/*".into(),
+                allow: false,
+            }],
+            ..Default::default()
+        });
+        assert!(matches!(
+            gate.check_path("/tmp/file.txt"),
+            PermissionDecision::Denied { .. }
+        ));
+        // 子目录不匹配 /*
+        assert!(matches!(
+            gate.check_path("/tmp/sub/file.txt"),
+            PermissionDecision::Approved
+        ));
+    }
+
+    #[test]
+    fn network_rule_deny_domain() {
+        let gate = PermissionGate::new(PermissionPolicy {
+            trust_mode: TrustMode::Supervised,
+            network_rules: vec![NetworkRule {
+                pattern: "*.evil.com".into(),
+                allow: false,
+            }],
+            ..Default::default()
+        });
+        assert!(matches!(
+            gate.check_network("sub.evil.com"),
+            PermissionDecision::Denied { .. }
+        ));
+        assert!(matches!(
+            gate.check_network("good.com"),
+            PermissionDecision::Approved
+        ));
+    }
+
+    #[test]
+    fn network_rule_deny_ip_range() {
+        let gate = PermissionGate::new(PermissionPolicy {
+            trust_mode: TrustMode::Supervised,
+            network_rules: vec![NetworkRule {
+                pattern: "10.0.0.*".into(),
+                allow: false,
+            }],
+            ..Default::default()
+        });
+        assert!(matches!(
+            gate.check_network("10.0.0.1"),
+            PermissionDecision::Denied { .. }
+        ));
+        assert!(matches!(
+            gate.check_network("192.168.1.1"),
+            PermissionDecision::Approved
+        ));
+    }
+
+    #[test]
+    fn full_trust_bypasses_path_rules() {
+        let gate = PermissionGate::new(PermissionPolicy {
+            trust_mode: TrustMode::FullTrust,
+            path_rules: vec![PathRule {
+                pattern: "/etc/**".into(),
+                allow: false,
+            }],
+            ..Default::default()
+        });
+        assert!(matches!(
+            gate.check_path("/etc/passwd"),
+            PermissionDecision::Approved
+        ));
     }
 }
