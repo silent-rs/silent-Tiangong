@@ -6,13 +6,18 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
+use crate::agent_config::AgentConfig;
 use crate::app_state::StreamEvent;
 use crate::app_state::TurnEvent;
 use crate::event_loop::{EventLoopRunner, LoopEvent, LoopOutcome};
-use crate::model::ModelStreamChunk;
+use crate::model::{ModelProviderConfig, ModelStreamChunk, SingleProviderClient};
+use crate::models_config::ModelsConfig;
 use crate::runtime::{LlmOutputRecord, RuntimeEngine};
 use crate::session::{MessageRole, Session};
 use crate::tool::ToolResult;
+
+/// 默认上下文窗口大小
+const DEFAULT_CONTEXT_LIMIT: usize = 32_768;
 
 /// 单一对话处理核心
 pub struct TiangongCore {
@@ -22,11 +27,8 @@ pub struct TiangongCore {
     event_tx: Option<Sender<LoopEvent>>,
     /// 从 runner 接收 TurnEvent
     turn_rx: Receiver<TurnEvent>,
-    /// 唯一的 session（由 core 维护）
+    /// 唯一的 session
     session: Session,
-    /// 引擎配置（用于重新启动 runner）
-    #[allow(dead_code)]
-    engine: RuntimeEngine,
     /// 当前 assistant 消息 ID（流式追加用）
     pending_assistant_id: Option<String>,
     /// 当前 stage thinking 消息 ID
@@ -34,18 +36,44 @@ pub struct TiangongCore {
 }
 
 impl TiangongCore {
-    /// 创建对话核心
-    pub fn new(engine: RuntimeEngine, session: Session) -> Self {
+    /// 创建新对话（自动加载配置）
+    pub fn new() -> Self {
+        let session = Session::new("新对话");
+        Self::with_session(session)
+    }
+
+    /// 从已有 session 创建（加载历史对话）
+    pub fn with_session(session: Session) -> Self {
+        let engine = Self::build_engine();
+        Self::start(engine, session)
+    }
+
+    /// 从配置构建 RuntimeEngine
+    fn build_engine() -> RuntimeEngine {
+        let mut models_config = ModelsConfig::load();
+        if models_config.is_empty() {
+            let env_config = ModelProviderConfig::from_env();
+            if !env_config.api_auth_token.is_empty() {
+                models_config = ModelsConfig::from_legacy(&env_config);
+            }
+        }
+        let model_config = models_config.to_chat_provider_config();
+        let agent_config = AgentConfig::default();
+
+        RuntimeEngine::new(
+            SingleProviderClient::new(model_config),
+            DEFAULT_CONTEXT_LIMIT,
+            agent_config,
+        )
+        .with_models_config(models_config)
+    }
+
+    /// 启动 runner 线程
+    fn start(engine: RuntimeEngine, session: Session) -> Self {
         let (turn_tx, turn_rx) = mpsc::channel::<TurnEvent>();
         let (event_tx, event_rx) = mpsc::channel::<LoopEvent>();
 
-        let runner = EventLoopRunner::new(
-            engine.clone(),
-            session.clone(),
-            turn_tx,
-            event_rx,
-        );
-
+        let runner = EventLoopRunner::new(engine, session.clone(), turn_tx, event_rx);
         let thread = thread::spawn(move || runner.run());
 
         Self {
@@ -53,7 +81,6 @@ impl TiangongCore {
             event_tx: Some(event_tx),
             turn_rx,
             session,
-            engine,
             pending_assistant_id: None,
             pending_thinking_id: None,
         }
@@ -68,8 +95,8 @@ impl TiangongCore {
 
     /// 发送用户消息
     pub fn send_message(&mut self, content: String) {
-        // 在 session 中记录用户消息
-        self.session.append_message(MessageRole::User, content.clone());
+        self.session
+            .append_message(MessageRole::User, content.clone());
         self.send(LoopEvent::UserMessage { content });
     }
 
@@ -107,7 +134,6 @@ impl TiangongCore {
     fn process_event(&mut self, event: TurnEvent) -> (bool, Option<StreamEvent>) {
         let mut done = false;
 
-        // 生成 StreamEvent
         let stream_event = match &event {
             TurnEvent::Chunk(delta) => {
                 if !delta.content.is_empty() {
@@ -151,7 +177,6 @@ impl TiangongCore {
             }
             TurnEvent::LlmOutput(output) => {
                 if !output.tool_calls.is_empty() {
-                    // 工具调用：重置 assistant id，下一轮 Chunk 创建新消息
                     self.pending_assistant_id = None;
                     self.pending_thinking_id = None;
                 }
@@ -167,7 +192,8 @@ impl TiangongCore {
                 done = true;
             }
             TurnEvent::Failed(err) => {
-                self.session.append_message(MessageRole::System, format!("执行失败：{err}"));
+                self.session
+                    .append_message(MessageRole::System, format!("执行失败：{err}"));
                 done = true;
             }
             _ => {}
@@ -182,15 +208,14 @@ impl TiangongCore {
             return;
         }
 
-        if let Some(ref id) = self.pending_assistant_id {
-            // 追加到已有消息
-            if let Some(msg) = self.session.messages.iter_mut().find(|m| m.id == *id) {
-                msg.content.push_str(&delta.content);
-                msg.reasoning_content.push_str(&delta.reasoning_content);
-            }
+        if let Some(ref id) = self.pending_assistant_id
+            && let Some(msg) = self.session.messages.iter_mut().find(|m| m.id == *id)
+        {
+            msg.content.push_str(&delta.content);
+            msg.reasoning_content.push_str(&delta.reasoning_content);
         } else {
-            // 创建新 assistant 消息
-            self.session.append_message(MessageRole::Assistant, String::new());
+            self.session
+                .append_message(MessageRole::Assistant, String::new());
             if let Some(msg) = self.session.messages.last_mut() {
                 msg.content.push_str(&delta.content);
                 msg.reasoning_content.push_str(&delta.reasoning_content);
@@ -214,7 +239,6 @@ impl TiangongCore {
         }
         let content = lines.join("\n");
 
-        // 如果有 stage thinking 消息，更新它；否则创建新的
         if let Some(ref id) = self.pending_thinking_id
             && let Some(msg) = self.session.messages.iter_mut().find(|m| m.id == *id)
         {
@@ -234,17 +258,20 @@ impl TiangongCore {
     /// 追加工具执行系统消息
     fn append_tool_execution(&mut self, result: &ToolResult) {
         let status = if result.ok { "ok=true" } else { "ok=false" };
+        let tool_name = result
+            .execution
+            .as_ref()
+            .map(|e| e.tool_name.as_str())
+            .unwrap_or("unknown");
+        let stdout_preview = if result.stdout.chars().count() > 500 {
+            let truncated: String = result.stdout.chars().take(500).collect();
+            format!("{truncated}...(截断)")
+        } else {
+            result.stdout.clone()
+        };
         let content = format!(
-            "工具执行 [{}]\n{} exit_code={}\nsummary: {}\nstdout:\n{}",
-            result.execution.as_ref().map(|e| e.tool_name.as_str()).unwrap_or("unknown"),
-            status,
-            result.exit_code,
-            result.summary,
-            if result.stdout.len() > 500 {
-                format!("{}...(截断)", &result.stdout.chars().take(500).collect::<String>())
-            } else {
-                result.stdout.clone()
-            }
+            "工具执行 [{tool_name}]\n{status} exit_code={}\nsummary: {}\nstdout:\n{stdout_preview}",
+            result.exit_code, result.summary,
         );
         self.session.append_message(MessageRole::System, content);
     }
@@ -263,7 +290,6 @@ impl TiangongCore {
             return;
         }
 
-        // 创建新的系统消息
         let initial = format!("LLM 输出 [{stage}]\n");
         self.session.append_message(MessageRole::System, initial);
         if let Some(msg) = self.session.messages.last_mut() {
@@ -293,13 +319,21 @@ impl TiangongCore {
         &self.session.id
     }
 
-    /// 关闭核心
+    /// 关闭
     pub fn shutdown(&mut self) {
-        self.send(LoopEvent::SystemSignal(crate::event_loop::SystemSignalKind::Shutdown));
+        self.send(LoopEvent::SystemSignal(
+            crate::event_loop::SystemSignalKind::Shutdown,
+        ));
         self.event_tx = None;
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
+    }
+}
+
+impl Default for TiangongCore {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
