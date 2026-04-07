@@ -10,8 +10,6 @@ use crate::completion;
 use crate::input::InputReader;
 use crate::output;
 
-const PROMPT: &str = "\x1b[1;36m❯ \x1b[0m";
-
 pub fn run() -> Result<()> {
     let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
     let core = TiangongCore::new(stream_tx);
@@ -23,10 +21,11 @@ pub fn run() -> Result<()> {
         // 消费残留事件（上一轮可能有延迟到达的）
         while stream_rx.try_recv().is_ok() {}
 
-        // prompt
-        output::prompt_status(core.session_id());
+        // 构建含 session ID 的 prompt
+        let short_id: String = core.session_id().chars().take(8).collect();
+        let prompt = format!("\x1b[2m{short_id}\x1b[0m \x1b[1;36m❯\x1b[0m ");
 
-        let input = reader.read_line(PROMPT, |buf, cursor| {
+        let input = reader.read_line(&prompt, |buf, cursor| {
             if let Some((trigger, _start, prefix)) = completion::detect_trigger(buf, cursor) {
                 let _ = (trigger, prefix);
                 Vec::new()
@@ -53,10 +52,7 @@ pub fn run() -> Result<()> {
             continue;
         }
 
-        // 显示用户消息
-        output::user_message(trimmed);
-
-        // 发送消息
+        // 发送消息（用户输入已在 prompt 行显示，不重复打印）
         core.send_message(trimmed.to_string());
 
         // 处理响应流

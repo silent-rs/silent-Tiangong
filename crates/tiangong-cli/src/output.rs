@@ -154,6 +154,7 @@ pub fn welcome() {
 }
 
 /// 打印 prompt 前的状态
+#[allow(dead_code)]
 pub fn prompt_status(session_id: &str) {
     let short: String = session_id.chars().take(8).collect();
     print!("{DIM}[{short}]{RESET} ");
