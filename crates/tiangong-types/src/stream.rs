@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 /// 外部输出流事件
 ///
 /// CLI / GUI / Server / Connector 统一消费此类型。
+/// 使用 serde tag 序列化，前端可直接用 event.type 判断类型。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamEvent {

@@ -5,8 +5,15 @@
 
 pub mod message;
 pub mod session;
+pub mod status;
 pub mod stream;
+pub mod token;
 
-pub use message::{Message, MessageRole};
+pub use message::{Message, MessageRole, now_text};
 pub use session::Session;
+pub use status::RunStatus;
 pub use stream::StreamEvent;
+pub use token::TokenUsage;
+
+#[cfg(test)]
+mod tests;
