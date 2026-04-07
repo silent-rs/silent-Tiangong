@@ -130,16 +130,16 @@ pub fn send_message(
     use std::sync::mpsc;
     use tiangong_types::StreamEvent;
 
-    // 准备 session：记录用户消息，持久化
+    // 准备 session：克隆后 core.send_message 会记录用户消息
     let (session_id, session_snapshot) = state.with_state(|core_state| {
         core_state.update_draft(content.clone());
         let idx = core_state.ensure_active_session_index();
-        // 记录用户消息到 TiangongState session
+        // 先克隆 session（不含用户消息），由 TiangongCore 内部 append
+        let session = core_state.sessions()[idx].clone();
+        // 往 TiangongState session 也添加用户消息（前端 run_snapshot 显示用）
         core_state.sessions_mut()[idx]
             .append_message(tiangong_core::session::MessageRole::User, content.clone());
         core_state.store.session.input_draft.clear();
-        // 克隆 session（含用户消息）给 TiangongCore
-        let session = core_state.sessions()[idx].clone();
         // 更新运行状态
         core_state.store.runtime.run.status = tiangong_core::runtime::RunStatus::Executing;
         core_state.store.runtime.run.summary = "正在处理".to_string();
