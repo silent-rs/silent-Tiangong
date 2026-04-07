@@ -29,9 +29,8 @@ export function MessageInput() {
 
   // 信任模式
   const [trustMode, setTrustMode] = useState('full_trust');
-  // 会话累计 token（idle 时从 API 加载）+ 当前轮增量（执行中从 lastUsage 取）
+  // 会话 token 计数
   const [sessionTotalTokens, setSessionTotalTokens] = useState(0);
-  const [prevTotalTokens, setPrevTotalTokens] = useState(0);
 
   const currentRunStatus = isDraft
     ? 'idle'
@@ -41,23 +40,17 @@ export function MessageInput() {
     api.getTrustMode().then(setTrustMode).catch(() => {});
   }, []);
 
-  // idle 时从 API 加载会话累计 token
+  // lastUsage 变化时更新显示（不区分 idle/executing）
   useEffect(() => {
-    if (!isDraft && activeSessionId && currentRunStatus === 'idle') {
-      api.getSessionCost(activeSessionId).then((cost) => {
-        const total = cost?.total_tokens ?? 0;
-        setSessionTotalTokens(total);
-        setPrevTotalTokens(total);
-      }).catch(() => {});
+    if (lastUsage && lastUsage.total_tokens > 0) {
+      setSessionTotalTokens(lastUsage.total_tokens);
     }
-  }, [activeSessionId, isDraft, currentRunStatus]);
+  }, [lastUsage]);
 
-  // 执行中实时更新：会话累计 + 当前轮 lastUsage
+  // 切换会话时重置
   useEffect(() => {
-    if (lastUsage && lastUsage.total_tokens > 0 && currentRunStatus !== 'idle') {
-      setSessionTotalTokens(prevTotalTokens + lastUsage.total_tokens);
-    }
-  }, [lastUsage, currentRunStatus, prevTotalTokens]);
+    setSessionTotalTokens(0);
+  }, [activeSessionId]);
 
   const toggleTrustMode = async () => {
     const newMode = trustMode === 'full_trust' ? 'supervised' : 'full_trust';
@@ -515,8 +508,8 @@ export function MessageInput() {
                   <span className="text-muted-foreground/50 tabular-nums">
                     {lastDurationMs ? `${(lastDurationMs / 1000).toFixed(1)}s · ` : ''}
                     {sessionTotalTokens.toLocaleString()} tokens
-                    {lastUsage && lastUsage.total_tokens > 0 && currentRunStatus !== 'idle' && (
-                      <span className="text-blue-400 ml-1">+{lastUsage.total_tokens.toLocaleString()}</span>
+                    {false && (
+                      <span className="text-blue-400 ml-1">placeholder</span>
                     )}
                   </span>
                 )}

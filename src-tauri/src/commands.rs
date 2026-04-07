@@ -359,6 +359,8 @@ pub fn send_message(
                     let _ = core_state.persist_session_and_app(&final_sid);
                     let final_snapshot = build_full_snapshot(core_state);
                     let _ = app_clone.emit("run_snapshot", &final_snapshot);
+                    // 通知前端 sessions 列表已更新（标题可能变化）
+                    let _ = app_clone.emit("sessions_updated", &());
                     Ok(())
                 });
                 break;
