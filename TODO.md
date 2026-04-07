@@ -349,9 +349,10 @@
 
 ### 待完成
 
-- [ ] GUI 前端直接消费 StreamEvent（替代 run_snapshot 快照）
-- [ ] CLI 接入 TiangongCore（替代 TiangongState poll）
-- [ ] src-tauri 依赖 tiangong-types，删除 DTO 转换层
-- [ ] 删除旧代码（TurnRunner / QueryClassifier / ControlSignal / 旧 poll 逻辑）
-- [ ] GUI spinner/状态/流式/工具调用完整验证
-- [ ] 全链路功能测试（CLI + GUI + 工具调用 + 多轮对话）
+- [x] GUI emit("stream_event") 直接推送 StreamEvent
+- [x] CLI 接入 TiangongCore（直接消费 StreamEvent）
+- [x] src-tauri 依赖 tiangong-types
+- [x] 删除旧 LoopHost/ActiveLoops/CliLoopHost（-433 行）
+- [ ] TurnRunner/ControlSignal 待 Worker 迁移后删除
+- [ ] src-tauri/types.rs DTO 转换层待前端完全迁移后删除
+- [ ] 全链路功能验证（CLI + GUI）
