@@ -64,7 +64,7 @@ fn stream_event_serde() {
     assert!(json.contains(r#""type":"delta""#));
     assert!(json.contains(r#""content":"你好""#));
 
-    let done = StreamEvent::Done;
+    let done = StreamEvent::Done { usage: None };
     let json = serde_json::to_string(&done).unwrap();
     assert_eq!(json, r#"{"type":"done"}"#);
 

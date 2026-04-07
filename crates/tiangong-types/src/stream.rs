@@ -30,7 +30,11 @@ pub enum StreamEvent {
         args_summary: String,
     },
     /// 本轮完成
-    Done,
+    Done {
+        /// 本轮累计 token 用量
+        #[serde(skip_serializing_if = "Option::is_none")]
+        usage: Option<crate::TokenUsage>,
+    },
     /// 执行出错
     Error { message: String },
 }

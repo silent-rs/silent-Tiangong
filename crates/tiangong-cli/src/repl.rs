@@ -26,7 +26,7 @@ pub fn run() -> Result<()> {
     loop {
         // 消费待处理的 StreamEvent（非阻塞）
         while let Ok(event) = stream_rx.try_recv() {
-            let is_terminal = matches!(event, StreamEvent::Done | StreamEvent::Error { .. });
+            let is_terminal = matches!(event, StreamEvent::Done { .. } | StreamEvent::Error { .. });
             process_event(&event, &mut printed_header, &mut in_stream, &mut reasoning_buf);
             if is_terminal {
                 if in_stream { output::flush_line(); in_stream = false; }
@@ -95,7 +95,7 @@ pub fn run() -> Result<()> {
         loop {
             match stream_rx.recv_timeout(std::time::Duration::from_secs(300)) {
                 Ok(event) => {
-                    let is_terminal = matches!(event, StreamEvent::Done | StreamEvent::Error { .. });
+                    let is_terminal = matches!(event, StreamEvent::Done { .. } | StreamEvent::Error { .. });
                     process_event(&event, &mut printed_header, &mut in_stream, &mut reasoning_buf);
                     if is_terminal {
                         if in_stream { output::flush_line(); in_stream = false; }
@@ -157,7 +157,7 @@ fn process_event(
         StreamEvent::ApprovalNeeded { tool_name, args_summary, .. } => {
             output::print_warn(&format!("工具 {tool_name} 需要审批：{args_summary}"));
         }
-        StreamEvent::Done | StreamEvent::Error { .. } => {}
+        StreamEvent::Done { .. } | StreamEvent::Error { .. } => {}
     }
 }
 

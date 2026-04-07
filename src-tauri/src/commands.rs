@@ -171,7 +171,7 @@ pub fn send_message(
         let mut assistant_msg_id: Option<String> = None;
 
         for event in stream_rx.iter() {
-            let is_done = matches!(event, StreamEvent::Done);
+            let is_done = matches!(event, StreamEvent::Done { .. });
             let is_error = matches!(event, StreamEvent::Error { .. });
 
             // emit StreamEvent 给前端
@@ -244,9 +244,20 @@ pub fn send_message(
                         core_state.store.runtime.run.summary =
                             format!("正在执行：{}", names.join(", "));
                     }
-                    StreamEvent::Done => {
-                        // 更新 usage
-                        // usage 通过 into_session 后的 task_records 获取（暂用 run snapshot）
+                    StreamEvent::Done { ref usage } => {
+                        if let Some(u) = usage {
+                            let core_usage = tiangong_core::model::TokenUsage {
+                                prompt_tokens: u.prompt_tokens,
+                                completion_tokens: u.completion_tokens,
+                                total_tokens: u.total_tokens,
+                            };
+                            match core_state.store.runtime.run.last_usage.as_mut() {
+                                Some(existing) => existing.accumulate(&core_usage),
+                                None => {
+                                    core_state.store.runtime.run.last_usage = Some(core_usage)
+                                }
+                            }
+                        }
                         core_state.report_run_idle(format!(
                             "模型供应商：{}",
                             core_state.provider_label()

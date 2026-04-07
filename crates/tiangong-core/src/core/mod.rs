@@ -258,11 +258,13 @@ impl ConsumerState {
             TurnEvent::LlmOutput(output) if !output.tool_calls.is_empty() => {
                 Some(StreamEvent::ToolCalls { names: output.tool_calls.clone() })
             }
-            TurnEvent::LlmOutput(_) => {
+            TurnEvent::LlmOutput(output) if output.tool_calls.is_empty() => {
                 // 无 tool_calls 的 LlmOutput = 最终回复完成
-                Some(StreamEvent::Done)
+                Some(StreamEvent::Done {
+                    usage: Some(output.usage.clone()),
+                })
             }
-            TurnEvent::Completed(_) => Some(StreamEvent::Done),
+            TurnEvent::Completed(_) => Some(StreamEvent::Done { usage: None }),
             TurnEvent::Failed(err) => Some(StreamEvent::Error { message: err.clone() }),
             TurnEvent::ApprovalRequest {
                 request_id,
