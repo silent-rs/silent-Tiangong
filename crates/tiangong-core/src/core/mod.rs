@@ -1,9 +1,9 @@
 //! TiangongCore：单一对话处理核心
 //!
 //! 只维护一个 session，不知道会话列表，不知道应用配置。
-//! CLI 直接使用一个 TiangongCore，GUI 使用 HashMap<String, TiangongCore>。
+//! 创建时传入 Sender<StreamEvent>，core 自动推送事件，外部消费 receiver。
 
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
 
 use crate::agent_config::AgentConfig;
@@ -16,39 +16,79 @@ use crate::runtime::{LlmOutputRecord, RuntimeEngine};
 use crate::session::{MessageRole, Session};
 use crate::tool::ToolResult;
 
-/// 默认上下文窗口大小
 const DEFAULT_CONTEXT_LIMIT: usize = 32_768;
 
 /// 单一对话处理核心
+///
+/// 创建时传入 `Sender<StreamEvent>`，core 自动推送事件。
+/// session 由内部消费线程独占维护，不需要锁。
 pub struct TiangongCore {
-    /// runner 线程
-    thread: Option<JoinHandle<LoopOutcome>>,
     /// 向 runner 发送事件
     event_tx: Option<Sender<LoopEvent>>,
-    /// 从 runner 接收 TurnEvent
-    turn_rx: Receiver<TurnEvent>,
-    /// 唯一的 session
+    /// runner 线程
+    runner_thread: Option<JoinHandle<LoopOutcome>>,
+    /// 消费线程（从 turn_rx 消费 → 更新 session → 推送 StreamEvent）
+    consumer_thread: Option<JoinHandle<Session>>,
+    /// 会话 ID（创建时记录）
+    session_id: String,
+}
+
+/// 消费线程内部状态
+struct ConsumerState {
     session: Session,
-    /// 当前 assistant 消息 ID（流式追加用）
+    stream_tx: Sender<StreamEvent>,
     pending_assistant_id: Option<String>,
-    /// 当前 stage thinking 消息 ID
     pending_thinking_id: Option<String>,
 }
 
 impl TiangongCore {
-    /// 创建新对话（自动加载配置）
-    pub fn new() -> Self {
+    /// 创建新对话
+    pub fn new(stream_tx: Sender<StreamEvent>) -> Self {
         let session = Session::new("新对话");
-        Self::with_session(session)
+        Self::with_session(session, stream_tx)
     }
 
-    /// 从已有 session 创建（加载历史对话）
-    pub fn with_session(session: Session) -> Self {
+    /// 从已有 session 创建
+    pub fn with_session(session: Session, stream_tx: Sender<StreamEvent>) -> Self {
         let engine = Self::build_engine();
-        Self::start(engine, session)
+        let session_id = session.id.clone();
+
+        let (turn_tx, turn_rx) = mpsc::channel::<TurnEvent>();
+        let (event_tx, event_rx) = mpsc::channel::<LoopEvent>();
+
+        // 启动 runner 线程
+        let runner = EventLoopRunner::new(engine, session.clone(), turn_tx, event_rx);
+        let runner_thread = thread::spawn(move || runner.run());
+
+        // 启动消费线程：从 turn_rx 消费 → 更新 session → 推送 StreamEvent
+        let consumer_thread = thread::spawn(move || {
+            let mut state = ConsumerState {
+                session,
+                stream_tx,
+                pending_assistant_id: None,
+                pending_thinking_id: None,
+            };
+
+            while let Ok(event) = turn_rx.recv() {
+                let stream_event = state.process_event(event);
+                if let Some(se) = stream_event
+                    && state.stream_tx.send(se).is_err()
+                {
+                    break; // receiver 已关闭
+                }
+            }
+
+            state.session
+        });
+
+        Self {
+            event_tx: Some(event_tx),
+            runner_thread: Some(runner_thread),
+            consumer_thread: Some(consumer_thread),
+            session_id,
+        }
     }
 
-    /// 从配置构建 RuntimeEngine
     fn build_engine() -> RuntimeEngine {
         let mut models_config = ModelsConfig::load();
         if models_config.is_empty() {
@@ -68,25 +108,7 @@ impl TiangongCore {
         .with_models_config(models_config)
     }
 
-    /// 启动 runner 线程
-    fn start(engine: RuntimeEngine, session: Session) -> Self {
-        let (turn_tx, turn_rx) = mpsc::channel::<TurnEvent>();
-        let (event_tx, event_rx) = mpsc::channel::<LoopEvent>();
-
-        let runner = EventLoopRunner::new(engine, session.clone(), turn_tx, event_rx);
-        let thread = thread::spawn(move || runner.run());
-
-        Self {
-            thread: Some(thread),
-            event_tx: Some(event_tx),
-            turn_rx,
-            session,
-            pending_assistant_id: None,
-            pending_thinking_id: None,
-        }
-    }
-
-    /// 发送事件到 runner
+    /// 发送事件
     pub fn send(&self, event: LoopEvent) {
         if let Some(ref tx) = self.event_tx {
             let _ = tx.send(event);
@@ -94,9 +116,7 @@ impl TiangongCore {
     }
 
     /// 发送用户消息
-    pub fn send_message(&mut self, content: String) {
-        self.session
-            .append_message(MessageRole::User, content.clone());
+    pub fn send_message(&self, content: String) {
         self.send(LoopEvent::UserMessage { content });
     }
 
@@ -105,35 +125,57 @@ impl TiangongCore {
         self.send(LoopEvent::Cancel);
     }
 
-    /// 消费 TurnEvent，更新 session，返回 StreamEvent 列表
-    pub fn poll(&mut self) -> Vec<StreamEvent> {
-        let mut events = Vec::new();
-
-        // 检查 runner 线程是否已结束
-        if let Some(ref thread) = self.thread
-            && thread.is_finished()
-        {
-            self.event_tx = None;
-            if let Some(t) = self.thread.take() {
-                let _ = t.join();
-            }
-        }
-
-        // 消费所有待处理的 TurnEvent
-        while let Ok(turn_event) = self.turn_rx.try_recv() {
-            let (_, stream_event) = self.process_event(turn_event);
-            if let Some(se) = stream_event {
-                events.push(se);
-            }
-        }
-
-        events
+    /// 会话 ID
+    pub fn session_id(&self) -> &str {
+        &self.session_id
     }
 
-    /// 处理单个 TurnEvent：更新 session + 生成 StreamEvent
-    fn process_event(&mut self, event: TurnEvent) -> (bool, Option<StreamEvent>) {
-        let mut done = false;
+    /// 是否有活跃任务
+    pub fn is_busy(&self) -> bool {
+        self.runner_thread
+            .as_ref()
+            .is_some_and(|t| !t.is_finished())
+    }
 
+    /// 关闭并获取最终 session（用于持久化）
+    pub fn shutdown(mut self) -> Session {
+        // 通知 runner 关闭
+        self.send(LoopEvent::SystemSignal(
+            crate::event_loop::SystemSignalKind::Shutdown,
+        ));
+        self.event_tx = None;
+
+        // 等待 runner 线程结束
+        if let Some(t) = self.runner_thread.take() {
+            let _ = t.join();
+        }
+
+        // 等待消费线程结束并获取 session
+        if let Some(t) = self.consumer_thread.take() {
+            match t.join() {
+                Ok(session) => return session,
+                Err(_) => tracing::warn!("消费线程 panic"),
+            }
+        }
+
+        Session::new("recovered")
+    }
+}
+
+impl Drop for TiangongCore {
+    fn drop(&mut self) {
+        self.send(LoopEvent::SystemSignal(
+            crate::event_loop::SystemSignalKind::Shutdown,
+        ));
+        self.event_tx = None;
+    }
+}
+
+// ==================== ConsumerState 事件处理 ====================
+
+impl ConsumerState {
+    fn process_event(&mut self, event: TurnEvent) -> Option<StreamEvent> {
+        // 生成 StreamEvent
         let stream_event = match &event {
             TurnEvent::Chunk(delta) => {
                 if !delta.content.is_empty() {
@@ -172,9 +214,7 @@ impl TiangongCore {
 
         // 更新 session
         match event {
-            TurnEvent::Chunk(delta) => {
-                self.apply_chunk(&delta);
-            }
+            TurnEvent::Chunk(delta) => self.apply_chunk(&delta),
             TurnEvent::LlmOutput(output) => {
                 if !output.tool_calls.is_empty() {
                     self.pending_assistant_id = None;
@@ -182,27 +222,18 @@ impl TiangongCore {
                 }
                 self.append_llm_output(&output);
             }
-            TurnEvent::ToolExecution(result) => {
-                self.append_tool_execution(&result);
-            }
-            TurnEvent::StageThinking { stage, delta } => {
-                self.apply_stage_thinking(&stage, &delta);
-            }
-            TurnEvent::Completed(_) => {
-                done = true;
-            }
+            TurnEvent::ToolExecution(result) => self.append_tool_execution(&result),
+            TurnEvent::StageThinking { stage, delta } => self.apply_stage_thinking(&stage, &delta),
             TurnEvent::Failed(err) => {
                 self.session
                     .append_message(MessageRole::System, format!("执行失败：{err}"));
-                done = true;
             }
             _ => {}
         }
 
-        (done, stream_event)
+        stream_event
     }
 
-    /// 流式追加到 assistant 消息
     fn apply_chunk(&mut self, delta: &ModelStreamChunk) {
         if delta.content.is_empty() && delta.reasoning_content.is_empty() {
             return;
@@ -224,7 +255,6 @@ impl TiangongCore {
         }
     }
 
-    /// 追加 LLM 输出系统消息
     fn append_llm_output(&mut self, output: &LlmOutputRecord) {
         let mut lines = vec![format!("LLM 输出 [{}]", output.stage)];
         lines.push(format!(
@@ -255,7 +285,6 @@ impl TiangongCore {
         self.pending_thinking_id = None;
     }
 
-    /// 追加工具执行系统消息
     fn append_tool_execution(&mut self, result: &ToolResult) {
         let status = if result.ok { "ok=true" } else { "ok=false" };
         let tool_name = result
@@ -269,14 +298,15 @@ impl TiangongCore {
         } else {
             result.stdout.clone()
         };
-        let content = format!(
-            "工具执行 [{tool_name}]\n{status} exit_code={}\nsummary: {}\nstdout:\n{stdout_preview}",
-            result.exit_code, result.summary,
+        self.session.append_message(
+            MessageRole::System,
+            format!(
+                "工具执行 [{tool_name}]\n{status} exit_code={}\nsummary: {}\nstdout:\n{stdout_preview}",
+                result.exit_code, result.summary,
+            ),
         );
-        self.session.append_message(MessageRole::System, content);
     }
 
-    /// 流式追加 stage thinking 到系统消息
     fn apply_stage_thinking(&mut self, stage: &str, delta: &ModelStreamChunk) {
         if delta.content.is_empty() && delta.reasoning_content.is_empty() {
             return;
@@ -297,48 +327,5 @@ impl TiangongCore {
             msg.reasoning_content.push_str(&delta.reasoning_content);
             self.pending_thinking_id = Some(msg.id.clone());
         }
-    }
-
-    /// 获取 session 引用
-    pub fn session(&self) -> &Session {
-        &self.session
-    }
-
-    /// 获取 session 可变引用
-    pub fn session_mut(&mut self) -> &mut Session {
-        &mut self.session
-    }
-
-    /// 是否有活跃任务
-    pub fn is_busy(&self) -> bool {
-        self.event_tx.is_some() && self.thread.as_ref().is_some_and(|t| !t.is_finished())
-    }
-
-    /// 会话 ID
-    pub fn session_id(&self) -> &str {
-        &self.session.id
-    }
-
-    /// 关闭
-    pub fn shutdown(&mut self) {
-        self.send(LoopEvent::SystemSignal(
-            crate::event_loop::SystemSignalKind::Shutdown,
-        ));
-        self.event_tx = None;
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
-    }
-}
-
-impl Default for TiangongCore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Drop for TiangongCore {
-    fn drop(&mut self) {
-        self.shutdown();
     }
 }
