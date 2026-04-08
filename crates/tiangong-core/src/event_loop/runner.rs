@@ -249,8 +249,10 @@ impl EventLoopRunner {
 
         // 使用 PromptAssembler 构建分层 prompt
         let assembler = PromptAssembler::new(self.engine.context_limit);
+        // 首轮：user_input 为空（用户消息已在 session 历史中）
+        // 后续轮：提示 LLM 基于工具结果继续
         let user_input = if self.state.round == 0 {
-            last_user_input.to_string()
+            String::new()
         } else {
             "根据上面的工具执行结果继续处理。如果已经收集到足够信息，直接给出最终回复，不要再调用工具。"
                 .to_string()
