@@ -1,47 +1,47 @@
-//! TiangongCore：单一对话处理核心
+//! TiangongCore：天工智能体核心
 //!
-//! 所有事件统一在消费线程中处理，session 由消费线程独占维护。
-//! 外部通过 Sender<StreamEvent> 接收输出，通过方法发送输入。
+//! 单一线程完成所有工作：接收消息 → LLM 调用 → 工具执行 → session 更新 → 推送 StreamEvent
+//! CLI / GUI / Server / Connector 统一通过 TiangongCore 运行。
 
-use std::sync::mpsc::{self, Sender};
+use std::collections::HashMap;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 use crate::agent_config::AgentConfig;
-use crate::app_state::StreamEvent;
-use crate::app_state::TurnEvent;
-use crate::event_loop::{EventLoopRunner, LoopEvent, LoopOutcome};
-use crate::model::{ModelProviderConfig, ModelStreamChunk, SingleProviderClient};
+use crate::agents::execution_mcp_agent::{McpFunctionTarget, execution_function_tools};
+use crate::app_state::formatting::{format_llm_output_message, format_tool_trace_message};
+use crate::model::{
+    FunctionToolSpec, ModelClient, ModelProviderConfig, ModelRequest, ModelStreamChunk,
+    SingleProviderClient, TokenUsage,
+};
 use crate::models_config::ModelsConfig;
-use crate::runtime::{LlmOutputRecord, RuntimeEngine};
-use crate::session::{MessageRole, Session};
-use crate::tool::ToolResult;
+use crate::prompt::PromptAssembler;
+use crate::runtime::{LlmOutputRecord, RuntimeEngine, inject_enhanced_tools, use_stream_mode};
+use crate::session::{Message, MessageRole, Session, now_text};
+use tiangong_types::StreamEvent;
 
 const DEFAULT_CONTEXT_LIMIT: usize = 32_768;
+const MAX_ROUNDS: usize = 20;
 
-/// 消费线程内部事件（统一所有事件来源）
-enum CoreEvent {
-    /// 从 runner 来的事件
-    Turn(TurnEvent),
-    /// 用户消息
-    UserMessage(String),
-    /// 审批响应
-    ApprovalResponse { request_id: String, approved: bool },
+/// 用户命令
+enum Command {
+    /// 发送消息
+    Message(String),
     /// 取消当前执行
     Cancel,
-    /// 关闭 core
+    /// 审批响应
+    #[allow(dead_code)]
+    Approval { request_id: String, approved: bool },
+    /// 关闭
     Shutdown,
 }
 
-/// 单一对话处理核心
+/// 天工智能体核心
 pub struct TiangongCore {
-    /// 向 runner 发送事件
-    event_tx: Option<Sender<LoopEvent>>,
-    /// 向消费线程发送事件
-    core_tx: Option<Sender<CoreEvent>>,
-    /// runner 线程
-    runner_thread: Option<JoinHandle<LoopOutcome>>,
-    /// 消费线程（返回最终 session）
-    consumer_thread: Option<JoinHandle<Session>>,
+    /// 用户命令发送端
+    cmd_tx: Option<Sender<Command>>,
+    /// 工作线程
+    worker: Option<JoinHandle<Session>>,
     /// 会话 ID
     session_id: String,
 }
@@ -55,312 +55,406 @@ impl TiangongCore {
 
     /// 从已有 session 创建
     pub fn with_session(session: Session, stream_tx: Sender<StreamEvent>) -> Self {
-        let engine = Self::build_engine();
         let session_id = session.id.clone();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
 
-        let (turn_tx, turn_rx) = mpsc::channel::<TurnEvent>();
-        let (event_tx, event_rx) = mpsc::channel::<LoopEvent>();
-        let (core_tx, core_rx) = mpsc::channel::<CoreEvent>();
-
-        // runner 的 TurnEvent 转发到 core_rx
-        let core_tx_for_turn = core_tx.clone();
-        thread::spawn(move || {
-            while let Ok(event) = turn_rx.recv() {
-                if core_tx_for_turn.send(CoreEvent::Turn(event)).is_err() {
-                    break;
-                }
-            }
-        });
-
-        // 启动 runner 线程
-        let runner = EventLoopRunner::new(engine, session.clone(), turn_tx, event_rx);
-        let runner_thread = thread::spawn(move || runner.run());
-
-        // 启动消费线程
-        let event_tx_for_consumer = event_tx.clone();
-        let consumer_thread = thread::spawn(move || {
-            let mut state = ConsumerState {
-                session,
-                event_tx: event_tx_for_consumer,
-                stream_tx,
-                pending_assistant_id: None,
-                pending_thinking_id: None,
-            };
-
-            while let Ok(event) = core_rx.recv() {
-                match event {
-                    CoreEvent::Turn(turn_event) => {
-                        let stream_event = state.process_turn_event(turn_event);
-                        if let Some(se) = stream_event
-                            && state.stream_tx.send(se).is_err()
-                        {
-                            break;
-                        }
-                    }
-                    CoreEvent::UserMessage(content) => {
-                        // 新一轮：重置 assistant 和 thinking ID
-                        state.pending_assistant_id = None;
-                        state.pending_thinking_id = None;
-                        state
-                            .session
-                            .append_message(MessageRole::User, content.clone());
-                        let _ = state.event_tx.send(LoopEvent::UserMessage { content });
-                    }
-                    CoreEvent::ApprovalResponse {
-                        request_id,
-                        approved,
-                    } => {
-                        let _ = state.event_tx.send(LoopEvent::PermissionResponse {
-                            request_id,
-                            approved,
-                        });
-                    }
-                    CoreEvent::Cancel => {
-                        let _ = state.event_tx.send(LoopEvent::Cancel);
-                    }
-                    CoreEvent::Shutdown => {
-                        let _ = state
-                            .event_tx
-                            .send(LoopEvent::SystemSignal(
-                                crate::event_loop::SystemSignalKind::Shutdown,
-                            ));
-                        break;
-                    }
-                }
-            }
-
-            state.session
-        });
+        let worker = thread::spawn(move || worker_loop(session, stream_tx, cmd_rx));
 
         Self {
-            event_tx: Some(event_tx),
-            core_tx: Some(core_tx),
-            runner_thread: Some(runner_thread),
-            consumer_thread: Some(consumer_thread),
+            cmd_tx: Some(cmd_tx),
+            worker: Some(worker),
             session_id,
         }
     }
 
-    fn send_core_event(&self, event: CoreEvent) {
-        if let Some(ref tx) = self.core_tx {
-            let _ = tx.send(event);
+    fn send_cmd(&self, cmd: Command) {
+        if let Some(ref tx) = self.cmd_tx {
+            let _ = tx.send(cmd);
         }
     }
 
-    fn build_engine() -> RuntimeEngine {
-        let mut models_config = ModelsConfig::load();
-        if models_config.is_empty() {
-            let env_config = ModelProviderConfig::from_env();
-            if !env_config.api_auth_token.is_empty() {
-                models_config = ModelsConfig::from_legacy(&env_config);
-            }
-        }
-        let model_config = models_config.to_chat_provider_config();
-        let agent_config = AgentConfig::default();
-
-        RuntimeEngine::new(
-            SingleProviderClient::new(model_config),
-            DEFAULT_CONTEXT_LIMIT,
-            agent_config,
-        )
-        .with_models_config(models_config)
-    }
-
-    /// 发送用户消息
     pub fn send_message(&self, content: String) {
-        self.send_core_event(CoreEvent::UserMessage(content));
+        self.send_cmd(Command::Message(content));
     }
 
-    /// 取消当前执行
     pub fn cancel(&self) {
-        self.send_core_event(CoreEvent::Cancel);
+        self.send_cmd(Command::Cancel);
     }
 
-    /// 响应审批
     pub fn respond_approval(&self, request_id: String, approved: bool) {
-        self.send_core_event(CoreEvent::ApprovalResponse {
+        self.send_cmd(Command::Approval {
             request_id,
             approved,
         });
     }
 
-    /// 会话 ID
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
 
-    /// 关闭并获取最终 session（用于持久化）
+    /// 关闭并获取最终 session
     pub fn into_session(mut self) -> Session {
-        // 发送 Shutdown 事件 → 消费线程 break → runner 收到 Shutdown
-        self.send_core_event(CoreEvent::Shutdown);
-        self.core_tx = None;
-        self.event_tx = None;
-
-        // 等待 runner 线程
-        if let Some(t) = self.runner_thread.take() {
-            let _ = t.join();
-        }
-
-        // 等待消费线程返回 session
-        if let Some(t) = self.consumer_thread.take() {
-            match t.join() {
+        self.send_cmd(Command::Shutdown);
+        self.cmd_tx = None;
+        if let Some(w) = self.worker.take() {
+            match w.join() {
                 Ok(session) => return session,
-                Err(_) => tracing::warn!("消费线程 panic"),
+                Err(_) => tracing::warn!("TiangongCore worker panic"),
             }
         }
-
         Session::new("recovered")
     }
 }
 
 impl Drop for TiangongCore {
     fn drop(&mut self) {
-        if let Some(ref tx) = self.event_tx {
-            let _ = tx.send(LoopEvent::SystemSignal(
-                crate::event_loop::SystemSignalKind::Shutdown,
-            ));
+        if let Some(ref tx) = self.cmd_tx {
+            let _ = tx.send(Command::Shutdown);
         }
-        self.event_tx = None;
+        self.cmd_tx = None;
     }
 }
 
-// ==================== 消费线程内部状态 ====================
+// ==================== 工作线程 ====================
 
-struct ConsumerState {
-    session: Session,
-    event_tx: Sender<LoopEvent>,
+/// 工作线程：接收用户命令，执行 LLM + 工具，推送 StreamEvent
+fn worker_loop(
+    mut session: Session,
     stream_tx: Sender<StreamEvent>,
-    pending_assistant_id: Option<String>,
-    pending_thinking_id: Option<String>,
+    cmd_rx: Receiver<Command>,
+) -> Session {
+    let engine = build_engine();
+
+    // 初始化工具
+    let (all_tools, mcp_targets) = execution_function_tools(&engine.agent_config().mcp);
+    let mut tools: Vec<FunctionToolSpec> = all_tools
+        .into_iter()
+        .filter(|t| t.name != "mark_step_completed")
+        .collect();
+    inject_enhanced_tools(&mut tools, engine.models_config(), engine.agent_config());
+
+    // 设置工作目录
+    if !session.cwd.is_empty() {
+        let p = std::path::PathBuf::from(&session.cwd);
+        if p.is_dir() {
+            crate::tool::set_session_cwd(Some(p));
+        }
+    }
+
+    while let Ok(cmd) = cmd_rx.recv() {
+
+        match cmd {
+            Command::Message(content) => {
+                // 记录用户消息
+                session.append_message(MessageRole::User, content.clone());
+
+                // 执行对话轮次
+                execute_turn(
+                    &mut session,
+                    &content,
+                    &engine,
+                    &tools,
+                    &mcp_targets,
+                    &stream_tx,
+                );
+            }
+            Command::Cancel => {
+                // 当前简单处理：发送错误事件
+                let _ = stream_tx.send(StreamEvent::Error {
+                    message: "已取消".into(),
+                });
+            }
+            Command::Approval { .. } => {
+                // TODO: 审批响应处理
+            }
+            Command::Shutdown => break,
+        }
+    }
+
+    session
 }
 
-impl ConsumerState {
-    fn process_turn_event(&mut self, event: TurnEvent) -> Option<StreamEvent> {
-        let stream_event = match &event {
-            TurnEvent::Chunk(delta) => {
+/// 执行一个完整的对话轮次（可能多轮工具调用）
+fn execute_turn(
+    session: &mut Session,
+    user_input: &str,
+    engine: &RuntimeEngine,
+    tools: &[FunctionToolSpec],
+    mcp_targets: &HashMap<String, McpFunctionTarget>,
+    stream_tx: &Sender<StreamEvent>,
+) {
+    let mut loop_context: Vec<Message> = Vec::new();
+    let mut round = 0;
+    let mut accumulated_usage = TokenUsage::default();
+
+    loop {
+        if round >= MAX_ROUNDS {
+            // 超限：强制最终回复
+            force_final_response(session, &loop_context, engine, stream_tx);
+            break;
+        }
+
+        // 构建 prompt
+        let assembler = PromptAssembler::new(engine.context_limit);
+        let llm_user_input = if round == 0 {
+            user_input.to_string()
+        } else {
+            "根据上面的工具执行结果继续处理。如果已经收集到足够信息，直接给出最终回复，不要再调用工具。".to_string()
+        };
+
+        let assembled = assembler.assemble(
+            session,
+            &llm_user_input,
+            tools.to_vec(),
+            engine.models_config(),
+            engine.agent_config(),
+            &loop_context,
+        );
+
+        let system_prompt = assembled.final_system_prompt();
+        let req = ModelRequest {
+            session_title: session.title.clone(),
+            user_input: assembled.user_input.clone(),
+            context: assembled.build_messages(),
+            assembled_system_prompt: Some(system_prompt),
+        };
+
+        // LLM 流式调用
+        let tx = stream_tx.clone();
+        let response = match engine.client().complete_with_functions_stream(
+            &req,
+            tools,
+            &mut |delta: &ModelStreamChunk| {
+                // 直接推送 StreamEvent
                 if !delta.content.is_empty() {
-                    Some(StreamEvent::Delta { content: delta.content.clone() })
-                } else if !delta.reasoning_content.is_empty() {
-                    Some(StreamEvent::Reasoning { content: delta.reasoning_content.clone() })
-                } else {
-                    None
+                    let _ = tx.send(StreamEvent::Delta {
+                        content: delta.content.clone(),
+                    });
                 }
+                if !delta.reasoning_content.is_empty() {
+                    let _ = tx.send(StreamEvent::Reasoning {
+                        content: delta.reasoning_content.clone(),
+                    });
+                }
+            },
+        ) {
+            Ok(r) => r,
+            Err(err) => {
+                let _ = stream_tx.send(StreamEvent::Error {
+                    message: err.to_string(),
+                });
+                return;
             }
-            TurnEvent::ToolStarted { name, summary } => Some(StreamEvent::ToolStart {
-                name: name.clone(),
-                summary: summary.clone(),
+        };
+
+        accumulated_usage.accumulate(&response.usage);
+        round += 1;
+
+        if response.tool_calls.is_empty() {
+            // 最终回复：记录到 session
+            session.append_message_with_reasoning(
+                MessageRole::Assistant,
+                response.text.clone(),
+                response.reasoning_content.clone(),
+            );
+            // 记录 LLM 输出
+            let output = LlmOutputRecord {
+                stage: format!("react-round-{round}"),
+                content: String::new(),
+                reasoning_content: String::new(),
+                tool_calls: Vec::new(),
+                usage: response.usage.clone(),
+            };
+            session.append_message(MessageRole::System, format_llm_output_message(&output));
+
+            let _ = stream_tx.send(StreamEvent::Done {
+                usage: Some(tiangong_types::TokenUsage {
+                    prompt_tokens: accumulated_usage.prompt_tokens,
+                    completion_tokens: accumulated_usage.completion_tokens,
+                    total_tokens: accumulated_usage.total_tokens,
+                }),
+            });
+            return;
+        }
+
+        // 工具调用
+        let tool_names: Vec<String> =
+            response.tool_calls.iter().map(|c| c.name.clone()).collect();
+
+        // 记录 LLM 输出到 session
+        let output = LlmOutputRecord {
+            stage: format!("react-round-{round}"),
+            content: response.text.clone(),
+            reasoning_content: response.reasoning_content.clone(),
+            tool_calls: tool_names.clone(),
+            usage: response.usage.clone(),
+        };
+        session.append_message_with_reasoning(
+            MessageRole::System,
+            format_llm_output_message(&output),
+            response.reasoning_content.clone(),
+        );
+
+        // 推送工具调用事件
+        let _ = stream_tx.send(StreamEvent::ToolCalls {
+            names: tool_names.clone(),
+            usage: Some(tiangong_types::TokenUsage {
+                prompt_tokens: response.usage.prompt_tokens,
+                completion_tokens: response.usage.completion_tokens,
+                total_tokens: response.usage.total_tokens,
             }),
-            TurnEvent::ToolExecution(result) => Some(StreamEvent::ToolResult {
+        });
+
+        // 记录 assistant 意图到 loop_context
+        let assistant_text = if response.text.is_empty() {
+            format!("[调用工具: {}]", tool_names.join(", "))
+        } else {
+            response.text.clone()
+        };
+        loop_context.push(Message {
+            id: scru128::new().to_string(),
+            role: MessageRole::Assistant,
+            content: assistant_text,
+            reasoning_content: response.reasoning_content.clone(),
+            worker_id: None,
+            created_at: now_text(),
+        });
+
+        // 执行工具
+        for call in &response.tool_calls {
+            let _ = stream_tx.send(StreamEvent::ToolStart {
+                name: call.name.clone(),
+                summary: String::new(),
+            });
+
+            let result =
+                engine.execute_tool_call(call, mcp_targets, &engine.agent_config().mcp);
+
+            let _ = stream_tx.send(StreamEvent::ToolResult {
                 name: result.summary.clone(),
                 ok: result.ok,
                 output: result.stdout.clone(),
-            }),
-            TurnEvent::LlmOutput(output) if !output.tool_calls.is_empty() => {
-                Some(StreamEvent::ToolCalls { names: output.tool_calls.clone(), usage: Some(output.usage.clone()) })
-            }
-            TurnEvent::LlmOutput(output) if output.tool_calls.is_empty() => {
-                // 无 tool_calls 的 LlmOutput = 最终回复完成
-                Some(StreamEvent::Done {
-                    usage: Some(output.usage.clone()),
-                })
-            }
-            TurnEvent::Completed(_) => Some(StreamEvent::Done { usage: None }),
-            TurnEvent::Failed(err) => Some(StreamEvent::Error { message: err.clone() }),
-            TurnEvent::ApprovalRequest {
-                request_id,
-                tool_name,
-                tool_args_summary,
-            } => Some(StreamEvent::ApprovalNeeded {
-                request_id: request_id.clone(),
-                tool_name: tool_name.clone(),
-                args_summary: tool_args_summary.clone(),
-            }),
-            _ => None,
-        };
+            });
 
-        // 更新 session
-        match event {
-            TurnEvent::Chunk(delta) => self.apply_chunk(&delta),
-            TurnEvent::LlmOutput(output) => {
-                if !output.tool_calls.is_empty() {
-                    self.pending_assistant_id = None;
-                    self.pending_thinking_id = None;
+            // 记录到 session
+            session.append_message(MessageRole::System, format_tool_trace_message(&result));
+
+            // 记录到 loop_context
+            let feedback = format!(
+                "工具 {} 执行{}：{}",
+                call.name,
+                if result.ok { "成功" } else { "失败" },
+                if result.stdout.chars().count() > 2000 {
+                    let truncated: String = result.stdout.chars().take(2000).collect();
+                    format!("{truncated}...(截断)")
+                } else if result.stdout.is_empty() {
+                    result.summary.clone()
+                } else {
+                    result.stdout.clone()
                 }
-                self.append_llm_output(&output);
+            );
+            loop_context.push(Message {
+                id: scru128::new().to_string(),
+                role: MessageRole::System,
+                content: feedback,
+                reasoning_content: String::new(),
+                worker_id: None,
+                created_at: now_text(),
+            });
+        }
+
+        // 继续下一轮
+    }
+}
+
+/// 超限时强制最终回复
+fn force_final_response(
+    session: &mut Session,
+    loop_context: &[Message],
+    engine: &RuntimeEngine,
+    stream_tx: &Sender<StreamEvent>,
+) {
+    let assembler = PromptAssembler::new(engine.context_limit);
+    let assembled = assembler.assemble(
+        session,
+        "请基于以上所有工具执行结果，直接给出最终回复。",
+        Vec::new(),
+        engine.models_config(),
+        engine.agent_config(),
+        loop_context,
+    );
+
+    let system_prompt = assembled.final_system_prompt();
+    let req = ModelRequest {
+        session_title: session.title.clone(),
+        user_input: assembled.user_input.clone(),
+        context: assembled.build_messages(),
+        assembled_system_prompt: Some(system_prompt),
+    };
+
+    let tx = stream_tx.clone();
+    let resp = if use_stream_mode() {
+        match engine
+            .client()
+            .complete_stream_with_callback(&req, |delta| {
+                if !delta.content.is_empty() {
+                    let _ = tx.send(StreamEvent::Delta {
+                        content: delta.content.clone(),
+                    });
+                }
+            }) {
+            Ok(r) => r,
+            Err(err) => {
+                let _ = stream_tx.send(StreamEvent::Error {
+                    message: err.to_string(),
+                });
+                return;
             }
-            TurnEvent::ToolExecution(result) => self.append_tool_execution(&result),
-            TurnEvent::StageThinking { stage, delta } => self.apply_stage_thinking(&stage, &delta),
-            TurnEvent::Failed(err) => {
-                self.session
-                    .append_message(MessageRole::System, format!("执行失败：{err}"));
+        }
+    } else {
+        match engine.client().complete(&req) {
+            Ok(r) => {
+                if !r.text.is_empty() {
+                    let _ = stream_tx.send(StreamEvent::Delta {
+                        content: r.text.clone(),
+                    });
+                }
+                r
             }
-            _ => {}
-        }
-
-        stream_event
-    }
-
-    fn apply_chunk(&mut self, delta: &ModelStreamChunk) {
-        if delta.content.is_empty() && delta.reasoning_content.is_empty() {
-            return;
-        }
-        if let Some(ref id) = self.pending_assistant_id
-            && let Some(msg) = self.session.messages.iter_mut().find(|m| m.id == *id)
-        {
-            msg.content.push_str(&delta.content);
-            msg.reasoning_content.push_str(&delta.reasoning_content);
-        } else {
-            self.session
-                .append_message(MessageRole::Assistant, String::new());
-            if let Some(msg) = self.session.messages.last_mut() {
-                msg.content.push_str(&delta.content);
-                msg.reasoning_content.push_str(&delta.reasoning_content);
-                self.pending_assistant_id = Some(msg.id.clone());
+            Err(err) => {
+                let _ = stream_tx.send(StreamEvent::Error {
+                    message: err.to_string(),
+                });
+                return;
             }
         }
-    }
+    };
 
-    fn append_llm_output(&mut self, output: &LlmOutputRecord) {
-        let content = crate::app_state::formatting::format_llm_output_message(output);
+    session.append_message(MessageRole::Assistant, resp.text);
+    let _ = stream_tx.send(StreamEvent::Done {
+        usage: Some(tiangong_types::TokenUsage {
+            prompt_tokens: resp.usage.prompt_tokens,
+            completion_tokens: resp.usage.completion_tokens,
+            total_tokens: resp.usage.total_tokens,
+        }),
+    });
+}
 
-        if let Some(ref id) = self.pending_thinking_id
-            && let Some(msg) = self.session.messages.iter_mut().find(|m| m.id == *id)
-        {
-            msg.content = content;
-            msg.reasoning_content = output.reasoning_content.clone();
-            self.pending_thinking_id = None;
-            return;
-        }
-        self.session.append_message_with_reasoning(
-            MessageRole::System,
-            content,
-            output.reasoning_content.clone(),
-        );
-        self.pending_thinking_id = None;
-    }
-
-    fn append_tool_execution(&mut self, result: &ToolResult) {
-        let content = crate::app_state::formatting::format_tool_trace_message(result);
-        self.session.append_message(MessageRole::System, content);
-    }
-
-    fn apply_stage_thinking(&mut self, stage: &str, delta: &ModelStreamChunk) {
-        if delta.content.is_empty() && delta.reasoning_content.is_empty() {
-            return;
-        }
-        if let Some(ref id) = self.pending_thinking_id
-            && let Some(msg) = self.session.messages.iter_mut().find(|m| m.id == *id)
-        {
-            msg.content.push_str(&delta.content);
-            msg.reasoning_content.push_str(&delta.reasoning_content);
-            return;
-        }
-        let initial = format!("LLM 输出 [{stage}]\n");
-        self.session.append_message(MessageRole::System, initial);
-        if let Some(msg) = self.session.messages.last_mut() {
-            msg.content.push_str(&delta.content);
-            msg.reasoning_content.push_str(&delta.reasoning_content);
-            self.pending_thinking_id = Some(msg.id.clone());
+fn build_engine() -> RuntimeEngine {
+    let mut models_config = ModelsConfig::load();
+    if models_config.is_empty() {
+        let env_config = ModelProviderConfig::from_env();
+        if !env_config.api_auth_token.is_empty() {
+            models_config = ModelsConfig::from_legacy(&env_config);
         }
     }
+    let model_config = models_config.to_chat_provider_config();
+    let agent_config = AgentConfig::default();
+
+    RuntimeEngine::new(
+        SingleProviderClient::new(model_config),
+        DEFAULT_CONTEXT_LIMIT,
+        agent_config,
+    )
+    .with_models_config(models_config)
 }
