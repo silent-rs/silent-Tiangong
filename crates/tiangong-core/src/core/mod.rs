@@ -7,22 +7,19 @@ use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
-use crate::agent_config::AgentConfig;
 use crate::agents::execution_mcp_agent::{McpFunctionTarget, execution_function_tools};
 use crate::app_state::formatting::{format_llm_output_message, format_tool_trace_message};
 use crate::coordinator::types::CoordinatorTask;
 use crate::coordinator::TaskCoordinator;
+use crate::core_config::CoreConfigProvider;
 use crate::model::{
-    FunctionToolSpec, ModelClient, ModelProviderConfig, ModelRequest, ModelStreamChunk,
-    SingleProviderClient, TokenUsage,
+    FunctionToolSpec, ModelClient, ModelRequest, ModelStreamChunk, SingleProviderClient, TokenUsage,
 };
-use crate::models_config::ModelsConfig;
 use crate::prompt::PromptAssembler;
 use crate::runtime::{LlmOutputRecord, RuntimeEngine, inject_enhanced_tools, use_stream_mode};
 use crate::session::{Message, MessageRole, Session, now_text};
 use tiangong_types::StreamEvent;
 
-const DEFAULT_CONTEXT_LIMIT: usize = 32_768;
 const MAX_ROUNDS: usize = 20;
 
 /// 用户命令
@@ -51,17 +48,21 @@ pub struct TiangongCore {
 
 impl TiangongCore {
     /// 创建新对话
-    pub fn new(stream_tx: Sender<StreamEvent>) -> Self {
+    pub fn new(config: CoreConfigProvider, stream_tx: Sender<StreamEvent>) -> Self {
         let session = Session::new("新对话");
-        Self::with_session(session, stream_tx)
+        Self::with_session(config, session, stream_tx)
     }
 
     /// 从已有 session 创建
-    pub fn with_session(session: Session, stream_tx: Sender<StreamEvent>) -> Self {
+    pub fn with_session(
+        config: CoreConfigProvider,
+        session: Session,
+        stream_tx: Sender<StreamEvent>,
+    ) -> Self {
         let session_id = session.id.clone();
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
 
-        let worker = thread::spawn(move || worker_loop(session, stream_tx, cmd_rx));
+        let worker = thread::spawn(move || worker_loop(config, session, stream_tx, cmd_rx));
 
         Self {
             cmd_tx: Some(cmd_tx),
@@ -122,19 +123,15 @@ impl Drop for TiangongCore {
 
 /// 工作线程：接收用户命令，执行 LLM + 工具，推送 StreamEvent
 fn worker_loop(
+    config: CoreConfigProvider,
     mut session: Session,
     stream_tx: Sender<StreamEvent>,
     cmd_rx: Receiver<Command>,
 ) -> Session {
-    let engine = build_engine();
-
-    // 初始化工具
-    let (all_tools, mcp_targets) = execution_function_tools(&engine.agent_config().mcp);
-    let mut tools: Vec<FunctionToolSpec> = all_tools
-        .into_iter()
-        .filter(|t| t.name != "mark_step_completed")
-        .collect();
-    inject_enhanced_tools(&mut tools, engine.models_config(), engine.agent_config());
+    let mut last_cfg_gen = 0u64;
+    let mut engine: Option<RuntimeEngine> = None;
+    let mut tools: Vec<FunctionToolSpec> = Vec::new();
+    let mut mcp_targets: HashMap<String, McpFunctionTarget> = HashMap::new();
 
     // 设置工作目录
     if !session.cwd.is_empty() {
@@ -145,6 +142,22 @@ fn worker_loop(
     }
 
     while let Ok(cmd) = cmd_rx.recv() {
+        // 配置变更检测：仅在 generation 变化时重建 engine 和工具列表
+        let cfg_gen = config.generation();
+        if engine.is_none() || cfg_gen != last_cfg_gen {
+            let cfg = config.snapshot();
+            engine = Some(build_engine_from_config(&cfg));
+            let e = engine.as_ref().unwrap();
+            let (all_tools, new_mcp_targets) = execution_function_tools(&e.agent_config().mcp);
+            let mut new_tools: Vec<FunctionToolSpec> = all_tools
+                .into_iter()
+                .filter(|t| t.name != "mark_step_completed")
+                .collect();
+            inject_enhanced_tools(&mut new_tools, e.models_config(), e.agent_config());
+            tools = new_tools;
+            mcp_targets = new_mcp_targets;
+            last_cfg_gen = cfg_gen;
+        }
 
         match cmd {
             Command::Message(content) => {
@@ -155,7 +168,7 @@ fn worker_loop(
                 execute_turn(
                     &mut session,
                     &content,
-                    &engine,
+                    engine.as_ref().unwrap(),
                     &tools,
                     &mcp_targets,
                     &stream_tx,
@@ -562,55 +575,21 @@ fn force_final_response(
     });
 }
 
-fn build_engine() -> RuntimeEngine {
-    let mut models_config = ModelsConfig::load();
-    if models_config.is_empty() {
-        let env_config = ModelProviderConfig::from_env();
-        if !env_config.api_auth_token.is_empty() {
-            models_config = ModelsConfig::from_legacy(&env_config);
-        }
-    }
-    let model_config = models_config.to_chat_provider_config();
+/// 从 CoreConfig 快照构建 RuntimeEngine
+fn build_engine_from_config(config: &crate::core_config::CoreConfig) -> RuntimeEngine {
+    use crate::agent_config::AgentConfig;
 
-    // 加载 AgentConfig：从 ~/.tiangong/ 读取 MCP/Skill 配置
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".to_string());
-    let tiangong_dir = std::path::PathBuf::from(&home).join(".tiangong");
-
-    let mut agent_config = AgentConfig::default();
-
-    // 加载 MCP 配置
-    let mcp_config_path = tiangong_dir.join("mcp.json");
-    if mcp_config_path.exists()
-        && let Ok(content) = std::fs::read_to_string(&mcp_config_path)
-        && let Ok(mcp_config) =
-            serde_json::from_str::<crate::agent_config::McpConfig>(&content)
-    {
-        agent_config.mcp = mcp_config;
-    }
-
-    // 加载 Skills 配置
-    let skills_config_path = tiangong_dir.join("skills.json");
-    if skills_config_path.exists()
-        && let Ok(content) = std::fs::read_to_string(&skills_config_path)
-        && let Ok(skills_config) =
-            serde_json::from_str::<crate::agent_config::SkillsConfig>(&content)
-    {
-        agent_config.skills = skills_config;
-    }
-
-    // 加载 MCP 能力缓存（使工具注册为 function tools）
-    let mcp_cache_path = tiangong_dir.join("mcp-tools-cache.json");
-    let _ = crate::mcp::load_mcp_capabilities_cache(&mcp_cache_path);
-
-    // 异步刷新 MCP 能力（后台更新，不阻塞启动）
-    crate::mcp::refresh_mcp_capabilities_async(agent_config.mcp.clone());
+    let model_config = config.models.to_chat_provider_config();
+    let agent_config = AgentConfig {
+        mcp: config.mcp.clone(),
+        skills: config.skills.clone(),
+        trust_mode: config.trust_mode,
+    };
 
     RuntimeEngine::new(
         SingleProviderClient::new(model_config),
-        DEFAULT_CONTEXT_LIMIT,
+        config.context_limit,
         agent_config,
     )
-    .with_models_config(models_config)
+    .with_models_config(config.models.clone())
 }

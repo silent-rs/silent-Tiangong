@@ -1,6 +1,7 @@
 //! CLI REPL — 类似 codex/claude code 风格交互
 
 use anyhow::Result;
+use tiangong_config::{CoreConfigProvider, load_core_config};
 use tiangong_core::app_state::TiangongState;
 use tiangong_core::core::TiangongCore;
 use tiangong_types::StreamEvent;
@@ -14,8 +15,9 @@ use crate::output;
 
 pub fn run() -> Result<()> {
     let mut state = TiangongState::load_or_default();
+    let config = CoreConfigProvider::new(load_core_config());
     let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
-    let core = TiangongCore::new(stream_tx);
+    let core = TiangongCore::new(config, stream_tx);
     let mut reader = InputReader::new();
     let mut draft_new_session = true;
 

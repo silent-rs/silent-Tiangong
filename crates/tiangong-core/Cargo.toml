@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 tiangong-types = { path = "../tiangong-types" }
 anyhow = "1"
+arc-swap = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 scru128 = "3"
 serde = { version = "1", features = ["derive"] }

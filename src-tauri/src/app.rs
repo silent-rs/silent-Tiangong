@@ -1,15 +1,18 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use tiangong_config::{CoreConfigProvider, load_core_config};
 use tiangong_core::core::TiangongCore;
 
 /// 天工应用状态
 ///
 /// state: 应用管理（会话列表、配置、持久化）
 /// cores: 活跃的对话核心（session_id → TiangongCore）
+/// config: 共享配置提供者（所有 Core 共享，GUI 修改配置后自动生效）
 pub struct TiangongApp {
     pub state: Mutex<tiangong_core::app_state::TiangongState>,
     pub cores: Mutex<HashMap<String, TiangongCore>>,
+    pub config: CoreConfigProvider,
 }
 
 impl Default for TiangongApp {
@@ -17,6 +20,7 @@ impl Default for TiangongApp {
         Self {
             state: Mutex::new(tiangong_core::app_state::TiangongState::load_or_default()),
             cores: Mutex::new(HashMap::new()),
+            config: CoreConfigProvider::new(load_core_config()),
         }
     }
 }
@@ -60,7 +64,7 @@ impl TiangongApp {
         if cores.contains_key(session_id) {
             return (session_id.to_string(), false); // 已存在，复用
         }
-        let core = TiangongCore::with_session(session, stream_tx);
+        let core = TiangongCore::with_session(self.config.clone(), session, stream_tx);
         let id = core.session_id().to_string();
         cores.insert(id.clone(), core);
         (id, true) // 新创建

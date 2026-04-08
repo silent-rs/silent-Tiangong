@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 tiangong-core = { path = "../tiangong-core" }
+tiangong-config = { path = "../tiangong-config" }
 tiangong-types = { path = "../tiangong-types" }
 anyhow = "1"
 crossterm = "0.28"
