@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use tiangong_config::{CoreConfigProvider, load_core_config};
+use tiangong_config::{CoreConfigProvider, load_tiangong_config};
 use tiangong_core::core::TiangongCore;
 
 /// 天工应用状态
@@ -20,7 +20,7 @@ impl Default for TiangongApp {
         Self {
             state: Mutex::new(tiangong_core::app_state::TiangongState::load_or_default()),
             cores: Mutex::new(HashMap::new()),
-            config: CoreConfigProvider::new(load_core_config()),
+            config: load_tiangong_config().into_core_config_provider(),
         }
     }
 }
