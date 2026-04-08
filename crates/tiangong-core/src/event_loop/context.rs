@@ -11,9 +11,14 @@ use super::types::LoopEvent;
 /// 返回 None 表示该事件不产生上下文消息（如 Cancel、SystemSignal）。
 pub fn event_to_message(event: &LoopEvent) -> Option<Message> {
     match event {
-        // UserMessage 不注入 loop_context（已在 core session 中 append，
-        // 且 PromptAssembler 会单独处理 user_input）
-        LoopEvent::UserMessage { .. } => None,
+        LoopEvent::UserMessage { content } => Some(Message {
+            id: scru128::new().to_string(),
+            role: MessageRole::User,
+            content: content.clone(),
+            reasoning_content: String::new(),
+            worker_id: None,
+            created_at: now_text(),
+        }),
 
         LoopEvent::ToolResult { call_name, result } => {
             let feedback = format!(
