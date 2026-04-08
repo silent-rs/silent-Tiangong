@@ -191,6 +191,30 @@ impl ResponseState {
                 output::error(message);
                 return true;
             }
+
+            StreamEvent::WorkerStarted {
+                worker_id: _,
+                worker_label,
+            } => {
+                output::worker_started(worker_label);
+            }
+
+            StreamEvent::WorkerChunk {
+                worker_id: _,
+                worker_label: _,
+                content,
+            } => {
+                output::delta(content);
+                self.in_delta = true;
+            }
+
+            StreamEvent::WorkerCompleted {
+                worker_id: _,
+                worker_label,
+                success,
+            } => {
+                output::worker_completed(worker_label, *success);
+            }
         }
         false
     }

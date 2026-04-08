@@ -10,6 +10,8 @@ use std::thread::{self, JoinHandle};
 use crate::agent_config::AgentConfig;
 use crate::agents::execution_mcp_agent::{McpFunctionTarget, execution_function_tools};
 use crate::app_state::formatting::{format_llm_output_message, format_tool_trace_message};
+use crate::coordinator::types::CoordinatorTask;
+use crate::coordinator::TaskCoordinator;
 use crate::model::{
     FunctionToolSpec, ModelClient, ModelProviderConfig, ModelRequest, ModelStreamChunk,
     SingleProviderClient, TokenUsage,
@@ -24,7 +26,7 @@ const DEFAULT_CONTEXT_LIMIT: usize = 32_768;
 const MAX_ROUNDS: usize = 20;
 
 /// 用户命令
-enum Command {
+pub(crate) enum Command {
     /// 发送消息
     Message(String),
     /// 取消当前执行
@@ -35,6 +37,7 @@ enum Command {
     /// 关闭
     Shutdown,
 }
+
 
 /// 天工智能体核心
 pub struct TiangongCore {
@@ -175,8 +178,28 @@ fn worker_loop(
     session
 }
 
+/// 供 Worker 调用的独立执行函数
+///
+/// 与 execute_turn 相同的执行逻辑，但返回累计 token 用量。
+/// Worker 通过此函数获得与 TiangongCore 完全一致的执行路径。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_turn_standalone(
+    session: &mut Session,
+    user_input: &str,
+    engine: &RuntimeEngine,
+    tools: &[FunctionToolSpec],
+    mcp_targets: &HashMap<String, McpFunctionTarget>,
+    stream_tx: &Sender<StreamEvent>,
+    cmd_rx: &Receiver<Command>,
+    max_rounds: usize,
+) -> TokenUsage {
+    execute_turn_inner(session, user_input, engine, tools, mcp_targets, stream_tx, cmd_rx, max_rounds)
+}
+
 /// 执行一个完整的对话轮次（可能多轮工具调用）
 ///
+/// 首先判断是否需要多代理并行执行，如需要则拆分并行；
+/// 否则走标准的 ReAct 循环。
 /// 每轮之间检查 cmd_rx：新消息注入上下文，cancel 立即生效。
 fn execute_turn(
     session: &mut Session,
@@ -187,12 +210,61 @@ fn execute_turn(
     stream_tx: &Sender<StreamEvent>,
     cmd_rx: &Receiver<Command>,
 ) {
+    // 判断是否需要多代理并行执行
+    let coordinator = TaskCoordinator::new(engine.clone());
+    let task = CoordinatorTask {
+        id: scru128::new().to_string(),
+        objective: user_input.to_string(),
+        user_input: user_input.to_string(),
+        context: Vec::new(),
+    };
+
+    if coordinator.should_split(&task) {
+        tracing::info!("任务需要拆分，启动多代理并行执行");
+        match coordinator.coordinate(task, session, stream_tx) {
+            Ok(result) => {
+                // 记录合并结果到 session
+                session.append_message(MessageRole::Assistant, result.final_response);
+                let _ = stream_tx.send(StreamEvent::Done {
+                    usage: Some(tiangong_types::TokenUsage {
+                        prompt_tokens: result.total_usage.prompt_tokens,
+                        completion_tokens: result.total_usage.completion_tokens,
+                        total_tokens: result.total_usage.total_tokens,
+                    }),
+                });
+            }
+            Err(err) => {
+                tracing::warn!("多代理并行执行失败，回退单代理: {err}");
+                // 回退到单代理执行
+                execute_turn_inner(
+                    session, user_input, engine, tools, mcp_targets, stream_tx, cmd_rx, MAX_ROUNDS,
+                );
+            }
+        }
+        return;
+    }
+
+    execute_turn_inner(session, user_input, engine, tools, mcp_targets, stream_tx, cmd_rx, MAX_ROUNDS);
+}
+
+/// 内部执行：标准 ReAct 循环
+#[allow(clippy::too_many_arguments)]
+fn execute_turn_inner(
+    session: &mut Session,
+    user_input: &str,
+    engine: &RuntimeEngine,
+    tools: &[FunctionToolSpec],
+    mcp_targets: &HashMap<String, McpFunctionTarget>,
+    stream_tx: &Sender<StreamEvent>,
+    cmd_rx: &Receiver<Command>,
+    max_rounds: usize,
+) -> TokenUsage {
     let mut loop_context: Vec<Message> = Vec::new();
     let mut round = 0;
     let mut accumulated_usage = TokenUsage::default();
 
     loop {
-        if round >= MAX_ROUNDS {
+        if round >= max_rounds {
             // 超限：强制最终回复
             force_final_response(session, &loop_context, engine, stream_tx);
             break;
@@ -247,7 +319,7 @@ fn execute_turn(
                 let _ = stream_tx.send(StreamEvent::Error {
                     message: err.to_string(),
                 });
-                return;
+                return accumulated_usage;
             }
         };
 
@@ -278,7 +350,7 @@ fn execute_turn(
                     total_tokens: accumulated_usage.total_tokens,
                 }),
             });
-            return;
+            return accumulated_usage;
         }
 
         // 工具调用
@@ -374,7 +446,7 @@ fn execute_turn(
                     let _ = stream_tx.send(StreamEvent::Error {
                         message: "已取消".into(),
                     });
-                    return;
+                    return accumulated_usage;
                 }
                 Command::Message(content) => {
                     // 用户追加消息：注入 loop_context，下一轮 LLM 会看到
@@ -388,13 +460,15 @@ fn execute_turn(
                         created_at: now_text(),
                     });
                 }
-                Command::Shutdown => return,
+                Command::Shutdown => return accumulated_usage,
                 _ => {}
             }
         }
 
         // 继续下一轮
     }
+
+    accumulated_usage
 }
 
 /// 超限时强制最终回复

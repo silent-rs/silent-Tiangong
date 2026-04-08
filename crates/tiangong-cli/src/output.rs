@@ -126,6 +126,20 @@ pub fn done() {
     // 静默，不需要额外标记
 }
 
+/// Worker 开始执行
+pub fn worker_started(label: &str) {
+    println!("{CYAN_BOLD}⚙ Worker 启动：{label}{RESET}");
+}
+
+/// Worker 执行完成
+pub fn worker_completed(label: &str, success: bool) {
+    if success {
+        println!("{GREEN_BOLD}✓ Worker 完成：{label}{RESET}");
+    } else {
+        println!("{RED_BOLD}✗ Worker 失败：{label}{RESET}");
+    }
+}
+
 /// 打印状态信息
 pub fn status(msg: &str) {
     println!("{DIM}{msg}{RESET}");

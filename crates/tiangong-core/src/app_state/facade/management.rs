@@ -1,7 +1,8 @@
 use super::super::*;
 
 impl TiangongState {
-    /// 执行管理命令（由 RuntimeEngine 通过 TurnEvent 触发）
+    /// 执行管理命令
+    #[allow(dead_code)]
     pub(in crate::app_state) fn execute_management_command(&mut self, cmd: ManagementCommand) {
         let result = match cmd {
             ManagementCommand::RegisterMcpServer {

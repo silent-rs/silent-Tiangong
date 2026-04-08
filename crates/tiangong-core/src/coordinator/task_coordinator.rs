@@ -3,13 +3,15 @@
 //! 使用 LLM 判断是否需要多代理并行执行，
 //! 拆分子任务后分配给独立 Worker 并行执行，
 //! 汇总结果生成最终回复。
+//!
+//! 输出统一使用 StreamEvent，与 TiangongCore 一致。
 
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::Sender;
 
-use crate::app_state::{ControlSignal, TurnEvent};
 use crate::model::{ModelClient, ModelRequest, TokenUsage};
 use crate::runtime::RuntimeEngine;
 use crate::session::Session;
+use tiangong_types::StreamEvent;
 
 use super::types::{CoordinatorResult, CoordinatorTask, WorkerBudget, WorkerContext, WorkerResult};
 use super::worker::Worker;
@@ -64,31 +66,29 @@ impl TaskCoordinator {
         &self,
         task: CoordinatorTask,
         session: &Session,
-        event_tx: Option<&mpsc::Sender<TurnEvent>>,
-        ctrl_rx: Option<Receiver<ControlSignal>>,
+        stream_tx: &Sender<StreamEvent>,
     ) -> anyhow::Result<CoordinatorResult> {
         if !self.should_split(&task) {
-            return self.run_single(task, session, event_tx, ctrl_rx);
+            return self.run_single(task, session, stream_tx);
         }
 
         let sub_tasks = self.split_task(&task)?;
         if sub_tasks.len() <= 1 {
             let single_task = sub_tasks.into_iter().next().unwrap_or(task);
-            return self.run_single(single_task, session, event_tx, ctrl_rx);
+            return self.run_single(single_task, session, stream_tx);
         }
 
         tracing::info!(sub_task_count = sub_tasks.len(), "多 Worker 并行执行");
-        let results = self.run_parallel(sub_tasks, session, event_tx);
-        self.merge_results(&task, results, event_tx)
+        let results = self.run_parallel(sub_tasks, session, stream_tx);
+        self.merge_results(&task, results, stream_tx)
     }
 
-    /// 单 Worker 执行（退化模式，透传控制信号）
+    /// 单 Worker 执行（退化模式）
     fn run_single(
         &self,
         task: CoordinatorTask,
         session: &Session,
-        event_tx: Option<&mpsc::Sender<TurnEvent>>,
-        ctrl_rx: Option<Receiver<ControlSignal>>,
+        stream_tx: &Sender<StreamEvent>,
     ) -> anyhow::Result<CoordinatorResult> {
         let worker_context = WorkerContext {
             worker_id: scru128::new().to_string(),
@@ -99,14 +99,8 @@ impl TaskCoordinator {
             budget: WorkerBudget::default(),
         };
 
-        let mut worker = Worker::new(worker_context, self.engine.clone(), session.clone());
-        if let Some(tx) = event_tx {
-            worker = worker.with_event_tx(tx.clone());
-        }
-        if let Some(rx) = ctrl_rx {
-            worker = worker.with_ctrl_rx(rx);
-        }
-        let result = worker.run();
+        let worker = Worker::new(worker_context, self.engine.clone(), session.clone());
+        let result = worker.run(stream_tx);
 
         let total_usage = result.usage.clone();
         Ok(CoordinatorResult {
@@ -161,33 +155,32 @@ impl TaskCoordinator {
         Ok(sub_tasks)
     }
 
-    /// 并行执行多个子任务，实时转发事件（每个 Worker 通过 worker_id 标识）
+    /// 并行执行多个子任务
     fn run_parallel(
         &self,
         tasks: Vec<CoordinatorTask>,
         session: &Session,
-        event_tx: Option<&mpsc::Sender<TurnEvent>>,
+        stream_tx: &Sender<StreamEvent>,
     ) -> Vec<WorkerResult> {
-        let results: Vec<WorkerResult> = std::thread::scope(|scope| {
+        std::thread::scope(|scope| {
             let handles: Vec<_> = tasks
                 .into_iter()
                 .enumerate()
                 .map(|(i, task)| {
                     let engine = self.engine.clone();
                     let session = session.clone();
-                    let event_tx = event_tx.cloned();
-                    let worker_id = format!("worker-{}-{}", i, scru128::new());
-                    let worker_label: String = task.user_input.chars().take(30).collect();
+                    let stream_tx = stream_tx.clone();
 
                     scope.spawn(move || {
-                        // 创建干净的 Worker 会话（只保留 cwd，清空消息历史）
+                        let worker_id = format!("worker-{}-{}", i, scru128::new());
+
+                        // 创建干净的 Worker 会话（只保留 cwd）
                         let mut worker_session = Session::new(&task.objective);
                         worker_session.cwd = session.cwd.clone();
 
-                        // 多 Worker 模式下每个 Worker 分配独立预算（总预算按 Worker 数均分）
                         let worker_budget = WorkerBudget {
                             max_tokens: WorkerBudget::default().max_tokens,
-                            max_rounds: 10, // 多 Worker 单个子任务轮次更少
+                            max_rounds: 10,
                             max_tool_calls: 20,
                             max_duration_secs: 120,
                         };
@@ -195,34 +188,22 @@ impl TaskCoordinator {
                         let worker_context = WorkerContext {
                             worker_id: worker_id.clone(),
                             task_objective: task.user_input,
-                            available_tools: Vec::new(), // 后续可通过 LLM 拆分时指定
+                            available_tools: Vec::new(),
                             context_scope: super::types::ContextScope::TaskOnly,
                             working_dir: None,
                             budget: worker_budget,
                         };
 
                         tracing::info!(worker_id, "Worker 开始执行");
-                        let mut worker = Worker::new(worker_context, engine, worker_session)
+                        let worker = Worker::new(worker_context, engine, worker_session)
                             .with_multi_worker_mode();
-                        if let Some(ref tx) = event_tx {
-                            worker = worker.with_event_tx(tx.clone());
-                        }
-                        let result = worker.run();
+                        let result = worker.run(&stream_tx);
                         tracing::info!(
                             worker_id,
                             success = result.success,
                             duration_ms = result.duration_ms,
                             "Worker 执行完成"
                         );
-
-                        // 发送 WorkerCompleted 事件
-                        if let Some(tx) = event_tx {
-                            let _ = tx.send(TurnEvent::WorkerCompleted {
-                                worker_id: worker_id.clone(),
-                                worker_label,
-                            });
-                        }
-
                         result
                     })
                 })
@@ -242,17 +223,15 @@ impl TaskCoordinator {
                     })
                 })
                 .collect()
-        });
-
-        results
+        })
     }
 
-    /// 使用 LLM 合并多个 Worker 结果（流式推送合成回复）
+    /// 使用 LLM 合并多个 Worker 结果
     fn merge_results(
         &self,
         original_task: &CoordinatorTask,
         results: Vec<WorkerResult>,
-        event_tx: Option<&mpsc::Sender<TurnEvent>>,
+        stream_tx: &Sender<StreamEvent>,
     ) -> anyhow::Result<CoordinatorResult> {
         let mut total_usage = TokenUsage::default();
         let mut worker_outputs = String::new();
@@ -273,7 +252,6 @@ impl TaskCoordinator {
             }
         }
 
-        // 使用 LLM 流式合成最终回复
         let final_response = if results.len() == 1 {
             results[0].result_text.clone()
         } else {
@@ -287,32 +265,26 @@ impl TaskCoordinator {
                 session_title: String::new(),
                 user_input: prompt,
                 context: Vec::new(),
-            assembled_system_prompt: None,
+                assembled_system_prompt: None,
             };
 
-            if let Some(tx) = event_tx {
-                // 流式合成，实时推送到前端
-                let tx_clone = tx.clone();
-                match self
-                    .engine
-                    .client()
-                    .complete_stream_with_callback(&req, |delta| {
-                        let _ = tx_clone.send(TurnEvent::Chunk(delta.clone()));
-                    }) {
-                    Ok(resp) => {
-                        total_usage.accumulate(&resp.usage);
-                        resp.text
+            // 流式合成，实时推送
+            let tx = stream_tx.clone();
+            match self
+                .engine
+                .client()
+                .complete_stream_with_callback(&req, |delta| {
+                    if !delta.content.is_empty() {
+                        let _ = tx.send(StreamEvent::Delta {
+                            content: delta.content.clone(),
+                        });
                     }
-                    Err(_) => worker_outputs,
+                }) {
+                Ok(resp) => {
+                    total_usage.accumulate(&resp.usage);
+                    resp.text
                 }
-            } else {
-                match self.engine.client().complete(&req) {
-                    Ok(resp) => {
-                        total_usage.accumulate(&resp.usage);
-                        resp.text
-                    }
-                    Err(_) => worker_outputs,
-                }
+                Err(_) => worker_outputs,
             }
         };
 

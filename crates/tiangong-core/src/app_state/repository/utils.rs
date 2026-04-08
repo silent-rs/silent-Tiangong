@@ -159,6 +159,7 @@ pub(in crate::app_state) fn new_scru128_string() -> String {
     scru128::new().to_string()
 }
 
+#[allow(dead_code)]
 pub(in crate::app_state) fn elapsed_ms_u64(value: u128) -> u64 {
     value.min(u128::from(u64::MAX)) as u64
 }
