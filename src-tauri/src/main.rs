@@ -53,11 +53,32 @@ fn main() {
 }
 
 fn run_gui() {
-    // 初始化日志
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
+    // 日志：文件 + 终端双输出
+    // DMG 安装后终端不可见，但日志仍写入 ~/.tiangong/logs/gui.log
+    // 开发时 cargo tauri dev 终端可见
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    let log_dir = std::path::PathBuf::from(home).join(".tiangong").join("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let file_appender = tracing_appender::rolling::daily(log_dir, "gui.log");
+
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let env_filter = tracing_subscriber::EnvFilter::from_default_env()
+        .add_directive(tracing::Level::INFO.into());
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr),
+        )
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(file_appender)
+                .with_ansi(false),
         )
         .init();
 
