@@ -90,7 +90,8 @@ impl AssembledPrompt {
 
     /// 构建完整的消息列表（按文档顺序）
     ///
-    /// 顺序：user_context_message → history → attachments → user_input
+    /// 顺序：user_context_message → history → attachments
+    /// 用户输入统一通过 session history 传递，不在此处追加。
     pub fn build_messages(&self) -> Vec<Message> {
         let mut messages = Vec::new();
 
@@ -106,23 +107,11 @@ impl AssembledPrompt {
             });
         }
 
-        // 历史消息
+        // 历史消息（包含用户输入）
         messages.extend(self.history_messages.iter().cloned());
 
         // Attachment messages
         messages.extend(self.attachment_messages.iter().cloned());
-
-        // 当前用户输入
-        if !self.user_input.is_empty() {
-            messages.push(Message {
-                id: scru128::new().to_string(),
-                role: crate::session::MessageRole::User,
-                content: self.user_input.clone(),
-                reasoning_content: String::new(),
-                worker_id: None,
-                created_at: crate::session::now_text(),
-            });
-        }
 
         messages
     }
@@ -191,10 +180,9 @@ mod tests {
             tools: Vec::new(),
         };
         let msgs = prompt.build_messages();
-        // user_context → history → user_input
-        assert_eq!(msgs.len(), 3);
+        // user_context → history（用户输入已在 history 中，不再单独追加）
+        assert_eq!(msgs.len(), 2);
         assert!(msgs[0].content.contains("system-reminder"));
         assert_eq!(msgs[1].content, "历史");
-        assert_eq!(msgs[2].content, "当前输入");
     }
 }

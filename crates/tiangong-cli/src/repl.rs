@@ -80,7 +80,11 @@ pub fn run() -> Result<()> {
     }
 
     output::status("再见！");
-    let _session = core.into_session();
+    // 获取 Core 的最终 session 并持久化
+    let final_session = core.into_session();
+    if !final_session.messages.is_empty() {
+        state.save_core_session(final_session);
+    }
     Ok(())
 }
 

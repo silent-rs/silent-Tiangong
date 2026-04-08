@@ -251,7 +251,7 @@ fn execute_turn(
 #[allow(clippy::too_many_arguments)]
 fn execute_turn_inner(
     session: &mut Session,
-    user_input: &str,
+    _user_input: &str,
     engine: &RuntimeEngine,
     tools: &[FunctionToolSpec],
     mcp_targets: &HashMap<String, McpFunctionTarget>,
@@ -271,16 +271,23 @@ fn execute_turn_inner(
         }
 
         // 构建 prompt
-        let assembler = PromptAssembler::new(engine.context_limit);
-        let llm_user_input = if round == 0 {
-            user_input.to_string()
-        } else {
-            "根据上面的工具执行结果继续处理。如果已经收集到足够信息，直接给出最终回复，不要再调用工具。".to_string()
-        };
+        // 用户输入统一通过 session.messages 传递，不使用独立的 user_input 通道
+        // 工具调用后续轮次的续写提示作为 System 消息注入 loop_context
+        if round > 0 {
+            loop_context.push(Message {
+                id: scru128::new().to_string(),
+                role: MessageRole::System,
+                content: "根据上面的工具执行结果继续处理。如果已经收集到足够信息，直接给出最终回复，不要再调用工具。".to_string(),
+                reasoning_content: String::new(),
+                worker_id: None,
+                created_at: now_text(),
+            });
+        }
 
+        let assembler = PromptAssembler::new(engine.context_limit);
         let assembled = assembler.assemble(
             session,
-            &llm_user_input,
+            "",
             tools.to_vec(),
             engine.models_config(),
             engine.agent_config(),
@@ -478,14 +485,25 @@ fn force_final_response(
     engine: &RuntimeEngine,
     stream_tx: &Sender<StreamEvent>,
 ) {
+    // 将强制回复提示作为 System 消息注入上下文
+    let mut final_context = loop_context.to_vec();
+    final_context.push(Message {
+        id: scru128::new().to_string(),
+        role: MessageRole::System,
+        content: "请基于以上所有工具执行结果，直接给出最终回复。".to_string(),
+        reasoning_content: String::new(),
+        worker_id: None,
+        created_at: now_text(),
+    });
+
     let assembler = PromptAssembler::new(engine.context_limit);
     let assembled = assembler.assemble(
         session,
-        "请基于以上所有工具执行结果，直接给出最终回复。",
+        "",
         Vec::new(),
         engine.models_config(),
         engine.agent_config(),
-        loop_context,
+        &final_context,
     );
 
     let system_prompt = assembled.final_system_prompt();
