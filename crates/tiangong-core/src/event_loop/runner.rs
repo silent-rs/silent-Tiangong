@@ -238,15 +238,6 @@ impl EventLoopRunner {
     }
 
     fn call_llm(&mut self) -> Result<bool> {
-        let last_user_input = self
-            .state
-            .loop_context
-            .iter()
-            .rev()
-            .find(|m| m.role == MessageRole::User)
-            .map(|m| m.content.as_str())
-            .unwrap_or("");
-
         // 使用 PromptAssembler 构建分层 prompt
         let assembler = PromptAssembler::new(self.engine.context_limit);
         // 首轮：user_input 为空（用户消息已在 session 历史中）

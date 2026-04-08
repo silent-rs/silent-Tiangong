@@ -186,70 +186,135 @@ fn complete_at_mentions(prefix: &str, state: &TiangongState) -> Vec<CompletionCa
 
 fn complete_files(prefix: &str) -> Vec<CompletionCandidate> {
     let file_prefix = prefix.strip_prefix("file:").unwrap_or(prefix);
+    let query = file_prefix.to_lowercase();
 
-    // 确定搜索路径
-    let (dir, name_prefix) = if file_prefix.contains('/') {
+    // 如果包含 /，从指定目录搜索
+    let (search_dir, name_query) = if file_prefix.contains('/') {
         let path = Path::new(file_prefix);
         let parent = path.parent().unwrap_or(Path::new("."));
         let name = path
             .file_name()
-            .map(|n| n.to_string_lossy().to_string())
+            .map(|n| n.to_string_lossy().to_lowercase())
             .unwrap_or_default();
         (parent.to_path_buf(), name)
     } else {
         (
             std::env::current_dir().unwrap_or_else(|_| ".".into()),
-            file_prefix.to_string(),
+            query.clone(),
         )
     };
 
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(_) => return Vec::new(),
+    let mut candidates = Vec::new();
+
+    // 当前目录文件（前缀匹配 + 模糊匹配）
+    collect_files_from_dir(&search_dir, &name_query, "", &mut candidates, 30);
+
+    // 如果没有 /，递归子目录模糊搜索（限制深度 2）
+    if !file_prefix.contains('/') && !name_query.is_empty() {
+        collect_files_recursive(&search_dir, &name_query, "", &mut candidates, 30, 0, 2);
+    }
+
+    candidates
+}
+
+/// 从目录收集匹配的文件（前缀 + 模糊）
+fn collect_files_from_dir(
+    dir: &Path,
+    query: &str,
+    rel_prefix: &str,
+    candidates: &mut Vec<CompletionCandidate>,
+    max: usize,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
     };
 
-    let mut candidates = Vec::new();
-    let mut count = 0;
-
     for entry in entries.flatten() {
-        if count >= 20 {
-            break; // 限制候选数量
+        if candidates.len() >= max {
+            break;
         }
         let name = entry.file_name().to_string_lossy().to_string();
         if name.starts_with('.') {
-            continue; // 跳过隐藏文件
+            continue;
         }
-        if !name_prefix.is_empty() && !name.starts_with(&name_prefix) {
+
+        let name_lower = name.to_lowercase();
+        // 模糊匹配：包含子串
+        if !query.is_empty() && !name_lower.contains(query) {
             continue;
         }
 
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let display_name = if is_dir {
-            format!("{name}/")
-        } else {
+        let rel_path = if rel_prefix.is_empty() {
             name.clone()
+        } else {
+            format!("{rel_prefix}/{name}")
         };
-
-        let file_path = if file_prefix.contains('/') {
-            let parent = Path::new(file_prefix).parent().unwrap_or(Path::new("."));
-            format!("{}/{name}", parent.display())
+        let display = if is_dir {
+            format!("{rel_path}/")
         } else {
-            name.clone()
+            rel_path.clone()
         };
 
         candidates.push(CompletionCandidate {
-            value: format!("@file:{file_path}"),
-            label: format!("@file:{display_name}"),
-            hint: if is_dir {
-                "目录".to_string()
-            } else {
-                "文件".to_string()
-            },
+            value: format!("@file:{rel_path}"),
+            label: format!("@file:{display}"),
+            hint: if is_dir { "目录".into() } else { "文件".into() },
         });
-        count += 1;
+    }
+}
+
+/// 递归搜索子目录（模糊匹配文件名）
+fn collect_files_recursive(
+    dir: &Path,
+    query: &str,
+    rel_prefix: &str,
+    candidates: &mut Vec<CompletionCandidate>,
+    max: usize,
+    depth: usize,
+    max_depth: usize,
+) {
+    if depth >= max_depth || candidates.len() >= max {
+        return;
     }
 
-    candidates
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        if candidates.len() >= max {
+            break;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') || name == "target" || name == "node_modules" {
+            continue;
+        }
+
+        let rel_path = if rel_prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{rel_prefix}/{name}")
+        };
+
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if is_dir {
+            // 先检查子目录中的文件
+            collect_files_from_dir(&entry.path(), query, &rel_path, candidates, max);
+            // 递归
+            collect_files_recursive(
+                &entry.path(),
+                query,
+                &rel_path,
+                candidates,
+                max,
+                depth + 1,
+                max_depth,
+            );
+        }
+    }
 }
 
 /// 格式化帮助信息（显示所有命令和 @ 提及类型）
