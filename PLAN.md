@@ -112,12 +112,21 @@
 - Phase C：生命周期管理、优雅关闭与持久化恢复
 - Phase D：清理旧代码（TurnRunner / QueryClassifier / ControlSignal）
 
+### Phase 13（CoreConfig 配置注入）— **待启动**
+> RFC：`docs/rfc/0006-core-config-provider.md`
+
+将 TiangongCore 的配置从内部磁盘加载改为外部注入：
+- Phase A：定义 CoreConfig + CoreConfigProvider，修改 TiangongCore 构造函数
+- Phase B：CLI/GUI/Server 适配，使用 CoreConfigProvider 注入配置
+- Phase C：tiangong-config 独立 crate（可选），提供磁盘加载、持久化、文件监听
+
 ## 参考文档
 - 项目说明：`README.md`
 - RFC 0001：`docs/rfc/0001-tiangong-desktop-agent-roadmap.md`
 - RFC 0002：`docs/rfc/0002-cli-agent-roadmap.md`
 - RFC 0003：`docs/rfc/0003-skill-market.md`
 - RFC 0004：`docs/rfc/0004-full-stack-agent-platform.md`（全栈平台架构）
+- RFC 0006：`docs/rfc/0006-core-config-provider.md`（CoreConfig 配置注入）
 - 架构基准：`docs/desktop-agent-technical-architecture.md`
 - 架构差距分析：`docs/architecture-gap-analysis.md`
 - 需求基线：`docs/requirements.md`

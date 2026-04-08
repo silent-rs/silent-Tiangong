@@ -571,7 +571,41 @@ fn build_engine() -> RuntimeEngine {
         }
     }
     let model_config = models_config.to_chat_provider_config();
-    let agent_config = AgentConfig::default();
+
+    // 加载 AgentConfig：从 ~/.tiangong/ 读取 MCP/Skill 配置
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    let tiangong_dir = std::path::PathBuf::from(&home).join(".tiangong");
+
+    let mut agent_config = AgentConfig::default();
+
+    // 加载 MCP 配置
+    let mcp_config_path = tiangong_dir.join("mcp.json");
+    if mcp_config_path.exists()
+        && let Ok(content) = std::fs::read_to_string(&mcp_config_path)
+        && let Ok(mcp_config) =
+            serde_json::from_str::<crate::agent_config::McpConfig>(&content)
+    {
+        agent_config.mcp = mcp_config;
+    }
+
+    // 加载 Skills 配置
+    let skills_config_path = tiangong_dir.join("skills.json");
+    if skills_config_path.exists()
+        && let Ok(content) = std::fs::read_to_string(&skills_config_path)
+        && let Ok(skills_config) =
+            serde_json::from_str::<crate::agent_config::SkillsConfig>(&content)
+    {
+        agent_config.skills = skills_config;
+    }
+
+    // 加载 MCP 能力缓存（使工具注册为 function tools）
+    let mcp_cache_path = tiangong_dir.join("mcp-tools-cache.json");
+    let _ = crate::mcp::load_mcp_capabilities_cache(&mcp_cache_path);
+
+    // 异步刷新 MCP 能力（后台更新，不阻塞启动）
+    crate::mcp::refresh_mcp_capabilities_async(agent_config.mcp.clone());
 
     RuntimeEngine::new(
         SingleProviderClient::new(model_config),
