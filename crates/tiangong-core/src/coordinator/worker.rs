@@ -59,7 +59,7 @@ impl Worker {
             .into_iter()
             .filter(|t| t.name != "mark_step_completed")
             .collect();
-        inject_enhanced_tools(&mut tools, self.engine.models_config(), self.engine.agent_config());
+        inject_enhanced_tools(&mut tools, &self.engine);
 
         // 创建 Worker 内部的 stream channel
         // 如果是多 Worker 模式，拦截事件并加上 worker_id 标记

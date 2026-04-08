@@ -67,6 +67,7 @@ pub struct RuntimeEngine {
     pub context_limit: usize,
     agent_config: AgentConfig,
     models_config: ModelsConfig,
+    core_config: Option<crate::core_config::CoreConfig>,
     permission_gate: crate::permission::PermissionGate,
 }
 
@@ -87,6 +88,7 @@ impl RuntimeEngine {
             context_limit,
             agent_config,
             models_config: ModelsConfig::default(),
+            core_config: None,
             permission_gate,
         }
     }
@@ -112,6 +114,7 @@ impl RuntimeEngine {
             context_limit,
             agent_config,
             models_config: ModelsConfig::default(),
+            core_config: None,
             permission_gate,
         }
     }
@@ -119,6 +122,16 @@ impl RuntimeEngine {
     pub fn with_models_config(mut self, config: ModelsConfig) -> Self {
         self.models_config = config;
         self
+    }
+
+    pub fn with_core_config(mut self, config: crate::core_config::CoreConfig) -> Self {
+        self.core_config = Some(config);
+        self
+    }
+
+    /// 获取 LlmConfig 引用（优先从 core_config 取）
+    pub fn llm_config(&self) -> Option<&crate::core_config::LlmConfig> {
+        self.core_config.as_ref().map(|c| &c.llm)
     }
 
     /// 获取模型客户端引用
@@ -1238,14 +1251,40 @@ impl RuntimeEngine {
 /// 注入增强工具定义（多媒体、Skill、后台任务、MCP 管理）
 pub(crate) fn inject_enhanced_tools(
     tools: &mut Vec<FunctionToolSpec>,
-    models_config: &ModelsConfig,
-    agent_config: &AgentConfig,
+    engine: &RuntimeEngine,
 ) {
-    use crate::models_config::ModelCapability;
-    if models_config
-        .resolve_for_capability(ModelCapability::ImageGeneration)
-        .is_some()
-    {
+    let agent_config = engine.agent_config();
+
+    // 多媒体能力判断：优先使用 LlmConfig（新路径），回退 ModelsConfig（旧路径）
+    let has_image_gen = engine
+        .llm_config()
+        .map(|c| c.image_generation.is_some())
+        .unwrap_or_else(|| {
+            engine
+                .models_config()
+                .resolve_for_capability(crate::models_config::ModelCapability::ImageGeneration)
+                .is_some()
+        });
+    let has_tts = engine
+        .llm_config()
+        .map(|c| c.tts.is_some())
+        .unwrap_or_else(|| {
+            engine
+                .models_config()
+                .resolve_for_capability(crate::models_config::ModelCapability::Tts)
+                .is_some()
+        });
+    let has_stt = engine
+        .llm_config()
+        .map(|c| c.stt.is_some())
+        .unwrap_or_else(|| {
+            engine
+                .models_config()
+                .resolve_for_capability(crate::models_config::ModelCapability::Stt)
+                .is_some()
+        });
+
+    if has_image_gen {
         tools.push(FunctionToolSpec {
             name: "generate_image".to_string(),
             description: "根据文字描述生成图片".to_string(),
@@ -1261,10 +1300,7 @@ pub(crate) fn inject_enhanced_tools(
             }),
         });
     }
-    if models_config
-        .resolve_for_capability(ModelCapability::Tts)
-        .is_some()
-    {
+    if has_tts {
         tools.push(FunctionToolSpec {
             name: "text_to_speech".to_string(),
             description: "将文本转换为语音音频文件".to_string(),
@@ -1280,10 +1316,7 @@ pub(crate) fn inject_enhanced_tools(
             }),
         });
     }
-    if models_config
-        .resolve_for_capability(ModelCapability::Stt)
-        .is_some()
-    {
+    if has_stt {
         tools.push(FunctionToolSpec {
             name: "speech_to_text".to_string(),
             description: "将音频文件转录为文本".to_string(),

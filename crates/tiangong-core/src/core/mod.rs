@@ -153,7 +153,7 @@ fn worker_loop(
                 .into_iter()
                 .filter(|t| t.name != "mark_step_completed")
                 .collect();
-            inject_enhanced_tools(&mut new_tools, e.models_config(), e.agent_config());
+            inject_enhanced_tools(&mut new_tools, e);
             tools = new_tools;
             mcp_targets = new_mcp_targets;
             last_cfg_gen = cfg_gen;
@@ -578,8 +578,12 @@ fn force_final_response(
 /// 从 CoreConfig 快照构建 RuntimeEngine
 fn build_engine_from_config(config: &crate::core_config::CoreConfig) -> RuntimeEngine {
     use crate::agent_config::AgentConfig;
+    use crate::models_config::ModelsConfig;
 
-    let model_config = config.models.to_chat_provider_config();
+    // 从 LlmConfig 构建兼容的 ModelsConfig（供 PromptAssembler 等旧代码使用）
+    let models_config = ModelsConfig::from_llm_config(&config.llm);
+    let model_config = models_config.to_chat_provider_config();
+
     let agent_config = AgentConfig {
         mcp: config.mcp.clone(),
         skills: config.skills.clone(),
@@ -591,5 +595,6 @@ fn build_engine_from_config(config: &crate::core_config::CoreConfig) -> RuntimeE
         config.context_limit,
         agent_config,
     )
-    .with_models_config(config.models.clone())
+    .with_models_config(models_config)
+    .with_core_config(config.clone())
 }

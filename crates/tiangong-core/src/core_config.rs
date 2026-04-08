@@ -11,18 +11,77 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::agent_config::{McpConfig, McpServerConfig, SkillsConfig};
 use crate::mcp::McpToolMeta;
-use crate::models_config::ModelsConfig;
 use crate::permission::TrustMode;
 
 const DEFAULT_CONTEXT_LIMIT: usize = 32_768;
+const DEFAULT_TIMEOUT_MS: u64 = 120_000;
+
+/// 模型端点配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelEndpoint {
+    /// API 基础 URL
+    pub base_url: String,
+    /// API 密钥
+    pub api_key: String,
+    /// 模型名称
+    pub model: String,
+    /// 请求超时（毫秒）
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_timeout_ms() -> u64 {
+    DEFAULT_TIMEOUT_MS
+}
+
+impl Default for ModelEndpoint {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            api_key: String::new(),
+            model: String::new(),
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+        }
+    }
+}
+
+/// LLM 配置 — TiangongCore 所需的模型端点
+///
+/// 扁平结构，直接描述端点，无需解析 Provider/Model/Routing。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LlmConfig {
+    /// 主 Chat 端点（必须）
+    pub chat: ModelEndpoint,
+    /// 图片生成端点
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_generation: Option<ModelEndpoint>,
+    /// 语音合成端点
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tts: Option<ModelEndpoint>,
+    /// 语音识别端点
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stt: Option<ModelEndpoint>,
+    /// 视频生成端点
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_generation: Option<ModelEndpoint>,
+}
+
+impl LlmConfig {
+    /// 检查是否有有效的 Chat 端点
+    pub fn is_valid(&self) -> bool {
+        !self.chat.base_url.is_empty() && !self.chat.api_key.is_empty()
+    }
+}
 
 /// TiangongCore 运行所需的最小配置
 #[derive(Debug, Clone)]
 pub struct CoreConfig {
-    /// LLM 模型配置（Provider + Model + Routing）
-    pub models: ModelsConfig,
+    /// LLM 模型端点配置
+    pub llm: LlmConfig,
     /// MCP 服务配置（server 列表）
     pub mcp: McpConfig,
     /// MCP 能力数据（预填充，Core 不发起网络请求）
@@ -38,7 +97,7 @@ pub struct CoreConfig {
 impl Default for CoreConfig {
     fn default() -> Self {
         Self {
-            models: ModelsConfig::default(),
+            llm: LlmConfig::default(),
             mcp: McpConfig::default(),
             mcp_capabilities: Vec::new(),
             skills: SkillsConfig::default(),
@@ -62,9 +121,20 @@ pub struct CoreConfigBuilder {
 }
 
 impl CoreConfigBuilder {
-    /// 设置完整的 ModelsConfig
-    pub fn with_models_config(mut self, models: ModelsConfig) -> Self {
-        self.config.models = models;
+    /// 设置 Chat 端点（最常用的快捷方式）
+    pub fn with_chat(mut self, base_url: &str, api_key: &str, model: &str) -> Self {
+        self.config.llm.chat = ModelEndpoint {
+            base_url: base_url.to_string(),
+            api_key: api_key.to_string(),
+            model: model.to_string(),
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+        };
+        self
+    }
+
+    /// 设置完整的 LlmConfig
+    pub fn with_llm_config(mut self, llm: LlmConfig) -> Self {
+        self.config.llm = llm;
         self
     }
 
@@ -197,11 +267,30 @@ mod tests {
     #[test]
     fn builder_basic() {
         let config = CoreConfig::builder()
+            .with_chat("https://api.example.com/v1", "sk-test", "gpt-4o")
             .with_trust_mode(TrustMode::FullTrust)
             .with_context_limit(65536)
             .build();
 
+        assert_eq!(config.llm.chat.base_url, "https://api.example.com/v1");
+        assert_eq!(config.llm.chat.model, "gpt-4o");
+        assert!(config.llm.is_valid());
         assert_eq!(config.trust_mode, TrustMode::FullTrust);
         assert_eq!(config.context_limit, 65536);
+    }
+
+    #[test]
+    fn llm_config_capabilities() {
+        let mut llm = LlmConfig::default();
+        assert!(llm.image_generation.is_none());
+        assert!(llm.tts.is_none());
+
+        llm.image_generation = Some(ModelEndpoint {
+            base_url: "https://api.example.com/v1".into(),
+            api_key: "sk-test".into(),
+            model: "dall-e-3".into(),
+            ..Default::default()
+        });
+        assert!(llm.image_generation.is_some());
     }
 }

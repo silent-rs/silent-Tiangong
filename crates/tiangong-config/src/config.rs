@@ -2,9 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 use tiangong_core::agent_config::{McpConfig, SkillsConfig};
-use tiangong_core::core_config::CoreConfig;
+use tiangong_core::core_config::{CoreConfig, LlmConfig, ModelEndpoint};
 use tiangong_core::mcp::McpToolMeta;
-use tiangong_core::models_config::ModelsConfig;
+use tiangong_core::models_config::{ModelCapability, ModelsConfig};
 use tiangong_core::permission::TrustMode;
 
 const DEFAULT_CONTEXT_LIMIT: usize = 32_768;
@@ -103,14 +103,37 @@ impl Default for TiangongConfig {
 
 impl TiangongConfig {
     /// 转换为 CoreConfig（提取 Core 所需的最小子集）
+    ///
+    /// 将 ModelsConfig（3 层）解析为 LlmConfig（扁平端点）
     pub fn to_core_config(&self) -> CoreConfig {
         CoreConfig {
-            models: self.models.clone(),
+            llm: self.resolve_llm_config(),
             mcp: self.mcp.clone(),
             mcp_capabilities: self.mcp_capabilities.clone(),
             skills: self.skills.clone(),
             trust_mode: self.trust_mode,
             context_limit: self.context_limit,
+        }
+    }
+
+    /// 从 ModelsConfig 解析出 LlmConfig
+    fn resolve_llm_config(&self) -> LlmConfig {
+        let resolve = |cap: ModelCapability| -> Option<ModelEndpoint> {
+            let resolved = self.models.resolve_for_capability(cap)?;
+            Some(ModelEndpoint {
+                base_url: resolved.base_url,
+                api_key: resolved.api_key,
+                model: resolved.model,
+                timeout_ms: resolved.timeout_ms,
+            })
+        };
+
+        LlmConfig {
+            chat: resolve(ModelCapability::Chat).unwrap_or_default(),
+            image_generation: resolve(ModelCapability::ImageGeneration),
+            tts: resolve(ModelCapability::Tts),
+            stt: resolve(ModelCapability::Stt),
+            video_generation: resolve(ModelCapability::VideoGeneration),
         }
     }
 

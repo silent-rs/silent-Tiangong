@@ -244,6 +244,64 @@ impl ModelsConfig {
         }
     }
 
+    /// 从 LlmConfig 构建兼容的 ModelsConfig
+    ///
+    /// 将扁平的 LlmConfig 端点映射为 Provider + Model + Routing 三层结构，
+    /// 使旧代码（PromptAssembler、系统 prompt 构建等）无需修改。
+    pub fn from_llm_config(llm: &crate::core_config::LlmConfig) -> Self {
+        let mut providers = HashMap::new();
+        let mut models = HashMap::new();
+        let mut routing = HashMap::new();
+
+        // 辅助：注册一个端点为 provider + model + routing
+        let mut register =
+            |name: &str, endpoint: &crate::core_config::ModelEndpoint, cap: ModelCapability| {
+                let provider_key = format!("{name}-provider");
+                providers.insert(
+                    provider_key.clone(),
+                    ProviderConfig {
+                        base_url: endpoint.base_url.clone(),
+                        api_key: endpoint.api_key.clone(),
+                        timeout_ms: endpoint.timeout_ms,
+                    },
+                );
+                let model_key = format!("{name}-model");
+                models.insert(
+                    model_key.clone(),
+                    ModelEntry {
+                        provider: provider_key,
+                        model: endpoint.model.clone(),
+                        capabilities: vec![cap],
+                        options: default_options(),
+                    },
+                );
+                routing.insert(cap, model_key);
+            };
+
+        // Chat（必须）
+        register("chat", &llm.chat, ModelCapability::Chat);
+
+        // 可选能力
+        if let Some(ref ep) = llm.image_generation {
+            register("image", ep, ModelCapability::ImageGeneration);
+        }
+        if let Some(ref ep) = llm.tts {
+            register("tts", ep, ModelCapability::Tts);
+        }
+        if let Some(ref ep) = llm.stt {
+            register("stt", ep, ModelCapability::Stt);
+        }
+        if let Some(ref ep) = llm.video_generation {
+            register("video", ep, ModelCapability::VideoGeneration);
+        }
+
+        Self {
+            providers,
+            models,
+            routing,
+        }
+    }
+
     /// 解析 api_key 中的 ${ENV_VAR} 引用
     pub fn resolve_api_key(raw: &str) -> String {
         if let Some(inner) = raw.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
