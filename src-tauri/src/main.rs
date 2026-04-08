@@ -8,6 +8,48 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+/// 初始化日志（所有模式统一）
+///
+/// - 文件：~/.tiangong/logs/tiangong.log（按天滚动，始终写入）
+/// - 终端：CLI 模式静默，其他模式输出到 stderr
+fn init_logging(terminal_output: bool) {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    let log_dir = std::path::PathBuf::from(home).join(".tiangong").join("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let file_appender = tracing_appender::rolling::daily(log_dir, "tiangong.log");
+
+    let env_filter = tracing_subscriber::EnvFilter::from_default_env()
+        .add_directive(tracing::Level::INFO.into());
+
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    if terminal_output {
+        // 文件 + 终端双输出
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(file_appender)
+                    .with_ansi(false),
+            )
+            .init();
+    } else {
+        // 仅文件输出（CLI 模式终端静默）
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(file_appender)
+                    .with_ansi(false),
+            )
+            .init();
+    }
+}
+
 fn main() {
     // 无参数 → GUI
     if std::env::args().len() <= 1 {
@@ -15,36 +57,9 @@ fn main() {
         return;
     }
 
-    // 有参数 → 委托给 tiangong_entry
-    // CLI 模式不在终端输出日志（避免干扰交互），日志写入文件
+    // CLI 模式终端静默，其他模式终端输出
     let is_cli = std::env::args().nth(1).as_deref() == Some("cli");
-    if is_cli {
-        // CLI：日志写入 ~/.tiangong/logs/，终端静默
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_else(|_| ".".to_string());
-        let log_dir = std::path::PathBuf::from(home)
-            .join(".tiangong")
-            .join("logs");
-        let _ = std::fs::create_dir_all(&log_dir);
-        let file_appender = tracing_appender::rolling::daily(log_dir, "cli.log");
-        tracing_subscriber::fmt()
-            .with_writer(file_appender)
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::from_default_env()
-                    .add_directive(tracing::Level::INFO.into()),
-            )
-            .with_ansi(false)
-            .init();
-    } else {
-        // Server/MCP/Skill：日志输出到终端
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::from_default_env()
-                    .add_directive(tracing::Level::INFO.into()),
-            )
-            .init();
-    }
+    init_logging(!is_cli);
 
     if let Err(err) = tiangong_entry::run() {
         eprintln!("错误：{err}");
@@ -53,34 +68,7 @@ fn main() {
 }
 
 fn run_gui() {
-    // 日志：文件 + 终端双输出
-    // DMG 安装后终端不可见，但日志仍写入 ~/.tiangong/logs/gui.log
-    // 开发时 cargo tauri dev 终端可见
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".to_string());
-    let log_dir = std::path::PathBuf::from(home).join(".tiangong").join("logs");
-    let _ = std::fs::create_dir_all(&log_dir);
-    let file_appender = tracing_appender::rolling::daily(log_dir, "gui.log");
-
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-
-    let env_filter = tracing_subscriber::EnvFilter::from_default_env()
-        .add_directive(tracing::Level::INFO.into());
-
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(std::io::stderr),
-        )
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(file_appender)
-                .with_ansi(false),
-        )
-        .init();
+    init_logging(true);
 
     tauri::Builder::default()
         .manage(tiangong_app::TiangongApp::new())
