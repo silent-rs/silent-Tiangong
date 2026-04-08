@@ -62,45 +62,12 @@ impl TiangongState {
         self.store.session.sessions.len() - 1
     }
 
+    /// 自动恢复未完成的计划（已迁移到 TiangongCore 管理）
     pub(in crate::app_state) fn try_auto_resume_unfinished_plan_for_active_session(
         &mut self,
     ) -> Result<bool> {
-        let active_id_check = self.store.session.active_session_id.clone();
-        if self
-            .store
-            .runtime
-            .pending_turns
-            .contains_key(&active_id_check)
-        {
-            return Ok(false);
-        }
-
-        let active_id = self.store.session.active_session_id.clone();
-        let Some(session) = self
-            .store
-            .session
-            .sessions
-            .iter()
-            .find(|session| session.id == active_id)
-        else {
-            return Ok(false);
-        };
-        let Some(last_task) = session.task_records.last() else {
-            return Ok(false);
-        };
-        let has_pending_plans = session.task_plans.iter().any(|plan| {
-            plan.task_id == last_task.task_id && plan.status == PlanStepStatus::Pending
-        });
-        if !has_pending_plans {
-            return Ok(false);
-        }
-
-        let resume_input = last_task.user_input.trim().to_string();
-        if resume_input.is_empty() {
-            return Ok(false);
-        }
-
-        self.start_turn_with_input(resume_input)
+        // TiangongCore 统一管理执行，不再从 TiangongState 启动 turn
+        Ok(false)
     }
 
     pub(in crate::app_state) fn recover_interrupted_tasks(&mut self) -> usize {

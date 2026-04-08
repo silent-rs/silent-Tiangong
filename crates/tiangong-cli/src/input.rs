@@ -373,10 +373,7 @@ fn char_to_byte(s: &str, char_pos: usize) -> usize {
 
 fn display_width(s: &str, char_pos: usize) -> usize {
     let byte_pos = char_to_byte(s, char_pos);
-    s[..byte_pos]
-        .chars()
-        .map(|c| if c.is_ascii() { 1 } else { 2 })
-        .sum()
+    s[..byte_pos].chars().map(char_display_width).sum()
 }
 
 /// 计算去掉 ANSI 转义序列后的可见字符宽度
@@ -391,8 +388,31 @@ fn visible_len(s: &str) -> usize {
         } else if c == '\x1b' {
             in_escape = true;
         } else {
-            len += if c.is_ascii() { 1 } else { 2 };
+            len += char_display_width(c);
         }
     }
     len
+}
+
+/// 字符显示宽度（终端列数）
+fn char_display_width(c: char) -> usize {
+    if c.is_ascii() {
+        return 1;
+    }
+    // CJK 统一表意文字 + 扩展区 → 宽度 2
+    let cp = c as u32;
+    if (0x4E00..=0x9FFF).contains(&cp)       // CJK 基本
+        || (0x3400..=0x4DBF).contains(&cp)    // CJK 扩展 A
+        || (0x20000..=0x2A6DF).contains(&cp)  // CJK 扩展 B
+        || (0xF900..=0xFAFF).contains(&cp)    // CJK 兼容
+        || (0x3000..=0x303F).contains(&cp)    // CJK 符号
+        || (0xFF01..=0xFF60).contains(&cp)    // 全角形式
+        || (0xFFE0..=0xFFE6).contains(&cp)    // 全角符号
+        || (0x1100..=0x115F).contains(&cp)    // 韩文 Jamo
+        || (0xAC00..=0xD7AF).contains(&cp)    // 韩文音节
+    {
+        return 2;
+    }
+    // 其他 Unicode（Emoji 部分符号、拉丁扩展等）→ 宽度 1
+    1
 }

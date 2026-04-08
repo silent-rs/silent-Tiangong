@@ -1082,13 +1082,17 @@ fn build_openai_messages(req: &ModelRequest) -> Result<Vec<ChatCompletionRequest
             .into(),
     );
 
-    messages.push(
-        ChatCompletionRequestUserMessageArgs::default()
-            .content(req.user_input.clone())
-            .build()
-            .context("构建当前 user 消息失败")?
-            .into(),
-    );
+    // 用户输入统一通过 context 传递（session history），不再单独追加。
+    // 仅在旧路径（无 assembled_system_prompt）时追加 user_input 作为兼容。
+    if req.assembled_system_prompt.is_none() && !req.user_input.is_empty() {
+        messages.push(
+            ChatCompletionRequestUserMessageArgs::default()
+                .content(req.user_input.clone())
+                .build()
+                .context("构建当前 user 消息失败")?
+                .into(),
+        );
+    }
 
     Ok(messages)
 }

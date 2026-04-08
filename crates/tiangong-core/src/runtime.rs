@@ -1,6 +1,4 @@
 use std::collections::HashMap;
-use std::sync::mpsc::Sender;
-
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
@@ -9,7 +7,7 @@ use crate::agents::execution_mcp_agent::{
     McpFunctionTarget, execute_mcp_tool_call, resolve_mcp_tool_call_from_run_command,
 };
 use crate::agents::execution_tool_agent::build_tool_call_from_function;
-use crate::app_state::{ManagementCommand, TurnEvent};
+use crate::app_state::ManagementCommand;
 use crate::model::FunctionToolSpec;
 use crate::model::{ModelClient, ModelFunctionCall, SingleProviderClient, TokenUsage};
 use crate::models_config::{ModelCapability, ModelsConfig};
@@ -123,7 +121,7 @@ impl RuntimeEngine {
         self
     }
 
-    /// 获取模型客户端引用（供 TurnRunner 使用）
+    /// 获取模型客户端引用
     pub fn client(&self) -> &SingleProviderClient {
         &self.client
     }
@@ -500,25 +498,8 @@ impl RuntimeEngine {
         }
     }
 
-    /// 处理 MCP/Skill 管理工具调用（Sender 版本，供 TurnRunner 使用）
-    pub fn handle_management_tool(
-        call: &ModelFunctionCall,
-        tx: &Sender<TurnEvent>,
-    ) -> Option<ToolResult> {
-        let cmd = Self::parse_management_command(call)?;
-        let desc = Self::describe_management_command(&cmd);
-        let _ = tx.send(TurnEvent::ManagementCommand(cmd));
-        Some(ToolResult {
-            ok: true,
-            summary: format!("{desc}，操作已提交"),
-            stdout: format!("{desc}，将在当前执行完成后生效"),
-            stderr: String::new(),
-            exit_code: 0,
-            execution: None,
-        })
-    }
-
     /// 解析管理命令
+    #[allow(dead_code)]
     fn parse_management_command(call: &ModelFunctionCall) -> Option<ManagementCommand> {
         match call.name.as_str() {
             "register_mcp_server" => {
@@ -642,6 +623,7 @@ impl RuntimeEngine {
         }
     }
 
+    #[allow(dead_code)]
     fn describe_management_command(cmd: &ManagementCommand) -> String {
         match cmd {
             ManagementCommand::RegisterMcpServer { name, .. } => format!("注册 MCP 服务器：{name}"),
@@ -1398,6 +1380,7 @@ pub(crate) fn inject_enhanced_tools(
 }
 
 /// 构建 ReAct agent 的系统 prompt
+#[allow(dead_code)]
 pub(crate) fn build_react_system_prompt(
     user_input: &str,
     models_config: &ModelsConfig,
@@ -1480,6 +1463,7 @@ pub(crate) fn use_stream_mode() -> bool {
 }
 
 /// 清理 LLM 响应中混入的工具执行 trace 文本
+#[allow(dead_code)]
 pub(crate) fn strip_tool_traces_from_response(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut in_trace_block = false;

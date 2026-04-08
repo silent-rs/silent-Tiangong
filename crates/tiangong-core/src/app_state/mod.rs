@@ -3,9 +3,8 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::thread;
-use std::time::Instant;
+
+
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -19,12 +18,12 @@ use crate::mcp::{
     load_mcp_capabilities_cache, refresh_mcp_capabilities_async, summarize_mcp_servers,
     validate_mcp_config,
 };
-use crate::model::{ModelProviderConfig, ModelStreamChunk, SingleProviderClient};
+use crate::model::{ModelProviderConfig, SingleProviderClient};
 use crate::planner::{PlanStepStatus, TaskPlan};
 use crate::runtime::{
     LlmOutputRecord, RunSnapshot, RunStatus, RuntimeEngine, TurnExecution, VerifyExecutionRecord,
 };
-use crate::session::{Message, MessageRole, Session, SessionTaskPlan, now_text};
+use crate::session::{MessageRole, Session, SessionTaskPlan, now_text};
 use crate::skill::{
     analyze_external_skill, init_tiangong_skill_scaffold, load_skill_from_local_dir,
     prepare_skill_source_for_install,
@@ -46,13 +45,13 @@ use self::repository::{
     cleanup_empty_skill_install_dirs, converted_stage_cleanup_dir, copy_dir_recursive,
     default_app_storage_path, default_mcp_capability_cache_path, default_mcp_config_path,
     default_sessions_dir_path, default_skills_config_path, default_skills_storage_dir_path,
-    elapsed_ms_u64, ensure_dir, normalize_model_list, parse_bool, parse_list_value,
+    ensure_dir, normalize_model_list, parse_bool, parse_list_value,
     validate_agent_config,
 };
 use self::services::{AppMcpService, AppSkillService, AppTurnService};
-pub use self::support::{ControlSignal, StreamEvent, TurnEvent};
+pub use self::support::StreamEvent;
 use self::support::{
-    LegacyPersistedState, LoadedState, McpDependencyLockRecord, PendingTurn, PersistedAppState,
+    LegacyPersistedState, LoadedState, McpDependencyLockRecord, PersistedAppState,
     ScopedDirCleanup, SkillsLockRecord,
 };
 
@@ -119,20 +118,9 @@ impl TiangongState {
         &self.store.agent.agent_config
     }
 
-    /// 获取当前活跃的 Worker 列表（从 pending_turns 的 worker_message_ids 提取）
+    /// 获取当前活跃的 Worker 列表（已迁移到 TiangongCore 管理）
     pub fn list_active_workers(&self) -> Vec<serde_json::Value> {
-        let mut workers = Vec::new();
-        for (session_id, pending) in &self.store.runtime.pending_turns {
-            for (worker_id, msg_id) in &pending.worker_message_ids {
-                workers.push(serde_json::json!({
-                    "session_id": session_id,
-                    "worker_id": worker_id,
-                    "assistant_message_id": msg_id,
-                    "status": "executing",
-                }));
-            }
-        }
-        workers
+        Vec::new()
     }
 
     pub fn set_trust_mode(&mut self, mode: crate::permission::TrustMode) -> Result<()> {

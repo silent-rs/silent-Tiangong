@@ -1,53 +1,44 @@
+//! CLI REPL — 类似 codex/claude code 风格交互
+
 use anyhow::Result;
+use tiangong_core::app_state::TiangongState;
 use tiangong_core::core::TiangongCore;
 use tiangong_types::StreamEvent;
 
 use std::sync::mpsc;
 
+use crate::commands;
 use crate::completion;
 use crate::input::InputReader;
 use crate::output;
 
-const PROMPT: &str = "\x1b[1;36m› \x1b[0m";
-const DIM: &str = "\x1b[2m";
-const GREEN_BOLD: &str = "\x1b[1;32m";
-const RESET: &str = "\x1b[0m";
-
 pub fn run() -> Result<()> {
+    let mut state = TiangongState::load_or_default();
     let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
     let core = TiangongCore::new(stream_tx);
     let mut reader = InputReader::new();
-    let mut printed_header = false;
-    let mut in_stream = false;
-    let mut reasoning_buf = String::new();
+    let mut draft_new_session = true;
 
-    output::print_status("天工 CLI — /help 查看命令，Ctrl+C 清空/退出");
+    output::welcome();
 
     loop {
-        // 消费待处理的 StreamEvent（非阻塞）
-        while let Ok(event) = stream_rx.try_recv() {
-            let is_terminal = matches!(event, StreamEvent::Done { .. } | StreamEvent::Error { .. });
-            process_event(&event, &mut printed_header, &mut in_stream, &mut reasoning_buf);
-            if is_terminal {
-                if in_stream { output::flush_line(); in_stream = false; }
-                printed_header = false;
-                reasoning_buf.clear();
-                println!();
-            }
-        }
+        // 消费残留事件
+        while stream_rx.try_recv().is_ok() {}
 
-        // 显示 prompt 等待输入
-        print_separator();
-        print_status_line(&core);
+        // prompt
+        let short_id: String = core.session_id().chars().take(8).collect();
+        let prompt = format!("\x1b[2m{short_id}\x1b[0m \x1b[1;36m❯\x1b[0m ");
 
-        let input = reader.read_line(PROMPT, |buf, cursor| {
-            if let Some((trigger, _start, prefix)) = completion::detect_trigger(buf, cursor) {
-                let _ = (trigger, prefix);
-                Vec::new()
-            } else {
-                Vec::new()
-            }
-        })?;
+        let input = {
+            let state_ref = &state;
+            reader.read_line(&prompt, |buf, cursor| {
+                if let Some((trigger, _start, prefix)) = completion::detect_trigger(buf, cursor) {
+                    completion::complete(trigger, &prefix, state_ref)
+                } else {
+                    Vec::new()
+                }
+            })?
+        };
 
         let input = match input {
             Some(line) => line,
@@ -60,125 +51,190 @@ pub fn run() -> Result<()> {
         }
 
         reader.push_history(trimmed);
-        print_separator();
 
-        // / 命令
+        // / 命令（通过 TiangongState 处理）
         if trimmed.starts_with('/') {
-            match trimmed {
-                "/help" | "/h" => {
-                    output::print_status("命令：/help /cancel /quit");
-                    continue;
-                }
-                "/cancel" | "/c" => {
-                    core.cancel();
-                    output::print_status("已发送取消请求");
-                    continue;
-                }
-                "/quit" | "/q" | "/exit" => break,
-                _ => {
-                    output::print_warn(&format!("未知命令：{trimmed}"));
+            match commands::handle_command(&mut state, trimmed, &mut draft_new_session) {
+                Ok(true) => break,
+                Ok(false) => continue,
+                Err(err) => {
+                    output::error(&format!("{err}"));
                     continue;
                 }
             }
+        }
+
+        // 首次发送时创建会话
+        if draft_new_session {
+            state.create_session();
+            draft_new_session = false;
         }
 
         // 发送消息
-        output::print_user_message(trimmed);
         core.send_message(trimmed.to_string());
 
-        // 重置输出状态
-        printed_header = false;
-        in_stream = false;
-        reasoning_buf.clear();
+        // 处理响应流
+        handle_response(&stream_rx);
 
-        // 阻塞等待本轮完成
-        loop {
-            match stream_rx.recv_timeout(std::time::Duration::from_secs(300)) {
-                Ok(event) => {
-                    let is_terminal = matches!(event, StreamEvent::Done { .. } | StreamEvent::Error { .. });
-                    process_event(&event, &mut printed_header, &mut in_stream, &mut reasoning_buf);
-                    if is_terminal {
-                        if in_stream { output::flush_line(); in_stream = false; }
-                        if !reasoning_buf.is_empty() { flush_reasoning(&reasoning_buf); }
-                        printed_header = false;
-                        reasoning_buf.clear();
-                        println!();
-                        break;
-                    }
-                }
-                Err(_) => {
-                    output::print_error("等待响应超时（300s）");
-                    break;
-                }
-            }
-        }
+        output::separator();
     }
 
-    output::print_status("再见！");
-    let _session = core.into_session();
+    output::status("再见！");
+    // 获取 Core 的最终 session 并持久化
+    let final_session = core.into_session();
+    if !final_session.messages.is_empty() {
+        state.save_core_session(final_session);
+    }
     Ok(())
 }
 
-fn process_event(
-    event: &StreamEvent,
-    printed_header: &mut bool,
-    in_stream: &mut bool,
-    reasoning_buf: &mut String,
-) {
-    match event {
-        StreamEvent::Delta { content } => {
-            if !*printed_header {
-                flush_reasoning(reasoning_buf);
-                reasoning_buf.clear();
-                println!("{GREEN_BOLD}助手{RESET}");
-                *printed_header = true;
+/// 处理完整的响应流
+fn handle_response(rx: &mpsc::Receiver<StreamEvent>) {
+    let mut state = ResponseState::new();
+
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_secs(300)) {
+            Ok(event) => {
+                if state.process(&event) {
+                    break;
+                }
             }
-            output::print_delta(content);
-            *in_stream = true;
+            Err(_) => {
+                state.finish();
+                output::error("等待响应超时（300s）");
+                break;
+            }
         }
-        StreamEvent::Reasoning { content } => {
-            reasoning_buf.push_str(content);
-        }
-        StreamEvent::ToolStart { name, .. } => {
-            if *in_stream { output::flush_line(); *in_stream = false; }
-            output::print_status(&format!("  ⚙ 执行 {name}..."));
-        }
-        StreamEvent::ToolResult { name, ok, output } => {
-            let status = if *ok { "✓" } else { "✗" };
-            let preview: String = output.lines().next().unwrap_or("").chars().take(80).collect();
-            output::print_status(&format!("  {status} {name}: {preview}"));
-        }
-        StreamEvent::ToolCalls { names, .. } => {
-            if *in_stream { output::flush_line(); *in_stream = false; }
-            flush_reasoning(reasoning_buf);
-            reasoning_buf.clear();
-            output::print_status(&format!("  {DIM}[调用工具: {}]{RESET}", names.join(", ")));
-        }
-        StreamEvent::ApprovalNeeded { tool_name, args_summary, .. } => {
-            output::print_warn(&format!("工具 {tool_name} 需要审批：{args_summary}"));
-        }
-        StreamEvent::Done { .. } | StreamEvent::Error { .. } => {}
     }
 }
 
-fn flush_reasoning(buf: &str) {
-    let trimmed = buf.trim();
-    if trimmed.is_empty() { return; }
-    let summary: String = if trimmed.chars().count() > 80 {
-        let truncated: String = trimmed.chars().take(77).collect();
-        format!("{truncated}...")
-    } else {
-        trimmed.to_string()
-    };
-    println!("  {DIM}[思考] {summary}{RESET}");
+/// 响应流状态机
+struct ResponseState {
+    thinking_shown: bool,
+    reasoning_buf: String,
+    in_delta: bool,
+    has_delta: bool,
 }
 
-fn print_separator() {
-    let width = crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(80);
-    println!("{DIM}{}{RESET}", "─".repeat(width));
-}
+impl ResponseState {
+    fn new() -> Self {
+        Self {
+            thinking_shown: false,
+            reasoning_buf: String::new(),
+            in_delta: false,
+            has_delta: false,
+        }
+    }
 
-fn print_status_line(core: &TiangongCore) {
-    let short_id: String = core.session_id().chars().take(8).collect();
-    println!("{DIM}[{short_id}]{RESET}");
+    /// 处理单个事件，返回 true 表示本轮结束
+    fn process(&mut self, event: &StreamEvent) -> bool {
+        match event {
+            StreamEvent::Reasoning { content } => {
+                if !self.thinking_shown {
+                    output::thinking_start();
+                    self.thinking_shown = true;
+                }
+                self.reasoning_buf.push_str(content);
+            }
+
+            StreamEvent::Delta { content } => {
+                if !self.has_delta {
+                    if self.thinking_shown {
+                        output::thinking_clear();
+                    }
+                    if !self.reasoning_buf.is_empty() {
+                        output::thinking_summary(&self.reasoning_buf);
+                    }
+                    output::assistant_start();
+                    self.has_delta = true;
+                }
+                output::delta(content);
+                self.in_delta = true;
+            }
+
+            StreamEvent::ToolCalls { names, .. } => {
+                if self.in_delta {
+                    output::delta_end();
+                    self.in_delta = false;
+                }
+                if self.thinking_shown && !self.has_delta {
+                    output::thinking_clear();
+                }
+                if !self.reasoning_buf.is_empty() {
+                    output::thinking_summary(&self.reasoning_buf);
+                    self.reasoning_buf.clear();
+                }
+                output::tool_calls(names);
+                self.thinking_shown = false;
+                self.has_delta = false;
+            }
+
+            StreamEvent::ToolStart { name, .. } => {
+                output::tool_start(name);
+            }
+
+            StreamEvent::ToolResult { name, ok, output } => {
+                output::tool_result(name, *ok, output);
+            }
+
+            StreamEvent::ApprovalNeeded {
+                tool_name,
+                args_summary,
+                ..
+            } => {
+                output::approval_needed(tool_name, args_summary);
+            }
+
+            StreamEvent::Done { .. } => {
+                self.finish();
+                return true;
+            }
+
+            StreamEvent::Error { message } => {
+                self.finish();
+                output::error(message);
+                return true;
+            }
+
+            StreamEvent::WorkerStarted {
+                worker_id: _,
+                worker_label,
+            } => {
+                output::worker_started(worker_label);
+            }
+
+            StreamEvent::WorkerChunk {
+                worker_id: _,
+                worker_label: _,
+                content,
+            } => {
+                output::delta(content);
+                self.in_delta = true;
+            }
+
+            StreamEvent::WorkerCompleted {
+                worker_id: _,
+                worker_label,
+                success,
+            } => {
+                output::worker_completed(worker_label, *success);
+            }
+        }
+        false
+    }
+
+    fn finish(&mut self) {
+        if self.in_delta {
+            output::delta_end();
+            self.in_delta = false;
+        }
+        if self.thinking_shown && !self.has_delta {
+            output::thinking_clear();
+        }
+        if !self.reasoning_buf.is_empty() && !self.has_delta {
+            output::thinking_summary(&self.reasoning_buf);
+        }
+        self.reasoning_buf.clear();
+        println!();
+    }
 }

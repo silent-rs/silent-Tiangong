@@ -42,4 +42,23 @@ pub enum StreamEvent {
     },
     /// 执行出错
     Error { message: String },
+
+    // ===== 多 Worker 并行执行事件 =====
+    /// Worker 开始执行
+    WorkerStarted {
+        worker_id: String,
+        worker_label: String,
+    },
+    /// Worker 流式输出（带 Worker 标识的 Delta）
+    WorkerChunk {
+        worker_id: String,
+        worker_label: String,
+        content: String,
+    },
+    /// Worker 执行完成
+    WorkerCompleted {
+        worker_id: String,
+        worker_label: String,
+        success: bool,
+    },
 }
