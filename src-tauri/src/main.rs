@@ -15,14 +15,36 @@ fn main() {
         return;
     }
 
-    // 有参数 → 委托给 tiangong_entry（clap 解析 cli/server/mcp/skill/-h 等）
-    // 初始化日志（CLI/Server 模式）
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
-        )
-        .init();
+    // 有参数 → 委托给 tiangong_entry
+    // CLI 模式不在终端输出日志（避免干扰交互），日志写入文件
+    let is_cli = std::env::args().nth(1).as_deref() == Some("cli");
+    if is_cli {
+        // CLI：日志写入 ~/.tiangong/logs/，终端静默
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".to_string());
+        let log_dir = std::path::PathBuf::from(home)
+            .join(".tiangong")
+            .join("logs");
+        let _ = std::fs::create_dir_all(&log_dir);
+        let file_appender = tracing_appender::rolling::daily(log_dir, "cli.log");
+        tracing_subscriber::fmt()
+            .with_writer(file_appender)
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .with_ansi(false)
+            .init();
+    } else {
+        // Server/MCP/Skill：日志输出到终端
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .init();
+    }
 
     if let Err(err) = tiangong_entry::run() {
         eprintln!("错误：{err}");
