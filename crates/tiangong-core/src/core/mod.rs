@@ -156,6 +156,7 @@ fn worker_loop(
                     &tools,
                     &mcp_targets,
                     &stream_tx,
+                    &cmd_rx,
                 );
             }
             Command::Cancel => {
@@ -175,6 +176,8 @@ fn worker_loop(
 }
 
 /// 执行一个完整的对话轮次（可能多轮工具调用）
+///
+/// 每轮之间检查 cmd_rx：新消息注入上下文，cancel 立即生效。
 fn execute_turn(
     session: &mut Session,
     user_input: &str,
@@ -182,6 +185,7 @@ fn execute_turn(
     tools: &[FunctionToolSpec],
     mcp_targets: &HashMap<String, McpFunctionTarget>,
     stream_tx: &Sender<StreamEvent>,
+    cmd_rx: &Receiver<Command>,
 ) {
     let mut loop_context: Vec<Message> = Vec::new();
     let mut round = 0;
@@ -361,6 +365,32 @@ fn execute_turn(
                 worker_id: None,
                 created_at: now_text(),
             });
+        }
+
+        // 每轮之间检查用户命令（非阻塞）
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            match cmd {
+                Command::Cancel => {
+                    let _ = stream_tx.send(StreamEvent::Error {
+                        message: "已取消".into(),
+                    });
+                    return;
+                }
+                Command::Message(content) => {
+                    // 用户追加消息：注入 loop_context，下一轮 LLM 会看到
+                    session.append_message(MessageRole::User, content.clone());
+                    loop_context.push(Message {
+                        id: scru128::new().to_string(),
+                        role: MessageRole::User,
+                        content,
+                        reasoning_content: String::new(),
+                        worker_id: None,
+                        created_at: now_text(),
+                    });
+                }
+                Command::Shutdown => return,
+                _ => {}
+            }
         }
 
         // 继续下一轮
