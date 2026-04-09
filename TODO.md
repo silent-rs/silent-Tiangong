@@ -378,7 +378,15 @@
 - [x] CLI 重试时输出黄色警告信息
 - [x] 底部状态栏显示重试进度和错误详情
 
-### C. 验证
+### C. 监督模式工具审批 + 工具展示优化
+- [x] 监督模式下工具执行前权限检查，Elevated/Critical 工具发送 `ApprovalNeeded` 事件
+- [x] Core 阻塞等待用户审批响应，支持允许/拒绝/取消
+- [x] 修复 `cancel_turn` 和 `respond_approval` 命令路由到 TiangongCore
+- [x] `StreamEvent::ToolStart` 携带 `args_summary`，展示实际命令和参数
+- [x] 前端工具展示解析 `工具执行 [xxx]` 格式，折叠摘要包含命令信息
+- [x] CLI 审批交互（y/n 确认）
+
+### D. 验证
 - [x] `cargo check --workspace` 通过
 - [x] `cargo clippy` 通过（tiangong-core / cli / types 零警告）
 - [x] `yarn build` 通过

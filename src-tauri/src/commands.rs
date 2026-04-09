@@ -159,6 +159,7 @@ pub fn send_message(
     let app_clone = app.clone();
     thread::spawn(move || {
         let mut assistant_msg_id: Option<String> = None;
+        let mut last_tool_args_summary = String::new();
         for session_event in stream_rx.iter() {
             // 先 emit 完整事件给前端，再解构
             let _ = app_clone.emit("stream_event", &session_event);
@@ -225,18 +226,33 @@ pub fn send_message(
                             );
                             assistant_msg_id = None;
                         }
-                        StreamEvent::ToolStart { .. } => {}
-                        StreamEvent::ToolResult { name, ok, output } => {
+                        StreamEvent::ToolStart { ref args_summary, .. } => {
+                            last_tool_args_summary = args_summary.clone();
+                        }
+                        StreamEvent::ToolResult { ref name, ok, ref output } => {
                             let status = if *ok { "ok=true" } else { "ok=false" };
                             let preview = if output.chars().count() > 200 {
                                 format!("{}...", output.chars().take(200).collect::<String>())
                             } else {
                                 output.clone()
                             };
+                            let mut lines = vec![format!("工具执行 [{name}]")];
+                            if !last_tool_args_summary.is_empty() {
+                                lines.push(format!("命令: {last_tool_args_summary}"));
+                            }
+                            lines.push(format!("{status} exit_code=0"));
+                            lines.push(format!("summary: {name}"));
+                            if !preview.trim().is_empty() {
+                                lines.push(format!("stdout:\n{preview}"));
+                            }
                             session.append_message(
                                 tiangong_core::session::MessageRole::System,
-                                format!("工具执行 [{name}]\n{status} exit_code=0\nsummary: {name}\nstdout:\n{preview}"),
+                                lines.join("\n"),
                             );
+                            last_tool_args_summary.clear();
+                        }
+                        StreamEvent::ApprovalNeeded { .. } => {
+                            // 审批请求不写入 session（前端通过 RunStatus 展示审批 UI）
                         }
                         StreamEvent::Error { ref message } => {
                             session.append_message(
@@ -265,8 +281,31 @@ pub fn send_message(
                 }
                 // RunStatus/usage 更新
                 match &event {
-                    StreamEvent::ToolStart { name, .. } => {
-                        core_state.store.runtime.run.summary = format!("正在执行：{name}");
+                    StreamEvent::ApprovalNeeded {
+                        ref request_id,
+                        ref tool_name,
+                        ref args_summary,
+                    } => {
+                        core_state.store.runtime.run.status =
+                            tiangong_core::runtime::RunStatus::WaitingApproval;
+                        core_state.store.runtime.run.summary = if args_summary.is_empty() {
+                            format!("工具 {tool_name} 需要确认")
+                        } else {
+                            format!("{tool_name}: {args_summary}")
+                        };
+                        core_state.store.runtime.run.approval_request_id =
+                            Some(request_id.clone());
+                    }
+                    StreamEvent::ToolStart { name, ref args_summary } => {
+                        // 审批通过后恢复执行状态
+                        core_state.store.runtime.run.status =
+                            tiangong_core::runtime::RunStatus::Executing;
+                        core_state.store.runtime.run.approval_request_id = None;
+                        core_state.store.runtime.run.summary = if args_summary.is_empty() {
+                            format!("正在执行：{name}")
+                        } else {
+                            format!("正在执行：{name} {args_summary}")
+                        };
                     }
                     StreamEvent::ToolResult { name, ok, .. } => {
                         let s = if *ok { "✓" } else { "✗" };
@@ -314,6 +353,12 @@ pub fn send_message(
                     } => {
                         core_state.store.runtime.run.summary =
                             format!("重试中 ({attempt}/{max_attempts})...");
+                    }
+                    StreamEvent::Reasoning { .. } => {
+                        core_state.store.runtime.run.summary = "正在思考...".to_string();
+                    }
+                    StreamEvent::Delta { .. } => {
+                        core_state.store.runtime.run.summary = "正在回复...".to_string();
                     }
                     _ => {}
                 }
@@ -396,7 +441,10 @@ pub fn send_message(
 /// 取消当前执行
 #[tauri::command]
 pub fn cancel_turn(state: State<TiangongApp>) -> Result<bool, String> {
-    state.with_state(|core_state| core_state.cancel_pending_turn())
+    let session_id =
+        state.with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))?;
+    state.cancel_core(&session_id);
+    Ok(true)
 }
 
 /// 向正在执行的 turn 追加用户消息
@@ -412,9 +460,10 @@ pub fn respond_approval(
     approved: bool,
     state: State<TiangongApp>,
 ) -> Result<bool, String> {
-    state.with_state(|core_state| {
-        core_state.respond_to_approval(&request_id, approved)
-    })
+    let session_id =
+        state.with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))?;
+    state.respond_approval_to_core(&session_id, request_id, approved);
+    Ok(true)
 }
 
 /// 获取当前信任模式
@@ -433,12 +482,19 @@ pub fn get_trust_mode(state: State<TiangongApp>) -> Result<String, String> {
 /// 设置信任模式
 #[tauri::command]
 pub fn set_trust_mode(mode: String, state: State<TiangongApp>) -> Result<(), String> {
-    state.with_state(|core_state| {
-        let trust_mode: tiangong_core::permission::TrustMode =
-            serde_json::from_value(serde_json::Value::String(mode))
-                .map_err(|e| anyhow::anyhow!("无效的信任模式: {e}"))?;
-        core_state.set_trust_mode(trust_mode)
-    })
+    let trust_mode: tiangong_core::permission::TrustMode =
+        serde_json::from_value(serde_json::Value::String(mode))
+            .map_err(|e| format!("无效的信任模式: {e}"))?;
+
+    // 更新 TiangongState（持久化）
+    state.with_state(|core_state| core_state.set_trust_mode(trust_mode))?;
+
+    // 实时更新当前活跃 core 的信任模式（立即生效）
+    let session_id =
+        state.with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))?;
+    state.set_core_trust_mode(&session_id, trust_mode);
+
+    Ok(())
 }
 
 /// 获取会话成本统计

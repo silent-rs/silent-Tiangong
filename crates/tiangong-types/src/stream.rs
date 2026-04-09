@@ -22,7 +22,10 @@ pub enum StreamEvent {
         content: String,
     },
     /// 工具开始执行
-    ToolStart { name: String, summary: String },
+    ToolStart {
+        name: String,
+        args_summary: String,
+    },
     /// 工具执行结果
     ToolResult {
         name: String,

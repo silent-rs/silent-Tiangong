@@ -5319,6 +5319,7 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "async-openai",
+ "backoff",
  "chrono",
  "diffy",
  "futures-util",
