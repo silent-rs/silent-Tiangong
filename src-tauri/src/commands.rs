@@ -398,7 +398,7 @@ pub fn send_message(
                                 .find(|m| m.role == tiangong_core::session::MessageRole::User)
                                 .map(|m| m.content.clone())
                             {
-                                let provider_config = core_state.store.provider.models_config.to_chat_provider_config();
+                                let provider_config = core_state.store.provider.models_config.to_lite_provider_config();
                                 return Ok(Some((input, provider_config)));
                             }
                         }

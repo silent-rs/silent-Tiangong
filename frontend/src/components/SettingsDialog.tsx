@@ -615,7 +615,7 @@ function ModelsSection({
       <div>
         <Label className="text-xs">能力</Label>
         <div className="flex flex-wrap gap-1.5 mt-1">
-          {capabilities.map((cap) => (
+          {capabilities.filter((cap) => cap.key !== 'lite').map((cap) => (
             <button
               key={cap.key}
               className={`px-2 py-0.5 text-xs rounded border transition-colors ${
@@ -831,7 +831,11 @@ function RoutingSection({
                     {modelKeys
                       .filter((mk) => {
                         const m = config.models[mk];
-                        return m.capabilities.length === 0 || m.capabilities.includes(cap.key);
+                        if (m.capabilities.length === 0) return true;
+                        if (m.capabilities.includes(cap.key)) return true;
+                        // lite 路由也可以选择 chat 文本模型
+                        if (cap.key === 'lite' && m.capabilities.includes('chat')) return true;
+                        return false;
                       })
                       .map((mk) => (
                         <SelectItem key={mk} value={mk}>{mk}</SelectItem>

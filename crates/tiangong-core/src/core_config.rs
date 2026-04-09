@@ -56,6 +56,9 @@ impl Default for ModelEndpoint {
 pub struct LlmConfig {
     /// 主 Chat 端点（必须）
     pub chat: ModelEndpoint,
+    /// 轻量级文本端点（标题生成、意图分类等简单任务，未配置时回退到 chat）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lite: Option<ModelEndpoint>,
     /// 图片生成端点
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_generation: Option<ModelEndpoint>,
