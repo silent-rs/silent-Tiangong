@@ -10,9 +10,17 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamEvent {
     /// 文本增量（assistant 回复内容）
-    Delta { content: String },
+    Delta {
+        /// 所属消息 ID（前端据此组装到正确的消息）
+        message_id: String,
+        content: String,
+    },
     /// 思考过程增量
-    Reasoning { content: String },
+    Reasoning {
+        /// 所属消息 ID
+        message_id: String,
+        content: String,
+    },
     /// 工具开始执行
     ToolStart { name: String, summary: String },
     /// 工具执行结果
@@ -61,4 +69,22 @@ pub enum StreamEvent {
         worker_label: String,
         success: bool,
     },
+    /// 用户消息（Core 收到用户输入后回传，供前端统一渲染）
+    UserMessage {
+        /// 该用户消息在 session 中的 ID
+        message_id: String,
+        content: String,
+    },
+}
+
+/// 带会话标识的流事件
+///
+/// Core 输出的所有事件都携带 session_id，
+/// 消费端（GUI / CLI / Server）可据此路由到正确的会话。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionStreamEvent {
+    /// 产生该事件的会话 ID
+    pub session_id: String,
+    /// 原始流事件
+    pub event: StreamEvent,
 }

@@ -15,6 +15,7 @@ tiangong_entry = { path = "../crates/tiangong-entry", package = "tiangong-entry"
 tiangong_server = { path = "../crates/tiangong-server", package = "tiangong-server" }
 tiangong_connector = { path = "../crates/tiangong-connector", package = "tiangong-connector" }
 tiangong_media = { path = "../crates/tiangong-media", package = "tiangong-media" }
+tiangong_config = { path = "../crates/tiangong-config", package = "tiangong-config" }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

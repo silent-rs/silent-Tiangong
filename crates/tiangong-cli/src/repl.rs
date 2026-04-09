@@ -1,9 +1,10 @@
 //! CLI REPL — 类似 codex/claude code 风格交互
 
 use anyhow::Result;
+use tiangong_config::load_tiangong_config;
 use tiangong_core::app_state::TiangongState;
 use tiangong_core::core::TiangongCore;
-use tiangong_types::StreamEvent;
+use tiangong_types::{SessionStreamEvent, StreamEvent};
 
 use std::sync::mpsc;
 
@@ -14,8 +15,10 @@ use crate::output;
 
 pub fn run() -> Result<()> {
     let mut state = TiangongState::load_or_default();
-    let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
-    let core = TiangongCore::new(stream_tx);
+    let app_config = load_tiangong_config();
+    let config = app_config.into_core_config_provider();
+    let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
+    let core = TiangongCore::new(config, stream_tx);
     let mut reader = InputReader::new();
     let mut draft_new_session = true;
 
@@ -89,13 +92,13 @@ pub fn run() -> Result<()> {
 }
 
 /// 处理完整的响应流
-fn handle_response(rx: &mpsc::Receiver<StreamEvent>) {
+fn handle_response(rx: &mpsc::Receiver<SessionStreamEvent>) {
     let mut state = ResponseState::new();
 
     loop {
         match rx.recv_timeout(std::time::Duration::from_secs(300)) {
-            Ok(event) => {
-                if state.process(&event) {
+            Ok(session_event) => {
+                if state.process(&session_event.event) {
                     break;
                 }
             }
@@ -129,7 +132,10 @@ impl ResponseState {
     /// 处理单个事件，返回 true 表示本轮结束
     fn process(&mut self, event: &StreamEvent) -> bool {
         match event {
-            StreamEvent::Reasoning { content } => {
+            StreamEvent::UserMessage { .. } => {
+                // CLI 模式下用户消息由 REPL 自己显示，忽略
+            }
+            StreamEvent::Reasoning { content, .. } => {
                 if !self.thinking_shown {
                     output::thinking_start();
                     self.thinking_shown = true;
@@ -137,7 +143,7 @@ impl ResponseState {
                 self.reasoning_buf.push_str(content);
             }
 
-            StreamEvent::Delta { content } => {
+            StreamEvent::Delta { content, .. } => {
                 if !self.has_delta {
                     if self.thinking_shown {
                         output::thinking_clear();

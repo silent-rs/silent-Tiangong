@@ -8,6 +8,7 @@ members = [
     "crates/tiangong-gateway",
     "crates/tiangong-connector",
     "crates/tiangong-media",
+    "crates/tiangong-config",
 ]
 exclude = ["src-tauri"]
 

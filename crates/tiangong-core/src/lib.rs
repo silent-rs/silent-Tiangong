@@ -4,6 +4,7 @@ pub mod app_state;
 pub mod config_watch;
 pub mod context;
 pub mod core;
+pub mod core_config;
 pub mod coordinator;
 pub mod event;
 pub mod execution;

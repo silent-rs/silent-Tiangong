@@ -270,12 +270,14 @@ impl TaskCoordinator {
 
             // 流式合成，实时推送
             let tx = stream_tx.clone();
+            let merge_msg_id = scru128::new().to_string();
             match self
                 .engine
                 .client()
                 .complete_stream_with_callback(&req, |delta| {
                     if !delta.content.is_empty() {
                         let _ = tx.send(StreamEvent::Delta {
+                            message_id: merge_msg_id.clone(),
                             content: delta.content.clone(),
                         });
                     }

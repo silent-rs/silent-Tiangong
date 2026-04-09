@@ -12,7 +12,7 @@ pub mod token;
 pub use message::{Message, MessageRole, now_text};
 pub use session::Session;
 pub use status::RunStatus;
-pub use stream::StreamEvent;
+pub use stream::{SessionStreamEvent, StreamEvent};
 pub use token::TokenUsage;
 
 #[cfg(test)]

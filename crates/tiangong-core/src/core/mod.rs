@@ -7,22 +7,19 @@ use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
-use crate::agent_config::AgentConfig;
 use crate::agents::execution_mcp_agent::{McpFunctionTarget, execution_function_tools};
 use crate::app_state::formatting::{format_llm_output_message, format_tool_trace_message};
 use crate::coordinator::types::CoordinatorTask;
 use crate::coordinator::TaskCoordinator;
+use crate::core_config::CoreConfigProvider;
 use crate::model::{
-    FunctionToolSpec, ModelClient, ModelProviderConfig, ModelRequest, ModelStreamChunk,
-    SingleProviderClient, TokenUsage,
+    FunctionToolSpec, ModelClient, ModelRequest, ModelStreamChunk, SingleProviderClient, TokenUsage,
 };
-use crate::models_config::ModelsConfig;
 use crate::prompt::PromptAssembler;
 use crate::runtime::{LlmOutputRecord, RuntimeEngine, inject_enhanced_tools, use_stream_mode};
 use crate::session::{Message, MessageRole, Session, now_text};
-use tiangong_types::StreamEvent;
+use tiangong_types::{SessionStreamEvent, StreamEvent};
 
-const DEFAULT_CONTEXT_LIMIT: usize = 32_768;
 const MAX_ROUNDS: usize = 20;
 
 /// 用户命令
@@ -51,17 +48,21 @@ pub struct TiangongCore {
 
 impl TiangongCore {
     /// 创建新对话
-    pub fn new(stream_tx: Sender<StreamEvent>) -> Self {
+    pub fn new(config: CoreConfigProvider, stream_tx: Sender<SessionStreamEvent>) -> Self {
         let session = Session::new("新对话");
-        Self::with_session(session, stream_tx)
+        Self::with_session(config, session, stream_tx)
     }
 
     /// 从已有 session 创建
-    pub fn with_session(session: Session, stream_tx: Sender<StreamEvent>) -> Self {
+    pub fn with_session(
+        config: CoreConfigProvider,
+        session: Session,
+        stream_tx: Sender<SessionStreamEvent>,
+    ) -> Self {
         let session_id = session.id.clone();
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
 
-        let worker = thread::spawn(move || worker_loop(session, stream_tx, cmd_rx));
+        let worker = thread::spawn(move || worker_loop(config, session, stream_tx, cmd_rx));
 
         Self {
             cmd_tx: Some(cmd_tx),
@@ -122,19 +123,34 @@ impl Drop for TiangongCore {
 
 /// 工作线程：接收用户命令，执行 LLM + 工具，推送 StreamEvent
 fn worker_loop(
+    config: CoreConfigProvider,
     mut session: Session,
-    stream_tx: Sender<StreamEvent>,
+    external_tx: Sender<SessionStreamEvent>,
     cmd_rx: Receiver<Command>,
 ) -> Session {
-    let engine = build_engine();
+    let session_id = session.id.clone();
+    let mut last_cfg_gen = 0u64;
+    let mut engine: Option<RuntimeEngine> = None;
+    let mut tools: Vec<FunctionToolSpec> = Vec::new();
+    let mut mcp_targets: HashMap<String, McpFunctionTarget> = HashMap::new();
 
-    // 初始化工具
-    let (all_tools, mcp_targets) = execution_function_tools(&engine.agent_config().mcp);
-    let mut tools: Vec<FunctionToolSpec> = all_tools
-        .into_iter()
-        .filter(|t| t.name != "mark_step_completed")
-        .collect();
-    inject_enhanced_tools(&mut tools, engine.models_config(), engine.agent_config());
+    // 内部 StreamEvent 通道 —— 转发线程负责包装 session_id
+    let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
+    let fwd_session_id = session_id.clone();
+    let fwd_tx = external_tx.clone();
+    let forward_handle = thread::spawn(move || {
+        while let Ok(event) = stream_rx.recv() {
+            if fwd_tx
+                .send(SessionStreamEvent {
+                    session_id: fwd_session_id.clone(),
+                    event,
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
 
     // 设置工作目录
     if !session.cwd.is_empty() {
@@ -145,17 +161,39 @@ fn worker_loop(
     }
 
     while let Ok(cmd) = cmd_rx.recv() {
+        // 配置变更检测：仅在 generation 变化时重建 engine 和工具列表
+        let cfg_gen = config.generation();
+        if engine.is_none() || cfg_gen != last_cfg_gen {
+            let cfg = config.snapshot();
+            engine = Some(build_engine_from_config(&cfg));
+            let e = engine.as_ref().unwrap();
+            let (all_tools, new_mcp_targets) = execution_function_tools(&e.agent_config().mcp);
+            let mut new_tools: Vec<FunctionToolSpec> = all_tools
+                .into_iter()
+                .filter(|t| t.name != "mark_step_completed")
+                .collect();
+            inject_enhanced_tools(&mut new_tools, e);
+            tools = new_tools;
+            mcp_targets = new_mcp_targets;
+            last_cfg_gen = cfg_gen;
+        }
 
         match cmd {
             Command::Message(content) => {
                 // 记录用户消息
                 session.append_message(MessageRole::User, content.clone());
+                // 通知消费端：用户消息已记录（携带 session 中的 message_id）
+                let user_msg_id = session.messages.last().map(|m| m.id.clone()).unwrap_or_default();
+                let _ = stream_tx.send(StreamEvent::UserMessage {
+                    message_id: user_msg_id,
+                    content: content.clone(),
+                });
 
                 // 执行对话轮次
                 execute_turn(
                     &mut session,
                     &content,
-                    &engine,
+                    engine.as_ref().unwrap(),
                     &tools,
                     &mcp_targets,
                     &stream_tx,
@@ -174,6 +212,10 @@ fn worker_loop(
             Command::Shutdown => break,
         }
     }
+
+    // 关闭内部通道，等待转发线程结束
+    drop(stream_tx);
+    let _ = forward_handle.join();
 
     session
 }
@@ -302,20 +344,26 @@ fn execute_turn_inner(
             assembled_system_prompt: Some(system_prompt),
         };
 
+        // 预生成本轮 assistant 消息 ID（Delta/Reasoning 事件先于消息创建）
+        let pending_msg_id = scru128::new().to_string();
+
         // LLM 流式调用
         let tx = stream_tx.clone();
+        let msg_id_for_cb = pending_msg_id.clone();
         let response = match engine.client().complete_with_functions_stream(
             &req,
             tools,
             &mut |delta: &ModelStreamChunk| {
-                // 直接推送 StreamEvent
+                // 直接推送 StreamEvent（携带 message_id）
                 if !delta.content.is_empty() {
                     let _ = tx.send(StreamEvent::Delta {
+                        message_id: msg_id_for_cb.clone(),
                         content: delta.content.clone(),
                     });
                 }
                 if !delta.reasoning_content.is_empty() {
                     let _ = tx.send(StreamEvent::Reasoning {
+                        message_id: msg_id_for_cb.clone(),
                         content: delta.reasoning_content.clone(),
                     });
                 }
@@ -334,8 +382,9 @@ fn execute_turn_inner(
         round += 1;
 
         if response.tool_calls.is_empty() {
-            // 最终回复：记录到 session
-            session.append_message_with_reasoning(
+            // 最终回复：使用预生成的 ID 记录到 session
+            session.append_message_with_id(
+                pending_msg_id,
                 MessageRole::Assistant,
                 response.text.clone(),
                 response.reasoning_content.clone(),
@@ -514,13 +563,18 @@ fn force_final_response(
         assembled_system_prompt: Some(system_prompt),
     };
 
+    // 预生成 message_id
+    let pending_msg_id = scru128::new().to_string();
+
     let tx = stream_tx.clone();
+    let msg_id_for_cb = pending_msg_id.clone();
     let resp = if use_stream_mode() {
         match engine
             .client()
             .complete_stream_with_callback(&req, |delta| {
                 if !delta.content.is_empty() {
                     let _ = tx.send(StreamEvent::Delta {
+                        message_id: msg_id_for_cb.clone(),
                         content: delta.content.clone(),
                     });
                 }
@@ -534,10 +588,12 @@ fn force_final_response(
             }
         }
     } else {
+        let msg_id_non_stream = pending_msg_id.clone();
         match engine.client().complete(&req) {
             Ok(r) => {
                 if !r.text.is_empty() {
                     let _ = stream_tx.send(StreamEvent::Delta {
+                        message_id: msg_id_non_stream,
                         content: r.text.clone(),
                     });
                 }
@@ -552,7 +608,7 @@ fn force_final_response(
         }
     };
 
-    session.append_message(MessageRole::Assistant, resp.text);
+    session.append_message_with_id(pending_msg_id, MessageRole::Assistant, resp.text, String::new());
     let _ = stream_tx.send(StreamEvent::Done {
         usage: Some(tiangong_types::TokenUsage {
             prompt_tokens: resp.usage.prompt_tokens,
@@ -562,21 +618,26 @@ fn force_final_response(
     });
 }
 
-fn build_engine() -> RuntimeEngine {
-    let mut models_config = ModelsConfig::load();
-    if models_config.is_empty() {
-        let env_config = ModelProviderConfig::from_env();
-        if !env_config.api_auth_token.is_empty() {
-            models_config = ModelsConfig::from_legacy(&env_config);
-        }
-    }
+/// 从 CoreConfig 快照构建 RuntimeEngine
+fn build_engine_from_config(config: &crate::core_config::CoreConfig) -> RuntimeEngine {
+    use crate::agent_config::AgentConfig;
+    use crate::models_config::ModelsConfig;
+
+    // 从 LlmConfig 构建兼容的 ModelsConfig（供 PromptAssembler 等旧代码使用）
+    let models_config = ModelsConfig::from_llm_config(&config.llm);
     let model_config = models_config.to_chat_provider_config();
-    let agent_config = AgentConfig::default();
+
+    let agent_config = AgentConfig {
+        mcp: config.mcp.clone(),
+        skills: config.skills.clone(),
+        trust_mode: config.trust_mode,
+    };
 
     RuntimeEngine::new(
         SingleProviderClient::new(model_config),
-        DEFAULT_CONTEXT_LIMIT,
+        config.context_limit,
         agent_config,
     )
     .with_models_config(models_config)
+    .with_core_config(config.clone())
 }

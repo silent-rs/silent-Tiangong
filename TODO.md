@@ -353,7 +353,37 @@
 - [x] CLI 接入 TiangongCore（直接消费 StreamEvent）
 - [x] src-tauri 依赖 tiangong-types
 - [x] 删除旧 LoopHost/ActiveLoops/CliLoopHost（-433 行）
-- [ ] TurnRunner/ControlSignal 待 Worker 迁移后删除
+- [x] TurnRunner/ControlSignal/EventLoopRunner 已删除（并行智能体集成后清理）
 - [ ] src-tauri/types.rs DTO 转换层待前端完全迁移后删除
 - [x] GUI 全链路功能验证通过
-- [ ] CLI 交互优化（类似 codex/claude code 风格，Phase 10-C）
+- [x] CLI 交互优化（类似 codex/claude code 风格）
+- [x] 并行智能体（TaskCoordinator/Worker）集成到 TiangongCore
+- [x] 统一用户输入通道（消除消息重复）
+- [x] CLI 会话持久化
+
+---
+
+## Phase 14：CoreConfig 配置注入 — **当前阶段**
+
+> RFC：`docs/rfc/0006-core-config-provider.md`
+
+### Phase A：CoreConfig + CoreConfigProvider
+
+- [ ] 定义 `CoreConfig` 结构（models/mcp/skills/trust_mode/context_limit）
+- [ ] 实现 `CoreConfigProvider`（ArcSwap + generation 原子计数）
+- [ ] 修改 `TiangongCore` 构造函数接收 `CoreConfigProvider`
+- [ ] 修改 `worker_loop` 使用 generation 检测 + snapshot 重建 engine
+- [ ] 移除 `build_engine()` 中的磁盘加载逻辑
+
+### Phase B：各端适配
+
+- [ ] CLI：创建 CoreConfigProvider，从磁盘加载初始配置
+- [ ] GUI：TiangongApp 持有 CoreConfigProvider，配置变更时 update
+- [ ] Server/Connector：适配 CoreConfigProvider
+
+### Phase C：验证
+
+- [ ] cargo clippy --workspace 通过
+- [ ] cargo nextest run --workspace 通过
+- [ ] GUI 验证：切换模型/MCP/Skill 后下一轮对话生效
+- [ ] CLI 验证：/model 切换后生效

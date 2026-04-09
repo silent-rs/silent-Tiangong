@@ -1,15 +1,18 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use tiangong_config::{CoreConfigProvider, load_tiangong_config};
 use tiangong_core::core::TiangongCore;
 
 /// 天工应用状态
 ///
 /// state: 应用管理（会话列表、配置、持久化）
 /// cores: 活跃的对话核心（session_id → TiangongCore）
+/// config: 共享配置提供者（所有 Core 共享，GUI 修改配置后自动生效）
 pub struct TiangongApp {
     pub state: Mutex<tiangong_core::app_state::TiangongState>,
     pub cores: Mutex<HashMap<String, TiangongCore>>,
+    pub config: CoreConfigProvider,
 }
 
 impl Default for TiangongApp {
@@ -17,6 +20,7 @@ impl Default for TiangongApp {
         Self {
             state: Mutex::new(tiangong_core::app_state::TiangongState::load_or_default()),
             cores: Mutex::new(HashMap::new()),
+            config: load_tiangong_config().into_core_config_provider(),
         }
     }
 }
@@ -54,13 +58,13 @@ impl TiangongApp {
         &self,
         session_id: &str,
         session: tiangong_core::session::Session,
-        stream_tx: std::sync::mpsc::Sender<tiangong_types::StreamEvent>,
+        stream_tx: std::sync::mpsc::Sender<tiangong_types::SessionStreamEvent>,
     ) -> (String, bool) {
         let mut cores = self.cores.lock().unwrap();
         if cores.contains_key(session_id) {
             return (session_id.to_string(), false); // 已存在，复用
         }
-        let core = TiangongCore::with_session(session, stream_tx);
+        let core = TiangongCore::with_session(self.config.clone(), session, stream_tx);
         let id = core.session_id().to_string();
         cores.insert(id.clone(), core);
         (id, true) // 新创建
@@ -77,7 +81,7 @@ impl TiangongApp {
     /// 获取 core 的 session 快照（不消费 core）
     pub fn get_core_session(
         &self,
-        session_id: &str,
+        _session_id: &str,
     ) -> Option<tiangong_core::session::Session> {
         // core session 在消费线程中独占，无法直接读取
         // 只能在 into_session 时获取
