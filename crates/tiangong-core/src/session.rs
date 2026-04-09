@@ -43,14 +43,11 @@ pub struct Session {
     /// 摘要覆盖到的消息索引（messages[0..summary_up_to] 已被摘要覆盖）
     #[serde(default)]
     pub summary_up_to: usize,
-    /// 待审批请求列表（WaitingApproval 状态时持久化，恢复后可继续处理）
-    #[serde(default)]
-    pub pending_approvals: Vec<PendingApproval>,
     pub created_at: String,
     pub updated_at: String,
 }
 
-/// 待审批请求记录
+/// 待审批请求记录（存储在独立的 approval_store 中）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingApproval {
     pub request_id: String,
@@ -190,7 +187,6 @@ impl Session {
             cwd_mode: SessionCwdMode::Inherit,
             context_summary: None,
             summary_up_to: 0,
-            pending_approvals: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
         }
@@ -216,7 +212,6 @@ impl Session {
             cwd_mode: SessionCwdMode::Isolated,
             context_summary: None,
             summary_up_to: 0,
-            pending_approvals: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
         }

@@ -176,6 +176,19 @@ fn worker_loop(
         }
     }
 
+    // 恢复未完成的审批请求（崩溃恢复场景）
+    let pending = crate::approval_store::get_pending(&session_id);
+    if !pending.is_empty() {
+        tracing::info!(count = pending.len(), "恢复未完成的审批请求");
+        for approval in &pending {
+            let _ = stream_tx.send(StreamEvent::ApprovalNeeded {
+                request_id: approval.request_id.clone(),
+                tool_name: approval.tool_name.clone(),
+                args_summary: approval.tool_args_summary.clone(),
+            });
+        }
+    }
+
     while let Ok(cmd) = cmd_rx.recv() {
         // 配置变更检测：仅在 generation 变化时重建 engine 和工具列表
         let cfg_gen = config.generation();
@@ -226,8 +239,24 @@ fn worker_loop(
                     message: "已取消".into(),
                 });
             }
-            Command::Approval { .. } => {
-                // TODO: 审批响应处理
+            Command::Approval {
+                request_id,
+                approved,
+            } => {
+                // 恢复场景的审批响应：清除 pending 状态
+                let pending = crate::approval_store::get_pending(&session_id);
+                let had_pending = pending.iter().any(|a| a.request_id == request_id);
+                crate::approval_store::remove_pending(&session_id, &request_id);
+
+                if had_pending {
+                    let action = if approved { "已允许" } else { "已拒绝" };
+                    session.append_message(
+                        MessageRole::System,
+                        format!("审批响应：{action}（会话已恢复，请重新发送消息继续）"),
+                    );
+                    session.persist_to_disk();
+                    let _ = stream_tx.send(StreamEvent::Done { usage: None });
+                }
             }
             Command::Shutdown => break,
         }
@@ -502,6 +531,17 @@ fn execute_turn_inner(
                     continue;
                 }
                 PermissionDecision::NeedsApproval { request_id } => {
+                    // 记录待审批状态（独立存储，崩溃恢复时可重新展示）
+                    crate::approval_store::add_pending(
+                        &session.id,
+                        crate::session::PendingApproval {
+                            request_id: request_id.clone(),
+                            tool_name: call.name.clone(),
+                            tool_args_summary: args_summary.clone(),
+                            created_at: now_text(),
+                        },
+                    );
+
                     // 发送审批请求
                     let _ = stream_tx.send(StreamEvent::ApprovalNeeded {
                         request_id: request_id.clone(),
@@ -541,25 +581,30 @@ fn execute_turn_inner(
                         }
                     };
 
+                    // 审批完成，清除 pending 状态
+                    crate::approval_store::remove_pending(&session.id, &request_id);
+
                     if !approved {
+                        session.append_message(
+                            MessageRole::System,
+                            format!("工具 {} 被用户拒绝执行", call.name),
+                        );
+                        session.persist_to_disk();
+
                         let _ = stream_tx.send(StreamEvent::ToolResult {
                             name: call.name.clone(),
                             ok: false,
                             output: "用户拒绝执行".to_string(),
                         });
-                        session.append_message(
-                            MessageRole::System,
-                            format!("工具 {} 被用户拒绝执行", call.name),
-                        );
-                        loop_context.push(Message {
-                            id: scru128::new().to_string(),
-                            role: MessageRole::System,
-                            content: format!("工具 {} 被用户拒绝执行", call.name),
-                            reasoning_content: String::new(),
-                            worker_id: None,
-                            created_at: now_text(),
+                        // 拒绝后结束本轮，避免 LLM 再次调用同工具形成死循环
+                        let _ = stream_tx.send(StreamEvent::Done {
+                            usage: Some(tiangong_types::TokenUsage {
+                                prompt_tokens: accumulated_usage.prompt_tokens,
+                                completion_tokens: accumulated_usage.completion_tokens,
+                                total_tokens: accumulated_usage.total_tokens,
+                            }),
                         });
-                        continue;
+                        return accumulated_usage;
                     }
                 }
             }

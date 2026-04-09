@@ -1,6 +1,7 @@
 pub mod agent_config;
 pub mod agents;
 pub mod app_state;
+pub mod approval_store;
 pub mod config_watch;
 pub mod context;
 pub mod core;
