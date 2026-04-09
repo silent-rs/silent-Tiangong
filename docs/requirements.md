@@ -74,6 +74,13 @@
 - GUI 消息文本必须去掉气泡边框和背景色，采用简洁无装饰风格。
 - CLI 必须从阻塞等待改为实时流式展示：思考过程、工具调用摘要、最终回复均实时输出。
 
+#### LLM 请求容错
+- LLM 请求遇到速率限制（429）、服务端错误（5xx）或超时时，必须自动重试。
+- 默认最大重试 3 次，采用指数退避策略（初始间隔 1 秒，倍率 ×2）。
+- 每次重试必须通过 `tracing::warn!` 记录日志（含重试次数、错误原因、等待时间）。
+- 非可重试错误（如 401 认证失败、400 参数错误）不进行重试，直接返回错误。
+- 重试逻辑必须覆盖所有 LLM 调用方法（complete / complete_stream / complete_with_functions / complete_with_functions_stream / complete_lite）。
+
 ### Should
 
 - Server 模式应支持 CORS 配置，方便 Web 前端调用。

@@ -721,6 +721,8 @@ function AgentTurn({
     | { type: "thinking"; content: string }
     | { type: "tool_group"; key: string; brief: string; tools: MessageItem[] }
     | { type: "assistant"; msg: MessageItem; isStreaming: boolean }
+    | { type: "error_system"; msg: MessageItem }
+    | { type: "retry_system"; msg: MessageItem }
     | { type: "other_system"; msg: MessageItem };
 
   const fragments: Fragment[] = [];
@@ -772,6 +774,12 @@ function AgentTurn({
         fragments.push({ type: "thinking", content: assistantReasoning });
       }
       fragments.push({ type: "assistant", msg, isStreaming });
+    } else if (msg.role === "System" && msg.content.startsWith("[错误]")) {
+      flushTools();
+      fragments.push({ type: "error_system", msg });
+    } else if (msg.role === "System" && msg.content.startsWith("[重试]")) {
+      flushTools();
+      fragments.push({ type: "retry_system", msg });
     } else if (msg.role === "System") {
       flushTools();
       fragments.push({ type: "other_system", msg });
@@ -848,6 +856,20 @@ function AgentTurn({
                 </div>
               )}
               {!isStreaming && msg.content && <MessageActions text={msg.content} showTts={hasTts} />}
+            </div>
+          );
+        }
+        if (frag.type === "error_system") {
+          return (
+            <div key={frag.msg.id} className="text-sm text-destructive bg-destructive/10 rounded-md px-3 py-2 my-1">
+              {frag.msg.content.replace("[错误] ", "")}
+            </div>
+          );
+        }
+        if (frag.type === "retry_system") {
+          return (
+            <div key={frag.msg.id} className="text-xs text-yellow-600 dark:text-yellow-400 bg-yellow-500/10 rounded-md px-3 py-1.5 my-0.5">
+              {frag.msg.content.replace("[重试] ", "")}
             </div>
           );
         }

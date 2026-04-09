@@ -202,6 +202,16 @@ impl ResponseState {
                 return true;
             }
 
+            StreamEvent::Retry {
+                message,
+                attempt,
+                max_attempts,
+            } => {
+                output::warn(&format!(
+                    "重试 ({attempt}/{max_attempts})：{message}"
+                ));
+            }
+
             StreamEvent::WorkerStarted {
                 worker_id: _,
                 worker_label,

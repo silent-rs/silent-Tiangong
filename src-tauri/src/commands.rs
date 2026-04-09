@@ -238,7 +238,26 @@ pub fn send_message(
                                 format!("工具执行 [{name}]\n{status} exit_code=0\nsummary: {name}\nstdout:\n{preview}"),
                             );
                         }
-                        StreamEvent::Done { .. } | StreamEvent::Error { .. } => {
+                        StreamEvent::Error { ref message } => {
+                            session.append_message(
+                                tiangong_core::session::MessageRole::System,
+                                format!("[错误] {message}"),
+                            );
+                            assistant_msg_id = None;
+                        }
+                        StreamEvent::Retry {
+                            ref message,
+                            attempt,
+                            max_attempts,
+                        } => {
+                            session.append_message(
+                                tiangong_core::session::MessageRole::System,
+                                format!(
+                                    "[重试] ({attempt}/{max_attempts}) {message}"
+                                ),
+                            );
+                        }
+                        StreamEvent::Done { .. } => {
                             assistant_msg_id = None;
                         }
                         _ => {}
@@ -285,8 +304,16 @@ pub fn send_message(
                             core_state.provider_label()
                         ));
                     }
-                    StreamEvent::Error { .. } => {
-                        core_state.report_run_idle("执行失败");
+                    StreamEvent::Error { ref message } => {
+                        core_state.report_run_idle(format!("执行失败：{message}"));
+                    }
+                    StreamEvent::Retry {
+                        attempt,
+                        max_attempts,
+                        ..
+                    } => {
+                        core_state.store.runtime.run.summary =
+                            format!("重试中 ({attempt}/{max_attempts})...");
                     }
                     _ => {}
                 }

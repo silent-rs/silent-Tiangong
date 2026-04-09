@@ -50,6 +50,12 @@ pub enum StreamEvent {
     },
     /// 执行出错
     Error { message: String },
+    /// LLM 请求重试中
+    Retry {
+        message: String,
+        attempt: u32,
+        max_attempts: u32,
+    },
 
     // ===== 多 Worker 并行执行事件 =====
     /// Worker 开始执行

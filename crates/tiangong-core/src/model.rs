@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -197,14 +198,37 @@ pub trait ModelClient {
     }
 }
 
-#[derive(Debug, Clone)]
+/// 重试回调类型：(attempt, max_attempts, delay_ms, error_text)
+pub type OnRetryCallback = Arc<dyn Fn(u32, u32, u64, &str) + Send + Sync>;
+
+#[derive(Clone)]
 pub struct SingleProviderClient {
     cfg: ModelProviderConfig,
+    /// 重试时的回调通知（可选）
+    on_retry: Option<OnRetryCallback>,
+}
+
+impl std::fmt::Debug for SingleProviderClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SingleProviderClient")
+            .field("cfg", &self.cfg)
+            .field("on_retry", &self.on_retry.is_some())
+            .finish()
+    }
 }
 
 impl SingleProviderClient {
     pub fn new(cfg: ModelProviderConfig) -> Self {
-        Self { cfg }
+        Self {
+            cfg,
+            on_retry: None,
+        }
+    }
+
+    /// 设置重试回调
+    pub fn with_on_retry(mut self, cb: OnRetryCallback) -> Self {
+        self.on_retry = Some(cb);
+        self
     }
 
     pub fn list_models(cfg: &ModelProviderConfig) -> Result<Vec<String>> {
@@ -305,10 +329,11 @@ impl SingleProviderClient {
 
         let response = runtime.block_on(async {
             timeout(Duration::from_millis(timeout_ms), async {
-                let mut stream = client
-                    .chat()
-                    .create_stream_byot::<_, Value>(request_json)
-                    .await?;
+                let chat = client.chat();
+                let mut stream = with_retry("流式模型请求", &self.on_retry, || {
+                    chat.create_stream_byot::<_, Value>(request_json.clone())
+                })
+                .await?;
                 let mut content = String::new();
                 let mut reasoning_content = String::new();
                 let mut chunks = 0usize;
@@ -529,10 +554,11 @@ impl SingleProviderClient {
 
         let response = runtime.block_on(async {
             timeout(Duration::from_millis(timeout_ms), async {
-                let mut stream = client
-                    .chat()
-                    .create_stream_byot::<_, Value>(request_json)
-                    .await?;
+                let chat = client.chat();
+                let mut stream = with_retry("流式工具调用", &self.on_retry, || {
+                    chat.create_stream_byot::<_, Value>(request_json.clone())
+                })
+                .await?;
 
                 let mut content = String::new();
                 let mut reasoning_content = String::new();
@@ -789,12 +815,15 @@ impl SingleProviderClient {
             .build()
             .context("初始化异步运行时失败")?;
 
+        let request_json =
+            serde_json::to_value(&request).context("序列化轻量级请求失败")?;
+        let chat = client.chat();
         let response = runtime.block_on(async {
             timeout(
                 Duration::from_millis(timeout_ms),
-                client
-                    .chat()
-                    .create_byot::<_, CreateChatCompletionResponse>(request),
+                with_retry("轻量级模型", &self.on_retry, || {
+                    chat.create_byot::<_, CreateChatCompletionResponse>(request_json.clone())
+                }),
             )
             .await
         });
@@ -907,10 +936,13 @@ impl ModelClient for SingleProviderClient {
             .build()
             .context("初始化异步运行时失败")?;
 
+        let chat = client.chat();
         let response = runtime.block_on(async {
             timeout(
                 Duration::from_millis(timeout_ms),
-                client.chat().create_byot::<_, Value>(request_json),
+                with_retry("模型请求", &self.on_retry, || {
+                    chat.create_byot::<_, Value>(request_json.clone())
+                }),
             )
             .await
         });
@@ -924,7 +956,7 @@ impl ModelClient for SingleProviderClient {
         let response = runtime.block_on(async {
             timeout(
                 Duration::from_millis(timeout_ms),
-                client.chat().create(request_for_fallback),
+                with_retry("模型请求回退", &self.on_retry, || chat.create(request_for_fallback.clone())),
             )
             .await
         });
@@ -1006,10 +1038,13 @@ impl ModelClient for SingleProviderClient {
             .build()
             .context("初始化异步运行时失败")?;
 
+        let chat = client.chat();
         let response = runtime.block_on(async {
             timeout(
                 Duration::from_millis(timeout_ms),
-                client.chat().create_byot::<_, Value>(request_json),
+                with_retry("工具调用", &self.on_retry, || {
+                    chat.create_byot::<_, Value>(request_json.clone())
+                }),
             )
             .await
         });
@@ -1206,6 +1241,96 @@ fn build_sdk_error_hint(error_text: &str) -> String {
         return "；当前网关返回的错误结构非 OpenAI 标准格式，请确认 API_BASE_URL 是否为 OpenAI 兼容接口".to_string();
     }
     String::new()
+}
+
+// ── 重试相关 ──────────────────────────────────────────────
+
+/// 最大重试次数
+const MAX_RETRIES: u32 = 3;
+/// 初始重试延迟（毫秒）
+const INITIAL_RETRY_DELAY_MS: u64 = 1000;
+/// 退避倍率
+const RETRY_BACKOFF_MULTIPLIER: u64 = 2;
+
+/// 判断 OpenAI SDK 错误是否可重试
+fn is_retryable_openai_error(err: &async_openai::error::OpenAIError) -> bool {
+    is_retryable_error_text(&err.to_string())
+}
+
+/// 判断错误文本是否表示可重试的错误
+fn is_retryable_error_text(text: &str) -> bool {
+    // 速率限制 (HTTP 429)
+    if text.contains("429")
+        || text.contains("Rate limit")
+        || text.contains("rate limit")
+        || text.contains("Rate limited")
+        || text.contains("访问量过大")
+        || text.contains("稍后再试")
+        || text.contains("too many requests")
+        || text.contains("Too Many Requests")
+    {
+        return true;
+    }
+    // 服务端错误 (5xx)
+    if text.contains("500 Internal Server Error")
+        || text.contains("502 Bad Gateway")
+        || text.contains("503 Service Unavailable")
+        || text.contains("504 Gateway Timeout")
+    {
+        return true;
+    }
+    // 连接错误
+    if text.contains("connection reset")
+        || text.contains("connection refused")
+        || text.contains("Connection reset")
+        || text.contains("Connection refused")
+    {
+        return true;
+    }
+    false
+}
+
+/// 带重试的异步调用（用于 OpenAI SDK 请求）
+///
+/// 遇到速率限制、5xx、连接错误时自动重试，采用指数退避策略。
+/// 可选的 `on_retry` 回调在每次重试前触发，用于通知上层。
+async fn with_retry<F, Fut, T>(
+    label: &str,
+    on_retry: &Option<OnRetryCallback>,
+    mut f: F,
+) -> Result<T, async_openai::error::OpenAIError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, async_openai::error::OpenAIError>>,
+{
+    let mut attempt = 0u32;
+    let mut delay_ms = INITIAL_RETRY_DELAY_MS;
+    loop {
+        match f().await {
+            Ok(result) => return Ok(result),
+            Err(err) => {
+                if attempt < MAX_RETRIES && is_retryable_openai_error(&err) {
+                    attempt += 1;
+                    let err_text = err.to_string();
+                    tracing::warn!(
+                        attempt = attempt,
+                        max_retries = MAX_RETRIES,
+                        delay_ms = delay_ms,
+                        error = %err_text,
+                        label = label,
+                        "LLM 请求失败，准备重试",
+                    );
+                    if let Some(cb) = on_retry {
+                        cb(attempt, MAX_RETRIES, delay_ms, &err_text);
+                    }
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    delay_ms *= RETRY_BACKOFF_MULTIPLIER;
+                } else {
+                    return Err(err);
+                }
+            }
+        }
+    }
 }
 
 fn extract_delta_text(delta: &Value, field: &str) -> String {
