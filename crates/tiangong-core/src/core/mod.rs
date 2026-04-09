@@ -420,6 +420,9 @@ fn execute_turn_inner(
             };
             session.append_message(MessageRole::System, format_llm_output_message(&output));
 
+            // 最终回复落盘（确保崩溃时不丢失）
+            session.persist_to_disk();
+
             let _ = stream_tx.send(StreamEvent::Done {
                 usage: Some(tiangong_types::TokenUsage {
                     prompt_tokens: accumulated_usage.prompt_tokens,

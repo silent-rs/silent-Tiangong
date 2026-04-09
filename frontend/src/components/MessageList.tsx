@@ -864,7 +864,7 @@ function AgentTurn({
             <div key={msg.id} className="text-foreground" title={formatMessageTime(msg.created_at)}>
               {isStreaming ? (
                 <TypingMessage content={streamingContent} reasoningContent={_streamingReasoningContent} speed={300} />
-              ) : (
+              ) : msg.content ? (
                 <div>
                   <div className="prose prose-sm max-w-none break-words text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
                     <ReactMarkdown remarkPlugins={[remarkGfm]} components={MarkdownComponents as any}>
@@ -872,6 +872,8 @@ function AgentTurn({
                     </ReactMarkdown>
                   </div>
                 </div>
+              ) : (
+                <p className="text-xs text-muted-foreground italic">（模型未返回文本回复，请继续对话）</p>
               )}
               {!isStreaming && msg.content && <MessageActions text={msg.content} showTts={hasTts} />}
             </div>
