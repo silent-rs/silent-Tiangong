@@ -82,7 +82,7 @@ impl Worker {
             while let Ok(event) = inner_rx.recv() {
                 let tagged = if is_multi {
                     match event {
-                        StreamEvent::Delta { content } => StreamEvent::WorkerChunk {
+                        StreamEvent::Delta { content, .. } => StreamEvent::WorkerChunk {
                             worker_id: fwd_worker_id.clone(),
                             worker_label: fwd_worker_label.clone(),
                             content,

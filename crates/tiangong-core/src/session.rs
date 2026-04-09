@@ -243,6 +243,25 @@ impl Session {
         self.updated_at = now_text();
     }
 
+    /// 使用预生成的 ID 追加消息（流式场景：Delta/Reasoning 事件先于消息创建）
+    pub fn append_message_with_id(
+        &mut self,
+        id: String,
+        role: MessageRole,
+        content: impl Into<String>,
+        reasoning_content: impl Into<String>,
+    ) {
+        self.messages.push(Message {
+            id,
+            role,
+            content: content.into(),
+            reasoning_content: reasoning_content.into(),
+            worker_id: None,
+            created_at: now_text(),
+        });
+        self.updated_at = now_text();
+    }
+
     pub fn append_worker_message(
         &mut self,
         role: MessageRole,

@@ -58,11 +58,13 @@ fn run_status_serde() {
 #[test]
 fn stream_event_serde() {
     let event = StreamEvent::Delta {
+        message_id: "msg-1".into(),
         content: "你好".into(),
     };
     let json = serde_json::to_string(&event).unwrap();
     assert!(json.contains(r#""type":"delta""#));
     assert!(json.contains(r#""content":"你好""#));
+    assert!(json.contains(r#""message_id":"msg-1""#));
 
     let done = StreamEvent::Done { usage: None };
     let json = serde_json::to_string(&done).unwrap();

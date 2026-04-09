@@ -58,7 +58,7 @@ impl TiangongApp {
         &self,
         session_id: &str,
         session: tiangong_core::session::Session,
-        stream_tx: std::sync::mpsc::Sender<tiangong_types::StreamEvent>,
+        stream_tx: std::sync::mpsc::Sender<tiangong_types::SessionStreamEvent>,
     ) -> (String, bool) {
         let mut cores = self.cores.lock().unwrap();
         if cores.contains_key(session_id) {
@@ -81,7 +81,7 @@ impl TiangongApp {
     /// 获取 core 的 session 快照（不消费 core）
     pub fn get_core_session(
         &self,
-        session_id: &str,
+        _session_id: &str,
     ) -> Option<tiangong_core::session::Session> {
         // core session 在消费线程中独占，无法直接读取
         // 只能在 into_session 时获取

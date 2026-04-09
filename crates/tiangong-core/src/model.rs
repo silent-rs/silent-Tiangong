@@ -314,6 +314,7 @@ impl SingleProviderClient {
                 let mut chunks = 0usize;
                 let mut has_think_output = false;
                 let mut stream_usage = (0usize, 0usize, 0usize); // (prompt, completion, total)
+                let mut think_filter = ThinkTagFilter::new();
 
                 while let Some(item) = stream.next().await {
                     let payload = match item {
@@ -362,19 +363,63 @@ impl SingleProviderClient {
 
                             let content_delta = extract_delta_text(delta, "content");
                             if !content_delta.is_empty() {
-                                push_stream_piece(
-                                    ModelStreamChunk {
-                                        content: content_delta.clone(),
-                                        reasoning_content: String::new(),
-                                    },
-                                    &mut on_delta,
-                                    &mut content,
-                                    &mut reasoning_content,
-                                    &mut chunks,
-                                );
+                                let (filtered_content, filtered_reasoning) =
+                                    think_filter.filter(&content_delta);
+                                if !filtered_reasoning.is_empty() {
+                                    has_think_output = true;
+                                    push_stream_piece(
+                                        ModelStreamChunk {
+                                            content: String::new(),
+                                            reasoning_content: filtered_reasoning,
+                                        },
+                                        &mut on_delta,
+                                        &mut content,
+                                        &mut reasoning_content,
+                                        &mut chunks,
+                                    );
+                                }
+                                if !filtered_content.is_empty() {
+                                    push_stream_piece(
+                                        ModelStreamChunk {
+                                            content: filtered_content,
+                                            reasoning_content: String::new(),
+                                        },
+                                        &mut on_delta,
+                                        &mut content,
+                                        &mut reasoning_content,
+                                        &mut chunks,
+                                    );
+                                }
                             }
                         }
                     }
+                }
+
+                // 刷出 <think> 过滤器缓冲区残留
+                let (flush_content, flush_reasoning) = think_filter.flush();
+                if !flush_reasoning.is_empty() {
+                    push_stream_piece(
+                        ModelStreamChunk {
+                            content: String::new(),
+                            reasoning_content: flush_reasoning,
+                        },
+                        &mut on_delta,
+                        &mut content,
+                        &mut reasoning_content,
+                        &mut chunks,
+                    );
+                }
+                if !flush_content.is_empty() {
+                    push_stream_piece(
+                        ModelStreamChunk {
+                            content: flush_content,
+                            reasoning_content: String::new(),
+                        },
+                        &mut on_delta,
+                        &mut content,
+                        &mut reasoning_content,
+                        &mut chunks,
+                    );
                 }
 
                 Ok::<
@@ -495,6 +540,7 @@ impl SingleProviderClient {
                 let mut tool_calls_map: std::collections::BTreeMap<u64, (String, String, String)> =
                     std::collections::BTreeMap::new();
                 let mut stream_usage = (0usize, 0usize, 0usize);
+                let mut think_filter = ThinkTagFilter::new();
 
                 while let Some(item) = stream.next().await {
                     let payload = match item {
@@ -526,7 +572,7 @@ impl SingleProviderClient {
                         for choice in choices {
                             let delta = choice.get("delta").unwrap_or(&Value::Null);
 
-                            // 流式输出 reasoning_content
+                            // 流式输出 reasoning_content（API 原生字段）
                             let think_delta = extract_delta_text(delta, "reasoning_content");
                             if !think_delta.is_empty() {
                                 reasoning_content.push_str(&think_delta);
@@ -536,14 +582,25 @@ impl SingleProviderClient {
                                 });
                             }
 
-                            // 流式输出 content
+                            // 流式输出 content（经 <think> 标签过滤）
                             let content_delta = extract_delta_text(delta, "content");
                             if !content_delta.is_empty() {
-                                content.push_str(&content_delta);
-                                on_delta(&ModelStreamChunk {
-                                    content: content_delta,
-                                    reasoning_content: String::new(),
-                                });
+                                let (filtered_content, filtered_reasoning) =
+                                    think_filter.filter(&content_delta);
+                                if !filtered_reasoning.is_empty() {
+                                    reasoning_content.push_str(&filtered_reasoning);
+                                    on_delta(&ModelStreamChunk {
+                                        content: String::new(),
+                                        reasoning_content: filtered_reasoning,
+                                    });
+                                }
+                                if !filtered_content.is_empty() {
+                                    content.push_str(&filtered_content);
+                                    on_delta(&ModelStreamChunk {
+                                        content: filtered_content,
+                                        reasoning_content: String::new(),
+                                    });
+                                }
                             }
 
                             // 累积 tool_calls
@@ -574,6 +631,23 @@ impl SingleProviderClient {
                             }
                         }
                     }
+                }
+
+                // 刷出 <think> 过滤器缓冲区残留
+                let (flush_content, flush_reasoning) = think_filter.flush();
+                if !flush_reasoning.is_empty() {
+                    reasoning_content.push_str(&flush_reasoning);
+                    on_delta(&ModelStreamChunk {
+                        content: String::new(),
+                        reasoning_content: flush_reasoning,
+                    });
+                }
+                if !flush_content.is_empty() {
+                    content.push_str(&flush_content);
+                    on_delta(&ModelStreamChunk {
+                        content: flush_content,
+                        reasoning_content: String::new(),
+                    });
                 }
 
                 Ok::<_, async_openai::error::OpenAIError>((
@@ -1176,6 +1250,92 @@ fn push_stream_piece(
     text.push_str(&piece.content);
     reasoning_content.push_str(&piece.reasoning_content);
     *chunks += 1;
+}
+
+/// 流式 `<think>` 标签过滤器
+///
+/// 某些模型不使用 API 级别的 `reasoning_content` 字段，
+/// 而是在 `content` 中输出 `<think>...</think>` 标签。
+/// 此过滤器跨 chunk 追踪状态，将标签内的内容转移到 `reasoning_content`。
+struct ThinkTagFilter {
+    /// 是否处于 `<think>` 块内
+    inside_think: bool,
+    /// 部分匹配缓冲（可能跨 chunk 的标签片段）
+    buf: String,
+}
+
+impl ThinkTagFilter {
+    fn new() -> Self {
+        Self {
+            inside_think: false,
+            buf: String::new(),
+        }
+    }
+
+    /// 过滤输入的 content，返回 (正文内容, 思考内容)
+    fn filter(&mut self, input: &str) -> (String, String) {
+        let mut content = String::new();
+        let mut reasoning = String::new();
+
+        self.buf.push_str(input);
+
+        while !self.buf.is_empty() {
+            if self.inside_think {
+                // 在 <think> 块内，寻找 </think>
+                if let Some(pos) = self.buf.find("</think>") {
+                    reasoning.push_str(&self.buf[..pos]);
+                    self.buf = self.buf[pos + 8..].to_string();
+                    self.inside_think = false;
+                } else if self.buf.len() >= 8 && !self.buf.ends_with('<')
+                    && !self.buf.ends_with("</")
+                    && !self.buf.ends_with("</t")
+                    && !self.buf.ends_with("</th")
+                    && !self.buf.ends_with("</thi")
+                    && !self.buf.ends_with("</thin")
+                    && !self.buf.ends_with("</think")
+                {
+                    // 没有部分匹配前缀，全部输出为 reasoning
+                    reasoning.push_str(&self.buf);
+                    self.buf.clear();
+                } else {
+                    // 可能有部分 </think> 标签，保留缓冲等下一个 chunk
+                    break;
+                }
+            } else {
+                // 在正常内容中，寻找 <think>
+                if let Some(pos) = self.buf.find("<think>") {
+                    content.push_str(&self.buf[..pos]);
+                    self.buf = self.buf[pos + 7..].to_string();
+                    self.inside_think = true;
+                } else if self.buf.len() >= 7 && !self.buf.ends_with('<')
+                    && !self.buf.ends_with("<t")
+                    && !self.buf.ends_with("<th")
+                    && !self.buf.ends_with("<thi")
+                    && !self.buf.ends_with("<thin")
+                    && !self.buf.ends_with("<think")
+                {
+                    // 没有部分匹配前缀，全部输出为 content
+                    content.push_str(&self.buf);
+                    self.buf.clear();
+                } else {
+                    // 可能有部分 <think> 标签，保留缓冲
+                    break;
+                }
+            }
+        }
+
+        (content, reasoning)
+    }
+
+    /// 流结束时刷出缓冲区残留
+    fn flush(&mut self) -> (String, String) {
+        let remaining = std::mem::take(&mut self.buf);
+        if self.inside_think {
+            (String::new(), remaining)
+        } else {
+            (remaining, String::new())
+        }
+    }
 }
 
 fn should_skip_stream_payload(raw: &str) -> bool {
