@@ -17,6 +17,8 @@ use crate::model::ModelProviderConfig;
 #[serde(rename_all = "snake_case")]
 pub enum ModelCapability {
     Chat,
+    /// 轻量级文本模型（标题生成、意图分类等简单任务）
+    Lite,
     Multimodal,
     ImageGeneration,
     VideoGeneration,
@@ -29,6 +31,7 @@ impl ModelCapability {
     pub fn all() -> &'static [ModelCapability] {
         &[
             ModelCapability::Chat,
+            ModelCapability::Lite,
             ModelCapability::Multimodal,
             ModelCapability::ImageGeneration,
             ModelCapability::VideoGeneration,
@@ -41,6 +44,7 @@ impl ModelCapability {
     pub fn display_name(&self) -> &'static str {
         match self {
             ModelCapability::Chat => "对话",
+            ModelCapability::Lite => "轻量文本",
             ModelCapability::Multimodal => "多模态",
             ModelCapability::ImageGeneration => "图片生成",
             ModelCapability::VideoGeneration => "视频生成",
@@ -53,6 +57,7 @@ impl ModelCapability {
     pub fn intent_label(&self) -> &'static str {
         match self {
             ModelCapability::Chat => "SIMPLE",
+            ModelCapability::Lite => "LITE",
             ModelCapability::Multimodal => "MULTIMODAL",
             ModelCapability::ImageGeneration => "IMAGE",
             ModelCapability::VideoGeneration => "VIDEO",
@@ -67,6 +72,7 @@ impl ModelCapability {
             ModelCapability::Chat => {
                 "简单对话（问候、闲聊、知识问答、翻译、解释概念等不需要执行工具或命令的请求）"
             }
+            ModelCapability::Lite => "轻量文本任务（标题生成、意图分类等内部任务，不参与意图路由）",
             ModelCapability::Multimodal => "多模态请求（需要理解图片、音频等多种输入形式）",
             ModelCapability::ImageGeneration => "图片生成请求（用户要求生成、绘制、创作图片）",
             ModelCapability::VideoGeneration => "视频生成请求（用户要求生成、制作视频）",
@@ -353,6 +359,22 @@ impl ModelsConfig {
             }
         } else {
             ModelProviderConfig::from_env()
+        }
+    }
+
+    /// 从 lite routing 生成 ModelProviderConfig（未配置时回退到 chat）
+    pub fn to_lite_provider_config(&self) -> ModelProviderConfig {
+        if let Some(resolved) = self.resolve_for_capability(ModelCapability::Lite) {
+            ModelProviderConfig {
+                api_auth_token: resolved.api_key,
+                api_base_url: resolved.base_url,
+                api_timeout_ms: resolved.timeout_ms.to_string(),
+                api_model: resolved.model.clone(),
+                api_lite_model: resolved.model,
+            }
+        } else {
+            // 回退到 chat 配置
+            self.to_chat_provider_config()
         }
     }
 }

@@ -130,6 +130,7 @@ impl TiangongConfig {
 
         LlmConfig {
             chat: resolve(ModelCapability::Chat).unwrap_or_default(),
+            lite: resolve(ModelCapability::Lite),
             image_generation: resolve(ModelCapability::ImageGeneration),
             tts: resolve(ModelCapability::Tts),
             stt: resolve(ModelCapability::Stt),

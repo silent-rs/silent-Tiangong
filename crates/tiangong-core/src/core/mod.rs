@@ -762,14 +762,30 @@ fn build_engine_from_config(
             });
         });
 
-    RuntimeEngine::with_shared_trust_mode(
-        SingleProviderClient::new(model_config).with_on_retry(on_retry),
+    let mut engine = RuntimeEngine::with_shared_trust_mode(
+        SingleProviderClient::new(model_config).with_on_retry(on_retry.clone()),
         config.context_limit,
         agent_config,
         shared_trust_mode,
     )
     .with_models_config(models_config)
-    .with_core_config(config.clone())
+    .with_core_config(config.clone());
+
+    // 如果配置了独立的 lite 端点，构建 lite client
+    if let Some(ref lite_endpoint) = config.llm.lite {
+        let lite_config = crate::model::ModelProviderConfig {
+            api_auth_token: lite_endpoint.api_key.clone(),
+            api_base_url: lite_endpoint.base_url.clone(),
+            api_timeout_ms: lite_endpoint.timeout_ms.to_string(),
+            api_model: lite_endpoint.model.clone(),
+            api_lite_model: lite_endpoint.model.clone(),
+        };
+        engine = engine.with_lite_client(
+            SingleProviderClient::new(lite_config).with_on_retry(on_retry),
+        );
+    }
+
+    engine
 }
 
 /// 格式化工具调用参数摘要（用于 ToolStart 和 ApprovalNeeded 事件）
