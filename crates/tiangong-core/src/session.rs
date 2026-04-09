@@ -222,6 +222,31 @@ impl Session {
         }
     }
 
+    /// 将 session 持久化到 `~/.tiangong/sessions/{id}.json`
+    ///
+    /// Core 在工具调用等关键节点调用此方法，确保中间数据不会因崩溃丢失。
+    pub fn persist_to_disk(&self) {
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let sessions_dir = home.join(".tiangong").join("sessions");
+        if std::fs::create_dir_all(&sessions_dir).is_err() {
+            tracing::warn!("创建 sessions 目录失败");
+            return;
+        }
+        let path = sessions_dir.join(format!("{}.json", self.id));
+        match serde_json::to_string_pretty(self) {
+            Ok(content) => {
+                if let Err(err) = std::fs::write(&path, content) {
+                    tracing::warn!(error = %err, "session 持久化写入失败");
+                }
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "session 序列化失败");
+            }
+        }
+    }
+
     pub fn append_message(&mut self, role: MessageRole, content: impl Into<String>) {
         self.append_message_with_reasoning(role, content, String::new());
     }

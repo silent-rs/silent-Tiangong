@@ -13,12 +13,17 @@ use crate::completion;
 use crate::input::InputReader;
 use crate::output;
 
-pub fn run() -> Result<()> {
+pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<()> {
     let mut state = TiangongState::load_or_default();
     let app_config = load_tiangong_config();
     let config = app_config.into_core_config_provider();
     let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
     let core = TiangongCore::new(config, stream_tx);
+
+    // CLI --trust-mode 参数覆盖
+    if let Some(mode) = trust_mode {
+        core.set_trust_mode(mode);
+    }
     let mut reader = InputReader::new();
     let mut draft_new_session = true;
 
@@ -77,7 +82,7 @@ pub fn run() -> Result<()> {
         core.send_message(trimmed.to_string());
 
         // 处理响应流
-        handle_response(&stream_rx);
+        handle_response(&stream_rx, &core);
 
         output::separator();
     }
@@ -92,13 +97,13 @@ pub fn run() -> Result<()> {
 }
 
 /// 处理完整的响应流
-fn handle_response(rx: &mpsc::Receiver<SessionStreamEvent>) {
+fn handle_response(rx: &mpsc::Receiver<SessionStreamEvent>, core: &TiangongCore) {
     let mut state = ResponseState::new();
 
     loop {
         match rx.recv_timeout(std::time::Duration::from_secs(300)) {
             Ok(session_event) => {
-                if state.process(&session_event.event) {
+                if state.process(&session_event.event, core) {
                     break;
                 }
             }
@@ -130,7 +135,7 @@ impl ResponseState {
     }
 
     /// 处理单个事件，返回 true 表示本轮结束
-    fn process(&mut self, event: &StreamEvent) -> bool {
+    fn process(&mut self, event: &StreamEvent, core: &TiangongCore) -> bool {
         match event {
             StreamEvent::UserMessage { .. } => {
                 // CLI 模式下用户消息由 REPL 自己显示，忽略
@@ -175,8 +180,15 @@ impl ResponseState {
                 self.has_delta = false;
             }
 
-            StreamEvent::ToolStart { name, .. } => {
-                output::tool_start(name);
+            StreamEvent::ToolStart {
+                name,
+                args_summary,
+            } => {
+                if args_summary.is_empty() {
+                    output::tool_start(name);
+                } else {
+                    output::tool_start(&format!("{name} {args_summary}"));
+                }
             }
 
             StreamEvent::ToolResult { name, ok, output } => {
@@ -184,11 +196,32 @@ impl ResponseState {
             }
 
             StreamEvent::ApprovalNeeded {
+                request_id,
                 tool_name,
                 args_summary,
-                ..
             } => {
                 output::approval_needed(tool_name, args_summary);
+                // 等待用户输入 y/n
+                let approved = loop {
+                    eprint!("\x1b[1;33m  允许执行？(y/n): \x1b[0m");
+                    let mut buf = String::new();
+                    if std::io::stdin().read_line(&mut buf).is_err() {
+                        break false;
+                    }
+                    match buf.trim().to_lowercase().as_str() {
+                        "y" | "yes" => break true,
+                        "n" | "no" => break false,
+                        _ => {
+                            eprintln!("  请输入 y 或 n");
+                        }
+                    }
+                };
+                core.respond_approval(request_id.clone(), approved);
+                if approved {
+                    output::status("已允许");
+                } else {
+                    output::warn("已拒绝");
+                }
             }
 
             StreamEvent::Done { .. } => {

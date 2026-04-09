@@ -12,6 +12,7 @@ scru128 = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 async-openai = { git = "https://github.com/silent-rs/async-openai", branch = "main", package = "async-openai", features = ["byot", "chat-completion", "model"] }
+backoff = "0.4"
 tokio = { version = "1", features = ["rt", "time", "process", "io-util"] }
 rmcp = { version = "0.17.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }

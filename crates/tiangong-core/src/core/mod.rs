@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 
 use crate::agents::execution_mcp_agent::{McpFunctionTarget, execution_function_tools};
@@ -44,6 +45,8 @@ pub struct TiangongCore {
     worker: Option<JoinHandle<Session>>,
     /// 会话 ID
     session_id: String,
+    /// 独立的信任模式（共享引用，实时生效）
+    shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
 }
 
 impl TiangongCore {
@@ -59,15 +62,20 @@ impl TiangongCore {
         session: Session,
         stream_tx: Sender<SessionStreamEvent>,
     ) -> Self {
+        let initial_trust_mode = config.snapshot().trust_mode;
+        let shared_trust_mode = Arc::new(RwLock::new(initial_trust_mode));
         let session_id = session.id.clone();
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
 
-        let worker = thread::spawn(move || worker_loop(config, session, stream_tx, cmd_rx));
+        let worker_trust_mode = shared_trust_mode.clone();
+        let worker =
+            thread::spawn(move || worker_loop(config, session, stream_tx, cmd_rx, worker_trust_mode));
 
         Self {
             cmd_tx: Some(cmd_tx),
             worker: Some(worker),
             session_id,
+            shared_trust_mode,
         }
     }
 
@@ -94,6 +102,13 @@ impl TiangongCore {
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// 设置信任模式（实时生效，当前对话下一次工具调用立即感知）
+    pub fn set_trust_mode(&self, mode: crate::permission::TrustMode) {
+        if let Ok(mut guard) = self.shared_trust_mode.write() {
+            *guard = mode;
+        }
     }
 
     /// 关闭并获取最终 session
@@ -127,6 +142,7 @@ fn worker_loop(
     mut session: Session,
     external_tx: Sender<SessionStreamEvent>,
     cmd_rx: Receiver<Command>,
+    shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
 ) -> Session {
     let session_id = session.id.clone();
     let mut last_cfg_gen = 0u64;
@@ -165,7 +181,11 @@ fn worker_loop(
         let cfg_gen = config.generation();
         if engine.is_none() || cfg_gen != last_cfg_gen {
             let cfg = config.snapshot();
-            engine = Some(build_engine_from_config(&cfg, &stream_tx));
+            engine = Some(build_engine_from_config(
+                &cfg,
+                &stream_tx,
+                shared_trust_mode.clone(),
+            ));
             let e = engine.as_ref().unwrap();
             let (all_tools, new_mcp_targets) = execution_function_tools(&e.agent_config().mcp);
             let mut new_tools: Vec<FunctionToolSpec> = all_tools
@@ -243,6 +263,7 @@ pub(crate) fn execute_turn_standalone(
 /// 首先判断是否需要多代理并行执行，如需要则拆分并行；
 /// 否则走标准的 ReAct 循环。
 /// 每轮之间检查 cmd_rx：新消息注入上下文，cancel 立即生效。
+#[allow(clippy::too_many_arguments)]
 fn execute_turn(
     session: &mut Session,
     user_input: &str,
@@ -454,16 +475,102 @@ fn execute_turn_inner(
 
         // 执行工具
         for call in &response.tool_calls {
+            let args_summary = format_call_args_summary(call);
+
+            // 权限检查（在执行前完成，trust_mode 通过 shared Arc 实时生效）
+            use crate::permission::PermissionDecision;
+            let decision = engine.check_tool_permission(&call.name);
+            match decision {
+                PermissionDecision::Approved => {}
+                PermissionDecision::Denied { reason } => {
+                    let _ = stream_tx.send(StreamEvent::ToolResult {
+                        name: call.name.clone(),
+                        ok: false,
+                        output: format!("权限拒绝：{reason}"),
+                    });
+                    loop_context.push(Message {
+                        id: scru128::new().to_string(),
+                        role: MessageRole::System,
+                        content: format!("工具 {} 执行失败：权限拒绝 - {reason}", call.name),
+                        reasoning_content: String::new(),
+                        worker_id: None,
+                        created_at: now_text(),
+                    });
+                    continue;
+                }
+                PermissionDecision::NeedsApproval { request_id } => {
+                    // 发送审批请求
+                    let _ = stream_tx.send(StreamEvent::ApprovalNeeded {
+                        request_id: request_id.clone(),
+                        tool_name: call.name.clone(),
+                        args_summary: args_summary.clone(),
+                    });
+
+                    // 阻塞等待用户审批
+                    let approved = loop {
+                        match cmd_rx.recv() {
+                            Ok(Command::Approval {
+                                request_id: rid,
+                                approved,
+                            }) if rid == request_id => {
+                                break approved;
+                            }
+                            Ok(Command::Cancel) => {
+                                let _ = stream_tx.send(StreamEvent::Error {
+                                    message: "已取消".into(),
+                                });
+                                return accumulated_usage;
+                            }
+                            Ok(Command::Message(content)) => {
+                                session
+                                    .append_message(MessageRole::User, content.clone());
+                                loop_context.push(Message {
+                                    id: scru128::new().to_string(),
+                                    role: MessageRole::User,
+                                    content,
+                                    reasoning_content: String::new(),
+                                    worker_id: None,
+                                    created_at: now_text(),
+                                });
+                            }
+                            Ok(Command::Shutdown) => return accumulated_usage,
+                            _ => {}
+                        }
+                    };
+
+                    if !approved {
+                        let _ = stream_tx.send(StreamEvent::ToolResult {
+                            name: call.name.clone(),
+                            ok: false,
+                            output: "用户拒绝执行".to_string(),
+                        });
+                        session.append_message(
+                            MessageRole::System,
+                            format!("工具 {} 被用户拒绝执行", call.name),
+                        );
+                        loop_context.push(Message {
+                            id: scru128::new().to_string(),
+                            role: MessageRole::System,
+                            content: format!("工具 {} 被用户拒绝执行", call.name),
+                            reasoning_content: String::new(),
+                            worker_id: None,
+                            created_at: now_text(),
+                        });
+                        continue;
+                    }
+                }
+            }
+
             let _ = stream_tx.send(StreamEvent::ToolStart {
                 name: call.name.clone(),
-                summary: String::new(),
+                args_summary: args_summary.clone(),
             });
 
             let result =
                 engine.execute_tool_call(call, mcp_targets, &engine.agent_config().mcp);
 
             let _ = stream_tx.send(StreamEvent::ToolResult {
-                name: result.summary.clone(),
+                name: call.name.clone(),
                 ok: result.ok,
                 output: result.stdout.clone(),
             });
@@ -494,6 +601,9 @@ fn execute_turn_inner(
                 created_at: now_text(),
             });
         }
+
+        // 工具调用完成后增量持久化（防止崩溃丢失中间数据）
+        session.persist_to_disk();
 
         // 每轮之间检查用户命令（非阻塞）
         while let Ok(cmd) = cmd_rx.try_recv() {
@@ -621,9 +731,11 @@ fn force_final_response(
 /// 从 CoreConfig 快照构建 RuntimeEngine
 ///
 /// `stream_tx` 用于在 LLM 请求重试时发送 `StreamEvent::Retry` 通知。
+/// `shared_trust_mode` 是 TiangongCore 持有的独立信任模式，RuntimeEngine 共享此引用。
 fn build_engine_from_config(
     config: &crate::core_config::CoreConfig,
     stream_tx: &Sender<StreamEvent>,
+    shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
 ) -> RuntimeEngine {
     use crate::agent_config::AgentConfig;
     use crate::model::OnRetryCallback;
@@ -642,7 +754,7 @@ fn build_engine_from_config(
     // 构造重试回调：发送 StreamEvent::Retry 通知前端
     let retry_tx = stream_tx.clone();
     let on_retry: OnRetryCallback =
-        std::sync::Arc::new(move |attempt, max_attempts, _delay_ms, error_text| {
+        Arc::new(move |attempt, max_attempts, _delay_ms, error_text| {
             let _ = retry_tx.send(StreamEvent::Retry {
                 message: error_text.to_string(),
                 attempt,
@@ -650,11 +762,81 @@ fn build_engine_from_config(
             });
         });
 
-    RuntimeEngine::new(
+    RuntimeEngine::with_shared_trust_mode(
         SingleProviderClient::new(model_config).with_on_retry(on_retry),
         config.context_limit,
         agent_config,
+        shared_trust_mode,
     )
     .with_models_config(models_config)
     .with_core_config(config.clone())
+}
+
+/// 格式化工具调用参数摘要（用于 ToolStart 和 ApprovalNeeded 事件）
+fn format_call_args_summary(call: &crate::model::ModelFunctionCall) -> String {
+    use serde_json::Value;
+
+    let args = &call.arguments;
+    if !args.is_object() || args.as_object().is_none_or(|m| m.is_empty()) {
+        return String::new();
+    }
+
+    // run_command / run_shell 特殊处理：直接展示命令
+    if call.name == "run_command" || call.name == "run_shell" {
+        if let Some(cmd) = args.get("command").and_then(Value::as_str) {
+            return cmd.to_string();
+        }
+        // shell 脚本模式
+        if let Some(script) = args.get("script").and_then(Value::as_str) {
+            let shell = args
+                .get("shell")
+                .and_then(Value::as_str)
+                .unwrap_or("auto");
+            return format!("[{shell}] {script}");
+        }
+    }
+
+    // write_file 特殊处理
+    if call.name == "write_file"
+        && let Some(path) = args.get("path").and_then(Value::as_str)
+    {
+        let len = args
+            .get("content")
+            .and_then(Value::as_str)
+            .map(|c| c.len())
+            .unwrap_or(0);
+        return format!("{path} ({len} bytes)");
+    }
+
+    // read_file / list_directory
+    if (call.name == "read_file" || call.name == "list_directory")
+        && let Some(path) = args.get("path").and_then(Value::as_str)
+    {
+        return path.to_string();
+    }
+
+    // 通用：key=value 格式，截断长值（按字符截断，避免 UTF-8 边界 panic）
+    let obj = args.as_object().unwrap();
+    obj.iter()
+        .map(|(k, v)| {
+            let val = match v {
+                Value::String(s) if s.chars().count() > 80 => {
+                    let truncated: String = s.chars().take(77).collect();
+                    format!("{truncated}...")
+                }
+                Value::String(s) => s.clone(),
+                other => {
+                    let s = other.to_string();
+                    if s.chars().count() > 80 {
+                        let truncated: String = s.chars().take(77).collect();
+                        format!("{truncated}...")
+                    } else {
+                        s
+                    }
+                }
+            };
+            format!("{k}={val}")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }

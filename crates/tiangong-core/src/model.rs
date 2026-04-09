@@ -316,7 +316,7 @@ impl SingleProviderClient {
         let config = OpenAIConfig::new()
             .with_api_key(token.to_string())
             .with_api_base(api_base);
-        let client = OpenAIClient::with_config(config);
+        let client = build_no_retry_client(config);
         let mut request_json = serde_json::to_value(&request).context("序列化流式请求失败")?;
         inject_temperature_config(&mut request_json);
         inject_thinking_config(&mut request_json);
@@ -540,7 +540,7 @@ impl SingleProviderClient {
         let config = OpenAIConfig::new()
             .with_api_key(token.to_string())
             .with_api_base(api_base);
-        let client = OpenAIClient::with_config(config);
+        let client = build_no_retry_client(config);
         let mut request_json = serde_json::to_value(&request).context("序列化请求失败")?;
         inject_temperature_config(&mut request_json);
         inject_thinking_config(&mut request_json);
@@ -808,7 +808,7 @@ impl SingleProviderClient {
         let config = OpenAIConfig::new()
             .with_api_key(token.to_string())
             .with_api_base(api_base);
-        let client = OpenAIClient::with_config(config);
+        let client = build_no_retry_client(config);
 
         let runtime = TokioRuntimeBuilder::new_current_thread()
             .enable_all()
@@ -926,7 +926,7 @@ impl ModelClient for SingleProviderClient {
         let config = OpenAIConfig::new()
             .with_api_key(token.to_string())
             .with_api_base(api_base);
-        let client = OpenAIClient::with_config(config);
+        let client = build_no_retry_client(config);
         let mut request_json = serde_json::to_value(&request).context("序列化请求失败")?;
         inject_temperature_config(&mut request_json);
         inject_thinking_config(&mut request_json);
@@ -1027,7 +1027,7 @@ impl ModelClient for SingleProviderClient {
         let config = OpenAIConfig::new()
             .with_api_key(token.to_string())
             .with_api_base(api_base);
-        let client = OpenAIClient::with_config(config);
+        let client = build_no_retry_client(config);
         let mut request_json = serde_json::to_value(&request).context("序列化请求失败")?;
         inject_temperature_config(&mut request_json);
         inject_thinking_config(&mut request_json);
@@ -1231,6 +1231,21 @@ fn normalize_api_base(base_url: &str) -> Result<String> {
     let cleaned = trimmed.trim_end_matches('/');
     let cleaned = cleaned.strip_suffix("/chat/completions").unwrap_or(cleaned);
     Ok(cleaned.to_string())
+}
+
+/// 创建禁用内部 backoff 的 OpenAI 客户端
+///
+/// async-openai 默认有 ExponentialBackoff（最长 15 分钟）。
+/// 禁用后由 `with_retry` 统一管理重试，确保 StreamEvent::Retry 能正确触发。
+fn build_no_retry_client(config: OpenAIConfig) -> OpenAIClient<OpenAIConfig> {
+    // 设置极小的 max_elapsed_time 确保 async-openai 不做任何内部重试。
+    // Duration::ZERO 在 backoff 首次调用时 elapsed ≈ 0 可能仍允许 1 次重试，
+    // 使用 1ns 确保 elapsed > max_elapsed_time 立即停止。
+    let no_retry = backoff::ExponentialBackoff {
+        max_elapsed_time: Some(Duration::from_nanos(1)),
+        ..Default::default()
+    };
+    OpenAIClient::build(reqwest::Client::new(), config, no_retry)
 }
 
 fn build_sdk_error_hint(error_text: &str) -> String {

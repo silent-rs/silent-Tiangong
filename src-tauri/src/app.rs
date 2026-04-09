@@ -94,6 +94,39 @@ impl TiangongApp {
         cores.remove(session_id)
     }
 
+    /// 取消指定会话的执行
+    pub fn cancel_core(&self, session_id: &str) {
+        let cores = self.cores.lock().unwrap();
+        if let Some(core) = cores.get(session_id) {
+            core.cancel();
+        }
+    }
+
+    /// 向指定会话的 core 发送审批响应
+    pub fn respond_approval_to_core(
+        &self,
+        session_id: &str,
+        request_id: String,
+        approved: bool,
+    ) {
+        let cores = self.cores.lock().unwrap();
+        if let Some(core) = cores.get(session_id) {
+            core.respond_approval(request_id, approved);
+        }
+    }
+
+    /// 设置指定会话 core 的信任模式（实时生效）
+    pub fn set_core_trust_mode(
+        &self,
+        session_id: &str,
+        mode: tiangong_core::permission::TrustMode,
+    ) {
+        let cores = self.cores.lock().unwrap();
+        if let Some(core) = cores.get(session_id) {
+            core.set_trust_mode(mode);
+        }
+    }
+
     /// 检查 session 是否有活跃 core
     pub fn is_session_executing(&self, session_id: &str) -> bool {
         let cores = self.cores.lock().unwrap();

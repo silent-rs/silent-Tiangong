@@ -113,7 +113,7 @@ impl SpeechRecognizer for OpenAIWhisper {
             serde_json::from_str(&resp_text).with_context(|| {
                 format!(
                     "解析 Whisper 响应失败，原始响应：{}",
-                    &resp_text[..resp_text.len().min(500)]
+                    &resp_text.chars().take(500).collect::<String>()
                 )
             })?;
 

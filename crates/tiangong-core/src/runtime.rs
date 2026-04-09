@@ -160,7 +160,18 @@ impl RuntimeEngine {
         )
     }
 
+    /// 对工具进行权限检查（暴露给 core 层在执行前调用）
+    pub(crate) fn check_tool_permission(
+        &self,
+        tool_name: &str,
+    ) -> crate::permission::PermissionDecision {
+        self.permission_gate.check(tool_name)
+    }
+
     /// 执行单个工具调用（本地工具、MCP 工具、多媒体生成或后台任务）
+    ///
+    /// 注意：权限检查已由调用方（core/mod.rs）在执行前完成，
+    /// 此方法内部的权限检查改为仅 Denied 拦截，NeedsApproval 由调用方处理。
     pub(crate) fn execute_tool_call(
         &self,
         call: &ModelFunctionCall,
@@ -181,12 +192,8 @@ impl RuntimeEngine {
                     execution: None,
                 };
             }
-            PermissionDecision::NeedsApproval { request_id } => {
-                // Phase 3 中将改为暂停等待审批，当前在非 FullTrust 模式下记录日志并放行
-                tracing::info!(
-                    "权限审批请求 {request_id}：工具 {} 需要用户确认（当前自动放行）",
-                    call.name
-                );
+            PermissionDecision::NeedsApproval { .. } => {
+                // 审批已由调用方（core/mod.rs execute_turn_inner）完成，此处放行
             }
         }
 

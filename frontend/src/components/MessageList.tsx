@@ -28,6 +28,19 @@ import { api } from "@/api/tauri";
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
+/** 格式化消息时间（hover 显示） */
+function formatMessageTime(createdAt?: string): string {
+  if (!createdAt) return "";
+  try {
+    const d = new Date(createdAt);
+    if (isNaN(d.getTime())) return createdAt;
+    const pad = (n: number) => n.toString().padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  } catch {
+    return createdAt;
+  }
+}
+
 function MessageActions({ text, showTts }: { text: string; showTts: boolean }) {
   const [copied, setCopied] = useState(false);
   const [playing, setPlaying] = useState(false);
@@ -529,7 +542,7 @@ export function MessageList() {
               const voiceInfo = voiceMessages[message.id];
               return (
                 <div key={group.key} className="mt-3 first:mt-0">
-                  <div className="flex justify-end">
+                  <div className="flex justify-end" title={formatMessageTime(message.created_at)}>
                     <div className="max-w-[100%] text-muted-foreground">
                       {voiceInfo ? (
                         <VoiceBubble
@@ -717,8 +730,8 @@ function AgentTurn({
 
   // 将消息序列解析为渲染片段
   type Fragment =
-    | { type: "explanation"; text: string }
-    | { type: "thinking"; content: string }
+    | { type: "explanation"; text: string; time?: string }
+    | { type: "thinking"; content: string; time?: string }
     | { type: "tool_group"; key: string; brief: string; tools: MessageItem[] }
     | { type: "assistant"; msg: MessageItem; isStreaming: boolean }
     | { type: "error_system"; msg: MessageItem }
@@ -749,14 +762,14 @@ function AgentTurn({
       const reasoning = msg.reasoning_content?.trim() || "";
       if (reasoning && !shownReasonings.has(reasoning)) {
         shownReasonings.add(reasoning);
-        fragments.push({ type: "thinking", content: reasoning });
+        fragments.push({ type: "thinking", content: reasoning, time: msg.created_at });
       }
       // 提取解释文本
       const explanation = extractLlmExplanation(msg.content);
       if (explanation) {
-        fragments.push({ type: "explanation", text: explanation });
+        fragments.push({ type: "explanation", text: explanation, time: msg.created_at });
       }
-    } else if (msg.role === "System" && (msg.content.includes("tool_name:") || msg.content.includes("exit_code"))) {
+    } else if (msg.role === "System" && (msg.content.includes("tool_name:") || msg.content.includes("exit_code") || msg.content.startsWith("工具执行 ["))) {
       pendingTools.push(msg);
     } else if (msg.role === "Assistant") {
       flushTools();
@@ -771,7 +784,7 @@ function AgentTurn({
       const assistantReasoning = msg.reasoning_content?.trim() || "";
       if (assistantReasoning && !shownReasonings.has(assistantReasoning)) {
         shownReasonings.add(assistantReasoning);
-        fragments.push({ type: "thinking", content: assistantReasoning });
+        fragments.push({ type: "thinking", content: assistantReasoning, time: msg.created_at });
       }
       fragments.push({ type: "assistant", msg, isStreaming });
     } else if (msg.role === "System" && msg.content.startsWith("[错误]")) {
@@ -792,7 +805,7 @@ function AgentTurn({
     const meta = getSystemMessageMeta(tool.content);
     const expanded = expandedItems.has(tool.id);
     return (
-      <div key={tool.id}>
+      <div key={tool.id} title={formatMessageTime(tool.created_at)}>
         <button
           className="w-full flex items-center gap-2 px-2 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 transition-colors text-left"
           onClick={() => toggleItem(tool.id)}
@@ -815,19 +828,24 @@ function AgentTurn({
     <div className="space-y-1.5">
       {fragments.map((frag, i) => {
         if (frag.type === "thinking") {
-          return <ThinkingBlock key={`think-${i}`} content={frag.content} defaultExpanded={false} />;
+          return (
+            <div key={`think-${i}`} title={formatMessageTime(frag.time)}>
+              <ThinkingBlock content={frag.content} defaultExpanded={false} />
+            </div>
+          );
         }
         if (frag.type === "explanation") {
           return (
-            <p key={`expl-${i}`} className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap break-words">
+            <p key={`expl-${i}`} className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap break-words" title={formatMessageTime(frag.time)}>
               {frag.text}
             </p>
           );
         }
         if (frag.type === "tool_group") {
           const collapsed = collapsedToolGroups.has(frag.key);
+          const groupTime = frag.tools.length > 0 ? formatMessageTime(frag.tools[0].created_at) : "";
           return (
-            <div key={`tools-${frag.key}`}>
+            <div key={`tools-${frag.key}`} title={groupTime}>
               <button
                 className="flex items-center gap-2 px-2 py-0.5 text-xs text-muted-foreground hover:bg-muted/50 rounded transition-colors"
                 onClick={() => toggleToolGroup(frag.key)}
@@ -843,7 +861,7 @@ function AgentTurn({
         if (frag.type === "assistant") {
           const { msg, isStreaming } = frag;
           return (
-            <div key={msg.id} className="text-foreground">
+            <div key={msg.id} className="text-foreground" title={formatMessageTime(msg.created_at)}>
               {isStreaming ? (
                 <TypingMessage content={streamingContent} reasoningContent={_streamingReasoningContent} speed={300} />
               ) : (
@@ -892,14 +910,17 @@ function getSystemMessageMeta(content: string) {
     const label = match ? match[1] : "LLM";
     return { icon: Cpu, label, summary: content.split("\n")[0] };
   }
-  if (content.includes("tool_name:") || content.includes("exit_code")) {
-    const nameMatch = content.match(/tool_name:\s*(\S+)/);
-    const codeMatch = content.match(/exit_code=(\d+)/);
+  if (content.includes("tool_name:") || content.includes("exit_code") || content.startsWith("工具执行 [")) {
+    const nameMatch = content.match(/tool_name:\s*(\S+)/) || content.match(/^工具执行 \[(.+?)\]/);
     const okMatch = content.match(/ok=(\w+)/);
+    const cmdMatch = content.match(/命令:\s*(.+)/);
     const parts = [];
     if (nameMatch) parts.push(nameMatch[1]);
-    if (codeMatch) parts.push(`exit=${codeMatch[1]}`);
     if (okMatch) parts.push(okMatch[1] === "true" ? "OK" : "FAIL");
+    if (cmdMatch) {
+      const cmd = cmdMatch[1];
+      parts.push(cmd.length > 60 ? cmd.slice(0, 57) + "..." : cmd);
+    }
     return {
       icon: Terminal,
       label: "工具执行",

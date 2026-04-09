@@ -20,7 +20,11 @@ pub(crate) enum MainCommand {
     #[command(about = "启动桌面 UI")]
     Ui,
     #[command(about = "启动 CLI 模式")]
-    Cli,
+    Cli {
+        /// 信任模式（full_trust / supervised）
+        #[arg(long = "trust-mode", value_enum, help = "强制指定信任模式")]
+        trust_mode: Option<TrustModeArg>,
+    },
     #[command(about = "启动 Server 模式")]
     Server(ServerArgs),
     #[command(about = "MCP 配置管理")]
@@ -45,6 +49,9 @@ pub(crate) struct ServerArgs {
     /// 后台运行
     #[arg(short, long, help = "后台运行")]
     pub(crate) daemon: bool,
+    /// 信任模式
+    #[arg(long = "trust-mode", value_enum, help = "强制指定信任模式")]
+    pub(crate) trust_mode: Option<TrustModeArg>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -63,6 +70,23 @@ pub(crate) struct McpArgs {
 pub(crate) struct SkillArgs {
     #[command(subcommand)]
     pub(crate) command: SkillSubcommand,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(crate) enum TrustModeArg {
+    /// 完全信任（工具自动执行，无审批）
+    FullTrust,
+    /// 监督模式（高风险工具需要用户审批）
+    Supervised,
+}
+
+impl TrustModeArg {
+    pub(crate) fn to_trust_mode(self) -> tiangong_core::permission::TrustMode {
+        match self {
+            TrustModeArg::FullTrust => tiangong_core::permission::TrustMode::FullTrust,
+            TrustModeArg::Supervised => tiangong_core::permission::TrustMode::Supervised,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
