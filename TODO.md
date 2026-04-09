@@ -363,6 +363,28 @@
 
 ---
 
+## Phase 13.5：LLM 请求容错 — **当前阶段**
+
+### A. LLM 请求重试机制
+- [x] 在 `model.rs` 中实现通用重试包装函数（指数退避，默认 3 次，初始 1s，×2）
+- [x] 识别可重试错误类型（429 速率限制、5xx 服务端错误、连接错误）
+- [x] 应用到所有 LLM 调用方法（complete / complete_stream / complete_with_functions / complete_with_functions_stream / complete_lite）
+- [x] 重试过程通过 `tracing::warn!` 记录日志
+
+### B. 错误与重试通知到前端
+- [x] `StreamEvent::Retry` 新增变体，重试时推送到前端
+- [x] `StreamEvent::Error` 错误信息写入 session 消息，前端可见
+- [x] GUI 前端错误消息红色醒目渲染、重试消息黄色提示渲染
+- [x] CLI 重试时输出黄色警告信息
+- [x] 底部状态栏显示重试进度和错误详情
+
+### C. 验证
+- [x] `cargo check --workspace` 通过
+- [x] `cargo clippy` 通过（tiangong-core / cli / types 零警告）
+- [x] `yarn build` 通过
+
+---
+
 ## Phase 14：CoreConfig 配置注入 — **当前阶段**
 
 > RFC：`docs/rfc/0006-core-config-provider.md`

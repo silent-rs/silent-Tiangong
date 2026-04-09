@@ -165,7 +165,7 @@ fn worker_loop(
         let cfg_gen = config.generation();
         if engine.is_none() || cfg_gen != last_cfg_gen {
             let cfg = config.snapshot();
-            engine = Some(build_engine_from_config(&cfg));
+            engine = Some(build_engine_from_config(&cfg, &stream_tx));
             let e = engine.as_ref().unwrap();
             let (all_tools, new_mcp_targets) = execution_function_tools(&e.agent_config().mcp);
             let mut new_tools: Vec<FunctionToolSpec> = all_tools
@@ -619,8 +619,14 @@ fn force_final_response(
 }
 
 /// 从 CoreConfig 快照构建 RuntimeEngine
-fn build_engine_from_config(config: &crate::core_config::CoreConfig) -> RuntimeEngine {
+///
+/// `stream_tx` 用于在 LLM 请求重试时发送 `StreamEvent::Retry` 通知。
+fn build_engine_from_config(
+    config: &crate::core_config::CoreConfig,
+    stream_tx: &Sender<StreamEvent>,
+) -> RuntimeEngine {
     use crate::agent_config::AgentConfig;
+    use crate::model::OnRetryCallback;
     use crate::models_config::ModelsConfig;
 
     // 从 LlmConfig 构建兼容的 ModelsConfig（供 PromptAssembler 等旧代码使用）
@@ -633,8 +639,19 @@ fn build_engine_from_config(config: &crate::core_config::CoreConfig) -> RuntimeE
         trust_mode: config.trust_mode,
     };
 
+    // 构造重试回调：发送 StreamEvent::Retry 通知前端
+    let retry_tx = stream_tx.clone();
+    let on_retry: OnRetryCallback =
+        std::sync::Arc::new(move |attempt, max_attempts, _delay_ms, error_text| {
+            let _ = retry_tx.send(StreamEvent::Retry {
+                message: error_text.to_string(),
+                attempt,
+                max_attempts,
+            });
+        });
+
     RuntimeEngine::new(
-        SingleProviderClient::new(model_config),
+        SingleProviderClient::new(model_config).with_on_retry(on_retry),
         config.context_limit,
         agent_config,
     )
