@@ -115,6 +115,14 @@ impl TiangongApp {
         }
     }
 
+    /// 设置所有活跃 core 的信任模式（全局生效）
+    pub fn set_all_cores_trust_mode(&self, mode: tiangong_core::permission::TrustMode) {
+        let cores = self.cores.lock().unwrap();
+        for core in cores.values() {
+            core.set_trust_mode(mode);
+        }
+    }
+
     /// 设置指定会话 core 的信任模式（实时生效）
     pub fn set_core_trust_mode(
         &self,
