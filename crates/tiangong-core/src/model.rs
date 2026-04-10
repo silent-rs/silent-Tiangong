@@ -850,13 +850,15 @@ impl SingleProviderClient {
             }
         };
 
-        let text = resp
+        let raw_text = resp
             .choices
             .first()
             .and_then(|choice| choice.message.content.as_deref())
             .unwrap_or("")
-            .trim()
-            .to_string();
+            .trim();
+
+        // 清理 <think>...</think> 标签（部分模型忽略 thinking.disabled 配置）
+        let text = strip_think_tags(raw_text).trim().to_string();
 
         if text.is_empty() {
             warn!(
@@ -1476,6 +1478,26 @@ impl ThinkTagFilter {
             (remaining, String::new())
         }
     }
+}
+
+/// 清理非流式响应中的 `<think>...</think>` 标签
+///
+/// 部分模型即使设置了 `thinking.type=disabled`，仍在 content 中输出 `<think>` 标签。
+/// 此函数移除所有 `<think>...</think>` 块，返回纯文本内容。
+fn strip_think_tags(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut remaining = text;
+    while let Some(start) = remaining.find("<think>") {
+        result.push_str(&remaining[..start]);
+        if let Some(end) = remaining[start..].find("</think>") {
+            remaining = &remaining[start + end + 8..];
+        } else {
+            // 没有闭合标签，丢弃从 <think> 开始的所有内容
+            return result;
+        }
+    }
+    result.push_str(remaining);
+    result
 }
 
 fn should_skip_stream_payload(raw: &str) -> bool {
