@@ -872,9 +872,7 @@ function AgentTurn({
                     </ReactMarkdown>
                   </div>
                 </div>
-              ) : (
-                <p className="text-xs text-muted-foreground italic">（模型未返回文本回复，请继续对话）</p>
-              )}
+              ) : null}
               {!isStreaming && msg.content && <MessageActions text={msg.content} showTts={hasTts} />}
             </div>
           );
