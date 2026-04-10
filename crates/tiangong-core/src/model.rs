@@ -815,12 +815,11 @@ impl SingleProviderClient {
 
         let mut request_json =
             serde_json::to_value(&request).context("序列化轻量级请求失败")?;
-        // 显式关闭 thinking 模式
+        // 不发送 thinking 字段——各 API 对该字段处理不一致：
+        // OpenAI 支持 thinking.type=disabled，MiniMax/DeepSeek 不认识会返回 400。
+        // 模型可能仍在 content 中输出 <think> 标签，由 strip_think_tags 兜底清理。
         if let Some(obj) = request_json.as_object_mut() {
-            obj.insert(
-                "thinking".to_string(),
-                serde_json::json!({ "type": "disabled" }),
-            );
+            obj.remove("thinking");
         }
         let chat = client.chat();
         let response = runtime.block_on(async {
