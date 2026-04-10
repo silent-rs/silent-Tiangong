@@ -6,8 +6,8 @@ use async_openai::Client as OpenAIClient;
 use async_openai::config::OpenAIConfig;
 use async_openai::types::chat::{
     ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
-    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs, ChatThinking,
-    ChatThinkingType, CreateChatCompletionRequestArgs, CreateChatCompletionResponse,
+    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
+    CreateChatCompletionRequestArgs, CreateChatCompletionResponse,
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -798,10 +798,6 @@ impl SingleProviderClient {
             .max_tokens(30u16)
             .temperature(0.3f32)
             .stream(false)
-            .thinking(ChatThinking {
-                r#type: Some(ChatThinkingType::Disabled),
-                clear_thinking: None,
-            })
             .build()
             .context("构建轻量级请求失败")?;
 
@@ -815,8 +811,12 @@ impl SingleProviderClient {
             .build()
             .context("初始化异步运行时失败")?;
 
-        let request_json =
+        let mut request_json =
             serde_json::to_value(&request).context("序列化轻量级请求失败")?;
+        // 轻量级请求不发送 thinking 字段（避免不支持的 API 返回 400）
+        if let Some(obj) = request_json.as_object_mut() {
+            obj.remove("thinking");
+        }
         let chat = client.chat();
         let response = runtime.block_on(async {
             timeout(
