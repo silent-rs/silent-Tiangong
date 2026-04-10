@@ -3,7 +3,7 @@ use std::fs;
 use anyhow::{Context, Result, anyhow};
 
 use super::common::{
-    display_rel_path, resolve_workspace_path, resolve_workspace_path_trusted, truncate_output,
+    display_rel_path, resolve_workspace_path, resolve_workspace_path_trusted,
 };
 use super::{LocalToolExecutor, ToolCall, ToolResult};
 
@@ -41,7 +41,7 @@ impl LocalToolExecutor {
         Ok(ToolResult {
             ok: true,
             summary: format!("目录列表：{}", display_rel_path(&full_path)),
-            stdout: truncate_output(&items.join("\n")),
+            stdout: items.join("\n"),
             stderr: String::new(),
             exit_code: 0,
             execution: None,

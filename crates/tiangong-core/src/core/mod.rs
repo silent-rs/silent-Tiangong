@@ -626,15 +626,12 @@ fn execute_turn_inner(
             // 记录到 session
             session.append_message(MessageRole::System, format_tool_trace_message(&result));
 
-            // 记录到 loop_context
+            // 记录到 loop_context（完整内容，截断由上下文压缩器处理）
             let feedback = format!(
                 "工具 {} 执行{}：{}",
                 call.name,
                 if result.ok { "成功" } else { "失败" },
-                if result.stdout.chars().count() > 2000 {
-                    let truncated: String = result.stdout.chars().take(2000).collect();
-                    format!("{truncated}...(截断)")
-                } else if result.stdout.is_empty() {
+                if result.stdout.is_empty() {
                     result.summary.clone()
                 } else {
                     result.stdout.clone()

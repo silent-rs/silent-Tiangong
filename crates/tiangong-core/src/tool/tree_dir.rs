@@ -4,7 +4,7 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow};
 
 use super::common::{
-    display_rel_path, resolve_workspace_path, resolve_workspace_path_trusted, truncate_output,
+    display_rel_path, resolve_workspace_path, resolve_workspace_path_trusted,
 };
 use super::{LocalToolExecutor, ToolCall, ToolResult};
 
@@ -54,7 +54,7 @@ impl LocalToolExecutor {
                 "目录树：{} (max_depth={max_depth})",
                 display_rel_path(&full_path)
             ),
-            stdout: truncate_output(&lines.join("\n")),
+            stdout: lines.join("\n"),
             stderr: String::new(),
             exit_code: 0,
             execution: None,
