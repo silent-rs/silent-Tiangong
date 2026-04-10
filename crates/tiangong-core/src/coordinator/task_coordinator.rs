@@ -177,6 +177,7 @@ impl TaskCoordinator {
                         // 创建干净的 Worker 会话（只保留 cwd）
                         let mut worker_session = Session::new(&task.objective);
                         worker_session.cwd = session.cwd.clone();
+                        worker_session.ephemeral = true; // Worker session 不落盘
 
                         let worker_budget = WorkerBudget {
                             max_tokens: WorkerBudget::default().max_tokens,
