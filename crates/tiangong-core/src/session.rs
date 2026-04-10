@@ -45,9 +45,9 @@ pub struct Session {
     pub summary_up_to: usize,
     pub created_at: String,
     pub updated_at: String,
-    /// 临时会话标记（Worker 等临时 session 不落盘）
-    #[serde(default, skip_serializing)]
-    pub ephemeral: bool,
+    /// 父会话 ID（Worker 子会话标注所属的父会话）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
 }
 
 /// 待审批请求记录（存储在独立的 approval_store 中）
@@ -192,7 +192,7 @@ impl Session {
             summary_up_to: 0,
             created_at: now.clone(),
             updated_at: now,
-            ephemeral: false,
+            parent_session_id: None,
         }
     }
 
@@ -218,7 +218,7 @@ impl Session {
             summary_up_to: 0,
             created_at: now.clone(),
             updated_at: now,
-            ephemeral: false,
+            parent_session_id: None,
         }
     }
 
@@ -226,9 +226,6 @@ impl Session {
     ///
     /// Core 在工具调用等关键节点调用此方法，确保中间数据不会因崩溃丢失。
     pub fn persist_to_disk(&self) {
-        if self.ephemeral {
-            return;
-        }
         let home = std::env::var_os("HOME")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from("."));
