@@ -815,9 +815,12 @@ impl SingleProviderClient {
 
         let mut request_json =
             serde_json::to_value(&request).context("序列化轻量级请求失败")?;
-        // 轻量级请求不发送 thinking 字段（避免不支持的 API 返回 400）
+        // 显式关闭 thinking 模式
         if let Some(obj) = request_json.as_object_mut() {
-            obj.remove("thinking");
+            obj.insert(
+                "thinking".to_string(),
+                serde_json::json!({ "type": "disabled" }),
+            );
         }
         let chat = client.chat();
         let response = runtime.block_on(async {
