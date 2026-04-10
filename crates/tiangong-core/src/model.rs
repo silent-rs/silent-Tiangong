@@ -815,21 +815,37 @@ impl SingleProviderClient {
 
         let mut request_json =
             serde_json::to_value(&request).context("序列化轻量级请求失败")?;
-        // 不发送 thinking 字段——各 API 对该字段处理不一致：
-        // OpenAI 支持 thinking.type=disabled，MiniMax/DeepSeek 不认识会返回 400。
-        // 模型可能仍在 content 中输出 <think> 标签，由 strip_think_tags 兜底清理。
+        // 显式关闭 thinking（GLM/DeepSeek 支持，MiniMax 等不支持）
         if let Some(obj) = request_json.as_object_mut() {
-            obj.remove("thinking");
+            obj.insert(
+                "thinking".to_string(),
+                serde_json::json!({ "type": "disabled" }),
+            );
         }
         let chat = client.chat();
         let response = runtime.block_on(async {
-            timeout(
+            let result = timeout(
                 Duration::from_millis(timeout_ms),
                 with_retry("轻量级模型", &self.on_retry, || {
                     chat.create_byot::<_, CreateChatCompletionResponse>(request_json.clone())
                 }),
             )
-            .await
+            .await;
+
+            // 如果带 thinking 字段请求失败（API 不支持），去掉 thinking 重试
+            if matches!(&result, Ok(Err(_))) {
+                let mut fallback_json = request_json.clone();
+                if let Some(obj) = fallback_json.as_object_mut() {
+                    obj.remove("thinking");
+                }
+                tracing::info!("轻量级模型请求失败，去掉 thinking 字段重试");
+                return timeout(
+                    Duration::from_millis(timeout_ms),
+                    chat.create_byot::<_, CreateChatCompletionResponse>(fallback_json),
+                )
+                .await;
+            }
+            result
         });
 
         let resp = match response {
