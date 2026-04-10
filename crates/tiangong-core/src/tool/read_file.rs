@@ -3,7 +3,7 @@ use std::fs;
 use anyhow::{Context, Result, anyhow};
 
 use super::common::{
-    display_rel_path, resolve_workspace_path, resolve_workspace_path_trusted, truncate_output,
+    display_rel_path, resolve_workspace_path, resolve_workspace_path_trusted,
 };
 use super::{LocalToolExecutor, ToolCall, ToolResult};
 
@@ -55,7 +55,8 @@ impl LocalToolExecutor {
             .map(|(idx, line)| format!("{:>6}\t{}", start_idx + idx + 1, line))
             .collect::<Vec<_>>()
             .join("\n");
-        let stdout = truncate_output(&selected);
+        // 文件内容完整返回给 LLM，不截断（截断由 LLM 通过 start_line/max_lines 参数控制）
+        let stdout = selected;
 
         Ok(ToolResult {
             ok: true,

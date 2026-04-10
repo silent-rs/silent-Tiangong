@@ -4,7 +4,7 @@ use anyhow::{Context, Result, anyhow};
 
 use super::common::{
     command_timeout_ms, execute_command_with_timeout, resolve_workspace_path,
-    resolve_workspace_path_trusted, truncate_output, workspace_root,
+    resolve_workspace_path_trusted, workspace_root,
 };
 use super::{LocalToolExecutor, ToolCall, ToolResult};
 
@@ -63,8 +63,8 @@ impl LocalToolExecutor {
         } else {
             output.status.code().unwrap_or(-1)
         };
-        let stdout = truncate_output(&String::from_utf8_lossy(&output.stdout));
-        let stderr = truncate_output(&String::from_utf8_lossy(&output.stderr));
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let ok = !timed_out && (output.status.success() || exit_code == 1);
         let summary = if timed_out {
             format!("代码检索超时：pattern={pattern} (timeout_ms={timeout_ms})")

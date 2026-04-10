@@ -489,7 +489,12 @@ pub fn set_trust_mode(mode: String, state: State<TiangongApp>) -> Result<(), Str
     // 更新 TiangongState（持久化）
     state.with_state(|core_state| core_state.set_trust_mode(trust_mode))?;
 
-    // 实时更新当前活跃 core 的信任模式（立即生效）
+    // 更新 CoreConfigProvider（新会话创建时的默认值）
+    state.config.update(|c| {
+        c.trust_mode = trust_mode;
+    });
+
+    // 只更新当前活跃会话的 core（session 级别）
     let session_id =
         state.with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))?;
     state.set_core_trust_mode(&session_id, trust_mode);

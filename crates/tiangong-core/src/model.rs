@@ -6,8 +6,8 @@ use async_openai::Client as OpenAIClient;
 use async_openai::config::OpenAIConfig;
 use async_openai::types::chat::{
     ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
-    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs, ChatThinking,
-    ChatThinkingType, CreateChatCompletionRequestArgs, CreateChatCompletionResponse,
+    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
+    CreateChatCompletionRequestArgs, CreateChatCompletionResponse,
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -792,16 +792,14 @@ impl SingleProviderClient {
         ];
 
         let mut request_args_binding = CreateChatCompletionRequestArgs::default();
+        // max_tokens 设大一些：模型可能先输出 <think> 再输出标题，
+        // 过小会导致 thinking 耗光 token 而标题截断
         let request = request_args_binding
             .model(model.to_string())
             .messages(messages)
-            .max_tokens(30u16)
+            .max_tokens(200u16)
             .temperature(0.3f32)
             .stream(false)
-            .thinking(ChatThinking {
-                r#type: Some(ChatThinkingType::Disabled),
-                clear_thinking: None,
-            })
             .build()
             .context("构建轻量级请求失败")?;
 
@@ -815,17 +813,39 @@ impl SingleProviderClient {
             .build()
             .context("初始化异步运行时失败")?;
 
-        let request_json =
+        let mut request_json =
             serde_json::to_value(&request).context("序列化轻量级请求失败")?;
+        // 显式关闭 thinking（GLM/DeepSeek 支持，MiniMax 等不支持）
+        if let Some(obj) = request_json.as_object_mut() {
+            obj.insert(
+                "thinking".to_string(),
+                serde_json::json!({ "type": "disabled" }),
+            );
+        }
         let chat = client.chat();
         let response = runtime.block_on(async {
-            timeout(
+            let result = timeout(
                 Duration::from_millis(timeout_ms),
                 with_retry("轻量级模型", &self.on_retry, || {
                     chat.create_byot::<_, CreateChatCompletionResponse>(request_json.clone())
                 }),
             )
-            .await
+            .await;
+
+            // 如果带 thinking 字段请求失败（API 不支持），去掉 thinking 重试
+            if matches!(&result, Ok(Err(_))) {
+                let mut fallback_json = request_json.clone();
+                if let Some(obj) = fallback_json.as_object_mut() {
+                    obj.remove("thinking");
+                }
+                tracing::info!("轻量级模型请求失败，去掉 thinking 字段重试");
+                return timeout(
+                    Duration::from_millis(timeout_ms),
+                    chat.create_byot::<_, CreateChatCompletionResponse>(fallback_json),
+                )
+                .await;
+            }
+            result
         });
 
         let resp = match response {
@@ -850,13 +870,15 @@ impl SingleProviderClient {
             }
         };
 
-        let text = resp
+        let raw_text = resp
             .choices
             .first()
             .and_then(|choice| choice.message.content.as_deref())
             .unwrap_or("")
-            .trim()
-            .to_string();
+            .trim();
+
+        // 清理 <think>...</think> 标签（部分模型忽略 thinking.disabled 配置）
+        let text = strip_think_tags(raw_text).trim().to_string();
 
         if text.is_empty() {
             warn!(
@@ -1476,6 +1498,26 @@ impl ThinkTagFilter {
             (remaining, String::new())
         }
     }
+}
+
+/// 清理非流式响应中的 `<think>...</think>` 标签
+///
+/// 部分模型即使设置了 `thinking.type=disabled`，仍在 content 中输出 `<think>` 标签。
+/// 此函数移除所有 `<think>...</think>` 块，返回纯文本内容。
+fn strip_think_tags(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut remaining = text;
+    while let Some(start) = remaining.find("<think>") {
+        result.push_str(&remaining[..start]);
+        if let Some(end) = remaining[start..].find("</think>") {
+            remaining = &remaining[start + end + 8..];
+        } else {
+            // 没有闭合标签，丢弃从 <think> 开始的所有内容
+            return result;
+        }
+    }
+    result.push_str(remaining);
+    result
 }
 
 fn should_skip_stream_payload(raw: &str) -> bool {

@@ -177,6 +177,7 @@ impl TaskCoordinator {
                         // 创建干净的 Worker 会话（只保留 cwd）
                         let mut worker_session = Session::new(&task.objective);
                         worker_session.cwd = session.cwd.clone();
+                        worker_session.parent_session_id = Some(session.id.clone());
 
                         let worker_budget = WorkerBudget {
                             max_tokens: WorkerBudget::default().max_tokens,
