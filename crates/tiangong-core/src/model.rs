@@ -792,10 +792,12 @@ impl SingleProviderClient {
         ];
 
         let mut request_args_binding = CreateChatCompletionRequestArgs::default();
+        // max_tokens 设大一些：模型可能先输出 <think> 再输出标题，
+        // 过小会导致 thinking 耗光 token 而标题截断
         let request = request_args_binding
             .model(model.to_string())
             .messages(messages)
-            .max_tokens(30u16)
+            .max_tokens(200u16)
             .temperature(0.3f32)
             .stream(false)
             .build()
