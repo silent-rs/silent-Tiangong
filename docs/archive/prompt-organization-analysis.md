@@ -236,7 +236,7 @@ attachment 层解决了三个问题：
 - agent 列表不再长期嵌在 AgentTool 描述里，而改走 attachment delta
 - skill 列表不直接膨胀为常驻 prompt，而是按预算输出、按会话增量发送
 
-这个思路很重要：  
+这个思路很重要：
 **高波动内容不要放在 cache-critical 的 prompt 主干里。**
 
 ## 9. 第六层：工具 Prompt 与 Tool Schema 的组织方式
@@ -366,7 +366,7 @@ compact prompt 的目标不是生成“简短摘要”，而是生成“可恢�
 
 ### 13.1 为什么稳定性这么重要
 
-在这个项目里，prompt 很长，工具和 system prompt 都可能非常重。  
+在这个项目里，prompt 很长，工具和 system prompt 都可能非常重。
 一旦 cache miss，成本和延迟都会显著上升。
 
 所以很多 prompt 组织手法，表面是在“整理结构”，本质是在“保护 cache key”。
@@ -496,7 +496,7 @@ sequenceDiagram
 
 ### 16.3 prompt 组织必须考虑 cache key
 
-对于长会话和 agent 系统，prompt 结构设计本质上是性能设计。  
+对于长会话和 agent 系统，prompt 结构设计本质上是性能设计。
 只从“语义清晰”角度写 prompt，通常不够。
 
 ### 16.4 prompt 的难点不是首轮，而是多轮稳定运行

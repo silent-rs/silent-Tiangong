@@ -2,6 +2,6 @@
 
 pub mod app;
 pub mod commands;
-pub mod types;
+pub mod view;
 
 pub use app::TiangongApp;

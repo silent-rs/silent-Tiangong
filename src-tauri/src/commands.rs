@@ -1,5 +1,5 @@
 use crate::app::TiangongApp;
-use crate::types::*;
+use crate::view::*;
 use std::path::PathBuf;
 use std::thread;
 use tauri::{AppHandle, Emitter, Manager, State, Window};
@@ -61,6 +61,20 @@ fn accumulate_usage(
     }
 }
 
+fn parse_model_capability(
+    capability: &str,
+) -> Result<tiangong_core::models_config::ModelCapability, String> {
+    tiangong_core::models_config::ModelCapability::from_key(capability)
+        .ok_or_else(|| format!("不支持的能力类型：{capability}"))
+}
+
+fn has_capability_in_state(
+    core_state: &tiangong_core::app_state::TiangongState,
+    capability: tiangong_core::models_config::ModelCapability,
+) -> bool {
+    core_state.models_config().has_capability(capability)
+}
+
 // ============================================================================
 // 辅助函数：构建完整的 RunSnapshot
 // ============================================================================
@@ -68,7 +82,7 @@ fn accumulate_usage(
 fn build_full_snapshot_with_status(
     core_state: &tiangong_core::app_state::TiangongState,
     is_executing: bool,
-) -> RunSnapshot {
+) -> RunSnapshotView {
     let sid = core_state.active_session_id();
     build_session_snapshot(core_state, sid, is_executing)
 }
@@ -77,15 +91,15 @@ fn build_session_snapshot(
     core_state: &tiangong_core::app_state::TiangongState,
     session_id: &str,
     is_session_executing: bool,
-) -> RunSnapshot {
+) -> RunSnapshotView {
     let core_snapshot = core_state.run_snapshot();
     let input_draft = core_state.input_draft().to_string();
 
-    let messages: Vec<Message> = core_state
+    let messages: Vec<tiangong_types::Message> = core_state
         .sessions()
         .iter()
         .find(|s| s.id == session_id)
-        .map(|s| s.messages.iter().map(Message::from_core).collect())
+        .map(|s| s.messages.clone())
         .unwrap_or_default();
 
     let current_plan = core_state
@@ -95,7 +109,7 @@ fn build_session_snapshot(
 
     let pending_session_ids = core_state.pending_session_ids();
 
-    let mut snapshot = RunSnapshot::from_core_with_session(
+    let mut snapshot = RunSnapshotView::from_core_with_session(
         core_snapshot,
         messages,
         input_draft,
@@ -107,12 +121,12 @@ fn build_session_snapshot(
     if is_session_executing {
         // 该 session 有活跃的 TiangongCore
         if snapshot.last_session_id.as_deref() != Some(session_id) {
-            snapshot.status = "executing".to_string();
+            snapshot.status = tiangong_types::RunStatus::Executing;
             snapshot.summary = "正在处理".to_string();
         }
     } else {
         // 该 session 没有活跃 core → idle
-        snapshot.status = "idle".to_string();
+        snapshot.status = tiangong_types::RunStatus::Idle;
         snapshot.current_plan = None;
     }
 
@@ -125,25 +139,25 @@ fn build_session_snapshot(
 
 /// 获取所有会话列表
 #[tauri::command]
-pub fn get_sessions(state: State<TiangongApp>) -> Result<Vec<Session>, String> {
+pub fn get_sessions(state: State<TiangongApp>) -> Result<Vec<SessionListItem>, String> {
     state.with_state_read(|core_state| {
         Ok(core_state
             .sessions()
             .iter()
-            .map(Session::from_core)
+            .map(SessionListItem::from_core)
             .collect())
     })
 }
 
 /// 创建新会话
 #[tauri::command]
-pub fn create_session(state: State<TiangongApp>) -> Result<Session, String> {
+pub fn create_session(state: State<TiangongApp>) -> Result<SessionListItem, String> {
     state.with_state(|core_state| {
         core_state.create_session();
         // 返回新创建的活动会话
         core_state
             .active_session()
-            .map(Session::from_core)
+            .map(SessionListItem::from_core)
             .ok_or_else(|| anyhow::anyhow!("Failed to create session"))
     })
 }
@@ -538,11 +552,7 @@ pub fn set_trust_mode(mode: String, state: State<TiangongApp>) -> Result<(), Str
 
     // 更新 TiangongState（持久化）
     state.with_state(|core_state| core_state.set_trust_mode(trust_mode))?;
-
-    // 更新 CoreConfigProvider（新会话创建时的默认值）
-    state.config.update(|c| {
-        c.trust_mode = trust_mode;
-    });
+    state.sync_core_config_from_state()?;
 
     // 只更新当前活跃会话的 core（session 级别）
     let session_id =
@@ -606,97 +616,83 @@ pub async fn synthesize_speech(
     text: String,
     state: State<'_, TiangongApp>,
 ) -> Result<SpeechResult, String> {
-    use tiangong_core::models_config::ModelCapability;
-    use tiangong_media::tts::{SpeechSynthesizer, SynthesizeRequest};
-
-    let resolved = state
-        .with_state_read(|core_state| {
-            core_state
-                .models_config()
-                .resolve_for_capability(ModelCapability::Tts)
-                .ok_or_else(|| anyhow::anyhow!("TTS 能力未配置"))
-        })
-        .map_err(|e| e.to_string())?;
-
-    let synthesizer = tiangong_media::openai_tts::OpenAITTS::new(
-        resolved.api_key.clone(),
-        resolved.base_url.clone(),
-    );
-
-    // 从模型配置 options 中读取 voice 参数
-    let voice = resolved
-        .options
-        .get("voice")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let request = SynthesizeRequest {
+    let models_config =
+        state.with_state_read(|core_state| Ok(core_state.models_config().clone()))?;
+    let output = tiangong_core::media::synthesize_speech(
+        &models_config,
         text,
-        voice,
-        speed: None,
-        model: Some(resolved.model.clone()),
-        output_format: Some("mp3".to_string()),
-    };
-
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        synthesizer.synthesize(request),
+        None,
+        None,
+        Some("mp3".to_string()),
     )
-    .await;
+    .await
+    .map_err(|e| e.to_string())?;
+    let resp = output.response;
 
-    match result {
-        Ok(Ok(resp)) => {
-            // 将音频保存到临时文件，通过 asset 协议播放
-            let media_dir = user_home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".tiangong")
-                .join("media");
-            std::fs::create_dir_all(&media_dir).map_err(|e| format!("创建媒体目录失败：{e}"))?;
+    // 将音频保存到临时文件，通过 asset 协议播放
+    let media_dir = user_home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".tiangong")
+        .join("media");
+    std::fs::create_dir_all(&media_dir).map_err(|e| format!("创建媒体目录失败：{e}"))?;
 
-            let ext = match resp.mime_type.as_str() {
-                "audio/mpeg" => "mp3",
-                "audio/wav" => "wav",
-                "audio/opus" => "opus",
-                "audio/aac" => "aac",
-                "audio/flac" => "flac",
-                _ => "mp3",
-            };
-            let file_name = format!("tts_{}.{}", scru128::new(), ext);
-            let file_path = media_dir.join(&file_name);
-            std::fs::write(&file_path, &resp.audio)
-                .map_err(|e| format!("音频文件写入失败：{e}"))?;
+    let ext = match resp.mime_type.as_str() {
+        "audio/mpeg" => "mp3",
+        "audio/wav" => "wav",
+        "audio/opus" => "opus",
+        "audio/aac" => "aac",
+        "audio/flac" => "flac",
+        _ => "mp3",
+    };
+    let file_name = format!("tts_{}.{}", scru128::new(), ext);
+    let file_path = media_dir.join(&file_name);
+    std::fs::write(&file_path, &resp.audio).map_err(|e| format!("音频文件写入失败：{e}"))?;
 
-            Ok(SpeechResult {
-                file_path: file_path.to_string_lossy().to_string(),
-                mime_type: resp.mime_type,
-            })
-        }
-        Ok(Err(e)) => Err(format!("语音合成失败：{e}")),
-        Err(_) => Err("语音合成超时（60秒）".to_string()),
-    }
+    Ok(SpeechResult {
+        file_path: file_path.to_string_lossy().to_string(),
+        mime_type: resp.mime_type,
+    })
 }
 
 /// 检查 TTS 能力是否已配置
 #[tauri::command]
 pub fn has_tts_capability(state: State<TiangongApp>) -> Result<bool, String> {
-    use tiangong_core::models_config::ModelCapability;
-    state.with_state_read(|core_state| {
-        Ok(core_state
-            .models_config()
-            .resolve_for_capability(ModelCapability::Tts)
-            .is_some())
-    })
+    has_model_capability("tts".to_string(), state)
 }
 
 /// 检查 STT 能力是否已配置
 #[tauri::command]
 pub fn has_stt_capability(state: State<TiangongApp>) -> Result<bool, String> {
+    has_model_capability("stt".to_string(), state)
+}
+
+/// 统一的能力可用性查询（基于配置快速检测）
+#[tauri::command]
+pub fn has_model_capability(capability: String, state: State<TiangongApp>) -> Result<bool, String> {
+    let capability = parse_model_capability(&capability)?;
+    state.with_state_read(|core_state| Ok(has_capability_in_state(core_state, capability)))
+}
+
+/// 获取所有能力的当前配置状态
+#[tauri::command]
+pub fn get_available_capabilities(
+    state: State<TiangongApp>,
+) -> Result<Vec<CapabilityAvailabilityInfo>, String> {
     use tiangong_core::models_config::ModelCapability;
+
     state.with_state_read(|core_state| {
-        Ok(core_state
-            .models_config()
-            .resolve_for_capability(ModelCapability::Stt)
-            .is_some())
+        Ok(ModelCapability::all()
+            .iter()
+            .map(|capability| CapabilityAvailabilityInfo {
+                key: capability.key().to_string(),
+                display_name: capability.display_name().to_string(),
+                enabled: has_capability_in_state(core_state, *capability),
+                routed_model: core_state
+                    .models_config()
+                    .routed_model(*capability)
+                    .map(str::to_string),
+            })
+            .collect())
     })
 }
 
@@ -707,17 +703,8 @@ pub async fn transcribe_speech(
     mime_type: String,
     state: State<'_, TiangongApp>,
 ) -> Result<TranscribeResult, String> {
-    use tiangong_core::models_config::ModelCapability;
-    use tiangong_media::stt::{SpeechRecognizer, TranscribeRequest};
-
-    let resolved = state
-        .with_state_read(|core_state| {
-            core_state
-                .models_config()
-                .resolve_for_capability(ModelCapability::Stt)
-                .ok_or_else(|| anyhow::anyhow!("STT 能力未配置"))
-        })
-        .map_err(|e| e.to_string())?;
+    let models_config =
+        state.with_state_read(|core_state| Ok(core_state.models_config().clone()))?;
 
     // 解码 base64 音频数据
     use base64::Engine;
@@ -744,34 +731,15 @@ pub async fn transcribe_speech(
     std::fs::write(&file_path, &audio).map_err(|e| format!("音频文件保存失败：{e}"))?;
 
     let audio_path = file_path.to_string_lossy().to_string();
+    let output = tiangong_core::media::transcribe_audio(&models_config, audio, mime_type, None)
+        .await
+        .map_err(|e| e.to_string())?;
 
-    let recognizer = tiangong_media::openai_stt::OpenAIWhisper::new(
-        resolved.api_key.clone(),
-        resolved.base_url.clone(),
-    );
-
-    let request = TranscribeRequest {
-        audio,
-        mime_type,
-        language: None,
-        model: Some(resolved.model.clone()),
-    };
-
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        recognizer.transcribe(request),
-    )
-    .await;
-
-    match result {
-        Ok(Ok(resp)) => Ok(TranscribeResult {
-            text: resp.text,
-            audio_path,
-            duration: resp.duration,
-        }),
-        Ok(Err(e)) => Err(format!("语音识别失败：{e}")),
-        Err(_) => Err("语音识别超时（120秒）".to_string()),
-    }
+    Ok(TranscribeResult {
+        text: output.response.text,
+        audio_path,
+        duration: output.response.duration,
+    })
 }
 
 /// 获取 TTS 可用音色列表
@@ -779,30 +747,11 @@ pub async fn transcribe_speech(
 pub async fn list_tts_voices(
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    use tiangong_core::models_config::ModelCapability;
-    use tiangong_media::tts::SpeechSynthesizer;
-
-    let resolved = state
-        .with_state_read(|core_state| {
-            core_state
-                .models_config()
-                .resolve_for_capability(ModelCapability::Tts)
-                .ok_or_else(|| anyhow::anyhow!("TTS 能力未配置"))
-        })
+    let models_config =
+        state.with_state_read(|core_state| Ok(core_state.models_config().clone()))?;
+    let voices = tiangong_core::media::list_tts_voices(&models_config)
+        .await
         .map_err(|e| e.to_string())?;
-
-    let synthesizer = tiangong_media::openai_tts::OpenAITTS::new(
-        resolved.api_key.clone(),
-        resolved.base_url.clone(),
-    );
-
-    let voices = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        synthesizer.list_voices(),
-    )
-    .await
-    .map_err(|_| "获取音色列表超时".to_string())?
-    .map_err(|e| format!("获取音色列表失败：{e}"))?;
 
     Ok(voices
         .into_iter()
@@ -916,7 +865,7 @@ pub fn get_mention_candidates(state: State<TiangongApp>) -> Result<Vec<MentionCa
 
 /// 获取运行状态快照
 #[tauri::command]
-pub fn get_run_snapshot(state: State<TiangongApp>) -> Result<RunSnapshot, String> {
+pub fn get_run_snapshot(state: State<TiangongApp>) -> Result<RunSnapshotView, String> {
     let active_id = state.with_state_read(|s| Ok(s.active_session_id().to_string()))?;
     let is_exec = state.is_session_executing(&active_id);
     state.with_state_read(|core_state| Ok(build_full_snapshot_with_status(core_state, is_exec)))
@@ -960,12 +909,12 @@ pub fn set_session_cwd(cwd: String, state: State<TiangongApp>) -> Result<(), Str
 
 /// 获取 MCP 服务器列表
 #[tauri::command]
-pub fn get_mcp_servers(state: State<TiangongApp>) -> Result<Vec<McpServer>, String> {
+pub fn get_mcp_servers(state: State<TiangongApp>) -> Result<Vec<McpServerView>, String> {
     state.with_state_read(|core_state| {
         Ok(core_state
             .mcp_servers()
             .iter()
-            .map(McpServer::from_core)
+            .map(McpServerView::from_core)
             .collect())
     })
 }
@@ -992,7 +941,7 @@ pub fn register_mcp_server(
     use tiangong_core::app_state::RegisterMcpServerOptions;
     use tiangong_core::app_state::RegisterMcpServerRequest;
 
-    state.with_state(|core_state| {
+    let message = state.with_state(|core_state| {
         // 转换 env HashMap 为 Vec<(String, String)>
         let env_vec = env.unwrap_or_default().into_iter().collect();
 
@@ -1008,13 +957,17 @@ pub fn register_mcp_server(
             },
         };
         core_state.register_mcp_server(request)
-    })
+    })?;
+    state.sync_core_config_from_state()?;
+    Ok(message)
 }
 
 /// 移除 MCP 服务器
 #[tauri::command]
 pub fn remove_mcp_server(name: String, state: State<TiangongApp>) -> Result<String, String> {
-    state.with_state(|core_state| core_state.remove_mcp_server(&name))
+    let message = state.with_state(|core_state| core_state.remove_mcp_server(&name))?;
+    state.sync_core_config_from_state()?;
+    Ok(message)
 }
 
 /// 设置 MCP 服务器启用状态
@@ -1024,7 +977,10 @@ pub fn set_mcp_server_enabled(
     enabled: bool,
     state: State<TiangongApp>,
 ) -> Result<String, String> {
-    state.with_state(|core_state| core_state.set_mcp_server_enabled(&name, enabled))
+    let message =
+        state.with_state(|core_state| core_state.set_mcp_server_enabled(&name, enabled))?;
+    state.sync_core_config_from_state()?;
+    Ok(message)
 }
 
 // ============================================================================
@@ -1033,12 +989,12 @@ pub fn set_mcp_server_enabled(
 
 /// 获取已安装的 Skill 列表
 #[tauri::command]
-pub fn get_skills(state: State<TiangongApp>) -> Result<Vec<Skill>, String> {
+pub fn get_skills(state: State<TiangongApp>) -> Result<Vec<SkillView>, String> {
     state.with_state_read(|core_state| {
         Ok(core_state
             .installed_skills()
             .iter()
-            .map(Skill::from_core)
+            .map(SkillView::from_core)
             .collect())
     })
 }
@@ -1063,20 +1019,24 @@ pub fn install_skill(
     env_values: Option<std::collections::HashMap<String, String>>,
     state: State<TiangongApp>,
 ) -> Result<String, String> {
-    state.with_state(|core_state| {
+    let message = state.with_state(|core_state| {
         let env: Vec<(String, String)> = env_values
             .unwrap_or_default()
             .into_iter()
             .filter(|(_, v)| !v.trim().is_empty())
             .collect();
         core_state.install_local_skill_with_options_and_inputs(&path, true, true, &env)
-    })
+    })?;
+    state.sync_core_config_from_state()?;
+    Ok(message)
 }
 
 /// 移除 Skill
 #[tauri::command]
 pub fn remove_skill(id: String, state: State<TiangongApp>) -> Result<String, String> {
-    state.with_state(|core_state| core_state.remove_skill(&id))
+    let message = state.with_state(|core_state| core_state.remove_skill(&id))?;
+    state.sync_core_config_from_state()?;
+    Ok(message)
 }
 
 /// 获取 Skill 的环境变量（合并 skill.toml 声明的 requires.env + .env.local 已有值）
@@ -1169,7 +1129,9 @@ pub fn set_skill_enabled(
     enabled: bool,
     state: State<TiangongApp>,
 ) -> Result<String, String> {
-    state.with_state(|core_state| core_state.set_skill_enabled(&id, enabled))
+    let message = state.with_state(|core_state| core_state.set_skill_enabled(&id, enabled))?;
+    state.sync_core_config_from_state()?;
+    Ok(message)
 }
 
 // ============================================================================
@@ -1260,9 +1222,9 @@ fn user_home_dir() -> Option<PathBuf> {
 
 /// 获取 Connector 列表
 #[tauri::command]
-pub fn get_connectors() -> Result<Vec<ConnectorInfo>, String> {
+pub fn get_connectors() -> Result<Vec<ConnectorInfoView>, String> {
     let configs = tiangong_server::config::load_connectors_config();
-    Ok(configs.iter().map(ConnectorInfo::from_config).collect())
+    Ok(configs.iter().map(ConnectorInfoView::from_config).collect())
 }
 
 /// 设置 Connector 启用状态
@@ -1295,7 +1257,9 @@ pub fn set_models_config(
     state.with_state(|core_state| {
         let core_config = config.to_core();
         core_state.save_models_config(core_config)
-    })
+    })?;
+    state.sync_core_config_from_state()?;
+    Ok(())
 }
 
 /// 获取所有可用的模型能力列表

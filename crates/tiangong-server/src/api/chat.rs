@@ -1,9 +1,12 @@
 use silent::prelude::*;
 
 use super::AuthToken;
-use super::SharedState;
+use super::SharedAppContext;
 use super::types::{ChatRequest, ChatResponse};
 use crate::auth::check_auth;
+use tiangong_core::session::now_text;
+use tiangong_gateway::message::{IncomingMessage, MessageContent};
+use tiangong_gateway::role::RemoteRole;
 
 /// POST /api/v1/chat — 发送消息并获取 AI 回复
 #[allow(deprecated)]
@@ -11,61 +14,46 @@ pub async fn chat(mut req: Request) -> Result<Response> {
     let token = req.get_config::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
 
-    let state = req.get_config::<SharedState>()?.clone();
+    let app = req.get_config::<SharedAppContext>()?.clone();
     let body: ChatRequest = req.json_parse().await?;
-
-    let mut app = state.lock().await;
 
     // 如果指定了 session_id，则切换到对应会话
     if let Some(ref sid) = body.session_id {
-        app.switch_session(sid);
+        let mut state = app.state.lock().await;
+        state.switch_session(sid);
     }
 
-    let session_id = app.active_session_id().to_string();
+    app.sync_core_config_from_state().await;
 
-    // 设置输入并发送
-    app.update_draft(body.message);
-    if let Err(e) = app.send_current_input() {
-        return Err(SilentError::business_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("发送消息失败：{e}"),
-        ));
-    }
+    let session_id = {
+        let state = app.state.lock().await;
+        state.active_session_id().to_string()
+    };
 
-    // 轮询等待执行完成（最多 300 秒）
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(300);
-    loop {
-        app.poll_pending_turn();
-
-        if !app.has_pending_turn() {
-            break;
-        }
-
-        if tokio::time::Instant::now() >= deadline {
-            return Err(SilentError::business_error(
-                StatusCode::GATEWAY_TIMEOUT,
-                "执行超时".to_string(),
-            ));
-        }
-
-        // 释放锁后短暂等待，避免忙等
-        drop(app);
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        app = state.lock().await;
-    }
-
-    // 获取最后一条 assistant 消息作为回复
-    let response_text = app
-        .active_session()
-        .and_then(|session| {
-            session
-                .messages
-                .iter()
-                .rev()
-                .find(|m| matches!(m.role, tiangong_core::session::MessageRole::Assistant))
-                .map(|m| m.content.clone())
+    let outgoing = app
+        .router
+        .handle_incoming(IncomingMessage {
+            id: scru128::new().to_string(),
+            connector: "server-api".to_string(),
+            channel_id: session_id.clone(),
+            sender_id: "http-client".to_string(),
+            sender_role: RemoteRole::Controller,
+            content: MessageContent::Text(body.message),
+            reply_to: None,
+            timestamp: now_text(),
         })
-        .unwrap_or_default();
+        .await
+        .map_err(|e| {
+            SilentError::business_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("发送消息失败：{e}"),
+            )
+        })?;
+
+    let response_text = match outgoing.content {
+        MessageContent::Text(text) => text,
+        _ => String::new(),
+    };
 
     Ok(Response::json(&ChatResponse {
         session_id,

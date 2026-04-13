@@ -185,15 +185,15 @@
 - [x] SystemMessageGroup 改造：活跃 round 以流式文本块展示（不折叠）
 - [x] 工具调用消息保持现有折叠展示方式不变
 
-### C. CLI 实时流式展示（待验收）
-- [ ] repl.rs 轮询循环从阻塞等待改为边轮询边输出增量
-- [ ] output.rs 新增流式输出函数（解释文本、工具摘要、增量输出）
-- [ ] 追踪消息增量，实现系统消息和助手消息的实时展示
+### C. CLI 实时流式展示（已完成 ✅）
+- [x] repl.rs 轮询循环从阻塞等待改为边轮询边输出增量
+- [x] output.rs 新增流式输出函数（解释文本、工具摘要、增量输出）
+- [x] 追踪消息增量，实现系统消息和助手消息的实时展示
 
 ### D. 验证
-- [ ] `cargo check --workspace` 通过
-- [ ] `cargo clippy --workspace --all-targets --tests --benches -- -D warnings` 通过
-- [ ] 前端 `yarn build` 通过
+- [x] `cargo check --workspace` 通过
+- [x] `cargo clippy --workspace --all-targets --tests --benches -- -D warnings` 通过
+- [x] 前端 `yarn build` 通过
 
 ---
 
@@ -354,7 +354,9 @@
 - [x] src-tauri 依赖 tiangong-types
 - [x] 删除旧 LoopHost/ActiveLoops/CliLoopHost（-433 行）
 - [x] TurnRunner/ControlSignal/EventLoopRunner 已删除（并行智能体集成后清理）
-- [ ] src-tauri/types.rs DTO 转换层待前端完全迁移后删除
+- [x] src-tauri/types.rs DTO 转换层删除，共享消息类型改为直接复用 tiangong-types
+- [x] GUI TTS/STT 命令改为复用 tiangong-core 媒体服务，消除对 tiangong-media 的重复直连
+- [x] 补充统一能力查询接口（has_model_capability / get_available_capabilities）
 - [x] GUI 全链路功能验证通过
 - [x] CLI 交互优化（类似 codex/claude code 风格）
 - [x] 并行智能体（TaskCoordinator/Worker）集成到 TiangongCore
@@ -399,21 +401,21 @@
 
 ### Phase A：CoreConfig + CoreConfigProvider
 
-- [ ] 定义 `CoreConfig` 结构（models/mcp/skills/trust_mode/context_limit）
-- [ ] 实现 `CoreConfigProvider`（ArcSwap + generation 原子计数）
-- [ ] 修改 `TiangongCore` 构造函数接收 `CoreConfigProvider`
-- [ ] 修改 `worker_loop` 使用 generation 检测 + snapshot 重建 engine
-- [ ] 移除 `build_engine()` 中的磁盘加载逻辑
+- [x] 定义 `CoreConfig` 结构（models/mcp/skills/trust_mode/context_limit）
+- [x] 实现 `CoreConfigProvider`（ArcSwap + generation 原子计数）
+- [x] 修改 `TiangongCore` 构造函数接收 `CoreConfigProvider`
+- [x] 修改 `worker_loop` 使用 generation 检测 + snapshot 重建 engine
+- [x] 移除 `build_engine()` 中的磁盘加载逻辑
 
 ### Phase B：各端适配
 
-- [ ] CLI：创建 CoreConfigProvider，从磁盘加载初始配置
-- [ ] GUI：TiangongApp 持有 CoreConfigProvider，配置变更时 update
-- [ ] Server/Connector：适配 CoreConfigProvider
+- [x] CLI：创建 CoreConfigProvider，从磁盘加载初始配置，并在 `/model` `/config set` `/mcp` `/skill` 变更后同步
+- [x] GUI：TiangongApp 持有 CoreConfigProvider，模型/MCP/Skill/TrustMode 变更时同步 update
+- [x] Server/Connector：共享 Server 上下文持有 CoreConfigProvider，REST/WS/MessageRouter 处理消息前同步配置快照
 
 ### Phase C：验证
 
-- [ ] cargo clippy --workspace 通过
-- [ ] cargo nextest run --workspace 通过
+- [x] cargo clippy --workspace 通过
+- [x] cargo nextest run --workspace 通过
 - [ ] GUI 验证：切换模型/MCP/Skill 后下一轮对话生效
-- [ ] CLI 验证：/model 切换后生效
+- [x] CLI 验证：`/model deepseek-chat` 后发送 `你好`，成功按新 routing 完成下一轮回复

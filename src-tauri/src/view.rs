@@ -1,14 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Token 用量摘要
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TokenUsageSummary {
-    pub prompt_tokens: usize,
-    pub completion_tokens: usize,
-    pub total_tokens: usize,
-}
-
 /// 语音合成结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpeechResult {
@@ -27,19 +19,15 @@ pub struct TranscribeResult {
 /// @提及候选项
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MentionCandidate {
-    /// 插入到输入框的值（如 @skill:skill-creator）
     pub value: String,
-    /// 显示标签
     pub label: String,
-    /// 类型（skill / mcp）
     pub kind: String,
-    /// 简短描述
     pub hint: String,
 }
 
-/// 会话数据（前端使用）
+/// 会话列表项（前端使用）
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Session {
+pub struct SessionListItem {
     pub id: String,
     pub title: String,
     pub created_at: String,
@@ -47,7 +35,7 @@ pub struct Session {
     pub message_count: usize,
 }
 
-impl Session {
+impl SessionListItem {
     pub fn from_core(core_session: &tiangong_core::session::Session) -> Self {
         Self {
             id: core_session.id.clone(),
@@ -59,39 +47,10 @@ impl Session {
     }
 }
 
-/// 消息数据（前端使用）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Message {
-    pub id: String,
-    pub role: String,
-    pub content: String,
-    pub reasoning_content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub worker_id: Option<String>,
-    pub created_at: String,
-}
-
-impl Message {
-    pub fn from_core(core_msg: &tiangong_core::session::Message) -> Self {
-        Self {
-            id: core_msg.id.clone(),
-            role: format!("{:?}", core_msg.role),
-            content: core_msg.content.clone(),
-            reasoning_content: if core_msg.reasoning_content.is_empty() {
-                None
-            } else {
-                Some(core_msg.reasoning_content.clone())
-            },
-            worker_id: core_msg.worker_id.clone(),
-            created_at: core_msg.created_at.clone(),
-        }
-    }
-}
-
 /// 运行状态快照（前端使用的完整快照）
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunSnapshot {
-    pub status: String,
+pub struct RunSnapshotView {
+    pub status: tiangong_types::RunStatus,
     pub summary: String,
     pub last_session_id: Option<String>,
     pub last_task_id: Option<String>,
@@ -100,30 +59,25 @@ pub struct RunSnapshot {
     pub last_plan: Option<String>,
     pub last_tool_result: Option<String>,
     pub last_error: Option<String>,
-    pub last_usage: Option<TokenUsageSummary>,
+    pub last_usage: Option<tiangong_types::TokenUsage>,
     pub updated_at: String,
-    /// 前端需要：当前会话的消息列表
-    pub messages: Vec<Message>,
-    /// 前端需要：当前输入草稿
+    pub messages: Vec<tiangong_types::Message>,
     pub input_draft: String,
-    /// 前端需要：当前执行计划
     pub current_plan: Option<TaskPlan>,
-    /// 前端需要：当前正在执行的会话 ID 列表
     pub pending_session_ids: Vec<String>,
-    /// 等待审批的请求 ID
     pub approval_request_id: Option<String>,
 }
 
-impl RunSnapshot {
+impl RunSnapshotView {
     pub fn from_core_with_session(
         core_snapshot: &tiangong_core::runtime::RunSnapshot,
-        messages: Vec<Message>,
+        messages: Vec<tiangong_types::Message>,
         input_draft: String,
         current_plan: Option<TaskPlan>,
         pending_session_ids: Vec<String>,
     ) -> Self {
         Self {
-            status: format!("{:?}", core_snapshot.status).to_lowercase(),
+            status: core_snapshot.status,
             summary: core_snapshot.summary.clone(),
             last_session_id: core_snapshot.last_session_id.clone(),
             last_task_id: core_snapshot.last_task_id.clone(),
@@ -132,14 +86,7 @@ impl RunSnapshot {
             last_plan: core_snapshot.last_plan.clone(),
             last_tool_result: core_snapshot.last_tool_result.clone(),
             last_error: core_snapshot.last_error.clone(),
-            last_usage: core_snapshot
-                .last_usage
-                .as_ref()
-                .map(|u| TokenUsageSummary {
-                    prompt_tokens: u.prompt_tokens,
-                    completion_tokens: u.completion_tokens,
-                    total_tokens: u.total_tokens,
-                }),
+            last_usage: core_snapshot.last_usage.clone(),
             updated_at: core_snapshot.updated_at.clone(),
             messages,
             input_draft,
@@ -150,7 +97,7 @@ impl RunSnapshot {
     }
 }
 
-/// 任务计划（匹配核心 TaskPlan 结构）
+/// 任务计划（前端使用的扁平视图）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskPlan {
     pub id: String,
@@ -163,18 +110,6 @@ pub struct TaskPlan {
 }
 
 impl TaskPlan {
-    pub fn from_core(core_plan: &tiangong_core::planner::TaskPlan) -> Self {
-        Self {
-            id: core_plan.id.clone(),
-            objective: core_plan.objective.clone(),
-            summary: core_plan.summary.clone(),
-            items: core_plan.plans.iter().map(PlanItem::from_core).collect(),
-            risks: core_plan.risks.clone(),
-            skill_hints: core_plan.skill_hints.clone(),
-            mcp_hints: core_plan.mcp_hints.clone(),
-        }
-    }
-
     pub fn from_session_task_plan(session_plan: &tiangong_core::session::SessionTaskPlan) -> Self {
         Self {
             id: session_plan.id.clone(),
@@ -201,19 +136,6 @@ pub struct PlanItem {
 }
 
 impl PlanItem {
-    pub fn from_core(core_item: &tiangong_core::planner::PlanItem) -> Self {
-        Self {
-            id: core_item.id.clone(),
-            description: core_item.description.clone(),
-            status: format!("{:?}", core_item.status),
-            steps: core_item
-                .execution_steps
-                .iter()
-                .map(PlanStep::from_core)
-                .collect(),
-        }
-    }
-
     pub fn from_session_step(step: &tiangong_core::session::SessionPlanExecutionStep) -> Self {
         Self {
             id: step.id.clone(),
@@ -232,20 +154,9 @@ pub struct PlanStep {
     pub source: String,
 }
 
-impl PlanStep {
-    pub fn from_core(core_step: &tiangong_core::planner::PlanStep) -> Self {
-        Self {
-            id: core_step.id.clone(),
-            description: core_step.description.clone(),
-            status: format!("{:?}", core_step.status),
-            source: format!("{:?}", core_step.source),
-        }
-    }
-}
-
 /// MCP 服务器配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpServer {
+pub struct McpServerView {
     pub name: String,
     pub command: String,
     pub args: Vec<String>,
@@ -253,7 +164,7 @@ pub struct McpServer {
     pub enabled: bool,
 }
 
-impl McpServer {
+impl McpServerView {
     pub fn from_core(core_server: &tiangong_core::agent_config::McpServerConfig) -> Self {
         Self {
             name: core_server.name.clone(),
@@ -271,7 +182,7 @@ impl McpServer {
 
 /// Skill 配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Skill {
+pub struct SkillView {
     pub id: String,
     pub name: String,
     pub version: String,
@@ -280,7 +191,7 @@ pub struct Skill {
     pub source_type: String,
 }
 
-impl Skill {
+impl SkillView {
     pub fn from_core(core_skill: &tiangong_core::agent_config::InstalledSkillConfig) -> Self {
         Self {
             id: core_skill.id.clone(),
@@ -316,13 +227,13 @@ pub struct ServerConfigView {
 
 /// Connector 信息（前端使用）
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectorInfo {
+pub struct ConnectorInfoView {
     pub name: String,
     pub connector_type: String,
     pub enabled: bool,
 }
 
-impl ConnectorInfo {
+impl ConnectorInfoView {
     pub fn from_config(config: &tiangong_connector::config::ConnectorConfig) -> Self {
         Self {
             name: config.name.clone(),
@@ -332,15 +243,21 @@ impl ConnectorInfo {
     }
 }
 
-// ============================================================================
-// 新版模型配置类型（Provider + Model + Routing 三层架构）
-// ============================================================================
-
 /// 模型能力（前端使用）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelCapabilityInfo {
     pub key: String,
     pub display_name: String,
+}
+
+/// 能力可用性状态（基于当前配置快速检测）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityAvailabilityInfo {
+    pub key: String,
+    pub display_name: String,
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routed_model: Option<String>,
 }
 
 /// Provider 连接配置（前端使用）

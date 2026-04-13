@@ -107,6 +107,7 @@ allow = [
     "MPL-2.0",
     "OpenSSL",
     "Zlib",
+    "CDLA-Permissive-2.0",
 ]
 # The confidence threshold for detecting a license from license text.
 # The higher the value, the more closely the license text must be to the
@@ -119,7 +120,7 @@ exceptions = [
     # Each entry is the crate and version constraint, and its specific allow
     # list
     #{ allow = ["Zlib"], crate = "adler32" },
-    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-root-certs" },
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
 ]
 
 # Some crates don't have (easily) machine readable licensing information,
@@ -240,12 +241,12 @@ unknown-git = "warn"
 # if not specified. If it is specified but empty, no registries are allowed.
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # List of URLs for allowed Git repositories
-allow-git = []
+allow-git = ["https://github.com/silent-rs/async-openai"]
 
 [sources.allow-org]
 # 1 or more github.com organizations to allow git sources for
-github = [""]
+github = ["silent-rs"]
 # 1 or more gitlab.com organizations to allow git sources for
-gitlab = [""]
+gitlab = []
 # 1 or more bitbucket.org organizations to allow git sources for
-bitbucket = [""]
+bitbucket = []

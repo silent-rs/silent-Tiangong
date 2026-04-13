@@ -10,6 +10,7 @@ pub mod core_config;
 pub mod event;
 pub mod execution;
 pub mod mcp;
+pub mod media;
 pub mod model;
 pub mod models_config;
 pub mod observe;

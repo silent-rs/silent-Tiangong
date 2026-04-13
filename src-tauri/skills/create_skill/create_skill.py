@@ -10,10 +10,11 @@ import os
 from pathlib import Path
 from datetime import datetime
 
+
 def create_skill_yaml(skill_name, display_name, description, triggers, category):
     """生成 skill.yaml 内容"""
     triggers_yaml = "\n".join([f"  - {kw}" for kw in triggers])
-    yaml_content = f'''# {display_name}
+    yaml_content = f"""# {display_name}
 # 自动生成的技能配置文件
 
 name: {skill_name}
@@ -46,8 +47,9 @@ error_handling:
 examples:
   - input: "执行{display_name}"
     description: "触发{display_name}功能"
-'''
+"""
     return yaml_content
+
 
 def create_python_script(skill_name, display_name):
     """生成 Python 执行脚本"""
@@ -91,9 +93,10 @@ if __name__ == "__main__":
 '''
     return script_content
 
+
 def create_readme(skill_name, display_name, description):
     """生成 README.md"""
-    readme_content = f'''# {display_name}
+    readme_content = f"""# {display_name}
 
 ## 简介
 
@@ -155,8 +158,9 @@ def create_readme(skill_name, display_name, description):
 ## 许可证
 
 MIT License
-'''
+"""
     return readme_content
+
 
 def main():
     parser = argparse.ArgumentParser(description="创建新的 Skill")
@@ -176,11 +180,18 @@ def main():
     # 生成文件
     files = {
         "skill.yaml": create_skill_yaml(
-            args.skill_name, args.display_name, 
-            args.description, args.triggers, args.category
+            args.skill_name,
+            args.display_name,
+            args.description,
+            args.triggers,
+            args.category,
         ),
-        f"{args.skill_name}.py": create_python_script(args.skill_name, args.display_name),
-        "README.md": create_readme(args.skill_name, args.display_name, args.description),
+        f"{args.skill_name}.py": create_python_script(
+            args.skill_name, args.display_name
+        ),
+        "README.md": create_readme(
+            args.skill_name, args.display_name, args.description
+        ),
     }
 
     # 写入文件
@@ -196,16 +207,17 @@ def main():
         "display_name": args.display_name,
         "output_directory": str(skill_dir),
         "created_files": list(files.keys()),
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
     }
 
-    print("\n" + "="*50)
+    print("\n" + "=" * 50)
     print("技能创建完成！")
     print(f"名称: {args.display_name}")
     print(f"目录: {skill_dir}")
-    print("="*50)
+    print("=" * 50)
 
     return json.dumps(result, ensure_ascii=False, indent=2)
+
 
 if __name__ == "__main__":
     main()

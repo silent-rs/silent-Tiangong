@@ -36,18 +36,21 @@ pub fn user_message(content: &str) {
 }
 
 /// 打印 thinking 开始指示
+#[allow(dead_code)]
 pub fn thinking_start() {
     print!("{DIM}  ⏳ 思考中...{RESET}");
     let _ = std::io::stdout().flush();
 }
 
 /// 清除 thinking 指示（覆盖当前行）
+#[allow(dead_code)]
 pub fn thinking_clear() {
     print!("\r\x1b[2K"); // 回到行首 + 清除整行
     let _ = std::io::stdout().flush();
 }
 
 /// 打印 thinking 摘要（折叠格式）
+#[allow(dead_code)]
 pub fn thinking_summary(reasoning: &str) {
     let trimmed = reasoning.trim();
     if trimmed.is_empty() {
@@ -63,6 +66,23 @@ pub fn thinking_summary(reasoning: &str) {
     println!("{DIM}  💭 思考 ({char_count} 字符) — {summary}{RESET}");
 }
 
+/// 打印解释文本流开始
+pub fn explanation_start() {
+    print!("\n{DIM}💭 ");
+    let _ = std::io::stdout().flush();
+}
+
+/// 打印解释文本增量
+pub fn explanation_delta(text: &str) {
+    print!("{text}");
+    let _ = std::io::stdout().flush();
+}
+
+/// 打印解释文本流结束
+pub fn explanation_end() {
+    println!("{RESET}");
+}
+
 /// 打印助手回复开始标记
 pub fn assistant_start() {
     println!();
@@ -76,6 +96,23 @@ pub fn delta(text: &str) {
 
 /// 流式结束换行
 pub fn delta_end() {
+    println!();
+}
+
+/// Worker 输出流开始
+pub fn worker_stream_start(label: &str) {
+    print!("\n{CYAN_BOLD}⚙ {label}: {RESET}");
+    let _ = std::io::stdout().flush();
+}
+
+/// Worker 输出增量
+pub fn worker_stream_delta(text: &str) {
+    print!("{text}");
+    let _ = std::io::stdout().flush();
+}
+
+/// Worker 输出流结束
+pub fn worker_stream_end() {
     println!();
 }
 

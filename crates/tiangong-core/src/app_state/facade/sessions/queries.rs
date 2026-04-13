@@ -52,6 +52,21 @@ impl TiangongState {
         &self.store.provider.models_config
     }
 
+    /// 根据当前应用状态构建供 TiangongCore 使用的最小配置快照
+    pub fn build_core_config_from_base(
+        &self,
+        base: &crate::core_config::CoreConfig,
+    ) -> crate::core_config::CoreConfig {
+        crate::core_config::CoreConfig {
+            llm: crate::core_config::LlmConfig::from_models_config(self.models_config()),
+            mcp: self.agent_config().mcp.clone(),
+            mcp_capabilities: base.mcp_capabilities.clone(),
+            skills: self.agent_config().skills.clone(),
+            trust_mode: self.agent_config().trust_mode,
+            context_limit: base.context_limit,
+        }
+    }
+
     pub fn session_title_draft(&self) -> &str {
         &self.store.session.session_title_draft
     }

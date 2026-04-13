@@ -361,10 +361,10 @@ export const useStore = create<AppState>((set, get) => ({
     let streamingReasoningContent = '';
 
     if (newMessages.length > 0) {
-      // 找最后一条 Assistant 消息（不一定是数组最后一条，可能后面还有系统消息）
+      // 找最后一条 assistant 消息（不一定是数组最后一条，可能后面还有系统消息）
       let lastAssistant = null;
       for (let i = newMessages.length - 1; i >= 0; i--) {
-        if (newMessages[i].role === 'Assistant' && !newMessages[i].worker_id) {
+        if (newMessages[i].role === 'assistant' && !newMessages[i].worker_id) {
           lastAssistant = newMessages[i];
           break;
         }
@@ -382,7 +382,7 @@ export const useStore = create<AppState>((set, get) => ({
         if (isNew || isGrowing) {
           streamingId = lastAssistant.id;
           streamingContent = lastAssistant.content;
-          streamingReasoningContent = lastAssistant.reasoning_content || '';
+          streamingReasoningContent = lastAssistant.reasoning_content;
         }
       }
     }

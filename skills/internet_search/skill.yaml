@@ -23,14 +23,14 @@ parameters:
     type: string
     description: 搜索查询内容
     required: true
-    
+
   max_results:
     type: integer
     description: 返回的最大结果数量
     default: 5
     min: 1
     max: 20
-    
+
   language:
     type: string
     description: 搜索语言偏好
@@ -48,7 +48,7 @@ command:
   headers:
     Content-Type: application/json
   timeout: 30000
-  
+
 # 请求模板
 request_template: |
   {
@@ -79,7 +79,7 @@ examples:
     parameters:
       query: "AI 最新新闻"
       max_results: 5
-      
+
   - input: "搜索 Python 教程"
     parameters:
       query: "Python 教程"

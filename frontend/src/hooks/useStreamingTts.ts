@@ -149,7 +149,7 @@ export function useStreamingTts() {
       // 从 store 获取最终完整文本
       const finalMessages = useStore.getState().messages;
       const lastMsg = finalMessages[finalMessages.length - 1];
-      if (lastMsg && lastMsg.role === "Assistant") {
+      if (lastMsg && lastMsg.role === "assistant") {
         extractSentences(lastMsg.content, true);
       }
       lastStreamingIdRef.current = null;

@@ -1,7 +1,7 @@
 use silent::prelude::*;
 
 use super::AuthToken;
-use super::SharedState;
+use super::SharedAppContext;
 use super::types::{MessageSummary, SessionSummary};
 use crate::auth::check_auth;
 
@@ -11,8 +11,8 @@ pub async fn list_sessions(req: Request) -> Result<Response> {
     let token = req.get_config::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
 
-    let state = req.get_config::<SharedState>()?.clone();
-    let app = state.lock().await;
+    let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    let app = app_ctx.state.lock().await;
 
     let sessions: Vec<SessionSummary> = app
         .sessions()
@@ -38,8 +38,8 @@ pub async fn create_session(req: Request) -> Result<Response> {
     let token = req.get_config::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
 
-    let state = req.get_config::<SharedState>()?.clone();
-    let mut app = state.lock().await;
+    let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    let mut app = app_ctx.state.lock().await;
 
     app.create_session();
     let session_id = app.active_session_id().to_string();
@@ -57,8 +57,8 @@ pub async fn get_session(req: Request) -> Result<Response> {
     check_auth(&req, token.0.as_deref())?;
 
     let id: String = req.get_path_params("id")?;
-    let state = req.get_config::<SharedState>()?.clone();
-    let app = state.lock().await;
+    let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    let app = app_ctx.state.lock().await;
 
     let session = app.sessions().iter().find(|s| s.id == id).ok_or_else(|| {
         SilentError::business_error(StatusCode::NOT_FOUND, format!("会话 '{id}' 不存在"))
@@ -91,8 +91,8 @@ pub async fn delete_session(req: Request) -> Result<Response> {
     check_auth(&req, token.0.as_deref())?;
 
     let id: String = req.get_path_params("id")?;
-    let state = req.get_config::<SharedState>()?.clone();
-    let mut app = state.lock().await;
+    let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    let mut app = app_ctx.state.lock().await;
 
     // 先切换到目标会话再删除
     let exists = app.sessions().iter().any(|s| s.id == id);

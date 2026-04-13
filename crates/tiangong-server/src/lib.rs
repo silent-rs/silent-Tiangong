@@ -8,12 +8,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use silent::prelude::*;
+use tiangong_config::load_tiangong_config;
 use tiangong_connector::manager::ConnectorManager;
 use tiangong_core::app_state::TiangongState;
 use tiangong_gateway::event::EventBus;
 use tokio::sync::Mutex;
 
-use self::api::{SharedState, build_routes};
+use self::api::{ServerAppContext, SharedState, build_routes};
 use self::config::load_connectors_config;
 
 /// 启动 Server 模式（前台运行，阻塞）
@@ -23,15 +24,17 @@ pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
 
     tracing::info!("正在初始化应用状态...");
     let state: SharedState = Arc::new(Mutex::new(TiangongState::load_or_default()));
+    let config = load_tiangong_config().into_core_config_provider();
 
     // 创建 EventBus
     let event_bus = Arc::new(EventBus::default());
+    let app = Arc::new(ServerAppContext::new(state, config, event_bus.clone()));
 
     // 加载并启动 Connector
     let connector_manager = load_and_start_connectors(event_bus.clone());
 
     tracing::info!("构建路由...");
-    let (api_routes, configs) = build_routes(state, token, event_bus);
+    let (api_routes, configs) = build_routes(app, token, event_bus);
 
     let mut route = Route::new_root().append(api_routes);
     route.set_configs(Some(configs));
