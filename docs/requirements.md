@@ -28,6 +28,7 @@
 #### 模型配置
 - 模型配置必须独立为 `models.json`，采用 Provider 与 Model 分离设计。
 - Provider 层只定义连接信息（`base_url`、`api_key`、`timeout_ms`），可被多个模型共享。
+- Provider 层必须支持声明请求协议类型，至少包含 `openai_compatible` 与 `anthropic` 两种协议；未显式配置时默认按 `openai_compatible` 处理。
 - Model 层引用 Provider，声明实际模型 ID 和能力列表（`capabilities`），携带专属参数（`options`）。
 - 能力类型包括：`chat`（常规对话/推理）、`multimodal`（多模态理解）、`image_generation`（图片生成）、`video_generation`（视频生成）、`stt`（语音识别）、`tts`（语音合成）。
 - 一个模型可声明多种能力（如 gpt-4o 同时支持 chat 和 multimodal）。
@@ -35,6 +36,8 @@
 - `chat` 为基础必选能力，routing 中未配置 `chat` 时程序必须在所有模式（GUI/CLI/Server）下持续提示用户完成模型设置，在设置完成前不执行对话任务。
 - 其余能力（multimodal/image_generation/video_generation/stt/tts）未在 routing 中配置时视为关闭，对应功能不可用但不影响其他功能正常运行。
 - `api_key` 必须支持环境变量引用（`${ENV_VAR}` 语法），避免明文存储。
+- 核心对话链路必须按 Provider 协议动态构建请求，不允许将所有聊天模型强制视为 OpenAI 兼容接口。
+- 当 `chat` 或 `lite` routing 指向 `anthropic` Provider 时，必须支持 Anthropic Messages 请求格式的同步、流式、工具调用与轻量模型调用，并保持 CLI/GUI/Server 行为一致。
 
 #### Server 模式
 - 必须新增 `tiangong server` 命令，启动 HTTP REST + WebSocket 服务。
