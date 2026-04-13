@@ -12,42 +12,10 @@
 ///
 /// - 文件：~/.tiangong/logs/tiangong.log（按天滚动，始终写入）
 /// - 终端：CLI 模式静默，其他模式输出到 stderr
-fn init_logging(terminal_output: bool) {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".to_string());
-    let log_dir = std::path::PathBuf::from(home).join(".tiangong").join("logs");
-    let _ = std::fs::create_dir_all(&log_dir);
-    let file_appender = tracing_appender::rolling::daily(log_dir, "tiangong.log");
-
-    let env_filter = tracing_subscriber::EnvFilter::from_default_env()
-        .add_directive(tracing::Level::INFO.into());
-
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-
-    if terminal_output {
-        // 文件 + 终端双输出
-        tracing_subscriber::registry()
-            .with(env_filter)
-            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_writer(file_appender)
-                    .with_ansi(false),
-            )
-            .init();
-    } else {
-        // 仅文件输出（CLI 模式终端静默）
-        tracing_subscriber::registry()
-            .with(env_filter)
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_writer(file_appender)
-                    .with_ansi(false),
-            )
-            .init();
-    }
+fn init_logging(terminal_output: bool) -> anyhow::Result<tiangong_config::logging::WorkerGuard> {
+    tiangong_config::logging::init_logging(tiangong_config::logging::LoggingOptions::desktop(
+        terminal_output,
+    ))
 }
 
 fn main() {
@@ -59,7 +27,7 @@ fn main() {
 
     // CLI 模式终端静默，其他模式终端输出
     let is_cli = std::env::args().nth(1).as_deref() == Some("cli");
-    init_logging(!is_cli);
+    let _guard = init_logging(!is_cli).expect("failed to initialize logging");
 
     if let Err(err) = tiangong_entry::run() {
         eprintln!("错误：{err}");
@@ -68,7 +36,7 @@ fn main() {
 }
 
 fn run_gui() {
-    init_logging(true);
+    let _guard = init_logging(true).expect("failed to initialize logging");
 
     tauri::Builder::default()
         .manage(tiangong_app::TiangongApp::new())
@@ -128,4 +96,6 @@ fn run_gui() {
         .plugin(tauri_plugin_dialog::init())
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+
+    drop(_guard);
 }

@@ -409,7 +409,8 @@ fn char_display_width(c: char) -> usize {
         || (0xFF01..=0xFF60).contains(&cp)    // 全角形式
         || (0xFFE0..=0xFFE6).contains(&cp)    // 全角符号
         || (0x1100..=0x115F).contains(&cp)    // 韩文 Jamo
-        || (0xAC00..=0xD7AF).contains(&cp)    // 韩文音节
+        || (0xAC00..=0xD7AF).contains(&cp)
+    // 韩文音节
     {
         return 2;
     }

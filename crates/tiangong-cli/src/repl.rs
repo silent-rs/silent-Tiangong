@@ -180,10 +180,7 @@ impl ResponseState {
                 self.has_delta = false;
             }
 
-            StreamEvent::ToolStart {
-                name,
-                args_summary,
-            } => {
+            StreamEvent::ToolStart { name, args_summary } => {
                 if args_summary.is_empty() {
                     output::tool_start(name);
                 } else {
@@ -240,9 +237,7 @@ impl ResponseState {
                 attempt,
                 max_attempts,
             } => {
-                output::warn(&format!(
-                    "重试 ({attempt}/{max_attempts})：{message}"
-                ));
+                output::warn(&format!("重试 ({attempt}/{max_attempts})：{message}"));
             }
 
             StreamEvent::WorkerStarted {

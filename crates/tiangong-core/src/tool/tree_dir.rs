@@ -3,9 +3,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
 
-use super::common::{
-    display_rel_path, resolve_workspace_path, resolve_workspace_path_trusted,
-};
+use super::common::{display_rel_path, resolve_workspace_path, resolve_workspace_path_trusted};
 use super::{LocalToolExecutor, ToolCall, ToolResult};
 
 const DEFAULT_TREE_MAX_DEPTH: usize = 2;

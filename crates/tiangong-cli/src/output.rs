@@ -18,7 +18,9 @@ const RESET: &str = "\x1b[0m";
 
 /// 终端宽度
 fn term_width() -> usize {
-    crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(80)
+    crossterm::terminal::size()
+        .map(|(w, _)| w as usize)
+        .unwrap_or(80)
 }
 
 /// 打印分隔线
@@ -209,13 +211,17 @@ fn output_preview(output: &str) -> String {
 
 // ==================== 旧函数兼容（commands/modal 模块使用）====================
 #[allow(dead_code)]
-pub fn print_user_message(content: &str) { user_message(content); }
+pub fn print_user_message(content: &str) {
+    user_message(content);
+}
 #[allow(dead_code)]
 pub fn print_assistant_message(msg: &tiangong_core::session::Message) {
     println!("{GREEN_BOLD}助手{RESET}");
     let content = msg.content.trim();
     if !content.is_empty() {
-        for line in content.lines() { println!("  {line}"); }
+        for line in content.lines() {
+            println!("  {line}");
+        }
     }
     println!();
 }
@@ -223,7 +229,9 @@ pub fn print_assistant_message(msg: &tiangong_core::session::Message) {
 pub fn print_system_message(msg: &tiangong_core::session::Message) {
     let content = msg.content.trim();
     if !content.is_empty() {
-        for line in content.lines() { println!("{DIM}{line}{RESET}"); }
+        for line in content.lines() {
+            println!("{DIM}{line}{RESET}");
+        }
     }
 }
 #[allow(dead_code)]
@@ -237,14 +245,26 @@ pub fn print_session_messages(messages: &[tiangong_core::session::Message]) {
     }
 }
 #[allow(dead_code)]
-pub fn print_error(msg: &str) { error(msg); }
+pub fn print_error(msg: &str) {
+    error(msg);
+}
 #[allow(dead_code)]
-pub fn print_info(msg: &str) { println!("{msg}"); }
+pub fn print_info(msg: &str) {
+    println!("{msg}");
+}
 #[allow(dead_code)]
-pub fn print_warn(msg: &str) { warn(msg); }
+pub fn print_warn(msg: &str) {
+    warn(msg);
+}
 #[allow(dead_code)]
-pub fn print_status(msg: &str) { status(msg); }
+pub fn print_status(msg: &str) {
+    status(msg);
+}
 #[allow(dead_code)]
-pub fn print_delta(delta: &str) { self::delta(delta); }
+pub fn print_delta(delta: &str) {
+    self::delta(delta);
+}
 #[allow(dead_code)]
-pub fn flush_line() { delta_end(); }
+pub fn flush_line() {
+    delta_end();
+}

@@ -6,8 +6,8 @@
 //! 外部（CLI/GUI/Server/第三方）负责构建和更新配置，
 //! TiangongCore 仅通过 CoreConfigProvider 只读消费。
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use arc_swap::ArcSwap;
 

@@ -4,6 +4,63 @@ use std::path::PathBuf;
 use std::thread;
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 
+fn ensure_assistant_message(
+    session: &mut tiangong_core::session::Session,
+    assistant_msg_id: &mut Option<String>,
+    message_id: &str,
+) {
+    if !session.messages.iter().any(|msg| msg.id == message_id) {
+        session.append_message_with_id(
+            message_id.to_string(),
+            tiangong_core::session::MessageRole::Assistant,
+            String::new(),
+            String::new(),
+        );
+    }
+
+    *assistant_msg_id = Some(message_id.to_string());
+}
+
+fn append_assistant_delta(
+    session: &mut tiangong_core::session::Session,
+    assistant_msg_id: &mut Option<String>,
+    message_id: &str,
+    content: &str,
+) {
+    ensure_assistant_message(session, assistant_msg_id, message_id);
+    if let Some(msg) = session.messages.iter_mut().find(|msg| msg.id == message_id) {
+        msg.content.push_str(content);
+    }
+}
+
+fn append_assistant_reasoning(
+    session: &mut tiangong_core::session::Session,
+    assistant_msg_id: &mut Option<String>,
+    message_id: &str,
+    content: &str,
+) {
+    ensure_assistant_message(session, assistant_msg_id, message_id);
+    if let Some(msg) = session.messages.iter_mut().find(|msg| msg.id == message_id) {
+        msg.reasoning_content.push_str(content);
+    }
+}
+
+fn accumulate_usage(
+    total: &mut Option<tiangong_core::model::TokenUsage>,
+    usage: &tiangong_types::TokenUsage,
+) {
+    let current = tiangong_core::model::TokenUsage {
+        prompt_tokens: usage.prompt_tokens,
+        completion_tokens: usage.completion_tokens,
+        total_tokens: usage.total_tokens,
+    };
+
+    match total.as_mut() {
+        Some(existing) => existing.accumulate(&current),
+        None => *total = Some(current),
+    }
+}
+
 // ============================================================================
 // 辅助函数：构建完整的 RunSnapshot
 // ============================================================================
@@ -173,7 +230,10 @@ pub fn send_message(
             let _ = app_clone.state::<TiangongApp>().with_state(|core_state| {
                 if let Some(session) = core_state.sessions_mut().iter_mut().find(|s| s.id == sid) {
                     match &event {
-                        StreamEvent::UserMessage { message_id, content } => {
+                        StreamEvent::UserMessage {
+                            message_id,
+                            content,
+                        } => {
                             // Core 已记录用户消息，同步到 TiangongState session
                             session.append_message_with_id(
                                 message_id.clone(),
@@ -182,42 +242,27 @@ pub fn send_message(
                                 String::new(),
                             );
                         }
-                        StreamEvent::Delta { message_id, content } => {
-                            // 使用 Core 预生成的 message_id 定位或创建 assistant 消息
-                            if assistant_msg_id.as_deref() == Some(message_id) {
-                                if let Some(msg) = session.messages.iter_mut().find(|m| m.id == *message_id) {
-                                    msg.content.push_str(content);
-                                }
-                            } else {
-                                session.append_message_with_id(
-                                    message_id.clone(),
-                                    tiangong_core::session::MessageRole::Assistant,
-                                    String::new(),
-                                    String::new(),
-                                );
-                                if let Some(msg) = session.messages.last_mut() {
-                                    msg.content.push_str(content);
-                                }
-                                assistant_msg_id = Some(message_id.clone());
-                            }
+                        StreamEvent::Delta {
+                            message_id,
+                            content,
+                        } => {
+                            append_assistant_delta(
+                                session,
+                                &mut assistant_msg_id,
+                                message_id,
+                                content,
+                            );
                         }
-                        StreamEvent::Reasoning { message_id, content } => {
-                            if assistant_msg_id.as_deref() == Some(message_id) {
-                                if let Some(msg) = session.messages.iter_mut().find(|m| m.id == *message_id) {
-                                    msg.reasoning_content.push_str(content);
-                                }
-                            } else {
-                                session.append_message_with_id(
-                                    message_id.clone(),
-                                    tiangong_core::session::MessageRole::Assistant,
-                                    String::new(),
-                                    String::new(),
-                                );
-                                if let Some(msg) = session.messages.last_mut() {
-                                    msg.reasoning_content.push_str(content);
-                                }
-                                assistant_msg_id = Some(message_id.clone());
-                            }
+                        StreamEvent::Reasoning {
+                            message_id,
+                            content,
+                        } => {
+                            append_assistant_reasoning(
+                                session,
+                                &mut assistant_msg_id,
+                                message_id,
+                                content,
+                            );
                         }
                         StreamEvent::ToolCalls { names, .. } => {
                             session.append_message(
@@ -226,10 +271,16 @@ pub fn send_message(
                             );
                             assistant_msg_id = None;
                         }
-                        StreamEvent::ToolStart { ref args_summary, .. } => {
+                        StreamEvent::ToolStart {
+                            ref args_summary, ..
+                        } => {
                             last_tool_args_summary = args_summary.clone();
                         }
-                        StreamEvent::ToolResult { ref name, ok, ref output } => {
+                        StreamEvent::ToolResult {
+                            ref name,
+                            ok,
+                            ref output,
+                        } => {
                             let status = if *ok { "ok=true" } else { "ok=false" };
                             let preview = if output.chars().count() > 200 {
                                 format!("{}...", output.chars().take(200).collect::<String>())
@@ -268,9 +319,7 @@ pub fn send_message(
                         } => {
                             session.append_message(
                                 tiangong_core::session::MessageRole::System,
-                                format!(
-                                    "[重试] ({attempt}/{max_attempts}) {message}"
-                                ),
+                                format!("[重试] ({attempt}/{max_attempts}) {message}"),
                             );
                         }
                         StreamEvent::Done { .. } => {
@@ -293,10 +342,12 @@ pub fn send_message(
                         } else {
                             format!("{tool_name}: {args_summary}")
                         };
-                        core_state.store.runtime.run.approval_request_id =
-                            Some(request_id.clone());
+                        core_state.store.runtime.run.approval_request_id = Some(request_id.clone());
                     }
-                    StreamEvent::ToolStart { name, ref args_summary } => {
+                    StreamEvent::ToolStart {
+                        name,
+                        ref args_summary,
+                    } => {
                         // 审批通过后恢复执行状态
                         core_state.store.runtime.run.status =
                             tiangong_core::runtime::RunStatus::Executing;
@@ -315,28 +366,12 @@ pub fn send_message(
                         core_state.store.runtime.run.summary =
                             format!("正在执行：{}", names.join(", "));
                         if let Some(u) = usage {
-                            let cu = tiangong_core::model::TokenUsage {
-                                prompt_tokens: u.prompt_tokens,
-                                completion_tokens: u.completion_tokens,
-                                total_tokens: u.total_tokens,
-                            };
-                            match core_state.store.runtime.run.last_usage.as_mut() {
-                                Some(e) => e.accumulate(&cu),
-                                None => core_state.store.runtime.run.last_usage = Some(cu),
-                            }
+                            accumulate_usage(&mut core_state.store.runtime.run.last_usage, u);
                         }
                     }
                     StreamEvent::Done { ref usage } => {
                         if let Some(u) = usage {
-                            let cu = tiangong_core::model::TokenUsage {
-                                prompt_tokens: u.prompt_tokens,
-                                completion_tokens: u.completion_tokens,
-                                total_tokens: u.total_tokens,
-                            };
-                            match core_state.store.runtime.run.last_usage.as_mut() {
-                                Some(e) => e.accumulate(&cu),
-                                None => core_state.store.runtime.run.last_usage = Some(cu),
-                            }
+                            accumulate_usage(&mut core_state.store.runtime.run.last_usage, u);
                         }
                         core_state.report_run_idle(format!(
                             "模型供应商：{}",
@@ -388,9 +423,10 @@ pub fn send_message(
                     let _ = app_clone.emit("sessions_updated", &());
 
                     // 检查是否需要生成标题
-                    if let Some(session) = core_state.sessions().iter().find(|s| s.id == final_sid) {
-                        let is_default = session.title == "新对话"
-                            || session.title.starts_with("会话 ");
+                    if let Some(session) = core_state.sessions().iter().find(|s| s.id == final_sid)
+                    {
+                        let is_default =
+                            session.title == "新对话" || session.title.starts_with("会话 ");
                         if is_default {
                             if let Some(input) = session
                                 .messages
@@ -398,7 +434,11 @@ pub fn send_message(
                                 .find(|m| m.role == tiangong_core::session::MessageRole::User)
                                 .map(|m| m.content.clone())
                             {
-                                let provider_config = core_state.store.provider.models_config.to_lite_provider_config();
+                                let provider_config = core_state
+                                    .store
+                                    .provider
+                                    .models_config
+                                    .to_lite_provider_config();
                                 return Ok(Some((input, provider_config)));
                             }
                         }
@@ -411,21 +451,31 @@ pub fn send_message(
                     let app_for_title = app_clone.clone();
                     let sid_for_title = final_sid.clone();
                     thread::spawn(move || {
-                        let client = tiangong_core::model::SingleProviderClient::new(provider_config);
+                        let client =
+                            tiangong_core::model::SingleProviderClient::new(provider_config);
                         if let Ok(t) = client.complete_lite(&input) {
                             let clean = t.trim().trim_matches('"').to_string();
                             if !clean.is_empty() {
-                                let _ = app_for_title.state::<TiangongApp>().with_state(|core_state| {
-                                    if let Some(s) = core_state.sessions_mut().iter_mut().find(|s| s.id == sid_for_title) {
-                                        s.title = clean;
-                                        s.updated_at = tiangong_core::session::now_text();
-                                    }
-                                    let _ = core_state.persist_session_and_app(&sid_for_title);
-                                    let snapshot = build_full_snapshot_with_status(core_state, false);
-                                    let _ = app_for_title.emit("run_snapshot", &snapshot);
-                                    let _ = app_for_title.emit("sessions_updated", &());
-                                    Ok(())
-                                });
+                                let _ =
+                                    app_for_title
+                                        .state::<TiangongApp>()
+                                        .with_state(|core_state| {
+                                            if let Some(s) = core_state
+                                                .sessions_mut()
+                                                .iter_mut()
+                                                .find(|s| s.id == sid_for_title)
+                                            {
+                                                s.title = clean;
+                                                s.updated_at = tiangong_core::session::now_text();
+                                            }
+                                            let _ =
+                                                core_state.persist_session_and_app(&sid_for_title);
+                                            let snapshot =
+                                                build_full_snapshot_with_status(core_state, false);
+                                            let _ = app_for_title.emit("run_snapshot", &snapshot);
+                                            let _ = app_for_title.emit("sessions_updated", &());
+                                            Ok(())
+                                        });
                             }
                         }
                     });
@@ -601,8 +651,7 @@ pub async fn synthesize_speech(
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join(".tiangong")
                 .join("media");
-            std::fs::create_dir_all(&media_dir)
-                .map_err(|e| format!("创建媒体目录失败：{e}"))?;
+            std::fs::create_dir_all(&media_dir).map_err(|e| format!("创建媒体目录失败：{e}"))?;
 
             let ext = match resp.mime_type.as_str() {
                 "audio/mpeg" => "mp3",
@@ -681,8 +730,7 @@ pub async fn transcribe_speech(
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".tiangong")
         .join("media");
-    std::fs::create_dir_all(&media_dir)
-        .map_err(|e| format!("创建媒体目录失败：{e}"))?;
+    std::fs::create_dir_all(&media_dir).map_err(|e| format!("创建媒体目录失败：{e}"))?;
 
     let ext = match mime_type.as_str() {
         "audio/wav" | "audio/x-wav" => "wav",
@@ -693,8 +741,7 @@ pub async fn transcribe_speech(
     };
     let file_name = format!("stt_{}.{}", scru128::new(), ext);
     let file_path = media_dir.join(&file_name);
-    std::fs::write(&file_path, &audio)
-        .map_err(|e| format!("音频文件保存失败：{e}"))?;
+    std::fs::write(&file_path, &audio).map_err(|e| format!("音频文件保存失败：{e}"))?;
 
     let audio_path = file_path.to_string_lossy().to_string();
 
@@ -789,7 +836,10 @@ pub async fn play_audio_file(file_path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         tokio::process::Command::new("powershell")
-            .args(["-c", &format!("(New-Object Media.SoundPlayer '{}').PlaySync()", file_path)])
+            .args([
+                "-c",
+                &format!("(New-Object Media.SoundPlayer '{}').PlaySync()", file_path),
+            ])
             .output()
             .await
             .map_err(|e| format!("播放失败：{e}"))?;
@@ -846,7 +896,8 @@ pub fn get_mention_candidates(state: State<TiangongApp>) -> Result<Vec<MentionCa
         let active_tools = tiangong_core::mcp::cached_active_tools();
         for server in core_state.mcp_servers() {
             if server.enabled {
-                let tool_count = active_tools.iter()
+                let tool_count = active_tools
+                    .iter()
                     .find(|(name, _)| name == &server.name)
                     .map(|(_, tools)| tools.len())
                     .unwrap_or(0);
@@ -866,8 +917,7 @@ pub fn get_mention_candidates(state: State<TiangongApp>) -> Result<Vec<MentionCa
 /// 获取运行状态快照
 #[tauri::command]
 pub fn get_run_snapshot(state: State<TiangongApp>) -> Result<RunSnapshot, String> {
-    let active_id = state
-        .with_state_read(|s| Ok(s.active_session_id().to_string()))?;
+    let active_id = state.with_state_read(|s| Ok(s.active_session_id().to_string()))?;
     let is_exec = state.is_session_executing(&active_id);
     state.with_state_read(|core_state| Ok(build_full_snapshot_with_status(core_state, is_exec)))
 }
@@ -1031,9 +1081,13 @@ pub fn remove_skill(id: String, state: State<TiangongApp>) -> Result<String, Str
 
 /// 获取 Skill 的环境变量（合并 skill.toml 声明的 requires.env + .env.local 已有值）
 #[tauri::command]
-pub fn get_skill_env(id: String, state: State<TiangongApp>) -> Result<std::collections::HashMap<String, String>, String> {
+pub fn get_skill_env(
+    id: String,
+    state: State<TiangongApp>,
+) -> Result<std::collections::HashMap<String, String>, String> {
     state.with_state_read(|core_state| {
-        let skill = core_state.installed_skills()
+        let skill = core_state
+            .installed_skills()
             .iter()
             .find(|s| s.id == id)
             .ok_or_else(|| anyhow::anyhow!("未找到 skill：{id}"))?;
@@ -1045,9 +1099,15 @@ pub fn get_skill_env(id: String, state: State<TiangongApp>) -> Result<std::colle
         let toml_path = skill_dir.join("skill.toml");
         if let Ok(raw) = std::fs::read_to_string(&toml_path) {
             #[derive(serde::Deserialize, Default)]
-            struct T { #[serde(default)] requires: R }
+            struct T {
+                #[serde(default)]
+                requires: R,
+            }
             #[derive(serde::Deserialize, Default)]
-            struct R { #[serde(default)] env: Vec<String> }
+            struct R {
+                #[serde(default)]
+                env: Vec<String>,
+            }
             if let Ok(parsed) = toml::from_str::<T>(&raw) {
                 for key in parsed.requires.env {
                     env.insert(key, String::new());
@@ -1060,7 +1120,9 @@ pub fn get_skill_env(id: String, state: State<TiangongApp>) -> Result<std::colle
         if let Ok(content) = std::fs::read_to_string(&env_path) {
             for line in content.lines() {
                 let line = line.trim();
-                if line.is_empty() || line.starts_with('#') { continue; }
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
                 if let Some((k, v)) = line.split_once('=') {
                     env.insert(k.trim().to_string(), v.trim().to_string());
                 }
@@ -1079,12 +1141,14 @@ pub fn set_skill_env(
     state: State<TiangongApp>,
 ) -> Result<(), String> {
     state.with_state_read(|core_state| {
-        let skill = core_state.installed_skills()
+        let skill = core_state
+            .installed_skills()
             .iter()
             .find(|s| s.id == id)
             .ok_or_else(|| anyhow::anyhow!("未找到 skill：{id}"))?;
         let env_path = std::path::Path::new(&skill.source.value).join(".env.local");
-        let lines: Vec<String> = env.iter()
+        let lines: Vec<String> = env
+            .iter()
             .filter(|(k, v)| !k.trim().is_empty() && !v.trim().is_empty())
             .map(|(k, v)| format!("{}={}", k.trim(), v.trim()))
             .collect();
@@ -1183,8 +1247,7 @@ fn user_home_dir() -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
         return Some(PathBuf::from(home));
     }
-    if let Some(profile) =
-        std::env::var_os("USERPROFILE").filter(|v| v != std::ffi::OsStr::new(""))
+    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| v != std::ffi::OsStr::new(""))
     {
         return Some(PathBuf::from(profile));
     }
@@ -1220,9 +1283,7 @@ pub fn set_connector_enabled(name: String, enabled: bool) -> Result<String, Stri
 /// 获取模型配置
 #[tauri::command]
 pub fn get_models_config(state: State<TiangongApp>) -> Result<ModelsConfigView, String> {
-    state.with_state_read(|core_state| {
-        Ok(ModelsConfigView::from_core(core_state.models_config()))
-    })
+    state.with_state_read(|core_state| Ok(ModelsConfigView::from_core(core_state.models_config())))
 }
 
 /// 设置模型配置

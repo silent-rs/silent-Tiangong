@@ -1,6 +1,6 @@
 //! Prompt 分层装配系统
 //!
-//! 参考：`docs/prompt-organization-analysis.md`
+//! 参考：`docs/archive/prompt-organization-analysis.md`
 //!
 //! 将 prompt 视为"可编排的上下文结构"，而不是"固定模板 + 聊天历史"。
 //!
