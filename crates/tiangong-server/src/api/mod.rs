@@ -22,6 +22,7 @@ pub type SharedState = Arc<Mutex<TiangongState>>;
 pub struct AuthToken(pub Option<String>);
 
 /// 构建完整的 API 路由树，通过 Configs 注入共享状态和 Token
+#[allow(deprecated)]
 pub fn build_routes(
     state: SharedState,
     token: Option<String>,

@@ -1,61 +1,64 @@
 fail_fast: false
+minimum_pre_commit_version: "3.5.0"
+default_install_hook_types: [pre-commit, pre-push]
+default_stages: [pre-commit]
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.5.0
+    rev: v5.0.0
     hooks:
       - id: check-byte-order-marker
       - id: check-case-conflict
+      - id: check-json
       - id: check-merge-conflict
       - id: check-symlinks
+      - id: check-toml
       - id: check-yaml
       - id: end-of-file-fixer
       - id: mixed-line-ending
       - id: trailing-whitespace
   - repo: https://github.com/psf/black
-    rev: 23.11.0
+    rev: 24.10.0
     hooks:
       - id: black
-  # Apple Silicon 需要 rosetta2 支持
-  #  - repo: https://github.com/crate-ci/typos
-  #    rev: v1.8.1
-  #    hooks:
-  #      - id: typos
+        files: \.py$
   - repo: local
     hooks:
-      - id: cargo-fmt
-        name: cargo fmt
-        description: Format files with rustfmt.
-        entry: bash -c 'cargo fmt -- --check'
+      - id: cargo-fmt-workspace
+        name: cargo fmt --all --check
+        description: Check Rust formatting for the workspace.
+        entry: bash -lc 'cargo fmt --all -- --check'
         language: system
-        files: (\.rs$|rustfmt\.toml$)
-        args: []
+        files: (\.rs$|Cargo\.toml$|Cargo\.lock$|rustfmt\.toml$|\.cargo/.*\.toml$)
         pass_filenames: false
-      - id: cargo-deny
-        name: cargo deny check
-        description: Check cargo dependencies
-        entry: bash -c 'cargo deny check --disable-fetch'
-        language: system
-        files: (Cargo\.toml$|Cargo\.lock$|deny\.toml$)
-        args: []
-        pass_filenames: false
-      - id: cargo-check
-        name: cargo check
-        description: Check the package for errors.
-        entry: bash -c 'cargo check --workspace'
+      - id: cargo-check-workspace
+        name: cargo check --workspace
+        description: Check the Rust workspace for compile errors.
+        entry: bash -lc 'cargo check --workspace'
         language: system
         files: (\.rs$|Cargo\.toml$|Cargo\.lock$|\.cargo/.*\.toml$)
         pass_filenames: false
-      - id: cargo-clippy
-        name: cargo clippy
-        description: Lint rust sources
-        entry: bash -c 'cargo clippy --workspace --all-targets --tests --benches -- -D warnings'
+        stages: [pre-push]
+      - id: cargo-clippy-workspace
+        name: cargo clippy --workspace
+        description: Lint the Rust workspace.
+        entry: bash -lc 'cargo clippy --workspace --all-targets --tests --benches -- -D warnings'
         language: system
         files: (\.rs$|Cargo\.toml$|Cargo\.lock$|\.cargo/.*\.toml$)
         pass_filenames: false
-      - id: cargo-test
-        name: cargo test
-        description: unit test for the project
-        entry: bash -c 'cargo nextest run --workspace --no-tests pass'
+        stages: [pre-push]
+      - id: cargo-nextest-workspace
+        name: cargo nextest run --workspace
+        description: Run the workspace test suite through nextest.
+        entry: bash -lc 'cargo nextest run --workspace --no-tests pass'
         language: system
         files: (\.rs$|Cargo\.toml$|Cargo\.lock$|\.cargo/.*\.toml$)
         pass_filenames: false
+        stages: [pre-push]
+      - id: frontend-build
+        name: yarn build (frontend)
+        description: Build the frontend bundle.
+        entry: bash -lc 'cd frontend && yarn build'
+        language: system
+        files: ^frontend/
+        pass_filenames: false
+        stages: [pre-push]

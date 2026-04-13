@@ -164,11 +164,11 @@ mod tests {
             messages: Vec::new(),
             task_records: Vec::new(),
             task_plans: Vec::new(),
+            parent_session_id: None,
             cwd: String::new(),
             cwd_mode: Default::default(),
             context_summary: None,
             summary_up_to: 0,
-            pending_approvals: Vec::new(),
             created_at: String::new(),
             updated_at: String::new(),
         }
