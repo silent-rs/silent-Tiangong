@@ -418,4 +418,4 @@
 - [x] cargo clippy --workspace 通过
 - [x] cargo nextest run --workspace 通过
 - [ ] GUI 验证：切换模型/MCP/Skill 后下一轮对话生效
-- [ ] CLI 验证：/model 切换后生效
+- [x] CLI 验证：`/model deepseek-chat` 后发送 `你好`，成功按新 routing 完成下一轮回复
