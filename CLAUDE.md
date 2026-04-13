@@ -165,7 +165,7 @@ fn load_session(&self, id: &str) -> Result<Session> {
 - `docs/requirements.md` - 需求边界与 Must/Should/非目标
 - `docs/rfc/0004-full-stack-agent-platform.md` - 全栈平台架构 RFC
 - `docs/core-architecture.md` - 核心架构详细说明
-- `docs/app-state-redesign.md` - app_state 重构设计稿
+- `docs/archive/app-state-redesign.md` - app_state 重构历史设计稿
 
 ## 关键依赖
 
