@@ -164,6 +164,7 @@ mod tests {
             messages: Vec::new(),
             task_records: Vec::new(),
             task_plans: Vec::new(),
+            parent_session_id: None,
             cwd: String::new(),
             cwd_mode: Default::default(),
             context_summary: None,
