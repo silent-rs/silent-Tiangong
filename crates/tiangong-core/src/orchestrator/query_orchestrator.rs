@@ -171,7 +171,6 @@ mod tests {
             summary_up_to: 0,
             created_at: String::new(),
             updated_at: String::new(),
-            parent_session_id: None,
         }
     }
 
