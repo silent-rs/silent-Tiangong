@@ -10,8 +10,8 @@ use std::thread::{self, JoinHandle};
 
 use crate::agents::execution_mcp_agent::{McpFunctionTarget, execution_function_tools};
 use crate::app_state::formatting::{format_llm_output_message, format_tool_trace_message};
-use crate::coordinator::types::CoordinatorTask;
 use crate::coordinator::TaskCoordinator;
+use crate::coordinator::types::CoordinatorTask;
 use crate::core_config::CoreConfigProvider;
 use crate::model::{
     FunctionToolSpec, ModelClient, ModelRequest, ModelStreamChunk, SingleProviderClient, TokenUsage,
@@ -35,7 +35,6 @@ pub(crate) enum Command {
     /// 关闭
     Shutdown,
 }
-
 
 /// 天工智能体核心
 pub struct TiangongCore {
@@ -68,8 +67,9 @@ impl TiangongCore {
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
 
         let worker_trust_mode = shared_trust_mode.clone();
-        let worker =
-            thread::spawn(move || worker_loop(config, session, stream_tx, cmd_rx, worker_trust_mode));
+        let worker = thread::spawn(move || {
+            worker_loop(config, session, stream_tx, cmd_rx, worker_trust_mode)
+        });
 
         Self {
             cmd_tx: Some(cmd_tx),
@@ -216,7 +216,11 @@ fn worker_loop(
                 // 记录用户消息
                 session.append_message(MessageRole::User, content.clone());
                 // 通知消费端：用户消息已记录（携带 session 中的 message_id）
-                let user_msg_id = session.messages.last().map(|m| m.id.clone()).unwrap_or_default();
+                let user_msg_id = session
+                    .messages
+                    .last()
+                    .map(|m| m.id.clone())
+                    .unwrap_or_default();
                 let _ = stream_tx.send(StreamEvent::UserMessage {
                     message_id: user_msg_id,
                     content: content.clone(),
@@ -284,7 +288,16 @@ pub(crate) fn execute_turn_standalone(
     cmd_rx: &Receiver<Command>,
     max_rounds: usize,
 ) -> TokenUsage {
-    execute_turn_inner(session, user_input, engine, tools, mcp_targets, stream_tx, cmd_rx, max_rounds)
+    execute_turn_inner(
+        session,
+        user_input,
+        engine,
+        tools,
+        mcp_targets,
+        stream_tx,
+        cmd_rx,
+        max_rounds,
+    )
 }
 
 /// 执行一个完整的对话轮次（可能多轮工具调用）
@@ -329,14 +342,30 @@ fn execute_turn(
                 tracing::warn!("多代理并行执行失败，回退单代理: {err}");
                 // 回退到单代理执行
                 execute_turn_inner(
-                    session, user_input, engine, tools, mcp_targets, stream_tx, cmd_rx, MAX_ROUNDS,
+                    session,
+                    user_input,
+                    engine,
+                    tools,
+                    mcp_targets,
+                    stream_tx,
+                    cmd_rx,
+                    MAX_ROUNDS,
                 );
             }
         }
         return;
     }
 
-    execute_turn_inner(session, user_input, engine, tools, mcp_targets, stream_tx, cmd_rx, MAX_ROUNDS);
+    execute_turn_inner(
+        session,
+        user_input,
+        engine,
+        tools,
+        mcp_targets,
+        stream_tx,
+        cmd_rx,
+        MAX_ROUNDS,
+    );
 }
 
 /// 内部执行：标准 ReAct 循环
@@ -463,8 +492,7 @@ fn execute_turn_inner(
         }
 
         // 工具调用
-        let tool_names: Vec<String> =
-            response.tool_calls.iter().map(|c| c.name.clone()).collect();
+        let tool_names: Vec<String> = response.tool_calls.iter().map(|c| c.name.clone()).collect();
 
         // 记录 LLM 输出到 session
         let output = LlmOutputRecord {
@@ -565,8 +593,7 @@ fn execute_turn_inner(
                                 return accumulated_usage;
                             }
                             Ok(Command::Message(content)) => {
-                                session
-                                    .append_message(MessageRole::User, content.clone());
+                                session.append_message(MessageRole::User, content.clone());
                                 loop_context.push(Message {
                                     id: scru128::new().to_string(),
                                     role: MessageRole::User,
@@ -614,8 +641,7 @@ fn execute_turn_inner(
                 args_summary: args_summary.clone(),
             });
 
-            let result =
-                engine.execute_tool_call(call, mcp_targets, &engine.agent_config().mcp);
+            let result = engine.execute_tool_call(call, mcp_targets, &engine.agent_config().mcp);
 
             let _ = stream_tx.send(StreamEvent::ToolResult {
                 name: call.name.clone(),
@@ -763,7 +789,12 @@ fn force_final_response(
         }
     };
 
-    session.append_message_with_id(pending_msg_id, MessageRole::Assistant, resp.text, String::new());
+    session.append_message_with_id(
+        pending_msg_id,
+        MessageRole::Assistant,
+        resp.text,
+        String::new(),
+    );
     let _ = stream_tx.send(StreamEvent::Done {
         usage: Some(tiangong_types::TokenUsage {
             prompt_tokens: resp.usage.prompt_tokens,
@@ -825,9 +856,8 @@ fn build_engine_from_config(
             api_model: lite_endpoint.model.clone(),
             api_lite_model: lite_endpoint.model.clone(),
         };
-        engine = engine.with_lite_client(
-            SingleProviderClient::new(lite_config).with_on_retry(on_retry),
-        );
+        engine =
+            engine.with_lite_client(SingleProviderClient::new(lite_config).with_on_retry(on_retry));
     }
 
     engine
@@ -849,10 +879,7 @@ fn format_call_args_summary(call: &crate::model::ModelFunctionCall) -> String {
         }
         // shell 脚本模式
         if let Some(script) = args.get("script").and_then(Value::as_str) {
-            let shell = args
-                .get("shell")
-                .and_then(Value::as_str)
-                .unwrap_or("auto");
+            let shell = args.get("shell").and_then(Value::as_str).unwrap_or("auto");
             return format!("[{shell}] {script}");
         }
     }

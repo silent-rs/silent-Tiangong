@@ -241,7 +241,7 @@ pub fn compress_loop_messages(
         session_title: String::new(),
         user_input: prompt,
         context: Vec::new(),
-            assembled_system_prompt: None,
+        assembled_system_prompt: None,
     };
 
     let summary = match client.complete(&req) {

@@ -73,7 +73,7 @@ pub(crate) fn infer_completion_signal_with_llm(
         session_title: format!("{} · execution-step-evaluator", session.title),
         user_input: prompt,
         context: context.to_vec(),
-            assembled_system_prompt: None,
+        assembled_system_prompt: None,
     };
     let response = client.complete_stream(&request, on_chunk)?;
     accumulated_usage.accumulate(&response.usage);
@@ -154,7 +154,7 @@ pub(crate) fn review_completion_signal_with_llm(
         session_title: format!("{} · execution-step-reviewer", session.title),
         user_input: prompt,
         context: context.to_vec(),
-            assembled_system_prompt: None,
+        assembled_system_prompt: None,
     };
     let response = client.complete_stream(&request, on_chunk)?;
     accumulated_usage.accumulate(&response.usage);

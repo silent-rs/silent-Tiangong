@@ -23,6 +23,7 @@
 - `tiangong-core` 必须作为独立 crate，不依赖任何 UI 框架。
 - `tiangong-cli` 和 `tiangong-gui` 必须作为独立前端 crate，依赖 `tiangong-core`。
 - 重构后现有 GUI 和 CLI 功能必须完整保留，不允许功能回退。
+- 必须提供 `TiangongCore` 的正式对接文档，覆盖最小配置、初始化方式、事件流消费、会话恢复与热更新接入说明，供 CLI/GUI/Server 与第三方嵌入方统一参考。
 
 #### 模型配置
 - 模型配置必须独立为 `models.json`，采用 Provider 与 Model 分离设计。

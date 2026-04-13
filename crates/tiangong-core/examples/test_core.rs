@@ -1,7 +1,7 @@
 use std::sync::mpsc;
-use tiangong_types::{SessionStreamEvent, StreamEvent};
 use tiangong_core::core::TiangongCore;
 use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
+use tiangong_types::{SessionStreamEvent, StreamEvent};
 
 fn main() {
     // 示例：使用默认配置（第三方开发者可直接构造 CoreConfig）

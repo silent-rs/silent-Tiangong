@@ -20,6 +20,7 @@
 
 mod config;
 mod loader;
+pub mod logging;
 
 pub use config::{ConnectorConfig, ConnectorType, ServerConfig, TiangongConfig};
 pub use loader::{load_tiangong_config, load_tiangong_config_from_dir};

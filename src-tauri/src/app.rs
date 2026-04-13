@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use tiangong_config::{CoreConfigProvider, load_tiangong_config};
+use tiangong_config::{load_tiangong_config, CoreConfigProvider};
 use tiangong_core::core::TiangongCore;
 
 /// 天工应用状态
@@ -79,10 +79,7 @@ impl TiangongApp {
     }
 
     /// 获取 core 的 session 快照（不消费 core）
-    pub fn get_core_session(
-        &self,
-        _session_id: &str,
-    ) -> Option<tiangong_core::session::Session> {
+    pub fn get_core_session(&self, _session_id: &str) -> Option<tiangong_core::session::Session> {
         // core session 在消费线程中独占，无法直接读取
         // 只能在 into_session 时获取
         None
@@ -103,12 +100,7 @@ impl TiangongApp {
     }
 
     /// 向指定会话的 core 发送审批响应
-    pub fn respond_approval_to_core(
-        &self,
-        session_id: &str,
-        request_id: String,
-        approved: bool,
-    ) {
+    pub fn respond_approval_to_core(&self, session_id: &str, request_id: String, approved: bool) {
         let cores = self.cores.lock().unwrap();
         if let Some(core) = cores.get(session_id) {
             core.respond_approval(request_id, approved);

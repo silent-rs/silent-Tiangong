@@ -132,11 +132,14 @@ impl RunSnapshot {
             last_plan: core_snapshot.last_plan.clone(),
             last_tool_result: core_snapshot.last_tool_result.clone(),
             last_error: core_snapshot.last_error.clone(),
-            last_usage: core_snapshot.last_usage.as_ref().map(|u| TokenUsageSummary {
-                prompt_tokens: u.prompt_tokens,
-                completion_tokens: u.completion_tokens,
-                total_tokens: u.total_tokens,
-            }),
+            last_usage: core_snapshot
+                .last_usage
+                .as_ref()
+                .map(|u| TokenUsageSummary {
+                    prompt_tokens: u.prompt_tokens,
+                    completion_tokens: u.completion_tokens,
+                    total_tokens: u.total_tokens,
+                }),
             updated_at: core_snapshot.updated_at.clone(),
             messages,
             input_draft,
@@ -420,7 +423,9 @@ impl ModelsConfigView {
     }
 
     pub fn to_core(&self) -> tiangong_core::models_config::ModelsConfig {
-        use tiangong_core::models_config::{ModelCapability, ModelEntry, ModelsConfig, ProviderConfig};
+        use tiangong_core::models_config::{
+            ModelCapability, ModelEntry, ModelsConfig, ProviderConfig,
+        };
 
         let providers = self
             .providers

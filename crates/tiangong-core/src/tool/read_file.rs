@@ -2,9 +2,7 @@ use std::fs;
 
 use anyhow::{Context, Result, anyhow};
 
-use super::common::{
-    display_rel_path, resolve_workspace_path, resolve_workspace_path_trusted,
-};
+use super::common::{display_rel_path, resolve_workspace_path, resolve_workspace_path_trusted};
 use super::{LocalToolExecutor, ToolCall, ToolResult};
 
 const DEFAULT_START_LINE: usize = 1;

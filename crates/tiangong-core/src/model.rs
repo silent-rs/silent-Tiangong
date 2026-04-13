@@ -813,8 +813,7 @@ impl SingleProviderClient {
             .build()
             .context("初始化异步运行时失败")?;
 
-        let mut request_json =
-            serde_json::to_value(&request).context("序列化轻量级请求失败")?;
+        let mut request_json = serde_json::to_value(&request).context("序列化轻量级请求失败")?;
         // 显式关闭 thinking（GLM/DeepSeek 支持，MiniMax 等不支持）
         if let Some(obj) = request_json.as_object_mut() {
             obj.insert(
@@ -978,7 +977,9 @@ impl ModelClient for SingleProviderClient {
         let response = runtime.block_on(async {
             timeout(
                 Duration::from_millis(timeout_ms),
-                with_retry("模型请求回退", &self.on_retry, || chat.create(request_for_fallback.clone())),
+                with_retry("模型请求回退", &self.on_retry, || {
+                    chat.create(request_for_fallback.clone())
+                }),
             )
             .await
         });
@@ -1448,7 +1449,8 @@ impl ThinkTagFilter {
                     reasoning.push_str(&self.buf[..pos]);
                     self.buf = self.buf[pos + 8..].to_string();
                     self.inside_think = false;
-                } else if self.buf.len() >= 8 && !self.buf.ends_with('<')
+                } else if self.buf.len() >= 8
+                    && !self.buf.ends_with('<')
                     && !self.buf.ends_with("</")
                     && !self.buf.ends_with("</t")
                     && !self.buf.ends_with("</th")
@@ -1469,7 +1471,8 @@ impl ThinkTagFilter {
                     content.push_str(&self.buf[..pos]);
                     self.buf = self.buf[pos + 7..].to_string();
                     self.inside_think = true;
-                } else if self.buf.len() >= 7 && !self.buf.ends_with('<')
+                } else if self.buf.len() >= 7
+                    && !self.buf.ends_with('<')
                     && !self.buf.ends_with("<t")
                     && !self.buf.ends_with("<th")
                     && !self.buf.ends_with("<thi")

@@ -635,7 +635,6 @@ impl Session {
     }
 }
 
-
 fn new_id() -> String {
     scru128::new().to_string()
 }

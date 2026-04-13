@@ -1,6 +1,6 @@
-use std::collections::HashMap;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::agent_config::{AgentConfig, McpConfig};
 use crate::agents::execution_mcp_agent::{
@@ -1270,10 +1270,7 @@ impl RuntimeEngine {
 }
 
 /// 注入增强工具定义（多媒体、Skill、后台任务、MCP 管理）
-pub(crate) fn inject_enhanced_tools(
-    tools: &mut Vec<FunctionToolSpec>,
-    engine: &RuntimeEngine,
-) {
+pub(crate) fn inject_enhanced_tools(tools: &mut Vec<FunctionToolSpec>, engine: &RuntimeEngine) {
     let agent_config = engine.agent_config();
 
     // 多媒体能力判断：优先使用 LlmConfig（新路径），回退 ModelsConfig（旧路径）

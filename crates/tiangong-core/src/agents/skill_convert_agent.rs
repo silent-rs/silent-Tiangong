@@ -31,7 +31,7 @@ pub fn convert_external_skill_with_agent(
         session_title: "skill-convert-agent".to_string(),
         user_input: prompt,
         context: Vec::<Message>::new(),
-            assembled_system_prompt: None,
+        assembled_system_prompt: None,
     };
     let response = client
         .complete(&request)

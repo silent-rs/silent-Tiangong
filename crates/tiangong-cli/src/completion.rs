@@ -260,7 +260,11 @@ fn collect_files_from_dir(
         candidates.push(CompletionCandidate {
             value: format!("@file:{rel_path}"),
             label: format!("@file:{display}"),
-            hint: if is_dir { "目录".into() } else { "文件".into() },
+            hint: if is_dir {
+                "目录".into()
+            } else {
+                "文件".into()
+            },
         });
     }
 }
