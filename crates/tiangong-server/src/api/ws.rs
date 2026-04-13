@@ -5,7 +5,7 @@ use async_lock::RwLock;
 use silent::prelude::*;
 use silent::ws::{WSHandlerAppend, WebSocketHandler, WebSocketParts};
 
-use super::SharedState;
+use super::SharedAppContext;
 use tiangong_gateway::event::{EventBus, TiangongEvent};
 use tiangong_gateway::message::MessageContent;
 
@@ -88,20 +88,19 @@ async fn on_receive(msg: Message, parts: Arc<RwLock<WebSocketParts>>) -> Result<
         }
     };
 
-    // 尝试解析客户端消息
-    // TODO: 后续通过 MessageRouter 处理完整消息路由
     let parts_read = parts.read().await;
-    let state = parts_read.extensions().get::<SharedState>().cloned();
+    let app = parts_read.extensions().get::<SharedAppContext>().cloned();
     drop(parts_read);
 
-    if let Some(state) = state {
-        let mut app = state.lock().await;
-        app.update_draft(text);
-        if let Err(e) = app.send_current_input() {
+    if let Some(app) = app {
+        app.sync_core_config_from_state().await;
+        let mut state = app.state.lock().await;
+        state.update_draft(text);
+        if let Err(e) = state.send_current_input() {
             tracing::error!("WebSocket 消息处理失败: {e}");
         }
     } else {
-        tracing::warn!("WebSocket 未找到 SharedState，无法处理消息");
+        tracing::warn!("WebSocket 未找到 ServerAppContext，无法处理消息");
     }
 
     Ok(())

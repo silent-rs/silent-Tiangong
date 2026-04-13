@@ -411,7 +411,7 @@
 
 - [x] CLI：创建 CoreConfigProvider，从磁盘加载初始配置，并在 `/model` `/config set` `/mcp` `/skill` 变更后同步
 - [x] GUI：TiangongApp 持有 CoreConfigProvider，模型/MCP/Skill/TrustMode 变更时同步 update
-- [ ] Server/Connector：适配 CoreConfigProvider
+- [x] Server/Connector：共享 Server 上下文持有 CoreConfigProvider，REST/WS/MessageRouter 处理消息前同步配置快照
 
 ### Phase C：验证
 

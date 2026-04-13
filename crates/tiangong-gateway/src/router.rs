@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tiangong_core::app_state::TiangongState;
+use tiangong_core::core_config::CoreConfigProvider;
 use tiangong_core::session::MessageRole;
 use tiangong_media::agent::MediaAgent;
 use tiangong_media::stt::TranscribeRequest;
@@ -14,6 +15,7 @@ pub struct MessageRouter {
     state: Arc<Mutex<TiangongState>>,
     event_bus: Arc<EventBus>,
     media_agent: Option<Arc<MediaAgent>>,
+    core_config: Option<CoreConfigProvider>,
 }
 
 impl MessageRouter {
@@ -22,7 +24,14 @@ impl MessageRouter {
             state,
             event_bus,
             media_agent: None,
+            core_config: None,
         }
+    }
+
+    /// 设置 CoreConfigProvider，使远程入口在处理消息前同步 Core 配置快照
+    pub fn with_core_config_provider(mut self, provider: CoreConfigProvider) -> Self {
+        self.core_config = Some(provider);
+        self
     }
 
     /// 设置 MediaAgent（启用语音转文字等能力）
@@ -55,6 +64,11 @@ impl MessageRouter {
 
         let response_text = {
             let mut state = self.state.lock().await;
+            if let Some(provider) = &self.core_config {
+                let base = provider.snapshot();
+                let next = state.build_core_config_from_base(&base);
+                provider.replace(next);
+            }
             state.update_draft(text);
             state.send_current_input()?;
 
