@@ -13,25 +13,36 @@ export interface Session {
   message_count: number;
 }
 
+export type MessageRole = 'system' | 'user' | 'assistant';
+export type RunStatus =
+  | 'idle'
+  | 'planning'
+  | 'executing'
+  | 'waiting_approval'
+  | 'completed'
+  | 'failed';
+
+export interface TokenUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
 export interface Message {
   id: string;
-  role: string;
+  role: MessageRole;
   content: string;
-  reasoning_content?: string;
+  reasoning_content: string;
   worker_id?: string;
   created_at: string;
 }
 
 export interface RunSnapshot {
-  status: string;
+  status: RunStatus;
   summary?: string;
   last_session_id?: string;
   last_duration_ms?: number;
-  last_usage?: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  };
+  last_usage?: TokenUsage;
   current_plan?: TaskPlan;
   messages: Message[];
   input_draft: string;
@@ -125,6 +136,13 @@ export interface ModelsConfigView {
 export interface ModelCapabilityInfo {
   key: string;
   display_name: string;
+}
+
+export interface CapabilityAvailabilityInfo {
+  key: string;
+  display_name: string;
+  enabled: boolean;
+  routed_model?: string;
 }
 
 // ============================================================================
@@ -258,6 +276,12 @@ export const api = {
   getModelCapabilities: (): Promise<ModelCapabilityInfo[]> =>
     invoke('get_model_capabilities'),
 
+  getAvailableCapabilities: (): Promise<CapabilityAvailabilityInfo[]> =>
+    invoke('get_available_capabilities'),
+
+  hasModelCapability: (capability: string): Promise<boolean> =>
+    invoke('has_model_capability', { capability }),
+
   getModelList: (): Promise<string[]> =>
     invoke('get_model_list'),
 
@@ -286,7 +310,7 @@ export const api = {
     invoke('get_session_cost', { sessionId }),
 
   hasTtsCapability: (): Promise<boolean> =>
-    invoke('has_tts_capability'),
+    api.hasModelCapability('tts'),
 
   listTtsVoices: (): Promise<{ id: string; name: string; gender?: string }[]> =>
     invoke('list_tts_voices'),
@@ -295,7 +319,7 @@ export const api = {
   // 语音识别
   // ----------------------------------------------------------------
   hasSttCapability: (): Promise<boolean> =>
-    invoke('has_stt_capability'),
+    api.hasModelCapability('stt'),
 
   transcribeSpeech: (audioBase64: string, mimeType: string): Promise<{ text: string; audio_path: string; duration?: number }> =>
     invoke('transcribe_speech', { audioBase64, mimeType }),

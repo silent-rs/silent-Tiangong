@@ -208,14 +208,14 @@ function WorkerCard({ group, isActive, MarkdownComponents }: {
   MarkdownComponents: any;
 }) {
   // 从 "🔧 Worker: xxx" 系统消息中提取标题
-  const workerStartMsg = group.messages.find(m => m.role === "System" && m.content.startsWith("🔧 Worker:"));
+  const workerStartMsg = group.messages.find(m => m.role === "system" && m.content.startsWith("🔧 Worker:"));
   const workerTitle = workerStartMsg?.content?.replace("🔧 Worker: ", "") || "Worker";
   // 过滤掉 Worker 标题系统消息（以 "🔧 Worker:" 开头的）
-  const contentMessages = group.messages.filter(m => !(m.role === "System" && m.content.startsWith("🔧 Worker:")));
-  const systemMsgs = contentMessages.filter(m => m.role === "System");
+  const contentMessages = group.messages.filter(m => !(m.role === "system" && m.content.startsWith("🔧 Worker:")));
+  const systemMsgs = contentMessages.filter(m => m.role === "system");
   // 只显示有内容的 assistant 消息（content 或 reasoning_content 不为空）
   const assistantMsgs = contentMessages.filter(m =>
-    m.role === "Assistant" && (m.content.trim().length > 0 || (m.reasoning_content?.trim().length ?? 0) > 0)
+    m.role === "assistant" && (m.content.trim().length > 0 || msgReasoning(m).length > 0)
   );
 
   // 计算 Worker 耗时（从第一条到最后一条消息的时间差）
@@ -570,7 +570,7 @@ export function MessageList() {
           )}
 
           {/* 审批请求 */}
-          {runStatus === "waitingapproval" && (
+          {runStatus === "waiting_approval" && (
             <div className="flex justify-start">
               <div className="text-foreground max-w-[100%]">
                 <div className="text-sm font-medium mb-2">需要您的确认</div>
@@ -606,8 +606,8 @@ export function MessageList() {
           )}
 
           {/* 思考中/执行中指示器（仅在助手尚未回复时显示） */}
-          {isThinking && runStatus !== "waitingapproval" && !streamingMessageId && !streamingContent &&
-           !(messages.length > 0 && messages[messages.length - 1].role === "Assistant") && (
+          {isThinking && runStatus !== "waiting_approval" && !streamingMessageId && !streamingContent &&
+           !(messages.length > 0 && messages[messages.length - 1].role === "assistant") && (
             <div className="flex justify-start">
               <div className="text-foreground">
                 <div className="flex items-center gap-2">
@@ -636,9 +636,9 @@ export function MessageList() {
 
 interface MessageItem {
   id: string;
-  role: string;
+  role: "system" | "user" | "assistant";
   content: string;
-  reasoning_content?: string;
+  reasoning_content: string;
   worker_id?: string;
   created_at: string;
 }
@@ -648,6 +648,10 @@ interface MessageGroup {
   type: "user" | "agent_turn" | "worker";
   worker_id?: string;
   messages: MessageItem[];
+}
+
+function msgReasoning(message: MessageItem): string {
+  return message.reasoning_content.trim();
 }
 
 function groupMessages(messages: MessageItem[]): MessageGroup[] {
@@ -665,7 +669,7 @@ function groupMessages(messages: MessageItem[]): MessageGroup[] {
         workerGroupMap.set(msg.worker_id, groups.length);
         groups.push({ key: `worker-${msg.worker_id}`, type: "worker", worker_id: msg.worker_id, messages: [msg] });
       }
-    } else if (msg.role === "User") {
+    } else if (msg.role === "user") {
       if (currentAgentTurn) { groups.push(currentAgentTurn); currentAgentTurn = null; }
       groups.push({ key: msg.id, type: "user", messages: [msg] });
     } else {
@@ -756,10 +760,10 @@ function AgentTurn({
   };
 
   for (const msg of messages) {
-    if (msg.role === "System" && msg.content.startsWith("LLM 输出")) {
+    if (msg.role === "system" && msg.content.startsWith("LLM 输出")) {
       flushTools();
       // 提取 reasoning
-      const reasoning = msg.reasoning_content?.trim() || "";
+      const reasoning = msgReasoning(msg);
       if (reasoning && !shownReasonings.has(reasoning)) {
         shownReasonings.add(reasoning);
         fragments.push({ type: "thinking", content: reasoning, time: msg.created_at });
@@ -769,9 +773,9 @@ function AgentTurn({
       if (explanation) {
         fragments.push({ type: "explanation", text: explanation, time: msg.created_at });
       }
-    } else if (msg.role === "System" && (msg.content.includes("tool_name:") || msg.content.includes("exit_code") || msg.content.startsWith("工具执行 ["))) {
+    } else if (msg.role === "system" && (msg.content.includes("tool_name:") || msg.content.includes("exit_code") || msg.content.startsWith("工具执行 ["))) {
       pendingTools.push(msg);
-    } else if (msg.role === "Assistant") {
+    } else if (msg.role === "assistant") {
       flushTools();
       const isStreaming = msg.id === streamingMessageId;
       // 跳过与前一个 explanation 完全重复的 assistant 内容
@@ -781,19 +785,19 @@ function AgentTurn({
         fragments.pop();
       }
       // assistant 自身携带的 reasoning（DirectAnswer 模式等无系统消息场景）
-      const assistantReasoning = msg.reasoning_content?.trim() || "";
+      const assistantReasoning = msgReasoning(msg);
       if (assistantReasoning && !shownReasonings.has(assistantReasoning)) {
         shownReasonings.add(assistantReasoning);
         fragments.push({ type: "thinking", content: assistantReasoning, time: msg.created_at });
       }
       fragments.push({ type: "assistant", msg, isStreaming });
-    } else if (msg.role === "System" && msg.content.startsWith("[错误]")) {
+    } else if (msg.role === "system" && msg.content.startsWith("[错误]")) {
       flushTools();
       fragments.push({ type: "error_system", msg });
-    } else if (msg.role === "System" && msg.content.startsWith("[重试]")) {
+    } else if (msg.role === "system" && msg.content.startsWith("[重试]")) {
       flushTools();
       fragments.push({ type: "retry_system", msg });
-    } else if (msg.role === "System") {
+    } else if (msg.role === "system") {
       flushTools();
       fragments.push({ type: "other_system", msg });
     }

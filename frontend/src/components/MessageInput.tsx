@@ -241,9 +241,9 @@ export function MessageInput() {
         // 轮询等待消息出现后，通过内容匹配关联语音
         const tryAssociate = (retries: number) => {
           const msgs = useStore.getState().messages;
-          // 从后往前找内容匹配的 User 消息
+          // 从后往前找内容匹配的 user 消息
           const matched = [...msgs].reverse().find(
-            m => m.role === 'User' && m.content === text
+            m => m.role === 'user' && m.content === text
           );
           if (matched && !useStore.getState().voiceMessages[matched.id]) {
             console.log("关联语音消息:", matched.id, "->", audioPath);

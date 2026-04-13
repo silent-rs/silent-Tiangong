@@ -27,6 +27,33 @@ pub enum ModelCapability {
 }
 
 impl ModelCapability {
+    /// 配置键（snake_case）
+    pub fn key(&self) -> &'static str {
+        match self {
+            ModelCapability::Chat => "chat",
+            ModelCapability::Lite => "lite",
+            ModelCapability::Multimodal => "multimodal",
+            ModelCapability::ImageGeneration => "image_generation",
+            ModelCapability::VideoGeneration => "video_generation",
+            ModelCapability::Stt => "stt",
+            ModelCapability::Tts => "tts",
+        }
+    }
+
+    /// 从配置键解析能力
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "chat" => Some(ModelCapability::Chat),
+            "lite" => Some(ModelCapability::Lite),
+            "multimodal" => Some(ModelCapability::Multimodal),
+            "image_generation" => Some(ModelCapability::ImageGeneration),
+            "video_generation" => Some(ModelCapability::VideoGeneration),
+            "stt" => Some(ModelCapability::Stt),
+            "tts" => Some(ModelCapability::Tts),
+            _ => None,
+        }
+    }
+
     /// 返回所有能力的列表
     pub fn all() -> &'static [ModelCapability] {
         &[
@@ -171,6 +198,20 @@ fn models_config_path() -> PathBuf {
 // ---------------------------------------------------------------------------
 
 impl ModelsConfig {
+    /// 检查指定能力是否已配置可用
+    pub fn has_capability(&self, capability: ModelCapability) -> bool {
+        self.resolve_for_capability(capability).is_some()
+    }
+
+    /// 返回当前已配置可用的能力列表
+    pub fn available_capabilities(&self) -> Vec<ModelCapability> {
+        ModelCapability::all()
+            .iter()
+            .copied()
+            .filter(|cap| self.has_capability(*cap))
+            .collect()
+    }
+
     /// 从 ~/.tiangong/models.json 加载，不存在则返回空配置
     pub fn load() -> Self {
         let path = models_config_path();
@@ -339,7 +380,7 @@ impl ModelsConfig {
 
     /// 检查 chat 能力是否已配置
     pub fn has_chat(&self) -> bool {
-        self.resolve_for_capability(ModelCapability::Chat).is_some()
+        self.has_capability(ModelCapability::Chat)
     }
 
     /// 检查配置是否为空（无 provider 也无 model）

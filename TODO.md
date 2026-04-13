@@ -354,7 +354,9 @@
 - [x] src-tauri 依赖 tiangong-types
 - [x] 删除旧 LoopHost/ActiveLoops/CliLoopHost（-433 行）
 - [x] TurnRunner/ControlSignal/EventLoopRunner 已删除（并行智能体集成后清理）
-- [ ] src-tauri/types.rs DTO 转换层待前端完全迁移后删除
+- [x] src-tauri/types.rs DTO 转换层删除，共享消息类型改为直接复用 tiangong-types
+- [x] GUI TTS/STT 命令改为复用 tiangong-core 媒体服务，消除对 tiangong-media 的重复直连
+- [x] 补充统一能力查询接口（has_model_capability / get_available_capabilities）
 - [x] GUI 全链路功能验证通过
 - [x] CLI 交互优化（类似 codex/claude code 风格）
 - [x] 并行智能体（TaskCoordinator/Worker）集成到 TiangongCore

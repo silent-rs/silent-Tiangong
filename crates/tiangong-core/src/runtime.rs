@@ -734,6 +734,21 @@ impl RuntimeEngine {
         }
     }
 
+    fn build_media_runtime() -> Result<tokio::runtime::Runtime, String> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())
+    }
+
+    fn media_error_summary(prefix: &str, err: &crate::media::MediaServiceError) -> String {
+        if err.is_timeout() || err.is_config() {
+            err.to_string()
+        } else {
+            format!("{prefix}失败：{err}")
+        }
+    }
+
     /// 处理多媒体生成工具调用（图片/视频）
     fn handle_media_generation(
         &self,
@@ -758,32 +773,12 @@ impl RuntimeEngine {
             };
         }
 
-        let resolved = match self.models_config.resolve_for_capability(capability) {
-            Some(r) => r,
-            None => {
-                return ToolResult {
-                    ok: false,
-                    summary: format!("{}能力未配置", capability.display_name()),
-                    stdout: String::new(),
-                    stderr: "请在设置中配置对应的模型和路由".to_string(),
-                    exit_code: 1,
-                    execution: None,
-                };
-            }
-        };
-
         let started = std::time::Instant::now();
         let tool_name = call.name.clone();
 
         // 使用 OpenAI 兼容 API 生成
         match capability {
             ModelCapability::ImageGeneration => {
-                use tiangong_media::image::ImageGenerator;
-                let generator = tiangong_media::openai_image::OpenAIImageGenerator::new(
-                    resolved.api_key.clone(),
-                    resolved.base_url.clone(),
-                    resolved.model.clone(),
-                );
                 let width = call
                     .arguments
                     .get("width")
@@ -799,19 +794,7 @@ impl RuntimeEngine {
                     .get("style")
                     .and_then(|v| v.as_str())
                     .map(String::from);
-                let request = tiangong_media::image::ImageGenRequest {
-                    prompt,
-                    negative_prompt: None,
-                    width,
-                    height,
-                    model: Some(resolved.model.clone()),
-                    style,
-                    num_images: 1,
-                };
-                let runtime = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
+                let runtime = match Self::build_media_runtime() {
                     Ok(rt) => rt,
                     Err(e) => {
                         return ToolResult {
@@ -824,18 +807,18 @@ impl RuntimeEngine {
                         };
                     }
                 };
-                let result = runtime.block_on(async {
-                    tokio::time::timeout(
-                        std::time::Duration::from_secs(120),
-                        generator.generate(request),
-                    )
-                    .await
-                });
+                let result = runtime.block_on(crate::media::generate_image(
+                    &self.models_config,
+                    prompt,
+                    width,
+                    height,
+                    style,
+                ));
                 let duration_ms = started.elapsed().as_millis() as u64;
                 match result {
-                    Ok(Ok(resp)) => {
+                    Ok(output) => {
                         let mut parts = Vec::new();
-                        for (i, img) in resp.images.iter().enumerate() {
+                        for (i, img) in output.response.images.iter().enumerate() {
                             if let Some(url) = &img.url {
                                 parts.push(format!("![图片 {}]({})", i + 1, url));
                             } else if let Some(b64) = &img.b64_data {
@@ -846,11 +829,11 @@ impl RuntimeEngine {
                                 ));
                             }
                         }
-                        let output = parts.join("\n");
+                        let markdown = parts.join("\n");
                         ToolResult {
                             ok: true,
-                            summary: format!("图片生成成功（模型：{}）", resolved.model),
-                            stdout: output,
+                            summary: format!("图片生成成功（模型：{}）", output.resolved.model),
+                            stdout: markdown,
                             stderr: String::new(),
                             exit_code: 0,
                             execution: Some(ToolExecutionRecord {
@@ -859,15 +842,15 @@ impl RuntimeEngine {
                                 duration_ms,
                                 ok: true,
                                 exit_code: 0,
-                                summary: format!("图片生成成功（模型：{}）", resolved.model),
+                                summary: format!("图片生成成功（模型：{}）", output.resolved.model),
                             }),
                         }
                     }
-                    Ok(Err(e)) => ToolResult {
+                    Err(err) => ToolResult {
                         ok: false,
-                        summary: format!("图片生成失败：{e}"),
+                        summary: Self::media_error_summary("图片生成", &err),
                         stdout: String::new(),
-                        stderr: e.to_string(),
+                        stderr: err.to_string(),
                         exit_code: 1,
                         execution: Some(ToolExecutionRecord {
                             tool_name,
@@ -875,22 +858,7 @@ impl RuntimeEngine {
                             duration_ms,
                             ok: false,
                             exit_code: 1,
-                            summary: format!("图片生成失败：{e}"),
-                        }),
-                    },
-                    Err(_) => ToolResult {
-                        ok: false,
-                        summary: "图片生成超时（120秒）".to_string(),
-                        stdout: String::new(),
-                        stderr: "timeout".to_string(),
-                        exit_code: 1,
-                        execution: Some(ToolExecutionRecord {
-                            tool_name,
-                            args: vec![],
-                            duration_ms,
-                            ok: false,
-                            exit_code: 1,
-                            summary: "图片生成超时".to_string(),
+                            summary: Self::media_error_summary("图片生成", &err),
                         }),
                     },
                 }
@@ -934,23 +902,6 @@ impl RuntimeEngine {
             };
         }
 
-        let resolved = match self
-            .models_config
-            .resolve_for_capability(ModelCapability::Tts)
-        {
-            Some(r) => r,
-            None => {
-                return ToolResult {
-                    ok: false,
-                    summary: "TTS 能力未配置".to_string(),
-                    stdout: String::new(),
-                    stderr: "请在设置中配置 TTS 模型路由".to_string(),
-                    exit_code: 1,
-                    execution: None,
-                };
-            }
-        };
-
         let voice = call
             .arguments
             .get("voice")
@@ -976,23 +927,7 @@ impl RuntimeEngine {
         let started = std::time::Instant::now();
         let tool_name = call.name.clone();
 
-        use tiangong_media::tts::SpeechSynthesizer;
-        let synthesizer = tiangong_media::openai_tts::OpenAITTS::new(
-            resolved.api_key.clone(),
-            resolved.base_url.clone(),
-        );
-        let request = tiangong_media::tts::SynthesizeRequest {
-            text: text.clone(),
-            voice,
-            speed,
-            model: Some(resolved.model.clone()),
-            output_format: Some("mp3".to_string()),
-        };
-
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
+        let runtime = match Self::build_media_runtime() {
             Ok(rt) => rt,
             Err(e) => {
                 return ToolResult {
@@ -1006,22 +941,22 @@ impl RuntimeEngine {
             }
         };
 
-        let result: Result<Result<tiangong_media::tts::SynthesizeResponse, anyhow::Error>, _> =
-            runtime.block_on(async {
-                tokio::time::timeout(
-                    std::time::Duration::from_secs(60),
-                    synthesizer.synthesize(request),
-                )
-                .await
-            });
+        let result = runtime.block_on(crate::media::synthesize_speech(
+            &self.models_config,
+            text.clone(),
+            voice,
+            speed,
+            Some("mp3".to_string()),
+        ));
 
         let duration_ms = started.elapsed().as_millis() as u64;
         match result {
-            Ok(Ok(resp)) => {
+            Ok(output) => {
                 // 写入文件
-                match std::fs::write(&output_path, &resp.audio) {
+                match std::fs::write(&output_path, &output.response.audio) {
                     Ok(_) => {
-                        let duration_info = resp
+                        let duration_info = output
+                            .response
                             .duration
                             .map(|d| format!("，时长 {:.1}s", d))
                             .unwrap_or_default();
@@ -1029,7 +964,7 @@ impl RuntimeEngine {
                             ok: true,
                             summary: format!(
                                 "语音合成成功（模型：{}{}）",
-                                resolved.model, duration_info
+                                output.resolved.model, duration_info
                             ),
                             stdout: format!("音频文件已保存到：{output_path}"),
                             stderr: String::new(),
@@ -1040,7 +975,10 @@ impl RuntimeEngine {
                                 duration_ms,
                                 ok: true,
                                 exit_code: 0,
-                                summary: format!("语音合成成功（模型：{}）", resolved.model),
+                                summary: format!(
+                                    "语音合成成功（模型：{}）",
+                                    output.resolved.model
+                                ),
                             }),
                         }
                     }
@@ -1054,11 +992,11 @@ impl RuntimeEngine {
                     },
                 }
             }
-            Ok(Err(e)) => ToolResult {
+            Err(err) => ToolResult {
                 ok: false,
-                summary: format!("语音合成失败：{e}"),
+                summary: Self::media_error_summary("语音合成", &err),
                 stdout: String::new(),
-                stderr: e.to_string(),
+                stderr: err.to_string(),
                 exit_code: 1,
                 execution: Some(ToolExecutionRecord {
                     tool_name,
@@ -1066,22 +1004,7 @@ impl RuntimeEngine {
                     duration_ms,
                     ok: false,
                     exit_code: 1,
-                    summary: format!("语音合成失败：{e}"),
-                }),
-            },
-            Err(_) => ToolResult {
-                ok: false,
-                summary: "语音合成超时（60秒）".to_string(),
-                stdout: String::new(),
-                stderr: "timeout".to_string(),
-                exit_code: 1,
-                execution: Some(ToolExecutionRecord {
-                    tool_name,
-                    args: vec![],
-                    duration_ms,
-                    ok: false,
-                    exit_code: 1,
-                    summary: "语音合成超时".to_string(),
+                    summary: Self::media_error_summary("语音合成", &err),
                 }),
             },
         }
@@ -1105,23 +1028,6 @@ impl RuntimeEngine {
                 execution: None,
             };
         }
-
-        let resolved = match self
-            .models_config
-            .resolve_for_capability(ModelCapability::Stt)
-        {
-            Some(r) => r,
-            None => {
-                return ToolResult {
-                    ok: false,
-                    summary: "STT 能力未配置".to_string(),
-                    stdout: String::new(),
-                    stderr: "请在设置中配置 STT 模型路由".to_string(),
-                    exit_code: 1,
-                    execution: None,
-                };
-            }
-        };
 
         // 读取音频文件
         let audio_data = match std::fs::read(&file_path) {
@@ -1162,22 +1068,7 @@ impl RuntimeEngine {
         let started = std::time::Instant::now();
         let tool_name = call.name.clone();
 
-        use tiangong_media::stt::SpeechRecognizer;
-        let recognizer = tiangong_media::openai_stt::OpenAIWhisper::new(
-            resolved.api_key.clone(),
-            resolved.base_url.clone(),
-        );
-        let request = tiangong_media::stt::TranscribeRequest {
-            audio: audio_data,
-            mime_type,
-            language,
-            model: Some(resolved.model.clone()),
-        };
-
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
+        let runtime = match Self::build_media_runtime() {
             Ok(rt) => rt,
             Err(e) => {
                 return ToolResult {
@@ -1191,24 +1082,24 @@ impl RuntimeEngine {
             }
         };
 
-        let result: Result<Result<tiangong_media::stt::TranscribeResponse, anyhow::Error>, _> =
-            runtime.block_on(async {
-                tokio::time::timeout(
-                    std::time::Duration::from_secs(120),
-                    recognizer.transcribe(request),
-                )
-                .await
-            });
+        let result = runtime.block_on(crate::media::transcribe_audio(
+            &self.models_config,
+            audio_data,
+            mime_type,
+            language,
+        ));
 
         let duration_ms = started.elapsed().as_millis() as u64;
         match result {
-            Ok(Ok(resp)) => {
-                let lang_info = resp
+            Ok(output) => {
+                let lang_info = output
+                    .response
                     .language
                     .as_deref()
                     .map(|l| format!("，语言：{l}"))
                     .unwrap_or_default();
-                let dur_info = resp
+                let dur_info = output
+                    .response
                     .duration
                     .map(|d| format!("，音频时长：{:.1}s", d))
                     .unwrap_or_default();
@@ -1216,9 +1107,9 @@ impl RuntimeEngine {
                     ok: true,
                     summary: format!(
                         "语音识别成功（模型：{}{}{dur_info}）",
-                        resolved.model, lang_info
+                        output.resolved.model, lang_info
                     ),
-                    stdout: resp.text,
+                    stdout: output.response.text,
                     stderr: String::new(),
                     exit_code: 0,
                     execution: Some(ToolExecutionRecord {
@@ -1227,15 +1118,15 @@ impl RuntimeEngine {
                         duration_ms,
                         ok: true,
                         exit_code: 0,
-                        summary: format!("语音识别成功（模型：{}）", resolved.model),
+                        summary: format!("语音识别成功（模型：{}）", output.resolved.model),
                     }),
                 }
             }
-            Ok(Err(e)) => ToolResult {
+            Err(err) => ToolResult {
                 ok: false,
-                summary: format!("语音识别失败：{e}"),
+                summary: Self::media_error_summary("语音识别", &err),
                 stdout: String::new(),
-                stderr: e.to_string(),
+                stderr: err.to_string(),
                 exit_code: 1,
                 execution: Some(ToolExecutionRecord {
                     tool_name,
@@ -1243,22 +1134,7 @@ impl RuntimeEngine {
                     duration_ms,
                     ok: false,
                     exit_code: 1,
-                    summary: format!("语音识别失败：{e}"),
-                }),
-            },
-            Err(_) => ToolResult {
-                ok: false,
-                summary: "语音识别超时（120秒）".to_string(),
-                stdout: String::new(),
-                stderr: "timeout".to_string(),
-                exit_code: 1,
-                execution: Some(ToolExecutionRecord {
-                    tool_name,
-                    args: vec![],
-                    duration_ms,
-                    ok: false,
-                    exit_code: 1,
-                    summary: "语音识别超时".to_string(),
+                    summary: Self::media_error_summary("语音识别", &err),
                 }),
             },
         }
