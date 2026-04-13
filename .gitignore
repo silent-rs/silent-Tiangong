@@ -11,3 +11,4 @@ frontend/dist
 *.zip
 node_modules
 src-tauri/create_skill/
+.workers

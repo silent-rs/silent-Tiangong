@@ -185,15 +185,15 @@
 - [x] SystemMessageGroup 改造：活跃 round 以流式文本块展示（不折叠）
 - [x] 工具调用消息保持现有折叠展示方式不变
 
-### C. CLI 实时流式展示（待验收）
-- [ ] repl.rs 轮询循环从阻塞等待改为边轮询边输出增量
-- [ ] output.rs 新增流式输出函数（解释文本、工具摘要、增量输出）
-- [ ] 追踪消息增量，实现系统消息和助手消息的实时展示
+### C. CLI 实时流式展示（已完成 ✅）
+- [x] repl.rs 轮询循环从阻塞等待改为边轮询边输出增量
+- [x] output.rs 新增流式输出函数（解释文本、工具摘要、增量输出）
+- [x] 追踪消息增量，实现系统消息和助手消息的实时展示
 
 ### D. 验证
-- [ ] `cargo check --workspace` 通过
-- [ ] `cargo clippy --workspace --all-targets --tests --benches -- -D warnings` 通过
-- [ ] 前端 `yarn build` 通过
+- [x] `cargo check --workspace` 通过
+- [x] `cargo clippy --workspace --all-targets --tests --benches -- -D warnings` 通过
+- [x] 前端 `yarn build` 通过
 
 ---
 

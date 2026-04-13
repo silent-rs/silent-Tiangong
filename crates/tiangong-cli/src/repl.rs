@@ -7,6 +7,7 @@ use tiangong_core::core::TiangongCore;
 use tiangong_types::{SessionStreamEvent, StreamEvent};
 
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use crate::commands;
 use crate::completion;
@@ -99,38 +100,60 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
 /// 处理完整的响应流
 fn handle_response(rx: &mpsc::Receiver<SessionStreamEvent>, core: &TiangongCore) {
     let mut state = ResponseState::new();
+    let mut last_event_at = Instant::now();
+    let timeout = Duration::from_secs(300);
+    let poll_interval = Duration::from_millis(50);
 
     loop {
-        match rx.recv_timeout(std::time::Duration::from_secs(300)) {
-            Ok(session_event) => {
-                if state.process(&session_event.event, core) {
+        let mut had_event = false;
+
+        loop {
+            match rx.try_recv() {
+                Ok(session_event) => {
+                    had_event = true;
+                    last_event_at = Instant::now();
+                    if state.process(&session_event.event, core) {
+                        return;
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    state.finish();
+                    output::error("响应流已断开");
                     break;
                 }
             }
-            Err(_) => {
-                state.finish();
-                output::error("等待响应超时（300s）");
-                break;
-            }
+        }
+
+        if last_event_at.elapsed() >= timeout {
+            state.finish();
+            output::error("等待响应超时（300s）");
+            break;
+        }
+
+        if !had_event {
+            std::thread::sleep(poll_interval);
         }
     }
 }
 
 /// 响应流状态机
 struct ResponseState {
-    thinking_shown: bool,
-    reasoning_buf: String,
-    in_delta: bool,
-    has_delta: bool,
+    active_stream: ActiveStream,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ActiveStream {
+    Idle,
+    Reasoning { message_id: String },
+    Assistant { message_id: String },
+    Worker { worker_id: String },
 }
 
 impl ResponseState {
     fn new() -> Self {
         Self {
-            thinking_shown: false,
-            reasoning_buf: String::new(),
-            in_delta: false,
-            has_delta: false,
+            active_stream: ActiveStream::Idle,
         }
     }
 
@@ -140,47 +163,29 @@ impl ResponseState {
             StreamEvent::UserMessage { .. } => {
                 // CLI 模式下用户消息由 REPL 自己显示，忽略
             }
-            StreamEvent::Reasoning { content, .. } => {
-                if !self.thinking_shown {
-                    output::thinking_start();
-                    self.thinking_shown = true;
-                }
-                self.reasoning_buf.push_str(content);
+            StreamEvent::Reasoning {
+                message_id,
+                content,
+            } => {
+                self.ensure_reasoning_stream(message_id);
+                output::explanation_delta(content);
             }
 
-            StreamEvent::Delta { content, .. } => {
-                if !self.has_delta {
-                    if self.thinking_shown {
-                        output::thinking_clear();
-                    }
-                    if !self.reasoning_buf.is_empty() {
-                        output::thinking_summary(&self.reasoning_buf);
-                    }
-                    output::assistant_start();
-                    self.has_delta = true;
-                }
+            StreamEvent::Delta {
+                message_id,
+                content,
+            } => {
+                self.ensure_assistant_stream(message_id);
                 output::delta(content);
-                self.in_delta = true;
             }
 
             StreamEvent::ToolCalls { names, .. } => {
-                if self.in_delta {
-                    output::delta_end();
-                    self.in_delta = false;
-                }
-                if self.thinking_shown && !self.has_delta {
-                    output::thinking_clear();
-                }
-                if !self.reasoning_buf.is_empty() {
-                    output::thinking_summary(&self.reasoning_buf);
-                    self.reasoning_buf.clear();
-                }
+                self.end_active_stream();
                 output::tool_calls(names);
-                self.thinking_shown = false;
-                self.has_delta = false;
             }
 
             StreamEvent::ToolStart { name, args_summary } => {
+                self.end_active_stream();
                 if args_summary.is_empty() {
                     output::tool_start(name);
                 } else {
@@ -189,6 +194,7 @@ impl ResponseState {
             }
 
             StreamEvent::ToolResult { name, ok, output } => {
+                self.end_active_stream();
                 output::tool_result(name, *ok, output);
             }
 
@@ -197,6 +203,7 @@ impl ResponseState {
                 tool_name,
                 args_summary,
             } => {
+                self.end_active_stream();
                 output::approval_needed(tool_name, args_summary);
                 // 等待用户输入 y/n
                 let approved = loop {
@@ -237,6 +244,7 @@ impl ResponseState {
                 attempt,
                 max_attempts,
             } => {
+                self.end_active_stream();
                 output::warn(&format!("重试 ({attempt}/{max_attempts})：{message}"));
             }
 
@@ -244,16 +252,17 @@ impl ResponseState {
                 worker_id: _,
                 worker_label,
             } => {
+                self.end_active_stream();
                 output::worker_started(worker_label);
             }
 
             StreamEvent::WorkerChunk {
-                worker_id: _,
-                worker_label: _,
+                worker_id,
+                worker_label,
                 content,
             } => {
-                output::delta(content);
-                self.in_delta = true;
+                self.ensure_worker_stream(worker_id, worker_label);
+                output::worker_stream_delta(content);
             }
 
             StreamEvent::WorkerCompleted {
@@ -261,24 +270,70 @@ impl ResponseState {
                 worker_label,
                 success,
             } => {
+                self.end_active_stream();
                 output::worker_completed(worker_label, *success);
             }
         }
         false
     }
 
+    fn ensure_reasoning_stream(&mut self, message_id: &str) {
+        if !matches!(
+            &self.active_stream,
+            ActiveStream::Reasoning {
+                message_id: current_message_id
+            } if current_message_id == message_id
+        ) {
+            self.end_active_stream();
+            output::explanation_start();
+            self.active_stream = ActiveStream::Reasoning {
+                message_id: message_id.to_string(),
+            };
+        }
+    }
+
+    fn ensure_assistant_stream(&mut self, message_id: &str) {
+        if !matches!(
+            &self.active_stream,
+            ActiveStream::Assistant {
+                message_id: current_message_id
+            } if current_message_id == message_id
+        ) {
+            self.end_active_stream();
+            output::assistant_start();
+            self.active_stream = ActiveStream::Assistant {
+                message_id: message_id.to_string(),
+            };
+        }
+    }
+
+    fn ensure_worker_stream(&mut self, worker_id: &str, worker_label: &str) {
+        if !matches!(
+            &self.active_stream,
+            ActiveStream::Worker {
+                worker_id: current_worker_id
+            } if current_worker_id == worker_id
+        ) {
+            self.end_active_stream();
+            output::worker_stream_start(worker_label);
+            self.active_stream = ActiveStream::Worker {
+                worker_id: worker_id.to_string(),
+            };
+        }
+    }
+
+    fn end_active_stream(&mut self) {
+        match self.active_stream {
+            ActiveStream::Idle => {}
+            ActiveStream::Reasoning { .. } => output::explanation_end(),
+            ActiveStream::Assistant { .. } => output::delta_end(),
+            ActiveStream::Worker { .. } => output::worker_stream_end(),
+        }
+        self.active_stream = ActiveStream::Idle;
+    }
+
     fn finish(&mut self) {
-        if self.in_delta {
-            output::delta_end();
-            self.in_delta = false;
-        }
-        if self.thinking_shown && !self.has_delta {
-            output::thinking_clear();
-        }
-        if !self.reasoning_buf.is_empty() && !self.has_delta {
-            output::thinking_summary(&self.reasoning_buf);
-        }
-        self.reasoning_buf.clear();
+        self.end_active_stream();
         println!();
     }
 }
