@@ -41,9 +41,11 @@ fn resolve_media_model(
     models_config: &ModelsConfig,
     capability: ModelCapability,
 ) -> Result<ResolvedModel, MediaServiceError> {
-    models_config.resolve_for_capability(capability).ok_or_else(|| {
-        MediaServiceError::Config(format!("{}能力未配置", capability.display_name()))
-    })
+    models_config
+        .resolve_for_capability(capability)
+        .ok_or_else(|| {
+            MediaServiceError::Config(format!("{}能力未配置", capability.display_name()))
+        })
 }
 
 fn resolved_voice(resolved: &ResolvedModel, voice: Option<String>) -> Option<String> {

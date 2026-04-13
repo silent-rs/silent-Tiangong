@@ -1,5 +1,6 @@
 use anyhow::{Result, anyhow};
 use tiangong_core::app_state::TiangongState;
+use tiangong_core::core_config::CoreConfigProvider;
 
 use crate::completion;
 use crate::modal;
@@ -9,10 +10,12 @@ use crate::output;
 /// draft_new_session: 切换会话时重置为 false
 pub fn handle_command(
     state: &mut TiangongState,
+    config: &CoreConfigProvider,
     command: &str,
     draft_new_session: &mut bool,
 ) -> Result<bool> {
     let command = command.trim();
+    let mut sync_core_config = false;
 
     match command {
         "/exit" | "/quit" | "/q" => return Ok(true),
@@ -34,12 +37,15 @@ pub fn handle_command(
         }
         _ if command == "/model" || command.starts_with("/model ") => {
             handle_model(state, command)?;
+            sync_core_config = true;
         }
         "/mcp" => {
             modal::mcp::open(state)?;
+            sync_core_config = true;
         }
         "/skill" => {
             modal::skill::open(state)?;
+            sync_core_config = true;
         }
         "/cancel" => {
             if state.cancel_pending_turn()? {
@@ -50,10 +56,20 @@ pub fn handle_command(
         }
         _ if command == "/config" || command.starts_with("/config ") => {
             handle_config(state, command)?;
+            sync_core_config = command
+                .trim_start_matches("/config")
+                .trim()
+                .starts_with("set ");
         }
         _ => {
             output::print_warn(&format!("未知命令：{command}，输入 /help 查看可用命令"));
         }
+    }
+
+    if sync_core_config {
+        let base = config.snapshot();
+        let next = state.build_core_config_from_base(&base);
+        config.replace(next);
     }
 
     Ok(false)

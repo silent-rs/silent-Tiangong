@@ -61,7 +61,9 @@ fn accumulate_usage(
     }
 }
 
-fn parse_model_capability(capability: &str) -> Result<tiangong_core::models_config::ModelCapability, String> {
+fn parse_model_capability(
+    capability: &str,
+) -> Result<tiangong_core::models_config::ModelCapability, String> {
     tiangong_core::models_config::ModelCapability::from_key(capability)
         .ok_or_else(|| format!("不支持的能力类型：{capability}"))
 }
@@ -550,11 +552,7 @@ pub fn set_trust_mode(mode: String, state: State<TiangongApp>) -> Result<(), Str
 
     // 更新 TiangongState（持久化）
     state.with_state(|core_state| core_state.set_trust_mode(trust_mode))?;
-
-    // 更新 CoreConfigProvider（新会话创建时的默认值）
-    state.config.update(|c| {
-        c.trust_mode = trust_mode;
-    });
+    state.sync_core_config_from_state()?;
 
     // 只更新当前活跃会话的 core（session 级别）
     let session_id =
@@ -618,7 +616,8 @@ pub async fn synthesize_speech(
     text: String,
     state: State<'_, TiangongApp>,
 ) -> Result<SpeechResult, String> {
-    let models_config = state.with_state_read(|core_state| Ok(core_state.models_config().clone()))?;
+    let models_config =
+        state.with_state_read(|core_state| Ok(core_state.models_config().clone()))?;
     let output = tiangong_core::media::synthesize_speech(
         &models_config,
         text,
@@ -669,10 +668,7 @@ pub fn has_stt_capability(state: State<TiangongApp>) -> Result<bool, String> {
 
 /// 统一的能力可用性查询（基于配置快速检测）
 #[tauri::command]
-pub fn has_model_capability(
-    capability: String,
-    state: State<TiangongApp>,
-) -> Result<bool, String> {
+pub fn has_model_capability(capability: String, state: State<TiangongApp>) -> Result<bool, String> {
     let capability = parse_model_capability(&capability)?;
     state.with_state_read(|core_state| Ok(has_capability_in_state(core_state, capability)))
 }
@@ -691,7 +687,10 @@ pub fn get_available_capabilities(
                 key: capability.key().to_string(),
                 display_name: capability.display_name().to_string(),
                 enabled: has_capability_in_state(core_state, *capability),
-                routed_model: core_state.models_config().routed_model(*capability).map(str::to_string),
+                routed_model: core_state
+                    .models_config()
+                    .routed_model(*capability)
+                    .map(str::to_string),
             })
             .collect())
     })
@@ -704,7 +703,8 @@ pub async fn transcribe_speech(
     mime_type: String,
     state: State<'_, TiangongApp>,
 ) -> Result<TranscribeResult, String> {
-    let models_config = state.with_state_read(|core_state| Ok(core_state.models_config().clone()))?;
+    let models_config =
+        state.with_state_read(|core_state| Ok(core_state.models_config().clone()))?;
 
     // 解码 base64 音频数据
     use base64::Engine;
@@ -747,7 +747,8 @@ pub async fn transcribe_speech(
 pub async fn list_tts_voices(
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let models_config = state.with_state_read(|core_state| Ok(core_state.models_config().clone()))?;
+    let models_config =
+        state.with_state_read(|core_state| Ok(core_state.models_config().clone()))?;
     let voices = tiangong_core::media::list_tts_voices(&models_config)
         .await
         .map_err(|e| e.to_string())?;
@@ -940,7 +941,7 @@ pub fn register_mcp_server(
     use tiangong_core::app_state::RegisterMcpServerOptions;
     use tiangong_core::app_state::RegisterMcpServerRequest;
 
-    state.with_state(|core_state| {
+    let message = state.with_state(|core_state| {
         // 转换 env HashMap 为 Vec<(String, String)>
         let env_vec = env.unwrap_or_default().into_iter().collect();
 
@@ -956,13 +957,17 @@ pub fn register_mcp_server(
             },
         };
         core_state.register_mcp_server(request)
-    })
+    })?;
+    state.sync_core_config_from_state()?;
+    Ok(message)
 }
 
 /// 移除 MCP 服务器
 #[tauri::command]
 pub fn remove_mcp_server(name: String, state: State<TiangongApp>) -> Result<String, String> {
-    state.with_state(|core_state| core_state.remove_mcp_server(&name))
+    let message = state.with_state(|core_state| core_state.remove_mcp_server(&name))?;
+    state.sync_core_config_from_state()?;
+    Ok(message)
 }
 
 /// 设置 MCP 服务器启用状态
@@ -972,7 +977,10 @@ pub fn set_mcp_server_enabled(
     enabled: bool,
     state: State<TiangongApp>,
 ) -> Result<String, String> {
-    state.with_state(|core_state| core_state.set_mcp_server_enabled(&name, enabled))
+    let message =
+        state.with_state(|core_state| core_state.set_mcp_server_enabled(&name, enabled))?;
+    state.sync_core_config_from_state()?;
+    Ok(message)
 }
 
 // ============================================================================
@@ -1011,20 +1019,24 @@ pub fn install_skill(
     env_values: Option<std::collections::HashMap<String, String>>,
     state: State<TiangongApp>,
 ) -> Result<String, String> {
-    state.with_state(|core_state| {
+    let message = state.with_state(|core_state| {
         let env: Vec<(String, String)> = env_values
             .unwrap_or_default()
             .into_iter()
             .filter(|(_, v)| !v.trim().is_empty())
             .collect();
         core_state.install_local_skill_with_options_and_inputs(&path, true, true, &env)
-    })
+    })?;
+    state.sync_core_config_from_state()?;
+    Ok(message)
 }
 
 /// 移除 Skill
 #[tauri::command]
 pub fn remove_skill(id: String, state: State<TiangongApp>) -> Result<String, String> {
-    state.with_state(|core_state| core_state.remove_skill(&id))
+    let message = state.with_state(|core_state| core_state.remove_skill(&id))?;
+    state.sync_core_config_from_state()?;
+    Ok(message)
 }
 
 /// 获取 Skill 的环境变量（合并 skill.toml 声明的 requires.env + .env.local 已有值）
@@ -1117,7 +1129,9 @@ pub fn set_skill_enabled(
     enabled: bool,
     state: State<TiangongApp>,
 ) -> Result<String, String> {
-    state.with_state(|core_state| core_state.set_skill_enabled(&id, enabled))
+    let message = state.with_state(|core_state| core_state.set_skill_enabled(&id, enabled))?;
+    state.sync_core_config_from_state()?;
+    Ok(message)
 }
 
 // ============================================================================
@@ -1243,7 +1257,9 @@ pub fn set_models_config(
     state.with_state(|core_state| {
         let core_config = config.to_core();
         core_state.save_models_config(core_config)
-    })
+    })?;
+    state.sync_core_config_from_state()?;
+    Ok(())
 }
 
 /// 获取所有可用的模型能力列表

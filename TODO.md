@@ -401,21 +401,21 @@
 
 ### Phase A：CoreConfig + CoreConfigProvider
 
-- [ ] 定义 `CoreConfig` 结构（models/mcp/skills/trust_mode/context_limit）
-- [ ] 实现 `CoreConfigProvider`（ArcSwap + generation 原子计数）
-- [ ] 修改 `TiangongCore` 构造函数接收 `CoreConfigProvider`
-- [ ] 修改 `worker_loop` 使用 generation 检测 + snapshot 重建 engine
-- [ ] 移除 `build_engine()` 中的磁盘加载逻辑
+- [x] 定义 `CoreConfig` 结构（models/mcp/skills/trust_mode/context_limit）
+- [x] 实现 `CoreConfigProvider`（ArcSwap + generation 原子计数）
+- [x] 修改 `TiangongCore` 构造函数接收 `CoreConfigProvider`
+- [x] 修改 `worker_loop` 使用 generation 检测 + snapshot 重建 engine
+- [x] 移除 `build_engine()` 中的磁盘加载逻辑
 
 ### Phase B：各端适配
 
-- [ ] CLI：创建 CoreConfigProvider，从磁盘加载初始配置
-- [ ] GUI：TiangongApp 持有 CoreConfigProvider，配置变更时 update
+- [x] CLI：创建 CoreConfigProvider，从磁盘加载初始配置，并在 `/model` `/config set` `/mcp` `/skill` 变更后同步
+- [x] GUI：TiangongApp 持有 CoreConfigProvider，模型/MCP/Skill/TrustMode 变更时同步 update
 - [ ] Server/Connector：适配 CoreConfigProvider
 
 ### Phase C：验证
 
-- [ ] cargo clippy --workspace 通过
-- [ ] cargo nextest run --workspace 通过
+- [x] cargo clippy --workspace 通过
+- [x] cargo nextest run --workspace 通过
 - [ ] GUI 验证：切换模型/MCP/Skill 后下一轮对话生效
 - [ ] CLI 验证：/model 切换后生效

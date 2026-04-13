@@ -30,6 +30,14 @@ impl TiangongApp {
         Self::default()
     }
 
+    pub fn sync_core_config_from_state(&self) -> Result<(), String> {
+        let base = self.config.snapshot();
+        let next =
+            self.with_state_read(|core_state| Ok(core_state.build_core_config_from_base(&base)))?;
+        self.config.replace(next);
+        Ok(())
+    }
+
     pub fn with_state<F, R>(&self, f: F) -> Result<R, String>
     where
         F: FnOnce(&mut tiangong_core::app_state::TiangongState) -> Result<R, anyhow::Error>,

@@ -975,10 +975,7 @@ impl RuntimeEngine {
                                 duration_ms,
                                 ok: true,
                                 exit_code: 0,
-                                summary: format!(
-                                    "语音合成成功（模型：{}）",
-                                    output.resolved.model
-                                ),
+                                summary: format!("语音合成成功（模型：{}）", output.resolved.model),
                             }),
                         }
                     }

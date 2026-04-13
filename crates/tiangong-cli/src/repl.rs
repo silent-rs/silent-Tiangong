@@ -19,7 +19,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
     let app_config = load_tiangong_config();
     let config = app_config.into_core_config_provider();
     let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
-    let core = TiangongCore::new(config, stream_tx);
+    let core = TiangongCore::new(config.clone(), stream_tx);
 
     // CLI --trust-mode 参数覆盖
     if let Some(mode) = trust_mode {
@@ -63,7 +63,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
 
         // / 命令（通过 TiangongState 处理）
         if trimmed.starts_with('/') {
-            match commands::handle_command(&mut state, trimmed, &mut draft_new_session) {
+            match commands::handle_command(&mut state, &config, trimmed, &mut draft_new_session) {
                 Ok(true) => break,
                 Ok(false) => continue,
                 Err(err) => {

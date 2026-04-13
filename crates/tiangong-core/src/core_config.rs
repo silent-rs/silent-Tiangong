@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent_config::{McpConfig, McpServerConfig, SkillsConfig};
 use crate::mcp::McpToolMeta;
+use crate::models_config::{ModelCapability, ModelsConfig};
 use crate::permission::TrustMode;
 
 const DEFAULT_CONTEXT_LIMIT: usize = 32_768;
@@ -74,6 +75,28 @@ pub struct LlmConfig {
 }
 
 impl LlmConfig {
+    /// 从 ModelsConfig 解析出 Core 运行所需的扁平端点配置
+    pub fn from_models_config(models: &ModelsConfig) -> Self {
+        let resolve = |cap: ModelCapability| -> Option<ModelEndpoint> {
+            let resolved = models.resolve_for_capability(cap)?;
+            Some(ModelEndpoint {
+                base_url: resolved.base_url,
+                api_key: resolved.api_key,
+                model: resolved.model,
+                timeout_ms: resolved.timeout_ms,
+            })
+        };
+
+        Self {
+            chat: resolve(ModelCapability::Chat).unwrap_or_default(),
+            lite: resolve(ModelCapability::Lite),
+            image_generation: resolve(ModelCapability::ImageGeneration),
+            tts: resolve(ModelCapability::Tts),
+            stt: resolve(ModelCapability::Stt),
+            video_generation: resolve(ModelCapability::VideoGeneration),
+        }
+    }
+
     /// 检查是否有有效的 Chat 端点
     pub fn is_valid(&self) -> bool {
         !self.chat.base_url.is_empty() && !self.chat.api_key.is_empty()
