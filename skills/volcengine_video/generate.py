@@ -127,7 +127,9 @@ def extract_video_url(data: dict) -> str:
 def generate_video(prompt: str, model: str, max_wait: int = 300) -> dict:
     """完整流程：提交 → 轮询 → 返回结果"""
     api_key = os.environ.get("ARK_API_KEY", "")
-    base_url = os.environ.get("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
+    base_url = os.environ.get(
+        "ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"
+    )
     base_url = base_url.rstrip("/")
 
     # 支持通过环境变量覆盖模型
@@ -200,7 +202,11 @@ def generate_video(prompt: str, model: str, max_wait: int = 300) -> dict:
 
         if status in ("failed", "error"):
             error_info = status_data.get("error", {})
-            msg = error_info.get("message", str(error_info)) if isinstance(error_info, dict) else str(error_info)
+            msg = (
+                error_info.get("message", str(error_info))
+                if isinstance(error_info, dict)
+                else str(error_info)
+            )
             return {"ok": False, "error": f"视频生成失败：{msg}", "task_id": task_id}
 
         # pending / running / processing → 继续
@@ -222,7 +228,9 @@ def download_video(url: str, output_path: str) -> str:
 def main():
     parser = argparse.ArgumentParser(description="火山方舟视频生成")
     parser.add_argument("--prompt", required=True, help="视频内容描述")
-    parser.add_argument("--model", default="doubao-seedance-1-0-pro-fast-251015", help="模型名称或接入点 ID")
+    parser.add_argument(
+        "--model", default="doubao-seedance-1-0-pro-fast-251015", help="模型名称或接入点 ID"
+    )
     parser.add_argument("--max-wait", type=int, default=300, help="最大等待时间（秒）")
     parser.add_argument("--output", "-o", default="", help="下载视频到本地路径（可选）")
     args = parser.parse_args()

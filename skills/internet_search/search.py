@@ -16,19 +16,21 @@ def search_duckduckgo(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
     """
     try:
         from duckduckgo_search import DDGS
-        
+
         results = []
         with DDGS() as ddgs:
             search_results = ddgs.text(query, max_results=max_results)
-            
+
             for result in search_results:
-                results.append({
-                    "title": result.get("title", ""),
-                    "url": result.get("href", ""),
-                    "snippet": result.get("body", ""),
-                    "source": "duckduckgo"
-                })
-        
+                results.append(
+                    {
+                        "title": result.get("title", ""),
+                        "url": result.get("href", ""),
+                        "snippet": result.get("body", ""),
+                        "source": "duckduckgo",
+                    }
+                )
+
         return results
     except ImportError:
         return [{"error": "请安装 duckduckgo-search: pip install duckduckgo-search"}]
@@ -58,12 +60,15 @@ def main():
     parser = argparse.ArgumentParser(description="联网搜索工具")
     parser.add_argument("--query", required=True, help="搜索查询内容")
     parser.add_argument("--max-results", type=int, default=5, help="最大结果数量")
-    parser.add_argument("--engine", default="duckduckgo", 
-                       choices=["duckduckgo", "google", "bing"],
-                       help="搜索引擎选择")
-    
+    parser.add_argument(
+        "--engine",
+        default="duckduckgo",
+        choices=["duckduckgo", "google", "bing"],
+        help="搜索引擎选择",
+    )
+
     args = parser.parse_args()
-    
+
     # 根据选择的搜索引擎执行搜索
     if args.engine == "duckduckgo":
         results = search_duckduckgo(args.query, args.max_results)
@@ -73,15 +78,15 @@ def main():
         results = search_bing(args.query, args.max_results)
     else:
         results = [{"error": f"不支持的搜索引擎: {args.engine}"}]
-    
+
     # 输出 JSON 格式结果
     output = {
         "query": args.query,
         "engine": args.engine,
         "total_results": len(results),
-        "results": results
+        "results": results,
     }
-    
+
     print(json.dumps(output, ensure_ascii=False, indent=2))
 
 
