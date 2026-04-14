@@ -210,9 +210,18 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 status = status.as_u16(),
                 "OpenAI 兼容请求失败"
             );
+            let message = format!("获取模型列表失败：HTTP {status}，响应：{body}");
+            if status.as_u16() == 429
+                || status.as_u16() == 529
+                || body.to_ascii_lowercase().contains("rate limit")
+                || body.to_ascii_lowercase().contains("too many requests")
+                || body.to_ascii_lowercase().contains("overloaded_error")
+            {
+                return Err(LlmError::RateLimited(message));
+            }
             return Err(LlmError::Provider {
                 provider: "openai_compatible",
-                message: format!("获取模型列表失败：HTTP {status}，响应：{body}"),
+                message,
             });
         }
         #[derive(serde::Deserialize)]

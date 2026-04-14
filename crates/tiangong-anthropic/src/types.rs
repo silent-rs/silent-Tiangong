@@ -137,11 +137,13 @@ pub struct MessagesCreateRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MessagesCreateResponse {
+    #[serde(default)]
     pub id: String,
     #[serde(rename = "type")]
     pub kind: String,
     pub role: MessageRole,
     pub content: Vec<ContentBlock>,
+    #[serde(default)]
     pub model: String,
     #[serde(default)]
     pub stop_reason: Option<String>,
@@ -172,7 +174,9 @@ pub struct ModelsListResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MessageStartData {
+    #[serde(default)]
     pub id: String,
+    #[serde(default)]
     pub model: String,
     pub role: MessageRole,
     #[serde(default)]
@@ -261,6 +265,7 @@ pub enum StreamEvent {
     Error {
         message: String,
     },
+    Unknown,
 }
 
 pub type EventStream = BoxStream<'static, Result<StreamEvent, AnthropicError>>;

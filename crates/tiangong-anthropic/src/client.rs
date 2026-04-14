@@ -120,14 +120,7 @@ async fn parse_error_response(response: reqwest::Response) -> AnthropicError {
     let status = response.status();
     let body = response.bytes().await.unwrap_or_default();
     let body_text = String::from_utf8_lossy(&body).to_string();
-
-    match status.as_u16() {
-        400 => AnthropicError::InvalidRequest(body_text),
-        401 | 403 => AnthropicError::Authentication(body_text),
-        429 => AnthropicError::RateLimited(body_text),
-        _ if status.is_server_error() => AnthropicError::Transport(body_text),
-        _ => AnthropicError::Api(body_text),
-    }
+    classify_http_error(status, body_text)
 }
 
 async fn parse_json_response<T: serde::de::DeserializeOwned>(
@@ -141,13 +134,7 @@ async fn parse_json_response<T: serde::de::DeserializeOwned>(
 
     if !status.is_success() {
         let body_text = String::from_utf8_lossy(&body).to_string();
-        return Err(match status.as_u16() {
-            400 => AnthropicError::InvalidRequest(body_text),
-            401 | 403 => AnthropicError::Authentication(body_text),
-            429 => AnthropicError::RateLimited(body_text),
-            _ if status.is_server_error() => AnthropicError::Transport(body_text),
-            _ => AnthropicError::Api(body_text),
-        });
+        return Err(classify_http_error(status, body_text));
     }
 
     serde_json::from_slice(&body).map_err(|err| {
@@ -156,6 +143,28 @@ async fn parse_json_response<T: serde::de::DeserializeOwned>(
             String::from_utf8_lossy(&body[..body.len().min(512)])
         ))
     })
+}
+
+fn classify_http_error(status: reqwest::StatusCode, body_text: String) -> AnthropicError {
+    if is_rate_limited_status_or_body(status, &body_text) {
+        return AnthropicError::RateLimited(body_text);
+    }
+
+    match status.as_u16() {
+        400 => AnthropicError::InvalidRequest(body_text),
+        401 | 403 => AnthropicError::Authentication(body_text),
+        _ if status.is_server_error() => AnthropicError::Transport(body_text),
+        _ => AnthropicError::Api(body_text),
+    }
+}
+
+fn is_rate_limited_status_or_body(status: reqwest::StatusCode, body_text: &str) -> bool {
+    let lower = body_text.to_ascii_lowercase();
+    matches!(status.as_u16(), 429 | 529)
+        || lower.contains("rate limit")
+        || lower.contains("too many requests")
+        || lower.contains("overloaded_error")
+        || lower.contains("\"type\":\"overloaded_error\"")
 }
 
 fn parse_sse_event(event_type: &str, data: &str) -> Result<StreamEvent, AnthropicError> {
@@ -233,8 +242,6 @@ fn parse_sse_event(event_type: &str, data: &str) -> Result<StreamEvent, Anthropi
                 .map_err(|err| AnthropicError::Serialization(err.to_string()))?,
         }),
         "message_stop" => Ok(StreamEvent::MessageStop),
-        other => Err(AnthropicError::Stream(format!(
-            "不支持的 SSE 事件：{other}"
-        ))),
+        _other => Ok(StreamEvent::Unknown),
     }
 }

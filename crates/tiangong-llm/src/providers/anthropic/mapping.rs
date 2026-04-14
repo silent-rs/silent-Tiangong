@@ -283,7 +283,7 @@ pub(super) fn map_stream_event(
         }
         StreamEvent::MessageStop => Ok(vec![ProviderStreamEvent::MessageEnd]),
         StreamEvent::Error { message } => Ok(vec![ProviderStreamEvent::Error(message)]),
-        StreamEvent::Ping => Ok(Vec::new()),
+        StreamEvent::Ping | StreamEvent::Unknown => Ok(Vec::new()),
     }
 }
 
