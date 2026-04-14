@@ -3419,6 +3419,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-anthropic"
+version = "0.1.0"
+dependencies = [
+ "eventsource-stream",
+ "futures-util",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "tiangong-cli"
 version = "0.1.0"
 dependencies = [
@@ -3478,6 +3490,7 @@ dependencies = [
  "scru128 3.6.1",
  "serde",
  "serde_json",
+ "tiangong-llm",
  "tiangong-media",
  "tiangong-types",
  "tokio",
@@ -3512,6 +3525,25 @@ dependencies = [
  "serde_json",
  "tiangong-core",
  "tiangong-media",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "tiangong-llm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-openai",
+ "async-trait",
+ "backoff",
+ "futures-util",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tiangong-anthropic",
+ "tiangong-types",
  "tokio",
  "tracing",
 ]

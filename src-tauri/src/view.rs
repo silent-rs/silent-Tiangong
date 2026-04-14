@@ -266,6 +266,7 @@ pub struct ProviderConfigView {
     pub base_url: String,
     pub api_key: String,
     pub timeout_ms: u64,
+    pub protocol: String,
 }
 
 /// 单个模型配置（前端使用）
@@ -297,6 +298,7 @@ impl ModelsConfigView {
                         base_url: v.base_url.clone(),
                         api_key: v.api_key.clone(),
                         timeout_ms: v.timeout_ms,
+                        protocol: v.protocol.as_str().to_string(),
                     },
                 )
             })
@@ -354,6 +356,7 @@ impl ModelsConfigView {
                         base_url: v.base_url.clone(),
                         api_key: v.api_key.clone(),
                         timeout_ms: v.timeout_ms,
+                        protocol: v.protocol.parse().unwrap_or_default(),
                     },
                 )
             })

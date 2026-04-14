@@ -227,14 +227,22 @@ function ProvidersSection({
     base_url: '',
     api_key: '',
     timeout_ms: 60000,
+    protocol: 'openai_compatible',
   });
   const [showApiKey, setShowApiKey] = useState(false);
 
   const providerKeys = Object.keys(config.providers);
+  const protocolLabel = (protocol?: string) =>
+    protocol === 'anthropic' ? 'Anthropic' : 'OpenAI 兼容';
 
   const openAdd = () => {
     setModalMode('add');
-    setDraft({ base_url: '', api_key: '', timeout_ms: 60000 });
+    setDraft({
+      base_url: '',
+      api_key: '',
+      timeout_ms: 60000,
+      protocol: 'openai_compatible',
+    });
     setNewKey('');
     setShowApiKey(false);
   };
@@ -303,10 +311,18 @@ function ProvidersSection({
           <Card key={key}>
             <CardContent className="p-3">
               <div className="flex items-center justify-between">
-                <div>
-                  <span className="font-medium text-sm">{key}</span>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-sm">{key}</span>
+                    <Badge variant="secondary" className="text-[10px] px-1.5 py-0 h-5">
+                      {protocolLabel(config.providers[key].protocol)}
+                    </Badge>
+                  </div>
                   <div className="text-xs text-muted-foreground mt-1">
                     {config.providers[key].base_url || '(未设置 URL)'}
+                  </div>
+                  <div className="text-[11px] text-muted-foreground mt-1">
+                    超时 {config.providers[key].timeout_ms} ms
                   </div>
                 </div>
                 <div className="flex items-center gap-1">
@@ -413,6 +429,21 @@ function ProviderForm({
           placeholder="60000"
         />
       </div>
+      <div>
+        <Label className="text-xs">协议类型</Label>
+        <Select
+          value={draft.protocol || 'openai_compatible'}
+          onValueChange={(value) => setDraft({ ...draft, protocol: value })}
+        >
+          <SelectTrigger className="text-sm h-8">
+            <SelectValue placeholder="选择协议" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="openai_compatible">OpenAI 兼容</SelectItem>
+            <SelectItem value="anthropic">Anthropic</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
       <div className="flex justify-end gap-2 pt-1">
         <Button variant="ghost" size="sm" onClick={onCancel}>
           取消
@@ -467,6 +498,7 @@ function ModelsSection({
         provider.base_url,
         provider.api_key,
         provider.timeout_ms,
+        provider.protocol,
       );
       if (models.length === 0) {
         showError('无可用模型', '该 Provider 未返回任何模型，请检查 API 配置');
@@ -788,6 +820,11 @@ function RoutingSection({
   capabilities: ModelCapabilityInfo[];
 }) {
   const modelKeys = Object.keys(config.models);
+  const modelLabel = (modelKey: string) => {
+    const model = config.models[modelKey];
+    if (!model) return modelKey;
+    return `${model.provider} / ${model.model}`;
+  };
 
   const setRoute = (capKey: string, modelName: string) => {
     const next = { ...config };
@@ -838,7 +875,7 @@ function RoutingSection({
                         return false;
                       })
                       .map((mk) => (
-                        <SelectItem key={mk} value={mk}>{mk}</SelectItem>
+                        <SelectItem key={mk} value={mk}>{modelLabel(mk)}</SelectItem>
                       ))}
                   </SelectContent>
                 </Select>

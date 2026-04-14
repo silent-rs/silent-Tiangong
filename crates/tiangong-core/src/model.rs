@@ -1,23 +1,26 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::mcp::build_mcp_tools_system_prompt;
+use crate::session::{Message, MessageRole};
 use anyhow::{Context, Result, anyhow};
-use async_openai::Client as OpenAIClient;
-use async_openai::config::OpenAIConfig;
-use async_openai::types::chat::{
-    ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
-    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
-    CreateChatCompletionRequestArgs, CreateChatCompletionResponse,
-};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use tiangong_llm::message::{
+    ChatMessage, MessageContent as LlmMessageContent, MessageRole as LlmMessageRole,
+};
+use tiangong_llm::provider::LlmProvider;
+use tiangong_llm::providers::anthropic::{AnthropicConfig, AnthropicProvider};
+use tiangong_llm::providers::openai::{OpenAiCompatibleConfig, OpenAiCompatibleProvider};
+use tiangong_llm::request::{ProviderRequest, ThinkingConfig as LlmThinkingConfig};
+use tiangong_llm::response::ProviderResponse;
+use tiangong_llm::stream::{ProviderStream, ProviderStreamEvent};
+use tiangong_llm::tool::{ToolCall as LlmToolCall, ToolChoice as LlmToolChoice, ToolSpec};
+use tiangong_llm::usage::TokenUsageData;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
-use tokio::time::timeout;
 
-use crate::mcp::build_mcp_tools_system_prompt;
-use crate::session::{Message, MessageRole};
-
+pub use tiangong_llm::ProviderProtocol;
 pub use tiangong_types::TokenUsage;
 
 #[derive(Debug, Clone)]
@@ -26,8 +29,13 @@ pub struct ModelRequest {
     pub user_input: String,
     pub context: Vec<Message>,
     /// 已由 PromptAssembler 装配的 system prompt。
-    /// 设置此字段后 build_openai_messages 跳过自己的环境注入。
     pub assembled_system_prompt: Option<String>,
+    pub thinking: Option<ModelThinkingConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelThinkingConfig {
+    pub budget_tokens: u32,
 }
 
 impl ModelRequest {
@@ -43,7 +51,13 @@ impl ModelRequest {
             user_input,
             context,
             assembled_system_prompt: Some(system_prompt),
+            thinking: None,
         }
+    }
+
+    pub fn with_thinking_budget(mut self, budget_tokens: u32) -> Self {
+        self.thinking = Some(ModelThinkingConfig { budget_tokens });
+        self
     }
 }
 
@@ -92,6 +106,8 @@ pub struct ModelProviderConfig {
     pub api_base_url: String,
     #[serde(rename = "API_TIMEOUT_MS", default = "default_api_timeout_ms")]
     pub api_timeout_ms: String,
+    #[serde(rename = "API_PROTOCOL", default)]
+    pub api_protocol: ProviderProtocol,
     #[serde(rename = "API_MODEL", default = "default_api_model")]
     pub api_model: String,
     #[serde(rename = "API_LITE_MODEL", default)]
@@ -105,12 +121,17 @@ impl ModelProviderConfig {
         let api_base_url = std::env::var("API_BASE_URL").unwrap_or_else(|_| default_api_base_url());
         let api_timeout_ms =
             std::env::var("API_TIMEOUT_MS").unwrap_or_else(|_| default_api_timeout_ms());
+        let api_protocol = std::env::var("API_PROTOCOL")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_default();
         let api_model = std::env::var("API_MODEL").unwrap_or_else(|_| default_api_model());
         let api_lite_model = std::env::var("API_LITE_MODEL").unwrap_or_default();
         Self {
             api_auth_token,
             api_base_url,
             api_timeout_ms,
+            api_protocol,
             api_model,
             api_lite_model,
         }
@@ -238,48 +259,115 @@ impl SingleProviderClient {
         }
 
         let timeout_ms = parse_timeout_ms(&cfg.api_timeout_ms)?;
-        let api_base = normalize_api_base(&cfg.api_base_url)?;
-
-        // 直接发 HTTP 请求而非使用 SDK 的 models().list()，
-        // 因为部分 API 供应商（如 DeepSeek）返回的模型对象缺少 `created` 等字段，
-        // SDK 的严格反序列化会失败。
-        let url = format!("{api_base}/models");
-        let http_client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_millis(timeout_ms))
+        if cfg.api_protocol == ProviderProtocol::Anthropic {
+            let provider = build_anthropic_provider_from_config(cfg, timeout_ms, None)?;
+            let runtime = TokioRuntimeBuilder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("初始化异步运行时失败")?;
+            let mut models = runtime
+                .block_on(provider.list_models())
+                .map(|items| items.into_iter().map(|item| item.id).collect::<Vec<_>>())
+                .map_err(map_llm_error)?;
+            models.sort();
+            models.dedup();
+            return Ok(models);
+        }
+        let provider = build_openai_provider_from_config(cfg, timeout_ms, None)?;
+        let runtime = TokioRuntimeBuilder::new_current_thread()
+            .enable_all()
             .build()
-            .context("创建 HTTP 客户端失败")?;
-
-        let resp = http_client
-            .get(&url)
-            .header("Authorization", format!("Bearer {token}"))
-            .send()
-            .with_context(|| format!("请求模型列表失败：{url}"))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().unwrap_or_default();
-            return Err(anyhow!("获取模型列表失败：HTTP {status}，响应：{body}"));
-        }
-
-        let body = resp.text().context("读取模型列表响应失败")?;
-
-        // 宽松反序列化：只需要 id 字段
-        #[derive(serde::Deserialize)]
-        struct ModelEntry {
-            id: String,
-        }
-        #[derive(serde::Deserialize)]
-        struct ModelsResponse {
-            data: Vec<ModelEntry>,
-        }
-
-        let parsed: ModelsResponse = serde_json::from_str(&body)
-            .with_context(|| format!("failed to deserialize api response: {body}"))?;
-
-        let mut models = parsed.data.into_iter().map(|m| m.id).collect::<Vec<_>>();
+            .context("初始化异步运行时失败")?;
+        let mut models = runtime
+            .block_on(provider.list_models())
+            .map(|items| items.into_iter().map(|item| item.id).collect::<Vec<_>>())
+            .map_err(map_llm_error)?;
         models.sort();
         models.dedup();
         Ok(models)
+    }
+
+    fn protocol(&self) -> ProviderProtocol {
+        self.cfg.api_protocol
+    }
+
+    fn build_anthropic_provider(&self, timeout_ms: u64) -> Result<AnthropicProvider> {
+        build_anthropic_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())
+    }
+
+    fn block_on_llm<F, T>(&self, future: F) -> Result<T>
+    where
+        F: std::future::Future<Output = std::result::Result<T, tiangong_llm::error::LlmError>>,
+    {
+        let runtime = TokioRuntimeBuilder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("初始化异步运行时失败")?;
+        runtime.block_on(future).map_err(map_llm_error)
+    }
+
+    fn complete_anthropic(&self, req: &ModelRequest) -> Result<ModelResponse> {
+        let response = self.complete_with_functions_anthropic(req, &[])?;
+        Ok(ModelResponse {
+            text: response.text,
+            reasoning_content: response.reasoning_content,
+            usage: response.usage,
+            output_mode: "anthropic-non-stream".to_string(),
+            output_chunk_count: 1,
+        })
+    }
+
+    fn complete_with_functions_anthropic(
+        &self,
+        req: &ModelRequest,
+        functions: &[FunctionToolSpec],
+    ) -> Result<ModelFunctionResponse> {
+        let timeout_ms = parse_function_timeout_ms(&self.cfg.api_timeout_ms)?;
+        let model = self.cfg.api_model.trim();
+        if model.is_empty() {
+            return Err(anyhow!("API_MODEL 不能为空，无法发起 Anthropic 请求"));
+        }
+
+        let provider = self.build_anthropic_provider(timeout_ms)?;
+        let request = build_provider_request(req, model, anthropic_max_tokens(), functions);
+        let response = self.block_on_llm(provider.complete(request))?;
+        convert_provider_response_to_function_response(response)
+    }
+
+    fn complete_lite_anthropic(&self, prompt: &str) -> Result<String> {
+        let timeout_ms = 30_000u64;
+        let model = self.cfg.lite_model().trim();
+        if model.is_empty() {
+            return Err(anyhow!(
+                "API_MODEL 不能为空，无法发起 Anthropic 轻量模型请求"
+            ));
+        }
+
+        let provider = self.build_anthropic_provider(timeout_ms)?;
+        let request = ProviderRequest {
+            model: model.to_string(),
+            system: Some(
+                "你是会话标题生成助手。根据用户输入生成简洁的标题，要求：\
+1. 标题不超过10个汉字\
+2. 直接返回标题，不要任何解释或额外文字\
+3. 标题要概括性强，简洁明了"
+                    .to_string(),
+            ),
+            messages: vec![ChatMessage::text(LlmMessageRole::User, prompt)],
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: Some(200),
+            temperature: Some(0.3),
+            top_p: None,
+            stop_sequences: Vec::new(),
+            metadata: None,
+            thinking: None,
+        };
+        let response = self.block_on_llm(provider.complete(request))?;
+        let text = strip_think_tags(&collect_provider_text(&response))
+            .trim()
+            .to_string();
+        Ok(text)
     }
 
     pub fn complete_stream_with_callback<F>(
@@ -290,222 +378,21 @@ impl SingleProviderClient {
     where
         F: FnMut(&ModelStreamChunk),
     {
-        let token = self.cfg.api_auth_token.trim();
-        if token.is_empty() {
-            return Err(anyhow!("API_AUTH_TOKEN 不能为空，无法发起流式模型请求"));
-        }
-
         let timeout_ms = parse_function_timeout_ms(&self.cfg.api_timeout_ms)?;
         let model = self.cfg.api_model.trim();
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起流式模型请求"));
         }
-
-        let api_base = normalize_api_base(&self.cfg.api_base_url)?;
-        let messages = build_openai_messages(req)?;
-        let mut request_args_binding = CreateChatCompletionRequestArgs::default();
-        let mut request_args = request_args_binding
-            .model(model.to_string())
-            .messages(messages);
-        if let Some(max_tokens) = configured_max_tokens() {
-            request_args = request_args.max_tokens(max_tokens);
-        }
-        let mut request = request_args.build().context("构建 OpenAI 流式请求失败")?;
-        request.stream = Some(true);
-
-        let config = OpenAIConfig::new()
-            .with_api_key(token.to_string())
-            .with_api_base(api_base);
-        let client = build_no_retry_client(config);
-        let mut request_json = serde_json::to_value(&request).context("序列化流式请求失败")?;
-        inject_temperature_config(&mut request_json);
-        inject_thinking_config(&mut request_json);
-        inject_stream_usage_option(&mut request_json);
-
-        let runtime = TokioRuntimeBuilder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("初始化异步运行时失败")?;
-
-        let response = runtime.block_on(async {
-            timeout(Duration::from_millis(timeout_ms), async {
-                let chat = client.chat();
-                let mut stream = with_retry("流式模型请求", &self.on_retry, || {
-                    chat.create_stream_byot::<_, Value>(request_json.clone())
-                })
-                .await?;
-                let mut content = String::new();
-                let mut reasoning_content = String::new();
-                let mut chunks = 0usize;
-                let mut has_think_output = false;
-                let mut stream_usage = (0usize, 0usize, 0usize); // (prompt, completion, total)
-                let mut think_filter = ThinkTagFilter::new();
-
-                while let Some(item) = stream.next().await {
-                    let payload = match item {
-                        Ok(payload) => payload,
-                        Err(err) => {
-                            if let async_openai::error::OpenAIError::JSONDeserialize(_, raw) = &err
-                                && should_skip_stream_payload(raw)
-                            {
-                                continue;
-                            }
-                            return Err(err);
-                        }
-                    };
-
-                    // 提取流式最后 chunk 中的 usage 数据
-                    if let Some(usage) = payload.get("usage") {
-                        if let Some(v) = usage.get("prompt_tokens").and_then(Value::as_u64) {
-                            stream_usage.0 = v as usize;
-                        }
-                        if let Some(v) = usage.get("completion_tokens").and_then(Value::as_u64) {
-                            stream_usage.1 = v as usize;
-                        }
-                        if let Some(v) = usage.get("total_tokens").and_then(Value::as_u64) {
-                            stream_usage.2 = v as usize;
-                        }
-                    }
-
-                    if let Some(choices) = payload.get("choices").and_then(Value::as_array) {
-                        for choice in choices {
-                            let delta = choice.get("delta").unwrap_or(&Value::Null);
-
-                            let think_delta = extract_delta_text(delta, "reasoning_content");
-                            if !think_delta.is_empty() {
-                                has_think_output = true;
-                                push_stream_piece(
-                                    ModelStreamChunk {
-                                        content: String::new(),
-                                        reasoning_content: think_delta.clone(),
-                                    },
-                                    &mut on_delta,
-                                    &mut content,
-                                    &mut reasoning_content,
-                                    &mut chunks,
-                                );
-                            }
-
-                            let content_delta = extract_delta_text(delta, "content");
-                            if !content_delta.is_empty() {
-                                let (filtered_content, filtered_reasoning) =
-                                    think_filter.filter(&content_delta);
-                                if !filtered_reasoning.is_empty() {
-                                    has_think_output = true;
-                                    push_stream_piece(
-                                        ModelStreamChunk {
-                                            content: String::new(),
-                                            reasoning_content: filtered_reasoning,
-                                        },
-                                        &mut on_delta,
-                                        &mut content,
-                                        &mut reasoning_content,
-                                        &mut chunks,
-                                    );
-                                }
-                                if !filtered_content.is_empty() {
-                                    push_stream_piece(
-                                        ModelStreamChunk {
-                                            content: filtered_content,
-                                            reasoning_content: String::new(),
-                                        },
-                                        &mut on_delta,
-                                        &mut content,
-                                        &mut reasoning_content,
-                                        &mut chunks,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // 刷出 <think> 过滤器缓冲区残留
-                let (flush_content, flush_reasoning) = think_filter.flush();
-                if !flush_reasoning.is_empty() {
-                    push_stream_piece(
-                        ModelStreamChunk {
-                            content: String::new(),
-                            reasoning_content: flush_reasoning,
-                        },
-                        &mut on_delta,
-                        &mut content,
-                        &mut reasoning_content,
-                        &mut chunks,
-                    );
-                }
-                if !flush_content.is_empty() {
-                    push_stream_piece(
-                        ModelStreamChunk {
-                            content: flush_content,
-                            reasoning_content: String::new(),
-                        },
-                        &mut on_delta,
-                        &mut content,
-                        &mut reasoning_content,
-                        &mut chunks,
-                    );
-                }
-
-                Ok::<
-                    (String, String, usize, bool, (usize, usize, usize)),
-                    async_openai::error::OpenAIError,
-                >((
-                    content,
-                    reasoning_content,
-                    chunks,
-                    has_think_output,
-                    stream_usage,
-                ))
-            })
-            .await
-        });
-
-        let byot_outcome = match response {
-            Ok(Ok(payload)) => Some(payload),
-            Ok(Err(_)) => None,
-            Err(_) => None,
-        };
-
-        if let Some((text, reasoning_content, chunks, has_think_output, stream_usage)) =
-            byot_outcome
-        {
-            let text = text.trim().to_string();
-            let reasoning_content = reasoning_content.trim().to_string();
-            if (!text.is_empty() || !reasoning_content.is_empty()) && chunks > 0 {
-                return Ok(ModelResponse {
-                    text,
-                    reasoning_content,
-                    usage: TokenUsage {
-                        prompt_tokens: stream_usage.0,
-                        completion_tokens: stream_usage.1,
-                        total_tokens: stream_usage.2,
-                    },
-                    output_mode: if has_think_output {
-                        "stream-think".to_string()
-                    } else {
-                        "stream".to_string()
-                    },
-                    output_chunk_count: chunks.max(1),
-                });
+        let request = build_provider_request(req, model, anthropic_max_tokens(), &[]);
+        let provider = match self.protocol() {
+            ProviderProtocol::Anthropic => {
+                ProviderDispatch::Anthropic(Box::new(self.build_anthropic_provider(timeout_ms)?))
             }
-        }
-
-        // 当流式 BYOT 路径失败时，转为非流式补偿请求，避免吞掉 reasoning_content。
-        let fallback_resp = self.complete(req)?;
-        if !fallback_resp.reasoning_content.is_empty() {
-            on_delta(&ModelStreamChunk {
-                content: String::new(),
-                reasoning_content: fallback_resp.reasoning_content.clone(),
-            });
-        }
-        if !fallback_resp.text.is_empty() {
-            on_delta(&ModelStreamChunk {
-                content: fallback_resp.text.clone(),
-                reasoning_content: String::new(),
-            });
-        }
-        Ok(fallback_resp)
+            ProviderProtocol::OpenAiCompatible => ProviderDispatch::OpenAi(Box::new(
+                build_openai_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())?,
+            )),
+        };
+        consume_provider_stream(provider, request, &mut on_delta)
     }
 
     /// 流式函数调用：实时输出 thinking，同时累积 tool_calls
@@ -515,386 +402,58 @@ impl SingleProviderClient {
         functions: &[FunctionToolSpec],
         on_delta: &mut dyn FnMut(&ModelStreamChunk),
     ) -> Result<ModelFunctionResponse> {
-        let token = self.cfg.api_auth_token.trim();
-        if token.is_empty() {
-            return Err(anyhow!("API_AUTH_TOKEN 不能为空，无法发起流式工具模型请求"));
-        }
-
         let timeout_ms = parse_function_timeout_ms(&self.cfg.api_timeout_ms)?;
         let model = self.cfg.api_model.trim();
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起流式工具模型请求"));
         }
-
-        let api_base = normalize_api_base(&self.cfg.api_base_url)?;
-        let messages = build_openai_messages(req)?;
-        let mut request_args_binding = CreateChatCompletionRequestArgs::default();
-        let request_args = request_args_binding
-            .model(model.to_string())
-            .messages(messages);
-        let mut request = request_args
-            .build()
-            .context("构建流式 function call 请求失败")?;
-        request.stream = Some(true);
-
-        let config = OpenAIConfig::new()
-            .with_api_key(token.to_string())
-            .with_api_base(api_base);
-        let client = build_no_retry_client(config);
-        let mut request_json = serde_json::to_value(&request).context("序列化请求失败")?;
-        inject_temperature_config(&mut request_json);
-        inject_thinking_config(&mut request_json);
-        inject_stream_usage_option(&mut request_json);
-        inject_function_tools(&mut request_json, functions);
-
-        let runtime = TokioRuntimeBuilder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("初始化异步运行时失败")?;
-
-        let response = runtime.block_on(async {
-            timeout(Duration::from_millis(timeout_ms), async {
-                let chat = client.chat();
-                let mut stream = with_retry("流式工具调用", &self.on_retry, || {
-                    chat.create_stream_byot::<_, Value>(request_json.clone())
-                })
-                .await?;
-
-                let mut content = String::new();
-                let mut reasoning_content = String::new();
-                // tool_calls 按 index 累积：index -> (id, name, arguments)
-                let mut tool_calls_map: std::collections::BTreeMap<u64, (String, String, String)> =
-                    std::collections::BTreeMap::new();
-                let mut stream_usage = (0usize, 0usize, 0usize);
-                let mut think_filter = ThinkTagFilter::new();
-
-                while let Some(item) = stream.next().await {
-                    let payload = match item {
-                        Ok(payload) => payload,
-                        Err(err) => {
-                            if let async_openai::error::OpenAIError::JSONDeserialize(_, raw) = &err
-                                && should_skip_stream_payload(raw)
-                            {
-                                continue;
-                            }
-                            return Err(err);
-                        }
-                    };
-
-                    // 提取流式最后 chunk 中的 usage 数据
-                    if let Some(usage) = payload.get("usage") {
-                        if let Some(v) = usage.get("prompt_tokens").and_then(Value::as_u64) {
-                            stream_usage.0 = v as usize;
-                        }
-                        if let Some(v) = usage.get("completion_tokens").and_then(Value::as_u64) {
-                            stream_usage.1 = v as usize;
-                        }
-                        if let Some(v) = usage.get("total_tokens").and_then(Value::as_u64) {
-                            stream_usage.2 = v as usize;
-                        }
-                    }
-
-                    if let Some(choices) = payload.get("choices").and_then(Value::as_array) {
-                        for choice in choices {
-                            let delta = choice.get("delta").unwrap_or(&Value::Null);
-
-                            // 流式输出 reasoning_content（API 原生字段）
-                            let think_delta = extract_delta_text(delta, "reasoning_content");
-                            if !think_delta.is_empty() {
-                                reasoning_content.push_str(&think_delta);
-                                on_delta(&ModelStreamChunk {
-                                    content: String::new(),
-                                    reasoning_content: think_delta,
-                                });
-                            }
-
-                            // 流式输出 content（经 <think> 标签过滤）
-                            let content_delta = extract_delta_text(delta, "content");
-                            if !content_delta.is_empty() {
-                                let (filtered_content, filtered_reasoning) =
-                                    think_filter.filter(&content_delta);
-                                if !filtered_reasoning.is_empty() {
-                                    reasoning_content.push_str(&filtered_reasoning);
-                                    on_delta(&ModelStreamChunk {
-                                        content: String::new(),
-                                        reasoning_content: filtered_reasoning,
-                                    });
-                                }
-                                if !filtered_content.is_empty() {
-                                    content.push_str(&filtered_content);
-                                    on_delta(&ModelStreamChunk {
-                                        content: filtered_content,
-                                        reasoning_content: String::new(),
-                                    });
-                                }
-                            }
-
-                            // 累积 tool_calls
-                            if let Some(tool_calls) =
-                                delta.get("tool_calls").and_then(Value::as_array)
-                            {
-                                for tc in tool_calls {
-                                    let index =
-                                        tc.get("index").and_then(Value::as_u64).unwrap_or(0);
-                                    let entry = tool_calls_map.entry(index).or_insert_with(|| {
-                                        (String::new(), String::new(), String::new())
-                                    });
-                                    if let Some(id) = tc.get("id").and_then(Value::as_str) {
-                                        entry.0 = id.to_string();
-                                    }
-                                    if let Some(func) = tc.get("function") {
-                                        if let Some(name) = func.get("name").and_then(Value::as_str)
-                                        {
-                                            entry.1 = name.to_string();
-                                        }
-                                        if let Some(args) =
-                                            func.get("arguments").and_then(Value::as_str)
-                                        {
-                                            entry.2.push_str(args);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // 刷出 <think> 过滤器缓冲区残留
-                let (flush_content, flush_reasoning) = think_filter.flush();
-                if !flush_reasoning.is_empty() {
-                    reasoning_content.push_str(&flush_reasoning);
-                    on_delta(&ModelStreamChunk {
-                        content: String::new(),
-                        reasoning_content: flush_reasoning,
-                    });
-                }
-                if !flush_content.is_empty() {
-                    content.push_str(&flush_content);
-                    on_delta(&ModelStreamChunk {
-                        content: flush_content,
-                        reasoning_content: String::new(),
-                    });
-                }
-
-                Ok::<_, async_openai::error::OpenAIError>((
-                    content,
-                    reasoning_content,
-                    tool_calls_map,
-                    stream_usage,
-                ))
-            })
-            .await
-        });
-
-        match response {
-            Ok(Ok((text, reasoning, tool_calls_map, stream_usage))) => {
-                let tool_calls = tool_calls_map
-                    .into_values()
-                    .filter(|(_, name, _)| !name.is_empty())
-                    .map(|(id, name, args)| {
-                        let arguments = serde_json::from_str::<Value>(&args)
-                            .ok()
-                            .filter(|v| v.is_object())
-                            .unwrap_or_else(|| Value::Object(Map::new()));
-                        ModelFunctionCall {
-                            id,
-                            name,
-                            arguments,
-                        }
-                    })
-                    .collect::<Vec<_>>();
-
-                let text = text.trim().to_string();
-                let reasoning_content = reasoning.trim().to_string();
-
-                if text.is_empty() && reasoning_content.is_empty() && tool_calls.is_empty() {
-                    // 流式路径未获取到有效内容，回退到非流式
-                    let fallback = self.complete_with_functions(req, functions)?;
-                    if !fallback.reasoning_content.is_empty() {
-                        on_delta(&ModelStreamChunk {
-                            content: String::new(),
-                            reasoning_content: fallback.reasoning_content.clone(),
-                        });
-                    }
-                    return Ok(fallback);
-                }
-
-                Ok(ModelFunctionResponse {
-                    text,
-                    reasoning_content,
-                    usage: TokenUsage {
-                        prompt_tokens: stream_usage.0,
-                        completion_tokens: stream_usage.1,
-                        total_tokens: stream_usage.2,
-                    },
-                    tool_calls,
-                })
+        let request = build_provider_request(req, model, anthropic_max_tokens(), functions);
+        let provider = match self.protocol() {
+            ProviderProtocol::Anthropic => {
+                ProviderDispatch::Anthropic(Box::new(self.build_anthropic_provider(timeout_ms)?))
             }
-            _ => {
-                // 流式失败，回退到非流式
-                let fallback = self.complete_with_functions(req, functions)?;
-                if !fallback.reasoning_content.is_empty() {
-                    on_delta(&ModelStreamChunk {
-                        content: String::new(),
-                        reasoning_content: fallback.reasoning_content.clone(),
-                    });
-                }
-                Ok(fallback)
-            }
-        }
+            ProviderProtocol::OpenAiCompatible => ProviderDispatch::OpenAi(Box::new(
+                build_openai_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())?,
+            )),
+        };
+        convert_stream_to_function_response(provider, request, on_delta)
     }
 
     /// 使用轻量级模型完成简单任务（如会话名称生成）
     /// 如果未配置轻量级模型，则使用主模型
     /// 该方法使用更短的超时时间和较低温度以获得更确定的结果
     pub fn complete_lite(&self, prompt: &str) -> Result<String> {
-        use tracing::{info, warn};
-
-        let token = self.cfg.api_auth_token.trim();
-        if token.is_empty() {
-            return Err(anyhow!("API_AUTH_TOKEN 不能为空，无法发起轻量级模型请求"));
+        if self.protocol() == ProviderProtocol::Anthropic {
+            return self.complete_lite_anthropic(prompt);
         }
-
-        // 轻量级任务使用更短的超时（30 秒）
         let timeout_ms = 30_000u64;
-        // lite_model() 会自动回退到主模型
         let model = self.cfg.lite_model().trim();
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起轻量级模型请求"));
         }
-
-        info!(
-            model = %model,
-            lite_model_config = %self.cfg.api_lite_model,
-            timeout_ms = timeout_ms,
-            prompt_length = prompt.len(),
-            "开始调用轻量级模型"
-        );
-
-        let api_base = normalize_api_base(&self.cfg.api_base_url)?;
-
-        let messages = vec![
-            ChatCompletionRequestSystemMessageArgs::default()
-                .content(
-                    "你是会话标题生成助手。根据用户输入生成简洁的标题，要求：\
+        let provider =
+            build_openai_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())?;
+        let request = ProviderRequest {
+            model: model.to_string(),
+            system: Some(
+                "你是会话标题生成助手。根据用户输入生成简洁的标题，要求：\
                     1. 标题不超过10个汉字\
                     2. 直接返回标题，不要任何解释或额外文字\
-                    3. 标题要概括性强，简洁明了",
-                )
-                .build()
-                .context("构建 system 消息失败")?
-                .into(),
-            ChatCompletionRequestUserMessageArgs::default()
-                .content(prompt.to_string())
-                .build()
-                .context("构建 user 消息失败")?
-                .into(),
-        ];
-
-        let mut request_args_binding = CreateChatCompletionRequestArgs::default();
-        // max_tokens 设大一些：模型可能先输出 <think> 再输出标题，
-        // 过小会导致 thinking 耗光 token 而标题截断
-        let request = request_args_binding
-            .model(model.to_string())
-            .messages(messages)
-            .max_tokens(200u16)
-            .temperature(0.3f32)
-            .stream(false)
-            .build()
-            .context("构建轻量级请求失败")?;
-
-        let config = OpenAIConfig::new()
-            .with_api_key(token.to_string())
-            .with_api_base(api_base);
-        let client = build_no_retry_client(config);
-
-        let runtime = TokioRuntimeBuilder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("初始化异步运行时失败")?;
-
-        let mut request_json = serde_json::to_value(&request).context("序列化轻量级请求失败")?;
-        // 显式关闭 thinking（GLM/DeepSeek 支持，MiniMax 等不支持）
-        if let Some(obj) = request_json.as_object_mut() {
-            obj.insert(
-                "thinking".to_string(),
-                serde_json::json!({ "type": "disabled" }),
-            );
-        }
-        let chat = client.chat();
-        let response = runtime.block_on(async {
-            let result = timeout(
-                Duration::from_millis(timeout_ms),
-                with_retry("轻量级模型", &self.on_retry, || {
-                    chat.create_byot::<_, CreateChatCompletionResponse>(request_json.clone())
-                }),
-            )
-            .await;
-
-            // 如果带 thinking 字段请求失败（API 不支持），去掉 thinking 重试
-            if matches!(&result, Ok(Err(_))) {
-                let mut fallback_json = request_json.clone();
-                if let Some(obj) = fallback_json.as_object_mut() {
-                    obj.remove("thinking");
-                }
-                tracing::info!("轻量级模型请求失败，去掉 thinking 字段重试");
-                return timeout(
-                    Duration::from_millis(timeout_ms),
-                    chat.create_byot::<_, CreateChatCompletionResponse>(fallback_json),
-                )
-                .await;
-            }
-            result
-        });
-
-        let resp = match response {
-            Ok(Ok(resp)) => resp,
-            Ok(Err(err)) => {
-                let hint = build_sdk_error_hint(&err.to_string());
-                tracing::error!(
-                    model = %model,
-                    error = %err,
-                    timeout_ms = %timeout_ms,
-                    "轻量级模型请求失败",
-                );
-                return Err(anyhow!("轻量级模型请求失败：{err}{hint}"));
-            }
-            Err(_) => {
-                tracing::error!(
-                    model = %model,
-                    timeout_ms = %timeout_ms,
-                    "轻量级模型请求超时",
-                );
-                return Err(anyhow!("轻量级模型请求超时：{timeout_ms}ms"));
-            }
+                    3. 标题要概括性强，简洁明了"
+                    .to_string(),
+            ),
+            messages: vec![ChatMessage::text(LlmMessageRole::User, prompt)],
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: Some(200),
+            temperature: Some(0.3),
+            top_p: None,
+            stop_sequences: Vec::new(),
+            metadata: None,
+            thinking: None,
         };
-
-        let raw_text = resp
-            .choices
-            .first()
-            .and_then(|choice| choice.message.content.as_deref())
-            .unwrap_or("")
-            .trim();
-
-        // 清理 <think>...</think> 标签（部分模型忽略 thinking.disabled 配置）
-        let text = strip_think_tags(raw_text).trim().to_string();
-
-        if text.is_empty() {
-            warn!(
-                model = %model,
-                response = ?resp,
-                "轻量级模型返回空响应",
-            );
-        } else {
-            info!(
-                model = %model,
-                response_length = text.len(),
-                response_preview = %text.chars().take(20).collect::<String>(),
-                "轻量级模型返回成功",
-            );
-        }
-
-        Ok(text)
+        let response = self.block_on_llm(provider.complete(request))?;
+        Ok(collect_provider_text(&response).trim().to_string())
     }
 }
 
@@ -920,9 +479,8 @@ impl ModelClient for SingleProviderClient {
     }
 
     fn complete(&self, req: &ModelRequest) -> Result<ModelResponse> {
-        let token = self.cfg.api_auth_token.trim();
-        if token.is_empty() {
-            return Err(anyhow!("API_AUTH_TOKEN 不能为空，无法发起模型请求"));
+        if self.protocol() == ProviderProtocol::Anthropic {
+            return self.complete_anthropic(req);
         }
 
         let timeout_ms = parse_timeout_ms(&self.cfg.api_timeout_ms)?;
@@ -930,91 +488,14 @@ impl ModelClient for SingleProviderClient {
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起模型请求"));
         }
-
-        let api_base = normalize_api_base(&self.cfg.api_base_url)?;
-        let messages = build_openai_messages(req)?;
-        let mut request_args_binding = CreateChatCompletionRequestArgs::default();
-        let mut request_args = request_args_binding
-            .model(model.to_string())
-            .messages(messages);
-        if let Some(max_tokens) = configured_max_tokens() {
-            request_args = request_args.max_tokens(max_tokens);
-        }
-        let mut request = request_args.build().context("构建 OpenAI 请求失败")?;
-        request.stream = Some(false);
-        let request_for_fallback = request.clone();
-
-        let config = OpenAIConfig::new()
-            .with_api_key(token.to_string())
-            .with_api_base(api_base);
-        let client = build_no_retry_client(config);
-        let mut request_json = serde_json::to_value(&request).context("序列化请求失败")?;
-        inject_temperature_config(&mut request_json);
-        inject_thinking_config(&mut request_json);
-
-        let runtime = TokioRuntimeBuilder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("初始化异步运行时失败")?;
-
-        let chat = client.chat();
-        let response = runtime.block_on(async {
-            timeout(
-                Duration::from_millis(timeout_ms),
-                with_retry("模型请求", &self.on_retry, || {
-                    chat.create_byot::<_, Value>(request_json.clone())
-                }),
-            )
-            .await
-        });
-
-        if let Ok(Ok(payload)) = response
-            && let Some(resp) = parse_non_stream_byot_response(&payload)
-        {
-            return Ok(resp);
-        }
-
-        let response = runtime.block_on(async {
-            timeout(
-                Duration::from_millis(timeout_ms),
-                with_retry("模型请求回退", &self.on_retry, || {
-                    chat.create(request_for_fallback.clone())
-                }),
-            )
-            .await
-        });
-
-        let response = match response {
-            Ok(Ok(resp)) => resp,
-            Ok(Err(err)) => {
-                let hint = build_sdk_error_hint(&err.to_string());
-                return Err(anyhow!("OpenAI SDK 请求失败：{err}{hint}"));
-            }
-            Err(_) => return Err(anyhow!("模型请求超时：{timeout_ms}ms")),
-        };
-
-        let text = response
-            .choices
-            .first()
-            .and_then(|choice| choice.message.content.as_deref())
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(|v| v.to_string())
-            .ok_or_else(|| anyhow!("模型响应缺少文本内容"))?;
-
-        let usage = response.usage.as_ref();
-        let prompt_tokens = usage.map(|u| u.prompt_tokens as usize).unwrap_or(0);
-        let completion_tokens = usage.map(|u| u.completion_tokens as usize).unwrap_or(0);
-        let total_tokens = usage.map(|u| u.total_tokens as usize).unwrap_or(0);
-
+        let provider =
+            build_openai_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())?;
+        let request = build_provider_request(req, model, anthropic_max_tokens(), &[]);
+        let response = self.block_on_llm(provider.complete(request))?;
         Ok(ModelResponse {
-            text,
-            reasoning_content: String::new(),
-            usage: TokenUsage {
-                prompt_tokens,
-                completion_tokens,
-                total_tokens,
-            },
+            text: collect_provider_text(&response).trim().to_string(),
+            reasoning_content: response.reasoning_content.unwrap_or_default(),
+            usage: response.usage.unwrap_or_default().into(),
             output_mode: "non-stream".to_string(),
             output_chunk_count: 1,
         })
@@ -1025,9 +506,8 @@ impl ModelClient for SingleProviderClient {
         req: &ModelRequest,
         functions: &[FunctionToolSpec],
     ) -> Result<ModelFunctionResponse> {
-        let token = self.cfg.api_auth_token.trim();
-        if token.is_empty() {
-            return Err(anyhow!("API_AUTH_TOKEN 不能为空，无法发起工具模型请求"));
+        if self.protocol() == ProviderProtocol::Anthropic {
+            return self.complete_with_functions_anthropic(req, functions);
         }
 
         let timeout_ms = parse_function_timeout_ms(&self.cfg.api_timeout_ms)?;
@@ -1035,51 +515,11 @@ impl ModelClient for SingleProviderClient {
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起工具模型请求"));
         }
-
-        let api_base = normalize_api_base(&self.cfg.api_base_url)?;
-        let messages = build_openai_messages(req)?;
-        let mut request_args_binding = CreateChatCompletionRequestArgs::default();
-        let request_args = request_args_binding
-            .model(model.to_string())
-            .messages(messages);
-        let mut request = request_args
-            .build()
-            .context("构建 function call 请求失败")?;
-        request.stream = Some(false);
-
-        let config = OpenAIConfig::new()
-            .with_api_key(token.to_string())
-            .with_api_base(api_base);
-        let client = build_no_retry_client(config);
-        let mut request_json = serde_json::to_value(&request).context("序列化请求失败")?;
-        inject_temperature_config(&mut request_json);
-        inject_thinking_config(&mut request_json);
-        inject_function_tools(&mut request_json, functions);
-
-        let runtime = TokioRuntimeBuilder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("初始化异步运行时失败")?;
-
-        let chat = client.chat();
-        let response = runtime.block_on(async {
-            timeout(
-                Duration::from_millis(timeout_ms),
-                with_retry("工具调用", &self.on_retry, || {
-                    chat.create_byot::<_, Value>(request_json.clone())
-                }),
-            )
-            .await
-        });
-
-        match response {
-            Ok(Ok(payload)) => parse_function_byot_response(&payload),
-            Ok(Err(err)) => {
-                let hint = build_sdk_error_hint(&err.to_string());
-                Err(anyhow!("OpenAI SDK 工具调用请求失败：{err}{hint}"))
-            }
-            Err(_) => Err(anyhow!("工具调用请求超时：{timeout_ms}ms")),
-        }
+        let provider =
+            build_openai_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())?;
+        let request = build_provider_request(req, model, anthropic_max_tokens(), functions);
+        let response = self.block_on_llm(provider.complete(request))?;
+        convert_provider_response_to_function_response(response)
     }
 
     fn complete_with_functions_stream(
@@ -1128,45 +568,91 @@ impl ModelClient for SingleProviderClient {
     }
 }
 
-fn build_openai_messages(req: &ModelRequest) -> Result<Vec<ChatCompletionRequestMessage>> {
+fn anthropic_max_tokens() -> u32 {
+    configured_max_tokens().map(u32::from).unwrap_or(4096)
+}
+fn build_anthropic_provider_from_config(
+    cfg: &ModelProviderConfig,
+    timeout_ms: u64,
+    on_retry: Option<OnRetryCallback>,
+) -> Result<AnthropicProvider> {
+    let token = cfg.api_auth_token.trim();
+    if token.is_empty() {
+        return Err(anyhow!("API_AUTH_TOKEN 不能为空，无法发起 Anthropic 请求"));
+    }
+
+    let mut config = AnthropicConfig::new(token.to_string());
+    config.base_url = Some(cfg.api_base_url.clone());
+    config.timeout = Duration::from_millis(timeout_ms);
+    config.max_retries = MAX_RETRIES;
+    config.retry_notifier = on_retry;
+    AnthropicProvider::from_config(config).map_err(map_llm_error)
+}
+
+fn build_openai_provider_from_config(
+    cfg: &ModelProviderConfig,
+    timeout_ms: u64,
+    on_retry: Option<OnRetryCallback>,
+) -> Result<OpenAiCompatibleProvider> {
+    let token = cfg.api_auth_token.trim();
+    if token.is_empty() {
+        return Err(anyhow!("API_AUTH_TOKEN 不能为空，无法发起 OpenAI 兼容请求"));
+    }
+    let mut config = OpenAiCompatibleConfig::new(token.to_string(), cfg.api_base_url.clone());
+    config.timeout = Duration::from_millis(timeout_ms);
+    config.max_retries = MAX_RETRIES;
+    config.retry_notifier = on_retry;
+    Ok(OpenAiCompatibleProvider::new(config))
+}
+
+fn build_provider_request(
+    req: &ModelRequest,
+    model: &str,
+    max_tokens: u32,
+    functions: &[FunctionToolSpec],
+) -> ProviderRequest {
+    let (system, messages) = build_provider_messages(req);
+    ProviderRequest {
+        model: model.to_string(),
+        system: (!system.trim().is_empty()).then_some(system),
+        messages,
+        tools: functions
+            .iter()
+            .map(|tool| ToolSpec {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                input_schema: tool.parameters.clone(),
+            })
+            .collect(),
+        tool_choice: (!functions.is_empty()).then_some(LlmToolChoice::Auto),
+        max_tokens: Some(max_tokens),
+        temperature: configured_temperature_f32(),
+        top_p: None,
+        stop_sequences: Vec::new(),
+        metadata: None,
+        thinking: req.thinking.as_ref().map(|thinking| LlmThinkingConfig {
+            budget_tokens: thinking.budget_tokens,
+        }),
+    }
+}
+
+fn build_provider_messages(req: &ModelRequest) -> (String, Vec<ChatMessage>) {
     let mut messages = Vec::new();
 
-    // 如果已由 PromptAssembler 装配，使用装配好的 system prompt，不再自行注入环境信息
     let system_texts = if let Some(ref assembled) = req.assembled_system_prompt {
         let mut texts = vec![assembled.clone()];
-        // context 中的 System 消息仍然追加（attachment 等）
         for msg in &req.context {
             if msg.role == MessageRole::System && !msg.content.trim().is_empty() {
                 texts.push(msg.content.clone());
             }
         }
-        // context 中的 User/Assistant 消息
         for msg in &req.context {
-            match msg.role {
-                MessageRole::User => {
-                    messages.push(
-                        ChatCompletionRequestUserMessageArgs::default()
-                            .content(msg.content.clone())
-                            .build()
-                            .context("构建 user 消息失败")?
-                            .into(),
-                    );
-                }
-                MessageRole::Assistant => {
-                    messages.push(
-                        ChatCompletionRequestAssistantMessageArgs::default()
-                            .content(msg.content.clone())
-                            .build()
-                            .context("构建 assistant 消息失败")?
-                            .into(),
-                    );
-                }
-                _ => {}
+            if let Some(message) = provider_message_from_session(msg) {
+                messages.push(message);
             }
         }
         texts
     } else {
-        // 旧路径：自行注入环境信息（兼容 TurnRunner / Worker）
         let mut texts = vec![
             format!("当前会话：{}", req.session_title),
             format!("当前工作目录：{}", current_working_directory_text()),
@@ -1182,51 +668,235 @@ fn build_openai_messages(req: &ModelRequest) -> Result<Vec<ChatCompletionRequest
                         texts.push(msg.content.clone());
                     }
                 }
-                MessageRole::User => {
-                    messages.push(
-                        ChatCompletionRequestUserMessageArgs::default()
-                            .content(msg.content.clone())
-                            .build()
-                            .context("构建 user 消息失败")?
-                            .into(),
-                    );
-                }
-                MessageRole::Assistant => {
-                    messages.push(
-                        ChatCompletionRequestAssistantMessageArgs::default()
-                            .content(msg.content.clone())
-                            .build()
-                            .context("构建 assistant 消息失败")?
-                            .into(),
-                    );
+                _ => {
+                    if let Some(message) = provider_message_from_session(msg) {
+                        messages.push(message);
+                    }
                 }
             }
         }
         texts
     };
 
-    messages.insert(
-        0,
-        ChatCompletionRequestSystemMessageArgs::default()
-            .content(system_texts.join("\n"))
-            .build()
-            .context("构建 system 消息失败")?
-            .into(),
-    );
-
-    // 用户输入统一通过 context 传递（session history），不再单独追加。
-    // 仅在旧路径（无 assembled_system_prompt）时追加 user_input 作为兼容。
     if req.assembled_system_prompt.is_none() && !req.user_input.is_empty() {
-        messages.push(
-            ChatCompletionRequestUserMessageArgs::default()
-                .content(req.user_input.clone())
-                .build()
-                .context("构建当前 user 消息失败")?
-                .into(),
-        );
+        messages.push(ChatMessage::text(
+            LlmMessageRole::User,
+            req.user_input.clone(),
+        ));
     }
 
-    Ok(messages)
+    (system_texts.join("\n"), messages)
+}
+
+fn provider_message_from_session(msg: &Message) -> Option<ChatMessage> {
+    let role = match msg.role {
+        MessageRole::User => LlmMessageRole::User,
+        MessageRole::Assistant => LlmMessageRole::Assistant,
+        MessageRole::System => return None,
+    };
+
+    let mut parts = Vec::new();
+    if !msg.content.trim().is_empty() {
+        parts.push(msg.content.trim().to_string());
+    }
+    if !msg.reasoning_content.trim().is_empty() {
+        parts.push(format!("[思考]\n{}", msg.reasoning_content.trim()));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+
+    Some(ChatMessage::new(
+        role,
+        vec![LlmMessageContent::Text(parts.join("\n\n"))],
+    ))
+}
+
+fn convert_provider_response_to_function_response(
+    response: ProviderResponse,
+) -> Result<ModelFunctionResponse> {
+    let text = collect_provider_text(&response);
+    let reasoning_content = response.reasoning_content.clone().unwrap_or_default();
+    let tool_calls = response
+        .assistant_message
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            LlmMessageContent::ToolCall(LlmToolCall {
+                id,
+                name,
+                arguments,
+            }) if !name.is_empty() => Some(ModelFunctionCall {
+                id: id.clone(),
+                name: name.clone(),
+                arguments: arguments.clone(),
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    if text.trim().is_empty() && reasoning_content.trim().is_empty() && tool_calls.is_empty() {
+        return Err(anyhow!("Anthropic 响应缺少文本和工具调用"));
+    }
+
+    Ok(ModelFunctionResponse {
+        text: text.trim().to_string(),
+        reasoning_content,
+        usage: response.usage.unwrap_or_default().into(),
+        tool_calls,
+    })
+}
+
+fn collect_provider_text(response: &ProviderResponse) -> String {
+    response
+        .assistant_message
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            LlmMessageContent::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+async fn consume_provider_stream_events_async(
+    mut stream: ProviderStream,
+    on_delta: &mut dyn FnMut(&ModelStreamChunk),
+) -> Result<ModelFunctionResponse> {
+    let mut text = String::new();
+    let mut reasoning_content = String::new();
+    let mut usage = TokenUsageData::default();
+    let mut tool_calls: std::collections::BTreeMap<String, (String, String)> =
+        std::collections::BTreeMap::new();
+
+    while let Some(event) = stream.next().await {
+        match event.map_err(map_llm_error)? {
+            ProviderStreamEvent::ReasoningDelta(delta) => {
+                if !delta.is_empty() {
+                    reasoning_content.push_str(&delta);
+                    on_delta(&ModelStreamChunk {
+                        content: String::new(),
+                        reasoning_content: delta.clone(),
+                    });
+                }
+            }
+            ProviderStreamEvent::TextDelta(delta) => {
+                if !delta.is_empty() {
+                    text.push_str(&delta);
+                    on_delta(&ModelStreamChunk {
+                        content: delta,
+                        reasoning_content: String::new(),
+                    });
+                }
+            }
+            ProviderStreamEvent::ToolCallStart(call) => {
+                let args = if call.arguments.is_null() || call.arguments == json!({}) {
+                    String::new()
+                } else {
+                    call.arguments.to_string()
+                };
+                tool_calls.insert(call.id.clone(), (call.name, args));
+            }
+            ProviderStreamEvent::ToolCallDelta {
+                call_id,
+                partial_json,
+            } => {
+                let entry = tool_calls
+                    .entry(call_id)
+                    .or_insert_with(|| (String::new(), String::new()));
+                entry.1.push_str(&partial_json);
+            }
+            ProviderStreamEvent::Usage(stream_usage) => usage = stream_usage,
+            ProviderStreamEvent::Error(message) => return Err(anyhow!(message)),
+            ProviderStreamEvent::MessageStart
+            | ProviderStreamEvent::ToolCallEnd { .. }
+            | ProviderStreamEvent::MessageEnd => {}
+        }
+    }
+
+    let tool_calls = tool_calls
+        .into_iter()
+        .filter(|(_, (name, _))| !name.is_empty())
+        .map(|(id, (name, raw_args))| ModelFunctionCall {
+            id,
+            name,
+            arguments: if raw_args.trim().is_empty() {
+                json!({})
+            } else {
+                serde_json::from_str(&raw_args).unwrap_or_else(|_| json!({}))
+            },
+        })
+        .collect::<Vec<_>>();
+
+    if text.trim().is_empty() && reasoning_content.trim().is_empty() && tool_calls.is_empty() {
+        return Err(anyhow!("Anthropic 流式响应缺少文本、思考内容和工具调用"));
+    }
+
+    Ok(ModelFunctionResponse {
+        text: text.trim().to_string(),
+        reasoning_content: reasoning_content.trim().to_string(),
+        usage: usage.into(),
+        tool_calls,
+    })
+}
+
+enum ProviderDispatch {
+    Anthropic(Box<AnthropicProvider>),
+    OpenAi(Box<OpenAiCompatibleProvider>),
+}
+
+impl ProviderDispatch {
+    async fn stream(
+        self,
+        request: ProviderRequest,
+    ) -> std::result::Result<ProviderStream, tiangong_llm::error::LlmError> {
+        match self {
+            ProviderDispatch::Anthropic(provider) => provider.stream(request).await,
+            ProviderDispatch::OpenAi(provider) => provider.stream(request).await,
+        }
+    }
+}
+
+fn consume_provider_stream(
+    provider: ProviderDispatch,
+    request: ProviderRequest,
+    on_delta: &mut dyn FnMut(&ModelStreamChunk),
+) -> Result<ModelResponse> {
+    let response = TokioRuntimeBuilder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("初始化异步运行时失败")?
+        .block_on(async {
+            let stream = provider.stream(request).await.map_err(map_llm_error)?;
+            consume_provider_stream_events_async(stream, on_delta).await
+        })?;
+    Ok(ModelResponse {
+        text: response.text,
+        reasoning_content: response.reasoning_content,
+        usage: response.usage,
+        output_mode: "stream".to_string(),
+        output_chunk_count: 1,
+    })
+}
+
+fn convert_stream_to_function_response(
+    provider: ProviderDispatch,
+    request: ProviderRequest,
+    on_delta: &mut dyn FnMut(&ModelStreamChunk),
+) -> Result<ModelFunctionResponse> {
+    TokioRuntimeBuilder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("初始化异步运行时失败")?
+        .block_on(async {
+            let stream = provider.stream(request).await.map_err(map_llm_error)?;
+            consume_provider_stream_events_async(stream, on_delta).await
+        })
+}
+
+fn map_llm_error(error: tiangong_llm::error::LlmError) -> anyhow::Error {
+    anyhow!(error.to_string())
 }
 
 fn current_working_directory_text() -> String {
@@ -1241,136 +911,12 @@ fn allowed_file_roots_text() -> String {
     format!("{workspace}；{temp}")
 }
 
-/// 规范化 API 基础地址
-///
-/// 仅做基本清理（去空格、去尾部斜杠、去意外拼接的 /chat/completions），
-/// 不自动补充版本路径——版本由用户在 provider base_url 中指定。
-fn normalize_api_base(base_url: &str) -> Result<String> {
-    let trimmed = base_url.trim();
-    if trimmed.is_empty() {
-        return Err(anyhow!("API_BASE_URL 不能为空"));
-    }
-
-    let cleaned = trimmed.trim_end_matches('/');
-    let cleaned = cleaned.strip_suffix("/chat/completions").unwrap_or(cleaned);
-    Ok(cleaned.to_string())
-}
-
-/// 创建禁用内部 backoff 的 OpenAI 客户端
-///
-/// async-openai 默认有 ExponentialBackoff（最长 15 分钟）。
-/// 禁用后由 `with_retry` 统一管理重试，确保 StreamEvent::Retry 能正确触发。
-fn build_no_retry_client(config: OpenAIConfig) -> OpenAIClient<OpenAIConfig> {
-    // 设置极小的 max_elapsed_time 确保 async-openai 不做任何内部重试。
-    // Duration::ZERO 在 backoff 首次调用时 elapsed ≈ 0 可能仍允许 1 次重试，
-    // 使用 1ns 确保 elapsed > max_elapsed_time 立即停止。
-    let no_retry = backoff::ExponentialBackoff {
-        max_elapsed_time: Some(Duration::from_nanos(1)),
-        ..Default::default()
-    };
-    OpenAIClient::build(reqwest::Client::new(), config, no_retry)
-}
-
-fn build_sdk_error_hint(error_text: &str) -> String {
-    if error_text.contains("/chat/completions") && error_text.contains("404") {
-        return "；请检查 API_BASE_URL 是否包含正确的版本路径（如 .../v1）".to_string();
-    }
-    if error_text.contains("expected struct ApiError") {
-        return "；当前网关返回的错误结构非 OpenAI 标准格式，请确认 API_BASE_URL 是否为 OpenAI 兼容接口".to_string();
-    }
-    String::new()
-}
-
 // ── 重试相关 ──────────────────────────────────────────────
 
 /// 最大重试次数
 const MAX_RETRIES: u32 = 3;
-/// 初始重试延迟（毫秒）
-const INITIAL_RETRY_DELAY_MS: u64 = 1000;
-/// 退避倍率
-const RETRY_BACKOFF_MULTIPLIER: u64 = 2;
 
-/// 判断 OpenAI SDK 错误是否可重试
-fn is_retryable_openai_error(err: &async_openai::error::OpenAIError) -> bool {
-    is_retryable_error_text(&err.to_string())
-}
-
-/// 判断错误文本是否表示可重试的错误
-fn is_retryable_error_text(text: &str) -> bool {
-    // 速率限制 (HTTP 429)
-    if text.contains("429")
-        || text.contains("Rate limit")
-        || text.contains("rate limit")
-        || text.contains("Rate limited")
-        || text.contains("访问量过大")
-        || text.contains("稍后再试")
-        || text.contains("too many requests")
-        || text.contains("Too Many Requests")
-    {
-        return true;
-    }
-    // 服务端错误 (5xx)
-    if text.contains("500 Internal Server Error")
-        || text.contains("502 Bad Gateway")
-        || text.contains("503 Service Unavailable")
-        || text.contains("504 Gateway Timeout")
-    {
-        return true;
-    }
-    // 连接错误
-    if text.contains("connection reset")
-        || text.contains("connection refused")
-        || text.contains("Connection reset")
-        || text.contains("Connection refused")
-    {
-        return true;
-    }
-    false
-}
-
-/// 带重试的异步调用（用于 OpenAI SDK 请求）
-///
-/// 遇到速率限制、5xx、连接错误时自动重试，采用指数退避策略。
-/// 可选的 `on_retry` 回调在每次重试前触发，用于通知上层。
-async fn with_retry<F, Fut, T>(
-    label: &str,
-    on_retry: &Option<OnRetryCallback>,
-    mut f: F,
-) -> Result<T, async_openai::error::OpenAIError>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T, async_openai::error::OpenAIError>>,
-{
-    let mut attempt = 0u32;
-    let mut delay_ms = INITIAL_RETRY_DELAY_MS;
-    loop {
-        match f().await {
-            Ok(result) => return Ok(result),
-            Err(err) => {
-                if attempt < MAX_RETRIES && is_retryable_openai_error(&err) {
-                    attempt += 1;
-                    let err_text = err.to_string();
-                    tracing::warn!(
-                        attempt = attempt,
-                        max_retries = MAX_RETRIES,
-                        delay_ms = delay_ms,
-                        error = %err_text,
-                        label = label,
-                        "LLM 请求失败，准备重试",
-                    );
-                    if let Some(cb) = on_retry {
-                        cb(attempt, MAX_RETRIES, delay_ms, &err_text);
-                    }
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    delay_ms *= RETRY_BACKOFF_MULTIPLIER;
-                } else {
-                    return Err(err);
-                }
-            }
-        }
-    }
-}
-
+#[allow(dead_code)]
 fn extract_delta_text(delta: &Value, field: &str) -> String {
     let Some(raw) = delta.get(field) else {
         return String::new();
@@ -1399,6 +945,7 @@ fn extract_delta_text(delta: &Value, field: &str) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn push_stream_piece(
     piece: ModelStreamChunk,
     on_delta: &mut impl FnMut(&ModelStreamChunk),
@@ -1420,6 +967,7 @@ fn push_stream_piece(
 /// 某些模型不使用 API 级别的 `reasoning_content` 字段，
 /// 而是在 `content` 中输出 `<think>...</think>` 标签。
 /// 此过滤器跨 chunk 追踪状态，将标签内的内容转移到 `reasoning_content`。
+#[allow(dead_code)]
 struct ThinkTagFilter {
     /// 是否处于 `<think>` 块内
     inside_think: bool,
@@ -1427,6 +975,7 @@ struct ThinkTagFilter {
     buf: String,
 }
 
+#[allow(dead_code)]
 impl ThinkTagFilter {
     fn new() -> Self {
         Self {
@@ -1523,6 +1072,7 @@ fn strip_think_tags(text: &str) -> String {
     result
 }
 
+#[allow(dead_code)]
 fn should_skip_stream_payload(raw: &str) -> bool {
     let normalized = raw.trim().to_ascii_lowercase();
     normalized.is_empty()
@@ -1532,6 +1082,7 @@ fn should_skip_stream_payload(raw: &str) -> bool {
         || normalized.contains("\"event\":\"ping\"")
 }
 
+#[allow(dead_code)]
 fn inject_thinking_config(payload: &mut Value) {
     let Some(obj) = payload.as_object_mut() else {
         return;
@@ -1544,6 +1095,7 @@ fn inject_thinking_config(payload: &mut Value) {
     obj.insert("thinking".to_string(), thinking);
 }
 
+#[allow(dead_code)]
 fn clear_thinking() -> bool {
     match std::env::var("API_CLEAR_THINKING") {
         Ok(v) => !matches!(
@@ -1555,6 +1107,7 @@ fn clear_thinking() -> bool {
 }
 
 /// 注入 stream_options.include_usage = true，使流式响应最后一个 chunk 返回 usage 数据
+#[allow(dead_code)]
 fn inject_stream_usage_option(payload: &mut Value) {
     let Some(obj) = payload.as_object_mut() else {
         return;
@@ -1562,6 +1115,7 @@ fn inject_stream_usage_option(payload: &mut Value) {
     obj.insert("stream_options".to_string(), json!({"include_usage": true}));
 }
 
+#[allow(dead_code)]
 fn inject_temperature_config(payload: &mut Value) {
     let Some(temp) = configured_temperature_number() else {
         return;
@@ -1572,6 +1126,7 @@ fn inject_temperature_config(payload: &mut Value) {
     obj.insert("temperature".to_string(), Value::Number(temp));
 }
 
+#[allow(dead_code)]
 fn inject_function_tools(payload: &mut Value, functions: &[FunctionToolSpec]) {
     let Some(obj) = payload.as_object_mut() else {
         return;
@@ -1601,6 +1156,12 @@ fn configured_temperature_number() -> Option<serde_json::Number> {
     }
     let rounded = (value * 100.0).round() / 100.0;
     serde_json::Number::from_f64(rounded)
+}
+
+fn configured_temperature_f32() -> Option<f32> {
+    configured_temperature_number()
+        .and_then(|value| value.as_f64())
+        .map(|value| value as f32)
 }
 
 fn configured_max_tokens() -> Option<u16> {
@@ -1637,6 +1198,7 @@ fn default_api_model() -> String {
     "gpt-4o-mini".to_string()
 }
 
+#[allow(dead_code)]
 fn parse_non_stream_byot_response(payload: &Value) -> Option<ModelResponse> {
     let choice = payload
         .get("choices")
@@ -1686,6 +1248,7 @@ fn parse_non_stream_byot_response(payload: &Value) -> Option<ModelResponse> {
     })
 }
 
+#[allow(dead_code)]
 fn parse_function_byot_response(payload: &Value) -> Result<ModelFunctionResponse> {
     let choice = payload
         .get("choices")
@@ -1744,6 +1307,7 @@ fn parse_function_byot_response(payload: &Value) -> Result<ModelFunctionResponse
     })
 }
 
+#[allow(dead_code)]
 fn parse_function_call_item(item: &Value) -> Option<ModelFunctionCall> {
     let name = item
         .get("function")

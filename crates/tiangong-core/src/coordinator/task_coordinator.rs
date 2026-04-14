@@ -41,6 +41,7 @@ impl TaskCoordinator {
             user_input: prompt,
             context: Vec::new(),
             assembled_system_prompt: None,
+            thinking: None,
         };
 
         match self.engine.client().complete(&req) {
@@ -125,6 +126,9 @@ impl TaskCoordinator {
             user_input: prompt,
             context: Vec::new(),
             assembled_system_prompt: None,
+            thinking: Some(crate::model::ModelThinkingConfig {
+                budget_tokens: 2048,
+            }),
         };
 
         let resp = self.engine.client().complete(&req)?;
@@ -267,6 +271,9 @@ impl TaskCoordinator {
                 user_input: prompt,
                 context: Vec::new(),
                 assembled_system_prompt: None,
+                thinking: Some(crate::model::ModelThinkingConfig {
+                    budget_tokens: 2048,
+                }),
             };
 
             // 流式合成，实时推送

@@ -32,6 +32,9 @@ pub fn convert_external_skill_with_agent(
         user_input: prompt,
         context: Vec::<Message>::new(),
         assembled_system_prompt: None,
+        thinking: Some(crate::model::ModelThinkingConfig {
+            budget_tokens: 4096,
+        }),
     };
     let response = client
         .complete(&request)

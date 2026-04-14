@@ -12,9 +12,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use arc_swap::ArcSwap;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::agent_config::{McpConfig, McpServerConfig, SkillsConfig};
 use crate::mcp::McpToolMeta;
+use crate::model::ProviderProtocol;
 use crate::models_config::{ModelCapability, ModelsConfig};
 use crate::permission::TrustMode;
 
@@ -30,9 +32,14 @@ pub struct ModelEndpoint {
     pub api_key: String,
     /// 模型名称
     pub model: String,
+    /// Provider 协议
+    #[serde(default)]
+    pub protocol: ProviderProtocol,
     /// 请求超时（毫秒）
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
+    #[serde(default)]
+    pub options: Value,
 }
 
 fn default_timeout_ms() -> u64 {
@@ -45,7 +52,9 @@ impl Default for ModelEndpoint {
             base_url: String::new(),
             api_key: String::new(),
             model: String::new(),
+            protocol: ProviderProtocol::default(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
+            options: Value::Object(serde_json::Map::new()),
         }
     }
 }
@@ -83,7 +92,9 @@ impl LlmConfig {
                 base_url: resolved.base_url,
                 api_key: resolved.api_key,
                 model: resolved.model,
+                protocol: resolved.protocol,
                 timeout_ms: resolved.timeout_ms,
+                options: resolved.options,
             })
         };
 
@@ -153,7 +164,9 @@ impl CoreConfigBuilder {
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
             model: model.to_string(),
+            protocol: ProviderProtocol::default(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
+            options: Value::Object(serde_json::Map::new()),
         };
         self
     }
@@ -318,5 +331,34 @@ mod tests {
             ..Default::default()
         });
         assert!(llm.image_generation.is_some());
+    }
+
+    #[test]
+    fn llm_config_from_models_config_preserves_protocol() {
+        let mut models = ModelsConfig::default();
+        models.providers.insert(
+            "anthropic".to_string(),
+            crate::models_config::ProviderConfig {
+                base_url: "https://api.anthropic.com".into(),
+                api_key: "sk-ant".into(),
+                timeout_ms: 30_000,
+                protocol: ProviderProtocol::Anthropic,
+            },
+        );
+        models.models.insert(
+            "chat-model".to_string(),
+            crate::models_config::ModelEntry {
+                provider: "anthropic".into(),
+                model: "claude-sonnet-4".into(),
+                capabilities: vec![ModelCapability::Chat],
+                options: serde_json::json!({}),
+            },
+        );
+        models
+            .routing
+            .insert(ModelCapability::Chat, "chat-model".into());
+
+        let llm = LlmConfig::from_models_config(&models);
+        assert_eq!(llm.chat.protocol, ProviderProtocol::Anthropic);
     }
 }

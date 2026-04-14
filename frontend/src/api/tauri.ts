@@ -118,6 +118,7 @@ export interface ProviderConfigView {
   base_url: string;
   api_key: string;
   timeout_ms: number;
+  protocol: string;
 }
 
 export interface ModelEntryView {
@@ -285,8 +286,13 @@ export const api = {
   getModelList: (): Promise<string[]> =>
     invoke('get_model_list'),
 
-  fetchProviderModels: (baseUrl: string, apiKey: string, timeoutMs?: number): Promise<string[]> =>
-    invoke('fetch_provider_models', { baseUrl, apiKey, timeoutMs }),
+  fetchProviderModels: (
+    baseUrl: string,
+    apiKey: string,
+    timeoutMs?: number,
+    protocol?: string,
+  ): Promise<string[]> =>
+    invoke('fetch_provider_models', { baseUrl, apiKey, timeoutMs, protocol }),
 
   // ----------------------------------------------------------------
   // @提及补全

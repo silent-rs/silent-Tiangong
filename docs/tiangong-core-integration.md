@@ -23,8 +23,8 @@
 
 代码入口见：
 
-- [core/mod.rs](/Users/hubertshelley/Documents/silent/tiangong/crates/tiangong-core/src/core/mod.rs)
-- [core_config.rs](/Users/hubertshelley/Documents/silent/tiangong/crates/tiangong-core/src/core_config.rs)
+- `crates/tiangong-core/src/core/mod.rs`
+- `crates/tiangong-core/src/core_config.rs`
 
 `TiangongCore` 不负责：
 
@@ -52,7 +52,7 @@
 
 ### `TiangongCore`
 
-主要接口位于 [core/mod.rs](/Users/hubertshelley/Documents/silent/tiangong/crates/tiangong-core/src/core/mod.rs)：
+主要接口位于 `crates/tiangong-core/src/core/mod.rs`：
 
 ```rust
 pub struct TiangongCore;
@@ -80,7 +80,7 @@ impl TiangongCore {
 
 ### `CoreConfig`
 
-定义位于 [core_config.rs](/Users/hubertshelley/Documents/silent/tiangong/crates/tiangong-core/src/core_config.rs)。
+定义位于 `crates/tiangong-core/src/core_config.rs`。
 
 当前运行所需最小配置包括：
 
@@ -122,7 +122,7 @@ impl TiangongCore {
 
 仓库内现成示例见：
 
-- [test_core.rs](/Users/hubertshelley/Documents/silent/tiangong/crates/tiangong-core/examples/test_core.rs)
+- `crates/tiangong-core/examples/test_core.rs`
 
 一个最小接入示例如下：
 
@@ -194,8 +194,8 @@ let provider = CoreConfigProvider::new(CoreConfig {
 
 相关代码：
 
-- [crates/tiangong-config/src/lib.rs](/Users/hubertshelley/Documents/silent/tiangong/crates/tiangong-config/src/lib.rs)
-- [crates/tiangong-config/src/config.rs](/Users/hubertshelley/Documents/silent/tiangong/crates/tiangong-config/src/config.rs)
+- `crates/tiangong-config/src/lib.rs`
+- `crates/tiangong-config/src/config.rs`
 
 示例：
 
@@ -375,8 +375,8 @@ Core 应负责：
 
 ## 参考材料
 
-- [docs/rfc/0006-core-config-provider.md](/Users/hubertshelley/Documents/silent/tiangong/docs/rfc/0006-core-config-provider.md)
-- [crates/tiangong-core/examples/test_core.rs](/Users/hubertshelley/Documents/silent/tiangong/crates/tiangong-core/examples/test_core.rs)
-- [crates/tiangong-core/src/core/mod.rs](/Users/hubertshelley/Documents/silent/tiangong/crates/tiangong-core/src/core/mod.rs)
-- [crates/tiangong-core/src/core_config.rs](/Users/hubertshelley/Documents/silent/tiangong/crates/tiangong-core/src/core_config.rs)
-- [crates/tiangong-config/src/lib.rs](/Users/hubertshelley/Documents/silent/tiangong/crates/tiangong-config/src/lib.rs)
+- `docs/rfc/0006-core-config-provider.md`
+- `crates/tiangong-core/examples/test_core.rs`
+- `crates/tiangong-core/src/core/mod.rs`
+- `crates/tiangong-core/src/core_config.rs`
+- `crates/tiangong-config/src/lib.rs`

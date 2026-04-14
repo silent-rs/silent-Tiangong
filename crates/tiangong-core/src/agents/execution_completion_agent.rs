@@ -74,6 +74,9 @@ pub(crate) fn infer_completion_signal_with_llm(
         user_input: prompt,
         context: context.to_vec(),
         assembled_system_prompt: None,
+        thinking: Some(crate::model::ModelThinkingConfig {
+            budget_tokens: 2048,
+        }),
     };
     let response = client.complete_stream(&request, on_chunk)?;
     accumulated_usage.accumulate(&response.usage);
@@ -155,6 +158,9 @@ pub(crate) fn review_completion_signal_with_llm(
         user_input: prompt,
         context: context.to_vec(),
         assembled_system_prompt: None,
+        thinking: Some(crate::model::ModelThinkingConfig {
+            budget_tokens: 2048,
+        }),
     };
     let response = client.complete_stream(&request, on_chunk)?;
     accumulated_usage.accumulate(&response.usage);
