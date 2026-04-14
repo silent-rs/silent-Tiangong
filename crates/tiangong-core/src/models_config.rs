@@ -324,7 +324,7 @@ impl ModelsConfig {
                         provider: provider_key,
                         model: endpoint.model.clone(),
                         capabilities: vec![cap],
-                        options: default_options(),
+                        options: endpoint.options.clone(),
                     },
                 );
                 routing.insert(cap, model_key);

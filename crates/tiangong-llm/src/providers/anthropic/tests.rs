@@ -3,44 +3,46 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures_util::stream;
 use serde_json::json;
+use tiangong_anthropic::types::{
+    ContentBlock, ContentBlockDeltaData, ContentBlockStartData, EventStream, MessageStartData,
+    MessagesCreateRequest, MessagesCreateResponse, StreamEvent, Usage,
+};
 
 use crate::message::{ChatMessage, MessageContent, MessageRole};
 use crate::provider::LlmProvider;
 use crate::providers::anthropic::client::{AnthropicClient, AnthropicTransport};
 use crate::providers::anthropic::config::AnthropicConfig;
 use crate::providers::anthropic::provider::AnthropicProvider;
-use crate::request::ProviderRequest;
+use crate::request::{ProviderRequest, ThinkingConfig};
 use crate::stream::ProviderStreamEvent;
 use crate::tool::{ToolChoice, ToolResult, ToolResultContent, ToolSpec};
 
 #[derive(Clone, Default)]
 struct MockAnthropicTransport {
-    response: Option<async_anthropic::types::CreateMessagesResponse>,
-    stream_events: Vec<Result<async_anthropic::types::MessagesStreamEvent, crate::error::LlmError>>,
+    response: Option<MessagesCreateResponse>,
+    stream_events: Vec<Result<StreamEvent, crate::error::LlmError>>,
 }
 
 #[async_trait]
 impl AnthropicTransport for MockAnthropicTransport {
     async fn create(
         &self,
-        _request: async_anthropic::types::CreateMessagesRequest,
-    ) -> Result<async_anthropic::types::CreateMessagesResponse, crate::error::LlmError> {
+        _request: MessagesCreateRequest,
+    ) -> Result<MessagesCreateResponse, crate::error::LlmError> {
         Ok(self.response.clone().expect("mock response"))
     }
 
     async fn create_stream(
         &self,
-        _request: async_anthropic::types::CreateMessagesRequest,
-    ) -> Result<super::stream::AnthropicSdkStream, crate::error::LlmError> {
+        _request: MessagesCreateRequest,
+    ) -> Result<EventStream, crate::error::LlmError> {
         let items = self
             .stream_events
             .clone()
             .into_iter()
-            .map(|event| match event {
+            .map(|item| match item {
                 Ok(event) => Ok(event),
-                Err(err) => Err(async_anthropic::errors::AnthropicError::Unknown(
-                    err.to_string(),
-                )),
+                Err(err) => Err(tiangong_anthropic::AnthropicError::Stream(err.to_string())),
             });
         Ok(Box::pin(stream::iter(items)))
     }
@@ -95,6 +97,9 @@ fn sample_request() -> ProviderRequest {
         top_p: None,
         stop_sequences: vec!["STOP".to_string()],
         metadata: None,
+        thinking: Some(ThinkingConfig {
+            budget_tokens: 4096,
+        }),
     }
 }
 
@@ -106,32 +111,45 @@ fn test_request_mapping_with_system_and_tools() {
     assert_eq!(mapped.messages.len(), 3);
     assert_eq!(mapped.tools.as_ref().map(Vec::len), Some(1));
     assert!(matches!(
+        mapped.thinking,
+        Some(tiangong_anthropic::types::ThinkingConfig::Enabled {
+            budget_tokens: 4096
+        })
+    ));
+    assert!(matches!(
         mapped.tool_choice,
-        Some(async_anthropic::types::ToolChoice::Auto)
+        Some(tiangong_anthropic::types::ToolChoice::Auto)
     ));
 }
 
 #[test]
-fn test_tool_result_mapping_back_to_message_content() {
-    let response = async_anthropic::types::CreateMessagesResponse {
-        id: Some("msg_1".to_string()),
-        content: Some(vec![async_anthropic::types::MessageContent::ToolUse(
-            async_anthropic::types::ToolUse {
+fn test_tool_and_thinking_mapping_back_to_message_content() {
+    let response = MessagesCreateResponse {
+        id: "msg_1".to_string(),
+        kind: "message".to_string(),
+        role: tiangong_anthropic::types::MessageRole::Assistant,
+        content: vec![
+            ContentBlock::Thinking {
+                thinking: "先搜索一下".to_string(),
+                signature: "sig".to_string(),
+            },
+            ContentBlock::ToolUse {
                 id: "call_1".to_string(),
                 name: "search_web".to_string(),
                 input: json!({"q": "rust"}),
             },
-        )]),
-        model: Some("claude-3-7-sonnet".to_string()),
+        ],
+        model: "claude-3-7-sonnet".to_string(),
         stop_reason: Some("tool_use".to_string()),
         stop_sequence: None,
-        usage: Some(async_anthropic::types::Usage {
+        usage: Some(Usage {
             input_tokens: Some(12),
             output_tokens: Some(7),
         }),
     };
 
     let mapped = super::mapping::from_anthropic_response(response).expect("mapped response");
+    assert_eq!(mapped.reasoning_content.as_deref(), Some("先搜索一下"));
     assert_eq!(
         mapped.usage.as_ref().map(|usage| usage.total_tokens),
         Some(19)
@@ -144,47 +162,51 @@ fn test_tool_result_mapping_back_to_message_content() {
 
 #[tokio::test]
 async fn test_provider_complete_and_stream_behavior() {
-    let response = async_anthropic::types::CreateMessagesResponse {
-        id: Some("msg_1".to_string()),
-        content: Some(vec![async_anthropic::types::MessageContent::Text(
-            async_anthropic::types::Text {
-                text: "你好，世界".to_string(),
-            },
-        )]),
-        model: Some("claude-3-7-sonnet".to_string()),
+    let response = MessagesCreateResponse {
+        id: "msg_1".to_string(),
+        kind: "message".to_string(),
+        role: tiangong_anthropic::types::MessageRole::Assistant,
+        content: vec![ContentBlock::Text {
+            text: "你好，世界".to_string(),
+        }],
+        model: "claude-3-7-sonnet".to_string(),
         stop_reason: Some("end_turn".to_string()),
         stop_sequence: None,
-        usage: Some(async_anthropic::types::Usage {
+        usage: Some(Usage {
             input_tokens: Some(10),
             output_tokens: Some(4),
         }),
     };
 
     let stream_events = vec![
-        Ok(async_anthropic::types::MessagesStreamEvent::MessageStart {
-            message: async_anthropic::types::MessageStart {
+        Ok(StreamEvent::MessageStart {
+            message: MessageStartData {
                 id: "msg_1".to_string(),
                 model: "claude-3-7-sonnet".to_string(),
-                role: "assistant".to_string(),
+                role: tiangong_anthropic::types::MessageRole::Assistant,
                 content: vec![],
                 stop_reason: None,
                 stop_sequence: None,
-                usage: None,
+                usage: Some(Usage {
+                    input_tokens: Some(10),
+                    output_tokens: Some(0),
+                }),
             },
-            usage: Some(async_anthropic::types::Usage {
-                input_tokens: Some(10),
-                output_tokens: Some(0),
-            }),
         }),
-        Ok(
-            async_anthropic::types::MessagesStreamEvent::ContentBlockDelta {
-                index: 0,
-                delta: async_anthropic::types::ContentBlockDelta::TextDelta {
-                    text: "你好".to_string(),
-                },
+        Ok(StreamEvent::ContentBlockStart {
+            index: 0,
+            content_block: ContentBlockStartData::Thinking {
+                thinking: "先想一下".to_string(),
+                signature: String::new(),
             },
-        ),
-        Ok(async_anthropic::types::MessagesStreamEvent::MessageStop),
+        }),
+        Ok(StreamEvent::ContentBlockDelta {
+            index: 1,
+            delta: ContentBlockDeltaData::TextDelta {
+                text: "你好".to_string(),
+            },
+        }),
+        Ok(StreamEvent::MessageStop),
     ];
 
     let transport = MockAnthropicTransport {
@@ -215,6 +237,19 @@ async fn test_provider_complete_and_stream_behavior() {
     }
 
     assert!(seen.contains(&ProviderStreamEvent::MessageStart));
+    assert!(seen.contains(&ProviderStreamEvent::ReasoningDelta("先想一下".to_string())));
     assert!(seen.contains(&ProviderStreamEvent::TextDelta("你好".to_string())));
     assert!(seen.contains(&ProviderStreamEvent::MessageEnd));
+}
+
+#[tokio::test]
+async fn test_provider_list_models() {
+    let provider = AnthropicProvider::new(AnthropicClient::new(
+        MockAnthropicTransport::default(),
+        AnthropicConfig::new("test"),
+    ));
+
+    let models = provider.list_models().await.expect("list models");
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].id, "claude-3-7-sonnet");
 }

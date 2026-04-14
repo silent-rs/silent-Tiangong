@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use arc_swap::ArcSwap;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::agent_config::{McpConfig, McpServerConfig, SkillsConfig};
 use crate::mcp::McpToolMeta;
@@ -37,6 +38,8 @@ pub struct ModelEndpoint {
     /// 请求超时（毫秒）
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
+    #[serde(default)]
+    pub options: Value,
 }
 
 fn default_timeout_ms() -> u64 {
@@ -51,6 +54,7 @@ impl Default for ModelEndpoint {
             model: String::new(),
             protocol: ProviderProtocol::default(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
+            options: Value::Object(serde_json::Map::new()),
         }
     }
 }
@@ -90,6 +94,7 @@ impl LlmConfig {
                 model: resolved.model,
                 protocol: resolved.protocol,
                 timeout_ms: resolved.timeout_ms,
+                options: resolved.options,
             })
         };
 
@@ -161,6 +166,7 @@ impl CoreConfigBuilder {
             model: model.to_string(),
             protocol: ProviderProtocol::default(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
+            options: Value::Object(serde_json::Map::new()),
         };
         self
     }

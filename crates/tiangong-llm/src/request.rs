@@ -4,6 +4,16 @@ use serde_json::{Map, Value};
 use crate::message::ChatMessage;
 use crate::tool::{ToolChoice, ToolSpec};
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThinkingConfig {
+    #[serde(default = "default_thinking_budget_tokens")]
+    pub budget_tokens: u32,
+}
+
+fn default_thinking_budget_tokens() -> u32 {
+    2048
+}
+
 /// 统一 provider 请求。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderRequest {
@@ -24,4 +34,6 @@ pub struct ProviderRequest {
     pub stop_sequences: Vec<String>,
     #[serde(default)]
     pub metadata: Option<Map<String, Value>>,
+    #[serde(default)]
+    pub thinking: Option<ThinkingConfig>,
 }

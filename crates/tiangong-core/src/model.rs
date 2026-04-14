@@ -1,16 +1,9 @@
-use std::io::{BufRead, BufReader};
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::mcp::build_mcp_tools_system_prompt;
 use crate::session::{Message, MessageRole};
 use anyhow::{Context, Result, anyhow};
-use async_openai::Client as OpenAIClient;
-use async_openai::config::OpenAIConfig;
-use async_openai::types::chat::{
-    ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
-    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
-};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -20,7 +13,7 @@ use tiangong_llm::message::{
 use tiangong_llm::provider::LlmProvider;
 use tiangong_llm::providers::anthropic::{AnthropicConfig, AnthropicProvider};
 use tiangong_llm::providers::openai::{OpenAiCompatibleConfig, OpenAiCompatibleProvider};
-use tiangong_llm::request::ProviderRequest;
+use tiangong_llm::request::{ProviderRequest, ThinkingConfig as LlmThinkingConfig};
 use tiangong_llm::response::ProviderResponse;
 use tiangong_llm::stream::{ProviderStream, ProviderStreamEvent};
 use tiangong_llm::tool::{ToolCall as LlmToolCall, ToolChoice as LlmToolChoice, ToolSpec};
@@ -36,8 +29,13 @@ pub struct ModelRequest {
     pub user_input: String,
     pub context: Vec<Message>,
     /// 已由 PromptAssembler 装配的 system prompt。
-    /// 设置此字段后 build_openai_messages 跳过自己的环境注入。
     pub assembled_system_prompt: Option<String>,
+    pub thinking: Option<ModelThinkingConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelThinkingConfig {
+    pub budget_tokens: u32,
 }
 
 impl ModelRequest {
@@ -53,7 +51,13 @@ impl ModelRequest {
             user_input,
             context,
             assembled_system_prompt: Some(system_prompt),
+            thinking: None,
         }
+    }
+
+    pub fn with_thinking_budget(mut self, budget_tokens: u32) -> Self {
+        self.thinking = Some(ModelThinkingConfig { budget_tokens });
+        self
     }
 }
 
@@ -325,8 +329,7 @@ impl SingleProviderClient {
         }
 
         let provider = self.build_anthropic_provider(timeout_ms)?;
-        let request =
-            build_anthropic_provider_request(req, model, anthropic_max_tokens(), functions);
+        let request = build_provider_request(req, model, anthropic_max_tokens(), functions);
         let response = self.block_on_llm(provider.complete(request))?;
         convert_provider_response_to_function_response(response)
     }
@@ -358,6 +361,7 @@ impl SingleProviderClient {
             top_p: None,
             stop_sequences: Vec::new(),
             metadata: None,
+            thinking: None,
         };
         let response = self.block_on_llm(provider.complete(request))?;
         let text = strip_think_tags(&collect_provider_text(&response))
@@ -446,6 +450,7 @@ impl SingleProviderClient {
             top_p: None,
             stop_sequences: Vec::new(),
             metadata: None,
+            thinking: None,
         };
         let response = self.block_on_llm(provider.complete(request))?;
         Ok(collect_provider_text(&response).trim().to_string())
@@ -563,600 +568,9 @@ impl ModelClient for SingleProviderClient {
     }
 }
 
-#[allow(dead_code)]
-fn build_openai_messages(req: &ModelRequest) -> Result<Vec<ChatCompletionRequestMessage>> {
-    let mut messages = Vec::new();
-
-    // 如果已由 PromptAssembler 装配，使用装配好的 system prompt，不再自行注入环境信息
-    let system_texts = if let Some(ref assembled) = req.assembled_system_prompt {
-        let mut texts = vec![assembled.clone()];
-        // context 中的 System 消息仍然追加（attachment 等）
-        for msg in &req.context {
-            if msg.role == MessageRole::System && !msg.content.trim().is_empty() {
-                texts.push(msg.content.clone());
-            }
-        }
-        // context 中的 User/Assistant 消息
-        for msg in &req.context {
-            match msg.role {
-                MessageRole::User => {
-                    messages.push(
-                        ChatCompletionRequestUserMessageArgs::default()
-                            .content(msg.content.clone())
-                            .build()
-                            .context("构建 user 消息失败")?
-                            .into(),
-                    );
-                }
-                MessageRole::Assistant => {
-                    messages.push(
-                        ChatCompletionRequestAssistantMessageArgs::default()
-                            .content(msg.content.clone())
-                            .build()
-                            .context("构建 assistant 消息失败")?
-                            .into(),
-                    );
-                }
-                _ => {}
-            }
-        }
-        texts
-    } else {
-        // 旧路径：自行注入环境信息（兼容 TurnRunner / Worker）
-        let mut texts = vec![
-            format!("当前会话：{}", req.session_title),
-            format!("当前工作目录：{}", current_working_directory_text()),
-            format!("允许文件操作目录：{}", allowed_file_roots_text()),
-        ];
-        if let Some(mcp_tools_prompt) = build_mcp_tools_system_prompt(24) {
-            texts.push(mcp_tools_prompt);
-        }
-        for msg in &req.context {
-            match msg.role {
-                MessageRole::System => {
-                    if !msg.content.trim().is_empty() {
-                        texts.push(msg.content.clone());
-                    }
-                }
-                MessageRole::User => {
-                    messages.push(
-                        ChatCompletionRequestUserMessageArgs::default()
-                            .content(msg.content.clone())
-                            .build()
-                            .context("构建 user 消息失败")?
-                            .into(),
-                    );
-                }
-                MessageRole::Assistant => {
-                    messages.push(
-                        ChatCompletionRequestAssistantMessageArgs::default()
-                            .content(msg.content.clone())
-                            .build()
-                            .context("构建 assistant 消息失败")?
-                            .into(),
-                    );
-                }
-            }
-        }
-        texts
-    };
-
-    messages.insert(
-        0,
-        ChatCompletionRequestSystemMessageArgs::default()
-            .content(system_texts.join("\n"))
-            .build()
-            .context("构建 system 消息失败")?
-            .into(),
-    );
-
-    // 用户输入统一通过 context 传递（session history），不再单独追加。
-    // 仅在旧路径（无 assembled_system_prompt）时追加 user_input 作为兼容。
-    if req.assembled_system_prompt.is_none() && !req.user_input.is_empty() {
-        messages.push(
-            ChatCompletionRequestUserMessageArgs::default()
-                .content(req.user_input.clone())
-                .build()
-                .context("构建当前 user 消息失败")?
-                .into(),
-        );
-    }
-
-    Ok(messages)
-}
-
-#[allow(dead_code)]
-fn build_anthropic_request_body(
-    req: &ModelRequest,
-    model: &str,
-    max_tokens: u32,
-    functions: &[FunctionToolSpec],
-    stream: bool,
-) -> Result<Value> {
-    let (system, messages) = build_anthropic_messages(req)?;
-    let mut body = json!({
-        "model": model,
-        "max_tokens": max_tokens,
-        "messages": messages,
-    });
-
-    if !system.is_empty() {
-        body["system"] = Value::String(system);
-    }
-    if stream {
-        body["stream"] = Value::Bool(true);
-    }
-    if !functions.is_empty() {
-        body["tools"] = Value::Array(
-            functions
-                .iter()
-                .map(|tool| {
-                    json!({
-                        "name": tool.name,
-                        "description": tool.description,
-                        "input_schema": tool.parameters,
-                    })
-                })
-                .collect(),
-        );
-    }
-
-    Ok(body)
-}
-
-#[allow(dead_code)]
-fn build_anthropic_messages(req: &ModelRequest) -> Result<(String, Vec<Value>)> {
-    let mut messages = Vec::new();
-
-    let system_texts = if let Some(ref assembled) = req.assembled_system_prompt {
-        let mut texts = vec![assembled.clone()];
-        for msg in &req.context {
-            if msg.role == MessageRole::System && !msg.content.trim().is_empty() {
-                texts.push(msg.content.clone());
-            }
-        }
-        for msg in &req.context {
-            if let Some(payload) = anthropic_message_from_session(msg) {
-                messages.push(payload);
-            }
-        }
-        texts
-    } else {
-        let mut texts = vec![
-            format!("当前会话：{}", req.session_title),
-            format!("当前工作目录：{}", current_working_directory_text()),
-            format!("允许文件操作目录：{}", allowed_file_roots_text()),
-        ];
-        if let Some(mcp_tools_prompt) = build_mcp_tools_system_prompt(24) {
-            texts.push(mcp_tools_prompt);
-        }
-        for msg in &req.context {
-            match msg.role {
-                MessageRole::System => {
-                    if !msg.content.trim().is_empty() {
-                        texts.push(msg.content.clone());
-                    }
-                }
-                _ => {
-                    if let Some(payload) = anthropic_message_from_session(msg) {
-                        messages.push(payload);
-                    }
-                }
-            }
-        }
-        texts
-    };
-
-    if req.assembled_system_prompt.is_none() && !req.user_input.is_empty() {
-        messages.push(json!({
-            "role": "user",
-            "content": [{ "type": "text", "text": req.user_input }],
-        }));
-    }
-
-    Ok((system_texts.join("\n"), messages))
-}
-
-#[allow(dead_code)]
-fn anthropic_message_from_session(msg: &Message) -> Option<Value> {
-    let role = match msg.role {
-        MessageRole::User => "user",
-        MessageRole::Assistant => "assistant",
-        MessageRole::System => return None,
-    };
-
-    let mut parts = Vec::new();
-    if !msg.content.trim().is_empty() {
-        parts.push(msg.content.trim().to_string());
-    }
-    if !msg.reasoning_content.trim().is_empty() {
-        parts.push(format!("[思考]\n{}", msg.reasoning_content.trim()));
-    }
-    if parts.is_empty() {
-        return None;
-    }
-
-    Some(json!({
-        "role": role,
-        "content": [{ "type": "text", "text": parts.join("\n\n") }],
-    }))
-}
-
-#[allow(dead_code)]
-fn normalize_anthropic_base(api_base: &str) -> Result<String> {
-    let trimmed = api_base.trim().trim_end_matches('/');
-    if trimmed.is_empty() {
-        return Err(anyhow!("API_BASE_URL 不能为空"));
-    }
-    if trimmed.ends_with("/v1") {
-        Ok(trimmed.to_string())
-    } else {
-        Ok(format!("{trimmed}/v1"))
-    }
-}
-
-#[allow(dead_code)]
-fn anthropic_version_header() -> &'static str {
-    "2023-06-01"
-}
-
 fn anthropic_max_tokens() -> u32 {
     configured_max_tokens().map(u32::from).unwrap_or(4096)
 }
-
-#[allow(dead_code)]
-fn anthropic_post_json(
-    client: &reqwest::blocking::Client,
-    url: &str,
-    token: &str,
-    body: &Value,
-    on_retry: &Option<OnRetryCallback>,
-    label: &str,
-) -> Result<Value> {
-    let body_text = serde_json::to_string(body).context("序列化 Anthropic 请求失败")?;
-    let response = with_retry_http(label, on_retry, || {
-        let resp = client
-            .post(url)
-            .header("x-api-key", token)
-            .header("anthropic-version", anthropic_version_header())
-            .header("content-type", "application/json")
-            .body(body_text.clone())
-            .send()
-            .map_err(map_reqwest_retry_error)?;
-        anthropic_check_response(resp)
-    })
-    .map_err(|err| anyhow!(err.to_string()))?;
-
-    let text = response.text().context("读取 Anthropic 响应失败")?;
-    serde_json::from_str(&text).with_context(|| format!("解析 Anthropic 响应失败：{text}"))
-}
-
-#[allow(dead_code)]
-fn anthropic_post_stream(
-    client: &reqwest::blocking::Client,
-    url: &str,
-    token: &str,
-    body: &Value,
-    on_retry: &Option<OnRetryCallback>,
-    label: &str,
-) -> Result<reqwest::blocking::Response> {
-    let body_text = serde_json::to_string(body).context("序列化 Anthropic 流式请求失败")?;
-    with_retry_http(label, on_retry, || {
-        let resp = client
-            .post(url)
-            .header("x-api-key", token)
-            .header("anthropic-version", anthropic_version_header())
-            .header("content-type", "application/json")
-            .body(body_text.clone())
-            .send()
-            .map_err(map_reqwest_retry_error)?;
-        anthropic_check_response(resp)
-    })
-    .map_err(|err| anyhow!(err.to_string()))
-}
-
-#[allow(dead_code)]
-fn anthropic_check_response(
-    resp: reqwest::blocking::Response,
-) -> std::result::Result<reqwest::blocking::Response, HttpRetryError> {
-    let status = resp.status();
-    if status.is_success() {
-        return Ok(resp);
-    }
-
-    let retryable = status.as_u16() == 429 || status.is_server_error();
-    let body = resp.text().unwrap_or_default();
-    let message = extract_anthropic_error_message(&body)
-        .unwrap_or_else(|| format!("Anthropic 请求失败：HTTP {status}，响应：{body}"));
-    Err(HttpRetryError::new(message, retryable))
-}
-
-#[allow(dead_code)]
-fn parse_anthropic_function_response(payload: &Value) -> Result<ModelFunctionResponse> {
-    let mut text = String::new();
-    let mut reasoning_content = String::new();
-    let mut tool_calls = Vec::new();
-
-    if let Some(content) = payload.get("content").and_then(Value::as_array) {
-        for block in content {
-            match block
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-            {
-                "text" => {
-                    if let Some(piece) = block.get("text").and_then(Value::as_str) {
-                        text.push_str(piece);
-                    }
-                }
-                "thinking" => {
-                    if let Some(piece) = block.get("thinking").and_then(Value::as_str) {
-                        reasoning_content.push_str(piece);
-                    }
-                }
-                "tool_use" => {
-                    let id = block
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    let name = block
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    let arguments = block.get("input").cloned().unwrap_or_else(|| json!({}));
-                    if !name.is_empty() {
-                        tool_calls.push(ModelFunctionCall {
-                            id,
-                            name,
-                            arguments,
-                        });
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    let input_tokens = payload
-        .get("usage")
-        .and_then(|usage| usage.get("input_tokens"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as usize;
-    let output_tokens = payload
-        .get("usage")
-        .and_then(|usage| usage.get("output_tokens"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as usize;
-
-    if text.trim().is_empty() && reasoning_content.trim().is_empty() && tool_calls.is_empty() {
-        return Err(anyhow!("Anthropic 响应缺少文本和工具调用"));
-    }
-
-    Ok(ModelFunctionResponse {
-        text: text.trim().to_string(),
-        reasoning_content: reasoning_content.trim().to_string(),
-        usage: TokenUsage {
-            prompt_tokens: input_tokens,
-            completion_tokens: output_tokens,
-            total_tokens: input_tokens + output_tokens,
-        },
-        tool_calls,
-    })
-}
-
-#[allow(dead_code)]
-fn parse_anthropic_stream_response(
-    resp: reqwest::blocking::Response,
-    on_delta: &mut dyn FnMut(&ModelStreamChunk),
-) -> Result<ModelFunctionResponse> {
-    let mut reader = BufReader::new(resp);
-    let mut current_event = String::new();
-    let mut data_lines: Vec<String> = Vec::new();
-    let mut text = String::new();
-    let mut reasoning_content = String::new();
-    let mut input_tokens = 0usize;
-    let mut output_tokens = 0usize;
-    let mut tool_calls_map: std::collections::BTreeMap<u64, (String, String, String)> =
-        std::collections::BTreeMap::new();
-
-    let mut process_payload = |event_name: &str, raw_data: &str| -> Result<()> {
-        if raw_data.trim().is_empty() || raw_data.trim() == "[DONE]" || event_name == "ping" {
-            return Ok(());
-        }
-
-        let payload: Value = serde_json::from_str(raw_data)
-            .with_context(|| format!("解析 Anthropic SSE 事件失败：{raw_data}"))?;
-        let payload_type = payload
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or(event_name);
-
-        if let Some(usage) = payload.get("usage") {
-            if let Some(v) = usage.get("input_tokens").and_then(Value::as_u64) {
-                input_tokens = v as usize;
-            }
-            if let Some(v) = usage.get("output_tokens").and_then(Value::as_u64) {
-                output_tokens = v as usize;
-            }
-        }
-        if let Some(message_usage) = payload
-            .get("message")
-            .and_then(|message| message.get("usage"))
-        {
-            if let Some(v) = message_usage.get("input_tokens").and_then(Value::as_u64) {
-                input_tokens = v as usize;
-            }
-            if let Some(v) = message_usage.get("output_tokens").and_then(Value::as_u64) {
-                output_tokens = v as usize;
-            }
-        }
-
-        match payload_type {
-            "content_block_start" => {
-                let index = payload.get("index").and_then(Value::as_u64).unwrap_or(0);
-                if let Some(block) = payload.get("content_block") {
-                    match block
-                        .get("type")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                    {
-                        "tool_use" => {
-                            let id = block
-                                .get("id")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default()
-                                .to_string();
-                            let name = block
-                                .get("name")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default()
-                                .to_string();
-                            let input = block
-                                .get("input")
-                                .and_then(|input| {
-                                    if input.is_object() {
-                                        Some(input.to_string())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .unwrap_or_default();
-                            tool_calls_map.insert(index, (id, name, input));
-                        }
-                        "thinking" => {
-                            if let Some(piece) = block.get("thinking").and_then(Value::as_str) {
-                                reasoning_content.push_str(piece);
-                                on_delta(&ModelStreamChunk {
-                                    content: String::new(),
-                                    reasoning_content: piece.to_string(),
-                                });
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            "content_block_delta" => {
-                let index = payload.get("index").and_then(Value::as_u64).unwrap_or(0);
-                if let Some(delta) = payload.get("delta") {
-                    match delta
-                        .get("type")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                    {
-                        "text_delta" => {
-                            if let Some(piece) = delta.get("text").and_then(Value::as_str) {
-                                text.push_str(piece);
-                                on_delta(&ModelStreamChunk {
-                                    content: piece.to_string(),
-                                    reasoning_content: String::new(),
-                                });
-                            }
-                        }
-                        "thinking_delta" => {
-                            if let Some(piece) = delta.get("thinking").and_then(Value::as_str) {
-                                reasoning_content.push_str(piece);
-                                on_delta(&ModelStreamChunk {
-                                    content: String::new(),
-                                    reasoning_content: piece.to_string(),
-                                });
-                            }
-                        }
-                        "input_json_delta" => {
-                            if let Some(partial) = delta.get("partial_json").and_then(Value::as_str)
-                            {
-                                let entry = tool_calls_map.entry(index).or_insert_with(|| {
-                                    (String::new(), String::new(), String::new())
-                                });
-                                entry.2.push_str(partial);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        Ok(())
-    };
-
-    loop {
-        let mut line = String::new();
-        let read = reader
-            .read_line(&mut line)
-            .context("读取 Anthropic SSE 流失败")?;
-        if read == 0 {
-            break;
-        }
-
-        let line = line.trim_end_matches(['\r', '\n']);
-        if line.is_empty() {
-            if !data_lines.is_empty() {
-                process_payload(&current_event, &data_lines.join("\n"))?;
-                current_event.clear();
-                data_lines.clear();
-            }
-            continue;
-        }
-
-        if let Some(rest) = line.strip_prefix("event:") {
-            current_event = rest.trim().to_string();
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("data:") {
-            data_lines.push(rest.trim_start().to_string());
-        }
-    }
-
-    if !data_lines.is_empty() {
-        process_payload(&current_event, &data_lines.join("\n"))?;
-    }
-
-    let tool_calls = tool_calls_map
-        .into_values()
-        .filter(|(_, name, _)| !name.is_empty())
-        .map(|(id, name, args)| {
-            let arguments = serde_json::from_str::<Value>(&args)
-                .ok()
-                .filter(|value| value.is_object())
-                .unwrap_or_else(|| json!({}));
-            ModelFunctionCall {
-                id,
-                name,
-                arguments,
-            }
-        })
-        .collect::<Vec<_>>();
-
-    if text.trim().is_empty() && reasoning_content.trim().is_empty() && tool_calls.is_empty() {
-        return Err(anyhow!("Anthropic 流式响应缺少文本和工具调用"));
-    }
-
-    Ok(ModelFunctionResponse {
-        text: text.trim().to_string(),
-        reasoning_content: reasoning_content.trim().to_string(),
-        usage: TokenUsage {
-            prompt_tokens: input_tokens,
-            completion_tokens: output_tokens,
-            total_tokens: input_tokens + output_tokens,
-        },
-        tool_calls,
-    })
-}
-
-#[allow(dead_code)]
-fn extract_anthropic_error_message(body: &str) -> Option<String> {
-    let payload: Value = serde_json::from_str(body).ok()?;
-    let message = payload
-        .get("error")
-        .and_then(|error| error.get("message"))
-        .and_then(Value::as_str)?;
-    Some(format!("Anthropic 请求失败：{message}"))
-}
-
 fn build_anthropic_provider_from_config(
     cfg: &ModelProviderConfig,
     timeout_ms: u64,
@@ -1191,15 +605,6 @@ fn build_openai_provider_from_config(
     Ok(OpenAiCompatibleProvider::new(config))
 }
 
-fn build_anthropic_provider_request(
-    req: &ModelRequest,
-    model: &str,
-    max_tokens: u32,
-    functions: &[FunctionToolSpec],
-) -> ProviderRequest {
-    build_provider_request(req, model, max_tokens, functions)
-}
-
 fn build_provider_request(
     req: &ModelRequest,
     model: &str,
@@ -1225,6 +630,9 @@ fn build_provider_request(
         top_p: None,
         stop_sequences: Vec::new(),
         metadata: None,
+        thinking: req.thinking.as_ref().map(|thinking| LlmThinkingConfig {
+            budget_tokens: thinking.budget_tokens,
+        }),
     }
 }
 
@@ -1352,7 +760,7 @@ fn collect_provider_text(response: &ProviderResponse) -> String {
         .join("")
 }
 
-fn consume_anthropic_stream(
+fn consume_provider_stream_events(
     stream: ProviderStream,
     on_delta: &mut dyn FnMut(&ModelStreamChunk),
 ) -> Result<ModelFunctionResponse> {
@@ -1364,6 +772,7 @@ fn consume_anthropic_stream(
     runtime.block_on(async {
         let mut stream = stream;
         let mut text = String::new();
+        let mut reasoning_content = String::new();
         let mut usage = TokenUsageData::default();
         let mut tool_calls: std::collections::BTreeMap<String, (String, String)> =
             std::collections::BTreeMap::new();
@@ -1372,6 +781,7 @@ fn consume_anthropic_stream(
             match event.map_err(map_llm_error)? {
                 ProviderStreamEvent::ReasoningDelta(delta) => {
                     if !delta.is_empty() {
+                        reasoning_content.push_str(&delta);
                         on_delta(&ModelStreamChunk {
                             content: String::new(),
                             reasoning_content: delta.clone(),
@@ -1426,13 +836,13 @@ fn consume_anthropic_stream(
             })
             .collect::<Vec<_>>();
 
-        if text.trim().is_empty() && tool_calls.is_empty() {
-            return Err(anyhow!("Anthropic 流式响应缺少文本和工具调用"));
+        if text.trim().is_empty() && reasoning_content.trim().is_empty() && tool_calls.is_empty() {
+            return Err(anyhow!("Anthropic 流式响应缺少文本、思考内容和工具调用"));
         }
 
         Ok(ModelFunctionResponse {
             text: text.trim().to_string(),
-            reasoning_content: String::new(),
+            reasoning_content: reasoning_content.trim().to_string(),
             usage: usage.into(),
             tool_calls,
         })
@@ -1468,7 +878,7 @@ fn consume_provider_stream(
         .block_on(provider.stream(request))
         .map_err(map_llm_error)?;
 
-    let response = consume_anthropic_stream(stream, on_delta)?;
+    let response = consume_provider_stream_events(stream, on_delta)?;
     Ok(ModelResponse {
         text: response.text,
         reasoning_content: response.reasoning_content,
@@ -1489,7 +899,7 @@ fn convert_stream_to_function_response(
         .context("初始化异步运行时失败")?
         .block_on(provider.stream(request))
         .map_err(map_llm_error)?;
-    consume_anthropic_stream(stream, on_delta)
+    consume_provider_stream_events(stream, on_delta)
 }
 
 fn map_llm_error(error: tiangong_llm::error::LlmError) -> anyhow::Error {
@@ -1508,209 +918,10 @@ fn allowed_file_roots_text() -> String {
     format!("{workspace}；{temp}")
 }
 
-/// 规范化 API 基础地址
-///
-/// 仅做基本清理（去空格、去尾部斜杠、去意外拼接的 /chat/completions），
-/// 不自动补充版本路径——版本由用户在 provider base_url 中指定。
-#[allow(dead_code)]
-fn normalize_api_base(base_url: &str) -> Result<String> {
-    let trimmed = base_url.trim();
-    if trimmed.is_empty() {
-        return Err(anyhow!("API_BASE_URL 不能为空"));
-    }
-
-    let cleaned = trimmed.trim_end_matches('/');
-    let cleaned = cleaned.strip_suffix("/chat/completions").unwrap_or(cleaned);
-    Ok(cleaned.to_string())
-}
-
-/// 创建禁用内部 backoff 的 OpenAI 客户端
-///
-/// async-openai 默认有 ExponentialBackoff（最长 15 分钟）。
-/// 禁用后由 `with_retry` 统一管理重试，确保 StreamEvent::Retry 能正确触发。
-#[allow(dead_code)]
-fn build_no_retry_client(config: OpenAIConfig) -> OpenAIClient<OpenAIConfig> {
-    // 设置极小的 max_elapsed_time 确保 async-openai 不做任何内部重试。
-    // Duration::ZERO 在 backoff 首次调用时 elapsed ≈ 0 可能仍允许 1 次重试，
-    // 使用 1ns 确保 elapsed > max_elapsed_time 立即停止。
-    let no_retry = backoff::ExponentialBackoff {
-        max_elapsed_time: Some(Duration::from_nanos(1)),
-        ..Default::default()
-    };
-    OpenAIClient::build(reqwest::Client::new(), config, no_retry)
-}
-
-#[allow(dead_code)]
-fn build_sdk_error_hint(error_text: &str) -> String {
-    if error_text.contains("/chat/completions") && error_text.contains("404") {
-        return "；请检查 API_BASE_URL 是否包含正确的版本路径（如 .../v1）".to_string();
-    }
-    if error_text.contains("expected struct ApiError") {
-        return "；当前网关返回的错误结构非 OpenAI 标准格式，请确认 API_BASE_URL 是否为 OpenAI 兼容接口".to_string();
-    }
-    String::new()
-}
-
 // ── 重试相关 ──────────────────────────────────────────────
 
 /// 最大重试次数
 const MAX_RETRIES: u32 = 3;
-/// 初始重试延迟（毫秒）
-const INITIAL_RETRY_DELAY_MS: u64 = 1000;
-/// 退避倍率
-const RETRY_BACKOFF_MULTIPLIER: u64 = 2;
-
-#[derive(Debug)]
-#[allow(dead_code)]
-struct HttpRetryError {
-    message: String,
-    retryable: bool,
-}
-
-impl HttpRetryError {
-    fn new(message: impl Into<String>, retryable: bool) -> Self {
-        Self {
-            message: message.into(),
-            retryable,
-        }
-    }
-}
-
-impl std::fmt::Display for HttpRetryError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.message.fmt(f)
-    }
-}
-
-impl std::error::Error for HttpRetryError {}
-
-/// 判断 OpenAI SDK 错误是否可重试
-#[allow(dead_code)]
-fn is_retryable_openai_error(err: &async_openai::error::OpenAIError) -> bool {
-    is_retryable_error_text(&err.to_string())
-}
-
-#[allow(dead_code)]
-fn map_reqwest_retry_error(err: reqwest::Error) -> HttpRetryError {
-    let retryable = err.is_timeout() || err.is_connect() || err.is_request();
-    HttpRetryError::new(format!("HTTP 请求失败：{err}"), retryable)
-}
-
-/// 判断错误文本是否表示可重试的错误
-#[allow(dead_code)]
-fn is_retryable_error_text(text: &str) -> bool {
-    // 速率限制 (HTTP 429)
-    if text.contains("429")
-        || text.contains("Rate limit")
-        || text.contains("rate limit")
-        || text.contains("Rate limited")
-        || text.contains("访问量过大")
-        || text.contains("稍后再试")
-        || text.contains("too many requests")
-        || text.contains("Too Many Requests")
-    {
-        return true;
-    }
-    // 服务端错误 (5xx)
-    if text.contains("500 Internal Server Error")
-        || text.contains("502 Bad Gateway")
-        || text.contains("503 Service Unavailable")
-        || text.contains("504 Gateway Timeout")
-    {
-        return true;
-    }
-    // 连接错误
-    if text.contains("connection reset")
-        || text.contains("connection refused")
-        || text.contains("Connection reset")
-        || text.contains("Connection refused")
-    {
-        return true;
-    }
-    false
-}
-
-/// 带重试的异步调用（用于 OpenAI SDK 请求）
-///
-/// 遇到速率限制、5xx、连接错误时自动重试，采用指数退避策略。
-/// 可选的 `on_retry` 回调在每次重试前触发，用于通知上层。
-#[allow(dead_code)]
-async fn with_retry<F, Fut, T>(
-    label: &str,
-    on_retry: &Option<OnRetryCallback>,
-    mut f: F,
-) -> Result<T, async_openai::error::OpenAIError>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T, async_openai::error::OpenAIError>>,
-{
-    let mut attempt = 0u32;
-    let mut delay_ms = INITIAL_RETRY_DELAY_MS;
-    loop {
-        match f().await {
-            Ok(result) => return Ok(result),
-            Err(err) => {
-                if attempt < MAX_RETRIES && is_retryable_openai_error(&err) {
-                    attempt += 1;
-                    let err_text = err.to_string();
-                    tracing::warn!(
-                        attempt = attempt,
-                        max_retries = MAX_RETRIES,
-                        delay_ms = delay_ms,
-                        error = %err_text,
-                        label = label,
-                        "LLM 请求失败，准备重试",
-                    );
-                    if let Some(cb) = on_retry {
-                        cb(attempt, MAX_RETRIES, delay_ms, &err_text);
-                    }
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    delay_ms *= RETRY_BACKOFF_MULTIPLIER;
-                } else {
-                    return Err(err);
-                }
-            }
-        }
-    }
-}
-
-#[allow(dead_code)]
-fn with_retry_http<F, T>(
-    label: &str,
-    on_retry: &Option<OnRetryCallback>,
-    mut f: F,
-) -> std::result::Result<T, HttpRetryError>
-where
-    F: FnMut() -> std::result::Result<T, HttpRetryError>,
-{
-    let mut attempt = 0u32;
-    let mut delay_ms = INITIAL_RETRY_DELAY_MS;
-    loop {
-        match f() {
-            Ok(result) => return Ok(result),
-            Err(err) => {
-                if attempt < MAX_RETRIES && err.retryable {
-                    attempt += 1;
-                    tracing::warn!(
-                        attempt = attempt,
-                        max_retries = MAX_RETRIES,
-                        delay_ms = delay_ms,
-                        error = %err,
-                        label = label,
-                        "LLM 请求失败，准备重试",
-                    );
-                    if let Some(cb) = on_retry {
-                        cb(attempt, MAX_RETRIES, delay_ms, &err.to_string());
-                    }
-                    std::thread::sleep(Duration::from_millis(delay_ms));
-                    delay_ms *= RETRY_BACKOFF_MULTIPLIER;
-                } else {
-                    return Err(err);
-                }
-            }
-        }
-    }
-}
 
 #[allow(dead_code)]
 fn extract_delta_text(delta: &Value, field: &str) -> String {

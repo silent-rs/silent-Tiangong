@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use crate::error::LlmError;
 use crate::model::ProviderModelInfo;
 use crate::provider::{LlmProvider, ProviderCapabilities};
-use crate::providers::anthropic::client::{AnthropicClient, AsyncAnthropicTransport};
+use crate::providers::anthropic::client::{AnthropicClient, NativeAnthropicTransport};
 use crate::providers::anthropic::config::AnthropicConfig;
 use crate::providers::anthropic::mapping::{from_anthropic_response, to_anthropic_request};
 use crate::providers::anthropic::stream::map_anthropic_stream;
@@ -12,11 +12,11 @@ use crate::response::ProviderResponse;
 use crate::stream::ProviderStream;
 
 #[derive(Clone)]
-pub struct AnthropicProvider<T = AsyncAnthropicTransport> {
+pub struct AnthropicProvider<T = NativeAnthropicTransport> {
     client: AnthropicClient<T>,
 }
 
-impl AnthropicProvider<AsyncAnthropicTransport> {
+impl AnthropicProvider<NativeAnthropicTransport> {
     pub fn from_config(config: AnthropicConfig) -> Result<Self, LlmError> {
         Ok(Self {
             client: AnthropicClient::from_config(config)?,

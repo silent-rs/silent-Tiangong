@@ -123,7 +123,7 @@
 ### Phase 15（LLM 协议抽象与 Anthropic 支持）— **进行中**
 - Provider 配置增加协议类型，区分 OpenAI 兼容与 Anthropic。
 - 新增独立 crate `tiangong-llm`，统一承载 Provider 抽象、领域模型、错误类型与各协议适配。
-- 在 `tiangong-core` 内部维护统一 Provider 抽象和领域模型，Anthropic provider 先通过 `async-anthropic` 适配，保证未来可替换为原生 `reqwest + serde` 实现。
+- 在 `tiangong-core` 内部维护统一 Provider 抽象和领域模型，Anthropic transport 下沉到独立 crate `tiangong-anthropic`，使用原生 `reqwest + serde` 实现 Messages 与 SSE 解析，`tiangong-llm` 仅负责协议抽象与 provider 封装。
 - `async-openai` 也迁入 `tiangong-llm` 作为 OpenAI 兼容 provider，避免协议实现继续散落在 `tiangong-core`。
 - 对话、流式输出、工具调用、轻量模型调用补齐 Anthropic Messages 适配。
 - GUI / CLI / Server 共享同一套协议能力判断与错误处理。

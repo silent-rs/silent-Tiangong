@@ -1,10 +1,16 @@
 use std::collections::BTreeMap;
 
-use serde_json::{Map, Value};
+use serde_json::Value;
+use tiangong_anthropic::types::{
+    ContentBlock, ContentBlockDeltaData, ContentBlockParam, ContentBlockStartData,
+    Message as AnthropicMessage, MessageRole as AnthropicMessageRole, MessagesCreateRequest,
+    MessagesCreateResponse, StreamEvent, ThinkingConfig, Tool as AnthropicTool,
+    ToolChoice as AnthropicToolChoice, Usage,
+};
 
 use crate::error::LlmError;
 use crate::message::{ChatMessage, MessageContent, MessageRole};
-use crate::request::ProviderRequest;
+use crate::request::{ProviderRequest, ThinkingConfig as ProviderThinkingConfig};
 use crate::response::{ProviderResponse, StopReason};
 use crate::stream::ProviderStreamEvent;
 use crate::tool::{ToolCall, ToolChoice, ToolResult, ToolResultContent};
@@ -12,84 +18,71 @@ use crate::usage::TokenUsageData;
 
 pub(super) fn to_anthropic_request(
     request: &ProviderRequest,
-) -> Result<async_anthropic::types::CreateMessagesRequest, LlmError> {
+) -> Result<MessagesCreateRequest, LlmError> {
     let messages = request
         .messages
         .iter()
         .filter_map(map_message)
         .collect::<Result<Vec<_>, _>>()?;
 
-    let tools: Option<Vec<Map<String, Value>>> = if request.tools.is_empty() {
+    let tools = if request.tools.is_empty() {
         None
     } else {
         Some(
             request
                 .tools
                 .iter()
-                .map(|tool| {
-                    let mut item = Map::new();
-                    item.insert("name".to_string(), Value::String(tool.name.clone()));
-                    item.insert(
-                        "description".to_string(),
-                        Value::String(tool.description.clone()),
-                    );
-                    item.insert("input_schema".to_string(), tool.input_schema.clone());
-                    item
+                .map(|tool| AnthropicTool {
+                    name: tool.name.clone(),
+                    description: Some(tool.description.clone()),
+                    input_schema: tool.input_schema.clone(),
                 })
                 .collect(),
         )
     };
 
     let tool_choice = request.tool_choice.as_ref().map(|choice| match choice {
-        ToolChoice::Auto => async_anthropic::types::ToolChoice::Auto,
-        ToolChoice::Any => async_anthropic::types::ToolChoice::Any,
-        ToolChoice::Tool(name) => async_anthropic::types::ToolChoice::Tool(name.clone()),
+        ToolChoice::Auto => AnthropicToolChoice::Auto,
+        ToolChoice::Any => AnthropicToolChoice::Any,
+        ToolChoice::Tool(name) => AnthropicToolChoice::Tool {
+            name: name.clone(),
+            disable_parallel_tool_use: None,
+        },
     });
 
-    let mut builder = async_anthropic::types::CreateMessagesRequestBuilder::default();
-    builder
-        .model(request.model.clone())
-        .messages(messages)
-        .max_tokens(request.max_tokens.unwrap_or(4096) as i32);
-
-    if let Some(system) = request
-        .system
-        .as_ref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        builder.system(system.clone());
-    }
-    if let Some(temperature) = request.temperature {
-        builder.temperature(temperature);
-    }
-    if let Some(top_p) = request.top_p {
-        builder.top_p(top_p);
-    }
-    if !request.stop_sequences.is_empty() {
-        builder.stop_sequences(request.stop_sequences.clone());
-    }
-    if let Some(metadata) = request.metadata.clone() {
-        builder.metadata(metadata);
-    }
-    if let Some(tools) = tools {
-        builder.tools(tools);
-    }
-    if let Some(tool_choice) = tool_choice {
-        builder.tool_choice(tool_choice);
-    }
-
-    builder
-        .build()
-        .map_err(|err| LlmError::InvalidRequest(format!("构建 Anthropic 请求失败：{err}")))
+    Ok(MessagesCreateRequest {
+        model: request.model.clone(),
+        max_tokens: request.max_tokens.unwrap_or(4096),
+        system: request
+            .system
+            .clone()
+            .filter(|value| !value.trim().is_empty()),
+        messages,
+        temperature: request.temperature,
+        stop_sequences: (!request.stop_sequences.is_empty())
+            .then(|| request.stop_sequences.clone()),
+        top_p: request.top_p,
+        metadata: request.metadata.clone(),
+        tools,
+        tool_choice,
+        stream: None,
+        thinking: map_thinking_config(request.thinking.as_ref()),
+    })
 }
 
-fn map_message(message: &ChatMessage) -> Option<Result<async_anthropic::types::Message, LlmError>> {
+fn map_thinking_config(thinking: Option<&ProviderThinkingConfig>) -> Option<ThinkingConfig> {
+    thinking.map(|thinking| ThinkingConfig::Enabled {
+        budget_tokens: thinking.budget_tokens,
+    })
+}
+
+fn map_message(message: &ChatMessage) -> Option<Result<AnthropicMessage, LlmError>> {
     match message.role {
         MessageRole::System => None,
         MessageRole::User | MessageRole::Assistant | MessageRole::Tool => {
             let role = match message.role {
-                MessageRole::Assistant => async_anthropic::types::MessageRole::Assistant,
-                _ => async_anthropic::types::MessageRole::User,
+                MessageRole::Assistant => AnthropicMessageRole::Assistant,
+                _ => AnthropicMessageRole::User,
             };
 
             let content = message
@@ -97,34 +90,27 @@ fn map_message(message: &ChatMessage) -> Option<Result<async_anthropic::types::M
                 .iter()
                 .map(map_content)
                 .collect::<Result<Vec<_>, _>>();
-            Some(content.map(|content| async_anthropic::types::Message {
-                role,
-                content: async_anthropic::types::MessageContentList(content),
-            }))
+            Some(content.map(|content| AnthropicMessage { role, content }))
         }
     }
 }
 
-fn map_content(
-    content: &MessageContent,
-) -> Result<async_anthropic::types::MessageContent, LlmError> {
+fn map_content(content: &MessageContent) -> Result<ContentBlockParam, LlmError> {
     match content {
-        MessageContent::Text(text) => Ok(async_anthropic::types::Text::from(text).into()),
-        MessageContent::ToolCall(tool_call) => Ok(async_anthropic::types::ToolUse {
+        MessageContent::Text(text) => Ok(ContentBlockParam::Text { text: text.clone() }),
+        MessageContent::ToolCall(tool_call) => Ok(ContentBlockParam::ToolUse {
             id: tool_call.id.clone(),
             name: tool_call.name.clone(),
             input: tool_call.arguments.clone(),
-        }
-        .into()),
-        MessageContent::ToolResult(tool_result) => Ok(async_anthropic::types::ToolResult {
+        }),
+        MessageContent::ToolResult(tool_result) => Ok(ContentBlockParam::ToolResult {
             tool_use_id: tool_result.tool_call_id.clone(),
             content: Some(match &tool_result.content {
-                ToolResultContent::Text(text) => text.clone(),
-                ToolResultContent::Json(value) => value.to_string(),
+                ToolResultContent::Text(text) => Value::String(text.clone()),
+                ToolResultContent::Json(value) => value.clone(),
             }),
-            is_error: tool_result.is_error,
-        }
-        .into()),
+            is_error: Some(tool_result.is_error),
+        }),
         MessageContent::Image(_) => Err(LlmError::UnsupportedFeature(
             "Anthropic 图片输入映射暂未实现".to_string(),
         )),
@@ -132,62 +118,69 @@ fn map_content(
 }
 
 pub(super) fn from_anthropic_response(
-    response: async_anthropic::types::CreateMessagesResponse,
+    response: MessagesCreateResponse,
 ) -> Result<ProviderResponse, LlmError> {
     let raw = serde_json::to_value(&response)
         .map(Some)
         .map_err(|err| LlmError::Serialization(err.to_string()))?;
 
-    let content = response.content.unwrap_or_default();
-    let assistant_message = ChatMessage {
-        role: MessageRole::Assistant,
-        content: content
-            .into_iter()
-            .map(from_content)
-            .collect::<Result<Vec<_>, _>>()?,
-    };
-
-    let usage = response.usage.map(|usage| {
-        TokenUsageData::new(
-            usage.input_tokens.unwrap_or(0) as usize,
-            usage.output_tokens.unwrap_or(0) as usize,
+    let mut reasoning_chunks = Vec::new();
+    let assistant_content = response
+        .content
+        .into_iter()
+        .filter_map(
+            |content| match from_content(content, &mut reasoning_chunks) {
+                Ok(Some(item)) => Some(Ok(item)),
+                Ok(None) => None,
+                Err(err) => Some(Err(err)),
+            },
         )
-    });
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(ProviderResponse {
-        id: response.id,
-        model: response.model,
-        assistant_message,
-        reasoning_content: None,
+        id: Some(response.id),
+        model: Some(response.model),
+        assistant_message: ChatMessage {
+            role: MessageRole::Assistant,
+            content: assistant_content,
+        },
+        reasoning_content: (!reasoning_chunks.is_empty()).then(|| reasoning_chunks.join("")),
         stop_reason: response.stop_reason.as_deref().map(map_stop_reason),
-        usage,
+        usage: response.usage.map(map_usage),
         raw,
     })
 }
 
 fn from_content(
-    content: async_anthropic::types::MessageContent,
-) -> Result<MessageContent, LlmError> {
+    content: ContentBlock,
+    reasoning_chunks: &mut Vec<String>,
+) -> Result<Option<MessageContent>, LlmError> {
     match content {
-        async_anthropic::types::MessageContent::Text(text) => Ok(MessageContent::Text(text.text)),
-        async_anthropic::types::MessageContent::ToolUse(tool_use) => {
-            Ok(MessageContent::ToolCall(ToolCall {
-                id: tool_use.id,
-                name: tool_use.name,
-                arguments: tool_use.input,
-            }))
+        ContentBlock::Text { text } => Ok(Some(MessageContent::Text(text))),
+        ContentBlock::ToolUse { id, name, input } => Ok(Some(MessageContent::ToolCall(ToolCall {
+            id,
+            name,
+            arguments: input,
+        }))),
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => Ok(Some(MessageContent::ToolResult(ToolResult {
+            tool_call_id: tool_use_id,
+            content: match content {
+                Some(Value::String(text)) => ToolResultContent::Text(text),
+                Some(value) => ToolResultContent::Json(value),
+                None => ToolResultContent::Text(String::new()),
+            },
+            is_error: is_error.unwrap_or(false),
+        }))),
+        ContentBlock::Thinking { thinking, .. } => {
+            reasoning_chunks.push(thinking);
+            Ok(None)
         }
-        async_anthropic::types::MessageContent::ToolResult(tool_result) => {
-            let content = tool_result
-                .content
-                .map(ToolResultContent::Text)
-                .unwrap_or_else(|| ToolResultContent::Text(String::new()));
-            Ok(MessageContent::ToolResult(ToolResult {
-                tool_call_id: tool_result.tool_use_id,
-                content,
-                is_error: tool_result.is_error,
-            }))
-        }
+        ContentBlock::RedactedThinking { .. } => Ok(None),
+        ContentBlock::Unknown => Ok(None),
     }
 }
 
@@ -199,6 +192,13 @@ fn map_stop_reason(reason: &str) -> StopReason {
         "stop_sequence" => StopReason::StopSequence,
         other => StopReason::Other(other.to_string()),
     }
+}
+
+fn map_usage(usage: Usage) -> TokenUsageData {
+    TokenUsageData::new(
+        usage.input_tokens.unwrap_or(0) as usize,
+        usage.output_tokens.unwrap_or(0) as usize,
+    )
 }
 
 #[derive(Default)]
@@ -213,75 +213,77 @@ struct ToolCallAccumulator {
 
 pub(super) fn map_stream_event(
     state: &mut AnthropicStreamState,
-    event: async_anthropic::types::MessagesStreamEvent,
+    event: StreamEvent,
 ) -> Result<Vec<ProviderStreamEvent>, LlmError> {
     match event {
-        async_anthropic::types::MessagesStreamEvent::MessageStart { usage, .. } => {
+        StreamEvent::MessageStart { message } => {
             let mut events = vec![ProviderStreamEvent::MessageStart];
-            if let Some(usage) = usage {
-                events.push(ProviderStreamEvent::Usage(TokenUsageData::new(
-                    usage.input_tokens.unwrap_or(0) as usize,
-                    usage.output_tokens.unwrap_or(0) as usize,
-                )));
+            if let Some(usage) = message.usage {
+                events.push(ProviderStreamEvent::Usage(map_usage(usage)));
             }
             Ok(events)
         }
-        async_anthropic::types::MessagesStreamEvent::ContentBlockStart {
+        StreamEvent::ContentBlockStart {
             index,
             content_block,
         } => match content_block {
-            async_anthropic::types::MessageContent::ToolUse(tool_use) => {
-                state.tool_calls.insert(
-                    index,
-                    ToolCallAccumulator {
-                        id: tool_use.id.clone(),
-                    },
-                );
+            ContentBlockStartData::ToolUse { id, name, input } => {
+                state
+                    .tool_calls
+                    .insert(index, ToolCallAccumulator { id: id.clone() });
                 Ok(vec![ProviderStreamEvent::ToolCallStart(ToolCall {
-                    id: tool_use.id,
-                    name: tool_use.name,
-                    arguments: tool_use.input,
+                    id,
+                    name,
+                    arguments: input,
                 })])
+            }
+            ContentBlockStartData::Thinking { thinking, .. } if !thinking.is_empty() => {
+                Ok(vec![ProviderStreamEvent::ReasoningDelta(thinking)])
+            }
+            ContentBlockStartData::Text { text } if !text.is_empty() => {
+                Ok(vec![ProviderStreamEvent::TextDelta(text)])
             }
             _ => Ok(Vec::new()),
         },
-        async_anthropic::types::MessagesStreamEvent::ContentBlockDelta { index, delta } => {
-            match delta {
-                async_anthropic::types::ContentBlockDelta::TextDelta { text } => {
-                    Ok(vec![ProviderStreamEvent::TextDelta(text)])
-                }
-                async_anthropic::types::ContentBlockDelta::InputJsonDelta { partial_json } => {
-                    let call_id = state
-                        .tool_calls
-                        .get(&index)
-                        .map(|call| call.id.clone())
-                        .unwrap_or_else(|| format!("tool_call_{index}"));
-                    Ok(vec![ProviderStreamEvent::ToolCallDelta {
-                        call_id,
-                        partial_json,
-                    }])
-                }
+        StreamEvent::ContentBlockDelta { index, delta } => match delta {
+            ContentBlockDeltaData::TextDelta { text } => {
+                Ok(vec![ProviderStreamEvent::TextDelta(text)])
             }
-        }
-        async_anthropic::types::MessagesStreamEvent::ContentBlockStop { index } => {
+            ContentBlockDeltaData::InputJsonDelta { partial_json } => {
+                let call_id = state
+                    .tool_calls
+                    .get(&index)
+                    .map(|call| call.id.clone())
+                    .unwrap_or_else(|| format!("tool_call_{index}"));
+                Ok(vec![ProviderStreamEvent::ToolCallDelta {
+                    call_id,
+                    partial_json,
+                }])
+            }
+            ContentBlockDeltaData::ThinkingDelta { thinking } => {
+                Ok(vec![ProviderStreamEvent::ReasoningDelta(thinking)])
+            }
+            ContentBlockDeltaData::SignatureDelta { .. } | ContentBlockDeltaData::Unknown => {
+                Ok(Vec::new())
+            }
+        },
+        StreamEvent::ContentBlockStop { index } => {
             if let Some(call) = state.tool_calls.remove(&index) {
                 Ok(vec![ProviderStreamEvent::ToolCallEnd { call_id: call.id }])
             } else {
                 Ok(Vec::new())
             }
         }
-        async_anthropic::types::MessagesStreamEvent::MessageDelta { usage, .. } => {
+        StreamEvent::MessageDelta { usage, .. } => {
             if let Some(usage) = usage {
-                return Ok(vec![ProviderStreamEvent::Usage(TokenUsageData::new(
-                    usage.input_tokens.unwrap_or(0) as usize,
-                    usage.output_tokens.unwrap_or(0) as usize,
-                ))]);
+                Ok(vec![ProviderStreamEvent::Usage(map_usage(usage))])
+            } else {
+                Ok(Vec::new())
             }
-            Ok(Vec::new())
         }
-        async_anthropic::types::MessagesStreamEvent::MessageStop => {
-            Ok(vec![ProviderStreamEvent::MessageEnd])
-        }
+        StreamEvent::MessageStop => Ok(vec![ProviderStreamEvent::MessageEnd]),
+        StreamEvent::Error { message } => Ok(vec![ProviderStreamEvent::Error(message)]),
+        StreamEvent::Ping => Ok(Vec::new()),
     }
 }
 

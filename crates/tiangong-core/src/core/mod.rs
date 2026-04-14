@@ -421,6 +421,9 @@ fn execute_turn_inner(
             user_input: assembled.user_input.clone(),
             context: assembled.build_messages(),
             assembled_system_prompt: Some(system_prompt),
+            thinking: Some(crate::model::ModelThinkingConfig {
+                budget_tokens: 4096,
+            }),
         };
 
         // 预生成本轮 assistant 消息 ID（Delta/Reasoning 事件先于消息创建）
@@ -742,6 +745,9 @@ fn force_final_response(
         user_input: assembled.user_input.clone(),
         context: assembled.build_messages(),
         assembled_system_prompt: Some(system_prompt),
+        thinking: Some(crate::model::ModelThinkingConfig {
+            budget_tokens: 4096,
+        }),
     };
 
     // 预生成 message_id
@@ -757,6 +763,12 @@ fn force_final_response(
                     let _ = tx.send(StreamEvent::Delta {
                         message_id: msg_id_for_cb.clone(),
                         content: delta.content.clone(),
+                    });
+                }
+                if !delta.reasoning_content.is_empty() {
+                    let _ = tx.send(StreamEvent::Reasoning {
+                        message_id: msg_id_for_cb.clone(),
+                        content: delta.reasoning_content.clone(),
                     });
                 }
             }) {
@@ -776,6 +788,12 @@ fn force_final_response(
                     let _ = stream_tx.send(StreamEvent::Delta {
                         message_id: msg_id_non_stream,
                         content: r.text.clone(),
+                    });
+                }
+                if !r.reasoning_content.is_empty() {
+                    let _ = stream_tx.send(StreamEvent::Reasoning {
+                        message_id: pending_msg_id.clone(),
+                        content: r.reasoning_content.clone(),
                     });
                 }
                 r

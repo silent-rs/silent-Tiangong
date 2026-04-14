@@ -56,8 +56,10 @@
 ### C. Anthropic Messages 适配
 
 - [x] 在 `tiangong-core` 内部新增统一 LLM Provider 抽象、领域模型和错误边界
-- [x] Anthropic provider 内部接入 `async-anthropic`，第三方类型不泄漏到上层
-- [x] Rust 侧 Anthropic 主链路切换到内部 provider 适配层，不保留手写 HTTP 作为主实现
+- [x] 新增独立 crate `tiangong-anthropic`
+- [x] `tiangong-anthropic` 内部使用 `reqwest + serde` 实现 Anthropic Messages 与 SSE
+- [x] `tiangong-llm` 的 Anthropic provider 切换到 `tiangong-anthropic`，第三方类型不泄漏到上层
+- [x] 删除 Anthropic 路径对 `async-anthropic` / `anthropic-async` 的依赖
 - [x] 支持 Anthropic 普通对话请求（`complete`）
 - [x] 支持 Anthropic 流式对话请求（`complete_stream`）
 - [x] 支持 Anthropic 工具调用请求（`complete_with_functions` / `complete_with_functions_stream`）

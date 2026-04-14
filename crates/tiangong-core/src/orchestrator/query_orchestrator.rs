@@ -115,6 +115,7 @@ impl QueryOrchestrator {
             user_input: prompt.clone(),
             context: Vec::new(),
             assembled_system_prompt: None,
+            thinking: None,
         };
 
         let resp = client.complete(&req)?;

@@ -1,13 +1,12 @@
 use futures_util::{StreamExt, stream};
+use tiangong_anthropic::types::EventStream;
 
 use crate::error::LlmError;
 use crate::stream::{ProviderStream, ProviderStreamEvent};
 
 use super::mapping::{AnthropicStreamState, map_stream_error, map_stream_event};
 
-pub(crate) type AnthropicSdkStream = async_anthropic::types::CreateMessagesResponseStream;
-
-pub(super) fn map_anthropic_stream(stream_in: AnthropicSdkStream) -> ProviderStream {
+pub(super) fn map_anthropic_stream(stream_in: EventStream) -> ProviderStream {
     let mut state = AnthropicStreamState::default();
     let stream = stream_in
         .map(move |event| match event {
