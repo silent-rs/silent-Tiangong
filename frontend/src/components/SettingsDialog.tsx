@@ -820,6 +820,11 @@ function RoutingSection({
   capabilities: ModelCapabilityInfo[];
 }) {
   const modelKeys = Object.keys(config.models);
+  const modelLabel = (modelKey: string) => {
+    const model = config.models[modelKey];
+    if (!model) return modelKey;
+    return `${model.provider} / ${model.model}`;
+  };
 
   const setRoute = (capKey: string, modelName: string) => {
     const next = { ...config };
@@ -870,7 +875,7 @@ function RoutingSection({
                         return false;
                       })
                       .map((mk) => (
-                        <SelectItem key={mk} value={mk}>{mk}</SelectItem>
+                        <SelectItem key={mk} value={mk}>{modelLabel(mk)}</SelectItem>
                       ))}
                   </SelectContent>
                 </Select>

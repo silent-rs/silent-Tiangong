@@ -1,6 +1,6 @@
+use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use futures_util::stream;
-use reqwest_eventsource::{Event, RequestBuilderExt};
 use serde_json::Value;
 
 use crate::config::AnthropicConfig;
@@ -46,20 +46,26 @@ impl AnthropicClient {
         mut request: MessagesCreateRequest,
     ) -> Result<EventStream, AnthropicError> {
         request.stream = Some(true);
-        let es = self
+        let response = self
             .request_builder("/v1/messages")
+            .header(reqwest::header::ACCEPT, "text/event-stream")
             .json(&request)
-            .eventsource()
-            .map_err(|err| AnthropicError::Stream(err.to_string()))?;
+            .send()
+            .await
+            .map_err(map_reqwest_error)?;
 
-        let stream = stream::unfold(es, |mut es| async move {
-            match es.next().await {
-                Some(Ok(Event::Open)) => Some((Ok(StreamEvent::Ping), es)),
-                Some(Ok(Event::Message(msg))) => {
-                    let item = parse_sse_event(&msg.event, &msg.data);
-                    Some((item, es))
+        if !response.status().is_success() {
+            return Err(parse_error_response(response).await);
+        }
+
+        let sse_stream = response.bytes_stream().eventsource();
+        let stream = stream::unfold(sse_stream, |mut sse_stream| async move {
+            match sse_stream.next().await {
+                Some(Ok(message)) => {
+                    let item = parse_sse_event(&message.event, &message.data);
+                    Some((item, sse_stream))
                 }
-                Some(Err(err)) => Some((Err(AnthropicError::Stream(err.to_string())), es)),
+                Some(Err(err)) => Some((Err(AnthropicError::Stream(err.to_string())), sse_stream)),
                 None => None,
             }
         });
@@ -107,6 +113,20 @@ fn map_reqwest_error(err: reqwest::Error) -> AnthropicError {
         AnthropicError::Transport(format!("timeout: {err}"))
     } else {
         AnthropicError::Transport(err.to_string())
+    }
+}
+
+async fn parse_error_response(response: reqwest::Response) -> AnthropicError {
+    let status = response.status();
+    let body = response.bytes().await.unwrap_or_default();
+    let body_text = String::from_utf8_lossy(&body).to_string();
+
+    match status.as_u16() {
+        400 => AnthropicError::InvalidRequest(body_text),
+        401 | 403 => AnthropicError::Authentication(body_text),
+        429 => AnthropicError::RateLimited(body_text),
+        _ if status.is_server_error() => AnthropicError::Transport(body_text),
+        _ => AnthropicError::Api(body_text),
     }
 }
 

@@ -131,7 +131,7 @@ fn test_tool_and_thinking_mapping_back_to_message_content() {
         content: vec![
             ContentBlock::Thinking {
                 thinking: "先搜索一下".to_string(),
-                signature: "sig".to_string(),
+                signature: Some("sig".to_string()),
             },
             ContentBlock::ToolUse {
                 id: "call_1".to_string(),

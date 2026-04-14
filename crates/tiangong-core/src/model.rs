@@ -760,92 +760,84 @@ fn collect_provider_text(response: &ProviderResponse) -> String {
         .join("")
 }
 
-fn consume_provider_stream_events(
-    stream: ProviderStream,
+async fn consume_provider_stream_events_async(
+    mut stream: ProviderStream,
     on_delta: &mut dyn FnMut(&ModelStreamChunk),
 ) -> Result<ModelFunctionResponse> {
-    let runtime = TokioRuntimeBuilder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("初始化异步运行时失败")?;
+    let mut text = String::new();
+    let mut reasoning_content = String::new();
+    let mut usage = TokenUsageData::default();
+    let mut tool_calls: std::collections::BTreeMap<String, (String, String)> =
+        std::collections::BTreeMap::new();
 
-    runtime.block_on(async {
-        let mut stream = stream;
-        let mut text = String::new();
-        let mut reasoning_content = String::new();
-        let mut usage = TokenUsageData::default();
-        let mut tool_calls: std::collections::BTreeMap<String, (String, String)> =
-            std::collections::BTreeMap::new();
-
-        while let Some(event) = stream.next().await {
-            match event.map_err(map_llm_error)? {
-                ProviderStreamEvent::ReasoningDelta(delta) => {
-                    if !delta.is_empty() {
-                        reasoning_content.push_str(&delta);
-                        on_delta(&ModelStreamChunk {
-                            content: String::new(),
-                            reasoning_content: delta.clone(),
-                        });
-                    }
+    while let Some(event) = stream.next().await {
+        match event.map_err(map_llm_error)? {
+            ProviderStreamEvent::ReasoningDelta(delta) => {
+                if !delta.is_empty() {
+                    reasoning_content.push_str(&delta);
+                    on_delta(&ModelStreamChunk {
+                        content: String::new(),
+                        reasoning_content: delta.clone(),
+                    });
                 }
-                ProviderStreamEvent::TextDelta(delta) => {
-                    if !delta.is_empty() {
-                        text.push_str(&delta);
-                        on_delta(&ModelStreamChunk {
-                            content: delta,
-                            reasoning_content: String::new(),
-                        });
-                    }
-                }
-                ProviderStreamEvent::ToolCallStart(call) => {
-                    let args = if call.arguments.is_null() || call.arguments == json!({}) {
-                        String::new()
-                    } else {
-                        call.arguments.to_string()
-                    };
-                    tool_calls.insert(call.id.clone(), (call.name, args));
-                }
-                ProviderStreamEvent::ToolCallDelta {
-                    call_id,
-                    partial_json,
-                } => {
-                    let entry = tool_calls
-                        .entry(call_id)
-                        .or_insert_with(|| (String::new(), String::new()));
-                    entry.1.push_str(&partial_json);
-                }
-                ProviderStreamEvent::Usage(stream_usage) => usage = stream_usage,
-                ProviderStreamEvent::Error(message) => return Err(anyhow!(message)),
-                ProviderStreamEvent::MessageStart
-                | ProviderStreamEvent::ToolCallEnd { .. }
-                | ProviderStreamEvent::MessageEnd => {}
             }
-        }
-
-        let tool_calls = tool_calls
-            .into_iter()
-            .filter(|(_, (name, _))| !name.is_empty())
-            .map(|(id, (name, raw_args))| ModelFunctionCall {
-                id,
-                name,
-                arguments: if raw_args.trim().is_empty() {
-                    json!({})
+            ProviderStreamEvent::TextDelta(delta) => {
+                if !delta.is_empty() {
+                    text.push_str(&delta);
+                    on_delta(&ModelStreamChunk {
+                        content: delta,
+                        reasoning_content: String::new(),
+                    });
+                }
+            }
+            ProviderStreamEvent::ToolCallStart(call) => {
+                let args = if call.arguments.is_null() || call.arguments == json!({}) {
+                    String::new()
                 } else {
-                    serde_json::from_str(&raw_args).unwrap_or_else(|_| json!({}))
-                },
-            })
-            .collect::<Vec<_>>();
-
-        if text.trim().is_empty() && reasoning_content.trim().is_empty() && tool_calls.is_empty() {
-            return Err(anyhow!("Anthropic 流式响应缺少文本、思考内容和工具调用"));
+                    call.arguments.to_string()
+                };
+                tool_calls.insert(call.id.clone(), (call.name, args));
+            }
+            ProviderStreamEvent::ToolCallDelta {
+                call_id,
+                partial_json,
+            } => {
+                let entry = tool_calls
+                    .entry(call_id)
+                    .or_insert_with(|| (String::new(), String::new()));
+                entry.1.push_str(&partial_json);
+            }
+            ProviderStreamEvent::Usage(stream_usage) => usage = stream_usage,
+            ProviderStreamEvent::Error(message) => return Err(anyhow!(message)),
+            ProviderStreamEvent::MessageStart
+            | ProviderStreamEvent::ToolCallEnd { .. }
+            | ProviderStreamEvent::MessageEnd => {}
         }
+    }
 
-        Ok(ModelFunctionResponse {
-            text: text.trim().to_string(),
-            reasoning_content: reasoning_content.trim().to_string(),
-            usage: usage.into(),
-            tool_calls,
+    let tool_calls = tool_calls
+        .into_iter()
+        .filter(|(_, (name, _))| !name.is_empty())
+        .map(|(id, (name, raw_args))| ModelFunctionCall {
+            id,
+            name,
+            arguments: if raw_args.trim().is_empty() {
+                json!({})
+            } else {
+                serde_json::from_str(&raw_args).unwrap_or_else(|_| json!({}))
+            },
         })
+        .collect::<Vec<_>>();
+
+    if text.trim().is_empty() && reasoning_content.trim().is_empty() && tool_calls.is_empty() {
+        return Err(anyhow!("Anthropic 流式响应缺少文本、思考内容和工具调用"));
+    }
+
+    Ok(ModelFunctionResponse {
+        text: text.trim().to_string(),
+        reasoning_content: reasoning_content.trim().to_string(),
+        usage: usage.into(),
+        tool_calls,
     })
 }
 
@@ -871,14 +863,14 @@ fn consume_provider_stream(
     request: ProviderRequest,
     on_delta: &mut dyn FnMut(&ModelStreamChunk),
 ) -> Result<ModelResponse> {
-    let stream = TokioRuntimeBuilder::new_current_thread()
+    let response = TokioRuntimeBuilder::new_current_thread()
         .enable_all()
         .build()
         .context("初始化异步运行时失败")?
-        .block_on(provider.stream(request))
-        .map_err(map_llm_error)?;
-
-    let response = consume_provider_stream_events(stream, on_delta)?;
+        .block_on(async {
+            let stream = provider.stream(request).await.map_err(map_llm_error)?;
+            consume_provider_stream_events_async(stream, on_delta).await
+        })?;
     Ok(ModelResponse {
         text: response.text,
         reasoning_content: response.reasoning_content,
@@ -893,13 +885,14 @@ fn convert_stream_to_function_response(
     request: ProviderRequest,
     on_delta: &mut dyn FnMut(&ModelStreamChunk),
 ) -> Result<ModelFunctionResponse> {
-    let stream = TokioRuntimeBuilder::new_current_thread()
+    TokioRuntimeBuilder::new_current_thread()
         .enable_all()
         .build()
         .context("初始化异步运行时失败")?
-        .block_on(provider.stream(request))
-        .map_err(map_llm_error)?;
-    consume_provider_stream_events(stream, on_delta)
+        .block_on(async {
+            let stream = provider.stream(request).await.map_err(map_llm_error)?;
+            consume_provider_stream_events_async(stream, on_delta).await
+        })
 }
 
 fn map_llm_error(error: tiangong_llm::error::LlmError) -> anyhow::Error {

@@ -45,7 +45,8 @@ pub enum ContentBlockParam {
     },
     Thinking {
         thinking: String,
-        signature: String,
+        #[serde(default)]
+        signature: Option<String>,
     },
     RedactedThinking {
         data: String,
@@ -72,7 +73,8 @@ pub enum ContentBlock {
     },
     Thinking {
         thinking: String,
-        signature: String,
+        #[serde(default)]
+        signature: Option<String>,
     },
     RedactedThinking {
         data: String,
