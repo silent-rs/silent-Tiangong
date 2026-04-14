@@ -3,6 +3,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Settings, Eye, EyeOff } from 'lucide-react';
 import { api } from '@/api/tauri';
 import type { ModelsConfigView, ProviderConfigView } from '@/api/tauri';
@@ -61,6 +62,7 @@ export function SettingsButton() {
     base_url: '',
     api_key: '',
     timeout_ms: 60000,
+    protocol: 'openai_compatible',
   };
 
   const updateProvider = (updates: Partial<ProviderConfigView>) => {
@@ -121,6 +123,22 @@ export function SettingsButton() {
                 className="bg-[#1E1E1E] border-[#3C3C3C] text-white"
                 placeholder="https://api.openai.com/v1"
               />
+            </div>
+
+            <div className="space-y-2">
+              <Label>协议类型</Label>
+              <Select
+                value={firstProvider.protocol || 'openai_compatible'}
+                onValueChange={(value) => updateProvider({ protocol: value })}
+              >
+                <SelectTrigger className="bg-[#1E1E1E] border-[#3C3C3C] text-white">
+                  <SelectValue placeholder="选择协议" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="openai_compatible">OpenAI 兼容</SelectItem>
+                  <SelectItem value="anthropic">Anthropic</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
 
             <div className="space-y-2">

@@ -853,6 +853,7 @@ fn build_engine_from_config(
             api_auth_token: lite_endpoint.api_key.clone(),
             api_base_url: lite_endpoint.base_url.clone(),
             api_timeout_ms: lite_endpoint.timeout_ms.to_string(),
+            api_protocol: lite_endpoint.protocol,
             api_model: lite_endpoint.model.clone(),
             api_lite_model: lite_endpoint.model.clone(),
         };

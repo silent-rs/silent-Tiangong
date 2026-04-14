@@ -38,6 +38,7 @@
 - `api_key` 必须支持环境变量引用（`${ENV_VAR}` 语法），避免明文存储。
 - 核心对话链路必须按 Provider 协议动态构建请求，不允许将所有聊天模型强制视为 OpenAI 兼容接口。
 - 当 `chat` 或 `lite` routing 指向 `anthropic` Provider 时，必须支持 Anthropic Messages 请求格式的同步、流式、工具调用与轻量模型调用，并保持 CLI/GUI/Server 行为一致。
+- Rust 侧 LLM 协议层必须沉淀为独立库（当前为 `tiangong-llm`），由该库统一维护 Provider 抽象、领域模型与错误边界；Anthropic 适配层当前可内部接入 `async-anthropic`，OpenAI 兼容适配层内部可接入 `async-openai`，但第三方 SDK 类型不允许泄漏到上层业务，也不允许长期保留手写 HTTP 请求作为主实现路径。
 
 #### Server 模式
 - 必须新增 `tiangong server` 命令，启动 HTTP REST + WebSocket 服务。

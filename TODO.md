@@ -1,6 +1,6 @@
 # TODO - 天工全栈平台重构任务清单
 
-> 最后更新：2026-04-13
+> 最后更新：2026-04-14
 > 当前主线 RFC：`docs/rfc/0004-full-stack-agent-platform.md`
 > 参考：`PLAN.md`、`docs/requirements.md`
 
@@ -37,30 +37,35 @@
 
 ---
 
-## Phase 15：LLM 协议抽象与 Anthropic 支持 — **待启动**
+## Phase 15：LLM 协议抽象与 Anthropic 支持 — **进行中**
 
 ### A. Provider 协议建模
 
-- [ ] `ModelsConfig::ProviderConfig` 增加协议类型字段，支持 `openai_compatible` / `anthropic`
-- [ ] 保持旧配置兼容：未配置协议类型时默认视为 `openai_compatible`
-- [ ] GUI / CLI 配置读写链路透传协议类型
+- [x] `ModelsConfig::ProviderConfig` 增加协议类型字段，支持 `openai_compatible` / `anthropic`
+- [x] 保持旧配置兼容：未配置协议类型时默认视为 `openai_compatible`
+- [x] GUI / CLI 配置读写链路透传协议类型
 
 ### B. Core 协议抽象
 
-- [ ] 将 `model.rs` 中 OpenAI 专有请求组装与响应解析拆分为协议适配层
-- [ ] 保持 `ModelClient` 统一接口不变，避免上层 Runtime / Core / CLI / GUI 感知协议差异
-- [ ] 保留现有重试、错误提示与 `StreamEvent::Retry` 语义
+- [x] 新增独立 crate `tiangong-llm`
+- [x] 将 Anthropic / OpenAI provider 抽到 `tiangong-llm`
+- [ ] 清理 `tiangong-core/src/model.rs` 中剩余兼容桥接和旧 helper
+- [x] 保持 `ModelClient` 统一接口不变，避免上层 Runtime / Core / CLI / GUI 感知协议差异
+- [x] 保留现有重试、错误提示与 `StreamEvent::Retry` 语义
 
 ### C. Anthropic Messages 适配
 
-- [ ] 支持 Anthropic 普通对话请求（`complete`）
-- [ ] 支持 Anthropic 流式对话请求（`complete_stream`）
-- [ ] 支持 Anthropic 工具调用请求（`complete_with_functions` / `complete_with_functions_stream`）
-- [ ] 支持 `lite` 模型调用与 `chat` 路由分离
+- [x] 在 `tiangong-core` 内部新增统一 LLM Provider 抽象、领域模型和错误边界
+- [x] Anthropic provider 内部接入 `async-anthropic`，第三方类型不泄漏到上层
+- [x] Rust 侧 Anthropic 主链路切换到内部 provider 适配层，不保留手写 HTTP 作为主实现
+- [x] 支持 Anthropic 普通对话请求（`complete`）
+- [x] 支持 Anthropic 流式对话请求（`complete_stream`）
+- [x] 支持 Anthropic 工具调用请求（`complete_with_functions` / `complete_with_functions_stream`）
+- [x] 支持 `lite` 模型调用与 `chat` 路由分离
 
 ### D. 集成与验证
 
-- [ ] `cargo check --workspace` 通过
-- [ ] `cargo clippy --workspace --all-targets --tests --benches -- -D warnings` 通过
-- [ ] `cargo nextest run --workspace` 通过
-- [ ] `yarn --cwd frontend build` 通过
+- [x] `cargo check --workspace` 通过
+- [x] `cargo clippy --workspace --all-targets --tests --benches -- -D warnings` 通过
+- [x] `cargo nextest run --workspace` 通过
+- [x] `yarn --cwd frontend build` 通过

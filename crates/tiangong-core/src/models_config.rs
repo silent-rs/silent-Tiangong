@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::model::ModelProviderConfig;
+use crate::model::{ModelProviderConfig, ProviderProtocol};
 
 // ---------------------------------------------------------------------------
 // 核心类型
@@ -127,6 +127,8 @@ pub struct ProviderConfig {
     pub api_key: String, // 支持 ${ENV_VAR} 引用
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
+    #[serde(default)]
+    pub protocol: ProviderProtocol,
 }
 
 fn default_timeout_ms() -> u64 {
@@ -165,6 +167,7 @@ pub struct ResolvedModel {
     pub base_url: String,
     pub api_key: String, // 已解析环境变量
     pub timeout_ms: u64,
+    pub protocol: ProviderProtocol,
     pub model: String,
     pub options: Value,
 }
@@ -251,6 +254,7 @@ impl ModelsConfig {
             base_url: legacy.api_base_url.clone(),
             api_key: legacy.api_auth_token.clone(),
             timeout_ms: legacy.api_timeout_ms.parse::<u64>().unwrap_or(60_000),
+            protocol: legacy.api_protocol,
         };
         providers.insert("default".to_string(), provider);
 
@@ -310,6 +314,7 @@ impl ModelsConfig {
                         base_url: endpoint.base_url.clone(),
                         api_key: endpoint.api_key.clone(),
                         timeout_ms: endpoint.timeout_ms,
+                        protocol: endpoint.protocol,
                     },
                 );
                 let model_key = format!("{name}-model");
@@ -373,6 +378,7 @@ impl ModelsConfig {
             base_url: provider.base_url.clone(),
             api_key: Self::resolve_api_key(&provider.api_key),
             timeout_ms: provider.timeout_ms,
+            protocol: provider.protocol,
             model: model_entry.model.clone(),
             options: model_entry.options.clone(),
         })
@@ -395,6 +401,7 @@ impl ModelsConfig {
                 api_auth_token: resolved.api_key,
                 api_base_url: resolved.base_url,
                 api_timeout_ms: resolved.timeout_ms.to_string(),
+                api_protocol: resolved.protocol,
                 api_model: resolved.model,
                 api_lite_model: String::new(),
             }
@@ -410,6 +417,7 @@ impl ModelsConfig {
                 api_auth_token: resolved.api_key,
                 api_base_url: resolved.base_url,
                 api_timeout_ms: resolved.timeout_ms.to_string(),
+                api_protocol: resolved.protocol,
                 api_model: resolved.model.clone(),
                 api_lite_model: resolved.model,
             }

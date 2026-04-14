@@ -120,9 +120,11 @@
 - Phase B：CLI/GUI/Server 适配，使用 CoreConfigProvider 注入配置
 - Phase C：tiangong-config 独立 crate（可选），提供磁盘加载、持久化、文件监听
 
-### Phase 15（LLM 协议抽象与 Anthropic 支持）— **待启动**
+### Phase 15（LLM 协议抽象与 Anthropic 支持）— **进行中**
 - Provider 配置增加协议类型，区分 OpenAI 兼容与 Anthropic。
-- `tiangong-core` 抽离统一 LLM 客户端接口，避免请求组装与响应解析绑定单一协议。
+- 新增独立 crate `tiangong-llm`，统一承载 Provider 抽象、领域模型、错误类型与各协议适配。
+- 在 `tiangong-core` 内部维护统一 Provider 抽象和领域模型，Anthropic provider 先通过 `async-anthropic` 适配，保证未来可替换为原生 `reqwest + serde` 实现。
+- `async-openai` 也迁入 `tiangong-llm` 作为 OpenAI 兼容 provider，避免协议实现继续散落在 `tiangong-core`。
 - 对话、流式输出、工具调用、轻量模型调用补齐 Anthropic Messages 适配。
 - GUI / CLI / Server 共享同一套协议能力判断与错误处理。
 

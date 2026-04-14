@@ -130,6 +130,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-anthropic"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b55f84bfda9889ff5e5052bbe16e681e90142eeb28e4c61cf380b1fed104dc73"
+dependencies = [
+ "backoff",
+ "derive_builder",
+ "reqwest 0.12.28",
+ "reqwest-eventsource",
+ "secrecy 0.10.3",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+]
+
+[[package]]
 name = "async-channel"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3478,6 +3497,7 @@ dependencies = [
  "scru128 3.6.1",
  "serde",
  "serde_json",
+ "tiangong-llm",
  "tiangong-media",
  "tiangong-types",
  "tokio",
@@ -3512,6 +3532,25 @@ dependencies = [
  "serde_json",
  "tiangong-core",
  "tiangong-media",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "tiangong-llm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-anthropic",
+ "async-openai",
+ "async-trait",
+ "backoff",
+ "futures-util",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tiangong-types",
  "tokio",
  "tracing",
 ]
