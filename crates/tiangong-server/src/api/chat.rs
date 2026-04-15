@@ -17,17 +17,11 @@ pub async fn chat(mut req: Request) -> Result<Response> {
     let app = req.get_config::<SharedAppContext>()?.clone();
     let body: ChatRequest = req.json_parse().await?;
 
-    // 如果指定了 session_id，则切换到对应会话
-    if let Some(ref sid) = body.session_id {
-        let mut state = app.state.lock().await;
-        state.switch_session(sid);
-    }
-
-    app.sync_core_config_from_state().await;
-
     let session_id = {
         let state = app.state.lock().await;
-        state.active_session_id().to_string()
+        body.session_id
+            .clone()
+            .unwrap_or_else(|| state.active_session_id().to_string())
     };
 
     let outgoing = app

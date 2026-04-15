@@ -2,12 +2,15 @@ use std::sync::Arc;
 
 use async_channel::Sender as UnboundedSender;
 use async_lock::RwLock;
+use serde::Deserialize;
 use silent::prelude::*;
 use silent::ws::{WSHandlerAppend, WebSocketHandler, WebSocketParts};
 
 use super::SharedAppContext;
+use tiangong_core::session::now_text;
 use tiangong_gateway::event::{EventBus, TiangongEvent};
-use tiangong_gateway::message::MessageContent;
+use tiangong_gateway::message::{IncomingMessage, MessageContent};
+use tiangong_gateway::role::RemoteRole;
 
 /// 共享的 EventBus 类型（注入到 Configs 中）
 #[derive(Clone)]
@@ -93,17 +96,49 @@ async fn on_receive(msg: Message, parts: Arc<RwLock<WebSocketParts>>) -> Result<
     drop(parts_read);
 
     if let Some(app) = app {
-        app.sync_core_config_from_state().await;
-        let mut state = app.state.lock().await;
-        state.update_draft(text);
-        if let Err(e) = state.send_current_input() {
-            tracing::error!("WebSocket 消息处理失败: {e}");
-        }
+        let request = parse_ws_request(&text);
+        tokio::spawn(async move {
+            let session_id = if let Some(session_id) = request.session_id {
+                session_id
+            } else {
+                let state = app.state.lock().await;
+                state.active_session_id().to_string()
+            };
+
+            let incoming = IncomingMessage {
+                id: scru128::new().to_string(),
+                connector: "server-ws".to_string(),
+                channel_id: session_id,
+                sender_id: "ws-client".to_string(),
+                sender_role: RemoteRole::Controller,
+                content: MessageContent::Text(request.message),
+                reply_to: None,
+                timestamp: now_text(),
+            };
+
+            if let Err(e) = app.router.handle_incoming(incoming).await {
+                tracing::error!("WebSocket 消息处理失败: {e}");
+            }
+        });
     } else {
         tracing::warn!("WebSocket 未找到 ServerAppContext，无法处理消息");
     }
 
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct WsIncomingRequest {
+    message: String,
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+fn parse_ws_request(raw: &str) -> WsIncomingRequest {
+    serde_json::from_str::<WsIncomingRequest>(raw).unwrap_or_else(|_| WsIncomingRequest {
+        message: raw.to_string(),
+        session_id: None,
+    })
 }
 
 /// WebSocket 连接关闭
