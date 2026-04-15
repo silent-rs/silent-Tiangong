@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 pub enum RemoteRole {
     #[default]
     Controller,
-    Approver,
     Observer,
 }
 
@@ -16,10 +15,6 @@ impl RemoteRole {
 
     pub fn can_manage_sessions(&self) -> bool {
         matches!(self, Self::Controller)
-    }
-
-    pub fn can_approve(&self) -> bool {
-        matches!(self, Self::Controller | Self::Approver)
     }
 
     pub fn can_observe(&self) -> bool {
@@ -33,7 +28,6 @@ impl RemoteRole {
     pub fn display_name(&self) -> &str {
         match self {
             Self::Controller => "控制者",
-            Self::Approver => "审批者",
             Self::Observer => "观察者",
         }
     }

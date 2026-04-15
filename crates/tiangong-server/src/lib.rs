@@ -12,6 +12,7 @@ use silent::prelude::*;
 use tiangong_config::load_tiangong_config;
 use tiangong_connector::manager::ConnectorManager;
 use tiangong_core::app_state::TiangongState;
+use tiangong_core::permission::TrustMode;
 use tokio::sync::Mutex;
 
 use self::api::{ServerAppContext, SharedState, build_routes};
@@ -25,7 +26,13 @@ pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
 
     tracing::info!("正在初始化应用状态...");
     let state: SharedState = Arc::new(Mutex::new(TiangongState::load_or_default()));
-    let config = load_tiangong_config().into_core_config_provider();
+    {
+        let mut guard = state.blocking_lock();
+        let _ = guard.set_trust_mode(TrustMode::FullTrust);
+    }
+    let mut app_config = load_tiangong_config();
+    app_config.trust_mode = TrustMode::FullTrust;
+    let config = app_config.into_core_config_provider();
 
     // 创建 EventBus
     let event_bus = Arc::new(EventBus::default());

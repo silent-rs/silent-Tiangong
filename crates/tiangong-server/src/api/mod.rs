@@ -1,4 +1,3 @@
-mod approvals;
 mod chat;
 mod health;
 mod mcp;
@@ -51,7 +50,9 @@ impl ServerAppContext {
         let base = self.config.snapshot();
         let next = {
             let state = self.state.lock().await;
-            state.build_core_config_from_base(&base)
+            let mut next = state.build_core_config_from_base(&base);
+            next.trust_mode = tiangong_core::permission::TrustMode::FullTrust;
+            next
         };
         self.config.replace(next);
     }
@@ -79,11 +80,6 @@ pub fn build_routes(
     let route = Route::new("api/v1")
         .append(Route::new("health").get(health::health_check))
         .append(Route::new("chat").post(chat::chat))
-        .append(
-            Route::new("approvals")
-                .get(approvals::list_approvals)
-                .append(Route::new("respond").post(approvals::respond_approval)),
-        )
         .append(
             Route::new("sessions")
                 .get(sessions::list_sessions)

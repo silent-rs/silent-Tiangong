@@ -8,7 +8,8 @@ use crate::remote::event::{EventBus, TiangongEvent};
 use anyhow::{Result, anyhow};
 use tiangong_config::CoreConfigProvider;
 use tiangong_core::core::TiangongCore;
-use tiangong_core::session::{MessageRole, PendingApproval, Session};
+use tiangong_core::permission::TrustMode;
+use tiangong_core::session::{MessageRole, Session};
 use tiangong_types::{SessionStreamEvent, StreamEvent};
 
 #[derive(Clone)]
@@ -62,59 +63,9 @@ impl ServerCoreManager {
                 .await
                 .unwrap_or_else(|| "处理完成".to_string()),
             TurnOutcome::Failed(message) => return Err(anyhow!(message)),
-            TurnOutcome::WaitingApproval {
-                tool_name,
-                args_summary,
-                ..
-            } => {
-                if args_summary.trim().is_empty() {
-                    format!("工具 {tool_name} 需要审批")
-                } else {
-                    format!("工具 {tool_name} 需要审批：{args_summary}")
-                }
-            }
         };
 
         Ok((session_id, response))
-    }
-
-    pub async fn list_pending_approvals(
-        &self,
-        requested_session_id: &str,
-    ) -> Result<(String, Vec<PendingApproval>)> {
-        let session_id = self.resolve_session_id(requested_session_id).await?;
-        Ok((
-            session_id.clone(),
-            tiangong_core::approval_store::get_pending(&session_id),
-        ))
-    }
-
-    pub async fn respond_approval(
-        &self,
-        requested_session_id: &str,
-        request_id: String,
-        approved: bool,
-    ) -> Result<String> {
-        let (session_id, session, created) = self.ensure_core(requested_session_id).await?;
-        if created {
-            let _ = session;
-        }
-
-        {
-            let cores = self.cores.lock().unwrap();
-            let Some(core) = cores.get(&session_id) else {
-                return Err(anyhow!("会话 core 不存在：{session_id}"));
-            };
-            core.respond_approval(request_id.clone(), approved);
-        }
-
-        self.event_bus.publish(TiangongEvent::ApprovalResponded {
-            session_id: session_id.clone(),
-            request_id,
-            approved,
-        });
-
-        Ok(session_id)
     }
 
     async fn ensure_core(&self, requested_session_id: &str) -> Result<(String, Session, bool)> {
@@ -149,6 +100,7 @@ impl ServerCoreManager {
 
         let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
         let core = TiangongCore::with_session(self.config.clone(), session.clone(), stream_tx);
+        core.set_trust_mode(TrustMode::FullTrust);
         let actual_session_id = core.session_id().to_string();
         let tracker = self.tracker_for(&actual_session_id);
         cores.insert(actual_session_id.clone(), core);
@@ -157,19 +109,6 @@ impl ServerCoreManager {
         self.spawn_stream_forwarder(actual_session_id.clone(), stream_rx, tracker);
 
         Ok((actual_session_id, session, true))
-    }
-
-    async fn resolve_session_id(&self, requested_session_id: &str) -> Result<String> {
-        let state = self.state.lock().await;
-        if state
-            .sessions()
-            .iter()
-            .any(|s| s.id == requested_session_id)
-        {
-            Ok(requested_session_id.to_string())
-        } else {
-            Ok(state.active_session_id().to_string())
-        }
     }
 
     fn spawn_stream_forwarder(
@@ -218,10 +157,6 @@ impl ServerCoreManager {
 enum TurnOutcome {
     Completed,
     Failed(String),
-    WaitingApproval {
-        tool_name: String,
-        args_summary: String,
-    },
 }
 
 #[derive(Default)]
@@ -254,20 +189,6 @@ impl ExecutionTracker {
         };
 
         match event {
-            StreamEvent::ApprovalNeeded {
-                tool_name,
-                args_summary,
-                ..
-            } => {
-                state.outcomes.insert(
-                    turn_id,
-                    TurnOutcome::WaitingApproval {
-                        tool_name: tool_name.clone(),
-                        args_summary: args_summary.clone(),
-                    },
-                );
-                self.notify.notify_all();
-            }
             StreamEvent::Done { .. } => {
                 state.outcomes.insert(turn_id, TurnOutcome::Completed);
                 state.current_turn_id = None;
@@ -304,7 +225,6 @@ fn sync_stream_event_to_state(
     let mut state = state.blocking_lock();
     let mut should_persist = false;
     let mut completion_event: Option<bool> = None;
-    let mut approval_event: Option<(String, String, String)> = None;
 
     let Some(session) = state.sessions_mut().iter_mut().find(|s| s.id == session_id) else {
         return;
@@ -357,12 +277,13 @@ fn sync_stream_event_to_state(
                 format!("工具 {name} 执行{status}\n{output}"),
             );
         }
-        StreamEvent::ApprovalNeeded {
-            request_id,
-            tool_name,
-            args_summary,
-        } => {
-            approval_event = Some((request_id.clone(), tool_name.clone(), args_summary.clone()));
+        StreamEvent::ApprovalNeeded { .. } => {
+            session.append_message(
+                MessageRole::System,
+                "[Server 模式已强制 full_trust，不应进入审批状态]".to_string(),
+            );
+            should_persist = true;
+            completion_event = Some(false);
         }
         StreamEvent::Done { .. } => {
             should_persist = true;
@@ -390,15 +311,6 @@ fn sync_stream_event_to_state(
         let _ = state.persist_session_and_app(session_id);
     }
     drop(state);
-
-    if let Some((request_id, tool_name, args_summary)) = approval_event {
-        event_bus.publish(TiangongEvent::ApprovalNeeded {
-            session_id: session_id.to_string(),
-            request_id,
-            tool_name,
-            args_summary,
-        });
-    }
 
     if let Some(success) = completion_event {
         event_bus.publish(TiangongEvent::TurnCompleted {
