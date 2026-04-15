@@ -28,6 +28,32 @@ export interface TokenUsage {
   total_tokens: number;
 }
 
+export interface CostSummary {
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  total_tokens: number;
+  call_count: number;
+  tool_call_count: number;
+}
+
+export interface RequestCost {
+  request_id: string;
+  usage: TokenUsage;
+  timestamp: string;
+}
+
+export interface TaskCost {
+  task_id: string;
+  requests: RequestCost[];
+  summary: CostSummary;
+}
+
+export interface SessionCost {
+  session_id: string;
+  tasks: TaskCost[];
+  summary: CostSummary;
+}
+
 export interface Message {
   id: string;
   role: MessageRole;
@@ -312,7 +338,7 @@ export const api = {
   stopAudio: (): Promise<void> =>
     invoke('stop_audio'),
 
-  getSessionCost: (sessionId?: string): Promise<{ total_prompt_tokens: number; total_completion_tokens: number; total_tokens: number; call_count: number; tool_call_count: number }> =>
+  getSessionCost: (sessionId?: string): Promise<SessionCost> =>
     invoke('get_session_cost', { sessionId }),
 
   hasTtsCapability: (): Promise<boolean> =>

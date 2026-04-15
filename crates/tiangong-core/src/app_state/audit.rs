@@ -3,6 +3,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use serde::Serialize;
+use serde_json::Value;
 
 use super::repository::default_storage_root;
 
@@ -13,6 +14,8 @@ pub struct AuditEntry {
     pub target: String,
     pub detail: String,
     pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
 }
 
 impl AuditEntry {
@@ -23,7 +26,13 @@ impl AuditEntry {
             target: target.to_string(),
             detail: detail.to_string(),
             success,
+            metadata: None,
         }
+    }
+
+    pub fn with_metadata(mut self, metadata: Value) -> Self {
+        self.metadata = Some(metadata);
+        self
     }
 }
 

@@ -16,6 +16,7 @@ use crate::core_config::CoreConfigProvider;
 use crate::model::{
     FunctionToolSpec, ModelClient, ModelRequest, ModelStreamChunk, SingleProviderClient, TokenUsage,
 };
+use crate::observe::{audit_permission_with_context, audit_tool_execution};
 use crate::prompt::PromptAssembler;
 use crate::runtime::{LlmOutputRecord, RuntimeEngine, inject_enhanced_tools, use_stream_mode};
 use crate::session::{Message, MessageRole, Session, now_text};
@@ -539,13 +540,44 @@ fn execute_turn_inner(
         // 执行工具
         for call in &response.tool_calls {
             let args_summary = format_call_args_summary(call);
+            let (target_scope, target_summary) = infer_audit_target(call);
+            let normalized_target = normalize_permission_target(
+                session,
+                target_scope.as_deref(),
+                target_summary.as_deref(),
+            );
 
             // 权限检查（在执行前完成，trust_mode 通过 shared Arc 实时生效）
             use crate::permission::PermissionDecision;
-            let decision = engine.check_tool_permission(&call.name);
+            let decision = evaluate_tool_permission(
+                engine,
+                &call.name,
+                target_scope.as_deref(),
+                normalized_target.as_deref(),
+            );
+            let trust_mode = format!("{:?}", engine.permission_gate().trust_mode());
             match decision {
-                PermissionDecision::Approved => {}
+                PermissionDecision::Approved => {
+                    audit_permission_with_context(
+                        &session.id,
+                        &call.name,
+                        "approved",
+                        &trust_mode,
+                        (!args_summary.is_empty()).then_some(args_summary.as_str()),
+                        target_scope.as_deref(),
+                        normalized_target.as_deref().or(target_summary.as_deref()),
+                    );
+                }
                 PermissionDecision::Denied { reason } => {
+                    audit_permission_with_context(
+                        &session.id,
+                        &call.name,
+                        "denied",
+                        &trust_mode,
+                        (!args_summary.is_empty()).then_some(args_summary.as_str()),
+                        target_scope.as_deref(),
+                        normalized_target.as_deref().or(target_summary.as_deref()),
+                    );
                     let _ = stream_tx.send(StreamEvent::ToolResult {
                         name: call.name.clone(),
                         ok: false,
@@ -562,6 +594,15 @@ fn execute_turn_inner(
                     continue;
                 }
                 PermissionDecision::NeedsApproval { request_id } => {
+                    audit_permission_with_context(
+                        &session.id,
+                        &call.name,
+                        "needs_approval",
+                        &trust_mode,
+                        (!args_summary.is_empty()).then_some(args_summary.as_str()),
+                        target_scope.as_deref(),
+                        normalized_target.as_deref().or(target_summary.as_deref()),
+                    );
                     // 记录待审批状态（独立存储，崩溃恢复时可重新展示）
                     crate::approval_store::add_pending(
                         &session.id,
@@ -615,6 +656,15 @@ fn execute_turn_inner(
                     crate::approval_store::remove_pending(&session.id, &request_id);
 
                     if !approved {
+                        audit_tool_execution(
+                            &session.id,
+                            &call.name,
+                            false,
+                            (!args_summary.is_empty()).then_some(args_summary.as_str()),
+                            target_scope.as_deref(),
+                            normalized_target.as_deref().or(target_summary.as_deref()),
+                            "用户拒绝执行",
+                        );
                         session.append_message(
                             MessageRole::System,
                             format!("工具 {} 被用户拒绝执行", call.name),
@@ -645,6 +695,16 @@ fn execute_turn_inner(
             });
 
             let result = engine.execute_tool_call(call, mcp_targets, &engine.agent_config().mcp);
+
+            audit_tool_execution(
+                &session.id,
+                &call.name,
+                result.ok,
+                (!args_summary.is_empty()).then_some(args_summary.as_str()),
+                target_scope.as_deref(),
+                normalized_target.as_deref().or(target_summary.as_deref()),
+                &result.summary,
+            );
 
             let _ = stream_tx.send(StreamEvent::ToolResult {
                 name: call.name.clone(),
@@ -946,4 +1006,163 @@ fn format_call_args_summary(call: &crate::model::ModelFunctionCall) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn infer_audit_target(call: &crate::model::ModelFunctionCall) -> (Option<String>, Option<String>) {
+    use serde_json::Value;
+
+    let Some(obj) = call.arguments.as_object() else {
+        return infer_tool_name_scope(call.name.as_str(), None);
+    };
+
+    let path_keys = [
+        "path",
+        "file_path",
+        "output_path",
+        "cwd",
+        "directory",
+        "dir",
+        "target_path",
+        "workspace_path",
+    ];
+    for key in path_keys {
+        if let Some(value) = obj.get(key).and_then(Value::as_str).map(str::trim)
+            && !value.is_empty()
+        {
+            return (Some("path".to_string()), Some(value.to_string()));
+        }
+    }
+
+    let network_keys = ["url", "endpoint", "host", "domain", "base_url"];
+    for key in network_keys {
+        if let Some(value) = obj.get(key).and_then(Value::as_str).map(str::trim)
+            && !value.is_empty()
+        {
+            return (Some("network".to_string()), Some(value.to_string()));
+        }
+    }
+
+    if let Some(value) = obj.get("task_id").and_then(Value::as_str).map(str::trim)
+        && !value.is_empty()
+    {
+        return (Some("task".to_string()), Some(value.to_string()));
+    }
+    if let Some(values) = obj.get("task_ids").and_then(Value::as_array)
+        && !values.is_empty()
+    {
+        let joined = values
+            .iter()
+            .filter_map(Value::as_str)
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(",");
+        if !joined.is_empty() {
+            return (Some("task".to_string()), Some(joined));
+        }
+    }
+
+    if let Some(value) = obj.get("command").and_then(Value::as_str).map(str::trim)
+        && !value.is_empty()
+    {
+        return (Some("command".to_string()), Some(value.to_string()));
+    }
+    if let Some(value) = obj.get("script").and_then(Value::as_str).map(str::trim)
+        && !value.is_empty()
+    {
+        return (Some("command".to_string()), Some(value.to_string()));
+    }
+
+    infer_tool_name_scope(call.name.as_str(), None)
+}
+
+fn infer_tool_name_scope(
+    tool_name: &str,
+    summary: Option<String>,
+) -> (Option<String>, Option<String>) {
+    let scope = match tool_name {
+        "read_file" | "write_file" | "replace_in_file" | "list_dir" | "tree_dir" => "path",
+        "generate_image" | "speech_to_text" | "text_to_speech" => "external",
+        "run_command" | "run_shell" => "command",
+        _ => return (None, summary),
+    };
+    (Some(scope.to_string()), summary)
+}
+
+fn evaluate_tool_permission(
+    engine: &RuntimeEngine,
+    tool_name: &str,
+    target_scope: Option<&str>,
+    target_summary: Option<&str>,
+) -> crate::permission::PermissionDecision {
+    let base_decision = engine.check_tool_permission(tool_name);
+    let scoped_decision = match (target_scope, target_summary) {
+        (Some("path"), Some(path)) => Some(engine.permission_gate().check_path(path)),
+        (Some("network"), Some(target)) => Some(engine.permission_gate().check_network(target)),
+        _ => None,
+    };
+
+    match (base_decision, scoped_decision) {
+        (crate::permission::PermissionDecision::Denied { reason }, _)
+        | (_, Some(crate::permission::PermissionDecision::Denied { reason })) => {
+            crate::permission::PermissionDecision::Denied { reason }
+        }
+        (crate::permission::PermissionDecision::NeedsApproval { request_id }, _) => {
+            crate::permission::PermissionDecision::NeedsApproval { request_id }
+        }
+        (_, Some(crate::permission::PermissionDecision::NeedsApproval { request_id })) => {
+            crate::permission::PermissionDecision::NeedsApproval { request_id }
+        }
+        _ => crate::permission::PermissionDecision::Approved,
+    }
+}
+
+fn normalize_permission_target(
+    session: &Session,
+    target_scope: Option<&str>,
+    target_summary: Option<&str>,
+) -> Option<String> {
+    let target = target_summary?.trim();
+    if target.is_empty() {
+        return None;
+    }
+
+    match target_scope {
+        Some("path") => Some(normalize_path_target(session, target)),
+        Some("network") => Some(normalize_network_target(target)),
+        _ => Some(target.to_string()),
+    }
+}
+
+fn normalize_path_target(session: &Session, target: &str) -> String {
+    let path = std::path::PathBuf::from(target);
+    if path.is_absolute() {
+        return path.to_string_lossy().to_string();
+    }
+
+    let base = if !session.cwd.is_empty() {
+        std::path::PathBuf::from(&session.cwd)
+    } else {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    };
+
+    base.join(path).to_string_lossy().to_string()
+}
+
+fn normalize_network_target(target: &str) -> String {
+    let trimmed = target.trim();
+    let without_scheme = trimmed
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(trimmed);
+    without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(without_scheme)
+        .split('@')
+        .next_back()
+        .unwrap_or(without_scheme)
+        .split(':')
+        .next()
+        .unwrap_or(without_scheme)
+        .to_string()
 }

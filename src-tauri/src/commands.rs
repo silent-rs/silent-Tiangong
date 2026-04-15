@@ -575,7 +575,7 @@ pub fn get_session_cost(
         let session = core_state.sessions().iter().find(|s| s.id == sid);
         match session {
             Some(s) => {
-                let cost = tiangong_core::observe::calculate_session_cost(&s.task_records);
+                let cost = tiangong_core::observe::build_session_cost(s.id.clone(), &s.task_records);
                 Ok(serde_json::to_value(cost).unwrap_or_default())
             }
             None => Ok(serde_json::json!({})),
