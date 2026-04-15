@@ -9,12 +9,13 @@
 - 安全目标：Server 模式默认安全（本地绑定、Token 认证），Connector 鉴权白名单制。
 - 工程目标：按 Phase 增量交付，每个 Phase 保证功能不回退。
 
-## 当前执行策略（2026-04-13）
+## 当前执行策略（2026-04-15）
 - 架构 RFC：`docs/rfc/0004-full-stack-agent-platform.md`
 - 架构基准：`docs/desktop-agent-technical-architecture.md`
 - 差距分析：`docs/architecture-gap-analysis.md`
-- Phase 1~14 主体已完成，GUI 手工验证剩余收尾项。
-- 当前目标：抽离 LLM 协议层，新增 Anthropic Messages 请求支持，避免对话链路继续绑定 OpenAI 兼容协议。
+- Phase 1~14 已完成，GUI 配置即时生效验证已收口。
+- Phase 15 已完成，Anthropic 协议抽象、独立 transport 与错误处理已接入。
+- 当前目标：基于架构基准继续补齐统一事件入口、远程角色模型、运行时收尾与安全/观测闭环。
 
 ## 里程碑
 
@@ -29,7 +30,7 @@
 - 动态 Step 执行闭环。
 - 待完成：锁文件、MCP 托管映射、事务回滚、审计。
 
-### Phase 3（Workspace 拆分与核心抽离）— **当前阶段**
+### Phase 3（Workspace 拆分与核心抽离，已完成）
 - 单 crate → Cargo workspace 多 crate。
 - `tiangong-core`：核心引擎独立（无 UI 依赖）。
 - `tiangong-cli`：CLI/TUI 前端独立。
@@ -77,12 +78,12 @@
 - 意图分类快速路径：简单对话跳过 planning，减少 token 消耗。
 - 多媒体能力通过 Routing 集成到执行引擎。
 
-### Phase 10（友好交互改造）— 进行中
+### Phase 10（友好交互改造，已完成）
 - GUI 样式简化（去头像、去气泡边框）。
 - GUI 解释文本独立流式展示。
 - CLI 实时流式展示。
 
-### Phase 11（架构补全 — 运行时基础设施）— **当前阶段**
+### Phase 11（架构补全 — 运行时基础设施，已完成）
 > 对照 `docs/desktop-agent-technical-architecture.md` 补全缺失能力
 > 差距分析：`docs/architecture-gap-analysis.md`
 
@@ -103,7 +104,7 @@
 **Phase 11-D：远程能力（低优先级）**
 - 远程接入角色模型：控制者/审批者/观察者角色区分。
 
-### Phase 12（事件驱动循环运行时）— **当前阶段**
+### Phase 12（事件驱动循环运行时，已完成）
 > RFC：`docs/rfc/0005-event-loop-runtime.md`
 
 将运行时从 Turn-based 改为 Event-loop 模型：
@@ -112,7 +113,7 @@
 - Phase C：生命周期管理、优雅关闭与持久化恢复
 - Phase D：清理旧代码（TurnRunner / QueryClassifier / ControlSignal）
 
-### Phase 13（CoreConfig 配置注入）— **待启动**
+### Phase 13（CoreConfig 配置注入，已完成）
 > RFC：`docs/rfc/0006-core-config-provider.md`
 
 将 TiangongCore 的配置从内部磁盘加载改为外部注入：
@@ -120,13 +121,22 @@
 - Phase B：CLI/GUI/Server 适配，使用 CoreConfigProvider 注入配置
 - Phase C：tiangong-config 独立 crate（可选），提供磁盘加载、持久化、文件监听
 
-### Phase 15（LLM 协议抽象与 Anthropic 支持）— **进行中**
+### Phase 15（LLM 协议抽象与 Anthropic 支持，已完成）
 - Provider 配置增加协议类型，区分 OpenAI 兼容与 Anthropic。
 - 新增独立 crate `tiangong-llm`，统一承载 Provider 抽象、领域模型、错误类型与各协议适配。
 - 在 `tiangong-core` 内部维护统一 Provider 抽象和领域模型，Anthropic transport 下沉到独立 crate `tiangong-anthropic`，使用原生 `reqwest + serde` 实现 Messages 与 SSE 解析，`tiangong-llm` 仅负责协议抽象与 provider 封装。
 - `async-openai` 也迁入 `tiangong-llm` 作为 OpenAI 兼容 provider，避免协议实现继续散落在 `tiangong-core`。
 - 对话、流式输出、工具调用、轻量模型调用补齐 Anthropic Messages 适配。
 - GUI / CLI / Server 共享同一套协议能力判断与错误处理。
+
+### Phase 16（架构收口与远程能力补齐）— **待启动**
+> 对照 `docs/desktop-agent-technical-architecture.md` 的剩余缺口继续推进
+
+- 统一会话入口与运行时事件模型，减少 GUI / Server / Gateway 的入口分叉。
+- 补齐远程角色模型（控制者 / 审批者 / 观察者）与相应权限边界。
+- 收敛 `tiangong-core/src/model.rs` 剩余兼容桥接，继续降低核心层协议细节。
+- 完善安全与审计闭环，补齐路径、网络目标与远程会话绑定的治理能力。
+- 继续补齐观测与成本治理，让请求级 / 任务级 / 会话级统计对齐架构基准。
 
 ## 参考文档
 - 项目说明：`README.md`
