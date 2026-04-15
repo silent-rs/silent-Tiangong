@@ -16,6 +16,38 @@ pub struct ChatResponse {
     pub response: String,
 }
 
+/// 审批摘要
+#[derive(Debug, Serialize)]
+pub struct ApprovalSummary {
+    pub request_id: String,
+    pub tool_name: String,
+    pub args_summary: String,
+    pub created_at: String,
+}
+
+/// 审批列表响应
+#[derive(Debug, Serialize)]
+pub struct ApprovalListResponse {
+    pub session_id: String,
+    pub items: Vec<ApprovalSummary>,
+}
+
+/// 审批响应请求
+#[derive(Debug, Deserialize)]
+pub struct ApprovalResponseRequest {
+    pub session_id: Option<String>,
+    pub request_id: String,
+    pub approved: bool,
+}
+
+/// 审批响应结果
+#[derive(Debug, Serialize)]
+pub struct ApprovalResponseResult {
+    pub session_id: String,
+    pub request_id: String,
+    pub approved: bool,
+}
+
 /// 会话摘要（列表项）
 #[derive(Debug, Serialize)]
 pub struct SessionSummary {

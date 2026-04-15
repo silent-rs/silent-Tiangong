@@ -6,7 +6,7 @@ use crate::session::{Message, MessageRole};
 use anyhow::{Context, Result, anyhow};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use tiangong_llm::message::{
     ChatMessage, MessageContent as LlmMessageContent, MessageRole as LlmMessageRole,
 };
@@ -295,6 +295,17 @@ impl SingleProviderClient {
         build_anthropic_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())
     }
 
+    fn build_provider_dispatch(&self, timeout_ms: u64) -> Result<ProviderDispatch> {
+        match self.protocol() {
+            ProviderProtocol::Anthropic => Ok(ProviderDispatch::Anthropic(Box::new(
+                self.build_anthropic_provider(timeout_ms)?,
+            ))),
+            ProviderProtocol::OpenAiCompatible => Ok(ProviderDispatch::OpenAi(Box::new(
+                build_openai_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())?,
+            ))),
+        }
+    }
+
     fn block_on_llm<F, T>(&self, future: F) -> Result<T>
     where
         F: std::future::Future<Output = std::result::Result<T, tiangong_llm::error::LlmError>>,
@@ -384,14 +395,7 @@ impl SingleProviderClient {
             return Err(anyhow!("API_MODEL 不能为空，无法发起流式模型请求"));
         }
         let request = build_provider_request(req, model, anthropic_max_tokens(), &[]);
-        let provider = match self.protocol() {
-            ProviderProtocol::Anthropic => {
-                ProviderDispatch::Anthropic(Box::new(self.build_anthropic_provider(timeout_ms)?))
-            }
-            ProviderProtocol::OpenAiCompatible => ProviderDispatch::OpenAi(Box::new(
-                build_openai_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())?,
-            )),
-        };
+        let provider = self.build_provider_dispatch(timeout_ms)?;
         consume_provider_stream(provider, request, &mut on_delta)
     }
 
@@ -408,14 +412,7 @@ impl SingleProviderClient {
             return Err(anyhow!("API_MODEL 不能为空，无法发起流式工具模型请求"));
         }
         let request = build_provider_request(req, model, anthropic_max_tokens(), functions);
-        let provider = match self.protocol() {
-            ProviderProtocol::Anthropic => {
-                ProviderDispatch::Anthropic(Box::new(self.build_anthropic_provider(timeout_ms)?))
-            }
-            ProviderProtocol::OpenAiCompatible => ProviderDispatch::OpenAi(Box::new(
-                build_openai_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())?,
-            )),
-        };
+        let provider = self.build_provider_dispatch(timeout_ms)?;
         convert_stream_to_function_response(provider, request, on_delta)
     }
 
@@ -916,142 +913,6 @@ fn allowed_file_roots_text() -> String {
 /// 最大重试次数
 const MAX_RETRIES: u32 = 3;
 
-#[allow(dead_code)]
-fn extract_delta_text(delta: &Value, field: &str) -> String {
-    let Some(raw) = delta.get(field) else {
-        return String::new();
-    };
-
-    match raw {
-        Value::String(value) => value.clone(),
-        Value::Array(items) => {
-            let mut out = String::new();
-            for item in items {
-                if let Some(value) = item.as_str() {
-                    out.push_str(value);
-                    continue;
-                }
-                if let Some(value) = item.get("text").and_then(Value::as_str) {
-                    out.push_str(value);
-                    continue;
-                }
-                if let Some(value) = item.get("content").and_then(Value::as_str) {
-                    out.push_str(value);
-                }
-            }
-            out
-        }
-        _ => String::new(),
-    }
-}
-
-#[allow(dead_code)]
-fn push_stream_piece(
-    piece: ModelStreamChunk,
-    on_delta: &mut impl FnMut(&ModelStreamChunk),
-    text: &mut String,
-    reasoning_content: &mut String,
-    chunks: &mut usize,
-) {
-    if piece.content.is_empty() && piece.reasoning_content.is_empty() {
-        return;
-    }
-    on_delta(&piece);
-    text.push_str(&piece.content);
-    reasoning_content.push_str(&piece.reasoning_content);
-    *chunks += 1;
-}
-
-/// 流式 `<think>` 标签过滤器
-///
-/// 某些模型不使用 API 级别的 `reasoning_content` 字段，
-/// 而是在 `content` 中输出 `<think>...</think>` 标签。
-/// 此过滤器跨 chunk 追踪状态，将标签内的内容转移到 `reasoning_content`。
-#[allow(dead_code)]
-struct ThinkTagFilter {
-    /// 是否处于 `<think>` 块内
-    inside_think: bool,
-    /// 部分匹配缓冲（可能跨 chunk 的标签片段）
-    buf: String,
-}
-
-#[allow(dead_code)]
-impl ThinkTagFilter {
-    fn new() -> Self {
-        Self {
-            inside_think: false,
-            buf: String::new(),
-        }
-    }
-
-    /// 过滤输入的 content，返回 (正文内容, 思考内容)
-    fn filter(&mut self, input: &str) -> (String, String) {
-        let mut content = String::new();
-        let mut reasoning = String::new();
-
-        self.buf.push_str(input);
-
-        while !self.buf.is_empty() {
-            if self.inside_think {
-                // 在 <think> 块内，寻找 </think>
-                if let Some(pos) = self.buf.find("</think>") {
-                    reasoning.push_str(&self.buf[..pos]);
-                    self.buf = self.buf[pos + 8..].to_string();
-                    self.inside_think = false;
-                } else if self.buf.len() >= 8
-                    && !self.buf.ends_with('<')
-                    && !self.buf.ends_with("</")
-                    && !self.buf.ends_with("</t")
-                    && !self.buf.ends_with("</th")
-                    && !self.buf.ends_with("</thi")
-                    && !self.buf.ends_with("</thin")
-                    && !self.buf.ends_with("</think")
-                {
-                    // 没有部分匹配前缀，全部输出为 reasoning
-                    reasoning.push_str(&self.buf);
-                    self.buf.clear();
-                } else {
-                    // 可能有部分 </think> 标签，保留缓冲等下一个 chunk
-                    break;
-                }
-            } else {
-                // 在正常内容中，寻找 <think>
-                if let Some(pos) = self.buf.find("<think>") {
-                    content.push_str(&self.buf[..pos]);
-                    self.buf = self.buf[pos + 7..].to_string();
-                    self.inside_think = true;
-                } else if self.buf.len() >= 7
-                    && !self.buf.ends_with('<')
-                    && !self.buf.ends_with("<t")
-                    && !self.buf.ends_with("<th")
-                    && !self.buf.ends_with("<thi")
-                    && !self.buf.ends_with("<thin")
-                    && !self.buf.ends_with("<think")
-                {
-                    // 没有部分匹配前缀，全部输出为 content
-                    content.push_str(&self.buf);
-                    self.buf.clear();
-                } else {
-                    // 可能有部分 <think> 标签，保留缓冲
-                    break;
-                }
-            }
-        }
-
-        (content, reasoning)
-    }
-
-    /// 流结束时刷出缓冲区残留
-    fn flush(&mut self) -> (String, String) {
-        let remaining = std::mem::take(&mut self.buf);
-        if self.inside_think {
-            (String::new(), remaining)
-        } else {
-            (remaining, String::new())
-        }
-    }
-}
-
 /// 清理非流式响应中的 `<think>...</think>` 标签
 ///
 /// 部分模型即使设置了 `thinking.type=disabled`，仍在 content 中输出 `<think>` 标签。
@@ -1070,82 +931,6 @@ fn strip_think_tags(text: &str) -> String {
     }
     result.push_str(remaining);
     result
-}
-
-#[allow(dead_code)]
-fn should_skip_stream_payload(raw: &str) -> bool {
-    let normalized = raw.trim().to_ascii_lowercase();
-    normalized.is_empty()
-        || normalized == "[done]"
-        || normalized == "ping"
-        || normalized == "pong"
-        || normalized.contains("\"event\":\"ping\"")
-}
-
-#[allow(dead_code)]
-fn inject_thinking_config(payload: &mut Value) {
-    let Some(obj) = payload.as_object_mut() else {
-        return;
-    };
-
-    let thinking = serde_json::json!({
-        "type": "enabled",
-        "clear_thinking": clear_thinking(),
-    });
-    obj.insert("thinking".to_string(), thinking);
-}
-
-#[allow(dead_code)]
-fn clear_thinking() -> bool {
-    match std::env::var("API_CLEAR_THINKING") {
-        Ok(v) => !matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "off" | "no"
-        ),
-        Err(_) => true,
-    }
-}
-
-/// 注入 stream_options.include_usage = true，使流式响应最后一个 chunk 返回 usage 数据
-#[allow(dead_code)]
-fn inject_stream_usage_option(payload: &mut Value) {
-    let Some(obj) = payload.as_object_mut() else {
-        return;
-    };
-    obj.insert("stream_options".to_string(), json!({"include_usage": true}));
-}
-
-#[allow(dead_code)]
-fn inject_temperature_config(payload: &mut Value) {
-    let Some(temp) = configured_temperature_number() else {
-        return;
-    };
-    let Some(obj) = payload.as_object_mut() else {
-        return;
-    };
-    obj.insert("temperature".to_string(), Value::Number(temp));
-}
-
-#[allow(dead_code)]
-fn inject_function_tools(payload: &mut Value, functions: &[FunctionToolSpec]) {
-    let Some(obj) = payload.as_object_mut() else {
-        return;
-    };
-    let tools = functions
-        .iter()
-        .map(|spec| {
-            json!({
-                "type": "function",
-                "function": {
-                    "name": spec.name,
-                    "description": spec.description,
-                    "parameters": spec.parameters,
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-    obj.insert("tools".to_string(), Value::Array(tools));
-    obj.insert("tool_choice".to_string(), Value::String("auto".to_string()));
 }
 
 fn configured_temperature_number() -> Option<serde_json::Number> {
@@ -1196,146 +981,6 @@ fn default_api_timeout_ms() -> String {
 
 fn default_api_model() -> String {
     "gpt-4o-mini".to_string()
-}
-
-#[allow(dead_code)]
-fn parse_non_stream_byot_response(payload: &Value) -> Option<ModelResponse> {
-    let choice = payload
-        .get("choices")
-        .and_then(Value::as_array)
-        .and_then(|choices| choices.first())?;
-    let message = choice.get("message")?;
-
-    let reasoning = extract_delta_text(message, "reasoning_content");
-    let content = extract_delta_text(message, "content");
-    let text = content.trim().to_string();
-    let reasoning_content = reasoning.trim().to_string();
-    if text.is_empty() && reasoning_content.is_empty() {
-        return None;
-    }
-
-    let usage = payload.get("usage");
-    let prompt_tokens = usage
-        .and_then(|v| v.get("prompt_tokens"))
-        .and_then(Value::as_u64)
-        .map(|v| v as usize)
-        .unwrap_or(0);
-    let completion_tokens = usage
-        .and_then(|v| v.get("completion_tokens"))
-        .and_then(Value::as_u64)
-        .map(|v| v as usize)
-        .unwrap_or(0);
-    let total_tokens = usage
-        .and_then(|v| v.get("total_tokens"))
-        .and_then(Value::as_u64)
-        .map(|v| v as usize)
-        .unwrap_or(0);
-
-    Some(ModelResponse {
-        text,
-        reasoning_content,
-        usage: TokenUsage {
-            prompt_tokens,
-            completion_tokens,
-            total_tokens,
-        },
-        output_mode: if reasoning.trim().is_empty() {
-            "non-stream".to_string()
-        } else {
-            "non-stream-think".to_string()
-        },
-        output_chunk_count: 1,
-    })
-}
-
-#[allow(dead_code)]
-fn parse_function_byot_response(payload: &Value) -> Result<ModelFunctionResponse> {
-    let choice = payload
-        .get("choices")
-        .and_then(Value::as_array)
-        .and_then(|choices| choices.first())
-        .ok_or_else(|| anyhow!("工具调用响应缺少 choices"))?;
-    let message = choice
-        .get("message")
-        .ok_or_else(|| anyhow!("工具调用响应缺少 message"))?;
-
-    let text = extract_delta_text(message, "content").trim().to_string();
-    let reasoning_content = extract_delta_text(message, "reasoning_content")
-        .trim()
-        .to_string();
-    let tool_calls = message
-        .get("tool_calls")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(parse_function_call_item)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    if text.is_empty() && reasoning_content.is_empty() && tool_calls.is_empty() {
-        return Err(anyhow!("工具调用响应既没有文本也没有函数调用"));
-    }
-
-    let usage = payload.get("usage");
-    let prompt_tokens = usage
-        .and_then(|v| v.get("prompt_tokens"))
-        .and_then(Value::as_u64)
-        .map(|v| v as usize)
-        .unwrap_or(0);
-    let completion_tokens = usage
-        .and_then(|v| v.get("completion_tokens"))
-        .and_then(Value::as_u64)
-        .map(|v| v as usize)
-        .unwrap_or(0);
-    let total_tokens = usage
-        .and_then(|v| v.get("total_tokens"))
-        .and_then(Value::as_u64)
-        .map(|v| v as usize)
-        .unwrap_or(0);
-
-    Ok(ModelFunctionResponse {
-        text,
-        reasoning_content,
-        usage: TokenUsage {
-            prompt_tokens,
-            completion_tokens,
-            total_tokens,
-        },
-        tool_calls,
-    })
-}
-
-#[allow(dead_code)]
-fn parse_function_call_item(item: &Value) -> Option<ModelFunctionCall> {
-    let name = item
-        .get("function")
-        .and_then(|v| v.get("name"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|v| !v.is_empty())?
-        .to_string();
-    let id = item
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let raw_args = item
-        .get("function")
-        .and_then(|v| v.get("arguments"))
-        .and_then(Value::as_str)
-        .unwrap_or("{}");
-    let arguments = serde_json::from_str::<Value>(raw_args)
-        .ok()
-        .filter(|v| v.is_object())
-        .unwrap_or_else(|| Value::Object(Map::new()));
-
-    Some(ModelFunctionCall {
-        id,
-        name,
-        arguments,
-    })
 }
 
 fn parse_timeout_ms(raw: &str) -> Result<u64> {

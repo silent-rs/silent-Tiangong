@@ -40,12 +40,12 @@
 
 - [x] 将 `control / approve / observe` 角色模型从结构定义推进到实际权限控制
 - [x] 区分远程控制、审批、旁观的接口能力与会话可见范围
-- [ ] 让远程端共享本地权限审批链路，不允许绕过本地安全边界
+- [x] 让远程端共享本地权限审批链路，不允许绕过本地安全边界
 
 ### C. Core 与协议层收尾
 
-- [ ] 清理 `tiangong-core/src/model.rs` 中剩余兼容桥接和旧 helper
-- [ ] 继续限制 `tiangong-llm` 只承载抽象、映射和错误边界
+- [x] 清理 `tiangong-core/src/model.rs` 中剩余兼容桥接和旧 helper
+- [x] 继续限制 `tiangong-llm` 只承载抽象、映射和错误边界
 - [ ] 将 OpenAI 兼容 transport 拆分保留为后续子任务，不阻塞当前主线功能
 
 ### D. 安全、审计与观测补齐

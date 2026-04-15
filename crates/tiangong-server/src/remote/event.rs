@@ -14,6 +14,17 @@ pub enum TiangongEvent {
         session_id: String,
         success: bool,
     },
+    ApprovalNeeded {
+        session_id: String,
+        request_id: String,
+        tool_name: String,
+        args_summary: String,
+    },
+    ApprovalResponded {
+        session_id: String,
+        request_id: String,
+        approved: bool,
+    },
     ConnectorStarted(String),
     ConnectorStopped(String),
     ConnectorError {

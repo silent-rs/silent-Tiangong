@@ -1,3 +1,4 @@
+mod approvals;
 mod chat;
 mod health;
 mod mcp;
@@ -14,6 +15,7 @@ use tiangong_config::CoreConfigProvider;
 use tiangong_core::app_state::TiangongState;
 use tokio::sync::Mutex;
 
+use crate::remote::core::ServerCoreManager;
 use crate::remote::event::EventBus;
 use crate::remote::router::MessageRouter;
 
@@ -25,17 +27,22 @@ pub type SharedState = Arc<Mutex<TiangongState>>;
 pub struct ServerAppContext {
     pub state: SharedState,
     pub config: CoreConfigProvider,
+    pub cores: Arc<ServerCoreManager>,
     pub router: Arc<MessageRouter>,
 }
 
 impl ServerAppContext {
     pub fn new(state: SharedState, config: CoreConfigProvider, event_bus: Arc<EventBus>) -> Self {
-        let router = Arc::new(
-            MessageRouter::new(state.clone(), event_bus).with_core_config_provider(config.clone()),
-        );
+        let cores = Arc::new(ServerCoreManager::new(
+            state.clone(),
+            config.clone(),
+            event_bus.clone(),
+        ));
+        let router = Arc::new(MessageRouter::new(state.clone(), event_bus, cores.clone()));
         Self {
             state,
             config,
+            cores,
             router,
         }
     }
@@ -72,6 +79,11 @@ pub fn build_routes(
     let route = Route::new("api/v1")
         .append(Route::new("health").get(health::health_check))
         .append(Route::new("chat").post(chat::chat))
+        .append(
+            Route::new("approvals")
+                .get(approvals::list_approvals)
+                .append(Route::new("respond").post(approvals::respond_approval)),
+        )
         .append(
             Route::new("sessions")
                 .get(sessions::list_sessions)

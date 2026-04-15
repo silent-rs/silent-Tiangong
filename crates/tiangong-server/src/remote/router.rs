@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tiangong_core::app_state::TiangongState;
-use tiangong_core::core_config::CoreConfigProvider;
 use tiangong_core::event::{EventSource, RuntimeEvent, RuntimeEventType};
 use tiangong_core::session::MessageRole;
 use tiangong_core::task::TaskNotification;
@@ -11,28 +10,28 @@ use tiangong_media::stt::TranscribeRequest;
 use tiangong_types::{IncomingMessage, MessageContent, OutgoingMessage};
 use tokio::sync::Mutex;
 
+use super::core::ServerCoreManager;
 use super::event::{EventBus, TiangongEvent};
 
 pub struct MessageRouter {
     state: Arc<Mutex<TiangongState>>,
     event_bus: Arc<EventBus>,
+    core_manager: Arc<ServerCoreManager>,
     media_agent: Option<Arc<MediaAgent>>,
-    core_config: Option<CoreConfigProvider>,
 }
 
 impl MessageRouter {
-    pub fn new(state: Arc<Mutex<TiangongState>>, event_bus: Arc<EventBus>) -> Self {
+    pub fn new(
+        state: Arc<Mutex<TiangongState>>,
+        event_bus: Arc<EventBus>,
+        core_manager: Arc<ServerCoreManager>,
+    ) -> Self {
         Self {
             state,
             event_bus,
+            core_manager,
             media_agent: None,
-            core_config: None,
         }
-    }
-
-    pub fn with_core_config_provider(mut self, provider: CoreConfigProvider) -> Self {
-        self.core_config = Some(provider);
-        self
     }
 
     pub fn with_media_agent(mut self, agent: Arc<MediaAgent>) -> Self {
@@ -208,37 +207,10 @@ impl MessageRouter {
                     return Ok(None);
                 }
 
-                let (actual_session_id, response_text) = {
-                    let mut state = self.state.lock().await;
-                    let actual_session_id =
-                        prepare_active_session_for_input(&mut state, &requested_session_id);
-                    if let Some(provider) = &self.core_config {
-                        let base = provider.snapshot();
-                        let next = state.build_core_config_from_base(&base);
-                        provider.replace(next);
-                    }
-                    state.update_draft(text);
-                    state.send_current_input()?;
-
-                    loop {
-                        state.poll_pending_turn();
-                        if !state.has_pending_turn_for(&actual_session_id) {
-                            break;
-                        }
-                        drop(state);
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        state = self.state.lock().await;
-                    }
-
-                    let response_text = state
-                        .active_session()
-                        .and_then(|s| s.messages.last())
-                        .filter(|m| m.role == MessageRole::Assistant)
-                        .map(|m| m.content.clone())
-                        .unwrap_or_else(|| "处理完成".to_string());
-
-                    (actual_session_id, response_text)
-                };
+                let (actual_session_id, response_text) = self
+                    .core_manager
+                    .send_message_and_wait(&requested_session_id, text)
+                    .await?;
 
                 let outgoing = OutgoingMessage {
                     content: MessageContent::Text(response_text),
@@ -280,20 +252,6 @@ impl MessageRouter {
             _ => Ok(None),
         }
     }
-}
-
-fn prepare_active_session_for_input(
-    state: &mut TiangongState,
-    requested_session_id: &str,
-) -> String {
-    let session_exists = state
-        .sessions()
-        .iter()
-        .any(|session| session.id == requested_session_id);
-    if session_exists && state.active_session_id() != requested_session_id {
-        state.switch_session(requested_session_id);
-    }
-    state.active_session_id().to_string()
 }
 
 fn summarize_runtime_event(event: &RuntimeEvent) -> Option<String> {

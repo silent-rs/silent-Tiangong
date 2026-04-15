@@ -234,6 +234,34 @@ fn event_to_json(event: &TiangongEvent) -> String {
             }
         })
         .to_string(),
+        TiangongEvent::ApprovalNeeded {
+            session_id,
+            request_id,
+            tool_name,
+            args_summary,
+        } => serde_json::json!({
+            "type": "approval_needed",
+            "data": {
+                "session_id": session_id,
+                "request_id": request_id,
+                "tool_name": tool_name,
+                "args_summary": args_summary,
+            }
+        })
+        .to_string(),
+        TiangongEvent::ApprovalResponded {
+            session_id,
+            request_id,
+            approved,
+        } => serde_json::json!({
+            "type": "approval_responded",
+            "data": {
+                "session_id": session_id,
+                "request_id": request_id,
+                "approved": approved,
+            }
+        })
+        .to_string(),
         TiangongEvent::ConnectorStarted(name) => serde_json::json!({
             "type": "connector_started",
             "data": { "name": name }
@@ -271,6 +299,8 @@ fn event_visible_to(event: &TiangongEvent, access: &RemoteAccessContext) -> bool
         TiangongEvent::MessageSent { session_id, .. } => session_id == session_scope,
         TiangongEvent::SessionCreated(session_id) => session_id == session_scope,
         TiangongEvent::TurnCompleted { session_id, .. } => session_id == session_scope,
+        TiangongEvent::ApprovalNeeded { session_id, .. } => session_id == session_scope,
+        TiangongEvent::ApprovalResponded { session_id, .. } => session_id == session_scope,
         TiangongEvent::ConnectorStarted(_)
         | TiangongEvent::ConnectorStopped(_)
         | TiangongEvent::ConnectorError { .. }
