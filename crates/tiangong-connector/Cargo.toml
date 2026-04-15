@@ -12,7 +12,7 @@ lark = ["reqwest"]
 
 [dependencies]
 tiangong-core = { path = "../tiangong-core" }
-tiangong-gateway = { path = "../tiangong-gateway" }
+tiangong-types = { path = "../tiangong-types" }
 anyhow = "1"
 tokio = { version = "1", features = ["sync", "rt"] }
 serde = { version = "1", features = ["derive"] }

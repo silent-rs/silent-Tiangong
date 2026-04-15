@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use tiangong_gateway::message::{IncomingMessage, OutgoingMessage};
+use tiangong_types::{IncomingMessage, OutgoingMessage};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectorStatus {

@@ -7,7 +7,12 @@ pub mod collector;
 pub mod cost;
 pub mod metrics;
 
-pub use audit::{AuditEventType, AuditRecord, audit_permission, audit_trust_mode_changed};
+pub use audit::{
+    AuditEventType, AuditRecord, audit_permission, audit_permission_with_context,
+    audit_tool_execution, audit_trust_mode_changed,
+};
 pub use collector::ObserveCollector;
-pub use cost::{CostSummary, RequestCost, SessionCost, TaskCost, calculate_session_cost};
+pub use cost::{
+    CostSummary, RequestCost, SessionCost, TaskCost, build_session_cost, calculate_session_cost,
+};
 pub use metrics::{AggregatedMetrics, MetricsCollector, OperationMetric, Timer};

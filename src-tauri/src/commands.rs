@@ -203,16 +203,7 @@ pub fn send_message(
 
     // 准备 session
     let (session_id, session_snapshot) = state.with_state(|core_state| {
-        core_state.update_draft(content.clone());
-        let idx = core_state.ensure_active_session_index();
-        let session = core_state.sessions()[idx].clone();
-        core_state.store.session.input_draft.clear();
-        // 更新运行状态
-        core_state.store.runtime.run.status = tiangong_core::runtime::RunStatus::Executing;
-        core_state.store.runtime.run.summary = "正在处理".to_string();
-        core_state.store.runtime.run.last_session_id = Some(session.id.clone());
-        core_state.store.runtime.run.updated_at = tiangong_core::session::now_text();
-        Ok((session.id.clone(), session))
+        core_state.prepare_active_user_message_ingress(content.clone())
     })?;
 
     // 获取或创建 TiangongCore
@@ -575,7 +566,7 @@ pub fn get_session_cost(
         let session = core_state.sessions().iter().find(|s| s.id == sid);
         match session {
             Some(s) => {
-                let cost = tiangong_core::observe::calculate_session_cost(&s.task_records);
+                let cost = tiangong_core::observe::build_session_cost(s.id.clone(), &s.task_records);
                 Ok(serde_json::to_value(cost).unwrap_or_default())
             }
             None => Ok(serde_json::json!({})),

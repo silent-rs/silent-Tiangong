@@ -12,9 +12,11 @@ use std::sync::Arc;
 use silent::prelude::*;
 use tiangong_config::CoreConfigProvider;
 use tiangong_core::app_state::TiangongState;
-use tiangong_gateway::event::EventBus;
-use tiangong_gateway::router::MessageRouter;
 use tokio::sync::Mutex;
+
+use crate::remote::core::ServerCoreManager;
+use crate::remote::event::EventBus;
+use crate::remote::router::MessageRouter;
 
 /// 共享应用状态类型
 pub type SharedState = Arc<Mutex<TiangongState>>;
@@ -24,17 +26,22 @@ pub type SharedState = Arc<Mutex<TiangongState>>;
 pub struct ServerAppContext {
     pub state: SharedState,
     pub config: CoreConfigProvider,
+    pub cores: Arc<ServerCoreManager>,
     pub router: Arc<MessageRouter>,
 }
 
 impl ServerAppContext {
     pub fn new(state: SharedState, config: CoreConfigProvider, event_bus: Arc<EventBus>) -> Self {
-        let router = Arc::new(
-            MessageRouter::new(state.clone(), event_bus).with_core_config_provider(config.clone()),
-        );
+        let cores = Arc::new(ServerCoreManager::new(
+            state.clone(),
+            config.clone(),
+            event_bus.clone(),
+        ));
+        let router = Arc::new(MessageRouter::new(state.clone(), event_bus, cores.clone()));
         Self {
             state,
             config,
+            cores,
             router,
         }
     }
@@ -43,7 +50,9 @@ impl ServerAppContext {
         let base = self.config.snapshot();
         let next = {
             let state = self.state.lock().await;
-            state.build_core_config_from_base(&base)
+            let mut next = state.build_core_config_from_base(&base);
+            next.trust_mode = tiangong_core::permission::TrustMode::FullTrust;
+            next
         };
         self.config.replace(next);
     }
@@ -78,6 +87,7 @@ pub fn build_routes(
                 .append(
                     Route::new("<id>")
                         .get(sessions::get_session)
+                        .append(Route::new("cost").get(sessions::get_session_cost))
                         .delete(sessions::delete_session),
                 ),
         )

@@ -6,9 +6,10 @@ license = "Apache-2.0"
 
 [dependencies]
 tiangong-core = { path = "../tiangong-core" }
-tiangong-gateway = { path = "../tiangong-gateway" }
 tiangong-connector = { path = "../tiangong-connector" }
 tiangong-config = { path = "../tiangong-config" }
+tiangong-media = { path = "../tiangong-media" }
+tiangong-types = { path = "../tiangong-types" }
 silent = { version = "2", features = ["upgrade"] }
 tokio = { version = "1", features = ["rt-multi-thread", "signal", "fs", "time"] }
 serde = { version = "1", features = ["derive"] }
@@ -18,3 +19,4 @@ tracing = "0.1"
 async-channel = "2"
 async-lock = "3"
 scru128 = "3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

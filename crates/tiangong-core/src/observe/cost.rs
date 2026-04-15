@@ -85,6 +85,26 @@ impl TaskCost {
         });
         self.summary.add_llm_usage(usage);
     }
+
+    pub fn add_request_with_timestamp(
+        &mut self,
+        request_id: String,
+        usage: &TokenUsage,
+        timestamp: String,
+    ) {
+        self.requests.push(RequestCost {
+            request_id,
+            usage: usage.clone(),
+            timestamp,
+        });
+        self.summary.add_llm_usage(usage);
+    }
+
+    pub fn add_tool_calls(&mut self, count: usize) {
+        for _ in 0..count {
+            self.summary.add_tool_call();
+        }
+    }
 }
 
 /// 会话级成本（聚合多个 TaskCost）
@@ -114,18 +134,50 @@ impl SessionCost {
     }
 }
 
-/// 从 Session 的 task_records 计算会话级成本
-pub fn calculate_session_cost(task_records: &[crate::session::SessionTaskRecord]) -> CostSummary {
-    let mut summary = CostSummary::default();
+/// 从 Session 的 task_records 计算会话级成本明细
+pub fn build_session_cost(
+    session_id: impl Into<String>,
+    task_records: &[crate::session::SessionTaskRecord],
+) -> SessionCost {
+    let mut session_cost = SessionCost::new(session_id.into());
     for record in task_records {
-        if let Some(ref usage) = record.usage {
-            summary.add_llm_usage(usage);
-        }
-        if record.tool_result.is_some() {
-            summary.add_tool_call();
-        }
+        session_cost.add_task(build_task_cost(record));
     }
-    summary
+    session_cost
+}
+
+/// 从 Session 的 task_records 计算会话级成本摘要
+pub fn calculate_session_cost(task_records: &[crate::session::SessionTaskRecord]) -> CostSummary {
+    build_session_cost("-", task_records).summary
+}
+
+fn build_task_cost(record: &crate::session::SessionTaskRecord) -> TaskCost {
+    let mut task_cost = TaskCost::new(record.task_id.clone());
+
+    if !record.llm_calls.is_empty() {
+        for (index, call) in record.llm_calls.iter().enumerate() {
+            let request_id = format!("{}:{}:{}", record.task_id, index + 1, call.stage);
+            task_cost.add_request_with_timestamp(request_id, &call.usage, call.timestamp.clone());
+            task_cost.add_tool_calls(call.tool_calls.len());
+        }
+    } else if let Some(usage) = &record.usage {
+        task_cost.add_request_with_timestamp(
+            format!("{}:aggregate", record.task_id),
+            usage,
+            record.updated_at.clone(),
+        );
+    }
+
+    if record
+        .llm_calls
+        .iter()
+        .all(|call| call.tool_calls.is_empty())
+        && record.tool_result.is_some()
+    {
+        task_cost.add_tool_calls(1);
+    }
+
+    task_cost
 }
 
 #[cfg(test)]

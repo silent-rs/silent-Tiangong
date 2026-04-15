@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use tiangong_gateway::message::{MessageContent, OutgoingMessage};
+use tiangong_types::{MessageContent, OutgoingMessage};
 
 use crate::traits::{Connector, ConnectorStatus};
 
