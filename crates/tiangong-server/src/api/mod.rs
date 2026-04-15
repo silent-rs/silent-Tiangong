@@ -87,6 +87,7 @@ pub fn build_routes(
                 .append(
                     Route::new("<id>")
                         .get(sessions::get_session)
+                        .append(Route::new("cost").get(sessions::get_session_cost))
                         .delete(sessions::delete_session),
                 ),
         )

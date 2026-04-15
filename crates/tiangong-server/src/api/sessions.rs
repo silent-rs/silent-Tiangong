@@ -102,6 +102,28 @@ pub async fn get_session(req: Request) -> Result<Response> {
     })))
 }
 
+/// GET /api/v1/sessions/:id/cost — 会话成本详情
+#[allow(deprecated)]
+pub async fn get_session_cost(req: Request) -> Result<Response> {
+    let token = req.get_config::<AuthToken>()?.clone();
+    check_auth(&req, token.0.as_deref())?;
+    let access = extract_remote_access(&req)?;
+    ensure_remote_action(&access, access.role.can_observe(), "查看会话成本")?;
+
+    let requested_id: String = req.get_path_params("id")?;
+    let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    let app = app_ctx.state.lock().await;
+    let id = resolve_visible_session_id(&access, app.active_session_id(), Some(&requested_id))?;
+
+    let session = app.sessions().iter().find(|s| s.id == id).ok_or_else(|| {
+        SilentError::business_error(StatusCode::NOT_FOUND, format!("会话 '{id}' 不存在"))
+    })?;
+
+    let cost =
+        tiangong_core::observe::build_session_cost(session.id.clone(), &session.task_records);
+    Ok(Response::json(&cost))
+}
+
 /// DELETE /api/v1/sessions/:id — 删除会话
 #[allow(deprecated)]
 pub async fn delete_session(req: Request) -> Result<Response> {

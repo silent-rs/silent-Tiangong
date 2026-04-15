@@ -163,22 +163,22 @@
 ### GAP-8：远程接入角色模型
 
 **当前问题**：
-- `tiangong-connector` 和 `tiangong-gateway` 框架存在
-- 缺少控制者/审批者/观察者三种角色区分
-- 远程操作不走统一权限模型
+- 早期方案基于 `tiangong-gateway` 设计远程角色与入口
+- 文档仍停留在“控制者/审批者/观察者”三角色模型
+- 当前实现已收敛为 `controller / observer`，但历史文档未同步
 
 **补全方案**：
-1. 在 `tiangong-gateway/src/` 中新增 `role.rs`，定义远程角色枚举
-2. `IncomingMessage` 增加 `sender_role` 字段
-3. `MessageRouter` 根据角色限制可执行操作：
+1. 共享远程类型迁入 `tiangong-types/src/remote.rs`
+2. 远程入口路由收敛到 `tiangong-server/src/remote/`
+3. Server 模式强制 `full_trust`，远程角色仅保留：
    - `Controller` — 完整控制权
-   - `Approver` — 只能响应审批请求
    - `Observer` — 只读查看
-4. 远程操作通过 `PermissionGate` 统一鉴权
+4. 风险控制通过部署边界、鉴权和会话可见范围完成，而不是远程审批
 
 **涉及文件**：
-- 新建：`tiangong-gateway/src/role.rs`
-- 修改：`tiangong-gateway/src/message.rs`, `tiangong-gateway/src/router.rs`
+- `crates/tiangong-types/src/remote.rs`
+- `crates/tiangong-server/src/auth.rs`
+- `crates/tiangong-server/src/remote/router.rs`
 
 ---
 
