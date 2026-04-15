@@ -12,9 +12,10 @@ use std::sync::Arc;
 use silent::prelude::*;
 use tiangong_config::CoreConfigProvider;
 use tiangong_core::app_state::TiangongState;
-use tiangong_gateway::event::EventBus;
-use tiangong_gateway::router::MessageRouter;
 use tokio::sync::Mutex;
+
+use crate::remote::event::EventBus;
+use crate::remote::router::MessageRouter;
 
 /// 共享应用状态类型
 pub type SharedState = Arc<Mutex<TiangongState>>;

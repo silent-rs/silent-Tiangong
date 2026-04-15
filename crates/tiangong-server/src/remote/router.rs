@@ -8,10 +8,10 @@ use tiangong_core::session::MessageRole;
 use tiangong_core::task::TaskNotification;
 use tiangong_media::agent::MediaAgent;
 use tiangong_media::stt::TranscribeRequest;
+use tiangong_types::{IncomingMessage, MessageContent, OutgoingMessage};
 use tokio::sync::Mutex;
 
-use crate::event::{EventBus, TiangongEvent};
-use crate::message::{IncomingMessage, MessageContent, OutgoingMessage};
+use super::event::{EventBus, TiangongEvent};
 
 pub struct MessageRouter {
     state: Arc<Mutex<TiangongState>>,
@@ -30,23 +30,17 @@ impl MessageRouter {
         }
     }
 
-    /// 设置 CoreConfigProvider，使远程入口在处理消息前同步 Core 配置快照
     pub fn with_core_config_provider(mut self, provider: CoreConfigProvider) -> Self {
         self.core_config = Some(provider);
         self
     }
 
-    /// 设置 MediaAgent（启用语音转文字等能力）
     pub fn with_media_agent(mut self, agent: Arc<MediaAgent>) -> Self {
         self.media_agent = Some(agent);
         self
     }
 
-    /// 处理入站消息：分发到 Agent 执行
-    ///
-    /// 根据发送者角色限制可执行操作，音频消息自动 STT 转文字。
     pub async fn handle_incoming(&self, msg: IncomingMessage) -> Result<OutgoingMessage> {
-        // 角色权限检查
         if !msg.sender_role.can_send_message() {
             let denied_text = format!(
                 "权限不足：{}角色不允许发送消息",
@@ -61,7 +55,6 @@ impl MessageRouter {
         self.event_bus
             .publish(TiangongEvent::MessageReceived(msg.clone()));
 
-        // 提取文本内容，音频消息自动转文字
         let text = self.extract_text(&msg).await;
         let session_id = if msg.channel_id.trim().is_empty() {
             let state = self.state.lock().await;
@@ -94,10 +87,6 @@ impl MessageRouter {
         Ok(outgoing)
     }
 
-    /// 处理统一运行时事件入口。
-    ///
-    /// 远程输入、后台任务通知、系统信号都通过此入口接入，
-    /// 避免不同来源事件走各自独立的状态更新分支。
     pub async fn handle_runtime_event(
         &self,
         event: RuntimeEvent,
@@ -105,7 +94,6 @@ impl MessageRouter {
         self.handle_runtime_event_with_reply(event, None).await
     }
 
-    /// 将后台任务通知转换为统一运行时事件入口。
     pub async fn handle_task_notification(
         &self,
         notification: TaskNotification,
@@ -116,7 +104,6 @@ impl MessageRouter {
         self.handle_runtime_event(event).await
     }
 
-    /// 将系统信号转换为统一运行时事件入口。
     pub async fn handle_system_signal(
         &self,
         session_id: impl Into<String>,
@@ -136,7 +123,6 @@ impl MessageRouter {
         self.handle_runtime_event(event).await
     }
 
-    /// 从消息中提取文本，音频自动 STT
     async fn extract_text(&self, msg: &IncomingMessage) -> String {
         match &msg.content {
             MessageContent::Text(text) => text.clone(),
@@ -147,13 +133,10 @@ impl MessageRouter {
             MessageContent::Video { caption, .. } => {
                 caption.clone().unwrap_or_else(|| "[视频消息]".to_string())
             }
-            MessageContent::File { name, .. } => {
-                format!("[文件: {name}]")
-            }
+            MessageContent::File { name, .. } => format!("[文件: {name}]"),
         }
     }
 
-    /// 尝试通过 STT 转录音频 URL
     async fn try_transcribe_audio(&self, url: &str) -> String {
         let Some(media_agent) = &self.media_agent else {
             tracing::warn!("收到音频消息但未配置 MediaAgent，无法转文字");
@@ -165,7 +148,6 @@ impl MessageRouter {
             return "[语音消息，未配置语音识别]".to_string();
         }
 
-        // 下载音频数据
         let audio_data = match download_url(url).await {
             Ok(data) => data,
             Err(err) => {
@@ -174,7 +156,6 @@ impl MessageRouter {
             }
         };
 
-        // 推断 MIME 类型
         let mime_type = if url.ends_with(".ogg") || url.ends_with(".oga") {
             "audio/ogg"
         } else if url.ends_with(".mp3") {
@@ -182,7 +163,7 @@ impl MessageRouter {
         } else if url.ends_with(".wav") {
             "audio/wav"
         } else {
-            "audio/ogg" // 大多数 IM 语音消息是 ogg 格式
+            "audio/ogg"
         };
 
         let request = TranscribeRequest {
@@ -227,7 +208,7 @@ impl MessageRouter {
                     return Ok(None);
                 }
 
-                let response_text = {
+                let (actual_session_id, response_text) = {
                     let mut state = self.state.lock().await;
                     let actual_session_id =
                         prepare_active_session_for_input(&mut state, &requested_session_id);
@@ -249,20 +230,24 @@ impl MessageRouter {
                         state = self.state.lock().await;
                     }
 
-                    state
+                    let response_text = state
                         .active_session()
                         .and_then(|s| s.messages.last())
                         .filter(|m| m.role == MessageRole::Assistant)
                         .map(|m| m.content.clone())
-                        .unwrap_or_else(|| "处理完成".to_string())
+                        .unwrap_or_else(|| "处理完成".to_string());
+
+                    (actual_session_id, response_text)
                 };
 
                 let outgoing = OutgoingMessage {
                     content: MessageContent::Text(response_text),
                     reply_to,
                 };
-                self.event_bus
-                    .publish(TiangongEvent::MessageSent(outgoing.clone()));
+                self.event_bus.publish(TiangongEvent::MessageSent {
+                    session_id: actual_session_id,
+                    message: outgoing.clone(),
+                });
                 Ok(Some(outgoing))
             }
             RuntimeEventType::TaskCompleted
@@ -286,8 +271,10 @@ impl MessageRouter {
                     content: MessageContent::Text(summary),
                     reply_to,
                 };
-                self.event_bus
-                    .publish(TiangongEvent::MessageSent(outgoing.clone()));
+                self.event_bus.publish(TiangongEvent::MessageSent {
+                    session_id: event.session_id,
+                    message: outgoing.clone(),
+                });
                 Ok(Some(outgoing))
             }
             _ => Ok(None),
@@ -348,10 +335,7 @@ fn summarize_runtime_event(event: &RuntimeEvent) -> Option<String> {
     }
 }
 
-/// 下载 URL 内容
 async fn download_url(url: &str) -> Result<Vec<u8>> {
-    // 简单的 HTTP GET 下载
-    // 实际使用时应复用 reqwest::Client
     let response = reqwest::get(url).await?;
     let bytes = response.bytes().await?;
     Ok(bytes.to_vec())

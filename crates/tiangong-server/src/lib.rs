@@ -2,6 +2,7 @@ pub mod api;
 pub mod auth;
 pub mod config;
 pub mod daemon;
+pub mod remote;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -11,11 +12,11 @@ use silent::prelude::*;
 use tiangong_config::load_tiangong_config;
 use tiangong_connector::manager::ConnectorManager;
 use tiangong_core::app_state::TiangongState;
-use tiangong_gateway::event::EventBus;
 use tokio::sync::Mutex;
 
 use self::api::{ServerAppContext, SharedState, build_routes};
 use self::config::load_connectors_config;
+use self::remote::event::{EventBus, TiangongEvent};
 
 /// 启动 Server 模式（前台运行，阻塞）
 #[allow(deprecated)]
@@ -76,7 +77,7 @@ fn load_and_start_connectors(event_bus: Arc<EventBus>) -> Option<ConnectorManage
             }
             Err(e) => {
                 tracing::error!(connector = %config.name, "注册 Connector 失败: {e}");
-                event_bus.publish(tiangong_gateway::event::TiangongEvent::ConnectorError {
+                event_bus.publish(TiangongEvent::ConnectorError {
                     name: config.name.clone(),
                     error: format!("注册失败: {e}"),
                 });
@@ -96,13 +97,11 @@ fn load_and_start_connectors(event_bus: Arc<EventBus>) -> Option<ConnectorManage
             match handle.block_on(manager.start(&name)) {
                 Ok(()) => {
                     tracing::info!(connector = %name_clone, "Connector 已启动");
-                    eb.publish(tiangong_gateway::event::TiangongEvent::ConnectorStarted(
-                        name_clone,
-                    ));
+                    eb.publish(TiangongEvent::ConnectorStarted(name_clone));
                 }
                 Err(e) => {
                     tracing::error!(connector = %name_clone, "启动 Connector 失败: {e}");
-                    eb.publish(tiangong_gateway::event::TiangongEvent::ConnectorError {
+                    eb.publish(TiangongEvent::ConnectorError {
                         name: name_clone,
                         error: format!("启动失败: {e}"),
                     });

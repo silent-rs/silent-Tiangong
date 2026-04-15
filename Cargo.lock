@@ -3468,7 +3468,7 @@ dependencies = [
  "serenity",
  "teloxide",
  "tiangong-core",
- "tiangong-gateway",
+ "tiangong-types",
  "tokio",
  "tracing",
 ]
@@ -3513,23 +3513,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tiangong-gateway"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "reqwest 0.12.28",
- "scru128 3.6.1",
- "serde",
- "serde_json",
- "tiangong-core",
- "tiangong-media",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "tiangong-llm"
 version = "0.1.0"
 dependencies = [
@@ -3568,6 +3551,7 @@ dependencies = [
  "anyhow",
  "async-channel",
  "async-lock",
+ "reqwest 0.12.28",
  "scru128 3.6.1",
  "serde",
  "serde_json",
@@ -3575,7 +3559,8 @@ dependencies = [
  "tiangong-config",
  "tiangong-connector",
  "tiangong-core",
- "tiangong-gateway",
+ "tiangong-media",
+ "tiangong-types",
  "tokio",
  "tracing",
 ]
