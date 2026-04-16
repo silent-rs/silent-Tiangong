@@ -89,6 +89,68 @@ fn looks_like_pure_image_markdown(output: &str) -> bool {
         })
 }
 
+fn is_video_tool(name: &str) -> bool {
+    matches!(name, "generate_video" | "query_video_generation")
+}
+
+/// 从视频工具输出中提取视频 URL 作为 MediaAsset。
+/// 支持 MCP 工具返回的 JSON（含 "Video URL: ..."）和纯 URL。
+fn parse_video_url_assets(output: &str) -> Vec<tiangong_types::MediaAsset> {
+    let text = output.trim();
+    let mut urls = Vec::new();
+
+    // 尝试从 "Video URL: <url>" 模式提取
+    for line in text.lines() {
+        if let Some(pos) = line.find("Video URL:") {
+            let url = line[pos + "Video URL:".len()..].trim();
+            if !url.is_empty() && (url.starts_with("http://") || url.starts_with("https://")) {
+                let url = url.split_whitespace().next().unwrap_or(url);
+                urls.push(url.to_string());
+            }
+        }
+    }
+
+    // 如果没找到，尝试从 JSON 的字段中提取视频 URL
+    if urls.is_empty() {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+            extract_video_urls_from_json(&value, &mut urls);
+        }
+    }
+
+    urls.into_iter()
+        .map(|url| tiangong_types::MediaAsset {
+            kind: tiangong_types::MediaKind::Video,
+            url,
+            mime_type: Some("video/mp4".to_string()),
+            title: Some("生成的视频".to_string()),
+            capability: Some("video_generation".to_string()),
+        })
+        .collect()
+}
+
+fn extract_video_urls_from_json(value: &serde_json::Value, urls: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(s) => {
+            if (s.starts_with("http://") || s.starts_with("https://"))
+                && (s.contains(".mp4") || s.contains("video"))
+            {
+                urls.push(s.clone());
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for v in map.values() {
+                extract_video_urls_from_json(v, urls);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr {
+                extract_video_urls_from_json(v, urls);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn clear_pending_final_media(
     pending_final_media: &mut Option<Vec<tiangong_types::MediaAsset>>,
 ) {
@@ -358,6 +420,8 @@ pub fn send_message(
                                 && looks_like_pure_image_markdown(output)
                             {
                                 parse_image_markdown_assets(output)
+                            } else if *ok && is_video_tool(name) {
+                                parse_video_url_assets(output)
                             } else {
                                 Vec::new()
                             };
@@ -369,8 +433,18 @@ pub fn send_message(
                             lines.push(format!("{status} exit_code=0"));
                             lines.push(format!("summary: {name}"));
                             if !media_assets.is_empty() {
-                                let image_count = media_assets.len();
-                                lines.push(format!("stdout: 已生成 {image_count} 张图片"));
+                                let media_desc = media_assets
+                                    .iter()
+                                    .map(|a| match a.kind {
+                                        tiangong_types::MediaKind::Image => "图片",
+                                        tiangong_types::MediaKind::Video => "视频",
+                                        tiangong_types::MediaKind::Audio => "音频",
+                                        _ => "文件",
+                                    })
+                                    .next()
+                                    .unwrap_or("媒体");
+                                let count = media_assets.len();
+                                lines.push(format!("stdout: 已生成 {count} 个{media_desc}"));
                                 pending_final_media
                                     .get_or_insert_with(Vec::new)
                                     .extend(media_assets);
