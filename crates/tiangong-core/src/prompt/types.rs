@@ -103,6 +103,7 @@ impl AssembledPrompt {
                 content: ctx_text,
                 reasoning_content: String::new(),
                 worker_id: None,
+                media: Vec::new(),
                 created_at: crate::session::now_text(),
             });
         }
@@ -173,6 +174,7 @@ mod tests {
                 content: "历史".into(),
                 reasoning_content: String::new(),
                 worker_id: None,
+                media: Vec::new(),
                 created_at: String::new(),
             }],
             attachment_messages: Vec::new(),

@@ -19,6 +19,8 @@ import {
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import rehypeRaw from "rehype-raw";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { TypingMessage } from "./TypingMessage";
@@ -215,7 +217,10 @@ function WorkerCard({ group, isActive, MarkdownComponents }: {
   const systemMsgs = contentMessages.filter(m => m.role === "system");
   // 只显示有内容的 assistant 消息（content 或 reasoning_content 不为空）
   const assistantMsgs = contentMessages.filter(m =>
-    m.role === "assistant" && (m.content.trim().length > 0 || msgReasoning(m).length > 0)
+    m.role === "assistant"
+      && (m.content.trim().length > 0
+        || msgReasoning(m).length > 0
+        || !!m.media?.length)
   );
 
   // 计算 Worker 耗时（从第一条到最后一条消息的时间差）
@@ -255,7 +260,9 @@ function WorkerCard({ group, isActive, MarkdownComponents }: {
         <span className="text-xs font-medium text-muted-foreground flex-1">{workerTitle}</span>
         {collapsed && assistantMsgs.length > 0 && (
           <span className="text-xs text-muted-foreground/60 truncate max-w-[200px]">
-            {assistantMsgs[assistantMsgs.length - 1].content.slice(0, 50)}...
+            {assistantMsgs[assistantMsgs.length - 1].content
+              ? `${assistantMsgs[assistantMsgs.length - 1].content.slice(0, 50)}...`
+              : "[媒体结果]"}
           </span>
         )}
         {hasResult && workerDuration && (
@@ -286,8 +293,9 @@ function WorkerCard({ group, isActive, MarkdownComponents }: {
                       defaultExpanded={false}
                     />
                   )}
+                  {renderMessageMedia(msg)}
                   <div className="prose prose-sm max-w-none break-words text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={MarkdownComponents as any}>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={MarkdownComponents as any}>
                       {msg.content}
                     </ReactMarkdown>
                   </div>
@@ -346,6 +354,7 @@ export function MessageList() {
     prevStreamingIdRef.current = streamingMessageId;
   }, [messages.length, streamingMessageId, totalContentLength, isThinking]);
 
+  // 将本地文件路径转换为 Tauri asset URL
   // Markdown 渲染器（用于非流式消息）
   const MarkdownComponents = {
     pre({ children, ...rest }: any) {
@@ -442,10 +451,11 @@ export function MessageList() {
     },
     img({ src, alt }: { src?: string; alt?: string }) {
       const [fullscreen, setFullscreen] = useState(false);
+      const resolvedSrc = resolveAssetUrl(src || "");
       return (
         <>
           <img
-            src={src}
+            src={resolvedSrc}
             alt={alt || "生成的图片"}
             className="max-w-full max-h-96 rounded-md my-2 cursor-pointer hover:opacity-90 transition-opacity"
             loading="lazy"
@@ -457,7 +467,7 @@ export function MessageList() {
               onClick={() => setFullscreen(false)}
             >
               <img
-                src={src}
+                src={resolvedSrc}
                 alt={alt || "生成的图片"}
                 className="max-w-[90vw] max-h-[90vh] object-contain rounded-md"
               />
@@ -487,6 +497,35 @@ export function MessageList() {
     },
     td({ children }: { children: ReactNode }) {
       return <td className="border border-border px-3 py-1.5">{children}</td>;
+    },
+    video({ src, children, ...rest }: any) {
+      return (
+        <video
+          src={src ? resolveAssetUrl(src) : undefined}
+          controls
+          className="max-w-full max-h-96 rounded-md my-2"
+          preload="metadata"
+          {...rest}
+        >
+          {children}
+        </video>
+      );
+    },
+    source({ src, type, ...rest }: any) {
+      return <source src={resolveAssetUrl(src)} type={type} {...rest} />;
+    },
+    audio({ src, children, ...rest }: any) {
+      return (
+        <audio
+          src={src ? resolveAssetUrl(src) : undefined}
+          controls
+          className="w-full my-2"
+          preload="metadata"
+          {...rest}
+        >
+          {children}
+        </audio>
+      );
     },
   };
 
@@ -640,6 +679,13 @@ interface MessageItem {
   content: string;
   reasoning_content: string;
   worker_id?: string;
+  media?: {
+    kind: "image" | "video" | "audio" | "file";
+    url: string;
+    mime_type?: string;
+    title?: string;
+    capability?: string;
+  }[];
   created_at: string;
 }
 
@@ -652,6 +698,82 @@ interface MessageGroup {
 
 function msgReasoning(message: MessageItem): string {
   return message.reasoning_content.trim();
+}
+
+function resolveAssetUrl(url: string): string {
+  if (!url) return "";
+  if (url.startsWith("http://") || url.startsWith("https://") || url.startsWith("asset://")) {
+    return url;
+  }
+  if (url.startsWith("/")) {
+    return convertFileSrc(url);
+  }
+  return url;
+}
+
+function renderMessageMedia(message: MessageItem) {
+  if (!message.media || message.media.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="space-y-2 my-2">
+      {message.media.map((asset, index) => {
+        const src = resolveAssetUrl(asset.url);
+        if (asset.kind === "image") {
+          return (
+            <img
+              key={`${message.id}-media-${index}`}
+              src={src}
+              alt={asset.title || "生成的图片"}
+              className="max-w-full max-h-96 rounded-md cursor-pointer hover:opacity-90 transition-opacity"
+              loading="lazy"
+            />
+          );
+        }
+
+        if (asset.kind === "video") {
+          return (
+            <video
+              key={`${message.id}-media-${index}`}
+              src={src}
+              controls
+              className="max-w-full max-h-96 rounded-md"
+              preload="metadata"
+            >
+              {asset.title || "生成的视频"}
+            </video>
+          );
+        }
+
+        if (asset.kind === "audio") {
+          return (
+            <audio
+              key={`${message.id}-media-${index}`}
+              src={src}
+              controls
+              className="w-full"
+              preload="metadata"
+            >
+              {asset.title || "生成的音频"}
+            </audio>
+          );
+        }
+
+        return (
+          <a
+            key={`${message.id}-media-${index}`}
+            href={src}
+            className="text-blue-400 hover:text-blue-300 underline text-sm"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            {asset.title || asset.url}
+          </a>
+        );
+      })}
+    </div>
+  );
 }
 
 function groupMessages(messages: MessageItem[]): MessageGroup[] {
@@ -868,10 +990,11 @@ function AgentTurn({
             <div key={msg.id} className="text-foreground" title={formatMessageTime(msg.created_at)}>
               {isStreaming ? (
                 <TypingMessage content={streamingContent} reasoningContent={_streamingReasoningContent} speed={300} />
-              ) : msg.content ? (
+              ) : msg.content || (msg.media && msg.media.length > 0) ? (
                 <div>
+                  {renderMessageMedia(msg)}
                   <div className="prose prose-sm max-w-none break-words text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={MarkdownComponents as any}>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={MarkdownComponents as any}>
                       {msg.content}
                     </ReactMarkdown>
                   </div>

@@ -12,3 +12,4 @@ frontend/dist
 node_modules
 src-tauri/create_skill/
 .workers
+*.mp4

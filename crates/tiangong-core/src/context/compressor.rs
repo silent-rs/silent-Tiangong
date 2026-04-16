@@ -94,6 +94,7 @@ impl ContextCompressor {
                 content: format!("[早期对话摘要]\n{summary}"),
                 reasoning_content: String::new(),
                 worker_id: None,
+                media: Vec::new(),
                 created_at: now_text(),
             });
         }
@@ -260,6 +261,7 @@ pub fn compress_loop_messages(
         content: format!("[前 {compress_rounds} 轮执行摘要]\n{summary}"),
         reasoning_content: String::new(),
         worker_id: None,
+        media: Vec::new(),
         created_at: now_text(),
     }];
     result.extend_from_slice(recent_messages);

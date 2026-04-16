@@ -398,10 +398,11 @@ fn execute_turn_inner(
         if round > 0 {
             loop_context.push(Message {
                 id: scru128::new().to_string(),
-                role: MessageRole::System,
+                role: MessageRole::User,
                 content: "根据上面的工具执行结果继续处理。如果已经收集到足够信息，直接给出最终回复，不要再调用工具。".to_string(),
                 reasoning_content: String::new(),
                 worker_id: None,
+                media: Vec::new(),
                 created_at: now_text(),
             });
         }
@@ -534,6 +535,7 @@ fn execute_turn_inner(
             content: assistant_text,
             reasoning_content: response.reasoning_content.clone(),
             worker_id: None,
+            media: Vec::new(),
             created_at: now_text(),
         });
 
@@ -585,10 +587,11 @@ fn execute_turn_inner(
                     });
                     loop_context.push(Message {
                         id: scru128::new().to_string(),
-                        role: MessageRole::System,
+                        role: MessageRole::User,
                         content: format!("工具 {} 执行失败：权限拒绝 - {reason}", call.name),
                         reasoning_content: String::new(),
                         worker_id: None,
+                        media: Vec::new(),
                         created_at: now_text(),
                     });
                     continue;
@@ -644,6 +647,7 @@ fn execute_turn_inner(
                                     content,
                                     reasoning_content: String::new(),
                                     worker_id: None,
+                                    media: Vec::new(),
                                     created_at: now_text(),
                                 });
                             }
@@ -716,22 +720,35 @@ fn execute_turn_inner(
             session.append_message(MessageRole::System, format_tool_trace_message(&result));
 
             // 记录到 loop_context（完整内容，截断由上下文压缩器处理）
-            let feedback = format!(
-                "工具 {} 执行{}：{}",
-                call.name,
-                if result.ok { "成功" } else { "失败" },
-                if result.stdout.is_empty() {
-                    result.summary.clone()
-                } else {
-                    result.stdout.clone()
-                }
+            // 媒体生成工具使用摘要反馈（避免 base64 数据污染上下文）
+            let is_media_tool = matches!(
+                call.name.as_str(),
+                "generate_image" | "text_to_speech" | "speech_to_text"
             );
+            let feedback = if is_media_tool && result.ok {
+                format!(
+                    "工具 {} 执行成功：{}。媒体内容已生成并交付给用户，不要再次调用该工具。请直接给出文本回复。",
+                    call.name, result.summary
+                )
+            } else {
+                format!(
+                    "工具 {} 执行{}：{}",
+                    call.name,
+                    if result.ok { "成功" } else { "失败" },
+                    if result.stdout.is_empty() {
+                        result.summary.clone()
+                    } else {
+                        result.stdout.clone()
+                    }
+                )
+            };
             loop_context.push(Message {
                 id: scru128::new().to_string(),
-                role: MessageRole::System,
+                role: MessageRole::User,
                 content: feedback,
                 reasoning_content: String::new(),
                 worker_id: None,
+                media: Vec::new(),
                 created_at: now_text(),
             });
         }
@@ -757,6 +774,7 @@ fn execute_turn_inner(
                         content,
                         reasoning_content: String::new(),
                         worker_id: None,
+                        media: Vec::new(),
                         created_at: now_text(),
                     });
                 }
@@ -786,6 +804,7 @@ fn force_final_response(
         content: "请基于以上所有工具执行结果，直接给出最终回复。".to_string(),
         reasoning_content: String::new(),
         worker_id: None,
+        media: Vec::new(),
         created_at: now_text(),
     });
 

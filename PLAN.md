@@ -9,14 +9,15 @@
 - 安全目标：Server 模式默认安全（本地绑定、Token 认证），Connector 鉴权白名单制。
 - 工程目标：按 Phase 增量交付，每个 Phase 保证功能不回退。
 
-## 当前执行策略（2026-04-15）
+## 当前执行策略（2026-04-16）
 - 架构 RFC：`docs/rfc/0004-full-stack-agent-platform.md`
 - 架构基准：`docs/desktop-agent-technical-architecture.md`
 - 差距分析：`docs/architecture-gap-analysis.md`
 - Phase 1~14 已完成，GUI 配置即时生效验证已收口。
 - Phase 15 已完成，Anthropic 协议抽象、独立 transport 与错误处理已接入。
 - Phase 16 已完成，入口统一、Server 信任语义、远程能力尾项和成本可见性已收口。
-- 当前状态：暂无新增功能阶段规划，后续按真实需求再开启新阶段。
+- 当前目标：推进多媒体结果语义收敛，避免图片/视频结果继续退化为工具文本。
+- 当前进展：本地 GUI 图片链路已完成结构化媒体消息接入，后续继续扩展视频语义与 MCP 媒体适配器。
 
 ## 里程碑
 
@@ -142,6 +143,14 @@
 - 已完成 Server 成本可见性主链路：支持会话级成本查询并继承远程会话可见范围控制。
 - 已完成入口尾项收口：GUI 本地消息入口准备逻辑下沉到 `app_state` ingress 门面，减少本地/远程入口分叉。
 - 已完成文档尾项收口：清理历史文档中的远程审批语义，保证路线与实现一致。
+
+### Phase 17（多媒体结果语义收敛，进行中）
+> 设计说明：`docs/media-capability-architecture-adjustment.md`
+
+- 为会话消息补齐结构化媒体结果语义，避免继续依赖工具日志文本渲染图片/视频。
+- 保留 `tiangong-media` 作为多媒体主链路，MCP 仅作为后端适配来源之一。
+- 区分最终结果媒体与中间过程媒体，避免将所有 `generate_image` / `generate_video` 结果一律提升为最终回复。
+- 优先完成本地 GUI 会话链路中的图片结果语义化，再逐步扩展到视频与远程链路。
 
 ## 参考文档
 - 项目说明：`README.md`
