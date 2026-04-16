@@ -45,6 +45,69 @@ fn append_assistant_reasoning(
     }
 }
 
+fn parse_image_markdown_assets(output: &str) -> Vec<tiangong_types::MediaAsset> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if !line.starts_with("![") || !line.ends_with(')') {
+                return None;
+            }
+
+            let close_alt = line.find("](")?;
+            let alt = line[2..close_alt].trim();
+            let url = line[close_alt + 2..line.len() - 1].trim();
+            if url.is_empty() {
+                return None;
+            }
+
+            let mime_type = if url.starts_with("data:image/") {
+                url.strip_prefix("data:")
+                    .and_then(|raw| raw.split(';').next())
+                    .map(str::to_string)
+            } else {
+                None
+            };
+
+            Some(tiangong_types::MediaAsset {
+                kind: tiangong_types::MediaKind::Image,
+                url: url.to_string(),
+                mime_type,
+                title: (!alt.is_empty()).then(|| alt.to_string()),
+                capability: Some("image_generation".to_string()),
+            })
+        })
+        .collect()
+}
+
+fn looks_like_pure_image_markdown(output: &str) -> bool {
+    let trimmed = output.trim();
+    !trimmed.is_empty()
+        && trimmed.lines().all(|line| {
+            let line = line.trim();
+            line.is_empty() || (line.starts_with("![") && line.contains("](") && line.ends_with(')'))
+        })
+}
+
+fn clear_pending_final_media(
+    pending_final_media: &mut Option<Vec<tiangong_types::MediaAsset>>,
+) {
+    if pending_final_media.is_some() {
+        *pending_final_media = None;
+    }
+}
+
+fn append_assistant_media(
+    session: &mut tiangong_core::session::Session,
+    media: Vec<tiangong_types::MediaAsset>,
+) {
+    session.append_message_with_media(
+        tiangong_core::session::MessageRole::Assistant,
+        String::new(),
+        media,
+    );
+}
+
 fn accumulate_usage(
     total: &mut Option<tiangong_core::model::TokenUsage>,
     usage: &tiangong_types::TokenUsage,
@@ -222,6 +285,7 @@ pub fn send_message(
     thread::spawn(move || {
         let mut assistant_msg_id: Option<String> = None;
         let mut last_tool_args_summary = String::new();
+        let mut pending_final_media: Option<Vec<tiangong_types::MediaAsset>> = None;
         for session_event in stream_rx.iter() {
             // 先 emit 完整事件给前端，再解构
             let _ = app_clone.emit("stream_event", &session_event);
@@ -270,6 +334,7 @@ pub fn send_message(
                             );
                         }
                         StreamEvent::ToolCalls { names, .. } => {
+                            clear_pending_final_media(&mut pending_final_media);
                             session.append_message(
                                 tiangong_core::session::MessageRole::System,
                                 format!("LLM 输出\ntool_calls: {}", names.join(", ")),
@@ -279,6 +344,7 @@ pub fn send_message(
                         StreamEvent::ToolStart {
                             ref args_summary, ..
                         } => {
+                            // 不清除 pending_final_media，允许多轮工具调用后仍保留已生成的媒体
                             last_tool_args_summary = args_summary.clone();
                         }
                         StreamEvent::ToolResult {
@@ -287,18 +353,34 @@ pub fn send_message(
                             ref output,
                         } => {
                             let status = if *ok { "ok=true" } else { "ok=false" };
-                            let preview = if output.chars().count() > 200 {
-                                format!("{}...", output.chars().take(200).collect::<String>())
+                            let media_assets = if *ok
+                                && name == "generate_image"
+                                && looks_like_pure_image_markdown(output)
+                            {
+                                parse_image_markdown_assets(output)
                             } else {
-                                output.clone()
+                                Vec::new()
                             };
+
                             let mut lines = vec![format!("工具执行 [{name}]")];
                             if !last_tool_args_summary.is_empty() {
                                 lines.push(format!("命令: {last_tool_args_summary}"));
                             }
                             lines.push(format!("{status} exit_code=0"));
                             lines.push(format!("summary: {name}"));
-                            if !preview.trim().is_empty() {
+                            if !media_assets.is_empty() {
+                                let image_count = media_assets.len();
+                                lines.push(format!("stdout: 已生成 {image_count} 张图片"));
+                                pending_final_media
+                                    .get_or_insert_with(Vec::new)
+                                    .extend(media_assets);
+                            } else if !output.trim().is_empty() {
+                                clear_pending_final_media(&mut pending_final_media);
+                                let preview = if output.chars().count() > 200 {
+                                    format!("{}...", output.chars().take(200).collect::<String>())
+                                } else {
+                                    output.clone()
+                                };
                                 lines.push(format!("stdout:\n{preview}"));
                             }
                             session.append_message(
@@ -311,6 +393,10 @@ pub fn send_message(
                             // 审批请求不写入 session（前端通过 RunStatus 展示审批 UI）
                         }
                         StreamEvent::Error { ref message } => {
+                            // 错误前先保存已生成的媒体资源
+                            if let Some(media) = pending_final_media.take() {
+                                append_assistant_media(session, media);
+                            }
                             session.append_message(
                                 tiangong_core::session::MessageRole::System,
                                 format!("[错误] {message}"),
@@ -322,12 +408,16 @@ pub fn send_message(
                             attempt,
                             max_attempts,
                         } => {
+                            clear_pending_final_media(&mut pending_final_media);
                             session.append_message(
                                 tiangong_core::session::MessageRole::System,
                                 format!("[重试] ({attempt}/{max_attempts}) {message}"),
                             );
                         }
                         StreamEvent::Done { .. } => {
+                            if let Some(media) = pending_final_media.take() {
+                                append_assistant_media(session, media);
+                            }
                             assistant_msg_id = None;
                         }
                         _ => {}

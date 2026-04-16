@@ -215,7 +215,10 @@ function WorkerCard({ group, isActive, MarkdownComponents }: {
   const systemMsgs = contentMessages.filter(m => m.role === "system");
   // 只显示有内容的 assistant 消息（content 或 reasoning_content 不为空）
   const assistantMsgs = contentMessages.filter(m =>
-    m.role === "assistant" && (m.content.trim().length > 0 || msgReasoning(m).length > 0)
+    m.role === "assistant"
+      && (m.content.trim().length > 0
+        || msgReasoning(m).length > 0
+        || !!m.media?.length)
   );
 
   // 计算 Worker 耗时（从第一条到最后一条消息的时间差）
@@ -255,7 +258,9 @@ function WorkerCard({ group, isActive, MarkdownComponents }: {
         <span className="text-xs font-medium text-muted-foreground flex-1">{workerTitle}</span>
         {collapsed && assistantMsgs.length > 0 && (
           <span className="text-xs text-muted-foreground/60 truncate max-w-[200px]">
-            {assistantMsgs[assistantMsgs.length - 1].content.slice(0, 50)}...
+            {assistantMsgs[assistantMsgs.length - 1].content
+              ? `${assistantMsgs[assistantMsgs.length - 1].content.slice(0, 50)}...`
+              : "[媒体结果]"}
           </span>
         )}
         {hasResult && workerDuration && (
@@ -286,6 +291,7 @@ function WorkerCard({ group, isActive, MarkdownComponents }: {
                       defaultExpanded={false}
                     />
                   )}
+                  {renderMessageMedia(msg)}
                   <div className="prose prose-sm max-w-none break-words text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
                     <ReactMarkdown remarkPlugins={[remarkGfm]} components={MarkdownComponents as any}>
                       {msg.content}
@@ -640,6 +646,13 @@ interface MessageItem {
   content: string;
   reasoning_content: string;
   worker_id?: string;
+  media?: {
+    kind: "image" | "video" | "audio" | "file";
+    url: string;
+    mime_type?: string;
+    title?: string;
+    capability?: string;
+  }[];
   created_at: string;
 }
 
@@ -652,6 +665,42 @@ interface MessageGroup {
 
 function msgReasoning(message: MessageItem): string {
   return message.reasoning_content.trim();
+}
+
+function renderMessageMedia(message: MessageItem) {
+  if (!message.media || message.media.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="space-y-2 my-2">
+      {message.media.map((asset, index) => {
+        if (asset.kind === "image") {
+          return (
+            <img
+              key={`${message.id}-media-${index}`}
+              src={asset.url}
+              alt={asset.title || "生成的图片"}
+              className="max-w-full max-h-96 rounded-md cursor-pointer hover:opacity-90 transition-opacity"
+              loading="lazy"
+            />
+          );
+        }
+
+        return (
+          <a
+            key={`${message.id}-media-${index}`}
+            href={asset.url}
+            className="text-blue-400 hover:text-blue-300 underline text-sm"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            {asset.title || asset.url}
+          </a>
+        );
+      })}
+    </div>
+  );
 }
 
 function groupMessages(messages: MessageItem[]): MessageGroup[] {
@@ -868,8 +917,9 @@ function AgentTurn({
             <div key={msg.id} className="text-foreground" title={formatMessageTime(msg.created_at)}>
               {isStreaming ? (
                 <TypingMessage content={streamingContent} reasoningContent={_streamingReasoningContent} speed={300} />
-              ) : msg.content ? (
+              ) : msg.content || (msg.media && msg.media.length > 0) ? (
                 <div>
+                  {renderMessageMedia(msg)}
                   <div className="prose prose-sm max-w-none break-words text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
                     <ReactMarkdown remarkPlugins={[remarkGfm]} components={MarkdownComponents as any}>
                       {msg.content}

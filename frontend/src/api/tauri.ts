@@ -42,6 +42,16 @@ export interface RequestCost {
   timestamp: string;
 }
 
+export type MediaKind = 'image' | 'video' | 'audio' | 'file';
+
+export interface MediaAsset {
+  kind: MediaKind;
+  url: string;
+  mime_type?: string;
+  title?: string;
+  capability?: string;
+}
+
 export interface TaskCost {
   task_id: string;
   requests: RequestCost[];
@@ -60,6 +70,7 @@ export interface Message {
   content: string;
   reasoning_content: string;
   worker_id?: string;
+  media?: MediaAsset[];
   created_at: string;
 }
 

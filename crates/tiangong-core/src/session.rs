@@ -251,6 +251,24 @@ impl Session {
         self.append_message_with_reasoning(role, content, String::new());
     }
 
+    pub fn append_message_with_media(
+        &mut self,
+        role: MessageRole,
+        content: impl Into<String>,
+        media: Vec<tiangong_types::MediaAsset>,
+    ) {
+        self.messages.push(Message {
+            id: new_id(),
+            role,
+            content: content.into(),
+            reasoning_content: String::new(),
+            worker_id: None,
+            media,
+            created_at: now_text(),
+        });
+        self.updated_at = now_text();
+    }
+
     pub fn append_message_with_reasoning(
         &mut self,
         role: MessageRole,
@@ -263,6 +281,7 @@ impl Session {
             content: content.into(),
             reasoning_content: reasoning_content.into(),
             worker_id: None,
+            media: Vec::new(),
             created_at: now_text(),
         });
         self.updated_at = now_text();
@@ -282,6 +301,7 @@ impl Session {
             content: content.into(),
             reasoning_content: reasoning_content.into(),
             worker_id: None,
+            media: Vec::new(),
             created_at: now_text(),
         });
         self.updated_at = now_text();
@@ -309,6 +329,7 @@ impl Session {
             content: content.into(),
             reasoning_content: reasoning_content.into(),
             worker_id: Some(worker_id.to_string()),
+            media: Vec::new(),
             created_at: now_text(),
         });
         self.updated_at = now_text();

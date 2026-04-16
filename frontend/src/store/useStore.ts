@@ -372,6 +372,7 @@ export const useStore = create<AppState>((set, get) => ({
 
       if (lastAssistant) {
         const oldAssistant = oldMessages.find(m => m.id === lastAssistant!.id);
+        const hasRenderableMedia = !!lastAssistant.media && lastAssistant.media.length > 0;
 
         // 新出现的 assistant 消息或内容在增长
         const isNew = !oldAssistant;
@@ -379,7 +380,7 @@ export const useStore = create<AppState>((set, get) => ({
           oldAssistant.content !== lastAssistant.content &&
           lastAssistant.content.length > oldAssistant.content.length;
 
-        if (isNew || isGrowing) {
+        if ((isNew || isGrowing) && !hasRenderableMedia) {
           streamingId = lastAssistant.id;
           streamingContent = lastAssistant.content;
           streamingReasoningContent = lastAssistant.reasoning_content;

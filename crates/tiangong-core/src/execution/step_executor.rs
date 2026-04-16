@@ -186,6 +186,7 @@ pub fn execute_single_plan_step_with_execution_agent(
                 ),
                 reasoning_content: String::new(),
                 worker_id: None,
+                media: Vec::new(),
                 created_at: now_text(),
             });
             continue;

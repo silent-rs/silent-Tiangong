@@ -78,6 +78,7 @@ fn build_attachments(agent_config: &AgentConfig) -> Vec<Message> {
             content: format!("<mcp-tools>\n{mcp_text}\n</mcp-tools>"),
             reasoning_content: String::new(),
             worker_id: None,
+            media: Vec::new(),
             created_at: crate::session::now_text(),
         });
     }
