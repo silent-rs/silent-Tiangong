@@ -56,11 +56,31 @@ impl TiangongCore {
         Self::with_session(config, session, stream_tx)
     }
 
+    /// 创建新对话，并显式注入 Memory Handle
+    pub fn new_with_memory(
+        config: CoreConfigProvider,
+        stream_tx: Sender<SessionStreamEvent>,
+        memory_handle: Option<tiangong_memory::MemoryHandle>,
+    ) -> Self {
+        let session = Session::new("新对话");
+        Self::with_session_and_memory(config, session, stream_tx, memory_handle)
+    }
+
     /// 从已有 session 创建
     pub fn with_session(
         config: CoreConfigProvider,
         session: Session,
         stream_tx: Sender<SessionStreamEvent>,
+    ) -> Self {
+        Self::with_session_and_memory(config, session, stream_tx, None)
+    }
+
+    /// 从已有 session 创建，并显式注入 Memory Handle
+    pub fn with_session_and_memory(
+        config: CoreConfigProvider,
+        session: Session,
+        stream_tx: Sender<SessionStreamEvent>,
+        memory_handle: Option<tiangong_memory::MemoryHandle>,
     ) -> Self {
         let initial_trust_mode = config.snapshot().trust_mode;
         let shared_trust_mode = Arc::new(RwLock::new(initial_trust_mode));
@@ -69,7 +89,14 @@ impl TiangongCore {
 
         let worker_trust_mode = shared_trust_mode.clone();
         let worker = thread::spawn(move || {
-            worker_loop(config, session, stream_tx, cmd_rx, worker_trust_mode)
+            worker_loop(
+                config,
+                session,
+                stream_tx,
+                cmd_rx,
+                worker_trust_mode,
+                memory_handle,
+            )
         });
 
         Self {
@@ -144,6 +171,7 @@ fn worker_loop(
     external_tx: Sender<SessionStreamEvent>,
     cmd_rx: Receiver<Command>,
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
+    memory_handle: Option<tiangong_memory::MemoryHandle>,
 ) -> Session {
     let session_id = session.id.clone();
     let mut last_cfg_gen = 0u64;
@@ -228,27 +256,26 @@ fn worker_loop(
                 });
 
                 // Phase C：召回相关记忆注入 user_context
-                let recall_context: Vec<String> =
-                    if let Some(handle) = tiangong_memory::global_handle() {
-                        let hits = handle.recall_blocking(
-                            tiangong_memory::RecallAnchors {
-                                query: content.clone(),
-                                keywords: Vec::new(),
-                            },
-                            5,
-                        );
-                        if hits.is_empty() {
-                            Vec::new()
-                        } else {
-                            let items: Vec<String> = hits
-                                .into_iter()
-                                .map(|h| format!("- **{}**: {}", h.title, h.summary))
-                                .collect();
-                            vec![format!("## 相关历史记忆\n{}", items.join("\n"))]
-                        }
-                    } else {
+                let recall_context: Vec<String> = if let Some(handle) = memory_handle.as_ref() {
+                    let hits = handle.recall_blocking(
+                        tiangong_memory::RecallAnchors {
+                            query: content.clone(),
+                            keywords: Vec::new(),
+                        },
+                        5,
+                    );
+                    if hits.is_empty() {
                         Vec::new()
-                    };
+                    } else {
+                        let items: Vec<String> = hits
+                            .into_iter()
+                            .map(|h| format!("- **{}**: {}", h.title, h.summary))
+                            .collect();
+                        vec![format!("## 相关历史记忆\n{}", items.join("\n"))]
+                    }
+                } else {
+                    Vec::new()
+                };
 
                 // 执行对话轮次
                 execute_turn(
@@ -263,7 +290,7 @@ fn worker_loop(
                 );
 
                 // turn 完成后触发 Micro 反刍（fire-and-forget）
-                if let Some(handle) = tiangong_memory::global_handle() {
+                if let Some(handle) = memory_handle.as_ref() {
                     let summary = session
                         .messages
                         .iter()

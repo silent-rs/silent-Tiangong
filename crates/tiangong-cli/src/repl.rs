@@ -15,20 +15,26 @@ use crate::input::InputReader;
 use crate::output;
 
 pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<()> {
-    // 启动 Memory Actor（进程级单例，之后通过 tiangong_memory::global_handle() 访问）
+    // 启动独立 Memory Actor，并将 Handle 显式注入 Core
     let workspace_id = std::env::current_dir()
         .ok()
         .map(|p| tiangong_memory::workspace_id_from_path(&p));
-    match tiangong_memory::ensure_started(workspace_id) {
-        Ok(_) => tracing::info!("Memory Actor 已启动"),
-        Err(e) => tracing::warn!("Memory Actor 启动失败（非致命）: {}", e),
-    }
+    let memory_handle = match tiangong_memory::start(workspace_id) {
+        Ok(handle) => {
+            tracing::info!("Memory Actor 已启动");
+            Some(handle)
+        }
+        Err(e) => {
+            tracing::warn!("Memory Actor 启动失败（非致命）: {}", e);
+            None
+        }
+    };
 
     let mut state = TiangongState::load_or_default();
     let app_config = load_tiangong_config();
     let config = app_config.into_core_config_provider();
     let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
-    let core = TiangongCore::new(config.clone(), stream_tx);
+    let core = TiangongCore::new_with_memory(config.clone(), stream_tx, memory_handle);
 
     // CLI --trust-mode 参数覆盖
     if let Some(mode) = trust_mode {

@@ -4,25 +4,23 @@
 //!
 //! # 使用方式
 //!
-//! 各入口（GUI、CLI、Server）在启动时调用 [`ensure_started`]，
-//! 之后任何代码都可通过 [`global_handle`] 直接获取 Handle，无需外部传递。
+//! 各入口（GUI、CLI、Server）在启动时调用 [`start`] 获取 [`MemoryHandle`]，
+//! 然后将 Handle 显式传给上层运行时。
 //!
 //! ```no_run
-//! tiangong_memory::ensure_started(None).expect("Memory 系统启动失败");
-//! let handle = tiangong_memory::global_handle(); // 可在任何地方调用
+//! let handle = tiangong_memory::start(None).expect("Memory 系统启动失败");
+//! let injections = tiangong_memory::load_injection_sync("session-1", None);
 //! ```
-
-use std::sync::{Mutex, OnceLock};
 
 pub mod command;
 pub mod election;
 pub mod handle;
+pub mod ipc;
 pub mod types;
 
 mod actor;
 mod db;
 mod injection;
-mod ipc;
 mod recall;
 mod rumination;
 mod search;
@@ -33,38 +31,6 @@ pub use actor::start_memory as start;
 pub use election::ProcessType;
 pub use handle::MemoryHandle;
 pub use types::*;
-
-/// 进程级全局 Memory Handle 单例
-static GLOBAL_HANDLE: OnceLock<MemoryHandle> = OnceLock::new();
-
-/// 初始化互斥锁，防止并发调用 `ensure_started` 时启动多个孤儿 Actor
-static INIT_LOCK: Mutex<()> = Mutex::new(());
-
-/// 确保 Memory Actor 已启动并返回全局 Handle 引用（幂等，并发安全）
-///
-/// 各进程入口（CLI、Server、GUI）在启动时调用一次即可。
-/// 使用双重检查锁定：快速路径无锁；慢速路径加锁后二次检查，
-/// 保证并发调用时只有一个 Actor 被启动，不会产生孤儿 Actor。
-pub fn ensure_started(workspace_id: Option<String>) -> anyhow::Result<&'static MemoryHandle> {
-    // 快速路径：已初始化则无锁直接返回
-    if let Some(h) = GLOBAL_HANDLE.get() {
-        return Ok(h);
-    }
-    // 慢速路径：加锁后二次检查，保证只有一个 start() 被执行
-    let _guard = INIT_LOCK
-        .lock()
-        .map_err(|_| anyhow::anyhow!("Memory 初始化互斥锁中毒"))?;
-    if let Some(h) = GLOBAL_HANDLE.get() {
-        return Ok(h);
-    }
-    let handle = start(workspace_id)?;
-    Ok(GLOBAL_HANDLE.get_or_init(|| handle))
-}
-
-/// 获取全局 Memory Handle（返回 None 表示 ensure_started 尚未调用或已失败）
-pub fn global_handle() -> Option<&'static MemoryHandle> {
-    GLOBAL_HANDLE.get()
-}
 
 /// 同步加载三级注入上下文（不经过 Actor，直接读文件）
 ///

@@ -31,11 +31,17 @@ pub struct ServerAppContext {
 }
 
 impl ServerAppContext {
-    pub fn new(state: SharedState, config: CoreConfigProvider, event_bus: Arc<EventBus>) -> Self {
+    pub fn new(
+        state: SharedState,
+        config: CoreConfigProvider,
+        event_bus: Arc<EventBus>,
+        memory_handle: Option<tiangong_memory::MemoryHandle>,
+    ) -> Self {
         let cores = Arc::new(ServerCoreManager::new(
             state.clone(),
             config.clone(),
             event_bus.clone(),
+            memory_handle,
         ));
         let router = Arc::new(MessageRouter::new(state.clone(), event_bus, cores.clone()));
         Self {

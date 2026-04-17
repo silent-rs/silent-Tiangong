@@ -24,14 +24,20 @@ use self::remote::event::{EventBus, TiangongEvent};
 pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
 
-    // 启动 Memory Actor（进程级单例，之后通过 tiangong_memory::global_handle() 访问）
+    // 启动独立 Memory Actor，并将 Handle 显式注入 ServerAppContext
     let workspace_id = std::env::current_dir()
         .ok()
         .map(|p| tiangong_memory::workspace_id_from_path(&p));
-    match tiangong_memory::ensure_started(workspace_id) {
-        Ok(_) => tracing::info!("Memory Actor 已启动"),
-        Err(e) => tracing::warn!("Memory Actor 启动失败（非致命）: {}", e),
-    }
+    let memory_handle = match tiangong_memory::start(workspace_id) {
+        Ok(handle) => {
+            tracing::info!("Memory Actor 已启动");
+            Some(handle)
+        }
+        Err(e) => {
+            tracing::warn!("Memory Actor 启动失败（非致命）: {}", e);
+            None
+        }
+    };
 
     tracing::info!("正在初始化应用状态...");
     let state: SharedState = Arc::new(Mutex::new(TiangongState::load_or_default()));
@@ -45,7 +51,12 @@ pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
 
     // 创建 EventBus
     let event_bus = Arc::new(EventBus::default());
-    let app = Arc::new(ServerAppContext::new(state, config, event_bus.clone()));
+    let app = Arc::new(ServerAppContext::new(
+        state,
+        config,
+        event_bus.clone(),
+        memory_handle,
+    ));
 
     // 加载并启动 Connector
     let connector_manager = load_and_start_connectors(event_bus.clone());

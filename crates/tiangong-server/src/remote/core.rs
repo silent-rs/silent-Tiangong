@@ -17,16 +17,23 @@ pub struct ServerCoreManager {
     state: SharedState,
     config: CoreConfigProvider,
     event_bus: Arc<EventBus>,
+    memory_handle: Option<tiangong_memory::MemoryHandle>,
     cores: Arc<Mutex<HashMap<String, TiangongCore>>>,
     trackers: Arc<Mutex<HashMap<String, Arc<ExecutionTracker>>>>,
 }
 
 impl ServerCoreManager {
-    pub fn new(state: SharedState, config: CoreConfigProvider, event_bus: Arc<EventBus>) -> Self {
+    pub fn new(
+        state: SharedState,
+        config: CoreConfigProvider,
+        event_bus: Arc<EventBus>,
+        memory_handle: Option<tiangong_memory::MemoryHandle>,
+    ) -> Self {
         Self {
             state,
             config,
             event_bus,
+            memory_handle,
             cores: Arc::new(Mutex::new(HashMap::new())),
             trackers: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -99,7 +106,12 @@ impl ServerCoreManager {
         }
 
         let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
-        let core = TiangongCore::with_session(self.config.clone(), session.clone(), stream_tx);
+        let core = TiangongCore::with_session_and_memory(
+            self.config.clone(),
+            session.clone(),
+            stream_tx,
+            self.memory_handle.clone(),
+        );
         core.set_trust_mode(TrustMode::FullTrust);
         let actual_session_id = core.session_id().to_string();
         let tracker = self.tracker_for(&actual_session_id);
