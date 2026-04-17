@@ -30,7 +30,18 @@
 
 ## 与现有架构的关系
 
-Memory 系统作为独立 crate `tiangong-memory` 实现，采用 **Actor 模型**独立运行，外部通过 `MemoryHandle` 消息通讯访问：
+Memory 系统作为独立 crate `tiangong-memory` 实现，采用 **Actor 模型**独立运行，外部通过 `MemoryHandle` 消息通讯访问。
+
+存储采用“**SQLite（加密）+ Tantivy（全文检索）+ Qdrant（向量语义）**”三层架构：
+
+| 层次 | 引擎 | 职责 |
+|------|------|------|
+| 元数据层 | SQLite（sqlcipher 加密） | 记忆管理、CRUD、生命周期 |
+| 全文检索层 | Tantivy | BM25 关键词/短语召回 |
+| 向量语义层 | Qdrant（**可选**） | 语义相似度召回、跨措辞匹配 |
+| Injection 层 | Markdown 文件 | 人类可读的注入内容 |
+
+> **降级策略**：当 `LlmConfig.embedding` 未配置时，Qdrant 引擎不初始化，向量语义检索和存储自动跳过，系统降级为"SQLite + Tantivy"双层架构，仅依赖全文检索召回。
 
 ```
 crates/
@@ -40,24 +51,15 @@ crates/
       command.rs             ← MemoryCommand 消息协议
       handle.rs              ← MemoryHandle（客户端句柄，支持自动重连）
       actor.rs               ← MemoryActor（独立 tokio task 运行时）
-      store.rs               ← MemoryStore（Actor 内部私有）
+      store.rs               ← MemoryStore（三层存储协调器）
       injection.rs           ← Injection 文件读写
-      recall.rs              ← Progressive Recall
+      recall.rs              ← Progressive Recall（双引擎召回 + 融合重排）
       writer.rs              ← Episode/Decision 写入
       rumination.rs          ← 反刍（后期）
+      db/                    ← SQLite 加密元数据库
+      search/                ← 双引擎检索（Tantivy + Qdrant + Reranker）
       ipc/                   ← 跨进程 IPC 服务端/客户端
       election/              ← Leader 选举与迁移
-
-  tiangong-core/src/         ← 智能体核心逻辑（依赖 tiangong-memory）
-    prompt/
-      assembler.rs           ← 通过 MemoryHandle 查询 Injection / Recall
-      sections.rs            ← build_user_context() 通过 Handle 异步查询
-    context/
-      organizer.rs           ← 压缩完成后通过 Handle 发送反刍命令
-    workspace_index/         ← 【新增模块】
-      mod.rs
-      file_tree.rs
-      symbol_index.rs
 ```
 
 **依赖方向**：
@@ -66,6 +68,10 @@ tiangong-cli、tiangong-server、src-tauri
   └─→ tiangong-memory   ← 启动时初始化 MemoryHandle
   └─→ tiangong-core     ← 将 Handle 传入 core
         └─→ tiangong-memory  ← 类型引用和 Handle 调用
+        └─→ tiangong-llm     ← EmbeddingProvider / RerankProvider
+
+tiangong-memory
+  └─→ tiangong-llm     ← Embedding/Rerank trait 引用
 ```
 
 **通讯模型**：
@@ -81,29 +87,37 @@ tiangong-cli、tiangong-server、src-tauri
 ```
 ~/.tiangong/
   memory/
+    metadata.db                   # SQLite 加密数据库（元数据 + 详细数据）
+    tantivy_index/                # Tantivy 全文索引目录
+    qdrant/                       # Qdrant 向量索引目录（嵌入式模式）
     profile/
       agent.md
+      preferences.json
     workspaces/
       <workspace_id>/
+        workspace.json
         agent.md
-        entities/
-        episodes/
-        decisions/
         evidence/
     sessions/
       <session_id>/
         agent.md
+    leader.lock
+    leader.json
+    registry.json
+    memory.sock
   workspace-index/
     <workspace_id>/
       file-tree.json
       symbols.json
 ```
 
+> Episode/Entity/Decision 的结构化数据存储在 SQLite 中，Evidence 因体积大仍使用文件存储。
+
 ## 分阶段交付
 
-| 阶段 | 内容 | 代码变更量 | 详见 |
-|------|------|-----------|------|
-| Phase A | Injection 层 + 独立 crate 骨架 | ~300 行 | [09-分阶段落地路径.md](09-分阶段落地路径.md) |
-| Phase B | Episodic Memory 写入 + IPC | ~500 行 | [09-分阶段落地路径.md](09-分阶段落地路径.md) |
-| Phase C | Progressive Recall | ~500 行 | [09-分阶段落地路径.md](09-分阶段落地路径.md) |
-| Phase D | Rumination + Workspace Index | ~800 行 | [09-分阶段落地路径.md](09-分阶段落地路径.md) |
+| 阶段 | 内容 | 存储引擎 | 代码变更量 | 详见 |
+|------|------|---------|-----------|------|
+| Phase A | Injection + 独立 crate + SQLite | SQLite | ~450 行 | [09](09-分阶段落地路径.md) |
+| Phase B | Episode 写入 + IPC + Tantivy | +Tantivy | ~700 行 | [09](09-分阶段落地路径.md) |
+| Phase C | Qdrant + 双引擎 Recall + Meso | +Qdrant | ~800 行 | [09](09-分阶段落地路径.md) |
+| Phase D | Rumination + RerankProvider 精排 + Index | +ONNX | ~900 行 | [09](09-分阶段落地路径.md) |
