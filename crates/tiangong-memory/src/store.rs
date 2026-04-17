@@ -64,12 +64,17 @@ impl MemoryStore {
         injection::load_injection_context(session_id, wid)
     }
 
-    /// 写入 Episode（SQLite + Tantivy）
-    pub(crate) fn write_episode(&mut self, episode: Episode) -> Result<()> {
+    /// 写入 Episode（SQLite + Tantivy），workspace_id 由调用方显式传入
+    pub(crate) fn write_episode(
+        &mut self,
+        episode: Episode,
+        workspace_id: Option<&str>,
+    ) -> Result<()> {
+        // 优先使用调用方传入的 workspace_id，回退到 store 启动时的值
+        let wid = workspace_id.or(self.workspace_id.as_deref());
         // 1. 写入 SQLite（携带 workspace_id，保证 scope_id 正确落库）
-        let node = episode_to_node(&episode, self.workspace_id.as_deref());
-        self.db
-            .insert_episode(&episode, self.workspace_id.as_deref())?;
+        let node = episode_to_node(&episode, wid);
+        self.db.insert_episode(&episode, wid)?;
 
         // 2. 写入 Tantivy 索引
         let body_extra = episode.tool_calls.join(" ");

@@ -18,13 +18,15 @@ use crate::writer;
 pub(crate) fn process_micro(
     store: &mut MemoryStore,
     turn_result: &TurnResult,
-    _workspace_id: Option<&str>,
+    workspace_id: Option<&str>,
 ) -> Result<()> {
     // 1. 提取并写入 Episode（嵌套 if let 用 let-chains 合并以满足 clippy）
     if let Some(episode) = writer::extract_episode(turn_result) {
-        store.write_episode(episode).unwrap_or_else(|e| {
-            tracing::warn!("Micro 反刍：写入 Episode 失败: {}", e);
-        });
+        store
+            .write_episode(episode, workspace_id)
+            .unwrap_or_else(|e| {
+                tracing::warn!("Micro 反刍：写入 Episode 失败: {}", e);
+            });
     }
 
     // 2. 更新 Session Injection（Phase C 实现，此处为桩）

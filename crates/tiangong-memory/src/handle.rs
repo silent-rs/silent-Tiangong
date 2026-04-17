@@ -53,8 +53,13 @@ impl MemoryHandle {
     }
 
     /// 写入 Episode（fire-and-forget）
-    pub fn write_episode(&self, episode: Episode) {
-        if let Err(e) = self.tx.try_send(MemoryCommand::WriteEpisode { episode }) {
+    ///
+    /// `workspace_id` 显式携带，为 `None` 时由 Actor 内部值兜底。
+    pub fn write_episode(&self, episode: Episode, workspace_id: Option<String>) {
+        if let Err(e) = self.tx.try_send(MemoryCommand::WriteEpisode {
+            episode,
+            workspace_id,
+        }) {
             tracing::warn!("Memory write_episode 发送失败: {}", e);
         }
     }

@@ -183,6 +183,8 @@ pub struct TurnResult {
     pub turn_id: String,
     pub had_tool_calls: bool,
     pub summary: String,
+    /// 当前工作区 ID（显式携带，避免 Actor 固化到启动时工作区）
+    pub workspace_id: Option<String>,
 }
 
 /// 根据工作区路径生成 workspace_id（SHA-256 前 16 字符）

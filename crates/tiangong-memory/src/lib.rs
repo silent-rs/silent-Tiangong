@@ -12,7 +12,7 @@
 //! let handle = tiangong_memory::global_handle(); // 可在任何地方调用
 //! ```
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 pub mod command;
 pub mod election;
@@ -37,16 +37,27 @@ pub use types::*;
 /// 进程级全局 Memory Handle 单例
 static GLOBAL_HANDLE: OnceLock<MemoryHandle> = OnceLock::new();
 
-/// 确保 Memory Actor 已启动并返回全局 Handle 引用（幂等，多次调用安全）
+/// 初始化互斥锁，防止并发调用 `ensure_started` 时启动多个孤儿 Actor
+static INIT_LOCK: Mutex<()> = Mutex::new(());
+
+/// 确保 Memory Actor 已启动并返回全局 Handle 引用（幂等，并发安全）
 ///
 /// 各进程入口（CLI、Server、GUI）在启动时调用一次即可。
-/// 若 Actor 已启动，忽略 workspace_id 参数直接返回已有 Handle。
+/// 使用双重检查锁定：快速路径无锁；慢速路径加锁后二次检查，
+/// 保证并发调用时只有一个 Actor 被启动，不会产生孤儿 Actor。
 pub fn ensure_started(workspace_id: Option<String>) -> anyhow::Result<&'static MemoryHandle> {
+    // 快速路径：已初始化则无锁直接返回
+    if let Some(h) = GLOBAL_HANDLE.get() {
+        return Ok(h);
+    }
+    // 慢速路径：加锁后二次检查，保证只有一个 start() 被执行
+    let _guard = INIT_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Memory 初始化互斥锁中毒"))?;
     if let Some(h) = GLOBAL_HANDLE.get() {
         return Ok(h);
     }
     let handle = start(workspace_id)?;
-    // OnceLock::get_or_init 在竞争时保证只有一个 winner
     Ok(GLOBAL_HANDLE.get_or_init(|| handle))
 }
 

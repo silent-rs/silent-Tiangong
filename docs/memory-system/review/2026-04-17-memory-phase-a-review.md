@@ -1,7 +1,10 @@
 # Memory Phase A Review
 
+> **⚠️ 已过期** — 本报告所指的 3 个问题（Tantivy 双 writer、`scope_id` 丢失、Server 未接入 Memory Handle）已在后续提交中全部修复。
+> 当前代码状态请参阅第二轮 Review 报告：[2026-04-17-memory-phase-a-review-round2.md](./2026-04-17-memory-phase-a-review-round2.md)
+
 - Review 时间：2026-04-17
-- Review 提交：`27da4c6`
+- Review 提交：`27da4c6`（**已被后续提交部分覆盖，结论不再适用**）
 - Review 范围：本次 `memory-system` 相关提交
 
 ## 结论

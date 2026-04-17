@@ -62,8 +62,11 @@ impl MemoryActor {
                 let _ = reply.send(result);
             }
 
-            MemoryCommand::WriteEpisode { episode } => {
-                if let Err(e) = self.store.write_episode(episode) {
+            MemoryCommand::WriteEpisode {
+                episode,
+                workspace_id,
+            } => {
+                if let Err(e) = self.store.write_episode(episode, workspace_id.as_deref()) {
                     tracing::warn!("Memory 写入 Episode 失败: {}", e);
                 }
             }
@@ -95,7 +98,11 @@ impl MemoryActor {
 
             // Phase B：Micro 反刍
             MemoryCommand::RunMicroRumination { turn_result } => {
-                let wid = self.workspace_id.as_deref();
+                // 优先使用 turn 携带的 workspace_id，避免跨工作区串写
+                let wid = turn_result
+                    .workspace_id
+                    .as_deref()
+                    .or(self.workspace_id.as_deref());
                 if let Err(e) = rumination::process_micro(&mut self.store, &turn_result, wid) {
                     tracing::warn!("Micro 反刍失败: {}", e);
                 }

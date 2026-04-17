@@ -33,6 +33,8 @@ pub enum MemoryCommand {
     // ── 写入类（fire-and-forget）──
     WriteEpisode {
         episode: Episode,
+        /// 显式 workspace_id，为 None 时由 Actor 自身 workspace_id 兜底
+        workspace_id: Option<String>,
     },
     UpdateInjection {
         level: InjectionLevel,

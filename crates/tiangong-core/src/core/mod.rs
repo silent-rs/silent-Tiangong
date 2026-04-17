@@ -276,11 +276,16 @@ fn worker_loop(
                             && m.content.contains("工具")
                             && m.content.contains("执行")
                     });
+                    // 显式携带 workspace_id，避免 Actor 固化到启动时工作区造成跨工作区串写
+                    let workspace_id = std::env::current_dir()
+                        .ok()
+                        .map(|p| tiangong_memory::types::workspace_id_from_path(&p));
                     handle.run_micro_rumination_blocking(tiangong_memory::TurnResult {
                         session_id: session.id.clone(),
                         turn_id: scru128::new().to_string(),
                         summary,
                         had_tool_calls,
+                        workspace_id,
                     });
                 }
             }
