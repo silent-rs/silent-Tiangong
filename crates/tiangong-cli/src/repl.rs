@@ -15,11 +15,38 @@ use crate::input::InputReader;
 use crate::output;
 
 pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<()> {
+    // 初始化 Memory（同步，仅确保 SQLite 数据库就绪）
+    if let Err(e) = tiangong_memory::init_blocking() {
+        tracing::warn!("Memory 初始化失败（非致命）: {}", e);
+    }
+
+    // 在后台线程中启动 tokio 运行时 + Memory Actor
+    let workspace_id = std::env::current_dir()
+        .ok()
+        .map(|p| tiangong_memory::workspace_id_from_path(&p));
+
+    // start() 现在是同步的，内部自管线程 + LocalSet
+    let memory_handle = match tiangong_memory::start(workspace_id) {
+        Ok(handle) => {
+            tracing::info!("Memory Actor 已启动");
+            Some(handle)
+        }
+        Err(e) => {
+            tracing::warn!("Memory Actor 启动失败（非致命）: {}", e);
+            None
+        }
+    };
+
     let mut state = TiangongState::load_or_default();
     let app_config = load_tiangong_config();
     let config = app_config.into_core_config_provider();
     let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
     let core = TiangongCore::new(config.clone(), stream_tx);
+
+    // 设置 Memory Handle（启动后立即绑定）
+    if let Some(handle) = memory_handle {
+        core.set_memory_handle(handle);
+    }
 
     // CLI --trust-mode 参数覆盖
     if let Some(mode) = trust_mode {

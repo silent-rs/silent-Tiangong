@@ -153,16 +153,10 @@ pub fn build_system_context() -> Vec<String> {
 }
 
 /// 构建 User Context（用户偏好/记忆，以 system-reminder 方式注入）
-pub fn build_user_context(session_id: &str) -> Vec<String> {
-    let mut ctx = Vec::new();
-
-    // 从 memory store 加载
-    let store = crate::context::memory::MemoryStore::load_from_disk();
-    if let Some(memory_text) = store.format_for_context(session_id) {
-        ctx.push(memory_text);
-    }
-
-    ctx
+///
+/// 通过 tiangong-memory 的三级 Injection 层（Profile / Workspace / Session）读取注入文件。
+pub fn build_user_context(session_id: &str, workspace_id: Option<&str>) -> Vec<String> {
+    tiangong_memory::load_injection_sync(session_id, workspace_id)
 }
 
 #[cfg(test)]

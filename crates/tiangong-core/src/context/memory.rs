@@ -1,7 +1,9 @@
-//! 用户偏好与长期记忆管理
+//! 用户偏好与长期记忆管理（已废弃）
 //!
-//! 从 `~/.tiangong/memory/` 加载用户偏好，支持会话级和全局级两种粒度。
-//! 装配上下文时注入记忆信息，帮助模型理解用户习惯和历史偏好。
+//! 此模块已被 `tiangong-memory` crate 替代。
+//! 注入上下文现在通过 `tiangong_memory::load_injection_sync` 读取三级 Injection 文件。
+//!
+//! 保留此文件仅供过渡期兼容，后续版本将移除。
 
 use std::collections::HashMap;
 use std::fs;
