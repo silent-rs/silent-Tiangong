@@ -1,7 +1,9 @@
 use serial_test::serial;
 use tempfile::TempDir;
 use tiangong_memory::ipc::protocol::{IpcRequest, IpcResponse};
+use tiangong_memory::ipc::spawn_memory_bridge;
 use tiangong_memory::ipc::{IpcClient, IpcServer, load_endpoint};
+use tiangong_memory::{Episode, EpisodeOutcome, MemoryHandle, RecallAnchors, start};
 
 struct EnvGuard {
     prev_home: Option<std::ffi::OsString>,
@@ -79,4 +81,65 @@ async fn public_tcp_loopback_ipc_api_roundtrip_works() {
     assert_eq!(response.payload["pong"], true);
 
     server_task.await.expect("服务端任务失败");
+}
+
+async fn wait_for_remote_recall_hit(
+    handle: &MemoryHandle,
+    query: &str,
+) -> Vec<tiangong_memory::RecallHit> {
+    for _ in 0..20 {
+        let hits = handle
+            .recall(
+                RecallAnchors {
+                    query: query.to_string(),
+                    keywords: Vec::new(),
+                },
+                5,
+            )
+            .await;
+        if !hits.is_empty() {
+            return hits;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    Vec::new()
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn remote_memory_handle_can_write_and_recall_via_tcp_bridge() {
+    let home = TempDir::new().expect("创建 fake home 失败");
+    let _env = EnvGuard::enter(home.path());
+
+    let local_handle = start(None).expect("启动本地 memory 失败");
+    let _bridge = spawn_memory_bridge("memory-remote-handle", local_handle.clone())
+        .expect("启动 memory bridge 失败");
+    let remote_handle = MemoryHandle::connect_tcp("memory-remote-handle")
+        .await
+        .expect("连接远端 memory 失败");
+
+    remote_handle.write_episode(
+        Episode::new(
+            "session-remote".to_string(),
+            "repair tcp bridge".to_string(),
+            "repair tcp bridge recall flow".to_string(),
+            EpisodeOutcome::Success,
+            vec![
+                "tcp".to_string(),
+                "bridge".to_string(),
+                "recall".to_string(),
+            ],
+            vec!["memory_ipc".to_string()],
+            0.9,
+        ),
+        None,
+    );
+
+    let hits = wait_for_remote_recall_hit(&remote_handle, "tcp bridge").await;
+    assert!(
+        hits.iter().any(|hit| hit.title.contains("tcp bridge")),
+        "远端句柄写入的 episode 应能被远端 recall 命中"
+    );
+
+    remote_handle.shutdown().await;
 }

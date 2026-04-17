@@ -5,7 +5,7 @@ use tokio::sync::oneshot;
 use crate::types::{Episode, ExpandedMemory, RecallAnchors, RecallHit, TurnResult};
 
 /// 注入级别
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum InjectionLevel {
     Profile,
     Workspace,

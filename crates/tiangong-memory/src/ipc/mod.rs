@@ -8,12 +8,22 @@
 pub mod protocol;
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::mpsc as std_mpsc;
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use protocol::{IpcAuth, IpcEndpoint, IpcFrame, IpcRequest, IpcResponse};
+use protocol::{
+    IpcAuth, IpcEndpoint, IpcFrame, IpcRequest, IpcResponse, MemoryIpcRequestPayload,
+    MemoryIpcResponsePayload,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
+
+use crate::handle::MemoryHandle;
 
 /// 监听中的 IPC 服务端。
 pub struct IpcServer {
@@ -31,6 +41,12 @@ pub struct IpcClient {
 pub struct IpcConnection {
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
+}
+
+/// 运行中的 IPC bridge 守卫。drop 时会触发后台服务退出。
+pub struct IpcBridge {
+    shutdown_tx: Option<watch::Sender<bool>>,
+    join_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl IpcServer {
@@ -130,6 +146,176 @@ impl IpcClient {
             IpcFrame::Response(resp) => Ok(resp),
             IpcFrame::Error { message } => bail!("IPC 服务端返回错误: {message}"),
             frame => bail!("期望 Response 帧，实际收到: {:?}", frame),
+        }
+    }
+}
+
+impl Drop for IpcBridge {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(true);
+        }
+        if let Some(join_handle) = self.join_handle.take() {
+            let _ = join_handle.join();
+        }
+    }
+}
+
+/// 启动 Memory IPC bridge，将本地 `MemoryHandle` 暴露为 TCP loopback 服务。
+pub fn spawn_memory_bridge(service: impl Into<String>, handle: MemoryHandle) -> Result<IpcBridge> {
+    let service = service.into();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (ready_tx, ready_rx) = std_mpsc::sync_channel(1);
+
+    let join_handle = thread::Builder::new()
+        .name(format!("memory-ipc-bridge-{service}"))
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Memory IPC runtime 构建失败");
+            let local = tokio::task::LocalSet::new();
+            local.block_on(&rt, async move {
+                let server = match IpcServer::bind(&service).await {
+                    Ok(server) => {
+                        let _ = ready_tx.send(Ok(()));
+                        Arc::new(server)
+                    }
+                    Err(err) => {
+                        let _ = ready_tx.send(Err(anyhow!(err.to_string())));
+                        return;
+                    }
+                };
+                if let Err(err) = run_memory_bridge(service, server, handle, shutdown_rx).await {
+                    tracing::warn!("Memory IPC bridge 退出异常: {}", err);
+                }
+            });
+        })
+        .with_context(|| "创建 Memory IPC bridge 线程失败")?;
+
+    ready_rx
+        .recv()
+        .with_context(|| "等待 Memory IPC bridge 就绪失败")??;
+
+    Ok(IpcBridge {
+        shutdown_tx: Some(shutdown_tx),
+        join_handle: Some(join_handle),
+    })
+}
+
+async fn run_memory_bridge(
+    service: String,
+    server: Arc<IpcServer>,
+    handle: MemoryHandle,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> Result<()> {
+    tracing::info!(
+        service = %service,
+        endpoint = %server.endpoint_path().display(),
+        port = server.endpoint().port,
+        "Memory IPC bridge 已启动"
+    );
+
+    loop {
+        tokio::select! {
+            changed = shutdown_rx.changed() => {
+                if changed.is_ok() && *shutdown_rx.borrow() {
+                    break;
+                }
+            }
+            accepted = server.accept_authenticated() => {
+                match accepted {
+                    Ok(connection) => {
+                        let handle = handle.clone();
+                        tokio::spawn(async move {
+                            if let Err(err) = serve_connection(connection, handle).await {
+                                tracing::debug!("Memory IPC 连接结束: {}", err);
+                            }
+                        });
+                    }
+                    Err(err) => {
+                        tracing::warn!("接受 Memory IPC 客户端失败: {}", err);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+            }
+        }
+    }
+
+    tracing::info!(service = %service, "Memory IPC bridge 已关闭");
+    Ok(())
+}
+
+async fn serve_connection(mut connection: IpcConnection, handle: MemoryHandle) -> Result<()> {
+    loop {
+        let request = connection.read_request().await?;
+        let payload: MemoryIpcRequestPayload = serde_json::from_value(request.payload)
+            .with_context(|| "解析 Memory IPC 请求载荷失败")?;
+        let response_payload = handle_memory_request(handle.clone(), payload).await?;
+        connection
+            .write_response(IpcResponse {
+                request_id: request.request_id,
+                payload: serde_json::to_value(response_payload)
+                    .with_context(|| "序列化 Memory IPC 响应载荷失败")?,
+            })
+            .await?;
+    }
+}
+
+async fn handle_memory_request(
+    handle: MemoryHandle,
+    payload: MemoryIpcRequestPayload,
+) -> Result<MemoryIpcResponsePayload> {
+    match payload {
+        MemoryIpcRequestPayload::LoadInjection {
+            session_id,
+            workspace_id,
+        } => Ok(MemoryIpcResponsePayload::Injection {
+            items: handle
+                .load_injection(&session_id, workspace_id.as_deref())
+                .await,
+        }),
+        MemoryIpcRequestPayload::Recall { anchors, limit } => {
+            Ok(MemoryIpcResponsePayload::Recall {
+                hits: handle.recall(anchors, limit).await,
+            })
+        }
+        MemoryIpcRequestPayload::LoadDepth2 { node_ids } => Ok(MemoryIpcResponsePayload::Depth2 {
+            items: handle.load_depth2(node_ids).await,
+        }),
+        MemoryIpcRequestPayload::WriteEpisode {
+            episode,
+            workspace_id,
+        } => {
+            handle.write_episode(episode, workspace_id);
+            Ok(MemoryIpcResponsePayload::Ack)
+        }
+        MemoryIpcRequestPayload::UpdateInjection {
+            level,
+            target_id,
+            content,
+        } => {
+            handle.update_injection(level, target_id, content);
+            Ok(MemoryIpcResponsePayload::Ack)
+        }
+        MemoryIpcRequestPayload::RunMicroRumination { turn_result } => {
+            handle.run_micro_rumination(turn_result);
+            Ok(MemoryIpcResponsePayload::Ack)
+        }
+        MemoryIpcRequestPayload::RunMesoRumination {
+            session_id,
+            workspace_id,
+        } => {
+            handle.run_meso_rumination(session_id, workspace_id);
+            Ok(MemoryIpcResponsePayload::Ack)
+        }
+        MemoryIpcRequestPayload::RunMetaRumination => {
+            handle.run_meta_rumination();
+            Ok(MemoryIpcResponsePayload::Ack)
+        }
+        MemoryIpcRequestPayload::Shutdown => {
+            handle.shutdown().await;
+            Ok(MemoryIpcResponsePayload::Ack)
         }
     }
 }

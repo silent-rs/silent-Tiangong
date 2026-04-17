@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::command::InjectionLevel;
+use crate::types::{Episode, ExpandedMemory, RecallAnchors, RecallHit, TurnResult};
+
 /// Endpoint 发现信息，写入本地 runtime 文件供 follower 读取。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpcEndpoint {
@@ -41,4 +44,49 @@ pub enum IpcFrame {
     Request(IpcRequest),
     Response(IpcResponse),
     Error { message: String },
+}
+
+/// Memory IPC 请求载荷
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "method", rename_all = "snake_case")]
+pub enum MemoryIpcRequestPayload {
+    LoadInjection {
+        session_id: String,
+        workspace_id: Option<String>,
+    },
+    Recall {
+        anchors: RecallAnchors,
+        limit: usize,
+    },
+    LoadDepth2 {
+        node_ids: Vec<String>,
+    },
+    WriteEpisode {
+        episode: Episode,
+        workspace_id: Option<String>,
+    },
+    UpdateInjection {
+        level: InjectionLevel,
+        target_id: String,
+        content: String,
+    },
+    RunMicroRumination {
+        turn_result: TurnResult,
+    },
+    RunMesoRumination {
+        session_id: String,
+        workspace_id: String,
+    },
+    RunMetaRumination,
+    Shutdown,
+}
+
+/// Memory IPC 响应载荷
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MemoryIpcResponsePayload {
+    Ack,
+    Injection { items: Vec<String> },
+    Recall { hits: Vec<RecallHit> },
+    Depth2 { items: Vec<ExpandedMemory> },
 }

@@ -54,6 +54,22 @@
 
 > 对照 `docs/memory-system/` 目录中的设计文档推进
 
+### 当前剩余未完成功能总览
+
+- [ ] 补齐 `db/sqlite.rs` 对 `Entity / Decision` 的完整 CRUD
+- [ ] 将 `writer.rs` 升级为调用 lite 模型提取 Episode 摘要、结果状态、工具调用和重要度
+- [x] 将当前 TCP IPC 原语真正接入 `MemoryHandle` 的 local/remote 双态
+- [ ] 完成 `election/` 的 Leader 选举、心跳、Follower 监控与自动接替
+- [ ] 为 GUI / 桌面入口补齐显式 Memory 启动与 Handle 注入
+- [ ] 设计并实现按 workspace 管理的 runtime / handle registry，避免后续多工作区冲突
+- [ ] 实现 `search/embedding.rs`，封装 `EmbeddingProvider` 的 memory 侧调用
+- [ ] 打通 Episode -> Embedding -> Qdrant upsert 的主写链路
+- [ ] 在运行时中增加 Qdrant 启用配置与降级策略
+- [ ] 实现真正的 `RecallAnchors` 提取，而不是只使用原始 query
+- [ ] 完成 `LoadDepth2` 的定向展开能力
+- [ ] 将 `process_meso()` 从关键词统计升级为真实的 `Entity / Decision` 提炼
+- [ ] 为 Memory 增加更多集成测试，覆盖多进程 IPC / leader 切换 / Qdrant 写链路
+
 ### Memory Phase A：Injection 层 + 独立 crate 骨架 + SQLite 元数据库 ✅
 
 - [x] 创建 `crates/tiangong-memory` 独立 crate
@@ -72,25 +88,26 @@
 
 ### Memory Phase B：Episode 写入 + IPC + Tantivy 全文检索
 
-- [ ] `tiangong-memory` 引入 `tantivy = "0.22"` 依赖
-- [ ] 实现 `search/tantivy.rs`：Tantivy Schema 定义、文档索引、BM25 查询
-- [ ] 扩展 `store.rs`：协调 SQLite + Tantivy 双层写入
+- [x] `tiangong-memory` 引入 `tantivy = "0.22"` 依赖
+- [x] 实现 `search/tantivy.rs`：Tantivy Schema 定义、文档索引、BM25 查询
+- [x] 扩展 `store.rs`：协调 SQLite + Tantivy 双层写入
 - [ ] 扩展 `db/sqlite.rs`：Episode/Entity/Decision 完整 CRUD
 - [ ] 实现 `writer.rs`：EpisodeWriter（调用 lite 模型提取摘要）
-- [ ] 实现 `rumination.rs`：MicroRumination（Episode 写入部分）
-- [ ] 扩展 `actor.rs`：处理 WriteEpisode / RunMicroRumination 命令
-- [ ] 实现 `ipc/`：UDS IPC 服务端/客户端
+- [x] 实现 `rumination.rs`：MicroRumination（Episode 写入部分）
+- [x] 扩展 `actor.rs`：处理 WriteEpisode / RunMicroRumination 命令
+- [x] 实现 `ipc/`：TCP loopback IPC 服务端/客户端骨架（动态端口 + endpoint 文件发现 + token 鉴权）
 - [ ] 扩展 `election/`：Leader 选举、心跳、Follower 监控
-- [ ] 各入口集成完整 Memory Actor 启动（CLI 引入 tokio 单线程运行时）
-- [ ] runtime 集成点：turn 完成后通过 Handle 发送反刍命令
+- [x] 各入口集成完整 Memory Actor 启动（CLI / Server 已显式启动并注入 Handle）
+- [x] runtime 集成点：turn 完成后通过 Handle 发送反刍命令
+- [x] 为 `tiangong-memory` 增加独立集成测试（runtime / ipc 主链路）
 
 ### Memory Phase C：Qdrant 向量检索 + 双引擎召回 + Recall 注入
 
-- [ ] 引入 `qdrant-client = "1"` 依赖
-- [ ] 实现 `search/qdrant.rs`：collection 管理、point upsert、语义查询
+- [x] 引入 `qdrant-client = "1"` 依赖
+- [x] 实现 `search/qdrant.rs`：collection 管理、point upsert、语义查询（骨架已落地，未接入主写链路）
 - [ ] 实现 `search/embedding.rs`：封装 EmbeddingProvider 调用
-- [ ] 实现 `search/reranker.rs`：分数归一化、时间衰减、重要度加权
-- [ ] 实现 `search/mod.rs`：双引擎召回统一入口
-- [ ] 实现 `recall.rs`：RecallAnchors 提取 + 双引擎召回 + 定向展开
+- [x] 实现 `search/reranker.rs`：分数归一化、时间衰减、重要度加权
+- [x] 实现 `search/mod.rs`：双引擎召回统一入口（当前为模块入口与 BM25 主路径）
+- [x] 实现 `recall.rs`：RecallAnchors 提取 + 双引擎召回 + 定向展开（当前仅 BM25-only 主路径可用，Depth2 未完成）
 - [ ] 扩展 `rumination.rs`：MesoRumination（Entity/Decision 提取）
-- [ ] 修改 `prompt/assembler.rs`：Recall 结果注入到 Prompt
+- [x] 修改 `prompt/assembler.rs`：Recall 结果注入到 Prompt
