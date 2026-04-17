@@ -4,14 +4,15 @@
 //!
 //! # 使用方式
 //!
-//! 各入口（GUI、CLI、Server）在启动时调用 [`start`] 获取 [`MemoryHandle`]，
-//! 然后将 Handle 传入 core 层使用。
+//! 各入口（GUI、CLI、Server）在启动时调用 [`ensure_started`]，
+//! 之后任何代码都可通过 [`global_handle`] 直接获取 Handle，无需外部传递。
 //!
 //! ```no_run
-//! use tiangong_memory::start;
-//!
-//! let handle = start(None).expect("Memory 系统启动失败");
+//! tiangong_memory::ensure_started(None).expect("Memory 系统启动失败");
+//! let handle = tiangong_memory::global_handle(); // 可在任何地方调用
 //! ```
+
+use std::sync::OnceLock;
 
 pub mod command;
 pub mod election;
@@ -32,6 +33,27 @@ pub use actor::start_memory as start;
 pub use election::ProcessType;
 pub use handle::MemoryHandle;
 pub use types::*;
+
+/// 进程级全局 Memory Handle 单例
+static GLOBAL_HANDLE: OnceLock<MemoryHandle> = OnceLock::new();
+
+/// 确保 Memory Actor 已启动并返回全局 Handle 引用（幂等，多次调用安全）
+///
+/// 各进程入口（CLI、Server、GUI）在启动时调用一次即可。
+/// 若 Actor 已启动，忽略 workspace_id 参数直接返回已有 Handle。
+pub fn ensure_started(workspace_id: Option<String>) -> anyhow::Result<&'static MemoryHandle> {
+    if let Some(h) = GLOBAL_HANDLE.get() {
+        return Ok(h);
+    }
+    let handle = start(workspace_id)?;
+    // OnceLock::get_or_init 在竞争时保证只有一个 winner
+    Ok(GLOBAL_HANDLE.get_or_init(|| handle))
+}
+
+/// 获取全局 Memory Handle（返回 None 表示 ensure_started 尚未调用或已失败）
+pub fn global_handle() -> Option<&'static MemoryHandle> {
+    GLOBAL_HANDLE.get()
+}
 
 /// 同步加载三级注入上下文（不经过 Actor，直接读文件）
 ///

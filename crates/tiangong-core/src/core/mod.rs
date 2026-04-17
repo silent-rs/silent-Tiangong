@@ -47,8 +47,6 @@ pub struct TiangongCore {
     session_id: String,
     /// 独立的信任模式（共享引用，实时生效）
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
-    /// Memory Handle（可选，创建后通过 set_memory_handle 设置）
-    memory_handle: Arc<RwLock<Option<tiangong_memory::MemoryHandle>>>,
 }
 
 impl TiangongCore {
@@ -68,20 +66,10 @@ impl TiangongCore {
         let shared_trust_mode = Arc::new(RwLock::new(initial_trust_mode));
         let session_id = session.id.clone();
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
-        let memory_handle: Arc<RwLock<Option<tiangong_memory::MemoryHandle>>> =
-            Arc::new(RwLock::new(None));
 
         let worker_trust_mode = shared_trust_mode.clone();
-        let worker_memory_handle = memory_handle.clone();
         let worker = thread::spawn(move || {
-            worker_loop(
-                config,
-                session,
-                stream_tx,
-                cmd_rx,
-                worker_trust_mode,
-                worker_memory_handle,
-            )
+            worker_loop(config, session, stream_tx, cmd_rx, worker_trust_mode)
         });
 
         Self {
@@ -89,14 +77,6 @@ impl TiangongCore {
             worker: Some(worker),
             session_id,
             shared_trust_mode,
-            memory_handle,
-        }
-    }
-
-    /// 设置 Memory Handle（创建后调用，实时生效）
-    pub fn set_memory_handle(&self, handle: tiangong_memory::MemoryHandle) {
-        if let Ok(mut guard) = self.memory_handle.write() {
-            *guard = Some(handle);
         }
     }
 
@@ -164,7 +144,6 @@ fn worker_loop(
     external_tx: Sender<SessionStreamEvent>,
     cmd_rx: Receiver<Command>,
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
-    memory_handle: Arc<RwLock<Option<tiangong_memory::MemoryHandle>>>,
 ) -> Session {
     let session_id = session.id.clone();
     let mut last_cfg_gen = 0u64;
@@ -249,8 +228,8 @@ fn worker_loop(
                 });
 
                 // Phase C：召回相关记忆注入 user_context
-                let recall_context: Vec<String> = if let Ok(guard) = memory_handle.read() {
-                    if let Some(handle) = guard.as_ref() {
+                let recall_context: Vec<String> =
+                    if let Some(handle) = tiangong_memory::global_handle() {
                         let hits = handle.recall_blocking(
                             tiangong_memory::RecallAnchors {
                                 query: content.clone(),
@@ -269,10 +248,7 @@ fn worker_loop(
                         }
                     } else {
                         Vec::new()
-                    }
-                } else {
-                    Vec::new()
-                };
+                    };
 
                 // 执行对话轮次
                 execute_turn(
@@ -287,34 +263,25 @@ fn worker_loop(
                 );
 
                 // turn 完成后触发 Micro 反刍（fire-and-forget）
-                if let Ok(guard) = memory_handle.read() {
-                    // 从 session 最后的 assistant 消息提取摘要
-                    let summary = guard.as_ref().map(|_| {
-                        session
-                            .messages
-                            .iter()
-                            .rev()
-                            .find(|m| m.role == MessageRole::Assistant)
-                            .map(|m| m.content.clone())
-                            .unwrap_or_default()
+                if let Some(handle) = tiangong_memory::global_handle() {
+                    let summary = session
+                        .messages
+                        .iter()
+                        .rev()
+                        .find(|m| m.role == MessageRole::Assistant)
+                        .map(|m| m.content.clone())
+                        .unwrap_or_default();
+                    let had_tool_calls = session.messages.iter().rev().take(20).any(|m| {
+                        m.role == MessageRole::System
+                            && m.content.contains("工具")
+                            && m.content.contains("执行")
                     });
-                    let had_tool_calls = guard.as_ref().map(|_| {
-                        session.messages.iter().rev().take(20).any(|m| {
-                            m.role == MessageRole::System
-                                && m.content.contains("工具")
-                                && m.content.contains("执行")
-                        })
+                    handle.run_micro_rumination_blocking(tiangong_memory::TurnResult {
+                        session_id: session.id.clone(),
+                        turn_id: scru128::new().to_string(),
+                        summary,
+                        had_tool_calls,
                     });
-                    if let (Some(handle), Some(summary), Some(had_tool_calls)) =
-                        (guard.as_ref(), summary, had_tool_calls)
-                    {
-                        handle.run_micro_rumination_blocking(tiangong_memory::TurnResult {
-                            session_id: session.id.clone(),
-                            turn_id: scru128::new().to_string(),
-                            summary,
-                            had_tool_calls,
-                        });
-                    }
                 }
             }
             Command::Cancel => {

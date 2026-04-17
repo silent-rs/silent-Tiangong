@@ -118,3 +118,44 @@ pub(crate) fn process_meta(store: &mut MemoryStore) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::db::sqlite::test_helpers::open_in_memory;
+    use crate::types::{Episode, EpisodeOutcome};
+
+    fn make_episode(session_id: &str) -> Episode {
+        Episode::new(
+            session_id.to_string(),
+            "功能开发标题".to_string(),
+            "完成了一个功能的开发".to_string(),
+            EpisodeOutcome::Success,
+            vec!["Rust".to_string(), "异步".to_string(), "测试".to_string()],
+            vec!["write_file".to_string()],
+            0.7,
+        )
+    }
+
+    #[test]
+    fn process_meso_generates_injection_content_with_keywords() {
+        let db = open_in_memory().unwrap();
+        // 写入 5 个 Episode，关键词包含 "Rust"
+        for i in 0..5 {
+            let ep = make_episode(&format!("sess-{i}"));
+            db.insert_episode(&ep, Some("ws-test")).unwrap();
+        }
+
+        let summaries = db.recent_episode_summaries(30).unwrap();
+        assert_eq!(summaries.len(), 5);
+
+        // 统计关键词出现频次
+        let mut kw_count = std::collections::HashMap::new();
+        for (_, kws) in &summaries {
+            for kw in kws {
+                *kw_count.entry(kw.clone()).or_insert(0usize) += 1;
+            }
+        }
+        // "Rust" 应出现 5 次（高频词）
+        assert_eq!(kw_count.get("Rust").copied().unwrap_or(0), 5);
+    }
+}

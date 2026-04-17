@@ -32,22 +32,27 @@ impl MemoryDb {
     }
 
     /// 插入 Episode 到 memory_nodes 和 episodes 表
-    pub(crate) fn insert_episode(&self, episode: &Episode) -> Result<()> {
+    pub(crate) fn insert_episode(
+        &self,
+        episode: &Episode,
+        workspace_id: Option<&str>,
+    ) -> Result<()> {
         let now = chrono::Local::now().naive_local().to_string();
         let keywords = serde_json::to_string(&episode.keywords)?;
         let tool_calls = serde_json::to_string(&episode.tool_calls)?;
         let outcome = serde_json::to_string(&episode.outcome)?;
         let full_content = serde_json::to_string(episode)?;
 
-        // 写入 memory_nodes
+        // 写入 memory_nodes（scope_id 来自 workspace_id，不再硬编码 NULL）
         self.conn
             .execute(
                 "INSERT OR REPLACE INTO memory_nodes
                  (id, kind, scope_type, scope_id, title, summary, keywords, importance,
                   confidence, status, source, usage_count, created_at, updated_at)
-                 VALUES (?1, 'episode', 'workspace', NULL, ?2, ?3, ?4, ?5, 1.0, 'active', ?6, 0, ?7, ?7)",
+                 VALUES (?1, 'episode', 'workspace', ?2, ?3, ?4, ?5, ?6, 1.0, 'active', ?7, 0, ?8, ?8)",
                 rusqlite::params![
                     episode.id,
+                    workspace_id,
                     episode.title,
                     episode.summary,
                     keywords,
@@ -186,4 +191,86 @@ fn open_encrypted_conn(db_path: &Path) -> Result<Connection> {
         .with_context(|| "设置 WAL 模式失败")?;
 
     Ok(conn)
+}
+
+#[cfg(test)]
+pub(crate) mod test_helpers {
+    use super::*;
+
+    /// 创建仅用于测试的内存数据库（不加密）
+    pub(crate) fn open_in_memory() -> Result<MemoryDb> {
+        let conn = Connection::open_in_memory().with_context(|| "创建测试内存数据库失败")?;
+        schema::init_schema(&conn)?;
+        Ok(MemoryDb { conn })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_helpers::open_in_memory;
+    use crate::types::{Episode, EpisodeOutcome};
+
+    fn make_episode(session_id: &str) -> Episode {
+        Episode::new(
+            session_id.to_string(),
+            "测试标题".to_string(),
+            "测试摘要".to_string(),
+            EpisodeOutcome::Success,
+            vec!["关键词A".to_string(), "关键词B".to_string()],
+            vec!["tool_call_1".to_string()],
+            0.7,
+        )
+    }
+
+    #[test]
+    fn insert_episode_stores_workspace_id_in_scope_id() {
+        let db = open_in_memory().unwrap();
+        let episode = make_episode("sess-001");
+        let workspace_id = "ws-project-x";
+
+        db.insert_episode(&episode, Some(workspace_id)).unwrap();
+
+        // 验证 scope_id 正确写入
+        let stored: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT scope_id FROM memory_nodes WHERE id = ?1",
+                rusqlite::params![episode.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(stored.as_deref(), Some(workspace_id));
+    }
+
+    #[test]
+    fn insert_episode_scope_id_is_null_when_no_workspace() {
+        let db = open_in_memory().unwrap();
+        let episode = make_episode("sess-002");
+
+        db.insert_episode(&episode, None).unwrap();
+
+        let stored: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT scope_id FROM memory_nodes WHERE id = ?1",
+                rusqlite::params![episode.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert!(stored.is_none(), "无 workspace_id 时 scope_id 应为 NULL");
+    }
+
+    #[test]
+    fn recent_episode_summaries_returns_correct_count() {
+        let db = open_in_memory().unwrap();
+        for i in 0..5 {
+            let ep = make_episode(&format!("sess-{i}"));
+            db.insert_episode(&ep, Some("ws-test")).unwrap();
+        }
+
+        let summaries = db.recent_episode_summaries(3).unwrap();
+        assert_eq!(summaries.len(), 3, "应返回最近 3 条");
+    }
 }

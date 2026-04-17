@@ -34,9 +34,8 @@ impl MemoryStore {
         let base = memory_base_dir();
         let db = MemoryDb::open()?;
         let tantivy = TantivyIndex::open(&base)?;
-        // Phase C：尝试克隆一个 tantivy 给 RecallEngine（BM25 模式）
-        let tantivy_for_recall = TantivyIndex::open(&base)?;
-        let recall_engine = RecallEngine::bm25_only(tantivy_for_recall);
+        // RecallEngine 不持有 TantivyIndex，避免同一索引目录双 writer 锁冲突
+        let recall_engine = RecallEngine::bm25_only();
         Ok(Self {
             db,
             tantivy,
@@ -52,10 +51,7 @@ impl MemoryStore {
         qdrant: QdrantIndex,
         embedding: Arc<dyn EmbeddingProvider>,
     ) {
-        let base = memory_base_dir();
-        if let Ok(tantivy) = TantivyIndex::open(&base) {
-            self.recall_engine = RecallEngine::dual(tantivy, qdrant, embedding);
-        }
+        self.recall_engine = RecallEngine::dual(qdrant, embedding);
     }
 
     /// 加载三级注入上下文
@@ -70,9 +66,10 @@ impl MemoryStore {
 
     /// 写入 Episode（SQLite + Tantivy）
     pub(crate) fn write_episode(&mut self, episode: Episode) -> Result<()> {
-        // 1. 写入 SQLite
+        // 1. 写入 SQLite（携带 workspace_id，保证 scope_id 正确落库）
         let node = episode_to_node(&episode, self.workspace_id.as_deref());
-        self.db.insert_episode(&episode)?;
+        self.db
+            .insert_episode(&episode, self.workspace_id.as_deref())?;
 
         // 2. 写入 Tantivy 索引
         let body_extra = episode.tool_calls.join(" ");
@@ -93,7 +90,14 @@ impl MemoryStore {
         anchors: &RecallAnchors,
         limit: usize,
     ) -> Vec<RecallHit> {
-        self.recall_engine.recall(anchors, limit).await
+        // BM25 由 MemoryStore 统一执行，保证只有一个 IndexWriter
+        let bm25_hits = self
+            .tantivy
+            .search(&anchors.query, limit * 2)
+            .unwrap_or_default();
+        self.recall_engine
+            .recall(bm25_hits, &anchors.query, limit)
+            .await
     }
 
     /// 查询最近 Episode 摘要（用于 MesoRumination 提炼关键词）

@@ -24,26 +24,14 @@ use self::remote::event::{EventBus, TiangongEvent};
 pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
 
-    // 初始化 Memory（同步 DB 初始化）
-    if let Err(e) = tiangong_memory::init_blocking() {
-        tracing::warn!("Memory 初始化失败（非致命）: {}", e);
-    }
-
-    // 启动 Memory Actor（同步接口，内部自管线程 + LocalSet）
+    // 启动 Memory Actor（进程级单例，之后通过 tiangong_memory::global_handle() 访问）
     let workspace_id = std::env::current_dir()
         .ok()
         .map(|p| tiangong_memory::workspace_id_from_path(&p));
-    let _memory_handle = match tiangong_memory::start(workspace_id) {
-        Ok(handle) => {
-            tracing::info!("Memory Actor 已启动");
-            Some(handle)
-        }
-        Err(e) => {
-            tracing::warn!("Memory Actor 启动失败（非致命）: {}", e);
-            None
-        }
-    };
-    // TODO: 将 _memory_handle 传递给 ServerAppContext（Phase C 集成）
+    match tiangong_memory::ensure_started(workspace_id) {
+        Ok(_) => tracing::info!("Memory Actor 已启动"),
+        Err(e) => tracing::warn!("Memory Actor 启动失败（非致命）: {}", e),
+    }
 
     tracing::info!("正在初始化应用状态...");
     let state: SharedState = Arc::new(Mutex::new(TiangongState::load_or_default()));
