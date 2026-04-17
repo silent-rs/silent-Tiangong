@@ -1,0 +1,123 @@
+# 天工 Memory 系统设计
+
+## 设计目标
+
+天工 Memory 系统的核心目标不是"存更多"，而是：
+
+- 低成本粗召回，按意图逐步深入
+- 多层细节展开，上下文预算可控
+- 可审计、可维护、可迁移
+- 与现有 Prompt 装配和事件循环架构无缝融合
+
+核心理念：
+
+> Memory 不应一次性注入，而应像人类回忆一样逐步展开。
+
+## 文档目录
+
+| 文档 | 说明 |
+|------|------|
+| [01-记忆分层设计.md](01-记忆分层设计.md) | 记忆分层设计（7 层模型） |
+| [02-注入层设计.md](02-注入层设计.md) | 注入层设计（Profile/Workspace/Session 三级注入） |
+| [03-渐进式回忆.md](03-渐进式回忆.md) | 渐进式回忆流程 |
+| [04-工作区文件索引.md](04-工作区文件索引.md) | 工作区文件索引 |
+| [05-反刍与反思层.md](05-反刍与反思层.md) | 反刍与反思层 |
+| [06-模块划分与代码归属.md](06-模块划分与代码归属.md) | 模块划分与代码归属 |
+| [07-持久化格式与技术选型.md](07-持久化格式与技术选型.md) | 持久化格式与技术选型 |
+| [08-并发安全策略.md](08-并发安全策略.md) | 并发安全策略 |
+| [09-分阶段落地路径.md](09-分阶段落地路径.md) | 分阶段落地路径 |
+| [10-预算控制与性能策略.md](10-预算控制与性能策略.md) | 预算控制与性能策略 |
+
+## 与现有架构的关系
+
+Memory 系统作为独立 crate `tiangong-memory` 实现，采用 **Actor 模型**独立运行，外部通过 `MemoryHandle` 消息通讯访问。
+
+存储采用“**SQLite（加密）+ Tantivy（全文检索）+ Qdrant（向量语义）**”三层架构：
+
+| 层次 | 引擎 | 职责 |
+|------|------|------|
+| 元数据层 | SQLite（sqlcipher 加密） | 记忆管理、CRUD、生命周期 |
+| 全文检索层 | Tantivy | BM25 关键词/短语召回 |
+| 向量语义层 | Qdrant（**可选**） | 语义相似度召回、跨措辞匹配 |
+| Injection 层 | Markdown 文件 | 人类可读的注入内容 |
+
+> **降级策略**：当 `LlmConfig.embedding` 未配置时，Qdrant 引擎不初始化，向量语义检索和存储自动跳过，系统降级为"SQLite + Tantivy"双层架构，仅依赖全文检索召回。
+
+```
+crates/
+  tiangong-memory/           ← 【独立 crate】Memory 基础设施
+    src/
+      lib.rs                 ← crate 入口，导出公共 API
+      command.rs             ← MemoryCommand 消息协议
+      handle.rs              ← MemoryHandle（客户端句柄，支持自动重连）
+      actor.rs               ← MemoryActor（独立 tokio task 运行时）
+      store.rs               ← MemoryStore（三层存储协调器）
+      injection.rs           ← Injection 文件读写
+      recall.rs              ← Progressive Recall（双引擎召回 + 融合重排）
+      writer.rs              ← Episode/Decision 写入
+      rumination.rs          ← 反刍（后期）
+      db/                    ← SQLite 加密元数据库
+      search/                ← 双引擎检索（Tantivy + Qdrant + Reranker）
+      ipc/                   ← 跨进程 IPC 服务端/客户端
+      election/              ← Leader 选举与迁移
+```
+
+**依赖方向**：
+```
+tiangong-cli、tiangong-server、src-tauri
+  └─→ tiangong-memory   ← 启动时初始化 MemoryHandle
+  └─→ tiangong-core     ← 将 Handle 传入 core
+        └─→ tiangong-memory  ← 类型引用和 Handle 调用
+        └─→ tiangong-llm     ← EmbeddingProvider / RerankProvider
+
+tiangong-memory
+  └─→ tiangong-llm     ← Embedding/Rerank trait 引用
+```
+
+**通讯模型**：
+```
+调用方 ──(mpsc channel / IPC)──→ MemoryActor ──→ 磁盘读写
+       ←(oneshot channel / IPC)── 查询响应
+```
+
+**所有运行模式都必须接入 Memory**，包括 GUI、TUI、Server、CLI，不允许任何模式跳过。
+
+## 磁盘目录结构
+
+```
+~/.tiangong/
+  memory/
+    metadata.db                   # SQLite 加密数据库（元数据 + 详细数据）
+    tantivy_index/                # Tantivy 全文索引目录
+    qdrant/                       # Qdrant 向量索引目录（嵌入式模式）
+    profile/
+      agent.md
+      preferences.json
+    workspaces/
+      <workspace_id>/
+        workspace.json
+        agent.md
+        evidence/
+    sessions/
+      <session_id>/
+        agent.md
+    leader.lock
+    leader.json
+    registry.json
+    memory.sock
+  workspace-index/
+    <workspace_id>/
+      file-tree.json
+      symbols.json
+```
+
+> Episode/Entity/Decision 的结构化数据存储在 SQLite 中，Evidence 因体积大仍使用文件存储。
+
+## 分阶段交付
+
+| 阶段 | 内容 | 存储引擎 | 代码变更量 | 详见 |
+|------|------|---------|-----------|------|
+| Phase A | Injection + 独立 crate + SQLite | SQLite | ~450 行 | [09](09-分阶段落地路径.md) |
+| Phase B | Episode 写入 + IPC + Tantivy | +Tantivy | ~700 行 | [09](09-分阶段落地路径.md) |
+| Phase C | Qdrant + 双引擎 Recall + Meso | +Qdrant | ~800 行 | [09](09-分阶段落地路径.md) |
+| Phase D | Rumination + RerankProvider 精排 + Index | +ONNX | ~900 行 | [09](09-分阶段落地路径.md) |
