@@ -14,7 +14,7 @@ pub use message::{MediaAsset, MediaKind, Message, MessageRole, now_text};
 pub use remote::{IncomingMessage, MessageContent, OutgoingMessage, RemoteRole};
 pub use session::Session;
 pub use status::RunStatus;
-pub use stream::{SessionStreamEvent, StreamEvent};
+pub use stream::{MemoryRecallHitSummary, SessionStreamEvent, StreamEvent};
 pub use token::TokenUsage;
 
 #[cfg(test)]

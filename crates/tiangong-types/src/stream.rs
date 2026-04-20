@@ -81,6 +81,28 @@ pub enum StreamEvent {
         message_id: String,
         content: String,
     },
+
+    // ===== 记忆检索事件 =====
+    /// 记忆检索开始
+    MemoryRecallStart {
+        /// 检索策略描述（如 "keyword" / "semantic" / "hybrid:0.6" / "skip"）
+        strategy: String,
+    },
+    /// 记忆检索完成
+    MemoryRecallDone {
+        /// 命中条数
+        hit_count: usize,
+        /// 命中摘要列表（每项为 "标题: 摘要"）
+        hits: Vec<MemoryRecallHitSummary>,
+    },
+}
+
+/// 记忆检索命中项摘要（前端展示用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryRecallHitSummary {
+    pub title: String,
+    pub summary: String,
+    pub score: f64,
 }
 
 /// 带会话标识的流事件

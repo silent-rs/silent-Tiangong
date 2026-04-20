@@ -492,6 +492,41 @@ pub fn send_message(
                             }
                             assistant_msg_id = None;
                         }
+                        StreamEvent::MemoryRecallStart { ref strategy } => {
+                            session.append_message(
+                                tiangong_core::session::MessageRole::System,
+                                format!("[记忆检索] 策略: {strategy}"),
+                            );
+                        }
+                        StreamEvent::MemoryRecallDone {
+                            hit_count,
+                            ref hits,
+                        } => {
+                            if *hit_count == 0 {
+                                session.append_message(
+                                    tiangong_core::session::MessageRole::System,
+                                    "[记忆检索] 无相关记忆".to_string(),
+                                );
+                            } else {
+                                let items: Vec<String> = hits
+                                    .iter()
+                                    .map(|h| {
+                                        format!(
+                                            "- [{:.2}] {}: {}",
+                                            h.score, h.title, h.summary
+                                        )
+                                    })
+                                    .collect();
+                                session.append_message(
+                                    tiangong_core::session::MessageRole::System,
+                                    format!(
+                                        "[记忆检索] 命中 {} 条\n{}",
+                                        hit_count,
+                                        items.join("\n")
+                                    ),
+                                );
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -561,6 +596,19 @@ pub fn send_message(
                     }
                     StreamEvent::Delta { .. } => {
                         core_state.store.runtime.run.summary = "正在回复...".to_string();
+                    }
+                    StreamEvent::MemoryRecallStart { .. } => {
+                        core_state.store.runtime.run.summary =
+                            "正在检索记忆...".to_string();
+                    }
+                    StreamEvent::MemoryRecallDone { hit_count, .. } => {
+                        if *hit_count > 0 {
+                            core_state.store.runtime.run.summary =
+                                format!("记忆检索完成，命中 {hit_count} 条");
+                        } else {
+                            core_state.store.runtime.run.summary =
+                                "记忆检索完成，无相关记忆".to_string();
+                        }
                     }
                     _ => {}
                 }

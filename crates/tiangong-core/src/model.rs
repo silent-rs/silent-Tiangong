@@ -346,7 +346,7 @@ impl SingleProviderClient {
     }
 
     fn complete_lite_anthropic(&self, prompt: &str) -> Result<String> {
-        let timeout_ms = 30_000u64;
+        let timeout_ms = 120_000u64;
         let model = self.cfg.lite_model().trim();
         if model.is_empty() {
             return Err(anyhow!(
@@ -423,7 +423,7 @@ impl SingleProviderClient {
         if self.protocol() == ProviderProtocol::Anthropic {
             return self.complete_lite_anthropic(prompt);
         }
-        let timeout_ms = 30_000u64;
+        let timeout_ms = 120_000u64;
         let model = self.cfg.lite_model().trim();
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起轻量级模型请求"));
@@ -457,7 +457,7 @@ impl SingleProviderClient {
     ///
     /// 适用于检索策略判断、意图分析等简单分类任务。
     pub fn complete_lite_with_system(&self, system: &str, prompt: &str) -> Result<String> {
-        let timeout_ms = 30_000u64;
+        let timeout_ms = 120_000u64;
         let model = self.cfg.lite_model().trim();
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起轻量级模型请求"));

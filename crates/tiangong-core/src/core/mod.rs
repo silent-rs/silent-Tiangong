@@ -273,8 +273,27 @@ fn worker_loop(
                     let strategy = engine
                         .as_ref()
                         .and_then(|e| judge_search_strategy(e.lite_client(), &content));
+
+                    let strategy_label = match &strategy {
+                        Some(tiangong_memory::SearchStrategy::Skip) => "skip".to_string(),
+                        Some(tiangong_memory::SearchStrategy::Keyword) => "keyword".to_string(),
+                        Some(tiangong_memory::SearchStrategy::Semantic) => "semantic".to_string(),
+                        Some(tiangong_memory::SearchStrategy::Hybrid { semantic_ratio }) => {
+                            format!("hybrid:{semantic_ratio:.1}")
+                        }
+                        None => "auto".to_string(),
+                    };
+
+                    let _ = stream_tx.send(StreamEvent::MemoryRecallStart {
+                        strategy: strategy_label,
+                    });
+
                     // Skip 策略：LLM 判断不需要历史记忆，直接跳过召回
                     if matches!(strategy, Some(tiangong_memory::SearchStrategy::Skip)) {
+                        let _ = stream_tx.send(StreamEvent::MemoryRecallDone {
+                            hit_count: 0,
+                            hits: Vec::new(),
+                        });
                         Vec::new()
                     } else {
                         let hits = handle.recall_blocking(
@@ -285,6 +304,20 @@ fn worker_loop(
                             },
                             5,
                         );
+
+                        let hit_summaries: Vec<tiangong_types::MemoryRecallHitSummary> = hits
+                            .iter()
+                            .map(|h| tiangong_types::MemoryRecallHitSummary {
+                                title: h.title.clone(),
+                                summary: h.summary.clone(),
+                                score: h.score,
+                            })
+                            .collect();
+                        let _ = stream_tx.send(StreamEvent::MemoryRecallDone {
+                            hit_count: hits.len(),
+                            hits: hit_summaries,
+                        });
+
                         if hits.is_empty() {
                             Vec::new()
                         } else {

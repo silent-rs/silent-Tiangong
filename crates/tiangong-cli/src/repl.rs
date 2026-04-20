@@ -276,6 +276,22 @@ impl ResponseState {
                 self.end_active_stream();
                 output::worker_completed(worker_label, *success);
             }
+
+            StreamEvent::MemoryRecallStart { strategy } => {
+                self.end_active_stream();
+                output::status(&format!("记忆检索 (策略: {strategy})..."));
+            }
+
+            StreamEvent::MemoryRecallDone { hit_count, hits } => {
+                if *hit_count == 0 {
+                    output::status("记忆检索完成，无相关记忆");
+                } else {
+                    output::status(&format!("记忆检索完成，命中 {hit_count} 条"));
+                    for h in hits {
+                        output::status(&format!("  [{:.2}] {}: {}", h.score, h.title, h.summary));
+                    }
+                }
+            }
         }
         false
     }
