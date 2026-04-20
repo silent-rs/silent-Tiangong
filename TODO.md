@@ -1,6 +1,6 @@
 # TODO - 天工全栈平台重构任务清单
 
-> 最后更新：2026-04-17
+> 最后更新：2026-04-20
 > 当前主线 RFC：`docs/rfc/0004-full-stack-agent-platform.md`
 > 参考：`PLAN.md`、`docs/requirements.md`
 
@@ -59,7 +59,7 @@
 - [x] 补齐 `db/sqlite.rs` 对 `Entity / Decision` 的完整 CRUD
 - [ ] 将 `writer.rs` 升级为调用 lite 模型提取 Episode 摘要、结果状态、工具调用和重要度
 - [x] 将当前 TCP IPC 原语真正接入 `MemoryHandle` 的 local/remote 双态
-- [ ] 补齐 `election/` 的 Follower 监控、leader 切换与自动接替
+- [x] 补齐 `election/` 的 Follower 监控、leader 切换与自动接替
 - [ ] 为 GUI / 桌面入口补齐显式 Memory 启动与 Handle 注入
 - [ ] 设计并实现按 workspace 管理的 runtime / handle registry，避免后续多工作区冲突
 - [ ] 实现 `search/embedding.rs`，封装 `EmbeddingProvider` 的 memory 侧调用
@@ -96,7 +96,7 @@
 - [x] 实现 `rumination.rs`：MicroRumination（Episode 写入部分）
 - [x] 扩展 `actor.rs`：处理 WriteEpisode / RunMicroRumination 命令
 - [x] 实现 `ipc/`：TCP loopback IPC 服务端/客户端骨架（动态端口 + endpoint 文件发现 + token 鉴权）
-- [ ] 扩展 `election/`：Follower 监控与自动接替
+- [x] 扩展 `election/`：Follower 监控与自动接替
 - [x] 各入口集成完整 Memory Actor 启动（CLI / Server 已显式启动并注入 Handle）
 - [x] runtime 集成点：turn 完成后通过 Handle 发送反刍命令
 - [x] 为 `tiangong-memory` 增加独立集成测试（runtime / ipc 主链路）

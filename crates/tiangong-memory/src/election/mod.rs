@@ -9,6 +9,7 @@
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -20,6 +21,7 @@ use crate::handle::MemoryHandle;
 use crate::ipc::{IpcBridge, spawn_memory_bridge};
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+const FOLLOWER_WATCH_INTERVAL: Duration = Duration::from_millis(250);
 const HEARTBEAT_TIMEOUT_SECS: i64 = 10;
 
 /// 进程类型（用于 Leader 选举，区分 GUI/CLI/Server）
@@ -53,6 +55,12 @@ pub struct LeaderInfo {
 
 /// 带运行时守卫的 Memory 句柄。
 pub struct ManagedMemory {
+    inner: Arc<Mutex<ManagedMemoryInner>>,
+    watcher_tx: Option<std_mpsc::Sender<()>>,
+    watcher_join: Option<thread::JoinHandle<()>>,
+}
+
+struct ManagedMemoryInner {
     handle: MemoryHandle,
     state: LeaderState,
     _bridge: Option<IpcBridge>,
@@ -69,19 +77,38 @@ struct LeaderLease {
 
 impl ManagedMemory {
     pub fn handle(&self) -> MemoryHandle {
-        self.handle.clone()
+        self.inner
+            .lock()
+            .expect("ManagedMemory inner lock poisoned")
+            .handle
+            .clone()
     }
 
-    pub fn state(&self) -> &LeaderState {
-        &self.state
+    pub fn state(&self) -> LeaderState {
+        self.inner
+            .lock()
+            .expect("ManagedMemory inner lock poisoned")
+            .state
+            .clone()
     }
 
     pub fn is_leader(&self) -> bool {
-        matches!(self.state, LeaderState::Leader)
+        matches!(self.state(), LeaderState::Leader)
     }
 }
 
 impl Drop for ManagedMemory {
+    fn drop(&mut self) {
+        if let Some(tx) = self.watcher_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(join_handle) = self.watcher_join.take() {
+            let _ = join_handle.join();
+        }
+    }
+}
+
+impl Drop for ManagedMemoryInner {
     fn drop(&mut self) {
         if let Some(tx) = self.heartbeat_tx.take() {
             let _ = tx.send(());
@@ -157,6 +184,30 @@ pub async fn start_or_connect_with_service(
     service: impl Into<String>,
 ) -> Result<ManagedMemory> {
     let service = service.into();
+    let inner =
+        start_or_connect_inner(workspace_id.clone(), process_type.clone(), service.clone()).await?;
+    let should_watch = matches!(inner.state, LeaderState::Follower { .. });
+    let inner = Arc::new(Mutex::new(inner));
+    let (watcher_tx, watcher_join) = if should_watch {
+        let (tx, join) =
+            spawn_follower_watcher(inner.clone(), workspace_id, process_type, service)?;
+        (Some(tx), Some(join))
+    } else {
+        (None, None)
+    };
+
+    Ok(ManagedMemory {
+        inner,
+        watcher_tx,
+        watcher_join,
+    })
+}
+
+async fn start_or_connect_inner(
+    workspace_id: Option<String>,
+    process_type: ProcessType,
+    service: String,
+) -> Result<ManagedMemoryInner> {
     ensure_memory_base_dir()?;
 
     for _ in 0..2 {
@@ -165,7 +216,7 @@ pub async fn start_or_connect_with_service(
             if is_leader_alive(&leader) {
                 match MemoryHandle::connect_tcp(&leader.service).await {
                     Ok(handle) => {
-                        return Ok(ManagedMemory {
+                        return Ok(ManagedMemoryInner {
                             handle,
                             state: LeaderState::Follower { pid: leader.pid },
                             _bridge: None,
@@ -190,7 +241,7 @@ pub async fn start_or_connect_with_service(
                 let bridge = spawn_memory_bridge(service.clone(), handle.clone())?;
                 let (heartbeat_tx, heartbeat_join) = spawn_heartbeat(lease.info.clone());
 
-                return Ok(ManagedMemory {
+                return Ok(ManagedMemoryInner {
                     handle,
                     state: LeaderState::Leader,
                     _bridge: Some(bridge),
@@ -206,7 +257,7 @@ pub async fn start_or_connect_with_service(
                         let handle = MemoryHandle::connect_tcp(&leader.service)
                             .await
                             .with_context(|| "连接选举完成后的 Memory leader 失败")?;
-                        return Ok(ManagedMemory {
+                        return Ok(ManagedMemoryInner {
                             handle,
                             state: LeaderState::Follower { pid: leader.pid },
                             _bridge: None,
@@ -224,6 +275,97 @@ pub async fn start_or_connect_with_service(
     }
 
     bail!("Memory leader 选举失败：未能建立 leader 或连接 follower")
+}
+
+fn spawn_follower_watcher(
+    inner: Arc<Mutex<ManagedMemoryInner>>,
+    workspace_id: Option<String>,
+    process_type: ProcessType,
+    service: String,
+) -> Result<(std_mpsc::Sender<()>, thread::JoinHandle<()>)> {
+    let (tx, rx) = std_mpsc::channel();
+    let join_handle = thread::Builder::new()
+        .name(format!("memory-follower-watch-{service}"))
+        .spawn(move || {
+            loop {
+                match rx.recv_timeout(FOLLOWER_WATCH_INTERVAL) {
+                    Ok(()) => break,
+                    Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(std_mpsc::RecvTimeoutError::Timeout) => {}
+                }
+
+                if matches!(
+                    inner
+                        .lock()
+                        .expect("ManagedMemory inner lock poisoned")
+                        .state,
+                    LeaderState::Leader
+                ) {
+                    break;
+                }
+
+                if !should_attempt_failover(workspace_id.as_deref()) {
+                    continue;
+                }
+
+                tracing::info!("Memory follower 检测到 leader 不可用，尝试自动接替");
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(err) => {
+                        tracing::warn!("创建 Memory failover runtime 失败: {}", err);
+                        continue;
+                    }
+                };
+
+                match rt.block_on(start_or_connect_inner(
+                    workspace_id.clone(),
+                    process_type.clone(),
+                    service.clone(),
+                )) {
+                    Ok(next_inner) => {
+                        let became_leader = matches!(next_inner.state, LeaderState::Leader);
+                        {
+                            let mut guard =
+                                inner.lock().expect("ManagedMemory inner lock poisoned");
+                            *guard = next_inner;
+                        }
+                        tracing::info!("Memory follower 自动接替完成");
+                        if became_leader {
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!("Memory follower 自动接替失败: {}", err);
+                    }
+                }
+            }
+        })
+        .with_context(|| "创建 Memory follower 监控线程失败")?;
+
+    Ok((tx, join_handle))
+}
+
+fn should_attempt_failover(workspace_id: Option<&str>) -> bool {
+    match read_leader_info() {
+        Ok(Some(leader)) => {
+            if ensure_workspace_compatible(&leader, workspace_id).is_err() {
+                return false;
+            }
+            if is_leader_alive(&leader) {
+                return false;
+            }
+            let _ = clear_stale_registration(&leader);
+            true
+        }
+        Ok(None) => true,
+        Err(err) => {
+            tracing::warn!("读取 Memory leader 信息失败，尝试重新选举: {}", err);
+            true
+        }
+    }
 }
 
 fn try_acquire_leader_lease(
@@ -486,6 +628,56 @@ mod tests {
         assert!(
             err.to_string().contains("workspace"),
             "错误信息应明确指出 workspace 不一致"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn follower_auto_promotes_when_leader_disappears() {
+        let home = TempDir::new().expect("创建 fake home 失败");
+        let _env = EnvGuard::enter(home.path());
+
+        let leader = start_or_connect(Some("ws-failover".to_string()), ProcessType::Cli)
+            .await
+            .expect("启动 leader 失败");
+        let follower = start_or_connect(Some("ws-failover".to_string()), ProcessType::Server)
+            .await
+            .expect("连接 follower 失败");
+
+        assert!(leader.is_leader(), "首个调用方应为 leader");
+        assert!(
+            matches!(follower.state(), LeaderState::Follower { .. }),
+            "第二个调用方应先作为 follower"
+        );
+
+        drop(leader);
+        for _ in 0..20 {
+            if follower.is_leader() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(follower.is_leader(), "leader 消失后 follower 应自动接替");
+
+        follower.handle().write_episode(
+            crate::types::Episode::new(
+                "session-failover".to_string(),
+                "promote follower".to_string(),
+                "promote follower after leader disappears".to_string(),
+                crate::types::EpisodeOutcome::Success,
+                vec!["failover".to_string(), "leader".to_string()],
+                vec!["memory_election".to_string()],
+                0.8,
+            ),
+            Some("ws-failover".to_string()),
+        );
+
+        let follower_handle = follower.handle();
+        let hits = wait_for_recall_hit(&follower_handle, "promote follower").await;
+        assert!(
+            hits.iter()
+                .any(|hit| hit.title.contains("promote follower")),
+            "自动接替后的 leader 应能继续写入与召回"
         );
     }
 
