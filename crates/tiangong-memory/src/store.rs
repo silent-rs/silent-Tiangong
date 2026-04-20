@@ -2,7 +2,7 @@
 //!
 //! Phase A：协调 SQLite 元数据库 + Injection 文件读写。
 //! Phase B：扩展为 SQLite + Tantivy 双层协调。
-//! Phase C：扩展为 SQLite + Tantivy + Qdrant 三层协调（recall 通过 RecallEngine）。
+//! Phase C：扩展为 SQLite + Tantivy + Vector 三层协调（recall 通过 RecallEngine）。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,10 +13,11 @@ use tiangong_llm::{EmbeddingProvider, OpenAiEmbeddingProvider, ProviderProtocol}
 use crate::command::InjectionLevel;
 use crate::db::MemoryDb;
 use crate::injection;
-use crate::options::MemoryEmbeddingConfig;
+use crate::options::{MemoryEmbeddingConfig, MemoryVectorMode};
 use crate::recall::RecallEngine;
 use crate::search::TantivyIndex;
 use crate::search::qdrant_search::QdrantIndex;
+use crate::search::vector::{EmbeddedFlatVectorIndex, VectorIndex};
 use crate::types::{
     Episode, MemoryKind, MemoryNode, MemoryScopeType, MemoryStatus, RecallAnchors, RecallHit,
 };
@@ -30,7 +31,7 @@ pub(crate) struct MemoryStore {
 }
 
 impl MemoryStore {
-    /// 打开存储（初始化 SQLite + Tantivy，无 Qdrant 降级为 BM25）
+    /// 打开存储（初始化 SQLite + Tantivy，无向量索引时降级为 BM25）
     pub(crate) fn open(workspace_id: Option<String>) -> Result<Self> {
         let base = memory_base_dir();
         let db = MemoryDb::open()?;
@@ -45,20 +46,23 @@ impl MemoryStore {
         })
     }
 
-    /// 启用 Qdrant 双引擎（Phase C，需要 Qdrant 已连接）
-    #[allow(dead_code)]
-    pub(crate) fn enable_qdrant(
+    /// 启用向量双引擎。
+    pub(crate) fn enable_vector_index(
         &mut self,
-        qdrant: QdrantIndex,
+        vector_index: Box<dyn VectorIndex>,
         embedding: Arc<dyn EmbeddingProvider>,
     ) {
-        self.recall_engine = RecallEngine::dual(qdrant, embedding);
+        self.recall_engine = RecallEngine::dual(vector_index, embedding);
     }
 
-    /// 基于上层传入的 embedding 配置启用 Qdrant。
+    /// 基于上层传入的 embedding 配置启用向量索引。
     ///
     /// 失败时仅记录 warning，Memory 自动降级为 BM25-only。
-    pub(crate) async fn try_enable_qdrant(&mut self, embedding: Option<&MemoryEmbeddingConfig>) {
+    pub(crate) async fn try_enable_vector(
+        &mut self,
+        embedding: Option<&MemoryEmbeddingConfig>,
+        vector_mode: MemoryVectorMode,
+    ) {
         let Some(embedding) = embedding else {
             tracing::debug!("Memory embedding 未配置，使用 BM25-only 召回");
             return;
@@ -66,28 +70,58 @@ impl MemoryStore {
 
         if embedding.protocol != ProviderProtocol::OpenAiCompatible {
             tracing::warn!(
-                "Memory embedding 仅支持 OpenAI 兼容协议，当前协议为 {}，跳过 Qdrant",
+                "Memory embedding 仅支持 OpenAI 兼容协议，当前协议为 {}，跳过向量层",
                 embedding.protocol.as_str()
             );
             return;
         }
 
         if embedding.dimension == 0 {
-            tracing::warn!("Memory embedding dimension 为 0，跳过 Qdrant");
+            tracing::warn!("Memory embedding dimension 为 0，跳过向量层");
             return;
         }
 
-        let qdrant = match QdrantIndex::connect(embedding.dimension).await {
-            Ok(index) => index,
-            Err(err) => {
-                tracing::warn!("Memory Qdrant 连接失败，使用 BM25-only 召回: {err}");
-                return;
-            }
+        let vector_mode = match vector_mode {
+            MemoryVectorMode::Auto => MemoryVectorMode::Embedded,
+            mode => mode,
         };
-        if let Err(err) = qdrant.ensure_collection().await {
-            tracing::warn!("Memory Qdrant collection 初始化失败，使用 BM25-only 召回: {err}");
+        if vector_mode == MemoryVectorMode::Disabled {
+            tracing::info!("Memory 向量层已禁用，使用 BM25-only 召回");
             return;
         }
+
+        let vector_index: Box<dyn VectorIndex> = match vector_mode {
+            MemoryVectorMode::Embedded => {
+                match EmbeddedFlatVectorIndex::open(embedding.dimension) {
+                    Ok(index) => Box::new(index),
+                    Err(err) => {
+                        tracing::warn!("Memory 内置向量索引初始化失败，使用 BM25-only 召回: {err}");
+                        return;
+                    }
+                }
+            }
+            MemoryVectorMode::ExternalQdrant => {
+                match QdrantIndex::connect(embedding.dimension).await {
+                    Ok(index) => Box::new(index),
+                    Err(err) => {
+                        tracing::warn!("Memory Qdrant 连接失败，使用 BM25-only 召回: {err}");
+                        return;
+                    }
+                }
+            }
+            MemoryVectorMode::Auto | MemoryVectorMode::Disabled => unreachable!(),
+        };
+
+        if let Err(err) = vector_index.ensure_ready().await {
+            tracing::warn!("Memory 向量索引初始化失败，使用 BM25-only 召回: {err}");
+            return;
+        }
+
+        let backend = match vector_mode {
+            MemoryVectorMode::Embedded => "embedded_flat",
+            MemoryVectorMode::ExternalQdrant => "external_qdrant",
+            MemoryVectorMode::Auto | MemoryVectorMode::Disabled => unreachable!(),
+        };
 
         let embedding_provider = Arc::new(OpenAiEmbeddingProvider::new(
             &embedding.base_url,
@@ -95,13 +129,21 @@ impl MemoryStore {
             &embedding.model,
             embedding.dimension,
         ));
-        self.enable_qdrant(qdrant, embedding_provider);
+        self.enable_vector_index(vector_index, embedding_provider);
         tracing::info!(
-            "Memory Qdrant 双引擎召回已启用: model={} dimension={} timeout_ms={}",
+            "Memory 向量双引擎召回已启用: backend={} model={} dimension={} timeout_ms={}",
+            backend,
             embedding.model,
             embedding.dimension,
             embedding.timeout_ms
         );
+    }
+
+    /// 显式启用外部 Qdrant，供后续兼容接口使用。
+    #[allow(dead_code)]
+    pub(crate) async fn try_enable_qdrant(&mut self, embedding: Option<&MemoryEmbeddingConfig>) {
+        self.try_enable_vector(embedding, MemoryVectorMode::ExternalQdrant)
+            .await;
     }
 
     /// 加载三级注入上下文
@@ -122,7 +164,7 @@ impl MemoryStore {
     ) -> Result<()> {
         let node = self.write_episode_metadata(episode, workspace_id)?;
         if let Err(err) = self.recall_engine.upsert_node(&node).await {
-            tracing::warn!("Qdrant 向量写入失败（非致命）: {err}");
+            tracing::warn!("Memory 向量写入失败（非致命）: {err}");
         }
         Ok(())
     }

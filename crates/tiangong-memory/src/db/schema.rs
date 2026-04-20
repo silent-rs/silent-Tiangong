@@ -64,4 +64,17 @@ CREATE TABLE IF NOT EXISTS evidence (
     evidence_path TEXT NOT NULL,
     byte_size     INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS memory_vectors (
+    node_id    TEXT PRIMARY KEY REFERENCES memory_nodes(id),
+    title      TEXT NOT NULL,
+    summary    TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    importance REAL NOT NULL DEFAULT 0.5,
+    dimension  INTEGER NOT NULL,
+    vector     TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_vectors_dimension ON memory_vectors(dimension);
 "#;

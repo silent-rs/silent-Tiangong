@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
 use crate::types::{
-    Decision, Entity, EntityType, Episode, MemoryKind, MemoryScopeType, MemoryStatus,
+    Decision, Entity, EntityType, Episode, MemoryKind, MemoryScopeType, MemoryStatus, VectorPoint,
 };
 
 use super::schema;
@@ -382,6 +382,70 @@ impl MemoryDb {
         Ok(())
     }
 
+    /// 写入或更新内置向量索引点。
+    pub(crate) fn upsert_vector(&self, point: &VectorPoint) -> Result<()> {
+        let vector_json = serde_json::to_string(&point.vector)?;
+        let now = chrono::Local::now().naive_local().to_string();
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO memory_vectors
+                 (node_id, title, summary, kind, importance, dimension, vector, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    point.node_id,
+                    point.title,
+                    point.summary,
+                    memory_kind_to_str(point.kind.clone()),
+                    point.importance,
+                    point.vector.len() as i64,
+                    vector_json,
+                    now,
+                ],
+            )
+            .with_context(|| "写入 memory_vectors 失败")?;
+        Ok(())
+    }
+
+    /// 加载指定维度的全部向量点，供内置 flat search 使用。
+    pub(crate) fn list_vectors(&self, dimension: usize) -> Result<Vec<VectorPoint>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT node_id, title, summary, kind, importance, vector
+             FROM memory_vectors
+             WHERE dimension = ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![dimension as i64], |row| {
+            let kind: String = row.get(3)?;
+            let vector_json: String = row.get(5)?;
+            let vector: Vec<f32> = serde_json::from_str(&vector_json).unwrap_or_default();
+            Ok(VectorPoint {
+                node_id: row.get(0)?,
+                title: row.get(1)?,
+                summary: row.get(2)?,
+                kind: str_to_memory_kind(&kind),
+                importance: row.get(4)?,
+                vector,
+            })
+        })?;
+
+        let mut points = Vec::new();
+        for row in rows {
+            points.push(row.with_context(|| "读取 memory_vectors 行失败")?);
+        }
+        Ok(points)
+    }
+
+    /// 删除内置向量索引点。
+    #[allow(dead_code)]
+    pub(crate) fn delete_vector(&self, node_id: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM memory_vectors WHERE node_id = ?1",
+                rusqlite::params![node_id],
+            )
+            .with_context(|| "删除 memory_vectors 记录失败")?;
+        Ok(())
+    }
+
     #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     fn upsert_memory_node(
@@ -460,6 +524,15 @@ fn memory_kind_to_str(kind: MemoryKind) -> &'static str {
         MemoryKind::Entity => "entity",
         MemoryKind::Decision => "decision",
         MemoryKind::Evidence => "evidence",
+    }
+}
+
+fn str_to_memory_kind(kind: &str) -> MemoryKind {
+    match kind {
+        "entity" => MemoryKind::Entity,
+        "decision" => MemoryKind::Decision,
+        "evidence" => MemoryKind::Evidence,
+        _ => MemoryKind::Episode,
     }
 }
 

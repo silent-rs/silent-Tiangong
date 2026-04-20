@@ -1,40 +1,35 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use qdrant_client::Qdrant;
 use serial_test::serial;
 use tempfile::TempDir;
 use tiangong_llm::ProviderProtocol;
 use tiangong_memory::{
-    Episode, EpisodeOutcome, MemoryEmbeddingConfig, MemoryOptions, RecallAnchors,
+    Episode, EpisodeOutcome, MemoryEmbeddingConfig, MemoryOptions, MemoryVectorMode, RecallAnchors,
     start_with_options, workspace_id_from_path,
 };
 
 struct EnvGuard {
     prev_home: Option<std::ffi::OsString>,
     prev_userprofile: Option<std::ffi::OsString>,
-    prev_collection: Option<std::ffi::OsString>,
     prev_cwd: PathBuf,
 }
 
 impl EnvGuard {
-    fn enter(home: &Path, cwd: &Path, collection: &str) -> Self {
+    fn enter(home: &Path, cwd: &Path) -> Self {
         let prev_home = std::env::var_os("HOME");
         let prev_userprofile = std::env::var_os("USERPROFILE");
-        let prev_collection = std::env::var_os("TIANGONG_MEMORY_QDRANT_COLLECTION");
         let prev_cwd = std::env::current_dir().expect("读取当前工作目录失败");
 
         unsafe {
             std::env::set_var("HOME", home);
             std::env::set_var("USERPROFILE", home);
-            std::env::set_var("TIANGONG_MEMORY_QDRANT_COLLECTION", collection);
         }
         std::env::set_current_dir(cwd).expect("切换当前工作目录失败");
 
         Self {
             prev_home,
             prev_userprofile,
-            prev_collection,
             prev_cwd,
         }
     }
@@ -51,10 +46,6 @@ impl Drop for EnvGuard {
             match &self.prev_userprofile {
                 Some(value) => std::env::set_var("USERPROFILE", value),
                 None => std::env::remove_var("USERPROFILE"),
-            }
-            match &self.prev_collection {
-                Some(value) => std::env::set_var("TIANGONG_MEMORY_QDRANT_COLLECTION", value),
-                None => std::env::remove_var("TIANGONG_MEMORY_QDRANT_COLLECTION"),
             }
         }
     }
@@ -77,23 +68,6 @@ fn embedding_config_from_tiangong_config() -> Option<MemoryEmbeddingConfig> {
         timeout_ms: endpoint.timeout_ms,
         dimension,
     })
-}
-
-async fn prepare_qdrant_collection(collection: &str) -> Option<Qdrant> {
-    let url = std::env::var("QDRANT_URL").unwrap_or_else(|_| "http://127.0.0.1:6334".to_string());
-    let client = match Qdrant::from_url(&url).build() {
-        Ok(client) => client,
-        Err(err) => {
-            println!("[skip] 无法创建 Qdrant client: url={url}, error={err}");
-            return None;
-        }
-    };
-    if let Err(err) = client.list_collections().await {
-        println!("[skip] Qdrant 不可用: url={url}, error={err}");
-        return None;
-    }
-    let _ = client.delete_collection(collection).await;
-    Some(client)
 }
 
 async fn wait_for_expected_hit(
@@ -131,8 +105,8 @@ async fn wait_for_expected_hit(
 
 #[tokio::test(flavor = "current_thread")]
 #[serial]
-#[ignore = "需要真实 ~/.tiangong/models.json embedding 配置和 Qdrant 服务；使用 --ignored --nocapture 运行"]
-async fn hybrid_retrieval_loads_configured_embedding_and_recalls_semantic_episode() {
+#[ignore = "需要真实 ~/.tiangong/models.json embedding 配置；使用 --ignored --nocapture 运行"]
+async fn embedded_hybrid_retrieval_loads_configured_embedding_and_recalls_semantic_episode() {
     let Some(embedding) = embedding_config_from_tiangong_config() else {
         println!("[skip] 未在配置文件中找到 embedding 路由或 options.dimension");
         return;
@@ -145,24 +119,21 @@ async fn hybrid_retrieval_loads_configured_embedding_and_recalls_semantic_episod
         return;
     }
 
-    let collection = format!("tiangong_memory_test_{}", scru128::new());
-    let Some(qdrant) = prepare_qdrant_collection(&collection).await else {
-        return;
-    };
-
     let home = TempDir::new().expect("创建 fake home 失败");
     let workspace = TempDir::new().expect("创建 workspace 失败");
     let workspace_path = workspace.path().to_path_buf();
     let workspace_id = workspace_id_from_path(&workspace_path);
-    let _env = EnvGuard::enter(home.path(), &workspace_path, &collection);
+    let _env = EnvGuard::enter(home.path(), &workspace_path);
 
     println!(
-        "[config] embedding_model={} dimension={} collection={}",
-        embedding.model, embedding.dimension, collection
+        "[config] embedding_model={} dimension={} backend=embedded_flat",
+        embedding.model, embedding.dimension
     );
 
     let handle = start_with_options(
-        MemoryOptions::new(Some(workspace_id.clone())).with_embedding(embedding),
+        MemoryOptions::new(Some(workspace_id.clone()))
+            .with_embedding(embedding)
+            .with_vector_mode(MemoryVectorMode::Embedded),
     )
     .expect("启动 memory 失败");
 
@@ -195,10 +166,9 @@ async fn hybrid_retrieval_loads_configured_embedding_and_recalls_semantic_episod
 
     let hits = wait_for_expected_hit(&handle, "embedding dimension", &expected_id).await;
     handle.shutdown().await;
-    let _ = qdrant.delete_collection(&collection).await;
 
     assert!(
         hits.iter().any(|hit| hit.node_id == expected_id),
-        "混合检索应通过配置的 embedding + Qdrant 召回语义相关 Episode"
+        "混合检索应通过配置的 embedding + 内置向量索引召回语义相关 Episode"
     );
 }

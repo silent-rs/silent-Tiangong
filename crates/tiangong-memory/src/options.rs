@@ -9,6 +9,7 @@ use tiangong_llm::ProviderProtocol;
 pub struct MemoryOptions {
     pub workspace_id: Option<String>,
     pub embedding: Option<MemoryEmbeddingConfig>,
+    pub vector_mode: MemoryVectorMode,
 }
 
 impl MemoryOptions {
@@ -16,11 +17,17 @@ impl MemoryOptions {
         Self {
             workspace_id,
             embedding: None,
+            vector_mode: MemoryVectorMode::default(),
         }
     }
 
     pub fn with_embedding(mut self, embedding: MemoryEmbeddingConfig) -> Self {
         self.embedding = Some(embedding);
+        self
+    }
+
+    pub fn with_vector_mode(mut self, vector_mode: MemoryVectorMode) -> Self {
+        self.vector_mode = vector_mode;
         self
     }
 }
@@ -33,4 +40,17 @@ pub struct MemoryEmbeddingConfig {
     pub protocol: ProviderProtocol,
     pub timeout_ms: u64,
     pub dimension: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MemoryVectorMode {
+    /// 有 embedding 配置时默认使用内置 flat 向量索引。
+    #[default]
+    Auto,
+    /// 禁用向量层，仅使用 SQLite + Tantivy。
+    Disabled,
+    /// 使用内置 SQLite flat 向量索引。
+    Embedded,
+    /// 使用外部 Qdrant 服务。
+    ExternalQdrant,
 }

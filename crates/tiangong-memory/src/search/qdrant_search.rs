@@ -10,7 +10,8 @@ use qdrant_client::qdrant::{
     VectorParamsBuilder,
 };
 
-use crate::types::{MemoryKind, MemoryNode, RecallHit};
+use crate::search::vector::VectorIndex;
+use crate::types::{MemoryKind, RecallHit, VectorPoint};
 
 const DEFAULT_COLLECTION_NAME: &str = "tiangong_memory";
 const PAYLOAD_FIELD_ID: &str = "node_id";
@@ -54,7 +55,7 @@ impl QdrantIndex {
 
     /// 确保 collection 已创建（幂等）
     #[allow(dead_code)]
-    pub(crate) async fn ensure_collection(&self) -> Result<()> {
+    async fn ensure_collection(&self) -> Result<()> {
         let collections = self
             .client
             .list_collections()
@@ -86,56 +87,54 @@ impl QdrantIndex {
         Ok(())
     }
 
-    /// 将 MemoryNode 的向量 upsert 到 Qdrant
+    /// 将向量点 upsert 到 Qdrant
     #[allow(dead_code)]
-    pub(crate) async fn upsert_node(&self, node: &MemoryNode, vector: Vec<f32>) -> Result<()> {
+    async fn upsert_point(&self, point: VectorPoint) -> Result<()> {
         use qdrant_client::qdrant::value::Kind;
         use qdrant_client::qdrant::{Value, Vectors};
         use std::collections::HashMap;
 
+        let node_id = point.node_id.clone();
         let mut payload: HashMap<String, Value> = HashMap::new();
         payload.insert(
             PAYLOAD_FIELD_ID.to_string(),
             Value {
-                kind: Some(Kind::StringValue(node.id.clone())),
+                kind: Some(Kind::StringValue(node_id.clone())),
             },
         );
         payload.insert(
             PAYLOAD_FIELD_TITLE.to_string(),
             Value {
-                kind: Some(Kind::StringValue(node.title.clone())),
+                kind: Some(Kind::StringValue(point.title)),
             },
         );
         payload.insert(
             PAYLOAD_FIELD_SUMMARY.to_string(),
             Value {
-                kind: Some(Kind::StringValue(node.summary.clone())),
+                kind: Some(Kind::StringValue(point.summary)),
             },
         );
         payload.insert(
             PAYLOAD_FIELD_IMPORTANCE.to_string(),
             Value {
-                kind: Some(Kind::DoubleValue(node.importance as f64)),
+                kind: Some(Kind::DoubleValue(point.importance)),
             },
         );
         payload.insert(
             PAYLOAD_FIELD_KIND.to_string(),
             Value {
-                kind: Some(Kind::StringValue(format!("{:?}", node.kind))),
-            },
-        );
-        payload.insert(
-            PAYLOAD_FIELD_CREATED_AT.to_string(),
-            Value {
-                kind: Some(Kind::StringValue(node.created_at.clone())),
+                kind: Some(Kind::StringValue(format!("{:?}", point.kind))),
             },
         );
 
-        let point_id = hash_id_to_u64(&node.id);
-        let point = PointStruct::new(point_id, Vectors::from(vector), payload);
+        let point_id = hash_id_to_u64(&node_id);
+        let qdrant_point = PointStruct::new(point_id, Vectors::from(point.vector), payload);
 
         self.client
-            .upsert_points(UpsertPointsBuilder::new(&self.collection_name, vec![point]))
+            .upsert_points(UpsertPointsBuilder::new(
+                &self.collection_name,
+                vec![qdrant_point],
+            ))
             .await
             .context("Qdrant upsert 失败")?;
 
@@ -144,11 +143,7 @@ impl QdrantIndex {
 
     /// 语义向量搜索
     #[allow(dead_code)]
-    pub(crate) async fn search(
-        &self,
-        query_vector: Vec<f32>,
-        limit: usize,
-    ) -> Result<Vec<RecallHit>> {
+    async fn search_points(&self, query_vector: Vec<f32>, limit: usize) -> Result<Vec<RecallHit>> {
         use qdrant_client::qdrant::value::Kind;
 
         let results = self
@@ -192,6 +187,26 @@ impl QdrantIndex {
             .collect();
 
         Ok(hits)
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl VectorIndex for QdrantIndex {
+    async fn ensure_ready(&self) -> Result<()> {
+        self.ensure_collection().await
+    }
+
+    async fn upsert(&self, point: VectorPoint) -> Result<()> {
+        self.upsert_point(point).await
+    }
+
+    async fn search(&self, query_vector: Vec<f32>, limit: usize) -> Result<Vec<RecallHit>> {
+        self.search_points(query_vector, limit).await
+    }
+
+    async fn delete(&self, _node_id: &str) -> Result<()> {
+        // Qdrant 删除将在后续归档链路中补齐；当前归档仍以 SQLite/Tantivy 为主。
+        Ok(())
     }
 }
 

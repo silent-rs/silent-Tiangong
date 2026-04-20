@@ -169,6 +169,17 @@ pub struct RecallHit {
     pub depth1_loaded: bool,
 }
 
+/// 向量索引点。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorPoint {
+    pub node_id: String,
+    pub title: String,
+    pub summary: String,
+    pub kind: MemoryKind,
+    pub importance: f64,
+    pub vector: Vec<f32>,
+}
+
 /// 展开的记忆节点（Phase C 实现）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpandedMemory {

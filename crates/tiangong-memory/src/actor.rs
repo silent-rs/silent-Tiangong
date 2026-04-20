@@ -37,7 +37,7 @@ impl MemoryActor {
     /// 启动 Actor 消息循环
     pub(crate) async fn run(mut self) {
         self.store
-            .try_enable_qdrant(self.options.embedding.as_ref())
+            .try_enable_vector(self.options.embedding.as_ref(), self.options.vector_mode)
             .await;
         tracing::info!("Memory Actor 已启动");
         loop {

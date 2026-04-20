@@ -7,6 +7,7 @@ pub(crate) mod embedding;
 pub(crate) mod qdrant_search;
 pub(crate) mod reranker;
 pub(crate) mod tantivy_search;
+pub(crate) mod vector;
 
 #[allow(unused_imports)]
 pub(crate) use embedding::MemoryEmbeddingClient;

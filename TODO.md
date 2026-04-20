@@ -63,12 +63,13 @@
 - [ ] 为 GUI / 桌面入口补齐显式 Memory 启动与 Handle 注入
 - [ ] 设计并实现按 workspace 管理的 runtime / handle registry，避免后续多工作区冲突
 - [x] 实现 `search/embedding.rs`，封装 `EmbeddingProvider` 的 memory 侧调用
-- [ ] 打通 Episode -> Embedding -> Qdrant upsert 的主写链路
-- [ ] 在运行时中增加 Qdrant 启用配置与降级策略
+- [x] 打通 Episode -> Embedding -> 内置向量索引 upsert 的主写链路
+- [x] 增加内置向量索引默认启用与 Qdrant external 兼容降级策略
 - [ ] 实现真正的 `RecallAnchors` 提取，而不是只使用原始 query
 - [ ] 完成 `LoadDepth2` 的定向展开能力
 - [ ] 将 `process_meso()` 从关键词统计升级为真实的 `Entity / Decision` 提炼
-- [ ] 为 Memory 增加更多集成测试，覆盖多进程 IPC / leader 切换 / Qdrant 写链路
+- [x] 为 Memory 增加更多集成测试，覆盖多进程 IPC / leader 切换 / embedded 混合检索主链路
+- [ ] 为 Memory 增加 external Qdrant 专项集成测试（可选，需外部服务）
 
 ### Memory Phase A：Injection 层 + 独立 crate 骨架 + SQLite 元数据库 ✅
 
@@ -101,13 +102,15 @@
 - [x] runtime 集成点：turn 完成后通过 Handle 发送反刍命令
 - [x] 为 `tiangong-memory` 增加独立集成测试（runtime / ipc 主链路）
 
-### Memory Phase C：Qdrant 向量检索 + 双引擎召回 + Recall 注入
+### Memory Phase C：内置向量检索 + 双引擎召回 + Recall 注入
 
 - [x] 引入 `qdrant-client = "1"` 依赖
-- [x] 实现 `search/qdrant.rs`：collection 管理、point upsert、语义查询（骨架已落地，未接入主写链路）
+- [x] 实现 `search/vector.rs`：内置 SQLite flat 向量索引与 `VectorIndex` 抽象
+- [x] 实现 `search/qdrant.rs`：collection 管理、point upsert、语义查询（作为 external backend 兼容路径）
 - [x] 实现 `search/embedding.rs`：封装 EmbeddingProvider 调用
 - [x] 实现 `search/reranker.rs`：分数归一化、时间衰减、重要度加权
-- [x] 实现 `search/mod.rs`：双引擎召回统一入口（当前为模块入口与 BM25 主路径）
-- [x] 实现 `recall.rs`：RecallAnchors 提取 + 双引擎召回 + 定向展开（当前仅 BM25-only 主路径可用，Depth2 未完成）
+- [x] 实现 `search/mod.rs`：双引擎召回统一入口（BM25 + Vector）
+- [x] 实现 `recall.rs`：RecallAnchors 提取 + 双引擎召回 + 定向展开（Depth2 未完成）
+- [x] 打通 `Episode -> Embedding -> EmbeddedFlatVectorIndex -> Hybrid Recall` 主链路
 - [ ] 扩展 `rumination.rs`：MesoRumination（Entity/Decision 提取）
 - [x] 修改 `prompt/assembler.rs`：Recall 结果注入到 Prompt
