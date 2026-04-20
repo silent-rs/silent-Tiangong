@@ -15,7 +15,7 @@ use crate::writer;
 ///
 /// 1. 若 turn 包含工具调用，提取 Episode 并写入 SQLite + Tantivy
 /// 2. 更新 Session Injection（Phase C 实现）
-pub(crate) fn process_micro(
+pub(crate) async fn process_micro(
     store: &mut MemoryStore,
     turn_result: &TurnResult,
     workspace_id: Option<&str>,
@@ -24,6 +24,7 @@ pub(crate) fn process_micro(
     if let Some(episode) = writer::extract_episode(turn_result) {
         store
             .write_episode(episode, workspace_id)
+            .await
             .unwrap_or_else(|e| {
                 tracing::warn!("Micro 反刍：写入 Episode 失败: {}", e);
             });

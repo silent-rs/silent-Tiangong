@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 
 use crate::command::MemoryCommand;
 use crate::handle::MemoryHandle;
+use crate::options::MemoryOptions;
 use crate::rumination;
 use crate::store::MemoryStore;
 
@@ -15,23 +16,29 @@ pub(crate) struct MemoryActor {
     rx: mpsc::Receiver<MemoryCommand>,
     store: MemoryStore,
     workspace_id: Option<String>,
+    options: MemoryOptions,
 }
 
 impl MemoryActor {
     pub(crate) fn new(
         rx: mpsc::Receiver<MemoryCommand>,
         store: MemoryStore,
-        workspace_id: Option<String>,
+        options: MemoryOptions,
     ) -> Self {
+        let workspace_id = options.workspace_id.clone();
         Self {
             rx,
             store,
             workspace_id,
+            options,
         }
     }
 
     /// 启动 Actor 消息循环
     pub(crate) async fn run(mut self) {
+        self.store
+            .try_enable_qdrant(self.options.embedding.as_ref())
+            .await;
         tracing::info!("Memory Actor 已启动");
         loop {
             match self.rx.recv().await {
@@ -66,7 +73,11 @@ impl MemoryActor {
                 episode,
                 workspace_id,
             } => {
-                if let Err(e) = self.store.write_episode(episode, workspace_id.as_deref()) {
+                if let Err(e) = self
+                    .store
+                    .write_episode(episode, workspace_id.as_deref())
+                    .await
+                {
                     tracing::warn!("Memory 写入 Episode 失败: {}", e);
                 }
             }
@@ -103,7 +114,8 @@ impl MemoryActor {
                     .workspace_id
                     .as_deref()
                     .or(self.workspace_id.as_deref());
-                if let Err(e) = rumination::process_micro(&mut self.store, &turn_result, wid) {
+                if let Err(e) = rumination::process_micro(&mut self.store, &turn_result, wid).await
+                {
                     tracing::warn!("Micro 反刍失败: {}", e);
                 }
             }
@@ -138,14 +150,22 @@ impl MemoryActor {
 /// 内部在独立线程 + current_thread runtime + LocalSet 中运行 Actor，
 /// 不要求 MemoryActor 或 MemoryStore 实现 Send/Sync。
 pub fn start_memory(workspace_id: Option<String>) -> anyhow::Result<MemoryHandle> {
+    start_memory_with_options(MemoryOptions::new(workspace_id))
+}
+
+/// 使用显式配置启动 Memory 系统。
+///
+/// 上层可通过 `tiangong-config` 读取配置文件，再将解析后的 embedding
+/// 端点传入这里。Memory 自身不负责重复解析全局配置文件。
+pub fn start_memory_with_options(options: MemoryOptions) -> anyhow::Result<MemoryHandle> {
     let (tx, rx) = mpsc::channel(256);
 
-    let store = MemoryStore::open(workspace_id.clone()).map_err(|e| {
+    let store = MemoryStore::open(options.workspace_id.clone()).map_err(|e| {
         tracing::error!("Memory Store 初始化失败: {}", e);
         e
     })?;
 
-    let actor = MemoryActor::new(rx, store, workspace_id);
+    let actor = MemoryActor::new(rx, store, options);
 
     std::thread::Builder::new()
         .name("tiangong-memory-actor".into())

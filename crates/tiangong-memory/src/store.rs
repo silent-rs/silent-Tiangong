@@ -8,11 +8,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use tiangong_llm::EmbeddingProvider;
+use tiangong_llm::{EmbeddingProvider, OpenAiEmbeddingProvider, ProviderProtocol};
 
 use crate::command::InjectionLevel;
 use crate::db::MemoryDb;
 use crate::injection;
+use crate::options::MemoryEmbeddingConfig;
 use crate::recall::RecallEngine;
 use crate::search::TantivyIndex;
 use crate::search::qdrant_search::QdrantIndex;
@@ -54,6 +55,55 @@ impl MemoryStore {
         self.recall_engine = RecallEngine::dual(qdrant, embedding);
     }
 
+    /// 基于上层传入的 embedding 配置启用 Qdrant。
+    ///
+    /// 失败时仅记录 warning，Memory 自动降级为 BM25-only。
+    pub(crate) async fn try_enable_qdrant(&mut self, embedding: Option<&MemoryEmbeddingConfig>) {
+        let Some(embedding) = embedding else {
+            tracing::debug!("Memory embedding 未配置，使用 BM25-only 召回");
+            return;
+        };
+
+        if embedding.protocol != ProviderProtocol::OpenAiCompatible {
+            tracing::warn!(
+                "Memory embedding 仅支持 OpenAI 兼容协议，当前协议为 {}，跳过 Qdrant",
+                embedding.protocol.as_str()
+            );
+            return;
+        }
+
+        if embedding.dimension == 0 {
+            tracing::warn!("Memory embedding dimension 为 0，跳过 Qdrant");
+            return;
+        }
+
+        let qdrant = match QdrantIndex::connect(embedding.dimension).await {
+            Ok(index) => index,
+            Err(err) => {
+                tracing::warn!("Memory Qdrant 连接失败，使用 BM25-only 召回: {err}");
+                return;
+            }
+        };
+        if let Err(err) = qdrant.ensure_collection().await {
+            tracing::warn!("Memory Qdrant collection 初始化失败，使用 BM25-only 召回: {err}");
+            return;
+        }
+
+        let embedding_provider = Arc::new(OpenAiEmbeddingProvider::new(
+            &embedding.base_url,
+            &embedding.api_key,
+            &embedding.model,
+            embedding.dimension,
+        ));
+        self.enable_qdrant(qdrant, embedding_provider);
+        tracing::info!(
+            "Memory Qdrant 双引擎召回已启用: model={} dimension={} timeout_ms={}",
+            embedding.model,
+            embedding.dimension,
+            embedding.timeout_ms
+        );
+    }
+
     /// 加载三级注入上下文
     pub(crate) fn load_injection(
         &self,
@@ -65,11 +115,23 @@ impl MemoryStore {
     }
 
     /// 写入 Episode（SQLite + Tantivy），workspace_id 由调用方显式传入
-    pub(crate) fn write_episode(
+    pub(crate) async fn write_episode(
         &mut self,
         episode: Episode,
         workspace_id: Option<&str>,
     ) -> Result<()> {
+        let node = self.write_episode_metadata(episode, workspace_id)?;
+        if let Err(err) = self.recall_engine.upsert_node(&node).await {
+            tracing::warn!("Qdrant 向量写入失败（非致命）: {err}");
+        }
+        Ok(())
+    }
+
+    fn write_episode_metadata(
+        &mut self,
+        episode: Episode,
+        workspace_id: Option<&str>,
+    ) -> Result<MemoryNode> {
         // 优先使用调用方传入的 workspace_id，回退到 store 启动时的值
         let wid = workspace_id.or(self.workspace_id.as_deref());
         // 1. 写入 SQLite（携带 workspace_id，保证 scope_id 正确落库）
@@ -84,7 +146,7 @@ impl MemoryStore {
 
         // Phase C：Qdrant upsert 在 actor 层触发（异步，通过 RunEmbedAndUpsert 命令）
 
-        Ok(())
+        Ok(node)
     }
 
     /// 渐进式召回（自动选择单引擎或双引擎）

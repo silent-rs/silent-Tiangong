@@ -12,7 +12,7 @@ use qdrant_client::qdrant::{
 
 use crate::types::{MemoryKind, MemoryNode, RecallHit};
 
-const COLLECTION_NAME: &str = "tiangong_memory";
+const DEFAULT_COLLECTION_NAME: &str = "tiangong_memory";
 const PAYLOAD_FIELD_ID: &str = "node_id";
 const PAYLOAD_FIELD_TITLE: &str = "title";
 const PAYLOAD_FIELD_SUMMARY: &str = "summary";
@@ -26,6 +26,7 @@ const PAYLOAD_FIELD_CREATED_AT: &str = "created_at";
 pub(crate) struct QdrantIndex {
     client: Qdrant,
     dimension: usize,
+    collection_name: String,
 }
 
 impl QdrantIndex {
@@ -38,7 +39,17 @@ impl QdrantIndex {
             .build()
             .with_context(|| format!("连接 Qdrant 失败: {url}"))?;
 
-        Ok(Self { client, dimension })
+        let collection_name = std::env::var("TIANGONG_MEMORY_QDRANT_COLLECTION")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| DEFAULT_COLLECTION_NAME.to_string());
+
+        Ok(Self {
+            client,
+            dimension,
+            collection_name,
+        })
     }
 
     /// 确保 collection 已创建（幂等）
@@ -53,20 +64,22 @@ impl QdrantIndex {
         let exists = collections
             .collections
             .iter()
-            .any(|c| c.name == COLLECTION_NAME);
+            .any(|c| c.name == self.collection_name);
 
         if !exists {
             self.client
                 .create_collection(
-                    CreateCollectionBuilder::new(COLLECTION_NAME).vectors_config(
+                    CreateCollectionBuilder::new(&self.collection_name).vectors_config(
                         VectorParamsBuilder::new(self.dimension as u64, Distance::Cosine),
                     ),
                 )
                 .await
-                .with_context(|| format!("创建 Qdrant collection '{COLLECTION_NAME}' 失败"))?;
+                .with_context(|| {
+                    format!("创建 Qdrant collection '{}' 失败", self.collection_name)
+                })?;
             tracing::info!(
                 "Qdrant collection '{}' 已创建（dimension={}）",
-                COLLECTION_NAME,
+                self.collection_name,
                 self.dimension
             );
         }
@@ -122,7 +135,7 @@ impl QdrantIndex {
         let point = PointStruct::new(point_id, Vectors::from(vector), payload);
 
         self.client
-            .upsert_points(UpsertPointsBuilder::new(COLLECTION_NAME, vec![point]))
+            .upsert_points(UpsertPointsBuilder::new(&self.collection_name, vec![point]))
             .await
             .context("Qdrant upsert 失败")?;
 
@@ -141,7 +154,7 @@ impl QdrantIndex {
         let results = self
             .client
             .search_points(
-                SearchPointsBuilder::new(COLLECTION_NAME, query_vector, limit as u64)
+                SearchPointsBuilder::new(&self.collection_name, query_vector, limit as u64)
                     .with_payload(true),
             )
             .await

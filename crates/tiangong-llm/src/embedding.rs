@@ -59,7 +59,7 @@ impl OpenAiEmbeddingProvider {
     /// - `model`: 模型名（如 `text-embedding-3-small`）
     /// - `dimension`: 向量维度（text-embedding-3-small=1536, ada-002=1536）
     pub fn new(base_url: &str, api_key: &str, model: &str, dimension: usize) -> Self {
-        let base_url = base_url.trim_end_matches('/').to_string();
+        let base_url = normalize_embedding_base_url(base_url);
         Self {
             base_url,
             api_key: api_key.to_string(),
@@ -77,6 +77,14 @@ impl OpenAiEmbeddingProvider {
     }
 }
 
+fn normalize_embedding_base_url(base_url: &str) -> String {
+    let cleaned = base_url.trim().trim_end_matches('/');
+    let cleaned = cleaned.strip_suffix("/chat/completions").unwrap_or(cleaned);
+    let cleaned = cleaned.strip_suffix("/embeddings").unwrap_or(cleaned);
+    let cleaned = cleaned.strip_suffix("/v1").unwrap_or(cleaned);
+    cleaned.to_string()
+}
+
 #[async_trait]
 impl EmbeddingProvider for OpenAiEmbeddingProvider {
     async fn embed(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
@@ -90,11 +98,12 @@ impl EmbeddingProvider for OpenAiEmbeddingProvider {
             input: &texts,
         };
 
-        let resp = self
-            .client
-            .post(&url)
-            .bearer_auth(&self.api_key)
-            .json(&req)
+        let mut request = self.client.post(&url).json(&req);
+        if !self.api_key.trim().is_empty() {
+            request = request.bearer_auth(&self.api_key);
+        }
+
+        let resp = request
             .send()
             .await
             .with_context(|| format!("Embedding 请求失败: {url}"))?;
@@ -118,5 +127,26 @@ impl EmbeddingProvider for OpenAiEmbeddingProvider {
 
     fn model(&self) -> &str {
         &self.model
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_embedding_base_url;
+
+    #[test]
+    fn normalizes_openai_compatible_embedding_base_url() {
+        assert_eq!(
+            normalize_embedding_base_url("http://127.0.0.1:8000/v1"),
+            "http://127.0.0.1:8000"
+        );
+        assert_eq!(
+            normalize_embedding_base_url("http://127.0.0.1:8000/v1/embeddings"),
+            "http://127.0.0.1:8000"
+        );
+        assert_eq!(
+            normalize_embedding_base_url("http://127.0.0.1:8000/chat/completions"),
+            "http://127.0.0.1:8000"
+        );
     }
 }

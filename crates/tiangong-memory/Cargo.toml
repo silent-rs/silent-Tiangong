@@ -24,3 +24,4 @@ async-trait = "0.1"
 [dev-dependencies]
 serial_test = "3"
 tempfile = "3"
+tiangong-config = { path = "../tiangong-config" }

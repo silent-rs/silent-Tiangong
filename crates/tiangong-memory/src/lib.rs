@@ -21,18 +21,20 @@ pub mod types;
 mod actor;
 mod db;
 mod injection;
+mod options;
 mod recall;
 mod rumination;
 mod search;
 mod store;
 mod writer;
 
-pub use actor::start_memory as start;
+pub use actor::{start_memory as start, start_memory_with_options as start_with_options};
 pub use election::{
     LeaderInfo, LeaderState, ManagedMemory, ProcessType, leader_info_path, leader_lock_path,
     memory_service_name, read_leader_info, start_or_connect, start_or_connect_with_service,
 };
 pub use handle::MemoryHandle;
+pub use options::{MemoryEmbeddingConfig, MemoryOptions};
 pub use types::*;
 
 /// 同步加载三级注入上下文（不经过 Actor，直接读文件）

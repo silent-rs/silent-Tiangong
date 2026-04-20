@@ -4198,6 +4198,7 @@ dependencies = [
  "sha2",
  "tantivy",
  "tempfile",
+ "tiangong-config",
  "tiangong-llm",
  "tokio",
  "tracing",

@@ -7,9 +7,10 @@ use std::sync::Arc;
 
 use tiangong_llm::EmbeddingProvider;
 
+use crate::search::embedding::node_embedding_text;
 use crate::search::qdrant_search::QdrantIndex;
 use crate::search::reranker::{Reranker, analyze_query};
-use crate::types::RecallHit;
+use crate::types::{MemoryNode, RecallHit};
 
 /// 召回引擎（可选 Qdrant，降级为纯 BM25）
 ///
@@ -35,6 +36,21 @@ impl RecallEngine {
             qdrant: Some(qdrant),
             embedding: Some(embedding),
         }
+    }
+
+    /// 将节点写入可选语义索引。未启用 Qdrant 时直接跳过。
+    pub(crate) async fn upsert_node(&self, node: &MemoryNode) -> anyhow::Result<()> {
+        let (qdrant_ref, emb_ref) = match (self.qdrant.as_ref(), self.embedding.as_ref()) {
+            (Some(q), Some(e)) => (q, e),
+            _ => return Ok(()),
+        };
+
+        let text = node_embedding_text(node);
+        let mut vectors = emb_ref.embed(vec![text]).await?;
+        let Some(vector) = vectors.pop() else {
+            anyhow::bail!("Memory node embedding 返回空结果");
+        };
+        qdrant_ref.upsert_node(node, vector).await
     }
 
     /// 执行召回：接受已完成的 BM25 结果，可选地用 Qdrant 增强后融合重排
