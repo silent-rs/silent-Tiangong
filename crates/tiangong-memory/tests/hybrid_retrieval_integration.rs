@@ -81,6 +81,7 @@ async fn wait_for_expected_hit(
                 RecallAnchors {
                     query: query.to_string(),
                     keywords: Vec::new(),
+                    strategy: None,
                 },
                 8,
             )

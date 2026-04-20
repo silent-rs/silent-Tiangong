@@ -10,7 +10,7 @@ use tiangong_llm::EmbeddingProvider;
 use crate::search::embedding::node_embedding_text;
 use crate::search::reranker::{Reranker, analyze_query};
 use crate::search::vector::VectorIndex;
-use crate::types::{MemoryNode, RecallHit, VectorPoint};
+use crate::types::{MemoryNode, RecallHit, SearchStrategy, VectorPoint};
 
 /// 召回引擎（可选向量索引，降级为纯 BM25）
 ///
@@ -66,14 +66,22 @@ impl RecallEngine {
     }
 
     /// 执行召回：接受已完成的 BM25 结果，可选地用向量检索增强后融合重排
+    ///
+    /// `strategy` 为外部（Core/LLM）传入的检索策略，为 None 时内部自动判断。
     pub(crate) async fn recall(
         &self,
         bm25_hits: Vec<RecallHit>,
         query: &str,
         limit: usize,
+        strategy: Option<&SearchStrategy>,
     ) -> Vec<RecallHit> {
-        let intent = analyze_query(query);
-        let reranker = Reranker::from_intent(intent);
+        let reranker = match strategy {
+            Some(s) => Reranker::from_strategy(s),
+            None => {
+                let intent = analyze_query(query);
+                Reranker::from_intent(intent)
+            }
+        };
 
         // 若没有向量索引，退化为纯 BM25
         let (vector_index, emb_ref) = match (self.vector_index.as_ref(), self.embedding.as_ref()) {
@@ -130,7 +138,7 @@ mod tests {
     async fn bm25_only_limits_results_to_requested_count() {
         let engine = RecallEngine::bm25_only();
         let hits = make_hits(10);
-        let result = engine.recall(hits, "测试查询", 5).await;
+        let result = engine.recall(hits, "测试查询", 5, None).await;
         assert_eq!(result.len(), 5);
     }
 
@@ -138,14 +146,14 @@ mod tests {
     async fn bm25_only_returns_all_when_limit_exceeds_hits() {
         let engine = RecallEngine::bm25_only();
         let hits = make_hits(3);
-        let result = engine.recall(hits, "测试查询", 10).await;
+        let result = engine.recall(hits, "测试查询", 10, None).await;
         assert_eq!(result.len(), 3, "结果数不应超过实际命中数");
     }
 
     #[tokio::test]
     async fn bm25_only_returns_empty_for_empty_input() {
         let engine = RecallEngine::bm25_only();
-        let result = engine.recall(vec![], "测试查询", 5).await;
+        let result = engine.recall(vec![], "测试查询", 5, None).await;
         assert!(result.is_empty());
     }
 
@@ -153,7 +161,7 @@ mod tests {
     async fn bm25_only_preserves_order_by_score() {
         let engine = RecallEngine::bm25_only();
         let hits = make_hits(5); // score 从高到低
-        let result = engine.recall(hits, "测试查询", 5).await;
+        let result = engine.recall(hits, "测试查询", 5, None).await;
         // 保持输入顺序（无 Qdrant 时不重排）
         for (i, hit) in result.iter().enumerate() {
             assert_eq!(hit.node_id, format!("node-{i}"));

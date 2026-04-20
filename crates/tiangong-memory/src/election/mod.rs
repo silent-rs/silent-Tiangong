@@ -691,6 +691,7 @@ mod tests {
                     crate::types::RecallAnchors {
                         query: query.to_string(),
                         keywords: Vec::new(),
+                        strategy: None,
                     },
                     5,
                 )

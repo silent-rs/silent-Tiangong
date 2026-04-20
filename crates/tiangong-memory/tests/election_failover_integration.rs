@@ -147,6 +147,7 @@ async fn assert_recall_contains(memory: &ManagedMemory, query: &str, expected_ti
                 RecallAnchors {
                     query: query.to_string(),
                     keywords: Vec::new(),
+                    strategy: None,
                 },
                 5,
             )

@@ -150,11 +150,36 @@ pub struct ProfileEntry {
     pub updated_at: String,
 }
 
+/// 检索策略（由 Core/LLM 决定，传入 Memory 执行层）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchStrategy {
+    /// 跳过记忆检索（查询不需要历史记忆）
+    Skip,
+    /// 纯关键词检索（BM25）
+    Keyword,
+    /// 纯语义检索（向量）
+    Semantic,
+    /// 混合检索：semantic_ratio 为语义权重占比（0.0~1.0）
+    Hybrid { semantic_ratio: f64 },
+}
+
+impl Default for SearchStrategy {
+    fn default() -> Self {
+        SearchStrategy::Hybrid {
+            semantic_ratio: 0.5,
+        }
+    }
+}
+
 /// 召回锚点（Phase C 实现）
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RecallAnchors {
     pub keywords: Vec<String>,
     pub query: String,
+    /// 检索策略（由 Core 传入，为 None 时 Memory 内部自行判断）
+    #[serde(default)]
+    pub strategy: Option<SearchStrategy>,
 }
 
 /// 召回命中项

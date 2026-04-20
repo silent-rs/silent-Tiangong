@@ -205,7 +205,7 @@ impl MemoryStore {
             .search(&anchors.query, limit * 2)
             .unwrap_or_default();
         self.recall_engine
-            .recall(bm25_hits, &anchors.query, limit)
+            .recall(bm25_hits, &anchors.query, limit, anchors.strategy.as_ref())
             .await
     }
 

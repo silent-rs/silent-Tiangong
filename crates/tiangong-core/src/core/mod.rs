@@ -269,21 +269,31 @@ fn worker_loop(
 
                 // Phase C：召回相关记忆注入 user_context
                 let recall_context: Vec<String> = if let Some(handle) = memory_handle.as_ref() {
-                    let hits = handle.recall_blocking(
-                        tiangong_memory::RecallAnchors {
-                            query: content.clone(),
-                            keywords: Vec::new(),
-                        },
-                        5,
-                    );
-                    if hits.is_empty() {
+                    // 通过 LLM 判断检索策略（失败时 Memory 内部自动 fallback）
+                    let strategy = engine
+                        .as_ref()
+                        .and_then(|e| judge_search_strategy(e.lite_client(), &content));
+                    // Skip 策略：LLM 判断不需要历史记忆，直接跳过召回
+                    if matches!(strategy, Some(tiangong_memory::SearchStrategy::Skip)) {
                         Vec::new()
                     } else {
-                        let items: Vec<String> = hits
-                            .into_iter()
-                            .map(|h| format!("- **{}**: {}", h.title, h.summary))
-                            .collect();
-                        vec![format!("## 相关历史记忆\n{}", items.join("\n"))]
+                        let hits = handle.recall_blocking(
+                            tiangong_memory::RecallAnchors {
+                                query: content.clone(),
+                                keywords: Vec::new(),
+                                strategy,
+                            },
+                            5,
+                        );
+                        if hits.is_empty() {
+                            Vec::new()
+                        } else {
+                            let items: Vec<String> = hits
+                                .into_iter()
+                                .map(|h| format!("- **{}**: {}", h.title, h.summary))
+                                .collect();
+                            vec![format!("## 相关历史记忆\n{}", items.join("\n"))]
+                        }
                     }
                 } else {
                     Vec::new()
@@ -1286,4 +1296,71 @@ fn normalize_network_target(target: &str) -> String {
         .next()
         .unwrap_or(without_scheme)
         .to_string()
+}
+
+// ==================== 记忆检索策略判断 ====================
+
+const SEARCH_STRATEGY_SYSTEM_PROMPT: &str = "\
+你是一个查询分类助手。根据用户的查询文本，判断是否需要检索历史记忆，以及最适合的检索策略。
+
+规则：
+- skip：查询是简单问候（你好、hi）、通用知识问答、格式化/重构等不需要历史记忆的请求
+- keyword：查询包含精确的代码符号（::、->、fn、struct）、文件路径（.rs、.py）、\
+  错误码（error[、E0、panic）或明确的标识符名称
+- semantic：查询使用模糊引用（之前、那个、上次、earlier）、自然语言提问结合历史语境
+- hybrid：兼有关键词特征和语义特征，或无法明确判断
+
+输出格式（严格遵守，不要输出其他内容）：
+- 不需要记忆：skip
+- 纯关键词检索：keyword
+- 纯语义检索：semantic
+- 混合检索：hybrid:0.N（N 为语义占比，0-9）
+
+示例：
+- \"你好\" → skip
+- \"帮我格式化这段代码\" → skip
+- \"什么是 TCP 三次握手\" → skip
+- \"impl TiangongCore\" → keyword
+- \"上次那个数据库配置怎么写的\" → semantic
+- \"rust async runtime 上次用的那个\" → hybrid:0.6";
+
+/// 通过 LLM 判断用户查询的最佳检索策略
+///
+/// 失败时返回 None，由 Memory 内部 fallback 到规则判断。
+fn judge_search_strategy(
+    client: &crate::model::SingleProviderClient,
+    query: &str,
+) -> Option<tiangong_memory::SearchStrategy> {
+    let result = client
+        .complete_lite_with_system(SEARCH_STRATEGY_SYSTEM_PROMPT, query)
+        .ok()?;
+    parse_search_strategy_response(&result)
+}
+
+/// 解析 LLM 返回的策略字符串
+fn parse_search_strategy_response(text: &str) -> Option<tiangong_memory::SearchStrategy> {
+    let text = text.trim().to_lowercase();
+    if text == "skip" {
+        return Some(tiangong_memory::SearchStrategy::Skip);
+    }
+    if text == "keyword" {
+        return Some(tiangong_memory::SearchStrategy::Keyword);
+    }
+    if text == "semantic" {
+        return Some(tiangong_memory::SearchStrategy::Semantic);
+    }
+    if let Some(rest) = text.strip_prefix("hybrid") {
+        // 解析 "hybrid:0.N" 或 "hybrid" 格式
+        if let Some(ratio_str) = rest.strip_prefix(':')
+            && let Ok(ratio) = ratio_str.trim().parse::<f64>()
+        {
+            return Some(tiangong_memory::SearchStrategy::Hybrid {
+                semantic_ratio: ratio.clamp(0.0, 1.0),
+            });
+        }
+        return Some(tiangong_memory::SearchStrategy::Hybrid {
+            semantic_ratio: 0.5,
+        });
+    }
+    None
 }
