@@ -102,9 +102,9 @@ impl MemoryActor {
                 let _ = reply.send(hits);
             }
 
-            // Phase C 实现
-            MemoryCommand::LoadDepth2 { reply, .. } => {
-                let _ = reply.send(Vec::new());
+            MemoryCommand::LoadDepth2 { node_ids, reply } => {
+                let items = self.store.load_depth2(&node_ids);
+                let _ = reply.send(items);
             }
 
             // Phase B：Micro 反刍

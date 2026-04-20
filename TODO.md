@@ -66,7 +66,7 @@
 - [x] 打通 Episode -> Embedding -> 内置向量索引 upsert 的主写链路
 - [x] 增加内置向量索引默认启用与 Qdrant external 兼容降级策略
 - [ ] 实现真正的 `RecallAnchors` 提取，而不是只使用原始 query
-- [ ] 完成 `LoadDepth2` 的定向展开能力
+- [x] 完成 `LoadDepth2` 的定向展开能力
 - [ ] 将 `process_meso()` 从关键词统计升级为真实的 `Entity / Decision` 提炼
 - [x] 为 Memory 增加更多集成测试，覆盖多进程 IPC / leader 切换 / embedded 混合检索主链路
 - [ ] 为 Memory 增加 external Qdrant 专项集成测试（可选，需外部服务）
@@ -114,3 +114,4 @@
 - [x] 打通 `Episode -> Embedding -> EmbeddedFlatVectorIndex -> Hybrid Recall` 主链路
 - [ ] 扩展 `rumination.rs`：MesoRumination（Entity/Decision 提取）
 - [x] 修改 `prompt/assembler.rs`：Recall 结果注入到 Prompt
+- [x] 完成 `LoadDepth2` 定向展开：按召回节点 ID 读取 Episode / Entity / Decision / Evidence 完整内容

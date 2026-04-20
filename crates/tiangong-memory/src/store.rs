@@ -19,7 +19,8 @@ use crate::search::TantivyIndex;
 use crate::search::qdrant_search::QdrantIndex;
 use crate::search::vector::{EmbeddedFlatVectorIndex, VectorIndex};
 use crate::types::{
-    Episode, MemoryKind, MemoryNode, MemoryScopeType, MemoryStatus, RecallAnchors, RecallHit,
+    Episode, ExpandedMemory, MemoryKind, MemoryNode, MemoryScopeType, MemoryStatus, RecallAnchors,
+    RecallHit,
 };
 
 /// Memory 存储协调器
@@ -207,6 +208,20 @@ impl MemoryStore {
         self.recall_engine
             .recall(bm25_hits, &anchors.query, limit, anchors.strategy.as_ref())
             .await
+    }
+
+    /// 加载已召回节点的完整内容，用于二跳展开。
+    pub(crate) fn load_depth2(&self, node_ids: &[String]) -> Vec<ExpandedMemory> {
+        if node_ids.is_empty() {
+            return Vec::new();
+        }
+        match self.db.load_expanded_memories(node_ids) {
+            Ok(items) => items,
+            Err(err) => {
+                tracing::warn!("Memory LoadDepth2 展开失败: {err}");
+                Vec::new()
+            }
+        }
     }
 
     /// 查询最近 Episode 摘要（用于 MesoRumination 提炼关键词）

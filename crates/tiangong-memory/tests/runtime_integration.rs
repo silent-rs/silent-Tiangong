@@ -173,6 +173,52 @@ async fn runtime_can_write_episode_and_recall_without_core() {
 
 #[tokio::test(flavor = "current_thread")]
 #[serial]
+async fn runtime_can_expand_recalled_episode_with_depth2() {
+    let (home, _workspace, workspace_path, workspace_id) = setup_workspace();
+    let _env = EnvGuard::enter(home.path(), &workspace_path);
+
+    let handle = start(Some(workspace_id.clone())).expect("启动 memory 失败");
+    handle.write_episode(
+        Episode::new(
+            "session-depth2".to_string(),
+            "depth2 expansion smoke".to_string(),
+            "depth2 full content should include the original episode payload".to_string(),
+            EpisodeOutcome::Success,
+            vec![
+                "depth2".to_string(),
+                "expansion".to_string(),
+                "payload".to_string(),
+            ],
+            vec!["memory_depth2_tool".to_string()],
+            0.85,
+        ),
+        Some(workspace_id.clone()),
+    );
+
+    let hits = wait_for_recall_hit(&handle, "depth2 expansion").await;
+    assert!(!hits.is_empty(), "测试前应先召回刚写入的 Episode");
+
+    let expanded = handle
+        .load_depth2(vec![hits[0].node_id.clone(), "missing-node".to_string()])
+        .await;
+    assert_eq!(expanded.len(), 1, "Depth2 应跳过不存在的节点");
+    assert_eq!(expanded[0].node_id, hits[0].node_id);
+    assert!(
+        expanded[0]
+            .full_content
+            .contains("depth2 full content should include"),
+        "Depth2 应返回 Episode 的完整序列化内容"
+    );
+    assert!(
+        expanded[0].full_content.contains("memory_depth2_tool"),
+        "Depth2 完整内容应包含 tool_calls 等摘要外信息"
+    );
+
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
 async fn micro_rumination_writes_episode_with_explicit_workspace_context() {
     let (home, _workspace, workspace_path, workspace_id) = setup_workspace();
     let _env = EnvGuard::enter(home.path(), &workspace_path);

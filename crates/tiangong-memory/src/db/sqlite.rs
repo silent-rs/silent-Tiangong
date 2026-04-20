@@ -3,11 +3,12 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
 use crate::types::{
-    Decision, Entity, EntityType, Episode, MemoryKind, MemoryScopeType, MemoryStatus, VectorPoint,
+    Decision, Entity, EntityType, Episode, ExpandedMemory, MemoryKind, MemoryScopeType,
+    MemoryStatus, VectorPoint,
 };
 
 use super::schema;
@@ -434,6 +435,24 @@ impl MemoryDb {
         Ok(points)
     }
 
+    /// 按节点 ID 加载完整内容，供 LoadDepth2 定向展开使用。
+    ///
+    /// 返回顺序与传入 ID 顺序一致；不存在或已归档的节点会被跳过。
+    pub(crate) fn load_expanded_memories(
+        &self,
+        node_ids: &[String],
+    ) -> Result<Vec<ExpandedMemory>> {
+        let mut items = Vec::new();
+        for node_id in node_ids {
+            let item = self.load_expanded_memory(node_id)?;
+            if let Some(item) = item {
+                self.mark_node_used(node_id)?;
+                items.push(item);
+            }
+        }
+        Ok(items)
+    }
+
     /// 删除内置向量索引点。
     #[allow(dead_code)]
     pub(crate) fn delete_vector(&self, node_id: &str) -> Result<()> {
@@ -443,6 +462,78 @@ impl MemoryDb {
                 rusqlite::params![node_id],
             )
             .with_context(|| "删除 memory_vectors 记录失败")?;
+        Ok(())
+    }
+
+    fn load_expanded_memory(&self, node_id: &str) -> Result<Option<ExpandedMemory>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT n.kind, n.title, n.summary,
+                        ep.full_content,
+                        en.full_content,
+                        de.full_content,
+                        ev.evidence_path,
+                        ev.byte_size
+                 FROM memory_nodes n
+                 LEFT JOIN episodes ep ON ep.id = n.id
+                 LEFT JOIN entities en ON en.id = n.id
+                 LEFT JOIN decisions de ON de.id = n.id
+                 LEFT JOIN evidence ev ON ev.id = n.id
+                 WHERE n.id = ?1 AND n.status = 'active'",
+                rusqlite::params![node_id],
+                |row| {
+                    Ok(ExpandedRow {
+                        kind: row.get(0)?,
+                        title: row.get(1)?,
+                        summary: row.get(2)?,
+                        episode_content: row.get(3)?,
+                        entity_content: row.get(4)?,
+                        decision_content: row.get(5)?,
+                        evidence_path: row.get(6)?,
+                        evidence_byte_size: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .with_context(|| format!("查询展开节点失败: {node_id}"))?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let full_content = match row.kind.as_str() {
+            "episode" => row.episode_content,
+            "entity" => row.entity_content,
+            "decision" => row.decision_content,
+            "evidence" => row.evidence_path.map(|path| {
+                serde_json::json!({
+                    "kind": "evidence",
+                    "title": row.title,
+                    "summary": row.summary,
+                    "evidence_path": path,
+                    "byte_size": row.evidence_byte_size.unwrap_or_default(),
+                })
+                .to_string()
+            }),
+            _ => None,
+        };
+
+        Ok(full_content.map(|full_content| ExpandedMemory {
+            node_id: node_id.to_string(),
+            full_content,
+        }))
+    }
+
+    fn mark_node_used(&self, node_id: &str) -> Result<()> {
+        let now = chrono::Local::now().naive_local().to_string();
+        self.conn
+            .execute(
+                "UPDATE memory_nodes
+                 SET usage_count = usage_count + 1, last_used_at = ?1, updated_at = ?1
+                 WHERE id = ?2",
+                rusqlite::params![now, node_id],
+            )
+            .with_context(|| format!("更新节点使用状态失败: {node_id}"))?;
         Ok(())
     }
 
@@ -485,6 +576,17 @@ impl MemoryDb {
             .with_context(|| "写入 memory_nodes 失败")?;
         Ok(())
     }
+}
+
+struct ExpandedRow {
+    kind: String,
+    title: String,
+    summary: String,
+    episode_content: Option<String>,
+    entity_content: Option<String>,
+    decision_content: Option<String>,
+    evidence_path: Option<String>,
+    evidence_byte_size: Option<i64>,
 }
 
 /// 获取数据库文件路径
@@ -718,5 +820,27 @@ mod tests {
 
         db.delete_decision("decision-1").unwrap();
         assert!(db.get_decision("decision-1").unwrap().is_none());
+    }
+
+    #[test]
+    fn load_expanded_memories_returns_full_content_in_requested_order() {
+        let db = open_in_memory().unwrap();
+        let episode_a = make_episode("sess-depth2-a");
+        let episode_b = make_episode("sess-depth2-b");
+        let id_a = episode_a.id.clone();
+        let id_b = episode_b.id.clone();
+
+        db.insert_episode(&episode_a, Some("ws-depth2")).unwrap();
+        db.insert_episode(&episode_b, Some("ws-depth2")).unwrap();
+
+        let expanded = db
+            .load_expanded_memories(&[id_b.clone(), "missing-node".to_string(), id_a.clone()])
+            .unwrap();
+
+        assert_eq!(expanded.len(), 2);
+        assert_eq!(expanded[0].node_id, id_b);
+        assert_eq!(expanded[1].node_id, id_a);
+        assert!(expanded[0].full_content.contains("sess-depth2-b"));
+        assert!(expanded[1].full_content.contains("sess-depth2-a"));
     }
 }
