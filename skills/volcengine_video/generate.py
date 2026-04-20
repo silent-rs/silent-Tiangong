@@ -229,7 +229,9 @@ def main():
     parser = argparse.ArgumentParser(description="火山方舟视频生成")
     parser.add_argument("--prompt", required=True, help="视频内容描述")
     parser.add_argument(
-        "--model", default="doubao-seedance-1-0-pro-fast-251015", help="模型名称或接入点 ID"
+        "--model",
+        default="doubao-seedance-1-0-pro-fast-251015",
+        help="模型名称或接入点 ID",
     )
     parser.add_argument("--max-wait", type=int, default=300, help="最大等待时间（秒）")
     parser.add_argument("--output", "-o", default="", help="下载视频到本地路径（可选）")

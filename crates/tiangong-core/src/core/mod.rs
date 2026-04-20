@@ -4,6 +4,7 @@
 //! CLI / GUI / Server / Connector 统一通过 TiangongCore 运行。
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
@@ -23,6 +24,36 @@ use crate::session::{Message, MessageRole, Session, now_text};
 use tiangong_types::{SessionStreamEvent, StreamEvent};
 
 const MAX_ROUNDS: usize = 20;
+
+/// 进程级 Memory Handle 单例
+///
+/// 利用 OnceLock 保证在进程生命周期内只启动一次 Memory Actor。
+/// 多个 TiangongCore 实例共享同一个 Handle（clone）。
+static MEMORY_HANDLE: OnceLock<Option<tiangong_memory::MemoryHandle>> = OnceLock::new();
+
+/// 获取或初始化进程级 Memory Handle
+fn get_or_init_memory(
+    config: &crate::core_config::CoreConfig,
+) -> Option<tiangong_memory::MemoryHandle> {
+    MEMORY_HANDLE
+        .get_or_init(|| {
+            let workspace_id = std::env::current_dir()
+                .ok()
+                .map(|p| tiangong_memory::workspace_id_from_path(&p));
+            let options = config.to_memory_options(workspace_id);
+            match tiangong_memory::start_with_options(options) {
+                Ok(handle) => {
+                    tracing::info!("Memory Actor 已启动");
+                    Some(handle)
+                }
+                Err(err) => {
+                    tracing::warn!("Memory Actor 启动失败（非致命）: {}", err);
+                    None
+                }
+            }
+        })
+        .clone()
+}
 
 /// 用户命令
 pub(crate) enum Command {
@@ -56,32 +87,13 @@ impl TiangongCore {
         Self::with_session(config, session, stream_tx)
     }
 
-    /// 创建新对话，并显式注入 Memory Handle
-    pub fn new_with_memory(
-        config: CoreConfigProvider,
-        stream_tx: Sender<SessionStreamEvent>,
-        memory_handle: Option<tiangong_memory::MemoryHandle>,
-    ) -> Self {
-        let session = Session::new("新对话");
-        Self::with_session_and_memory(config, session, stream_tx, memory_handle)
-    }
-
     /// 从已有 session 创建
     pub fn with_session(
         config: CoreConfigProvider,
         session: Session,
         stream_tx: Sender<SessionStreamEvent>,
     ) -> Self {
-        Self::with_session_and_memory(config, session, stream_tx, None)
-    }
-
-    /// 从已有 session 创建，并显式注入 Memory Handle
-    pub fn with_session_and_memory(
-        config: CoreConfigProvider,
-        session: Session,
-        stream_tx: Sender<SessionStreamEvent>,
-        memory_handle: Option<tiangong_memory::MemoryHandle>,
-    ) -> Self {
+        let memory_handle = get_or_init_memory(&config.snapshot());
         let initial_trust_mode = config.snapshot().trust_mode;
         let shared_trust_mode = Arc::new(RwLock::new(initial_trust_mode));
         let session_id = session.id.clone();

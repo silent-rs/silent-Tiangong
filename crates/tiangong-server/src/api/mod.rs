@@ -21,7 +21,7 @@ use crate::remote::router::MessageRouter;
 /// 共享应用状态类型
 pub type SharedState = Arc<Mutex<TiangongState>>;
 
-/// Server 共享上下文：统一持有应用状态、Core 配置提供者与消息路由器
+/// Server 共享上下文：统一持有应用状态、Core 运行时与消息路由器
 #[derive(Clone)]
 pub struct ServerAppContext {
     pub state: SharedState,
@@ -31,17 +31,11 @@ pub struct ServerAppContext {
 }
 
 impl ServerAppContext {
-    pub fn new(
-        state: SharedState,
-        config: CoreConfigProvider,
-        event_bus: Arc<EventBus>,
-        memory_handle: Option<tiangong_memory::MemoryHandle>,
-    ) -> Self {
+    pub fn new(state: SharedState, config: CoreConfigProvider, event_bus: Arc<EventBus>) -> Self {
         let cores = Arc::new(ServerCoreManager::new(
             state.clone(),
             config.clone(),
             event_bus.clone(),
-            memory_handle,
         ));
         let router = Arc::new(MessageRouter::new(state.clone(), event_bus, cores.clone()));
         Self {

@@ -6,8 +6,7 @@ use std::thread;
 use crate::api::SharedState;
 use crate::remote::event::{EventBus, TiangongEvent};
 use anyhow::{Result, anyhow};
-use tiangong_config::CoreConfigProvider;
-use tiangong_core::core::TiangongCore;
+use tiangong_core::core_config::CoreConfigProvider;
 use tiangong_core::permission::TrustMode;
 use tiangong_core::session::{MessageRole, Session};
 use tiangong_types::{SessionStreamEvent, StreamEvent};
@@ -17,23 +16,16 @@ pub struct ServerCoreManager {
     state: SharedState,
     config: CoreConfigProvider,
     event_bus: Arc<EventBus>,
-    memory_handle: Option<tiangong_memory::MemoryHandle>,
-    cores: Arc<Mutex<HashMap<String, TiangongCore>>>,
+    cores: Arc<Mutex<HashMap<String, tiangong_core::core::TiangongCore>>>,
     trackers: Arc<Mutex<HashMap<String, Arc<ExecutionTracker>>>>,
 }
 
 impl ServerCoreManager {
-    pub fn new(
-        state: SharedState,
-        config: CoreConfigProvider,
-        event_bus: Arc<EventBus>,
-        memory_handle: Option<tiangong_memory::MemoryHandle>,
-    ) -> Self {
+    pub fn new(state: SharedState, config: CoreConfigProvider, event_bus: Arc<EventBus>) -> Self {
         Self {
             state,
             config,
             event_bus,
-            memory_handle,
             cores: Arc::new(Mutex::new(HashMap::new())),
             trackers: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -106,11 +98,10 @@ impl ServerCoreManager {
         }
 
         let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
-        let core = TiangongCore::with_session_and_memory(
+        let core = tiangong_core::core::TiangongCore::with_session(
             self.config.clone(),
             session.clone(),
             stream_tx,
-            self.memory_handle.clone(),
         );
         core.set_trust_mode(TrustMode::FullTrust);
         let actual_session_id = core.session_id().to_string();

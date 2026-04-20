@@ -285,10 +285,14 @@ class WebQueryTool:
                 "unknown": "⚪",
             }
 
-            print(f"\n  状态: {status_icons.get(comp['status'], '?')} {comp['message']}")
+            print(
+                f"\n  状态: {status_icons.get(comp['status'], '?')} {comp['message']}"
+            )
             print(f"\n  GPU 显存: {comp['gpu_memory']} GB")
             print(f"  模型最低要求: {comp['memory_requirement']['min_vram']} GB")
-            print(f"  模型推荐显存: {comp['memory_requirement']['recommended_vram']} GB")
+            print(
+                f"  模型推荐显存: {comp['memory_requirement']['recommended_vram']} GB"
+            )
 
             if comp["status"] == "good":
                 print("\n  💡 建议:")
