@@ -81,6 +81,12 @@ pub struct LlmConfig {
     /// 视频生成端点
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_generation: Option<ModelEndpoint>,
+    /// 向量嵌入端点
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<ModelEndpoint>,
+    /// 结果重排端点
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerank: Option<ModelEndpoint>,
 }
 
 impl LlmConfig {
@@ -105,6 +111,8 @@ impl LlmConfig {
             tts: resolve(ModelCapability::Tts),
             stt: resolve(ModelCapability::Stt),
             video_generation: resolve(ModelCapability::VideoGeneration),
+            embedding: resolve(ModelCapability::Embedding),
+            rerank: resolve(ModelCapability::Rerank),
         }
     }
 

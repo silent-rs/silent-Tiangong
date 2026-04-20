@@ -481,7 +481,8 @@ function ModelsSection({
   const [isFetchingModels, setIsFetchingModels] = useState(false);
   const [ttsVoices, setTtsVoices] = useState<{ id: string; name: string; gender?: string }[]>([]);
   const [isFetchingVoices, setIsFetchingVoices] = useState(false);
-  const { showError } = useToast();
+  const [isProbingEmbeddingDimension, setIsProbingEmbeddingDimension] = useState(false);
+  const { showSuccess, showError } = useToast();
 
   const modelKeys = Object.keys(config.models);
   const providerKeys = Object.keys(config.providers);
@@ -522,6 +523,37 @@ function ModelsSection({
       setTtsVoices([]);
     } finally {
       setIsFetchingVoices(false);
+    }
+  };
+
+  const probeEmbeddingDimension = async () => {
+    const provider = config.providers[draft.provider];
+    if (!provider?.base_url || !draft.model.trim()) {
+      showError('配置不完整', '请先选择 Provider 并填写 Embedding 模型名称');
+      return;
+    }
+    setIsProbingEmbeddingDimension(true);
+    try {
+      const dimension = await api.probeEmbeddingDimension(
+        provider.base_url,
+        provider.api_key,
+        draft.model.trim(),
+        provider.timeout_ms,
+        provider.protocol,
+      );
+      setDraft((current) => ({
+        ...current,
+        options: {
+          ...current.options,
+          dimension,
+        },
+      }));
+      showSuccess('获取成功', `Embedding 维度：${dimension}`);
+    } catch (error) {
+      console.error('获取 Embedding 维度失败:', error);
+      showError('获取失败', `无法获取 Embedding 维度：${error}`);
+    } finally {
+      setIsProbingEmbeddingDimension(false);
     }
   };
 
@@ -723,6 +755,56 @@ function ModelsSection({
           )}
         </div>
       )}
+      {/* Embedding 模型参数 */}
+      {draft.capabilities.includes('embedding') && (
+        <div>
+          <div className="flex items-center justify-between">
+            <Label className="text-xs">Embedding 维度</Label>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-5 text-xs px-2"
+              onClick={probeEmbeddingDimension}
+              disabled={isProbingEmbeddingDimension || !draft.provider || !draft.model.trim()}
+            >
+              {isProbingEmbeddingDimension ? (
+                <>
+                  <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                  获取中...
+                </>
+              ) : (
+                '获取维度'
+              )}
+            </Button>
+          </div>
+          <Input
+            type="number"
+            min={1}
+            value={(draft.options?.dimension as number | undefined) || ''}
+            onChange={(e) =>
+              setDraft({
+                ...draft,
+                options: {
+                  ...draft.options,
+                  dimension: e.target.value ? Number(e.target.value) : undefined,
+                },
+              })
+            }
+            className="text-sm h-8"
+            placeholder="例如 1536、1024、768"
+          />
+          <p className="text-xs text-muted-foreground mt-1">
+            用于 Memory 向量索引初始化；不同 embedding 模型需要填写对应维度。
+          </p>
+        </div>
+      )}
+      {/* Rerank 模型说明 */}
+      {draft.capabilities.includes('rerank') && (
+        <div className="rounded-md border border-dashed p-2 text-xs text-muted-foreground">
+          Rerank 模型用于 Memory 召回结果精排。若服务需要额外参数，可在 models.json 的
+          options 中继续扩展。
+        </div>
+      )}
       <div className="flex justify-end gap-2 pt-1">
         <Button variant="ghost" size="sm" onClick={onCancel}>
           取消
@@ -843,7 +925,7 @@ function RoutingSection({
       <div className="mb-3">
         <h4 className="text-sm font-medium text-muted-foreground">Routing (能力路由)</h4>
         <p className="text-xs text-muted-foreground mt-1">
-          为每种能力选择对应的模型，多媒体（图片/视频/STT/TTS）也通过此处配置
+          为每种能力选择对应的模型，多媒体（图片/视频/STT/TTS）和 Memory（Embedding/Rerank）也通过此处配置
         </p>
       </div>
 

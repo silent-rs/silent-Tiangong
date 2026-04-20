@@ -76,6 +76,7 @@ fn run_gui() {
             tiangong_app::commands::get_model_capabilities,
             tiangong_app::commands::get_model_list,
             tiangong_app::commands::fetch_provider_models,
+            tiangong_app::commands::probe_embedding_dimension,
             tiangong_app::commands::append_message,
             tiangong_app::commands::respond_approval,
             tiangong_app::commands::get_trust_mode,

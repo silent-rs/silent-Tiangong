@@ -85,7 +85,8 @@ fn looks_like_pure_image_markdown(output: &str) -> bool {
     !trimmed.is_empty()
         && trimmed.lines().all(|line| {
             let line = line.trim();
-            line.is_empty() || (line.starts_with("![") && line.contains("](") && line.ends_with(')'))
+            line.is_empty()
+                || (line.starts_with("![") && line.contains("](") && line.ends_with(')'))
         })
 }
 
@@ -151,9 +152,7 @@ fn extract_video_urls_from_json(value: &serde_json::Value, urls: &mut Vec<String
     }
 }
 
-fn clear_pending_final_media(
-    pending_final_media: &mut Option<Vec<tiangong_types::MediaAsset>>,
-) {
+fn clear_pending_final_media(pending_final_media: &mut Option<Vec<tiangong_types::MediaAsset>>) {
     if pending_final_media.is_some() {
         *pending_final_media = None;
     }
@@ -327,9 +326,8 @@ pub fn send_message(
     use tiangong_types::{SessionStreamEvent, StreamEvent};
 
     // 准备 session
-    let (session_id, session_snapshot) = state.with_state(|core_state| {
-        core_state.prepare_active_user_message_ingress(content.clone())
-    })?;
+    let (session_id, session_snapshot) = state
+        .with_state(|core_state| core_state.prepare_active_user_message_ingress(content.clone()))?;
 
     // 获取或创建 TiangongCore
     let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
@@ -730,7 +728,8 @@ pub fn get_session_cost(
         let session = core_state.sessions().iter().find(|s| s.id == sid);
         match session {
             Some(s) => {
-                let cost = tiangong_core::observe::build_session_cost(s.id.clone(), &s.task_records);
+                let cost =
+                    tiangong_core::observe::build_session_cost(s.id.clone(), &s.task_records);
                 Ok(serde_json::to_value(cost).unwrap_or_default())
             }
             None => Ok(serde_json::json!({})),
@@ -1465,4 +1464,97 @@ pub fn fetch_provider_models(
         api_lite_model: String::new(),
     };
     SingleProviderClient::list_models(&config).map_err(|e| e.to_string())
+}
+
+fn embedding_probe_urls(base_url: &str) -> Result<Vec<String>, String> {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return Err("Base URL 不能为空".to_string());
+    }
+
+    let cleaned = trimmed.trim_end_matches('/');
+    let cleaned = cleaned.strip_suffix("/chat/completions").unwrap_or(cleaned);
+    let cleaned = cleaned.strip_suffix("/embeddings").unwrap_or(cleaned);
+    let primary = format!("{cleaned}/embeddings");
+
+    if cleaned.ends_with("/v1") {
+        return Ok(vec![primary]);
+    }
+
+    Ok(vec![primary, format!("{cleaned}/v1/embeddings")])
+}
+
+/// 探测 OpenAI 兼容 Embedding 接口返回的向量维度
+#[tauri::command]
+pub async fn probe_embedding_dimension(
+    base_url: String,
+    api_key: String,
+    model: String,
+    timeout_ms: Option<u64>,
+    protocol: Option<String>,
+) -> Result<usize, String> {
+    use tiangong_core::models_config::ModelsConfig;
+
+    let protocol = protocol.unwrap_or_else(|| "openai_compatible".to_string());
+    if protocol != "openai_compatible" {
+        return Err("Embedding 维度探测仅支持 OpenAI 兼容协议".to_string());
+    }
+
+    let model = model.trim();
+    if model.is_empty() {
+        return Err("模型名称不能为空".to_string());
+    }
+
+    let urls = embedding_probe_urls(&base_url)?;
+    let api_key = ModelsConfig::resolve_api_key(&api_key);
+    let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(60_000));
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|err| format!("创建 HTTP 客户端失败：{err}"))?;
+    let payload = serde_json::json!({
+        "model": model,
+        "input": "dimension probe",
+        "encoding_format": "float",
+    });
+
+    let mut last_error = None;
+    for url in urls {
+        let mut request = client.post(&url).json(&payload);
+        if !api_key.trim().is_empty() {
+            request = request.bearer_auth(&api_key);
+        }
+
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(err) => {
+                last_error = Some(format!("请求 Embedding 接口失败：{url}，{err}"));
+                continue;
+            }
+        };
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            last_error = Some(format!(
+                "Embedding 接口返回错误：HTTP {status}，响应：{body}"
+            ));
+            continue;
+        }
+
+        let value: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| format!("解析 Embedding 响应失败：{err}"))?;
+        let embedding = value
+            .pointer("/data/0/embedding")
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| "Embedding 响应中缺少 data[0].embedding".to_string())?;
+        if embedding.is_empty() {
+            return Err("Embedding 响应向量为空".to_string());
+        }
+        return Ok(embedding.len());
+    }
+
+    Err(last_error.unwrap_or_else(|| "无法请求 Embedding 接口".to_string()))
 }

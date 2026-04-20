@@ -24,6 +24,10 @@ pub enum ModelCapability {
     VideoGeneration,
     Stt,
     Tts,
+    /// 向量嵌入模型（Memory / 语义检索）
+    Embedding,
+    /// 重排模型（Memory / 召回精排）
+    Rerank,
 }
 
 impl ModelCapability {
@@ -37,6 +41,8 @@ impl ModelCapability {
             ModelCapability::VideoGeneration => "video_generation",
             ModelCapability::Stt => "stt",
             ModelCapability::Tts => "tts",
+            ModelCapability::Embedding => "embedding",
+            ModelCapability::Rerank => "rerank",
         }
     }
 
@@ -50,6 +56,8 @@ impl ModelCapability {
             "video_generation" => Some(ModelCapability::VideoGeneration),
             "stt" => Some(ModelCapability::Stt),
             "tts" => Some(ModelCapability::Tts),
+            "embedding" => Some(ModelCapability::Embedding),
+            "rerank" => Some(ModelCapability::Rerank),
             _ => None,
         }
     }
@@ -64,6 +72,8 @@ impl ModelCapability {
             ModelCapability::VideoGeneration,
             ModelCapability::Stt,
             ModelCapability::Tts,
+            ModelCapability::Embedding,
+            ModelCapability::Rerank,
         ]
     }
 
@@ -77,6 +87,8 @@ impl ModelCapability {
             ModelCapability::VideoGeneration => "视频生成",
             ModelCapability::Stt => "语音识别",
             ModelCapability::Tts => "语音合成",
+            ModelCapability::Embedding => "向量嵌入",
+            ModelCapability::Rerank => "结果重排",
         }
     }
 
@@ -90,6 +102,8 @@ impl ModelCapability {
             ModelCapability::VideoGeneration => "VIDEO",
             ModelCapability::Stt => "STT",
             ModelCapability::Tts => "TTS",
+            ModelCapability::Embedding => "EMBEDDING",
+            ModelCapability::Rerank => "RERANK",
         }
     }
 
@@ -105,6 +119,10 @@ impl ModelCapability {
             ModelCapability::VideoGeneration => "视频生成请求（用户要求生成、制作视频）",
             ModelCapability::Stt => "语音识别请求（用户要求将语音/音频转为文字）",
             ModelCapability::Tts => "语音合成请求（用户要求将文字转为语音/朗读）",
+            ModelCapability::Embedding => {
+                "向量嵌入模型（Memory 语义检索、向量索引等内部任务，不参与意图路由）"
+            }
+            ModelCapability::Rerank => "结果重排模型（Memory 召回精排等内部任务，不参与意图路由）",
         }
     }
 
@@ -345,6 +363,12 @@ impl ModelsConfig {
         }
         if let Some(ref ep) = llm.video_generation {
             register("video", ep, ModelCapability::VideoGeneration);
+        }
+        if let Some(ref ep) = llm.embedding {
+            register("embedding", ep, ModelCapability::Embedding);
+        }
+        if let Some(ref ep) = llm.rerank {
+            register("rerank", ep, ModelCapability::Rerank);
         }
 
         Self {

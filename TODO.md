@@ -62,7 +62,7 @@
 - [x] 补齐 `election/` 的 Follower 监控、leader 切换与自动接替
 - [ ] 为 GUI / 桌面入口补齐显式 Memory 启动与 Handle 注入
 - [ ] 设计并实现按 workspace 管理的 runtime / handle registry，避免后续多工作区冲突
-- [ ] 实现 `search/embedding.rs`，封装 `EmbeddingProvider` 的 memory 侧调用
+- [x] 实现 `search/embedding.rs`，封装 `EmbeddingProvider` 的 memory 侧调用
 - [ ] 打通 Episode -> Embedding -> Qdrant upsert 的主写链路
 - [ ] 在运行时中增加 Qdrant 启用配置与降级策略
 - [ ] 实现真正的 `RecallAnchors` 提取，而不是只使用原始 query
@@ -105,7 +105,7 @@
 
 - [x] 引入 `qdrant-client = "1"` 依赖
 - [x] 实现 `search/qdrant.rs`：collection 管理、point upsert、语义查询（骨架已落地，未接入主写链路）
-- [ ] 实现 `search/embedding.rs`：封装 EmbeddingProvider 调用
+- [x] 实现 `search/embedding.rs`：封装 EmbeddingProvider 调用
 - [x] 实现 `search/reranker.rs`：分数归一化、时间衰减、重要度加权
 - [x] 实现 `search/mod.rs`：双引擎召回统一入口（当前为模块入口与 BM25 主路径）
 - [x] 实现 `recall.rs`：RecallAnchors 提取 + 双引擎召回 + 定向展开（当前仅 BM25-only 主路径可用，Depth2 未完成）

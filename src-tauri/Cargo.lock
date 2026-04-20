@@ -5863,6 +5863,7 @@ dependencies = [
  "clap",
  "futures-util",
  "http",
+ "reqwest 0.12.28",
  "rmcp",
  "scru128",
  "serde",
