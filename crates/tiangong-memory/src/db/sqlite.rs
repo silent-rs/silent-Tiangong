@@ -6,7 +6,9 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
-use crate::types::{Episode, MemoryStatus};
+use crate::types::{
+    Decision, Entity, EntityType, Episode, MemoryKind, MemoryScopeType, MemoryStatus,
+};
 
 use super::schema;
 
@@ -81,6 +83,238 @@ impl MemoryDb {
         Ok(())
     }
 
+    /// 插入或更新 Entity 到 memory_nodes 和 entities 表
+    #[allow(dead_code)]
+    pub(crate) fn upsert_entity(&self, entity: &Entity, workspace_id: Option<&str>) -> Result<()> {
+        let keywords = serde_json::to_string(&entity.related_episodes)?;
+        let related_episodes = serde_json::to_string(&entity.related_episodes)?;
+        let full_content = serde_json::to_string(entity)?;
+
+        self.upsert_memory_node(
+            &entity.id,
+            MemoryKind::Entity,
+            MemoryScopeType::Workspace,
+            workspace_id,
+            &entity.name,
+            &entity.description,
+            &keywords,
+            entity.importance,
+            entity.file_path.as_deref(),
+            &entity.created_at,
+            &entity.updated_at,
+        )?;
+
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO entities
+                 (id, entity_type, file_path, related_episodes, full_content)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    entity.id,
+                    entity_type_to_str(&entity.entity_type),
+                    entity.file_path,
+                    related_episodes,
+                    full_content,
+                ],
+            )
+            .with_context(|| "写入 entities 失败")?;
+
+        Ok(())
+    }
+
+    /// 根据 id 查询 Entity
+    #[allow(dead_code)]
+    pub(crate) fn get_entity(&self, entity_id: &str) -> Result<Option<Entity>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT full_content FROM entities WHERE id = ?1")?;
+        let mut rows = stmt.query(rusqlite::params![entity_id])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let full_content: String = row.get(0)?;
+        let entity = serde_json::from_str(&full_content).with_context(|| "解析 Entity 失败")?;
+        Ok(Some(entity))
+    }
+
+    /// 列出工作区下的 Entity
+    #[allow(dead_code)]
+    pub(crate) fn list_entities(&self, workspace_id: Option<&str>) -> Result<Vec<Entity>> {
+        let mut entities = Vec::new();
+        if let Some(workspace_id) = workspace_id {
+            let mut stmt = self.conn.prepare(
+                "SELECT e.full_content
+                 FROM entities e
+                 JOIN memory_nodes n ON n.id = e.id
+                 WHERE n.scope_type = 'workspace' AND n.scope_id = ?1
+                 ORDER BY n.updated_at DESC",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![workspace_id], |row| {
+                row.get::<_, String>(0)
+            })?;
+            for row in rows {
+                let full_content = row?;
+                let entity = serde_json::from_str(&full_content)
+                    .with_context(|| "解析 Entity 列表项失败")?;
+                entities.push(entity);
+            }
+        } else {
+            let mut stmt = self.conn.prepare(
+                "SELECT e.full_content
+                 FROM entities e
+                 JOIN memory_nodes n ON n.id = e.id
+                 WHERE n.scope_type = 'workspace' AND n.scope_id IS NULL
+                 ORDER BY n.updated_at DESC",
+            )?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            for row in rows {
+                let full_content = row?;
+                let entity = serde_json::from_str(&full_content)
+                    .with_context(|| "解析 Entity 列表项失败")?;
+                entities.push(entity);
+            }
+        }
+        Ok(entities)
+    }
+
+    /// 删除 Entity
+    #[allow(dead_code)]
+    pub(crate) fn delete_entity(&self, entity_id: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM entities WHERE id = ?1",
+                rusqlite::params![entity_id],
+            )
+            .with_context(|| "删除 entities 记录失败")?;
+        self.conn
+            .execute(
+                "DELETE FROM memory_nodes WHERE id = ?1",
+                rusqlite::params![entity_id],
+            )
+            .with_context(|| "删除 entity 对应 memory_nodes 记录失败")?;
+        Ok(())
+    }
+
+    /// 插入或更新 Decision 到 memory_nodes 和 decisions 表
+    #[allow(dead_code)]
+    pub(crate) fn upsert_decision(
+        &self,
+        decision: &Decision,
+        workspace_id: Option<&str>,
+    ) -> Result<()> {
+        let keywords = serde_json::to_string(&decision.reasons)?;
+        let alternatives = serde_json::to_string(&decision.alternatives)?;
+        let reasons = serde_json::to_string(&decision.reasons)?;
+        let episode_ids = serde_json::to_string(&decision.episode_ids)?;
+        let full_content = serde_json::to_string(decision)?;
+
+        self.upsert_memory_node(
+            &decision.id,
+            MemoryKind::Decision,
+            MemoryScopeType::Workspace,
+            workspace_id,
+            &decision.title,
+            &decision.context,
+            &keywords,
+            0.7,
+            Some(&decision.chosen),
+            &decision.created_at,
+            &decision.created_at,
+        )?;
+
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO decisions
+                 (id, context, alternatives, chosen, reasons, episode_ids, full_content)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    decision.id,
+                    decision.context,
+                    alternatives,
+                    decision.chosen,
+                    reasons,
+                    episode_ids,
+                    full_content,
+                ],
+            )
+            .with_context(|| "写入 decisions 失败")?;
+
+        Ok(())
+    }
+
+    /// 根据 id 查询 Decision
+    #[allow(dead_code)]
+    pub(crate) fn get_decision(&self, decision_id: &str) -> Result<Option<Decision>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT full_content FROM decisions WHERE id = ?1")?;
+        let mut rows = stmt.query(rusqlite::params![decision_id])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let full_content: String = row.get(0)?;
+        let decision = serde_json::from_str(&full_content).with_context(|| "解析 Decision 失败")?;
+        Ok(Some(decision))
+    }
+
+    /// 列出工作区下的 Decision
+    #[allow(dead_code)]
+    pub(crate) fn list_decisions(&self, workspace_id: Option<&str>) -> Result<Vec<Decision>> {
+        let mut decisions = Vec::new();
+        if let Some(workspace_id) = workspace_id {
+            let mut stmt = self.conn.prepare(
+                "SELECT d.full_content
+                 FROM decisions d
+                 JOIN memory_nodes n ON n.id = d.id
+                 WHERE n.scope_type = 'workspace' AND n.scope_id = ?1
+                 ORDER BY n.updated_at DESC",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![workspace_id], |row| {
+                row.get::<_, String>(0)
+            })?;
+            for row in rows {
+                let full_content = row?;
+                let decision = serde_json::from_str(&full_content)
+                    .with_context(|| "解析 Decision 列表项失败")?;
+                decisions.push(decision);
+            }
+        } else {
+            let mut stmt = self.conn.prepare(
+                "SELECT d.full_content
+                 FROM decisions d
+                 JOIN memory_nodes n ON n.id = d.id
+                 WHERE n.scope_type = 'workspace' AND n.scope_id IS NULL
+                 ORDER BY n.updated_at DESC",
+            )?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            for row in rows {
+                let full_content = row?;
+                let decision = serde_json::from_str(&full_content)
+                    .with_context(|| "解析 Decision 列表项失败")?;
+                decisions.push(decision);
+            }
+        }
+        Ok(decisions)
+    }
+
+    /// 删除 Decision
+    #[allow(dead_code)]
+    pub(crate) fn delete_decision(&self, decision_id: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM decisions WHERE id = ?1",
+                rusqlite::params![decision_id],
+            )
+            .with_context(|| "删除 decisions 记录失败")?;
+        self.conn
+            .execute(
+                "DELETE FROM memory_nodes WHERE id = ?1",
+                rusqlite::params![decision_id],
+            )
+            .with_context(|| "删除 decision 对应 memory_nodes 记录失败")?;
+        Ok(())
+    }
+
     /// 查询最近的 Episode 摘要（用于 MesoRumination）
     pub(crate) fn recent_episode_summaries(
         &self,
@@ -147,6 +381,46 @@ impl MemoryDb {
         )?;
         Ok(())
     }
+
+    #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
+    fn upsert_memory_node(
+        &self,
+        id: &str,
+        kind: MemoryKind,
+        scope_type: MemoryScopeType,
+        scope_id: Option<&str>,
+        title: &str,
+        summary: &str,
+        keywords: &str,
+        importance: f32,
+        source: Option<&str>,
+        created_at: &str,
+        updated_at: &str,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO memory_nodes
+                 (id, kind, scope_type, scope_id, title, summary, keywords, importance,
+                  confidence, status, source, usage_count, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1.0, 'active', ?9, 0, ?10, ?11)",
+                rusqlite::params![
+                    id,
+                    memory_kind_to_str(kind),
+                    scope_type_to_str(scope_type),
+                    scope_id,
+                    title,
+                    summary,
+                    keywords,
+                    importance,
+                    source,
+                    created_at,
+                    updated_at,
+                ],
+            )
+            .with_context(|| "写入 memory_nodes 失败")?;
+        Ok(())
+    }
 }
 
 /// 获取数据库文件路径
@@ -179,6 +453,38 @@ fn derive_db_password() -> String {
     hex::encode(digest)
 }
 
+#[allow(dead_code)]
+fn memory_kind_to_str(kind: MemoryKind) -> &'static str {
+    match kind {
+        MemoryKind::Episode => "episode",
+        MemoryKind::Entity => "entity",
+        MemoryKind::Decision => "decision",
+        MemoryKind::Evidence => "evidence",
+    }
+}
+
+#[allow(dead_code)]
+fn scope_type_to_str(scope_type: MemoryScopeType) -> &'static str {
+    match scope_type {
+        MemoryScopeType::Global => "global",
+        MemoryScopeType::Workspace => "workspace",
+        MemoryScopeType::Session => "session",
+    }
+}
+
+#[allow(dead_code)]
+fn entity_type_to_str(entity_type: &EntityType) -> &'static str {
+    match entity_type {
+        EntityType::Project => "project",
+        EntityType::Repository => "repository",
+        EntityType::Server => "server",
+        EntityType::Skill => "skill",
+        EntityType::Provider => "provider",
+        EntityType::Document => "document",
+        EntityType::Module => "module",
+    }
+}
+
 /// 打开加密数据库连接
 fn open_encrypted_conn(db_path: &Path) -> Result<Connection> {
     let conn = Connection::open(db_path)
@@ -208,7 +514,7 @@ pub(crate) mod test_helpers {
 #[cfg(test)]
 mod tests {
     use super::test_helpers::open_in_memory;
-    use crate::types::{Episode, EpisodeOutcome};
+    use crate::types::{Decision, Entity, EntityType, Episode, EpisodeOutcome};
 
     fn make_episode(session_id: &str) -> Episode {
         Episode::new(
@@ -220,6 +526,34 @@ mod tests {
             vec!["tool_call_1".to_string()],
             0.7,
         )
+    }
+
+    fn make_entity(id: &str) -> Entity {
+        let now = chrono::Local::now().naive_local().to_string();
+        Entity {
+            id: id.to_string(),
+            name: "memory-system".to_string(),
+            entity_type: EntityType::Project,
+            description: "memory system project".to_string(),
+            file_path: Some("/tmp/memory-system".to_string()),
+            related_episodes: vec!["ep-1".to_string(), "ep-2".to_string()],
+            importance: 0.8,
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+
+    fn make_decision(id: &str) -> Decision {
+        Decision {
+            id: id.to_string(),
+            title: "use tcp ipc".to_string(),
+            context: "windows does not support unix socket path".to_string(),
+            alternatives: vec!["uds".to_string(), "named pipe".to_string()],
+            chosen: "tcp loopback".to_string(),
+            reasons: vec!["cross platform".to_string(), "easy to test".to_string()],
+            episode_ids: vec!["ep-10".to_string()],
+            created_at: chrono::Local::now().naive_local().to_string(),
+        }
     }
 
     #[test]
@@ -272,5 +606,44 @@ mod tests {
 
         let summaries = db.recent_episode_summaries(3).unwrap();
         assert_eq!(summaries.len(), 3, "应返回最近 3 条");
+    }
+
+    #[test]
+    fn entity_crud_roundtrip_works() {
+        let db = open_in_memory().unwrap();
+        let entity = make_entity("entity-1");
+
+        db.upsert_entity(&entity, Some("ws-entity")).unwrap();
+
+        let loaded = db.get_entity("entity-1").unwrap().expect("entity 应存在");
+        assert_eq!(loaded.name, entity.name);
+
+        let listed = db.list_entities(Some("ws-entity")).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, entity.id);
+
+        db.delete_entity("entity-1").unwrap();
+        assert!(db.get_entity("entity-1").unwrap().is_none());
+    }
+
+    #[test]
+    fn decision_crud_roundtrip_works() {
+        let db = open_in_memory().unwrap();
+        let decision = make_decision("decision-1");
+
+        db.upsert_decision(&decision, Some("ws-decision")).unwrap();
+
+        let loaded = db
+            .get_decision("decision-1")
+            .unwrap()
+            .expect("decision 应存在");
+        assert_eq!(loaded.title, decision.title);
+
+        let listed = db.list_decisions(Some("ws-decision")).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, decision.id);
+
+        db.delete_decision("decision-1").unwrap();
+        assert!(db.get_decision("decision-1").unwrap().is_none());
     }
 }

@@ -28,7 +28,10 @@ mod store;
 mod writer;
 
 pub use actor::start_memory as start;
-pub use election::ProcessType;
+pub use election::{
+    LeaderInfo, LeaderState, ManagedMemory, ProcessType, leader_info_path, leader_lock_path,
+    memory_service_name, read_leader_info, start_or_connect, start_or_connect_with_service,
+};
 pub use handle::MemoryHandle;
 pub use types::*;
 
