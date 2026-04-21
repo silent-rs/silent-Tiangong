@@ -5,6 +5,10 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::time::Duration;
+
+use crate::ProviderProtocol;
 
 /// Embedding 能力抽象 trait
 #[async_trait]
@@ -17,6 +21,35 @@ pub trait EmbeddingProvider: Send + Sync {
 
     /// 返回模型名称
     fn model(&self) -> &str;
+}
+
+/// Embedding 端点配置。
+///
+/// 上层配置系统负责解析模型文件；使用方只需把解析后的端点传给 llm crate，
+/// 由 llm crate 选择具体 provider 实现。
+#[derive(Debug, Clone)]
+pub struct EmbeddingEndpointConfig {
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+    pub protocol: ProviderProtocol,
+    pub timeout: Duration,
+    pub dimension: usize,
+}
+
+/// 根据端点配置创建 EmbeddingProvider。
+pub fn embedding_provider_from_config(
+    config: &EmbeddingEndpointConfig,
+) -> Result<Arc<dyn EmbeddingProvider>> {
+    match config.protocol {
+        ProviderProtocol::OpenAiCompatible => {
+            Ok(Arc::new(OpenAiEmbeddingProvider::from_config(config)?))
+        }
+        protocol => anyhow::bail!(
+            "Embedding 暂不支持 {} 协议，请使用 OpenAI 兼容端点",
+            protocol.as_str()
+        ),
+    }
 }
 
 // ==================== OpenAI 兼容实现 ====================
@@ -67,6 +100,31 @@ impl OpenAiEmbeddingProvider {
             dimension,
             client: reqwest::Client::new(),
         }
+    }
+
+    /// 从统一 Embedding 端点配置创建 provider。
+    pub fn from_config(config: &EmbeddingEndpointConfig) -> Result<Self> {
+        if config.protocol != ProviderProtocol::OpenAiCompatible {
+            anyhow::bail!(
+                "OpenAI Embedding Provider 不支持 {} 协议",
+                config.protocol.as_str()
+            );
+        }
+        if config.dimension == 0 {
+            anyhow::bail!("Embedding dimension 不能为 0");
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(config.timeout)
+            .build()
+            .context("创建 Embedding HTTP client 失败")?;
+        Ok(Self {
+            base_url: normalize_embedding_base_url(&config.base_url),
+            api_key: config.api_key.clone(),
+            model: config.model.clone(),
+            dimension: config.dimension,
+            client,
+        })
     }
 
     /// 从环境变量创建（`API_BASE_URL`, `API_AUTH_TOKEN`）

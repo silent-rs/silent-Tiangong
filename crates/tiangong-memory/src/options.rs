@@ -3,13 +3,13 @@
 //! 配置文件加载由 `tiangong-config` 等上层 crate 负责；Memory 只接收
 //! 已解析好的端点参数，保持自身不依赖 core/config。
 
-use tiangong_llm::ProviderProtocol;
+use tiangong_llm::{EmbeddingEndpointConfig, LlmEndpointConfig};
 
 #[derive(Debug, Clone, Default)]
 pub struct MemoryOptions {
     pub workspace_id: Option<String>,
-    pub model: Option<MemoryModelConfig>,
-    pub embedding: Option<MemoryEmbeddingConfig>,
+    pub model: Option<LlmEndpointConfig>,
+    pub embedding: Option<EmbeddingEndpointConfig>,
     pub vector_mode: MemoryVectorMode,
 }
 
@@ -23,12 +23,12 @@ impl MemoryOptions {
         }
     }
 
-    pub fn with_model(mut self, model: MemoryModelConfig) -> Self {
+    pub fn with_model(mut self, model: LlmEndpointConfig) -> Self {
         self.model = Some(model);
         self
     }
 
-    pub fn with_embedding(mut self, embedding: MemoryEmbeddingConfig) -> Self {
+    pub fn with_embedding(mut self, embedding: EmbeddingEndpointConfig) -> Self {
         self.embedding = Some(embedding);
         self
     }
@@ -37,25 +37,6 @@ impl MemoryOptions {
         self.vector_mode = vector_mode;
         self
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct MemoryModelConfig {
-    pub base_url: String,
-    pub api_key: String,
-    pub model: String,
-    pub protocol: ProviderProtocol,
-    pub timeout_ms: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct MemoryEmbeddingConfig {
-    pub base_url: String,
-    pub api_key: String,
-    pub model: String,
-    pub protocol: ProviderProtocol,
-    pub timeout_ms: u64,
-    pub dimension: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

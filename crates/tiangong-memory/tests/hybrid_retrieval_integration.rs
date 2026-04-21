@@ -3,10 +3,10 @@ use std::time::Duration;
 
 use serial_test::serial;
 use tempfile::TempDir;
-use tiangong_llm::ProviderProtocol;
+use tiangong_llm::{EmbeddingEndpointConfig, ProviderProtocol};
 use tiangong_memory::{
-    Episode, EpisodeOutcome, MemoryEmbeddingConfig, MemoryOptions, MemoryVectorMode, RecallAnchors,
-    start_with_options, workspace_id_from_path,
+    Episode, EpisodeOutcome, MemoryOptions, MemoryVectorMode, RecallAnchors, start_with_options,
+    workspace_id_from_path,
 };
 
 struct EnvGuard {
@@ -51,7 +51,7 @@ impl Drop for EnvGuard {
     }
 }
 
-fn embedding_config_from_tiangong_config() -> Option<MemoryEmbeddingConfig> {
+fn embedding_config_from_tiangong_config() -> Option<EmbeddingEndpointConfig> {
     let config = tiangong_config::load_tiangong_config();
     let endpoint = config.to_core_config().llm.embedding?;
     let dimension = endpoint
@@ -60,12 +60,12 @@ fn embedding_config_from_tiangong_config() -> Option<MemoryEmbeddingConfig> {
         .and_then(|value| value.as_u64())
         .and_then(|value| usize::try_from(value).ok())?;
 
-    Some(MemoryEmbeddingConfig {
+    Some(EmbeddingEndpointConfig {
         base_url: endpoint.base_url,
         api_key: endpoint.api_key,
         model: endpoint.model,
         protocol: endpoint.protocol,
-        timeout_ms: endpoint.timeout_ms,
+        timeout: Duration::from_millis(endpoint.timeout_ms),
         dimension,
     })
 }

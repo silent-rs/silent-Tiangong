@@ -244,6 +244,198 @@ async fn micro_rumination_writes_episode_with_explicit_workspace_context() {
 
 #[tokio::test(flavor = "current_thread")]
 #[serial]
+async fn artifact_only_turn_is_added_to_memory_and_recalled_by_context_tool() {
+    let (home, _workspace, workspace_path, workspace_id) = setup_workspace();
+    let _env = EnvGuard::enter(home.path(), &workspace_path);
+
+    let image_url = "https://example.invalid/artifacts/architecture-sunrise.png";
+    let file_path = "/tmp/tiangong/architecture-sunrise.png";
+    let handle = start(Some(workspace_id.clone())).expect("启动 memory 失败");
+
+    handle.run_micro_rumination(TurnResult {
+        session_id: "session-artifact-add".to_string(),
+        turn_id: "turn-artifact-only".to_string(),
+        had_tool_calls: false,
+        user_input: "展示刚生成的 architecture sunrise diagram".to_string(),
+        summary: "assistant produced architecture sunrise diagram artifact".to_string(),
+        tool_calls: Vec::new(),
+        artifacts: vec![
+            TurnArtifact {
+                kind: TurnArtifactKind::Media,
+                tool_name: Some("image_generation".to_string()),
+                title: Some("architecture sunrise diagram".to_string()),
+                url: Some(image_url.to_string()),
+                path: None,
+                summary: Some("final generated architecture diagram".to_string()),
+            },
+            TurnArtifact {
+                kind: TurnArtifactKind::File,
+                tool_name: Some("write_file".to_string()),
+                title: Some("architecture sunrise local file".to_string()),
+                url: None,
+                path: Some(file_path.to_string()),
+                summary: Some("local copy of generated diagram".to_string()),
+            },
+        ],
+        workspace_id: Some(workspace_id.clone()),
+    });
+    eprintln!("[artifact-add] submitted artifact-only turn url={image_url} path={file_path}");
+
+    let hits = wait_for_recall_hit(&handle, "architecture sunrise diagram").await;
+    eprintln!("[artifact-add] hit_count={}", hits.len());
+    for (idx, hit) in hits.iter().enumerate() {
+        eprintln!(
+            "[artifact-add] hit[{idx}] node_id={} score={:.3} title={} summary={}",
+            hit.node_id, hit.score, hit.title, hit.summary
+        );
+    }
+    assert!(
+        hits.iter()
+            .any(|hit| hit.summary.contains("architecture sunrise diagram")),
+        "即使没有工具调用，只要 turn 含结构化产物，也应新增 Episode 记忆"
+    );
+
+    let expanded = handle
+        .load_depth2(hits.iter().map(|hit| hit.node_id.clone()).collect())
+        .await;
+    let expanded_text = expanded
+        .iter()
+        .map(|item| item.full_content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    eprintln!(
+        "[artifact-add] expanded_contains_url={} expanded_contains_path={} expanded=\n{}",
+        expanded_text.contains(image_url),
+        expanded_text.contains(file_path),
+        compact_for_log(&expanded_text, 900)
+    );
+    assert!(expanded_text.contains(image_url));
+    assert!(expanded_text.contains(file_path));
+
+    let contextual = handle
+        .recall_context(MemoryRecallRequest {
+            query: "刚才那个 architecture sunrise diagram 的图片和文件路径".to_string(),
+            reason: Some("用户用历史指代继续使用刚生成的结构化产物".to_string()),
+            expected: vec!["media".to_string(), "file".to_string()],
+            context: vec!["当前上下文没有图片 URL，也没有本地文件路径".to_string()],
+            limit: 5,
+        })
+        .await;
+    eprintln!(
+        "[artifact-add] contextual_hit_count={} used_llm={} content=\n{}",
+        contextual.hits.len(),
+        contextual.used_llm,
+        contextual.content
+    );
+    assert!(
+        contextual.content.contains(image_url),
+        "按需回忆应返回结构化媒体 URL"
+    );
+    assert!(
+        contextual.content.contains(file_path),
+        "按需回忆应返回结构化文件路径"
+    );
+
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn contextual_recall_returns_incremental_memory_without_repeating_prompt_context() {
+    let (home, _workspace, workspace_path, workspace_id) = setup_workspace();
+    let _env = EnvGuard::enter(home.path(), &workspace_path);
+
+    let handle = start(Some(workspace_id.clone())).expect("启动 memory 失败");
+    let redundant_summary = "We chose coral teal palette for flamingo dashboard";
+    let export_url = "https://example.invalid/artifacts/flamingo-dashboard.svg";
+    let export_path = "/tmp/tiangong/flamingo-dashboard.svg";
+
+    handle.write_episode(
+        Episode::new(
+            "session-incremental-recall".to_string(),
+            "flamingo palette decision".to_string(),
+            redundant_summary.to_string(),
+            EpisodeOutcome::Success,
+            vec![
+                "flamingo".to_string(),
+                "palette".to_string(),
+                "dashboard".to_string(),
+            ],
+            vec!["recall_memory".to_string()],
+            0.6,
+        ),
+        Some(workspace_id.clone()),
+    );
+    handle.write_episode(
+        Episode::new(
+            "session-incremental-recall".to_string(),
+            "flamingo export artifact".to_string(),
+            format!("Exported flamingo dashboard artifact {export_url} {export_path}"),
+            EpisodeOutcome::Success,
+            vec![
+                "flamingo".to_string(),
+                "artifact".to_string(),
+                "dashboard".to_string(),
+            ],
+            vec!["generate_image".to_string(), "write_file".to_string()],
+            0.8,
+        ),
+        Some(workspace_id.clone()),
+    );
+    eprintln!(
+        "[incremental-recall] submitted redundant_summary={redundant_summary:?} export_url={export_url} export_path={export_path}"
+    );
+
+    let hits = wait_for_recall_hit(&handle, "flamingo dashboard artifact").await;
+    eprintln!("[incremental-recall] precheck_hit_count={}", hits.len());
+    assert!(
+        hits.iter()
+            .any(|hit| hit.summary.contains("flamingo dashboard artifact")),
+        "测试前应能召回带 URL/路径的增量记忆"
+    );
+
+    let contextual = handle
+        .recall_context(MemoryRecallRequest {
+            query: "继续 flamingo dashboard，需要之前的导出产物".to_string(),
+            reason: Some("当前上下文只有设计决策，缺少可继续使用的产物引用".to_string()),
+            expected: vec!["file".to_string(), "media".to_string()],
+            context: vec![
+                "user: 继续 flamingo dashboard".to_string(),
+                format!("assistant: {redundant_summary}"),
+            ],
+            limit: 5,
+        })
+        .await;
+    eprintln!(
+        "[incremental-recall] contextual_hit_count={} used_llm={} content=\n{}",
+        contextual.hits.len(),
+        contextual.used_llm,
+        contextual.content
+    );
+
+    assert!(
+        contextual.content.contains(export_url),
+        "回忆结果应保留当前上下文之外的 URL 增量信息"
+    );
+    assert!(
+        contextual.content.contains(export_path),
+        "回忆结果应保留当前上下文之外的路径增量信息"
+    );
+    assert!(
+        !contextual.content.contains(redundant_summary),
+        "回忆结果不应重复当前上下文已包含的摘要，避免浪费 prompt"
+    );
+    assert_eq!(
+        contextual.content.matches(export_url).count(),
+        1,
+        "同一 URL 在回忆结果中应只出现一次"
+    );
+
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
 async fn memory_recall_levels_cover_injection_depth1_depth2_and_context_summary() {
     let (home, _workspace, workspace_path, workspace_id) = setup_workspace();
     let _env = EnvGuard::enter(home.path(), &workspace_path);

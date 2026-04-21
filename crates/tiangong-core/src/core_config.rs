@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 
@@ -130,13 +131,15 @@ impl LlmConfig {
         workspace_id: Option<String>,
     ) -> tiangong_memory::MemoryOptions {
         let mut options = tiangong_memory::MemoryOptions::new(workspace_id);
-        if !self.chat.base_url.is_empty() && !self.chat.api_key.is_empty() {
-            options = options.with_model(tiangong_memory::MemoryModelConfig {
-                base_url: self.chat.base_url.clone(),
-                api_key: self.chat.api_key.clone(),
-                model: self.chat.model.clone(),
-                protocol: self.chat.protocol,
-                timeout_ms: self.chat.timeout_ms,
+        let memory_model_endpoint = self.lite.as_ref().unwrap_or(&self.chat);
+        if !memory_model_endpoint.base_url.is_empty() && !memory_model_endpoint.api_key.is_empty() {
+            options = options.with_model(tiangong_llm::LlmEndpointConfig {
+                base_url: memory_model_endpoint.base_url.clone(),
+                api_key: memory_model_endpoint.api_key.clone(),
+                model: memory_model_endpoint.model.clone(),
+                protocol: memory_model_endpoint.protocol,
+                timeout: Duration::from_millis(memory_model_endpoint.timeout_ms),
+                max_retries: 3,
             });
         }
         let Some(endpoint) = self.embedding.as_ref() else {
@@ -152,12 +155,12 @@ impl LlmConfig {
             return options;
         };
 
-        options = options.with_embedding(tiangong_memory::MemoryEmbeddingConfig {
+        options = options.with_embedding(tiangong_llm::EmbeddingEndpointConfig {
             base_url: endpoint.base_url.clone(),
             api_key: endpoint.api_key.clone(),
             model: endpoint.model.clone(),
             protocol: endpoint.protocol,
-            timeout_ms: endpoint.timeout_ms,
+            timeout: Duration::from_millis(endpoint.timeout_ms),
             dimension,
         });
 
@@ -466,5 +469,6 @@ mod tests {
         let embedding = options.embedding.expect("embedding 配置应存在");
         assert_eq!(embedding.model, "bge-m3");
         assert_eq!(embedding.dimension, 1024);
+        assert_eq!(embedding.timeout.as_millis(), 10_000);
     }
 }

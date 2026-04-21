@@ -10,6 +10,7 @@ use crate::command::InjectionLevel;
 use crate::store::MemoryStore;
 use crate::types::TurnResult;
 use crate::writer;
+use tiangong_llm::LlmEndpointConfig;
 
 /// Micro 反刍：turn 结束后处理
 ///
@@ -19,9 +20,10 @@ pub(crate) async fn process_micro(
     store: &mut MemoryStore,
     turn_result: &TurnResult,
     workspace_id: Option<&str>,
+    model: Option<&LlmEndpointConfig>,
 ) -> Result<()> {
     // 1. 提取并写入 Episode（嵌套 if let 用 let-chains 合并以满足 clippy）
-    if let Some(episode) = writer::extract_episode(turn_result) {
+    if let Some(episode) = writer::extract_episode_with_model(turn_result, model).await {
         store
             .write_episode(episode, workspace_id)
             .await

@@ -57,7 +57,7 @@
 ### 当前剩余未完成功能总览
 
 - [x] 补齐 `db/sqlite.rs` 对 `Entity / Decision` 的完整 CRUD
-- [ ] 将 `writer.rs` 升级为调用 lite 模型提取 Episode 摘要、结果状态、工具调用和重要度
+- [x] 将 `writer.rs` 升级为调用 lite 模型提取 Episode 摘要、结果状态、工具调用和重要度
 - [x] 将当前 TCP IPC 原语真正接入 `MemoryHandle` 的 local/remote 双态
 - [x] 补齐 `election/` 的 Follower 监控、leader 切换与自动接替
 - [x] 为 GUI / 桌面入口补齐显式 Memory 启动与 Handle 注入
@@ -65,6 +65,7 @@
 - [x] 实现 `search/embedding.rs`，封装 `EmbeddingProvider` 的 memory 侧调用
 - [x] 打通 Episode -> Embedding -> 内置向量索引 upsert 的主写链路
 - [x] 增加内置向量索引默认启用与 Qdrant external 兼容降级策略
+- [x] 将 Memory 的文本生成与 Embedding 端点配置收口为直接复用 `tiangong-llm`
 - [x] 将 Core 侧 turn 前自动 Recall 收口为 `recall_memory` 工具，由主模型按需调用
 - [x] 将 `recall_memory` 从简单检索包装升级为 Memory 内部自主整理查询、召回和返回内容
 - [ ] 实现真正的 `RecallAnchors` 提取，而不是只使用原始 query
@@ -96,7 +97,7 @@
 - [x] 实现 `search/tantivy.rs`：Tantivy Schema 定义、文档索引、BM25 查询
 - [x] 扩展 `store.rs`：协调 SQLite + Tantivy 双层写入
 - [x] 扩展 `db/sqlite.rs`：Episode/Entity/Decision 完整 CRUD
-- [ ] 实现 `writer.rs`：EpisodeWriter（调用 lite 模型提取摘要）
+- [x] 实现 `writer.rs`：EpisodeWriter（调用 lite 模型提取摘要）
 - [x] 实现 `rumination.rs`：MicroRumination（Episode 写入部分）
 - [x] 扩展 `actor.rs`：处理 WriteEpisode / RunMicroRumination 命令
 - [x] 实现 `ipc/`：TCP loopback IPC 服务端/客户端骨架（动态端口 + endpoint 文件发现 + token 鉴权）

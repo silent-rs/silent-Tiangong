@@ -125,7 +125,13 @@ impl MemoryActor {
                     .workspace_id
                     .as_deref()
                     .or(self.workspace_id.as_deref());
-                if let Err(e) = rumination::process_micro(&mut self.store, &turn_result, wid).await
+                if let Err(e) = rumination::process_micro(
+                    &mut self.store,
+                    &turn_result,
+                    wid,
+                    self.options.model.as_ref(),
+                )
+                .await
                 {
                     tracing::warn!("Micro 反刍失败: {}", e);
                 }

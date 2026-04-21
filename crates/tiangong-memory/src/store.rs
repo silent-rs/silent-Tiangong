@@ -8,12 +8,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use tiangong_llm::{EmbeddingProvider, OpenAiEmbeddingProvider, ProviderProtocol};
+use tiangong_llm::{EmbeddingEndpointConfig, EmbeddingProvider, embedding_provider_from_config};
 
 use crate::command::InjectionLevel;
 use crate::db::MemoryDb;
 use crate::injection;
-use crate::options::{MemoryEmbeddingConfig, MemoryVectorMode};
+use crate::options::MemoryVectorMode;
 use crate::recall::RecallEngine;
 use crate::search::TantivyIndex;
 use crate::search::qdrant_search::QdrantIndex;
@@ -61,7 +61,7 @@ impl MemoryStore {
     /// 失败时仅记录 warning，Memory 自动降级为 BM25-only。
     pub(crate) async fn try_enable_vector(
         &mut self,
-        embedding: Option<&MemoryEmbeddingConfig>,
+        embedding: Option<&EmbeddingEndpointConfig>,
         vector_mode: MemoryVectorMode,
     ) {
         let Some(embedding) = embedding else {
@@ -69,18 +69,18 @@ impl MemoryStore {
             return;
         };
 
-        if embedding.protocol != ProviderProtocol::OpenAiCompatible {
-            tracing::warn!(
-                "Memory embedding 仅支持 OpenAI 兼容协议，当前协议为 {}，跳过向量层",
-                embedding.protocol.as_str()
-            );
-            return;
-        }
-
         if embedding.dimension == 0 {
             tracing::warn!("Memory embedding dimension 为 0，跳过向量层");
             return;
         }
+
+        let embedding_provider = match embedding_provider_from_config(embedding) {
+            Ok(provider) => provider,
+            Err(err) => {
+                tracing::warn!("Memory embedding provider 初始化失败，跳过向量层: {err}");
+                return;
+            }
+        };
 
         let vector_mode = match vector_mode {
             MemoryVectorMode::Auto => MemoryVectorMode::Embedded,
@@ -124,25 +124,19 @@ impl MemoryStore {
             MemoryVectorMode::Auto | MemoryVectorMode::Disabled => unreachable!(),
         };
 
-        let embedding_provider = Arc::new(OpenAiEmbeddingProvider::new(
-            &embedding.base_url,
-            &embedding.api_key,
-            &embedding.model,
-            embedding.dimension,
-        ));
         self.enable_vector_index(vector_index, embedding_provider);
         tracing::info!(
             "Memory 向量双引擎召回已启用: backend={} model={} dimension={} timeout_ms={}",
             backend,
             embedding.model,
             embedding.dimension,
-            embedding.timeout_ms
+            embedding.timeout.as_millis()
         );
     }
 
     /// 显式启用外部 Qdrant，供后续兼容接口使用。
     #[allow(dead_code)]
-    pub(crate) async fn try_enable_qdrant(&mut self, embedding: Option<&MemoryEmbeddingConfig>) {
+    pub(crate) async fn try_enable_qdrant(&mut self, embedding: Option<&EmbeddingEndpointConfig>) {
         self.try_enable_vector(embedding, MemoryVectorMode::ExternalQdrant)
             .await;
     }

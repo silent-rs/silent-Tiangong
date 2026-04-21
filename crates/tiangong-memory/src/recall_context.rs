@@ -3,20 +3,12 @@
 //! Core 只把当前请求和最近语境传进来；Memory 内部自行规划检索锚点、
 //! 调用召回、加载二跳内容，并输出去重后的增量信息。
 
-use std::time::Duration;
-
-use tiangong_llm::message::{ChatMessage, MessageContent, MessageRole};
-use tiangong_llm::provider::LlmProvider;
-use tiangong_llm::providers::anthropic::{AnthropicConfig, AnthropicProvider};
-use tiangong_llm::providers::openai::{OpenAiCompatibleConfig, OpenAiCompatibleProvider};
-use tiangong_llm::request::ProviderRequest;
-
-use crate::options::MemoryModelConfig;
 use crate::store::MemoryStore;
 use crate::types::{
     ExpandedMemory, MemoryRecallRequest, MemoryRecallResponse, RecallAnchors, RecallHit,
     SearchStrategy,
 };
+use tiangong_llm::{LlmEndpointConfig, complete_text};
 
 const RECALL_PLAN_SYSTEM: &str = "\
 你是独立记忆系统的检索规划器。根据当前请求和语境，生成适合长期记忆检索的锚点。
@@ -58,7 +50,7 @@ struct RecallPlan {
 
 pub(crate) async fn recall_context(
     store: &MemoryStore,
-    model: Option<&MemoryModelConfig>,
+    model: Option<&LlmEndpointConfig>,
     request: MemoryRecallRequest,
 ) -> MemoryRecallResponse {
     let request = normalize_request(request);
@@ -137,7 +129,7 @@ fn normalize_request(mut request: MemoryRecallRequest) -> MemoryRecallRequest {
 }
 
 async fn plan_with_model(
-    config: &MemoryModelConfig,
+    config: &LlmEndpointConfig,
     request: &MemoryRecallRequest,
 ) -> anyhow::Result<PlannedAnchors> {
     let prompt = format!(
@@ -162,7 +154,7 @@ async fn plan_with_model(
 }
 
 async fn synthesize_with_model(
-    config: &MemoryModelConfig,
+    config: &LlmEndpointConfig,
     request: &MemoryRecallRequest,
     hits: &[RecallHit],
     expanded: &[ExpandedMemory],
@@ -238,6 +230,13 @@ fn fallback_synthesis(
             .unwrap_or(hit.summary.as_str());
         let original_urls = extract_urls(detail);
         let original_paths = extract_paths(detail);
+        if original_urls.is_empty()
+            && original_paths.is_empty()
+            && (is_redundant(&hit.summary, &context_text)
+                || is_redundant(&hit.title, &context_text))
+        {
+            continue;
+        }
         if !seen.insert(hit.node_id.clone()) {
             continue;
         }
@@ -348,61 +347,6 @@ fn contains_history_reference(text: &str) -> bool {
     .any(|marker| text.contains(marker))
 }
 
-async fn complete_text(
-    config: &MemoryModelConfig,
-    system: &str,
-    prompt: &str,
-    max_tokens: u32,
-) -> anyhow::Result<String> {
-    let provider = build_provider(config)?;
-    let request = ProviderRequest {
-        model: config.model.clone(),
-        system: Some(system.to_string()),
-        messages: vec![ChatMessage::text(MessageRole::User, prompt)],
-        tools: Vec::new(),
-        tool_choice: None,
-        max_tokens: Some(max_tokens),
-        temperature: Some(0.2),
-        top_p: None,
-        stop_sequences: Vec::new(),
-        metadata: None,
-        thinking: None,
-    };
-    let response = provider.complete(request).await?;
-    Ok(message_text(&response.assistant_message))
-}
-
-fn build_provider(config: &MemoryModelConfig) -> anyhow::Result<Box<dyn LlmProvider>> {
-    match config.protocol {
-        tiangong_llm::ProviderProtocol::OpenAiCompatible => {
-            let mut provider_config =
-                OpenAiCompatibleConfig::new(config.api_key.clone(), config.base_url.clone());
-            provider_config.timeout = Duration::from_millis(config.timeout_ms);
-            Ok(Box::new(OpenAiCompatibleProvider::new(provider_config)))
-        }
-        tiangong_llm::ProviderProtocol::Anthropic => {
-            let mut provider_config = AnthropicConfig::new(config.api_key.clone());
-            if !config.base_url.trim().is_empty() {
-                provider_config.base_url = Some(config.base_url.clone());
-            }
-            provider_config.timeout = Duration::from_millis(config.timeout_ms);
-            Ok(Box::new(AnthropicProvider::from_config(provider_config)?))
-        }
-    }
-}
-
-fn message_text(message: &ChatMessage) -> String {
-    message
-        .content
-        .iter()
-        .filter_map(|content| match content {
-            MessageContent::Text(text) => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("")
-}
-
 fn format_candidates(hits: &[RecallHit], expanded: &[ExpandedMemory]) -> String {
     hits.iter()
         .enumerate()
@@ -448,8 +392,33 @@ fn compact_text(text: &str, max_chars: usize) -> String {
 }
 
 fn is_redundant(text: &str, context: &str) -> bool {
-    let text = text.trim();
-    text.chars().count() >= 12 && context.contains(text)
+    let text = normalize_for_redundancy(text);
+    if text.chars().count() < 12 {
+        return false;
+    }
+    if context.contains(&text) {
+        return true;
+    }
+    context
+        .lines()
+        .map(strip_role_prefix)
+        .map(normalize_for_redundancy)
+        .filter(|item| item.chars().count() >= 12)
+        .any(|item| text.contains(&item))
+}
+
+fn strip_role_prefix(text: &str) -> &str {
+    let Some((prefix, rest)) = text.split_once(':') else {
+        return text;
+    };
+    match prefix.trim().to_ascii_lowercase().as_str() {
+        "user" | "assistant" | "system" | "tool" => rest.trim(),
+        _ => text,
+    }
+}
+
+fn normalize_for_redundancy(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn extract_urls(text: &str) -> Vec<String> {
@@ -487,6 +456,10 @@ fn extract_paths(text: &str) -> Vec<String> {
             continue;
         }
         let cleaned = cleaned.strip_prefix("path=").unwrap_or(cleaned);
+        let cleaned = cleaned
+            .split(['"', '\'', ')', ']', '}', ',', '，', '。'])
+            .next()
+            .unwrap_or(cleaned);
         if cleaned.starts_with('/')
             || cleaned.starts_with("./")
             || cleaned.starts_with("../")
