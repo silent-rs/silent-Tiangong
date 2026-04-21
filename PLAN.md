@@ -9,15 +9,17 @@
 - 安全目标：Server 模式默认安全（本地绑定、Token 认证），Connector 鉴权白名单制。
 - 工程目标：按 Phase 增量交付，每个 Phase 保证功能不回退。
 
-## 当前执行策略（2026-04-16）
+## 当前执行策略（2026-04-21）
 - 架构 RFC：`docs/rfc/0004-full-stack-agent-platform.md`
 - 架构基准：`docs/desktop-agent-technical-architecture.md`
 - 差距分析：`docs/architecture-gap-analysis.md`
 - Phase 1~14 已完成，GUI 配置即时生效验证已收口。
 - Phase 15 已完成，Anthropic 协议抽象、独立 transport 与错误处理已接入。
 - Phase 16 已完成，入口统一、Server 信任语义、远程能力尾项和成本可见性已收口。
-- 当前目标：推进多媒体结果语义收敛，避免图片/视频结果继续退化为工具文本。
-- 当前进展：本地 GUI 图片链路已完成结构化媒体消息接入，后续继续扩展视频语义与 MCP 媒体适配器。
+- Phase 17 已进入尾项阶段，本地 GUI 图片链路已完成结构化媒体消息接入，后续继续扩展视频语义与 MCP 媒体适配器。
+- 当前主目标：推进 Phase 18 Memory 系统收口，使长期记忆作为独立 crate 运行，复用 `tiangong-llm`，并通过 Tool 化按需回忆提升跨会话连续性。
+- 当前进展：Memory 已完成 Episode 写入、IPC、Leader/Follower、内置向量混合检索、`recall_memory` 工具化、媒体/文件/工具产物回忆、Meso Entity/Decision 提炼和多类集成测试。
+- 当前风险：`RecallAnchors` 仍需抽出稳定提取器；Meso Entity/Decision 提炼仍是规则版；external Qdrant 仍缺专项集成测试。
 
 ## 里程碑
 
@@ -151,6 +153,18 @@
 - 保留 `tiangong-media` 作为多媒体主链路，MCP 仅作为后端适配来源之一。
 - 区分最终结果媒体与中间过程媒体，避免将所有 `generate_image` / `generate_video` 结果一律提升为最终回复。
 - 优先完成本地 GUI 会话链路中的图片结果语义化，再逐步扩展到视频与远程链路。
+
+### Phase 18（Memory 系统，进行中）
+> 设计说明：`docs/memory-system/`
+
+- 将长期记忆从 Core 中拆出为独立 `tiangong-memory` crate，保证可单独集成测试、可复用、可关闭。
+- Memory 依赖 `tiangong-llm` 获取文本生成与 embedding 能力，不在 Memory 内部重复实现模型配置和协议适配。
+- 已完成 Micro 写入主链路：TurnResult -> EpisodeWriter -> SQLite/Tantivy/向量索引。
+- 已完成 Tool 化按需回忆：主模型通过 `recall_memory` 主动触发 Memory，Memory 内部完成规划、召回、Depth2 展开、去重整理后返回增量记忆。
+- 已完成结构化产物记忆：媒体 URL、文件路径、工具结果摘要进入 Episode，支持“刚刚生成的图片/文件”等跨会话回忆。
+- 已完成 Meso 反刍第一阶段：从近期 Episode 提炼 Entity/Decision，写入 SQLite/Tantivy 并更新 Workspace Injection。
+- 已完成 workspace 级 runtime/handle registry，长生命周期 GUI/Server 进程会按 workspace_id 缓存 Memory Handle，避免误复用首个工作区。
+- 下一步抽出独立 `RecallAnchors` 提取器，并将 Meso 提炼从规则版升级为 LLM 规划 + 规则 fallback。
 
 ## 参考文档
 - 项目说明：`README.md`

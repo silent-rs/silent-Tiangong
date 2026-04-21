@@ -1,124 +1,148 @@
-# TODO - 天工全栈平台重构任务清单
+# TODO - 天工当前开发任务
 
-> 最后更新：2026-04-20
-> 当前主线 RFC：`docs/rfc/0004-full-stack-agent-platform.md`
-> 参考：`PLAN.md`、`docs/requirements.md`
-
----
-
-## 已完成阶段摘要
-
-- `Phase 2`：Skill 管理 MVP 已完成，包含安装、启停、卸载、锁文件、托管 MCP 清理、事务回滚与审计。
-- `Phase 3`：Workspace 拆分与核心抽离已完成，`tiangong-core` / `tiangong-cli` / `tiangong-entry` / `src-tauri` 已稳定运行。
-- `Phase 4`：Server 模式已完成，REST、WebSocket、Token 认证、后台运行与停止命令已落地。
-- `Phase 5`：Gateway 与 EventBus 已完成，统一消息模型和消息路由已投入使用。
-- `Phase 6`：Connector 框架已完成，Webhook、Telegram、Discord、Lark 已接入。
-- `Phase 7`：多媒体框架已完成，图片生成、STT、TTS 与媒体任务模型已接入主链路。
-- `Phase 8`：生产化增强已完成，日志分级、错误恢复、配置脱敏、配置热重载已上线。
-- `Phase 9`：模型配置重构与多媒体集成已完成，`ModelsConfig` 三层架构与多媒体 routing 已稳定。
-- `Phase 10`：GUI/CLI 友好交互改造已完成，解释文本和工具调用支持实时展示。
-- `Phase 11`：运行时基础设施补全已完成，统一任务模型、查询编排、恢复、权限和成本治理已落地。
-- `Phase 12`：事件驱动循环运行时已完成，EventLoopRunner 已替代旧的主执行链。
-- `Phase 13`：`TiangongCore` 纯粹化与统一类型已完成，CLI/GUI/Server 已统一到核心流事件接口。
-- `Phase 13.5`：LLM 请求容错已完成，重试、错误展示、审批流程和工具展示优化已接入。
-- `Phase 14`：CoreConfig 配置注入已完成，CLI/GUI/Server 的配置同步与即时生效链路已打通。
-- `Phase 15`：LLM 协议抽象与 Anthropic 支持已完成，统一 Provider 抽象、Anthropic transport、协议配置透传与兼容性处理已接入。
-- `Phase 16`：架构收口与远程能力补齐已完成，统一入口、Server 信任语义、远程成本可见性和历史文档收敛已落地。
+> 最后更新：2026-04-21
+> 当前主线：Phase 18 Memory 系统收口
+> 参考：`PLAN.md`、`docs/requirements.md`、`docs/memory-system/`
 
 ---
 
-## Phase 17：多媒体结果语义收敛 — **进行中**
+## 当前结论
 
-> 对照 `docs/media-capability-architecture-adjustment.md` 继续推进
+Memory 主链路已经可用，但还不能视为完全收口。当前最重要的差距不是“能不能写入和回忆”，而是回忆策略、Meso 提炼质量、运行时生命周期、配置热更新和外部向量后端验证。
 
-### A. 媒体结果模型
-
-- [x] 为统一消息模型增加结构化媒体结果字段
-- [x] 定义图片结果最小可用结构（URL / MIME / 来源能力 / 标题）
-- [x] 保持文本内容与媒体内容并存，避免强制回退到 Markdown 文本
-
-### B. 本地 GUI 图片链路
-
-- [x] 将本地图片生成最终结果改为结构化媒体消息，而不是工具日志文本
-- [x] 区分最终结果图片与中间过程图片，避免一律提升为最终 assistant 回复
-- [x] 前端基于结构化媒体消息渲染图片，保留旧 Markdown 图片渲染作为兼容路径
-
-### C. 后续扩展口
-
-- [ ] 为视频结果预留相同的结构化媒体语义
-- [ ] 约束 MCP 只作为媒体后端适配来源，不直接定义上层媒体消息语义
+已完成能力只在本节压缩记录，后续 TODO 只保留真实开发差距。
 
 ---
 
-## Phase 18：Memory 系统 — **进行中**
+## 已完成能力摘要
 
-> 对照 `docs/memory-system/` 目录中的设计文档推进
+- 平台基础：Workspace 多 crate、Core/CLI/GUI/Server 拆分、Server 模式、Connector、EventBus、多媒体框架、CoreConfig 注入、LLM 协议抽象、Anthropic 支持、远程信任语义和成本可见性已完成。
+- Phase 17 多媒体：图片结果已进入结构化消息链路，本地 GUI 可渲染结构化图片结果，旧 Markdown 图片仍保留兼容。
+- Phase 18 Memory 基础：`tiangong-memory` 独立 crate、SQLite 元数据库、Injection、Actor/Handle、TCP IPC、Leader/Follower、workspace 显式写入上下文已完成。
+- Phase 18 写入/检索：Episode 写入、Tantivy BM25、内置 SQLite flat 向量索引、Qdrant 兼容路径、BM25+Vector 混合召回、Depth2 展开已完成。
+- Phase 18 Tool 化回忆：Core 已移除 turn 前自动 Recall，改为主模型按需调用 `recall_memory`；Memory 内部负责规划、召回、展开和去重整理。
+- Phase 18 产物记忆：媒体 URL、文件路径、工具结果摘要已写入 Episode，可支持“刚刚生成的图片/文件”等回忆。
+- Phase 18 模型能力收口：Memory 文本生成与 embedding 配置复用 `tiangong-llm`，不再在 Memory 内重复实现模型配置和协议适配。
+- Phase 18 Meso 初版：规则版 Entity/Decision 提炼已接入 SQLite/Tantivy，并更新 Workspace Injection。
+- Phase 18 测试：Memory 已覆盖 runtime、IPC、leader failover、embedded 混合检索、artifact-only 写入、增量回忆去重、Meso Entity/Decision。
 
-### 当前剩余未完成功能总览
+---
 
-- [x] 补齐 `db/sqlite.rs` 对 `Entity / Decision` 的完整 CRUD
-- [x] 将 `writer.rs` 升级为调用 lite 模型提取 Episode 摘要、结果状态、工具调用和重要度
-- [x] 将当前 TCP IPC 原语真正接入 `MemoryHandle` 的 local/remote 双态
-- [x] 补齐 `election/` 的 Follower 监控、leader 切换与自动接替
-- [x] 为 GUI / 桌面入口补齐显式 Memory 启动与 Handle 注入
-- [ ] 设计并实现按 workspace 管理的 runtime / handle registry，避免后续多工作区冲突
-- [x] 实现 `search/embedding.rs`，封装 `EmbeddingProvider` 的 memory 侧调用
-- [x] 打通 Episode -> Embedding -> 内置向量索引 upsert 的主写链路
-- [x] 增加内置向量索引默认启用与 Qdrant external 兼容降级策略
-- [x] 将 Memory 的文本生成与 Embedding 端点配置收口为直接复用 `tiangong-llm`
-- [x] 将 Core 侧 turn 前自动 Recall 收口为 `recall_memory` 工具，由主模型按需调用
-- [x] 将 `recall_memory` 从简单检索包装升级为 Memory 内部自主整理查询、召回和返回内容
-- [ ] 实现真正的 `RecallAnchors` 提取，而不是只使用原始 query
-- [x] 将结构化媒体结果、工具结果和产物引用写入 Episode，支持“刚刚生成的图片”等回忆
-- [x] 完成 `LoadDepth2` 的定向展开能力
-- [ ] 将 `process_meso()` 从关键词统计升级为真实的 `Entity / Decision` 提炼
-- [x] 为 Memory 增加更多集成测试，覆盖多进程 IPC / leader 切换 / embedded 混合检索主链路
-- [ ] 为 Memory 增加 external Qdrant 专项集成测试（可选，需外部服务）
+## P0 - 必须优先收口
 
-### Memory Phase A：Injection 层 + 独立 crate 骨架 + SQLite 元数据库 ✅
+### 1. 抽出稳定的 `RecallAnchorExtractor`
 
-- [x] 创建 `crates/tiangong-memory` 独立 crate
-- [x] 实现基础类型（`types.rs`）：MemoryNode, Episode, Entity, Decision 等
-- [x] 实现 MemoryActor + MemoryHandle（Actor 消息协议 + 客户端句柄）
-- [x] 实现三级 Injection 读取（`injection.rs`）：Profile / Workspace / Session agent.md
-- [x] 实现 SQLite 加密元数据库（`db/`）：sqlcipher + WAL + 建表
-- [x] 实现 Leader 选举骨架（`election/mod.rs`）
-- [x] 添加 `init_blocking()` 同步初始化函数
-- [x] 将 `tiangong-memory` 加入 workspace members
-- [x] `tiangong-core` 添加 `tiangong-memory` 依赖
-- [x] 修改 `build_user_context()` 调用 `tiangong_memory::load_injection_sync`
-- [x] CLI / Server 入口添加 Memory 初始化调用
-- [x] `context/memory.rs` 标记废弃注释
-- [x] `cargo clippy --workspace` 全量通过
+- [ ] 新增 `recall_anchor.rs`，提供统一的 `RecallAnchorExtractor` 入口。
+- [ ] 将 `recall_context` 中的 LLM plan 逻辑迁移到 `RecallAnchorExtractor`。
+- [ ] 将 `recall_context` 中的规则 fallback 逻辑迁移到 `RecallAnchorExtractor`。
+- [ ] 让 LLM 规划和规则 fallback 都输出同一个 `RecallAnchors` 结构。
+- [ ] 规则 fallback 覆盖历史指代、文件路径、URL、工具名、代码符号、媒体产物和用户显式关键词。
+- [ ] 明确 `SearchStrategy::Skip` 的入口语义，避免普通闲聊触发无意义检索。
+- [ ] 为 anchor 提取增加单元测试：历史指代、精确文件路径、媒体 URL、普通闲聊、空输入。
 
-### Memory Phase B：Episode 写入 + IPC + Tantivy 全文检索
+### 2. 修正 Meso Entity/Decision 的幂等与质量问题
 
-- [x] `tiangong-memory` 引入 `tantivy = "0.22"` 依赖
-- [x] 实现 `search/tantivy.rs`：Tantivy Schema 定义、文档索引、BM25 查询
-- [x] 扩展 `store.rs`：协调 SQLite + Tantivy 双层写入
-- [x] 扩展 `db/sqlite.rs`：Episode/Entity/Decision 完整 CRUD
-- [x] 实现 `writer.rs`：EpisodeWriter（调用 lite 模型提取摘要）
-- [x] 实现 `rumination.rs`：MicroRumination（Episode 写入部分）
-- [x] 扩展 `actor.rs`：处理 WriteEpisode / RunMicroRumination 命令
-- [x] 实现 `ipc/`：TCP loopback IPC 服务端/客户端骨架（动态端口 + endpoint 文件发现 + token 鉴权）
-- [x] 扩展 `election/`：Follower 监控与自动接替
-- [x] 各入口集成完整 Memory Actor 启动（CLI / Server / GUI 已显式启动并注入 Handle）
-- [x] runtime 集成点：turn 完成后通过 Handle 发送反刍命令
-- [x] 为 `tiangong-memory` 增加独立集成测试（runtime / ipc 主链路）
+- [ ] 为 Entity 生成稳定 key，按 `(workspace_id, entity_type, name)` 去重更新。
+- [ ] 为 Decision 生成稳定 dedupe key，避免同一 Episode 多次生成重复 Decision。
+- [ ] 增加 LLM 版 Meso 提炼器，复用 `tiangong-llm` 输出结构化 Entity/Decision。
+- [ ] 为 LLM Meso 输出增加严格 JSON 解析、字段校验和错误 fallback。
+- [ ] 保留当前规则版 Meso 作为 LLM 失败时的 fallback。
+- [ ] 增加集成测试验证重复运行 Meso 不会重复膨胀 Entity/Decision 数量。
+- [ ] 增加测试验证 LLM Meso 失败时仍能回退到规则版。
 
-### Memory Phase C：内置向量检索 + 双引擎召回 + Tool 化按需回忆
+### 3. Memory runtime / handle registry 生命周期收口
 
-- [x] 引入 `qdrant-client = "1"` 依赖
-- [x] 实现 `search/vector.rs`：内置 SQLite flat 向量索引与 `VectorIndex` 抽象
-- [x] 实现 `search/qdrant.rs`：collection 管理、point upsert、语义查询（作为 external backend 兼容路径）
-- [x] 实现 `search/embedding.rs`：封装 EmbeddingProvider 调用
-- [x] 实现 `search/reranker.rs`：分数归一化、时间衰减、重要度加权
-- [x] 实现 `search/mod.rs`：双引擎召回统一入口（BM25 + Vector）
-- [x] 实现 `recall.rs`：RecallAnchors 提取 + 双引擎召回 + 定向展开（Depth2 未完成）
-- [x] 打通 `Episode -> Embedding -> EmbeddedFlatVectorIndex -> Hybrid Recall` 主链路
-- [ ] 扩展 `rumination.rs`：MesoRumination（Entity/Decision 提取）
-- [x] 注册 `recall_memory` 工具，允许主模型在需要历史语境时主动请求 Memory
-- [x] 移除 Core 侧 turn 前自动 Recall 注入，避免 skip/recall 判断在 Core 内固化
-- [x] 将 `recall_memory` 请求交给 Memory 系统内部完成自主检索计划与结果整理
-- [x] 将媒体 URL、文件产物、工具输出摘要写入 Memory，补齐跨会话产物回忆能力
-- [x] 完成 `LoadDepth2` 定向展开：按召回节点 ID 读取 Episode / Entity / Decision / Evidence 完整内容
+- [ ] 为 registry entry 记录 workspace_id、配置摘要或 generation、创建时间、最后使用时间。
+- [ ] 定义配置 generation 变化时的处理策略：复用、重启或标记待重启。
+- [ ] 保证 `TiangongCore::into_session` / Drop 不误关共享 MemoryHandle。
+- [ ] 增加应用退出路径的统一 Memory shutdown 能力。
+- [ ] 增加测试验证两个 workspace 使用不同 handle。
+- [ ] 增加测试验证两个 workspace 的 Episode 不会串写 scope_id。
+
+---
+
+## P1 - 主链路质量增强
+
+### 4. 更新 Memory 接手指南
+
+- [ ] 更新 `docs/memory-system/11-当前开发状态与接手指南.md` 到当前代码状态。
+- [ ] 删除或标注旧结论：Meso 只是关键词统计、RecallAnchors 未规划、Server 未接入等。
+- [ ] 补充当前可用链路：Micro、Meso、Tool 化回忆、Depth2、混合检索、产物记忆。
+- [ ] 补充测试脚本和观察日志命令。
+- [ ] 补充当前已知限制和下一步任务。
+
+### 5. external Qdrant 专项集成测试
+
+- [ ] 新增 Qdrant ignored 集成测试。
+- [ ] 使用 `TIANGONG_MEMORY_QDRANT_TEST=1` 显式启用测试。
+- [ ] 覆盖 Qdrant collection 创建。
+- [ ] 覆盖 Qdrant point upsert。
+- [ ] 覆盖 Qdrant semantic search。
+- [ ] 未设置环境变量或服务不可用时跳过，不影响默认 CI。
+
+### 6. Memory 配置热更新
+
+- [ ] 定义 Memory 配置摘要，覆盖 model、embedding、dimension、vector_mode。
+- [ ] registry 根据配置摘要判断是否复用旧 handle。
+- [ ] 明确哪些配置变更需要重启 Memory actor。
+- [ ] 明确哪些配置变更可以原地更新。
+- [ ] embedding 维度变化时拒绝复用旧向量索引。
+- [ ] embedding/vector 配置不兼容时输出 warning 并降级为 BM25-only。
+- [ ] 增加配置变更相关单元测试或集成测试。
+
+### 7. Recall 输出预算与去重策略继续收口
+
+- [ ] 为 `MemoryRecallResponse` 增加统一输出预算策略。
+- [ ] 至少按字符数或估算 token 限制 recall 输出长度。
+- [ ] 同一 node_id 不重复输出。
+- [ ] 同一 URL 不重复输出。
+- [ ] 同一路径不重复输出。
+- [ ] 同一工具结果摘要不重复输出。
+- [ ] 当前上下文已有内容不重复输出。
+- [ ] 增加长 Episode 裁剪测试。
+- [ ] 增加重复 URL、重复 path、重复当前上下文测试。
+
+---
+
+## P2 - 后续增强
+
+### 8. Memory 观测与调试能力
+
+- [ ] tracing 日志输出 recall query。
+- [ ] tracing 日志输出 recall strategy。
+- [ ] tracing 日志输出 hit count。
+- [ ] tracing 日志输出 backend：BM25、embedded vector、Qdrant。
+- [ ] tracing 日志输出 used_llm 和 fallback reason。
+- [ ] debug 日志可观察 Episode 写入。
+- [ ] debug 日志可观察 vector upsert。
+- [ ] debug 日志可观察 Meso Entity/Decision 提炼数量。
+
+### 9. Phase 17 多媒体尾项
+
+- [ ] 为视频结果补齐与图片一致的结构化消息字段。
+- [ ] GUI 支持渲染结构化视频结果。
+- [ ] Connector 支持发送结构化视频结果。
+- [ ] 约束 MCP 只作为媒体后端来源之一。
+- [ ] 防止多媒体结果重新退化为工具文本。
+
+### 10. requirements 文档补齐 Memory 需求
+
+- [ ] 在 `docs/requirements.md` 增加 Memory 系统 Must/Should 要求。
+- [ ] 明确 Memory 功能必须可关闭。
+- [ ] 明确 Memory 必须保持独立 crate。
+- [ ] 明确 Memory 必须复用 `tiangong-llm`。
+- [ ] 明确 Memory 必须支持按需回忆。
+- [ ] 明确 Memory 必须支持 workspace 隔离。
+- [ ] 明确 Memory 必须支持产物记忆。
+- [ ] 明确 Memory 必须具备独立集成测试。
+
+---
+
+## 当前推荐执行顺序
+
+1. 先提交当前 Meso + workspace registry + 文档整理变更。
+2. 开发 `RecallAnchorExtractor`。
+3. 修正 Meso 幂等问题，再升级 LLM 提炼。
+4. 更新 Memory 接手指南。
+5. 补 external Qdrant ignored test。
+6. 处理 Memory 配置热更新和 runtime 生命周期清理。

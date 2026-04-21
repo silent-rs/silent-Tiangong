@@ -5,8 +5,8 @@ use std::time::Duration;
 use serial_test::serial;
 use tempfile::TempDir;
 use tiangong_memory::{
-    Episode, EpisodeOutcome, MemoryRecallRequest, RecallAnchors, TurnArtifact, TurnArtifactKind,
-    TurnResult, load_injection_sync, start, workspace_id_from_path,
+    Episode, EpisodeOutcome, MemoryKind, MemoryRecallRequest, RecallAnchors, TurnArtifact,
+    TurnArtifactKind, TurnResult, load_injection_sync, start, workspace_id_from_path,
 };
 
 struct EnvGuard {
@@ -82,6 +82,34 @@ async fn wait_for_recall_hit(
             )
             .await;
         if !hits.is_empty() {
+            return hits;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Vec::new()
+}
+
+async fn wait_for_recall_kind(
+    handle: &tiangong_memory::MemoryHandle,
+    query: &str,
+    kind: MemoryKind,
+) -> Vec<tiangong_memory::RecallHit> {
+    for attempt in 1..=30 {
+        let hits = handle
+            .recall(
+                RecallAnchors {
+                    query: query.to_string(),
+                    keywords: Vec::new(),
+                    strategy: None,
+                },
+                8,
+            )
+            .await;
+        eprintln!(
+            "[wait-kind] attempt={attempt} query={query:?} kind={kind:?} hits={}",
+            hits.len()
+        );
+        if hits.iter().any(|hit| hit.kind == kind) {
             return hits;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -430,6 +458,104 @@ async fn contextual_recall_returns_incremental_memory_without_repeating_prompt_c
         1,
         "同一 URL 在回忆结果中应只出现一次"
     );
+
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn meso_rumination_extracts_entity_and_decision_memories() {
+    let (home, _workspace, workspace_path, workspace_id) = setup_workspace();
+    let _env = EnvGuard::enter(home.path(), &workspace_path);
+
+    let handle = start(Some(workspace_id.clone())).expect("启动 memory 失败");
+    handle.write_episode(
+        Episode::new(
+            "session-meso".to_string(),
+            "qdrant vector backend evaluation".to_string(),
+            "Compared external qdrant server with embedded flat vector index for memory recall."
+                .to_string(),
+            EpisodeOutcome::Success,
+            vec![
+                "qdrant".to_string(),
+                "vector".to_string(),
+                "memory".to_string(),
+            ],
+            vec!["cargo_test".to_string()],
+            0.7,
+        ),
+        Some(workspace_id.clone()),
+    );
+    handle.write_episode(
+        Episode::new(
+            "session-meso".to_string(),
+            "choose embedded vector index for memory".to_string(),
+            "We decided to choose embedded vector index instead of external qdrant server to reduce user startup complexity."
+                .to_string(),
+            EpisodeOutcome::Success,
+            vec![
+                "qdrant".to_string(),
+                "vector".to_string(),
+                "memory".to_string(),
+                "embedded".to_string(),
+            ],
+            vec!["architecture_decision".to_string()],
+            0.85,
+        ),
+        Some(workspace_id.clone()),
+    );
+    eprintln!("[meso] submitted source episodes workspace_id={workspace_id}");
+
+    handle.run_meso_rumination("session-meso".to_string(), workspace_id.clone());
+
+    let entity_hits =
+        wait_for_recall_kind(&handle, "qdrant memory entity", MemoryKind::Entity).await;
+    for (idx, hit) in entity_hits.iter().enumerate() {
+        eprintln!(
+            "[meso] entity_hit[{idx}] kind={:?} title={} summary={}",
+            hit.kind, hit.title, hit.summary
+        );
+    }
+    assert!(
+        entity_hits.iter().any(|hit| hit.kind == MemoryKind::Entity),
+        "Meso 反刍应从近期 Episode 提炼 Entity 并写入可召回索引"
+    );
+
+    let decision_hits = wait_for_recall_kind(
+        &handle,
+        "choose embedded vector index decision",
+        MemoryKind::Decision,
+    )
+    .await;
+    for (idx, hit) in decision_hits.iter().enumerate() {
+        eprintln!(
+            "[meso] decision_hit[{idx}] kind={:?} title={} summary={}",
+            hit.kind, hit.title, hit.summary
+        );
+    }
+    let decision = decision_hits
+        .iter()
+        .find(|hit| hit.kind == MemoryKind::Decision)
+        .expect("应召回 Decision 节点");
+    let expanded = handle.load_depth2(vec![decision.node_id.clone()]).await;
+    let expanded_text = expanded
+        .iter()
+        .map(|item| item.full_content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    eprintln!("[meso] decision_depth2={expanded_text}");
+    assert!(
+        expanded_text.contains("embedded vector index"),
+        "Decision 完整内容应保留 chosen/context 等决策线索"
+    );
+
+    let injection = handle
+        .load_injection("session-meso", Some(&workspace_id))
+        .await
+        .join("\n");
+    eprintln!("[meso] workspace_injection=\n{injection}");
+    assert!(injection.contains("实体记忆"));
+    assert!(injection.contains("决策记忆"));
 
     handle.shutdown().await;
 }

@@ -317,6 +317,7 @@ impl MemoryDb {
     }
 
     /// 查询最近的 Episode 摘要（用于 MesoRumination）
+    #[allow(dead_code)]
     pub(crate) fn recent_episode_summaries(
         &self,
         limit: usize,
@@ -342,6 +343,56 @@ impl MemoryDb {
             })
             .collect();
         Ok(rows)
+    }
+
+    /// 查询最近的完整 Episode，供 MesoRumination 提炼 Entity / Decision。
+    pub(crate) fn recent_episodes(
+        &self,
+        workspace_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Episode>> {
+        let (sql, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) =
+            if let Some(workspace_id) = workspace_id {
+                (
+                    "SELECT ep.full_content
+                     FROM episodes ep
+                     JOIN memory_nodes n ON n.id = ep.id
+                     WHERE n.kind = 'episode'
+                       AND n.status = 'active'
+                       AND n.scope_type = 'workspace'
+                       AND n.scope_id = ?1
+                     ORDER BY n.created_at DESC
+                     LIMIT ?2",
+                    vec![Box::new(workspace_id.to_string()), Box::new(limit as i64)],
+                )
+            } else {
+                (
+                    "SELECT ep.full_content
+                     FROM episodes ep
+                     JOIN memory_nodes n ON n.id = ep.id
+                     WHERE n.kind = 'episode'
+                       AND n.status = 'active'
+                       AND n.scope_type = 'workspace'
+                       AND n.scope_id IS NULL
+                     ORDER BY n.created_at DESC
+                     LIMIT ?1",
+                    vec![Box::new(limit as i64)],
+                )
+            };
+
+        let mut stmt = self.conn.prepare(sql)?;
+        let params = params.iter().map(|item| item.as_ref()).collect::<Vec<_>>();
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut episodes = Vec::new();
+        for row in rows {
+            let full_content = row?;
+            let episode = serde_json::from_str(&full_content)
+                .with_context(|| "解析 Meso Episode 列表项失败")?;
+            episodes.push(episode);
+        }
+        Ok(episodes)
     }
 
     /// 列出超过指定天数未使用且重要度低于阈值的节点（用于归档）

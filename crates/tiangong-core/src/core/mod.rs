@@ -4,9 +4,8 @@
 //! CLI / GUI / Server / Connector 统一通过 TiangongCore 运行。
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread::{self, JoinHandle};
 
 use crate::agents::execution_mcp_agent::{McpFunctionTarget, execution_function_tools};
@@ -24,34 +23,64 @@ use tiangong_types::{SessionStreamEvent, StreamEvent};
 
 const MAX_ROUNDS: usize = 20;
 
-/// 进程级 Memory Handle 单例
+/// 进程级 Memory Handle 注册表。
 ///
-/// 利用 OnceLock 保证在进程生命周期内只启动一次 Memory Actor。
-/// 多个 TiangongCore 实例共享同一个 Handle（clone）。
-static MEMORY_HANDLE: OnceLock<Option<tiangong_memory::MemoryHandle>> = OnceLock::new();
+/// 按 workspace_id 缓存 MemoryHandle，避免长生命周期 GUI/Server 进程在打开多个
+/// workspace 时把后续对话错误绑定到首个 workspace 的 Memory Actor。
+static MEMORY_HANDLES: OnceLock<Mutex<HashMap<String, tiangong_memory::MemoryHandle>>> =
+    OnceLock::new();
 
-/// 获取或初始化进程级 Memory Handle
+const GLOBAL_MEMORY_WORKSPACE_KEY: &str = "__global__";
+
+/// 获取或初始化 workspace 级 Memory Handle。
 fn get_or_init_memory(
     config: &crate::core_config::CoreConfig,
+    workspace_id: Option<String>,
 ) -> Option<tiangong_memory::MemoryHandle> {
-    MEMORY_HANDLE
-        .get_or_init(|| {
-            let workspace_id = std::env::current_dir()
-                .ok()
-                .map(|p| tiangong_memory::workspace_id_from_path(&p));
-            let options = config.to_memory_options(workspace_id);
-            match tiangong_memory::start_with_options(options) {
-                Ok(handle) => {
-                    tracing::info!("Memory Actor 已启动");
-                    Some(handle)
-                }
-                Err(err) => {
-                    tracing::warn!("Memory Actor 启动失败（非致命）: {}", err);
-                    None
-                }
-            }
-        })
-        .clone()
+    let key = memory_registry_key(workspace_id.as_deref());
+    let registry = MEMORY_HANDLES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = match registry.lock() {
+        Ok(guard) => guard,
+        Err(err) => {
+            tracing::warn!("Memory Handle registry 已污染，跳过 Memory 启动: {}", err);
+            return None;
+        }
+    };
+    if let Some(handle) = guard.get(&key) {
+        return Some(handle.clone());
+    }
+
+    let options = config.to_memory_options(workspace_id.clone());
+    match tiangong_memory::start_with_options(options) {
+        Ok(handle) => {
+            tracing::info!(workspace_id = ?workspace_id, "Memory Actor 已启动");
+            guard.insert(key, handle.clone());
+            Some(handle)
+        }
+        Err(err) => {
+            tracing::warn!(workspace_id = ?workspace_id, "Memory Actor 启动失败（非致命）: {}", err);
+            None
+        }
+    }
+}
+
+fn memory_registry_key(workspace_id: Option<&str>) -> String {
+    workspace_id
+        .filter(|workspace_id| !workspace_id.trim().is_empty())
+        .unwrap_or(GLOBAL_MEMORY_WORKSPACE_KEY)
+        .to_string()
+}
+
+fn resolve_memory_workspace_id(session_cwd: &str) -> Option<String> {
+    let trimmed = session_cwd.trim();
+    if !trimmed.is_empty() {
+        return Some(tiangong_memory::workspace_id_from_path(
+            &std::path::PathBuf::from(trimmed),
+        ));
+    }
+    std::env::current_dir()
+        .ok()
+        .map(|p| tiangong_memory::workspace_id_from_path(&p))
 }
 
 /// 用户命令
@@ -92,8 +121,10 @@ impl TiangongCore {
         session: Session,
         stream_tx: Sender<SessionStreamEvent>,
     ) -> Self {
-        let memory_handle = get_or_init_memory(&config.snapshot());
-        let initial_trust_mode = config.snapshot().trust_mode;
+        let config_snapshot = config.snapshot();
+        let memory_workspace_id = resolve_memory_workspace_id(&session.cwd);
+        let memory_handle = get_or_init_memory(&config_snapshot, memory_workspace_id.clone());
+        let initial_trust_mode = config_snapshot.trust_mode;
         let shared_trust_mode = Arc::new(RwLock::new(initial_trust_mode));
         let session_id = session.id.clone();
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
@@ -107,6 +138,7 @@ impl TiangongCore {
                 cmd_rx,
                 worker_trust_mode,
                 memory_handle,
+                memory_workspace_id,
             )
         });
 
@@ -183,6 +215,7 @@ fn worker_loop(
     cmd_rx: Receiver<Command>,
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
     memory_handle: Option<tiangong_memory::MemoryHandle>,
+    memory_workspace_id: Option<String>,
 ) -> Session {
     let session_id = session.id.clone();
     let mut last_cfg_gen = 0u64;
@@ -285,12 +318,9 @@ fn worker_loop(
                 // turn 完成后触发 Micro 反刍（fire-and-forget）
                 if let Some(handle) = memory_handle.as_ref() {
                     // 显式携带 workspace_id，避免 Actor 固化到启动时工作区造成跨工作区串写
-                    let workspace_id = std::env::current_dir()
-                        .ok()
-                        .map(|p| tiangong_memory::types::workspace_id_from_path(&p));
                     let mut turn_result =
                         build_memory_turn_result(&session, turn_start_idx, &content);
-                    turn_result.workspace_id = workspace_id;
+                    turn_result.workspace_id = memory_workspace_id.clone();
                     handle.run_micro_rumination_blocking(turn_result);
                 }
             }
@@ -1685,4 +1715,29 @@ fn normalize_network_target(target: &str) -> String {
         .next()
         .unwrap_or(without_scheme)
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_registry_key_separates_workspace_and_global_handles() {
+        assert_eq!(memory_registry_key(None), GLOBAL_MEMORY_WORKSPACE_KEY);
+        assert_eq!(memory_registry_key(Some("")), GLOBAL_MEMORY_WORKSPACE_KEY);
+        assert_eq!(memory_registry_key(Some("ws-a")), "ws-a");
+        assert_ne!(
+            memory_registry_key(Some("ws-a")),
+            memory_registry_key(Some("ws-b"))
+        );
+    }
+
+    #[test]
+    fn resolve_memory_workspace_id_prefers_session_cwd() {
+        let from_session = resolve_memory_workspace_id("/tmp/tiangong-memory-workspace-a")
+            .expect("session cwd 应生成 workspace_id");
+        let from_other_session = resolve_memory_workspace_id("/tmp/tiangong-memory-workspace-b")
+            .expect("session cwd 应生成 workspace_id");
+        assert_ne!(from_session, from_other_session);
+    }
 }

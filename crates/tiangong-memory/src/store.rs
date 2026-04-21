@@ -19,8 +19,8 @@ use crate::search::TantivyIndex;
 use crate::search::qdrant_search::QdrantIndex;
 use crate::search::vector::{EmbeddedFlatVectorIndex, VectorIndex};
 use crate::types::{
-    Episode, ExpandedMemory, MemoryKind, MemoryNode, MemoryScopeType, MemoryStatus, RecallAnchors,
-    RecallHit,
+    Decision, Entity, Episode, ExpandedMemory, MemoryKind, MemoryNode, MemoryScopeType,
+    MemoryStatus, RecallAnchors, RecallHit,
 };
 
 /// Memory 存储协调器
@@ -219,8 +219,44 @@ impl MemoryStore {
     }
 
     /// 查询最近 Episode 摘要（用于 MesoRumination 提炼关键词）
+    #[allow(dead_code)]
     pub(crate) fn recent_episode_summaries(&self, limit: usize) -> Vec<(String, Vec<String>)> {
         self.db.recent_episode_summaries(limit).unwrap_or_default()
+    }
+
+    /// 查询当前工作区最近 Episode 的完整内容，供 MesoRumination 提炼结构化记忆。
+    pub(crate) fn recent_episodes(&self, workspace_id: Option<&str>, limit: usize) -> Vec<Episode> {
+        self.db
+            .recent_episodes(workspace_id, limit)
+            .unwrap_or_default()
+    }
+
+    /// 写入 Entity（SQLite + Tantivy）。
+    pub(crate) fn upsert_entity(
+        &mut self,
+        entity: Entity,
+        workspace_id: Option<&str>,
+    ) -> Result<()> {
+        let node = entity_to_node(&entity, workspace_id);
+        self.db.upsert_entity(&entity, workspace_id)?;
+        if let Err(e) = self.tantivy.index_node(&node, &entity.name) {
+            tracing::warn!("Tantivy Entity 索引写入失败（非致命）: {}", e);
+        }
+        Ok(())
+    }
+
+    /// 写入 Decision（SQLite + Tantivy）。
+    pub(crate) fn upsert_decision(
+        &mut self,
+        decision: Decision,
+        workspace_id: Option<&str>,
+    ) -> Result<()> {
+        let node = decision_to_node(&decision, workspace_id);
+        self.db.upsert_decision(&decision, workspace_id)?;
+        if let Err(e) = self.tantivy.index_node(&node, &decision.chosen) {
+            tracing::warn!("Tantivy Decision 索引写入失败（非致命）: {}", e);
+        }
+        Ok(())
     }
 
     /// 列出低活跃节点（用于 MetaRumination 归档）
@@ -284,6 +320,46 @@ fn episode_to_node(ep: &Episode, workspace_id: Option<&str>) -> MemoryNode {
         last_used_at: None,
         created_at: ep.created_at.clone(),
         updated_at: now,
+    }
+}
+
+fn entity_to_node(entity: &Entity, workspace_id: Option<&str>) -> MemoryNode {
+    MemoryNode {
+        id: entity.id.clone(),
+        kind: MemoryKind::Entity,
+        scope_type: MemoryScopeType::Workspace,
+        scope_id: workspace_id.map(String::from),
+        title: entity.name.clone(),
+        summary: entity.description.clone(),
+        keywords: entity.related_episodes.clone(),
+        importance: entity.importance,
+        confidence: 1.0,
+        status: MemoryStatus::Active,
+        source: entity.file_path.clone(),
+        usage_count: 0,
+        last_used_at: None,
+        created_at: entity.created_at.clone(),
+        updated_at: entity.updated_at.clone(),
+    }
+}
+
+fn decision_to_node(decision: &Decision, workspace_id: Option<&str>) -> MemoryNode {
+    MemoryNode {
+        id: decision.id.clone(),
+        kind: MemoryKind::Decision,
+        scope_type: MemoryScopeType::Workspace,
+        scope_id: workspace_id.map(String::from),
+        title: decision.title.clone(),
+        summary: decision.context.clone(),
+        keywords: decision.reasons.clone(),
+        importance: 0.7,
+        confidence: 1.0,
+        status: MemoryStatus::Active,
+        source: Some(decision.chosen.clone()),
+        usage_count: 0,
+        last_used_at: None,
+        created_at: decision.created_at.clone(),
+        updated_at: decision.created_at.clone(),
     }
 }
 
