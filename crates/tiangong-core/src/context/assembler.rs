@@ -162,6 +162,7 @@ mod tests {
             id: "test".into(),
             title: "test".into(),
             messages: Vec::new(),
+            token_usage: Default::default(),
             task_records: Vec::new(),
             task_plans: Vec::new(),
             parent_session_id: None,

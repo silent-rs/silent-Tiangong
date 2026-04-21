@@ -23,6 +23,12 @@ pub struct Session {
     pub id: String,
     pub title: String,
     pub messages: Vec<Message>,
+    /// 当前会话累计 token 用量。
+    ///
+    /// `RunSnapshot.last_usage` 是运行时快照字段，不能跨会话复用；会话级累计值
+    /// 存在这里，供 GUI 切换会话时恢复原先统计。
+    #[serde(default)]
+    pub token_usage: TokenUsage,
     #[serde(default)]
     pub task_records: Vec<SessionTaskRecord>,
     #[serde(default)]
@@ -184,6 +190,7 @@ impl Session {
             id: new_id(),
             title: title.into(),
             messages: Vec::new(),
+            token_usage: TokenUsage::default(),
             task_records: Vec::new(),
             task_plans: Vec::new(),
             cwd,
@@ -210,6 +217,7 @@ impl Session {
             id,
             title: title.into(),
             messages: Vec::new(),
+            token_usage: TokenUsage::default(),
             task_records: Vec::new(),
             task_plans: Vec::new(),
             cwd: workspace_dir.to_string_lossy().to_string(),
@@ -639,6 +647,10 @@ impl Session {
 
     /// 计算当前会话所有任务的累计 token 用量
     pub fn total_usage(&self) -> TokenUsage {
+        if self.token_usage.total_tokens > 0 {
+            return self.token_usage.clone();
+        }
+
         let mut total = TokenUsage::default();
         for record in &self.task_records {
             if let Some(usage) = &record.usage {
