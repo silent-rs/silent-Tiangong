@@ -1367,9 +1367,10 @@ pub(crate) fn build_react_system_prompt(
 6. 回复使用 Markdown 格式：代码和命令用代码块（```语言 ... ```）包裹，使用标题、列表等结构化排版。
 7. 工具调用失败时必须如实告知用户失败原因，绝对不能虚构成功结果。
 8. 如果已安装的 Skill 能处理用户请求，优先通过 run_command 调用 Skill 脚本。
-9. 耗时较长的命令（编译、下载、视频生成等）使用 spawn_task 在后台执行。
-10. 多个可并行的耗时任务使用 spawn+join 模式：先多次调用 spawn_task 启动所有任务，再调用 wait_tasks 一次性等待全部完成。
-11. 独立的后台任务（不需要等待结果的）用 spawn_task 启动后直接继续，无需 wait_tasks。{media_section}{skills_section}
+9. 如果工具列表包含 recall_memory，且用户提到“刚刚、刚才、上次、之前、那个、继续、这张图、生成的图片”等历史指代，必须先调用 recall_memory，除非当前上下文已经包含明确答案。
+10. 耗时较长的命令（编译、下载、视频生成等）使用 spawn_task 在后台执行。
+11. 多个可并行的耗时任务使用 spawn+join 模式：先多次调用 spawn_task 启动所有任务，再调用 wait_tasks 一次性等待全部完成。
+12. 独立的后台任务（不需要等待结果的）用 spawn_task 启动后直接继续，无需 wait_tasks。{media_section}{skills_section}
 
 用户输入：
 {user_input}"

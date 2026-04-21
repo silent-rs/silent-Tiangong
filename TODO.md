@@ -65,7 +65,10 @@
 - [x] 实现 `search/embedding.rs`，封装 `EmbeddingProvider` 的 memory 侧调用
 - [x] 打通 Episode -> Embedding -> 内置向量索引 upsert 的主写链路
 - [x] 增加内置向量索引默认启用与 Qdrant external 兼容降级策略
+- [x] 将 Core 侧 turn 前自动 Recall 收口为 `recall_memory` 工具，由主模型按需调用
+- [ ] 将 `recall_memory` 从简单检索包装升级为 Memory 内部自主整理查询、召回和返回内容
 - [ ] 实现真正的 `RecallAnchors` 提取，而不是只使用原始 query
+- [ ] 将结构化媒体结果、工具结果和产物引用写入 Episode，支持“刚刚生成的图片”等回忆
 - [x] 完成 `LoadDepth2` 的定向展开能力
 - [ ] 将 `process_meso()` 从关键词统计升级为真实的 `Entity / Decision` 提炼
 - [x] 为 Memory 增加更多集成测试，覆盖多进程 IPC / leader 切换 / embedded 混合检索主链路
@@ -102,7 +105,7 @@
 - [x] runtime 集成点：turn 完成后通过 Handle 发送反刍命令
 - [x] 为 `tiangong-memory` 增加独立集成测试（runtime / ipc 主链路）
 
-### Memory Phase C：内置向量检索 + 双引擎召回 + Recall 注入
+### Memory Phase C：内置向量检索 + 双引擎召回 + Tool 化按需回忆
 
 - [x] 引入 `qdrant-client = "1"` 依赖
 - [x] 实现 `search/vector.rs`：内置 SQLite flat 向量索引与 `VectorIndex` 抽象
@@ -113,5 +116,8 @@
 - [x] 实现 `recall.rs`：RecallAnchors 提取 + 双引擎召回 + 定向展开（Depth2 未完成）
 - [x] 打通 `Episode -> Embedding -> EmbeddedFlatVectorIndex -> Hybrid Recall` 主链路
 - [ ] 扩展 `rumination.rs`：MesoRumination（Entity/Decision 提取）
-- [x] 修改 `prompt/assembler.rs`：Recall 结果注入到 Prompt
+- [x] 注册 `recall_memory` 工具，允许主模型在需要历史语境时主动请求 Memory
+- [x] 移除 Core 侧 turn 前自动 Recall 注入，避免 skip/recall 判断在 Core 内固化
+- [ ] 将 `recall_memory` 请求交给 Memory 系统内部完成自主检索计划与结果整理
+- [ ] 将媒体 URL、文件产物、工具输出摘要写入 Memory，补齐跨会话产物回忆能力
 - [x] 完成 `LoadDepth2` 定向展开：按召回节点 ID 读取 Episode / Entity / Decision / Evidence 完整内容

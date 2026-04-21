@@ -246,6 +246,9 @@ fn worker_loop(
                 .filter(|t| t.name != "mark_step_completed")
                 .collect();
             inject_enhanced_tools(&mut new_tools, e);
+            if memory_handle.is_some() {
+                inject_memory_recall_tool(&mut new_tools);
+            }
             tools = new_tools;
             mcp_targets = new_mcp_targets;
             last_cfg_gen = cfg_gen;
@@ -266,71 +269,6 @@ fn worker_loop(
                     content: content.clone(),
                 });
 
-                // Phase C：召回相关记忆注入 user_context
-                let recall_context: Vec<String> = if let Some(handle) = memory_handle.as_ref() {
-                    // 通过 LLM 判断检索策略（失败时 Memory 内部自动 fallback）
-                    let strategy = engine
-                        .as_ref()
-                        .and_then(|e| judge_search_strategy(e.lite_client(), &content));
-
-                    let strategy_label = match &strategy {
-                        Some(tiangong_memory::SearchStrategy::Skip) => "skip".to_string(),
-                        Some(tiangong_memory::SearchStrategy::Keyword) => "keyword".to_string(),
-                        Some(tiangong_memory::SearchStrategy::Semantic) => "semantic".to_string(),
-                        Some(tiangong_memory::SearchStrategy::Hybrid { semantic_ratio }) => {
-                            format!("hybrid:{semantic_ratio:.1}")
-                        }
-                        None => "auto".to_string(),
-                    };
-
-                    let _ = stream_tx.send(StreamEvent::MemoryRecallStart {
-                        strategy: strategy_label,
-                    });
-
-                    // Skip 策略：LLM 判断不需要历史记忆，直接跳过召回
-                    if matches!(strategy, Some(tiangong_memory::SearchStrategy::Skip)) {
-                        let _ = stream_tx.send(StreamEvent::MemoryRecallDone {
-                            hit_count: 0,
-                            hits: Vec::new(),
-                        });
-                        Vec::new()
-                    } else {
-                        let hits = handle.recall_blocking(
-                            tiangong_memory::RecallAnchors {
-                                query: content.clone(),
-                                keywords: Vec::new(),
-                                strategy,
-                            },
-                            5,
-                        );
-
-                        let hit_summaries: Vec<tiangong_types::MemoryRecallHitSummary> = hits
-                            .iter()
-                            .map(|h| tiangong_types::MemoryRecallHitSummary {
-                                title: h.title.clone(),
-                                summary: h.summary.clone(),
-                                score: h.score,
-                            })
-                            .collect();
-                        let _ = stream_tx.send(StreamEvent::MemoryRecallDone {
-                            hit_count: hits.len(),
-                            hits: hit_summaries,
-                        });
-
-                        if hits.is_empty() {
-                            Vec::new()
-                        } else {
-                            let items: Vec<String> = hits
-                                .into_iter()
-                                .map(|h| format!("- **{}**: {}", h.title, h.summary))
-                                .collect();
-                            vec![format!("## 相关历史记忆\n{}", items.join("\n"))]
-                        }
-                    }
-                } else {
-                    Vec::new()
-                };
-
                 // 执行对话轮次
                 execute_turn(
                     &mut session,
@@ -340,7 +278,7 @@ fn worker_loop(
                     &mcp_targets,
                     &stream_tx,
                     &cmd_rx,
-                    recall_context,
+                    memory_handle.as_ref(),
                 );
 
                 // turn 完成后触发 Micro 反刍（fire-and-forget）
@@ -430,7 +368,7 @@ pub(crate) fn execute_turn_standalone(
         stream_tx,
         cmd_rx,
         max_rounds,
-        &[],
+        None,
     )
 }
 
@@ -448,7 +386,7 @@ fn execute_turn(
     mcp_targets: &HashMap<String, McpFunctionTarget>,
     stream_tx: &Sender<StreamEvent>,
     cmd_rx: &Receiver<Command>,
-    recall_context: Vec<String>,
+    memory_handle: Option<&tiangong_memory::MemoryHandle>,
 ) {
     // 判断是否需要多代理并行执行
     let coordinator = TaskCoordinator::new(engine.clone());
@@ -485,7 +423,7 @@ fn execute_turn(
                     stream_tx,
                     cmd_rx,
                     MAX_ROUNDS,
-                    &recall_context,
+                    memory_handle,
                 );
             }
         }
@@ -501,7 +439,7 @@ fn execute_turn(
         stream_tx,
         cmd_rx,
         MAX_ROUNDS,
-        &recall_context,
+        memory_handle,
     );
 }
 
@@ -516,7 +454,7 @@ fn execute_turn_inner(
     stream_tx: &Sender<StreamEvent>,
     cmd_rx: &Receiver<Command>,
     max_rounds: usize,
-    recall_context: &[String],
+    memory_handle: Option<&tiangong_memory::MemoryHandle>,
 ) -> TokenUsage {
     let mut loop_context: Vec<Message> = Vec::new();
     let mut round = 0;
@@ -546,7 +484,7 @@ fn execute_turn_inner(
         }
 
         let assembler = PromptAssembler::new(engine.context_limit);
-        let mut assembled = assembler.assemble(
+        let assembled = assembler.assemble(
             session,
             "",
             tools.to_vec(),
@@ -554,13 +492,6 @@ fn execute_turn_inner(
             engine.agent_config(),
             &prompt_loop_context,
         );
-
-        // Phase C：第一轮时将 recall 结果注入 user_context
-        if round == 0 && !recall_context.is_empty() {
-            assembled
-                .user_context
-                .extend(recall_context.iter().cloned());
-        }
 
         let system_prompt = assembled.final_system_prompt();
         let req = ModelRequest {
@@ -831,7 +762,11 @@ fn execute_turn_inner(
                 args_summary: args_summary.clone(),
             });
 
-            let result = engine.execute_tool_call(call, mcp_targets, &engine.agent_config().mcp);
+            let result = if call.name == "recall_memory" {
+                execute_memory_recall_tool(call, memory_handle, session)
+            } else {
+                engine.execute_tool_call(call, mcp_targets, &engine.agent_config().mcp)
+            };
 
             audit_tool_execution(
                 &session.id,
@@ -1084,6 +1019,169 @@ fn build_engine_from_config(
     engine
 }
 
+fn inject_memory_recall_tool(tools: &mut Vec<FunctionToolSpec>) {
+    if tools.iter().any(|tool| tool.name == "recall_memory") {
+        return;
+    }
+
+    tools.push(FunctionToolSpec {
+        name: "recall_memory".to_string(),
+        description: "按需回忆历史上下文、跨会话结果、之前的工具输出或生成产物。用户提到刚刚、刚才、上次、之前、那个、继续、这张图、生成的图片等历史指代时，应先调用此工具。".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "要回忆的内容，结合用户当前请求改写成可检索查询"
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "为什么需要回忆，简述当前任务依赖的历史语境"
+                },
+                "expected": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "期望找回的内容类型，如 media、file、tool_result、decision、code_context"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "最多返回多少条记忆，默认 5，最大 10"
+                }
+            },
+            "required": ["query"]
+        }),
+    });
+}
+
+fn execute_memory_recall_tool(
+    call: &crate::model::ModelFunctionCall,
+    memory_handle: Option<&tiangong_memory::MemoryHandle>,
+    session: &Session,
+) -> crate::tool::ToolResult {
+    let Some(handle) = memory_handle else {
+        return crate::tool::ToolResult {
+            ok: false,
+            summary: "记忆系统未启用".to_string(),
+            stdout: String::new(),
+            stderr: "memory disabled".to_string(),
+            exit_code: 1,
+            execution: None,
+        };
+    };
+
+    let query = call
+        .arguments
+        .get("query")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| latest_user_message(session));
+    if query.is_empty() {
+        return crate::tool::ToolResult {
+            ok: false,
+            summary: "缺少回忆查询".to_string(),
+            stdout: String::new(),
+            stderr: "recall_memory.query is empty".to_string(),
+            exit_code: 1,
+            execution: None,
+        };
+    }
+
+    let reason = call
+        .arguments
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let expected = call
+        .arguments
+        .get("expected")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(String::from)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let limit = call
+        .arguments
+        .get("limit")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(5)
+        .clamp(1, 10) as usize;
+
+    let mut recall_query = query.to_string();
+    if !reason.is_empty() {
+        recall_query.push_str("\nreason: ");
+        recall_query.push_str(reason);
+    }
+    if !expected.is_empty() {
+        recall_query.push_str("\nexpected: ");
+        recall_query.push_str(&expected.join(", "));
+    }
+
+    let hits = handle.recall_blocking(
+        tiangong_memory::RecallAnchors {
+            query: recall_query,
+            keywords: expected.clone(),
+            strategy: None,
+        },
+        limit,
+    );
+
+    if hits.is_empty() {
+        return crate::tool::ToolResult {
+            ok: true,
+            summary: "未找到相关记忆".to_string(),
+            stdout: format!("未找到与「{query}」相关的历史记忆。"),
+            stderr: String::new(),
+            exit_code: 0,
+            execution: None,
+        };
+    }
+
+    let mut lines = vec![
+        "记忆回忆结果（供继续推理使用）".to_string(),
+        format!("query: {query}"),
+    ];
+    if !reason.is_empty() {
+        lines.push(format!("reason: {reason}"));
+    }
+    for (idx, hit) in hits.iter().enumerate() {
+        lines.push(format!(
+            "{}. [{:.2}] {}",
+            idx + 1,
+            hit.score,
+            hit.title.trim()
+        ));
+        lines.push(format!("   summary: {}", hit.summary.trim()));
+        lines.push(format!("   node_id: {}", hit.node_id));
+    }
+
+    crate::tool::ToolResult {
+        ok: true,
+        summary: format!("命中 {} 条相关记忆", hits.len()),
+        stdout: lines.join("\n"),
+        stderr: String::new(),
+        exit_code: 0,
+        execution: None,
+    }
+}
+
+fn latest_user_message(session: &Session) -> &str {
+    session
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == MessageRole::User)
+        .map(|message| message.content.as_str())
+        .unwrap_or_default()
+}
+
 /// 格式化工具调用参数摘要（用于 ToolStart 和 ApprovalNeeded 事件）
 fn format_call_args_summary(call: &crate::model::ModelFunctionCall) -> String {
     use serde_json::Value;
@@ -1115,6 +1213,12 @@ fn format_call_args_summary(call: &crate::model::ModelFunctionCall) -> String {
             .map(|c| c.len())
             .unwrap_or(0);
         return format!("{path} ({len} bytes)");
+    }
+
+    if call.name == "recall_memory"
+        && let Some(query) = args.get("query").and_then(Value::as_str)
+    {
+        return query.to_string();
     }
 
     // read_file / list_directory
@@ -1307,71 +1411,4 @@ fn normalize_network_target(target: &str) -> String {
         .next()
         .unwrap_or(without_scheme)
         .to_string()
-}
-
-// ==================== 记忆检索策略判断 ====================
-
-const SEARCH_STRATEGY_SYSTEM_PROMPT: &str = "\
-你是一个查询分类助手。根据用户的查询文本，判断是否需要检索历史记忆，以及最适合的检索策略。
-
-规则：
-- skip：查询是简单问候（你好、hi）、通用知识问答、格式化/重构等不需要历史记忆的请求
-- keyword：查询包含精确的代码符号（::、->、fn、struct）、文件路径（.rs、.py）、\
-  错误码（error[、E0、panic）或明确的标识符名称
-- semantic：查询使用模糊引用（之前、那个、上次、earlier）、自然语言提问结合历史语境
-- hybrid：兼有关键词特征和语义特征，或无法明确判断
-
-输出格式（严格遵守，不要输出其他内容）：
-- 不需要记忆：skip
-- 纯关键词检索：keyword
-- 纯语义检索：semantic
-- 混合检索：hybrid:0.N（N 为语义占比，0-9）
-
-示例：
-- \"你好\" → skip
-- \"帮我格式化这段代码\" → skip
-- \"什么是 TCP 三次握手\" → skip
-- \"impl TiangongCore\" → keyword
-- \"上次那个数据库配置怎么写的\" → semantic
-- \"rust async runtime 上次用的那个\" → hybrid:0.6";
-
-/// 通过 LLM 判断用户查询的最佳检索策略
-///
-/// 失败时返回 None，由 Memory 内部 fallback 到规则判断。
-fn judge_search_strategy(
-    client: &crate::model::SingleProviderClient,
-    query: &str,
-) -> Option<tiangong_memory::SearchStrategy> {
-    let result = client
-        .complete_lite_with_system(SEARCH_STRATEGY_SYSTEM_PROMPT, query)
-        .ok()?;
-    parse_search_strategy_response(&result)
-}
-
-/// 解析 LLM 返回的策略字符串
-fn parse_search_strategy_response(text: &str) -> Option<tiangong_memory::SearchStrategy> {
-    let text = text.trim().to_lowercase();
-    if text == "skip" {
-        return Some(tiangong_memory::SearchStrategy::Skip);
-    }
-    if text == "keyword" {
-        return Some(tiangong_memory::SearchStrategy::Keyword);
-    }
-    if text == "semantic" {
-        return Some(tiangong_memory::SearchStrategy::Semantic);
-    }
-    if let Some(rest) = text.strip_prefix("hybrid") {
-        // 解析 "hybrid:0.N" 或 "hybrid" 格式
-        if let Some(ratio_str) = rest.strip_prefix(':')
-            && let Ok(ratio) = ratio_str.trim().parse::<f64>()
-        {
-            return Some(tiangong_memory::SearchStrategy::Hybrid {
-                semantic_ratio: ratio.clamp(0.0, 1.0),
-            });
-        }
-        return Some(tiangong_memory::SearchStrategy::Hybrid {
-            semantic_ratio: 0.5,
-        });
-    }
-    None
 }
