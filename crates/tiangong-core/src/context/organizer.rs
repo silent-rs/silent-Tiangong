@@ -91,7 +91,10 @@ impl ContextOrganizer {
         Self::filter_execution_traces_vec(&raw)
     }
 
-    /// 过滤执行阶段的 System 消息，保留纯对话
+    /// 过滤执行阶段的 System 消息。
+    ///
+    /// `LLM 输出` 等内部痕迹仍会被丢弃；`工具执行` 会被压缩为摘要保留，
+    /// 避免跨用户轮次丢失“刚刚读过/定位过的文件路径”等关键现场信息。
     pub fn filter_execution_traces(messages: &[Message]) -> Vec<Message> {
         Self::filter_execution_traces_vec(messages)
     }
@@ -99,22 +102,93 @@ impl ContextOrganizer {
     fn filter_execution_traces_vec(messages: &[Message]) -> Vec<Message> {
         messages
             .iter()
-            .filter(|msg| {
+            .filter_map(|msg| {
                 if msg.role != MessageRole::System {
-                    return true;
+                    return Some(msg.clone());
                 }
                 let c = msg.content.as_str();
                 // 保留摘要消息
                 if c.starts_with("[早期对话摘要]") {
-                    return true;
+                    return Some(msg.clone());
                 }
-                !(c.starts_with("工具执行")
-                    || c.starts_with("LLM 输出")
+                if c.starts_with("工具执行") {
+                    let mut summarized = msg.clone();
+                    summarized.content = summarize_tool_execution_trace(c);
+                    return Some(summarized);
+                }
+                if c.starts_with("LLM 输出")
                     || c.starts_with("Plan 执行总结")
                     || c.starts_with("检测到")
-                    || c.starts_with("执行已取消"))
+                    || c.starts_with("执行已取消")
+                {
+                    return None;
+                }
+                Some(msg.clone())
             })
-            .cloned()
             .collect()
+    }
+}
+
+fn summarize_tool_execution_trace(content: &str) -> String {
+    let mut kept_lines = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("stdout:") || trimmed.starts_with("stderr:") {
+            kept_lines.push(format!("{trimmed} ...(已省略原始输出)"));
+            break;
+        }
+        if trimmed.starts_with("```") {
+            break;
+        }
+        kept_lines.push(line.to_string());
+        if kept_lines.len() >= 12 {
+            kept_lines.push("...(已截断工具执行摘要)".to_string());
+            break;
+        }
+    }
+
+    format!("[工具执行摘要]\n{}", kept_lines.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::now_text;
+
+    fn message(role: MessageRole, content: &str) -> Message {
+        Message {
+            id: scru128::new().to_string(),
+            role,
+            content: content.to_string(),
+            reasoning_content: String::new(),
+            worker_id: None,
+            media: Vec::new(),
+            created_at: now_text(),
+        }
+    }
+
+    #[test]
+    fn filter_execution_traces_keeps_tool_execution_summary_paths() {
+        let messages = vec![
+            message(MessageRole::User, "直接帮我修复这个脚本就行了"),
+            message(MessageRole::System, "LLM 输出\ntool_calls: read_file"),
+            message(
+                MessageRole::System,
+                "工具执行 [read_file]\n命令: /Users/example/.tiangong/skills/installed/web-search/1.0.0/web_search.py\nok=true exit_code=0\nsummary: read_file\nstdout:\n     1\t#!/usr/bin/env python3\n     2\tfrom duckduckgo_search import DDGS",
+            ),
+        ];
+
+        let filtered = ContextOrganizer::filter_execution_traces(&messages);
+
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0].role, MessageRole::User);
+        assert!(filtered[1].content.starts_with("[工具执行摘要]"));
+        assert!(
+            filtered[1].content.contains(
+                "/Users/example/.tiangong/skills/installed/web-search/1.0.0/web_search.py"
+            )
+        );
+        assert!(filtered[1].content.contains("stdout: ...(已省略原始输出)"));
+        assert!(!filtered[1].content.contains("from duckduckgo_search"));
     }
 }

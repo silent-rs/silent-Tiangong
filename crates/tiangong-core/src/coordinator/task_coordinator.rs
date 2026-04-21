@@ -11,6 +11,7 @@ use std::sync::mpsc::Sender;
 use crate::model::{ModelClient, ModelRequest, TokenUsage};
 use crate::runtime::RuntimeEngine;
 use crate::session::Session;
+use crate::stream_throttle::ThrottledStreamSink;
 use tiangong_types::StreamEvent;
 
 use super::types::{CoordinatorResult, CoordinatorTask, WorkerBudget, WorkerContext, WorkerResult};
@@ -276,20 +277,17 @@ impl TaskCoordinator {
                 }),
             };
 
-            // 流式合成，实时推送
-            let tx = stream_tx.clone();
+            // 流式合成，按固定节奏推送，避免高速模型压垮前端事件队列
             let merge_msg_id = scru128::new().to_string();
-            match self
-                .engine
-                .client()
-                .complete_stream_with_callback(&req, |delta| {
-                    if !delta.content.is_empty() {
-                        let _ = tx.send(StreamEvent::Delta {
-                            message_id: merge_msg_id.clone(),
-                            content: delta.content.clone(),
-                        });
-                    }
-                }) {
+            let sink = ThrottledStreamSink::new(merge_msg_id, stream_tx.clone());
+            let response_result =
+                self.engine
+                    .client()
+                    .complete_stream_with_callback(&req, |delta| {
+                        sink.push_chunk(delta);
+                    });
+            sink.finish();
+            match response_result {
                 Ok(resp) => {
                     total_usage.accumulate(&resp.usage);
                     resp.text

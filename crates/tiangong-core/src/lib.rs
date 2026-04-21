@@ -22,5 +22,6 @@ pub mod prompt;
 pub mod runtime;
 pub mod session;
 pub mod skill;
+mod stream_throttle;
 pub mod task;
 pub mod tool;

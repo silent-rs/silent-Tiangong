@@ -157,6 +157,10 @@ export const useStore = create<AppState>((set, get) => ({
         messages: snapshot.messages,
         inputContent: snapshot.input_draft,
         runStatus: snapshot.status,
+        runSummary: snapshot.summary || '',
+        lastDurationMs: snapshot.last_duration_ms ?? null,
+        lastUsage: snapshot.last_usage ?? null,
+        approvalRequestId: snapshot.approval_request_id || null,
         currentPlan: snapshot.current_plan,
         sessionCwd: cwd,
         streamingMessageId: null,
@@ -182,6 +186,10 @@ export const useStore = create<AppState>((set, get) => ({
         messages: snapshot.messages,
         inputContent: snapshot.input_draft,
         runStatus: snapshot.status,
+        runSummary: snapshot.summary || '',
+        lastDurationMs: snapshot.last_duration_ms ?? null,
+        lastUsage: snapshot.last_usage ?? null,
+        approvalRequestId: snapshot.approval_request_id || null,
       });
     } catch (error) {
       console.error('删除会话失败:', error);
@@ -333,8 +341,17 @@ export const useStore = create<AppState>((set, get) => ({
     // snapshot.status 已由后端 build_session_snapshot 按 session 修正
     const { runStatus: prevStatus, isSending: prevSending } = get();
     const snapshotStatus = snapshot.status;
+    const snapshotApprovalRequestId = (snapshot as any).approval_request_id
+      || (snapshot as any).approvalRequestId
+      || null;
     // 防止取消后被旧快照覆盖
-    const effectiveStatus = (prevStatus === 'idle' && !prevSending && snapshotStatus !== 'idle')
+    const effectiveStatus = (
+      prevStatus === 'idle'
+      && !prevSending
+      && snapshotStatus !== 'idle'
+      && snapshotStatus !== 'waiting_approval'
+      && !snapshotApprovalRequestId
+    )
       ? 'idle'
       : snapshotStatus;
     set({
@@ -342,9 +359,7 @@ export const useStore = create<AppState>((set, get) => ({
       runSummary: snapshot.summary || '',
       lastDurationMs: snapshot.last_duration_ms ?? null,
       lastUsage: snapshot.last_usage ?? null,
-      approvalRequestId: (snapshot as any).approval_request_id
-        || (snapshot as any).approvalRequestId
-        || null,
+      approvalRequestId: snapshotApprovalRequestId,
     });
 
     // 草稿模式或不是当前查看的会话 → 不更新消息/流式内容

@@ -14,13 +14,12 @@ use crate::app_state::formatting::{format_llm_output_message, format_tool_trace_
 use crate::coordinator::TaskCoordinator;
 use crate::coordinator::types::CoordinatorTask;
 use crate::core_config::CoreConfigProvider;
-use crate::model::{
-    FunctionToolSpec, ModelClient, ModelRequest, ModelStreamChunk, SingleProviderClient, TokenUsage,
-};
+use crate::model::{FunctionToolSpec, ModelClient, ModelRequest, SingleProviderClient, TokenUsage};
 use crate::observe::{audit_permission_with_context, audit_tool_execution};
 use crate::prompt::PromptAssembler;
 use crate::runtime::{LlmOutputRecord, RuntimeEngine, inject_enhanced_tools, use_stream_mode};
 use crate::session::{Message, MessageRole, Session, now_text};
+use crate::stream_throttle::ThrottledStreamSink;
 use tiangong_types::{SessionStreamEvent, StreamEvent};
 
 const MAX_ROUNDS: usize = 20;
@@ -531,13 +530,14 @@ fn execute_turn_inner(
         }
 
         // 构建 prompt
-        // 用户输入统一通过 session.messages 传递，不使用独立的 user_input 通道
-        // 工具调用后续轮次的续写提示作为 System 消息注入 loop_context
+        // 用户输入统一通过 session.messages 传递，不使用独立的 user_input 通道。
+        // 工具调用后的续写提示只在本轮 prompt 中临时注入，避免重复累积到 loop_context。
+        let mut prompt_loop_context = loop_context.clone();
         if round > 0 {
-            loop_context.push(Message {
+            prompt_loop_context.push(Message {
                 id: scru128::new().to_string(),
-                role: MessageRole::User,
-                content: "根据上面的工具执行结果继续处理。如果已经收集到足够信息，直接给出最终回复，不要再调用工具。".to_string(),
+                role: MessageRole::System,
+                content: "内部调度提示：根据上面的工具执行结果继续完成用户原始目标。若目标尚未实际完成，继续调用必要工具；只有确认目标已完成时，才给出最终回复。".to_string(),
                 reasoning_content: String::new(),
                 worker_id: None,
                 media: Vec::new(),
@@ -552,7 +552,7 @@ fn execute_turn_inner(
             tools.to_vec(),
             engine.models_config(),
             engine.agent_config(),
-            &loop_context,
+            &prompt_loop_context,
         );
 
         // Phase C：第一轮时将 recall 结果注入 user_context
@@ -577,27 +577,15 @@ fn execute_turn_inner(
         let pending_msg_id = scru128::new().to_string();
 
         // LLM 流式调用
-        let tx = stream_tx.clone();
-        let msg_id_for_cb = pending_msg_id.clone();
-        let response = match engine.client().complete_with_functions_stream(
-            &req,
-            tools,
-            &mut |delta: &ModelStreamChunk| {
-                // 直接推送 StreamEvent（携带 message_id）
-                if !delta.content.is_empty() {
-                    let _ = tx.send(StreamEvent::Delta {
-                        message_id: msg_id_for_cb.clone(),
-                        content: delta.content.clone(),
-                    });
-                }
-                if !delta.reasoning_content.is_empty() {
-                    let _ = tx.send(StreamEvent::Reasoning {
-                        message_id: msg_id_for_cb.clone(),
-                        content: delta.reasoning_content.clone(),
-                    });
-                }
-            },
-        ) {
+        let sink = ThrottledStreamSink::new(pending_msg_id.clone(), stream_tx.clone());
+        let response_result =
+            engine
+                .client()
+                .complete_with_functions_stream(&req, tools, &mut |delta| {
+                    sink.push_chunk(delta);
+                });
+        sink.finish();
+        let response = match response_result {
             Ok(r) => r,
             Err(err) => {
                 let _ = stream_tx.send(StreamEvent::Error {
@@ -977,25 +965,15 @@ fn force_final_response(
     // 预生成 message_id
     let pending_msg_id = scru128::new().to_string();
 
-    let tx = stream_tx.clone();
-    let msg_id_for_cb = pending_msg_id.clone();
     let resp = if use_stream_mode() {
-        match engine
+        let sink = ThrottledStreamSink::new(pending_msg_id.clone(), stream_tx.clone());
+        let response_result = engine
             .client()
             .complete_stream_with_callback(&req, |delta| {
-                if !delta.content.is_empty() {
-                    let _ = tx.send(StreamEvent::Delta {
-                        message_id: msg_id_for_cb.clone(),
-                        content: delta.content.clone(),
-                    });
-                }
-                if !delta.reasoning_content.is_empty() {
-                    let _ = tx.send(StreamEvent::Reasoning {
-                        message_id: msg_id_for_cb.clone(),
-                        content: delta.reasoning_content.clone(),
-                    });
-                }
-            }) {
+                sink.push_chunk(delta);
+            });
+        sink.finish();
+        match response_result {
             Ok(r) => r,
             Err(err) => {
                 let _ = stream_tx.send(StreamEvent::Error {

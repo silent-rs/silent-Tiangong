@@ -4,13 +4,14 @@ use serde::{Deserialize, Serialize};
 
 /// 运行状态
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum RunStatus {
     #[default]
     Idle,
     Planning,
     Executing,
     /// 等待用户审批
+    #[serde(alias = "waitingapproval")]
     WaitingApproval,
     Completed,
     Failed,
