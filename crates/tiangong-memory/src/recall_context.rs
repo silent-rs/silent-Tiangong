@@ -3,30 +3,12 @@
 //! Core 只把当前请求和最近语境传进来；Memory 内部自行规划检索锚点、
 //! 调用召回、加载二跳内容，并输出去重后的增量信息。
 
+use crate::recall_anchor::extract_recall_anchors;
 use crate::store::MemoryStore;
 use crate::types::{
-    ExpandedMemory, MemoryRecallRequest, MemoryRecallResponse, RecallAnchors, RecallHit,
-    SearchStrategy,
+    ExpandedMemory, MemoryRecallRequest, MemoryRecallResponse, RecallHit, SearchStrategy,
 };
 use tiangong_llm::{LlmEndpointConfig, complete_text};
-
-const RECALL_PLAN_SYSTEM: &str = "\
-你是独立记忆系统的检索规划器。根据当前请求和语境，生成适合长期记忆检索的锚点。
-
-要求：
-- 只输出 JSON 对象，不要 Markdown。
-- query 应改写为面向历史记忆检索的短查询，不要照抄整段提示词。
-- keywords 只保留能区分历史记录的实体、文件名、工具名、媒体/产物类型。
-- strategy 可取 keyword、semantic、hybrid。
-- 用户提到刚刚、刚才、之前、上次、继续、那个、这张图、生成的图片等历史指代时，优先 semantic 或 hybrid。
-
-JSON 格式：
-{
-  \"query\": \"...\",
-  \"keywords\": [\"...\"],
-  \"strategy\": \"hybrid\",
-  \"semantic_ratio\": 0.7
-}";
 
 const RECALL_SYNTHESIS_SYSTEM: &str = "\
 你是独立记忆系统的结果整理器。你的输出会被交给主模型继续推理。
@@ -38,15 +20,6 @@ const RECALL_SYNTHESIS_SYSTEM: &str = "\
 - 不要输出泛泛解释，不要说“根据记忆”等套话。
 - 如果没有增量信息，输出：没有发现当前上下文之外的增量记忆。
 - 总长度控制在 1200 字以内。";
-
-#[derive(Debug, Default, serde::Deserialize)]
-struct RecallPlan {
-    query: Option<String>,
-    keywords: Option<Vec<String>>,
-    strategy: Option<String>,
-    semantic_ratio: Option<f64>,
-    limit: Option<usize>,
-}
 
 pub(crate) async fn recall_context(
     store: &MemoryStore,
@@ -61,29 +34,21 @@ pub(crate) async fn recall_context(
         };
     }
 
-    let plan = match model {
-        Some(config) => plan_with_model(config, &request)
-            .await
-            .unwrap_or_else(|err| {
-                tracing::warn!("Memory recall 规划失败，使用规则 fallback: {err}");
-                fallback_plan(&request)
-            }),
-        None => fallback_plan(&request),
-    };
+    let plan = extract_recall_anchors(model, &request).await;
+    if plan.anchors.strategy == Some(SearchStrategy::Skip) {
+        return MemoryRecallResponse {
+            content: "当前请求不需要检索长期记忆。".to_string(),
+            hits: Vec::new(),
+            used_llm: plan.used_llm,
+        };
+    }
 
-    let limit = plan.limit.unwrap_or(request.limit).clamp(1, 10);
-    let anchors = RecallAnchors {
-        query: plan.query.clone().unwrap_or_else(|| request.query.clone()),
-        keywords: plan.keywords.clone().unwrap_or_default(),
-        strategy: plan.strategy.clone(),
-    };
-
-    let hits = dedupe_hits(store.recall_async(&anchors, limit).await);
+    let hits = dedupe_hits(store.recall_async(&plan.anchors, plan.limit).await);
     if hits.is_empty() {
         return MemoryRecallResponse {
             content: format!("未找到与「{}」相关的历史记忆。", request.query),
             hits,
-            used_llm: model.is_some(),
+            used_llm: plan.used_llm,
         };
     }
 
@@ -106,7 +71,7 @@ pub(crate) async fn recall_context(
     MemoryRecallResponse {
         content,
         hits,
-        used_llm: model.is_some(),
+        used_llm: plan.used_llm || model.is_some(),
     }
 }
 
@@ -128,31 +93,6 @@ fn normalize_request(mut request: MemoryRecallRequest) -> MemoryRecallRequest {
     request
 }
 
-async fn plan_with_model(
-    config: &LlmEndpointConfig,
-    request: &MemoryRecallRequest,
-) -> anyhow::Result<PlannedAnchors> {
-    let prompt = format!(
-        "当前请求:\n{}\n\n调用原因:\n{}\n\n期望内容:\n{}\n\n最近语境:\n{}",
-        request.query,
-        request.reason.as_deref().unwrap_or(""),
-        request.expected.join(", "),
-        request.context.join("\n---\n")
-    );
-    let response = complete_text(config, RECALL_PLAN_SYSTEM, &prompt, 512).await?;
-    let json = extract_json_object(&response).unwrap_or(response.as_str());
-    let parsed: RecallPlan = serde_json::from_str(json)?;
-    Ok(PlannedAnchors {
-        query: parsed
-            .query
-            .map(|item| item.trim().to_string())
-            .filter(|item| !item.is_empty()),
-        keywords: parsed.keywords.map(dedupe_strings),
-        strategy: parse_strategy(parsed.strategy.as_deref(), parsed.semantic_ratio),
-        limit: parsed.limit,
-    })
-}
-
 async fn synthesize_with_model(
     config: &LlmEndpointConfig,
     request: &MemoryRecallRequest,
@@ -172,40 +112,6 @@ async fn synthesize_with_model(
         Ok("没有发现当前上下文之外的增量记忆。".to_string())
     } else {
         Ok(compacted)
-    }
-}
-
-#[derive(Debug, Default)]
-struct PlannedAnchors {
-    query: Option<String>,
-    keywords: Option<Vec<String>>,
-    strategy: Option<SearchStrategy>,
-    limit: Option<usize>,
-}
-
-fn fallback_plan(request: &MemoryRecallRequest) -> PlannedAnchors {
-    let mut keywords = request.expected.clone();
-    keywords.extend(
-        request
-            .query
-            .split(|c: char| c.is_whitespace() || "，。！？；：、,.!?;:'\"()（）".contains(c))
-            .map(str::trim)
-            .filter(|item| item.chars().count() >= 2)
-            .take(8)
-            .map(String::from),
-    );
-    let strategy = if contains_history_reference(&request.query) {
-        SearchStrategy::Semantic
-    } else {
-        SearchStrategy::Hybrid {
-            semantic_ratio: 0.6,
-        }
-    };
-    PlannedAnchors {
-        query: Some(request.query.clone()),
-        keywords: Some(dedupe_strings(keywords)),
-        strategy: Some(strategy),
-        limit: Some(request.limit),
     }
 }
 
@@ -318,35 +224,6 @@ fn dedupe_strings(items: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-fn parse_strategy(raw: Option<&str>, semantic_ratio: Option<f64>) -> Option<SearchStrategy> {
-    match raw?.trim().to_ascii_lowercase().as_str() {
-        "keyword" => Some(SearchStrategy::Keyword),
-        "semantic" => Some(SearchStrategy::Semantic),
-        "hybrid" => Some(SearchStrategy::Hybrid {
-            semantic_ratio: semantic_ratio.unwrap_or(0.6).clamp(0.0, 1.0),
-        }),
-        _ => None,
-    }
-}
-
-fn contains_history_reference(text: &str) -> bool {
-    [
-        "刚刚",
-        "刚才",
-        "之前",
-        "上次",
-        "继续",
-        "那个",
-        "这张图",
-        "生成的图片",
-        "previous",
-        "earlier",
-        "that one",
-    ]
-    .iter()
-    .any(|marker| text.contains(marker))
-}
-
 fn format_candidates(hits: &[RecallHit], expanded: &[ExpandedMemory]) -> String {
     hits.iter()
         .enumerate()
@@ -368,12 +245,6 @@ fn format_candidates(hits: &[RecallHit], expanded: &[ExpandedMemory]) -> String 
         })
         .collect::<Vec<_>>()
         .join("\n\n")
-}
-
-fn extract_json_object(text: &str) -> Option<&str> {
-    let start = text.find('{')?;
-    let end = text.rfind('}')?;
-    (end >= start).then_some(&text[start..=end])
 }
 
 fn compact_text(text: &str, max_chars: usize) -> String {

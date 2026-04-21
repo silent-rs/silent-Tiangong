@@ -32,13 +32,13 @@ Memory 主链路已经可用，但还不能视为完全收口。当前最重要�
 
 ### 1. 抽出稳定的 `RecallAnchorExtractor`
 
-- [ ] 新增 `recall_anchor.rs`，提供统一的 `RecallAnchorExtractor` 入口。
-- [ ] 将 `recall_context` 中的 LLM plan 逻辑迁移到 `RecallAnchorExtractor`。
-- [ ] 将 `recall_context` 中的规则 fallback 逻辑迁移到 `RecallAnchorExtractor`。
-- [ ] 让 LLM 规划和规则 fallback 都输出同一个 `RecallAnchors` 结构。
-- [ ] 规则 fallback 覆盖历史指代、文件路径、URL、工具名、代码符号、媒体产物和用户显式关键词。
-- [ ] 明确 `SearchStrategy::Skip` 的入口语义，避免普通闲聊触发无意义检索。
-- [ ] 为 anchor 提取增加单元测试：历史指代、精确文件路径、媒体 URL、普通闲聊、空输入。
+- [x] 新增 `recall_anchor.rs`，提供统一的 `RecallAnchorExtractor` 入口。
+- [x] 将 `recall_context` 中的 LLM plan 逻辑迁移到 `RecallAnchorExtractor`。
+- [x] 将 `recall_context` 中的规则 fallback 逻辑迁移到 `RecallAnchorExtractor`。
+- [x] 让 LLM 规划和规则 fallback 都输出同一个 `RecallAnchors` 结构。
+- [x] 规则 fallback 覆盖历史指代、文件路径、URL、工具名、代码符号、媒体产物和用户显式关键词。
+- [x] 明确 `SearchStrategy::Skip` 的入口语义，避免普通闲聊触发无意义检索。
+- [x] 为 anchor 提取增加单元测试：历史指代、精确文件路径、媒体 URL、普通闲聊、空输入。
 
 ### 2. 修正 Meso Entity/Decision 的幂等与质量问题
 

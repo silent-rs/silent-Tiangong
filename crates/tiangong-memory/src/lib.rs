@@ -23,6 +23,7 @@ mod db;
 mod injection;
 mod options;
 mod recall;
+mod recall_anchor;
 mod recall_context;
 mod rumination;
 mod search;
