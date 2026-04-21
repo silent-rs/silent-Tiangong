@@ -3,7 +3,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::command::InjectionLevel;
-use crate::types::{Episode, ExpandedMemory, RecallAnchors, RecallHit, TurnResult};
+use crate::types::{
+    Episode, ExpandedMemory, MemoryRecallRequest, MemoryRecallResponse, RecallAnchors, RecallHit,
+    TurnResult,
+};
 
 /// Endpoint 发现信息，写入本地 runtime 文件供 follower 读取。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +61,9 @@ pub enum MemoryIpcRequestPayload {
         anchors: RecallAnchors,
         limit: usize,
     },
+    RecallContext {
+        request: MemoryRecallRequest,
+    },
     LoadDepth2 {
         node_ids: Vec<String>,
     },
@@ -88,5 +94,6 @@ pub enum MemoryIpcResponsePayload {
     Ack,
     Injection { items: Vec<String> },
     Recall { hits: Vec<RecallHit> },
+    RecallContext { response: MemoryRecallResponse },
     Depth2 { items: Vec<ExpandedMemory> },
 }

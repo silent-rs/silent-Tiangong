@@ -2,7 +2,10 @@
 
 use tokio::sync::oneshot;
 
-use crate::types::{Episode, ExpandedMemory, RecallAnchors, RecallHit, TurnResult};
+use crate::types::{
+    Episode, ExpandedMemory, MemoryRecallRequest, MemoryRecallResponse, RecallAnchors, RecallHit,
+    TurnResult,
+};
 
 /// 注入级别
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -24,6 +27,10 @@ pub enum MemoryCommand {
         anchors: RecallAnchors,
         limit: usize,
         reply: oneshot::Sender<Vec<RecallHit>>,
+    },
+    RecallContext {
+        request: MemoryRecallRequest,
+        reply: oneshot::Sender<MemoryRecallResponse>,
     },
     LoadDepth2 {
         node_ids: Vec<String>,

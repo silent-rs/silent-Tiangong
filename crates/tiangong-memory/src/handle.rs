@@ -11,7 +11,10 @@ use tokio::sync::mpsc;
 use crate::command::{InjectionLevel, MemoryCommand};
 use crate::ipc::IpcClient;
 use crate::ipc::protocol::{IpcRequest, MemoryIpcRequestPayload, MemoryIpcResponsePayload};
-use crate::types::{Episode, ExpandedMemory, RecallAnchors, RecallHit, TurnResult};
+use crate::types::{
+    Episode, ExpandedMemory, MemoryRecallRequest, MemoryRecallResponse, RecallAnchors, RecallHit,
+    TurnResult,
+};
 
 /// Memory 系统的客户端句柄，可任意 Clone 跨线程使用
 #[derive(Clone)]
@@ -87,6 +90,29 @@ impl MemoryHandle {
                     Err(e) => {
                         tracing::warn!("Memory IPC recall 失败: {}", e);
                         Vec::new()
+                    }
+                }
+            }
+        }
+    }
+
+    /// 执行 Tool 化上下文回忆，由 Memory 内部完成检索规划和结果整理。
+    pub async fn recall_context(&self, request: MemoryRecallRequest) -> MemoryRecallResponse {
+        match self.inner.as_ref() {
+            HandleInner::Local { .. } => self.recall_context_local(request).await,
+            HandleInner::Remote { .. } => {
+                match self
+                    .send_remote_request(MemoryIpcRequestPayload::RecallContext { request })
+                    .await
+                {
+                    Ok(MemoryIpcResponsePayload::RecallContext { response }) => response,
+                    Ok(other) => {
+                        tracing::warn!("Memory IPC recall_context 返回了非预期响应: {:?}", other);
+                        MemoryRecallResponse::default()
+                    }
+                    Err(e) => {
+                        tracing::warn!("Memory IPC recall_context 失败: {}", e);
+                        MemoryRecallResponse::default()
                     }
                 }
             }
@@ -220,6 +246,40 @@ impl MemoryHandle {
         }
     }
 
+    /// Tool 化上下文回忆（同步版，适用于 std::thread 中使用）。
+    pub fn recall_context_blocking(&self, request: MemoryRecallRequest) -> MemoryRecallResponse {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                let cmd = MemoryCommand::RecallContext {
+                    request,
+                    reply: reply_tx,
+                };
+                if tx.blocking_send(cmd).is_err() {
+                    tracing::warn!("Memory Actor 已关闭，返回空上下文回忆");
+                    return MemoryRecallResponse::default();
+                }
+                reply_rx.blocking_recv().unwrap_or_default()
+            }
+            HandleInner::Remote { .. } => match self
+                .block_on_remote_request(MemoryIpcRequestPayload::RecallContext { request })
+            {
+                Ok(MemoryIpcResponsePayload::RecallContext { response }) => response,
+                Ok(other) => {
+                    tracing::warn!(
+                        "Memory IPC recall_context_blocking 返回了非预期响应: {:?}",
+                        other
+                    );
+                    MemoryRecallResponse::default()
+                }
+                Err(e) => {
+                    tracing::warn!("Memory IPC recall_context_blocking 失败: {}", e);
+                    MemoryRecallResponse::default()
+                }
+            },
+        }
+    }
+
     /// 加载二跳展开内容（查询，等待响应）
     pub async fn load_depth2(&self, node_ids: Vec<String>) -> Vec<ExpandedMemory> {
         match self.inner.as_ref() {
@@ -331,6 +391,22 @@ impl MemoryHandle {
         if tx.send(cmd).await.is_err() {
             tracing::warn!("Memory Actor 已关闭，返回空召回");
             return Vec::new();
+        }
+        reply_rx.await.unwrap_or_default()
+    }
+
+    async fn recall_context_local(&self, request: MemoryRecallRequest) -> MemoryRecallResponse {
+        let HandleInner::Local { tx } = self.inner.as_ref() else {
+            return MemoryRecallResponse::default();
+        };
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let cmd = MemoryCommand::RecallContext {
+            request,
+            reply: reply_tx,
+        };
+        if tx.send(cmd).await.is_err() {
+            tracing::warn!("Memory Actor 已关闭，返回空上下文回忆");
+            return MemoryRecallResponse::default();
         }
         reply_rx.await.unwrap_or_default()
     }

@@ -280,6 +280,11 @@ async fn handle_memory_request(
                 hits: handle.recall(anchors, limit).await,
             })
         }
+        MemoryIpcRequestPayload::RecallContext { request } => {
+            Ok(MemoryIpcResponsePayload::RecallContext {
+                response: handle.recall_context(request).await,
+            })
+        }
         MemoryIpcRequestPayload::LoadDepth2 { node_ids } => Ok(MemoryIpcResponsePayload::Depth2 {
             items: handle.load_depth2(node_ids).await,
         }),

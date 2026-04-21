@@ -23,6 +23,7 @@ mod db;
 mod injection;
 mod options;
 mod recall;
+mod recall_context;
 mod rumination;
 mod search;
 mod store;
@@ -34,7 +35,7 @@ pub use election::{
     memory_service_name, read_leader_info, start_or_connect, start_or_connect_with_service,
 };
 pub use handle::MemoryHandle;
-pub use options::{MemoryEmbeddingConfig, MemoryOptions, MemoryVectorMode};
+pub use options::{MemoryEmbeddingConfig, MemoryModelConfig, MemoryOptions, MemoryVectorMode};
 pub use types::*;
 
 /// 同步加载三级注入上下文（不经过 Actor，直接读文件）

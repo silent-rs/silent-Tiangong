@@ -256,6 +256,7 @@ fn worker_loop(
 
         match cmd {
             Command::Message(content) => {
+                let turn_start_idx = session.messages.len();
                 // 记录用户消息
                 session.append_message(MessageRole::User, content.clone());
                 // 通知消费端：用户消息已记录（携带 session 中的 message_id）
@@ -283,29 +284,14 @@ fn worker_loop(
 
                 // turn 完成后触发 Micro 反刍（fire-and-forget）
                 if let Some(handle) = memory_handle.as_ref() {
-                    let summary = session
-                        .messages
-                        .iter()
-                        .rev()
-                        .find(|m| m.role == MessageRole::Assistant)
-                        .map(|m| m.content.clone())
-                        .unwrap_or_default();
-                    let had_tool_calls = session.messages.iter().rev().take(20).any(|m| {
-                        m.role == MessageRole::System
-                            && m.content.contains("工具")
-                            && m.content.contains("执行")
-                    });
                     // 显式携带 workspace_id，避免 Actor 固化到启动时工作区造成跨工作区串写
                     let workspace_id = std::env::current_dir()
                         .ok()
                         .map(|p| tiangong_memory::types::workspace_id_from_path(&p));
-                    handle.run_micro_rumination_blocking(tiangong_memory::TurnResult {
-                        session_id: session.id.clone(),
-                        turn_id: scru128::new().to_string(),
-                        summary,
-                        had_tool_calls,
-                        workspace_id,
-                    });
+                    let mut turn_result =
+                        build_memory_turn_result(&session, turn_start_idx, &content);
+                    turn_result.workspace_id = workspace_id;
+                    handle.run_micro_rumination_blocking(turn_result);
                 }
             }
             Command::Cancel => {
@@ -1058,15 +1044,17 @@ fn execute_memory_recall_tool(
     memory_handle: Option<&tiangong_memory::MemoryHandle>,
     session: &Session,
 ) -> crate::tool::ToolResult {
+    let started = std::time::Instant::now();
     let Some(handle) = memory_handle else {
-        return crate::tool::ToolResult {
-            ok: false,
-            summary: "记忆系统未启用".to_string(),
-            stdout: String::new(),
-            stderr: "memory disabled".to_string(),
-            exit_code: 1,
-            execution: None,
-        };
+        return memory_recall_tool_result(
+            false,
+            "记忆系统未启用",
+            String::new(),
+            "memory disabled".to_string(),
+            1,
+            Vec::new(),
+            started,
+        );
     };
 
     let query = call
@@ -1077,14 +1065,15 @@ fn execute_memory_recall_tool(
         .filter(|text| !text.is_empty())
         .unwrap_or_else(|| latest_user_message(session));
     if query.is_empty() {
-        return crate::tool::ToolResult {
-            ok: false,
-            summary: "缺少回忆查询".to_string(),
-            stdout: String::new(),
-            stderr: "recall_memory.query is empty".to_string(),
-            exit_code: 1,
-            execution: None,
-        };
+        return memory_recall_tool_result(
+            false,
+            "缺少回忆查询",
+            String::new(),
+            "recall_memory.query is empty".to_string(),
+            1,
+            Vec::new(),
+            started,
+        );
     }
 
     let reason = call
@@ -1114,61 +1103,71 @@ fn execute_memory_recall_tool(
         .unwrap_or(5)
         .clamp(1, 10) as usize;
 
-    let mut recall_query = query.to_string();
-    if !reason.is_empty() {
-        recall_query.push_str("\nreason: ");
-        recall_query.push_str(reason);
-    }
-    if !expected.is_empty() {
-        recall_query.push_str("\nexpected: ");
-        recall_query.push_str(&expected.join(", "));
-    }
-
-    let hits = handle.recall_blocking(
-        tiangong_memory::RecallAnchors {
-            query: recall_query,
-            keywords: expected.clone(),
-            strategy: None,
-        },
+    let response = handle.recall_context_blocking(tiangong_memory::MemoryRecallRequest {
+        query: query.to_string(),
+        reason: (!reason.is_empty()).then(|| reason.to_string()),
+        expected,
+        context: build_memory_recall_context(session),
         limit,
-    );
+    });
 
-    if hits.is_empty() {
-        return crate::tool::ToolResult {
-            ok: true,
-            summary: "未找到相关记忆".to_string(),
-            stdout: format!("未找到与「{query}」相关的历史记忆。"),
-            stderr: String::new(),
-            exit_code: 0,
-            execution: None,
-        };
+    if response.hits.is_empty() {
+        return memory_recall_tool_result(
+            true,
+            "未找到相关记忆",
+            if response.content.trim().is_empty() {
+                format!("未找到与「{query}」相关的历史记忆。")
+            } else {
+                response.content
+            },
+            String::new(),
+            0,
+            vec![query.to_string()],
+            started,
+        );
     }
 
-    let mut lines = vec![
-        "记忆回忆结果（供继续推理使用）".to_string(),
-        format!("query: {query}"),
-    ];
-    if !reason.is_empty() {
-        lines.push(format!("reason: {reason}"));
-    }
-    for (idx, hit) in hits.iter().enumerate() {
-        lines.push(format!(
-            "{}. [{:.2}] {}",
-            idx + 1,
-            hit.score,
-            hit.title.trim()
-        ));
-        lines.push(format!("   summary: {}", hit.summary.trim()));
-        lines.push(format!("   node_id: {}", hit.node_id));
-    }
+    let stdout = if response.content.trim().is_empty() {
+        "没有发现当前上下文之外的增量记忆。".to_string()
+    } else {
+        response.content
+    };
 
+    memory_recall_tool_result(
+        true,
+        format!("命中 {} 条相关记忆并完成整理", response.hits.len()),
+        stdout,
+        String::new(),
+        0,
+        vec![query.to_string()],
+        started,
+    )
+}
+
+fn memory_recall_tool_result(
+    ok: bool,
+    summary: impl Into<String>,
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+    args: Vec<String>,
+    started: std::time::Instant,
+) -> crate::tool::ToolResult {
+    let summary = summary.into();
     crate::tool::ToolResult {
-        ok: true,
-        summary: format!("命中 {} 条相关记忆", hits.len()),
-        stdout: lines.join("\n"),
-        stderr: String::new(),
-        exit_code: 0,
-        execution: None,
+        ok,
+        summary: summary.clone(),
+        stdout,
+        stderr,
+        exit_code,
+        execution: Some(crate::tool::ToolExecutionRecord {
+            tool_name: "recall_memory".to_string(),
+            args,
+            duration_ms: started.elapsed().as_millis() as u64,
+            ok,
+            exit_code,
+            summary,
+        }),
     }
 }
 
@@ -1180,6 +1179,281 @@ fn latest_user_message(session: &Session) -> &str {
         .find(|message| message.role == MessageRole::User)
         .map(|message| message.content.as_str())
         .unwrap_or_default()
+}
+
+fn build_memory_recall_context(session: &Session) -> Vec<String> {
+    let mut items = session
+        .messages
+        .iter()
+        .rev()
+        .filter_map(|message| {
+            let role = match message.role {
+                MessageRole::User => "user",
+                MessageRole::Assistant => "assistant",
+                MessageRole::System => {
+                    if !message.content.starts_with("工具执行")
+                        && !message.content.starts_with("LLM 输出")
+                    {
+                        return None;
+                    }
+                    "system"
+                }
+            };
+            let content = compact_single_memory_text(&message.content, 900);
+            (!content.is_empty()).then(|| format!("{role}: {content}"))
+        })
+        .take(30)
+        .collect::<Vec<_>>();
+    items.reverse();
+    items
+}
+
+fn build_memory_turn_result(
+    session: &Session,
+    turn_start_idx: usize,
+    user_input: &str,
+) -> tiangong_memory::TurnResult {
+    let messages = session.messages.get(turn_start_idx..).unwrap_or_default();
+    let tool_calls = extract_turn_tool_calls(messages);
+    let artifacts = extract_turn_artifacts(messages);
+    let summary = build_turn_memory_summary(messages, &artifacts);
+    tiangong_memory::TurnResult {
+        session_id: session.id.clone(),
+        turn_id: scru128::new().to_string(),
+        had_tool_calls: !tool_calls.is_empty(),
+        user_input: user_input.to_string(),
+        summary,
+        tool_calls,
+        artifacts,
+        workspace_id: None,
+    }
+}
+
+fn extract_turn_tool_calls(messages: &[Message]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut names = Vec::new();
+    for message in messages {
+        if message.role != MessageRole::System {
+            continue;
+        }
+        for name in parse_tool_calls_line(&message.content)
+            .into_iter()
+            .chain(parse_tool_trace_name(&message.content))
+        {
+            if name == "recall_memory" {
+                continue;
+            }
+            if seen.insert(name.clone()) {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
+fn extract_turn_artifacts(messages: &[Message]) -> Vec<tiangong_memory::TurnArtifact> {
+    let mut artifacts = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for message in messages {
+        if message.role == MessageRole::Assistant {
+            for media in &message.media {
+                let key = format!("media:{}", media.url);
+                if seen.insert(key) {
+                    artifacts.push(tiangong_memory::TurnArtifact {
+                        kind: tiangong_memory::TurnArtifactKind::Media,
+                        tool_name: None,
+                        title: media.title.clone(),
+                        url: Some(media.url.clone()),
+                        path: None,
+                        summary: media.capability.clone(),
+                    });
+                }
+            }
+            continue;
+        }
+
+        if message.role != MessageRole::System {
+            continue;
+        }
+        let tool_name = parse_tool_trace_name(&message.content);
+        for artifact in
+            parse_media_artifacts_from_tool_trace(&message.content, tool_name.as_deref())
+        {
+            let key = artifact
+                .url
+                .as_deref()
+                .or(artifact.path.as_deref())
+                .unwrap_or_default()
+                .to_string();
+            if !key.is_empty() && seen.insert(key) {
+                artifacts.push(artifact);
+            }
+        }
+        if let Some(path) = tool_name
+            .as_deref()
+            .filter(|name| *name == "write_file" || *name == "replace_in_file")
+            .and_then(|_| parse_written_path(&message.content))
+        {
+            let key = format!("file:{path}");
+            if seen.insert(key) {
+                artifacts.push(tiangong_memory::TurnArtifact {
+                    kind: tiangong_memory::TurnArtifactKind::File,
+                    tool_name: tool_name.clone(),
+                    title: Some("文件产物".to_string()),
+                    url: None,
+                    path: Some(path),
+                    summary: parse_summary_line(&message.content),
+                });
+            }
+        }
+        if let Some(tool_name) = tool_name
+            && should_record_tool_result(&tool_name)
+        {
+            let summary = parse_summary_line(&message.content)
+                .unwrap_or_else(|| compact_single_memory_text(&message.content, 240));
+            let key = format!("tool:{tool_name}:{summary}");
+            if !summary.is_empty() && seen.insert(key) {
+                artifacts.push(tiangong_memory::TurnArtifact {
+                    kind: tiangong_memory::TurnArtifactKind::ToolResult,
+                    tool_name: Some(tool_name),
+                    title: Some("工具结果".to_string()),
+                    url: None,
+                    path: None,
+                    summary: Some(summary),
+                });
+            }
+        }
+    }
+    artifacts.into_iter().take(12).collect()
+}
+
+fn build_turn_memory_summary(
+    messages: &[Message],
+    artifacts: &[tiangong_memory::TurnArtifact],
+) -> String {
+    let assistant_summary = messages
+        .iter()
+        .rev()
+        .find(|message| {
+            message.role == MessageRole::Assistant && !message.content.trim().is_empty()
+        })
+        .map(|message| compact_single_memory_text(&message.content, 600))
+        .unwrap_or_default();
+    if !assistant_summary.is_empty() {
+        return assistant_summary;
+    }
+    artifacts
+        .iter()
+        .filter_map(|artifact| {
+            artifact
+                .url
+                .as_deref()
+                .or(artifact.path.as_deref())
+                .or(artifact.summary.as_deref())
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn parse_tool_calls_line(content: &str) -> Vec<String> {
+    content
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("tool_calls:"))
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_tool_trace_name(content: &str) -> Option<String> {
+    let first_line = content.lines().next()?.trim();
+    let rest = first_line.strip_prefix("工具执行 [")?;
+    let end = rest.find(']')?;
+    Some(rest[..end].to_string()).filter(|name| !name.is_empty())
+}
+
+fn parse_summary_line(content: &str) -> Option<String> {
+    content.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("summary:")
+            .map(str::trim)
+            .map(String::from)
+            .filter(|item| !item.is_empty())
+    })
+}
+
+fn parse_media_artifacts_from_tool_trace(
+    content: &str,
+    tool_name: Option<&str>,
+) -> Vec<tiangong_memory::TurnArtifact> {
+    let mut artifacts = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("![") || !trimmed.ends_with(')') {
+            continue;
+        }
+        let Some(close_alt) = trimmed.find("](") else {
+            continue;
+        };
+        let title = trimmed[2..close_alt].trim();
+        let url = trimmed[close_alt + 2..trimmed.len() - 1].trim();
+        if url.is_empty() {
+            continue;
+        }
+        artifacts.push(tiangong_memory::TurnArtifact {
+            kind: tiangong_memory::TurnArtifactKind::Media,
+            tool_name: tool_name.map(String::from),
+            title: (!title.is_empty()).then(|| title.to_string()),
+            url: Some(url.to_string()),
+            path: None,
+            summary: parse_summary_line(content),
+        });
+    }
+    artifacts
+}
+
+fn parse_written_path(content: &str) -> Option<String> {
+    let command = content.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("命令:")
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+    })?;
+    let rest = command.strip_prefix("path=")?;
+    let end = rest.find(" content=").unwrap_or(rest.len());
+    Some(rest[..end].trim().to_string()).filter(|path| !path.is_empty())
+}
+
+fn should_record_tool_result(tool_name: &str) -> bool {
+    !matches!(
+        tool_name,
+        "read_file"
+            | "list_dir"
+            | "tree_dir"
+            | "search_code"
+            | "recall_memory"
+            | "get_skill_detail"
+    )
+}
+
+fn compact_single_memory_text(text: &str, max_chars: usize) -> String {
+    let normalized = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if normalized.chars().count() <= max_chars {
+        return normalized;
+    }
+    let mut clipped = normalized.chars().take(max_chars).collect::<String>();
+    clipped.push_str("...");
+    clipped
 }
 
 /// 格式化工具调用参数摘要（用于 ToolStart 和 ApprovalNeeded 事件）

@@ -130,6 +130,15 @@ impl LlmConfig {
         workspace_id: Option<String>,
     ) -> tiangong_memory::MemoryOptions {
         let mut options = tiangong_memory::MemoryOptions::new(workspace_id);
+        if !self.chat.base_url.is_empty() && !self.chat.api_key.is_empty() {
+            options = options.with_model(tiangong_memory::MemoryModelConfig {
+                base_url: self.chat.base_url.clone(),
+                api_key: self.chat.api_key.clone(),
+                model: self.chat.model.clone(),
+                protocol: self.chat.protocol,
+                timeout_ms: self.chat.timeout_ms,
+            });
+        }
         let Some(endpoint) = self.embedding.as_ref() else {
             return options;
         };

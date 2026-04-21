@@ -194,6 +194,32 @@ pub struct RecallHit {
     pub depth1_loaded: bool,
 }
 
+/// Tool 化回忆请求。
+///
+/// Core 只提供当前请求和最近语境；检索规划、去重和结果整理由 Memory 内部完成。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemoryRecallRequest {
+    pub query: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub expected: Vec<String>,
+    #[serde(default)]
+    pub context: Vec<String>,
+    #[serde(default)]
+    pub limit: usize,
+}
+
+/// Tool 化回忆响应。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemoryRecallResponse {
+    pub content: String,
+    #[serde(default)]
+    pub hits: Vec<RecallHit>,
+    #[serde(default)]
+    pub used_llm: bool,
+}
+
 /// 向量索引点。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorPoint {
@@ -212,13 +238,45 @@ pub struct ExpandedMemory {
     pub full_content: String,
 }
 
+/// Turn 中可被长期记忆保存的结构化产物类型。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnArtifactKind {
+    Media,
+    File,
+    #[default]
+    ToolResult,
+}
+
+/// Turn 中可被长期记忆保存的结构化产物。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TurnArtifact {
+    pub kind: TurnArtifactKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
 /// Turn 执行结果（Phase B 实现）
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TurnResult {
     pub session_id: String,
     pub turn_id: String,
     pub had_tool_calls: bool,
+    #[serde(default)]
+    pub user_input: String,
     pub summary: String,
+    #[serde(default)]
+    pub tool_calls: Vec<String>,
+    #[serde(default)]
+    pub artifacts: Vec<TurnArtifact>,
     /// 当前工作区 ID（显式携带，避免 Actor 固化到启动时工作区）
     pub workspace_id: Option<String>,
 }

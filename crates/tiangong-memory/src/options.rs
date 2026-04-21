@@ -8,6 +8,7 @@ use tiangong_llm::ProviderProtocol;
 #[derive(Debug, Clone, Default)]
 pub struct MemoryOptions {
     pub workspace_id: Option<String>,
+    pub model: Option<MemoryModelConfig>,
     pub embedding: Option<MemoryEmbeddingConfig>,
     pub vector_mode: MemoryVectorMode,
 }
@@ -16,9 +17,15 @@ impl MemoryOptions {
     pub fn new(workspace_id: Option<String>) -> Self {
         Self {
             workspace_id,
+            model: None,
             embedding: None,
             vector_mode: MemoryVectorMode::default(),
         }
+    }
+
+    pub fn with_model(mut self, model: MemoryModelConfig) -> Self {
+        self.model = Some(model);
+        self
     }
 
     pub fn with_embedding(mut self, embedding: MemoryEmbeddingConfig) -> Self {
@@ -30,6 +37,15 @@ impl MemoryOptions {
         self.vector_mode = vector_mode;
         self
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct MemoryModelConfig {
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+    pub protocol: ProviderProtocol,
+    pub timeout_ms: u64,
 }
 
 #[derive(Debug, Clone)]

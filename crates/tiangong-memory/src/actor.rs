@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use crate::command::MemoryCommand;
 use crate::handle::MemoryHandle;
 use crate::options::MemoryOptions;
+use crate::recall_context;
 use crate::rumination;
 use crate::store::MemoryStore;
 
@@ -100,6 +101,16 @@ impl MemoryActor {
             } => {
                 let hits = self.store.recall_async(&anchors, limit).await;
                 let _ = reply.send(hits);
+            }
+
+            MemoryCommand::RecallContext { request, reply } => {
+                let response = recall_context::recall_context(
+                    &self.store,
+                    self.options.model.as_ref(),
+                    request,
+                )
+                .await;
+                let _ = reply.send(response);
             }
 
             MemoryCommand::LoadDepth2 { node_ids, reply } => {
