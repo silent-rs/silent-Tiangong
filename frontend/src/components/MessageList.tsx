@@ -16,6 +16,7 @@ import {
   ShieldCheck,
   ShieldX,
   GitBranch,
+  Brain,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -859,6 +860,7 @@ function AgentTurn({
     | { type: "explanation"; text: string; time?: string }
     | { type: "thinking"; content: string; time?: string }
     | { type: "tool_group"; key: string; brief: string; tools: MessageItem[] }
+    | { type: "memory_recall"; key: string; strategy: string; brief: string; hits: string[] }
     | { type: "assistant"; msg: MessageItem; isStreaming: boolean }
     | { type: "error_system"; msg: MessageItem }
     | { type: "retry_system"; msg: MessageItem }
@@ -867,6 +869,7 @@ function AgentTurn({
   const fragments: Fragment[] = [];
   const shownReasonings = new Set<string>();
   let pendingTools: MessageItem[] = [];
+  let pendingRecall: { strategy: string; key: string } | null = null;
 
   const flushTools = () => {
     if (pendingTools.length === 0) return;
@@ -881,8 +884,41 @@ function AgentTurn({
     pendingTools = [];
   };
 
+  const flushRecall = (resultMsg?: MessageItem) => {
+    if (!pendingRecall) return;
+    const strategy = pendingRecall.strategy;
+    const key = pendingRecall.key;
+    let brief: string;
+    let hits: string[] = [];
+
+    if (!resultMsg) {
+      brief = `记忆检索 (${strategy})`;
+    } else if (resultMsg.content.includes("无相关记忆")) {
+      brief = `记忆检索 (${strategy}) · 无命中`;
+    } else {
+      const countMatch = resultMsg.content.match(/命中 (\d+) 条/);
+      const count = countMatch ? countMatch[1] : "?";
+      brief = `记忆检索 (${strategy}) · ${count} 条命中`;
+      // 解析命中条目
+      const lines = resultMsg.content.split("\n").slice(1);
+      hits = lines.filter(l => l.startsWith("- "));
+    }
+    fragments.push({ type: "memory_recall", key, strategy, brief, hits });
+    pendingRecall = null;
+  };
+
   for (const msg of messages) {
-    if (msg.role === "system" && msg.content.startsWith("LLM 输出")) {
+    if (msg.role === "system" && msg.content.startsWith("[记忆检索] 策略:")) {
+      flushTools();
+      flushRecall();
+      const strategyMatch = msg.content.match(/策略:\s*(.+)/);
+      pendingRecall = {
+        strategy: strategyMatch ? strategyMatch[1].trim() : "auto",
+        key: msg.id,
+      };
+    } else if (msg.role === "system" && msg.content.startsWith("[记忆检索]") && pendingRecall) {
+      flushRecall(msg);
+    } else if (msg.role === "system" && msg.content.startsWith("LLM 输出")) {
       flushTools();
       // 提取 reasoning
       const reasoning = msgReasoning(msg);
@@ -925,6 +961,7 @@ function AgentTurn({
     }
   }
   flushTools();
+  flushRecall();
 
   /** 渲染工具条目 */
   const renderToolItem = (tool: MessageItem) => {
@@ -981,6 +1018,45 @@ function AgentTurn({
                 <span>{frag.brief}</span>
               </button>
               {!collapsed && <div className="ml-4 space-y-0">{frag.tools.map(t => renderToolItem(t))}</div>}
+            </div>
+          );
+        }
+        if (frag.type === "memory_recall") {
+          const expanded = expandedItems.has(frag.key);
+          return (
+            <div key={`recall-${frag.key}`}>
+              <button
+                className="flex items-center gap-2 px-2 py-0.5 text-xs text-muted-foreground hover:bg-muted/50 rounded transition-colors"
+                onClick={() => toggleItem(frag.key)}
+              >
+                {expanded ? <ChevronDown className="w-3 h-3 shrink-0" /> : <ChevronRight className="w-3 h-3 shrink-0" />}
+                <Brain className="w-3 h-3 shrink-0" />
+                <span>{frag.brief}</span>
+              </button>
+              {expanded && frag.hits.length > 0 && (
+                <div className="ml-6 mt-0.5 space-y-0.5">
+                  {frag.hits.map((hit, idx) => {
+                    // hit 格式: "- [0.85] 标题: 摘要..."
+                    const trimmed = hit.replace(/^-\s*/, "");
+                    const scoreMatch = trimmed.match(/^\[([0-9.]+)\]\s*/);
+                    const score = scoreMatch ? scoreMatch[1] : null;
+                    const rest = scoreMatch ? trimmed.slice(scoreMatch[0].length) : trimmed;
+                    const colonIdx = rest.indexOf(": ");
+                    const title = colonIdx > 0 ? rest.slice(0, colonIdx) : rest;
+                    const summary = colonIdx > 0 ? rest.slice(colonIdx + 2) : "";
+                    const displaySummary = summary.length > 80 ? summary.slice(0, 77) + "..." : summary;
+                    return (
+                      <div key={idx} className="flex items-start gap-1.5 text-xs text-muted-foreground px-2 py-0.5">
+                        {score && (
+                          <span className="shrink-0 text-[10px] font-mono opacity-60">[{score}]</span>
+                        )}
+                        <span className="font-medium shrink-0">{title}</span>
+                        {displaySummary && <span className="opacity-70 truncate">{displaySummary}</span>}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           );
         }

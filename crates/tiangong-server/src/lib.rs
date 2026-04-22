@@ -23,6 +23,11 @@ use self::remote::event::{EventBus, TiangongEvent};
 #[allow(deprecated)]
 pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
+    let mut app_config = load_tiangong_config();
+    app_config.trust_mode = TrustMode::FullTrust;
+    let core_config = app_config.to_core_config();
+
+    let config = tiangong_core::core_config::CoreConfigProvider::new(core_config);
 
     tracing::info!("正在初始化应用状态...");
     let state: SharedState = Arc::new(Mutex::new(TiangongState::load_or_default()));
@@ -30,9 +35,6 @@ pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
         let mut guard = state.blocking_lock();
         let _ = guard.set_trust_mode(TrustMode::FullTrust);
     }
-    let mut app_config = load_tiangong_config();
-    app_config.trust_mode = TrustMode::FullTrust;
-    let config = app_config.into_core_config_provider();
 
     // 创建 EventBus
     let event_bus = Arc::new(EventBus::default());

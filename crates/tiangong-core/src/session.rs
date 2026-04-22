@@ -23,6 +23,12 @@ pub struct Session {
     pub id: String,
     pub title: String,
     pub messages: Vec<Message>,
+    /// 当前会话累计 token 用量。
+    ///
+    /// `RunSnapshot.last_usage` 是运行时快照字段，不能跨会话复用；会话级累计值
+    /// 存在这里，供 GUI 切换会话时恢复原先统计。
+    #[serde(default)]
+    pub token_usage: TokenUsage,
     #[serde(default)]
     pub task_records: Vec<SessionTaskRecord>,
     #[serde(default)]
@@ -184,6 +190,7 @@ impl Session {
             id: new_id(),
             title: title.into(),
             messages: Vec::new(),
+            token_usage: TokenUsage::default(),
             task_records: Vec::new(),
             task_plans: Vec::new(),
             cwd,
@@ -210,6 +217,7 @@ impl Session {
             id,
             title: title.into(),
             messages: Vec::new(),
+            token_usage: TokenUsage::default(),
             task_records: Vec::new(),
             task_plans: Vec::new(),
             cwd: workspace_dir.to_string_lossy().to_string(),
@@ -295,13 +303,25 @@ impl Session {
         content: impl Into<String>,
         reasoning_content: impl Into<String>,
     ) {
+        self.append_message_with_id_and_media(id, role, content, reasoning_content, Vec::new());
+    }
+
+    /// 使用预生成的 ID 追加带结构化媒体的消息。
+    pub fn append_message_with_id_and_media(
+        &mut self,
+        id: String,
+        role: MessageRole,
+        content: impl Into<String>,
+        reasoning_content: impl Into<String>,
+        media: Vec<tiangong_types::MediaAsset>,
+    ) {
         self.messages.push(Message {
             id,
             role,
             content: content.into(),
             reasoning_content: reasoning_content.into(),
             worker_id: None,
-            media: Vec::new(),
+            media,
             created_at: now_text(),
         });
         self.updated_at = now_text();
@@ -494,7 +514,7 @@ impl Session {
         let item = pending.remove(from_idx);
         pending.insert(to_idx, item);
 
-        for (slot, item) in pending_positions.iter().zip(pending.into_iter()) {
+        for (slot, item) in pending_positions.iter().zip(pending) {
             self.task_plans[*slot] = item;
         }
         self.updated_at = now_text();
@@ -639,6 +659,10 @@ impl Session {
 
     /// 计算当前会话所有任务的累计 token 用量
     pub fn total_usage(&self) -> TokenUsage {
+        if self.token_usage.total_tokens > 0 {
+            return self.token_usage.clone();
+        }
+
         let mut total = TokenUsage::default();
         for record in &self.task_records {
             if let Some(usage) = &record.usage {

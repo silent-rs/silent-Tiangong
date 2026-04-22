@@ -85,7 +85,8 @@ fn looks_like_pure_image_markdown(output: &str) -> bool {
     !trimmed.is_empty()
         && trimmed.lines().all(|line| {
             let line = line.trim();
-            line.is_empty() || (line.starts_with("![") && line.contains("](") && line.ends_with(')'))
+            line.is_empty()
+                || (line.starts_with("![") && line.contains("](") && line.ends_with(')'))
         })
 }
 
@@ -151,14 +152,6 @@ fn extract_video_urls_from_json(value: &serde_json::Value, urls: &mut Vec<String
     }
 }
 
-fn clear_pending_final_media(
-    pending_final_media: &mut Option<Vec<tiangong_types::MediaAsset>>,
-) {
-    if pending_final_media.is_some() {
-        *pending_final_media = None;
-    }
-}
-
 fn append_assistant_media(
     session: &mut tiangong_core::session::Session,
     media: Vec<tiangong_types::MediaAsset>,
@@ -170,20 +163,32 @@ fn append_assistant_media(
     );
 }
 
-fn accumulate_usage(
-    total: &mut Option<tiangong_core::model::TokenUsage>,
+fn usage_delta(
+    total: &tiangong_types::TokenUsage,
+    already_recorded: &tiangong_types::TokenUsage,
+) -> tiangong_types::TokenUsage {
+    tiangong_types::TokenUsage {
+        prompt_tokens: total
+            .prompt_tokens
+            .saturating_sub(already_recorded.prompt_tokens),
+        completion_tokens: total
+            .completion_tokens
+            .saturating_sub(already_recorded.completion_tokens),
+        total_tokens: total
+            .total_tokens
+            .saturating_sub(already_recorded.total_tokens),
+    }
+}
+
+fn add_session_usage(
+    session: &mut tiangong_core::session::Session,
     usage: &tiangong_types::TokenUsage,
 ) {
-    let current = tiangong_core::model::TokenUsage {
-        prompt_tokens: usage.prompt_tokens,
-        completion_tokens: usage.completion_tokens,
-        total_tokens: usage.total_tokens,
-    };
-
-    match total.as_mut() {
-        Some(existing) => existing.accumulate(&current),
-        None => *total = Some(current),
+    if usage.total_tokens == 0 {
+        return;
     }
+    session.token_usage.accumulate(usage);
+    session.updated_at = tiangong_core::session::now_text();
 }
 
 fn parse_model_capability(
@@ -220,10 +225,9 @@ fn build_session_snapshot(
     let core_snapshot = core_state.run_snapshot();
     let input_draft = core_state.input_draft().to_string();
 
-    let messages: Vec<tiangong_types::Message> = core_state
-        .sessions()
-        .iter()
-        .find(|s| s.id == session_id)
+    let selected_session = core_state.sessions().iter().find(|s| s.id == session_id);
+
+    let messages: Vec<tiangong_types::Message> = selected_session
         .map(|s| s.messages.clone())
         .unwrap_or_default();
 
@@ -241,6 +245,10 @@ fn build_session_snapshot(
         current_plan,
         pending_session_ids,
     );
+    snapshot.last_usage = selected_session.and_then(|session| {
+        let usage = session.total_usage();
+        (usage.total_tokens > 0).then_some(usage)
+    });
 
     // 按 session 独立判断状态
     if is_session_executing {
@@ -327,9 +335,8 @@ pub fn send_message(
     use tiangong_types::{SessionStreamEvent, StreamEvent};
 
     // 准备 session
-    let (session_id, session_snapshot) = state.with_state(|core_state| {
-        core_state.prepare_active_user_message_ingress(content.clone())
-    })?;
+    let (session_id, session_snapshot) = state
+        .with_state(|core_state| core_state.prepare_active_user_message_ingress(content.clone()))?;
 
     // 获取或创建 TiangongCore
     let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
@@ -348,6 +355,7 @@ pub fn send_message(
         let mut assistant_msg_id: Option<String> = None;
         let mut last_tool_args_summary = String::new();
         let mut pending_final_media: Option<Vec<tiangong_types::MediaAsset>> = None;
+        let mut recorded_turn_usage = tiangong_types::TokenUsage::default();
         for session_event in stream_rx.iter() {
             // 先 emit 完整事件给前端，再解构
             let _ = app_clone.emit("stream_event", &session_event);
@@ -365,6 +373,7 @@ pub fn send_message(
                             message_id,
                             content,
                         } => {
+                            recorded_turn_usage = tiangong_types::TokenUsage::default();
                             // Core 已记录用户消息，同步到 TiangongState session
                             session.append_message_with_id(
                                 message_id.clone(),
@@ -395,12 +404,15 @@ pub fn send_message(
                                 content,
                             );
                         }
-                        StreamEvent::ToolCalls { names, .. } => {
-                            clear_pending_final_media(&mut pending_final_media);
+                        StreamEvent::ToolCalls { names, usage } => {
                             session.append_message(
                                 tiangong_core::session::MessageRole::System,
                                 format!("LLM 输出\ntool_calls: {}", names.join(", ")),
                             );
+                            if let Some(usage) = usage {
+                                add_session_usage(session, usage);
+                                recorded_turn_usage.accumulate(usage);
+                            }
                             assistant_msg_id = None;
                         }
                         StreamEvent::ToolStart {
@@ -449,7 +461,6 @@ pub fn send_message(
                                     .get_or_insert_with(Vec::new)
                                     .extend(media_assets);
                             } else if !output.trim().is_empty() {
-                                clear_pending_final_media(&mut pending_final_media);
                                 let preview = if output.chars().count() > 200 {
                                     format!("{}...", output.chars().take(200).collect::<String>())
                                 } else {
@@ -482,17 +493,53 @@ pub fn send_message(
                             attempt,
                             max_attempts,
                         } => {
-                            clear_pending_final_media(&mut pending_final_media);
                             session.append_message(
                                 tiangong_core::session::MessageRole::System,
                                 format!("[重试] ({attempt}/{max_attempts}) {message}"),
                             );
                         }
-                        StreamEvent::Done { .. } => {
+                        StreamEvent::Done { usage } => {
+                            if let Some(usage) = usage {
+                                let delta = usage_delta(usage, &recorded_turn_usage);
+                                add_session_usage(session, &delta);
+                                recorded_turn_usage = tiangong_types::TokenUsage::default();
+                            }
                             if let Some(media) = pending_final_media.take() {
                                 append_assistant_media(session, media);
                             }
                             assistant_msg_id = None;
+                        }
+                        StreamEvent::MemoryRecallStart { ref strategy } => {
+                            session.append_message(
+                                tiangong_core::session::MessageRole::System,
+                                format!("[记忆检索] 策略: {strategy}"),
+                            );
+                        }
+                        StreamEvent::MemoryRecallDone {
+                            hit_count,
+                            ref hits,
+                        } => {
+                            if *hit_count == 0 {
+                                session.append_message(
+                                    tiangong_core::session::MessageRole::System,
+                                    "[记忆检索] 无相关记忆".to_string(),
+                                );
+                            } else {
+                                let items: Vec<String> = hits
+                                    .iter()
+                                    .map(|h| {
+                                        format!("- [{:.2}] {}: {}", h.score, h.title, h.summary)
+                                    })
+                                    .collect();
+                                session.append_message(
+                                    tiangong_core::session::MessageRole::System,
+                                    format!(
+                                        "[记忆检索] 命中 {} 条\n{}",
+                                        hit_count,
+                                        items.join("\n")
+                                    ),
+                                );
+                            }
                         }
                         _ => {}
                     }
@@ -534,13 +581,25 @@ pub fn send_message(
                     StreamEvent::ToolCalls { names, usage } => {
                         core_state.store.runtime.run.summary =
                             format!("正在执行：{}", names.join(", "));
-                        if let Some(u) = usage {
-                            accumulate_usage(&mut core_state.store.runtime.run.last_usage, u);
+                        if usage.is_some() {
+                            if let Some(session) =
+                                core_state.sessions().iter().find(|s| s.id == sid)
+                            {
+                                let total = session.total_usage();
+                                core_state.store.runtime.run.last_usage =
+                                    (total.total_tokens > 0).then_some(total);
+                            }
                         }
                     }
                     StreamEvent::Done { ref usage } => {
-                        if let Some(u) = usage {
-                            accumulate_usage(&mut core_state.store.runtime.run.last_usage, u);
+                        if usage.is_some() {
+                            if let Some(session) =
+                                core_state.sessions().iter().find(|s| s.id == sid)
+                            {
+                                let total = session.total_usage();
+                                core_state.store.runtime.run.last_usage =
+                                    (total.total_tokens > 0).then_some(total);
+                            }
                         }
                         core_state.report_run_idle(format!(
                             "模型供应商：{}",
@@ -548,6 +607,7 @@ pub fn send_message(
                         ));
                     }
                     StreamEvent::Error { ref message } => {
+                        recorded_turn_usage = tiangong_types::TokenUsage::default();
                         core_state.report_run_idle(format!("执行失败：{message}"));
                     }
                     StreamEvent::Retry {
@@ -563,6 +623,18 @@ pub fn send_message(
                     }
                     StreamEvent::Delta { .. } => {
                         core_state.store.runtime.run.summary = "正在回复...".to_string();
+                    }
+                    StreamEvent::MemoryRecallStart { .. } => {
+                        core_state.store.runtime.run.summary = "正在检索记忆...".to_string();
+                    }
+                    StreamEvent::MemoryRecallDone { hit_count, .. } => {
+                        if *hit_count > 0 {
+                            core_state.store.runtime.run.summary =
+                                format!("记忆检索完成，命中 {hit_count} 条");
+                        } else {
+                            core_state.store.runtime.run.summary =
+                                "记忆检索完成，无相关记忆".to_string();
+                        }
                     }
                     _ => {}
                 }
@@ -730,7 +802,8 @@ pub fn get_session_cost(
         let session = core_state.sessions().iter().find(|s| s.id == sid);
         match session {
             Some(s) => {
-                let cost = tiangong_core::observe::build_session_cost(s.id.clone(), &s.task_records);
+                let cost =
+                    tiangong_core::observe::build_session_cost(s.id.clone(), &s.task_records);
                 Ok(serde_json::to_value(cost).unwrap_or_default())
             }
             None => Ok(serde_json::json!({})),
@@ -1465,4 +1538,97 @@ pub fn fetch_provider_models(
         api_lite_model: String::new(),
     };
     SingleProviderClient::list_models(&config).map_err(|e| e.to_string())
+}
+
+fn embedding_probe_urls(base_url: &str) -> Result<Vec<String>, String> {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return Err("Base URL 不能为空".to_string());
+    }
+
+    let cleaned = trimmed.trim_end_matches('/');
+    let cleaned = cleaned.strip_suffix("/chat/completions").unwrap_or(cleaned);
+    let cleaned = cleaned.strip_suffix("/embeddings").unwrap_or(cleaned);
+    let primary = format!("{cleaned}/embeddings");
+
+    if cleaned.ends_with("/v1") {
+        return Ok(vec![primary]);
+    }
+
+    Ok(vec![primary, format!("{cleaned}/v1/embeddings")])
+}
+
+/// 探测 OpenAI 兼容 Embedding 接口返回的向量维度
+#[tauri::command]
+pub async fn probe_embedding_dimension(
+    base_url: String,
+    api_key: String,
+    model: String,
+    timeout_ms: Option<u64>,
+    protocol: Option<String>,
+) -> Result<usize, String> {
+    use tiangong_core::models_config::ModelsConfig;
+
+    let protocol = protocol.unwrap_or_else(|| "openai_compatible".to_string());
+    if protocol != "openai_compatible" {
+        return Err("Embedding 维度探测仅支持 OpenAI 兼容协议".to_string());
+    }
+
+    let model = model.trim();
+    if model.is_empty() {
+        return Err("模型名称不能为空".to_string());
+    }
+
+    let urls = embedding_probe_urls(&base_url)?;
+    let api_key = ModelsConfig::resolve_api_key(&api_key);
+    let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(60_000));
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|err| format!("创建 HTTP 客户端失败：{err}"))?;
+    let payload = serde_json::json!({
+        "model": model,
+        "input": "dimension probe",
+        "encoding_format": "float",
+    });
+
+    let mut last_error = None;
+    for url in urls {
+        let mut request = client.post(&url).json(&payload);
+        if !api_key.trim().is_empty() {
+            request = request.bearer_auth(&api_key);
+        }
+
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(err) => {
+                last_error = Some(format!("请求 Embedding 接口失败：{url}，{err}"));
+                continue;
+            }
+        };
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            last_error = Some(format!(
+                "Embedding 接口返回错误：HTTP {status}，响应：{body}"
+            ));
+            continue;
+        }
+
+        let value: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| format!("解析 Embedding 响应失败：{err}"))?;
+        let embedding = value
+            .pointer("/data/0/embedding")
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| "Embedding 响应中缺少 data[0].embedding".to_string())?;
+        if embedding.is_empty() {
+            return Err("Embedding 响应向量为空".to_string());
+        }
+        return Ok(embedding.len());
+    }
+
+    Err(last_error.unwrap_or_else(|| "无法请求 Embedding 接口".to_string()))
 }

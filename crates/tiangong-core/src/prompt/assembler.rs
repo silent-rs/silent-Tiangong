@@ -42,7 +42,10 @@ impl PromptAssembler {
         let system_context = sections::build_system_context();
 
         // 3. User Context（用户偏好/记忆，system-reminder 方式）
-        let user_context = sections::build_user_context(&session.id);
+        let workspace_id = std::env::current_dir()
+            .ok()
+            .map(|p| tiangong_memory::types::workspace_id_from_path(&p));
+        let user_context = sections::build_user_context(&session.id, workspace_id.as_deref());
 
         // 4. 历史消息（经过裁剪/压缩）
         let organizer = ContextOrganizer::new(self.context_limit).with_keep_recent_turns(6);

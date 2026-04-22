@@ -29,28 +29,15 @@ export function MessageInput() {
 
   // 信任模式
   const [trustMode, setTrustMode] = useState('full_trust');
-  // 会话 token 计数
-  const [sessionTotalTokens, setSessionTotalTokens] = useState(0);
 
   const currentRunStatus = isDraft
     ? 'idle'
     : (activeSessionId && sessionRunStatuses[activeSessionId]) || runStatus;
+  const sessionTotalTokens = lastUsage?.total_tokens ?? 0;
 
   useEffect(() => {
     api.getTrustMode().then(setTrustMode).catch(() => {});
   }, []);
-
-  // lastUsage 变化时更新显示（不区分 idle/executing）
-  useEffect(() => {
-    if (lastUsage && lastUsage.total_tokens > 0) {
-      setSessionTotalTokens(lastUsage.total_tokens);
-    }
-  }, [lastUsage]);
-
-  // 切换会话时重置
-  useEffect(() => {
-    setSessionTotalTokens(0);
-  }, [activeSessionId]);
 
   const toggleTrustMode = async () => {
     const newMode = trustMode === 'full_trust' ? 'supervised' : 'full_trust';

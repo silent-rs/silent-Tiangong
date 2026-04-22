@@ -152,6 +152,10 @@ impl Connector for DiscordConnector {
                     // TODO: 使用附件发送文件
                     format!("[文件] {name}: {url}")
                 }
+                MessageContent::Audio { url, .. } => format!("[音频] {url}"),
+                MessageContent::Video { url, caption } => {
+                    format!("[视频] {}\n{}", url, caption.as_deref().unwrap_or(""))
+                }
             };
 
             channel

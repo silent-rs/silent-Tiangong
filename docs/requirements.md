@@ -80,6 +80,17 @@
 - 压缩策略优先使用 LLM 摘要，保留最近 N 轮完整对话，对早期消息生成摘要；LLM 摘要失败时回退到滑动窗口截断。
 - ReAct 循环内 loop_messages 累积过大时，必须对早期轮次的工具调用和结果进行摘要压缩，避免单轮执行 token 溢出。
 
+#### Memory 系统
+- Memory 功能必须可关闭，未启动或启动失败时主对话链路必须降级继续运行。
+- Memory 必须保持独立 crate，不能依赖 `tiangong-core` 或 UI 层。
+- Memory 必须复用 `tiangong-llm` 的文本生成与 embedding 能力，不在内部重复实现模型配置和 Provider 协议适配。
+- Memory 必须支持主模型按需调用的 Tool 化回忆，不能在每个 turn 前强制自动注入 recall 结果。
+- Memory 收到 Tool 化回忆刺激后，必须先执行初始回忆，再基于初始结果判断是否需要 deep recall，不能把一次 `recall_memory` 调用等同为深度回忆。
+- Memory 必须支持 workspace 隔离，长生命周期 GUI/Server 进程不得把不同 workspace 的记忆写入同一 scope。
+- Memory 必须支持产物记忆，至少覆盖媒体 URL、文件路径、工具结果摘要和可继续使用的产物引用。
+- Memory 必须具备独立集成测试，覆盖写入、召回、IPC、workspace 隔离、混合检索、产物记忆和配置热更新。
+- Memory recall 输出必须有统一预算和去重策略，避免重复当前上下文、重复 URL、重复路径或重复工具结果摘要。
+
 #### 友好交互体验
 - GUI 和 CLI 必须支持执行过程中实时展示中间推理/解释文本（边执行边解释）。
 - 解释文本和工具调用必须独立展示：解释文本以流式非折叠方式展示，工具调用保持现有折叠展示方式。

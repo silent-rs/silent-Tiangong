@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 
@@ -81,6 +82,12 @@ pub struct LlmConfig {
     /// 视频生成端点
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_generation: Option<ModelEndpoint>,
+    /// 向量嵌入端点
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<ModelEndpoint>,
+    /// 结果重排端点
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerank: Option<ModelEndpoint>,
 }
 
 impl LlmConfig {
@@ -105,12 +112,78 @@ impl LlmConfig {
             tts: resolve(ModelCapability::Tts),
             stt: resolve(ModelCapability::Stt),
             video_generation: resolve(ModelCapability::VideoGeneration),
+            embedding: resolve(ModelCapability::Embedding),
+            rerank: resolve(ModelCapability::Rerank),
         }
     }
 
     /// 检查是否有有效的 Chat 端点
     pub fn is_valid(&self) -> bool {
         !self.chat.base_url.is_empty() && !self.chat.api_key.is_empty()
+    }
+
+    /// 根据当前 LLM 配置生成 Memory 启动参数。
+    ///
+    /// Memory 本身不负责加载应用配置；上层先通过 `tiangong-config`
+    /// 解析配置，再通过这里把 embedding 端点转换为 memory 运行参数。
+    pub fn to_memory_options(
+        &self,
+        workspace_id: Option<String>,
+    ) -> tiangong_memory::MemoryOptions {
+        let mut options = tiangong_memory::MemoryOptions::new(workspace_id);
+        let memory_model_endpoint = self.lite.as_ref().unwrap_or(&self.chat);
+        if !memory_model_endpoint.base_url.is_empty() && !memory_model_endpoint.api_key.is_empty() {
+            options = options.with_model(tiangong_llm::LlmEndpointConfig {
+                base_url: memory_model_endpoint.base_url.clone(),
+                api_key: memory_model_endpoint.api_key.clone(),
+                model: memory_model_endpoint.model.clone(),
+                protocol: memory_model_endpoint.protocol,
+                timeout: Duration::from_millis(memory_model_endpoint.timeout_ms),
+                max_retries: 3,
+            });
+        }
+        let Some(endpoint) = self.embedding.as_ref() else {
+            return options;
+        };
+        let Some(dimension) = endpoint
+            .options
+            .get("dimension")
+            .and_then(|value| value.as_u64())
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| *value > 0)
+        else {
+            return options;
+        };
+
+        options = options.with_embedding(tiangong_llm::EmbeddingEndpointConfig {
+            base_url: endpoint.base_url.clone(),
+            api_key: endpoint.api_key.clone(),
+            model: endpoint.model.clone(),
+            protocol: endpoint.protocol,
+            timeout: Duration::from_millis(endpoint.timeout_ms),
+            dimension,
+        });
+
+        options.with_vector_mode(memory_vector_mode_from_options(&endpoint.options))
+    }
+}
+
+fn memory_vector_mode_from_options(options: &Value) -> tiangong_memory::MemoryVectorMode {
+    let Some(raw) = options
+        .get("vector_mode")
+        .or_else(|| options.get("memory_vector_mode"))
+        .and_then(|value| value.as_str())
+    else {
+        return tiangong_memory::MemoryVectorMode::Auto;
+    };
+
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "disabled" | "disable" | "off" | "none" => tiangong_memory::MemoryVectorMode::Disabled,
+        "embedded" | "embedded_flat" | "flat" => tiangong_memory::MemoryVectorMode::Embedded,
+        "external_qdrant" | "qdrant" | "external" => {
+            tiangong_memory::MemoryVectorMode::ExternalQdrant
+        }
+        _ => tiangong_memory::MemoryVectorMode::Auto,
     }
 }
 
@@ -148,6 +221,14 @@ impl CoreConfig {
     /// 快捷构建器
     pub fn builder() -> CoreConfigBuilder {
         CoreConfigBuilder::default()
+    }
+
+    /// 根据 CoreConfig 生成 Memory 启动参数。
+    pub fn to_memory_options(
+        &self,
+        workspace_id: Option<String>,
+    ) -> tiangong_memory::MemoryOptions {
+        self.llm.to_memory_options(workspace_id)
     }
 }
 
@@ -360,5 +441,34 @@ mod tests {
 
         let llm = LlmConfig::from_models_config(&models);
         assert_eq!(llm.chat.protocol, ProviderProtocol::Anthropic);
+    }
+
+    #[test]
+    fn llm_config_builds_memory_options_from_embedding_endpoint() {
+        let llm = LlmConfig {
+            embedding: Some(ModelEndpoint {
+                base_url: "http://127.0.0.1:8000/v1".into(),
+                api_key: "token".into(),
+                model: "bge-m3".into(),
+                protocol: ProviderProtocol::OpenAiCompatible,
+                timeout_ms: 10_000,
+                options: serde_json::json!({
+                    "dimension": 1024,
+                    "vector_mode": "embedded"
+                }),
+            }),
+            ..Default::default()
+        };
+
+        let options = llm.to_memory_options(Some("ws-1".to_string()));
+        assert_eq!(options.workspace_id.as_deref(), Some("ws-1"));
+        assert_eq!(
+            options.vector_mode,
+            tiangong_memory::MemoryVectorMode::Embedded
+        );
+        let embedding = options.embedding.expect("embedding 配置应存在");
+        assert_eq!(embedding.model, "bge-m3");
+        assert_eq!(embedding.dimension, 1024);
+        assert_eq!(embedding.timeout.as_millis(), 10_000);
     }
 }

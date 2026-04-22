@@ -346,7 +346,7 @@ impl SingleProviderClient {
     }
 
     fn complete_lite_anthropic(&self, prompt: &str) -> Result<String> {
-        let timeout_ms = 30_000u64;
+        let timeout_ms = 120_000u64;
         let model = self.cfg.lite_model().trim();
         if model.is_empty() {
             return Err(anyhow!(
@@ -423,7 +423,7 @@ impl SingleProviderClient {
         if self.protocol() == ProviderProtocol::Anthropic {
             return self.complete_lite_anthropic(prompt);
         }
-        let timeout_ms = 30_000u64;
+        let timeout_ms = 120_000u64;
         let model = self.cfg.lite_model().trim();
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起轻量级模型请求"));
@@ -449,6 +449,41 @@ impl SingleProviderClient {
             metadata: None,
             thinking: None,
         };
+        let response = self.block_on_llm(provider.complete(request))?;
+        Ok(collect_provider_text(&response).trim().to_string())
+    }
+
+    /// 使用自定义 system prompt 的轻量级模型调用
+    ///
+    /// 适用于检索策略判断、意图分析等简单分类任务。
+    pub fn complete_lite_with_system(&self, system: &str, prompt: &str) -> Result<String> {
+        let timeout_ms = 120_000u64;
+        let model = self.cfg.lite_model().trim();
+        if model.is_empty() {
+            return Err(anyhow!("API_MODEL 不能为空，无法发起轻量级模型请求"));
+        }
+        let request = ProviderRequest {
+            model: model.to_string(),
+            system: Some(system.to_string()),
+            messages: vec![ChatMessage::text(LlmMessageRole::User, prompt)],
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: Some(200),
+            temperature: Some(0.1),
+            top_p: None,
+            stop_sequences: Vec::new(),
+            metadata: None,
+            thinking: None,
+        };
+        if self.protocol() == ProviderProtocol::Anthropic {
+            let provider = self.build_anthropic_provider(timeout_ms)?;
+            let response = self.block_on_llm(provider.complete(request))?;
+            return Ok(strip_think_tags(&collect_provider_text(&response))
+                .trim()
+                .to_string());
+        }
+        let provider =
+            build_openai_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())?;
         let response = self.block_on_llm(provider.complete(request))?;
         Ok(collect_provider_text(&response).trim().to_string())
     }

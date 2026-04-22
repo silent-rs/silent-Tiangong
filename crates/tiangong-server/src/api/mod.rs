@@ -21,7 +21,7 @@ use crate::remote::router::MessageRouter;
 /// 共享应用状态类型
 pub type SharedState = Arc<Mutex<TiangongState>>;
 
-/// Server 共享上下文：统一持有应用状态、Core 配置提供者与消息路由器
+/// Server 共享上下文：统一持有应用状态、Core 运行时与消息路由器
 #[derive(Clone)]
 pub struct ServerAppContext {
     pub state: SharedState,

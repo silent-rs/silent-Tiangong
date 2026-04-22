@@ -31,6 +31,7 @@ rmcp = { version = "0.17.0", default-features = false, features = ["client", "tr
 futures-util = "0.3"
 http = "1"
 toml = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Tauri 相关依赖
 tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }

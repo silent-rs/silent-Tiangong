@@ -3,6 +3,7 @@ members = [
     "crates/tiangong-types",
     "crates/tiangong-anthropic",
     "crates/tiangong-llm",
+    "crates/tiangong-memory",
     "crates/tiangong-core",
     "crates/tiangong-cli",
     "crates/tiangong-entry",

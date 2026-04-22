@@ -120,6 +120,14 @@ impl Connector for TelegramConnector {
                     // TODO: 使用 send_document API 发送文件
                     format!("[文件] {name}: {url}")
                 }
+                MessageContent::Audio { url, .. } => {
+                    // TODO: 使用 send_audio API 发送音频
+                    format!("[音频] {url}")
+                }
+                MessageContent::Video { url, caption } => {
+                    // TODO: 使用 send_video API 发送视频
+                    format!("[视频] {}\n{}", url, caption.as_deref().unwrap_or(""))
+                }
             };
 
             bot.send_message(ChatId(chat_id), text).await?;

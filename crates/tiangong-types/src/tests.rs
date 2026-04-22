@@ -51,8 +51,14 @@ fn token_usage_accumulate() {
 fn run_status_serde() {
     let json = serde_json::to_string(&RunStatus::Executing).unwrap();
     assert_eq!(json, r#""executing""#);
+    let waiting = serde_json::to_string(&RunStatus::WaitingApproval).unwrap();
+    assert_eq!(waiting, r#""waiting_approval""#);
     let parsed: RunStatus = serde_json::from_str(r#""idle""#).unwrap();
     assert_eq!(parsed, RunStatus::Idle);
+    let parsed_waiting: RunStatus = serde_json::from_str(r#""waiting_approval""#).unwrap();
+    assert_eq!(parsed_waiting, RunStatus::WaitingApproval);
+    let parsed_legacy_waiting: RunStatus = serde_json::from_str(r#""waitingapproval""#).unwrap();
+    assert_eq!(parsed_legacy_waiting, RunStatus::WaitingApproval);
 }
 
 #[test]

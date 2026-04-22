@@ -3,6 +3,7 @@ pub mod image;
 pub mod openai_image;
 pub mod openai_stt;
 pub mod openai_tts;
+pub mod openai_video;
 pub mod stt;
 pub mod stub_video;
 pub mod task;

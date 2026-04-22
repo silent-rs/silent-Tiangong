@@ -224,6 +224,9 @@ impl RuntimeEngine {
         if call.name == "generate_image" {
             return self.handle_media_generation(call, ModelCapability::ImageGeneration);
         }
+        if call.name == "generate_video" {
+            return self.handle_media_generation(call, ModelCapability::VideoGeneration);
+        }
         if call.name == "text_to_speech" {
             return self.handle_tts(call);
         }
@@ -863,15 +866,124 @@ impl RuntimeEngine {
                     },
                 }
             }
-            // 视频生成暂通过 skill 机制处理
-            ModelCapability::VideoGeneration => ToolResult {
-                ok: false,
-                summary: "视频生成请通过 skill 调用".to_string(),
-                stdout: String::new(),
-                stderr: "视频生成功能暂未内置，请安装对应的视频生成 skill".to_string(),
-                exit_code: 1,
-                execution: None,
-            },
+            ModelCapability::VideoGeneration => {
+                let duration = call
+                    .arguments
+                    .get("duration")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
+                let resolution = call
+                    .arguments
+                    .get("resolution")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let runtime = match Self::build_media_runtime() {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        return ToolResult {
+                            ok: false,
+                            summary: format!("运行时初始化失败：{e}"),
+                            stdout: String::new(),
+                            stderr: e.to_string(),
+                            exit_code: 1,
+                            execution: None,
+                        };
+                    }
+                };
+                let result = runtime.block_on(crate::media::generate_video(
+                    &self.models_config,
+                    prompt,
+                    duration,
+                    resolution,
+                ));
+                let duration_ms = started.elapsed().as_millis() as u64;
+                match result {
+                    Ok(output) => {
+                        use tiangong_media::video::VideoGenStatus;
+
+                        let (ok, summary, stdout, stderr, exit_code) = match output.response.status
+                        {
+                            VideoGenStatus::Completed {
+                                video_url,
+                                duration,
+                            } => {
+                                let duration_line = duration
+                                    .map(|seconds| format!("\nDuration: {seconds:.1}s"))
+                                    .unwrap_or_default();
+                                (
+                                    true,
+                                    format!("视频生成成功（模型：{}）", output.resolved.model),
+                                    format!("Video URL: {video_url}{duration_line}"),
+                                    String::new(),
+                                    0,
+                                )
+                            }
+                            VideoGenStatus::Pending => (
+                                true,
+                                format!("视频生成任务已提交（模型：{}）", output.resolved.model),
+                                format!("Task ID: {}\nStatus: pending", output.response.task_id),
+                                String::new(),
+                                0,
+                            ),
+                            VideoGenStatus::Processing { progress } => {
+                                let progress_line = progress
+                                    .map(|p| format!("\nProgress: {p:.1}%"))
+                                    .unwrap_or_default();
+                                (
+                                    true,
+                                    format!(
+                                        "视频生成任务处理中（模型：{}）",
+                                        output.resolved.model
+                                    ),
+                                    format!(
+                                        "Task ID: {}\nStatus: processing{progress_line}",
+                                        output.response.task_id
+                                    ),
+                                    String::new(),
+                                    0,
+                                )
+                            }
+                            VideoGenStatus::Failed { error } => (
+                                false,
+                                format!("视频生成失败：{error}"),
+                                String::new(),
+                                error,
+                                1,
+                            ),
+                        };
+                        ToolResult {
+                            ok,
+                            summary: summary.clone(),
+                            stdout,
+                            stderr,
+                            exit_code,
+                            execution: Some(ToolExecutionRecord {
+                                tool_name,
+                                args: vec![],
+                                duration_ms,
+                                ok,
+                                exit_code,
+                                summary,
+                            }),
+                        }
+                    }
+                    Err(err) => ToolResult {
+                        ok: false,
+                        summary: Self::media_error_summary("视频生成", &err),
+                        stdout: String::new(),
+                        stderr: err.to_string(),
+                        exit_code: 1,
+                        execution: Some(ToolExecutionRecord {
+                            tool_name,
+                            args: vec![],
+                            duration_ms,
+                            ok: false,
+                            exit_code: 1,
+                            summary: Self::media_error_summary("视频生成", &err),
+                        }),
+                    },
+                }
+            }
             _ => ToolResult {
                 ok: false,
                 summary: format!("不支持的多媒体能力：{}", capability.display_name()),
@@ -1156,6 +1268,15 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<FunctionToolSpec>, engine: &
                 .resolve_for_capability(crate::models_config::ModelCapability::ImageGeneration)
                 .is_some()
         });
+    let has_video_gen = engine
+        .llm_config()
+        .map(|c| c.video_generation.is_some())
+        .unwrap_or_else(|| {
+            engine
+                .models_config()
+                .resolve_for_capability(crate::models_config::ModelCapability::VideoGeneration)
+                .is_some()
+        });
     let has_tts = engine
         .llm_config()
         .map(|c| c.tts.is_some())
@@ -1186,6 +1307,21 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<FunctionToolSpec>, engine: &
                     "width": { "type": "integer", "description": "宽度（可选）" },
                     "height": { "type": "integer", "description": "高度（可选）" },
                     "style": { "type": "string", "description": "风格（可选）" }
+                },
+                "required": ["prompt"]
+            }),
+        });
+    }
+    if has_video_gen {
+        tools.push(FunctionToolSpec {
+            name: "generate_video".to_string(),
+            description: "根据文字描述生成视频，成功时返回结构化视频资源".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "视频描述" },
+                    "duration": { "type": "integer", "description": "视频时长，单位秒（可选）" },
+                    "resolution": { "type": "string", "description": "分辨率，如 720p、1080p（可选）" }
                 },
                 "required": ["prompt"]
             }),
@@ -1367,9 +1503,10 @@ pub(crate) fn build_react_system_prompt(
 6. 回复使用 Markdown 格式：代码和命令用代码块（```语言 ... ```）包裹，使用标题、列表等结构化排版。
 7. 工具调用失败时必须如实告知用户失败原因，绝对不能虚构成功结果。
 8. 如果已安装的 Skill 能处理用户请求，优先通过 run_command 调用 Skill 脚本。
-9. 耗时较长的命令（编译、下载、视频生成等）使用 spawn_task 在后台执行。
-10. 多个可并行的耗时任务使用 spawn+join 模式：先多次调用 spawn_task 启动所有任务，再调用 wait_tasks 一次性等待全部完成。
-11. 独立的后台任务（不需要等待结果的）用 spawn_task 启动后直接继续，无需 wait_tasks。{media_section}{skills_section}
+9. 如果工具列表包含 recall_memory，且用户提到“刚刚、刚才、上次、之前、那个、继续、这张图、生成的图片”等历史指代，必须先调用 recall_memory，除非当前上下文已经包含明确答案。
+10. 耗时较长的命令（编译、下载、视频生成等）使用 spawn_task 在后台执行。
+11. 多个可并行的耗时任务使用 spawn+join 模式：先多次调用 spawn_task 启动所有任务，再调用 wait_tasks 一次性等待全部完成。
+12. 独立的后台任务（不需要等待结果的）用 spawn_task 启动后直接继续，无需 wait_tasks。{media_section}{skills_section}
 
 用户输入：
 {user_input}"

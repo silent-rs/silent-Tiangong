@@ -18,6 +18,8 @@ impl TiangongState {
         self.store.runtime.run.status = crate::runtime::RunStatus::Executing;
         self.store.runtime.run.summary = "正在处理".to_string();
         self.store.runtime.run.last_session_id = Some(session.id.clone());
+        let usage = session.total_usage();
+        self.store.runtime.run.last_usage = (usage.total_tokens > 0).then_some(usage);
         self.store.runtime.run.updated_at = now_text();
         Ok((session.id.clone(), session))
     }

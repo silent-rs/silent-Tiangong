@@ -3,7 +3,7 @@
 use anyhow::Result;
 use tiangong_config::load_tiangong_config;
 use tiangong_core::app_state::TiangongState;
-use tiangong_core::core::TiangongCore;
+use tiangong_core::core::{TiangongCore, shutdown_memory_registry_blocking};
 use tiangong_types::{SessionStreamEvent, StreamEvent};
 
 use std::sync::mpsc;
@@ -15,9 +15,12 @@ use crate::input::InputReader;
 use crate::output;
 
 pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<()> {
-    let mut state = TiangongState::load_or_default();
     let app_config = load_tiangong_config();
-    let config = app_config.into_core_config_provider();
+    let core_config = app_config.to_core_config();
+
+    let config = tiangong_core::core_config::CoreConfigProvider::new(core_config);
+
+    let mut state = TiangongState::load_or_default();
     let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
     let core = TiangongCore::new(config.clone(), stream_tx);
 
@@ -94,6 +97,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
     if !final_session.messages.is_empty() {
         state.save_core_session(final_session);
     }
+    shutdown_memory_registry_blocking();
     Ok(())
 }
 
@@ -272,6 +276,22 @@ impl ResponseState {
             } => {
                 self.end_active_stream();
                 output::worker_completed(worker_label, *success);
+            }
+
+            StreamEvent::MemoryRecallStart { strategy } => {
+                self.end_active_stream();
+                output::status(&format!("记忆检索 (策略: {strategy})..."));
+            }
+
+            StreamEvent::MemoryRecallDone { hit_count, hits } => {
+                if *hit_count == 0 {
+                    output::status("记忆检索完成，无相关记忆");
+                } else {
+                    output::status(&format!("记忆检索完成，命中 {hit_count} 条"));
+                    for h in hits {
+                        output::status(&format!("  [{:.2}] {}: {}", h.score, h.title, h.summary));
+                    }
+                }
             }
         }
         false
