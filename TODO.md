@@ -1,6 +1,6 @@
 # TODO - 天工当前开发任务
 
-> 最后更新：2026-04-21
+> 最后更新：2026-04-22
 > 当前主线：Phase 18 Memory 系统收口
 > 参考：`PLAN.md`、`docs/requirements.md`、`docs/memory-system/`
 
@@ -42,13 +42,13 @@ Memory 主链路已经可用，但还不能视为完全收口。当前最重要�
 
 ### 2. 修正 Meso Entity/Decision 的幂等与质量问题
 
-- [ ] 为 Entity 生成稳定 key，按 `(workspace_id, entity_type, name)` 去重更新。
-- [ ] 为 Decision 生成稳定 dedupe key，避免同一 Episode 多次生成重复 Decision。
-- [ ] 增加 LLM 版 Meso 提炼器，复用 `tiangong-llm` 输出结构化 Entity/Decision。
-- [ ] 为 LLM Meso 输出增加严格 JSON 解析、字段校验和错误 fallback。
-- [ ] 保留当前规则版 Meso 作为 LLM 失败时的 fallback。
-- [ ] 增加集成测试验证重复运行 Meso 不会重复膨胀 Entity/Decision 数量。
-- [ ] 增加测试验证 LLM Meso 失败时仍能回退到规则版。
+- [x] 为 Entity 生成稳定 key，按 `(workspace_id, entity_type, name)` 去重更新。
+- [x] 为 Decision 生成稳定 dedupe key，避免同一 Episode 多次生成重复 Decision。
+- [x] 增加 LLM 版 Meso 提炼器，复用 `tiangong-llm` 输出结构化 Entity/Decision。
+- [x] 为 LLM Meso 输出增加严格 JSON 解析、字段校验和错误 fallback。
+- [x] 保留当前规则版 Meso 作为 LLM 失败时的 fallback。
+- [x] 增加集成测试验证重复运行 Meso 不会重复膨胀 Entity/Decision 数量。
+- [x] 增加测试验证 LLM Meso 失败时仍能回退到规则版。
 
 ### 3. Memory runtime / handle registry 生命周期收口
 
@@ -140,9 +140,8 @@ Memory 主链路已经可用，但还不能视为完全收口。当前最重要�
 
 ## 当前推荐执行顺序
 
-1. 先提交当前 Meso + workspace registry + 文档整理变更。
-2. 开发 `RecallAnchorExtractor`。
-3. 修正 Meso 幂等问题，再升级 LLM 提炼。
-4. 更新 Memory 接手指南。
-5. 补 external Qdrant ignored test。
-6. 处理 Memory 配置热更新和 runtime 生命周期清理。
+1. 收口 Memory runtime / handle registry 生命周期。
+2. 更新 Memory 接手指南到当前代码状态。
+3. 补 external Qdrant ignored test。
+4. 处理 Memory 配置热更新。
+5. 继续收口 Recall 输出预算与去重策略。

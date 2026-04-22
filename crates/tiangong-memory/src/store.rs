@@ -259,6 +259,16 @@ impl MemoryStore {
         Ok(())
     }
 
+    /// 列出 Entity，供 MesoRumination 幂等更新使用。
+    pub(crate) fn list_entities(&self, workspace_id: Option<&str>) -> Vec<Entity> {
+        self.db.list_entities(workspace_id).unwrap_or_default()
+    }
+
+    /// 列出 Decision，供 MesoRumination 幂等更新使用。
+    pub(crate) fn list_decisions(&self, workspace_id: Option<&str>) -> Vec<Decision> {
+        self.db.list_decisions(workspace_id).unwrap_or_default()
+    }
+
     /// 列出低活跃节点（用于 MetaRumination 归档）
     pub(crate) fn list_stale_nodes(
         &self,

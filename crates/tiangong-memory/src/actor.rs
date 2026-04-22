@@ -142,8 +142,13 @@ impl MemoryActor {
                 session_id,
                 workspace_id,
             } => {
-                if let Err(e) =
-                    rumination::process_meso(&mut self.store, &session_id, &workspace_id)
+                if let Err(e) = rumination::process_meso(
+                    &mut self.store,
+                    &session_id,
+                    &workspace_id,
+                    self.options.model.as_ref(),
+                )
+                .await
                 {
                     tracing::warn!("Meso 反刍失败: {}", e);
                 }

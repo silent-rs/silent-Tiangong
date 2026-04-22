@@ -103,6 +103,10 @@ impl TantivyIndex {
     pub(crate) fn index_node(&mut self, node: &MemoryNode, body_extra: &str) -> Result<()> {
         let mut doc = TantivyDocument::default();
 
+        // 同一 node_id 重新索引时先删除旧文档，避免 Meso 重跑后 BM25 返回重复命中。
+        let term = Term::from_field_text(self.fields.id, &node.id);
+        self.writer.delete_term(term);
+
         doc.add_text(self.fields.id, &node.id);
         doc.add_text(self.fields.kind, kind_str(&node.kind));
         doc.add_text(self.fields.title, &node.title);

@@ -117,6 +117,43 @@ async fn wait_for_recall_kind(
     Vec::new()
 }
 
+async fn wait_for_unique_kind_hits(
+    handle: &tiangong_memory::MemoryHandle,
+    query: &str,
+    kind: MemoryKind,
+) -> Vec<tiangong_memory::RecallHit> {
+    for attempt in 1..=30 {
+        let hits = handle
+            .recall(
+                RecallAnchors {
+                    query: query.to_string(),
+                    keywords: Vec::new(),
+                    strategy: None,
+                },
+                8,
+            )
+            .await;
+        let kind_hits = hits
+            .iter()
+            .filter(|hit| hit.kind == kind)
+            .collect::<Vec<_>>();
+        let unique_ids = kind_hits
+            .iter()
+            .map(|hit| hit.node_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        eprintln!(
+            "[wait-unique-kind] attempt={attempt} query={query:?} kind={kind:?} kind_hits={} unique_ids={}",
+            kind_hits.len(),
+            unique_ids.len()
+        );
+        if !kind_hits.is_empty() && kind_hits.len() == unique_ids.len() {
+            return hits;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Vec::new()
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[serial]
 async fn runtime_loads_profile_workspace_and_session_injections() {
@@ -556,6 +593,62 @@ async fn meso_rumination_extracts_entity_and_decision_memories() {
     eprintln!("[meso] workspace_injection=\n{injection}");
     assert!(injection.contains("实体记忆"));
     assert!(injection.contains("决策记忆"));
+
+    handle.run_meso_rumination("session-meso".to_string(), workspace_id.clone());
+    eprintln!("[meso] rerun submitted for idempotency verification");
+
+    let rerun_entity_hits =
+        wait_for_unique_kind_hits(&handle, "qdrant memory entity", MemoryKind::Entity).await;
+    let entity_ids = rerun_entity_hits
+        .iter()
+        .filter(|hit| hit.kind == MemoryKind::Entity)
+        .map(|hit| hit.node_id.as_str())
+        .collect::<Vec<_>>();
+    let unique_entity_ids = entity_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    eprintln!(
+        "[meso] rerun_entity_hits={} unique_entity_ids={} ids={entity_ids:?}",
+        entity_ids.len(),
+        unique_entity_ids.len()
+    );
+    assert_eq!(
+        entity_ids.len(),
+        unique_entity_ids.len(),
+        "重复运行 Meso 后 Entity 搜索结果不应出现同一 node_id 的重复命中"
+    );
+
+    let rerun_decision_hits = wait_for_unique_kind_hits(
+        &handle,
+        "choose embedded vector index decision",
+        MemoryKind::Decision,
+    )
+    .await;
+    let decision_ids = rerun_decision_hits
+        .iter()
+        .filter(|hit| hit.kind == MemoryKind::Decision)
+        .map(|hit| hit.node_id.as_str())
+        .collect::<Vec<_>>();
+    let unique_decision_ids = decision_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    eprintln!(
+        "[meso] rerun_decision_hits={} unique_decision_ids={} ids={decision_ids:?}",
+        decision_ids.len(),
+        unique_decision_ids.len()
+    );
+    assert_eq!(
+        decision_ids.len(),
+        unique_decision_ids.len(),
+        "重复运行 Meso 后 Decision 搜索结果不应出现同一 node_id 的重复命中"
+    );
+    assert_eq!(
+        unique_decision_ids.len(),
+        1,
+        "同一 Episode 的决策记忆重复反刍后仍应保持单个 Decision 节点"
+    );
 
     handle.shutdown().await;
 }
