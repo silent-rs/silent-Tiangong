@@ -3,6 +3,7 @@
 //! 可任意 Clone 跨线程/任务使用，通过 mpsc channel 与 MemoryActor 通信。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use tokio::sync::Mutex;
@@ -11,6 +12,7 @@ use tokio::sync::mpsc;
 use crate::command::{InjectionLevel, MemoryCommand};
 use crate::ipc::IpcClient;
 use crate::ipc::protocol::{IpcRequest, MemoryIpcRequestPayload, MemoryIpcResponsePayload};
+use crate::options::MemoryOptions;
 use crate::types::{
     Episode, ExpandedMemory, MemoryRecallRequest, MemoryRecallResponse, RecallAnchors, RecallHit,
     TurnResult,
@@ -49,6 +51,28 @@ impl MemoryHandle {
     /// 同一个 handle clone；不同 workspace 应创建不同 handle。
     pub fn is_same_handle(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    /// 同步热更新 Memory Actor 配置。
+    ///
+    /// 该方法用于 Core 工作线程响应配置 generation 变化；远程 handle 暂不支持
+    /// 跨进程重配置，调用方应在本进程 registry 内使用。
+    pub fn reconfigure_blocking(&self, options: MemoryOptions) -> Result<()> {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+                tx.blocking_send(MemoryCommand::Reconfigure {
+                    options: Box::new(options),
+                    reply: reply_tx,
+                })
+                .with_context(|| "发送 Memory 热更新命令失败")?;
+                reply_rx
+                    .recv_timeout(Duration::from_secs(30))
+                    .with_context(|| "等待 Memory 热更新结果超时或失败")?
+                    .map_err(|err| anyhow!(err))
+            }
+            HandleInner::Remote { .. } => Err(anyhow!("远程 MemoryHandle 暂不支持配置热更新")),
+        }
     }
 
     /// 加载注入上下文（查询，等待响应）

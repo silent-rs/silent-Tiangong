@@ -2,6 +2,7 @@
 
 use tokio::sync::oneshot;
 
+use crate::options::MemoryOptions;
 use crate::types::{
     Episode, ExpandedMemory, MemoryRecallRequest, MemoryRecallResponse, RecallAnchors, RecallHit,
     TurnResult,
@@ -60,5 +61,9 @@ pub enum MemoryCommand {
     RunMetaRumination,
 
     // ── 生命周期 ──
+    Reconfigure {
+        options: Box<MemoryOptions>,
+        reply: std::sync::mpsc::Sender<Result<(), String>>,
+    },
     Shutdown,
 }

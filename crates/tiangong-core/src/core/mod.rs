@@ -71,7 +71,8 @@ fn get_or_init_memory(
     workspace_id: Option<String>,
 ) -> Option<tiangong_memory::MemoryHandle> {
     let key = memory_registry_key(workspace_id.as_deref());
-    let config_summary = memory_config_summary(config);
+    let options = config.to_memory_options(workspace_id.clone());
+    let config_summary = memory_config_summary_from_options(&options);
     let registry = MEMORY_HANDLES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = match registry.lock() {
         Ok(guard) => guard,
@@ -82,25 +83,47 @@ fn get_or_init_memory(
     };
     if let Some(entry) = guard.get_mut(&key) {
         entry.last_used_at = now_text();
-        let summary_changed =
-            memory_config_requires_restart(&entry.config_summary, &config_summary);
+        let summary_changed = memory_config_changed(&entry.config_summary, &config_summary);
         let generation_changed = entry.config_generation != config_generation;
         if generation_changed {
             entry.config_generation = config_generation;
         }
         if summary_changed {
-            entry.restart_required = true;
-            tracing::warn!(
-                workspace_id = ?entry.workspace_id,
-                created_at = %entry.created_at,
-                last_used_at = %entry.last_used_at,
-                "Memory 配置已变化，当前策略为复用旧 handle 并标记待重启"
-            );
+            if memory_config_can_update_in_place(&entry.config_summary, &config_summary) {
+                match entry.handle.reconfigure_blocking(options) {
+                    Ok(()) => {
+                        tracing::info!(
+                            workspace_id = ?entry.workspace_id,
+                            created_at = %entry.created_at,
+                            last_used_at = %entry.last_used_at,
+                            "Memory 配置已原地热更新"
+                        );
+                        entry.config_summary = config_summary;
+                        entry.restart_required = false;
+                    }
+                    Err(err) => {
+                        entry.restart_required = true;
+                        tracing::warn!(
+                            workspace_id = ?entry.workspace_id,
+                            created_at = %entry.created_at,
+                            last_used_at = %entry.last_used_at,
+                            "Memory 配置热更新失败，继续复用旧 handle 并标记待重启: {}", err
+                        );
+                    }
+                }
+            } else {
+                entry.restart_required = true;
+                tracing::warn!(
+                    workspace_id = ?entry.workspace_id,
+                    created_at = %entry.created_at,
+                    last_used_at = %entry.last_used_at,
+                    "Memory 配置变化需要重启 actor，当前继续复用旧 handle 并标记待重启"
+                );
+            }
         }
         return Some(entry.handle.clone());
     }
 
-    let options = config.to_memory_options(workspace_id.clone());
     match tiangong_memory::start_with_options(options) {
         Ok(handle) => {
             tracing::info!(workspace_id = ?workspace_id, "Memory Actor 已启动");
@@ -126,29 +149,45 @@ fn get_or_init_memory(
     }
 }
 
-fn memory_config_requires_restart(
-    running: &MemoryConfigSummary,
-    latest: &MemoryConfigSummary,
-) -> bool {
+fn memory_config_changed(running: &MemoryConfigSummary, latest: &MemoryConfigSummary) -> bool {
     running != latest
 }
 
+#[cfg(test)]
 fn memory_config_summary(config: &CoreConfig) -> MemoryConfigSummary {
     let options = config.to_memory_options(None);
+    memory_config_summary_from_options(&options)
+}
+
+fn memory_config_summary_from_options(
+    options: &tiangong_memory::MemoryOptions,
+) -> MemoryConfigSummary {
     MemoryConfigSummary {
-        model: options.model.map(|model| MemoryModelSummary {
-            base_url: model.base_url,
-            model: model.model,
+        model: options.model.as_ref().map(|model| MemoryModelSummary {
+            base_url: model.base_url.clone(),
+            model: model.model.clone(),
             protocol: format!("{:?}", model.protocol),
         }),
-        embedding: options.embedding.map(|embedding| MemoryEmbeddingSummary {
-            base_url: embedding.base_url,
-            model: embedding.model,
-            protocol: format!("{:?}", embedding.protocol),
-            dimension: embedding.dimension,
-        }),
+        embedding: options
+            .embedding
+            .as_ref()
+            .map(|embedding| MemoryEmbeddingSummary {
+                base_url: embedding.base_url.clone(),
+                model: embedding.model.clone(),
+                protocol: format!("{:?}", embedding.protocol),
+                dimension: embedding.dimension,
+            }),
         vector_mode: format!("{:?}", options.vector_mode),
     }
+}
+
+fn memory_config_can_update_in_place(
+    _running: &MemoryConfigSummary,
+    _latest: &MemoryConfigSummary,
+) -> bool {
+    // 当前 Memory Actor 已支持模型端点和向量层原地重配置；workspace_id
+    // 变化通过 registry key 创建新 entry，不在同一 actor 内热更新。
+    true
 }
 
 fn memory_registry_key(workspace_id: Option<&str>) -> String {
@@ -343,7 +382,7 @@ fn worker_loop(
     external_tx: Sender<SessionStreamEvent>,
     cmd_rx: Receiver<Command>,
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
-    memory_handle: Option<tiangong_memory::MemoryHandle>,
+    mut memory_handle: Option<tiangong_memory::MemoryHandle>,
     memory_workspace_id: Option<String>,
 ) -> Session {
     let session_id = session.id.clone();
@@ -396,6 +435,7 @@ fn worker_loop(
         let cfg_gen = config.generation();
         if engine.is_none() || cfg_gen != last_cfg_gen {
             let cfg = config.snapshot();
+            memory_handle = get_or_init_memory(&cfg, cfg_gen, memory_workspace_id.clone());
             engine = Some(build_engine_from_config(
                 &cfg,
                 &stream_tx,
@@ -1850,6 +1890,15 @@ fn normalize_network_target(target: &str) -> String {
 mod tests {
     use super::*;
 
+    static MEMORY_REGISTRY_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn memory_registry_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        MEMORY_REGISTRY_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("memory registry 测试锁已污染")
+    }
+
     #[test]
     fn memory_registry_key_separates_workspace_and_global_handles() {
         assert_eq!(memory_registry_key(None), GLOBAL_MEMORY_WORKSPACE_KEY);
@@ -1885,23 +1934,22 @@ mod tests {
         assert_eq!(summary.vector_mode, "Embedded");
 
         let changed_dimension = memory_config_summary(&memory_test_config(1024, "embedded"));
-        assert!(memory_config_requires_restart(&summary, &changed_dimension));
+        assert!(memory_config_changed(&summary, &changed_dimension));
 
         let changed_vector_mode = memory_config_summary(&memory_test_config(768, "disabled"));
-        assert!(memory_config_requires_restart(
-            &summary,
-            &changed_vector_mode
-        ));
+        assert!(memory_config_changed(&summary, &changed_vector_mode));
 
         let same_memory_config = memory_config_summary(&memory_test_config(768, "embedded"));
-        assert!(!memory_config_requires_restart(
+        assert!(!memory_config_changed(&summary, &same_memory_config));
+        assert!(memory_config_can_update_in_place(
             &summary,
-            &same_memory_config
+            &changed_dimension
         ));
     }
 
     #[test]
     fn memory_registry_reuses_workspace_handle_and_separates_workspaces() {
+        let _lock = memory_registry_test_lock();
         let _env = MemoryRegistryEnvGuard::enter();
         shutdown_memory_registry_blocking();
 
@@ -1924,6 +1972,97 @@ mod tests {
             !handle_a.is_same_handle(&handle_b),
             "不同 workspace 应使用不同 MemoryHandle"
         );
+
+        shutdown_memory_registry_blocking();
+    }
+
+    #[test]
+    fn memory_registry_hot_updates_memory_config_in_place() {
+        let _lock = memory_registry_test_lock();
+        let _env = MemoryRegistryEnvGuard::enter();
+        shutdown_memory_registry_blocking();
+
+        let workspace = format!("ws-hot-update-{}", scru128::new());
+        let initial = CoreConfig::default();
+        let updated = memory_test_config(1024, "embedded");
+        let expected_summary = memory_config_summary(&updated);
+
+        let initial_handle = get_or_init_memory(&initial, 1, Some(workspace.clone()))
+            .expect("初始 MemoryHandle 应启动成功");
+        let updated_handle = get_or_init_memory(&updated, 2, Some(workspace.clone()))
+            .expect("MemoryHandle 应支持热更新后继续可用");
+
+        assert!(
+            initial_handle.is_same_handle(&updated_handle),
+            "Memory 配置热更新应原地复用同一 handle"
+        );
+
+        let registry = MEMORY_HANDLES.get().expect("registry 应已初始化");
+        let guard = registry.lock().expect("registry 锁应可用");
+        let entry = guard
+            .get(&memory_registry_key(Some(&workspace)))
+            .expect("workspace entry 应存在");
+        assert_eq!(entry.config_generation, 2);
+        assert!(!entry.restart_required);
+        assert_eq!(entry.config_summary, expected_summary);
+        drop(guard);
+
+        shutdown_memory_registry_blocking();
+    }
+
+    #[test]
+    fn memory_registry_reacts_to_core_config_provider_hot_reload() {
+        let _lock = memory_registry_test_lock();
+        let _env = MemoryRegistryEnvGuard::enter();
+        shutdown_memory_registry_blocking();
+
+        let workspace = format!("ws-provider-reload-{}", scru128::new());
+        let provider = CoreConfigProvider::new(CoreConfig::default());
+        let initial_snapshot = provider.snapshot();
+        let initial_handle = get_or_init_memory(
+            &initial_snapshot,
+            provider.generation(),
+            Some(workspace.clone()),
+        )
+        .expect("初始 MemoryHandle 应启动成功");
+
+        let hot_config = memory_test_config(2048, "embedded");
+        provider.update(|config| {
+            config.llm = hot_config.llm.clone();
+        });
+        let updated_snapshot = provider.snapshot();
+        let expected_summary = memory_config_summary(&updated_snapshot);
+        let updated_handle = get_or_init_memory(
+            &updated_snapshot,
+            provider.generation(),
+            Some(workspace.clone()),
+        )
+        .expect("配置热重载后 MemoryHandle 应继续可用");
+
+        assert!(
+            initial_handle.is_same_handle(&updated_handle),
+            "CoreConfigProvider 热重载后应原地复用同一 MemoryHandle"
+        );
+
+        let registry = MEMORY_HANDLES.get().expect("registry 应已初始化");
+        let guard = registry.lock().expect("registry 锁应可用");
+        let entry = guard
+            .get(&memory_registry_key(Some(&workspace)))
+            .expect("workspace entry 应存在");
+        assert_eq!(
+            entry.config_generation,
+            provider.generation(),
+            "registry 应记录最新配置 generation"
+        );
+        assert_eq!(
+            entry.config_summary, expected_summary,
+            "registry 应记录热重载后的 Memory 配置摘要"
+        );
+        assert!(
+            !entry.restart_required,
+            "model/embedding/dimension/vector_mode 变化应通过原地热更新完成"
+        );
+        drop(guard);
 
         shutdown_memory_registry_blocking();
     }

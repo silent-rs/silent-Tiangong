@@ -56,6 +56,19 @@ impl MemoryStore {
         self.recall_engine = RecallEngine::dual(vector_index, embedding);
     }
 
+    /// 重新配置向量层。
+    ///
+    /// 热更新时先回到 BM25-only，再尝试按新配置启用向量层。这样 embedding
+    /// 维度或后端变化不会继续复用旧向量索引；新配置不可用时也能明确降级。
+    pub(crate) async fn reconfigure_vector_index(
+        &mut self,
+        embedding: Option<&EmbeddingEndpointConfig>,
+        vector_mode: MemoryVectorMode,
+    ) {
+        self.recall_engine = RecallEngine::bm25_only();
+        self.try_enable_vector(embedding, vector_mode).await;
+    }
+
     /// 基于上层传入的 embedding 配置启用向量索引。
     ///
     /// 失败时仅记录 warning，Memory 自动降级为 BM25-only。

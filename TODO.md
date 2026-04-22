@@ -63,34 +63,17 @@ Memory 主链路已经可用，但还不能视为完全收口。当前最重要�
 
 ## P1 - 主链路质量增强
 
-### 4. 更新 Memory 接手指南
+### 4. Memory 配置热更新
 
-- [ ] 更新 `docs/memory-system/11-当前开发状态与接手指南.md` 到当前代码状态。
-- [ ] 删除或标注旧结论：Meso 只是关键词统计、RecallAnchors 未规划、Server 未接入等。
-- [ ] 补充当前可用链路：Micro、Meso、Tool 化回忆、Depth2、混合检索、产物记忆。
-- [ ] 补充测试脚本和观察日志命令。
-- [ ] 补充当前已知限制和下一步任务。
+- [x] 定义 Memory 配置摘要，覆盖 model、embedding、dimension、vector_mode。
+- [x] registry 根据配置摘要判断是否复用旧 handle。
+- [x] 明确哪些配置变更需要重启 Memory actor：workspace 变化使用独立 registry entry，不在同一 actor 内热更新。
+- [x] 明确哪些配置变更可以原地更新：model、embedding、dimension、vector_mode。
+- [x] embedding 维度变化时拒绝复用旧向量索引。
+- [x] embedding/vector 配置不兼容时输出 warning 并降级为 BM25-only。
+- [x] 增加配置变更相关单元测试或集成测试。
 
-### 5. external Qdrant 专项集成测试
-
-- [ ] 新增 Qdrant ignored 集成测试。
-- [ ] 使用 `TIANGONG_MEMORY_QDRANT_TEST=1` 显式启用测试。
-- [ ] 覆盖 Qdrant collection 创建。
-- [ ] 覆盖 Qdrant point upsert。
-- [ ] 覆盖 Qdrant semantic search。
-- [ ] 未设置环境变量或服务不可用时跳过，不影响默认 CI。
-
-### 6. Memory 配置热更新
-
-- [ ] 定义 Memory 配置摘要，覆盖 model、embedding、dimension、vector_mode。
-- [ ] registry 根据配置摘要判断是否复用旧 handle。
-- [ ] 明确哪些配置变更需要重启 Memory actor。
-- [ ] 明确哪些配置变更可以原地更新。
-- [ ] embedding 维度变化时拒绝复用旧向量索引。
-- [ ] embedding/vector 配置不兼容时输出 warning 并降级为 BM25-only。
-- [ ] 增加配置变更相关单元测试或集成测试。
-
-### 7. Recall 输出预算与去重策略继续收口
+### 5. Recall 输出预算与去重策略继续收口
 
 - [ ] 为 `MemoryRecallResponse` 增加统一输出预算策略。
 - [ ] 至少按字符数或估算 token 限制 recall 输出长度。
@@ -106,7 +89,7 @@ Memory 主链路已经可用，但还不能视为完全收口。当前最重要�
 
 ## P2 - 后续增强
 
-### 8. Memory 观测与调试能力
+### 6. Memory 观测与调试能力
 
 - [ ] tracing 日志输出 recall query。
 - [ ] tracing 日志输出 recall strategy。
@@ -117,7 +100,7 @@ Memory 主链路已经可用，但还不能视为完全收口。当前最重要�
 - [ ] debug 日志可观察 vector upsert。
 - [ ] debug 日志可观察 Meso Entity/Decision 提炼数量。
 
-### 9. Phase 17 多媒体尾项
+### 7. Phase 17 多媒体尾项
 
 - [ ] 为视频结果补齐与图片一致的结构化消息字段。
 - [ ] GUI 支持渲染结构化视频结果。
@@ -125,7 +108,7 @@ Memory 主链路已经可用，但还不能视为完全收口。当前最重要�
 - [ ] 约束 MCP 只作为媒体后端来源之一。
 - [ ] 防止多媒体结果重新退化为工具文本。
 
-### 10. requirements 文档补齐 Memory 需求
+### 8. requirements 文档补齐 Memory 需求
 
 - [ ] 在 `docs/requirements.md` 增加 Memory 系统 Must/Should 要求。
 - [ ] 明确 Memory 功能必须可关闭。
@@ -140,8 +123,8 @@ Memory 主链路已经可用，但还不能视为完全收口。当前最重要�
 
 ## 当前推荐执行顺序
 
-1. 收口 Memory runtime / handle registry 生命周期。
-2. 更新 Memory 接手指南到当前代码状态。
-3. 补 external Qdrant ignored test。
-4. 处理 Memory 配置热更新。
-5. 继续收口 Recall 输出预算与去重策略。
+1. 处理 Memory 配置热更新。
+2. 继续收口 Recall 输出预算与去重策略。
+3. 增强 Memory 观测与调试能力。
+4. 补齐 Phase 17 多媒体尾项。
+5. 补齐 requirements 文档中的 Memory 需求。

@@ -161,9 +161,35 @@ impl MemoryActor {
                 }
             }
 
+            MemoryCommand::Reconfigure { options, reply } => {
+                let result = self
+                    .reconfigure(*options)
+                    .await
+                    .map_err(|err| err.to_string());
+                let _ = reply.send(result);
+            }
+
             // Shutdown 在外层 loop 处理
             MemoryCommand::Shutdown => {}
         }
+    }
+
+    async fn reconfigure(&mut self, mut options: MemoryOptions) -> anyhow::Result<()> {
+        if options.workspace_id != self.workspace_id {
+            tracing::warn!(
+                current_workspace = ?self.workspace_id,
+                requested_workspace = ?options.workspace_id,
+                "Memory 热更新不允许修改 actor workspace_id，继续使用当前 workspace"
+            );
+            options.workspace_id = self.workspace_id.clone();
+        }
+
+        self.store
+            .reconfigure_vector_index(options.embedding.as_ref(), options.vector_mode)
+            .await;
+        self.options = options;
+        tracing::info!("Memory Actor 配置热更新完成");
+        Ok(())
     }
 }
 
