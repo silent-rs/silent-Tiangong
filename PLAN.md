@@ -9,7 +9,7 @@
 - 安全目标：Server 模式默认安全（本地绑定、Token 认证），Connector 鉴权白名单制。
 - 工程目标：按 Phase 增量交付，每个 Phase 保证功能不回退。
 
-## 当前执行策略（2026-04-21）
+## 当前执行策略（2026-04-22）
 - 架构 RFC：`docs/rfc/0004-full-stack-agent-platform.md`
 - 架构基准：`docs/desktop-agent-technical-architecture.md`
 - 差距分析：`docs/architecture-gap-analysis.md`
@@ -17,9 +17,9 @@
 - Phase 15 已完成，Anthropic 协议抽象、独立 transport 与错误处理已接入。
 - Phase 16 已完成，入口统一、Server 信任语义、远程能力尾项和成本可见性已收口。
 - Phase 17 已完成图片/视频结构化媒体消息收口，`tiangong-media` 保持主链路，MCP 仅作为后端适配来源之一。
-- 当前主目标：推进 Phase 18 Memory 系统收口，使长期记忆作为独立 crate 运行，复用 `tiangong-llm`，并通过 Tool 化按需回忆提升跨会话连续性。
-- 当前进展：Memory 已完成 Episode 写入、IPC、Leader/Follower、内置向量混合检索、`recall_memory` 工具化、媒体/文件/工具产物回忆、Meso Entity/Decision 提炼和多类集成测试。
-- 当前风险：Memory 与多媒体改动需要继续跑完整 workspace 检查链；external Qdrant 仍缺专项集成测试。
+- 当前主目标：推进 RFC-0007 Skill 文件系统注册表，把 Skill 注册事实源从 `skills.json.installed[]` / `skills-lock.json` 迁移到 `~/.tiangong/skills/<id>/`。
+- 当前进展：已整理 RFC-0007 TODO，准备先落地 `SkillRegistryView`、`LoadedSkill`、`skill.toml.available`、轻量扫描与按需加载。
+- 当前风险：Skill 管理旧链路与 GUI/CLI/Server 命令耦合较深，需要分阶段保持 `install/remove/enable/list/get` 行为兼容。
 
 ## 里程碑
 
@@ -32,7 +32,8 @@
 - Skill 支持安装、启停、卸载、列表、详情。
 - `/skill` 管理交互对齐 `/mcp`。
 - 动态 Step 执行闭环。
-- 待完成：锁文件、MCP 托管映射、事务回滚、审计。
+- 当前重构：根据 RFC-0007 将 Skill 注册事实源改为文件系统目录，保留 MCP 锁机制。
+- 待完成：文件系统注册表、按需实时加载、旧布局迁移、GC 与诊断工具。
 
 ### Phase 3（Workspace 拆分与核心抽离，已完成）
 - 单 crate → Cargo workspace 多 crate。

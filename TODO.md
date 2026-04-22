@@ -23,46 +23,48 @@
 
 ### 1. 接受 RFC-0007 并同步需求边界
 
-- [ ] 将 `docs/rfc/0007-skill-filesystem-registry.md` 状态从 Draft 调整为 Accepted。
-- [ ] 在 `docs/requirements.md` 中补充 Skill 文件系统注册表要求。
-- [ ] 在 `PLAN.md` 中把当前主目标切换到 RFC-0007。
-- [ ] 明确首期不引入文件系统通知，仅使用扫描 + mtime 缓存。
-- [ ] 明确 MCP 侧 `mcp-lock.json` 机制保持不变。
+- [x] 将 `docs/rfc/0007-skill-filesystem-registry.md` 状态从 Draft 调整为 Accepted。
+- [x] 在 `docs/requirements.md` 中补充 Skill 文件系统注册表要求。
+- [x] 在 `PLAN.md` 中把当前主目标切换到 RFC-0007。
+- [x] 明确首期不引入文件系统通知，仅使用扫描 + mtime 缓存。
+- [x] 明确 MCP 侧 `mcp-lock.json` 机制保持不变。
 
 ### 2. 定义 Skill 文件系统注册表数据结构
 
-- [ ] 新增或改造 `SkillEntry`，字段至少包含 `id`、`dir`、`manifest_mtime`。
-- [ ] 新增或改造 `SkillRegistryView`，只保存轻量索引，不保存 `SKILL.md` 全文。
-- [ ] 新增或改造 `LoadedSkill`，字段至少包含 `manifest`、`readme`、`loaded_at`、`source_mtime`。
-- [ ] 为注册表扫描结果定义非法目录、manifest 缺失、id 不一致等错误/告警类型。
-- [ ] 明确缓存阈值默认 2 秒，支持强制刷新绕过缓存。
+- [x] 新增或改造 `SkillEntry`，字段至少包含 `id`、`dir`、`manifest_mtime`。
+- [x] 新增或改造 `SkillRegistryView`，只保存轻量索引，不保存 `SKILL.md` 全文。
+- [x] 新增或改造 `LoadedSkill`，字段至少包含 `manifest`、`readme`、`loaded_at`、`source_mtime`。
+- [x] 为注册表扫描结果定义非法目录、manifest 缺失、id 不一致等错误/告警类型。
+- [x] 明确缓存阈值默认 2 秒，支持强制刷新绕过缓存。
 
 ### 3. 支持 `skill.toml.available`
 
-- [ ] 为 Skill manifest 增加 `available: bool` 字段。
-- [ ] `available` 缺失时按 `true` 处理。
-- [ ] manifest 序列化时保留或写入 `available`。
+- [x] 为 Skill manifest 增加 `available: bool` 字段。
+- [x] `available` 缺失时按 `true` 处理。
+- [x] manifest 序列化时保留或写入 `available`。
+- [x] 注册表层提供 `set_available` / `write_skill_available` 写入能力。
 - [ ] `set_skill_enabled(id, enabled)` 只修改 `skills/<id>/skill.toml`。
+- [x] `available=false` 时按需加载不读取 `SKILL.md` 正文。
 - [ ] 禁用 Skill 不参与 `@skill` 激活、检索匹配和 Agent 可用工具列表。
 
 ### 4. 实现轻量扫描与按需加载
 
-- [ ] 扫描 `~/.tiangong/skills/<id>/` 平铺目录。
-- [ ] 跳过 `mcp-lock.json`、隐藏文件、非目录和非法目录。
-- [ ] 校验目录名必须等于 `skill.toml.id`，不一致时跳过并记录告警。
+- [x] 扫描 `~/.tiangong/skills/<id>/` 平铺目录。
+- [x] 跳过 `mcp-lock.json`、隐藏文件、非目录和非法目录。
+- [x] 校验目录名必须等于 `skill.toml.id`，不一致时跳过并记录告警。
 - [ ] `list_skills()` 返回轻量 `SkillEntry` / 摘要，不读取 `SKILL.md` 全文。
 - [ ] `get_skill_detail(id)` 触发 `skill.toml` + `SKILL.md` 实时加载。
-- [ ] 已加载 Skill 在 `manifest_mtime` 未变化时命中缓存。
-- [ ] 缓存容量默认 32，超出后按 `loaded_at` 做 LRU 淘汰。
+- [x] 已加载 Skill 在 `manifest_mtime` 未变化时命中缓存。
+- [x] 缓存容量默认 32，超出后按 `loaded_at` 做 LRU 淘汰。
 
 ### 5. Phase A 测试
 
-- [ ] 单元测试：扫描合法 `skills/<id>/skill.toml`。
-- [ ] 单元测试：跳过目录名与 manifest id 不一致的目录。
-- [ ] 单元测试：`available` 缺失默认 true。
-- [ ] 单元测试：`available=false` 不可激活。
-- [ ] 单元测试：mtime 变化后重新加载。
-- [ ] 单元测试：强制 refresh 绕过缓存。
+- [x] 单元测试：扫描合法 `skills/<id>/skill.toml`。
+- [x] 单元测试：跳过目录名与 manifest id 不一致的目录。
+- [x] 单元测试：`available` 缺失默认 true。
+- [x] 单元测试：`available=false` 不可激活。
+- [x] 单元测试：mtime 变化后重新加载。
+- [x] 单元测试：强制 refresh 绕过缓存。
 
 ---
 

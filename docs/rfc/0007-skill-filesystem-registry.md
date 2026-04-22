@@ -1,6 +1,6 @@
 # RFC-0007：基于文件系统的 Skill 实时加载机制
 
-- 状态：Draft
+- 状态：Accepted
 - 发起：2026-03-27
 - 修订 RFC：[RFC-0003 Skill 市场与 MCP 依赖](./0003-skill-market.md)
 - 关联 RFC：[RFC-0005 事件循环运行时](./0005-event-loop-runtime.md) / [RFC-0006 Core Config Provider](./0006-core-config-provider.md)

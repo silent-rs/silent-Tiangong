@@ -30,3 +30,6 @@ tiangong-media = { path = "../tiangong-media" }
 [features]
 default = ["diffy"]
 llm-debug-log = []
+
+[dev-dependencies]
+tempfile = "3"
