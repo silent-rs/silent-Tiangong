@@ -17,7 +17,7 @@ Memory 主链路已经可用，但还不能视为完全收口。当前最重要�
 ## 已完成能力摘要
 
 - 平台基础：Workspace 多 crate、Core/CLI/GUI/Server 拆分、Server 模式、Connector、EventBus、多媒体框架、CoreConfig 注入、LLM 协议抽象、Anthropic 支持、远程信任语义和成本可见性已完成。
-- Phase 17 多媒体：图片结果已进入结构化消息链路，本地 GUI 可渲染结构化图片结果，旧 Markdown 图片仍保留兼容。
+- Phase 17 多媒体：图片/视频结果已进入结构化消息链路，本地 GUI 可渲染结构化媒体结果，旧 Markdown 图片仍保留兼容。
 - Phase 18 Memory 基础：`tiangong-memory` 独立 crate、SQLite 元数据库、Injection、Actor/Handle、TCP IPC、Leader/Follower、workspace 显式写入上下文已完成。
 - Phase 18 写入/检索：Episode 写入、Tantivy BM25、内置 SQLite flat 向量索引、Qdrant 兼容路径、BM25+Vector 混合召回、Depth2 展开已完成。
 - Phase 18 Tool 化回忆：Core 已移除 turn 前自动 Recall，改为主模型按需调用 `recall_memory`；Memory 内部负责规划、召回、展开和去重整理。
@@ -75,15 +75,15 @@ Memory 主链路已经可用，但还不能视为完全收口。当前最重要�
 
 ### 5. Recall 输出预算与去重策略继续收口
 
-- [ ] 为 `MemoryRecallResponse` 增加统一输出预算策略。
-- [ ] 至少按字符数或估算 token 限制 recall 输出长度。
-- [ ] 同一 node_id 不重复输出。
-- [ ] 同一 URL 不重复输出。
-- [ ] 同一路径不重复输出。
-- [ ] 同一工具结果摘要不重复输出。
-- [ ] 当前上下文已有内容不重复输出。
-- [ ] 增加长 Episode 裁剪测试。
-- [ ] 增加重复 URL、重复 path、重复当前上下文测试。
+- [x] 为 `MemoryRecallResponse` 增加统一输出预算策略。
+- [x] 至少按字符数或估算 token 限制 recall 输出长度。
+- [x] 同一 node_id 不重复输出。
+- [x] 同一 URL 不重复输出。
+- [x] 同一路径不重复输出。
+- [x] 同一工具结果摘要不重复输出。
+- [x] 当前上下文已有内容不重复输出。
+- [x] 增加长 Episode 裁剪测试。
+- [x] 增加重复 URL、重复 path、重复当前上下文测试。
 
 ---
 
@@ -91,40 +91,38 @@ Memory 主链路已经可用，但还不能视为完全收口。当前最重要�
 
 ### 6. Memory 观测与调试能力
 
-- [ ] tracing 日志输出 recall query。
-- [ ] tracing 日志输出 recall strategy。
-- [ ] tracing 日志输出 hit count。
-- [ ] tracing 日志输出 backend：BM25、embedded vector、Qdrant。
-- [ ] tracing 日志输出 used_llm 和 fallback reason。
-- [ ] debug 日志可观察 Episode 写入。
-- [ ] debug 日志可观察 vector upsert。
-- [ ] debug 日志可观察 Meso Entity/Decision 提炼数量。
+- [x] tracing 日志输出 recall query。
+- [x] tracing 日志输出 recall strategy。
+- [x] tracing 日志输出 hit count。
+- [x] tracing 日志输出 backend：BM25、embedded vector、Qdrant。
+- [x] tracing 日志输出 used_llm 和 fallback reason。
+- [x] debug 日志可观察 Episode 写入。
+- [x] debug 日志可观察 vector upsert。
+- [x] debug 日志可观察 Meso Entity/Decision 提炼数量。
 
 ### 7. Phase 17 多媒体尾项
 
-- [ ] 为视频结果补齐与图片一致的结构化消息字段。
-- [ ] GUI 支持渲染结构化视频结果。
-- [ ] Connector 支持发送结构化视频结果。
-- [ ] 约束 MCP 只作为媒体后端来源之一。
-- [ ] 防止多媒体结果重新退化为工具文本。
+- [x] 为视频结果补齐与图片一致的结构化消息字段。
+- [x] GUI 支持渲染结构化视频结果。
+- [x] Connector 支持发送结构化视频结果。
+- [x] 约束 MCP 只作为媒体后端来源之一。
+- [x] 防止多媒体结果重新退化为工具文本。
 
 ### 8. requirements 文档补齐 Memory 需求
 
-- [ ] 在 `docs/requirements.md` 增加 Memory 系统 Must/Should 要求。
-- [ ] 明确 Memory 功能必须可关闭。
-- [ ] 明确 Memory 必须保持独立 crate。
-- [ ] 明确 Memory 必须复用 `tiangong-llm`。
-- [ ] 明确 Memory 必须支持按需回忆。
-- [ ] 明确 Memory 必须支持 workspace 隔离。
-- [ ] 明确 Memory 必须支持产物记忆。
-- [ ] 明确 Memory 必须具备独立集成测试。
+- [x] 在 `docs/requirements.md` 增加 Memory 系统 Must/Should 要求。
+- [x] 明确 Memory 功能必须可关闭。
+- [x] 明确 Memory 必须保持独立 crate。
+- [x] 明确 Memory 必须复用 `tiangong-llm`。
+- [x] 明确 Memory 必须支持按需回忆。
+- [x] 明确 Memory 必须支持 workspace 隔离。
+- [x] 明确 Memory 必须支持产物记忆。
+- [x] 明确 Memory 必须具备独立集成测试。
 
 ---
 
 ## 当前推荐执行顺序
 
-1. 处理 Memory 配置热更新。
-2. 继续收口 Recall 输出预算与去重策略。
-3. 增强 Memory 观测与调试能力。
-4. 补齐 Phase 17 多媒体尾项。
-5. 补齐 requirements 文档中的 Memory 需求。
+1. 跑完整 workspace 检查链，确认 Memory 与多媒体收口改动没有跨 crate 回归。
+2. 进行一轮针对 Memory / 多媒体主链路的代码 review。
+3. 根据 review 结果决定是否进入 Phase 19 或先做缺陷修复。

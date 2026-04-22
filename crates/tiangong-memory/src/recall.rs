@@ -62,7 +62,14 @@ impl RecallEngine {
                 importance: f64::from(node.importance),
                 vector,
             })
-            .await
+            .await?;
+        tracing::debug!(
+            node_id = %node.id,
+            kind = ?node.kind,
+            backend = "vector",
+            "Memory vector upsert 完成"
+        );
+        Ok(())
     }
 
     /// 执行召回：接受已完成的 BM25 结果，可选地用向量检索增强后融合重排
@@ -87,6 +94,12 @@ impl RecallEngine {
         let (vector_index, emb_ref) = match (self.vector_index.as_ref(), self.embedding.as_ref()) {
             (Some(q), Some(e)) => (q, e),
             _ => {
+                tracing::debug!(
+                    query = %query,
+                    backend = "bm25",
+                    hit_count = bm25_hits.len().min(limit),
+                    "Memory recall 使用 BM25-only 后端"
+                );
                 return bm25_hits.into_iter().take(limit).collect();
             }
         };
@@ -97,6 +110,12 @@ impl RecallEngine {
             Ok(_) => return bm25_hits.into_iter().take(limit).collect(),
             Err(e) => {
                 tracing::warn!("Embedding 失败，退化为 BM25 召回: {}", e);
+                tracing::debug!(
+                    query = %query,
+                    backend = "bm25_fallback",
+                    hit_count = bm25_hits.len().min(limit),
+                    "Memory recall 向量化失败后降级"
+                );
                 return bm25_hits.into_iter().take(limit).collect();
             }
         };
@@ -106,12 +125,29 @@ impl RecallEngine {
             Ok(h) => h,
             Err(e) => {
                 tracing::warn!("向量搜索失败，退化为 BM25 召回: {}", e);
+                tracing::debug!(
+                    query = %query,
+                    backend = "bm25_fallback",
+                    hit_count = bm25_hits.len().min(limit),
+                    "Memory recall 向量搜索失败后降级"
+                );
                 return bm25_hits.into_iter().take(limit).collect();
             }
         };
 
         // 融合重排
-        reranker.fuse(bm25_hits, semantic_hits, limit)
+        let bm25_count = bm25_hits.len();
+        let semantic_count = semantic_hits.len();
+        let fused = reranker.fuse(bm25_hits, semantic_hits, limit);
+        tracing::debug!(
+            query = %query,
+            backend = "hybrid",
+            bm25_hit_count = bm25_count,
+            semantic_hit_count = semantic_count,
+            hit_count = fused.len(),
+            "Memory recall 使用混合后端"
+        );
+        fused
     }
 }
 

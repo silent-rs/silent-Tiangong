@@ -91,6 +91,72 @@ pub async fn generate_image(
     Ok(MediaCallOutput { resolved, response })
 }
 
+pub async fn generate_video(
+    models_config: &ModelsConfig,
+    prompt: String,
+    duration: Option<u32>,
+    resolution: Option<String>,
+) -> Result<MediaCallOutput<tiangong_media::video::VideoGenTask>, MediaServiceError> {
+    use tiangong_media::video::{VideoGenStatus, VideoGenerator};
+
+    let resolved = resolve_media_model(models_config, ModelCapability::VideoGeneration)?;
+    let endpoint_path = resolved
+        .options
+        .get("endpoint_path")
+        .or_else(|| resolved.options.get("video_generation_path"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let poll_timeout_secs = resolved
+        .options
+        .get("poll_timeout_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(180);
+    let poll_interval_ms = resolved
+        .options
+        .get("poll_interval_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(2_000);
+    let generator = tiangong_media::openai_video::OpenAIVideoGenerator::new(
+        resolved.api_key.clone(),
+        resolved.base_url.clone(),
+        resolved.model.clone(),
+        endpoint_path,
+    );
+    let request = tiangong_media::video::VideoGenRequest {
+        prompt,
+        duration,
+        resolution,
+        model: Some(resolved.model.clone()),
+        reference_image: None,
+    };
+
+    let mut task = tokio::time::timeout(Duration::from_secs(60), generator.generate(request))
+        .await
+        .map_err(|_| MediaServiceError::Timeout("提交视频生成任务超时（60秒）".to_string()))?
+        .map_err(|e| MediaServiceError::Backend(e.to_string()))?;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(poll_timeout_secs);
+    while matches!(
+        task.status,
+        VideoGenStatus::Pending | VideoGenStatus::Processing { .. }
+    ) && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(poll_interval_ms.max(500))).await;
+        match generator.query_status(&task.task_id).await {
+            Ok(status) => task.status = status,
+            Err(err) => {
+                tracing::warn!(task_id = %task.task_id, error = %err, "视频任务状态查询失败，保留已提交任务状态");
+                break;
+            }
+        }
+    }
+
+    Ok(MediaCallOutput {
+        resolved,
+        response: task,
+    })
+}
+
 pub async fn synthesize_speech(
     models_config: &ModelsConfig,
     text: String,

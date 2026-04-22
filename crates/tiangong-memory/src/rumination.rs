@@ -171,6 +171,14 @@ pub(crate) async fn process_meso(
         &existing_decisions,
     )
     .await;
+    tracing::debug!(
+        workspace_id = %workspace_id,
+        used_llm,
+        episode_count = full_episodes.len(),
+        entity_count = entities.len(),
+        decision_count = decisions.len(),
+        "Meso 反刍结构化提炼完成"
+    );
     for entity in &entities {
         store.upsert_entity(entity.clone(), Some(workspace_id))?;
     }

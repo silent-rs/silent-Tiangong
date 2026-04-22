@@ -207,15 +207,11 @@ impl MessageRouter {
                     return Ok(None);
                 }
 
-                let (actual_session_id, response_text) = self
+                let (actual_session_id, mut outgoing) = self
                     .core_manager
                     .send_message_and_wait(&requested_session_id, text)
                     .await?;
-
-                let outgoing = OutgoingMessage {
-                    content: MessageContent::Text(response_text),
-                    reply_to,
-                };
+                outgoing.reply_to = reply_to;
                 self.event_bus.publish(TiangongEvent::MessageSent {
                     session_id: actual_session_id,
                     message: outgoing.clone(),

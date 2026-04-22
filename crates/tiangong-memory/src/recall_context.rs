@@ -10,6 +10,8 @@ use crate::types::{
 };
 use tiangong_llm::{LlmEndpointConfig, complete_text};
 
+const DEFAULT_RECALL_OUTPUT_BUDGET_CHARS: usize = 1200;
+
 const RECALL_SYNTHESIS_SYSTEM: &str = "\
 你是独立记忆系统的结果整理器。你的输出会被交给主模型继续推理。
 
@@ -29,24 +31,45 @@ pub(crate) async fn recall_context(
     let request = normalize_request(request);
     if request.query.is_empty() {
         return MemoryRecallResponse {
-            content: "recall_memory.query is empty".to_string(),
+            content: apply_output_budget(
+                "recall_memory.query is empty".to_string(),
+                DEFAULT_RECALL_OUTPUT_BUDGET_CHARS,
+            ),
             ..MemoryRecallResponse::default()
         };
     }
 
     let plan = extract_recall_anchors(model, &request).await;
+    tracing::debug!(
+        query = %request.query,
+        strategy = ?plan.anchors.strategy,
+        limit = plan.limit,
+        used_llm = plan.used_llm,
+        "Memory recall 规划完成"
+    );
     if plan.anchors.strategy == Some(SearchStrategy::Skip) {
         return MemoryRecallResponse {
-            content: "当前请求不需要检索长期记忆。".to_string(),
+            content: apply_output_budget(
+                "当前请求不需要检索长期记忆。".to_string(),
+                DEFAULT_RECALL_OUTPUT_BUDGET_CHARS,
+            ),
             hits: Vec::new(),
             used_llm: plan.used_llm,
         };
     }
 
     let hits = dedupe_hits(store.recall_async(&plan.anchors, plan.limit).await);
+    tracing::debug!(
+        query = %request.query,
+        hit_count = hits.len(),
+        "Memory recall 粗召回完成"
+    );
     if hits.is_empty() {
         return MemoryRecallResponse {
-            content: format!("未找到与「{}」相关的历史记忆。", request.query),
+            content: apply_output_budget(
+                format!("未找到与「{}」相关的历史记忆。", request.query),
+                DEFAULT_RECALL_OUTPUT_BUDGET_CHARS,
+            ),
             hits,
             used_llm: plan.used_llm,
         };
@@ -58,7 +81,7 @@ pub(crate) async fn recall_context(
             .map(|hit| hit.node_id.clone())
             .collect::<Vec<_>>(),
     );
-    let content = match model {
+    let raw_content = match model {
         Some(config) => synthesize_with_model(config, &request, &hits, &expanded)
             .await
             .unwrap_or_else(|err| {
@@ -67,6 +90,14 @@ pub(crate) async fn recall_context(
             }),
         None => fallback_synthesis(&request, &hits, &expanded),
     };
+    let content =
+        finalize_recall_content(&raw_content, &request, DEFAULT_RECALL_OUTPUT_BUDGET_CHARS);
+    tracing::debug!(
+        query = %request.query,
+        content_chars = content.chars().count(),
+        used_llm = plan.used_llm || model.is_some(),
+        "Memory recall 输出整理完成"
+    );
 
     MemoryRecallResponse {
         content,
@@ -107,7 +138,7 @@ async fn synthesize_with_model(
         format_candidates(hits, expanded),
     );
     let text = complete_text(config, RECALL_SYNTHESIS_SYSTEM, &prompt, 1200).await?;
-    let compacted = compact_text(&text, 3000);
+    let compacted = compact_text(&text, DEFAULT_RECALL_OUTPUT_BUDGET_CHARS * 2);
     if compacted.is_empty() {
         Ok("没有发现当前上下文之外的增量记忆。".to_string())
     } else {
@@ -124,6 +155,7 @@ fn fallback_synthesis(
     let mut seen = std::collections::HashSet::new();
     let mut emitted_urls = std::collections::HashSet::new();
     let mut emitted_paths = std::collections::HashSet::new();
+    let mut emitted_tool_summaries = std::collections::HashSet::new();
     let mut lines = Vec::new();
     for hit in hits {
         if is_redundant(&hit.summary, &context_text) && is_redundant(&hit.title, &context_text) {
@@ -164,6 +196,14 @@ fn fallback_synthesis(
         }
 
         let cleaned_summary = strip_refs(&hit.summary, &original_urls, &original_paths);
+        let tool_summary_key = normalize_for_redundancy(&cleaned_summary).to_ascii_lowercase();
+        if urls.is_empty()
+            && paths.is_empty()
+            && !tool_summary_key.is_empty()
+            && !emitted_tool_summaries.insert(tool_summary_key)
+        {
+            continue;
+        }
         let mut item = format!(
             "- {}: {}",
             strip_refs(&hit.title, &original_urls, &original_paths),
@@ -203,14 +243,7 @@ fn strip_refs(text: &str, urls: &[String], paths: &[String]) -> String {
 fn dedupe_hits(hits: Vec<RecallHit>) -> Vec<RecallHit> {
     let mut seen = std::collections::HashSet::new();
     hits.into_iter()
-        .filter(|hit| {
-            let key = format!(
-                "{}:{}",
-                hit.node_id,
-                compact_text(&hit.summary.to_lowercase(), 120)
-            );
-            seen.insert(key)
-        })
+        .filter(|hit| seen.insert(hit.node_id.clone()))
         .collect()
 }
 
@@ -258,6 +291,62 @@ fn compact_text(text: &str, max_chars: usize) -> String {
         return normalized;
     }
     let mut clipped = normalized.chars().take(max_chars).collect::<String>();
+    clipped.push_str("...");
+    clipped
+}
+
+fn finalize_recall_content(
+    content: &str,
+    request: &MemoryRecallRequest,
+    budget_chars: usize,
+) -> String {
+    let context_text = request.context.join("\n");
+    let mut seen_lines = std::collections::HashSet::new();
+    let mut emitted_urls = std::collections::HashSet::new();
+    let mut emitted_paths = std::collections::HashSet::new();
+    let mut lines = Vec::new();
+
+    for line in content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if is_redundant(line, &context_text) {
+            continue;
+        }
+        let urls = extract_urls(line);
+        let paths = extract_paths(line);
+        if urls
+            .iter()
+            .any(|url| !emitted_urls.insert(url.to_ascii_lowercase()))
+            || paths
+                .iter()
+                .any(|path| !emitted_paths.insert(path.to_ascii_lowercase()))
+        {
+            continue;
+        }
+        let key = normalize_for_redundancy(line).to_ascii_lowercase();
+        if seen_lines.insert(key) {
+            lines.push(line.to_string());
+        }
+    }
+
+    let cleaned = if lines.is_empty() {
+        "没有发现当前上下文之外的增量记忆。".to_string()
+    } else {
+        lines.join("\n")
+    };
+    apply_output_budget(cleaned, budget_chars)
+}
+
+fn apply_output_budget(content: String, budget_chars: usize) -> String {
+    if content.chars().count() <= budget_chars {
+        return content;
+    }
+    let mut clipped = content
+        .chars()
+        .take(budget_chars.saturating_sub(3))
+        .collect::<String>();
     clipped.push_str("...");
     clipped
 }
@@ -344,4 +433,77 @@ fn extract_paths(text: &str) -> Vec<String> {
         }
     }
     dedupe_strings(paths)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::MemoryKind;
+
+    fn hit(node_id: &str, title: &str, summary: &str) -> RecallHit {
+        RecallHit {
+            node_id: node_id.to_string(),
+            title: title.to_string(),
+            summary: summary.to_string(),
+            score: 1.0,
+            kind: MemoryKind::Episode,
+            importance: 0.5,
+            depth1_loaded: false,
+        }
+    }
+
+    #[test]
+    fn dedupe_hits_uses_node_id_only() {
+        let hits = dedupe_hits(vec![
+            hit("node-a", "title", "summary one"),
+            hit("node-a", "title", "summary two"),
+            hit("node-b", "title", "summary two"),
+        ]);
+
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].node_id, "node-a");
+        assert_eq!(hits[1].node_id, "node-b");
+    }
+
+    #[test]
+    fn finalize_recall_content_applies_budget_and_dedupes_refs() {
+        let request = MemoryRecallRequest {
+            query: "continue artifact".to_string(),
+            context: vec!["assistant: 已经知道 repeated context line".to_string()],
+            ..MemoryRecallRequest::default()
+        };
+        let content = "\
+repeated context line
+- first url https://example.invalid/a.png
+- duplicate url https://example.invalid/a.png
+- first path /tmp/a.png
+- duplicate path /tmp/a.png
+- keep this new detail";
+
+        let finalized = finalize_recall_content(content, &request, 90);
+
+        assert!(!finalized.contains("repeated context line"));
+        assert_eq!(
+            finalized.matches("https://example.invalid/a.png").count(),
+            1
+        );
+        assert_eq!(finalized.matches("/tmp/a.png").count(), 1);
+        assert!(finalized.chars().count() <= 90);
+    }
+
+    #[test]
+    fn fallback_synthesis_dedupes_tool_result_summaries() {
+        let request = MemoryRecallRequest {
+            query: "tool result".to_string(),
+            ..MemoryRecallRequest::default()
+        };
+        let hits = vec![
+            hit("node-a", "tool result a", "same tool output summary"),
+            hit("node-b", "tool result b", "same tool output summary"),
+        ];
+
+        let content = fallback_synthesis(&request, &hits, &[]);
+
+        assert_eq!(content.matches("same tool output summary").count(), 1);
+    }
 }

@@ -134,6 +134,14 @@ impl Connector for LarkConnector {
                     let text = format!("[文件] {name}: {url}");
                     ("text", serde_json::json!({ "text": text }))
                 }
+                MessageContent::Audio { url, .. } => {
+                    let text = format!("[音频] {url}");
+                    ("text", serde_json::json!({ "text": text }))
+                }
+                MessageContent::Video { url, caption } => {
+                    let text = format!("[视频] {}\n{}", url, caption.as_deref().unwrap_or(""));
+                    ("text", serde_json::json!({ "text": text }))
+                }
             };
 
             let client = reqwest::Client::new();

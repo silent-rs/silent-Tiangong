@@ -644,6 +644,7 @@ fn execute_turn_inner(
     let mut loop_context: Vec<Message> = Vec::new();
     let mut round = 0;
     let mut accumulated_usage = TokenUsage::default();
+    let mut pending_media_assets: Vec<tiangong_types::MediaAsset> = Vec::new();
 
     loop {
         if round >= max_rounds {
@@ -716,11 +717,12 @@ fn execute_turn_inner(
 
         if response.tool_calls.is_empty() {
             // 最终回复：使用预生成的 ID 记录到 session
-            session.append_message_with_id(
+            session.append_message_with_id_and_media(
                 pending_msg_id,
                 MessageRole::Assistant,
                 response.text.clone(),
                 response.reasoning_content.clone(),
+                std::mem::take(&mut pending_media_assets),
             );
             // 记录 LLM 输出
             let output = LlmOutputRecord {
@@ -976,8 +978,15 @@ fn execute_turn_inner(
             // 媒体生成工具使用摘要反馈（避免 base64 数据污染上下文）
             let is_media_tool = matches!(
                 call.name.as_str(),
-                "generate_image" | "text_to_speech" | "speech_to_text"
+                "generate_image" | "generate_video" | "text_to_speech" | "speech_to_text"
             );
+            if result.ok {
+                pending_media_assets.extend(parse_media_assets_from_tool_result(
+                    &call.name,
+                    &result.stdout,
+                    &result.summary,
+                ));
+            }
             let feedback = if is_media_tool && result.ok {
                 format!(
                     "工具 {} 执行成功：{}。媒体内容已生成并交付给用户，不要再次调用该工具。请直接给出文本回复。",
@@ -1591,29 +1600,106 @@ fn parse_media_artifacts_from_tool_trace(
     tool_name: Option<&str>,
 ) -> Vec<tiangong_memory::TurnArtifact> {
     let mut artifacts = Vec::new();
+    let summary = parse_summary_line(content);
     for line in content.lines() {
         let trimmed = line.trim();
-        if !trimmed.starts_with("![") || !trimmed.ends_with(')') {
+        if trimmed.starts_with("![") && trimmed.ends_with(')') {
+            let Some(close_alt) = trimmed.find("](") else {
+                continue;
+            };
+            let title = trimmed[2..close_alt].trim();
+            let url = trimmed[close_alt + 2..trimmed.len() - 1].trim();
+            if url.is_empty() {
+                continue;
+            }
+            artifacts.push(tiangong_memory::TurnArtifact {
+                kind: tiangong_memory::TurnArtifactKind::Media,
+                tool_name: tool_name.map(String::from),
+                title: (!title.is_empty()).then(|| title.to_string()),
+                url: Some(url.to_string()),
+                path: None,
+                summary: summary.clone(),
+            });
             continue;
         }
-        let Some(close_alt) = trimmed.find("](") else {
-            continue;
-        };
-        let title = trimmed[2..close_alt].trim();
-        let url = trimmed[close_alt + 2..trimmed.len() - 1].trim();
-        if url.is_empty() {
-            continue;
+
+        if let Some(url) = parse_video_url_line(trimmed) {
+            artifacts.push(tiangong_memory::TurnArtifact {
+                kind: tiangong_memory::TurnArtifactKind::Media,
+                tool_name: tool_name.map(String::from),
+                title: Some("生成的视频".to_string()),
+                url: Some(url),
+                path: None,
+                summary: summary.clone(),
+            });
         }
-        artifacts.push(tiangong_memory::TurnArtifact {
-            kind: tiangong_memory::TurnArtifactKind::Media,
-            tool_name: tool_name.map(String::from),
-            title: (!title.is_empty()).then(|| title.to_string()),
-            url: Some(url.to_string()),
-            path: None,
-            summary: parse_summary_line(content),
-        });
     }
     artifacts
+}
+
+fn parse_media_assets_from_tool_result(
+    tool_name: &str,
+    stdout: &str,
+    summary: &str,
+) -> Vec<tiangong_types::MediaAsset> {
+    match tool_name {
+        "generate_image" => parse_image_assets(stdout),
+        "generate_video" => parse_video_assets(stdout, summary),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_image_assets(output: &str) -> Vec<tiangong_types::MediaAsset> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if !line.starts_with("![") || !line.ends_with(')') {
+                return None;
+            }
+            let close_alt = line.find("](")?;
+            let title = line[2..close_alt].trim();
+            let url = line[close_alt + 2..line.len() - 1].trim();
+            if url.is_empty() {
+                return None;
+            }
+            let mime_type = url
+                .strip_prefix("data:")
+                .and_then(|raw| raw.split(';').next())
+                .filter(|mime| mime.starts_with("image/"))
+                .map(str::to_string);
+            Some(tiangong_types::MediaAsset {
+                kind: tiangong_types::MediaKind::Image,
+                url: url.to_string(),
+                mime_type,
+                title: (!title.is_empty()).then(|| title.to_string()),
+                capability: Some("image_generation".to_string()),
+            })
+        })
+        .collect()
+}
+
+fn parse_video_assets(output: &str, summary: &str) -> Vec<tiangong_types::MediaAsset> {
+    output
+        .lines()
+        .filter_map(|line| parse_video_url_line(line.trim()))
+        .map(|url| tiangong_types::MediaAsset {
+            kind: tiangong_types::MediaKind::Video,
+            url,
+            mime_type: Some("video/mp4".to_string()),
+            title: Some(summary.to_string()).filter(|item| !item.trim().is_empty()),
+            capability: Some("video_generation".to_string()),
+        })
+        .collect()
+}
+
+fn parse_video_url_line(line: &str) -> Option<String> {
+    let raw = line
+        .strip_prefix("Video URL:")
+        .or_else(|| line.strip_prefix("video_url:"))
+        .map(str::trim)?;
+    let url = raw.split_whitespace().next().unwrap_or(raw);
+    (url.starts_with("http://") || url.starts_with("https://")).then(|| url.to_string())
 }
 
 fn parse_written_path(content: &str) -> Option<String> {

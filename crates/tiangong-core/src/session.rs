@@ -303,13 +303,25 @@ impl Session {
         content: impl Into<String>,
         reasoning_content: impl Into<String>,
     ) {
+        self.append_message_with_id_and_media(id, role, content, reasoning_content, Vec::new());
+    }
+
+    /// 使用预生成的 ID 追加带结构化媒体的消息。
+    pub fn append_message_with_id_and_media(
+        &mut self,
+        id: String,
+        role: MessageRole,
+        content: impl Into<String>,
+        reasoning_content: impl Into<String>,
+        media: Vec<tiangong_types::MediaAsset>,
+    ) {
         self.messages.push(Message {
             id,
             role,
             content: content.into(),
             reasoning_content: reasoning_content.into(),
             worker_id: None,
-            media: Vec::new(),
+            media,
             created_at: now_text(),
         });
         self.updated_at = now_text();

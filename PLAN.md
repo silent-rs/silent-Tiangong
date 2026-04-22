@@ -16,10 +16,10 @@
 - Phase 1~14 已完成，GUI 配置即时生效验证已收口。
 - Phase 15 已完成，Anthropic 协议抽象、独立 transport 与错误处理已接入。
 - Phase 16 已完成，入口统一、Server 信任语义、远程能力尾项和成本可见性已收口。
-- Phase 17 已进入尾项阶段，本地 GUI 图片链路已完成结构化媒体消息接入，后续继续扩展视频语义与 MCP 媒体适配器。
+- Phase 17 已完成图片/视频结构化媒体消息收口，`tiangong-media` 保持主链路，MCP 仅作为后端适配来源之一。
 - 当前主目标：推进 Phase 18 Memory 系统收口，使长期记忆作为独立 crate 运行，复用 `tiangong-llm`，并通过 Tool 化按需回忆提升跨会话连续性。
 - 当前进展：Memory 已完成 Episode 写入、IPC、Leader/Follower、内置向量混合检索、`recall_memory` 工具化、媒体/文件/工具产物回忆、Meso Entity/Decision 提炼和多类集成测试。
-- 当前风险：`RecallAnchors` 仍需抽出稳定提取器；Meso Entity/Decision 提炼仍是规则版；external Qdrant 仍缺专项集成测试。
+- 当前风险：Memory 与多媒体改动需要继续跑完整 workspace 检查链；external Qdrant 仍缺专项集成测试。
 
 ## 里程碑
 
@@ -146,13 +146,13 @@
 - 已完成入口尾项收口：GUI 本地消息入口准备逻辑下沉到 `app_state` ingress 门面，减少本地/远程入口分叉。
 - 已完成文档尾项收口：清理历史文档中的远程审批语义，保证路线与实现一致。
 
-### Phase 17（多媒体结果语义收敛，进行中）
+### Phase 17（多媒体结果语义收敛，已完成）
 > 设计说明：`docs/media-capability-architecture-adjustment.md`
 
-- 为会话消息补齐结构化媒体结果语义，避免继续依赖工具日志文本渲染图片/视频。
-- 保留 `tiangong-media` 作为多媒体主链路，MCP 仅作为后端适配来源之一。
-- 区分最终结果媒体与中间过程媒体，避免将所有 `generate_image` / `generate_video` 结果一律提升为最终回复。
-- 优先完成本地 GUI 会话链路中的图片结果语义化，再逐步扩展到视频与远程链路。
+- 已为会话消息补齐结构化图片/视频结果语义，避免依赖工具日志文本渲染图片/视频。
+- 已保留 `tiangong-media` 作为多媒体主链路，MCP 仅作为后端适配来源之一。
+- 已在 Core/Tauri/Server 链路中保留结构化媒体资源，避免多媒体结果退化为工具文本。
+- 已补齐 Connector 对结构化视频结果的发送分支。
 
 ### Phase 18（Memory 系统，进行中）
 > 设计说明：`docs/memory-system/`

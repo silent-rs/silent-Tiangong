@@ -152,12 +152,6 @@ fn extract_video_urls_from_json(value: &serde_json::Value, urls: &mut Vec<String
     }
 }
 
-fn clear_pending_final_media(pending_final_media: &mut Option<Vec<tiangong_types::MediaAsset>>) {
-    if pending_final_media.is_some() {
-        *pending_final_media = None;
-    }
-}
-
 fn append_assistant_media(
     session: &mut tiangong_core::session::Session,
     media: Vec<tiangong_types::MediaAsset>,
@@ -174,11 +168,15 @@ fn usage_delta(
     already_recorded: &tiangong_types::TokenUsage,
 ) -> tiangong_types::TokenUsage {
     tiangong_types::TokenUsage {
-        prompt_tokens: total.prompt_tokens.saturating_sub(already_recorded.prompt_tokens),
+        prompt_tokens: total
+            .prompt_tokens
+            .saturating_sub(already_recorded.prompt_tokens),
         completion_tokens: total
             .completion_tokens
             .saturating_sub(already_recorded.completion_tokens),
-        total_tokens: total.total_tokens.saturating_sub(already_recorded.total_tokens),
+        total_tokens: total
+            .total_tokens
+            .saturating_sub(already_recorded.total_tokens),
     }
 }
 
@@ -227,10 +225,7 @@ fn build_session_snapshot(
     let core_snapshot = core_state.run_snapshot();
     let input_draft = core_state.input_draft().to_string();
 
-    let selected_session = core_state
-        .sessions()
-        .iter()
-        .find(|s| s.id == session_id);
+    let selected_session = core_state.sessions().iter().find(|s| s.id == session_id);
 
     let messages: Vec<tiangong_types::Message> = selected_session
         .map(|s| s.messages.clone())
@@ -410,7 +405,6 @@ pub fn send_message(
                             );
                         }
                         StreamEvent::ToolCalls { names, usage } => {
-                            clear_pending_final_media(&mut pending_final_media);
                             session.append_message(
                                 tiangong_core::session::MessageRole::System,
                                 format!("LLM 输出\ntool_calls: {}", names.join(", ")),
@@ -467,7 +461,6 @@ pub fn send_message(
                                     .get_or_insert_with(Vec::new)
                                     .extend(media_assets);
                             } else if !output.trim().is_empty() {
-                                clear_pending_final_media(&mut pending_final_media);
                                 let preview = if output.chars().count() > 200 {
                                     format!("{}...", output.chars().take(200).collect::<String>())
                                 } else {
@@ -500,7 +493,6 @@ pub fn send_message(
                             attempt,
                             max_attempts,
                         } => {
-                            clear_pending_final_media(&mut pending_final_media);
                             session.append_message(
                                 tiangong_core::session::MessageRole::System,
                                 format!("[重试] ({attempt}/{max_attempts}) {message}"),
@@ -536,10 +528,7 @@ pub fn send_message(
                                 let items: Vec<String> = hits
                                     .iter()
                                     .map(|h| {
-                                        format!(
-                                            "- [{:.2}] {}: {}",
-                                            h.score, h.title, h.summary
-                                        )
+                                        format!("- [{:.2}] {}: {}", h.score, h.title, h.summary)
                                     })
                                     .collect();
                                 session.append_message(
@@ -636,8 +625,7 @@ pub fn send_message(
                         core_state.store.runtime.run.summary = "正在回复...".to_string();
                     }
                     StreamEvent::MemoryRecallStart { .. } => {
-                        core_state.store.runtime.run.summary =
-                            "正在检索记忆...".to_string();
+                        core_state.store.runtime.run.summary = "正在检索记忆...".to_string();
                     }
                     StreamEvent::MemoryRecallDone { hit_count, .. } => {
                         if *hit_count > 0 {

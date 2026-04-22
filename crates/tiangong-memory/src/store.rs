@@ -187,6 +187,12 @@ impl MemoryStore {
         // 1. 写入 SQLite（携带 workspace_id，保证 scope_id 正确落库）
         let node = episode_to_node(&episode, wid);
         self.db.insert_episode(&episode, wid)?;
+        tracing::debug!(
+            node_id = %node.id,
+            workspace_id = ?wid,
+            title = %node.title,
+            "Memory Episode 元数据写入完成"
+        );
 
         // 2. 写入 Tantivy 索引
         let body_extra = episode.tool_calls.join(" ");
@@ -212,6 +218,13 @@ impl MemoryStore {
             .tantivy
             .search(&anchors.query, limit * 2)
             .unwrap_or_default();
+        tracing::debug!(
+            query = %anchors.query,
+            strategy = ?anchors.strategy,
+            bm25_hit_count = bm25_hits.len(),
+            backend = "bm25",
+            "Memory BM25 召回完成"
+        );
         self.recall_engine
             .recall(bm25_hits, &anchors.query, limit, anchors.strategy.as_ref())
             .await

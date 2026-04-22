@@ -224,6 +224,9 @@ impl RuntimeEngine {
         if call.name == "generate_image" {
             return self.handle_media_generation(call, ModelCapability::ImageGeneration);
         }
+        if call.name == "generate_video" {
+            return self.handle_media_generation(call, ModelCapability::VideoGeneration);
+        }
         if call.name == "text_to_speech" {
             return self.handle_tts(call);
         }
@@ -863,15 +866,124 @@ impl RuntimeEngine {
                     },
                 }
             }
-            // 视频生成暂通过 skill 机制处理
-            ModelCapability::VideoGeneration => ToolResult {
-                ok: false,
-                summary: "视频生成请通过 skill 调用".to_string(),
-                stdout: String::new(),
-                stderr: "视频生成功能暂未内置，请安装对应的视频生成 skill".to_string(),
-                exit_code: 1,
-                execution: None,
-            },
+            ModelCapability::VideoGeneration => {
+                let duration = call
+                    .arguments
+                    .get("duration")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
+                let resolution = call
+                    .arguments
+                    .get("resolution")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let runtime = match Self::build_media_runtime() {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        return ToolResult {
+                            ok: false,
+                            summary: format!("运行时初始化失败：{e}"),
+                            stdout: String::new(),
+                            stderr: e.to_string(),
+                            exit_code: 1,
+                            execution: None,
+                        };
+                    }
+                };
+                let result = runtime.block_on(crate::media::generate_video(
+                    &self.models_config,
+                    prompt,
+                    duration,
+                    resolution,
+                ));
+                let duration_ms = started.elapsed().as_millis() as u64;
+                match result {
+                    Ok(output) => {
+                        use tiangong_media::video::VideoGenStatus;
+
+                        let (ok, summary, stdout, stderr, exit_code) = match output.response.status
+                        {
+                            VideoGenStatus::Completed {
+                                video_url,
+                                duration,
+                            } => {
+                                let duration_line = duration
+                                    .map(|seconds| format!("\nDuration: {seconds:.1}s"))
+                                    .unwrap_or_default();
+                                (
+                                    true,
+                                    format!("视频生成成功（模型：{}）", output.resolved.model),
+                                    format!("Video URL: {video_url}{duration_line}"),
+                                    String::new(),
+                                    0,
+                                )
+                            }
+                            VideoGenStatus::Pending => (
+                                true,
+                                format!("视频生成任务已提交（模型：{}）", output.resolved.model),
+                                format!("Task ID: {}\nStatus: pending", output.response.task_id),
+                                String::new(),
+                                0,
+                            ),
+                            VideoGenStatus::Processing { progress } => {
+                                let progress_line = progress
+                                    .map(|p| format!("\nProgress: {p:.1}%"))
+                                    .unwrap_or_default();
+                                (
+                                    true,
+                                    format!(
+                                        "视频生成任务处理中（模型：{}）",
+                                        output.resolved.model
+                                    ),
+                                    format!(
+                                        "Task ID: {}\nStatus: processing{progress_line}",
+                                        output.response.task_id
+                                    ),
+                                    String::new(),
+                                    0,
+                                )
+                            }
+                            VideoGenStatus::Failed { error } => (
+                                false,
+                                format!("视频生成失败：{error}"),
+                                String::new(),
+                                error,
+                                1,
+                            ),
+                        };
+                        ToolResult {
+                            ok,
+                            summary: summary.clone(),
+                            stdout,
+                            stderr,
+                            exit_code,
+                            execution: Some(ToolExecutionRecord {
+                                tool_name,
+                                args: vec![],
+                                duration_ms,
+                                ok,
+                                exit_code,
+                                summary,
+                            }),
+                        }
+                    }
+                    Err(err) => ToolResult {
+                        ok: false,
+                        summary: Self::media_error_summary("视频生成", &err),
+                        stdout: String::new(),
+                        stderr: err.to_string(),
+                        exit_code: 1,
+                        execution: Some(ToolExecutionRecord {
+                            tool_name,
+                            args: vec![],
+                            duration_ms,
+                            ok: false,
+                            exit_code: 1,
+                            summary: Self::media_error_summary("视频生成", &err),
+                        }),
+                    },
+                }
+            }
             _ => ToolResult {
                 ok: false,
                 summary: format!("不支持的多媒体能力：{}", capability.display_name()),
@@ -1156,6 +1268,15 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<FunctionToolSpec>, engine: &
                 .resolve_for_capability(crate::models_config::ModelCapability::ImageGeneration)
                 .is_some()
         });
+    let has_video_gen = engine
+        .llm_config()
+        .map(|c| c.video_generation.is_some())
+        .unwrap_or_else(|| {
+            engine
+                .models_config()
+                .resolve_for_capability(crate::models_config::ModelCapability::VideoGeneration)
+                .is_some()
+        });
     let has_tts = engine
         .llm_config()
         .map(|c| c.tts.is_some())
@@ -1186,6 +1307,21 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<FunctionToolSpec>, engine: &
                     "width": { "type": "integer", "description": "宽度（可选）" },
                     "height": { "type": "integer", "description": "高度（可选）" },
                     "style": { "type": "string", "description": "风格（可选）" }
+                },
+                "required": ["prompt"]
+            }),
+        });
+    }
+    if has_video_gen {
+        tools.push(FunctionToolSpec {
+            name: "generate_video".to_string(),
+            description: "根据文字描述生成视频，成功时返回结构化视频资源".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "视频描述" },
+                    "duration": { "type": "integer", "description": "视频时长，单位秒（可选）" },
+                    "resolution": { "type": "string", "description": "分辨率，如 720p、1080p（可选）" }
                 },
                 "required": ["prompt"]
             }),
