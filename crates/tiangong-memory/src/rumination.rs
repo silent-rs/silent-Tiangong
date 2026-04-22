@@ -106,10 +106,29 @@ pub(crate) async fn process_micro(
             });
     }
 
-    // 2. 更新 Session Injection（Phase C 实现，此处为桩）
-    // store.update_injection(InjectionLevel::Session, &turn_result.session_id, "...")?;
+    // 2. 更新 Session Injection（最近 3 条 Episode 摘要）
+    let recent = store.recent_episodes(workspace_id, 3);
+    if !recent.is_empty() {
+        let content = build_session_injection(&recent, &turn_result.session_id);
+        store
+            .update_injection(InjectionLevel::Session, &turn_result.session_id, &content)
+            .unwrap_or_else(|e| {
+                tracing::warn!("Micro 反刍：更新 Session Injection 失败: {}", e);
+            });
+    }
 
     Ok(())
+}
+
+/// 构建 Session 级注入内容（最近几条 Episode 摘要）
+fn build_session_injection(episodes: &[Episode], session_id: &str) -> String {
+    let now = chrono::Local::now().naive_local();
+    let items = episodes
+        .iter()
+        .map(|ep| format!("- {}: {}", ep.title, ep.summary))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("# Session Memory ({session_id})\n更新时间: {now}\n\n## 本会话近期活动\n{items}\n")
 }
 
 /// Meso 反刍（Phase C）：会话结束时调用

@@ -392,6 +392,8 @@ fn worker_loop(
     let mut mcp_targets: HashMap<String, McpFunctionTarget> = HashMap::new();
     // 跨 turn 持久的回忆上下文，新 recall_memory 执行时替换
     let mut memory_context: Option<String> = None;
+    // turn 计数器：每 10 个 turn 触发一次 Meta 反刍（归档低活跃节点）
+    let mut turn_count: u32 = 0;
 
     // 内部 StreamEvent 通道 —— 转发线程负责包装 session_id
     let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
@@ -494,6 +496,13 @@ fn worker_loop(
                         build_memory_turn_result(&session, turn_start_idx, &content);
                     turn_result.workspace_id = memory_workspace_id.clone();
                     handle.run_micro_rumination_blocking(turn_result);
+
+                    // 每 10 个 turn 触发一次 Meta 反刍（归档低活跃节点）
+                    turn_count += 1;
+                    if turn_count % 10 == 0 {
+                        handle.run_meta_rumination();
+                        tracing::debug!(turn_count, "Meta 反刍已触发（定期归档）");
+                    }
                 }
             }
             Command::Cancel => {
@@ -528,6 +537,15 @@ fn worker_loop(
     // 关闭内部通道，等待转发线程结束
     drop(stream_tx);
     let _ = forward_handle.join();
+
+    // 会话结束 → 触发 Meso 反刍（提炼 Entity/Decision，更新 Workspace Injection）
+    // fire-and-forget：handle 仍可使用（Memory Actor 在 registry 中持续运行）
+    if let Some(handle) = memory_handle.as_ref() {
+        if let Some(wid) = &memory_workspace_id {
+            handle.run_meso_rumination(session_id.clone(), wid.clone());
+            tracing::info!(session_id = %session_id, workspace_id = %wid, "Meso 反刍已触发（会话结束）");
+        }
+    }
 
     session
 }
