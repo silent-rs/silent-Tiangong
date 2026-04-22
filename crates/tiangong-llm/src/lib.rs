@@ -16,4 +16,5 @@ pub use embedding::{
     embedding_provider_from_config,
 };
 pub use model::{ProviderModelInfo, ProviderProtocol};
-pub use text::{LlmEndpointConfig, complete_text};
+pub use text::{LlmEndpointConfig, complete_text, complete_text_with_usage};
+pub use usage::TokenUsageData;

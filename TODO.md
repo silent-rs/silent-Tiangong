@@ -123,6 +123,7 @@ Memory 主链路已经可用，但还不能视为完全收口。当前最重要�
 
 ## 当前推荐执行顺序
 
-1. 跑完整 workspace 检查链，确认 Memory 与多媒体收口改动没有跨 crate 回归。
-2. 进行一轮针对 Memory / 多媒体主链路的代码 review。
-3. 根据 review 结果决定是否进入 Phase 19 或先做缺陷修复。
+1. ✅ 全量 workspace 检查链已通过（cargo test --workspace：全部 pass，0 failed）。
+2. ✅ LLM Meso 提炼器已完成：LLM 版 + 规则 fallback + 严格校验 + 幂等测试全部通过。
+3. 进行一轮针对 Memory / 多媒体主链路的代码 review（重点：recall_anchor.rs、recall_context.rs、rumination.rs）。
+4. 根据 review 结果决定是否进入 Phase 19 或先做缺陷修复。

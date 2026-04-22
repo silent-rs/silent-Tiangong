@@ -8,7 +8,7 @@ use crate::store::MemoryStore;
 use crate::types::{
     ExpandedMemory, MemoryRecallRequest, MemoryRecallResponse, RecallHit, SearchStrategy,
 };
-use tiangong_llm::{LlmEndpointConfig, complete_text};
+use tiangong_llm::{LlmEndpointConfig, TokenUsageData, complete_text_with_usage};
 
 const DEFAULT_RECALL_OUTPUT_BUDGET_CHARS: usize = 1200;
 
@@ -40,12 +40,13 @@ pub(crate) async fn recall_context(
     }
 
     let plan = extract_recall_anchors(model, &request).await;
+    let mut total_usage = plan.usage.clone();
     tracing::debug!(
         query = %request.query,
         strategy = ?plan.anchors.strategy,
         limit = plan.limit,
         used_llm = plan.used_llm,
-        "Memory recall 规划完成"
+        "内存 recall 规划完成"
     );
     if plan.anchors.strategy == Some(SearchStrategy::Skip) {
         return MemoryRecallResponse {
@@ -55,6 +56,7 @@ pub(crate) async fn recall_context(
             ),
             hits: Vec::new(),
             used_llm: plan.used_llm,
+            usage: total_usage,
         };
     }
 
@@ -62,7 +64,7 @@ pub(crate) async fn recall_context(
     tracing::debug!(
         query = %request.query,
         hit_count = hits.len(),
-        "Memory recall 粗召回完成"
+        "内存 recall 粗召回完成"
     );
     if hits.is_empty() {
         return MemoryRecallResponse {
@@ -72,6 +74,7 @@ pub(crate) async fn recall_context(
             ),
             hits,
             used_llm: plan.used_llm,
+            usage: total_usage,
         };
     }
 
@@ -81,28 +84,34 @@ pub(crate) async fn recall_context(
             .map(|hit| hit.node_id.clone())
             .collect::<Vec<_>>(),
     );
-    let raw_content = match model {
+    let (raw_content, synthesis_usage) = match model {
         Some(config) => synthesize_with_model(config, &request, &hits, &expanded)
             .await
             .unwrap_or_else(|err| {
-                tracing::warn!("Memory recall 整理失败，使用规则 fallback: {err}");
-                fallback_synthesis(&request, &hits, &expanded)
+                tracing::warn!("内存 recall 整理失败，使用规则 fallback: {err}");
+                (fallback_synthesis(&request, &hits, &expanded), None)
             }),
-        None => fallback_synthesis(&request, &hits, &expanded),
+        None => (fallback_synthesis(&request, &hits, &expanded), None),
     };
+    if let Some(usage) = synthesis_usage {
+        total_usage.prompt_tokens += usage.prompt_tokens;
+        total_usage.completion_tokens += usage.completion_tokens;
+        total_usage.total_tokens += usage.total_tokens;
+    }
     let content =
         finalize_recall_content(&raw_content, &request, DEFAULT_RECALL_OUTPUT_BUDGET_CHARS);
     tracing::debug!(
         query = %request.query,
         content_chars = content.chars().count(),
         used_llm = plan.used_llm || model.is_some(),
-        "Memory recall 输出整理完成"
+        "内存 recall 输出整理完成"
     );
 
     MemoryRecallResponse {
         content,
         hits,
         used_llm: plan.used_llm || model.is_some(),
+        usage: total_usage,
     }
 }
 
@@ -129,7 +138,7 @@ async fn synthesize_with_model(
     request: &MemoryRecallRequest,
     hits: &[RecallHit],
     expanded: &[ExpandedMemory],
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, Option<TokenUsageData>)> {
     let prompt = format!(
         "当前请求:\n{}\n\n调用原因:\n{}\n\n当前上下文（避免重复这些内容）:\n{}\n\n候选记忆:\n{}",
         request.query,
@@ -137,12 +146,13 @@ async fn synthesize_with_model(
         request.context.join("\n---\n"),
         format_candidates(hits, expanded),
     );
-    let text = complete_text(config, RECALL_SYNTHESIS_SYSTEM, &prompt, 1200).await?;
+    let (text, usage) =
+        complete_text_with_usage(config, RECALL_SYNTHESIS_SYSTEM, &prompt, 1200).await?;
     let compacted = compact_text(&text, DEFAULT_RECALL_OUTPUT_BUDGET_CHARS * 2);
     if compacted.is_empty() {
-        Ok("没有发现当前上下文之外的增量记忆。".to_string())
+        Ok(("没有发现当前上下文之外的增量记忆。".to_string(), usage))
     } else {
-        Ok(compacted)
+        Ok((compacted, usage))
     }
 }
 

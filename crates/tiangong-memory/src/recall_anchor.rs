@@ -2,7 +2,7 @@
 //!
 //! 统一 Tool 化回忆、粗召回和后续主动回忆的检索锚点生成逻辑。
 
-use tiangong_llm::{LlmEndpointConfig, complete_text};
+use tiangong_llm::{LlmEndpointConfig, TokenUsageData, complete_text_with_usage};
 
 use crate::types::{MemoryRecallRequest, RecallAnchors, SearchStrategy};
 
@@ -31,6 +31,8 @@ pub(crate) struct PlannedRecall {
     pub anchors: RecallAnchors,
     pub limit: usize,
     pub used_llm: bool,
+    /// anchor 规划阶段产生的 LLM token 消耗。
+    pub usage: TokenUsageData,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -67,7 +69,8 @@ async fn plan_with_model(
         request.expected.join(", "),
         request.context.join("\n---\n")
     );
-    let response = complete_text(config, RECALL_ANCHOR_SYSTEM, &prompt, 512).await?;
+    let (response, llm_usage) =
+        complete_text_with_usage(config, RECALL_ANCHOR_SYSTEM, &prompt, 512).await?;
     let json = extract_json_object(&response).unwrap_or(response.as_str());
     let parsed: RecallAnchorPlan = serde_json::from_str(json)?;
     let query = parsed
@@ -88,6 +91,7 @@ async fn plan_with_model(
         },
         limit: parsed.limit.unwrap_or(request.limit).clamp(1, 10),
         used_llm: true,
+        usage: llm_usage.unwrap_or_default(),
     })
 }
 
@@ -108,6 +112,7 @@ fn fallback_plan(request: &MemoryRecallRequest) -> PlannedRecall {
         },
         limit: request.limit.clamp(1, 10),
         used_llm: false,
+        usage: TokenUsageData::default(),
     }
 }
 

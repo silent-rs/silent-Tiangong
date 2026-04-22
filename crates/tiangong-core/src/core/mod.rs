@@ -390,6 +390,8 @@ fn worker_loop(
     let mut engine: Option<RuntimeEngine> = None;
     let mut tools: Vec<FunctionToolSpec> = Vec::new();
     let mut mcp_targets: HashMap<String, McpFunctionTarget> = HashMap::new();
+    // 跨 turn 持久的回忆上下文，新 recall_memory 执行时替换
+    let mut memory_context: Option<String> = None;
 
     // 内部 StreamEvent 通道 —— 转发线程负责包装 session_id
     let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
@@ -482,6 +484,7 @@ fn worker_loop(
                     &stream_tx,
                     &cmd_rx,
                     memory_handle.as_ref(),
+                    &mut memory_context,
                 );
 
                 // turn 完成后触发 Micro 反刍（fire-and-forget）
@@ -544,6 +547,7 @@ pub(crate) fn execute_turn_standalone(
     cmd_rx: &Receiver<Command>,
     max_rounds: usize,
 ) -> TokenUsage {
+    let mut memory_context: Option<String> = None;
     execute_turn_inner(
         session,
         user_input,
@@ -554,6 +558,7 @@ pub(crate) fn execute_turn_standalone(
         cmd_rx,
         max_rounds,
         None,
+        &mut memory_context,
     )
 }
 
@@ -572,6 +577,7 @@ fn execute_turn(
     stream_tx: &Sender<StreamEvent>,
     cmd_rx: &Receiver<Command>,
     memory_handle: Option<&tiangong_memory::MemoryHandle>,
+    memory_context: &mut Option<String>,
 ) {
     // 判断是否需要多代理并行执行
     let coordinator = TaskCoordinator::new(engine.clone());
@@ -609,6 +615,7 @@ fn execute_turn(
                     cmd_rx,
                     MAX_ROUNDS,
                     memory_handle,
+                    memory_context,
                 );
             }
         }
@@ -625,6 +632,7 @@ fn execute_turn(
         cmd_rx,
         MAX_ROUNDS,
         memory_handle,
+        memory_context,
     );
 }
 
@@ -640,6 +648,7 @@ fn execute_turn_inner(
     cmd_rx: &Receiver<Command>,
     max_rounds: usize,
     memory_handle: Option<&tiangong_memory::MemoryHandle>,
+    memory_context: &mut Option<String>,
 ) -> TokenUsage {
     let mut loop_context: Vec<Message> = Vec::new();
     let mut round = 0;
@@ -679,7 +688,16 @@ fn execute_turn_inner(
             &prompt_loop_context,
         );
 
-        let system_prompt = assembled.final_system_prompt();
+        let mut system_prompt = assembled.final_system_prompt();
+        // 将 recall_memory 检索到的历史上下文追加到 system prompt
+        if let Some(ctx) = memory_context.as_deref() {
+            system_prompt.push_str(
+                "\n\n---\n## 历史上下文（回忆系统注入）\n\
+以下内容来自 recall_memory 工具的检索结果，仅供当前回复参考，\
+请勿重复回忆，除非用户有新的回忆需求：\n",
+            );
+            system_prompt.push_str(ctx);
+        }
         let req = ModelRequest {
             session_title: session.title.clone(),
             user_input: assembled.user_input.clone(),
@@ -949,11 +967,16 @@ fn execute_turn_inner(
                 args_summary: args_summary.clone(),
             });
 
-            let result = if call.name == "recall_memory" {
+            let (result, memory_tool_usage) = if call.name == "recall_memory" {
                 execute_memory_recall_tool(call, memory_handle, session)
             } else {
-                engine.execute_tool_call(call, mcp_targets, &engine.agent_config().mcp)
+                (
+                    engine.execute_tool_call(call, mcp_targets, &engine.agent_config().mcp),
+                    tiangong_types::TokenUsage::default(),
+                )
             };
+            // 累加 memory 阶段产生的 token 消耗
+            accumulated_usage.accumulate(&memory_tool_usage);
 
             audit_tool_execution(
                 &session.id,
@@ -1004,15 +1027,36 @@ fn execute_turn_inner(
                     }
                 )
             };
-            loop_context.push(Message {
-                id: scru128::new().to_string(),
-                role: MessageRole::User,
-                content: feedback,
-                reasoning_content: String::new(),
-                worker_id: None,
-                media: Vec::new(),
-                created_at: now_text(),
-            });
+            // recall_memory 的检索内容注入 system prompt，loop_context 只记录简短通知
+            if call.name == "recall_memory" && result.ok {
+                if !result.stdout.trim().is_empty() {
+                    *memory_context = Some(result.stdout.clone());
+                }
+                let notice = if result.stdout.trim().is_empty() {
+                    "recall_memory 执行完成：未找到增量历史记忆。".to_string()
+                } else {
+                    "recall_memory 执行完成：历史上下文已注入 system prompt，请直接参考使用，无需再次调用此工具。".to_string()
+                };
+                loop_context.push(Message {
+                    id: scru128::new().to_string(),
+                    role: MessageRole::System,
+                    content: notice,
+                    reasoning_content: String::new(),
+                    worker_id: None,
+                    media: Vec::new(),
+                    created_at: now_text(),
+                });
+            } else {
+                loop_context.push(Message {
+                    id: scru128::new().to_string(),
+                    role: MessageRole::User,
+                    content: feedback,
+                    reasoning_content: String::new(),
+                    worker_id: None,
+                    media: Vec::new(),
+                    created_at: now_text(),
+                });
+            }
         }
 
         // 工具调用完成后增量持久化（防止崩溃丢失中间数据）
@@ -1251,17 +1295,20 @@ fn execute_memory_recall_tool(
     call: &crate::model::ModelFunctionCall,
     memory_handle: Option<&tiangong_memory::MemoryHandle>,
     session: &Session,
-) -> crate::tool::ToolResult {
+) -> (crate::tool::ToolResult, tiangong_types::TokenUsage) {
     let started = std::time::Instant::now();
     let Some(handle) = memory_handle else {
-        return memory_recall_tool_result(
-            false,
-            "记忆系统未启用",
-            String::new(),
-            "memory disabled".to_string(),
-            1,
-            Vec::new(),
-            started,
+        return (
+            memory_recall_tool_result(
+                false,
+                "记忆系统未启用",
+                String::new(),
+                "memory disabled".to_string(),
+                1,
+                Vec::new(),
+                started,
+            ),
+            tiangong_types::TokenUsage::default(),
         );
     };
 
@@ -1273,14 +1320,17 @@ fn execute_memory_recall_tool(
         .filter(|text| !text.is_empty())
         .unwrap_or_else(|| latest_user_message(session));
     if query.is_empty() {
-        return memory_recall_tool_result(
-            false,
-            "缺少回忆查询",
-            String::new(),
-            "recall_memory.query is empty".to_string(),
-            1,
-            Vec::new(),
-            started,
+        return (
+            memory_recall_tool_result(
+                false,
+                "缺少回忆查询",
+                String::new(),
+                "recall_memory.query is empty".to_string(),
+                1,
+                Vec::new(),
+                started,
+            ),
+            tiangong_types::TokenUsage::default(),
         );
     }
 
@@ -1319,19 +1369,24 @@ fn execute_memory_recall_tool(
         limit,
     });
 
+    let memory_usage = tiangong_types::TokenUsage::from(response.usage.clone());
+
     if response.hits.is_empty() {
-        return memory_recall_tool_result(
-            true,
-            "未找到相关记忆",
-            if response.content.trim().is_empty() {
-                format!("未找到与「{query}」相关的历史记忆。")
-            } else {
-                response.content
-            },
-            String::new(),
-            0,
-            vec![query.to_string()],
-            started,
+        return (
+            memory_recall_tool_result(
+                true,
+                "未找到相关记忆",
+                if response.content.trim().is_empty() {
+                    format!("未找到与「{query}」相关的历史记忆。")
+                } else {
+                    response.content
+                },
+                String::new(),
+                0,
+                vec![query.to_string()],
+                started,
+            ),
+            memory_usage,
         );
     }
 
@@ -1341,14 +1396,17 @@ fn execute_memory_recall_tool(
         response.content
     };
 
-    memory_recall_tool_result(
-        true,
-        format!("命中 {} 条相关记忆并完成整理", response.hits.len()),
-        stdout,
-        String::new(),
-        0,
-        vec![query.to_string()],
-        started,
+    (
+        memory_recall_tool_result(
+            true,
+            format!("命中 {} 条相关记忆并完成整理", response.hits.len()),
+            stdout,
+            String::new(),
+            0,
+            vec![query.to_string()],
+            started,
+        ),
+        memory_usage,
     )
 }
 

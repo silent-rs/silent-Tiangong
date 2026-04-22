@@ -46,6 +46,17 @@ pub async fn complete_text(
     prompt: &str,
     max_tokens: u32,
 ) -> Result<String, LlmError> {
+    let (text, _) = complete_text_with_usage(config, system, prompt, max_tokens).await?;
+    Ok(text)
+}
+
+/// 带 token 用量信息的文本完成。
+pub async fn complete_text_with_usage(
+    config: &LlmEndpointConfig,
+    system: &str,
+    prompt: &str,
+    max_tokens: u32,
+) -> Result<(String, Option<crate::usage::TokenUsageData>), LlmError> {
     let provider = build_provider(config)?;
     let request = ProviderRequest {
         model: config.model.clone(),
@@ -61,7 +72,7 @@ pub async fn complete_text(
         thinking: None,
     };
     let response = provider.complete(request).await?;
-    Ok(message_text(&response.assistant_message))
+    Ok((message_text(&response.assistant_message), response.usage))
 }
 
 fn build_provider(config: &LlmEndpointConfig) -> Result<Box<dyn LlmProvider>, LlmError> {

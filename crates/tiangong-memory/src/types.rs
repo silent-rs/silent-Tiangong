@@ -218,6 +218,9 @@ pub struct MemoryRecallResponse {
     pub hits: Vec<RecallHit>,
     #[serde(default)]
     pub used_llm: bool,
+    /// 回忆过程中产生的 LLM token 消耗（anchor 规划 + 结果整理）。
+    #[serde(default)]
+    pub usage: tiangong_llm::TokenUsageData,
 }
 
 /// 向量索引点。
