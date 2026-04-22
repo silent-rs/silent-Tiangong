@@ -107,7 +107,7 @@ pub(crate) async fn process_micro(
     }
 
     // 2. 更新 Session Injection（最近 3 条 Episode 摘要）
-    let recent = store.recent_episodes(workspace_id, 3);
+    let recent = store.recent_episodes_for_session(workspace_id, &turn_result.session_id, 3);
     if !recent.is_empty() {
         let content = build_session_injection(&recent, &turn_result.session_id);
         store

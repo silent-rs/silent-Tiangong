@@ -160,11 +160,11 @@
 - 将长期记忆从 Core 中拆出为独立 `tiangong-memory` crate，保证可单独集成测试、可复用、可关闭。
 - Memory 依赖 `tiangong-llm` 获取文本生成与 embedding 能力，不在 Memory 内部重复实现模型配置和协议适配。
 - 已完成 Micro 写入主链路：TurnResult -> EpisodeWriter -> SQLite/Tantivy/向量索引。
-- 已完成 Tool 化按需回忆：主模型通过 `recall_memory` 主动触发 Memory，Memory 内部完成规划、召回、Depth2 展开、去重整理后返回增量记忆。
+- 已完成 Tool 化按需回忆：主模型通过 `recall_memory` 主动触发 Memory，Memory 内部先做初始回忆，再根据初始结果判断是否进入 deep recall，最后返回去重后的增量记忆，并支持沿 Entity/Decision 追溯来源 Episode。
 - 已完成结构化产物记忆：媒体 URL、文件路径、工具结果摘要进入 Episode，支持“刚刚生成的图片/文件”等跨会话回忆。
 - 已完成 Meso 反刍第一阶段：从近期 Episode 提炼 Entity/Decision，写入 SQLite/Tantivy 并更新 Workspace Injection。
 - 已完成 workspace 级 runtime/handle registry，长生命周期 GUI/Server 进程会按 workspace_id 缓存 Memory Handle，避免误复用首个工作区。
-- 下一步抽出独立 `RecallAnchors` 提取器，并将 Meso 提炼从规则版升级为 LLM 规划 + 规则 fallback。
+- 下一步针对 deep recall 的真实 LLM 配置路径进行观察验证，并基于观察结果决定是否继续加强多跳关系追溯。
 
 ## 参考文档
 - 项目说明：`README.md`

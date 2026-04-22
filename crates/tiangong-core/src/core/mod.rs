@@ -390,8 +390,6 @@ fn worker_loop(
     let mut engine: Option<RuntimeEngine> = None;
     let mut tools: Vec<FunctionToolSpec> = Vec::new();
     let mut mcp_targets: HashMap<String, McpFunctionTarget> = HashMap::new();
-    // 跨 turn 持久的回忆上下文，新 recall_memory 执行时替换
-    let mut memory_context: Option<String> = None;
     // turn 计数器：每 10 个 turn 触发一次 Meta 反刍（归档低活跃节点）
     let mut turn_count: u32 = 0;
 
@@ -486,7 +484,6 @@ fn worker_loop(
                     &stream_tx,
                     &cmd_rx,
                     memory_handle.as_ref(),
-                    &mut memory_context,
                 );
 
                 // turn 完成后触发 Micro 反刍（fire-and-forget）
@@ -499,7 +496,7 @@ fn worker_loop(
 
                     // 每 10 个 turn 触发一次 Meta 反刍（归档低活跃节点）
                     turn_count += 1;
-                    if turn_count % 10 == 0 {
+                    if turn_count.is_multiple_of(10) {
                         handle.run_meta_rumination();
                         tracing::debug!(turn_count, "Meta 反刍已触发（定期归档）");
                     }
@@ -540,11 +537,11 @@ fn worker_loop(
 
     // 会话结束 → 触发 Meso 反刍（提炼 Entity/Decision，更新 Workspace Injection）
     // fire-and-forget：handle 仍可使用（Memory Actor 在 registry 中持续运行）
-    if let Some(handle) = memory_handle.as_ref() {
-        if let Some(wid) = &memory_workspace_id {
-            handle.run_meso_rumination(session_id.clone(), wid.clone());
-            tracing::info!(session_id = %session_id, workspace_id = %wid, "Meso 反刍已触发（会话结束）");
-        }
+    if let Some(handle) = memory_handle.as_ref()
+        && let Some(wid) = &memory_workspace_id
+    {
+        handle.run_meso_rumination(session_id.clone(), wid.clone());
+        tracing::info!(session_id = %session_id, workspace_id = %wid, "Meso 反刍已触发（会话结束）");
     }
 
     session
@@ -565,7 +562,6 @@ pub(crate) fn execute_turn_standalone(
     cmd_rx: &Receiver<Command>,
     max_rounds: usize,
 ) -> TokenUsage {
-    let mut memory_context: Option<String> = None;
     execute_turn_inner(
         session,
         user_input,
@@ -576,7 +572,6 @@ pub(crate) fn execute_turn_standalone(
         cmd_rx,
         max_rounds,
         None,
-        &mut memory_context,
     )
 }
 
@@ -595,7 +590,6 @@ fn execute_turn(
     stream_tx: &Sender<StreamEvent>,
     cmd_rx: &Receiver<Command>,
     memory_handle: Option<&tiangong_memory::MemoryHandle>,
-    memory_context: &mut Option<String>,
 ) {
     // 判断是否需要多代理并行执行
     let coordinator = TaskCoordinator::new(engine.clone());
@@ -633,7 +627,6 @@ fn execute_turn(
                     cmd_rx,
                     MAX_ROUNDS,
                     memory_handle,
-                    memory_context,
                 );
             }
         }
@@ -650,7 +643,6 @@ fn execute_turn(
         cmd_rx,
         MAX_ROUNDS,
         memory_handle,
-        memory_context,
     );
 }
 
@@ -666,12 +658,12 @@ fn execute_turn_inner(
     cmd_rx: &Receiver<Command>,
     max_rounds: usize,
     memory_handle: Option<&tiangong_memory::MemoryHandle>,
-    memory_context: &mut Option<String>,
 ) -> TokenUsage {
     let mut loop_context: Vec<Message> = Vec::new();
     let mut round = 0;
     let mut accumulated_usage = TokenUsage::default();
     let mut pending_media_assets: Vec<tiangong_types::MediaAsset> = Vec::new();
+    let mut memory_context: Option<String> = None;
 
     loop {
         if round >= max_rounds {
@@ -985,12 +977,14 @@ fn execute_turn_inner(
                 args_summary: args_summary.clone(),
             });
 
-            let (result, memory_tool_usage) = if call.name == "recall_memory" {
+            let (result, memory_tool_usage, allow_memory_context) = if call.name == "recall_memory"
+            {
                 execute_memory_recall_tool(call, memory_handle, session)
             } else {
                 (
                     engine.execute_tool_call(call, mcp_targets, &engine.agent_config().mcp),
                     tiangong_types::TokenUsage::default(),
+                    false,
                 )
             };
             // 累加 memory 阶段产生的 token 消耗
@@ -1047,10 +1041,10 @@ fn execute_turn_inner(
             };
             // recall_memory 的检索内容注入 system prompt，loop_context 只记录简短通知
             if call.name == "recall_memory" && result.ok {
-                if !result.stdout.trim().is_empty() {
-                    *memory_context = Some(result.stdout.clone());
+                if allow_memory_context && !result.stdout.trim().is_empty() {
+                    memory_context = Some(result.stdout.clone());
                 }
-                let notice = if result.stdout.trim().is_empty() {
+                let notice = if !allow_memory_context || result.stdout.trim().is_empty() {
                     "recall_memory 执行完成：未找到增量历史记忆。".to_string()
                 } else {
                     "recall_memory 执行完成：历史上下文已注入 system prompt，请直接参考使用，无需再次调用此工具。".to_string()
@@ -1313,7 +1307,7 @@ fn execute_memory_recall_tool(
     call: &crate::model::ModelFunctionCall,
     memory_handle: Option<&tiangong_memory::MemoryHandle>,
     session: &Session,
-) -> (crate::tool::ToolResult, tiangong_types::TokenUsage) {
+) -> (crate::tool::ToolResult, tiangong_types::TokenUsage, bool) {
     let started = std::time::Instant::now();
     let Some(handle) = memory_handle else {
         return (
@@ -1327,6 +1321,7 @@ fn execute_memory_recall_tool(
                 started,
             ),
             tiangong_types::TokenUsage::default(),
+            false,
         );
     };
 
@@ -1349,6 +1344,7 @@ fn execute_memory_recall_tool(
                 started,
             ),
             tiangong_types::TokenUsage::default(),
+            false,
         );
     }
 
@@ -1405,6 +1401,7 @@ fn execute_memory_recall_tool(
                 started,
             ),
             memory_usage,
+            false,
         );
     }
 
@@ -1413,6 +1410,9 @@ fn execute_memory_recall_tool(
     } else {
         response.content
     };
+    let allow_memory_context = !stdout
+        .trim()
+        .starts_with("没有发现当前上下文之外的增量记忆");
 
     (
         memory_recall_tool_result(
@@ -1425,6 +1425,7 @@ fn execute_memory_recall_tool(
             started,
         ),
         memory_usage,
+        allow_memory_context,
     )
 }
 

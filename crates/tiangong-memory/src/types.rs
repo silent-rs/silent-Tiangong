@@ -172,6 +172,23 @@ impl Default for SearchStrategy {
     }
 }
 
+/// 回忆执行深度。
+///
+/// `recall_memory` 只是外部刺激入口；真正的深度由 Memory 在初始回忆后基于命中结果决定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecallDepth {
+    /// 不需要回忆。
+    Skip,
+    /// 初始回忆已足够，直接快速整理。
+    Simple,
+    /// 常规召回与 Depth2 展开。
+    #[default]
+    Normal,
+    /// 初始回忆不足，已执行后续深挖查询。
+    Deep,
+}
+
 /// 召回锚点（Phase C 实现）
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RecallAnchors {
@@ -218,6 +235,10 @@ pub struct MemoryRecallResponse {
     pub hits: Vec<RecallHit>,
     #[serde(default)]
     pub used_llm: bool,
+    #[serde(default)]
+    pub recall_depth: RecallDepth,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deep_queries: Vec<String>,
     /// 回忆过程中产生的 LLM token 消耗（anchor 规划 + 结果整理）。
     #[serde(default)]
     pub usage: tiangong_llm::TokenUsageData,

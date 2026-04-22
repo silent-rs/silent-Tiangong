@@ -6,7 +6,8 @@
 use crate::recall_anchor::extract_recall_anchors;
 use crate::store::MemoryStore;
 use crate::types::{
-    ExpandedMemory, MemoryRecallRequest, MemoryRecallResponse, RecallHit, SearchStrategy,
+    ExpandedMemory, MemoryKind, MemoryRecallRequest, MemoryRecallResponse, RecallDepth, RecallHit,
+    SearchStrategy,
 };
 use tiangong_llm::{LlmEndpointConfig, TokenUsageData, complete_text_with_usage};
 
@@ -22,6 +23,49 @@ const RECALL_SYNTHESIS_SYSTEM: &str = "\
 - 不要输出泛泛解释，不要说“根据记忆”等套话。
 - 如果没有增量信息，输出：没有发现当前上下文之外的增量记忆。
 - 总长度控制在 1200 字以内。";
+
+const DEEP_RECALL_DECISION_SYSTEM: &str = "\
+你是独立 Memory 系统的深度回忆裁决器。
+
+Core 传入的是一次外部刺激。你不能仅凭触发词决定深挖，必须基于初始回忆结果判断。
+
+请只输出 JSON：
+{
+  \"need_deep_recall\": true/false,
+  \"reason\": \"简短原因\",
+  \"followup_queries\": [\"后续追溯查询\"],
+  \"target_kinds\": [\"episode\", \"entity\", \"decision\", \"evidence\"],
+  \"max_rounds\": 1
+}
+
+判断规则：
+- 初始回忆已经足够回答时，need_deep_recall=false。
+- 初始命中为空但刺激明显需要历史产物、历史决策或跨会话上下文时，可深挖。
+- 命中 Entity/Decision 但缺少来源 Episode，或用户需要解释原因/来源时，可深挖。
+- 命中产物但缺少生成上下文、保存路径或继续使用方式时，可深挖。
+- followup_queries 最多 3 条，max_rounds 取 1~2。
+- 如果初始命中已包含可追溯的 Entity/Decision，可将 followup_queries 留空，仅通过 target_kinds 指定要追溯的类型。
+- 不要输出 JSON 之外的文字。";
+
+#[derive(Debug, Clone, Default)]
+struct DeepRecallDecision {
+    need_deep_recall: bool,
+    reason: String,
+    followup_queries: Vec<String>,
+    target_kinds: Vec<MemoryKind>,
+    max_rounds: usize,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct RawDeepRecallDecision {
+    need_deep_recall: Option<bool>,
+    reason: Option<String>,
+    #[serde(default)]
+    followup_queries: Vec<String>,
+    #[serde(default)]
+    target_kinds: Vec<String>,
+    max_rounds: Option<usize>,
+}
 
 pub(crate) async fn recall_context(
     store: &MemoryStore,
@@ -56,16 +100,55 @@ pub(crate) async fn recall_context(
             ),
             hits: Vec::new(),
             used_llm: plan.used_llm,
+            recall_depth: RecallDepth::Skip,
             usage: total_usage,
+            deep_queries: Vec::new(),
         };
     }
 
-    let hits = dedupe_hits(store.recall_async(&plan.anchors, plan.limit).await);
+    let initial_hits = dedupe_hits(store.recall_async(&plan.anchors, plan.limit).await);
     tracing::debug!(
         query = %request.query,
-        hit_count = hits.len(),
-        "内存 recall 粗召回完成"
+        hit_count = initial_hits.len(),
+        "内存 recall 初始召回完成"
     );
+    let initial_expanded = store.load_depth2(
+        &initial_hits
+            .iter()
+            .map(|hit| hit.node_id.clone())
+            .collect::<Vec<_>>(),
+    );
+
+    let (decision, decision_usage) =
+        decide_deep_recall(model, &request, &initial_hits, &initial_expanded).await;
+    if let Some(usage) = decision_usage {
+        accumulate_usage(&mut total_usage, &usage);
+    }
+
+    let mut hits = initial_hits;
+    let mut expanded = initial_expanded;
+    let mut deep_queries = Vec::new();
+    let mut recall_depth = infer_initial_depth(&hits);
+    if decision.need_deep_recall && model.is_some() {
+        tracing::debug!(
+            query = %request.query,
+            reason = %decision.reason,
+            followup_count = decision.followup_queries.len(),
+            "Memory deep recall 已触发"
+        );
+        let (deep_hits, deep_expanded, deep_usage, queries) =
+            deep_recall(store, model, &request, &decision, &hits, &expanded).await;
+        if let Some(usage) = deep_usage {
+            accumulate_usage(&mut total_usage, &usage);
+        }
+        deep_queries = queries;
+        if !deep_hits.is_empty() || !deep_expanded.is_empty() {
+            recall_depth = RecallDepth::Deep;
+            hits = merge_hits(hits, deep_hits);
+            expanded = merge_expanded(expanded, deep_expanded);
+        }
+    }
+
     if hits.is_empty() {
         return MemoryRecallResponse {
             content: apply_output_budget(
@@ -73,17 +156,13 @@ pub(crate) async fn recall_context(
                 DEFAULT_RECALL_OUTPUT_BUDGET_CHARS,
             ),
             hits,
-            used_llm: plan.used_llm,
+            used_llm: plan.used_llm || model.is_some(),
+            recall_depth,
             usage: total_usage,
+            deep_queries,
         };
     }
 
-    let expanded = store.load_depth2(
-        &hits
-            .iter()
-            .map(|hit| hit.node_id.clone())
-            .collect::<Vec<_>>(),
-    );
     let (raw_content, synthesis_usage) = match model {
         Some(config) => synthesize_with_model(config, &request, &hits, &expanded)
             .await
@@ -94,9 +173,7 @@ pub(crate) async fn recall_context(
         None => (fallback_synthesis(&request, &hits, &expanded), None),
     };
     if let Some(usage) = synthesis_usage {
-        total_usage.prompt_tokens += usage.prompt_tokens;
-        total_usage.completion_tokens += usage.completion_tokens;
-        total_usage.total_tokens += usage.total_tokens;
+        accumulate_usage(&mut total_usage, &usage);
     }
     let content =
         finalize_recall_content(&raw_content, &request, DEFAULT_RECALL_OUTPUT_BUDGET_CHARS);
@@ -104,6 +181,7 @@ pub(crate) async fn recall_context(
         query = %request.query,
         content_chars = content.chars().count(),
         used_llm = plan.used_llm || model.is_some(),
+        recall_depth = ?recall_depth,
         "内存 recall 输出整理完成"
     );
 
@@ -111,6 +189,8 @@ pub(crate) async fn recall_context(
         content,
         hits,
         used_llm: plan.used_llm || model.is_some(),
+        recall_depth,
+        deep_queries,
         usage: total_usage,
     }
 }
@@ -131,6 +211,159 @@ fn normalize_request(mut request: MemoryRecallRequest) -> MemoryRecallRequest {
         .collect();
     request.limit = request.limit.clamp(1, 10);
     request
+}
+
+async fn decide_deep_recall(
+    model: Option<&LlmEndpointConfig>,
+    request: &MemoryRecallRequest,
+    hits: &[RecallHit],
+    expanded: &[ExpandedMemory],
+) -> (DeepRecallDecision, Option<TokenUsageData>) {
+    let Some(config) = model else {
+        return (DeepRecallDecision::default(), None);
+    };
+    let prompt = format!(
+        "外部刺激:\n{}\n\n调用原因:\n{}\n\n当前上下文:\n{}\n\n初始回忆结果:\n{}",
+        request.query,
+        request.reason.as_deref().unwrap_or(""),
+        request.context.join("\n---\n"),
+        format_candidates(hits, expanded),
+    );
+    match complete_text_with_usage(config, DEEP_RECALL_DECISION_SYSTEM, &prompt, 512).await {
+        Ok((text, usage)) => {
+            let decision = parse_deep_recall_decision(&text).unwrap_or_else(|err| {
+                tracing::warn!("Memory deep recall 裁决解析失败，跳过深挖: {err}");
+                DeepRecallDecision::default()
+            });
+            (decision, usage)
+        }
+        Err(err) => {
+            tracing::warn!("Memory deep recall 裁决失败，跳过深挖: {err}");
+            (DeepRecallDecision::default(), None)
+        }
+    }
+}
+
+async fn deep_recall(
+    store: &MemoryStore,
+    model: Option<&LlmEndpointConfig>,
+    request: &MemoryRecallRequest,
+    decision: &DeepRecallDecision,
+    initial_hits: &[RecallHit],
+    initial_expanded: &[ExpandedMemory],
+) -> (
+    Vec<RecallHit>,
+    Vec<ExpandedMemory>,
+    Option<TokenUsageData>,
+    Vec<String>,
+) {
+    let mut all_hits = Vec::new();
+    let mut queries = Vec::new();
+    let mut total_usage = TokenUsageData::default();
+    let mut used_llm = false;
+    let max_rounds = decision.max_rounds.clamp(1, 2);
+    for query in decision
+        .followup_queries
+        .iter()
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+        .take(max_rounds * 3)
+    {
+        queries.push(query.to_string());
+        let mut followup = request.clone();
+        followup.query = query.to_string();
+        followup.reason = Some(format!("deep recall: {}", decision.reason));
+        let plan = extract_recall_anchors(model, &followup).await;
+        if plan.used_llm {
+            used_llm = true;
+            accumulate_usage(&mut total_usage, &plan.usage);
+        }
+        let mut hits = store.recall_async(&plan.anchors, plan.limit).await;
+        if !decision.target_kinds.is_empty() {
+            hits.retain(|hit| {
+                decision.target_kinds.contains(&hit.kind)
+                    || matches!(hit.kind, MemoryKind::Entity | MemoryKind::Decision)
+            });
+        }
+        all_hits.extend(hits);
+    }
+
+    let initial_ids = initial_hits
+        .iter()
+        .map(|hit| hit.node_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let hits = dedupe_hits(all_hits)
+        .into_iter()
+        .filter(|hit| !initial_ids.contains(hit.node_id.as_str()))
+        .collect::<Vec<_>>();
+    let expanded = store.load_depth2(
+        &hits
+            .iter()
+            .map(|hit| hit.node_id.clone())
+            .collect::<Vec<_>>(),
+    );
+    let seed_hits = merge_hits(initial_hits.to_vec(), hits.clone());
+    let seed_expanded = merge_expanded(initial_expanded.to_vec(), expanded.clone());
+    let (linked_hits, linked_expanded) =
+        expand_related_memories(store, &seed_hits, &seed_expanded, max_rounds);
+    tracing::debug!(
+        query = %request.query,
+        followup_queries = queries.len(),
+        relation_hit_count = linked_hits.len(),
+        "Memory deep recall 关系追溯完成"
+    );
+    (
+        merge_hits(hits, linked_hits)
+            .into_iter()
+            .filter(|hit| !initial_ids.contains(hit.node_id.as_str()))
+            .collect(),
+        merge_expanded(expanded, linked_expanded),
+        used_llm.then_some(total_usage),
+        dedupe_strings(queries),
+    )
+}
+
+fn expand_related_memories(
+    store: &MemoryStore,
+    seed_hits: &[RecallHit],
+    seed_expanded: &[ExpandedMemory],
+    max_rounds: usize,
+) -> (Vec<RecallHit>, Vec<ExpandedMemory>) {
+    let mut seen_ids = seed_hits
+        .iter()
+        .map(|hit| hit.node_id.clone())
+        .chain(seed_expanded.iter().map(|item| item.node_id.clone()))
+        .collect::<std::collections::HashSet<_>>();
+    let mut all_hits = Vec::new();
+    let mut all_expanded = Vec::new();
+    let mut frontier = seed_expanded.to_vec();
+
+    for round in 0..max_rounds.clamp(1, 2) {
+        let related_ids = related_node_ids_from_expanded(&frontier)
+            .into_iter()
+            .filter(|id| seen_ids.insert(id.clone()))
+            .collect::<Vec<_>>();
+        if related_ids.is_empty() {
+            break;
+        }
+        let hits = store.load_hits_by_ids(&related_ids);
+        let hit_ids = hits
+            .iter()
+            .map(|hit| hit.node_id.clone())
+            .collect::<Vec<_>>();
+        let expanded = store.load_depth2(&hit_ids);
+        tracing::debug!(
+            round = round + 1,
+            related_id_count = related_ids.len(),
+            related_hit_count = hits.len(),
+            "Memory deep recall 加载关联节点"
+        );
+        frontier = expanded.clone();
+        all_hits = merge_hits(all_hits, hits);
+        all_expanded = merge_expanded(all_expanded, expanded);
+    }
+
+    (all_hits, all_expanded)
 }
 
 async fn synthesize_with_model(
@@ -257,6 +490,98 @@ fn dedupe_hits(hits: Vec<RecallHit>) -> Vec<RecallHit> {
         .collect()
 }
 
+fn merge_hits(left: Vec<RecallHit>, right: Vec<RecallHit>) -> Vec<RecallHit> {
+    dedupe_hits(left.into_iter().chain(right).collect())
+}
+
+fn merge_expanded(left: Vec<ExpandedMemory>, right: Vec<ExpandedMemory>) -> Vec<ExpandedMemory> {
+    let mut seen = std::collections::HashSet::new();
+    left.into_iter()
+        .chain(right)
+        .filter(|item| seen.insert(item.node_id.clone()))
+        .collect()
+}
+
+fn infer_initial_depth(hits: &[RecallHit]) -> RecallDepth {
+    if hits.is_empty() {
+        return RecallDepth::Simple;
+    }
+    if hits.len() <= 2 && hits.iter().all(|hit| hit.score >= 0.7) {
+        RecallDepth::Simple
+    } else {
+        RecallDepth::Normal
+    }
+}
+
+fn accumulate_usage(total: &mut TokenUsageData, usage: &TokenUsageData) {
+    total.prompt_tokens += usage.prompt_tokens;
+    total.completion_tokens += usage.completion_tokens;
+    total.total_tokens += usage.total_tokens;
+}
+
+fn parse_deep_recall_decision(text: &str) -> anyhow::Result<DeepRecallDecision> {
+    let json = extract_json_object(text).unwrap_or(text);
+    let raw: RawDeepRecallDecision = serde_json::from_str(json)?;
+    let followup_queries = dedupe_strings(raw.followup_queries)
+        .into_iter()
+        .take(3)
+        .collect::<Vec<_>>();
+    let target_kinds = raw
+        .target_kinds
+        .into_iter()
+        .filter_map(|item| parse_memory_kind(&item))
+        .collect::<Vec<_>>();
+    let has_trace_target = !followup_queries.is_empty() || !target_kinds.is_empty();
+    Ok(DeepRecallDecision {
+        need_deep_recall: raw.need_deep_recall.unwrap_or(false) && has_trace_target,
+        reason: raw.reason.unwrap_or_default().trim().to_string(),
+        followup_queries,
+        target_kinds,
+        max_rounds: raw.max_rounds.unwrap_or(1).clamp(1, 2),
+    })
+}
+
+fn parse_memory_kind(text: &str) -> Option<MemoryKind> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "episode" => Some(MemoryKind::Episode),
+        "entity" => Some(MemoryKind::Entity),
+        "decision" => Some(MemoryKind::Decision),
+        "evidence" => Some(MemoryKind::Evidence),
+        _ => None,
+    }
+}
+
+fn extract_json_object(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    (end >= start).then_some(&text[start..=end])
+}
+
+fn related_node_ids_from_expanded(expanded: &[ExpandedMemory]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for item in expanded {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&item.full_content) else {
+            continue;
+        };
+        collect_string_array(&value, "related_episodes", &mut ids);
+        collect_string_array(&value, "episode_ids", &mut ids);
+        collect_string_array(&value, "related_episode_ids", &mut ids);
+    }
+    dedupe_strings(ids)
+}
+
+fn collect_string_array(value: &serde_json::Value, key: &str, output: &mut Vec<String>) {
+    let Some(items) = value.get(key).and_then(|item| item.as_array()) else {
+        return;
+    };
+    output.extend(
+        items
+            .iter()
+            .filter_map(|item| item.as_str())
+            .map(str::to_string),
+    );
+}
+
 fn dedupe_strings(items: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     items
@@ -277,9 +602,10 @@ fn format_candidates(hits: &[RecallHit], expanded: &[ExpandedMemory]) -> String 
                 .map(|item| compact_text(&item.full_content, 1200))
                 .unwrap_or_default();
             format!(
-                "{}. node_id={}\n标题: {}\n摘要: {}\nscore: {:.2}\n完整内容:\n{}",
+                "{}. node_id={}\n类型: {:?}\n标题: {}\n摘要: {}\nscore: {:.2}\n完整内容:\n{}",
                 idx + 1,
                 hit.node_id,
+                hit.kind,
                 hit.title,
                 hit.summary,
                 hit.score,
@@ -515,5 +841,65 @@ repeated context line
         let content = fallback_synthesis(&request, &hits, &[]);
 
         assert_eq!(content.matches("same tool output summary").count(), 1);
+    }
+
+    #[test]
+    fn parse_deep_recall_decision_requires_followup_queries() {
+        let decision = parse_deep_recall_decision(
+            r#"{
+                "need_deep_recall": true,
+                "reason": "需要追溯来源 Episode",
+                "followup_queries": ["why choose embedded vector", "why choose embedded vector"],
+                "target_kinds": ["decision", "episode"],
+                "max_rounds": 2
+            }"#,
+        )
+        .unwrap();
+
+        assert!(decision.need_deep_recall);
+        assert_eq!(decision.followup_queries.len(), 1);
+        assert_eq!(decision.target_kinds.len(), 2);
+        assert_eq!(decision.max_rounds, 2);
+
+        let no_query =
+            parse_deep_recall_decision(r#"{"need_deep_recall": true, "reason": "missing query"}"#)
+                .unwrap();
+        assert!(!no_query.need_deep_recall);
+
+        let relation_only = parse_deep_recall_decision(
+            r#"{
+                "need_deep_recall": true,
+                "reason": "命中 Decision，需要追溯来源 Episode",
+                "target_kinds": ["episode"]
+            }"#,
+        )
+        .unwrap();
+        assert!(relation_only.need_deep_recall);
+        assert!(relation_only.followup_queries.is_empty());
+    }
+
+    #[test]
+    fn related_node_ids_from_expanded_reads_entity_and_decision_links() {
+        let ids = related_node_ids_from_expanded(&[
+            ExpandedMemory {
+                node_id: "entity-a".to_string(),
+                full_content: serde_json::json!({
+                    "id": "entity-a",
+                    "related_episodes": ["ep-1", "ep-2", "ep-1"]
+                })
+                .to_string(),
+            },
+            ExpandedMemory {
+                node_id: "decision-a".to_string(),
+                full_content: serde_json::json!({
+                    "id": "decision-a",
+                    "episode_ids": ["ep-3"],
+                    "related_episode_ids": ["ep-4"]
+                })
+                .to_string(),
+            },
+        ]);
+
+        assert_eq!(ids, vec!["ep-1", "ep-2", "ep-3", "ep-4"]);
     }
 }

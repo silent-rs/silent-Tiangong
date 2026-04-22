@@ -20,7 +20,7 @@ Memory 主链路已经可用，但还不能视为完全收口。当前最重要�
 - Phase 17 多媒体：图片/视频结果已进入结构化消息链路，本地 GUI 可渲染结构化媒体结果，旧 Markdown 图片仍保留兼容。
 - Phase 18 Memory 基础：`tiangong-memory` 独立 crate、SQLite 元数据库、Injection、Actor/Handle、TCP IPC、Leader/Follower、workspace 显式写入上下文已完成。
 - Phase 18 写入/检索：Episode 写入、Tantivy BM25、内置 SQLite flat 向量索引、Qdrant 兼容路径、BM25+Vector 混合召回、Depth2 展开已完成。
-- Phase 18 Tool 化回忆：Core 已移除 turn 前自动 Recall，改为主模型按需调用 `recall_memory`；Memory 内部负责规划、召回、展开和去重整理。
+- Phase 18 Tool 化回忆：Core 已移除 turn 前自动 Recall，改为主模型按需调用 `recall_memory`；Memory 内部先执行初始回忆，再基于初始结果判断是否需要 deep recall，并可沿 Entity/Decision 追溯来源 Episode。
 - Phase 18 产物记忆：媒体 URL、文件路径、工具结果摘要已写入 Episode，可支持“刚刚生成的图片/文件”等回忆。
 - Phase 18 模型能力收口：Memory 文本生成与 embedding 配置复用 `tiangong-llm`，不再在 Memory 内重复实现模型配置和协议适配。
 - Phase 18 Meso 初版：规则版 Entity/Decision 提炼已接入 SQLite/Tantivy，并更新 Workspace Injection。
@@ -125,5 +125,6 @@ Memory 主链路已经可用，但还不能视为完全收口。当前最重要�
 
 1. ✅ 全量 workspace 检查链已通过（cargo test --workspace：全部 pass，0 failed）。
 2. ✅ LLM Meso 提炼器已完成：LLM 版 + 规则 fallback + 严格校验 + 幂等测试全部通过。
-3. 进行一轮针对 Memory / 多媒体主链路的代码 review（重点：recall_anchor.rs、recall_context.rs、rumination.rs）。
-4. 根据 review 结果决定是否进入 Phase 19 或先做缺陷修复。
+3. 针对 deep recall 的真实 LLM 配置路径运行一次带日志的集成观察。
+4. 补一轮针对 Memory 主链路的代码 review（重点：recall_context.rs、rumination.rs、core/mod.rs）。
+5. 根据 review 结果决定是否进入 Phase 19 或先做缺陷修复。

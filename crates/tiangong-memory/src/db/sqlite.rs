@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::types::{
     Decision, Entity, EntityType, Episode, ExpandedMemory, MemoryKind, MemoryScopeType,
-    MemoryStatus, VectorPoint,
+    MemoryStatus, RecallHit, VectorPoint,
 };
 
 use super::schema;
@@ -395,6 +395,63 @@ impl MemoryDb {
         Ok(episodes)
     }
 
+    /// 查询当前工作区内指定会话最近 Episode 的完整内容，供 Session Injection 使用。
+    pub(crate) fn recent_episodes_for_session(
+        &self,
+        workspace_id: Option<&str>,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Episode>> {
+        let (sql, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) =
+            if let Some(workspace_id) = workspace_id {
+                (
+                    "SELECT ep.full_content
+                     FROM episodes ep
+                     JOIN memory_nodes n ON n.id = ep.id
+                     WHERE n.kind = 'episode'
+                       AND n.status = 'active'
+                       AND n.scope_type = 'workspace'
+                       AND n.scope_id = ?1
+                       AND ep.session_id = ?2
+                     ORDER BY n.created_at DESC
+                     LIMIT ?3",
+                    vec![
+                        Box::new(workspace_id.to_string()),
+                        Box::new(session_id.to_string()),
+                        Box::new(limit as i64),
+                    ],
+                )
+            } else {
+                (
+                    "SELECT ep.full_content
+                     FROM episodes ep
+                     JOIN memory_nodes n ON n.id = ep.id
+                     WHERE n.kind = 'episode'
+                       AND n.status = 'active'
+                       AND n.scope_type = 'workspace'
+                       AND n.scope_id IS NULL
+                       AND ep.session_id = ?1
+                     ORDER BY n.created_at DESC
+                     LIMIT ?2",
+                    vec![Box::new(session_id.to_string()), Box::new(limit as i64)],
+                )
+            };
+
+        let mut stmt = self.conn.prepare(sql)?;
+        let params = params.iter().map(|item| item.as_ref()).collect::<Vec<_>>();
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut episodes = Vec::new();
+        for row in rows {
+            let full_content = row?;
+            let episode = serde_json::from_str(&full_content)
+                .with_context(|| "解析 Session Episode 列表项失败")?;
+            episodes.push(episode);
+        }
+        Ok(episodes)
+    }
+
     /// 列出超过指定天数未使用且重要度低于阈值的节点（用于归档）
     pub(crate) fn list_stale_nodes(
         &self,
@@ -502,6 +559,42 @@ impl MemoryDb {
             }
         }
         Ok(items)
+    }
+
+    /// 按节点 ID 加载 RecallHit 元数据，供 deep recall 关系追溯把源节点补回候选集。
+    ///
+    /// 返回顺序与传入 ID 顺序一致；不存在或已归档的节点会被跳过。
+    pub(crate) fn load_recall_hits_by_ids(&self, node_ids: &[String]) -> Result<Vec<RecallHit>> {
+        let mut hits = Vec::new();
+        for node_id in node_ids {
+            let hit = self
+                .conn
+                .query_row(
+                    "SELECT id, title, summary, kind, importance
+                     FROM memory_nodes
+                     WHERE id = ?1 AND status = 'active'",
+                    rusqlite::params![node_id],
+                    |row| {
+                        let kind: String = row.get(3)?;
+                        Ok(RecallHit {
+                            node_id: row.get(0)?,
+                            title: row.get(1)?,
+                            summary: row.get(2)?,
+                            score: 0.65,
+                            kind: str_to_memory_kind(&kind),
+                            importance: row.get::<_, f64>(4)?,
+                            depth1_loaded: true,
+                        })
+                    },
+                )
+                .optional()
+                .with_context(|| format!("查询 RecallHit 节点失败: {node_id}"))?;
+            if let Some(hit) = hit {
+                self.mark_node_used(node_id)?;
+                hits.push(hit);
+            }
+        }
+        Ok(hits)
     }
 
     /// 删除内置向量索引点。
@@ -855,6 +948,37 @@ mod tests {
     }
 
     #[test]
+    fn recent_episodes_for_session_filters_by_workspace_and_session() {
+        let db = open_in_memory().unwrap();
+        let episode_a1 = make_episode("session-a");
+        let episode_a2 = make_episode("session-a");
+        let episode_b = make_episode("session-b");
+        let id_a1 = episode_a1.id.clone();
+        let id_a2 = episode_a2.id.clone();
+
+        db.insert_episode(&episode_a1, Some("ws-shared")).unwrap();
+        db.insert_episode(&episode_b, Some("ws-shared")).unwrap();
+        db.insert_episode(&episode_a2, Some("ws-shared")).unwrap();
+
+        let items = db
+            .recent_episodes_for_session(Some("ws-shared"), "session-a", 10)
+            .unwrap();
+
+        assert_eq!(items.len(), 2);
+        assert!(
+            items
+                .iter()
+                .all(|episode| episode.session_id == "session-a")
+        );
+        let ids = items
+            .iter()
+            .map(|episode| episode.id.as_str())
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&id_a1.as_str()));
+        assert!(ids.contains(&id_a2.as_str()));
+    }
+
+    #[test]
     fn entity_crud_roundtrip_works() {
         let db = open_in_memory().unwrap();
         let entity = make_entity("entity-1");
@@ -913,5 +1037,25 @@ mod tests {
         assert_eq!(expanded[1].node_id, id_a);
         assert!(expanded[0].full_content.contains("sess-depth2-b"));
         assert!(expanded[1].full_content.contains("sess-depth2-a"));
+    }
+
+    #[test]
+    fn load_recall_hits_by_ids_returns_metadata_for_relation_trace() {
+        let db = open_in_memory().unwrap();
+        let episode = make_episode("sess-relation-source");
+        let id = episode.id.clone();
+        let title = episode.title.clone();
+
+        db.insert_episode(&episode, Some("ws-relation")).unwrap();
+
+        let hits = db
+            .load_recall_hits_by_ids(&["missing-node".to_string(), id.clone()])
+            .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].node_id, id);
+        assert_eq!(hits[0].title, title);
+        assert_eq!(hits[0].kind, crate::types::MemoryKind::Episode);
+        assert!(hits[0].depth1_loaded);
     }
 }

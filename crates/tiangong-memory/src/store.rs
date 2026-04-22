@@ -244,6 +244,20 @@ impl MemoryStore {
         }
     }
 
+    /// 按节点 ID 加载 RecallHit 元数据，供 deep recall 关系追溯使用。
+    pub(crate) fn load_hits_by_ids(&self, node_ids: &[String]) -> Vec<RecallHit> {
+        if node_ids.is_empty() {
+            return Vec::new();
+        }
+        match self.db.load_recall_hits_by_ids(node_ids) {
+            Ok(items) => items,
+            Err(err) => {
+                tracing::warn!("Memory 关系追溯加载节点失败: {err}");
+                Vec::new()
+            }
+        }
+    }
+
     /// 查询最近 Episode 摘要（用于 MesoRumination 提炼关键词）
     #[allow(dead_code)]
     pub(crate) fn recent_episode_summaries(&self, limit: usize) -> Vec<(String, Vec<String>)> {
@@ -254,6 +268,18 @@ impl MemoryStore {
     pub(crate) fn recent_episodes(&self, workspace_id: Option<&str>, limit: usize) -> Vec<Episode> {
         self.db
             .recent_episodes(workspace_id, limit)
+            .unwrap_or_default()
+    }
+
+    /// 查询当前工作区内指定会话最近 Episode 的完整内容。
+    pub(crate) fn recent_episodes_for_session(
+        &self,
+        workspace_id: Option<&str>,
+        session_id: &str,
+        limit: usize,
+    ) -> Vec<Episode> {
+        self.db
+            .recent_episodes_for_session(workspace_id, session_id, limit)
             .unwrap_or_default()
     }
 
