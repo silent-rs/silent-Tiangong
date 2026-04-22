@@ -293,19 +293,17 @@ fn sync_stream_event_to_state(
         StreamEvent::UserMessage {
             message_id,
             content,
-        } => {
-            if !session
-                .messages
-                .iter()
-                .any(|message| message.id == *message_id)
-            {
-                session.append_message_with_id(
-                    message_id.clone(),
-                    MessageRole::User,
-                    content.clone(),
-                    String::new(),
-                );
-            }
+        } if !session
+            .messages
+            .iter()
+            .any(|message| message.id == *message_id) =>
+        {
+            session.append_message_with_id(
+                message_id.clone(),
+                MessageRole::User,
+                content.clone(),
+                String::new(),
+            );
         }
         StreamEvent::Delta {
             message_id,

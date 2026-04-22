@@ -514,7 +514,7 @@ impl Session {
         let item = pending.remove(from_idx);
         pending.insert(to_idx, item);
 
-        for (slot, item) in pending_positions.iter().zip(pending.into_iter()) {
+        for (slot, item) in pending_positions.iter().zip(pending) {
             self.task_plans[*slot] = item;
         }
         self.updated_at = now_text();

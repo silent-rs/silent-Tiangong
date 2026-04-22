@@ -102,22 +102,16 @@ pub fn open(state: &mut TiangongState) -> Result<Option<String>> {
                         break;
                     }
                     KeyCode::Up => selected = selected.saturating_sub(1),
-                    KeyCode::Down => {
-                        if !matched.is_empty() {
-                            selected = (selected + 1).min(matched.len() - 1);
-                        }
+                    KeyCode::Down if !matched.is_empty() => {
+                        selected = (selected + 1).min(matched.len() - 1);
                     }
                     KeyCode::PageUp => selected = selected.saturating_sub(10),
-                    KeyCode::PageDown => {
-                        if !matched.is_empty() {
-                            selected = (selected + 10).min(matched.len() - 1);
-                        }
+                    KeyCode::PageDown if !matched.is_empty() => {
+                        selected = (selected + 10).min(matched.len() - 1);
                     }
                     KeyCode::Home => selected = 0,
-                    KeyCode::End => {
-                        if !matched.is_empty() {
-                            selected = matched.len() - 1;
-                        }
+                    KeyCode::End if !matched.is_empty() => {
+                        selected = matched.len() - 1;
                     }
                     KeyCode::Backspace => {
                         query.pop();

@@ -144,10 +144,8 @@ pub fn open(state: &mut TiangongState) -> Result<()> {
                 match key.code {
                     KeyCode::Esc => break,
                     KeyCode::Up => selected = selected.saturating_sub(1),
-                    KeyCode::Down => {
-                        if !matched.is_empty() {
-                            selected = (selected + 1).min(matched.len() - 1);
-                        }
+                    KeyCode::Down if !matched.is_empty() => {
+                        selected = (selected + 1).min(matched.len() - 1);
                     }
                     KeyCode::Char(' ') => {
                         if let Some(&si) = matched.get(selected) {
