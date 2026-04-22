@@ -12,7 +12,7 @@ use crate::agents::execution_mcp_agent::{McpFunctionTarget, execution_function_t
 use crate::app_state::formatting::{format_llm_output_message, format_tool_trace_message};
 use crate::coordinator::TaskCoordinator;
 use crate::coordinator::types::CoordinatorTask;
-use crate::core_config::CoreConfigProvider;
+use crate::core_config::{CoreConfig, CoreConfigProvider};
 use crate::model::{FunctionToolSpec, ModelClient, ModelRequest, SingleProviderClient, TokenUsage};
 use crate::observe::{audit_permission_with_context, audit_tool_execution};
 use crate::prompt::PromptAssembler;
@@ -27,17 +27,51 @@ const MAX_ROUNDS: usize = 20;
 ///
 /// 按 workspace_id 缓存 MemoryHandle，避免长生命周期 GUI/Server 进程在打开多个
 /// workspace 时把后续对话错误绑定到首个 workspace 的 Memory Actor。
-static MEMORY_HANDLES: OnceLock<Mutex<HashMap<String, tiangong_memory::MemoryHandle>>> =
-    OnceLock::new();
+static MEMORY_HANDLES: OnceLock<Mutex<HashMap<String, MemoryRegistryEntry>>> = OnceLock::new();
 
 const GLOBAL_MEMORY_WORKSPACE_KEY: &str = "__global__";
 
+#[derive(Clone)]
+struct MemoryRegistryEntry {
+    handle: tiangong_memory::MemoryHandle,
+    workspace_id: Option<String>,
+    config_summary: MemoryConfigSummary,
+    config_generation: u64,
+    created_at: String,
+    last_used_at: String,
+    restart_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemoryConfigSummary {
+    model: Option<MemoryModelSummary>,
+    embedding: Option<MemoryEmbeddingSummary>,
+    vector_mode: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemoryModelSummary {
+    base_url: String,
+    model: String,
+    protocol: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemoryEmbeddingSummary {
+    base_url: String,
+    model: String,
+    protocol: String,
+    dimension: usize,
+}
+
 /// 获取或初始化 workspace 级 Memory Handle。
 fn get_or_init_memory(
-    config: &crate::core_config::CoreConfig,
+    config: &CoreConfig,
+    config_generation: u64,
     workspace_id: Option<String>,
 ) -> Option<tiangong_memory::MemoryHandle> {
     let key = memory_registry_key(workspace_id.as_deref());
+    let config_summary = memory_config_summary(config);
     let registry = MEMORY_HANDLES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = match registry.lock() {
         Ok(guard) => guard,
@@ -46,15 +80,43 @@ fn get_or_init_memory(
             return None;
         }
     };
-    if let Some(handle) = guard.get(&key) {
-        return Some(handle.clone());
+    if let Some(entry) = guard.get_mut(&key) {
+        entry.last_used_at = now_text();
+        let summary_changed =
+            memory_config_requires_restart(&entry.config_summary, &config_summary);
+        let generation_changed = entry.config_generation != config_generation;
+        if generation_changed {
+            entry.config_generation = config_generation;
+        }
+        if summary_changed {
+            entry.restart_required = true;
+            tracing::warn!(
+                workspace_id = ?entry.workspace_id,
+                created_at = %entry.created_at,
+                last_used_at = %entry.last_used_at,
+                "Memory 配置已变化，当前策略为复用旧 handle 并标记待重启"
+            );
+        }
+        return Some(entry.handle.clone());
     }
 
     let options = config.to_memory_options(workspace_id.clone());
     match tiangong_memory::start_with_options(options) {
         Ok(handle) => {
             tracing::info!(workspace_id = ?workspace_id, "Memory Actor 已启动");
-            guard.insert(key, handle.clone());
+            let now = now_text();
+            guard.insert(
+                key,
+                MemoryRegistryEntry {
+                    handle: handle.clone(),
+                    workspace_id,
+                    config_summary,
+                    config_generation,
+                    created_at: now.clone(),
+                    last_used_at: now,
+                    restart_required: false,
+                },
+            );
             Some(handle)
         }
         Err(err) => {
@@ -64,11 +126,74 @@ fn get_or_init_memory(
     }
 }
 
+fn memory_config_requires_restart(
+    running: &MemoryConfigSummary,
+    latest: &MemoryConfigSummary,
+) -> bool {
+    running != latest
+}
+
+fn memory_config_summary(config: &CoreConfig) -> MemoryConfigSummary {
+    let options = config.to_memory_options(None);
+    MemoryConfigSummary {
+        model: options.model.map(|model| MemoryModelSummary {
+            base_url: model.base_url,
+            model: model.model,
+            protocol: format!("{:?}", model.protocol),
+        }),
+        embedding: options.embedding.map(|embedding| MemoryEmbeddingSummary {
+            base_url: embedding.base_url,
+            model: embedding.model,
+            protocol: format!("{:?}", embedding.protocol),
+            dimension: embedding.dimension,
+        }),
+        vector_mode: format!("{:?}", options.vector_mode),
+    }
+}
+
 fn memory_registry_key(workspace_id: Option<&str>) -> String {
     workspace_id
         .filter(|workspace_id| !workspace_id.trim().is_empty())
         .unwrap_or(GLOBAL_MEMORY_WORKSPACE_KEY)
         .to_string()
+}
+
+/// 统一关闭当前进程内所有 MemoryHandle。
+///
+/// `TiangongCore::drop` 和 `into_session` 不会关闭 Memory，避免多会话共享 handle
+/// 时误关 Actor。应用进程退出时应显式调用这里统一清理 registry。
+pub fn shutdown_memory_registry_blocking() {
+    let Some(registry) = MEMORY_HANDLES.get() else {
+        return;
+    };
+    let entries = match registry.lock() {
+        Ok(mut guard) => guard
+            .drain()
+            .map(|(_, entry)| entry.handle)
+            .collect::<Vec<_>>(),
+        Err(err) => {
+            tracing::warn!("Memory Handle registry 已污染，无法统一关闭: {}", err);
+            return;
+        }
+    };
+    if entries.is_empty() {
+        return;
+    }
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            tracing::warn!("Memory shutdown runtime 构建失败: {}", err);
+            return;
+        }
+    };
+    runtime.block_on(async move {
+        for handle in entries {
+            handle.shutdown().await;
+        }
+    });
 }
 
 fn resolve_memory_workspace_id(session_cwd: &str) -> Option<String> {
@@ -123,7 +248,11 @@ impl TiangongCore {
     ) -> Self {
         let config_snapshot = config.snapshot();
         let memory_workspace_id = resolve_memory_workspace_id(&session.cwd);
-        let memory_handle = get_or_init_memory(&config_snapshot, memory_workspace_id.clone());
+        let memory_handle = get_or_init_memory(
+            &config_snapshot,
+            config.generation(),
+            memory_workspace_id.clone(),
+        );
         let initial_trust_mode = config_snapshot.trust_mode;
         let shared_trust_mode = Arc::new(RwLock::new(initial_trust_mode));
         let session_id = session.id.clone();
@@ -1739,5 +1868,126 @@ mod tests {
         let from_other_session = resolve_memory_workspace_id("/tmp/tiangong-memory-workspace-b")
             .expect("session cwd 应生成 workspace_id");
         assert_ne!(from_session, from_other_session);
+    }
+
+    #[test]
+    fn memory_config_summary_tracks_memory_relevant_fields() {
+        let config = memory_test_config(768, "embedded");
+        let summary = memory_config_summary(&config);
+
+        let model = summary.model.as_ref().expect("应包含 memory model 摘要");
+        assert_eq!(model.base_url, "http://chat.example");
+        assert_eq!(model.model, "chat-model");
+        let embedding = summary.embedding.as_ref().expect("应包含 embedding 摘要");
+        assert_eq!(embedding.base_url, "http://embed.example");
+        assert_eq!(embedding.model, "embed-model");
+        assert_eq!(embedding.dimension, 768);
+        assert_eq!(summary.vector_mode, "Embedded");
+
+        let changed_dimension = memory_config_summary(&memory_test_config(1024, "embedded"));
+        assert!(memory_config_requires_restart(&summary, &changed_dimension));
+
+        let changed_vector_mode = memory_config_summary(&memory_test_config(768, "disabled"));
+        assert!(memory_config_requires_restart(
+            &summary,
+            &changed_vector_mode
+        ));
+
+        let same_memory_config = memory_config_summary(&memory_test_config(768, "embedded"));
+        assert!(!memory_config_requires_restart(
+            &summary,
+            &same_memory_config
+        ));
+    }
+
+    #[test]
+    fn memory_registry_reuses_workspace_handle_and_separates_workspaces() {
+        let _env = MemoryRegistryEnvGuard::enter();
+        shutdown_memory_registry_blocking();
+
+        let config = CoreConfig::default();
+        let workspace_a = format!("ws-registry-a-{}", scru128::new());
+        let workspace_b = format!("ws-registry-b-{}", scru128::new());
+
+        let handle_a = get_or_init_memory(&config, 1, Some(workspace_a.clone()))
+            .expect("workspace A memory handle 应启动成功");
+        let handle_a_again = get_or_init_memory(&config, 1, Some(workspace_a))
+            .expect("workspace A memory handle 应可复用");
+        let handle_b = get_or_init_memory(&config, 1, Some(workspace_b))
+            .expect("workspace B memory handle 应启动成功");
+
+        assert!(
+            handle_a.is_same_handle(&handle_a_again),
+            "同一 workspace 应复用同一个 MemoryHandle"
+        );
+        assert!(
+            !handle_a.is_same_handle(&handle_b),
+            "不同 workspace 应使用不同 MemoryHandle"
+        );
+
+        shutdown_memory_registry_blocking();
+    }
+
+    fn memory_test_config(dimension: usize, vector_mode: &str) -> CoreConfig {
+        let mut config = CoreConfig::default();
+        config.llm.chat = crate::core_config::ModelEndpoint {
+            base_url: "http://chat.example".to_string(),
+            api_key: "secret".to_string(),
+            model: "chat-model".to_string(),
+            ..Default::default()
+        };
+        config.llm.embedding = Some(crate::core_config::ModelEndpoint {
+            base_url: "http://embed.example".to_string(),
+            api_key: "secret".to_string(),
+            model: "embed-model".to_string(),
+            options: serde_json::json!({
+                "dimension": dimension,
+                "vector_mode": vector_mode,
+            }),
+            ..Default::default()
+        });
+        config
+    }
+
+    struct MemoryRegistryEnvGuard {
+        prev_home: Option<std::ffi::OsString>,
+        prev_userprofile: Option<std::ffi::OsString>,
+        home: std::path::PathBuf,
+    }
+
+    impl MemoryRegistryEnvGuard {
+        fn enter() -> Self {
+            let prev_home = std::env::var_os("HOME");
+            let prev_userprofile = std::env::var_os("USERPROFILE");
+            let home =
+                std::env::temp_dir().join(format!("tiangong-core-memory-{}", scru128::new()));
+            std::fs::create_dir_all(&home).expect("创建 memory registry 测试目录失败");
+            unsafe {
+                std::env::set_var("HOME", &home);
+                std::env::set_var("USERPROFILE", &home);
+            }
+            Self {
+                prev_home,
+                prev_userprofile,
+                home,
+            }
+        }
+    }
+
+    impl Drop for MemoryRegistryEnvGuard {
+        fn drop(&mut self) {
+            shutdown_memory_registry_blocking();
+            unsafe {
+                match &self.prev_home {
+                    Some(value) => std::env::set_var("HOME", value),
+                    None => std::env::remove_var("HOME"),
+                }
+                match &self.prev_userprofile {
+                    Some(value) => std::env::set_var("USERPROFILE", value),
+                    None => std::env::remove_var("USERPROFILE"),
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.home);
+        }
     }
 }

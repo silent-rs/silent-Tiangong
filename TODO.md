@@ -52,12 +52,12 @@ Memory 主链路已经可用，但还不能视为完全收口。当前最重要�
 
 ### 3. Memory runtime / handle registry 生命周期收口
 
-- [ ] 为 registry entry 记录 workspace_id、配置摘要或 generation、创建时间、最后使用时间。
-- [ ] 定义配置 generation 变化时的处理策略：复用、重启或标记待重启。
-- [ ] 保证 `TiangongCore::into_session` / Drop 不误关共享 MemoryHandle。
-- [ ] 增加应用退出路径的统一 Memory shutdown 能力。
-- [ ] 增加测试验证两个 workspace 使用不同 handle。
-- [ ] 增加测试验证两个 workspace 的 Episode 不会串写 scope_id。
+- [x] 为 registry entry 记录 workspace_id、配置摘要或 generation、创建时间、最后使用时间。
+- [x] 定义配置 generation 变化时的处理策略：memory 相关摘要变化时复用旧 handle 并标记待重启。
+- [x] 保证 `TiangongCore::into_session` / Drop 不误关共享 MemoryHandle。
+- [x] 增加应用退出路径的统一 Memory shutdown 能力。
+- [x] 增加测试验证两个 workspace 使用不同 handle。
+- [x] 增加测试验证两个 workspace 的 Episode 不会串写 scope_id。
 
 ---
 

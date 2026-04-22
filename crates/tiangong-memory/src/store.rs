@@ -34,7 +34,7 @@ pub(crate) struct MemoryStore {
 impl MemoryStore {
     /// 打开存储（初始化 SQLite + Tantivy，无向量索引时降级为 BM25）
     pub(crate) fn open(workspace_id: Option<String>) -> Result<Self> {
-        let base = memory_base_dir();
+        let base = memory_index_base_dir(workspace_id.as_deref());
         let db = MemoryDb::open()?;
         let tantivy = TantivyIndex::open(&base)?;
         // RecallEngine 不持有 TantivyIndex，避免同一索引目录双 writer 锁冲突
@@ -378,6 +378,14 @@ fn memory_base_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".tiangong")
         .join("memory")
+}
+
+fn memory_index_base_dir(workspace_id: Option<&str>) -> PathBuf {
+    let base = memory_base_dir();
+    workspace_id
+        .filter(|workspace_id| !workspace_id.trim().is_empty())
+        .map(|workspace_id| base.join("workspaces").join(workspace_id))
+        .unwrap_or(base)
 }
 
 fn home_dir() -> Option<PathBuf> {

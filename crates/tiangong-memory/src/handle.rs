@@ -43,6 +43,14 @@ impl MemoryHandle {
         })
     }
 
+    /// 判断两个 handle 是否指向同一个底层 handle 实例。
+    ///
+    /// 主要用于 registry 生命周期测试和诊断：同一 workspace 的重复获取应返回
+    /// 同一个 handle clone；不同 workspace 应创建不同 handle。
+    pub fn is_same_handle(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     /// 加载注入上下文（查询，等待响应）
     pub async fn load_injection(
         &self,

@@ -835,6 +835,26 @@ mod tests {
     }
 
     #[test]
+    fn recent_episodes_filters_by_workspace_scope() {
+        let db = open_in_memory().unwrap();
+        let episode_a = make_episode("sess-ws-a");
+        let episode_b = make_episode("sess-ws-b");
+        let id_a = episode_a.id.clone();
+        let id_b = episode_b.id.clone();
+
+        db.insert_episode(&episode_a, Some("ws-a")).unwrap();
+        db.insert_episode(&episode_b, Some("ws-b")).unwrap();
+
+        let ws_a = db.recent_episodes(Some("ws-a"), 10).unwrap();
+        let ws_b = db.recent_episodes(Some("ws-b"), 10).unwrap();
+
+        assert_eq!(ws_a.len(), 1);
+        assert_eq!(ws_a[0].id, id_a);
+        assert_eq!(ws_b.len(), 1);
+        assert_eq!(ws_b[0].id, id_b);
+    }
+
+    #[test]
     fn entity_crud_roundtrip_works() {
         let db = open_in_memory().unwrap();
         let entity = make_entity("entity-1");
