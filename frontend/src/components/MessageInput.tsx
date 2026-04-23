@@ -159,8 +159,9 @@ export function MessageInput() {
       sendMessage(inputContent);
     } else {
       // 执行中：追加消息到正在执行的 turn
+      if (!activeSessionId) return;
       try {
-        await api.appendMessage(inputContent);
+        await api.appendMessage(activeSessionId, inputContent);
         setInputContent('');
       } catch (e) {
         console.error('追加消息失败:', e);

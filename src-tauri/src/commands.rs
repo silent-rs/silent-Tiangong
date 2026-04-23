@@ -27,8 +27,16 @@ fn append_assistant_delta(
     message_id: &str,
     content: &str,
 ) {
+    if content.trim().is_empty()
+        && !session.messages.iter().any(|msg| msg.id == message_id)
+    {
+        return;
+    }
     ensure_assistant_message(session, assistant_msg_id, message_id);
     if let Some(msg) = session.messages.iter_mut().find(|msg| msg.id == message_id) {
+        if msg.content.trim().is_empty() && content.trim().is_empty() {
+            return;
+        }
         msg.content.push_str(content);
     }
 }
@@ -42,6 +50,29 @@ fn append_assistant_reasoning(
     ensure_assistant_message(session, assistant_msg_id, message_id);
     if let Some(msg) = session.messages.iter_mut().find(|msg| msg.id == message_id) {
         msg.reasoning_content.push_str(content);
+    }
+}
+
+fn cleanup_assistant_before_tool_calls(
+    session: &mut tiangong_core::session::Session,
+    assistant_msg_id: &mut Option<String>,
+) {
+    let Some(message_id) = assistant_msg_id.take() else {
+        return;
+    };
+    let Some(index) = session.messages.iter().position(|msg| {
+        msg.id == message_id && msg.role == tiangong_core::session::MessageRole::Assistant
+    }) else {
+        return;
+    };
+
+    let message = &mut session.messages[index];
+    if !message.content.trim().is_empty() {
+        return;
+    }
+    message.content.clear();
+    if message.reasoning_content.trim().is_empty() && message.media.is_empty() {
+        session.messages.remove(index);
     }
 }
 
@@ -412,6 +443,7 @@ pub fn send_message(
                             );
                         }
                         StreamEvent::ToolCalls { names, usage } => {
+                            cleanup_assistant_before_tool_calls(session, &mut assistant_msg_id);
                             session.append_message(
                                 tiangong_core::session::MessageRole::System,
                                 format!("LLM 输出\ntool_calls: {}", names.join(", ")),
@@ -420,7 +452,6 @@ pub fn send_message(
                                 add_session_usage(session, usage);
                                 recorded_turn_usage.accumulate(usage);
                             }
-                            assistant_msg_id = None;
                         }
                         StreamEvent::ToolStart {
                             ref args_summary, ..
@@ -744,8 +775,16 @@ pub fn cancel_turn(state: State<TiangongApp>) -> Result<bool, String> {
 
 /// 向正在执行的 turn 追加用户消息
 #[tauri::command]
-pub fn append_message(content: String, state: State<TiangongApp>) -> Result<bool, String> {
-    state.with_state(|core_state| core_state.append_user_message_to_running_turn(&content))
+pub fn append_message(
+    session_id: String,
+    content: String,
+    state: State<TiangongApp>,
+) -> Result<bool, String> {
+    if session_id.trim().is_empty() {
+        return Err("当前会话 ID 不能为空".to_string());
+    }
+
+    Ok(state.send_to_core(&session_id, content))
 }
 
 /// 响应工具审批请求

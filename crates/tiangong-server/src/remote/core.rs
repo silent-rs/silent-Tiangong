@@ -315,6 +315,7 @@ fn sync_stream_event_to_state(
             content,
         } => append_assistant_reasoning(session, message_id, content),
         StreamEvent::ToolCalls { names, .. } => {
+            cleanup_latest_assistant_before_tool_calls(session);
             session.append_message(
                 MessageRole::System,
                 format!("LLM 输出\ntool_calls: {}", names.join(", ")),
@@ -391,12 +392,23 @@ fn sync_stream_event_to_state(
 }
 
 fn append_assistant_delta(session: &mut Session, message_id: &str, content: &str) {
+    if content.trim().is_empty()
+        && !session
+            .messages
+            .iter()
+            .any(|message| message.id == message_id)
+    {
+        return;
+    }
     ensure_assistant_message(session, message_id);
     if let Some(message) = session
         .messages
         .iter_mut()
         .find(|message| message.id == message_id)
     {
+        if message.content.trim().is_empty() && content.trim().is_empty() {
+            return;
+        }
         message.content.push_str(content);
     }
 }
@@ -409,6 +421,25 @@ fn append_assistant_reasoning(session: &mut Session, message_id: &str, content: 
         .find(|message| message.id == message_id)
     {
         message.reasoning_content.push_str(content);
+    }
+}
+
+fn cleanup_latest_assistant_before_tool_calls(session: &mut Session) {
+    let Some(index) = session
+        .messages
+        .iter()
+        .rposition(|message| message.role == MessageRole::Assistant)
+    else {
+        return;
+    };
+
+    let message = &mut session.messages[index];
+    if !message.content.trim().is_empty() {
+        return;
+    }
+    message.content.clear();
+    if message.reasoning_content.trim().is_empty() && message.media.is_empty() {
+        session.messages.remove(index);
     }
 }
 

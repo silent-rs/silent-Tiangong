@@ -84,10 +84,13 @@ impl TiangongApp {
     }
 
     /// 向指定会话的 core 发送消息
-    pub fn send_to_core(&self, session_id: &str, content: String) {
+    pub fn send_to_core(&self, session_id: &str, content: String) -> bool {
         let cores = self.cores.lock().unwrap();
         if let Some(core) = cores.get(session_id) {
             core.send_message(content);
+            true
+        } else {
+            false
         }
     }
 
