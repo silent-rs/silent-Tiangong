@@ -197,7 +197,9 @@ impl ResponseState {
                 }
             }
 
-            StreamEvent::ToolResult { name, ok, output } => {
+            StreamEvent::ToolResult {
+                name, ok, output, ..
+            } => {
                 self.end_active_stream();
                 output::tool_result(name, *ok, output);
             }

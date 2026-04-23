@@ -833,6 +833,16 @@ fn build_provider_messages(req: &ModelRequest) -> (String, Vec<ChatMessage>) {
         ));
     }
 
+    let mut messages = sanitize_provider_messages(messages);
+    if messages.is_empty() {
+        let fallback = if req.user_input.trim().is_empty() {
+            "请继续处理当前任务。".to_string()
+        } else {
+            req.user_input.trim().to_string()
+        };
+        messages.push(ChatMessage::text(LlmMessageRole::User, fallback));
+    }
+
     (system_texts.join("\n"), messages)
 }
 
@@ -847,9 +857,6 @@ fn provider_message_from_session(msg: &Message) -> Option<ChatMessage> {
     if !msg.content.trim().is_empty() {
         parts.push(msg.content.trim().to_string());
     }
-    if !msg.reasoning_content.trim().is_empty() {
-        parts.push(format!("[思考]\n{}", msg.reasoning_content.trim()));
-    }
     if parts.is_empty() {
         return None;
     }
@@ -858,6 +865,56 @@ fn provider_message_from_session(msg: &Message) -> Option<ChatMessage> {
         role,
         vec![LlmMessageContent::Text(parts.join("\n\n"))],
     ))
+}
+
+fn sanitize_provider_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    let mut sanitized: Vec<ChatMessage> = Vec::new();
+    let mut seen_user = false;
+
+    for message in messages {
+        if message.role == LlmMessageRole::System || is_empty_provider_message(&message) {
+            continue;
+        }
+        if !seen_user {
+            if message.role != LlmMessageRole::User {
+                continue;
+            }
+            seen_user = true;
+        }
+
+        if let Some(last) = sanitized.last_mut()
+            && last.role == message.role
+        {
+            merge_provider_message_content(last, message);
+            continue;
+        }
+        sanitized.push(message);
+    }
+
+    sanitized
+}
+
+fn is_empty_provider_message(message: &ChatMessage) -> bool {
+    message.content.iter().all(|content| match content {
+        LlmMessageContent::Text(text) => text.trim().is_empty(),
+        _ => false,
+    })
+}
+
+fn merge_provider_message_content(target: &mut ChatMessage, source: ChatMessage) {
+    for content in source.content {
+        match (target.content.last_mut(), content) {
+            (Some(LlmMessageContent::Text(current)), LlmMessageContent::Text(next)) => {
+                if !next.trim().is_empty() {
+                    if !current.trim().is_empty() {
+                        current.push_str("\n\n");
+                    }
+                    current.push_str(next.trim());
+                }
+            }
+            (_, content) => target.content.push(content),
+        }
+    }
 }
 
 fn convert_provider_response_to_function_response(

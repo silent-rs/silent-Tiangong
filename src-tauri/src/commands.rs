@@ -432,15 +432,17 @@ pub fn send_message(
                             ref name,
                             ok,
                             ref output,
+                            ref full_output,
                         } => {
+                            let persisted_output = full_output.as_deref().unwrap_or(output);
                             let status = if *ok { "ok=true" } else { "ok=false" };
                             let media_assets = if *ok
                                 && name == "generate_image"
-                                && looks_like_pure_image_markdown(output)
+                                && looks_like_pure_image_markdown(persisted_output)
                             {
-                                parse_image_markdown_assets(output)
+                                parse_image_markdown_assets(persisted_output)
                             } else if *ok && is_video_tool(name) {
-                                parse_video_url_assets(output)
+                                parse_video_url_assets(persisted_output)
                             } else {
                                 Vec::new()
                             };
@@ -467,13 +469,8 @@ pub fn send_message(
                                 pending_final_media
                                     .get_or_insert_with(Vec::new)
                                     .extend(media_assets);
-                            } else if !output.trim().is_empty() {
-                                let preview = if output.chars().count() > 200 {
-                                    format!("{}...", output.chars().take(200).collect::<String>())
-                                } else {
-                                    output.clone()
-                                };
-                                lines.push(format!("stdout:\n{preview}"));
+                            } else if !persisted_output.trim().is_empty() {
+                                lines.push(format!("stdout:\n{persisted_output}"));
                             }
                             session.append_message(
                                 tiangong_core::session::MessageRole::System,

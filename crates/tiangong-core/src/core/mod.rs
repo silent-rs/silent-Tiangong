@@ -27,6 +27,10 @@ use tiangong_types::{SessionStreamEvent, StreamEvent};
 use std::sync::mpsc::Receiver;
 
 const MAX_ROUNDS: usize = 20;
+const MEMORY_LOOP_FEEDBACK_MAX_CHARS: usize = 12_000;
+const TOOL_RESULT_STREAM_MAX_CHARS: usize = 8_000;
+
+type MemoryRecallToolOutput = (crate::tool::ToolResult, tiangong_types::TokenUsage, bool);
 
 /// 进程级 Memory Handle 注册表。
 ///
@@ -725,11 +729,16 @@ async fn execute_turn_inner_async(
     let mut accumulated_usage = TokenUsage::default();
     let mut pending_media_assets: Vec<tiangong_types::MediaAsset> = Vec::new();
     let mut memory_context: Option<String> = None;
+    let mut memory_recall_attempted = false;
 
     'react_loop: loop {
         match drain_pending_commands_async(session, &mut loop_context, stream_tx, cmd_rx) {
             PendingCommandEffect::Terminate => return accumulated_usage,
-            PendingCommandEffect::MessageInjected | PendingCommandEffect::None => {}
+            PendingCommandEffect::MessageInjected => {
+                memory_context = None;
+                memory_recall_attempted = false;
+            }
+            PendingCommandEffect::None => {}
         }
 
         if round >= max_rounds {
@@ -893,6 +902,7 @@ async fn execute_turn_inner_async(
             if user_message_injected_during_stream {
                 // 新输入到来后，旧的 recall_memory 注入上下文可能不再相关，避免污染下一轮 prompt
                 memory_context = None;
+                memory_recall_attempted = false;
                 continue 'react_loop;
             }
 
@@ -945,6 +955,8 @@ async fn execute_turn_inner_async(
             match drain_pending_commands_async(session, &mut loop_context, stream_tx, cmd_rx) {
                 PendingCommandEffect::Terminate => return accumulated_usage,
                 PendingCommandEffect::MessageInjected => {
+                    memory_context = None;
+                    memory_recall_attempted = false;
                     session.persist_to_disk();
                     continue 'react_loop;
                 }
@@ -993,6 +1005,7 @@ async fn execute_turn_inner_async(
                         name: call.name.clone(),
                         ok: false,
                         output: format!("权限拒绝：{reason}"),
+                        full_output: None,
                     });
                     loop_context.push(Message {
                         id: scru128::new().to_string(),
@@ -1082,6 +1095,7 @@ async fn execute_turn_inner_async(
                             name: call.name.clone(),
                             ok: false,
                             output: "用户拒绝执行".to_string(),
+                            full_output: None,
                         });
                         let _ = stream_tx.send(StreamEvent::Done {
                             usage: Some(tiangong_types::TokenUsage {
@@ -1103,7 +1117,12 @@ async fn execute_turn_inner_async(
             let (result, memory_tool_usage, allow_memory_context) =
                 tokio::task::block_in_place(|| {
                     if call.name == "recall_memory" {
-                        execute_memory_recall_tool(call, memory_handle, session)
+                        if memory_recall_attempted {
+                            duplicate_memory_recall_tool_result()
+                        } else {
+                            memory_recall_attempted = true;
+                            execute_memory_recall_tool(call, memory_handle, session)
+                        }
                     } else {
                         (
                             engine.execute_tool_call(call, mcp_targets, &engine.agent_config().mcp),
@@ -1126,7 +1145,8 @@ async fn execute_turn_inner_async(
             let _ = stream_tx.send(StreamEvent::ToolResult {
                 name: call.name.clone(),
                 ok: result.ok,
-                output: result.stdout.clone(),
+                output: tool_result_stream_output(&result.stdout),
+                full_output: Some(result.stdout.clone()),
             });
             session.append_message(MessageRole::System, format_tool_trace_message(&result));
 
@@ -1162,15 +1182,10 @@ async fn execute_turn_inner_async(
                 if allow_memory_context && !result.stdout.trim().is_empty() {
                     memory_context = Some(result.stdout.clone());
                 }
-                let notice = if !allow_memory_context || result.stdout.trim().is_empty() {
-                    "recall_memory 执行完成：未找到增量历史记忆。".to_string()
-                } else {
-                    "recall_memory 执行完成：历史上下文已注入 system prompt，请直接参考使用，无需再次调用此工具。".to_string()
-                };
                 loop_context.push(Message {
                     id: scru128::new().to_string(),
-                    role: MessageRole::System,
-                    content: notice,
+                    role: MessageRole::User,
+                    content: build_memory_recall_feedback(&result.stdout, allow_memory_context),
                     reasoning_content: String::new(),
                     worker_id: None,
                     media: Vec::new(),
@@ -1191,6 +1206,8 @@ async fn execute_turn_inner_async(
             match drain_pending_commands_async(session, &mut loop_context, stream_tx, cmd_rx) {
                 PendingCommandEffect::Terminate => return accumulated_usage,
                 PendingCommandEffect::MessageInjected => {
+                    memory_context = None;
+                    memory_recall_attempted = false;
                     session.persist_to_disk();
                     continue 'react_loop;
                 }
@@ -1222,11 +1239,16 @@ fn execute_turn_inner(
     let mut accumulated_usage = TokenUsage::default();
     let mut pending_media_assets: Vec<tiangong_types::MediaAsset> = Vec::new();
     let mut memory_context: Option<String> = None;
+    let mut memory_recall_attempted = false;
 
     'react_loop: loop {
         match drain_pending_commands(session, &mut loop_context, stream_tx, cmd_rx) {
             PendingCommandEffect::Terminate => return accumulated_usage,
-            PendingCommandEffect::MessageInjected | PendingCommandEffect::None => {}
+            PendingCommandEffect::MessageInjected => {
+                memory_context = None;
+                memory_recall_attempted = false;
+            }
+            PendingCommandEffect::None => {}
         }
 
         if round >= max_rounds {
@@ -1348,6 +1370,8 @@ fn execute_turn_inner(
                 false
             };
             if had_messages {
+                memory_context = None;
+                memory_recall_attempted = false;
                 continue 'react_loop;
             }
         }
@@ -1445,6 +1469,8 @@ fn execute_turn_inner(
             match drain_pending_commands(session, &mut loop_context, stream_tx, cmd_rx) {
                 PendingCommandEffect::Terminate => return accumulated_usage,
                 PendingCommandEffect::MessageInjected => {
+                    memory_context = None;
+                    memory_recall_attempted = false;
                     session.persist_to_disk();
                     continue 'react_loop;
                 }
@@ -1494,6 +1520,7 @@ fn execute_turn_inner(
                         name: call.name.clone(),
                         ok: false,
                         output: format!("权限拒绝：{reason}"),
+                        full_output: None,
                     });
                     loop_context.push(Message {
                         id: scru128::new().to_string(),
@@ -1589,6 +1616,7 @@ fn execute_turn_inner(
                             name: call.name.clone(),
                             ok: false,
                             output: "用户拒绝执行".to_string(),
+                            full_output: None,
                         });
                         // 拒绝后结束本轮，避免 LLM 再次调用同工具形成死循环
                         let _ = stream_tx.send(StreamEvent::Done {
@@ -1610,7 +1638,12 @@ fn execute_turn_inner(
 
             let (result, memory_tool_usage, allow_memory_context) = if call.name == "recall_memory"
             {
-                execute_memory_recall_tool(call, memory_handle, session)
+                if memory_recall_attempted {
+                    duplicate_memory_recall_tool_result()
+                } else {
+                    memory_recall_attempted = true;
+                    execute_memory_recall_tool(call, memory_handle, session)
+                }
             } else {
                 (
                     engine.execute_tool_call(call, mcp_targets, &engine.agent_config().mcp),
@@ -1634,7 +1667,8 @@ fn execute_turn_inner(
             let _ = stream_tx.send(StreamEvent::ToolResult {
                 name: call.name.clone(),
                 ok: result.ok,
-                output: result.stdout.clone(),
+                output: tool_result_stream_output(&result.stdout),
+                full_output: Some(result.stdout.clone()),
             });
 
             // 记录到 session
@@ -1670,20 +1704,14 @@ fn execute_turn_inner(
                     }
                 )
             };
-            // recall_memory 的检索内容注入 system prompt，loop_context 只记录简短通知
             if call.name == "recall_memory" && result.ok {
                 if allow_memory_context && !result.stdout.trim().is_empty() {
                     memory_context = Some(result.stdout.clone());
                 }
-                let notice = if !allow_memory_context || result.stdout.trim().is_empty() {
-                    "recall_memory 执行完成：未找到增量历史记忆。".to_string()
-                } else {
-                    "recall_memory 执行完成：历史上下文已注入 system prompt，请直接参考使用，无需再次调用此工具。".to_string()
-                };
                 loop_context.push(Message {
                     id: scru128::new().to_string(),
-                    role: MessageRole::System,
-                    content: notice,
+                    role: MessageRole::User,
+                    content: build_memory_recall_feedback(&result.stdout, allow_memory_context),
                     reasoning_content: String::new(),
                     worker_id: None,
                     media: Vec::new(),
@@ -1704,6 +1732,8 @@ fn execute_turn_inner(
             match drain_pending_commands(session, &mut loop_context, stream_tx, cmd_rx) {
                 PendingCommandEffect::Terminate => return accumulated_usage,
                 PendingCommandEffect::MessageInjected => {
+                    memory_context = None;
+                    memory_recall_attempted = false;
                     session.persist_to_disk();
                     continue 'react_loop;
                 }
@@ -2061,7 +2091,7 @@ fn execute_memory_recall_tool(
     call: &crate::model::ModelFunctionCall,
     memory_handle: Option<&tiangong_memory::MemoryHandle>,
     session: &Session,
-) -> (crate::tool::ToolResult, tiangong_types::TokenUsage, bool) {
+) -> MemoryRecallToolOutput {
     let started = std::time::Instant::now();
     let Some(handle) = memory_handle else {
         return (
@@ -2207,6 +2237,62 @@ fn memory_recall_tool_result(
             exit_code,
             summary,
         }),
+    }
+}
+
+fn duplicate_memory_recall_tool_result() -> MemoryRecallToolOutput {
+    let started = std::time::Instant::now();
+    (
+        memory_recall_tool_result(
+            true,
+            "本轮已完成回忆，跳过重复调用",
+            "recall_memory 本轮已经执行过，回忆结果已经注入当前上下文。请直接基于已有回忆结果完成用户原始目标，不要再次调用 recall_memory。"
+                .to_string(),
+            String::new(),
+            0,
+            vec!["duplicate-recall".to_string()],
+            started,
+        ),
+        tiangong_types::TokenUsage::default(),
+        false,
+    )
+}
+
+fn build_memory_recall_feedback(stdout: &str, allow_memory_context: bool) -> String {
+    let header = if allow_memory_context && !stdout.trim().is_empty() {
+        "recall_memory 已完成。以下是可直接使用的回忆结果，请基于这些内容继续完成用户原始目标；不要再次调用 recall_memory，除非用户提出新的历史查询。"
+    } else if stdout.trim().is_empty() {
+        "recall_memory 已完成，但没有可用的增量历史记忆。请基于当前上下文继续完成用户原始目标；不要再次调用 recall_memory。"
+    } else {
+        "recall_memory 已完成，结果如下。请基于当前上下文继续完成用户原始目标；不要再次调用 recall_memory。"
+    };
+    let body = truncate_chars_with_notice(
+        stdout.trim(),
+        MEMORY_LOOP_FEEDBACK_MAX_CHARS,
+        "\n...(已截断，完整回忆结果已记录在工具执行消息中)",
+    );
+    if body.trim().is_empty() {
+        header.to_string()
+    } else {
+        format!("{header}\n\n{body}")
+    }
+}
+
+fn tool_result_stream_output(output: &str) -> String {
+    truncate_chars_with_notice(
+        output,
+        TOOL_RESULT_STREAM_MAX_CHARS,
+        "\n...(已截断，完整工具输出已记录到会话数据)",
+    )
+}
+
+fn truncate_chars_with_notice(text: &str, max_chars: usize, notice: &str) -> String {
+    let mut chars = text.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}{notice}")
+    } else {
+        truncated
     }
 }
 

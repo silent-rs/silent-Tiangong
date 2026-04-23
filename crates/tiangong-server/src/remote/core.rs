@@ -328,17 +328,23 @@ fn sync_stream_event_to_state(
             };
             session.append_message(MessageRole::System, summary);
         }
-        StreamEvent::ToolResult { name, ok, output } => {
+        StreamEvent::ToolResult {
+            name,
+            ok,
+            output,
+            full_output,
+        } => {
+            let persisted_output = full_output.as_deref().unwrap_or(output);
             let status = if *ok { "成功" } else { "失败" };
             if *ok {
-                let media = parse_tool_media_assets(name, output);
+                let media = parse_tool_media_assets(name, persisted_output);
                 if !media.is_empty() {
                     session.append_message_with_media(MessageRole::Assistant, String::new(), media);
                 }
             }
             session.append_message(
                 MessageRole::System,
-                format!("工具 {name} 执行{status}\n{output}"),
+                format!("工具 {name} 执行{status}\n{persisted_output}"),
             );
         }
         StreamEvent::ApprovalNeeded { .. } => {
