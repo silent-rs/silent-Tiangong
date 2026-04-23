@@ -250,7 +250,10 @@ fn resolve_memory_workspace_id(session_cwd: &str) -> Option<String> {
 /// 用户命令
 pub(crate) enum Command {
     /// 发送消息
-    Message(String),
+    Message {
+        content: String,
+        message_id: Option<String>,
+    },
     /// 取消当前执行
     Cancel,
     /// 审批响应
@@ -325,7 +328,17 @@ impl TiangongCore {
     }
 
     pub fn send_message(&self, content: String) {
-        self.send_cmd(Command::Message(content));
+        self.send_cmd(Command::Message {
+            content,
+            message_id: None,
+        });
+    }
+
+    pub fn send_message_with_id(&self, content: String, message_id: String) {
+        self.send_cmd(Command::Message {
+            content,
+            message_id: Some(message_id),
+        });
     }
 
     pub fn cancel(&self) {
@@ -459,18 +472,16 @@ fn worker_loop(
         }
 
         match cmd {
-            Command::Message(content) => {
+            Command::Message {
+                content,
+                message_id,
+            } => {
                 let turn_start_idx = session.messages.len();
                 // 记录用户消息
-                session.append_message(MessageRole::User, content.clone());
+                let user_msg_id = append_or_reuse_user_message(&mut session, &content, message_id);
                 // 通知消费端：用户消息已记录（携带 session 中的 message_id）
-                let user_msg_id = session
-                    .messages
-                    .last()
-                    .map(|m| m.id.clone())
-                    .unwrap_or_default();
                 let _ = stream_tx.send(StreamEvent::UserMessage {
-                    message_id: user_msg_id,
+                    message_id: user_msg_id.clone(),
                     content: content.clone(),
                 });
 
@@ -918,10 +929,14 @@ fn execute_turn_inner(
                                 });
                                 return accumulated_usage;
                             }
-                            Ok(Command::Message(content)) => {
-                                session.append_message(MessageRole::User, content.clone());
+                            Ok(Command::Message {
+                                content,
+                                message_id,
+                            }) => {
+                                let loop_message_id =
+                                    append_or_reuse_user_message(session, &content, message_id);
                                 loop_context.push(Message {
-                                    id: scru128::new().to_string(),
+                                    id: loop_message_id,
                                     role: MessageRole::User,
                                     content,
                                     reasoning_content: String::new(),
@@ -1083,11 +1098,15 @@ fn execute_turn_inner(
                     });
                     return accumulated_usage;
                 }
-                Command::Message(content) => {
+                Command::Message {
+                    content,
+                    message_id,
+                } => {
                     // 用户追加消息：注入 loop_context，下一轮 LLM 会看到
-                    session.append_message(MessageRole::User, content.clone());
+                    let loop_message_id =
+                        append_or_reuse_user_message(session, &content, message_id);
                     loop_context.push(Message {
-                        id: scru128::new().to_string(),
+                        id: loop_message_id,
                         role: MessageRole::User,
                         content,
                         reasoning_content: String::new(),
@@ -1105,6 +1124,31 @@ fn execute_turn_inner(
     }
 
     accumulated_usage
+}
+
+fn append_or_reuse_user_message(
+    session: &mut Session,
+    content: &str,
+    message_id: Option<String>,
+) -> String {
+    if let Some(message_id) = message_id {
+        if !session.messages.iter().any(|msg| msg.id == message_id) {
+            session.append_message_with_id(
+                message_id.clone(),
+                MessageRole::User,
+                content.to_string(),
+                String::new(),
+            );
+        }
+        return message_id;
+    }
+
+    session.append_message(MessageRole::User, content.to_string());
+    session
+        .messages
+        .last()
+        .map(|m| m.id.clone())
+        .unwrap_or_default()
 }
 
 /// 超限时强制最终回复

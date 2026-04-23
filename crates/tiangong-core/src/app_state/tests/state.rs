@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::fs;
 
 use super::super::repository::canonical_scru128_id;
 use super::super::*;
@@ -21,6 +22,34 @@ fn normalize_sessions_repairs_invalid_ids_and_active_session() -> Result<()> {
         assert_eq!(canonical_scru128_id(&second_id), Some(second_id.clone()));
         assert_ne!(first_id, second_id);
         assert_eq!(state.store.session.active_session_id, first_id);
+        Ok(())
+    })
+}
+
+#[test]
+fn prepare_active_user_message_ingress_persists_message_immediately() -> Result<()> {
+    with_isolated_state("tiangong-state-ingress-persist", |paths, state| {
+        state.create_session();
+
+        let (session_id, message_id, session) =
+            state.prepare_active_user_message_ingress("立即固定这条消息")?;
+
+        assert_eq!(state.active_session_id(), session_id);
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.messages[0].id, message_id);
+        assert_eq!(session.messages[0].content, "立即固定这条消息");
+
+        let session_path = paths
+            .fake_home
+            .join(".tiangong")
+            .join("sessions")
+            .join(format!("{session_id}.json"));
+        assert!(session_path.exists());
+
+        let persisted: Session = serde_json::from_str(&fs::read_to_string(session_path)?)?;
+        assert_eq!(persisted.messages.len(), 1);
+        assert_eq!(persisted.messages[0].id, message_id);
+        assert_eq!(persisted.messages[0].content, "立即固定这条消息");
         Ok(())
     })
 }

@@ -335,14 +335,19 @@ pub fn send_message(
     use tiangong_types::{SessionStreamEvent, StreamEvent};
 
     // 准备 session
-    let (session_id, session_snapshot) = state
+    let (session_id, user_message_id, session_snapshot) = state
         .with_state(|core_state| core_state.prepare_active_user_message_ingress(content.clone()))?;
 
     // 获取或创建 TiangongCore
     let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
     let (sid, is_new_core) = state.ensure_core(&session_id, session_snapshot, stream_tx);
     // 发送消息（core 内部会 append 到 core session 并推送 UserMessage 事件）
-    state.send_to_core(&sid, content.clone());
+    {
+        let cores = state.cores.lock().map_err(|e| e.to_string())?;
+        if let Some(core) = cores.get(&sid) {
+            core.send_message_with_id(content.clone(), user_message_id);
+        }
+    }
 
     // 只在新创建 core 时启动消费线程（复用 core 时旧消费线程仍在运行）
     if !is_new_core {
@@ -375,12 +380,14 @@ pub fn send_message(
                         } => {
                             recorded_turn_usage = tiangong_types::TokenUsage::default();
                             // Core 已记录用户消息，同步到 TiangongState session
-                            session.append_message_with_id(
-                                message_id.clone(),
-                                tiangong_core::session::MessageRole::User,
-                                content.clone(),
-                                String::new(),
-                            );
+                            if !session.messages.iter().any(|msg| msg.id == *message_id) {
+                                session.append_message_with_id(
+                                    message_id.clone(),
+                                    tiangong_core::session::MessageRole::User,
+                                    content.clone(),
+                                    String::new(),
+                                );
+                            }
                         }
                         StreamEvent::Delta {
                             message_id,

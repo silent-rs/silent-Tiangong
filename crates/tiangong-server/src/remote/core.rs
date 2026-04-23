@@ -304,6 +304,7 @@ fn sync_stream_event_to_state(
                 content.clone(),
                 String::new(),
             );
+            should_persist = true;
         }
         StreamEvent::Delta {
             message_id,
