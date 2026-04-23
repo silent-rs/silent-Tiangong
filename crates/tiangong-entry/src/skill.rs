@@ -55,6 +55,18 @@ pub(crate) fn run_skill_command(args: SkillArgs) -> anyhow::Result<()> {
             let msg = state.set_skill_enabled(&id, false)?;
             println!("{msg}");
         }
+        SkillSubcommand::Refresh => {
+            let msg = state.refresh_skills()?;
+            println!("{msg}");
+        }
+        SkillSubcommand::Gc { apply } => {
+            let msg = state.gc_skills(apply)?;
+            println!("{msg}");
+        }
+        SkillSubcommand::Doctor => {
+            let msg = state.doctor_skills()?;
+            println!("{msg}");
+        }
         SkillSubcommand::Validate => {
             state.validate_agent_config()?;
             println!("配置校验通过");

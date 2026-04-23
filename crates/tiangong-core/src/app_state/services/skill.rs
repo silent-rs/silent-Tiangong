@@ -137,6 +137,22 @@ impl AppSkillService {
             llm_artifacts.as_ref(),
             convert_env_values,
         )?;
+
+        // 兼容旧路径：当用户直接安装仅含 SKILL.md 的目录时，自动补全 skill.toml 后继续安装。
+        if !convert_external
+            && prepared_source.install_path.join("SKILL.md").exists()
+            && !prepared_source.install_path.join("skill.toml").exists()
+        {
+            prepared_source = prepare_skill_source_for_install(
+                &source_path,
+                true,
+                llm_artifacts.as_ref(),
+                convert_env_values,
+            )?;
+            pre_conversion_notes
+                .push("检测到 SKILL.md-only skill，已自动生成 skill.toml 以兼容安装".to_string());
+        }
+
         let stage_cleanup = ScopedDirCleanup::new(converted_stage_cleanup_dir(
             &prepared_source.install_path,
             prepared_source.converted,
@@ -147,20 +163,19 @@ impl AppSkillService {
             merged_notes.extend(prepared_source.conversion_notes);
             prepared_source.conversion_notes = merged_notes;
         }
-        let mut skill = load_skill_from_local_dir(&prepared_source.install_path)?;
+        let skill_manifest =
+            crate::skill::read_skill_manifest(&prepared_source.install_path.join("skill.toml"))?;
+        let skill_id = skill_manifest.id.clone();
+        let skill_version = skill_manifest.version.clone();
 
-        // 版本更新：读取旧版本的 .env.local 以便保留
+        // 新平铺安装目录：~/.tiangong/skills/<id>/
+        let installed_dir = default_skills_storage_dir_path().join(&skill_id);
+
+        // 读取旧目录的 .env.local（如果已存在），保留环境变量
         let mut old_env: Vec<(String, String)> = Vec::new();
-        if let Some(existing) = state
-            .store
-            .agent
-            .agent_config
-            .skills
-            .installed
-            .iter()
-            .find(|item| item.id == skill.id)
-        {
-            let old_env_path = std::path::Path::new(&existing.source.value).join(".env.local");
+        // 保留原 available 状态（避免覆盖用户禁用状态）
+        let preserve_available = if installed_dir.exists() {
+            let old_env_path = installed_dir.join(".env.local");
             if let Ok(content) = fs::read_to_string(&old_env_path) {
                 for line in content.lines() {
                     let line = line.trim();
@@ -172,36 +187,23 @@ impl AppSkillService {
                     }
                 }
             }
-            // 清理旧版本目录
-            let old_dir = std::path::Path::new(&existing.source.value);
-            if old_dir.exists() {
-                let _ = fs::remove_dir_all(old_dir);
-                // 如果父目录（skill id 目录）为空也清理
-                if let Some(parent) = old_dir.parent() {
-                    let _ = fs::remove_dir(parent); // 只在空目录时成功
-                }
-            }
-            // 移除旧版本注册信息（允许重新安装/更新）
-            state
-                .store
-                .agent
-                .agent_config
-                .skills
-                .installed
-                .retain(|item| item.id != skill.id);
-        }
+            // 读取旧的 available 值
+            crate::skill::read_skill_manifest(&installed_dir.join("skill.toml"))
+                .ok()
+                .map(|m| m.available)
+        } else {
+            None
+        };
 
-        let installed_dir = default_skills_storage_dir_path()
-            .join("installed")
-            .join(&skill.id)
-            .join(&skill.version);
+        // 如果目标目录已存在，先删除
         if installed_dir.exists() {
-            // 版本目录已存在时覆盖安装
-            let _ = fs::remove_dir_all(&installed_dir);
+            fs::remove_dir_all(&installed_dir)
+                .with_context(|| format!("清理旧 skill 目录失败：{}", installed_dir.display()))?;
         }
-        if let Some(parent) = installed_dir.parent() {
-            ensure_dir(parent)?;
-        }
+        ensure_dir(&installed_dir)?;
+
+        let rollback_guard = InstallRollbackGuard::new(installed_dir.clone());
+
         copy_dir_recursive(&prepared_source.install_path, &installed_dir).with_context(|| {
             format!(
                 "复制 skill 到安装目录失败：{} -> {}",
@@ -214,13 +216,11 @@ impl AppSkillService {
         {
             let mut merged: std::collections::BTreeMap<String, String> =
                 std::collections::BTreeMap::new();
-            // 先填入旧版本的值
             for (k, v) in &old_env {
                 if !k.trim().is_empty() && !v.trim().is_empty() {
                     merged.insert(k.trim().to_string(), v.trim().to_string());
                 }
             }
-            // 新值覆盖
             for (k, v) in convert_env_values {
                 if !k.trim().is_empty() && !v.trim().is_empty() {
                     merged.insert(k.trim().to_string(), v.trim().replace('\n', "\\n"));
@@ -235,26 +235,23 @@ impl AppSkillService {
             }
         }
 
-        let rollback_guard = InstallRollbackGuard::new(installed_dir.clone());
+        // 写入 skill.toml.available：保留旧值或设置新值
+        let final_available = preserve_available.unwrap_or(enabled);
+        crate::skill::write_skill_available(&installed_dir, final_available)?;
 
-        skill.source.kind = "local".to_string();
-        skill.source.value = installed_dir.display().to_string();
-        skill.enabled = enabled;
+        rollback_guard.commit();
 
-        state
-            .store
-            .agent
-            .agent_config
-            .skills
-            .installed
-            .push(skill.clone());
+        // 刷新注册表并同步内存缓存
+        state.services.skill_registry.refresh();
+        state.sync_installed_from_registry();
         validate_agent_config(&state.store.agent.agent_config)?;
         state.rebuild_runtime_for_agent_config();
         state.persist_app_only()?;
-        state.sync_skill_locks()?;
+        state.sync_mcp_dependency_lock()?;
+
         let mut message = format!(
             "skill 已安装：{}@{} enabled={}",
-            skill.id, skill.version, skill.enabled
+            skill_id, skill_version, final_available
         );
         if prepared_source.converted {
             if stage_cleanup_enabled {
@@ -269,10 +266,9 @@ impl AppSkillService {
             };
             message.push_str(&format!("（{details}）"));
         }
-        rollback_guard.commit();
         audit::append_audit_log(&audit::AuditEntry::new(
             "skill.install",
-            &skill.id,
+            &skill_id,
             &message,
             true,
         ));
@@ -288,36 +284,41 @@ impl AppSkillService {
         if id.is_empty() {
             return Err(anyhow!("skill id 不能为空"));
         }
-        let Some(remove_idx) = state
+
+        // 从文件系统注册表查找 Skill 目录
+        let view = state.services.skill_registry.view();
+        let entry = view
+            .entries
+            .get(id)
+            .cloned()
+            .ok_or_else(|| anyhow!("未找到 skill：{id}"))?;
+        let skill_dir = entry.dir.clone();
+
+        // 收集该 Skill 托管的 MCP server（用于清理引用）
+        let managed_mcp_servers: Vec<String> = state
             .store
             .agent
             .agent_config
             .skills
             .installed
             .iter()
-            .position(|item| item.id == id)
-        else {
-            return Err(anyhow!("未找到 skill：{id}"));
-        };
-        let removed = state.store.agent.agent_config.skills.installed[remove_idx].clone();
+            .find(|s| s.id == id)
+            .map(|s| s.managed_mcp_servers.clone())
+            .unwrap_or_default();
 
-        let install_root = default_skills_storage_dir_path().join("installed");
-        let source_path = PathBuf::from(removed.source.value.trim());
-        if source_path.starts_with(&install_root) && source_path.exists() {
-            fs::remove_dir_all(&source_path)
-                .with_context(|| format!("删除 skill 安装目录失败：{}", source_path.display()))?;
-            cleanup_empty_skill_install_dirs(&source_path, &install_root)?;
+        // 删除 skills/<id>/ 目录
+        if skill_dir.exists() {
+            fs::remove_dir_all(&skill_dir)
+                .with_context(|| format!("删除 skill 目录失败：{}", skill_dir.display()))?;
         }
-        state
-            .store
-            .agent
-            .agent_config
-            .skills
-            .installed
-            .remove(remove_idx);
+
+        // 驱逐注册表缓存并同步内存
+        state.services.skill_registry.invalidate(id);
+        state.services.skill_registry.refresh();
+        state.sync_installed_from_registry();
 
         // 清理该 skill 托管的 MCP server（引用计数为 0 时移除）
-        for mcp_id in &removed.managed_mcp_servers {
+        for mcp_id in &managed_mcp_servers {
             let still_referenced = state
                 .store
                 .agent
@@ -340,7 +341,7 @@ impl AppSkillService {
         validate_agent_config(&state.store.agent.agent_config)?;
         state.rebuild_runtime_for_agent_config();
         state.persist_app_only()?;
-        state.sync_skill_locks()?;
+        state.sync_mcp_dependency_lock()?;
         audit::append_audit_log(&audit::AuditEntry::new(
             "skill.remove",
             id,
@@ -360,22 +361,18 @@ impl AppSkillService {
         if id.is_empty() {
             return Err(anyhow!("skill id 不能为空"));
         }
-        let Some(skill) = state
-            .store
-            .agent
-            .agent_config
-            .skills
-            .installed
-            .iter_mut()
-            .find(|item| item.id == id)
-        else {
-            return Err(anyhow!("未找到 skill：{id}"));
-        };
-        skill.enabled = enabled;
+        // 只修改 skills/<id>/skill.toml 的 available 字段
+        state
+            .services
+            .skill_registry
+            .set_available(id, enabled)
+            .with_context(|| format!("设置 skill available 失败：{id}"))?;
+
+        // 同步内存缓存
+        state.sync_installed_from_registry();
         validate_agent_config(&state.store.agent.agent_config)?;
         state.rebuild_runtime_for_agent_config();
-        state.persist_app_only()?;
-        state.sync_skill_locks()?;
+        state.sync_mcp_dependency_lock()?;
         audit::append_audit_log(&audit::AuditEntry::new(
             "skill.toggle",
             id,

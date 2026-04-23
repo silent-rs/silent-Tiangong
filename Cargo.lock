@@ -4138,6 +4138,7 @@ dependencies = [
  "scru128 3.6.1",
  "serde",
  "serde_json",
+ "tempfile",
  "tiangong-llm",
  "tiangong-media",
  "tiangong-memory",

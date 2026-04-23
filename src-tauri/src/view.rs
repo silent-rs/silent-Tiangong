@@ -191,6 +191,35 @@ pub struct SkillView {
     pub source_type: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillDetailView {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub description: Option<String>,
+    pub enabled: bool,
+    pub entry: String,
+    pub readme: String,
+}
+
+impl SkillDetailView {
+    pub fn from_core(core_skill: &tiangong_core::skill::LoadedSkill) -> Self {
+        Self {
+            id: core_skill.manifest.id.clone(),
+            name: core_skill.manifest.name.clone(),
+            version: core_skill.manifest.version.clone(),
+            description: if core_skill.manifest.description.is_empty() {
+                None
+            } else {
+                Some(core_skill.manifest.description.clone())
+            },
+            enabled: core_skill.manifest.available,
+            entry: core_skill.manifest.entry.clone(),
+            readme: core_skill.readme.clone(),
+        }
+    }
+}
+
 impl SkillView {
     pub fn from_core(core_skill: &tiangong_core::agent_config::InstalledSkillConfig) -> Self {
         Self {

@@ -8,9 +8,9 @@ import { Card, CardContent } from './ui/card';
 import { Switch } from './ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Link, Edit2, KeyRound } from 'lucide-react';
+import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Link, Edit2, KeyRound, RefreshCw, Info, Wrench } from 'lucide-react';
 import { api } from '@/api/tauri';
-import type { McpServer, Skill, ServerConfig, ConnectorInfo, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo } from '@/api/tauri';
+import type { McpServer, Skill, SkillDetail, ServerConfig, ConnectorInfo, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo } from '@/api/tauri';
 import { useToast } from './Toast';
 
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
@@ -1245,6 +1245,8 @@ function SkillSettings() {
   // skill env 编辑
   const [editSkillEnvId, setEditSkillEnvId] = useState<string | null>(null);
   const [editSkillEnvValues, setEditSkillEnvValues] = useState<Record<string, string>>({});
+  const [skillDetail, setSkillDetail] = useState<SkillDetail | null>(null);
+  const [skillGcReport, setSkillGcReport] = useState<string>('');
   const { showSuccess, showError } = useToast();
 
   const loadSkills = async () => {
@@ -1348,15 +1350,69 @@ function SkillSettings() {
     }
   };
 
+  const handleRefreshSkills = async () => {
+    try {
+      const msg = await api.refreshSkills();
+      showSuccess('已刷新', msg);
+      loadSkills();
+    } catch (error) {
+      console.error('刷新 Skill 失败:', error);
+      showError('刷新失败', `${error}`);
+    }
+  };
+
+  const handleGcSkills = async (apply: boolean) => {
+    try {
+      const msg = await api.gcSkills(apply);
+      setSkillGcReport(msg);
+      showSuccess(apply ? '清理完成' : '检测完成', msg);
+      loadSkills();
+    } catch (error) {
+      console.error('Skill GC 失败:', error);
+      showError('GC 失败', `${error}`);
+    }
+  };
+
+  const handleShowSkillDetail = async (id: string) => {
+    try {
+      const detail = await api.getSkillDetail(id);
+      setSkillDetail(detail);
+    } catch (error) {
+      console.error('读取 Skill 详情失败:', error);
+      showError('读取失败', `${error}`);
+    }
+  };
+
   return (
     <div className="p-4">
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-lg font-medium">Skills</h3>
-        <Button size="sm" onClick={() => setShowInstallDialog(true)}>
-          <Plus className="w-4 h-4 mr-2" />
-          安装 Skill
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="outline" onClick={handleRefreshSkills}>
+            <RefreshCw className="w-4 h-4 mr-2" />
+            刷新
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => handleGcSkills(false)}>
+            <Wrench className="w-4 h-4 mr-2" />
+            GC 检测
+          </Button>
+          <Button size="sm" onClick={() => setShowInstallDialog(true)}>
+            <Plus className="w-4 h-4 mr-2" />
+            安装 Skill
+          </Button>
+        </div>
       </div>
+
+      {skillGcReport && (
+        <div className="mb-4 rounded-md border bg-muted/40 p-3 text-xs font-mono whitespace-pre-wrap">
+          {skillGcReport}
+          <div className="mt-2">
+            <Button size="sm" variant="outline" onClick={() => handleGcSkills(true)}>
+              清理报告中的孤儿项
+            </Button>
+          </div>
+        </div>
+      )}
 
       {isLoading ? (
         <div className="text-center text-muted-foreground py-8">加载中...</div>
@@ -1380,6 +1436,15 @@ function SkillSettings() {
                   )}
                 </div>
                 <div className="flex items-center gap-2">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8"
+                    onClick={() => handleShowSkillDetail(skill.id)}
+                    title="查看详情"
+                  >
+                    <Info className="w-4 h-4" />
+                  </Button>
                   <Button
                     variant="ghost"
                     size="icon"
@@ -1436,6 +1501,32 @@ function SkillSettings() {
         }}
         onCancel={() => setEditSkillEnvId(null)}
       />
+
+      <Dialog open={skillDetail !== null} onOpenChange={(open) => !open && setSkillDetail(null)}>
+        <DialogContent className="max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
+          <DialogHeader>
+            <DialogTitle>{skillDetail?.name || 'Skill 详情'}</DialogTitle>
+          </DialogHeader>
+          {skillDetail && (
+            <div className="space-y-3 overflow-auto pr-1">
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                <Badge variant="outline">{skillDetail.id}</Badge>
+                <Badge variant={skillDetail.enabled ? 'default' : 'secondary'}>
+                  {skillDetail.enabled ? '已启用' : '已禁用'}
+                </Badge>
+                <Badge variant="outline">v{skillDetail.version}</Badge>
+                <Badge variant="outline">{skillDetail.entry}</Badge>
+              </div>
+              {skillDetail.description && (
+                <p className="text-sm text-muted-foreground">{skillDetail.description}</p>
+              )}
+              <pre className="whitespace-pre-wrap rounded-md bg-muted/50 p-3 text-xs leading-relaxed">
+                {skillDetail.readme}
+              </pre>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
 
       {/* 安装 Skill 对话框 */}
       {showInstallDialog && (

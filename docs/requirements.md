@@ -91,6 +91,17 @@
 - Memory 必须具备独立集成测试，覆盖写入、召回、IPC、workspace 隔离、混合检索、产物记忆和配置热更新。
 - Memory recall 输出必须有统一预算和去重策略，避免重复当前上下文、重复 URL、重复路径或重复工具结果摘要。
 
+#### Skill 文件系统注册表
+- Skill 注册事实源必须从 `skills.json.installed[]` / `skills-lock.json` 迁移到 `~/.tiangong/skills/<id>/` 目录存在性。
+- Skill 的 `id` 必须作为稳定机器标识用于目录、引用和审计；`name` 仅作为展示名称，不参与寻址。
+- Skill 启停状态必须由 `skills/<id>/skill.toml` 中的 `available` 字段表达；字段缺失时默认可用。
+- `SKILL.md` 不允许在启动期全量读入系统提示词，必须在激活、详情查看或检索命中时按需加载。
+- 用户手动拷贝或删除 `skills/<id>/` 后，下一次扫描、刷新或激活必须能感知，无需重启应用。
+- Skill 文件系统注册表必须保留 MCP 侧 `mcp-lock.json` 引用计数机制，不在本阶段重写 MCP 锁。
+- 新机制不得继续读取或写入 `skills-lock.json`，该文件仅允许作为旧布局迁移输入被备份。
+- 从 RFC-0003 旧布局 `skills/installed/<id>/<version>/` 到 RFC-0007 新布局必须提供自动迁移，失败时保留旧文件并可回退。
+- Skill 管理 API 必须保持现有 `install/remove/enable/list/get` 行为兼容，同时新增 refresh/gc 能力用于重扫与孤儿清理。
+
 #### 友好交互体验
 - GUI 和 CLI 必须支持执行过程中实时展示中间推理/解释文本（边执行边解释）。
 - 解释文本和工具调用必须独立展示：解释文本以流式非折叠方式展示，工具调用保持现有折叠展示方式。

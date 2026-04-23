@@ -38,7 +38,7 @@ fn scan_skills_with_warnings(config: &SkillsConfig) -> (Vec<SkillMeta>, Vec<Stri
     {
         roots.push(PathBuf::from(codex_home).join("skills"));
     }
-    roots.push(default_installed_skills_scan_dir());
+    // 不再扫描 installed/ 目录，已安装的 Skill 通过 config.installed 内存缓存提供
 
     let mut dedup = HashSet::new();
     roots.retain(|path| dedup.insert(path.display().to_string()));
@@ -47,13 +47,11 @@ fn scan_skills_with_warnings(config: &SkillsConfig) -> (Vec<SkillMeta>, Vec<Stri
     let mut files = Vec::new();
     for root in roots {
         if !root.exists() {
-            if root != default_installed_skills_scan_dir() {
-                warnings.push(format_skill_record(
-                    "error",
-                    root.display(),
-                    "skills dir not found",
-                ));
-            }
+            warnings.push(format_skill_record(
+                "error",
+                root.display(),
+                "skills dir not found",
+            ));
             continue;
         }
         collect_skill_files(&root, &mut files);
@@ -67,6 +65,8 @@ fn scan_skills_with_warnings(config: &SkillsConfig) -> (Vec<SkillMeta>, Vec<Stri
         .iter()
         .map(|item| item.name.to_ascii_lowercase())
         .collect::<HashSet<_>>();
+    // 将内存缓存中 enabled=true 的已安装 Skill 合并进 catalog
+    // 内存缓存由 SkillRegistry 扫描同步，只含 available=true 的 Skill
     for installed in &config.installed {
         if !installed.enabled {
             continue;
@@ -196,33 +196,4 @@ fn split_tokens(input: &str) -> Vec<&str> {
         .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
         .filter(|token| !token.is_empty())
         .collect()
-}
-
-fn default_installed_skills_scan_dir() -> PathBuf {
-    user_home_dir()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .join(".tiangong")
-        .join("skills")
-        .join("installed")
-}
-
-fn user_home_dir() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(home));
-    }
-
-    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(profile));
-    }
-
-    let drive = std::env::var_os("HOMEDRIVE").filter(|v| !v.is_empty());
-    let path = std::env::var_os("HOMEPATH").filter(|v| !v.is_empty());
-    match (drive, path) {
-        (Some(drive), Some(path)) => {
-            let mut buf = PathBuf::from(drive);
-            buf.push(path);
-            Some(buf)
-        }
-        _ => None,
-    }
 }

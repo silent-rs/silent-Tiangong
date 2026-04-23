@@ -81,8 +81,8 @@ fn repository_persist_to_disk_round_trips_split_configs_and_sessions() -> Result
 }
 
 #[test]
-fn sync_skill_locks_writes_expected_ref_counts() -> Result<()> {
-    with_isolated_state("tiangong-skill-locks", |paths, state| {
+fn sync_mcp_dependency_lock_writes_expected_ref_counts() -> Result<()> {
+    with_isolated_state("tiangong-mcp-dependency-lock", |paths, state| {
         state.store.agent.agent_config.skills.installed = vec![
             make_installed_skill(
                 "alpha",
@@ -114,31 +114,24 @@ fn sync_skill_locks_writes_expected_ref_counts() -> Result<()> {
             ),
         ];
 
-        state.sync_skill_locks()?;
+        state.sync_mcp_dependency_lock()?;
 
-        let skills_lock_path = paths
-            .fake_home
-            .join(".tiangong")
-            .join("skills")
-            .join("skills-lock.json");
         let mcp_lock_path = paths
             .fake_home
             .join(".tiangong")
             .join("skills")
             .join("mcp-lock.json");
 
-        let skills_lock: std::collections::BTreeMap<String, serde_json::Value> =
-            serde_json::from_str(&fs::read_to_string(skills_lock_path)?)?;
         let mcp_lock: std::collections::BTreeMap<String, serde_json::Value> =
             serde_json::from_str(&fs::read_to_string(mcp_lock_path)?)?;
 
-        assert_eq!(skills_lock.len(), 2);
-        assert_eq!(
-            skills_lock
-                .get("alpha")
-                .and_then(|item| item.get("version"))
-                .and_then(|value| value.as_str()),
-            Some("0.1.0")
+        assert!(
+            !paths
+                .fake_home
+                .join(".tiangong")
+                .join("skills")
+                .join("skills-lock.json")
+                .exists()
         );
         assert_eq!(
             mcp_lock

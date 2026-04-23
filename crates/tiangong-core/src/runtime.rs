@@ -1,6 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::agent_config::{AgentConfig, McpConfig};
 use crate::agents::execution_mcp_agent::{
@@ -711,6 +711,21 @@ impl RuntimeEngine {
                 execution: None,
             };
         };
+
+        let missing_mcp = missing_managed_mcp_servers(skill, &self.agent_config);
+        if !missing_mcp.is_empty() {
+            return ToolResult {
+                ok: false,
+                summary: format!("Skill {skill_id} 缺少托管 MCP 依赖"),
+                stdout: String::new(),
+                stderr: format!(
+                    "SkillActivationError::MissingMcp skill_id={skill_id} missing={}；请提示用户确认后补充注册这些托管 MCP",
+                    missing_mcp.join(",")
+                ),
+                exit_code: 1,
+                execution: None,
+            };
+        }
 
         let skill_dir = &skill.source.value;
         let skill_md = std::path::Path::new(skill_dir).join(&skill.entry);
@@ -1439,6 +1454,38 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<FunctionToolSpec>, engine: &
     }
 }
 
+fn missing_managed_mcp_servers(
+    skill: &crate::agent_config::InstalledSkillConfig,
+    agent_config: &AgentConfig,
+) -> Vec<String> {
+    if skill.requires_mcp.is_empty() {
+        return Vec::new();
+    }
+    let configured = agent_config
+        .mcp
+        .servers
+        .iter()
+        .map(|server| server.name.as_str())
+        .collect::<HashSet<_>>();
+
+    skill
+        .requires_mcp
+        .iter()
+        .filter_map(|requirement| {
+            let mcp_id = if requirement.id.trim().is_empty() {
+                requirement.package.trim()
+            } else {
+                requirement.id.trim()
+            };
+            if mcp_id.is_empty() {
+                return None;
+            }
+            let server_name = format!("skill::{}::{mcp_id}", skill.id);
+            (!configured.contains(server_name.as_str())).then_some(server_name)
+        })
+        .collect()
+}
+
 /// 构建 ReAct agent 的系统 prompt
 #[allow(dead_code)]
 pub(crate) fn build_react_system_prompt(
@@ -1586,4 +1633,83 @@ pub(crate) fn strip_tool_traces_from_response(text: &str) -> String {
     }
 
     cleaned.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_config::{
+        InstalledSkillConfig, McpServerConfig, McpTransportMode, SkillMcpRequirementConfig,
+        SkillSourceConfig,
+    };
+
+    #[test]
+    fn missing_managed_mcp_servers_reports_absent_skill_server() {
+        let skill = InstalledSkillConfig {
+            id: "demo".to_string(),
+            name: "Demo".to_string(),
+            version: "0.1.0".to_string(),
+            description: String::new(),
+            entry: "SKILL.md".to_string(),
+            enabled: true,
+            installed_at: String::new(),
+            managed_mcp_servers: vec!["skill::demo::tool".to_string()],
+            source: SkillSourceConfig {
+                kind: "local".to_string(),
+                value: "/tmp/demo".to_string(),
+            },
+            requires_mcp: vec![SkillMcpRequirementConfig {
+                id: "tool".to_string(),
+                source: "npm".to_string(),
+                package: "demo-tool".to_string(),
+                version: "1.0.0".to_string(),
+            }],
+            permissions: Default::default(),
+        };
+
+        let missing = missing_managed_mcp_servers(&skill, &AgentConfig::default());
+        assert_eq!(missing, vec!["skill::demo::tool"]);
+    }
+
+    #[test]
+    fn missing_managed_mcp_servers_accepts_configured_skill_server() {
+        let mut config = AgentConfig::default();
+        config.mcp.servers.push(McpServerConfig {
+            name: "skill::demo::tool".to_string(),
+            transport: McpTransportMode::Stdio,
+            command: "echo".to_string(),
+            args: Vec::new(),
+            endpoint: String::new(),
+            auth_header: String::new(),
+            headers: Default::default(),
+            env: Default::default(),
+            cwd: String::new(),
+            enabled: true,
+            tags: Vec::new(),
+        });
+        let skill = InstalledSkillConfig {
+            id: "demo".to_string(),
+            name: "Demo".to_string(),
+            version: "0.1.0".to_string(),
+            description: String::new(),
+            entry: "SKILL.md".to_string(),
+            enabled: true,
+            installed_at: String::new(),
+            managed_mcp_servers: vec!["skill::demo::tool".to_string()],
+            source: SkillSourceConfig {
+                kind: "local".to_string(),
+                value: "/tmp/demo".to_string(),
+            },
+            requires_mcp: vec![SkillMcpRequirementConfig {
+                id: "tool".to_string(),
+                source: "npm".to_string(),
+                package: "demo-tool".to_string(),
+                version: "1.0.0".to_string(),
+            }],
+            permissions: Default::default(),
+        };
+
+        let missing = missing_managed_mcp_servers(&skill, &config);
+        assert!(missing.is_empty());
+    }
 }

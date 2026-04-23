@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::*;
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -62,15 +64,6 @@ pub enum ManagementCommand {
 pub use tiangong_types::StreamEvent;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub(in crate::app_state) struct SkillsLockRecord {
-    pub(in crate::app_state) version: String,
-    pub(in crate::app_state) enabled: bool,
-    pub(in crate::app_state) source: String,
-    pub(in crate::app_state) installed_at: String,
-    pub(in crate::app_state) managed_mcp_servers: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(in crate::app_state) struct McpDependencyLockRecord {
     pub(in crate::app_state) path: String,
     pub(in crate::app_state) ref_count: usize,
@@ -116,6 +109,7 @@ pub struct AppServices {
     pub repository: AppRepository,
     pub runtime: RuntimeEngine,
     pub turn_service: AppTurnService,
+    pub skill_registry: Arc<crate::skill::SkillRegistry>,
 }
 
 #[derive(Debug)]

@@ -1,12 +1,19 @@
-id = "volcengine-video"
+id = "volcengine_video"
 name = "火山方舟视频生成"
 version = "1.1.0"
 entry = "SKILL.md"
+available = true
 
 [source]
 type = "local"
+value = "skills/volcengine_video"
 
 [requires]
 env = ["ARK_API_KEY", "ARK_BASE_URL", "ARK_MODEL"]
+mcp = []
 
 [permissions]
+fs_read = ["./**"]
+fs_write = ["./**"]
+cmd_exec = ["python3", "python"]
+net = ["ark.cn-beijing.volces.com", "volces.com"]

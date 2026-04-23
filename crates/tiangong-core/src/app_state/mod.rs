@@ -8,7 +8,8 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use crate::agent_config::{
-    AgentConfig, InstalledSkillConfig, McpConfig, McpServerConfig, McpTransportMode, SkillsConfig,
+    AgentConfig, InstalledSkillConfig, McpConfig, McpServerConfig, McpTransportMode,
+    SkillMcpRequirementConfig, SkillsConfig,
 };
 use crate::agents::skill_convert_agent::convert_external_skill_with_agent;
 use crate::mcp::{
@@ -23,8 +24,7 @@ use crate::runtime::{
 };
 use crate::session::{MessageRole, Session, SessionTaskPlan, now_text};
 use crate::skill::{
-    analyze_external_skill, init_tiangong_skill_scaffold, load_skill_from_local_dir,
-    prepare_skill_source_for_install,
+    analyze_external_skill, init_tiangong_skill_scaffold, prepare_skill_source_for_install,
 };
 use crate::tool::{ToolExecutionRecord, ToolResult};
 
@@ -40,16 +40,15 @@ mod tests;
 
 // Private imports
 use self::repository::{
-    cleanup_empty_skill_install_dirs, converted_stage_cleanup_dir, copy_dir_recursive,
-    default_app_storage_path, default_mcp_capability_cache_path, default_mcp_config_path,
+    converted_stage_cleanup_dir, copy_dir_recursive, default_app_storage_path,
+    default_mcp_capability_cache_path, default_mcp_config_path, default_mcp_lock_path,
     default_sessions_dir_path, default_skills_config_path, default_skills_storage_dir_path,
     ensure_dir, normalize_model_list, parse_bool, parse_list_value, validate_agent_config,
 };
 use self::services::{AppMcpService, AppSkillService, AppTurnService};
 pub use self::support::StreamEvent;
 use self::support::{
-    LegacyPersistedState, LoadedState, McpDependencyLockRecord, PersistedAppState,
-    ScopedDirCleanup, SkillsLockRecord,
+    LegacyPersistedState, LoadedState, McpDependencyLockRecord, PersistedAppState, ScopedDirCleanup,
 };
 
 // Public re-exports for Tauri API

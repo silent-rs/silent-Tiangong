@@ -1,12 +1,19 @@
-id = "skill-creator"
+id = "skill_creator"
 name = "Skill 创建器"
 version = "0.1.0"
 entry = "SKILL.md"
+available = true
 
 [source]
 type = "local"
+value = "skills/skill_creator"
 
 [requires]
 env = []
+mcp = []
 
 [permissions]
+fs_read = ["./**"]
+fs_write = ["./**"]
+cmd_exec = ["python3", "python"]
+net = []

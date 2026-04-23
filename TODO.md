@@ -1,130 +1,197 @@
 # TODO - 天工当前开发任务
 
-> 最后更新：2026-04-22
-> 当前主线：Phase 18 Memory 系统收口
-> 参考：`PLAN.md`、`docs/requirements.md`、`docs/memory-system/`
+> 最后更新：2026-04-23
+> 当前主线：RFC-0007 Skill 文件系统注册表
+> 参考：`PLAN.md`、`docs/requirements.md`、`docs/rfc/0007-skill-filesystem-registry.md`
 
 ---
 
 ## 当前结论
 
-Memory 主链路已经可用，但还不能视为完全收口。当前最重要的差距不是“能不能写入和回忆”，而是回忆策略、Meso 提炼质量、运行时生命周期、配置热更新和外部向量后端验证。
+接下来从 RFC-0007 开始收口 Skill 管理机制。目标是把 Skill 注册状态从 `skills.json.installed[]` / `skills-lock.json` 迁移到文件系统目录本身：
 
-已完成能力只在本节压缩记录，后续 TODO 只保留真实开发差距。
+- `~/.tiangong/skills/<id>/` 的存在性决定 Skill 是否安装。
+- `<id>` 是稳定机器标识，`name` 仅用于展示；系统始终只使用当前安装版本。
+- `skill.toml.available` 决定 Skill 是否可激活。
+- `SKILL.md` 只在激活、详情查看或匹配命中时加载。
+- MCP 依赖锁仍保留 `mcp-lock.json`，不在本轮重构中推翻。
 
----
-
-## 已完成能力摘要
-
-- 平台基础：Workspace 多 crate、Core/CLI/GUI/Server 拆分、Server 模式、Connector、EventBus、多媒体框架、CoreConfig 注入、LLM 协议抽象、Anthropic 支持、远程信任语义和成本可见性已完成。
-- Phase 17 多媒体：图片/视频结果已进入结构化消息链路，本地 GUI 可渲染结构化媒体结果，旧 Markdown 图片仍保留兼容。
-- Phase 18 Memory 基础：`tiangong-memory` 独立 crate、SQLite 元数据库、Injection、Actor/Handle、TCP IPC、Leader/Follower、workspace 显式写入上下文已完成。
-- Phase 18 写入/检索：Episode 写入、Tantivy BM25、内置 SQLite flat 向量索引、Qdrant 兼容路径、BM25+Vector 混合召回、Depth2 展开已完成。
-- Phase 18 Tool 化回忆：Core 已移除 turn 前自动 Recall，改为主模型按需调用 `recall_memory`；Memory 内部先执行初始回忆，再基于初始结果判断是否需要 deep recall，并可沿 Entity/Decision 追溯来源 Episode。
-- Phase 18 产物记忆：媒体 URL、文件路径、工具结果摘要已写入 Episode，可支持“刚刚生成的图片/文件”等回忆。
-- Phase 18 模型能力收口：Memory 文本生成与 embedding 配置复用 `tiangong-llm`，不再在 Memory 内重复实现模型配置和协议适配。
-- Phase 18 Meso 初版：规则版 Entity/Decision 提炼已接入 SQLite/Tantivy，并更新 Workspace Injection。
-- Phase 18 测试：Memory 已覆盖 runtime、IPC、leader failover、embedded 混合检索、artifact-only 写入、增量回忆去重、Meso Entity/Decision。
+旧 Memory 主线已迁出到 PR，本文档只保留 RFC-0007 真实开发差距。
 
 ---
 
-## P0 - 必须优先收口
+## P0 - Phase A：设计冻结与基础结构
 
-### 1. 抽出稳定的 `RecallAnchorExtractor`
+### 1. 接受 RFC-0007 并同步需求边界
 
-- [x] 新增 `recall_anchor.rs`，提供统一的 `RecallAnchorExtractor` 入口。
-- [x] 将 `recall_context` 中的 LLM plan 逻辑迁移到 `RecallAnchorExtractor`。
-- [x] 将 `recall_context` 中的规则 fallback 逻辑迁移到 `RecallAnchorExtractor`。
-- [x] 让 LLM 规划和规则 fallback 都输出同一个 `RecallAnchors` 结构。
-- [x] 规则 fallback 覆盖历史指代、文件路径、URL、工具名、代码符号、媒体产物和用户显式关键词。
-- [x] 明确 `SearchStrategy::Skip` 的入口语义，避免普通闲聊触发无意义检索。
-- [x] 为 anchor 提取增加单元测试：历史指代、精确文件路径、媒体 URL、普通闲聊、空输入。
+- [x] 将 `docs/rfc/0007-skill-filesystem-registry.md` 状态从 Draft 调整为 Accepted。
+- [x] 在 `docs/requirements.md` 中补充 Skill 文件系统注册表要求。
+- [x] 在 `PLAN.md` 中把当前主目标切换到 RFC-0007。
+- [x] 明确首期不引入文件系统通知，仅使用扫描 + mtime 缓存。
+- [x] 明确 MCP 侧 `mcp-lock.json` 机制保持不变。
 
-### 2. 修正 Meso Entity/Decision 的幂等与质量问题
+### 2. 定义 Skill 文件系统注册表数据结构
 
-- [x] 为 Entity 生成稳定 key，按 `(workspace_id, entity_type, name)` 去重更新。
-- [x] 为 Decision 生成稳定 dedupe key，避免同一 Episode 多次生成重复 Decision。
-- [x] 增加 LLM 版 Meso 提炼器，复用 `tiangong-llm` 输出结构化 Entity/Decision。
-- [x] 为 LLM Meso 输出增加严格 JSON 解析、字段校验和错误 fallback。
-- [x] 保留当前规则版 Meso 作为 LLM 失败时的 fallback。
-- [x] 增加集成测试验证重复运行 Meso 不会重复膨胀 Entity/Decision 数量。
-- [x] 增加测试验证 LLM Meso 失败时仍能回退到规则版。
+- [x] 新增或改造 `SkillEntry`，字段至少包含 `id`、`dir`、`manifest_mtime`。
+- [x] 新增或改造 `SkillRegistryView`，只保存轻量索引，不保存 `SKILL.md` 全文。
+- [x] 新增或改造 `LoadedSkill`，字段至少包含 `manifest`、`readme`、`loaded_at`、`source_mtime`。
+- [x] 为注册表扫描结果定义非法目录、manifest 缺失、id 不一致等错误/告警类型。
+- [x] 明确缓存阈值默认 2 秒，支持强制刷新绕过缓存。
 
-### 3. Memory runtime / handle registry 生命周期收口
+### 3. 支持 `skill.toml.available`
 
-- [x] 为 registry entry 记录 workspace_id、配置摘要或 generation、创建时间、最后使用时间。
-- [x] 定义配置 generation 变化时的处理策略：memory 相关摘要变化时复用旧 handle 并标记待重启。
-- [x] 保证 `TiangongCore::into_session` / Drop 不误关共享 MemoryHandle。
-- [x] 增加应用退出路径的统一 Memory shutdown 能力。
-- [x] 增加测试验证两个 workspace 使用不同 handle。
-- [x] 增加测试验证两个 workspace 的 Episode 不会串写 scope_id。
+- [x] 为 Skill manifest 增加 `available: bool` 字段。
+- [x] `available` 缺失时按 `true` 处理。
+- [x] manifest 序列化时保留或写入 `available`。
+- [x] 注册表层提供 `set_available` / `write_skill_available` 写入能力。
+- [x] `set_skill_enabled(id, enabled)` 只修改 `skills/<id>/skill.toml`。
+- [x] `available=false` 时按需加载不读取 `SKILL.md` 正文。
+- [x] 禁用 Skill 不参与 `@skill` 激活、检索匹配和 Agent 可用工具列表。
 
----
+### 4. 实现轻量扫描与按需加载
 
-## P1 - 主链路质量增强
+- [x] 扫描 `~/.tiangong/skills/<id>/` 平铺目录。
+- [x] 跳过 `mcp-lock.json`、隐藏文件、非目录和非法目录。
+- [x] 校验目录名必须等于 `skill.toml.id`，不一致时跳过并记录告警。
+- [x] `list_skills()` 返回轻量 `SkillEntry` / 摘要，不读取 `SKILL.md` 全文。
+- [x] `get_skill_detail(id)` 触发 `skill.toml` + `SKILL.md` 实时加载。
+- [x] 已加载 Skill 在 `manifest_mtime` 未变化时命中缓存。
+- [x] 缓存容量默认 32，超出后按 `loaded_at` 做 LRU 淘汰。
 
-### 4. Memory 配置热更新
+### 5. Phase A 测试
 
-- [x] 定义 Memory 配置摘要，覆盖 model、embedding、dimension、vector_mode。
-- [x] registry 根据配置摘要判断是否复用旧 handle。
-- [x] 明确哪些配置变更需要重启 Memory actor：workspace 变化使用独立 registry entry，不在同一 actor 内热更新。
-- [x] 明确哪些配置变更可以原地更新：model、embedding、dimension、vector_mode。
-- [x] embedding 维度变化时拒绝复用旧向量索引。
-- [x] embedding/vector 配置不兼容时输出 warning 并降级为 BM25-only。
-- [x] 增加配置变更相关单元测试或集成测试。
-
-### 5. Recall 输出预算与去重策略继续收口
-
-- [x] 为 `MemoryRecallResponse` 增加统一输出预算策略。
-- [x] 至少按字符数或估算 token 限制 recall 输出长度。
-- [x] 同一 node_id 不重复输出。
-- [x] 同一 URL 不重复输出。
-- [x] 同一路径不重复输出。
-- [x] 同一工具结果摘要不重复输出。
-- [x] 当前上下文已有内容不重复输出。
-- [x] 增加长 Episode 裁剪测试。
-- [x] 增加重复 URL、重复 path、重复当前上下文测试。
+- [x] 单元测试：扫描合法 `skills/<id>/skill.toml`。
+- [x] 单元测试：跳过目录名与 manifest id 不一致的目录。
+- [x] 单元测试：`available` 缺失默认 true。
+- [x] 单元测试：`available=false` 不可激活。
+- [x] 单元测试：mtime 变化后重新加载。
+- [x] 单元测试：强制 refresh 绕过缓存。
 
 ---
 
-## P2 - 后续增强
+## P1 - Phase B：运行时接入与迁移
 
-### 6. Memory 观测与调试能力
+### 6. 改造 SkillService 主链路
 
-- [x] tracing 日志输出 recall query。
-- [x] tracing 日志输出 recall strategy。
-- [x] tracing 日志输出 hit count。
-- [x] tracing 日志输出 backend：BM25、embedded vector、Qdrant。
-- [x] tracing 日志输出 used_llm 和 fallback reason。
-- [x] debug 日志可观察 Episode 写入。
-- [x] debug 日志可观察 vector upsert。
-- [x] debug 日志可观察 Meso Entity/Decision 提炼数量。
+- [x] `install_skill(path, enabled)` 改为复制到 `skills/<id>/`。
+- [x] 安装时目标目录已存在则保留 `.env.local`。
+- [x] 安装时目标目录已存在则保留原 `available`，避免覆盖用户禁用状态。
+- [x] 安装完成后触发 `SkillRegistryView` 重扫。
+- [x] `remove_skill(id)` 改为删除 `skills/<id>/` 并驱逐缓存。
+- [x] `list/get/enable/remove/install` 全部走文件系统注册表，不再依赖 `skills.json.installed[]`。
 
-### 7. Phase 17 多媒体尾项
+### 7. 移除 `skills.installed[]` 持久化写入
 
-- [x] 为视频结果补齐与图片一致的结构化消息字段。
-- [x] GUI 支持渲染结构化视频结果。
-- [x] Connector 支持发送结构化视频结果。
-- [x] 约束 MCP 只作为媒体后端来源之一。
-- [x] 防止多媒体结果重新退化为工具文本。
+- [x] 删除或旁路 `persist_app_only()` 中对 `skills.installed[]` 的写入。
+- [x] `app.json` / `skills.json` 只保留非注册状态配置，例如 `enabled`、`dirs`、`max_matches`。
+- [x] 外部手动修改 `skills/` 目录后不会被下一次全局持久化覆盖。
+- [x] 启动时优先使用新布局 `skills/<id>/`。
 
-### 8. requirements 文档补齐 Memory 需求
+### 8. 实现旧布局迁移器
 
-- [x] 在 `docs/requirements.md` 增加 Memory 系统 Must/Should 要求。
-- [x] 明确 Memory 功能必须可关闭。
-- [x] 明确 Memory 必须保持独立 crate。
-- [x] 明确 Memory 必须复用 `tiangong-llm`。
-- [x] 明确 Memory 必须支持按需回忆。
-- [x] 明确 Memory 必须支持 workspace 隔离。
-- [x] 明确 Memory 必须支持产物记忆。
-- [x] 明确 Memory 必须具备独立集成测试。
+- [x] 检测 `skills/installed/<id>/<version>/skill.toml` 旧目录。
+- [x] 检测旧 `skills.json.installed[]`。
+- [x] 旧 `skills/skills-lock.json` 仅作为旧布局伴随文件处理，不单独触发迁移。
+- [x] 多版本并存时优先选择 `skills.json` 登记版本。
+- [x] 将选中版本平铺迁移到 `skills/<id>/`。
+- [x] 将旧 `enabled` 写入新 `skill.toml.available`。
+- [x] 将 `skills.json` 备份为 `skills.json.legacy`。
+- [x] 将旧布局伴随的 `skills-lock.json` 备份为 `skills-lock.json.legacy` 后移除原文件。
+- [x] 从 app 配置中移除 `agent_config.skills.installed[]`。
+- [x] 迁移失败时写入 `migration-failed.lock`，不删除旧文件。
+- [x] 生成 `skill_migration` 审计事件，记录新旧路径与结果。
+
+### 9. Phase B 测试
+
+- [x] 集成测试：命令式安装后目录落在 `skills/<id>/`。
+- [x] 集成测试：手动拷贝目录后下一次扫描可见。
+- [x] 集成测试：删除目录后下一次扫描不可见。
+- [x] 集成测试：禁用状态通过 `skill.toml.available=false` 持久化。
+- [x] 集成测试：旧 `<id>/<version>` 布局自动迁移。
+- [x] 集成测试：迁移失败保留旧文件并写入失败锁。
+
+---
+
+## P2 - Phase C：外围命令、UI 与一致性修复
+
+### 10. 刷新与 GC 命令
+
+- [x] 新增 Tauri command：`refresh_skills()`。
+- [x] 新增 Tauri command：`gc_skills()`。
+- [x] 新增 CLI 子命令：`tiangong skill refresh`。
+- [x] 新增 CLI 子命令：`tiangong skill gc`。
+- [x] `gc_skills()` 能识别 orphan `skill::*::*` MCP server。
+- [x] `gc_skills()` 能识别 `mcp-lock.json` 中无 Skill 引用的孤儿锁条目。
+- [x] GC 默认只报告，用户确认后才删除 MCP server 或递减引用计数。
+
+### 11. Skill 激活期 MCP 缺失处理
+
+- [x] 从 `skills/<id>/skill.toml` 的 `[mcp]` / `requires.mcp` 读取托管 MCP 声明。
+- [x] 手动安装 Skill 时不自动安装 MCP。
+- [x] 激活时发现缺失托管 MCP，返回 `SkillActivationError::MissingMcp`。
+- [x] GUI/CLI 收到缺失 MCP 错误后提示用户确认补装。
+- [x] 托管 MCP server 命名继续使用 `skill::<id>::<mcp_id>`。
+
+### 12. UI 管理面板懒加载
+
+- [x] Skill 列表页只调用轻量 `list_skills()`。
+- [x] 打开详情时调用 `get_skill_detail(id)`。
+- [x] 列表页展示非法目录 / orphan MCP 的非阻塞告警。
+- [x] 启停开关直接写 `skill.toml.available`。
+- [x] 手动拷贝 Skill 后点击刷新即可出现，无需重启。
+
+### 13. `skill doctor` 诊断工具
+
+- [x] 新增 CLI 子命令：`tiangong skill doctor`。
+- [x] 诊断缺失 `skill.toml` 的目录。
+- [x] 诊断目录名与 `skill.toml.id` 不一致。
+- [x] 诊断 `SKILL.md` 缺失或 entry 指向不存在。
+- [x] 诊断托管 MCP 引用缺失或孤儿。
+
+---
+
+## P3 - Phase D：清理与文档
+
+### 14. 删除旧注册机制
+
+- [x] 删除 `skills-lock.json` 相关 Skill 注册读写代码（仅保留旧布局迁移备份）。
+- [x] 删除 `skills.json.installed[]` 作为注册事实源的代码路径。
+- [x] 删除 `installed/<id>/<version>/` 新写入路径。
+- [x] 保留 `mcp-lock.json` 相关代码。
+- [x] 清理不再使用的类型、字段和迁移兼容分支。
+
+### 15. 文档与示例更新
+
+- [x] 更新用户文档：手动安装 Skill = 拷贝目录到 `~/.tiangong/skills/<id>/`。
+- [x] 更新开发文档：`skill.toml.available` 字段语义。
+- [x] 更新示例 Skill 为新平铺布局。
+- [x] 更新 Tauri command 契约说明。
+- [x] 更新 RFC-0003 中被 RFC-0007 修订的章节引用。
+
+### 16. `.legacy` 备份清理
+
+- [x] `tiangong skill gc` 支持列出超过 30 天的 `.legacy` 备份。
+- [x] 用户确认后清理过期 `.legacy` 文件。
+- [x] 保证 GC 清理失败不影响主程序启动或 Skill 激活。
 
 ---
 
 ## 当前推荐执行顺序
 
-1. ✅ 全量 workspace 检查链已通过（cargo test --workspace：全部 pass，0 failed）。
-2. ✅ LLM Meso 提炼器已完成：LLM 版 + 规则 fallback + 严格校验 + 幂等测试全部通过。
-3. 针对 deep recall 的真实 LLM 配置路径运行一次带日志的集成观察。
-4. 补一轮针对 Memory 主链路的代码 review（重点：recall_context.rs、rumination.rs、core/mod.rs）。
-5. 根据 review 结果决定是否进入 Phase 19 或先做缺陷修复。
+1. 先同步 `PLAN.md` 和 `docs/requirements.md`，确认 RFC-0007 已进入当前开发主线。
+2. 实现 Phase A 的数据结构、manifest `available` 字段、轻量扫描和按需加载。
+3. 为 Phase A 补齐单元测试，确保无需改动 UI 即可验证核心行为。
+4. 再改造 SkillService 的 install/remove/enable/list/get 主链路。
+5. 最后处理迁移器、GC、Tauri/CLI/UI 外围能力。
+
+---
+
+## 验收标准
+
+- [x] `skills/<id>/` 目录存在性唯一决定 Skill 是否安装。
+- [x] 手动拷贝/删除 Skill 目录后，下一次扫描或激活可立即感知。
+- [x] `skill.toml.available` 完整表达 Skill 启停状态。
+- [x] `SKILL.md` 仅在激活、详情查看或检索命中时读入内存。
+- [x] 从 RFC-0003 旧布局到 RFC-0007 新布局可自动迁移，失败可回退。
+- [x] `mcp-lock.json` 引用计数与所有 Skill 声明的 MCP 依赖汇总一致。
+- [x] `tiangong skill gc` 可清理删除 Skill 后遗留的孤儿 MCP 托管条目。

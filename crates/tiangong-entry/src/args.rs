@@ -241,6 +241,15 @@ pub(crate) enum SkillSubcommand {
         #[arg(help = "Skill ID")]
         id: String,
     },
+    #[command(about = "刷新 Skill 注册表（重扫 skills/<id>/）")]
+    Refresh,
+    #[command(about = "检测或清理孤儿 Skill 托管 MCP 配置")]
+    Gc {
+        #[arg(long, default_value_t = false, help = "执行清理；默认只报告不删除")]
+        apply: bool,
+    },
+    #[command(about = "诊断 Skill 注册表、manifest 与托管 MCP 一致性")]
+    Doctor,
     #[command(about = "校验配置")]
     Validate,
 }

@@ -1227,6 +1227,31 @@ pub fn get_skills(state: State<TiangongApp>) -> Result<Vec<SkillView>, String> {
     })
 }
 
+/// 刷新 Skill 注册表（重扫 skills/<id>/）
+#[tauri::command]
+pub fn refresh_skills(state: State<TiangongApp>) -> Result<String, String> {
+    let message = state.with_state(|core_state| core_state.refresh_skills())?;
+    state.sync_core_config_from_state()?;
+    Ok(message)
+}
+
+/// 检测或清理孤儿 Skill 托管 MCP 配置
+#[tauri::command]
+pub fn gc_skills(apply: bool, state: State<TiangongApp>) -> Result<String, String> {
+    let message = state.with_state(|core_state| core_state.gc_skills(apply))?;
+    state.sync_core_config_from_state()?;
+    Ok(message)
+}
+
+/// 获取 Skill 完整详情（按需读取 SKILL.md）
+#[tauri::command]
+pub fn get_skill_detail(id: String, state: State<TiangongApp>) -> Result<SkillDetailView, String> {
+    state.with_state_read(|core_state| {
+        let detail = core_state.get_skill_detail(&id)?;
+        Ok(SkillDetailView::from_core(&detail))
+    })
+}
+
 /// 检查 Skill 安装需求（返回需要配置的环境变量列表）
 #[tauri::command]
 pub fn inspect_skill(path: String, state: State<TiangongApp>) -> Result<SkillInspection, String> {
