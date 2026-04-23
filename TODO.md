@@ -1,6 +1,6 @@
 # TODO - 天工当前开发任务
 
-> 最后更新：2026-04-22
+> 最后更新：2026-04-23
 > 当前主线：RFC-0007 Skill 文件系统注册表
 > 参考：`PLAN.md`、`docs/requirements.md`、`docs/rfc/0007-skill-filesystem-registry.md`
 
@@ -46,7 +46,7 @@
 - [x] 注册表层提供 `set_available` / `write_skill_available` 写入能力。
 - [x] `set_skill_enabled(id, enabled)` 只修改 `skills/<id>/skill.toml`。
 - [x] `available=false` 时按需加载不读取 `SKILL.md` 正文。
-- [ ] 禁用 Skill 不参与 `@skill` 激活、检索匹配和 Agent 可用工具列表。
+- [x] 禁用 Skill 不参与 `@skill` 激活、检索匹配和 Agent 可用工具列表。
 
 ### 4. 实现轻量扫描与按需加载
 
@@ -116,37 +116,37 @@
 
 ### 10. 刷新与 GC 命令
 
-- [ ] 新增 Tauri command：`refresh_skills()`。
-- [ ] 新增 Tauri command：`gc_skills()`。
-- [ ] 新增 CLI 子命令：`tiangong skill refresh`。
-- [ ] 新增 CLI 子命令：`tiangong skill gc`。
-- [ ] `gc_skills()` 能识别 orphan `skill::*::*` MCP server。
-- [ ] `gc_skills()` 能识别 `mcp-lock.json` 中无 Skill 引用的孤儿锁条目。
-- [ ] GC 默认只报告，用户确认后才删除 MCP server 或递减引用计数。
+- [x] 新增 Tauri command：`refresh_skills()`。
+- [x] 新增 Tauri command：`gc_skills()`。
+- [x] 新增 CLI 子命令：`tiangong skill refresh`。
+- [x] 新增 CLI 子命令：`tiangong skill gc`。
+- [x] `gc_skills()` 能识别 orphan `skill::*::*` MCP server。
+- [x] `gc_skills()` 能识别 `mcp-lock.json` 中无 Skill 引用的孤儿锁条目。
+- [x] GC 默认只报告，用户确认后才删除 MCP server 或递减引用计数。
 
 ### 11. Skill 激活期 MCP 缺失处理
 
-- [ ] 从 `skills/<id>/skill.toml` 的 `[mcp]` / `requires.mcp` 读取托管 MCP 声明。
-- [ ] 手动安装 Skill 时不自动安装 MCP。
-- [ ] 激活时发现缺失托管 MCP，返回 `SkillActivationError::MissingMcp`。
-- [ ] GUI/CLI 收到缺失 MCP 错误后提示用户确认补装。
-- [ ] 托管 MCP server 命名继续使用 `skill::<id>::<mcp_id>`。
+- [x] 从 `skills/<id>/skill.toml` 的 `[mcp]` / `requires.mcp` 读取托管 MCP 声明。
+- [x] 手动安装 Skill 时不自动安装 MCP。
+- [x] 激活时发现缺失托管 MCP，返回 `SkillActivationError::MissingMcp`。
+- [x] GUI/CLI 收到缺失 MCP 错误后提示用户确认补装。
+- [x] 托管 MCP server 命名继续使用 `skill::<id>::<mcp_id>`。
 
 ### 12. UI 管理面板懒加载
 
-- [ ] Skill 列表页只调用轻量 `list_skills()`。
-- [ ] 打开详情时调用 `get_skill_detail(id)`。
-- [ ] 列表页展示非法目录 / orphan MCP 的非阻塞告警。
-- [ ] 启停开关直接写 `skill.toml.available`。
-- [ ] 手动拷贝 Skill 后点击刷新即可出现，无需重启。
+- [x] Skill 列表页只调用轻量 `list_skills()`。
+- [x] 打开详情时调用 `get_skill_detail(id)`。
+- [x] 列表页展示非法目录 / orphan MCP 的非阻塞告警。
+- [x] 启停开关直接写 `skill.toml.available`。
+- [x] 手动拷贝 Skill 后点击刷新即可出现，无需重启。
 
 ### 13. `skill doctor` 诊断工具
 
-- [ ] 新增 CLI 子命令：`tiangong skill doctor`。
-- [ ] 诊断缺失 `skill.toml` 的目录。
-- [ ] 诊断目录名与 `skill.toml.id` 不一致。
-- [ ] 诊断 `SKILL.md` 缺失或 entry 指向不存在。
-- [ ] 诊断托管 MCP 引用缺失或孤儿。
+- [x] 新增 CLI 子命令：`tiangong skill doctor`。
+- [x] 诊断缺失 `skill.toml` 的目录。
+- [x] 诊断目录名与 `skill.toml.id` 不一致。
+- [x] 诊断 `SKILL.md` 缺失或 entry 指向不存在。
+- [x] 诊断托管 MCP 引用缺失或孤儿。
 
 ---
 
@@ -155,24 +155,24 @@
 ### 14. 删除旧注册机制
 
 - [x] 删除 `skills-lock.json` 相关 Skill 注册读写代码（仅保留旧布局迁移备份）。
-- [ ] 删除 `skills.json.installed[]` 作为注册事实源的代码路径。
-- [ ] 删除 `installed/<id>/<version>/` 新写入路径。
-- [ ] 保留 `mcp-lock.json` 相关代码。
-- [ ] 清理不再使用的类型、字段和迁移兼容分支。
+- [x] 删除 `skills.json.installed[]` 作为注册事实源的代码路径。
+- [x] 删除 `installed/<id>/<version>/` 新写入路径。
+- [x] 保留 `mcp-lock.json` 相关代码。
+- [x] 清理不再使用的类型、字段和迁移兼容分支。
 
 ### 15. 文档与示例更新
 
-- [ ] 更新用户文档：手动安装 Skill = 拷贝目录到 `~/.tiangong/skills/<id>/`。
-- [ ] 更新开发文档：`skill.toml.available` 字段语义。
-- [ ] 更新示例 Skill 为新平铺布局。
-- [ ] 更新 Tauri command 契约说明。
-- [ ] 更新 RFC-0003 中被 RFC-0007 修订的章节引用。
+- [x] 更新用户文档：手动安装 Skill = 拷贝目录到 `~/.tiangong/skills/<id>/`。
+- [x] 更新开发文档：`skill.toml.available` 字段语义。
+- [x] 更新示例 Skill 为新平铺布局。
+- [x] 更新 Tauri command 契约说明。
+- [x] 更新 RFC-0003 中被 RFC-0007 修订的章节引用。
 
 ### 16. `.legacy` 备份清理
 
-- [ ] `tiangong skill gc` 支持列出超过 30 天的 `.legacy` 备份。
-- [ ] 用户确认后清理过期 `.legacy` 文件。
-- [ ] 保证 GC 清理失败不影响主程序启动或 Skill 激活。
+- [x] `tiangong skill gc` 支持列出超过 30 天的 `.legacy` 备份。
+- [x] 用户确认后清理过期 `.legacy` 文件。
+- [x] 保证 GC 清理失败不影响主程序启动或 Skill 激活。
 
 ---
 
@@ -188,10 +188,10 @@
 
 ## 验收标准
 
-- [ ] `skills/<id>/` 目录存在性唯一决定 Skill 是否安装。
-- [ ] 手动拷贝/删除 Skill 目录后，下一次扫描或激活可立即感知。
-- [ ] `skill.toml.available` 完整表达 Skill 启停状态。
-- [ ] `SKILL.md` 仅在激活、详情查看或检索命中时读入内存。
-- [ ] 从 RFC-0003 旧布局到 RFC-0007 新布局可自动迁移，失败可回退。
-- [ ] `mcp-lock.json` 引用计数与所有 Skill 声明的 MCP 依赖汇总一致。
-- [ ] `tiangong skill gc` 可清理删除 Skill 后遗留的孤儿 MCP 托管条目。
+- [x] `skills/<id>/` 目录存在性唯一决定 Skill 是否安装。
+- [x] 手动拷贝/删除 Skill 目录后，下一次扫描或激活可立即感知。
+- [x] `skill.toml.available` 完整表达 Skill 启停状态。
+- [x] `SKILL.md` 仅在激活、详情查看或检索命中时读入内存。
+- [x] 从 RFC-0003 旧布局到 RFC-0007 新布局可自动迁移，失败可回退。
+- [x] `mcp-lock.json` 引用计数与所有 Skill 声明的 MCP 依赖汇总一致。
+- [x] `tiangong skill gc` 可清理删除 Skill 后遗留的孤儿 MCP 托管条目。

@@ -1,0 +1,20 @@
+id = "internet_search"
+name = "联网搜索"
+version = "0.1.0"
+description = "从搜索引擎获取实时网页结果。"
+entry = "SKILL.md"
+available = true
+
+[source]
+type = "local"
+value = "skills/internet_search"
+
+[requires]
+env = []
+mcp = []
+
+[permissions]
+fs_read = ["./**"]
+fs_write = []
+cmd_exec = ["python3", "python"]
+net = ["duckduckgo.com", "google.com", "bing.com"]

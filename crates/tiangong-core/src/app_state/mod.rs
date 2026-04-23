@@ -8,7 +8,8 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use crate::agent_config::{
-    AgentConfig, InstalledSkillConfig, McpConfig, McpServerConfig, McpTransportMode, SkillsConfig,
+    AgentConfig, InstalledSkillConfig, McpConfig, McpServerConfig, McpTransportMode,
+    SkillMcpRequirementConfig, SkillsConfig,
 };
 use crate::agents::skill_convert_agent::convert_external_skill_with_agent;
 use crate::mcp::{
@@ -40,9 +41,9 @@ mod tests;
 // Private imports
 use self::repository::{
     converted_stage_cleanup_dir, copy_dir_recursive, default_app_storage_path,
-    default_mcp_capability_cache_path, default_mcp_config_path, default_sessions_dir_path,
-    default_skills_config_path, default_skills_storage_dir_path, ensure_dir, normalize_model_list,
-    parse_bool, parse_list_value, validate_agent_config,
+    default_mcp_capability_cache_path, default_mcp_config_path, default_mcp_lock_path,
+    default_sessions_dir_path, default_skills_config_path, default_skills_storage_dir_path,
+    ensure_dir, normalize_model_list, parse_bool, parse_list_value, validate_agent_config,
 };
 use self::services::{AppMcpService, AppSkillService, AppTurnService};
 pub use self::support::StreamEvent;

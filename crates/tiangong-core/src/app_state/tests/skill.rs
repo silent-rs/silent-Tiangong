@@ -5,6 +5,7 @@ use anyhow::Result;
 use serde_json::json;
 
 use super::common::with_isolated_state;
+use crate::agent_config::{McpServerConfig, McpTransportMode};
 use crate::app_state::TiangongState;
 use crate::skill::{build_skill_hints, read_skill_manifest};
 
@@ -449,4 +450,251 @@ fn migration_failure_writes_fail_lock_and_keeps_legacy_files() -> Result<()> {
         assert!(legacy_lock_path.exists());
         Ok(())
     })
+}
+
+#[test]
+fn refresh_skills_detects_manual_copy_without_restart() -> Result<()> {
+    with_isolated_state("tiangong-skill-refresh-copy", |paths, state| {
+        let nonce = scru128::new().to_string();
+        let skill_id = format!("refresh-copy-skill-{nonce}");
+        let manual_dir = paths
+            .fake_home
+            .join(".tiangong")
+            .join("skills")
+            .join(&skill_id);
+        fs::create_dir_all(&manual_dir)?;
+        fs::write(
+            manual_dir.join("SKILL.md"),
+            "# Refresh Copy Skill\n用于测试 refresh 重扫。\n",
+        )?;
+        fs::write(
+            manual_dir.join("skill.toml"),
+            format!(
+                "id = \"{skill_id}\"\nname = \"Refresh Copy Skill\"\nversion = \"0.1.0\"\nentry = \"SKILL.md\"\navailable = true\n\n[source]\ntype = \"local\"\nvalue = \"{}\"\n\n[requires]\nmcp = []\n\n[permissions]\nfs_read = [\"./**\"]\nfs_write = []\ncmd_exec = []\nnet = []\n",
+                manual_dir.display()
+            ),
+        )?;
+
+        assert!(!state.installed_skills().iter().any(|s| s.id == skill_id));
+        let msg = state.refresh_skills()?;
+        assert!(msg.contains("skills 已刷新"));
+        assert!(state.installed_skills().iter().any(|s| s.id == skill_id));
+        Ok(())
+    })
+}
+
+#[test]
+fn refresh_skills_detects_manual_delete_without_restart() -> Result<()> {
+    with_isolated_state("tiangong-skill-refresh-delete", |paths, state| {
+        let nonce = scru128::new().to_string();
+        let source_dir = paths.workspace.join("refresh-delete-skill-src");
+        fs::create_dir_all(&source_dir)?;
+
+        let skill_id = format!("refresh-delete-skill-{nonce}");
+        fs::write(source_dir.join("SKILL.md"), "# Refresh Delete Skill\n")?;
+        fs::write(
+            source_dir.join("skill.toml"),
+            format!(
+                "id = \"{skill_id}\"\nname = \"Refresh Delete Skill\"\nversion = \"0.1.0\"\nentry = \"SKILL.md\"\n\n[source]\ntype = \"local\"\nvalue = \"{}\"\n\n[requires]\nmcp = []\n\n[permissions]\nfs_read = [\"./**\"]\nfs_write = []\ncmd_exec = []\nnet = []\n",
+                source_dir.display()
+            ),
+        )?;
+
+        state.install_local_skill(source_dir.to_str().unwrap_or_default(), true)?;
+        assert!(state.installed_skills().iter().any(|s| s.id == skill_id));
+
+        let installed_dir = paths
+            .fake_home
+            .join(".tiangong")
+            .join("skills")
+            .join(&skill_id);
+        fs::remove_dir_all(&installed_dir)?;
+
+        let msg = state.refresh_skills()?;
+        assert!(msg.contains("skills 已刷新"));
+        assert!(!state.installed_skills().iter().any(|s| s.id == skill_id));
+        Ok(())
+    })
+}
+
+#[test]
+fn gc_skills_dry_run_reports_orphans_without_removing() -> Result<()> {
+    with_isolated_state("tiangong-skill-gc-dry-run", |paths, state| {
+        let orphan_server = "skill::missing-skill::tool";
+        state
+            .store
+            .agent
+            .agent_config
+            .mcp
+            .servers
+            .push(test_mcp_server(orphan_server));
+
+        let mcp_lock_path = paths
+            .fake_home
+            .join(".tiangong")
+            .join("skills")
+            .join("mcp-lock.json");
+        fs::create_dir_all(mcp_lock_path.parent().expect("mcp-lock 应有父目录"))?;
+        fs::write(
+            &mcp_lock_path,
+            serde_json::json!({
+                "stale-pkg@9.9.9": {
+                    "path": "",
+                    "ref_count": 1,
+                    "installed_at": ""
+                }
+            })
+            .to_string(),
+        )?;
+
+        let msg = state.gc_skills(false)?;
+        assert!(msg.contains(orphan_server));
+        assert!(msg.contains("stale-pkg@9.9.9"));
+        assert!(
+            state
+                .store
+                .agent
+                .agent_config
+                .mcp
+                .servers
+                .iter()
+                .any(|server| server.name == orphan_server)
+        );
+        let lock: std::collections::BTreeMap<String, serde_json::Value> =
+            serde_json::from_str(&fs::read_to_string(&mcp_lock_path)?)?;
+        assert!(lock.contains_key("stale-pkg@9.9.9"));
+        Ok(())
+    })
+}
+
+#[test]
+fn gc_skills_apply_removes_only_orphan_mcp_state() -> Result<()> {
+    with_isolated_state("tiangong-skill-gc-apply", |paths, state| {
+        let nonce = scru128::new().to_string();
+        let skill_id = format!("gc-active-skill-{nonce}");
+        let skill_dir = paths
+            .fake_home
+            .join(".tiangong")
+            .join("skills")
+            .join(&skill_id);
+        fs::create_dir_all(&skill_dir)?;
+        fs::write(skill_dir.join("SKILL.md"), "# GC Active Skill\n")?;
+        fs::write(
+            skill_dir.join("skill.toml"),
+            format!(
+                "id = \"{skill_id}\"\nname = \"GC Active Skill\"\nversion = \"0.1.0\"\nentry = \"SKILL.md\"\navailable = true\n\n[source]\ntype = \"local\"\nvalue = \"{}\"\n\n[requires]\nmcp = [{{ id = \"tool\", source = \"npm\", package = \"active-pkg\", version = \"1.0.0\" }}]\n\n[permissions]\nfs_read = [\"./**\"]\nfs_write = []\ncmd_exec = []\nnet = []\n",
+                skill_dir.display()
+            ),
+        )?;
+
+        let active_server = format!("skill::{skill_id}::tool");
+        let orphan_server = "skill::deleted-skill::tool";
+        state
+            .store
+            .agent
+            .agent_config
+            .mcp
+            .servers
+            .push(test_mcp_server(&active_server));
+        state
+            .store
+            .agent
+            .agent_config
+            .mcp
+            .servers
+            .push(test_mcp_server(orphan_server));
+
+        let mcp_lock_path = paths
+            .fake_home
+            .join(".tiangong")
+            .join("skills")
+            .join("mcp-lock.json");
+        fs::create_dir_all(mcp_lock_path.parent().expect("mcp-lock 应有父目录"))?;
+        fs::write(
+            &mcp_lock_path,
+            serde_json::json!({
+                "active-pkg@1.0.0": {
+                    "path": "",
+                    "ref_count": 1,
+                    "installed_at": ""
+                },
+                "stale-pkg@9.9.9": {
+                    "path": "",
+                    "ref_count": 1,
+                    "installed_at": ""
+                }
+            })
+            .to_string(),
+        )?;
+
+        let msg = state.gc_skills(true)?;
+        assert!(msg.contains(orphan_server));
+        assert!(msg.contains("stale-pkg@9.9.9"));
+        assert!(
+            state
+                .store
+                .agent
+                .agent_config
+                .mcp
+                .servers
+                .iter()
+                .any(|server| server.name == active_server)
+        );
+        assert!(
+            !state
+                .store
+                .agent
+                .agent_config
+                .mcp
+                .servers
+                .iter()
+                .any(|server| server.name == orphan_server)
+        );
+        let lock: std::collections::BTreeMap<String, serde_json::Value> =
+            serde_json::from_str(&fs::read_to_string(&mcp_lock_path)?)?;
+        assert!(lock.contains_key("active-pkg@1.0.0"));
+        assert!(!lock.contains_key("stale-pkg@9.9.9"));
+        Ok(())
+    })
+}
+
+#[test]
+fn doctor_skills_reports_registry_issues_and_orphans() -> Result<()> {
+    with_isolated_state("tiangong-skill-doctor", |paths, state| {
+        let skills_root = paths.fake_home.join(".tiangong").join("skills");
+        let broken_dir = skills_root.join("broken-skill");
+        fs::create_dir_all(&broken_dir)?;
+        fs::write(broken_dir.join("SKILL.md"), "# Broken Skill\n")?;
+
+        let orphan_server = "skill::missing-skill::tool";
+        state
+            .store
+            .agent
+            .agent_config
+            .mcp
+            .servers
+            .push(test_mcp_server(orphan_server));
+
+        let report = state.doctor_skills()?;
+        assert!(report.contains("registry_issue"));
+        assert!(report.contains("MissingManifest"));
+        assert!(report.contains(orphan_server));
+        Ok(())
+    })
+}
+
+fn test_mcp_server(name: &str) -> McpServerConfig {
+    McpServerConfig {
+        name: name.to_string(),
+        transport: McpTransportMode::Stdio,
+        command: "echo".to_string(),
+        args: Vec::new(),
+        endpoint: String::new(),
+        auth_header: String::new(),
+        headers: Default::default(),
+        env: Default::default(),
+        cwd: String::new(),
+        enabled: true,
+        tags: Vec::new(),
+    }
 }

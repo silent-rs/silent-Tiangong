@@ -6,6 +6,8 @@
 - 更新时间：2026-03-03
 - 版本：0.2.0
 
+> 修订说明：Skill 注册与本地安装布局已被 [RFC-0007](./0007-skill-filesystem-registry.md) 修订；`skills-lock.json` 和 `skills.json.installed[]` 不再作为注册事实源，当前安装目录为 `~/.tiangong/skills/<id>/`。
+
 ---
 
 ## 1. 背景
