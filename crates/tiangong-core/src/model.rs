@@ -487,6 +487,122 @@ impl SingleProviderClient {
         let response = self.block_on_llm(provider.complete(request))?;
         Ok(collect_provider_text(&response).trim().to_string())
     }
+    /// 真正的 async 流式函数调用。
+    ///
+    /// 通过 `chunk_tx` 实时发送每个 token chunk，完成后返回 `ModelFunctionResponse`。
+    /// 该方法持有 `self`（owned），可直接在 `tokio::spawn` 里使用，future 是 `Send + 'static`。
+    /// 取消 JoinHandle 后 HTTP 流会随 future drop 而断开。
+    pub async fn stream_function_calls(
+        self,
+        req: ModelRequest,
+        functions: Vec<FunctionToolSpec>,
+        chunk_tx: tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
+    ) -> Result<ModelFunctionResponse> {
+        fn looks_like_complete_json(raw: &str) -> bool {
+            let trimmed = raw.trim();
+            (trimmed.starts_with('{') && trimmed.ends_with('}'))
+                || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+        }
+
+        let timeout_ms = parse_function_timeout_ms(&self.cfg.api_timeout_ms)?;
+        let model = self.cfg.api_model.trim().to_string();
+        if model.is_empty() {
+            return Err(anyhow!(
+                "API_MODEL 不能为空，无法发起 async 流式工具模型请求"
+            ));
+        }
+        let request = build_provider_request(&req, &model, anthropic_max_tokens(), &functions);
+        let provider = self.build_provider_dispatch(timeout_ms)?;
+
+        let mut text = String::new();
+        let mut reasoning_content = String::new();
+        let mut usage = TokenUsageData::default();
+        let mut tool_calls: std::collections::BTreeMap<String, (String, String)> =
+            std::collections::BTreeMap::new();
+
+        let mut stream = provider.stream(request).await.map_err(map_llm_error)?;
+        while let Some(event) = stream.next().await {
+            match event.map_err(map_llm_error)? {
+                ProviderStreamEvent::ReasoningDelta(delta) => {
+                    if !delta.is_empty() {
+                        reasoning_content.push_str(&delta);
+                        let _ = chunk_tx.send(ModelStreamChunk {
+                            content: String::new(),
+                            reasoning_content: delta,
+                        });
+                    }
+                }
+                ProviderStreamEvent::TextDelta(delta) => {
+                    if !delta.is_empty() {
+                        text.push_str(&delta);
+                        let _ = chunk_tx.send(ModelStreamChunk {
+                            content: delta,
+                            reasoning_content: String::new(),
+                        });
+                    }
+                }
+                ProviderStreamEvent::ToolCallStart(call) => {
+                    let args = if call.arguments.is_null() || call.arguments == json!({}) {
+                        String::new()
+                    } else {
+                        call.arguments.to_string()
+                    };
+                    tool_calls.insert(call.id.clone(), (call.name, args));
+                }
+                ProviderStreamEvent::ToolCallDelta {
+                    call_id,
+                    partial_json,
+                } => {
+                    let entry = tool_calls
+                        .entry(call_id)
+                        .or_insert_with(|| (String::new(), String::new()));
+                    // 某些 provider 会在 ToolCallStart 里直接给出完整 arguments，
+                    // 也可能在 delta 中再发送一遍；这里尽量避免重复拼接导致 JSON 无法解析。
+                    if entry.1.trim().is_empty() || !looks_like_complete_json(&entry.1) {
+                        entry.1.push_str(&partial_json);
+                    }
+                }
+                ProviderStreamEvent::Usage(stream_usage) => usage = stream_usage,
+                ProviderStreamEvent::Error(message) => return Err(anyhow!(message)),
+                ProviderStreamEvent::MessageStart
+                | ProviderStreamEvent::ToolCallEnd { .. }
+                | ProviderStreamEvent::MessageEnd => {}
+            }
+        }
+
+        let mut tool_calls_vec = Vec::new();
+        for (id, (name, raw_args)) in tool_calls.into_iter() {
+            if name.trim().is_empty() {
+                continue;
+            }
+            let arguments = if raw_args.trim().is_empty() {
+                json!({})
+            } else {
+                serde_json::from_str(&raw_args).with_context(|| {
+                    format!("解析工具调用参数失败：tool={name} id={id} raw={raw_args}")
+                })?
+            };
+            tool_calls_vec.push(ModelFunctionCall {
+                id,
+                name,
+                arguments,
+            });
+        }
+
+        if text.trim().is_empty()
+            && reasoning_content.trim().is_empty()
+            && tool_calls_vec.is_empty()
+        {
+            return Err(anyhow!("async 流式响应缺少文本、思考内容和工具调用"));
+        }
+
+        Ok(ModelFunctionResponse {
+            text: text.trim().to_string(),
+            reasoning_content: reasoning_content.trim().to_string(),
+            usage: usage.into(),
+            tool_calls: tool_calls_vec,
+        })
+    }
 }
 
 impl ModelClient for SingleProviderClient {
