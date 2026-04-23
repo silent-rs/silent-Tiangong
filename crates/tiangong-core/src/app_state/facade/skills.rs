@@ -1,8 +1,38 @@
+use std::sync::Arc;
+
+use crate::agent_config::SkillSourceConfig;
+use crate::skill::{LoadedSkill, SkillRegistryEntry, SkillRegistryView};
+
 use super::super::*;
 
 impl TiangongState {
     pub fn installed_skills(&self) -> &[InstalledSkillConfig] {
         &self.store.agent.agent_config.skills.installed
+    }
+
+    /// 从文件系统注册表扫描，并同步内存中的 installed[] 缓存（包含启用与禁用 Skill）
+    pub(in crate::app_state) fn sync_installed_from_registry(&mut self) {
+        let view = self.services.skill_registry.refresh();
+        let mut installed = Vec::new();
+        for entry in view.entries.values() {
+            if let Some(config) =
+                build_installed_skill_config_from_entry(entry, &self.services.skill_registry)
+            {
+                installed.push(config);
+            }
+        }
+        installed.sort_by(|a, b| a.id.cmp(&b.id));
+        self.store.agent.agent_config.skills.installed = installed;
+    }
+
+    /// 返回注册表轻量视图（不含 SKILL.md 全文）
+    pub fn list_skills_view(&self) -> SkillRegistryView {
+        self.services.skill_registry.view()
+    }
+
+    /// 返回 Skill 完整详情（含 SKILL.md 全文），按需加载
+    pub fn get_skill_detail(&self, id: &str) -> Result<Arc<LoadedSkill>> {
+        self.services.skill_registry.get(id)
     }
 
     pub fn init_skill_scaffold(
@@ -64,4 +94,41 @@ impl TiangongState {
         let service = self.services.skill_service;
         service.set_skill_enabled(self, id, enabled)
     }
+}
+
+/// 从注册表 entry 构建 InstalledSkillConfig（轻量，只读 skill.toml，不读 SKILL.md）
+fn build_installed_skill_config_from_entry(
+    entry: &SkillRegistryEntry,
+    registry: &crate::skill::SkillRegistry,
+) -> Option<InstalledSkillConfig> {
+    let manifest = crate::skill::read_skill_manifest(&entry.dir.join("skill.toml")).ok()?;
+    let managed_mcp_servers = manifest
+        .requires
+        .mcp
+        .iter()
+        .map(|m| {
+            if m.id.trim().is_empty() {
+                format!("skill::{}::{}", entry.id, m.package)
+            } else {
+                format!("skill::{}::{}", entry.id, m.id)
+            }
+        })
+        .collect::<Vec<_>>();
+    let _ = registry; // 当前不需要额外读取
+    Some(InstalledSkillConfig {
+        id: manifest.id,
+        name: manifest.name,
+        version: manifest.version,
+        description: manifest.description,
+        entry: manifest.entry,
+        enabled: manifest.available,
+        installed_at: String::new(),
+        managed_mcp_servers,
+        source: SkillSourceConfig {
+            kind: "local".to_string(),
+            value: entry.dir.display().to_string(),
+        },
+        requires_mcp: manifest.requires.mcp,
+        permissions: manifest.permissions,
+    })
 }

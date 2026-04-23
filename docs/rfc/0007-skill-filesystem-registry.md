@@ -121,7 +121,9 @@ net = []
 ### 4.3 目录名规则
 
 - 目录名必须等于 `skill.toml` 中的 `id`，否则扫描时视为非法目录并跳过（带审计告警）。
+- `id` 是稳定机器标识（slug），用于目录名、`@skill` 引用、MCP 托管名前缀和审计 key；`name` 仅用于 UI 展示，可本地化或调整，不参与寻址。
 - 不接受 `<id>/<version>/` 的旧布局；迁移器会在首次启动时处理（见 §9）。
+- 系统始终只使用 `skills/<id>/` 当前内容，`skill.toml.version` 仅用于展示、审计和诊断，不参与版本选择或运行期回滚。
 
 ---
 
@@ -280,15 +282,15 @@ MCP 部分**基本保留 RFC-0003 §7 的设计**，仅做以下调整：
 
 - `skills/installed/<id>/<version>/skill.toml` 形态：存在子目录且该子目录包含 `skill.toml`。
 - `~/.tiangong/skills.json` 存在且含 `installed[]`。
-- `~/.tiangong/skills/skills-lock.json` 存在。
+- `~/.tiangong/skills/skills-lock.json` 仅作为旧布局伴随文件处理，不允许单独触发迁移。
 
 ### 9.2 自动迁移步骤
 
-1. 扫描所有 `skills/installed/<id>/<version>/`，按 `id` 聚合；若有多个版本 → 选择 `skills.json` 中登记的版本，其余备份到 `~/.tiangong/legacy/<id>/<version>/`。
+1. 扫描所有 `skills/installed/<id>/<version>/`，按 `id` 聚合；若有多个版本 → 只选择一个版本迁移为当前安装版本，其余仅作为旧布局备份，不参与后续运行。
 2. 将选中版本的内容**平铺**到 `skills/<id>/`（删除中间 `installed/` 和 `<version>/` 两层）。
 3. 基于 `skills.json.installed[]` 中的 `enabled` 字段，写入 `skill.toml` 的 `available` 字段。
 4. 将 `skills.json` 备份为 `skills.json.legacy`，从 `app.json` 中移除 `agent_config.skills.installed[]`（保留 `enabled`、`dirs`、`max_matches` 等配置字段）。
-5. 删除 `skills-lock.json`（备份为 `skills-lock.json.legacy`）。
+5. 删除 `skills-lock.json`（备份为 `skills-lock.json.legacy`），新机制不再读取或写入该文件。
 6. 迁移过程生成 `skill_migration` 审计事件，记录每条 Skill 的新旧路径与结果。
 
 ### 9.3 失败回退

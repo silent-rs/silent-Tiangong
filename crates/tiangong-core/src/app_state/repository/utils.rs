@@ -1,25 +1,5 @@
 use super::super::*;
 
-pub(in crate::app_state) fn cleanup_empty_skill_install_dirs(
-    removed_path: &Path,
-    install_root: &Path,
-) -> Result<()> {
-    let mut current = removed_path.parent().map(Path::to_path_buf);
-    while let Some(dir) = current {
-        if dir == install_root || !dir.starts_with(install_root) {
-            break;
-        }
-        let mut entries =
-            fs::read_dir(&dir).with_context(|| format!("读取目录失败：{}", dir.display()))?;
-        if entries.next().is_some() {
-            break;
-        }
-        fs::remove_dir(&dir).with_context(|| format!("删除空目录失败：{}", dir.display()))?;
-        current = dir.parent().map(Path::to_path_buf);
-    }
-    Ok(())
-}
-
 pub(in crate::app_state) fn converted_stage_cleanup_dir(
     install_path: &Path,
     converted: bool,
@@ -65,10 +45,6 @@ pub(in crate::app_state) fn default_legacy_storage_path() -> PathBuf {
 
 pub(in crate::app_state) fn default_skills_storage_dir_path() -> PathBuf {
     default_storage_root().join("skills")
-}
-
-pub(in crate::app_state) fn default_skills_lock_path() -> PathBuf {
-    default_skills_storage_dir_path().join("skills-lock.json")
 }
 
 pub(in crate::app_state) fn default_mcp_lock_path() -> PathBuf {

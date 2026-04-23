@@ -11,6 +11,7 @@
 接下来从 RFC-0007 开始收口 Skill 管理机制。目标是把 Skill 注册状态从 `skills.json.installed[]` / `skills-lock.json` 迁移到文件系统目录本身：
 
 - `~/.tiangong/skills/<id>/` 的存在性决定 Skill 是否安装。
+- `<id>` 是稳定机器标识，`name` 仅用于展示；系统始终只使用当前安装版本。
 - `skill.toml.available` 决定 Skill 是否可激活。
 - `SKILL.md` 只在激活、详情查看或匹配命中时加载。
 - MCP 依赖锁仍保留 `mcp-lock.json`，不在本轮重构中推翻。
@@ -43,7 +44,7 @@
 - [x] `available` 缺失时按 `true` 处理。
 - [x] manifest 序列化时保留或写入 `available`。
 - [x] 注册表层提供 `set_available` / `write_skill_available` 写入能力。
-- [ ] `set_skill_enabled(id, enabled)` 只修改 `skills/<id>/skill.toml`。
+- [x] `set_skill_enabled(id, enabled)` 只修改 `skills/<id>/skill.toml`。
 - [x] `available=false` 时按需加载不读取 `SKILL.md` 正文。
 - [ ] 禁用 Skill 不参与 `@skill` 激活、检索匹配和 Agent 可用工具列表。
 
@@ -52,8 +53,8 @@
 - [x] 扫描 `~/.tiangong/skills/<id>/` 平铺目录。
 - [x] 跳过 `mcp-lock.json`、隐藏文件、非目录和非法目录。
 - [x] 校验目录名必须等于 `skill.toml.id`，不一致时跳过并记录告警。
-- [ ] `list_skills()` 返回轻量 `SkillEntry` / 摘要，不读取 `SKILL.md` 全文。
-- [ ] `get_skill_detail(id)` 触发 `skill.toml` + `SKILL.md` 实时加载。
+- [x] `list_skills()` 返回轻量 `SkillEntry` / 摘要，不读取 `SKILL.md` 全文。
+- [x] `get_skill_detail(id)` 触发 `skill.toml` + `SKILL.md` 实时加载。
 - [x] 已加载 Skill 在 `manifest_mtime` 未变化时命中缓存。
 - [x] 缓存容量默认 32，超出后按 `loaded_at` 做 LRU 淘汰。
 
@@ -72,42 +73,42 @@
 
 ### 6. 改造 SkillService 主链路
 
-- [ ] `install_skill(path, enabled)` 改为复制到 `skills/<id>/`。
-- [ ] 安装时目标目录已存在则保留 `.env.local`。
-- [ ] 安装时目标目录已存在则保留原 `available`，避免覆盖用户禁用状态。
-- [ ] 安装完成后触发 `SkillRegistryView` 重扫。
-- [ ] `remove_skill(id)` 改为删除 `skills/<id>/` 并驱逐缓存。
-- [ ] `list/get/enable/remove/install` 全部走文件系统注册表，不再依赖 `skills.json.installed[]`。
+- [x] `install_skill(path, enabled)` 改为复制到 `skills/<id>/`。
+- [x] 安装时目标目录已存在则保留 `.env.local`。
+- [x] 安装时目标目录已存在则保留原 `available`，避免覆盖用户禁用状态。
+- [x] 安装完成后触发 `SkillRegistryView` 重扫。
+- [x] `remove_skill(id)` 改为删除 `skills/<id>/` 并驱逐缓存。
+- [x] `list/get/enable/remove/install` 全部走文件系统注册表，不再依赖 `skills.json.installed[]`。
 
 ### 7. 移除 `skills.installed[]` 持久化写入
 
-- [ ] 删除或旁路 `persist_app_only()` 中对 `skills.installed[]` 的写入。
-- [ ] `app.json` / `skills.json` 只保留非注册状态配置，例如 `enabled`、`dirs`、`max_matches`。
-- [ ] 外部手动修改 `skills/` 目录后不会被下一次全局持久化覆盖。
-- [ ] 启动时优先使用新布局 `skills/<id>/`。
+- [x] 删除或旁路 `persist_app_only()` 中对 `skills.installed[]` 的写入。
+- [x] `app.json` / `skills.json` 只保留非注册状态配置，例如 `enabled`、`dirs`、`max_matches`。
+- [x] 外部手动修改 `skills/` 目录后不会被下一次全局持久化覆盖。
+- [x] 启动时优先使用新布局 `skills/<id>/`。
 
 ### 8. 实现旧布局迁移器
 
-- [ ] 检测 `skills/installed/<id>/<version>/skill.toml` 旧目录。
-- [ ] 检测旧 `skills.json.installed[]`。
-- [ ] 检测旧 `skills/skills-lock.json`。
-- [ ] 多版本并存时优先选择 `skills.json` 登记版本。
-- [ ] 将选中版本平铺迁移到 `skills/<id>/`。
-- [ ] 将旧 `enabled` 写入新 `skill.toml.available`。
-- [ ] 将 `skills.json` 备份为 `skills.json.legacy`。
-- [ ] 将 `skills-lock.json` 备份为 `skills-lock.json.legacy`。
-- [ ] 从 app 配置中移除 `agent_config.skills.installed[]`。
-- [ ] 迁移失败时写入 `migration-failed.lock`，不删除旧文件。
-- [ ] 生成 `skill_migration` 审计事件，记录新旧路径与结果。
+- [x] 检测 `skills/installed/<id>/<version>/skill.toml` 旧目录。
+- [x] 检测旧 `skills.json.installed[]`。
+- [x] 旧 `skills/skills-lock.json` 仅作为旧布局伴随文件处理，不单独触发迁移。
+- [x] 多版本并存时优先选择 `skills.json` 登记版本。
+- [x] 将选中版本平铺迁移到 `skills/<id>/`。
+- [x] 将旧 `enabled` 写入新 `skill.toml.available`。
+- [x] 将 `skills.json` 备份为 `skills.json.legacy`。
+- [x] 将旧布局伴随的 `skills-lock.json` 备份为 `skills-lock.json.legacy` 后移除原文件。
+- [x] 从 app 配置中移除 `agent_config.skills.installed[]`。
+- [x] 迁移失败时写入 `migration-failed.lock`，不删除旧文件。
+- [x] 生成 `skill_migration` 审计事件，记录新旧路径与结果。
 
 ### 9. Phase B 测试
 
-- [ ] 集成测试：命令式安装后目录落在 `skills/<id>/`。
-- [ ] 集成测试：手动拷贝目录后下一次扫描可见。
-- [ ] 集成测试：删除目录后下一次扫描不可见。
-- [ ] 集成测试：禁用状态通过 `skill.toml.available=false` 持久化。
-- [ ] 集成测试：旧 `<id>/<version>` 布局自动迁移。
-- [ ] 集成测试：迁移失败保留旧文件并写入失败锁。
+- [x] 集成测试：命令式安装后目录落在 `skills/<id>/`。
+- [x] 集成测试：手动拷贝目录后下一次扫描可见。
+- [x] 集成测试：删除目录后下一次扫描不可见。
+- [x] 集成测试：禁用状态通过 `skill.toml.available=false` 持久化。
+- [x] 集成测试：旧 `<id>/<version>` 布局自动迁移。
+- [x] 集成测试：迁移失败保留旧文件并写入失败锁。
 
 ---
 
@@ -153,7 +154,7 @@
 
 ### 14. 删除旧注册机制
 
-- [ ] 删除 `skills-lock.json` 相关 Skill 注册代码。
+- [x] 删除 `skills-lock.json` 相关 Skill 注册读写代码（仅保留旧布局迁移备份）。
 - [ ] 删除 `skills.json.installed[]` 作为注册事实源的代码路径。
 - [ ] 删除 `installed/<id>/<version>/` 新写入路径。
 - [ ] 保留 `mcp-lock.json` 相关代码。

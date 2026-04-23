@@ -38,7 +38,7 @@ impl AppRepository {
             )
         })?;
         self.persist_agent_configs(&store.agent.agent_config)?;
-        self.sync_skill_locks(&store.agent.agent_config)
+        self.sync_mcp_dependency_lock(&store.agent.agent_config)
     }
 
     pub(in crate::app_state) fn persist_to_disk(&self, store: &AppStore) -> Result<()> {
@@ -80,7 +80,7 @@ impl AppRepository {
             )
         })?;
         self.persist_agent_configs(&store.agent.agent_config)?;
-        self.sync_skill_locks(&store.agent.agent_config)
+        self.sync_mcp_dependency_lock(&store.agent.agent_config)
     }
 
     pub(in crate::app_state) fn remove_session_file(&self, session_id: &str) -> Result<()> {
@@ -95,8 +95,13 @@ impl AppRepository {
     fn persist_agent_configs(&self, agent_config: &AgentConfig) -> Result<()> {
         ensure_parent_dir(&self.paths.skills_config_path)?;
         ensure_parent_dir(&self.paths.mcp_config_path)?;
-        let skills_content =
-            serde_json::to_string_pretty(&agent_config.skills).context("序列化 skills 配置失败")?;
+        // skills.installed[] 现在由文件系统注册表（skills/<id>/）管理，不再写入 skills.json
+        let skills_without_installed = SkillsConfig {
+            installed: Vec::new(),
+            ..agent_config.skills.clone()
+        };
+        let skills_content = serde_json::to_string_pretty(&skills_without_installed)
+            .context("序列化 skills 配置失败")?;
         let mcp_content =
             serde_json::to_string_pretty(&agent_config.mcp).context("序列化 mcp 配置失败")?;
         fs::write(&self.paths.skills_config_path, skills_content).with_context(|| {

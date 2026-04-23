@@ -31,10 +31,10 @@ impl TiangongState {
         self.services.repository.remove_session_file(session_id)
     }
 
-    pub(in crate::app_state) fn sync_skill_locks(&self) -> Result<()> {
+    pub(in crate::app_state) fn sync_mcp_dependency_lock(&self) -> Result<()> {
         self.services
             .repository
-            .sync_skill_locks(&self.store.agent.agent_config)
+            .sync_mcp_dependency_lock(&self.store.agent.agent_config)
     }
 
     pub(in crate::app_state) fn load_from_disk(&self) -> Result<Option<LoadedState>> {
