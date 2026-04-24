@@ -76,6 +76,49 @@ fn cleanup_assistant_before_tool_calls(
     }
 }
 
+fn finalize_assistant_tool_calls(
+    session: &mut tiangong_core::session::Session,
+    assistant_msg_id: &mut Option<String>,
+    message_id: &str,
+    calls: &[tiangong_types::StreamToolCall],
+) {
+    if calls.is_empty() {
+        cleanup_assistant_before_tool_calls(session, assistant_msg_id);
+        return;
+    }
+    ensure_assistant_message(session, assistant_msg_id, message_id);
+    if let Some(msg) = session.messages.iter_mut().find(|msg| msg.id == message_id) {
+        msg.tool_calls = calls
+            .iter()
+            .map(|call| tiangong_core::session::MessageToolCall {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+            })
+            .collect();
+    }
+    *assistant_msg_id = None;
+}
+
+fn append_tool_result_message(
+    session: &mut tiangong_core::session::Session,
+    tool_call_id: Option<&str>,
+    tool_name: &str,
+    content: String,
+    is_error: bool,
+) {
+    let Some(tool_call_id) = tool_call_id else {
+        return;
+    };
+    let mut message =
+        tiangong_core::session::Message::new(tiangong_core::session::MessageRole::Tool, content);
+    message.tool_call_id = Some(tool_call_id.to_string());
+    message.tool_name = Some(tool_name.to_string());
+    message.tool_result_is_error = is_error;
+    session.messages.push(message);
+    session.updated_at = tiangong_core::session::now_text();
+}
+
 fn parse_image_markdown_assets(output: &str) -> Vec<tiangong_types::MediaAsset> {
     output
         .lines()
@@ -444,8 +487,18 @@ pub fn send_message(
                                 content,
                             );
                         }
-                        StreamEvent::ToolCalls { names, usage } => {
-                            cleanup_assistant_before_tool_calls(session, &mut assistant_msg_id);
+                        StreamEvent::ToolCalls {
+                            message_id,
+                            names,
+                            calls,
+                            usage,
+                        } => {
+                            finalize_assistant_tool_calls(
+                                session,
+                                &mut assistant_msg_id,
+                                message_id,
+                                calls,
+                            );
                             session.append_message(
                                 tiangong_core::session::MessageRole::System,
                                 format!("LLM 输出\ntool_calls: {}", names.join(", ")),
@@ -463,6 +516,7 @@ pub fn send_message(
                         }
                         StreamEvent::ToolResult {
                             ref name,
+                            ref tool_call_id,
                             ok,
                             ref output,
                             ref full_output,
@@ -508,6 +562,13 @@ pub fn send_message(
                             session.append_message(
                                 tiangong_core::session::MessageRole::System,
                                 lines.join("\n"),
+                            );
+                            append_tool_result_message(
+                                session,
+                                tool_call_id.as_deref(),
+                                name,
+                                persisted_output.to_string(),
+                                !*ok,
                             );
                             last_tool_args_summary.clear();
                         }
@@ -612,7 +673,7 @@ pub fn send_message(
                         let s = if *ok { "✓" } else { "✗" };
                         core_state.store.runtime.run.summary = format!("{s} {name}");
                     }
-                    StreamEvent::ToolCalls { names, usage } => {
+                    StreamEvent::ToolCalls { names, usage, .. } => {
                         core_state.store.runtime.run.summary =
                             format!("正在执行：{}", names.join(", "));
                         if usage.is_some() {

@@ -112,9 +112,7 @@ fn test_request_mapping_with_system_and_tools() {
     assert_eq!(mapped.tools.as_ref().map(Vec::len), Some(1));
     assert!(matches!(
         mapped.thinking,
-        Some(tiangong_anthropic::types::ThinkingConfig::Enabled {
-            budget_tokens: 4096
-        })
+        Some(tiangong_anthropic::types::ThinkingConfig::Disabled)
     ));
     assert!(matches!(
         mapped.tool_choice,

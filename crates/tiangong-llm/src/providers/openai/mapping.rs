@@ -1,8 +1,9 @@
 use anyhow::{Context, Result, anyhow};
 use async_openai::types::chat::{
+    ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
     ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
-    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
-    CreateChatCompletionRequestArgs,
+    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestToolMessage,
+    ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs, FunctionCall,
 };
 use serde_json::{Value, json};
 
@@ -65,7 +66,7 @@ fn build_openai_messages(req: &ProviderRequest) -> Result<Vec<ChatCompletionRequ
     for message in &req.messages {
         match message.role {
             MessageRole::System => {}
-            MessageRole::User | MessageRole::Tool => {
+            MessageRole::User => {
                 let text = extract_message_text(message);
                 if !text.is_empty() {
                     messages.push(
@@ -77,16 +78,52 @@ fn build_openai_messages(req: &ProviderRequest) -> Result<Vec<ChatCompletionRequ
                     );
                 }
             }
+            MessageRole::Tool => {
+                for result in message.content.iter().filter_map(|content| match content {
+                    MessageContent::ToolResult(result) => Some(result),
+                    _ => None,
+                }) {
+                    let content = match &result.content {
+                        crate::tool::ToolResultContent::Text(text) => text.clone(),
+                        crate::tool::ToolResultContent::Json(value) => value.to_string(),
+                    };
+                    messages.push(ChatCompletionRequestMessage::Tool(
+                        ChatCompletionRequestToolMessage {
+                            content: content.into(),
+                            tool_call_id: result.tool_call_id.clone(),
+                        },
+                    ));
+                }
+            }
             MessageRole::Assistant => {
                 let text = extract_message_text(message);
-                if !text.is_empty() {
-                    messages.push(
-                        ChatCompletionRequestAssistantMessageArgs::default()
-                            .content(text)
-                            .build()
-                            .context("构建 assistant 消息失败")?
-                            .into(),
-                    );
+                let tool_calls = message
+                    .content
+                    .iter()
+                    .filter_map(|content| match content {
+                        MessageContent::ToolCall(tool_call) => {
+                            Some(ChatCompletionMessageToolCalls::Function(
+                                ChatCompletionMessageToolCall {
+                                    id: tool_call.id.clone(),
+                                    function: FunctionCall {
+                                        name: tool_call.name.clone(),
+                                        arguments: tool_call.arguments.to_string(),
+                                    },
+                                },
+                            ))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if !text.is_empty() || !tool_calls.is_empty() {
+                    let mut args = ChatCompletionRequestAssistantMessageArgs::default();
+                    if !text.is_empty() {
+                        args.content(text);
+                    }
+                    if !tool_calls.is_empty() {
+                        args.tool_calls(tool_calls);
+                    }
+                    messages.push(args.build().context("构建 assistant 消息失败")?.into());
                 }
             }
         }

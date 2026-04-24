@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::model::TokenUsage;
 use crate::planner::{PlanItem, PlanStepSource, PlanStepStatus};
 
-pub use tiangong_types::{Message, MessageRole, now_text};
+pub use tiangong_types::{Message, MessageRole, MessageToolCall, now_text};
 
 /// 会话工作目录模式
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -272,6 +272,11 @@ impl Session {
             reasoning_content: String::new(),
             worker_id: None,
             media,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_result_is_error: false,
+            compact: false,
             created_at: now_text(),
         });
         self.updated_at = now_text();
@@ -290,6 +295,11 @@ impl Session {
             reasoning_content: reasoning_content.into(),
             worker_id: None,
             media: Vec::new(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_result_is_error: false,
+            compact: false,
             created_at: now_text(),
         });
         self.updated_at = now_text();
@@ -322,6 +332,11 @@ impl Session {
             reasoning_content: reasoning_content.into(),
             worker_id: None,
             media,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_result_is_error: false,
+            compact: false,
             created_at: now_text(),
         });
         self.updated_at = now_text();
@@ -350,6 +365,11 @@ impl Session {
             reasoning_content: reasoning_content.into(),
             worker_id: Some(worker_id.to_string()),
             media: Vec::new(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_result_is_error: false,
+            compact: false,
             created_at: now_text(),
         });
         self.updated_at = now_text();

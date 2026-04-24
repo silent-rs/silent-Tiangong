@@ -2,18 +2,16 @@ use anyhow::{Result, anyhow};
 
 use crate::agent_config::McpConfig;
 use crate::execution::{
-    DynamicPlanStep, ExecutionStepReport, ExecutionStepResult, SuccessfulBusinessResult,
-    build_aggregated_llm_output, build_tool_failure_error, collect_llm_output,
-    extract_successful_business_result, runtime_message, summarize_round_tool_feedback,
+    DynamicPlanStep, ExecutionStepReport, ExecutionStepResult, build_aggregated_llm_output,
+    build_tool_failure_error, collect_llm_output, extract_successful_business_result,
+    runtime_message, summarize_round_tool_feedback,
 };
 use crate::model::{ModelClient, ModelRequest, ModelStreamChunk, SingleProviderClient, TokenUsage};
 use crate::planner::{PlanStep, PlanStepStatus, TaskPlan};
 use crate::session::{Message, MessageRole, Session, now_text};
 use crate::tool::{LocalToolExecutor, ToolExecutor, ToolResult};
 
-use crate::agents::execution_completion_agent::{
-    infer_completion_signal_with_llm, parse_completion_signal, review_completion_signal_with_llm,
-};
+use crate::agents::execution_completion_agent::parse_completion_signal;
 use crate::agents::execution_mcp_agent::{
     build_internal_tool_error_result, execute_mcp_tool_call, execute_mcp_tool_call_with_args,
     execution_function_tools, normalize_mcp_call_arguments, resolve_mcp_tool_call_from_run_command,
@@ -93,7 +91,7 @@ pub fn execute_single_plan_step_with_execution_agent(
         }
 
         let mut completion_signal = None;
-        let mut successful_result: Option<SuccessfulBusinessResult> = None;
+        let mut successful_result = None;
         let mut ignored_failed_tool = false;
         let mut round_feedback = Vec::new();
         let mut blocking_errors = Vec::new();
@@ -187,6 +185,11 @@ pub fn execute_single_plan_step_with_execution_agent(
                 reasoning_content: String::new(),
                 worker_id: None,
                 media: Vec::new(),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                tool_name: None,
+                tool_result_is_error: false,
+                compact: false,
                 created_at: now_text(),
             });
             continue;
@@ -245,73 +248,25 @@ pub fn execute_single_plan_step_with_execution_agent(
         }
 
         if let Some(successful_result) = successful_result {
-            let mut auto_signal = infer_completion_signal_with_llm(
-                client,
-                session,
-                &loop_context,
-                user_input,
-                plan_name,
-                step,
-                &successful_result,
-                &round_feedback,
-                on_chunk,
-                &mut step_usage,
-            )?;
-            if !auto_signal.continue_execution {
-                auto_signal = review_completion_signal_with_llm(
-                    client,
-                    session,
-                    &loop_context,
-                    user_input,
-                    plan_name,
-                    step,
-                    &successful_result,
-                    &round_feedback,
-                    &auto_signal,
-                    on_chunk,
-                    &mut step_usage,
-                )?;
+            if round + 1 >= MAX_EXECUTION_AGENT_ROUNDS {
+                return Err(anyhow!(
+                    "执行智能体已获得成功工具结果但未提交 mark_step_completed：step={} {}，result={}",
+                    step.name,
+                    step.description,
+                    successful_result.summary
+                ));
             }
-            let mut summary_parts = Vec::new();
-            if !auto_signal.result.trim().is_empty() {
-                summary_parts.push(format!("result={}", auto_signal.result.trim()));
-            } else {
-                summary_parts.push(format!("result={}", successful_result.summary));
-            }
-            if executed_tools.is_empty() {
-                summary_parts.push("tools=none".to_string());
-            } else {
-                summary_parts.push(format!("tools={}", executed_tools.join(",")));
-            }
-            if ignored_failed_tool {
-                summary_parts.push("ignored_failed_tool=true".to_string());
-            }
-            let next_step = auto_signal.continue_execution.then_some(DynamicPlanStep {
-                name: auto_signal.next_step_name.clone(),
-                description: auto_signal.next_step_description.clone(),
-            });
-            if next_step.is_some() {
-                summary_parts.push("auto_continue=true".to_string());
-            }
-            summary_parts.push("auto_decision=llm".to_string());
-            let tool_summary = format!("步骤完成（LLM决策收敛）：{}", summary_parts.join("；"));
-
-            let llm_output = build_aggregated_llm_output(
-                output_contents,
-                output_reasonings,
-                output_tool_calls,
-                step_usage.clone(),
+            let mut feedback = format!(
+                "执行反馈：上一轮工具已经返回明确成功结果，但尚未调用 mark_step_completed。\n\
+                 成功结果：{}\n\
+                 要求：不要重复执行已经成功的工具。若结果已满足当前步骤和用户目标，直接调用 mark_step_completed(continue_execution=false)；若只是中间结果，调用 mark_step_completed(continue_execution=true) 并给出下一步名称和描述。",
+                successful_result.summary
             );
-
-            return Ok(ExecutionStepResult {
-                llm_output,
-                report: ExecutionStepReport {
-                    step_name: step.name.clone(),
-                    status: PlanStepStatus::Completed,
-                    summary: tool_summary,
-                },
-                next_step,
-            });
+            if ignored_failed_tool {
+                feedback.push_str("\n注意：成功结果之后的额外失败调用已忽略，请基于成功结果收敛。");
+            }
+            loop_context.push(runtime_message(MessageRole::System, feedback));
+            continue;
         }
 
         if round_feedback.is_empty() {
