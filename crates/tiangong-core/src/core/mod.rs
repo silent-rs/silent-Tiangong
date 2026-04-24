@@ -15,9 +15,7 @@ use crate::app_state::formatting::{format_llm_output_message, format_tool_trace_
 use crate::coordinator::TaskCoordinator;
 use crate::coordinator::types::CoordinatorTask;
 use crate::core_config::{CoreConfig, CoreConfigProvider};
-use crate::model::{
-    FunctionToolSpec, ModelClient, ModelRequest, ModelToolChoice, SingleProviderClient, TokenUsage,
-};
+use crate::model::{FunctionToolSpec, ModelClient, ModelRequest, SingleProviderClient, TokenUsage};
 use crate::observe::{audit_permission_with_context, audit_tool_execution};
 use crate::prompt::PromptAssembler;
 use crate::runtime::{LlmOutputRecord, RuntimeEngine, inject_enhanced_tools, use_stream_mode};
@@ -29,10 +27,8 @@ use tiangong_types::{SessionStreamEvent, StreamEvent, StreamToolCall};
 use std::sync::mpsc::Receiver;
 
 const MAX_ROUNDS: usize = 20;
-const MAX_REQUIRED_TOOL_REPROMPTS: usize = 2;
 const MEMORY_LOOP_FEEDBACK_MAX_CHARS: usize = 12_000;
 const TOOL_RESULT_STREAM_MAX_CHARS: usize = 8_000;
-const FINISH_TASK_TOOL_NAME: &str = "finish_task";
 
 type MemoryRecallToolOutput = (crate::tool::ToolResult, tiangong_types::TokenUsage, bool);
 
@@ -742,7 +738,6 @@ async fn execute_turn_inner_async(
     let mut pending_media_assets: Vec<tiangong_types::MediaAsset> = Vec::new();
     let mut memory_context: Option<String> = None;
     let mut memory_recall_attempted = false;
-    let mut required_tool_reprompts = 0;
 
     'react_loop: loop {
         match drain_pending_commands_async(session, &mut loop_context, stream_tx, cmd_rx) {
@@ -761,27 +756,7 @@ async fn execute_turn_inner_async(
             break;
         }
 
-        let structured_action_required = round > 0;
-        let request_tools = tools_for_round(tools, structured_action_required);
-        let tool_choice = structured_action_required.then_some(ModelToolChoice::Any);
-
-        let mut prompt_loop_context = loop_context.clone();
-        if round > 0 {
-            prompt_loop_context.push(Message {
-                id: scru128::new().to_string(),
-                role: MessageRole::System,
-                content: "内部调度提示：根据上面的工具执行结果继续完成用户原始目标。本轮必须调用一个工具：若仍需读取、写入、执行命令或验证文件，请调用真实工具；若目标已经完成，请调用 finish_task 并提供完成依据。不要用普通文本声称已经执行工具。".to_string(),
-                reasoning_content: String::new(),
-                worker_id: None,
-                media: Vec::new(),
-                tool_calls: Vec::new(),
-                tool_call_id: None,
-                tool_name: None,
-                tool_result_is_error: false,
-                compact: false,
-                created_at: now_text(),
-            });
-        }
+        let request_tools = tools.to_vec();
 
         let assembler = PromptAssembler::new(engine.context_limit);
         let assembled = assembler.assemble(
@@ -790,7 +765,7 @@ async fn execute_turn_inner_async(
             request_tools.clone(),
             engine.models_config(),
             engine.agent_config(),
-            &prompt_loop_context,
+            &loop_context,
         );
 
         let mut system_prompt = assembled.final_system_prompt();
@@ -823,12 +798,7 @@ async fn execute_turn_inner_async(
         let tools_clone = request_tools.clone();
         let llm_fut = tokio::task::spawn(async move {
             client
-                .stream_function_calls_with_tool_choice(
-                    req_clone,
-                    tools_clone,
-                    tool_choice,
-                    chunk_tx,
-                )
+                .stream_function_calls_with_tool_choice(req_clone, tools_clone, None, chunk_tx)
                 .await
         });
 
@@ -909,17 +879,6 @@ async fn execute_turn_inner_async(
                 continue;
             }
 
-            if structured_action_required && required_tool_reprompts < MAX_REQUIRED_TOOL_REPROMPTS {
-                required_tool_reprompts += 1;
-                push_required_tool_reprompt(
-                    &mut loop_context,
-                    &response.text,
-                    &response.reasoning_content,
-                    "上一轮没有返回 tool_calls。请调用真实工具继续执行，或调用 finish_task 结构化结束。",
-                );
-                continue;
-            }
-
             session.append_message_with_id_and_media(
                 pending_msg_id,
                 MessageRole::Assistant,
@@ -955,78 +914,13 @@ async fn execute_turn_inner_async(
         }
 
         // 工具调用
-        if let Some(finish_call) = only_finish_task_call(&response.tool_calls) {
-            match build_finish_task_final_text(finish_call) {
-                Ok(final_text) => {
-                    let output = LlmOutputRecord {
-                        stage: format!("react-round-{round}"),
-                        content: response.text.clone(),
-                        reasoning_content: response.reasoning_content.clone(),
-                        tool_calls: vec![FINISH_TASK_TOOL_NAME.to_string()],
-                        usage: response.usage.clone(),
-                    };
-                    session.append_message_with_reasoning(
-                        MessageRole::System,
-                        format_llm_output_message(&output),
-                        response.reasoning_content.clone(),
-                    );
-                    let _ = stream_tx.send(StreamEvent::Delta {
-                        message_id: pending_msg_id.clone(),
-                        content: final_text.clone(),
-                    });
-                    session.append_message_with_id_and_media(
-                        pending_msg_id,
-                        MessageRole::Assistant,
-                        final_text,
-                        response.reasoning_content.clone(),
-                        std::mem::take(&mut pending_media_assets),
-                    );
-                    session.persist_to_disk();
-                    let _ = stream_tx.send(StreamEvent::Done {
-                        usage: Some(tiangong_types::TokenUsage {
-                            prompt_tokens: accumulated_usage.prompt_tokens,
-                            completion_tokens: accumulated_usage.completion_tokens,
-                            total_tokens: accumulated_usage.total_tokens,
-                        }),
-                    });
-                    return accumulated_usage;
-                }
-                Err(err) if required_tool_reprompts < MAX_REQUIRED_TOOL_REPROMPTS => {
-                    required_tool_reprompts += 1;
-                    push_required_tool_reprompt(
-                        &mut loop_context,
-                        &response.text,
-                        &response.reasoning_content,
-                        &format!("finish_task 参数无效：{err}"),
-                    );
-                    continue;
-                }
-                Err(_) => {}
-            }
-        }
-
-        let executable_calls = response
-            .tool_calls
-            .iter()
-            .filter(|call| call.name != FINISH_TASK_TOOL_NAME)
-            .collect::<Vec<_>>();
+        let executable_calls = response.tool_calls.iter().collect::<Vec<_>>();
         if executable_calls.is_empty() {
-            if required_tool_reprompts < MAX_REQUIRED_TOOL_REPROMPTS {
-                required_tool_reprompts += 1;
-                push_required_tool_reprompt(
-                    &mut loop_context,
-                    &response.text,
-                    &response.reasoning_content,
-                    "模型没有返回可执行工具调用。",
-                );
-                continue;
-            }
             let _ = stream_tx.send(StreamEvent::Error {
                 message: "模型没有返回可执行工具调用，任务已停止".to_string(),
             });
             return accumulated_usage;
         }
-        required_tool_reprompts = 0;
         let tool_names: Vec<String> = executable_calls.iter().map(|c| c.name.clone()).collect();
         let output = LlmOutputRecord {
             stage: format!("react-round-{round}"),
@@ -1330,7 +1224,6 @@ fn execute_turn_inner(
     let mut pending_media_assets: Vec<tiangong_types::MediaAsset> = Vec::new();
     let mut memory_context: Option<String> = None;
     let mut memory_recall_attempted = false;
-    let mut required_tool_reprompts = 0;
 
     'react_loop: loop {
         match drain_pending_commands(session, &mut loop_context, stream_tx, cmd_rx) {
@@ -1348,30 +1241,10 @@ fn execute_turn_inner(
             break;
         }
 
-        // 构建 prompt
-        // 用户输入统一通过 session.messages 传递，不使用独立的 user_input 通道。
-        // 工具调用后的续写提示只在本轮 prompt 中临时注入，避免重复累积到 loop_context。
-        let structured_action_required = round > 0;
-        let request_tools = tools_for_round(tools, structured_action_required);
-        let tool_choice = structured_action_required.then_some(ModelToolChoice::Any);
-
-        let mut prompt_loop_context = loop_context.clone();
-        if round > 0 {
-            prompt_loop_context.push(Message {
-                id: scru128::new().to_string(),
-                role: MessageRole::System,
-                content: "内部调度提示：根据上面的工具执行结果继续完成用户原始目标。本轮必须调用一个工具：若仍需读取、写入、执行命令或验证文件，请调用真实工具；若目标已经完成，请调用 finish_task 并提供完成依据。不要用普通文本声称已经执行工具。".to_string(),
-                reasoning_content: String::new(),
-                worker_id: None,
-                media: Vec::new(),
-                tool_calls: Vec::new(),
-                tool_call_id: None,
-                tool_name: None,
-                tool_result_is_error: false,
-                compact: false,
-                created_at: now_text(),
-            });
-        }
+        // 构建 prompt。用户输入和工具结果统一通过 session/loop messages 传递；
+        // 工具执行后的下一轮允许模型直接最终回复，避免为了满足 forced tool choice
+        // 而重复调用无关工具。
+        let request_tools = tools.to_vec();
 
         let assembler = PromptAssembler::new(engine.context_limit);
         let assembled = assembler.assemble(
@@ -1380,7 +1253,7 @@ fn execute_turn_inner(
             request_tools.clone(),
             engine.models_config(),
             engine.agent_config(),
-            &prompt_loop_context,
+            &loop_context,
         );
 
         let mut system_prompt = assembled.final_system_prompt();
@@ -1419,7 +1292,7 @@ fn execute_turn_inner(
             .complete_with_functions_stream_with_tool_choice(
                 &req,
                 &request_tools,
-                tool_choice,
+                None,
                 &mut |delta| {
                     // 每个 chunk 回调时顺带排空命令队列，实现任意时刻响应
                     while let Ok(cmd) = cmd_rx.try_recv() {
@@ -1497,17 +1370,6 @@ fn execute_turn_inner(
                 continue;
             }
 
-            if structured_action_required && required_tool_reprompts < MAX_REQUIRED_TOOL_REPROMPTS {
-                required_tool_reprompts += 1;
-                push_required_tool_reprompt(
-                    &mut loop_context,
-                    &response.text,
-                    &response.reasoning_content,
-                    "上一轮没有返回 tool_calls。请调用真实工具继续执行，或调用 finish_task 结构化结束。",
-                );
-                continue;
-            }
-
             // 最终回复：使用预生成的 ID 记录到 session
             session.append_message_with_id_and_media(
                 pending_msg_id,
@@ -1540,78 +1402,13 @@ fn execute_turn_inner(
         }
 
         // 工具调用
-        if let Some(finish_call) = only_finish_task_call(&response.tool_calls) {
-            match build_finish_task_final_text(finish_call) {
-                Ok(final_text) => {
-                    let output = LlmOutputRecord {
-                        stage: format!("react-round-{round}"),
-                        content: response.text.clone(),
-                        reasoning_content: response.reasoning_content.clone(),
-                        tool_calls: vec![FINISH_TASK_TOOL_NAME.to_string()],
-                        usage: response.usage.clone(),
-                    };
-                    session.append_message_with_reasoning(
-                        MessageRole::System,
-                        format_llm_output_message(&output),
-                        response.reasoning_content.clone(),
-                    );
-                    let _ = stream_tx.send(StreamEvent::Delta {
-                        message_id: pending_msg_id.clone(),
-                        content: final_text.clone(),
-                    });
-                    session.append_message_with_id_and_media(
-                        pending_msg_id,
-                        MessageRole::Assistant,
-                        final_text,
-                        response.reasoning_content.clone(),
-                        std::mem::take(&mut pending_media_assets),
-                    );
-                    session.persist_to_disk();
-                    let _ = stream_tx.send(StreamEvent::Done {
-                        usage: Some(tiangong_types::TokenUsage {
-                            prompt_tokens: accumulated_usage.prompt_tokens,
-                            completion_tokens: accumulated_usage.completion_tokens,
-                            total_tokens: accumulated_usage.total_tokens,
-                        }),
-                    });
-                    return accumulated_usage;
-                }
-                Err(err) if required_tool_reprompts < MAX_REQUIRED_TOOL_REPROMPTS => {
-                    required_tool_reprompts += 1;
-                    push_required_tool_reprompt(
-                        &mut loop_context,
-                        &response.text,
-                        &response.reasoning_content,
-                        &format!("finish_task 参数无效：{err}"),
-                    );
-                    continue;
-                }
-                Err(_) => {}
-            }
-        }
-
-        let executable_calls = response
-            .tool_calls
-            .iter()
-            .filter(|call| call.name != FINISH_TASK_TOOL_NAME)
-            .collect::<Vec<_>>();
+        let executable_calls = response.tool_calls.iter().collect::<Vec<_>>();
         if executable_calls.is_empty() {
-            if required_tool_reprompts < MAX_REQUIRED_TOOL_REPROMPTS {
-                required_tool_reprompts += 1;
-                push_required_tool_reprompt(
-                    &mut loop_context,
-                    &response.text,
-                    &response.reasoning_content,
-                    "模型没有返回可执行工具调用。",
-                );
-                continue;
-            }
             let _ = stream_tx.send(StreamEvent::Error {
                 message: "模型没有返回可执行工具调用，任务已停止".to_string(),
             });
             return accumulated_usage;
         }
-        required_tool_reprompts = 0;
         let tool_names: Vec<String> = executable_calls.iter().map(|c| c.name.clone()).collect();
 
         // 记录 LLM 输出到 session
@@ -2060,133 +1857,6 @@ fn append_or_reuse_user_message(
 fn is_synthetic_tool_call_placeholder(text: &str) -> bool {
     let trimmed = text.trim();
     trimmed.starts_with("[调用工具:") && trimmed.ends_with(']')
-}
-
-fn tools_for_round(tools: &[FunctionToolSpec], include_finish_task: bool) -> Vec<FunctionToolSpec> {
-    let mut request_tools = tools.to_vec();
-    if include_finish_task
-        && !request_tools
-            .iter()
-            .any(|tool| tool.name == FINISH_TASK_TOOL_NAME)
-    {
-        request_tools.push(finish_task_tool_spec());
-    }
-    request_tools
-}
-
-fn finish_task_tool_spec() -> FunctionToolSpec {
-    FunctionToolSpec {
-        name: FINISH_TASK_TOOL_NAME.to_string(),
-        description:
-            "结构化结束当前任务。仅当已经通过工具结果确认目标完成、或确认无法继续推进时调用。"
-                .to_string(),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "status": {
-                    "type": "string",
-                    "enum": ["completed", "blocked"],
-                    "description": "completed 表示任务已完成；blocked 表示已尽力但被外部条件阻塞"
-                },
-                "summary": {
-                    "type": "string",
-                    "description": "给用户的最终简明结论"
-                },
-                "evidence": {
-                    "type": "string",
-                    "description": "完成或阻塞依据，必须引用最近工具结果中的实际观察"
-                }
-            },
-            "required": ["status", "summary", "evidence"]
-        }),
-    }
-}
-
-fn only_finish_task_call(
-    calls: &[crate::model::ModelFunctionCall],
-) -> Option<&crate::model::ModelFunctionCall> {
-    if calls.len() == 1 && calls[0].name == FINISH_TASK_TOOL_NAME {
-        Some(&calls[0])
-    } else {
-        None
-    }
-}
-
-fn build_finish_task_final_text(call: &crate::model::ModelFunctionCall) -> anyhow::Result<String> {
-    let status = call
-        .arguments
-        .get("status")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .trim();
-    let summary = call
-        .arguments
-        .get("summary")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .trim();
-    let evidence = call
-        .arguments
-        .get("evidence")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .trim();
-
-    if !matches!(status, "completed" | "blocked") {
-        return Err(anyhow::anyhow!("status 必须是 completed 或 blocked"));
-    }
-    if summary.is_empty() {
-        return Err(anyhow::anyhow!("summary 不能为空"));
-    }
-    if evidence.is_empty() {
-        return Err(anyhow::anyhow!("evidence 不能为空"));
-    }
-
-    if status == "blocked" {
-        Ok(format!("{summary}\n\n依据：{evidence}"))
-    } else {
-        Ok(summary.to_string())
-    }
-}
-
-fn push_required_tool_reprompt(
-    loop_context: &mut Vec<Message>,
-    text: &str,
-    reasoning_content: &str,
-    reason: &str,
-) {
-    if !text.trim().is_empty() || !reasoning_content.trim().is_empty() {
-        loop_context.push(Message {
-            id: scru128::new().to_string(),
-            role: MessageRole::Assistant,
-            content: text.trim().to_string(),
-            reasoning_content: reasoning_content.trim().to_string(),
-            worker_id: None,
-            media: Vec::new(),
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            tool_name: None,
-            tool_result_is_error: false,
-            compact: false,
-            created_at: now_text(),
-        });
-    }
-    loop_context.push(Message {
-        id: scru128::new().to_string(),
-        role: MessageRole::System,
-        content: format!(
-            "内部调度提示：{reason} 本轮被强制要求使用工具。若仍需读取、写入、执行命令或验证文件，必须直接调用真实工具；若目标已经完成，必须调用 finish_task 并提供 status、summary、evidence。"
-        ),
-        reasoning_content: String::new(),
-        worker_id: None,
-        media: Vec::new(),
-        tool_calls: Vec::new(),
-        tool_call_id: None,
-        tool_name: None,
-        tool_result_is_error: false,
-        compact: false,
-        created_at: now_text(),
-    });
 }
 
 fn append_assistant_tool_call_message(
