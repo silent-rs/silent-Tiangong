@@ -74,8 +74,12 @@ impl TiangongApp {
         stream_tx: std::sync::mpsc::Sender<tiangong_types::SessionStreamEvent>,
     ) -> (String, bool) {
         let mut cores = self.cores.lock().unwrap();
-        if cores.contains_key(session_id) {
-            return (session_id.to_string(), false); // 已存在，复用
+        if let Some(core) = cores.get(session_id) {
+            if core.is_running() {
+                return (session_id.to_string(), false); // 已存在，复用
+            }
+            eprintln!("移除已停止的 TiangongCore：{session_id}");
+            cores.remove(session_id);
         }
         let core = TiangongCore::with_session(self.config.clone(), session, stream_tx);
         let id = core.session_id().to_string();
@@ -84,10 +88,31 @@ impl TiangongApp {
     }
 
     /// 向指定会话的 core 发送消息
-    pub fn send_to_core(&self, session_id: &str, content: String) {
-        let cores = self.cores.lock().unwrap();
+    pub fn send_to_core(&self, session_id: &str, content: String) -> bool {
+        self.send_to_core_with_id(session_id, content, None)
+    }
+
+    /// 向指定会话的 core 发送带固定消息 ID 的消息
+    pub fn send_to_core_with_id(
+        &self,
+        session_id: &str,
+        content: String,
+        message_id: Option<String>,
+    ) -> bool {
+        let mut cores = self.cores.lock().unwrap();
         if let Some(core) = cores.get(session_id) {
-            core.send_message(content);
+            let sent = if let Some(message_id) = message_id {
+                core.send_message_with_id(content, message_id)
+            } else {
+                core.send_message(content)
+            };
+            if !sent {
+                eprintln!("TiangongCore 命令通道已关闭，移除僵尸 core：{session_id}");
+                cores.remove(session_id);
+            }
+            sent
+        } else {
+            false
         }
     }
 

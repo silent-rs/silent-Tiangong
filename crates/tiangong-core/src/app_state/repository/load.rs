@@ -16,9 +16,11 @@ impl AppRepository {
                 }
             }
 
+            let active_session_id = resolve_active_session_id(&sessions, None);
+
             return Ok(Some(LoadedState {
                 sessions,
-                active_session_id: session_ids.first().cloned().unwrap_or_default(),
+                active_session_id,
                 model_list: Vec::new(),
                 agent_config,
             }));
@@ -39,14 +41,8 @@ impl AppRepository {
                 sessions.push(session);
             }
         }
-        let active_session_id = if session_ids
-            .iter()
-            .any(|session_id| session_id == &persisted.active_session_id)
-        {
-            persisted.active_session_id
-        } else {
-            session_ids.first().cloned().unwrap_or_default()
-        };
+        let active_session_id =
+            resolve_active_session_id(&sessions, Some(&persisted.active_session_id));
         let agent_config = self.load_agent_config_with_fallback(persisted.agent_config)?;
 
         Ok(Some(LoadedState {
@@ -197,4 +193,23 @@ impl AppRepository {
         session_ids.dedup();
         Ok(session_ids)
     }
+}
+
+fn resolve_active_session_id(sessions: &[Session], persisted_active_id: Option<&str>) -> String {
+    if let Some(active_id) = persisted_active_id
+        && sessions.iter().any(|session| session.id == active_id)
+    {
+        return active_id.to_string();
+    }
+
+    sessions
+        .iter()
+        .max_by(|left, right| {
+            left.updated_at
+                .cmp(&right.updated_at)
+                .then_with(|| left.created_at.cmp(&right.created_at))
+                .then_with(|| left.id.cmp(&right.id))
+        })
+        .map(|session| session.id.clone())
+        .unwrap_or_default()
 }

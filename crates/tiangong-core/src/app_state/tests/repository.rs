@@ -81,6 +81,79 @@ fn repository_persist_to_disk_round_trips_split_configs_and_sessions() -> Result
 }
 
 #[test]
+fn load_from_disk_prefers_most_recent_session_when_app_storage_missing() -> Result<()> {
+    with_isolated_state(
+        "tiangong-repository-recover-latest-without-app",
+        |paths, state| {
+            state.store.session.sessions.clear();
+
+            let mut older = Session::new("较早会话");
+            older.created_at = "2026-04-22 09:00:00.000000".to_string();
+            older.updated_at = "2026-04-22 09:05:00.000000".to_string();
+
+            let mut newer = Session::new("最近会话");
+            newer.created_at = "2026-04-23 10:00:00.000000".to_string();
+            newer.updated_at = "2026-04-23 10:20:00.000000".to_string();
+
+            state.store.session.active_session_id = older.id.clone();
+            state.store.session.sessions = vec![older.clone(), newer.clone()];
+            state.persist_to_disk()?;
+
+            fs::remove_file(paths.fake_home.join(".tiangong").join("app.json"))?;
+
+            let loaded = state
+                .services
+                .repository
+                .load_from_disk()?
+                .expect("应能从 session 文件恢复状态");
+
+            assert_eq!(loaded.active_session_id, newer.id);
+            assert_eq!(loaded.sessions.len(), 2);
+            Ok(())
+        },
+    )
+}
+
+#[test]
+fn load_from_disk_prefers_most_recent_session_when_active_session_is_invalid() -> Result<()> {
+    with_isolated_state(
+        "tiangong-repository-recover-latest-invalid-active",
+        |paths, state| {
+            state.store.session.sessions.clear();
+
+            let mut older = Session::new("较早会话");
+            older.created_at = "2026-04-22 09:00:00.000000".to_string();
+            older.updated_at = "2026-04-22 09:05:00.000000".to_string();
+
+            let mut newer = Session::new("最近会话");
+            newer.created_at = "2026-04-23 10:00:00.000000".to_string();
+            newer.updated_at = "2026-04-23 10:20:00.000000".to_string();
+
+            state.store.session.sessions = vec![older, newer.clone()];
+            state.store.session.active_session_id = newer.id.clone();
+            state.persist_to_disk()?;
+
+            let app_path = paths.fake_home.join(".tiangong").join("app.json");
+            let mut app_json: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&app_path)?)?;
+            app_json["active_session_id"] =
+                serde_json::Value::String("missing-session-id".to_string());
+            fs::write(&app_path, serde_json::to_string_pretty(&app_json)?)?;
+
+            let loaded = state
+                .services
+                .repository
+                .load_from_disk()?
+                .expect("应能在 active_session_id 失效时恢复状态");
+
+            assert_eq!(loaded.active_session_id, newer.id);
+            assert_eq!(loaded.sessions.len(), 2);
+            Ok(())
+        },
+    )
+}
+
+#[test]
 fn sync_mcp_dependency_lock_writes_expected_ref_counts() -> Result<()> {
     with_isolated_state("tiangong-mcp-dependency-lock", |paths, state| {
         state.store.agent.agent_config.skills.installed = vec![

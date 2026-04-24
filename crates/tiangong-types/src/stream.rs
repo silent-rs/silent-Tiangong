@@ -27,7 +27,11 @@ pub enum StreamEvent {
     ToolResult {
         name: String,
         ok: bool,
+        /// 给 UI/外部消费者展示的输出，可能被截断。
         output: String,
+        /// Rust 内部落盘使用的完整输出，不序列化给前端或远端消费者。
+        #[serde(default, skip)]
+        full_output: Option<String>,
     },
     /// LLM 决定调用工具
     ToolCalls {

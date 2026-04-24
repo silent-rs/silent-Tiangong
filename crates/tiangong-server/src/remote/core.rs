@@ -304,6 +304,7 @@ fn sync_stream_event_to_state(
                 content.clone(),
                 String::new(),
             );
+            should_persist = true;
         }
         StreamEvent::Delta {
             message_id,
@@ -314,6 +315,7 @@ fn sync_stream_event_to_state(
             content,
         } => append_assistant_reasoning(session, message_id, content),
         StreamEvent::ToolCalls { names, .. } => {
+            cleanup_latest_assistant_before_tool_calls(session);
             session.append_message(
                 MessageRole::System,
                 format!("LLM 输出\ntool_calls: {}", names.join(", ")),
@@ -327,17 +329,23 @@ fn sync_stream_event_to_state(
             };
             session.append_message(MessageRole::System, summary);
         }
-        StreamEvent::ToolResult { name, ok, output } => {
+        StreamEvent::ToolResult {
+            name,
+            ok,
+            output,
+            full_output,
+        } => {
+            let persisted_output = full_output.as_deref().unwrap_or(output);
             let status = if *ok { "成功" } else { "失败" };
             if *ok {
-                let media = parse_tool_media_assets(name, output);
+                let media = parse_tool_media_assets(name, persisted_output);
                 if !media.is_empty() {
                     session.append_message_with_media(MessageRole::Assistant, String::new(), media);
                 }
             }
             session.append_message(
                 MessageRole::System,
-                format!("工具 {name} 执行{status}\n{output}"),
+                format!("工具 {name} 执行{status}\n{persisted_output}"),
             );
         }
         StreamEvent::ApprovalNeeded { .. } => {
@@ -384,12 +392,23 @@ fn sync_stream_event_to_state(
 }
 
 fn append_assistant_delta(session: &mut Session, message_id: &str, content: &str) {
+    if content.trim().is_empty()
+        && !session
+            .messages
+            .iter()
+            .any(|message| message.id == message_id)
+    {
+        return;
+    }
     ensure_assistant_message(session, message_id);
     if let Some(message) = session
         .messages
         .iter_mut()
         .find(|message| message.id == message_id)
     {
+        if message.content.trim().is_empty() && content.trim().is_empty() {
+            return;
+        }
         message.content.push_str(content);
     }
 }
@@ -402,6 +421,25 @@ fn append_assistant_reasoning(session: &mut Session, message_id: &str, content: 
         .find(|message| message.id == message_id)
     {
         message.reasoning_content.push_str(content);
+    }
+}
+
+fn cleanup_latest_assistant_before_tool_calls(session: &mut Session) {
+    let Some(index) = session
+        .messages
+        .iter()
+        .rposition(|message| message.role == MessageRole::Assistant)
+    else {
+        return;
+    };
+
+    let message = &mut session.messages[index];
+    if !message.content.trim().is_empty() {
+        return;
+    }
+    message.content.clear();
+    if message.reasoning_content.trim().is_empty() && message.media.is_empty() {
+        session.messages.remove(index);
     }
 }
 

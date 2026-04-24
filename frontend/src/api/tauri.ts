@@ -225,8 +225,8 @@ export const api = {
   cancelTurn: (): Promise<boolean> =>
     invoke('cancel_turn'),
 
-  appendMessage: (content: string): Promise<boolean> =>
-    invoke('append_message', { content }),
+  appendMessage: (sessionId: string, content: string): Promise<boolean> =>
+    invoke('append_message', { sessionId, content }),
 
   respondApproval: (requestId: string, approved: boolean): Promise<boolean> =>
     invoke('respond_approval', { requestId, approved }),

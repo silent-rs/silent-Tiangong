@@ -159,9 +159,14 @@ export function MessageInput() {
       sendMessage(inputContent);
     } else {
       // 执行中：追加消息到正在执行的 turn
+      if (!activeSessionId) return;
       try {
-        await api.appendMessage(inputContent);
-        setInputContent('');
+        const appended = await api.appendMessage(activeSessionId, inputContent);
+        if (appended) {
+          setInputContent('');
+        } else {
+          console.warn('当前会话没有正在执行的任务，追加消息未发送');
+        }
       } catch (e) {
         console.error('追加消息失败:', e);
       }

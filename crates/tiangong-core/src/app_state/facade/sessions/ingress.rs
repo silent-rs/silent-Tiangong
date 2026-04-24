@@ -5,14 +5,25 @@ impl TiangongState {
     ///
     /// 统一处理：
     /// - 解析活动会话
+    /// - 固定用户消息并立即持久化
     /// - 清空输入草稿
     /// - 更新运行状态
     /// - 返回用于创建/复用 TiangongCore 的会话快照
     pub fn prepare_active_user_message_ingress(
         &mut self,
-        _content: impl Into<String>,
-    ) -> Result<(String, Session)> {
+        content: impl Into<String>,
+    ) -> Result<(String, String, Session)> {
+        let content = content.into();
         let idx = self.ensure_active_session_index();
+        let message_id = scru128::new().to_string();
+        let session_id = self.store.session.sessions[idx].id.clone();
+        self.store.session.sessions[idx].append_message_with_id(
+            message_id.clone(),
+            MessageRole::User,
+            content,
+            String::new(),
+        );
+        self.persist_session_and_app(&session_id)?;
         let session = self.store.session.sessions[idx].clone();
         self.store.session.input_draft.clear();
         self.store.runtime.run.status = crate::runtime::RunStatus::Executing;
@@ -21,7 +32,7 @@ impl TiangongState {
         let usage = session.total_usage();
         self.store.runtime.run.last_usage = (usage.total_tokens > 0).then_some(usage);
         self.store.runtime.run.updated_at = now_text();
-        Ok((session.id.clone(), session))
+        Ok((session.id.clone(), message_id, session))
     }
 
     /// 向指定会话注入外部事件消息，并立即持久化。

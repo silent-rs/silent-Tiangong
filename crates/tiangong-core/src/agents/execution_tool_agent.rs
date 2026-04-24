@@ -161,6 +161,14 @@ pub(crate) fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
 }
 
 pub(crate) fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<ToolCall> {
+    if let Some(parse_error) = call
+        .arguments
+        .get("__parse_error")
+        .and_then(serde_json::Value::as_str)
+    {
+        return Err(anyhow::anyhow!("{parse_error}"));
+    }
+
     let mut args = Vec::new();
     let tool_call = match call.name.as_str() {
         "list_dir" => {

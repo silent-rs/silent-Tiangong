@@ -4,16 +4,20 @@
 //! CLI / GUI / Server / Connector 统一通过 TiangongCore 运行。
 
 use std::collections::HashMap;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Sender, Sender as StdSender};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread::{self, JoinHandle};
+use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::agents::execution_mcp_agent::{McpFunctionTarget, execution_function_tools};
 use crate::app_state::formatting::{format_llm_output_message, format_tool_trace_message};
 use crate::coordinator::TaskCoordinator;
 use crate::coordinator::types::CoordinatorTask;
 use crate::core_config::{CoreConfig, CoreConfigProvider};
-use crate::model::{FunctionToolSpec, ModelClient, ModelRequest, SingleProviderClient, TokenUsage};
+use crate::model::{
+    FunctionToolSpec, ModelClient, ModelRequest, ModelToolChoice, SingleProviderClient, TokenUsage,
+};
 use crate::observe::{audit_permission_with_context, audit_tool_execution};
 use crate::prompt::PromptAssembler;
 use crate::runtime::{LlmOutputRecord, RuntimeEngine, inject_enhanced_tools, use_stream_mode};
@@ -21,7 +25,16 @@ use crate::session::{Message, MessageRole, Session, now_text};
 use crate::stream_throttle::ThrottledStreamSink;
 use tiangong_types::{SessionStreamEvent, StreamEvent};
 
+// 为了让 drain_pending_commands / execute_turn_standalone 继续使用 std Receiver
+use std::sync::mpsc::Receiver;
+
 const MAX_ROUNDS: usize = 20;
+const MAX_REQUIRED_TOOL_REPROMPTS: usize = 2;
+const MEMORY_LOOP_FEEDBACK_MAX_CHARS: usize = 12_000;
+const TOOL_RESULT_STREAM_MAX_CHARS: usize = 8_000;
+const FINISH_TASK_TOOL_NAME: &str = "finish_task";
+
+type MemoryRecallToolOutput = (crate::tool::ToolResult, tiangong_types::TokenUsage, bool);
 
 /// 进程级 Memory Handle 注册表。
 ///
@@ -250,7 +263,10 @@ fn resolve_memory_workspace_id(session_cwd: &str) -> Option<String> {
 /// 用户命令
 pub(crate) enum Command {
     /// 发送消息
-    Message(String),
+    Message {
+        content: String,
+        message_id: Option<String>,
+    },
     /// 取消当前执行
     Cancel,
     /// 审批响应
@@ -262,8 +278,8 @@ pub(crate) enum Command {
 
 /// 天工智能体核心
 pub struct TiangongCore {
-    /// 用户命令发送端
-    cmd_tx: Option<Sender<Command>>,
+    /// 用户命令发送端（tokio unbounded，send 不需要 await）
+    cmd_tx: Option<tokio_mpsc::UnboundedSender<Command>>,
     /// 工作线程
     worker: Option<JoinHandle<Session>>,
     /// 会话 ID
@@ -295,7 +311,7 @@ impl TiangongCore {
         let initial_trust_mode = config_snapshot.trust_mode;
         let shared_trust_mode = Arc::new(RwLock::new(initial_trust_mode));
         let session_id = session.id.clone();
-        let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
+        let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel::<Command>();
 
         let worker_trust_mode = shared_trust_mode.clone();
         let worker = thread::spawn(move || {
@@ -318,29 +334,47 @@ impl TiangongCore {
         }
     }
 
-    fn send_cmd(&self, cmd: Command) {
-        if let Some(ref tx) = self.cmd_tx {
-            let _ = tx.send(cmd);
-        }
+    fn send_cmd(&self, cmd: Command) -> bool {
+        let Some(ref tx) = self.cmd_tx else {
+            return false;
+        };
+        tx.send(cmd).is_ok()
     }
 
-    pub fn send_message(&self, content: String) {
-        self.send_cmd(Command::Message(content));
+    pub fn send_message(&self, content: String) -> bool {
+        self.send_cmd(Command::Message {
+            content,
+            message_id: None,
+        })
     }
 
-    pub fn cancel(&self) {
-        self.send_cmd(Command::Cancel);
+    pub fn send_message_with_id(&self, content: String, message_id: String) -> bool {
+        self.send_cmd(Command::Message {
+            content,
+            message_id: Some(message_id),
+        })
     }
 
-    pub fn respond_approval(&self, request_id: String, approved: bool) {
+    pub fn cancel(&self) -> bool {
+        self.send_cmd(Command::Cancel)
+    }
+
+    pub fn respond_approval(&self, request_id: String, approved: bool) -> bool {
         self.send_cmd(Command::Approval {
             request_id,
             approved,
-        });
+        })
     }
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.worker
+            .as_ref()
+            .map(|worker| !worker.is_finished())
+            .unwrap_or(false)
     }
 
     /// 设置信任模式（实时生效，当前对话下一次工具调用立即感知）
@@ -352,7 +386,7 @@ impl TiangongCore {
 
     /// 关闭并获取最终 session
     pub fn into_session(mut self) -> Session {
-        self.send_cmd(Command::Shutdown);
+        let _ = self.send_cmd(Command::Shutdown);
         self.cmd_tx = None;
         if let Some(w) = self.worker.take() {
             match w.join() {
@@ -378,9 +412,40 @@ impl Drop for TiangongCore {
 /// 工作线程：接收用户命令，执行 LLM + 工具，推送 StreamEvent
 fn worker_loop(
     config: CoreConfigProvider,
+    session: Session,
+    external_tx: StdSender<SessionStreamEvent>,
+    cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
+    shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
+    memory_handle: Option<tiangong_memory::MemoryHandle>,
+    memory_workspace_id: Option<String>,
+) -> Session {
+    // 在专用的 tokio runtime 上运行 async 工作循环，
+    // 使 execute_turn_inner 可以用 select! + stream_function_calls 实现真正取消。
+    //
+    // 注意：execute_turn_inner_async 内部使用了 tokio::task::block_in_place，
+    // 该 API 仅在 multi-thread runtime 可用，因此这里使用 1 worker 的 multi-thread runtime。
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("创建 TiangongCore tokio runtime 失败");
+    rt.block_on(worker_loop_async(
+        config,
+        session,
+        external_tx,
+        cmd_rx,
+        shared_trust_mode,
+        memory_handle,
+        memory_workspace_id,
+    ))
+}
+
+/// 真正的 async 工作循环
+async fn worker_loop_async(
+    config: CoreConfigProvider,
     mut session: Session,
-    external_tx: Sender<SessionStreamEvent>,
-    cmd_rx: Receiver<Command>,
+    external_tx: StdSender<SessionStreamEvent>,
+    mut cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
     mut memory_handle: Option<tiangong_memory::MemoryHandle>,
     memory_workspace_id: Option<String>,
@@ -394,6 +459,7 @@ fn worker_loop(
     let mut turn_count: u32 = 0;
 
     // 内部 StreamEvent 通道 —— 转发线程负责包装 session_id
+    // stream_tx 保持 std::sync::mpsc（工具执行等同步代码可直接使用）
     let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
     let fwd_session_id = session_id.clone();
     let fwd_tx = external_tx.clone();
@@ -432,7 +498,7 @@ fn worker_loop(
         }
     }
 
-    while let Ok(cmd) = cmd_rx.recv() {
+    while let Some(cmd) = cmd_rx.recv().await {
         // 配置变更检测：仅在 generation 变化时重建 engine 和工具列表
         let cfg_gen = config.generation();
         if engine.is_none() || cfg_gen != last_cfg_gen {
@@ -459,32 +525,31 @@ fn worker_loop(
         }
 
         match cmd {
-            Command::Message(content) => {
+            Command::Message {
+                content,
+                message_id,
+            } => {
                 let turn_start_idx = session.messages.len();
                 // 记录用户消息
-                session.append_message(MessageRole::User, content.clone());
+                let user_msg_id = append_or_reuse_user_message(&mut session, &content, message_id);
                 // 通知消费端：用户消息已记录（携带 session 中的 message_id）
-                let user_msg_id = session
-                    .messages
-                    .last()
-                    .map(|m| m.id.clone())
-                    .unwrap_or_default();
                 let _ = stream_tx.send(StreamEvent::UserMessage {
-                    message_id: user_msg_id,
+                    message_id: user_msg_id.clone(),
                     content: content.clone(),
                 });
 
                 // 执行对话轮次
-                execute_turn(
+                execute_turn_async(
                     &mut session,
                     &content,
                     engine.as_ref().unwrap(),
                     &tools,
                     &mcp_targets,
                     &stream_tx,
-                    &cmd_rx,
+                    &mut cmd_rx,
                     memory_handle.as_ref(),
-                );
+                )
+                .await;
 
                 // turn 完成后触发 Micro 反刍（fire-and-forget）
                 if let Some(handle) = memory_handle.as_ref() {
@@ -533,6 +598,7 @@ fn worker_loop(
 
     // 关闭内部通道，等待转发线程结束
     drop(stream_tx);
+    tokio::task::spawn_blocking(|| ()).await.ok(); // yield，让 forward_handle 有机会 drain
     let _ = forward_handle.join();
 
     // 会话结束 → 触发 Meso 反刍（提炼 Entity/Decision，更新 Workspace Injection）
@@ -558,7 +624,7 @@ pub(crate) fn execute_turn_standalone(
     engine: &RuntimeEngine,
     tools: &[FunctionToolSpec],
     mcp_targets: &HashMap<String, McpFunctionTarget>,
-    stream_tx: &Sender<StreamEvent>,
+    stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &Receiver<Command>,
     max_rounds: usize,
 ) -> TokenUsage {
@@ -575,36 +641,45 @@ pub(crate) fn execute_turn_standalone(
     )
 }
 
-/// 执行一个完整的对话轮次（可能多轮工具调用）
+/// 执行一个完整的对话轮次（可能多轮工具调用），async 版
 ///
 /// 首先判断是否需要多代理并行执行，如需要则拆分并行；
 /// 否则走标准的 ReAct 循环。
 /// 每轮之间检查 cmd_rx：新消息注入上下文，cancel 立即生效。
 #[allow(clippy::too_many_arguments)]
-fn execute_turn(
+async fn execute_turn_async(
     session: &mut Session,
     user_input: &str,
     engine: &RuntimeEngine,
     tools: &[FunctionToolSpec],
     mcp_targets: &HashMap<String, McpFunctionTarget>,
-    stream_tx: &Sender<StreamEvent>,
-    cmd_rx: &Receiver<Command>,
+    stream_tx: &StdSender<StreamEvent>,
+    cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     memory_handle: Option<&tiangong_memory::MemoryHandle>,
 ) {
-    // 判断是否需要多代理并行执行
-    let coordinator = TaskCoordinator::new(engine.clone());
-    let task = CoordinatorTask {
-        id: scru128::new().to_string(),
-        objective: user_input.to_string(),
-        user_input: user_input.to_string(),
-        context: Vec::new(),
+    // 判断是否需要多代理并行执行（同步 LLM 调用，用 block_in_place 保护）
+    let should_split = {
+        let coordinator = TaskCoordinator::new(engine.clone());
+        let task = CoordinatorTask {
+            id: scru128::new().to_string(),
+            objective: user_input.to_string(),
+            user_input: user_input.to_string(),
+            context: Vec::new(),
+        };
+        tokio::task::block_in_place(|| coordinator.should_split(&task))
     };
 
-    if coordinator.should_split(&task) {
+    if should_split {
         tracing::info!("任务需要拆分，启动多代理并行执行");
-        match coordinator.coordinate(task, session, stream_tx) {
+        let coordinator = TaskCoordinator::new(engine.clone());
+        let task = CoordinatorTask {
+            id: scru128::new().to_string(),
+            objective: user_input.to_string(),
+            user_input: user_input.to_string(),
+            context: Vec::new(),
+        };
+        match tokio::task::block_in_place(|| coordinator.coordinate(task, session, stream_tx)) {
             Ok(result) => {
-                // 记录合并结果到 session
                 session.append_message(MessageRole::Assistant, result.final_response);
                 let _ = stream_tx.send(StreamEvent::Done {
                     usage: Some(tiangong_types::TokenUsage {
@@ -616,8 +691,7 @@ fn execute_turn(
             }
             Err(err) => {
                 tracing::warn!("多代理并行执行失败，回退单代理: {err}");
-                // 回退到单代理执行
-                execute_turn_inner(
+                execute_turn_inner_async(
                     session,
                     user_input,
                     engine,
@@ -627,13 +701,14 @@ fn execute_turn(
                     cmd_rx,
                     MAX_ROUNDS,
                     memory_handle,
-                );
+                )
+                .await;
             }
         }
         return;
     }
 
-    execute_turn_inner(
+    execute_turn_inner_async(
         session,
         user_input,
         engine,
@@ -643,19 +718,21 @@ fn execute_turn(
         cmd_rx,
         MAX_ROUNDS,
         memory_handle,
-    );
+    )
+    .await;
 }
 
-/// 内部执行：标准 ReAct 循环
+/// 内部执行：标准 ReAct 循环（async 版，由 TiangongCore 主路径使用）
+/// LLM 流式调用使用真正的 async stream，通过 tokio::select! 实现任意时刻取消。
 #[allow(clippy::too_many_arguments)]
-fn execute_turn_inner(
+async fn execute_turn_inner_async(
     session: &mut Session,
     _user_input: &str,
     engine: &RuntimeEngine,
     tools: &[FunctionToolSpec],
     mcp_targets: &HashMap<String, McpFunctionTarget>,
-    stream_tx: &Sender<StreamEvent>,
-    cmd_rx: &Receiver<Command>,
+    stream_tx: &StdSender<StreamEvent>,
+    cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     max_rounds: usize,
     memory_handle: Option<&tiangong_memory::MemoryHandle>,
 ) -> TokenUsage {
@@ -664,23 +741,36 @@ fn execute_turn_inner(
     let mut accumulated_usage = TokenUsage::default();
     let mut pending_media_assets: Vec<tiangong_types::MediaAsset> = Vec::new();
     let mut memory_context: Option<String> = None;
+    let mut memory_recall_attempted = false;
+    let mut required_tool_reprompts = 0;
 
-    loop {
+    'react_loop: loop {
+        match drain_pending_commands_async(session, &mut loop_context, stream_tx, cmd_rx) {
+            PendingCommandEffect::Terminate => return accumulated_usage,
+            PendingCommandEffect::MessageInjected => {
+                memory_context = None;
+                memory_recall_attempted = false;
+            }
+            PendingCommandEffect::None => {}
+        }
+
         if round >= max_rounds {
-            // 超限：强制最终回复
-            force_final_response(session, &loop_context, engine, stream_tx);
+            tokio::task::block_in_place(|| {
+                force_final_response(session, &loop_context, engine, stream_tx);
+            });
             break;
         }
 
-        // 构建 prompt
-        // 用户输入统一通过 session.messages 传递，不使用独立的 user_input 通道。
-        // 工具调用后的续写提示只在本轮 prompt 中临时注入，避免重复累积到 loop_context。
+        let structured_action_required = round > 0;
+        let request_tools = tools_for_round(tools, structured_action_required);
+        let tool_choice = structured_action_required.then_some(ModelToolChoice::Any);
+
         let mut prompt_loop_context = loop_context.clone();
         if round > 0 {
             prompt_loop_context.push(Message {
                 id: scru128::new().to_string(),
                 role: MessageRole::System,
-                content: "内部调度提示：根据上面的工具执行结果继续完成用户原始目标。若目标尚未实际完成，继续调用必要工具；只有确认目标已完成时，才给出最终回复。".to_string(),
+                content: "内部调度提示：根据上面的工具执行结果继续完成用户原始目标。本轮必须调用一个工具：若仍需读取、写入、执行命令或验证文件，请调用真实工具；若目标已经完成，请调用 finish_task 并提供完成依据。不要用普通文本声称已经执行工具。".to_string(),
                 reasoning_content: String::new(),
                 worker_id: None,
                 media: Vec::new(),
@@ -692,7 +782,612 @@ fn execute_turn_inner(
         let assembled = assembler.assemble(
             session,
             "",
-            tools.to_vec(),
+            request_tools.clone(),
+            engine.models_config(),
+            engine.agent_config(),
+            &prompt_loop_context,
+        );
+
+        let mut system_prompt = assembled.final_system_prompt();
+        if let Some(ctx) = memory_context.as_deref() {
+            system_prompt.push_str(
+                "\n\n---\n## 历史上下文（回忆系统注入）\n\
+以下内容来自 recall_memory 工具的检索结果，仅供当前回复参考，\
+请勿重复回忆，除非用户有新的回忆需求：\n",
+            );
+            system_prompt.push_str(ctx);
+        }
+        let req = ModelRequest {
+            session_title: session.title.clone(),
+            user_input: assembled.user_input.clone(),
+            context: assembled.build_messages(),
+            assembled_system_prompt: Some(system_prompt),
+            thinking: Some(crate::model::ModelThinkingConfig {
+                budget_tokens: 4096,
+            }),
+        };
+
+        let pending_msg_id = scru128::new().to_string();
+        let sink = ThrottledStreamSink::new(pending_msg_id.clone(), stream_tx.clone());
+
+        // ── 真正的 async 流式调用 + select! 取消 ──
+        let (chunk_tx, mut chunk_rx) =
+            tokio_mpsc::unbounded_channel::<crate::model::ModelStreamChunk>();
+        let client = engine.client().clone();
+        let req_clone = req.clone();
+        let tools_clone = request_tools.clone();
+        let llm_fut = tokio::task::spawn(async move {
+            client
+                .stream_function_calls_with_tool_choice(
+                    req_clone,
+                    tools_clone,
+                    tool_choice,
+                    chunk_tx,
+                )
+                .await
+        });
+
+        // 同时驱动 LLM 流和命令队列，直到 LLM 完成或收到取消指令。
+        // 用户新消息在流式阶段立即落盘并回显，但不打断当前生成；
+        // 本次输出完成后再进入下一轮规划处理新消息。
+        let mut user_message_injected_during_stream = false;
+        let response_result: anyhow::Result<crate::model::ModelFunctionResponse> = loop {
+            tokio::select! {
+                biased;
+                // 优先处理用户命令
+                cmd_opt = cmd_rx.recv() => {
+                    match cmd_opt {
+                        Some(Command::Cancel) | Some(Command::Shutdown) | None => {
+                            llm_fut.abort();
+                            sink.finish();
+                            let _ = stream_tx.send(StreamEvent::Error {
+                                message: "已取消".into(),
+                            });
+                            return accumulated_usage;
+                        }
+                        // 用户输入到来时不打断当前生成：立即落盘并回显给前端，
+                        // 当前 assistant 继续输出；输出完成后马上进入下一轮规划处理新消息。
+                        Some(Command::Message { content, message_id }) => {
+                            append_user_message_to_loop_context(
+                                session,
+                                &mut loop_context,
+                                stream_tx,
+                                content,
+                                message_id,
+                            );
+                            user_message_injected_during_stream = true;
+                        }
+                        // Approval 在非等待阶段无语义，忽略
+                        Some(Command::Approval { .. }) => {}
+                    }
+                }
+                // 处理 LLM chunk
+                chunk_opt = chunk_rx.recv() => {
+                    match chunk_opt {
+                        Some(chunk) => sink.push_chunk(&chunk),
+                        None => {
+                            // chunk_tx 已关闭，LLM future 即将完成，等待结果
+                            let response_result = match llm_fut.await {
+                                Ok(r) => r,
+                                Err(e) if e.is_cancelled() => {
+                                    sink.finish();
+                                    let _ = stream_tx.send(StreamEvent::Error {
+                                        message: "已取消".into(),
+                                    });
+                                    return accumulated_usage;
+                                }
+                                Err(e) => Err(anyhow::anyhow!(e.to_string())),
+                            };
+                            break response_result;
+                        }
+                    }
+                }
+            }
+        };
+        sink.finish();
+
+        let response = match response_result {
+            Ok(r) => r,
+            Err(err) => {
+                let _ = stream_tx.send(StreamEvent::Error {
+                    message: err.to_string(),
+                });
+                return accumulated_usage;
+            }
+        };
+
+        accumulated_usage.accumulate(&response.usage);
+        round += 1;
+
+        if response.tool_calls.is_empty() {
+            if is_synthetic_tool_call_placeholder(&response.text) {
+                continue;
+            }
+
+            if structured_action_required && required_tool_reprompts < MAX_REQUIRED_TOOL_REPROMPTS {
+                required_tool_reprompts += 1;
+                push_required_tool_reprompt(
+                    &mut loop_context,
+                    &response.text,
+                    &response.reasoning_content,
+                    "上一轮没有返回 tool_calls。请调用真实工具继续执行，或调用 finish_task 结构化结束。",
+                );
+                continue;
+            }
+
+            session.append_message_with_id_and_media(
+                pending_msg_id,
+                MessageRole::Assistant,
+                response.text.clone(),
+                response.reasoning_content.clone(),
+                std::mem::take(&mut pending_media_assets),
+            );
+            let output = LlmOutputRecord {
+                stage: format!("react-round-{round}"),
+                content: String::new(),
+                reasoning_content: String::new(),
+                tool_calls: Vec::new(),
+                usage: response.usage.clone(),
+            };
+            session.append_message(MessageRole::System, format_llm_output_message(&output));
+            session.persist_to_disk();
+
+            if user_message_injected_during_stream {
+                // 新输入到来后，旧的 recall_memory 注入上下文可能不再相关，避免污染下一轮 prompt
+                memory_context = None;
+                memory_recall_attempted = false;
+                continue 'react_loop;
+            }
+
+            let _ = stream_tx.send(StreamEvent::Done {
+                usage: Some(tiangong_types::TokenUsage {
+                    prompt_tokens: accumulated_usage.prompt_tokens,
+                    completion_tokens: accumulated_usage.completion_tokens,
+                    total_tokens: accumulated_usage.total_tokens,
+                }),
+            });
+            return accumulated_usage;
+        }
+
+        // 工具调用
+        if let Some(finish_call) = only_finish_task_call(&response.tool_calls) {
+            match build_finish_task_final_text(finish_call) {
+                Ok(final_text) => {
+                    let output = LlmOutputRecord {
+                        stage: format!("react-round-{round}"),
+                        content: response.text.clone(),
+                        reasoning_content: response.reasoning_content.clone(),
+                        tool_calls: vec![FINISH_TASK_TOOL_NAME.to_string()],
+                        usage: response.usage.clone(),
+                    };
+                    session.append_message_with_reasoning(
+                        MessageRole::System,
+                        format_llm_output_message(&output),
+                        response.reasoning_content.clone(),
+                    );
+                    let _ = stream_tx.send(StreamEvent::Delta {
+                        message_id: pending_msg_id.clone(),
+                        content: final_text.clone(),
+                    });
+                    session.append_message_with_id_and_media(
+                        pending_msg_id,
+                        MessageRole::Assistant,
+                        final_text,
+                        response.reasoning_content.clone(),
+                        std::mem::take(&mut pending_media_assets),
+                    );
+                    session.persist_to_disk();
+                    let _ = stream_tx.send(StreamEvent::Done {
+                        usage: Some(tiangong_types::TokenUsage {
+                            prompt_tokens: accumulated_usage.prompt_tokens,
+                            completion_tokens: accumulated_usage.completion_tokens,
+                            total_tokens: accumulated_usage.total_tokens,
+                        }),
+                    });
+                    return accumulated_usage;
+                }
+                Err(err) if required_tool_reprompts < MAX_REQUIRED_TOOL_REPROMPTS => {
+                    required_tool_reprompts += 1;
+                    push_required_tool_reprompt(
+                        &mut loop_context,
+                        &response.text,
+                        &response.reasoning_content,
+                        &format!("finish_task 参数无效：{err}"),
+                    );
+                    continue;
+                }
+                Err(_) => {}
+            }
+        }
+
+        let executable_calls = response
+            .tool_calls
+            .iter()
+            .filter(|call| call.name != FINISH_TASK_TOOL_NAME)
+            .collect::<Vec<_>>();
+        if executable_calls.is_empty() {
+            if required_tool_reprompts < MAX_REQUIRED_TOOL_REPROMPTS {
+                required_tool_reprompts += 1;
+                push_required_tool_reprompt(
+                    &mut loop_context,
+                    &response.text,
+                    &response.reasoning_content,
+                    "模型没有返回可执行工具调用。",
+                );
+                continue;
+            }
+            let _ = stream_tx.send(StreamEvent::Error {
+                message: "模型没有返回可执行工具调用，任务已停止".to_string(),
+            });
+            return accumulated_usage;
+        }
+        required_tool_reprompts = 0;
+        let tool_names: Vec<String> = executable_calls.iter().map(|c| c.name.clone()).collect();
+        let output = LlmOutputRecord {
+            stage: format!("react-round-{round}"),
+            content: response.text.clone(),
+            reasoning_content: response.reasoning_content.clone(),
+            tool_calls: tool_names.clone(),
+            usage: response.usage.clone(),
+        };
+        session.append_message_with_reasoning(
+            MessageRole::System,
+            format_llm_output_message(&output),
+            response.reasoning_content.clone(),
+        );
+        let _ = stream_tx.send(StreamEvent::ToolCalls {
+            names: tool_names.clone(),
+            usage: Some(tiangong_types::TokenUsage {
+                prompt_tokens: response.usage.prompt_tokens,
+                completion_tokens: response.usage.completion_tokens,
+                total_tokens: response.usage.total_tokens,
+            }),
+        });
+        if !response.text.is_empty() || !response.reasoning_content.is_empty() {
+            loop_context.push(Message {
+                id: scru128::new().to_string(),
+                role: MessageRole::Assistant,
+                content: response.text.clone(),
+                reasoning_content: response.reasoning_content.clone(),
+                worker_id: None,
+                media: Vec::new(),
+                created_at: now_text(),
+            });
+        }
+
+        // 执行工具
+        for call in executable_calls {
+            match drain_pending_commands_async(session, &mut loop_context, stream_tx, cmd_rx) {
+                PendingCommandEffect::Terminate => return accumulated_usage,
+                PendingCommandEffect::MessageInjected => {
+                    memory_context = None;
+                    memory_recall_attempted = false;
+                    session.persist_to_disk();
+                    continue 'react_loop;
+                }
+                PendingCommandEffect::None => {}
+            }
+
+            let args_summary = format_call_args_summary(call);
+            let (target_scope, target_summary) = infer_audit_target(call);
+            let normalized_target = normalize_permission_target(
+                session,
+                target_scope.as_deref(),
+                target_summary.as_deref(),
+            );
+
+            use crate::permission::PermissionDecision;
+            let decision = evaluate_tool_permission(
+                engine,
+                &call.name,
+                target_scope.as_deref(),
+                normalized_target.as_deref(),
+            );
+            let trust_mode = format!("{:?}", engine.permission_gate().trust_mode());
+            match decision {
+                PermissionDecision::Approved => {
+                    audit_permission_with_context(
+                        &session.id,
+                        &call.name,
+                        "approved",
+                        &trust_mode,
+                        (!args_summary.is_empty()).then_some(args_summary.as_str()),
+                        target_scope.as_deref(),
+                        normalized_target.as_deref().or(target_summary.as_deref()),
+                    );
+                }
+                PermissionDecision::Denied { reason } => {
+                    audit_permission_with_context(
+                        &session.id,
+                        &call.name,
+                        "denied",
+                        &trust_mode,
+                        (!args_summary.is_empty()).then_some(args_summary.as_str()),
+                        target_scope.as_deref(),
+                        normalized_target.as_deref().or(target_summary.as_deref()),
+                    );
+                    let _ = stream_tx.send(StreamEvent::ToolResult {
+                        name: call.name.clone(),
+                        ok: false,
+                        output: format!("权限拒绝：{reason}"),
+                        full_output: None,
+                    });
+                    loop_context.push(Message {
+                        id: scru128::new().to_string(),
+                        role: MessageRole::User,
+                        content: format!("工具 {} 执行失败：权限拒绝 - {reason}", call.name),
+                        reasoning_content: String::new(),
+                        worker_id: None,
+                        media: Vec::new(),
+                        created_at: now_text(),
+                    });
+                    continue;
+                }
+                PermissionDecision::NeedsApproval { request_id } => {
+                    audit_permission_with_context(
+                        &session.id,
+                        &call.name,
+                        "needs_approval",
+                        &trust_mode,
+                        (!args_summary.is_empty()).then_some(args_summary.as_str()),
+                        target_scope.as_deref(),
+                        normalized_target.as_deref().or(target_summary.as_deref()),
+                    );
+                    crate::approval_store::add_pending(
+                        &session.id,
+                        crate::session::PendingApproval {
+                            request_id: request_id.clone(),
+                            tool_name: call.name.clone(),
+                            tool_args_summary: args_summary.clone(),
+                            created_at: now_text(),
+                        },
+                    );
+                    let _ = stream_tx.send(StreamEvent::ApprovalNeeded {
+                        request_id: request_id.clone(),
+                        tool_name: call.name.clone(),
+                        args_summary: args_summary.clone(),
+                    });
+
+                    // async 等待用户审批
+                    let approved = loop {
+                        match cmd_rx.recv().await {
+                            Some(Command::Approval {
+                                request_id: rid,
+                                approved,
+                            }) if rid == request_id => {
+                                break approved;
+                            }
+                            Some(Command::Cancel) | Some(Command::Shutdown) | None => {
+                                let _ = stream_tx.send(StreamEvent::Error {
+                                    message: "已取消".into(),
+                                });
+                                return accumulated_usage;
+                            }
+                            Some(Command::Message {
+                                content,
+                                message_id,
+                            }) => {
+                                append_user_message_to_loop_context(
+                                    session,
+                                    &mut loop_context,
+                                    stream_tx,
+                                    content,
+                                    message_id,
+                                );
+                            }
+                            Some(Command::Approval { .. }) => {}
+                        }
+                    };
+
+                    crate::approval_store::remove_pending(&session.id, &request_id);
+
+                    if !approved {
+                        audit_tool_execution(
+                            &session.id,
+                            &call.name,
+                            false,
+                            (!args_summary.is_empty()).then_some(args_summary.as_str()),
+                            target_scope.as_deref(),
+                            normalized_target.as_deref().or(target_summary.as_deref()),
+                            "用户拒绝执行",
+                        );
+                        session.append_message(
+                            MessageRole::System,
+                            format!("工具 {} 被用户拒绝执行", call.name),
+                        );
+                        session.persist_to_disk();
+                        let _ = stream_tx.send(StreamEvent::ToolResult {
+                            name: call.name.clone(),
+                            ok: false,
+                            output: "用户拒绝执行".to_string(),
+                            full_output: None,
+                        });
+                        let _ = stream_tx.send(StreamEvent::Done {
+                            usage: Some(tiangong_types::TokenUsage {
+                                prompt_tokens: accumulated_usage.prompt_tokens,
+                                completion_tokens: accumulated_usage.completion_tokens,
+                                total_tokens: accumulated_usage.total_tokens,
+                            }),
+                        });
+                        return accumulated_usage;
+                    }
+                }
+            }
+
+            let _ = stream_tx.send(StreamEvent::ToolStart {
+                name: call.name.clone(),
+                args_summary: args_summary.clone(),
+            });
+
+            let (result, memory_tool_usage, allow_memory_context) =
+                tokio::task::block_in_place(|| {
+                    if call.name == "recall_memory" {
+                        if memory_recall_attempted {
+                            duplicate_memory_recall_tool_result()
+                        } else {
+                            memory_recall_attempted = true;
+                            execute_memory_recall_tool(call, memory_handle, session)
+                        }
+                    } else {
+                        (
+                            engine.execute_tool_call(call, mcp_targets, &engine.agent_config().mcp),
+                            tiangong_types::TokenUsage::default(),
+                            false,
+                        )
+                    }
+                });
+            accumulated_usage.accumulate(&memory_tool_usage);
+
+            audit_tool_execution(
+                &session.id,
+                &call.name,
+                result.ok,
+                (!args_summary.is_empty()).then_some(args_summary.as_str()),
+                target_scope.as_deref(),
+                normalized_target.as_deref().or(target_summary.as_deref()),
+                &result.summary,
+            );
+            let _ = stream_tx.send(StreamEvent::ToolResult {
+                name: call.name.clone(),
+                ok: result.ok,
+                output: tool_result_stream_output(&result),
+                full_output: Some(tool_result_full_output(&result)),
+            });
+            session.append_message(MessageRole::System, format_tool_trace_message(&result));
+
+            let is_media_tool = matches!(
+                call.name.as_str(),
+                "generate_image" | "generate_video" | "text_to_speech" | "speech_to_text"
+            );
+            if result.ok {
+                pending_media_assets.extend(parse_media_assets_from_tool_result(
+                    &call.name,
+                    &result.stdout,
+                    &result.summary,
+                ));
+            }
+            let feedback = if is_media_tool && result.ok {
+                format!(
+                    "工具 {} 执行成功：{}。媒体内容已生成并交付给用户，不要再次调用该工具。请直接给出文本回复。",
+                    call.name, result.summary
+                )
+            } else {
+                format!(
+                    "工具 {} 执行{}：{}",
+                    call.name,
+                    if result.ok { "成功" } else { "失败" },
+                    if result.stdout.is_empty() {
+                        result.summary.clone()
+                    } else {
+                        result.stdout.clone()
+                    }
+                )
+            };
+            if call.name == "recall_memory" && result.ok {
+                if allow_memory_context && !result.stdout.trim().is_empty() {
+                    memory_context = Some(result.stdout.clone());
+                }
+                loop_context.push(Message {
+                    id: scru128::new().to_string(),
+                    role: MessageRole::User,
+                    content: build_memory_recall_feedback(&result.stdout, allow_memory_context),
+                    reasoning_content: String::new(),
+                    worker_id: None,
+                    media: Vec::new(),
+                    created_at: now_text(),
+                });
+            } else {
+                loop_context.push(Message {
+                    id: scru128::new().to_string(),
+                    role: MessageRole::User,
+                    content: feedback,
+                    reasoning_content: String::new(),
+                    worker_id: None,
+                    media: Vec::new(),
+                    created_at: now_text(),
+                });
+            }
+
+            match drain_pending_commands_async(session, &mut loop_context, stream_tx, cmd_rx) {
+                PendingCommandEffect::Terminate => return accumulated_usage,
+                PendingCommandEffect::MessageInjected => {
+                    memory_context = None;
+                    memory_recall_attempted = false;
+                    session.persist_to_disk();
+                    continue 'react_loop;
+                }
+                PendingCommandEffect::None => {}
+            }
+        }
+
+        session.persist_to_disk();
+    }
+
+    accumulated_usage
+}
+
+/// 内部执行：标准 ReAct 循环（同步版，由 execute_turn_standalone / Worker 使用）
+#[allow(clippy::too_many_arguments)]
+fn execute_turn_inner(
+    session: &mut Session,
+    _user_input: &str,
+    engine: &RuntimeEngine,
+    tools: &[FunctionToolSpec],
+    mcp_targets: &HashMap<String, McpFunctionTarget>,
+    stream_tx: &StdSender<StreamEvent>,
+    cmd_rx: &Receiver<Command>,
+    max_rounds: usize,
+    memory_handle: Option<&tiangong_memory::MemoryHandle>,
+) -> TokenUsage {
+    let mut loop_context: Vec<Message> = Vec::new();
+    let mut round = 0;
+    let mut accumulated_usage = TokenUsage::default();
+    let mut pending_media_assets: Vec<tiangong_types::MediaAsset> = Vec::new();
+    let mut memory_context: Option<String> = None;
+    let mut memory_recall_attempted = false;
+    let mut required_tool_reprompts = 0;
+
+    'react_loop: loop {
+        match drain_pending_commands(session, &mut loop_context, stream_tx, cmd_rx) {
+            PendingCommandEffect::Terminate => return accumulated_usage,
+            PendingCommandEffect::MessageInjected => {
+                memory_context = None;
+                memory_recall_attempted = false;
+            }
+            PendingCommandEffect::None => {}
+        }
+
+        if round >= max_rounds {
+            // 超限：强制最终回复
+            force_final_response(session, &loop_context, engine, stream_tx);
+            break;
+        }
+
+        // 构建 prompt
+        // 用户输入统一通过 session.messages 传递，不使用独立的 user_input 通道。
+        // 工具调用后的续写提示只在本轮 prompt 中临时注入，避免重复累积到 loop_context。
+        let structured_action_required = round > 0;
+        let request_tools = tools_for_round(tools, structured_action_required);
+        let tool_choice = structured_action_required.then_some(ModelToolChoice::Any);
+
+        let mut prompt_loop_context = loop_context.clone();
+        if round > 0 {
+            prompt_loop_context.push(Message {
+                id: scru128::new().to_string(),
+                role: MessageRole::System,
+                content: "内部调度提示：根据上面的工具执行结果继续完成用户原始目标。本轮必须调用一个工具：若仍需读取、写入、执行命令或验证文件，请调用真实工具；若目标已经完成，请调用 finish_task 并提供完成依据。不要用普通文本声称已经执行工具。".to_string(),
+                reasoning_content: String::new(),
+                worker_id: None,
+                media: Vec::new(),
+                created_at: now_text(),
+            });
+        }
+
+        let assembler = PromptAssembler::new(engine.context_limit);
+        let assembled = assembler.assemble(
+            session,
+            "",
+            request_tools.clone(),
             engine.models_config(),
             engine.agent_config(),
             &prompt_loop_context,
@@ -722,14 +1417,78 @@ fn execute_turn_inner(
         let pending_msg_id = scru128::new().to_string();
 
         // LLM 流式调用
+        // stream_cancel：流期间收到 Cancel/Shutdown 时设为 true，后续 chunk 不再入 sink
+        // cmds_during_stream：流期间截获的非终止命令（如 Message），LLM 完成后统一处理
         let sink = ThrottledStreamSink::new(pending_msg_id.clone(), stream_tx.clone());
-        let response_result =
-            engine
-                .client()
-                .complete_with_functions_stream(&req, tools, &mut |delta| {
-                    sink.push_chunk(delta);
-                });
+        let stream_cancel = Arc::new(AtomicBool::new(false));
+        let stream_cancel_c = stream_cancel.clone();
+        let cmds_during_stream: Arc<Mutex<Vec<Command>>> = Arc::new(Mutex::new(Vec::new()));
+        let cmds_during_stream_c = cmds_during_stream.clone();
+        let response_result = engine
+            .client()
+            .complete_with_functions_stream_with_tool_choice(
+                &req,
+                &request_tools,
+                tool_choice,
+                &mut |delta| {
+                    // 每个 chunk 回调时顺带排空命令队列，实现任意时刻响应
+                    while let Ok(cmd) = cmd_rx.try_recv() {
+                        match cmd {
+                            Command::Cancel => {
+                                stream_cancel_c.store(true, Ordering::Release);
+                            }
+                            Command::Shutdown => {
+                                stream_cancel_c.store(true, Ordering::Release);
+                            }
+                            other => {
+                                if let Ok(mut q) = cmds_during_stream_c.lock() {
+                                    q.push(other);
+                                }
+                            }
+                        }
+                    }
+                    if !stream_cancel_c.load(Ordering::Acquire) {
+                        sink.push_chunk(delta);
+                    }
+                },
+            );
         sink.finish();
+        // Cancel/Shutdown 在流期间被触发
+        if stream_cancel.load(Ordering::Acquire) {
+            let _ = stream_tx.send(StreamEvent::Error {
+                message: "已取消".into(),
+            });
+            return accumulated_usage;
+        }
+        // 处理流期间截获的用户消息，有新消息则立即重新规划
+        {
+            let had_messages = if let Ok(mut q) = cmds_during_stream.lock() {
+                let has = !q.is_empty();
+                for cmd in q.drain(..) {
+                    if let Command::Message {
+                        content,
+                        message_id,
+                    } = cmd
+                    {
+                        append_user_message_to_loop_context(
+                            session,
+                            &mut loop_context,
+                            stream_tx,
+                            content,
+                            message_id,
+                        );
+                    }
+                }
+                has
+            } else {
+                false
+            };
+            if had_messages {
+                memory_context = None;
+                memory_recall_attempted = false;
+                continue 'react_loop;
+            }
+        }
         let response = match response_result {
             Ok(r) => r,
             Err(err) => {
@@ -744,6 +1503,21 @@ fn execute_turn_inner(
         round += 1;
 
         if response.tool_calls.is_empty() {
+            if is_synthetic_tool_call_placeholder(&response.text) {
+                continue;
+            }
+
+            if structured_action_required && required_tool_reprompts < MAX_REQUIRED_TOOL_REPROMPTS {
+                required_tool_reprompts += 1;
+                push_required_tool_reprompt(
+                    &mut loop_context,
+                    &response.text,
+                    &response.reasoning_content,
+                    "上一轮没有返回 tool_calls。请调用真实工具继续执行，或调用 finish_task 结构化结束。",
+                );
+                continue;
+            }
+
             // 最终回复：使用预生成的 ID 记录到 session
             session.append_message_with_id_and_media(
                 pending_msg_id,
@@ -776,7 +1550,79 @@ fn execute_turn_inner(
         }
 
         // 工具调用
-        let tool_names: Vec<String> = response.tool_calls.iter().map(|c| c.name.clone()).collect();
+        if let Some(finish_call) = only_finish_task_call(&response.tool_calls) {
+            match build_finish_task_final_text(finish_call) {
+                Ok(final_text) => {
+                    let output = LlmOutputRecord {
+                        stage: format!("react-round-{round}"),
+                        content: response.text.clone(),
+                        reasoning_content: response.reasoning_content.clone(),
+                        tool_calls: vec![FINISH_TASK_TOOL_NAME.to_string()],
+                        usage: response.usage.clone(),
+                    };
+                    session.append_message_with_reasoning(
+                        MessageRole::System,
+                        format_llm_output_message(&output),
+                        response.reasoning_content.clone(),
+                    );
+                    let _ = stream_tx.send(StreamEvent::Delta {
+                        message_id: pending_msg_id.clone(),
+                        content: final_text.clone(),
+                    });
+                    session.append_message_with_id_and_media(
+                        pending_msg_id,
+                        MessageRole::Assistant,
+                        final_text,
+                        response.reasoning_content.clone(),
+                        std::mem::take(&mut pending_media_assets),
+                    );
+                    session.persist_to_disk();
+                    let _ = stream_tx.send(StreamEvent::Done {
+                        usage: Some(tiangong_types::TokenUsage {
+                            prompt_tokens: accumulated_usage.prompt_tokens,
+                            completion_tokens: accumulated_usage.completion_tokens,
+                            total_tokens: accumulated_usage.total_tokens,
+                        }),
+                    });
+                    return accumulated_usage;
+                }
+                Err(err) if required_tool_reprompts < MAX_REQUIRED_TOOL_REPROMPTS => {
+                    required_tool_reprompts += 1;
+                    push_required_tool_reprompt(
+                        &mut loop_context,
+                        &response.text,
+                        &response.reasoning_content,
+                        &format!("finish_task 参数无效：{err}"),
+                    );
+                    continue;
+                }
+                Err(_) => {}
+            }
+        }
+
+        let executable_calls = response
+            .tool_calls
+            .iter()
+            .filter(|call| call.name != FINISH_TASK_TOOL_NAME)
+            .collect::<Vec<_>>();
+        if executable_calls.is_empty() {
+            if required_tool_reprompts < MAX_REQUIRED_TOOL_REPROMPTS {
+                required_tool_reprompts += 1;
+                push_required_tool_reprompt(
+                    &mut loop_context,
+                    &response.text,
+                    &response.reasoning_content,
+                    "模型没有返回可执行工具调用。",
+                );
+                continue;
+            }
+            let _ = stream_tx.send(StreamEvent::Error {
+                message: "模型没有返回可执行工具调用，任务已停止".to_string(),
+            });
+            return accumulated_usage;
+        }
+        required_tool_reprompts = 0;
+        let tool_names: Vec<String> = executable_calls.iter().map(|c| c.name.clone()).collect();
 
         // 记录 LLM 输出到 session
         let output = LlmOutputRecord {
@@ -802,24 +1648,32 @@ fn execute_turn_inner(
             }),
         });
 
-        // 记录 assistant 意图到 loop_context
-        let assistant_text = if response.text.is_empty() {
-            format!("[调用工具: {}]", tool_names.join(", "))
-        } else {
-            response.text.clone()
-        };
-        loop_context.push(Message {
-            id: scru128::new().to_string(),
-            role: MessageRole::Assistant,
-            content: assistant_text,
-            reasoning_content: response.reasoning_content.clone(),
-            worker_id: None,
-            media: Vec::new(),
-            created_at: now_text(),
-        });
+        // 仅保留模型真实输出，避免把内部工具占位文本再次喂回上下文。
+        if !response.text.is_empty() || !response.reasoning_content.is_empty() {
+            loop_context.push(Message {
+                id: scru128::new().to_string(),
+                role: MessageRole::Assistant,
+                content: response.text.clone(),
+                reasoning_content: response.reasoning_content.clone(),
+                worker_id: None,
+                media: Vec::new(),
+                created_at: now_text(),
+            });
+        }
 
         // 执行工具
-        for call in &response.tool_calls {
+        for call in executable_calls {
+            match drain_pending_commands(session, &mut loop_context, stream_tx, cmd_rx) {
+                PendingCommandEffect::Terminate => return accumulated_usage,
+                PendingCommandEffect::MessageInjected => {
+                    memory_context = None;
+                    memory_recall_attempted = false;
+                    session.persist_to_disk();
+                    continue 'react_loop;
+                }
+                PendingCommandEffect::None => {}
+            }
+
             let args_summary = format_call_args_summary(call);
             let (target_scope, target_summary) = infer_audit_target(call);
             let normalized_target = normalize_permission_target(
@@ -863,6 +1717,7 @@ fn execute_turn_inner(
                         name: call.name.clone(),
                         ok: false,
                         output: format!("权限拒绝：{reason}"),
+                        full_output: None,
                     });
                     loop_context.push(Message {
                         id: scru128::new().to_string(),
@@ -918,17 +1773,17 @@ fn execute_turn_inner(
                                 });
                                 return accumulated_usage;
                             }
-                            Ok(Command::Message(content)) => {
-                                session.append_message(MessageRole::User, content.clone());
-                                loop_context.push(Message {
-                                    id: scru128::new().to_string(),
-                                    role: MessageRole::User,
+                            Ok(Command::Message {
+                                content,
+                                message_id,
+                            }) => {
+                                append_user_message_to_loop_context(
+                                    session,
+                                    &mut loop_context,
+                                    stream_tx,
                                     content,
-                                    reasoning_content: String::new(),
-                                    worker_id: None,
-                                    media: Vec::new(),
-                                    created_at: now_text(),
-                                });
+                                    message_id,
+                                );
                             }
                             Ok(Command::Shutdown) => return accumulated_usage,
                             _ => {}
@@ -958,6 +1813,7 @@ fn execute_turn_inner(
                             name: call.name.clone(),
                             ok: false,
                             output: "用户拒绝执行".to_string(),
+                            full_output: None,
                         });
                         // 拒绝后结束本轮，避免 LLM 再次调用同工具形成死循环
                         let _ = stream_tx.send(StreamEvent::Done {
@@ -979,7 +1835,12 @@ fn execute_turn_inner(
 
             let (result, memory_tool_usage, allow_memory_context) = if call.name == "recall_memory"
             {
-                execute_memory_recall_tool(call, memory_handle, session)
+                if memory_recall_attempted {
+                    duplicate_memory_recall_tool_result()
+                } else {
+                    memory_recall_attempted = true;
+                    execute_memory_recall_tool(call, memory_handle, session)
+                }
             } else {
                 (
                     engine.execute_tool_call(call, mcp_targets, &engine.agent_config().mcp),
@@ -1003,7 +1864,8 @@ fn execute_turn_inner(
             let _ = stream_tx.send(StreamEvent::ToolResult {
                 name: call.name.clone(),
                 ok: result.ok,
-                output: result.stdout.clone(),
+                output: tool_result_stream_output(&result),
+                full_output: Some(tool_result_full_output(&result)),
             });
 
             // 记录到 session
@@ -1039,20 +1901,14 @@ fn execute_turn_inner(
                     }
                 )
             };
-            // recall_memory 的检索内容注入 system prompt，loop_context 只记录简短通知
             if call.name == "recall_memory" && result.ok {
                 if allow_memory_context && !result.stdout.trim().is_empty() {
                     memory_context = Some(result.stdout.clone());
                 }
-                let notice = if !allow_memory_context || result.stdout.trim().is_empty() {
-                    "recall_memory 执行完成：未找到增量历史记忆。".to_string()
-                } else {
-                    "recall_memory 执行完成：历史上下文已注入 system prompt，请直接参考使用，无需再次调用此工具。".to_string()
-                };
                 loop_context.push(Message {
                     id: scru128::new().to_string(),
-                    role: MessageRole::System,
-                    content: notice,
+                    role: MessageRole::User,
+                    content: build_memory_recall_feedback(&result.stdout, allow_memory_context),
                     reasoning_content: String::new(),
                     worker_id: None,
                     media: Vec::new(),
@@ -1069,37 +1925,21 @@ fn execute_turn_inner(
                     created_at: now_text(),
                 });
             }
+
+            match drain_pending_commands(session, &mut loop_context, stream_tx, cmd_rx) {
+                PendingCommandEffect::Terminate => return accumulated_usage,
+                PendingCommandEffect::MessageInjected => {
+                    memory_context = None;
+                    memory_recall_attempted = false;
+                    session.persist_to_disk();
+                    continue 'react_loop;
+                }
+                PendingCommandEffect::None => {}
+            }
         }
 
         // 工具调用完成后增量持久化（防止崩溃丢失中间数据）
         session.persist_to_disk();
-
-        // 每轮之间检查用户命令（非阻塞）
-        while let Ok(cmd) = cmd_rx.try_recv() {
-            match cmd {
-                Command::Cancel => {
-                    let _ = stream_tx.send(StreamEvent::Error {
-                        message: "已取消".into(),
-                    });
-                    return accumulated_usage;
-                }
-                Command::Message(content) => {
-                    // 用户追加消息：注入 loop_context，下一轮 LLM 会看到
-                    session.append_message(MessageRole::User, content.clone());
-                    loop_context.push(Message {
-                        id: scru128::new().to_string(),
-                        role: MessageRole::User,
-                        content,
-                        reasoning_content: String::new(),
-                        worker_id: None,
-                        media: Vec::new(),
-                        created_at: now_text(),
-                    });
-                }
-                Command::Shutdown => return accumulated_usage,
-                _ => {}
-            }
-        }
 
         // 继续下一轮
     }
@@ -1107,12 +1947,270 @@ fn execute_turn_inner(
     accumulated_usage
 }
 
+enum PendingCommandEffect {
+    None,
+    MessageInjected,
+    Terminate,
+}
+
+fn drain_pending_commands_async(
+    session: &mut Session,
+    loop_context: &mut Vec<Message>,
+    stream_tx: &StdSender<StreamEvent>,
+    cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+) -> PendingCommandEffect {
+    let mut injected_message = false;
+
+    while let Ok(cmd) = cmd_rx.try_recv() {
+        match cmd {
+            Command::Cancel => {
+                let _ = stream_tx.send(StreamEvent::Error {
+                    message: "已取消".into(),
+                });
+                return PendingCommandEffect::Terminate;
+            }
+            Command::Shutdown => return PendingCommandEffect::Terminate,
+            Command::Message {
+                content,
+                message_id,
+            } => {
+                append_user_message_to_loop_context(
+                    session,
+                    loop_context,
+                    stream_tx,
+                    content,
+                    message_id,
+                );
+                injected_message = true;
+            }
+            Command::Approval { .. } => {}
+        }
+    }
+
+    if injected_message {
+        PendingCommandEffect::MessageInjected
+    } else {
+        PendingCommandEffect::None
+    }
+}
+
+fn drain_pending_commands(
+    session: &mut Session,
+    loop_context: &mut Vec<Message>,
+    stream_tx: &StdSender<StreamEvent>,
+    cmd_rx: &Receiver<Command>,
+) -> PendingCommandEffect {
+    let mut injected_message = false;
+
+    while let Ok(cmd) = cmd_rx.try_recv() {
+        match cmd {
+            Command::Cancel => {
+                let _ = stream_tx.send(StreamEvent::Error {
+                    message: "已取消".into(),
+                });
+                return PendingCommandEffect::Terminate;
+            }
+            Command::Shutdown => return PendingCommandEffect::Terminate,
+            Command::Message {
+                content,
+                message_id,
+            } => {
+                append_user_message_to_loop_context(
+                    session,
+                    loop_context,
+                    stream_tx,
+                    content,
+                    message_id,
+                );
+                injected_message = true;
+            }
+            Command::Approval { .. } => {}
+        }
+    }
+
+    if injected_message {
+        PendingCommandEffect::MessageInjected
+    } else {
+        PendingCommandEffect::None
+    }
+}
+
+fn append_user_message_to_loop_context(
+    session: &mut Session,
+    loop_context: &mut Vec<Message>,
+    stream_tx: &StdSender<StreamEvent>,
+    content: String,
+    message_id: Option<String>,
+) {
+    let loop_message_id = append_or_reuse_user_message(session, &content, message_id);
+    let _ = stream_tx.send(StreamEvent::UserMessage {
+        message_id: loop_message_id.clone(),
+        content: content.clone(),
+    });
+    loop_context.push(Message {
+        id: loop_message_id,
+        role: MessageRole::User,
+        content,
+        reasoning_content: String::new(),
+        worker_id: None,
+        media: Vec::new(),
+        created_at: now_text(),
+    });
+}
+
+fn append_or_reuse_user_message(
+    session: &mut Session,
+    content: &str,
+    message_id: Option<String>,
+) -> String {
+    if let Some(message_id) = message_id {
+        if !session.messages.iter().any(|msg| msg.id == message_id) {
+            session.append_message_with_id(
+                message_id.clone(),
+                MessageRole::User,
+                content.to_string(),
+                String::new(),
+            );
+        }
+        return message_id;
+    }
+
+    session.append_message(MessageRole::User, content.to_string());
+    session
+        .messages
+        .last()
+        .map(|m| m.id.clone())
+        .unwrap_or_default()
+}
+
+fn is_synthetic_tool_call_placeholder(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed.starts_with("[调用工具:") && trimmed.ends_with(']')
+}
+
+fn tools_for_round(tools: &[FunctionToolSpec], include_finish_task: bool) -> Vec<FunctionToolSpec> {
+    let mut request_tools = tools.to_vec();
+    if include_finish_task
+        && !request_tools
+            .iter()
+            .any(|tool| tool.name == FINISH_TASK_TOOL_NAME)
+    {
+        request_tools.push(finish_task_tool_spec());
+    }
+    request_tools
+}
+
+fn finish_task_tool_spec() -> FunctionToolSpec {
+    FunctionToolSpec {
+        name: FINISH_TASK_TOOL_NAME.to_string(),
+        description:
+            "结构化结束当前任务。仅当已经通过工具结果确认目标完成、或确认无法继续推进时调用。"
+                .to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["completed", "blocked"],
+                    "description": "completed 表示任务已完成；blocked 表示已尽力但被外部条件阻塞"
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "给用户的最终简明结论"
+                },
+                "evidence": {
+                    "type": "string",
+                    "description": "完成或阻塞依据，必须引用最近工具结果中的实际观察"
+                }
+            },
+            "required": ["status", "summary", "evidence"]
+        }),
+    }
+}
+
+fn only_finish_task_call(
+    calls: &[crate::model::ModelFunctionCall],
+) -> Option<&crate::model::ModelFunctionCall> {
+    if calls.len() == 1 && calls[0].name == FINISH_TASK_TOOL_NAME {
+        Some(&calls[0])
+    } else {
+        None
+    }
+}
+
+fn build_finish_task_final_text(call: &crate::model::ModelFunctionCall) -> anyhow::Result<String> {
+    let status = call
+        .arguments
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let summary = call
+        .arguments
+        .get("summary")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let evidence = call
+        .arguments
+        .get("evidence")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim();
+
+    if !matches!(status, "completed" | "blocked") {
+        return Err(anyhow::anyhow!("status 必须是 completed 或 blocked"));
+    }
+    if summary.is_empty() {
+        return Err(anyhow::anyhow!("summary 不能为空"));
+    }
+    if evidence.is_empty() {
+        return Err(anyhow::anyhow!("evidence 不能为空"));
+    }
+
+    if status == "blocked" {
+        Ok(format!("{summary}\n\n依据：{evidence}"))
+    } else {
+        Ok(summary.to_string())
+    }
+}
+
+fn push_required_tool_reprompt(
+    loop_context: &mut Vec<Message>,
+    text: &str,
+    reasoning_content: &str,
+    reason: &str,
+) {
+    if !text.trim().is_empty() || !reasoning_content.trim().is_empty() {
+        loop_context.push(Message {
+            id: scru128::new().to_string(),
+            role: MessageRole::Assistant,
+            content: text.trim().to_string(),
+            reasoning_content: reasoning_content.trim().to_string(),
+            worker_id: None,
+            media: Vec::new(),
+            created_at: now_text(),
+        });
+    }
+    loop_context.push(Message {
+        id: scru128::new().to_string(),
+        role: MessageRole::System,
+        content: format!(
+            "内部调度提示：{reason} 本轮被强制要求使用工具。若仍需读取、写入、执行命令或验证文件，必须直接调用真实工具；若目标已经完成，必须调用 finish_task 并提供 status、summary、evidence。"
+        ),
+        reasoning_content: String::new(),
+        worker_id: None,
+        media: Vec::new(),
+        created_at: now_text(),
+    });
+}
+
 /// 超限时强制最终回复
 fn force_final_response(
     session: &mut Session,
     loop_context: &[Message],
     engine: &RuntimeEngine,
-    stream_tx: &Sender<StreamEvent>,
+    stream_tx: &StdSender<StreamEvent>,
 ) {
     // 将强制回复提示作为 System 消息注入上下文
     let mut final_context = loop_context.to_vec();
@@ -1215,7 +2313,7 @@ fn force_final_response(
 /// `shared_trust_mode` 是 TiangongCore 持有的独立信任模式，RuntimeEngine 共享此引用。
 fn build_engine_from_config(
     config: &crate::core_config::CoreConfig,
-    stream_tx: &Sender<StreamEvent>,
+    stream_tx: &StdSender<StreamEvent>,
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
 ) -> RuntimeEngine {
     use crate::agent_config::AgentConfig;
@@ -1307,7 +2405,7 @@ fn execute_memory_recall_tool(
     call: &crate::model::ModelFunctionCall,
     memory_handle: Option<&tiangong_memory::MemoryHandle>,
     session: &Session,
-) -> (crate::tool::ToolResult, tiangong_types::TokenUsage, bool) {
+) -> MemoryRecallToolOutput {
     let started = std::time::Instant::now();
     let Some(handle) = memory_handle else {
         return (
@@ -1453,6 +2551,89 @@ fn memory_recall_tool_result(
             exit_code,
             summary,
         }),
+    }
+}
+
+fn duplicate_memory_recall_tool_result() -> MemoryRecallToolOutput {
+    let started = std::time::Instant::now();
+    (
+        memory_recall_tool_result(
+            true,
+            "本轮已完成回忆，跳过重复调用",
+            "recall_memory 本轮已经执行过，回忆结果已经注入当前上下文。请直接基于已有回忆结果完成用户原始目标，不要再次调用 recall_memory。"
+                .to_string(),
+            String::new(),
+            0,
+            vec!["duplicate-recall".to_string()],
+            started,
+        ),
+        tiangong_types::TokenUsage::default(),
+        false,
+    )
+}
+
+fn build_memory_recall_feedback(stdout: &str, allow_memory_context: bool) -> String {
+    let header = if allow_memory_context && !stdout.trim().is_empty() {
+        "recall_memory 已完成。以下是可直接使用的回忆结果，请基于这些内容继续完成用户原始目标；不要再次调用 recall_memory，除非用户提出新的历史查询。"
+    } else if stdout.trim().is_empty() {
+        "recall_memory 已完成，但没有可用的增量历史记忆。请基于当前上下文继续完成用户原始目标；不要再次调用 recall_memory。"
+    } else {
+        "recall_memory 已完成，结果如下。请基于当前上下文继续完成用户原始目标；不要再次调用 recall_memory。"
+    };
+    let body = truncate_chars_with_notice(
+        stdout.trim(),
+        MEMORY_LOOP_FEEDBACK_MAX_CHARS,
+        "\n...(已截断，完整回忆结果已记录在工具执行消息中)",
+    );
+    if body.trim().is_empty() {
+        header.to_string()
+    } else {
+        format!("{header}\n\n{body}")
+    }
+}
+
+fn tool_result_full_output(result: &crate::tool::ToolResult) -> String {
+    if result.ok {
+        return if result.stdout.trim().is_empty() {
+            result.summary.clone()
+        } else {
+            result.stdout.clone()
+        };
+    }
+
+    let mut lines = Vec::new();
+    if !result.summary.trim().is_empty() {
+        lines.push(format!("summary: {}", result.summary));
+    }
+    if !result.stderr.trim().is_empty() {
+        lines.push(format!("stderr:\n{}", result.stderr));
+    }
+    if !result.stdout.trim().is_empty() {
+        lines.push(format!("stdout:\n{}", result.stdout));
+    }
+    if lines.is_empty() {
+        "工具执行失败，但没有返回详细错误".to_string()
+    } else {
+        lines.join("\n")
+    }
+}
+
+fn tool_result_stream_output(result: &crate::tool::ToolResult) -> String {
+    let output = tool_result_full_output(result);
+    truncate_chars_with_notice(
+        &output,
+        TOOL_RESULT_STREAM_MAX_CHARS,
+        "\n...(已截断，完整工具输出已记录到会话数据)",
+    )
+}
+
+fn truncate_chars_with_notice(text: &str, max_chars: usize, notice: &str) -> String {
+    let mut chars = text.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}{notice}")
+    } else {
+        truncated
     }
 }
 
