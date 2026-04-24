@@ -41,7 +41,7 @@ impl LlmError {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            Self::Transport(_) | Self::Timeout(_) | Self::RateLimited(_)
+            Self::Transport(_) | Self::Timeout(_) | Self::RateLimited(_) | Self::Stream(_)
         )
     }
 }

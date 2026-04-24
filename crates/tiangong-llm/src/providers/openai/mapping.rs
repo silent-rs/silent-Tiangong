@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use crate::message::{ChatMessage, MessageContent, MessageRole};
 use crate::request::ProviderRequest;
 use crate::response::{ProviderResponse, StopReason};
-use crate::tool::ToolSpec;
+use crate::tool::{ToolChoice, ToolSpec};
 use crate::usage::TokenUsageData;
 
 pub fn normalize_api_base(base_url: &str) -> Result<String> {
@@ -45,7 +45,7 @@ pub fn build_request_json(req: &ProviderRequest, stream: bool) -> Result<Value> 
         inject_temperature_config(&mut payload, temperature)?;
     }
     if !req.tools.is_empty() {
-        inject_function_tools(&mut payload, &req.tools);
+        inject_function_tools(&mut payload, &req.tools, req.tool_choice.as_ref());
     }
     Ok(payload)
 }
@@ -237,7 +237,11 @@ fn inject_temperature_config(payload: &mut Value, temperature: f32) -> Result<()
     Ok(())
 }
 
-fn inject_function_tools(payload: &mut Value, functions: &[ToolSpec]) {
+fn inject_function_tools(
+    payload: &mut Value,
+    functions: &[ToolSpec],
+    tool_choice: Option<&ToolChoice>,
+) {
     let Some(obj) = payload.as_object_mut() else {
         return;
     };
@@ -255,7 +259,15 @@ fn inject_function_tools(payload: &mut Value, functions: &[ToolSpec]) {
         })
         .collect::<Vec<_>>();
     obj.insert("tools".to_string(), Value::Array(tools));
-    obj.insert("tool_choice".to_string(), Value::String("auto".to_string()));
+    let tool_choice = match tool_choice {
+        Some(ToolChoice::Any) => Value::String("required".to_string()),
+        Some(ToolChoice::Tool(name)) => json!({
+            "type": "function",
+            "function": { "name": name },
+        }),
+        Some(ToolChoice::Auto) | None => Value::String("auto".to_string()),
+    };
+    obj.insert("tool_choice".to_string(), tool_choice);
 }
 
 pub fn strip_think_tags(text: &str) -> String {

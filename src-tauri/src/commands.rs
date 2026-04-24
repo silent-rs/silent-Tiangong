@@ -376,7 +376,9 @@ pub fn send_message(
     {
         let cores = state.cores.lock().map_err(|e| e.to_string())?;
         if let Some(core) = cores.get(&sid) {
-            core.send_message_with_id(content.clone(), user_message_id);
+            if !core.send_message_with_id(content.clone(), user_message_id) {
+                return Err("会话 core 已停止，请重试发送".to_string());
+            }
         }
     }
 
@@ -528,10 +530,7 @@ pub fn send_message(
                             attempt,
                             max_attempts,
                         } => {
-                            session.append_message(
-                                tiangong_core::session::MessageRole::System,
-                                format!("[重试] ({attempt}/{max_attempts}) {message}"),
-                            );
+                            let _ = (message, attempt, max_attempts);
                         }
                         StreamEvent::Done { usage } => {
                             if let Some(usage) = usage {
@@ -787,6 +786,11 @@ pub fn append_message(
 
     let message_id = scru128::new().to_string();
     if !state.send_to_core_with_id(&session_id, content.clone(), Some(message_id.clone())) {
+        let snapshot = state.with_state(|core_state| {
+            core_state.report_run_idle("当前会话任务已结束，请重新发送");
+            Ok(build_session_snapshot(core_state, &session_id, false))
+        })?;
+        let _ = app.emit("run_snapshot", &snapshot);
         return Ok(false);
     }
 

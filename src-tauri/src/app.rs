@@ -74,8 +74,12 @@ impl TiangongApp {
         stream_tx: std::sync::mpsc::Sender<tiangong_types::SessionStreamEvent>,
     ) -> (String, bool) {
         let mut cores = self.cores.lock().unwrap();
-        if cores.contains_key(session_id) {
-            return (session_id.to_string(), false); // 已存在，复用
+        if let Some(core) = cores.get(session_id) {
+            if core.is_running() {
+                return (session_id.to_string(), false); // 已存在，复用
+            }
+            eprintln!("移除已停止的 TiangongCore：{session_id}");
+            cores.remove(session_id);
         }
         let core = TiangongCore::with_session(self.config.clone(), session, stream_tx);
         let id = core.session_id().to_string();
@@ -95,14 +99,18 @@ impl TiangongApp {
         content: String,
         message_id: Option<String>,
     ) -> bool {
-        let cores = self.cores.lock().unwrap();
+        let mut cores = self.cores.lock().unwrap();
         if let Some(core) = cores.get(session_id) {
-            if let Some(message_id) = message_id {
-                core.send_message_with_id(content, message_id);
+            let sent = if let Some(message_id) = message_id {
+                core.send_message_with_id(content, message_id)
             } else {
-                core.send_message(content);
+                core.send_message(content)
+            };
+            if !sent {
+                eprintln!("TiangongCore 命令通道已关闭，移除僵尸 core：{session_id}");
+                cores.remove(session_id);
             }
-            true
+            sent
         } else {
             false
         }
