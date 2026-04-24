@@ -1174,10 +1174,12 @@ async fn execute_turn_inner_async(
                     &result.summary,
                 ));
             }
-            if call.name == "recall_memory" && result.ok {
-                if allow_memory_context && !result.stdout.trim().is_empty() {
-                    memory_context = Some(result.stdout.clone());
-                }
+            if call.name == "recall_memory"
+                && result.ok
+                && allow_memory_context
+                && !result.stdout.trim().is_empty()
+            {
+                memory_context = Some(result.stdout.clone());
             }
             append_tool_result_message(
                 session,
@@ -1679,10 +1681,12 @@ fn execute_turn_inner(
                     &result.summary,
                 ));
             }
-            if call.name == "recall_memory" && result.ok {
-                if allow_memory_context && !result.stdout.trim().is_empty() {
-                    memory_context = Some(result.stdout.clone());
-                }
+            if call.name == "recall_memory"
+                && result.ok
+                && allow_memory_context
+                && !result.stdout.trim().is_empty()
+            {
+                memory_context = Some(result.stdout.clone());
             }
             append_tool_result_message(
                 session,
