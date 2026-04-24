@@ -778,13 +778,55 @@ pub fn cancel_turn(state: State<TiangongApp>) -> Result<bool, String> {
 pub fn append_message(
     session_id: String,
     content: String,
+    app: AppHandle,
     state: State<TiangongApp>,
 ) -> Result<bool, String> {
     if session_id.trim().is_empty() {
         return Err("当前会话 ID 不能为空".to_string());
     }
 
-    Ok(state.send_to_core(&session_id, content))
+    let message_id = scru128::new().to_string();
+    if !state.send_to_core_with_id(&session_id, content.clone(), Some(message_id.clone())) {
+        return Ok(false);
+    }
+
+    let snapshot = state.with_state(|core_state| {
+        {
+            let Some(session) = core_state
+                .sessions_mut()
+                .iter_mut()
+                .find(|session| session.id == session_id)
+            else {
+                return Err(anyhow::anyhow!("当前会话不存在"));
+            };
+            if !session.messages.iter().any(|msg| msg.id == message_id) {
+                session.append_message_with_id(
+                    message_id,
+                    tiangong_core::session::MessageRole::User,
+                    content,
+                    String::new(),
+                );
+            }
+        }
+
+        let usage = core_state
+            .sessions()
+            .iter()
+            .find(|session| session.id == session_id)
+            .map(|session| session.total_usage())
+            .unwrap_or_default();
+        core_state.store.session.input_draft.clear();
+        core_state.store.runtime.run.status = tiangong_core::runtime::RunStatus::Executing;
+        core_state.store.runtime.run.summary = "正在处理".to_string();
+        core_state.store.runtime.run.last_session_id = Some(session_id.clone());
+        core_state.store.runtime.run.last_usage = (usage.total_tokens > 0).then_some(usage);
+        core_state.store.runtime.run.updated_at = tiangong_core::session::now_text();
+        core_state.persist_session_and_app(&session_id)?;
+        Ok(build_session_snapshot(core_state, &session_id, true))
+    })?;
+    let _ = app.emit("run_snapshot", &snapshot);
+
+    Ok(true)
 }
 
 /// 响应工具审批请求
