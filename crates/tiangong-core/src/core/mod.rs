@@ -263,6 +263,8 @@ pub(crate) enum Command {
         content: String,
         message_id: Option<String>,
     },
+    /// 更新当前会话工作目录
+    UpdateCwd { cwd: String },
     /// 取消当前执行
     Cancel,
     /// 审批响应
@@ -349,6 +351,10 @@ impl TiangongCore {
             content,
             message_id: Some(message_id),
         })
+    }
+
+    pub fn update_cwd(&self, cwd: String) -> bool {
+        self.send_cmd(Command::UpdateCwd { cwd })
     }
 
     pub fn cancel(&self) -> bool {
@@ -444,7 +450,7 @@ async fn worker_loop_async(
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
     mut memory_handle: Option<tiangong_memory::MemoryHandle>,
-    memory_workspace_id: Option<String>,
+    mut memory_workspace_id: Option<String>,
 ) -> Session {
     let session_id = session.id.clone();
     let mut last_cfg_gen = 0u64;
@@ -473,13 +479,7 @@ async fn worker_loop_async(
         }
     });
 
-    // 设置工作目录
-    if !session.cwd.is_empty() {
-        let p = std::path::PathBuf::from(&session.cwd);
-        if p.is_dir() {
-            crate::tool::set_session_cwd(Some(p));
-        }
-    }
+    apply_session_cwd(&session);
 
     // 恢复未完成的审批请求（崩溃恢复场景）
     let pending = crate::approval_store::get_pending(&session_id);
@@ -521,6 +521,15 @@ async fn worker_loop_async(
         }
 
         match cmd {
+            Command::UpdateCwd { cwd } => {
+                session.cwd = cwd;
+                apply_session_cwd(&session);
+                memory_workspace_id = resolve_memory_workspace_id(&session.cwd);
+                let cfg = config.snapshot();
+                memory_handle =
+                    get_or_init_memory(&cfg, config.generation(), memory_workspace_id.clone());
+                continue;
+            }
             Command::Message {
                 content,
                 message_id,
@@ -607,6 +616,19 @@ async fn worker_loop_async(
     }
 
     session
+}
+
+fn apply_session_cwd(session: &Session) {
+    let cwd = session.cwd.trim();
+    if cwd.is_empty() {
+        crate::tool::set_session_cwd(None);
+        return;
+    }
+
+    let path = std::path::PathBuf::from(cwd);
+    if path.is_dir() {
+        crate::tool::set_session_cwd(Some(path));
+    }
 }
 
 /// 供 Worker 调用的独立执行函数
@@ -831,6 +853,10 @@ async fn execute_turn_inner_async(
                                 message_id,
                             );
                             user_message_injected_during_stream = true;
+                        }
+                        Some(Command::UpdateCwd { cwd }) => {
+                            session.cwd = cwd;
+                            apply_session_cwd(session);
                         }
                         // Approval 在非等待阶段无语义，忽略
                         Some(Command::Approval { .. }) => {}
@@ -1077,6 +1103,10 @@ async fn execute_turn_inner_async(
                                     content,
                                     message_id,
                                 );
+                            }
+                            Some(Command::UpdateCwd { cwd }) => {
+                                session.cwd = cwd;
+                                apply_session_cwd(session);
                             }
                             Some(Command::Approval { .. }) => {}
                         }
@@ -1577,6 +1607,10 @@ fn execute_turn_inner(
                                     message_id,
                                 );
                             }
+                            Ok(Command::UpdateCwd { cwd }) => {
+                                session.cwd = cwd;
+                                apply_session_cwd(session);
+                            }
                             Ok(Command::Shutdown) => return accumulated_usage,
                             _ => {}
                         }
@@ -1753,6 +1787,10 @@ fn drain_pending_commands_async(
                 );
                 injected_message = true;
             }
+            Command::UpdateCwd { cwd } => {
+                session.cwd = cwd;
+                apply_session_cwd(session);
+            }
             Command::Approval { .. } => {}
         }
     }
@@ -1793,6 +1831,10 @@ fn drain_pending_commands(
                     message_id,
                 );
                 injected_message = true;
+            }
+            Command::UpdateCwd { cwd } => {
+                session.cwd = cwd;
+                apply_session_cwd(session);
             }
             Command::Approval { .. } => {}
         }

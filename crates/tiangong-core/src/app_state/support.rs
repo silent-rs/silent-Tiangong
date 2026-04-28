@@ -7,6 +7,8 @@ pub(in crate::app_state) struct PersistedAppState {
     #[serde(default)]
     pub(in crate::app_state) active_session_id: String,
     #[serde(default)]
+    pub(in crate::app_state) workspace_dir: String,
+    #[serde(default)]
     pub(in crate::app_state) model_list: Vec<String>,
     #[serde(default)]
     pub(in crate::app_state) agent_config: Option<AgentConfig>,
@@ -26,6 +28,7 @@ pub(in crate::app_state) struct LegacyPersistedState {
 pub(in crate::app_state) struct LoadedState {
     pub(in crate::app_state) sessions: Vec<Session>,
     pub(in crate::app_state) active_session_id: String,
+    pub(in crate::app_state) workspace_dir: String,
     pub(in crate::app_state) model_list: Vec<String>,
     pub(in crate::app_state) agent_config: Option<AgentConfig>,
 }

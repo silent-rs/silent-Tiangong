@@ -177,7 +177,7 @@ export function MessageInput() {
 
   const handleChangeCwd = async () => {
     try {
-      const selected = await open({ directory: true, multiple: false, defaultPath: sessionCwd || undefined, title: '选择工作目录' });
+      const selected = await open({ directory: true, multiple: false, defaultPath: sessionCwd || undefined, title: '选择对话目录' });
       if (selected && typeof selected === 'string') { await setSessionCwd(selected); }
     } catch (error) { console.error('选择目录失败:', error); }
   };
@@ -371,10 +371,10 @@ export function MessageInput() {
                 onClick={handleChangeCwd}
                 disabled={!isIdle}
                 className="flex items-center gap-1 hover:text-foreground transition-colors truncate max-w-[300px] disabled:opacity-50 disabled:cursor-default disabled:hover:text-muted-foreground"
-                title={sessionCwd || '点击设置工作目录'}
+                title={sessionCwd || '点击设置对话目录'}
               >
                 <FolderOpen className="w-3 h-3 shrink-0" />
-                <span className="truncate">{displayCwd || '设置工作目录'}</span>
+                <span className="truncate">{displayCwd || '设置对话目录'}</span>
               </button>
               <span>空格键 录音</span>
             </div>
@@ -478,10 +478,10 @@ export function MessageInput() {
                   onClick={handleChangeCwd}
                   disabled={!isIdle}
                   className="flex items-center gap-1 hover:text-foreground transition-colors truncate max-w-[300px] disabled:opacity-50 disabled:cursor-default disabled:hover:text-muted-foreground shrink-0"
-                  title={sessionCwd || '点击设置工作目录'}
+                  title={sessionCwd || '点击设置对话目录'}
                 >
                   <FolderOpen className="w-3 h-3 shrink-0" />
-                  <span className="truncate">{displayCwd || '设置工作目录'}</span>
+                  <span className="truncate">{displayCwd || '设置对话目录'}</span>
                 </button>
                 {currentRunStatus !== 'idle' ? (
                   <span className="flex items-center gap-1 text-yellow-500 truncate" title={runSummary || '执行中'}>

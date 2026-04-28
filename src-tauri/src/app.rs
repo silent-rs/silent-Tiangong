@@ -76,6 +76,7 @@ impl TiangongApp {
         let mut cores = self.cores.lock().unwrap();
         if let Some(core) = cores.get(session_id) {
             if core.is_running() {
+                let _ = core.update_cwd(session.cwd.clone());
                 return (session_id.to_string(), false); // 已存在，复用
             }
             eprintln!("移除已停止的 TiangongCore：{session_id}");

@@ -43,7 +43,8 @@ use self::repository::{
     converted_stage_cleanup_dir, copy_dir_recursive, default_app_storage_path,
     default_mcp_capability_cache_path, default_mcp_config_path, default_mcp_lock_path,
     default_sessions_dir_path, default_skills_config_path, default_skills_storage_dir_path,
-    ensure_dir, normalize_model_list, parse_bool, parse_list_value, validate_agent_config,
+    default_workspace_dir, ensure_dir, normalize_model_list, parse_bool, parse_list_value,
+    validate_agent_config,
 };
 use self::services::{AppMcpService, AppSkillService, AppTurnService};
 pub use self::support::StreamEvent;

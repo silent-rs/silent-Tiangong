@@ -28,31 +28,18 @@ pub(super) fn workspace_root() -> Result<PathBuf> {
     })
 }
 
-fn allowed_roots() -> Result<Vec<PathBuf>> {
+fn write_allowed_roots() -> Result<Vec<PathBuf>> {
     let workspace = workspace_root()?;
     let workspace_canonical = workspace
         .canonicalize()
         .with_context(|| format!("解析工作目录失败：{}", workspace.display()))?;
-    let temp = std::env::temp_dir();
-    let temp_canonical = temp.canonicalize().unwrap_or(temp);
 
     let mut roots = vec![workspace_canonical];
     if let Some(home) = user_home_dir() {
-        let tiangong = home.join(".tiangong");
-        let tiangong_canonical = tiangong.canonicalize().unwrap_or(tiangong);
-        if !roots.iter().any(|root| root == &tiangong_canonical) {
-            roots.push(tiangong_canonical);
-        }
-    }
-    if !roots.iter().any(|root| root == &temp_canonical) {
-        roots.push(temp_canonical);
-    }
-    #[cfg(unix)]
-    for alias in ["/tmp", "/private/tmp"] {
-        let path = PathBuf::from(alias);
-        let canonical = path.canonicalize().unwrap_or(path);
-        if !roots.iter().any(|root| root == &canonical) {
-            roots.push(canonical);
+        let skills = home.join(".tiangong").join("skills");
+        let skills_canonical = skills.canonicalize().unwrap_or(skills);
+        if !roots.iter().any(|root| root == &skills_canonical) {
+            roots.push(skills_canonical);
         }
     }
     Ok(roots)
@@ -61,15 +48,16 @@ fn allowed_roots() -> Result<Vec<PathBuf>> {
 pub(super) fn resolve_effective_cwd(raw: Option<&str>) -> Result<PathBuf> {
     let root = workspace_root()?;
     let value = raw.unwrap_or(".").trim();
-    if value.is_empty() {
-        return root
-            .canonicalize()
-            .with_context(|| format!("解析工作目录失败：{}", root.display()));
-    }
-    let cwd = resolve_path_from_base(value, &root)?;
+    let cwd = if value.is_empty() {
+        root.canonicalize()
+            .with_context(|| format!("解析工作目录失败：{}", root.display()))?
+    } else {
+        resolve_path_from_base(value, &root)?
+    };
     if !cwd.is_dir() {
         return Err(anyhow!("workdir 不是目录：{}", cwd.display()));
     }
+    ensure_path_in_write_allowed_roots(&cwd, "workdir")?;
     Ok(cwd)
 }
 
@@ -95,14 +83,10 @@ pub(super) fn resolve_workspace_write_path(raw: &str) -> Result<PathBuf> {
     resolve_write_path_from_base(raw, &base)
 }
 
-/// 信任模式下的写入路径解析：不做越界检查
+/// 信任模式下仍然限制写入范围，仅放宽目标文件不存在的场景。
 pub(super) fn resolve_workspace_write_path_trusted(raw: &str) -> Result<PathBuf> {
     let base = workspace_root()?;
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return Err(anyhow!("路径参数不能为空"));
-    }
-    Ok(resolve_path_candidate(raw, &base))
+    resolve_write_path_from_base(raw, &base)
 }
 
 pub(super) fn resolve_path_from_base(raw: &str, base: &Path) -> Result<PathBuf> {
@@ -115,14 +99,6 @@ pub(super) fn resolve_path_from_base(raw: &str, base: &Path) -> Result<PathBuf> 
     let canonical = candidate
         .canonicalize()
         .with_context(|| format!("解析路径失败：{}", candidate.display()))?;
-    let roots = allowed_roots()?;
-
-    if !is_path_in_allowed_roots(&canonical, &roots) {
-        return Err(anyhow!(
-            "路径越界，仅允许当前目录、~/.tiangong 或临时目录：{}",
-            canonical.display()
-        ));
-    }
     Ok(canonical)
 }
 
@@ -146,11 +122,11 @@ pub(super) fn resolve_write_path_from_base(raw: &str, base: &Path) -> Result<Pat
     let parent_canonical = anchor
         .canonicalize()
         .with_context(|| format!("解析目标目录失败：{}", anchor.display()))?;
-    let roots = allowed_roots()?;
+    let roots = write_allowed_roots()?;
 
     if !is_path_in_allowed_roots(&parent_canonical, &roots) {
         return Err(anyhow!(
-            "路径越界，仅允许当前目录、~/.tiangong 或临时目录：{}",
+            "路径越界，仅允许当前工作空间或 ~/.tiangong/skills：{}",
             candidate.display()
         ));
     }
@@ -173,16 +149,30 @@ fn is_path_in_allowed_roots(path: &Path, roots: &[PathBuf]) -> bool {
     roots.iter().any(|root| path.starts_with(root))
 }
 
+fn ensure_path_in_write_allowed_roots(path: &Path, label: &str) -> Result<()> {
+    let roots = write_allowed_roots()?;
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("解析{label}失败：{}", path.display()))?;
+    if !is_path_in_allowed_roots(&canonical, &roots) {
+        return Err(anyhow!(
+            "{label}越界，仅允许当前工作空间或 ~/.tiangong/skills：{}",
+            canonical.display()
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn validate_command_args_in_allowed_roots(
     cmd: &str,
     args: &[String],
     base_dir: &Path,
 ) -> Result<()> {
-    if matches!(cmd, "echo" | "pwd") {
+    if matches!(cmd, "echo" | "pwd") || !command_may_write_files(cmd) {
         return Ok(());
     }
 
-    let roots = allowed_roots()?;
+    let roots = write_allowed_roots()?;
     let mut skip_next_value = false;
     for arg in args {
         let raw = arg.trim();
@@ -197,7 +187,7 @@ pub(super) fn validate_command_args_in_allowed_roots(
             skip_next_value = option_requires_value(cmd, raw);
             continue;
         }
-        if !argument_may_be_path(cmd, raw) {
+        if !write_command_argument_may_be_path(cmd, raw) {
             continue;
         }
         ensure_command_arg_path_allowed(raw, base_dir, &roots)?;
@@ -212,12 +202,22 @@ fn option_requires_value(cmd: &str, option: &str) -> bool {
     }
 }
 
-fn argument_may_be_path(cmd: &str, raw: &str) -> bool {
+fn command_may_write_files(cmd: &str) -> bool {
     match cmd {
-        "ls" | "cat" | "wc" | "rg" | "grep" => true,
-        "head" | "tail" => !raw
-            .chars()
-            .all(|ch| ch.is_ascii_digit() || ch == '+' || ch == '-'),
+        "cp" | "mv" | "rm" | "mkdir" | "touch" | "chmod" | "ln" | "cargo" | "git" | "node"
+        | "npm" | "npx" | "yarn" | "pnpm" | "ts-node" | "python" | "python3" | "pip" | "pip3"
+        | "pipx" | "uv" | "uvx" | "sea-orm-cli" | "bash" | "sh" | "powershell" | "pwsh" => true,
+        _ => false,
+    }
+}
+
+fn write_command_argument_may_be_path(cmd: &str, raw: &str) -> bool {
+    match cmd {
+        "cp" | "mv" | "rm" | "mkdir" | "touch" | "chmod" | "ln" => true,
+        "cargo" | "git" | "node" | "npm" | "npx" | "yarn" | "pnpm" | "ts-node" | "python"
+        | "python3" | "pip" | "pip3" | "pipx" | "uv" | "uvx" | "sea-orm-cli" => {
+            raw.contains('/') || raw == "." || raw == ".." || raw.starts_with('~')
+        }
         _ => false,
     }
 }
@@ -378,7 +378,16 @@ pub(super) fn validate_shell_command_args(
     if script.is_empty() {
         return Err(anyhow!("{shell_cmd} 脚本不能为空"));
     }
+    if script_contains_write_redirection(script) {
+        return Err(anyhow!(
+            "shell 脚本不允许使用重定向写入，请改用受控文件工具"
+        ));
+    }
     validate_shell_script(script, base_dir)
+}
+
+fn script_contains_write_redirection(script: &str) -> bool {
+    script.contains(">>") || script.contains('>') || script.contains("<<")
 }
 
 fn validate_shell_script(script: &str, base_dir: &Path) -> Result<()> {
@@ -416,27 +425,7 @@ fn validate_shell_script(script: &str, base_dir: &Path) -> Result<()> {
         if cmd == "cd" {
             let target = sub.split_whitespace().nth(1).unwrap_or(".");
             let resolved = resolve_path_candidate(target, base_dir);
-            if resolved.is_absolute() {
-                let roots = allowed_roots()?;
-                // canonicalize 以解析符号链接（如 macOS 上 /tmp → /private/tmp）
-                let check_path = resolved.canonicalize().unwrap_or(resolved.clone());
-                if !is_path_in_allowed_roots(&check_path, &roots) {
-                    // 如果目录不存在则检查父目录
-                    if resolved.exists() || {
-                        let mut p = resolved.clone();
-                        while !p.exists() {
-                            if let Some(parent) = p.parent() {
-                                p = parent.to_path_buf();
-                            } else {
-                                break;
-                            }
-                        }
-                        !is_path_in_allowed_roots(&p, &roots)
-                    } {
-                        return Err(anyhow!("shell 脚本 cd 目标越界：{}", target));
-                    }
-                }
-            }
+            ensure_path_in_write_allowed_roots(&resolved, "shell 脚本 cd 目标")?;
             continue;
         }
 

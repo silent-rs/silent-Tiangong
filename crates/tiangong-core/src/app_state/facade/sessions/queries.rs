@@ -79,6 +79,23 @@ impl TiangongState {
         self.active_session().map(|s| s.cwd.as_str()).unwrap_or("")
     }
 
+    pub fn workspace_dir(&self) -> &str {
+        &self.store.session.workspace_dir
+    }
+
+    pub fn update_workspace_dir(&mut self, workspace_dir: String) -> Result<()> {
+        self.store.session.workspace_dir = workspace_dir;
+        self.persist_app_only()
+    }
+
+    pub fn active_session_effective_cwd(&self) -> String {
+        self.active_session()
+            .map(|session| session.cwd.trim())
+            .filter(|cwd| !cwd.is_empty())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| self.store.session.workspace_dir.clone())
+    }
+
     pub fn update_active_session_cwd(&mut self, cwd: String) -> Result<()> {
         let active_id = self.store.session.active_session_id.clone();
         if let Some(session) = self

@@ -37,6 +37,7 @@ impl TiangongState {
                 session: SessionState {
                     sessions: Vec::new(),
                     active_session_id: String::new(),
+                    workspace_dir: default_workspace_dir(),
                     session_title_draft: DEFAULT_SESSION_TITLE.to_string(),
                     input_draft: String::new(),
                 },
@@ -92,7 +93,8 @@ impl TiangongState {
         }
 
         if state.store.session.sessions.is_empty() {
-            let session = Session::new(DEFAULT_SESSION_TITLE);
+            let mut session = Session::new(DEFAULT_SESSION_TITLE);
+            session.cwd = state.store.session.workspace_dir.clone();
             state.store.session.active_session_id = session.id.clone();
             state.store.session.sessions.push(session);
             let _ = state.persist_to_disk();
@@ -170,6 +172,7 @@ impl TiangongState {
     fn apply_loaded_state(&mut self, loaded: LoadedState) {
         self.store.session.sessions = loaded.sessions;
         self.store.session.active_session_id = loaded.active_session_id;
+        self.store.session.workspace_dir = loaded.workspace_dir;
         self.store.provider.model_list = loaded.model_list;
         if let Some(agent_config) = loaded.agent_config {
             self.store.agent.agent_config = agent_config;

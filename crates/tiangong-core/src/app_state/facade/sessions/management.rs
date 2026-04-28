@@ -14,7 +14,13 @@ impl TiangongState {
             .iter_mut()
             .find(|s| s.id == session_id)
         {
+            let existing_cwd = existing.cwd.clone();
+            let existing_cwd_mode = existing.cwd_mode.clone();
             *existing = session;
+            if existing_cwd_mode == crate::session::SessionCwdMode::Inherit {
+                existing.cwd = existing_cwd;
+                existing.cwd_mode = existing_cwd_mode;
+            }
         } else {
             self.store.session.sessions.insert(0, session);
             self.store.session.active_session_id = session_id.clone();
@@ -23,7 +29,8 @@ impl TiangongState {
     }
 
     pub fn create_session(&mut self) {
-        let session = Session::new("新对话");
+        let mut session = Session::new("新对话");
+        session.cwd = self.store.session.workspace_dir.clone();
         self.store.session.active_session_id = session.id.clone();
         self.store.session.session_title_draft = session.title.clone();
         self.store.session.sessions.push(session);
@@ -85,7 +92,8 @@ impl TiangongState {
         self.store.session.sessions.remove(remove_idx);
 
         if self.store.session.sessions.is_empty() {
-            let session = Session::new(DEFAULT_SESSION_TITLE);
+            let mut session = Session::new(DEFAULT_SESSION_TITLE);
+            session.cwd = self.store.session.workspace_dir.clone();
             self.store.session.active_session_id = session.id.clone();
             self.store.session.session_title_draft = session.title.clone();
             self.store.session.sessions.push(session);

@@ -39,12 +39,17 @@ impl PromptAssembler {
         let system_prompt = system_block.to_text();
 
         // 2. System Context（环境事实）
-        let system_context = sections::build_system_context();
+        let system_context = sections::build_system_context(session);
 
         // 3. User Context（用户偏好/记忆，system-reminder 方式）
-        let workspace_id = std::env::current_dir()
-            .ok()
-            .map(|p| tiangong_memory::types::workspace_id_from_path(&p));
+        let workspace_path = if session.cwd.trim().is_empty() {
+            std::env::current_dir().ok()
+        } else {
+            Some(std::path::PathBuf::from(session.cwd.trim()))
+        };
+        let workspace_id = workspace_path
+            .as_deref()
+            .map(tiangong_memory::types::workspace_id_from_path);
         let user_context = sections::build_user_context(&session.id, workspace_id.as_deref());
 
         // 4. 历史消息（经过裁剪/压缩）

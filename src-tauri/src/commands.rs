@@ -1270,6 +1270,22 @@ pub fn get_session_cwd(state: State<TiangongApp>) -> Result<String, String> {
     state.with_state_read(|core_state| Ok(core_state.active_session_cwd().to_string()))
 }
 
+/// 获取 Desktop 工作空间目录
+#[tauri::command]
+pub fn get_workspace_dir(state: State<TiangongApp>) -> Result<String, String> {
+    state.with_state_read(|core_state| Ok(core_state.workspace_dir().to_string()))
+}
+
+/// 设置 Desktop 工作空间目录
+#[tauri::command]
+pub fn set_workspace_dir(workspace_dir: String, state: State<TiangongApp>) -> Result<(), String> {
+    let path = std::path::Path::new(&workspace_dir);
+    if !path.is_dir() {
+        return Err(format!("路径不存在或不是目录：{workspace_dir}"));
+    }
+    state.with_state(|core_state| core_state.update_workspace_dir(workspace_dir))
+}
+
 /// 设置活动会话的工作目录
 #[tauri::command]
 pub fn set_session_cwd(cwd: String, state: State<TiangongApp>) -> Result<(), String> {
