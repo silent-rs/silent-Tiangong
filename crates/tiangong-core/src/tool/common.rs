@@ -203,12 +203,35 @@ fn option_requires_value(cmd: &str, option: &str) -> bool {
 }
 
 fn command_may_write_files(cmd: &str) -> bool {
-    match cmd {
-        "cp" | "mv" | "rm" | "mkdir" | "touch" | "chmod" | "ln" | "cargo" | "git" | "node"
-        | "npm" | "npx" | "yarn" | "pnpm" | "ts-node" | "python" | "python3" | "pip" | "pip3"
-        | "pipx" | "uv" | "uvx" | "sea-orm-cli" | "bash" | "sh" | "powershell" | "pwsh" => true,
-        _ => false,
-    }
+    matches!(
+        cmd,
+        "cp" | "mv"
+            | "rm"
+            | "mkdir"
+            | "touch"
+            | "chmod"
+            | "ln"
+            | "cargo"
+            | "git"
+            | "node"
+            | "npm"
+            | "npx"
+            | "yarn"
+            | "pnpm"
+            | "ts-node"
+            | "python"
+            | "python3"
+            | "pip"
+            | "pip3"
+            | "pipx"
+            | "uv"
+            | "uvx"
+            | "sea-orm-cli"
+            | "bash"
+            | "sh"
+            | "powershell"
+            | "pwsh"
+    )
 }
 
 fn write_command_argument_may_be_path(cmd: &str, raw: &str) -> bool {
