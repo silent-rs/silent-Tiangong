@@ -1,6 +1,15 @@
 //! 统一的外部输出流事件
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamToolCall {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub arguments: Value,
+}
 
 /// 外部输出流事件
 ///
@@ -26,6 +35,8 @@ pub enum StreamEvent {
     /// 工具执行结果
     ToolResult {
         name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<String>,
         ok: bool,
         /// 给 UI/外部消费者展示的输出，可能被截断。
         output: String,
@@ -35,7 +46,10 @@ pub enum StreamEvent {
     },
     /// LLM 决定调用工具
     ToolCalls {
+        message_id: String,
         names: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        calls: Vec<StreamToolCall>,
         /// 本次 LLM 调用的 token 用量
         #[serde(skip_serializing_if = "Option::is_none")]
         usage: Option<crate::TokenUsage>,

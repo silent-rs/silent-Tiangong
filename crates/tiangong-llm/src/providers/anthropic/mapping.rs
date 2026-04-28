@@ -10,7 +10,7 @@ use tiangong_anthropic::types::{
 
 use crate::error::LlmError;
 use crate::message::{ChatMessage, MessageContent, MessageRole};
-use crate::request::{ProviderRequest, ThinkingConfig as ProviderThinkingConfig};
+use crate::request::ProviderRequest;
 use crate::response::{ProviderResponse, StopReason};
 use crate::stream::ProviderStreamEvent;
 use crate::tool::{ToolCall, ToolChoice, ToolResult, ToolResultContent};
@@ -66,14 +66,32 @@ pub(super) fn to_anthropic_request(
         tools,
         tool_choice,
         stream: None,
-        thinking: map_thinking_config(request.thinking.as_ref()),
+        thinking: map_thinking_config(request),
     })
 }
 
-fn map_thinking_config(thinking: Option<&ProviderThinkingConfig>) -> Option<ThinkingConfig> {
-    thinking.map(|thinking| ThinkingConfig::Enabled {
-        budget_tokens: thinking.budget_tokens,
-    })
+fn map_thinking_config(request: &ProviderRequest) -> Option<ThinkingConfig> {
+    if request_has_tool_payload(request) {
+        return Some(ThinkingConfig::Disabled);
+    }
+    request
+        .thinking
+        .as_ref()
+        .map(|thinking| ThinkingConfig::Enabled {
+            budget_tokens: thinking.budget_tokens,
+        })
+}
+
+fn request_has_tool_payload(request: &ProviderRequest) -> bool {
+    !request.tools.is_empty()
+        || request.messages.iter().any(|message| {
+            message.content.iter().any(|content| {
+                matches!(
+                    content,
+                    MessageContent::ToolCall(_) | MessageContent::ToolResult(_)
+                )
+            })
+        })
 }
 
 fn map_message(message: &ChatMessage) -> Option<Result<AnthropicMessage, LlmError>> {

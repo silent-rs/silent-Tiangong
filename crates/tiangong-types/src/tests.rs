@@ -77,7 +77,9 @@ fn stream_event_serde() {
     assert_eq!(json, r#"{"type":"done"}"#);
 
     let tool = StreamEvent::ToolCalls {
+        message_id: "msg-2".into(),
         names: vec!["read_file".into(), "list_dir".into()],
+        calls: Vec::new(),
         usage: None,
     };
     let json = serde_json::to_string(&tool).unwrap();

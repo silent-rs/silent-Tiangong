@@ -15,24 +15,20 @@ use crate::app_state::formatting::{format_llm_output_message, format_tool_trace_
 use crate::coordinator::TaskCoordinator;
 use crate::coordinator::types::CoordinatorTask;
 use crate::core_config::{CoreConfig, CoreConfigProvider};
-use crate::model::{
-    FunctionToolSpec, ModelClient, ModelRequest, ModelToolChoice, SingleProviderClient, TokenUsage,
-};
+use crate::model::{FunctionToolSpec, ModelClient, ModelRequest, SingleProviderClient, TokenUsage};
 use crate::observe::{audit_permission_with_context, audit_tool_execution};
 use crate::prompt::PromptAssembler;
 use crate::runtime::{LlmOutputRecord, RuntimeEngine, inject_enhanced_tools, use_stream_mode};
-use crate::session::{Message, MessageRole, Session, now_text};
+use crate::session::{Message, MessageRole, MessageToolCall, Session, now_text};
 use crate::stream_throttle::ThrottledStreamSink;
-use tiangong_types::{SessionStreamEvent, StreamEvent};
+use tiangong_types::{SessionStreamEvent, StreamEvent, StreamToolCall};
 
 // 为了让 drain_pending_commands / execute_turn_standalone 继续使用 std Receiver
 use std::sync::mpsc::Receiver;
 
 const MAX_ROUNDS: usize = 20;
-const MAX_REQUIRED_TOOL_REPROMPTS: usize = 2;
 const MEMORY_LOOP_FEEDBACK_MAX_CHARS: usize = 12_000;
 const TOOL_RESULT_STREAM_MAX_CHARS: usize = 8_000;
-const FINISH_TASK_TOOL_NAME: &str = "finish_task";
 
 type MemoryRecallToolOutput = (crate::tool::ToolResult, tiangong_types::TokenUsage, bool);
 
@@ -742,7 +738,6 @@ async fn execute_turn_inner_async(
     let mut pending_media_assets: Vec<tiangong_types::MediaAsset> = Vec::new();
     let mut memory_context: Option<String> = None;
     let mut memory_recall_attempted = false;
-    let mut required_tool_reprompts = 0;
 
     'react_loop: loop {
         match drain_pending_commands_async(session, &mut loop_context, stream_tx, cmd_rx) {
@@ -761,22 +756,7 @@ async fn execute_turn_inner_async(
             break;
         }
 
-        let structured_action_required = round > 0;
-        let request_tools = tools_for_round(tools, structured_action_required);
-        let tool_choice = structured_action_required.then_some(ModelToolChoice::Any);
-
-        let mut prompt_loop_context = loop_context.clone();
-        if round > 0 {
-            prompt_loop_context.push(Message {
-                id: scru128::new().to_string(),
-                role: MessageRole::System,
-                content: "内部调度提示：根据上面的工具执行结果继续完成用户原始目标。本轮必须调用一个工具：若仍需读取、写入、执行命令或验证文件，请调用真实工具；若目标已经完成，请调用 finish_task 并提供完成依据。不要用普通文本声称已经执行工具。".to_string(),
-                reasoning_content: String::new(),
-                worker_id: None,
-                media: Vec::new(),
-                created_at: now_text(),
-            });
-        }
+        let request_tools = tools.to_vec();
 
         let assembler = PromptAssembler::new(engine.context_limit);
         let assembled = assembler.assemble(
@@ -785,7 +765,7 @@ async fn execute_turn_inner_async(
             request_tools.clone(),
             engine.models_config(),
             engine.agent_config(),
-            &prompt_loop_context,
+            &loop_context,
         );
 
         let mut system_prompt = assembled.final_system_prompt();
@@ -818,12 +798,7 @@ async fn execute_turn_inner_async(
         let tools_clone = request_tools.clone();
         let llm_fut = tokio::task::spawn(async move {
             client
-                .stream_function_calls_with_tool_choice(
-                    req_clone,
-                    tools_clone,
-                    tool_choice,
-                    chunk_tx,
-                )
+                .stream_function_calls_with_tool_choice(req_clone, tools_clone, None, chunk_tx)
                 .await
         });
 
@@ -904,17 +879,6 @@ async fn execute_turn_inner_async(
                 continue;
             }
 
-            if structured_action_required && required_tool_reprompts < MAX_REQUIRED_TOOL_REPROMPTS {
-                required_tool_reprompts += 1;
-                push_required_tool_reprompt(
-                    &mut loop_context,
-                    &response.text,
-                    &response.reasoning_content,
-                    "上一轮没有返回 tool_calls。请调用真实工具继续执行，或调用 finish_task 结构化结束。",
-                );
-                continue;
-            }
-
             session.append_message_with_id_and_media(
                 pending_msg_id,
                 MessageRole::Assistant,
@@ -950,78 +914,13 @@ async fn execute_turn_inner_async(
         }
 
         // 工具调用
-        if let Some(finish_call) = only_finish_task_call(&response.tool_calls) {
-            match build_finish_task_final_text(finish_call) {
-                Ok(final_text) => {
-                    let output = LlmOutputRecord {
-                        stage: format!("react-round-{round}"),
-                        content: response.text.clone(),
-                        reasoning_content: response.reasoning_content.clone(),
-                        tool_calls: vec![FINISH_TASK_TOOL_NAME.to_string()],
-                        usage: response.usage.clone(),
-                    };
-                    session.append_message_with_reasoning(
-                        MessageRole::System,
-                        format_llm_output_message(&output),
-                        response.reasoning_content.clone(),
-                    );
-                    let _ = stream_tx.send(StreamEvent::Delta {
-                        message_id: pending_msg_id.clone(),
-                        content: final_text.clone(),
-                    });
-                    session.append_message_with_id_and_media(
-                        pending_msg_id,
-                        MessageRole::Assistant,
-                        final_text,
-                        response.reasoning_content.clone(),
-                        std::mem::take(&mut pending_media_assets),
-                    );
-                    session.persist_to_disk();
-                    let _ = stream_tx.send(StreamEvent::Done {
-                        usage: Some(tiangong_types::TokenUsage {
-                            prompt_tokens: accumulated_usage.prompt_tokens,
-                            completion_tokens: accumulated_usage.completion_tokens,
-                            total_tokens: accumulated_usage.total_tokens,
-                        }),
-                    });
-                    return accumulated_usage;
-                }
-                Err(err) if required_tool_reprompts < MAX_REQUIRED_TOOL_REPROMPTS => {
-                    required_tool_reprompts += 1;
-                    push_required_tool_reprompt(
-                        &mut loop_context,
-                        &response.text,
-                        &response.reasoning_content,
-                        &format!("finish_task 参数无效：{err}"),
-                    );
-                    continue;
-                }
-                Err(_) => {}
-            }
-        }
-
-        let executable_calls = response
-            .tool_calls
-            .iter()
-            .filter(|call| call.name != FINISH_TASK_TOOL_NAME)
-            .collect::<Vec<_>>();
+        let executable_calls = response.tool_calls.iter().collect::<Vec<_>>();
         if executable_calls.is_empty() {
-            if required_tool_reprompts < MAX_REQUIRED_TOOL_REPROMPTS {
-                required_tool_reprompts += 1;
-                push_required_tool_reprompt(
-                    &mut loop_context,
-                    &response.text,
-                    &response.reasoning_content,
-                    "模型没有返回可执行工具调用。",
-                );
-                continue;
-            }
             let _ = stream_tx.send(StreamEvent::Error {
                 message: "模型没有返回可执行工具调用，任务已停止".to_string(),
             });
             return accumulated_usage;
         }
-        required_tool_reprompts = 0;
         let tool_names: Vec<String> = executable_calls.iter().map(|c| c.name.clone()).collect();
         let output = LlmOutputRecord {
             stage: format!("react-round-{round}"),
@@ -1036,24 +935,29 @@ async fn execute_turn_inner_async(
             response.reasoning_content.clone(),
         );
         let _ = stream_tx.send(StreamEvent::ToolCalls {
+            message_id: pending_msg_id.clone(),
             names: tool_names.clone(),
+            calls: executable_calls
+                .iter()
+                .map(|call| StreamToolCall {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    arguments: call.arguments.clone(),
+                })
+                .collect(),
             usage: Some(tiangong_types::TokenUsage {
                 prompt_tokens: response.usage.prompt_tokens,
                 completion_tokens: response.usage.completion_tokens,
                 total_tokens: response.usage.total_tokens,
             }),
         });
-        if !response.text.is_empty() || !response.reasoning_content.is_empty() {
-            loop_context.push(Message {
-                id: scru128::new().to_string(),
-                role: MessageRole::Assistant,
-                content: response.text.clone(),
-                reasoning_content: response.reasoning_content.clone(),
-                worker_id: None,
-                media: Vec::new(),
-                created_at: now_text(),
-            });
-        }
+        append_assistant_tool_call_message(
+            session,
+            pending_msg_id.clone(),
+            &response.text,
+            &response.reasoning_content,
+            &executable_calls,
+        );
 
         // 执行工具
         for call in executable_calls {
@@ -1108,19 +1012,18 @@ async fn execute_turn_inner_async(
                     );
                     let _ = stream_tx.send(StreamEvent::ToolResult {
                         name: call.name.clone(),
+                        tool_call_id: Some(call.id.clone()),
                         ok: false,
                         output: format!("权限拒绝：{reason}"),
                         full_output: None,
                     });
-                    loop_context.push(Message {
-                        id: scru128::new().to_string(),
-                        role: MessageRole::User,
-                        content: format!("工具 {} 执行失败：权限拒绝 - {reason}", call.name),
-                        reasoning_content: String::new(),
-                        worker_id: None,
-                        media: Vec::new(),
-                        created_at: now_text(),
-                    });
+                    append_tool_result_message(
+                        session,
+                        &call.id,
+                        &call.name,
+                        format!("权限拒绝：{reason}"),
+                        true,
+                    );
                     continue;
                 }
                 PermissionDecision::NeedsApproval { request_id } => {
@@ -1195,9 +1098,17 @@ async fn execute_turn_inner_async(
                             MessageRole::System,
                             format!("工具 {} 被用户拒绝执行", call.name),
                         );
+                        append_tool_result_message(
+                            session,
+                            &call.id,
+                            &call.name,
+                            "用户拒绝执行".to_string(),
+                            true,
+                        );
                         session.persist_to_disk();
                         let _ = stream_tx.send(StreamEvent::ToolResult {
                             name: call.name.clone(),
+                            tool_call_id: Some(call.id.clone()),
                             ok: false,
                             output: "用户拒绝执行".to_string(),
                             full_output: None,
@@ -1249,16 +1160,13 @@ async fn execute_turn_inner_async(
             );
             let _ = stream_tx.send(StreamEvent::ToolResult {
                 name: call.name.clone(),
+                tool_call_id: Some(call.id.clone()),
                 ok: result.ok,
                 output: tool_result_stream_output(&result),
                 full_output: Some(tool_result_full_output(&result)),
             });
             session.append_message(MessageRole::System, format_tool_trace_message(&result));
 
-            let is_media_tool = matches!(
-                call.name.as_str(),
-                "generate_image" | "generate_video" | "text_to_speech" | "speech_to_text"
-            );
             if result.ok {
                 pending_media_assets.extend(parse_media_assets_from_tool_result(
                     &call.name,
@@ -1266,47 +1174,20 @@ async fn execute_turn_inner_async(
                     &result.summary,
                 ));
             }
-            let feedback = if is_media_tool && result.ok {
-                format!(
-                    "工具 {} 执行成功：{}。媒体内容已生成并交付给用户，不要再次调用该工具。请直接给出文本回复。",
-                    call.name, result.summary
-                )
-            } else {
-                format!(
-                    "工具 {} 执行{}：{}",
-                    call.name,
-                    if result.ok { "成功" } else { "失败" },
-                    if result.stdout.is_empty() {
-                        result.summary.clone()
-                    } else {
-                        result.stdout.clone()
-                    }
-                )
-            };
-            if call.name == "recall_memory" && result.ok {
-                if allow_memory_context && !result.stdout.trim().is_empty() {
-                    memory_context = Some(result.stdout.clone());
-                }
-                loop_context.push(Message {
-                    id: scru128::new().to_string(),
-                    role: MessageRole::User,
-                    content: build_memory_recall_feedback(&result.stdout, allow_memory_context),
-                    reasoning_content: String::new(),
-                    worker_id: None,
-                    media: Vec::new(),
-                    created_at: now_text(),
-                });
-            } else {
-                loop_context.push(Message {
-                    id: scru128::new().to_string(),
-                    role: MessageRole::User,
-                    content: feedback,
-                    reasoning_content: String::new(),
-                    worker_id: None,
-                    media: Vec::new(),
-                    created_at: now_text(),
-                });
+            if call.name == "recall_memory"
+                && result.ok
+                && allow_memory_context
+                && !result.stdout.trim().is_empty()
+            {
+                memory_context = Some(result.stdout.clone());
             }
+            append_tool_result_message(
+                session,
+                &call.id,
+                &call.name,
+                tool_result_provider_text(&call.name, &result, allow_memory_context),
+                !result.ok,
+            );
 
             match drain_pending_commands_async(session, &mut loop_context, stream_tx, cmd_rx) {
                 PendingCommandEffect::Terminate => return accumulated_usage,
@@ -1345,7 +1226,6 @@ fn execute_turn_inner(
     let mut pending_media_assets: Vec<tiangong_types::MediaAsset> = Vec::new();
     let mut memory_context: Option<String> = None;
     let mut memory_recall_attempted = false;
-    let mut required_tool_reprompts = 0;
 
     'react_loop: loop {
         match drain_pending_commands(session, &mut loop_context, stream_tx, cmd_rx) {
@@ -1363,25 +1243,10 @@ fn execute_turn_inner(
             break;
         }
 
-        // 构建 prompt
-        // 用户输入统一通过 session.messages 传递，不使用独立的 user_input 通道。
-        // 工具调用后的续写提示只在本轮 prompt 中临时注入，避免重复累积到 loop_context。
-        let structured_action_required = round > 0;
-        let request_tools = tools_for_round(tools, structured_action_required);
-        let tool_choice = structured_action_required.then_some(ModelToolChoice::Any);
-
-        let mut prompt_loop_context = loop_context.clone();
-        if round > 0 {
-            prompt_loop_context.push(Message {
-                id: scru128::new().to_string(),
-                role: MessageRole::System,
-                content: "内部调度提示：根据上面的工具执行结果继续完成用户原始目标。本轮必须调用一个工具：若仍需读取、写入、执行命令或验证文件，请调用真实工具；若目标已经完成，请调用 finish_task 并提供完成依据。不要用普通文本声称已经执行工具。".to_string(),
-                reasoning_content: String::new(),
-                worker_id: None,
-                media: Vec::new(),
-                created_at: now_text(),
-            });
-        }
+        // 构建 prompt。用户输入和工具结果统一通过 session/loop messages 传递；
+        // 工具执行后的下一轮允许模型直接最终回复，避免为了满足 forced tool choice
+        // 而重复调用无关工具。
+        let request_tools = tools.to_vec();
 
         let assembler = PromptAssembler::new(engine.context_limit);
         let assembled = assembler.assemble(
@@ -1390,7 +1255,7 @@ fn execute_turn_inner(
             request_tools.clone(),
             engine.models_config(),
             engine.agent_config(),
-            &prompt_loop_context,
+            &loop_context,
         );
 
         let mut system_prompt = assembled.final_system_prompt();
@@ -1429,7 +1294,7 @@ fn execute_turn_inner(
             .complete_with_functions_stream_with_tool_choice(
                 &req,
                 &request_tools,
-                tool_choice,
+                None,
                 &mut |delta| {
                     // 每个 chunk 回调时顺带排空命令队列，实现任意时刻响应
                     while let Ok(cmd) = cmd_rx.try_recv() {
@@ -1507,17 +1372,6 @@ fn execute_turn_inner(
                 continue;
             }
 
-            if structured_action_required && required_tool_reprompts < MAX_REQUIRED_TOOL_REPROMPTS {
-                required_tool_reprompts += 1;
-                push_required_tool_reprompt(
-                    &mut loop_context,
-                    &response.text,
-                    &response.reasoning_content,
-                    "上一轮没有返回 tool_calls。请调用真实工具继续执行，或调用 finish_task 结构化结束。",
-                );
-                continue;
-            }
-
             // 最终回复：使用预生成的 ID 记录到 session
             session.append_message_with_id_and_media(
                 pending_msg_id,
@@ -1550,78 +1404,13 @@ fn execute_turn_inner(
         }
 
         // 工具调用
-        if let Some(finish_call) = only_finish_task_call(&response.tool_calls) {
-            match build_finish_task_final_text(finish_call) {
-                Ok(final_text) => {
-                    let output = LlmOutputRecord {
-                        stage: format!("react-round-{round}"),
-                        content: response.text.clone(),
-                        reasoning_content: response.reasoning_content.clone(),
-                        tool_calls: vec![FINISH_TASK_TOOL_NAME.to_string()],
-                        usage: response.usage.clone(),
-                    };
-                    session.append_message_with_reasoning(
-                        MessageRole::System,
-                        format_llm_output_message(&output),
-                        response.reasoning_content.clone(),
-                    );
-                    let _ = stream_tx.send(StreamEvent::Delta {
-                        message_id: pending_msg_id.clone(),
-                        content: final_text.clone(),
-                    });
-                    session.append_message_with_id_and_media(
-                        pending_msg_id,
-                        MessageRole::Assistant,
-                        final_text,
-                        response.reasoning_content.clone(),
-                        std::mem::take(&mut pending_media_assets),
-                    );
-                    session.persist_to_disk();
-                    let _ = stream_tx.send(StreamEvent::Done {
-                        usage: Some(tiangong_types::TokenUsage {
-                            prompt_tokens: accumulated_usage.prompt_tokens,
-                            completion_tokens: accumulated_usage.completion_tokens,
-                            total_tokens: accumulated_usage.total_tokens,
-                        }),
-                    });
-                    return accumulated_usage;
-                }
-                Err(err) if required_tool_reprompts < MAX_REQUIRED_TOOL_REPROMPTS => {
-                    required_tool_reprompts += 1;
-                    push_required_tool_reprompt(
-                        &mut loop_context,
-                        &response.text,
-                        &response.reasoning_content,
-                        &format!("finish_task 参数无效：{err}"),
-                    );
-                    continue;
-                }
-                Err(_) => {}
-            }
-        }
-
-        let executable_calls = response
-            .tool_calls
-            .iter()
-            .filter(|call| call.name != FINISH_TASK_TOOL_NAME)
-            .collect::<Vec<_>>();
+        let executable_calls = response.tool_calls.iter().collect::<Vec<_>>();
         if executable_calls.is_empty() {
-            if required_tool_reprompts < MAX_REQUIRED_TOOL_REPROMPTS {
-                required_tool_reprompts += 1;
-                push_required_tool_reprompt(
-                    &mut loop_context,
-                    &response.text,
-                    &response.reasoning_content,
-                    "模型没有返回可执行工具调用。",
-                );
-                continue;
-            }
             let _ = stream_tx.send(StreamEvent::Error {
                 message: "模型没有返回可执行工具调用，任务已停止".to_string(),
             });
             return accumulated_usage;
         }
-        required_tool_reprompts = 0;
         let tool_names: Vec<String> = executable_calls.iter().map(|c| c.name.clone()).collect();
 
         // 记录 LLM 输出到 session
@@ -1640,7 +1429,16 @@ fn execute_turn_inner(
 
         // 推送工具调用事件
         let _ = stream_tx.send(StreamEvent::ToolCalls {
+            message_id: pending_msg_id.clone(),
             names: tool_names.clone(),
+            calls: executable_calls
+                .iter()
+                .map(|call| StreamToolCall {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    arguments: call.arguments.clone(),
+                })
+                .collect(),
             usage: Some(tiangong_types::TokenUsage {
                 prompt_tokens: response.usage.prompt_tokens,
                 completion_tokens: response.usage.completion_tokens,
@@ -1648,18 +1446,13 @@ fn execute_turn_inner(
             }),
         });
 
-        // 仅保留模型真实输出，避免把内部工具占位文本再次喂回上下文。
-        if !response.text.is_empty() || !response.reasoning_content.is_empty() {
-            loop_context.push(Message {
-                id: scru128::new().to_string(),
-                role: MessageRole::Assistant,
-                content: response.text.clone(),
-                reasoning_content: response.reasoning_content.clone(),
-                worker_id: None,
-                media: Vec::new(),
-                created_at: now_text(),
-            });
-        }
+        append_assistant_tool_call_message(
+            session,
+            pending_msg_id.clone(),
+            &response.text,
+            &response.reasoning_content,
+            &executable_calls,
+        );
 
         // 执行工具
         for call in executable_calls {
@@ -1715,19 +1508,18 @@ fn execute_turn_inner(
                     );
                     let _ = stream_tx.send(StreamEvent::ToolResult {
                         name: call.name.clone(),
+                        tool_call_id: Some(call.id.clone()),
                         ok: false,
                         output: format!("权限拒绝：{reason}"),
                         full_output: None,
                     });
-                    loop_context.push(Message {
-                        id: scru128::new().to_string(),
-                        role: MessageRole::User,
-                        content: format!("工具 {} 执行失败：权限拒绝 - {reason}", call.name),
-                        reasoning_content: String::new(),
-                        worker_id: None,
-                        media: Vec::new(),
-                        created_at: now_text(),
-                    });
+                    append_tool_result_message(
+                        session,
+                        &call.id,
+                        &call.name,
+                        format!("权限拒绝：{reason}"),
+                        true,
+                    );
                     continue;
                 }
                 PermissionDecision::NeedsApproval { request_id } => {
@@ -1807,10 +1599,18 @@ fn execute_turn_inner(
                             MessageRole::System,
                             format!("工具 {} 被用户拒绝执行", call.name),
                         );
+                        append_tool_result_message(
+                            session,
+                            &call.id,
+                            &call.name,
+                            "用户拒绝执行".to_string(),
+                            true,
+                        );
                         session.persist_to_disk();
 
                         let _ = stream_tx.send(StreamEvent::ToolResult {
                             name: call.name.clone(),
+                            tool_call_id: Some(call.id.clone()),
                             ok: false,
                             output: "用户拒绝执行".to_string(),
                             full_output: None,
@@ -1863,6 +1663,7 @@ fn execute_turn_inner(
 
             let _ = stream_tx.send(StreamEvent::ToolResult {
                 name: call.name.clone(),
+                tool_call_id: Some(call.id.clone()),
                 ok: result.ok,
                 output: tool_result_stream_output(&result),
                 full_output: Some(tool_result_full_output(&result)),
@@ -1873,10 +1674,6 @@ fn execute_turn_inner(
 
             // 记录到 loop_context（完整内容，截断由上下文压缩器处理）
             // 媒体生成工具使用摘要反馈（避免 base64 数据污染上下文）
-            let is_media_tool = matches!(
-                call.name.as_str(),
-                "generate_image" | "generate_video" | "text_to_speech" | "speech_to_text"
-            );
             if result.ok {
                 pending_media_assets.extend(parse_media_assets_from_tool_result(
                     &call.name,
@@ -1884,47 +1681,20 @@ fn execute_turn_inner(
                     &result.summary,
                 ));
             }
-            let feedback = if is_media_tool && result.ok {
-                format!(
-                    "工具 {} 执行成功：{}。媒体内容已生成并交付给用户，不要再次调用该工具。请直接给出文本回复。",
-                    call.name, result.summary
-                )
-            } else {
-                format!(
-                    "工具 {} 执行{}：{}",
-                    call.name,
-                    if result.ok { "成功" } else { "失败" },
-                    if result.stdout.is_empty() {
-                        result.summary.clone()
-                    } else {
-                        result.stdout.clone()
-                    }
-                )
-            };
-            if call.name == "recall_memory" && result.ok {
-                if allow_memory_context && !result.stdout.trim().is_empty() {
-                    memory_context = Some(result.stdout.clone());
-                }
-                loop_context.push(Message {
-                    id: scru128::new().to_string(),
-                    role: MessageRole::User,
-                    content: build_memory_recall_feedback(&result.stdout, allow_memory_context),
-                    reasoning_content: String::new(),
-                    worker_id: None,
-                    media: Vec::new(),
-                    created_at: now_text(),
-                });
-            } else {
-                loop_context.push(Message {
-                    id: scru128::new().to_string(),
-                    role: MessageRole::User,
-                    content: feedback,
-                    reasoning_content: String::new(),
-                    worker_id: None,
-                    media: Vec::new(),
-                    created_at: now_text(),
-                });
+            if call.name == "recall_memory"
+                && result.ok
+                && allow_memory_context
+                && !result.stdout.trim().is_empty()
+            {
+                memory_context = Some(result.stdout.clone());
             }
+            append_tool_result_message(
+                session,
+                &call.id,
+                &call.name,
+                tool_result_provider_text(&call.name, &result, allow_memory_context),
+                !result.ok,
+            );
 
             match drain_pending_commands(session, &mut loop_context, stream_tx, cmd_rx) {
                 PendingCommandEffect::Terminate => return accumulated_usage,
@@ -2054,6 +1824,11 @@ fn append_user_message_to_loop_context(
         reasoning_content: String::new(),
         worker_id: None,
         media: Vec::new(),
+        tool_calls: Vec::new(),
+        tool_call_id: None,
+        tool_name: None,
+        tool_result_is_error: false,
+        compact: false,
         created_at: now_text(),
     });
 }
@@ -2088,121 +1863,73 @@ fn is_synthetic_tool_call_placeholder(text: &str) -> bool {
     trimmed.starts_with("[调用工具:") && trimmed.ends_with(']')
 }
 
-fn tools_for_round(tools: &[FunctionToolSpec], include_finish_task: bool) -> Vec<FunctionToolSpec> {
-    let mut request_tools = tools.to_vec();
-    if include_finish_task
-        && !request_tools
-            .iter()
-            .any(|tool| tool.name == FINISH_TASK_TOOL_NAME)
-    {
-        request_tools.push(finish_task_tool_spec());
-    }
-    request_tools
-}
-
-fn finish_task_tool_spec() -> FunctionToolSpec {
-    FunctionToolSpec {
-        name: FINISH_TASK_TOOL_NAME.to_string(),
-        description:
-            "结构化结束当前任务。仅当已经通过工具结果确认目标完成、或确认无法继续推进时调用。"
-                .to_string(),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "status": {
-                    "type": "string",
-                    "enum": ["completed", "blocked"],
-                    "description": "completed 表示任务已完成；blocked 表示已尽力但被外部条件阻塞"
-                },
-                "summary": {
-                    "type": "string",
-                    "description": "给用户的最终简明结论"
-                },
-                "evidence": {
-                    "type": "string",
-                    "description": "完成或阻塞依据，必须引用最近工具结果中的实际观察"
-                }
-            },
-            "required": ["status", "summary", "evidence"]
-        }),
-    }
-}
-
-fn only_finish_task_call(
-    calls: &[crate::model::ModelFunctionCall],
-) -> Option<&crate::model::ModelFunctionCall> {
-    if calls.len() == 1 && calls[0].name == FINISH_TASK_TOOL_NAME {
-        Some(&calls[0])
-    } else {
-        None
-    }
-}
-
-fn build_finish_task_final_text(call: &crate::model::ModelFunctionCall) -> anyhow::Result<String> {
-    let status = call
-        .arguments
-        .get("status")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .trim();
-    let summary = call
-        .arguments
-        .get("summary")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .trim();
-    let evidence = call
-        .arguments
-        .get("evidence")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .trim();
-
-    if !matches!(status, "completed" | "blocked") {
-        return Err(anyhow::anyhow!("status 必须是 completed 或 blocked"));
-    }
-    if summary.is_empty() {
-        return Err(anyhow::anyhow!("summary 不能为空"));
-    }
-    if evidence.is_empty() {
-        return Err(anyhow::anyhow!("evidence 不能为空"));
-    }
-
-    if status == "blocked" {
-        Ok(format!("{summary}\n\n依据：{evidence}"))
-    } else {
-        Ok(summary.to_string())
-    }
-}
-
-fn push_required_tool_reprompt(
-    loop_context: &mut Vec<Message>,
+fn append_assistant_tool_call_message(
+    session: &mut Session,
+    message_id: String,
     text: &str,
     reasoning_content: &str,
-    reason: &str,
+    calls: &[&crate::model::ModelFunctionCall],
 ) {
-    if !text.trim().is_empty() || !reasoning_content.trim().is_empty() {
-        loop_context.push(Message {
-            id: scru128::new().to_string(),
-            role: MessageRole::Assistant,
-            content: text.trim().to_string(),
-            reasoning_content: reasoning_content.trim().to_string(),
-            worker_id: None,
-            media: Vec::new(),
-            created_at: now_text(),
-        });
+    let tool_calls = calls
+        .iter()
+        .map(|call| MessageToolCall {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            arguments: call.arguments.clone(),
+        })
+        .collect::<Vec<_>>();
+    if tool_calls.is_empty() {
+        return;
     }
-    loop_context.push(Message {
-        id: scru128::new().to_string(),
-        role: MessageRole::System,
-        content: format!(
-            "内部调度提示：{reason} 本轮被强制要求使用工具。若仍需读取、写入、执行命令或验证文件，必须直接调用真实工具；若目标已经完成，必须调用 finish_task 并提供 status、summary、evidence。"
-        ),
-        reasoning_content: String::new(),
-        worker_id: None,
-        media: Vec::new(),
-        created_at: now_text(),
-    });
+
+    let mut message = Message::with_reasoning(
+        MessageRole::Assistant,
+        text.trim().to_string(),
+        reasoning_content.trim().to_string(),
+    );
+    message.id = message_id;
+    message.tool_calls = tool_calls;
+    session.messages.push(message);
+    session.updated_at = now_text();
+}
+
+fn append_tool_result_message(
+    session: &mut Session,
+    tool_call_id: &str,
+    tool_name: &str,
+    text: String,
+    is_error: bool,
+) {
+    let mut message = Message::new(MessageRole::Tool, text);
+    message.tool_call_id = Some(tool_call_id.to_string());
+    message.tool_name = Some(tool_name.to_string());
+    message.tool_result_is_error = is_error;
+    session.messages.push(message);
+    session.updated_at = now_text();
+}
+
+fn tool_result_provider_text(
+    tool_name: &str,
+    result: &crate::tool::ToolResult,
+    allow_memory_context: bool,
+) -> String {
+    if tool_name == "recall_memory" {
+        build_memory_recall_feedback(&result.stdout, allow_memory_context)
+    } else if is_media_tool_name(tool_name) && result.ok {
+        format!(
+            "工具 {tool_name} 执行成功：{}。媒体内容已生成并交付给用户，不要再次调用该工具。",
+            result.summary
+        )
+    } else {
+        tool_result_full_output(result)
+    }
+}
+
+fn is_media_tool_name(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "generate_image" | "generate_video" | "text_to_speech" | "speech_to_text"
+    )
 }
 
 /// 超限时强制最终回复
@@ -2221,6 +1948,11 @@ fn force_final_response(
         reasoning_content: String::new(),
         worker_id: None,
         media: Vec::new(),
+        tool_calls: Vec::new(),
+        tool_call_id: None,
+        tool_name: None,
+        tool_result_is_error: false,
+        compact: false,
         created_at: now_text(),
     });
 
@@ -2664,6 +2396,7 @@ fn build_memory_recall_context(session: &Session) -> Vec<String> {
                     }
                     "system"
                 }
+                MessageRole::Tool => "tool",
             };
             let content = compact_single_memory_text(&message.content, 900);
             (!content.is_empty()).then(|| format!("{role}: {content}"))

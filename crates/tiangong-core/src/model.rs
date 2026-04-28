@@ -16,7 +16,10 @@ use tiangong_llm::providers::openai::{OpenAiCompatibleConfig, OpenAiCompatiblePr
 use tiangong_llm::request::{ProviderRequest, ThinkingConfig as LlmThinkingConfig};
 use tiangong_llm::response::ProviderResponse;
 use tiangong_llm::stream::{ProviderStream, ProviderStreamEvent};
-use tiangong_llm::tool::{ToolCall as LlmToolCall, ToolChoice as LlmToolChoice, ToolSpec};
+use tiangong_llm::tool::{
+    ToolCall as LlmToolCall, ToolChoice as LlmToolChoice, ToolResult as LlmToolResult,
+    ToolResultContent as LlmToolResultContent, ToolSpec,
+};
 use tiangong_llm::usage::TokenUsageData;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 
@@ -875,6 +878,26 @@ fn build_provider_request(
     tool_choice: Option<ModelToolChoice>,
 ) -> ProviderRequest {
     let (system, messages) = build_provider_messages(req);
+    let has_tool_messages = messages.iter().any(|message| {
+        message.content.iter().any(|content| {
+            matches!(
+                content,
+                LlmMessageContent::ToolCall(_) | LlmMessageContent::ToolResult(_)
+            )
+        })
+    });
+    // Anthropic extended thinking + tool_use requires passing provider-native
+    // thinking blocks/signatures back in subsequent requests. The unified
+    // history keeps tool calls/results structurally, but does not persist
+    // those Anthropic-private thinking blocks yet, so tool turns must not
+    // enter thinking mode.
+    let thinking = if functions.is_empty() && !has_tool_messages {
+        req.thinking.as_ref().map(|thinking| LlmThinkingConfig {
+            budget_tokens: thinking.budget_tokens,
+        })
+    } else {
+        None
+    };
     ProviderRequest {
         model: model.to_string(),
         system: (!system.trim().is_empty()).then_some(system),
@@ -893,9 +916,7 @@ fn build_provider_request(
         top_p: None,
         stop_sequences: Vec::new(),
         metadata: None,
-        thinking: req.thinking.as_ref().map(|thinking| LlmThinkingConfig {
-            budget_tokens: thinking.budget_tokens,
-        }),
+        thinking,
     }
 }
 
@@ -965,21 +986,38 @@ fn provider_message_from_session(msg: &Message) -> Option<ChatMessage> {
     let role = match msg.role {
         MessageRole::User => LlmMessageRole::User,
         MessageRole::Assistant => LlmMessageRole::Assistant,
+        MessageRole::Tool => LlmMessageRole::Tool,
         MessageRole::System => return None,
     };
 
-    let mut parts = Vec::new();
-    if !msg.content.trim().is_empty() {
-        parts.push(msg.content.trim().to_string());
+    if msg.role == MessageRole::Tool {
+        let tool_call_id = msg.tool_call_id.as_ref()?;
+        return Some(ChatMessage::new(
+            role,
+            vec![LlmMessageContent::ToolResult(LlmToolResult {
+                tool_call_id: tool_call_id.clone(),
+                content: LlmToolResultContent::Text(msg.content.clone()),
+                is_error: msg.tool_result_is_error,
+            })],
+        ));
     }
-    if parts.is_empty() {
+
+    let mut content = Vec::new();
+    if !msg.content.trim().is_empty() {
+        content.push(LlmMessageContent::Text(msg.content.trim().to_string()));
+    }
+    content.extend(msg.tool_calls.iter().map(|call| {
+        LlmMessageContent::ToolCall(LlmToolCall {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            arguments: call.arguments.clone(),
+        })
+    }));
+    if content.is_empty() {
         return None;
     }
 
-    Some(ChatMessage::new(
-        role,
-        vec![LlmMessageContent::Text(parts.join("\n\n"))],
-    ))
+    Some(ChatMessage::new(role, content))
 }
 
 fn sanitize_provider_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {

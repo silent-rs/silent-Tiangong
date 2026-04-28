@@ -163,6 +163,11 @@ mod tests {
             reasoning_content: String::new(),
             worker_id: None,
             media: Vec::new(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_result_is_error: false,
+            compact: false,
             created_at: now_text(),
         }
     }

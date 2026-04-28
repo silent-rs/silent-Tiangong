@@ -1,6 +1,7 @@
 //! 消息类型
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// 消息角色
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -9,6 +10,15 @@ pub enum MessageRole {
     System,
     User,
     Assistant,
+    Tool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessageToolCall {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub arguments: Value,
 }
 
 /// 媒体类型
@@ -47,6 +57,17 @@ pub struct Message {
     pub worker_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub media: Vec<MediaAsset>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<MessageToolCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub tool_result_is_error: bool,
+    /// 表示从当前消息及以前的历史已被压缩摘要覆盖。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub compact: bool,
     pub created_at: String,
 }
 
@@ -59,6 +80,11 @@ impl Message {
             reasoning_content: String::new(),
             worker_id: None,
             media: Vec::new(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_result_is_error: false,
+            compact: false,
             created_at: now_text(),
         }
     }
@@ -75,9 +101,18 @@ impl Message {
             reasoning_content: reasoning.into(),
             worker_id: None,
             media: Vec::new(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_result_is_error: false,
+            compact: false,
             created_at: now_text(),
         }
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// 当前本地时间文本

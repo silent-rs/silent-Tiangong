@@ -13,7 +13,7 @@ export interface Session {
   message_count: number;
 }
 
-export type MessageRole = 'system' | 'user' | 'assistant';
+export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
 export type RunStatus =
   | 'idle'
   | 'planning'
@@ -71,6 +71,11 @@ export interface Message {
   reasoning_content: string;
   worker_id?: string;
   media?: MediaAsset[];
+  tool_calls?: { id: string; name: string; arguments?: unknown }[];
+  tool_call_id?: string;
+  tool_name?: string;
+  tool_result_is_error?: boolean;
+  compact?: boolean;
   created_at: string;
 }
 

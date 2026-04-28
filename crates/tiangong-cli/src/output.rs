@@ -278,6 +278,7 @@ pub fn print_session_messages(messages: &[tiangong_core::session::Message]) {
             tiangong_core::session::MessageRole::User => print_user_message(&msg.content),
             tiangong_core::session::MessageRole::Assistant => print_assistant_message(msg),
             tiangong_core::session::MessageRole::System => print_system_message(msg),
+            tiangong_core::session::MessageRole::Tool => print_system_message(msg),
         }
     }
 }

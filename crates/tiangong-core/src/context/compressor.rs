@@ -68,6 +68,7 @@ impl ContextCompressor {
 
         session.context_summary = Some(summary);
         session.summary_up_to = split_point;
+        mark_compact_boundary(&mut session.messages, split_point);
         Ok(true)
     }
 
@@ -95,6 +96,11 @@ impl ContextCompressor {
                 reasoning_content: String::new(),
                 worker_id: None,
                 media: Vec::new(),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                tool_name: None,
+                tool_result_is_error: false,
+                compact: true,
                 created_at: now_text(),
             });
         }
@@ -144,6 +150,7 @@ impl ContextCompressor {
                 MessageRole::User => "用户",
                 MessageRole::Assistant => "助手",
                 MessageRole::System => "系统",
+                MessageRole::Tool => "工具结果",
             };
             let content = if msg.content.chars().count() > 2000 {
                 let truncated: String = msg.content.chars().take(2000).collect();
@@ -186,7 +193,7 @@ pub fn compress_loop_messages(
     keep_recent: usize,
     client: &SingleProviderClient,
 ) -> Result<Vec<Message>> {
-    // 按 Assistant+System 配对分组为"轮次"
+    // 按 Assistant + Tool/System 配对分组为"轮次"
     let mut rounds: Vec<(usize, usize)> = Vec::new();
     let mut i = 0;
     while i < loop_messages.len() {
@@ -194,7 +201,12 @@ pub fn compress_loop_messages(
         if i < loop_messages.len() && loop_messages[i].role == MessageRole::Assistant {
             i += 1;
         }
-        while i < loop_messages.len() && loop_messages[i].role == MessageRole::System {
+        while i < loop_messages.len()
+            && matches!(
+                loop_messages[i].role,
+                MessageRole::System | MessageRole::Tool
+            )
+        {
             i += 1;
         }
         if i > start {
@@ -219,6 +231,7 @@ pub fn compress_loop_messages(
             MessageRole::Assistant => "Agent",
             MessageRole::System => "工具结果",
             MessageRole::User => "用户",
+            MessageRole::Tool => "工具结果",
         };
         let content = if msg.content.chars().count() > 1000 {
             let truncated: String = msg.content.chars().take(1000).collect();
@@ -262,8 +275,25 @@ pub fn compress_loop_messages(
         reasoning_content: String::new(),
         worker_id: None,
         media: Vec::new(),
+        tool_calls: Vec::new(),
+        tool_call_id: None,
+        tool_name: None,
+        tool_result_is_error: false,
+        compact: true,
         created_at: now_text(),
     }];
     result.extend_from_slice(recent_messages);
     Ok(result)
+}
+
+fn mark_compact_boundary(messages: &mut [Message], split_point: usize) {
+    for message in messages.iter_mut() {
+        message.compact = false;
+    }
+    if let Some(boundary) = split_point
+        .checked_sub(1)
+        .and_then(|index| messages.get_mut(index))
+    {
+        boundary.compact = true;
+    }
 }

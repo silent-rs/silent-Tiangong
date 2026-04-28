@@ -8,7 +8,7 @@ use crate::remote::event::{EventBus, TiangongEvent};
 use anyhow::{Result, anyhow};
 use tiangong_core::core_config::CoreConfigProvider;
 use tiangong_core::permission::TrustMode;
-use tiangong_core::session::{MessageRole, Session};
+use tiangong_core::session::{Message, MessageRole, MessageToolCall, Session, now_text};
 use tiangong_types::{
     MediaAsset, MediaKind, MessageContent, OutgoingMessage, SessionStreamEvent, StreamEvent,
 };
@@ -314,8 +314,13 @@ fn sync_stream_event_to_state(
             message_id,
             content,
         } => append_assistant_reasoning(session, message_id, content),
-        StreamEvent::ToolCalls { names, .. } => {
-            cleanup_latest_assistant_before_tool_calls(session);
+        StreamEvent::ToolCalls {
+            message_id,
+            names,
+            calls,
+            ..
+        } => {
+            finalize_assistant_tool_calls(session, message_id, calls);
             session.append_message(
                 MessageRole::System,
                 format!("LLM 输出\ntool_calls: {}", names.join(", ")),
@@ -331,6 +336,7 @@ fn sync_stream_event_to_state(
         }
         StreamEvent::ToolResult {
             name,
+            tool_call_id,
             ok,
             output,
             full_output,
@@ -346,6 +352,13 @@ fn sync_stream_event_to_state(
             session.append_message(
                 MessageRole::System,
                 format!("工具 {name} 执行{status}\n{persisted_output}"),
+            );
+            append_tool_result_message(
+                session,
+                tool_call_id.as_deref(),
+                name,
+                persisted_output.to_string(),
+                !*ok,
             );
         }
         StreamEvent::ApprovalNeeded { .. } => {
@@ -441,6 +454,50 @@ fn cleanup_latest_assistant_before_tool_calls(session: &mut Session) {
     if message.reasoning_content.trim().is_empty() && message.media.is_empty() {
         session.messages.remove(index);
     }
+}
+
+fn finalize_assistant_tool_calls(
+    session: &mut Session,
+    message_id: &str,
+    calls: &[tiangong_types::StreamToolCall],
+) {
+    if calls.is_empty() {
+        cleanup_latest_assistant_before_tool_calls(session);
+        return;
+    }
+    ensure_assistant_message(session, message_id);
+    if let Some(message) = session
+        .messages
+        .iter_mut()
+        .find(|message| message.id == message_id)
+    {
+        message.tool_calls = calls
+            .iter()
+            .map(|call| MessageToolCall {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+            })
+            .collect();
+    }
+}
+
+fn append_tool_result_message(
+    session: &mut Session,
+    tool_call_id: Option<&str>,
+    tool_name: &str,
+    content: String,
+    is_error: bool,
+) {
+    let Some(tool_call_id) = tool_call_id else {
+        return;
+    };
+    let mut message = Message::new(MessageRole::Tool, content);
+    message.tool_call_id = Some(tool_call_id.to_string());
+    message.tool_name = Some(tool_name.to_string());
+    message.tool_result_is_error = is_error;
+    session.messages.push(message);
+    session.updated_at = now_text();
 }
 
 fn parse_tool_media_assets(name: &str, output: &str) -> Vec<MediaAsset> {

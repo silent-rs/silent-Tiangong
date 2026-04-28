@@ -9,7 +9,6 @@ const SUCCESS_RESULT_PREVIEW_MAX_CHARS: usize = 500;
 #[derive(Debug, Clone)]
 pub(crate) struct SuccessfulBusinessResult {
     pub(crate) summary: String,
-    pub(crate) payload: Option<Value>,
 }
 
 pub(crate) fn build_tool_failure_error(result: &ToolResult) -> String {
@@ -131,7 +130,6 @@ pub(crate) fn extract_successful_business_result(
                     "MCP 调用返回结构化结果: {}",
                     truncate_summary_text(&compact, SUCCESS_RESULT_PREVIEW_MAX_CHARS)
                 ),
-                payload: Some(value),
             });
         }
         return Some(SuccessfulBusinessResult {
@@ -139,7 +137,6 @@ pub(crate) fn extract_successful_business_result(
                 "MCP 调用返回文本结果: {}",
                 truncate_summary_text(stdout, SUCCESS_RESULT_PREVIEW_MAX_CHARS)
             ),
-            payload: None,
         });
     }
 
@@ -160,7 +157,6 @@ pub(crate) fn extract_successful_business_result(
                 "run_command 返回 success=true: {}",
                 truncate_summary_text(&compact, SUCCESS_RESULT_PREVIEW_MAX_CHARS)
             ),
-            payload: Some(value),
         });
     }
 
@@ -171,7 +167,6 @@ pub(crate) fn extract_successful_business_result(
                 "run_command 输出包含 success=true: {}",
                 truncate_summary_text(stdout, SUCCESS_RESULT_PREVIEW_MAX_CHARS)
             ),
-            payload: None,
         });
     }
     None

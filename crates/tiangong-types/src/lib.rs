@@ -10,11 +10,11 @@ pub mod status;
 pub mod stream;
 pub mod token;
 
-pub use message::{MediaAsset, MediaKind, Message, MessageRole, now_text};
+pub use message::{MediaAsset, MediaKind, Message, MessageRole, MessageToolCall, now_text};
 pub use remote::{IncomingMessage, MessageContent, OutgoingMessage, RemoteRole};
 pub use session::Session;
 pub use status::RunStatus;
-pub use stream::{MemoryRecallHitSummary, SessionStreamEvent, StreamEvent};
+pub use stream::{MemoryRecallHitSummary, SessionStreamEvent, StreamEvent, StreamToolCall};
 pub use token::TokenUsage;
 
 #[cfg(test)]
