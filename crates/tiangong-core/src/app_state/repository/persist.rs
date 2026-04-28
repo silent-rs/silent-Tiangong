@@ -27,6 +27,7 @@ impl AppRepository {
 
         let payload = PersistedAppState {
             active_session_id: store.session.active_session_id.clone(),
+            workspace_dir: store.session.workspace_dir.clone(),
             model_list: store.provider.model_list.clone(),
             agent_config: None,
         };
@@ -69,6 +70,7 @@ impl AppRepository {
 
         let payload = PersistedAppState {
             active_session_id: store.session.active_session_id.clone(),
+            workspace_dir: store.session.workspace_dir.clone(),
             model_list: store.provider.model_list.clone(),
             agent_config: None,
         };

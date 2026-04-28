@@ -1,26 +1,53 @@
 # TODO - 天工当前开发任务
 
-> 最后更新：2026-04-23
-> 当前主线：RFC-0007 Skill 文件系统注册表
-> 参考：`PLAN.md`、`docs/requirements.md`、`docs/rfc/0007-skill-filesystem-registry.md`
+> 最后更新：2026-04-28
+> 当前主线：工作空间与文件操作边界
+> 参考：`PLAN.md`、`docs/requirements.md`
 
 ---
 
 ## 当前结论
 
-接下来从 RFC-0007 开始收口 Skill 管理机制。目标是把 Skill 注册状态从 `skills.json.installed[]` / `skills-lock.json` 迁移到文件系统目录本身：
+接下来收口工作空间与文件操作边界。目标是把默认目录、读取能力和写入限制拆清楚：
 
-- `~/.tiangong/skills/<id>/` 的存在性决定 Skill 是否安装。
-- `<id>` 是稳定机器标识，`name` 仅用于展示；系统始终只使用当前安装版本。
-- `skill.toml.available` 决定 Skill 是否可激活。
-- `SKILL.md` 只在激活、详情查看或匹配命中时加载。
-- MCP 依赖锁仍保留 `mcp-lock.json`，不在本轮重构中推翻。
+- Desktop 模式从界面设置工作空间；CLI / Server 模式默认以进程当前运行目录作为工作空间。
+- 用户未指定目录时，默认加载当前工作空间。
+- 读取类操作不限制目录，便于必要时获取外部信息。
+- 写入、修改、删除、补丁和有文件副作用的命令只允许当前工作空间、当前对话指定目录和 `~/.tiangong/skills`。
+- `~/.tiangong/skills` 作为特殊可写目录，支持 Skill 故障时及时修复。
 
-旧 Memory 主线已迁出到 PR，本文档只保留 RFC-0007 真实开发差距。
+旧 RFC-0007 Skill 主线已迁出到 PR，本文档只保留当前工作空间主线真实开发差距。
 
 ---
 
-## P0 - Phase A：设计冻结与基础结构
+## P0 - Phase A：工作空间边界收口
+
+### 1. 同步需求边界
+
+- [x] 在 `docs/requirements.md` 中补充工作空间与文件操作边界。
+- [x] 明确 `~/.tiangong/skills` 是特殊可写范围。
+- [x] 明确工作空间与当前对话目录分离，`session_cwd` 只表示当前对话目录。
+
+### 2. 调整工具路径策略
+
+- [x] Desktop 系统设置弹窗提供工作区目录设置入口。
+- [x] Desktop 工作空间独立持久化到应用级状态，不复用 `session_cwd`。
+- [x] 新对话默认复制当前工作空间作为对话目录。
+- [x] 读取类工具允许访问工作空间外路径。
+- [x] 写入类工具只允许当前工作空间和 `~/.tiangong/skills`。
+- [x] 命令执行 cwd 必须限制在写入允许范围内。
+- [x] shell 文件副作用命令的路径参数必须限制在写入允许范围内。
+- [x] 保持用户未指定目录时默认使用当前工作空间。
+
+### 3. 验证
+
+- [x] `cargo check --workspace` 通过。
+
+---
+
+## 已完成：RFC-0007 Skill 文件系统注册表
+
+### Phase A：设计冻结与基础结构
 
 ### 1. 接受 RFC-0007 并同步需求边界
 

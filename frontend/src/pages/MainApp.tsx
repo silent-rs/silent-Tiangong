@@ -43,10 +43,12 @@ export function MainApp() {
       updateFromSnapshot(snapshot);
     }).catch(console.error);
 
-    // 加载初始工作目录
-    api.getSessionCwd().then((cwd) => {
-      useStore.setState({ sessionCwd: cwd });
-    }).catch(console.error);
+    // 加载初始工作空间和当前对话目录
+    Promise.all([api.getWorkspaceDir(), api.getSessionCwd()])
+      .then(([workspaceDir, sessionCwd]) => {
+        useStore.setState({ workspaceDir, sessionCwd });
+      })
+      .catch(console.error);
 
     return () => {
       unlistenRef.current?.();

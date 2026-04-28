@@ -21,6 +21,7 @@ impl AppRepository {
             return Ok(Some(LoadedState {
                 sessions,
                 active_session_id,
+                workspace_dir: default_workspace_dir(),
                 model_list: Vec::new(),
                 agent_config,
             }));
@@ -48,6 +49,11 @@ impl AppRepository {
         Ok(Some(LoadedState {
             sessions,
             active_session_id,
+            workspace_dir: if persisted.workspace_dir.trim().is_empty() {
+                default_workspace_dir()
+            } else {
+                persisted.workspace_dir
+            },
             model_list: persisted.model_list,
             agent_config,
         }))
@@ -67,6 +73,7 @@ impl AppRepository {
         Ok(Some(LoadedState {
             sessions: persisted.sessions,
             active_session_id: persisted.active_session_id,
+            workspace_dir: default_workspace_dir(),
             model_list: persisted.model_list,
             agent_config: None,
         }))

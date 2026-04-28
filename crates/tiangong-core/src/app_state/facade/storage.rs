@@ -56,7 +56,8 @@ impl TiangongState {
             return idx;
         }
 
-        let session = Session::new(DEFAULT_SESSION_TITLE);
+        let mut session = Session::new(DEFAULT_SESSION_TITLE);
+        session.cwd = self.store.session.workspace_dir.clone();
         self.store.session.active_session_id = session.id.clone();
         self.store.session.sessions.push(session);
         self.store.session.sessions.len() - 1

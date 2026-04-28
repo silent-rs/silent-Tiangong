@@ -183,9 +183,6 @@ pub struct SessionTaskPlan {
 impl Session {
     pub fn new(title: impl Into<String>) -> Self {
         let now = now_text();
-        let cwd = std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
         Self {
             id: new_id(),
             title: title.into(),
@@ -193,7 +190,7 @@ impl Session {
             token_usage: TokenUsage::default(),
             task_records: Vec::new(),
             task_plans: Vec::new(),
-            cwd,
+            cwd: String::new(),
             cwd_mode: SessionCwdMode::Inherit,
             context_summary: None,
             summary_up_to: 0,

@@ -6,8 +6,7 @@ use diffy::{Patch, apply as diffy_apply};
 use serde_json::json;
 
 use super::common::{
-    display_rel_path, resolve_effective_cwd, resolve_path_from_base, resolve_write_path_from_base,
-    truncate_output,
+    display_rel_path, resolve_effective_cwd, resolve_write_path_from_base, truncate_output,
 };
 use super::{LocalToolExecutor, ToolCall, ToolResult};
 
@@ -110,7 +109,7 @@ fn apply_unified_diff_patch(patch: &str, effective_cwd: &Path, verify: bool) -> 
         }
 
         if is_delete {
-            let source = resolve_path_from_base(&original, effective_cwd)
+            let source = resolve_write_path_from_base(&original, effective_cwd)
                 .map_err(|err| patch_path_error(err.to_string()))?;
             if !source.is_file() {
                 return Err(patch_path_error(format!(
@@ -143,7 +142,7 @@ fn apply_unified_diff_patch(patch: &str, effective_cwd: &Path, verify: bool) -> 
             continue;
         }
 
-        let source = resolve_path_from_base(&original, effective_cwd)
+        let source = resolve_write_path_from_base(&original, effective_cwd)
             .map_err(|err| patch_path_error(err.to_string()))?;
         let target = resolve_write_path_from_base(&modified, effective_cwd)
             .map_err(|err| patch_path_error(err.to_string()))?;

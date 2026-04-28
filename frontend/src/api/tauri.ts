@@ -257,6 +257,12 @@ export const api = {
   setSessionCwd: (cwd: string): Promise<void> =>
     invoke('set_session_cwd', { cwd }),
 
+  getWorkspaceDir: (): Promise<string> =>
+    invoke('get_workspace_dir'),
+
+  setWorkspaceDir: (workspaceDir: string): Promise<void> =>
+    invoke('set_workspace_dir', { workspaceDir }),
+
   // ----------------------------------------------------------------
   // MCP 管理
   // ----------------------------------------------------------------

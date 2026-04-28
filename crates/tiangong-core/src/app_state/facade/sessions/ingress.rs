@@ -32,7 +32,11 @@ impl TiangongState {
         let usage = session.total_usage();
         self.store.runtime.run.last_usage = (usage.total_tokens > 0).then_some(usage);
         self.store.runtime.run.updated_at = now_text();
-        Ok((session.id.clone(), message_id, session))
+        let mut runtime_session = session.clone();
+        if runtime_session.cwd.trim().is_empty() {
+            runtime_session.cwd = self.store.session.workspace_dir.clone();
+        }
+        Ok((session.id.clone(), message_id, runtime_session))
     }
 
     /// 向指定会话注入外部事件消息，并立即持久化。

@@ -20,6 +20,7 @@ interface AppState {
   isDraft: boolean;
 
   // 工作目录
+  workspaceDir: string;
   sessionCwd: string;
 
   // 多会话运行状态 (session_id -> status)
@@ -51,6 +52,7 @@ interface AppState {
   setInputContent: (content: string) => void;
 
   setSessionCwd: (cwd: string) => Promise<void>;
+  setWorkspaceDir: (workspaceDir: string) => Promise<void>;
 
   loadMcpServers: () => Promise<void>;
   loadSkills: () => Promise<void>;
@@ -74,6 +76,7 @@ export const useStore = create<AppState>((set, get) => ({
   mcpServers: null,
   skills: null,
   isDraft: false,
+  workspaceDir: '',
   sessionCwd: '',
   sessionRunStatuses: {},
   streamingMessageId: null,
@@ -119,7 +122,7 @@ export const useStore = create<AppState>((set, get) => ({
       // 首次加载时默认进入新对话（草稿模式）
       const { activeSessionId, isDraft } = get();
       if (!activeSessionId && !isDraft) {
-        set({ isDraft: true, sessionCwd: '' });
+        set({ isDraft: true, sessionCwd: get().workspaceDir });
       }
     } catch (error) {
       console.error('加载会话失败:', error);
@@ -129,6 +132,7 @@ export const useStore = create<AppState>((set, get) => ({
 
   // 创建新会话 — 纯前端草稿模式，不立即调后端
   createSession: () => {
+    const workspaceDir = get().workspaceDir;
     set({
       isDraft: true,
       activeSessionId: null,
@@ -139,7 +143,7 @@ export const useStore = create<AppState>((set, get) => ({
       streamingMessageId: null,
       streamingContent: '',
       streamingReasoningContent: '',
-      sessionCwd: '',
+      sessionCwd: workspaceDir,
     });
   },
 
@@ -281,6 +285,17 @@ export const useStore = create<AppState>((set, get) => ({
       set({ sessionCwd: cwd });
     } catch (error) {
       console.error('设置工作目录失败:', error);
+      throw error;
+    }
+  },
+
+  // 设置 Desktop 工作空间
+  setWorkspaceDir: async (workspaceDir: string) => {
+    try {
+      await api.setWorkspaceDir(workspaceDir);
+      set({ workspaceDir });
+    } catch (error) {
+      console.error('设置工作空间失败:', error);
       throw error;
     }
   },

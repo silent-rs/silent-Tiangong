@@ -5,6 +5,7 @@
 
 use crate::agent_config::AgentConfig;
 use crate::models_config::ModelsConfig;
+use crate::session::Session;
 
 use super::types::{PromptSection, SystemPromptBlock};
 
@@ -129,27 +130,35 @@ fn build_skills_section(agent_config: &AgentConfig) -> String {
 }
 
 /// 构建 System Context（环境事实，追加到 system prompt 尾部）
-pub fn build_system_context() -> Vec<String> {
+pub fn build_system_context(session: &Session) -> Vec<String> {
     let mut ctx = Vec::new();
 
-    ctx.push(format!(
-        "当前工作目录：{}",
-        std::env::current_dir()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| ".".into())
-    ));
+    let workspace = session_working_directory(session);
+    ctx.push(format!("当前工作目录：{}", workspace));
 
-    let workspace = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| ".".into());
     let home = std::env::var("HOME").unwrap_or_default();
     let mut roots = vec![workspace];
     if !home.is_empty() {
-        roots.push(format!("{home}/.tiangong"));
+        roots.push(format!("{home}/.tiangong/skills"));
     }
     ctx.push(format!("允许文件操作目录：{}", roots.join(", ")));
 
     ctx
+}
+
+fn session_working_directory(session: &Session) -> String {
+    let cwd = session.cwd.trim();
+    if !cwd.is_empty() {
+        return std::path::PathBuf::from(cwd)
+            .canonicalize()
+            .unwrap_or_else(|_| std::path::PathBuf::from(cwd))
+            .display()
+            .to_string();
+    }
+
+    std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| ".".into())
 }
 
 /// 构建 User Context（用户偏好/记忆，以 system-reminder 方式注入）
@@ -177,7 +186,7 @@ mod tests {
 
     #[test]
     fn system_context_has_cwd() {
-        let ctx = build_system_context();
+        let ctx = build_system_context(&Session::new("测试"));
         assert!(ctx.iter().any(|c| c.contains("当前工作目录")));
     }
 }

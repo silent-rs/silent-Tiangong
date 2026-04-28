@@ -8,9 +8,11 @@ import { Card, CardContent } from './ui/card';
 import { Switch } from './ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Link, Edit2, KeyRound, RefreshCw, Info, Wrench } from 'lucide-react';
+import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Link, Edit2, KeyRound, RefreshCw, Info, Wrench, FolderOpen, Save } from 'lucide-react';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { api } from '@/api/tauri';
 import type { McpServer, Skill, SkillDetail, ServerConfig, ConnectorInfo, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo } from '@/api/tauri';
+import { useStore } from '@/store/useStore';
 import { useToast } from './Toast';
 
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
@@ -44,8 +46,12 @@ export function SettingsDialog() {
             <DialogTitle>系统设置</DialogTitle>
           </DialogHeader>
 
-          <Tabs defaultValue="llm" className="flex-1 overflow-hidden flex flex-col">
+          <Tabs defaultValue="workspace" className="flex-1 overflow-hidden flex flex-col">
             <TabsList className="w-full justify-start">
+              <TabsTrigger value="workspace">
+                <FolderOpen className="w-4 h-4 mr-2" />
+                工作区
+              </TabsTrigger>
               <TabsTrigger value="llm">
                 <Settings className="w-4 h-4 mr-2" />
                 LLM 配置
@@ -69,6 +75,9 @@ export function SettingsDialog() {
             </TabsList>
 
             <div className="flex-1 overflow-y-auto">
+              <TabsContent value="workspace">
+                <WorkspaceSettings />
+              </TabsContent>
               <TabsContent value="llm">
                 <LLMSettings onSaveStatusChange={setSaveStatus} />
               </TabsContent>
@@ -89,6 +98,99 @@ export function SettingsDialog() {
         </DialogContent>
       </Dialog>
     </>
+  );
+}
+
+// ============================================================================
+// 工作区设置组件
+// ============================================================================
+
+function WorkspaceSettings() {
+  const { workspaceDir, setWorkspaceDir } = useStore();
+  const [editWorkspaceDir, setEditWorkspaceDir] = useState(workspaceDir);
+  const [isSaving, setIsSaving] = useState(false);
+  const { showSuccess, showError } = useToast();
+
+  useEffect(() => {
+    setEditWorkspaceDir(workspaceDir);
+  }, [workspaceDir]);
+
+  const handleSelectDirectory = async () => {
+    try {
+      const selected = await openDialog({
+        directory: true,
+        multiple: false,
+        defaultPath: editWorkspaceDir || workspaceDir || undefined,
+        title: '选择工作区目录',
+      });
+      if (selected && typeof selected === 'string') {
+        setEditWorkspaceDir(selected);
+      }
+    } catch (error) {
+      console.error('选择工作区目录失败:', error);
+      showError('选择失败', '无法打开目录选择器');
+    }
+  };
+
+  const handleSave = async () => {
+    const nextWorkspaceDir = editWorkspaceDir.trim();
+    if (!nextWorkspaceDir) {
+      showError('路径为空', '请选择或输入工作区目录');
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      await setWorkspaceDir(nextWorkspaceDir);
+      showSuccess('工作区已更新', '未指定对话目录时会默认使用该工作区');
+    } catch (error) {
+      console.error('保存工作区失败:', error);
+      showError('保存失败', error instanceof Error ? error.message : '无法保存工作区目录');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4 p-4">
+      <div className="space-y-2">
+        <Label htmlFor="workspacePath">工作区目录</Label>
+        <div className="flex gap-2">
+          <Input
+            id="workspacePath"
+            value={editWorkspaceDir}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditWorkspaceDir(e.target.value)}
+            placeholder="选择或输入工作区目录"
+            disabled={isSaving}
+          />
+          <Button variant="outline" onClick={handleSelectDirectory} disabled={isSaving}>
+            <FolderOpen className="w-4 h-4 mr-2" />
+            选择
+          </Button>
+        </div>
+      </div>
+
+      <div className="rounded-md border p-3 text-sm">
+        <div className="text-muted-foreground mb-1">当前工作区</div>
+        <div className="break-all font-mono text-xs">{workspaceDir || '未设置'}</div>
+      </div>
+
+      <div className="flex justify-end">
+        <Button onClick={handleSave} disabled={isSaving || editWorkspaceDir.trim() === workspaceDir}>
+          {isSaving ? (
+            <>
+              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              保存中...
+            </>
+          ) : (
+            <>
+              <Save className="w-4 h-4 mr-2" />
+              保存工作区
+            </>
+          )}
+        </Button>
+      </div>
+    </div>
   );
 }
 

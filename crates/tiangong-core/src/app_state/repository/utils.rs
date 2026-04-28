@@ -23,6 +23,12 @@ pub(in crate::app_state) fn default_app_storage_path() -> PathBuf {
     default_storage_root().join("app.json")
 }
 
+pub(in crate::app_state) fn default_workspace_dir() -> String {
+    std::env::current_dir()
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
 pub(in crate::app_state) fn default_skills_config_path() -> PathBuf {
     default_storage_root().join("skills.json")
 }
