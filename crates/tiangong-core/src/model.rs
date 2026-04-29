@@ -312,8 +312,23 @@ impl SingleProviderClient {
 
     fn block_on_llm<F, T>(&self, future: F) -> Result<T>
     where
-        F: std::future::Future<Output = std::result::Result<T, tiangong_llm::error::LlmError>>,
+        F: std::future::Future<Output = std::result::Result<T, tiangong_llm::error::LlmError>>
+            + Send,
+        T: Send,
     {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return std::thread::scope(|scope| {
+                let handle = scope.spawn(move || {
+                    let runtime = TokioRuntimeBuilder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .context("初始化异步运行时失败")?;
+                    runtime.block_on(future).map_err(map_llm_error)
+                });
+                handle.join().map_err(|_| anyhow!("LLM 请求线程 panic"))?
+            });
+        }
+
         let runtime = TokioRuntimeBuilder::new_current_thread()
             .enable_all()
             .build()
@@ -924,12 +939,7 @@ fn build_provider_messages(req: &ModelRequest) -> (String, Vec<ChatMessage>) {
     let mut messages = Vec::new();
 
     let system_texts = if let Some(ref assembled) = req.assembled_system_prompt {
-        let mut texts = vec![assembled.clone()];
-        for msg in &req.context {
-            if msg.role == MessageRole::System && !msg.content.trim().is_empty() {
-                texts.push(msg.content.clone());
-            }
-        }
+        let texts = vec![assembled.clone()];
         for msg in &req.context {
             if let Some(message) = provider_message_from_session(msg) {
                 messages.push(message);
@@ -946,17 +956,8 @@ fn build_provider_messages(req: &ModelRequest) -> (String, Vec<ChatMessage>) {
             texts.push(mcp_tools_prompt);
         }
         for msg in &req.context {
-            match msg.role {
-                MessageRole::System => {
-                    if !msg.content.trim().is_empty() {
-                        texts.push(msg.content.clone());
-                    }
-                }
-                _ => {
-                    if let Some(message) = provider_message_from_session(msg) {
-                        messages.push(message);
-                    }
-                }
+            if let Some(message) = provider_message_from_session(msg) {
+                messages.push(message);
             }
         }
         texts
@@ -991,7 +992,17 @@ fn provider_message_from_session(msg: &Message) -> Option<ChatMessage> {
     };
 
     if msg.role == MessageRole::Tool {
-        let tool_call_id = msg.tool_call_id.as_ref()?;
+        let Some(tool_call_id) = msg.tool_call_id.as_ref() else {
+            let text = msg.content.trim();
+            if text.is_empty() {
+                return None;
+            }
+            let tool_name = msg.tool_name.as_deref().unwrap_or("runtime_context");
+            return Some(ChatMessage::text(
+                LlmMessageRole::User,
+                format!("<tool-context name=\"{tool_name}\">\n{text}\n</tool-context>"),
+            ));
+        };
         return Some(ChatMessage::new(
             role,
             vec![LlmMessageContent::ToolResult(LlmToolResult {
@@ -1023,6 +1034,8 @@ fn provider_message_from_session(msg: &Message) -> Option<ChatMessage> {
 fn sanitize_provider_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     let mut sanitized: Vec<ChatMessage> = Vec::new();
     let mut seen_user = false;
+    let mut deferred_tool_contexts: Vec<ChatMessage> = Vec::new();
+    let mut pending_tool_results = 0usize;
 
     for message in messages {
         if message.role == LlmMessageRole::System || is_empty_provider_message(&message) {
@@ -1035,6 +1048,66 @@ fn sanitize_provider_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
             seen_user = true;
         }
 
+        if pending_tool_results > 0 {
+            if message.role == LlmMessageRole::User && is_internal_tool_context_message(&message) {
+                deferred_tool_contexts.push(message);
+                continue;
+            }
+            if message.role == LlmMessageRole::Tool {
+                pending_tool_results = pending_tool_results
+                    .saturating_sub(provider_message_tool_result_count(&message));
+            } else {
+                flush_deferred_messages(&mut sanitized, &mut deferred_tool_contexts);
+                pending_tool_results = 0;
+            }
+        }
+
+        if let Some(last) = sanitized.last_mut()
+            && last.role == message.role
+        {
+            merge_provider_message_content(last, message);
+        } else {
+            pending_tool_results =
+                pending_tool_results.max(provider_message_tool_call_count(&message));
+            sanitized.push(message);
+            continue;
+        }
+        pending_tool_results =
+            pending_tool_results.max(provider_message_tool_call_count(sanitized.last().unwrap()));
+    }
+
+    flush_deferred_messages(&mut sanitized, &mut deferred_tool_contexts);
+    sanitized
+}
+
+fn provider_message_tool_call_count(message: &ChatMessage) -> usize {
+    message
+        .content
+        .iter()
+        .filter(|content| matches!(content, LlmMessageContent::ToolCall(_)))
+        .count()
+}
+
+fn provider_message_tool_result_count(message: &ChatMessage) -> usize {
+    message
+        .content
+        .iter()
+        .filter(|content| matches!(content, LlmMessageContent::ToolResult(_)))
+        .count()
+}
+
+fn is_internal_tool_context_message(message: &ChatMessage) -> bool {
+    message.role == LlmMessageRole::User
+        && message.content.iter().any(|content| {
+            matches!(
+                content,
+                LlmMessageContent::Text(text) if text.trim_start().starts_with("<tool-context")
+            )
+        })
+}
+
+fn flush_deferred_messages(sanitized: &mut Vec<ChatMessage>, deferred: &mut Vec<ChatMessage>) {
+    for message in deferred.drain(..) {
         if let Some(last) = sanitized.last_mut()
             && last.role == message.role
         {
@@ -1043,8 +1116,6 @@ fn sanitize_provider_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
         }
         sanitized.push(message);
     }
-
-    sanitized
 }
 
 fn is_empty_provider_message(message: &ChatMessage) -> bool {
@@ -1383,4 +1454,59 @@ fn parse_function_timeout_ms(raw: &str) -> Result<u64> {
 
     // 工具调用阶段默认用更保守的超时，避免长时间卡住导致后续 plan 看似不执行。
     Ok(fallback.min(120_000))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_defers_internal_tool_context_until_tool_results_complete() {
+        let messages = vec![
+            ChatMessage::text(LlmMessageRole::User, "开始"),
+            ChatMessage::new(
+                LlmMessageRole::Assistant,
+                vec![
+                    LlmMessageContent::ToolCall(LlmToolCall {
+                        id: "call_1".to_string(),
+                        name: "read_file".to_string(),
+                        arguments: serde_json::json!({"path": "a"}),
+                    }),
+                    LlmMessageContent::ToolCall(LlmToolCall {
+                        id: "call_2".to_string(),
+                        name: "read_file".to_string(),
+                        arguments: serde_json::json!({"path": "b"}),
+                    }),
+                ],
+            ),
+            ChatMessage::new(
+                LlmMessageRole::Tool,
+                vec![LlmMessageContent::ToolResult(LlmToolResult {
+                    tool_call_id: "call_1".to_string(),
+                    content: LlmToolResultContent::Text("a".to_string()),
+                    is_error: false,
+                })],
+            ),
+            ChatMessage::text(
+                LlmMessageRole::User,
+                "<tool-context name=\"read_file\">trace</tool-context>",
+            ),
+            ChatMessage::new(
+                LlmMessageRole::Tool,
+                vec![LlmMessageContent::ToolResult(LlmToolResult {
+                    tool_call_id: "call_2".to_string(),
+                    content: LlmToolResultContent::Text("b".to_string()),
+                    is_error: false,
+                })],
+            ),
+        ];
+
+        let sanitized = sanitize_provider_messages(messages);
+
+        assert_eq!(sanitized.len(), 4);
+        assert_eq!(sanitized[2].role, LlmMessageRole::Tool);
+        assert_eq!(provider_message_tool_result_count(&sanitized[2]), 2);
+        assert_eq!(sanitized[3].role, LlmMessageRole::User);
+        assert!(is_internal_tool_context_message(&sanitized[3]));
+    }
 }

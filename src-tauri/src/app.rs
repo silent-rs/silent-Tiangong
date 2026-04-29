@@ -40,6 +40,11 @@ impl TiangongApp {
         let next =
             self.with_state_read(|core_state| Ok(core_state.build_core_config_from_base(&base)))?;
         self.config.replace(next);
+        if let Ok(cores) = self.cores.lock() {
+            for core in cores.values() {
+                let _ = core.reload_config();
+            }
+        }
         Ok(())
     }
 
@@ -76,6 +81,7 @@ impl TiangongApp {
         let mut cores = self.cores.lock().unwrap();
         if let Some(core) = cores.get(session_id) {
             if core.is_running() {
+                let _ = core.reload_config();
                 let _ = core.update_cwd(session.cwd.clone());
                 return (session_id.to_string(), false); // 已存在，复用
             }

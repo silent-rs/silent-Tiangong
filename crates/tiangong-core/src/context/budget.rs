@@ -4,8 +4,6 @@
 
 use crate::model::FunctionToolSpec;
 
-use super::organizer::estimate_tokens;
-
 /// Token 预算分配
 #[derive(Debug, Clone)]
 pub struct TokenBudget {
@@ -52,9 +50,20 @@ impl TokenBudget {
     ) -> usize {
         let max = self.max_prompt_tokens();
         let tools_cost = Self::estimate_tools_tokens(tools);
-        let messages_cost = estimate_tokens(messages);
+        let messages_cost = estimate_message_tokens(messages);
         max.saturating_sub(tools_cost + messages_cost)
     }
+}
+
+fn estimate_message_tokens(messages: &[crate::session::Message]) -> usize {
+    messages
+        .iter()
+        .map(|msg| {
+            let content_chars = msg.content.chars().count();
+            let reasoning_chars = msg.reasoning_content.chars().count();
+            ((content_chars + reasoning_chars) as f64 * 0.6) as usize + 4
+        })
+        .sum()
 }
 
 #[cfg(test)]
