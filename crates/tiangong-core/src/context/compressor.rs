@@ -74,7 +74,9 @@ impl ContextCompressor {
 
     /// 构建发送给 LLM 的上下文消息列表
     ///
-    /// 结构：[摘要系统消息(可选)] + [最近 N 轮完整消息]
+    /// 结构：[最近 N 轮完整消息]
+    ///
+    /// 滚动摘要由 PromptAssembler 注入 system prompt，不作为普通消息进入对话链。
     pub fn build_context(&self, session: &Session) -> Vec<Message> {
         let split_point = if session.summary_up_to > 0 {
             // 使用已有摘要覆盖点
@@ -84,29 +86,7 @@ impl ContextCompressor {
             0
         };
 
-        let recent_messages = &session.messages[split_point..];
-        let mut context = Vec::new();
-
-        // 注入摘要
-        if let Some(summary) = &session.context_summary {
-            context.push(Message {
-                id: scru128::new().to_string(),
-                role: MessageRole::System,
-                content: format!("[早期对话摘要]\n{summary}"),
-                reasoning_content: String::new(),
-                worker_id: None,
-                media: Vec::new(),
-                tool_calls: Vec::new(),
-                tool_call_id: None,
-                tool_name: None,
-                tool_result_is_error: false,
-                compact: true,
-                created_at: now_text(),
-            });
-        }
-
-        context.extend_from_slice(recent_messages);
-        context
+        session.messages[split_point..].to_vec()
     }
 
     /// 查找分割点：保留最近 N 轮对话（一轮 = 一次 user 消息及其后续消息）
@@ -270,14 +250,14 @@ pub fn compress_loop_messages(
 
     let mut result = vec![Message {
         id: scru128::new().to_string(),
-        role: MessageRole::System,
+        role: MessageRole::Tool,
         content: format!("[前 {compress_rounds} 轮执行摘要]\n{summary}"),
         reasoning_content: String::new(),
         worker_id: None,
         media: Vec::new(),
         tool_calls: Vec::new(),
         tool_call_id: None,
-        tool_name: None,
+        tool_name: Some("loop_summary".to_string()),
         tool_result_is_error: false,
         compact: true,
         created_at: now_text(),

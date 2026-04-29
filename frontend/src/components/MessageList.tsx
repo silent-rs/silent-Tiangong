@@ -826,6 +826,37 @@ function extractLlmExplanation(content: string): string {
   return "";
 }
 
+function llmOutputHasToolCalls(content: string): boolean {
+  return content
+    .split("\n")
+    .some((line) => line.trim().startsWith("tool_calls:"));
+}
+
+function toolItemSucceeded(tool: MessageItem): boolean {
+  return !tool.content.includes("ok=false") && !tool.tool_result_is_error;
+}
+
+function summarizeToolGroup(tools: MessageItem[]): string {
+  const total = tools.length;
+  const failed = tools.filter((tool) => !toolItemSucceeded(tool)).length;
+  const succeeded = total - failed;
+  const names = Array.from(
+    new Set(
+      tools
+        .map((tool) => {
+          const meta = getSystemMessageMeta(tool.content);
+          return meta.toolName || meta.summary.split(" · ")[0] || "";
+        })
+        .filter(Boolean)
+    )
+  );
+  const nameSummary = names.length > 0
+    ? ` · ${names.slice(0, 3).join(", ")}${names.length > 3 ? ` 等 ${names.length} 类` : ""}`
+    : "";
+  const statusSummary = failed > 0 ? `成功 ${succeeded} / 失败 ${failed}` : `成功 ${succeeded}`;
+  return `工具调用 ${total} 次 · ${statusSummary}${nameSummary}`;
+}
+
 /** 统一的智能体回合渲染 — 将系统消息（事件）和 assistant 消息（回复）合并展示 */
 function AgentTurn({
   messages,
@@ -843,7 +874,7 @@ function AgentTurn({
   hasTts: boolean;
 }) {
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
-  const [collapsedToolGroups, setCollapsedToolGroups] = useState<Set<string>>(new Set());
+  const [expandedToolGroups, setExpandedToolGroups] = useState<Set<string>>(new Set());
 
   const toggleItem = (id: string) => {
     setExpandedItems((prev) => {
@@ -853,7 +884,7 @@ function AgentTurn({
     });
   };
   const toggleToolGroup = (key: string) => {
-    setCollapsedToolGroups((prev) => {
+    setExpandedToolGroups((prev) => {
       const next = new Set(prev);
       next.has(key) ? next.delete(key) : next.add(key);
       return next;
@@ -878,12 +909,11 @@ function AgentTurn({
 
   const flushTools = () => {
     if (pendingTools.length === 0) return;
-    const summary = pendingTools.map(t => t.content.includes("ok=true") ? "OK" : "FAIL");
     const key = pendingTools[0].id;
     fragments.push({
       type: "tool_group",
       key,
-      brief: `${pendingTools.length} 次调用 (${summary.join(", ")})`,
+      brief: summarizeToolGroup(pendingTools),
       tools: [...pendingTools],
     });
     pendingTools = [];
@@ -924,15 +954,18 @@ function AgentTurn({
     } else if (msg.role === "system" && msg.content.startsWith("[记忆检索]") && pendingRecall) {
       flushRecall(msg);
     } else if (msg.role === "system" && msg.content.startsWith("LLM 输出")) {
-      flushTools();
       // 提取 reasoning
       const reasoning = msgReasoning(msg);
+      const explanation = extractLlmExplanation(msg.content);
+      if (!reasoning && !explanation && llmOutputHasToolCalls(msg.content)) {
+        continue;
+      }
+      flushTools();
       if (reasoning && !shownReasonings.has(reasoning)) {
         shownReasonings.add(reasoning);
         fragments.push({ type: "thinking", content: reasoning, time: msg.created_at });
       }
       // 提取解释文本
-      const explanation = extractLlmExplanation(msg.content);
       if (explanation) {
         fragments.push({ type: "explanation", text: explanation, time: msg.created_at });
       }
@@ -942,8 +975,18 @@ function AgentTurn({
       // tool 消息用于还原 LLM 历史，UI 继续使用系统 trace 渲染工具过程，避免重复展示。
       continue;
     } else if (msg.role === "assistant") {
-      flushTools();
       const isStreaming = msg.id === streamingMessageId;
+      const assistantReasoning = msgReasoning(msg);
+      const hasVisibleAssistantContent =
+        isStreaming ||
+        msg.content.trim().length > 0 ||
+        assistantReasoning.length > 0 ||
+        !!msg.media?.length;
+      if (!hasVisibleAssistantContent) {
+        continue;
+      }
+
+      flushTools();
       // 跳过与前一个 explanation 完全重复的 assistant 内容
       const prevFrag = fragments[fragments.length - 1];
       if (prevFrag?.type === "explanation" && prevFrag.text === msg.content.trim() && !isStreaming) {
@@ -951,7 +994,6 @@ function AgentTurn({
         fragments.pop();
       }
       // assistant 自身携带的 reasoning（DirectAnswer 模式等无系统消息场景）
-      const assistantReasoning = msgReasoning(msg);
       if (assistantReasoning && !shownReasonings.has(assistantReasoning)) {
         shownReasonings.add(assistantReasoning);
         fragments.push({ type: "thinking", content: assistantReasoning, time: msg.created_at });
@@ -970,6 +1012,17 @@ function AgentTurn({
   }
   flushTools();
   flushRecall();
+
+  const mergedFragments: Fragment[] = [];
+  for (const frag of fragments) {
+    const previous = mergedFragments[mergedFragments.length - 1];
+    if (frag.type === "tool_group" && previous?.type === "tool_group") {
+      previous.tools.push(...frag.tools);
+      previous.brief = summarizeToolGroup(previous.tools);
+      continue;
+    }
+    mergedFragments.push(frag);
+  }
 
   /** 渲染工具条目 */
   const renderToolItem = (tool: MessageItem) => {
@@ -997,7 +1050,7 @@ function AgentTurn({
 
   return (
     <div className="space-y-1.5">
-      {fragments.map((frag, i) => {
+      {mergedFragments.map((frag, i) => {
         if (frag.type === "thinking") {
           return (
             <div key={`think-${i}`} title={formatMessageTime(frag.time)}>
@@ -1013,7 +1066,7 @@ function AgentTurn({
           );
         }
         if (frag.type === "tool_group") {
-          const collapsed = collapsedToolGroups.has(frag.key);
+          const collapsed = !expandedToolGroups.has(frag.key);
           const groupTime = frag.tools.length > 0 ? formatMessageTime(frag.tools[0].created_at) : "";
           return (
             <div key={`tools-${frag.key}`} title={groupTime}>
@@ -1115,7 +1168,14 @@ function AgentTurn({
   );
 }
 
-function getSystemMessageMeta(content: string) {
+interface SystemMessageMeta {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  summary: string;
+  toolName?: string;
+}
+
+function getSystemMessageMeta(content: string): SystemMessageMeta {
   if (content.startsWith("LLM 输出")) {
     const match = content.match(/^LLM 输出 \[(.+?)\]/);
     const label = match ? match[1] : "LLM";
@@ -1136,6 +1196,7 @@ function getSystemMessageMeta(content: string) {
       icon: Terminal,
       label: "工具执行",
       summary: parts.join(" · ") || content.split("\n")[0],
+      toolName: nameMatch?.[1],
     };
   }
   if (

@@ -177,7 +177,7 @@ pub fn execute_single_plan_step_with_execution_agent(
             }
             loop_context.push(Message {
                 id: scru128::new().to_string(),
-                role: MessageRole::System,
+                role: MessageRole::Tool,
                 content: format!(
                     "执行反馈：上一轮工具调用失败，请修正后继续。\n错误列表：\n{}\n要求：必须优先直接调用函数工具（尤其 MCP 工具），不要将工具名当 shell 命令。",
                     blocking_errors.join("\n")
@@ -187,7 +187,7 @@ pub fn execute_single_plan_step_with_execution_agent(
                 media: Vec::new(),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
-                tool_name: None,
+                tool_name: Some("execution_feedback".to_string()),
                 tool_result_is_error: false,
                 compact: false,
                 created_at: now_text(),
@@ -265,7 +265,7 @@ pub fn execute_single_plan_step_with_execution_agent(
             if ignored_failed_tool {
                 feedback.push_str("\n注意：成功结果之后的额外失败调用已忽略，请基于成功结果收敛。");
             }
-            loop_context.push(runtime_message(MessageRole::System, feedback));
+            loop_context.push(runtime_message(MessageRole::Tool, feedback));
             continue;
         }
 
@@ -279,7 +279,7 @@ pub fn execute_single_plan_step_with_execution_agent(
         }
 
         loop_context.push(runtime_message(
-            MessageRole::System,
+            MessageRole::Tool,
             format!(
                 "execution-agent round {} 工具执行结果：\n{}",
                 round + 1,

@@ -45,7 +45,7 @@ impl QueryOrchestrator {
         // 会话有工具历史 → 继续多步执行
         let has_tool_history = session.task_records.iter().any(|r| r.tool_result.is_some())
             || session.messages.iter().any(|m| {
-                m.role == crate::session::MessageRole::System
+                m.role == crate::session::MessageRole::Tool
                     && (m.content.contains("tool_name:") || m.content.contains("exit_code"))
             });
         if has_tool_history {

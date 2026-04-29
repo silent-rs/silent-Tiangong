@@ -39,7 +39,17 @@ impl PromptAssembler {
         let system_prompt = system_block.to_text();
 
         // 2. System Context（环境事实）
-        let system_context = sections::build_system_context(session);
+        let mut system_context = sections::build_system_context(session);
+        if let Some(summary) = session
+            .context_summary
+            .as_deref()
+            .map(str::trim)
+            .filter(|summary| !summary.is_empty())
+        {
+            system_context.push(format!(
+                "## 早期对话摘要（上下文压缩）\n{summary}\n\n请将以上摘要视为此前多轮对话的压缩上下文。"
+            ));
+        }
 
         // 3. User Context（用户偏好/记忆，system-reminder 方式）
         let workspace_path = if session.cwd.trim().is_empty() {
@@ -82,14 +92,16 @@ fn build_attachments(agent_config: &AgentConfig) -> Vec<Message> {
     if let Some(mcp_text) = crate::mcp::build_mcp_tools_system_prompt(24) {
         attachments.push(Message {
             id: scru128::new().to_string(),
-            role: crate::session::MessageRole::System,
-            content: format!("<mcp-tools>\n{mcp_text}\n</mcp-tools>"),
+            role: crate::session::MessageRole::Tool,
+            content: format!(
+                "<system-reminder>\n<mcp-tools>\n{mcp_text}\n</mcp-tools>\n</system-reminder>"
+            ),
             reasoning_content: String::new(),
             worker_id: None,
             media: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: None,
-            tool_name: None,
+            tool_name: Some("mcp_tools_summary".to_string()),
             tool_result_is_error: false,
             compact: false,
             created_at: crate::session::now_text(),

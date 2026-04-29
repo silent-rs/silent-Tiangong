@@ -1,26 +1,39 @@
 # TODO - 天工当前开发任务
 
 > 最后更新：2026-04-28
-> 当前主线：工作空间与文件操作边界
+> 当前主线：Core 多轮对话上下文整理
 > 参考：`PLAN.md`、`docs/requirements.md`
 
 ---
 
 ## 当前结论
 
-接下来收口工作空间与文件操作边界。目标是把默认目录、读取能力和写入限制拆清楚：
+接下来先收口 Core 层多轮对话上下文整理。目标是让主对话链路符合无状态 Chat API 的多轮对话模式：
 
-- Desktop 模式从界面设置工作空间；CLI / Server 模式默认以进程当前运行目录作为工作空间。
-- 用户未指定目录时，默认加载当前工作空间。
-- 读取类操作不限制目录，便于必要时获取外部信息。
-- 写入、修改、删除、补丁和有文件副作用的命令只允许当前工作空间、当前对话指定目录和 `~/.tiangong/skills`。
-- `~/.tiangong/skills` 作为特殊可写目录，支持 Skill 故障时及时修复。
+- 每轮请求由 Core 负责拼接历史 `user -> assistant -> user` 消息链。
+- 运行时日志、recall_memory 结果和 MCP 摘要不再污染 system prompt。
+- recall_memory 结果、MCP 摘要、执行反馈和工具 trace 统一作为 `tool` 类型消息进入会话层。
+- 对话历史达到模型上下文限制 95% 时触发滚动摘要压缩，压缩摘要注入 system prompt。
+- LLM 请求层的显式 cache_control / system blocks 暂不处理，后续再按 RFC-0008 单独推进。
 
-旧 RFC-0007 Skill 主线已迁出到 PR，本文档只保留当前工作空间主线真实开发差距。
+旧 RFC-0007 Skill 主线已迁出到 PR，工作空间边界主线已完成，本文档切换到 Core 多轮对话上下文整理。
+
+## P0 - Core 多轮对话上下文整理
+
+- [x] 在 `docs/requirements.md` 中补充无状态 Chat API 多轮对话上下文要求。
+- [x] Core 层将 recall_memory 结果作为消息上下文注入，不再追加到 system prompt。
+- [x] Core 层停止把动态 `MessageRole::System` 上下文折叠进 system prompt。
+- [x] 非用户提交的运行时上下文统一改为 `MessageRole::Tool`。
+- [x] MCP 摘要改为 `tool` 类型附件，不再作为 system role 附件被折叠。
+- [x] 无 `tool_call_id` 的内部 tool 上下文发送给 Provider 时转换为兼容文本上下文。
+- [x] 对话历史达到上下文限制 95% 时启动滚动摘要压缩。
+- [x] 上下文压缩摘要注入 system prompt，不作为普通 `tool` 消息发送。
+- [x] 暂缓 LLM 请求层 `cache_control` / `system_blocks` 改造。
+- [x] 使用 `cargo check --workspace` 验证。
 
 ---
 
-## P0 - Phase A：工作空间边界收口
+## 已完成：Phase A 工作空间边界收口
 
 ### 1. 同步需求边界
 

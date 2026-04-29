@@ -17,9 +17,9 @@
 - Phase 15 已完成，Anthropic 协议抽象、独立 transport 与错误处理已接入。
 - Phase 16 已完成，入口统一、Server 信任语义、远程能力尾项和成本可见性已收口。
 - Phase 17 已完成图片/视频结构化媒体消息收口，`tiangong-media` 保持主链路，MCP 仅作为后端适配来源之一。
-- 当前主目标：推进 RFC-0007 Skill 文件系统注册表，把 Skill 注册事实源从 `skills.json.installed[]` / `skills-lock.json` 迁移到 `~/.tiangong/skills/<id>/`。
-- 当前进展：已整理 RFC-0007 TODO，准备先落地 `SkillRegistryView`、`LoadedSkill`、`skill.toml.available`、轻量扫描与按需加载。
-- 当前风险：Skill 管理旧链路与 GUI/CLI/Server 命令耦合较深，需要分阶段保持 `install/remove/enable/list/get` 行为兼容。
+- 当前主目标：先收口 Core 层多轮对话上下文组织，让主链路符合无状态 Chat API 的多轮消息拼接模式。
+- 当前进展：已确认动态 recall、运行时日志、执行反馈、上下文摘要和 MCP 摘要不应拼入稳定 system prompt，先在 Core 层统一迁移到 `tool` 类型消息。
+- 当前风险：LLM 请求层的显式缓存断点暂不处理，RFC-0008 中类型层和映射层改造需后续单独推进。
 
 ## 里程碑
 
