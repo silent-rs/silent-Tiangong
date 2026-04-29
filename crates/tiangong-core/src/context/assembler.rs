@@ -143,6 +143,7 @@ impl ContextAssembler {
             "list_dir",
             "run_command",
             "search_code",
+            "web_fetch",
             "tree_dir",
         ];
 
