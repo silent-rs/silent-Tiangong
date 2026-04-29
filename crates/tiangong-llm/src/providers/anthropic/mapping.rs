@@ -9,7 +9,7 @@ use tiangong_anthropic::types::{
 };
 
 use crate::error::LlmError;
-use crate::message::{ChatMessage, MessageContent, MessageRole};
+use crate::message::{ChatMessage, MessageContent, MessageRole, ThinkingContent};
 use crate::request::ProviderRequest;
 use crate::response::{ProviderResponse, StopReason};
 use crate::stream::ProviderStreamEvent;
@@ -71,26 +71,11 @@ pub(super) fn to_anthropic_request(
 }
 
 fn map_thinking_config(request: &ProviderRequest) -> Option<ThinkingConfig> {
-    if request_has_tool_payload(request) {
-        return Some(ThinkingConfig::Disabled);
-    }
     request
         .thinking
         .as_ref()
         .map(|thinking| ThinkingConfig::Enabled {
             budget_tokens: thinking.budget_tokens,
-        })
-}
-
-fn request_has_tool_payload(request: &ProviderRequest) -> bool {
-    !request.tools.is_empty()
-        || request.messages.iter().any(|message| {
-            message.content.iter().any(|content| {
-                matches!(
-                    content,
-                    MessageContent::ToolCall(_) | MessageContent::ToolResult(_)
-                )
-            })
         })
 }
 
@@ -116,6 +101,13 @@ fn map_message(message: &ChatMessage) -> Option<Result<AnthropicMessage, LlmErro
 fn map_content(content: &MessageContent) -> Result<ContentBlockParam, LlmError> {
     match content {
         MessageContent::Text(text) => Ok(ContentBlockParam::Text { text: text.clone() }),
+        MessageContent::Thinking(thinking) => Ok(ContentBlockParam::Thinking {
+            thinking: thinking.thinking.clone(),
+            signature: thinking.signature.clone(),
+        }),
+        MessageContent::RedactedThinking(data) => {
+            Ok(ContentBlockParam::RedactedThinking { data: data.clone() })
+        }
         MessageContent::ToolCall(tool_call) => Ok(ContentBlockParam::ToolUse {
             id: tool_call.id.clone(),
             name: tool_call.name.clone(),
@@ -193,11 +185,17 @@ fn from_content(
             },
             is_error: is_error.unwrap_or(false),
         }))),
-        ContentBlock::Thinking { thinking, .. } => {
-            reasoning_chunks.push(thinking);
-            Ok(None)
+        ContentBlock::Thinking {
+            thinking,
+            signature,
+        } => {
+            reasoning_chunks.push(thinking.clone());
+            Ok(Some(MessageContent::Thinking(ThinkingContent {
+                thinking,
+                signature,
+            })))
         }
-        ContentBlock::RedactedThinking { .. } => Ok(None),
+        ContentBlock::RedactedThinking { data } => Ok(Some(MessageContent::RedactedThinking(data))),
         ContentBlock::Unknown => Ok(None),
     }
 }
@@ -244,25 +242,38 @@ pub(super) fn map_stream_event(
         StreamEvent::ContentBlockStart {
             index,
             content_block,
-        } => match content_block {
-            ContentBlockStartData::ToolUse { id, name, input } => {
-                state
-                    .tool_calls
-                    .insert(index, ToolCallAccumulator { id: id.clone() });
-                Ok(vec![ProviderStreamEvent::ToolCallStart(ToolCall {
-                    id,
-                    name,
-                    arguments: input,
-                })])
+        } => {
+            match content_block {
+                ContentBlockStartData::ToolUse { id, name, input } => {
+                    state
+                        .tool_calls
+                        .insert(index, ToolCallAccumulator { id: id.clone() });
+                    Ok(vec![ProviderStreamEvent::ToolCallStart(ToolCall {
+                        id,
+                        name,
+                        arguments: input,
+                    })])
+                }
+                ContentBlockStartData::Thinking {
+                    thinking,
+                    signature,
+                } if !thinking.is_empty() => {
+                    let mut events = vec![ProviderStreamEvent::ReasoningDelta(thinking)];
+                    if !signature.is_empty() {
+                        events.push(ProviderStreamEvent::ReasoningSignatureDelta(signature));
+                    }
+                    Ok(events)
+                }
+                ContentBlockStartData::Thinking { signature, .. } if !signature.is_empty() => Ok(
+                    vec![ProviderStreamEvent::ReasoningSignatureDelta(signature)],
+                ),
+                ContentBlockStartData::RedactedThinking { .. } => Ok(Vec::new()),
+                ContentBlockStartData::Text { text } if !text.is_empty() => {
+                    Ok(vec![ProviderStreamEvent::TextDelta(text)])
+                }
+                _ => Ok(Vec::new()),
             }
-            ContentBlockStartData::Thinking { thinking, .. } if !thinking.is_empty() => {
-                Ok(vec![ProviderStreamEvent::ReasoningDelta(thinking)])
-            }
-            ContentBlockStartData::Text { text } if !text.is_empty() => {
-                Ok(vec![ProviderStreamEvent::TextDelta(text)])
-            }
-            _ => Ok(Vec::new()),
-        },
+        }
         StreamEvent::ContentBlockDelta { index, delta } => match delta {
             ContentBlockDeltaData::TextDelta { text } => {
                 Ok(vec![ProviderStreamEvent::TextDelta(text)])
@@ -281,9 +292,12 @@ pub(super) fn map_stream_event(
             ContentBlockDeltaData::ThinkingDelta { thinking } => {
                 Ok(vec![ProviderStreamEvent::ReasoningDelta(thinking)])
             }
-            ContentBlockDeltaData::SignatureDelta { .. } | ContentBlockDeltaData::Unknown => {
-                Ok(Vec::new())
+            ContentBlockDeltaData::SignatureDelta { signature } => {
+                Ok(vec![ProviderStreamEvent::ReasoningSignatureDelta(
+                    signature,
+                )])
             }
+            ContentBlockDeltaData::Unknown => Ok(Vec::new()),
         },
         StreamEvent::ContentBlockStop { index } => {
             if let Some(call) = state.tool_calls.remove(&index) {

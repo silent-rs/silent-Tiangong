@@ -253,6 +253,7 @@ pub fn compress_loop_messages(
         role: MessageRole::Tool,
         content: format!("[前 {compress_rounds} 轮执行摘要]\n{summary}"),
         reasoning_content: String::new(),
+        reasoning_signature: None,
         worker_id: None,
         media: Vec::new(),
         tool_calls: Vec::new(),

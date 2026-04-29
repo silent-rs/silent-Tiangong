@@ -112,7 +112,9 @@ fn test_request_mapping_with_system_and_tools() {
     assert_eq!(mapped.tools.as_ref().map(Vec::len), Some(1));
     assert!(matches!(
         mapped.thinking,
-        Some(tiangong_anthropic::types::ThinkingConfig::Disabled)
+        Some(tiangong_anthropic::types::ThinkingConfig::Enabled {
+            budget_tokens: 4096
+        })
     ));
     assert!(matches!(
         mapped.tool_choice,
@@ -154,6 +156,10 @@ fn test_tool_and_thinking_mapping_back_to_message_content() {
     );
     assert!(matches!(
         mapped.assistant_message.content.first(),
+        Some(MessageContent::Thinking(thinking)) if thinking.signature.as_deref() == Some("sig")
+    ));
+    assert!(matches!(
+        mapped.assistant_message.content.get(1),
         Some(MessageContent::ToolCall(_))
     ));
 }

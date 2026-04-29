@@ -994,7 +994,7 @@ function AgentTurn({
         fragments.pop();
       }
       // assistant 自身携带的 reasoning（DirectAnswer 模式等无系统消息场景）
-      if (assistantReasoning && !shownReasonings.has(assistantReasoning)) {
+      if (!isStreaming && assistantReasoning && !shownReasonings.has(assistantReasoning)) {
         shownReasonings.add(assistantReasoning);
         fragments.push({ type: "thinking", content: assistantReasoning, time: msg.created_at });
       }
