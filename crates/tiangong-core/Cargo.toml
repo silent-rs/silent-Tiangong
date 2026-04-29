@@ -21,6 +21,8 @@ rmcp = { version = "0.17.0", default-features = false, features = ["client", "tr
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 futures-util = "0.3"
 http = "1"
+scraper = "0.19"
+sha2 = "0.10"
 toml = "0.8"
 tracing = "0.1"
 zip = { version = "2", default-features = false, features = ["deflate"] }

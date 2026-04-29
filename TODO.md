@@ -1,22 +1,33 @@
 # TODO - 天工当前开发任务
 
-> 最后更新：2026-04-28
-> 当前主线：Core 多轮对话上下文整理
+> 最后更新：2026-04-29
+> 当前主线：web_fetch 基础能力
 > 参考：`PLAN.md`、`docs/requirements.md`
 
 ---
 
 ## 当前结论
 
-接下来先收口 Core 层多轮对话上下文整理。目标是让主对话链路符合无状态 Chat API 的多轮对话模式：
+接下来基于 RFC-0009 实现 `web_fetch` 基础能力。该能力作为 Core 内置工具，为未安装 `curl` / `wget` 的用户提供受控网页读取与在线文件下载替代路径，并保证 CLI、GUI、Server 共享同一执行链路。
 
-- 每轮请求由 Core 负责拼接历史 `user -> assistant -> user` 消息链。
-- 运行时日志、recall_memory 结果和 MCP 摘要不再污染 system prompt。
-- recall_memory 结果、MCP 摘要、执行反馈和工具 trace 统一作为 `tool` 类型消息进入会话层。
-- 对话历史达到模型上下文限制 95% 时触发滚动摘要压缩，压缩摘要注入 system prompt。
-- LLM 请求层的显式 cache_control / system blocks 暂不处理，后续再按 RFC-0008 单独推进。
+能力边界：
 
-旧 RFC-0007 Skill 主线已迁出到 PR，工作空间边界主线已完成，本文档切换到 Core 多轮对话上下文整理。
+- `text` 模式读取公开 HTTP/HTTPS 文本页面，支持 HTML 基础正文提取。
+- `download` 模式下载在线文件到允许写入目录，复用现有工作空间写入边界。
+- 默认拒绝非 HTTP 协议、本机、私网、链路本地、保留地址和云元数据地址。
+- 工具结果进入会话层 tool 消息，不污染稳定 system prompt。
+
+旧 Core 多轮对话上下文整理主线已完成，本文档切换到 `web_fetch` 基础能力。
+
+## P0 - web_fetch 基础能力
+
+- [x] 创建 RFC：`docs/rfc/0009-web-fetch-basic-capability.md`。
+- [x] 在 `docs/requirements.md` 中补充 `web_fetch` 基础能力要求。
+- [x] 在 Core 内置工具集中注册 `web_fetch` 工具 schema。
+- [x] 实现 `text` 模式 URL 校验、权限策略、超时、重定向、响应体大小限制和 HTML / 文本提取。
+- [x] 实现 `download` 模式路径校验、覆盖控制、流式写入、大小限制和摘要计算。
+- [x] 接入工具调用参数解析与权限分类。
+- [x] 使用 `cargo check --workspace` 验证。
 
 ## P0 - Core 多轮对话上下文整理
 

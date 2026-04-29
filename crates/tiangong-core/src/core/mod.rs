@@ -2909,6 +2909,13 @@ fn infer_audit_target(call: &crate::model::ModelFunctionCall) -> (Option<String>
         return infer_tool_name_scope(call.name.as_str(), None);
     };
 
+    if call.name == "web_fetch"
+        && let Some(value) = obj.get("url").and_then(Value::as_str).map(str::trim)
+        && !value.is_empty()
+    {
+        return (Some("network".to_string()), Some(value.to_string()));
+    }
+
     let path_keys = [
         "path",
         "file_path",
@@ -2975,6 +2982,7 @@ fn infer_tool_name_scope(
 ) -> (Option<String>, Option<String>) {
     let scope = match tool_name {
         "read_file" | "write_file" | "replace_in_file" | "list_dir" | "tree_dir" => "path",
+        "web_fetch" => "network",
         "generate_image" | "speech_to_text" | "text_to_speech" => "external",
         "run_command" | "run_shell" => "command",
         _ => return (None, summary),

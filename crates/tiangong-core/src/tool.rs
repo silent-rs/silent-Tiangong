@@ -15,6 +15,7 @@ mod replace_in_file;
 mod run_command;
 mod search_code;
 mod tree_dir;
+mod web_fetch;
 mod write_file;
 
 #[cfg(feature = "diffy")]
@@ -27,6 +28,7 @@ pub enum ToolName {
     TreeDir,
     RunCommand,
     SearchCode,
+    WebFetch,
     WriteFile,
     ReplaceInFile,
     #[cfg(feature = "diffy")]
@@ -41,6 +43,7 @@ impl ToolName {
             Self::TreeDir => "tree_dir",
             Self::RunCommand => "run_command",
             Self::SearchCode => "search_code",
+            Self::WebFetch => "web_fetch",
             Self::WriteFile => "write_file",
             Self::ReplaceInFile => "replace_in_file",
             #[cfg(feature = "diffy")]
@@ -96,6 +99,7 @@ impl ToolExecutor for LocalToolExecutor {
             ToolName::TreeDir => self.tree_dir(call),
             ToolName::RunCommand => self.run_command(call),
             ToolName::SearchCode => self.search_code(call),
+            ToolName::WebFetch => self.web_fetch(call),
             ToolName::WriteFile => self.write_file(call),
             ToolName::ReplaceInFile => self.replace_in_file(call),
             #[cfg(feature = "diffy")]

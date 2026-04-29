@@ -61,6 +61,51 @@ pub(crate) fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
             }),
         },
         FunctionToolSpec {
+            name: "web_fetch".to_string(),
+            description: "受控获取 HTTP/HTTPS URL。text 模式读取网页/文本正文；download 模式下载在线文件到允许写入目录，可替代 curl/wget。".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "要获取的 HTTP/HTTPS URL" },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["text", "download"],
+                        "description": "执行模式，默认 text"
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "text 模式最多返回字符数，默认 12000，最大 50000",
+                        "minimum": 1,
+                        "maximum": 50000
+                    },
+                    "output_path": {
+                        "type": "string",
+                        "description": "download 模式目标文件路径，必须位于允许写入目录"
+                    },
+                    "overwrite": {
+                        "type": "boolean",
+                        "description": "download 模式是否覆盖已有文件，默认 false"
+                    },
+                    "timeout_ms": {
+                        "type": "integer",
+                        "description": "请求超时时间，默认 15000，最大 60000",
+                        "minimum": 1000,
+                        "maximum": 60000
+                    },
+                    "follow_redirects": {
+                        "type": "boolean",
+                        "description": "是否跟随重定向，默认 true"
+                    },
+                    "extract_mode": {
+                        "type": "string",
+                        "enum": ["auto", "text", "raw"],
+                        "description": "text 模式提取方式，默认 auto"
+                    }
+                },
+                "required": ["url"]
+            }),
+        },
+        FunctionToolSpec {
             name: "write_file".to_string(),
             description: "写入文件内容（支持覆盖或追加）".to_string(),
             parameters: serde_json::json!({
@@ -294,6 +339,66 @@ pub(crate) fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<
             args.push(path);
             Ok(ToolCall {
                 name: ToolName::SearchCode,
+                args,
+            })
+        }
+        "web_fetch" => {
+            let url = call
+                .arguments
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let mode = call
+                .arguments
+                .get("mode")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("text")
+                .to_string();
+            let max_chars = call
+                .arguments
+                .get("max_chars")
+                .and_then(number_or_string_to_text)
+                .unwrap_or_else(|| "12000".to_string());
+            let output_path = call
+                .arguments
+                .get("output_path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let overwrite = call
+                .arguments
+                .get("overwrite")
+                .and_then(bool_or_string_to_text)
+                .unwrap_or_else(|| "false".to_string());
+            let timeout_ms = call
+                .arguments
+                .get("timeout_ms")
+                .and_then(number_or_string_to_text)
+                .unwrap_or_else(|| "15000".to_string());
+            let follow_redirects = call
+                .arguments
+                .get("follow_redirects")
+                .and_then(bool_or_string_to_text)
+                .unwrap_or_else(|| "true".to_string());
+            let extract_mode = call
+                .arguments
+                .get("extract_mode")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("auto")
+                .to_string();
+            args.extend([
+                url,
+                mode,
+                max_chars,
+                output_path,
+                overwrite,
+                timeout_ms,
+                follow_redirects,
+                extract_mode,
+            ]);
+            Ok(ToolCall {
+                name: ToolName::WebFetch,
                 args,
             })
         }

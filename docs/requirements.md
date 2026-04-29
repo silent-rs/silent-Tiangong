@@ -104,6 +104,17 @@
 - `~/.tiangong/skills` 作为特殊可写范围保留，用于 Skill 出现问题时及时调整和修复。
 - 除上述允许范围外，不允许工具在其他目录创建、修改或删除文件。
 
+#### web_fetch 基础能力
+- 必须提供 Core 内置 `web_fetch` 工具，作为未安装 `curl` / `wget` 时的受控网页获取与在线文件下载替代能力。
+- `web_fetch` 必须支持 `text` 与 `download` 两种模式；`text` 模式返回网页或文本正文，`download` 模式将在线文件保存到允许写入目录。
+- `web_fetch` 仅允许 HTTP / HTTPS URL，必须拒绝非 HTTP 协议。
+- 默认策略下必须拒绝本机、私网、链路本地、保留地址和云元数据地址，重定向后的目标也必须重新检查。
+- `text` 模式必须支持 HTML、纯文本、JSON、Markdown 和 XML 等常见文本内容，并对 HTML 做基础正文提取。
+- `download` 模式必须复用现有写入边界，只允许写入当前工作空间、当前对话显式指定目录和 `~/.tiangong/skills` 等允许范围。
+- `download` 模式必须限制最大下载大小，默认不覆盖已有文件，写入完成后返回文件路径、字节数、内容类型和摘要信息。
+- `web_fetch` 结果必须作为结构化工具结果进入会话层，不得追加到稳定 system prompt。
+- CLI、GUI、Server 必须通过同一 Core 工具链路获得一致行为，不允许前端重复实现抓取或下载逻辑。
+
 #### Skill 文件系统注册表
 - Skill 注册事实源必须从 `skills.json.installed[]` / `skills-lock.json` 迁移到 `~/.tiangong/skills/<id>/` 目录存在性。
 - Skill 的 `id` 必须作为稳定机器标识用于目录、引用和审计；`name` 仅作为展示名称，不参与寻址。
