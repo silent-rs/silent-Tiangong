@@ -15,7 +15,22 @@ interface MentionCandidate {
 }
 
 export function MessageInput() {
-  const { inputContent, setInputContent, sendMessage, cancelTurn, runStatus, runSummary, isDraft, activeSessionId, sessionRunStatuses, sessionCwd, setSessionCwd, addVoiceMessage, lastDurationMs, lastUsage } = useStore();
+  const inputContent = useStore((state) => state.inputContent);
+  const setInputContent = useStore((state) => state.setInputContent);
+  const sendMessage = useStore((state) => state.sendMessage);
+  const cancelTurn = useStore((state) => state.cancelTurn);
+  const runStatus = useStore((state) => state.runStatus);
+  const runSummary = useStore((state) => state.runSummary);
+  const isDraft = useStore((state) => state.isDraft);
+  const activeSessionId = useStore((state) => state.activeSessionId);
+  const currentSessionRunStatus = useStore((state) => (
+    state.activeSessionId ? state.sessionRunStatuses[state.activeSessionId] : undefined
+  ));
+  const sessionCwd = useStore((state) => state.sessionCwd);
+  const setSessionCwd = useStore((state) => state.setSessionCwd);
+  const addVoiceMessage = useStore((state) => state.addVoiceMessage);
+  const lastDurationMs = useStore((state) => state.lastDurationMs);
+  const lastUsage = useStore((state) => state.lastUsage);
   const [isComposing, setIsComposing] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -32,7 +47,7 @@ export function MessageInput() {
 
   const currentRunStatus = isDraft
     ? 'idle'
-    : (activeSessionId && sessionRunStatuses[activeSessionId]) || runStatus;
+    : currentSessionRunStatus || runStatus;
   const sessionTotalTokens = lastUsage?.total_tokens ?? 0;
 
   useEffect(() => {
@@ -64,7 +79,7 @@ export function MessageInput() {
   // 当前会话是否空闲
   const currentSessionStatus = isDraft
     ? 'idle'
-    : (activeSessionId && sessionRunStatuses[activeSessionId]) || runStatus;
+    : currentSessionRunStatus || runStatus;
   const isIdle = currentSessionStatus === 'idle';
   const canSend = inputContent.trim().length > 0;  // 执行中也允许输入
 
