@@ -31,6 +31,9 @@ pub enum ContentBlockParam {
     Text {
         text: String,
     },
+    Image {
+        source: ImageSourceParam,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -51,6 +54,14 @@ pub enum ContentBlockParam {
     RedactedThinking {
         data: String,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImageSourceParam {
+    #[serde(rename = "type")]
+    pub source_type: String,
+    pub media_type: String,
+    pub data: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

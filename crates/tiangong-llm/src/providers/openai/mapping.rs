@@ -67,15 +67,8 @@ fn build_openai_messages(req: &ProviderRequest) -> Result<Vec<ChatCompletionRequ
         match message.role {
             MessageRole::System => {}
             MessageRole::User => {
-                let text = extract_message_text(message);
-                if !text.is_empty() {
-                    messages.push(
-                        ChatCompletionRequestUserMessageArgs::default()
-                            .content(text)
-                            .build()
-                            .context("构建 user 消息失败")?
-                            .into(),
-                    );
+                if let Some(message) = build_openai_user_message(message)? {
+                    messages.push(message);
                 }
             }
             MessageRole::Tool => {
@@ -130,6 +123,50 @@ fn build_openai_messages(req: &ProviderRequest) -> Result<Vec<ChatCompletionRequ
     }
 
     Ok(messages)
+}
+
+fn build_openai_user_message(
+    message: &ChatMessage,
+) -> Result<Option<ChatCompletionRequestMessage>> {
+    let images = message
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            MessageContent::Image(image) => Some(image),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let text = extract_message_text(message);
+    if images.is_empty() {
+        if text.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(
+            ChatCompletionRequestUserMessageArgs::default()
+                .content(text)
+                .build()
+                .context("构建 user 消息失败")?
+                .into(),
+        ));
+    }
+
+    let mut content = Vec::new();
+    if !text.is_empty() {
+        content.push(json!({ "type": "text", "text": text }));
+    }
+    for image in images {
+        content.push(json!({
+            "type": "image_url",
+            "image_url": { "url": image.data }
+        }));
+    }
+    Ok(Some(
+        serde_json::from_value(json!({
+            "role": "user",
+            "content": content
+        }))
+        .context("构建 OpenAI 多模态 user 消息失败")?,
+    ))
 }
 
 fn extract_message_text(message: &ChatMessage) -> String {

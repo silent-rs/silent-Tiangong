@@ -112,6 +112,8 @@ impl TiangongConfig {
             mcp_capabilities: self.mcp_capabilities.clone(),
             skills: self.skills.clone(),
             trust_mode: self.trust_mode,
+            default_trust_mode: self.trust_mode,
+            custom_system_prompt: String::new(),
             context_limit: self.context_limit,
         }
     }

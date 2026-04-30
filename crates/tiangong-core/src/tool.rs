@@ -8,6 +8,7 @@ use crate::agent_config::AgentConfig;
 
 pub mod background_task;
 mod common;
+mod current_time;
 pub use common::set_session_cwd;
 mod list_dir;
 mod read_file;
@@ -28,6 +29,7 @@ pub enum ToolName {
     TreeDir,
     RunCommand,
     SearchCode,
+    CurrentTime,
     WebFetch,
     WriteFile,
     ReplaceInFile,
@@ -43,6 +45,7 @@ impl ToolName {
             Self::TreeDir => "tree_dir",
             Self::RunCommand => "run_command",
             Self::SearchCode => "search_code",
+            Self::CurrentTime => "current_time",
             Self::WebFetch => "web_fetch",
             Self::WriteFile => "write_file",
             Self::ReplaceInFile => "replace_in_file",
@@ -99,6 +102,7 @@ impl ToolExecutor for LocalToolExecutor {
             ToolName::TreeDir => self.tree_dir(call),
             ToolName::RunCommand => self.run_command(call),
             ToolName::SearchCode => self.search_code(call),
+            ToolName::CurrentTime => self.current_time(call),
             ToolName::WebFetch => self.web_fetch(call),
             ToolName::WriteFile => self.write_file(call),
             ToolName::ReplaceInFile => self.replace_in_file(call),

@@ -2,7 +2,7 @@ import { useState, KeyboardEvent, useEffect, useRef, useCallback } from 'react';
 import { useStore } from '@/store/useStore';
 import { Textarea } from './ui/textarea';
 import { Button } from './ui/button';
-import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle } from 'lucide-react';
+import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { api } from '@/api/tauri';
 import { useAudioRecording } from '@/hooks/useAudioRecording';
@@ -12,6 +12,15 @@ interface MentionCandidate {
   label: string;
   kind: string;
   hint: string;
+}
+
+function imageMimeType(path: string): string | undefined {
+  const lower = path.toLowerCase();
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  if (lower.endsWith('.png')) return 'image/png';
+  return undefined;
 }
 
 export function MessageInput() {
@@ -29,6 +38,8 @@ export function MessageInput() {
 
   // 信任模式
   const [trustMode, setTrustMode] = useState('full_trust');
+  const [hasMultimodal, setHasMultimodal] = useState(false);
+  const [attachments, setAttachments] = useState<Array<{ kind: 'image' | 'file'; url: string; title: string; mime_type?: string }>>([]);
 
   const currentRunStatus = isDraft
     ? 'idle'
@@ -37,6 +48,7 @@ export function MessageInput() {
 
   useEffect(() => {
     api.getTrustMode().then(setTrustMode).catch(() => {});
+    api.hasModelCapability('multimodal').then(setHasMultimodal).catch(() => setHasMultimodal(false));
   }, []);
 
   const toggleTrustMode = async () => {
@@ -66,7 +78,7 @@ export function MessageInput() {
     ? 'idle'
     : (activeSessionId && sessionRunStatuses[activeSessionId]) || runStatus;
   const isIdle = currentSessionStatus === 'idle';
-  const canSend = inputContent.trim().length > 0;  // 执行中也允许输入
+  const canSend = inputContent.trim().length > 0 || attachments.length > 0;  // 执行中也允许输入
 
   // 自动调整文本框高度
   useEffect(() => {
@@ -155,15 +167,25 @@ export function MessageInput() {
   const handleSend = async () => {
     if (!canSend) return;
     setMentionOpen(false);
+    const media = attachments.map(item => ({
+      kind: item.kind,
+      url: item.url,
+      title: item.title,
+      mime_type: item.mime_type,
+      capability: 'multimodal',
+    }));
+    const content = inputContent.trim() || (attachments.length > 0 ? '请处理这些附件。' : inputContent);
     if (isIdle) {
-      sendMessage(inputContent);
+      await sendMessage(content, media);
+      setAttachments([]);
     } else {
       // 执行中：追加消息到正在执行的 turn
       if (!activeSessionId) return;
       try {
-        const appended = await api.appendMessage(activeSessionId, inputContent);
+        const appended = await api.appendMessage(activeSessionId, content);
         if (appended) {
           setInputContent('');
+          setAttachments([]);
         } else {
           console.warn('当前会话没有正在执行的任务，追加消息未发送');
         }
@@ -174,6 +196,45 @@ export function MessageInput() {
   };
 
   const handleCancel = () => { cancelTurn(); };
+
+  const handleAttachFiles = async () => {
+    if (!hasMultimodal) return;
+    try {
+      const selected = await open({
+        multiple: true,
+        directory: false,
+        title: '选择图片或文件',
+        filters: [
+          { name: '图片和文件', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'pdf', 'txt', 'md', 'json', 'csv'] },
+        ],
+      });
+      const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
+      if (paths.length === 0) return;
+      setAttachments(prev => {
+        const next = [...prev];
+        for (const path of paths) {
+          const lower = path.toLowerCase();
+          const isImage = /\.(png|jpe?g|webp|gif)$/.test(lower);
+          const title = path.split('/').pop() || path;
+          if (!next.some(item => item.url === path)) {
+            next.push({
+              kind: isImage ? 'image' : 'file',
+              url: path,
+              title,
+              mime_type: imageMimeType(path),
+            });
+          }
+        }
+        return next;
+      });
+    } catch (e) {
+      console.error('选择附件失败:', e);
+    }
+  };
+
+  const removeAttachment = (url: string) => {
+    setAttachments(prev => prev.filter(item => item.url !== url));
+  };
 
   const handleChangeCwd = async () => {
     try {
@@ -412,7 +473,7 @@ export function MessageInput() {
                 </div>
               )}
 
-              <Textarea
+	              <Textarea
                 ref={textareaRef}
                 value={inputContent}
                 onChange={(e) => handleInputChange(e.target.value)}
@@ -425,11 +486,44 @@ export function MessageInput() {
                     ? '输入消息... (⌘+Enter 发送，@ 引用 Skill/MCP)'
                     : '追加指示... (⌘+Enter 发送)'
                 }
-                className="min-h-[60px] max-h-[200px] resize-none pr-24 bg-muted/50 focus-visible:ring-ring"
-              />
-              {/* 按钮区域 */}
-              <div className="absolute right-2 bottom-2 flex items-center gap-1">
-                {hasStt && isIdle && (
+	                className="min-h-[60px] max-h-[200px] resize-none pr-32 bg-muted/50 focus-visible:ring-ring"
+	              />
+              {attachments.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {attachments.map(item => (
+                    <span
+                      key={item.url}
+                      className="inline-flex h-7 max-w-[220px] items-center gap-1 rounded-md border bg-muted/40 px-2 text-xs"
+                      title={item.url}
+                    >
+                      <Paperclip className="h-3 w-3 shrink-0" />
+                      <span className="truncate">{item.title}</span>
+                      <button
+                        type="button"
+                        onClick={() => removeAttachment(item.url)}
+                        className="ml-1 text-muted-foreground hover:text-foreground"
+                        title="移除附件"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+	              {/* 按钮区域 */}
+	              <div className="absolute right-2 bottom-2 flex items-center gap-1">
+                {hasMultimodal && isIdle && (
+                  <Button
+                    onClick={handleAttachFiles}
+                    size="icon"
+                    variant="ghost"
+                    className="h-8 w-8 rounded-md text-muted-foreground hover:text-foreground"
+                    title="添加图片或文件"
+                  >
+                    <Paperclip className="w-4 h-4" />
+                  </Button>
+                )}
+	                {hasStt && isIdle && (
                   <Button
                     onClick={() => setVoiceMode(true)}
                     size="icon"

@@ -10,6 +10,7 @@ tiangong-llm = { path = "../tiangong-llm" }
 tiangong-memory = { path = "../tiangong-memory" }
 anyhow = "1"
 arc-swap = "1"
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 scru128 = "3"
 serde = { version = "1", features = ["derive"] }

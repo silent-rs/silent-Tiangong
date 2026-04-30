@@ -82,6 +82,9 @@ pub struct LlmConfig {
     /// 视频生成端点
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_generation: Option<ModelEndpoint>,
+    /// 多模态理解端点
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multimodal: Option<ModelEndpoint>,
     /// 向量嵌入端点
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding: Option<ModelEndpoint>,
@@ -112,6 +115,7 @@ impl LlmConfig {
             tts: resolve(ModelCapability::Tts),
             stt: resolve(ModelCapability::Stt),
             video_generation: resolve(ModelCapability::VideoGeneration),
+            multimodal: resolve(ModelCapability::Multimodal),
             embedding: resolve(ModelCapability::Embedding),
             rerank: resolve(ModelCapability::Rerank),
         }
@@ -200,6 +204,10 @@ pub struct CoreConfig {
     pub skills: SkillsConfig,
     /// 权限信任模式
     pub trust_mode: TrustMode,
+    /// 新对话默认权限信任模式
+    pub default_trust_mode: TrustMode,
+    /// 用户自定义 system prompt
+    pub custom_system_prompt: String,
     /// 上下文窗口大小（token 数）
     pub context_limit: usize,
 }
@@ -212,6 +220,8 @@ impl Default for CoreConfig {
             mcp_capabilities: Vec::new(),
             skills: SkillsConfig::default(),
             trust_mode: TrustMode::default(),
+            default_trust_mode: TrustMode::default(),
+            custom_system_prompt: String::new(),
             context_limit: DEFAULT_CONTEXT_LIMIT,
         }
     }
@@ -279,6 +289,16 @@ impl CoreConfigBuilder {
     /// 设置信任模式
     pub fn with_trust_mode(mut self, mode: TrustMode) -> Self {
         self.config.trust_mode = mode;
+        self
+    }
+
+    pub fn with_default_trust_mode(mut self, mode: TrustMode) -> Self {
+        self.config.default_trust_mode = mode;
+        self
+    }
+
+    pub fn with_custom_system_prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.config.custom_system_prompt = prompt.into();
         self
     }
 

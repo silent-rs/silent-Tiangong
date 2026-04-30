@@ -13,15 +13,24 @@ impl TiangongState {
         &mut self,
         content: impl Into<String>,
     ) -> Result<(String, String, Session)> {
+        self.prepare_active_user_message_ingress_with_media(content, Vec::new())
+    }
+
+    pub fn prepare_active_user_message_ingress_with_media(
+        &mut self,
+        content: impl Into<String>,
+        media: Vec<tiangong_types::MediaAsset>,
+    ) -> Result<(String, String, Session)> {
         let content = content.into();
         let idx = self.ensure_active_session_index();
         let message_id = scru128::new().to_string();
         let session_id = self.store.session.sessions[idx].id.clone();
-        self.store.session.sessions[idx].append_message_with_id(
+        self.store.session.sessions[idx].append_message_with_id_and_media(
             message_id.clone(),
             MessageRole::User,
             content,
             String::new(),
+            media,
         );
         self.persist_session_and_app(&session_id)?;
         let session = self.store.session.sessions[idx].clone();

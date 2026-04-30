@@ -170,9 +170,15 @@ pub struct AgentConfig {
     pub skills: SkillsConfig,
     #[serde(default)]
     pub mcp: McpConfig,
-    /// 权限信任模式（默认完全信任）
+    /// 当前权限信任模式（可按当前会话调整）
     #[serde(default)]
     pub trust_mode: crate::permission::TrustMode,
+    /// 新对话默认权限信任模式
+    #[serde(default)]
+    pub default_trust_mode: crate::permission::TrustMode,
+    /// 用户自定义特色 Prompt，会注入到 system prompt。
+    #[serde(default)]
+    pub custom_system_prompt: String,
 }
 
 impl Default for SkillsConfig {

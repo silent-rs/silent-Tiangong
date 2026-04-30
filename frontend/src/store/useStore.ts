@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { api, Session, Message, RunSnapshot, McpServer, Skill, TaskPlan } from '../api/tauri';
+import { api, Session, Message, RunSnapshot, McpServer, Skill, TaskPlan, MediaAsset } from '../api/tauri';
 import { notifyBackgroundSessionCompleted } from '../utils/desktopNotification';
 
 interface AppState {
@@ -47,7 +47,7 @@ interface AppState {
   switchSession: (id: string) => Promise<void>;
   deleteSession: () => Promise<void>;
 
-  sendMessage: (content: string) => Promise<void>;
+  sendMessage: (content: string, media?: MediaAsset[]) => Promise<void>;
   cancelTurn: () => Promise<boolean>;
 
   setInputContent: (content: string) => void;
@@ -202,7 +202,7 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   // 发送消息
-  sendMessage: async (content: string) => {
+  sendMessage: async (content: string, media: MediaAsset[] = []) => {
     const { isDraft, activeSessionId, sessionRunStatuses } = get();
 
     // 草稿模式时先创建后端会话
@@ -235,7 +235,11 @@ export const useStore = create<AppState>((set, get) => ({
     set({ inputContent: '', isSending: true });
 
     try {
-      await api.sendMessage(content);
+      if (media.length > 0) {
+        await api.sendMessageWithMedia(content, media);
+      } else {
+        await api.sendMessage(content);
+      }
       // 消息已提交到后端，释放发送锁，允许用户切换对话等操作
       const runningSessionId = get().activeSessionId;
       set(state => ({

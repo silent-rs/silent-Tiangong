@@ -131,4 +131,15 @@ impl TiangongState {
         // 持久化
         self.persist_to_disk()
     }
+
+    pub fn set_default_trust_mode(&mut self, mode: crate::permission::TrustMode) -> Result<()> {
+        self.store.agent.agent_config.default_trust_mode = mode;
+        self.persist_to_disk()
+    }
+
+    pub fn set_custom_system_prompt(&mut self, prompt: String) -> Result<()> {
+        self.store.agent.agent_config.custom_system_prompt = prompt;
+        self.rebuild_runtime_from_current_config();
+        self.persist_to_disk()
+    }
 }

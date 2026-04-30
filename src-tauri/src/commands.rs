@@ -94,8 +94,7 @@ fn send_macos_interactive_notification(
                     .title(&title)
                     .message(&body)
                     .main_button(mac_notification_sys::MainButton::DropdownActions(
-                        "处理",
-                        &actions,
+                        "处理", &actions,
                     ))
                     .close_button("稍后")
                     .wait_for_click(true);
@@ -230,9 +229,7 @@ fn append_assistant_delta(
     message_id: &str,
     content: &str,
 ) {
-    if content.trim().is_empty()
-        && !session.messages.iter().any(|msg| msg.id == message_id)
-    {
+    if content.trim().is_empty() && !session.messages.iter().any(|msg| msg.id == message_id) {
         return;
     }
     ensure_assistant_message(session, assistant_msg_id, message_id);
@@ -355,6 +352,12 @@ fn parse_image_markdown_assets(output: &str) -> Vec<tiangong_types::MediaAsset> 
             })
         })
         .collect()
+}
+
+fn output_may_contain_generated_images(tool_name: &str, output: &str) -> bool {
+    tool_name == "generate_image"
+        || looks_like_pure_image_markdown(output)
+        || (tool_name.to_ascii_lowercase().contains("image") && output.contains("]("))
 }
 
 fn looks_like_pure_image_markdown(output: &str) -> bool {
@@ -609,12 +612,33 @@ pub fn send_message(
     _window: Window,
     state: State<TiangongApp>,
 ) -> Result<(), String> {
+    send_message_inner(content, Vec::new(), app, state)
+}
+
+#[tauri::command]
+pub fn send_message_with_media(
+    content: String,
+    media: Vec<tiangong_types::MediaAsset>,
+    app: AppHandle,
+    _window: Window,
+    state: State<TiangongApp>,
+) -> Result<(), String> {
+    send_message_inner(content, media, app, state)
+}
+
+fn send_message_inner(
+    content: String,
+    media: Vec<tiangong_types::MediaAsset>,
+    app: AppHandle,
+    state: State<TiangongApp>,
+) -> Result<(), String> {
     use std::sync::mpsc;
     use tiangong_types::{SessionStreamEvent, StreamEvent};
 
     // 准备 session
-    let (session_id, user_message_id, session_snapshot) = state
-        .with_state(|core_state| core_state.prepare_active_user_message_ingress(content.clone()))?;
+    let (session_id, user_message_id, session_snapshot) = state.with_state(|core_state| {
+        core_state.prepare_active_user_message_ingress_with_media(content.clone(), media)
+    })?;
 
     // 获取或创建 TiangongCore
     let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
@@ -728,8 +752,7 @@ pub fn send_message(
                             let persisted_output = full_output.as_deref().unwrap_or(output);
                             let status = if *ok { "ok=true" } else { "ok=false" };
                             let media_assets = if *ok
-                                && name == "generate_image"
-                                && looks_like_pure_image_markdown(persisted_output)
+                                && output_may_contain_generated_images(name, persisted_output)
                             {
                                 parse_image_markdown_assets(persisted_output)
                             } else if *ok && is_video_tool(name) {
@@ -1158,6 +1181,41 @@ pub fn set_trust_mode(mode: String, state: State<TiangongApp>) -> Result<(), Str
         state.with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))?;
     state.set_core_trust_mode(&session_id, trust_mode);
 
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_default_trust_mode(state: State<TiangongApp>) -> Result<String, String> {
+    state.with_state_read(|core_state| {
+        let mode = core_state.agent_config().default_trust_mode;
+        Ok(serde_json::to_value(mode)
+            .unwrap_or_default()
+            .as_str()
+            .unwrap_or("full_trust")
+            .to_string())
+    })
+}
+
+#[tauri::command]
+pub fn set_default_trust_mode(mode: String, state: State<TiangongApp>) -> Result<(), String> {
+    let trust_mode: tiangong_core::permission::TrustMode =
+        serde_json::from_value(serde_json::Value::String(mode))
+            .map_err(|e| format!("无效的默认信任模式: {e}"))?;
+
+    state.with_state(|core_state| core_state.set_default_trust_mode(trust_mode))?;
+    state.sync_core_config_from_state()?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_custom_system_prompt(state: State<TiangongApp>) -> Result<String, String> {
+    state.with_state_read(|core_state| Ok(core_state.agent_config().custom_system_prompt.clone()))
+}
+
+#[tauri::command]
+pub fn set_custom_system_prompt(prompt: String, state: State<TiangongApp>) -> Result<(), String> {
+    state.with_state(|core_state| core_state.set_custom_system_prompt(prompt))?;
+    state.sync_core_config_from_state()?;
     Ok(())
 }
 

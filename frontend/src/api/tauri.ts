@@ -233,6 +233,9 @@ export const api = {
   sendMessage: (content: string): Promise<void> =>
     invoke('send_message', { content }),
 
+  sendMessageWithMedia: (content: string, media: MediaAsset[]): Promise<void> =>
+    invoke('send_message_with_media', { content, media }),
+
   cancelTurn: (): Promise<boolean> =>
     invoke('cancel_turn'),
 
@@ -247,6 +250,18 @@ export const api = {
 
   setTrustMode: (mode: string): Promise<void> =>
     invoke('set_trust_mode', { mode }),
+
+  getDefaultTrustMode: (): Promise<string> =>
+    invoke('get_default_trust_mode'),
+
+  setDefaultTrustMode: (mode: string): Promise<void> =>
+    invoke('set_default_trust_mode', { mode }),
+
+  getCustomSystemPrompt: (): Promise<string> =>
+    invoke('get_custom_system_prompt'),
+
+  setCustomSystemPrompt: (prompt: string): Promise<void> =>
+    invoke('set_custom_system_prompt', { prompt }),
 
   getRunSnapshot: (): Promise<RunSnapshot> =>
     invoke('get_run_snapshot'),
