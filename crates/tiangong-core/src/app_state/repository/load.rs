@@ -11,7 +11,9 @@ impl AppRepository {
             let agent_config = self.load_agent_config_with_fallback(None)?;
             let mut sessions = Vec::new();
             for session_id in &session_ids {
-                if let Some(session) = self.load_session_from_disk(session_id)? {
+                if let Some(session) = self.load_session_from_disk(session_id)?
+                    && session.parent_session_id.is_none()
+                {
                     sessions.push(session);
                 }
             }
@@ -38,7 +40,9 @@ impl AppRepository {
 
         let mut sessions = Vec::new();
         for session_id in &session_ids {
-            if let Some(session) = self.load_session_from_disk(session_id)? {
+            if let Some(session) = self.load_session_from_disk(session_id)?
+                && session.parent_session_id.is_none()
+            {
                 sessions.push(session);
             }
         }

@@ -87,6 +87,9 @@ impl Worker {
                             worker_label: fwd_worker_label.clone(),
                             content,
                         },
+                        StreamEvent::Done { .. } | StreamEvent::Error { .. } => {
+                            continue;
+                        }
                         other => other, // 其他事件透传（ToolStart/ToolResult 等）
                     }
                 } else {

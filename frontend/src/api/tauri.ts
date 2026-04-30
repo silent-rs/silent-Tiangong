@@ -221,6 +221,12 @@ export const api = {
   updateSessionTitle: (title: string): Promise<void> =>
     invoke('update_session_title', { title }),
 
+  requestDesktopNotificationPermission: (): Promise<boolean> =>
+    invoke('request_desktop_notification_permission'),
+
+  sendDesktopNotification: (title: string, body: string, sessionId?: string): Promise<boolean> =>
+    invoke('send_desktop_notification', { title, body, sessionId }),
+
   // ----------------------------------------------------------------
   // 消息和执行
   // ----------------------------------------------------------------

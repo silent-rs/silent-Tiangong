@@ -5,7 +5,7 @@ mod session;
 
 pub use agent::AgentState;
 pub use provider::ProviderState;
-pub use runtime::RuntimeState;
+pub use runtime::{PendingTurnStub, RuntimeState};
 pub use session::SessionState;
 
 #[derive(Debug)]

@@ -54,7 +54,9 @@ use self::support::{
 
 // Public re-exports for Tauri API
 pub use self::repository::AppRepository;
-pub use self::store::{AgentState, AppStore, ProviderState, RuntimeState, SessionState};
+pub use self::store::{
+    AgentState, AppStore, PendingTurnStub, ProviderState, RuntimeState, SessionState,
+};
 pub use self::support::{AppPaths, AppServices, ManagementCommand};
 
 const DEFAULT_SESSION_TITLE: &str = "默认会话";

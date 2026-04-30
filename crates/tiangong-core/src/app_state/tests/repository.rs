@@ -154,6 +154,39 @@ fn load_from_disk_prefers_most_recent_session_when_active_session_is_invalid() -
 }
 
 #[test]
+fn load_from_disk_filters_child_sessions_from_session_list_state() -> Result<()> {
+    with_isolated_state(
+        "tiangong-repository-filter-child-sessions",
+        |_paths, state| {
+            state.store.session.sessions.clear();
+
+            let mut parent = Session::new("主会话");
+            parent.updated_at = "2026-04-30 09:00:00.000000".to_string();
+
+            let mut child = Session::new("Worker 子会话");
+            child.parent_session_id = Some(parent.id.clone());
+            child.updated_at = "2026-04-30 09:10:00.000000".to_string();
+
+            state.store.session.active_session_id = child.id.clone();
+            state.store.session.sessions = vec![parent.clone(), child];
+            state.persist_to_disk()?;
+
+            let loaded = state
+                .services
+                .repository
+                .load_from_disk()?
+                .expect("应能从磁盘回读状态");
+
+            assert_eq!(loaded.active_session_id, parent.id);
+            assert_eq!(loaded.sessions.len(), 1);
+            assert_eq!(loaded.sessions[0].title, "主会话");
+            assert!(loaded.sessions[0].parent_session_id.is_none());
+            Ok(())
+        },
+    )
+}
+
+#[test]
 fn sync_mcp_dependency_lock_writes_expected_ref_counts() -> Result<()> {
     with_isolated_state("tiangong-mcp-dependency-lock", |paths, state| {
         state.store.agent.agent_config.skills.installed = vec![

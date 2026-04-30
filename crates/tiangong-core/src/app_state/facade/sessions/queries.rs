@@ -40,6 +40,18 @@ impl TiangongState {
         self.store.runtime.pending_turns.keys().cloned().collect()
     }
 
+    pub fn mark_pending_turn_for(&mut self, session_id: impl Into<String>) {
+        let session_id = session_id.into();
+        self.store
+            .runtime
+            .pending_turns
+            .insert(session_id.clone(), PendingTurnStub { session_id });
+    }
+
+    pub fn clear_pending_turn_for(&mut self, session_id: &str) {
+        self.store.runtime.pending_turns.remove(session_id);
+    }
+
     pub fn update_draft(&mut self, value: String) {
         self.store.session.input_draft = value;
     }

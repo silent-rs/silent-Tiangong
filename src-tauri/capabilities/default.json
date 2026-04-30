@@ -19,6 +19,7 @@
     "core:window:allow-set-focus",
     "shell:default",
     "fs:default",
-    "dialog:default"
+    "dialog:default",
+    "notification:default"
   ]
 }
