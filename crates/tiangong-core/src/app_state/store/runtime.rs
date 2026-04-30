@@ -3,8 +3,8 @@ use super::super::*;
 #[derive(Debug)]
 pub struct RuntimeState {
     pub run: RunSnapshot,
-    /// 已废弃：pending_turns 已迁移到 TiangongCore 内部管理
-    /// 保留字段以兼容现有代码引用（均为空 HashMap）
+    /// 当前正在执行 turn 的会话索引，用于快照和 Desktop 后台完成通知。
+    /// 实际执行仍由 TiangongCore 管理，这里只保存轻量 session_id。
     pub pending_turns: HashMap<String, PendingTurnStub>,
 }
 

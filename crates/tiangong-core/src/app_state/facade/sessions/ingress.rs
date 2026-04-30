@@ -32,6 +32,7 @@ impl TiangongState {
         let usage = session.total_usage();
         self.store.runtime.run.last_usage = (usage.total_tokens > 0).then_some(usage);
         self.store.runtime.run.updated_at = now_text();
+        self.mark_pending_turn_for(session.id.clone());
         let mut runtime_session = session.clone();
         if runtime_session.cwd.trim().is_empty() {
             runtime_session.cwd = self.store.session.workspace_dir.clone();

@@ -237,7 +237,14 @@ export const useStore = create<AppState>((set, get) => ({
     try {
       await api.sendMessage(content);
       // 消息已提交到后端，释放发送锁，允许用户切换对话等操作
-      set({ runStatus: 'executing', isSending: false });
+      const runningSessionId = get().activeSessionId;
+      set(state => ({
+        runStatus: 'executing',
+        isSending: false,
+        sessionRunStatuses: runningSessionId
+          ? { ...state.sessionRunStatuses, [runningSessionId]: 'executing' }
+          : state.sessionRunStatuses,
+      }));
     } catch (error) {
       console.error('发送消息失败:', error);
       set({ inputContent: content, isSending: false });
@@ -337,13 +344,16 @@ export const useStore = create<AppState>((set, get) => ({
       }
     }
 
-    // 检测刚完成的后台会话并发送通知
+    const appIsForeground = document.visibilityState === 'visible' && document.hasFocus();
+
+    // 检测刚完成的后台会话并发送通知。
+    // 后台包含两类场景：非当前查看会话完成，或当前会话在应用失焦/隐藏时完成。
     for (const sid of Object.keys(prevStatuses)) {
-      if (!newStatuses[sid] && sid !== activeSessionId) {
+      if (!newStatuses[sid] && (sid !== activeSessionId || !appIsForeground)) {
         // 该会话刚从运行中变为完成
         const session = get().sessions.find(s => s.id === sid);
         const title = session?.title || '对话';
-        notifyBackgroundSessionCompleted(title).catch(console.warn);
+        notifyBackgroundSessionCompleted(title, sid).catch(console.warn);
       }
     }
 

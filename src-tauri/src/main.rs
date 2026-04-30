@@ -46,6 +46,8 @@ fn run_gui() {
             tiangong_app::commands::switch_session,
             tiangong_app::commands::delete_session,
             tiangong_app::commands::update_session_title,
+            tiangong_app::commands::request_desktop_notification_permission,
+            tiangong_app::commands::send_desktop_notification,
             tiangong_app::commands::send_message,
             tiangong_app::commands::cancel_turn,
             tiangong_app::commands::get_background_tasks,

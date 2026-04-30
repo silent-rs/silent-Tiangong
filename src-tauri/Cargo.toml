@@ -43,6 +43,9 @@ tauri-plugin-notification = "2"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+mac-notification-sys = "0.6"
+
 [features]
 default = []
 cli = []

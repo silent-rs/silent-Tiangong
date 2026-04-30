@@ -27,11 +27,18 @@ export function MainApp() {
       const unlistenSessions = await listen('sessions_updated', () => {
         loadSessions();
       });
+      const unlistenOpenSession = await listen<string>('desktop_notification_open_session', (event) => {
+        const sessionId = event.payload;
+        if (sessionId) {
+          useStore.getState().switchSession(sessionId).catch(console.error);
+        }
+      });
 
       const prevUnlisten = unlistenRef.current;
       unlistenRef.current = () => {
         prevUnlisten?.();
         unlistenSessions();
+        unlistenOpenSession();
       };
     };
 

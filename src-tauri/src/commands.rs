@@ -3,6 +3,209 @@ use crate::view::*;
 use std::path::PathBuf;
 use std::thread;
 use tauri::{AppHandle, Emitter, Manager, State, Window};
+use tauri_plugin_notification::{NotificationExt, PermissionState};
+
+#[tauri::command]
+pub fn request_desktop_notification_permission(app: AppHandle) -> Result<bool, String> {
+    let permission = app
+        .notification()
+        .request_permission()
+        .map_err(|err| err.to_string())?;
+    Ok(matches!(permission, PermissionState::Granted))
+}
+
+#[tauri::command]
+pub fn send_desktop_notification(
+    title: String,
+    body: String,
+    session_id: Option<String>,
+    app: AppHandle,
+) -> Result<bool, String> {
+    let permission = app
+        .notification()
+        .request_permission()
+        .map_err(|err| err.to_string())?;
+    if !matches!(permission, PermissionState::Granted) {
+        return Ok(false);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        send_macos_interactive_notification(
+            app.clone(),
+            title,
+            body,
+            session_id,
+            MacNotificationKind::OpenSession,
+        );
+        return Ok(true);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        app.notification()
+            .builder()
+            .title(title)
+            .body(body)
+            .group("tiangong-background-sessions")
+            .auto_cancel()
+            .show()
+            .map_err(|err| err.to_string())?;
+        Ok(true)
+    }
+}
+
+#[cfg(target_os = "macos")]
+enum MacNotificationKind {
+    OpenSession,
+    Approval {
+        session_id: String,
+        request_id: String,
+    },
+}
+
+#[cfg(target_os = "macos")]
+fn send_macos_interactive_notification(
+    app: AppHandle,
+    title: String,
+    body: String,
+    session_id: Option<String>,
+    kind: MacNotificationKind,
+) {
+    thread::spawn(move || {
+        let identifier = app.config().identifier.clone();
+        let _ = mac_notification_sys::set_application(&identifier);
+
+        let response = match &kind {
+            MacNotificationKind::OpenSession => {
+                let mut notification = mac_notification_sys::Notification::new();
+                notification
+                    .title(&title)
+                    .message(&body)
+                    .main_button(mac_notification_sys::MainButton::SingleAction("显示"))
+                    .close_button("关闭")
+                    .wait_for_click(true);
+                notification.send()
+            }
+            MacNotificationKind::Approval { .. } => {
+                let actions = ["同意", "拒绝"];
+                let mut notification = mac_notification_sys::Notification::new();
+                notification
+                    .title(&title)
+                    .message(&body)
+                    .main_button(mac_notification_sys::MainButton::DropdownActions(
+                        "处理",
+                        &actions,
+                    ))
+                    .close_button("稍后")
+                    .wait_for_click(true);
+                notification.send()
+            }
+        };
+
+        match response {
+            Ok(mac_notification_sys::NotificationResponse::Click)
+            | Ok(mac_notification_sys::NotificationResponse::ActionButton(_))
+                if matches!(kind, MacNotificationKind::OpenSession) =>
+            {
+                focus_main_window(&app);
+                if let Some(session_id) = session_id {
+                    let _ = app.emit("desktop_notification_open_session", session_id);
+                }
+            }
+            Ok(mac_notification_sys::NotificationResponse::ActionButton(action)) => {
+                if let MacNotificationKind::Approval {
+                    session_id,
+                    request_id,
+                } = kind
+                {
+                    let approved = action == "同意";
+                    app.state::<TiangongApp>().respond_approval_to_core(
+                        &session_id,
+                        request_id,
+                        approved,
+                    );
+                    focus_main_window(&app);
+                }
+            }
+            Ok(_) => {}
+            Err(err) => eprintln!("macOS 交互通知发送失败：{err}"),
+        }
+    });
+}
+
+fn focus_main_window(app: &AppHandle) {
+    activate_main_app(app);
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn activate_main_app(app: &AppHandle) {
+    let _ = std::process::Command::new("open")
+        .arg("-b")
+        .arg(app.config().identifier.as_str())
+        .spawn();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn activate_main_app(_app: &AppHandle) {}
+
+fn main_window_is_focused(app: &AppHandle) -> bool {
+    app.get_webview_window("main")
+        .and_then(|window| window.is_focused().ok())
+        .unwrap_or(false)
+}
+
+fn send_approval_notification_if_background(
+    app: AppHandle,
+    session_id: String,
+    request_id: String,
+    tool_name: String,
+    args_summary: String,
+) {
+    let is_current_session = app
+        .state::<TiangongApp>()
+        .with_state_read(|state| Ok(state.active_session_id() == session_id))
+        .unwrap_or(false);
+    if is_current_session && main_window_is_focused(&app) {
+        return;
+    }
+
+    let permission = app.notification().request_permission();
+    if !matches!(permission, Ok(PermissionState::Granted)) {
+        return;
+    }
+
+    let title = "天工 - 需要审批".to_string();
+    let body = if args_summary.trim().is_empty() {
+        format!("工具 {tool_name} 等待同意或拒绝")
+    } else {
+        format!("{tool_name}: {args_summary}")
+    };
+
+    #[cfg(target_os = "macos")]
+    {
+        send_macos_interactive_notification(
+            app,
+            title,
+            body,
+            None,
+            MacNotificationKind::Approval {
+                session_id,
+                request_id,
+            },
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = send_desktop_notification(title, body, Some(session_id), app);
+    }
+}
 
 fn ensure_assistant_message(
     session: &mut tiangong_core::session::Session,
@@ -351,6 +554,7 @@ pub fn get_sessions(state: State<TiangongApp>) -> Result<Vec<SessionListItem>, S
         Ok(core_state
             .sessions()
             .iter()
+            .filter(|session| session.parent_session_id.is_none())
             .map(SessionListItem::from_core)
             .collect())
     })
@@ -700,10 +904,12 @@ pub fn send_message(
                             "模型供应商：{}",
                             core_state.provider_label()
                         ));
+                        core_state.clear_pending_turn_for(&sid);
                     }
                     StreamEvent::Error { ref message } => {
                         recorded_turn_usage = tiangong_types::TokenUsage::default();
                         core_state.report_run_idle(format!("执行失败：{message}"));
+                        core_state.clear_pending_turn_for(&sid);
                     }
                     StreamEvent::Retry {
                         attempt,
@@ -745,6 +951,21 @@ pub fn send_message(
                 {
                     let _ = app_clone.emit("run_snapshot", &snapshot);
                 }
+            }
+
+            if let StreamEvent::ApprovalNeeded {
+                request_id,
+                tool_name,
+                args_summary,
+            } = &event
+            {
+                send_approval_notification_if_background(
+                    app_clone.clone(),
+                    sid.clone(),
+                    request_id.clone(),
+                    tool_name.clone(),
+                    args_summary.clone(),
+                );
             }
 
             if is_done || is_error {
@@ -886,6 +1107,7 @@ pub fn append_message(
         core_state.store.runtime.run.last_session_id = Some(session_id.clone());
         core_state.store.runtime.run.last_usage = (usage.total_tokens > 0).then_some(usage);
         core_state.store.runtime.run.updated_at = tiangong_core::session::now_text();
+        core_state.mark_pending_turn_for(session_id.clone());
         core_state.persist_session_and_app(&session_id)?;
         Ok(build_session_snapshot(core_state, &session_id, true))
     })?;
@@ -1245,7 +1467,7 @@ pub fn get_mention_candidates(state: State<TiangongApp>) -> Result<Vec<MentionCa
 #[tauri::command]
 pub fn get_run_snapshot(state: State<TiangongApp>) -> Result<RunSnapshotView, String> {
     let active_id = state.with_state_read(|s| Ok(s.active_session_id().to_string()))?;
-    let is_exec = state.is_session_executing(&active_id);
+    let is_exec = state.with_state_read(|s| Ok(s.has_pending_turn_for(&active_id)))?;
     state.with_state_read(|core_state| Ok(build_full_snapshot_with_status(core_state, is_exec)))
 }
 
