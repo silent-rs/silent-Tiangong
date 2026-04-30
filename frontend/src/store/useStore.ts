@@ -48,6 +48,7 @@ interface AppState {
   deleteSession: () => Promise<void>;
 
   sendMessage: (content: string, media?: MediaAsset[]) => Promise<void>;
+  editAndResend: (messageId: string, newContent: string) => Promise<void>;
   cancelTurn: () => Promise<boolean>;
 
   setInputContent: (content: string) => void;
@@ -252,6 +253,26 @@ export const useStore = create<AppState>((set, get) => ({
     } catch (error) {
       console.error('发送消息失败:', error);
       set({ inputContent: content, isSending: false });
+    }
+  },
+
+  // 编辑用户消息并从该节点重新发送
+  editAndResend: async (messageId: string, newContent: string) => {
+    set({ isSending: true });
+    try {
+      await api.editAndResend(messageId, newContent);
+      const runningSessionId = get().activeSessionId;
+      set(state => ({
+        runStatus: 'executing',
+        isSending: false,
+        inputContent: '',
+        sessionRunStatuses: runningSessionId
+          ? { ...state.sessionRunStatuses, [runningSessionId]: 'executing' }
+          : state.sessionRunStatuses,
+      }));
+    } catch (error) {
+      console.error('编辑重发失败:', error);
+      set({ isSending: false });
     }
   },
 

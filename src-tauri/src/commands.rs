@@ -566,14 +566,16 @@ pub fn get_sessions(state: State<TiangongApp>) -> Result<Vec<SessionListItem>, S
 /// 创建新会话
 #[tauri::command]
 pub fn create_session(state: State<TiangongApp>) -> Result<SessionListItem, String> {
-    state.with_state(|core_state| {
+    let result = state.with_state(|core_state| {
         core_state.create_session();
         // 返回新创建的活动会话
         core_state
             .active_session()
             .map(SessionListItem::from_core)
             .ok_or_else(|| anyhow::anyhow!("Failed to create session"))
-    })
+    })?;
+    state.sync_core_config_from_state()?;
+    Ok(result)
 }
 
 /// 切换到指定会话
@@ -633,7 +635,7 @@ fn send_message_inner(
     state: State<TiangongApp>,
 ) -> Result<(), String> {
     use std::sync::mpsc;
-    use tiangong_types::{SessionStreamEvent, StreamEvent};
+    use tiangong_types::SessionStreamEvent;
 
     // 准备 session
     let (session_id, user_message_id, session_snapshot) = state.with_state(|core_state| {
@@ -658,8 +660,18 @@ fn send_message_inner(
         return Ok(());
     }
 
-    // 消费 SessionStreamEvent：emit 给前端 + 更新 RunStatus + Done 时同步 session
-    let app_clone = app.clone();
+    start_stream_consumer(app, stream_rx);
+
+    Ok(())
+}
+
+/// 消费 SessionStreamEvent：emit 给前端 + 更新 RunStatus + Done 时同步 session
+fn start_stream_consumer(
+    app: AppHandle,
+    stream_rx: std::sync::mpsc::Receiver<tiangong_types::SessionStreamEvent>,
+) {
+    use tiangong_types::StreamEvent;
+
     thread::spawn(move || {
         let mut assistant_msg_id: Option<String> = None;
         let mut last_tool_args_summary = String::new();
@@ -667,7 +679,7 @@ fn send_message_inner(
         let mut recorded_turn_usage = tiangong_types::TokenUsage::default();
         for session_event in stream_rx.iter() {
             // 先 emit 完整事件给前端，再解构
-            let _ = app_clone.emit("stream_event", &session_event);
+            let _ = app.emit("stream_event", &session_event);
 
             let sid = session_event.session_id;
             let event = session_event.event;
@@ -675,7 +687,7 @@ fn send_message_inner(
             let is_error = matches!(event, StreamEvent::Error { .. });
 
             // 更新 session + RunStatus/usage
-            let _ = app_clone.state::<TiangongApp>().with_state(|core_state| {
+            let _ = app.state::<TiangongApp>().with_state(|core_state| {
                 if let Some(session) = core_state.sessions_mut().iter_mut().find(|s| s.id == sid) {
                     match &event {
                         StreamEvent::UserMessage {
@@ -968,11 +980,11 @@ fn send_message_inner(
             // emit run_snapshot
             {
                 let is_exec = !is_done && !is_error;
-                if let Ok(snapshot) = app_clone
+                if let Ok(snapshot) = app
                     .state::<TiangongApp>()
                     .with_state_read(|s| Ok(build_full_snapshot_with_status(s, is_exec)))
                 {
-                    let _ = app_clone.emit("run_snapshot", &snapshot);
+                    let _ = app.emit("run_snapshot", &snapshot);
                 }
             }
 
@@ -983,7 +995,7 @@ fn send_message_inner(
             } = &event
             {
                 send_approval_notification_if_background(
-                    app_clone.clone(),
+                    app.clone(),
                     sid.clone(),
                     request_id.clone(),
                     tool_name.clone(),
@@ -996,11 +1008,11 @@ fn send_message_inner(
                 let final_sid = sid.clone();
 
                 // 提取标题生成所需数据（在锁内完成，避免长时间持锁）
-                let title_task = app_clone.state::<TiangongApp>().with_state(|core_state| {
+                let title_task = app.state::<TiangongApp>().with_state(|core_state| {
                     let _ = core_state.persist_session_and_app(&final_sid);
                     let snapshot = build_full_snapshot_with_status(core_state, false);
-                    let _ = app_clone.emit("run_snapshot", &snapshot);
-                    let _ = app_clone.emit("sessions_updated", &());
+                    let _ = app.emit("run_snapshot", &snapshot);
+                    let _ = app.emit("sessions_updated", &());
 
                     // 检查是否需要生成标题
                     if let Some(session) = core_state.sessions().iter().find(|s| s.id == final_sid)
@@ -1028,7 +1040,7 @@ fn send_message_inner(
 
                 // 异步生成标题（不阻塞消费线程）
                 if let Ok(Some((input, provider_config))) = title_task {
-                    let app_for_title = app_clone.clone();
+                    let app_for_title = app.clone();
                     let sid_for_title = final_sid.clone();
                     thread::spawn(move || {
                         let client =
@@ -1064,6 +1076,82 @@ fn send_message_inner(
             }
         }
     });
+}
+
+/// 编辑用户消息并从该节点重新发送
+///
+/// 截断该消息之后的所有内容，更新消息内容，然后创建新的 core 重新执行 turn。
+#[tauri::command]
+pub fn edit_and_resend(
+    message_id: String,
+    new_content: String,
+    app: AppHandle,
+    state: State<TiangongApp>,
+) -> Result<(), String> {
+    use std::sync::mpsc;
+
+    // 1. 查找消息所在会话并验证
+    let session_id = state.with_state(|core_state| {
+        let session = core_state
+            .sessions()
+            .iter()
+            .find(|s| s.messages.iter().any(|m| m.id == message_id))
+            .ok_or_else(|| anyhow::anyhow!("消息不存在：{message_id}"))?;
+
+        let msg = session
+            .messages
+            .iter()
+            .find(|m| m.id == message_id)
+            .ok_or_else(|| anyhow::anyhow!("消息不存在"))?;
+        if msg.role != tiangong_core::session::MessageRole::User {
+            return Err(anyhow::anyhow!("只能编辑用户消息"));
+        }
+        Ok(session.id.clone())
+    })?;
+
+    // 2. 取消并丢弃旧 core
+    state.cancel_core(&session_id);
+    state.take_core(&session_id);
+
+    // 3. 更新消息内容、截断后续消息、持久化
+    let session_snapshot = state.with_state(|core_state| {
+        let session = core_state
+            .sessions_mut()
+            .iter_mut()
+            .find(|s| s.id == session_id)
+            .ok_or_else(|| anyhow::anyhow!("会话不存在"))?;
+
+        session.update_message_content(&message_id, new_content.clone());
+        session.truncate_after_message(&message_id);
+
+        let mut runtime_session = session.clone();
+        if runtime_session.cwd.trim().is_empty() {
+            runtime_session.cwd = core_state.workspace_dir().to_string();
+        }
+
+        core_state.clear_pending_turn_for(&session_id);
+        core_state.report_run_idle("正在重新发送编辑后的消息");
+        core_state.persist_session_and_app(&session_id)?;
+
+        Ok(runtime_session)
+    })?;
+
+    // 4. 创建新 core 并发送消息
+    let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::SessionStreamEvent>();
+    let (sid, is_new_core) = state.ensure_core(&session_id, session_snapshot, stream_tx);
+
+    {
+        let cores = state.cores.lock().map_err(|e| e.to_string())?;
+        if let Some(core) = cores.get(&sid) {
+            if !core.send_message_with_id(new_content.clone(), message_id.clone()) {
+                return Err("会话 core 已停止，请重试".to_string());
+            }
+        }
+    }
+
+    if is_new_core {
+        start_stream_consumer(app, stream_rx);
+    }
 
     Ok(())
 }
@@ -1176,7 +1264,7 @@ pub fn set_trust_mode(mode: String, state: State<TiangongApp>) -> Result<(), Str
     state.with_state(|core_state| core_state.set_trust_mode(trust_mode))?;
     state.sync_core_config_from_state()?;
 
-    // 只更新当前活跃会话的 core（session 级别）
+    // 更新当前活跃会话的 core（session 级别）
     let session_id =
         state.with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))?;
     state.set_core_trust_mode(&session_id, trust_mode);

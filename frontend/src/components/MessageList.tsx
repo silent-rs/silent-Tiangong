@@ -1,5 +1,6 @@
 import { useStore } from "@/store/useStore";
 import { ScrollArea } from "./ui/scroll-area";
+import { Textarea } from "./ui/textarea";
 import {
   Loader2,
   ChevronRight,
@@ -15,8 +16,9 @@ import {
   ChevronUp,
   ShieldCheck,
   ShieldX,
-  GitBranch,
   Brain,
+  Pencil,
+  X,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -112,8 +114,14 @@ function MessageActions({ text, showTts }: { text: string; showTts: boolean }) {
   );
 }
 
-function UserMessageActions({ text }: { text: string }) {
+function UserMessageActions({ text, messageId, runStatus, onStartEdit }: {
+  text: string;
+  messageId: string;
+  runStatus: string;
+  onStartEdit: (messageId: string, text: string) => void;
+}) {
   const [copied, setCopied] = useState(false);
+  const idle = runStatus === "idle";
 
   const handleCopy = async () => {
     try {
@@ -132,8 +140,13 @@ function UserMessageActions({ text }: { text: string }) {
       <button onClick={handleCopy} className={btnClass} title={copied ? "已复制" : "复制"}>
         {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
       </button>
-      <button className={btnClass} title="分叉（开发中）" disabled>
-        <GitBranch className="w-3.5 h-3.5" />
+      <button
+        onClick={() => onStartEdit(messageId, text)}
+        className={btnClass}
+        title={idle ? "编辑并重发" : "执行中无法编辑"}
+        disabled={!idle}
+      >
+        <Pencil className="w-3.5 h-3.5" />
       </button>
     </div>
   );
@@ -320,11 +333,14 @@ export function MessageList() {
     streamingReasoningContent,
     voiceMessages,
     approvalRequestId,
+    editAndResend,
   } = useStore();
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevMessagesLengthRef = useRef(0);
   const prevStreamingIdRef = useRef<string | null>(null);
   const [hasTts, setHasTts] = useState(false);
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editingContent, setEditingContent] = useState("");
 
   // 检查 TTS 能力
   useEffect(() => {
@@ -332,6 +348,24 @@ export function MessageList() {
   }, []);
 
   const isThinking = runStatus !== "idle";
+
+  const handleStartEdit = (messageId: string, text: string) => {
+    if (runStatus !== "idle") return;
+    setEditingMessageId(messageId);
+    setEditingContent(text);
+  };
+
+  const handleConfirmEdit = () => {
+    if (!editingMessageId || !editingContent.trim()) return;
+    editAndResend(editingMessageId, editingContent.trim());
+    setEditingMessageId(null);
+    setEditingContent("");
+  };
+
+  const handleCancelEdit = () => {
+    setEditingMessageId(null);
+    setEditingContent("");
+  };
 
   // 计算消息内容总长度，用于检测内容增长
   const totalContentLength = messages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
@@ -580,11 +614,45 @@ export function MessageList() {
               // 用户消息
               const message = group.messages[0];
               const voiceInfo = voiceMessages[message.id];
+              const isEditing = editingMessageId === message.id;
               return (
                 <div key={group.key} className="mt-3 first:mt-0">
                   <div className="flex justify-end" title={formatMessageTime(message.created_at)}>
                     <div className="max-w-[100%] text-muted-foreground">
-                      {voiceInfo ? (
+                      {isEditing ? (
+                        <div className="w-full">
+                          <Textarea
+                            value={editingContent}
+                            onChange={(e) => setEditingContent(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                                e.preventDefault();
+                                handleConfirmEdit();
+                              }
+                              if (e.key === "Escape") {
+                                handleCancelEdit();
+                              }
+                            }}
+                            className="min-h-[60px] max-h-[200px] resize-none text-sm"
+                            autoFocus
+                          />
+                          <div className="flex justify-end gap-1.5 mt-1">
+                            <button
+                              onClick={handleCancelEdit}
+                              className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                            >
+                              <X className="w-3 h-3" />
+                              取消
+                            </button>
+                            <button
+                              onClick={handleConfirmEdit}
+                              className="px-2.5 py-1 text-xs bg-green-600 hover:bg-green-700 text-white rounded transition-colors"
+                            >
+                              发送 (⌘+Enter)
+                            </button>
+                          </div>
+                        </div>
+                      ) : voiceInfo ? (
                         <VoiceBubble
                           messageId={message.id}
                           audioPath={voiceInfo.audioPath}
@@ -599,9 +667,14 @@ export function MessageList() {
                       )}
                     </div>
                   </div>
-                  {message.content && (
+                  {message.content && !isEditing && (
                     <div className="flex justify-end">
-                      <UserMessageActions text={message.content} />
+                      <UserMessageActions
+                        text={message.content}
+                        messageId={message.id}
+                        runStatus={runStatus}
+                        onStartEdit={handleStartEdit}
+                      />
                     </div>
                   )}
                 </div>

@@ -333,15 +333,30 @@ fn inject_function_tools(
         })
         .collect::<Vec<_>>();
     obj.insert("tools".to_string(), Value::Array(tools));
-    let tool_choice = match tool_choice {
-        Some(ToolChoice::Any) => Value::String("required".to_string()),
-        Some(ToolChoice::Tool(name)) => json!({
-            "type": "function",
-            "function": { "name": name },
-        }),
-        Some(ToolChoice::Auto) | None => Value::String("auto".to_string()),
-    };
-    obj.insert("tool_choice".to_string(), tool_choice);
+    match tool_choice {
+        Some(ToolChoice::Any) => {
+            obj.insert(
+                "tool_choice".to_string(),
+                Value::String("required".to_string()),
+            );
+        }
+        Some(ToolChoice::Tool(name)) => {
+            obj.insert(
+                "tool_choice".to_string(),
+                json!({
+                    "type": "function",
+                    "function": { "name": name },
+                }),
+            );
+        }
+        // 兼容 vLLM / 部分 OpenAI-compatible 后端：
+        // 显式 `tool_choice: "auto"` 可能要求服务端开启
+        // --enable-auto-tool-choice 和 --tool-call-parser。
+        // 省略该字段时，OpenAI Chat Completions 语义仍会在提供 tools 后
+        // 使用默认自动选择策略，且不会触发这些后端的 400。
+        Some(ToolChoice::Auto) => {}
+        None => {}
+    }
 }
 
 pub fn strip_think_tags(text: &str) -> String {

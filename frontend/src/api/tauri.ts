@@ -242,6 +242,9 @@ export const api = {
   appendMessage: (sessionId: string, content: string): Promise<boolean> =>
     invoke('append_message', { sessionId, content }),
 
+  editAndResend: (messageId: string, newContent: string): Promise<void> =>
+    invoke('edit_and_resend', { messageId, newContent }),
+
   respondApproval: (requestId: string, approved: boolean): Promise<boolean> =>
     invoke('respond_approval', { requestId, approved }),
 
