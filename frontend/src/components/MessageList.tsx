@@ -28,7 +28,7 @@ import { TypingMessage } from "./TypingMessage";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { api } from "@/api/tauri";
 
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 /** 格式化消息时间（hover 显示） */
@@ -205,7 +205,7 @@ function VoiceBubble({ messageId, audioPath, duration, showText, content }: {
   );
 }
 
-function WorkerCard({ group, isActive, MarkdownComponents }: {
+function WorkerCardView({ group, isActive, MarkdownComponents }: {
   group: MessageGroup;
   isActive: boolean;
   MarkdownComponents: any;
@@ -310,6 +310,12 @@ function WorkerCard({ group, isActive, MarkdownComponents }: {
   );
 }
 
+const WorkerCard = memo(WorkerCardView, (prev, next) => (
+  prev.isActive === next.isActive
+  && prev.MarkdownComponents === next.MarkdownComponents
+  && sameMessageRefs(prev.group.messages, next.group.messages)
+));
+
 export function MessageList() {
   const {
     messages,
@@ -357,7 +363,7 @@ export function MessageList() {
 
   // 将本地文件路径转换为 Tauri asset URL
   // Markdown 渲染器（用于非流式消息）
-  const MarkdownComponents = {
+  const MarkdownComponents = useMemo(() => ({
     pre({ children, ...rest }: any) {
       return (
         <pre
@@ -528,7 +534,7 @@ export function MessageList() {
         </audio>
       );
     },
-  };
+  }), []);
 
   return (
     <ScrollArea className="h-full">
@@ -858,21 +864,23 @@ function summarizeToolGroup(tools: MessageItem[]): string {
 }
 
 /** 统一的智能体回合渲染 — 将系统消息（事件）和 assistant 消息（回复）合并展示 */
-function AgentTurn({
-  messages,
-  streamingMessageId,
-  streamingContent,
-  streamingReasoningContent: _streamingReasoningContent,
-  MarkdownComponents,
-  hasTts,
-}: {
+interface AgentTurnProps {
   messages: MessageItem[];
   streamingMessageId: string | null;
   streamingContent: string;
   streamingReasoningContent: string;
   MarkdownComponents: any;
   hasTts: boolean;
-}) {
+}
+
+function AgentTurnView({
+  messages,
+  streamingMessageId,
+  streamingContent,
+  streamingReasoningContent: _streamingReasoningContent,
+  MarkdownComponents,
+  hasTts,
+}: AgentTurnProps) {
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
   const [expandedToolGroups, setExpandedToolGroups] = useState<Set<string>>(new Set());
 
@@ -1167,6 +1175,39 @@ function AgentTurn({
     </div>
   );
 }
+
+function sameMessageRefs(left: MessageItem[], right: MessageItem[]): boolean {
+  if (left.length !== right.length) return false;
+  for (let i = 0; i < left.length; i++) {
+    if (left[i] !== right[i]) return false;
+  }
+  return true;
+}
+
+function hasMessage(messages: MessageItem[], id: string | null): boolean {
+  return !!id && messages.some((message) => message.id === id);
+}
+
+const AgentTurn = memo(AgentTurnView, (prev, next) => {
+  if (
+    prev.hasTts !== next.hasTts
+    || prev.MarkdownComponents !== next.MarkdownComponents
+    || !sameMessageRefs(prev.messages, next.messages)
+  ) {
+    return false;
+  }
+
+  const touchesStreamingMessage =
+    hasMessage(prev.messages, prev.streamingMessageId)
+    || hasMessage(prev.messages, next.streamingMessageId);
+  if (!touchesStreamingMessage) {
+    return true;
+  }
+
+  return prev.streamingMessageId === next.streamingMessageId
+    && prev.streamingContent === next.streamingContent
+    && prev.streamingReasoningContent === next.streamingReasoningContent;
+});
 
 interface SystemMessageMeta {
   icon: React.ComponentType<{ className?: string }>;

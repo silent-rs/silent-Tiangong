@@ -2,6 +2,46 @@ import { create } from 'zustand';
 import { api, Session, Message, RunSnapshot, McpServer, Skill, TaskPlan } from '../api/tauri';
 import { notifyBackgroundSessionCompleted } from '../utils/desktopNotification';
 
+function sameJsonValue(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (left == null || right == null) return left == right;
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function sameMessage(left: Message, right: Message): boolean {
+  return left.id === right.id
+    && left.role === right.role
+    && left.content === right.content
+    && left.reasoning_content === right.reasoning_content
+    && left.worker_id === right.worker_id
+    && left.tool_call_id === right.tool_call_id
+    && left.tool_name === right.tool_name
+    && left.tool_result_is_error === right.tool_result_is_error
+    && left.compact === right.compact
+    && left.created_at === right.created_at
+    && sameJsonValue(left.media, right.media)
+    && sameJsonValue(left.tool_calls, right.tool_calls);
+}
+
+function mergeSnapshotMessages(oldMessages: Message[], newMessages: Message[]): Message[] {
+  if (oldMessages.length === 0 || newMessages.length === 0) {
+    return newMessages;
+  }
+
+  const oldById = new Map(oldMessages.map((message) => [message.id, message]));
+  let changed = oldMessages.length !== newMessages.length;
+  const merged = newMessages.map((message) => {
+    const old = oldById.get(message.id);
+    if (old && sameMessage(old, message)) {
+      return old;
+    }
+    changed = true;
+    return message;
+  });
+
+  return changed ? merged : oldMessages;
+}
+
 interface AppState {
   // 状态
   sessions: Session[];
@@ -390,7 +430,7 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     const { messages: oldMessages, streamingMessageId: oldStreamingId } = get();
-    const newMessages = snapshot.messages;
+    const newMessages = mergeSnapshotMessages(oldMessages, snapshot.messages);
 
     // 检测最后一条消息是否是新的或内容在更新
     let streamingId: string | null = null;

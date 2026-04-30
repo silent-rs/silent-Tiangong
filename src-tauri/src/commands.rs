@@ -29,130 +29,26 @@ pub fn send_desktop_notification(
         return Ok(false);
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        send_macos_interactive_notification(
-            app.clone(),
-            title,
-            body,
-            session_id,
-            MacNotificationKind::OpenSession,
-        );
-        return Ok(true);
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        app.notification()
-            .builder()
-            .title(title)
-            .body(body)
-            .group("tiangong-background-sessions")
-            .auto_cancel()
-            .show()
-            .map_err(|err| err.to_string())?;
-        Ok(true)
-    }
+    let _ = session_id;
+    show_desktop_notification(&app, title, body, "tiangong-background-sessions")?;
+    Ok(true)
 }
 
-#[cfg(target_os = "macos")]
-enum MacNotificationKind {
-    OpenSession,
-    Approval {
-        session_id: String,
-        request_id: String,
-    },
-}
-
-#[cfg(target_os = "macos")]
-fn send_macos_interactive_notification(
-    app: AppHandle,
+fn show_desktop_notification(
+    app: &AppHandle,
     title: String,
     body: String,
-    session_id: Option<String>,
-    kind: MacNotificationKind,
-) {
-    thread::spawn(move || {
-        let identifier = app.config().identifier.clone();
-        let _ = mac_notification_sys::set_application(&identifier);
-
-        let response = match &kind {
-            MacNotificationKind::OpenSession => {
-                let mut notification = mac_notification_sys::Notification::new();
-                notification
-                    .title(&title)
-                    .message(&body)
-                    .main_button(mac_notification_sys::MainButton::SingleAction("显示"))
-                    .close_button("关闭")
-                    .wait_for_click(true);
-                notification.send()
-            }
-            MacNotificationKind::Approval { .. } => {
-                let actions = ["同意", "拒绝"];
-                let mut notification = mac_notification_sys::Notification::new();
-                notification
-                    .title(&title)
-                    .message(&body)
-                    .main_button(mac_notification_sys::MainButton::DropdownActions(
-                        "处理",
-                        &actions,
-                    ))
-                    .close_button("稍后")
-                    .wait_for_click(true);
-                notification.send()
-            }
-        };
-
-        match response {
-            Ok(mac_notification_sys::NotificationResponse::Click)
-            | Ok(mac_notification_sys::NotificationResponse::ActionButton(_))
-                if matches!(kind, MacNotificationKind::OpenSession) =>
-            {
-                focus_main_window(&app);
-                if let Some(session_id) = session_id {
-                    let _ = app.emit("desktop_notification_open_session", session_id);
-                }
-            }
-            Ok(mac_notification_sys::NotificationResponse::ActionButton(action)) => {
-                if let MacNotificationKind::Approval {
-                    session_id,
-                    request_id,
-                } = kind
-                {
-                    let approved = action == "同意";
-                    app.state::<TiangongApp>().respond_approval_to_core(
-                        &session_id,
-                        request_id,
-                        approved,
-                    );
-                    focus_main_window(&app);
-                }
-            }
-            Ok(_) => {}
-            Err(err) => eprintln!("macOS 交互通知发送失败：{err}"),
-        }
-    });
+    group: &str,
+) -> Result<(), String> {
+    app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .group(group)
+        .auto_cancel()
+        .show()
+        .map_err(|err| err.to_string())
 }
-
-fn focus_main_window(app: &AppHandle) {
-    activate_main_app(app);
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn activate_main_app(app: &AppHandle) {
-    let _ = std::process::Command::new("open")
-        .arg("-b")
-        .arg(app.config().identifier.as_str())
-        .spawn();
-}
-
-#[cfg(not(target_os = "macos"))]
-fn activate_main_app(_app: &AppHandle) {}
 
 fn main_window_is_focused(app: &AppHandle) -> bool {
     app.get_webview_window("main")
@@ -187,24 +83,8 @@ fn send_approval_notification_if_background(
         format!("{tool_name}: {args_summary}")
     };
 
-    #[cfg(target_os = "macos")]
-    {
-        send_macos_interactive_notification(
-            app,
-            title,
-            body,
-            None,
-            MacNotificationKind::Approval {
-                session_id,
-                request_id,
-            },
-        );
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = send_desktop_notification(title, body, Some(session_id), app);
-    }
+    let _ = request_id;
+    let _ = show_desktop_notification(&app, title, body, "tiangong-approval-requests");
 }
 
 fn ensure_assistant_message(
@@ -230,9 +110,7 @@ fn append_assistant_delta(
     message_id: &str,
     content: &str,
 ) {
-    if content.trim().is_empty()
-        && !session.messages.iter().any(|msg| msg.id == message_id)
-    {
+    if content.trim().is_empty() && !session.messages.iter().any(|msg| msg.id == message_id) {
         return;
     }
     ensure_assistant_message(session, assistant_msg_id, message_id);
