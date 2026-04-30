@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { api, Session, Message, RunSnapshot, McpServer, Skill, TaskPlan } from '../api/tauri';
+import { notifyBackgroundSessionCompleted } from '../utils/desktopNotification';
 
 interface AppState {
   // 状态
@@ -342,11 +343,7 @@ export const useStore = create<AppState>((set, get) => ({
         // 该会话刚从运行中变为完成
         const session = get().sessions.find(s => s.id === sid);
         const title = session?.title || '对话';
-        if ('Notification' in window && Notification.permission === 'granted') {
-          new Notification('天工 - 任务完成', { body: `「${title}」执行完成` });
-        } else if ('Notification' in window && Notification.permission !== 'denied') {
-          Notification.requestPermission();
-        }
+        notifyBackgroundSessionCompleted(title).catch(console.warn);
       }
     }
 

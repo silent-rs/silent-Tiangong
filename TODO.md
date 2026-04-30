@@ -1,23 +1,34 @@
 # TODO - 天工当前开发任务
 
-> 最后更新：2026-04-29
-> 当前主线：web_fetch 基础能力
+> 最后更新：2026-04-30
+> 当前主线：Desktop 后台对话完成系统通知
 > 参考：`PLAN.md`、`docs/requirements.md`
 
 ---
 
 ## 当前结论
 
-接下来基于 RFC-0009 实现 `web_fetch` 基础能力。该能力作为 Core 内置工具，为未安装 `curl` / `wget` 的用户提供受控网页读取与在线文件下载替代路径，并保证 CLI、GUI、Server 共享同一执行链路。
+接下来基于 RFC-0010 实现 Desktop 后台对话完成系统通知。该能力作为 Desktop 友好交互体验补充，在非当前查看会话于后台完成时使用系统通知提醒用户，并保证权限拒绝或通知发送失败不影响对话执行与快照同步。
 
 能力边界：
 
-- `text` 模式读取公开 HTTP/HTTPS 文本页面，支持 HTML 基础正文提取。
-- `download` 模式下载在线文件到允许写入目录，复用现有工作空间写入边界。
-- 默认拒绝非 HTTP 协议、本机、私网、链路本地、保留地址和云元数据地址。
-- 工具结果进入会话层 tool 消息，不污染稳定 system prompt。
+- 首期仅覆盖 Desktop 模式，不扩展到 Server / Connector。
+- 后台会话完成时发送系统通知，当前查看会话完成不重复通知。
+- 通知主链路使用 Tauri 原生 notification 插件，不再依赖浏览器 Notification API。
+- 权限拒绝、插件不可用或发送失败时静默降级，不影响运行时状态同步。
 
-旧 Core 多轮对话上下文整理主线已完成，本文档切换到 `web_fetch` 基础能力。
+旧 `web_fetch` 基础能力主线已完成，本文档切换到 Desktop 后台通知能力。
+
+## P0 - Desktop 后台对话完成系统通知
+
+- [x] 创建 RFC：`docs/rfc/0010-desktop-background-notification.md`。
+- [x] 在 `docs/requirements.md` 中补充 Desktop 后台通知要求。
+- [x] 提交 RFC 与需求文档。
+- [x] 接入 Tauri notification 插件依赖、初始化和 capability 权限。
+- [x] 应用启动时请求系统通知权限。
+- [x] 替换后台会话完成检测中的浏览器 Notification 调用。
+- [x] 使用 `yarn build` 验证前端构建。
+- [x] 使用 `cargo check --manifest-path src-tauri/Cargo.toml` 验证 Tauri 侧构建。
 
 ## P0 - web_fetch 基础能力
 

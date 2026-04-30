@@ -4,6 +4,7 @@ import { api } from '@/api/tauri';
 import { AppSidebar } from '@/components/AppSidebar';
 import { SidebarProvider } from '@/components/ui/sidebar';
 import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components/LazyComponents';
+import { ensureDesktopNotificationPermission } from '@/utils/desktopNotification';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 
 export function MainApp() {
@@ -11,10 +12,7 @@ export function MainApp() {
   const unlistenRef = useRef<UnlistenFn | null>(null);
 
   useEffect(() => {
-    // 请求通知权限
-    if ('Notification' in window && Notification.permission === 'default') {
-      Notification.requestPermission();
-    }
+    ensureDesktopNotificationPermission().catch(console.warn);
 
     loadSessions();
 
