@@ -404,13 +404,16 @@ export const useStore = create<AppState>((set, get) => ({
         const oldAssistant = oldMessages.find(m => m.id === lastAssistant!.id);
         const hasRenderableMedia = !!lastAssistant.media && lastAssistant.media.length > 0;
 
-        // 新出现的 assistant 消息或内容在增长
+        // 新出现的 assistant 消息、正文增长或 thinking 增长都属于流式更新。
         const isNew = !oldAssistant;
-        const isGrowing = oldAssistant &&
+        const isContentGrowing = oldAssistant &&
           oldAssistant.content !== lastAssistant.content &&
           lastAssistant.content.length > oldAssistant.content.length;
+        const isReasoningGrowing = oldAssistant &&
+          oldAssistant.reasoning_content !== lastAssistant.reasoning_content &&
+          lastAssistant.reasoning_content.length > oldAssistant.reasoning_content.length;
 
-        if ((isNew || isGrowing) && !hasRenderableMedia) {
+        if ((isNew || isContentGrowing || isReasoningGrowing) && !hasRenderableMedia) {
           streamingId = lastAssistant.id;
           streamingContent = lastAssistant.content;
           streamingReasoningContent = lastAssistant.reasoning_content;

@@ -146,6 +146,7 @@ mod tests {
             role,
             content: content.to_string(),
             reasoning_content: String::new(),
+            reasoning_signature: None,
             worker_id: None,
             media: Vec::new(),
             tool_calls: Vec::new(),

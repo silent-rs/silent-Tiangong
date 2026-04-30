@@ -183,6 +183,7 @@ pub fn execute_single_plan_step_with_execution_agent(
                     blocking_errors.join("\n")
                 ),
                 reasoning_content: String::new(),
+                reasoning_signature: None,
                 worker_id: None,
                 media: Vec::new(),
                 tool_calls: Vec::new(),

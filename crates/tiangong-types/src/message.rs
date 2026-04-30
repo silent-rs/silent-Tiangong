@@ -52,6 +52,8 @@ pub struct Message {
     pub content: String,
     #[serde(default)]
     pub reasoning_content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_signature: Option<String>,
     /// 多 Worker 模式下标识消息所属 Worker
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_id: Option<String>,
@@ -78,6 +80,7 @@ impl Message {
             role,
             content: content.into(),
             reasoning_content: String::new(),
+            reasoning_signature: None,
             worker_id: None,
             media: Vec::new(),
             tool_calls: Vec::new(),
@@ -99,6 +102,7 @@ impl Message {
             role,
             content: content.into(),
             reasoning_content: reasoning.into(),
+            reasoning_signature: None,
             worker_id: None,
             media: Vec::new(),
             tool_calls: Vec::new(),

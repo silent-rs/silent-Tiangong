@@ -12,6 +12,7 @@ use crate::usage::TokenUsageData;
 pub enum ProviderStreamEvent {
     MessageStart,
     ReasoningDelta(String),
+    ReasoningSignatureDelta(String),
     TextDelta(String),
     ToolCallStart(ToolCall),
     ToolCallDelta {

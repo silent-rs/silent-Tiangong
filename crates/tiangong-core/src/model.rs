@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tiangong_llm::message::{
     ChatMessage, MessageContent as LlmMessageContent, MessageRole as LlmMessageRole,
+    ThinkingContent as LlmThinkingContent,
 };
 use tiangong_llm::provider::LlmProvider;
 use tiangong_llm::providers::anthropic::{AnthropicConfig, AnthropicProvider};
@@ -69,6 +70,7 @@ impl ModelRequest {
 pub struct ModelResponse {
     pub text: String,
     pub reasoning_content: String,
+    pub reasoning_signature: Option<String>,
     pub usage: TokenUsage,
     pub output_mode: String,
     pub output_chunk_count: usize,
@@ -98,6 +100,7 @@ pub struct ModelFunctionCall {
 pub struct ModelFunctionResponse {
     pub text: String,
     pub reasoning_content: String,
+    pub reasoning_signature: Option<String>,
     pub usage: TokenUsage,
     pub tool_calls: Vec<ModelFunctionCall>,
 }
@@ -195,6 +198,7 @@ pub trait ModelClient {
         Ok(ModelFunctionResponse {
             text: resp.text,
             reasoning_content: resp.reasoning_content,
+            reasoning_signature: resp.reasoning_signature,
             usage: resp.usage,
             tool_calls: Vec::new(),
         })
@@ -341,6 +345,7 @@ impl SingleProviderClient {
         Ok(ModelResponse {
             text: response.text,
             reasoning_content: response.reasoning_content,
+            reasoning_signature: response.reasoning_signature,
             usage: response.usage,
             output_mode: "anthropic-non-stream".to_string(),
             output_chunk_count: 1,
@@ -621,6 +626,7 @@ impl SingleProviderClient {
 
         let mut text = String::new();
         let mut reasoning_content = String::new();
+        let mut reasoning_signature: Option<String> = None;
         let mut usage = TokenUsageData::default();
         let mut tool_calls: std::collections::BTreeMap<String, (String, String)> =
             std::collections::BTreeMap::new();
@@ -635,6 +641,11 @@ impl SingleProviderClient {
                             content: String::new(),
                             reasoning_content: delta,
                         });
+                    }
+                }
+                ProviderStreamEvent::ReasoningSignatureDelta(signature) => {
+                    if !signature.trim().is_empty() {
+                        reasoning_signature = Some(signature);
                     }
                 }
                 ProviderStreamEvent::TextDelta(delta) => {
@@ -698,6 +709,7 @@ impl SingleProviderClient {
         Ok(ModelFunctionResponse {
             text: text.trim().to_string(),
             reasoning_content: reasoning_content.trim().to_string(),
+            reasoning_signature: reasoning_signature.filter(|value| !value.trim().is_empty()),
             usage: usage.into(),
             tool_calls: tool_calls_vec,
         })
@@ -822,6 +834,7 @@ impl ModelClient for SingleProviderClient {
         Ok(ModelResponse {
             text: collect_provider_text(&response).trim().to_string(),
             reasoning_content: response.reasoning_content.unwrap_or_default(),
+            reasoning_signature: None,
             usage: response.usage.unwrap_or_default().into(),
             output_mode: "non-stream".to_string(),
             output_chunk_count: 1,
@@ -893,26 +906,9 @@ fn build_provider_request(
     tool_choice: Option<ModelToolChoice>,
 ) -> ProviderRequest {
     let (system, messages) = build_provider_messages(req);
-    let has_tool_messages = messages.iter().any(|message| {
-        message.content.iter().any(|content| {
-            matches!(
-                content,
-                LlmMessageContent::ToolCall(_) | LlmMessageContent::ToolResult(_)
-            )
-        })
+    let thinking = req.thinking.as_ref().map(|thinking| LlmThinkingConfig {
+        budget_tokens: thinking.budget_tokens,
     });
-    // Anthropic extended thinking + tool_use requires passing provider-native
-    // thinking blocks/signatures back in subsequent requests. The unified
-    // history keeps tool calls/results structurally, but does not persist
-    // those Anthropic-private thinking blocks yet, so tool turns must not
-    // enter thinking mode.
-    let thinking = if functions.is_empty() && !has_tool_messages {
-        req.thinking.as_ref().map(|thinking| LlmThinkingConfig {
-            budget_tokens: thinking.budget_tokens,
-        })
-    } else {
-        None
-    };
     ProviderRequest {
         model: model.to_string(),
         system: (!system.trim().is_empty()).then_some(system),
@@ -1014,6 +1010,12 @@ fn provider_message_from_session(msg: &Message) -> Option<ChatMessage> {
     }
 
     let mut content = Vec::new();
+    if !msg.reasoning_content.trim().is_empty() {
+        content.push(LlmMessageContent::Thinking(LlmThinkingContent {
+            thinking: msg.reasoning_content.trim().to_string(),
+            signature: msg.reasoning_signature.clone(),
+        }));
+    }
     if !msg.content.trim().is_empty() {
         content.push(LlmMessageContent::Text(msg.content.trim().to_string()));
     }
@@ -1171,6 +1173,7 @@ fn convert_provider_response_to_function_response(
     Ok(ModelFunctionResponse {
         text: text.trim().to_string(),
         reasoning_content,
+        reasoning_signature: collect_provider_reasoning_signature(&response),
         usage: response.usage.unwrap_or_default().into(),
         tool_calls,
     })
@@ -1206,12 +1209,31 @@ fn collect_provider_text(response: &ProviderResponse) -> String {
         .join("")
 }
 
+fn collect_provider_reasoning_signature(response: &ProviderResponse) -> Option<String> {
+    response
+        .assistant_message
+        .content
+        .iter()
+        .find_map(|content| {
+            if let LlmMessageContent::Thinking(thinking) = content {
+                thinking
+                    .signature
+                    .as_ref()
+                    .filter(|signature| !signature.trim().is_empty())
+                    .cloned()
+            } else {
+                None
+            }
+        })
+}
+
 async fn consume_provider_stream_events_async(
     mut stream: ProviderStream,
     on_delta: &mut dyn FnMut(&ModelStreamChunk),
 ) -> Result<ModelFunctionResponse> {
     let mut text = String::new();
     let mut reasoning_content = String::new();
+    let mut reasoning_signature: Option<String> = None;
     let mut usage = TokenUsageData::default();
     let mut tool_calls: std::collections::BTreeMap<String, (String, String)> =
         std::collections::BTreeMap::new();
@@ -1225,6 +1247,11 @@ async fn consume_provider_stream_events_async(
                         content: String::new(),
                         reasoning_content: delta.clone(),
                     });
+                }
+            }
+            ProviderStreamEvent::ReasoningSignatureDelta(signature) => {
+                if !signature.trim().is_empty() {
+                    reasoning_signature = Some(signature);
                 }
             }
             ProviderStreamEvent::TextDelta(delta) => {
@@ -1278,6 +1305,7 @@ async fn consume_provider_stream_events_async(
     Ok(ModelFunctionResponse {
         text: text.trim().to_string(),
         reasoning_content: reasoning_content.trim().to_string(),
+        reasoning_signature: reasoning_signature.filter(|value| !value.trim().is_empty()),
         usage: usage.into(),
         tool_calls,
     })
@@ -1316,6 +1344,7 @@ fn consume_provider_stream(
     Ok(ModelResponse {
         text: response.text,
         reasoning_content: response.reasoning_content,
+        reasoning_signature: response.reasoning_signature,
         usage: response.usage,
         output_mode: "stream".to_string(),
         output_chunk_count: 1,

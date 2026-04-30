@@ -97,6 +97,7 @@ fn build_attachments(agent_config: &AgentConfig) -> Vec<Message> {
                 "<system-reminder>\n<mcp-tools>\n{mcp_text}\n</mcp-tools>\n</system-reminder>"
             ),
             reasoning_content: String::new(),
+            reasoning_signature: None,
             worker_id: None,
             media: Vec::new(),
             tool_calls: Vec::new(),

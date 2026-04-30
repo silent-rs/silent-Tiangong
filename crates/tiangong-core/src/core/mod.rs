@@ -914,6 +914,9 @@ async fn execute_turn_inner_async(
                 response.reasoning_content.clone(),
                 std::mem::take(&mut pending_media_assets),
             );
+            if let Some(message) = session.messages.last_mut() {
+                message.reasoning_signature = response.reasoning_signature.clone();
+            }
             let output = LlmOutputRecord {
                 stage: format!("react-round-{round}"),
                 content: String::new(),
@@ -978,6 +981,7 @@ async fn execute_turn_inner_async(
             pending_msg_id.clone(),
             &response.text,
             &response.reasoning_content,
+            response.reasoning_signature.clone(),
             &executable_calls,
         );
 
@@ -1399,6 +1403,9 @@ fn execute_turn_inner(
                 response.reasoning_content.clone(),
                 std::mem::take(&mut pending_media_assets),
             );
+            if let Some(message) = session.messages.last_mut() {
+                message.reasoning_signature = response.reasoning_signature.clone();
+            }
             // 记录 LLM 输出
             let output = LlmOutputRecord {
                 stage: format!("react-round-{round}"),
@@ -1464,6 +1471,7 @@ fn execute_turn_inner(
             pending_msg_id.clone(),
             &response.text,
             &response.reasoning_content,
+            response.reasoning_signature.clone(),
             &executable_calls,
         );
 
@@ -1848,6 +1856,7 @@ fn append_user_message_to_loop_context(
         role: MessageRole::User,
         content,
         reasoning_content: String::new(),
+        reasoning_signature: None,
         worker_id: None,
         media: Vec::new(),
         tool_calls: Vec::new(),
@@ -1894,6 +1903,7 @@ fn append_assistant_tool_call_message(
     message_id: String,
     text: &str,
     reasoning_content: &str,
+    reasoning_signature: Option<String>,
     calls: &[&crate::model::ModelFunctionCall],
 ) {
     let tool_calls = calls
@@ -1914,6 +1924,7 @@ fn append_assistant_tool_call_message(
         reasoning_content.trim().to_string(),
     );
     message.id = message_id;
+    message.reasoning_signature = reasoning_signature;
     message.tool_calls = tool_calls;
     session.messages.push(message);
     session.updated_at = now_text();
@@ -2026,6 +2037,7 @@ fn loop_context_with_memory(
 请基于以上 recall_memory 检索结果继续完成用户原始目标；不要再次调用 recall_memory，除非用户提出新的历史查询。"
             ),
             reasoning_content: String::new(),
+            reasoning_signature: None,
             worker_id: None,
             media: Vec::new(),
             tool_calls: Vec::new(),
@@ -2055,6 +2067,7 @@ fn force_final_response(
             "<system-reminder>\n请基于以上所有工具执行结果，直接给出最终回复。\n</system-reminder>"
                 .to_string(),
         reasoning_content: String::new(),
+        reasoning_signature: None,
         worker_id: None,
         media: Vec::new(),
         tool_calls: Vec::new(),
