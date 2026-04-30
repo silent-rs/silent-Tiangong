@@ -641,6 +641,12 @@ fn send_message_inner(
     let (session_id, user_message_id, session_snapshot) = state.with_state(|core_state| {
         core_state.prepare_active_user_message_ingress_with_media(content.clone(), media)
     })?;
+    let command_media = session_snapshot
+        .messages
+        .iter()
+        .find(|message| message.id == user_message_id)
+        .map(|message| message.media.clone())
+        .unwrap_or_default();
 
     // 获取或创建 TiangongCore
     let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
@@ -649,7 +655,7 @@ fn send_message_inner(
     {
         let cores = state.cores.lock().map_err(|e| e.to_string())?;
         if let Some(core) = cores.get(&sid) {
-            if !core.send_message_with_id(content.clone(), user_message_id) {
+            if !core.send_message_with_id(content.clone(), user_message_id, command_media) {
                 return Err("会话 core 已停止，请重试发送".to_string());
             }
         }
@@ -693,16 +699,26 @@ fn start_stream_consumer(
                         StreamEvent::UserMessage {
                             message_id,
                             content,
+                            media,
                         } => {
                             recorded_turn_usage = tiangong_types::TokenUsage::default();
                             // Core 已记录用户消息，同步到 TiangongState session
                             if !session.messages.iter().any(|msg| msg.id == *message_id) {
-                                session.append_message_with_id(
+                                session.append_message_with_id_and_media(
                                     message_id.clone(),
                                     tiangong_core::session::MessageRole::User,
                                     content.clone(),
                                     String::new(),
+                                    media.clone(),
                                 );
+                            } else if !media.is_empty() {
+                                if let Some(message) =
+                                    session.messages.iter_mut().find(|msg| msg.id == *message_id)
+                                {
+                                    if message.media.is_empty() {
+                                        message.media = media.clone();
+                                    }
+                                }
                             }
                         }
                         StreamEvent::Delta {
@@ -1114,7 +1130,7 @@ pub fn edit_and_resend(
     state.take_core(&session_id);
 
     // 3. 更新消息内容、截断后续消息、持久化
-    let session_snapshot = state.with_state(|core_state| {
+    let (session_snapshot, message_media) = state.with_state(|core_state| {
         let session = core_state
             .sessions_mut()
             .iter_mut()
@@ -1123,6 +1139,12 @@ pub fn edit_and_resend(
 
         session.update_message_content(&message_id, new_content.clone());
         session.truncate_after_message(&message_id);
+        let message_media = session
+            .messages
+            .iter()
+            .find(|message| message.id == message_id)
+            .map(|message| message.media.clone())
+            .unwrap_or_default();
 
         let mut runtime_session = session.clone();
         if runtime_session.cwd.trim().is_empty() {
@@ -1133,7 +1155,7 @@ pub fn edit_and_resend(
         core_state.report_run_idle("正在重新发送编辑后的消息");
         core_state.persist_session_and_app(&session_id)?;
 
-        Ok(runtime_session)
+        Ok((runtime_session, message_media))
     })?;
 
     // 4. 创建新 core 并发送消息
@@ -1143,7 +1165,11 @@ pub fn edit_and_resend(
     {
         let cores = state.cores.lock().map_err(|e| e.to_string())?;
         if let Some(core) = cores.get(&sid) {
-            if !core.send_message_with_id(new_content.clone(), message_id.clone()) {
+            if !core.send_message_with_id(
+                new_content.clone(),
+                message_id.clone(),
+                message_media.clone(),
+            ) {
                 return Err("会话 core 已停止，请重试".to_string());
             }
         }
@@ -1197,11 +1223,12 @@ pub fn append_message(
                 return Err(anyhow::anyhow!("当前会话不存在"));
             };
             if !session.messages.iter().any(|msg| msg.id == message_id) {
-                session.append_message_with_id(
+                session.append_message_with_id_and_media(
                     message_id,
                     tiangong_core::session::MessageRole::User,
                     content,
                     String::new(),
+                    Vec::new(),
                 );
             }
         }

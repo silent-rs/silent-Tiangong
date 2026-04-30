@@ -293,16 +293,18 @@ fn sync_stream_event_to_state(
         StreamEvent::UserMessage {
             message_id,
             content,
+            media,
         } if !session
             .messages
             .iter()
             .any(|message| message.id == *message_id) =>
         {
-            session.append_message_with_id(
+            session.append_message_with_id_and_media(
                 message_id.clone(),
                 MessageRole::User,
                 content.clone(),
                 String::new(),
+                media.clone(),
             );
             should_persist = true;
         }

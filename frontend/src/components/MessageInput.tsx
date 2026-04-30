@@ -4,6 +4,7 @@ import { Textarea } from './ui/textarea';
 import { Button } from './ui/button';
 import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import { api } from '@/api/tauri';
 import { useAudioRecording } from '@/hooks/useAudioRecording';
 
@@ -21,6 +22,17 @@ function imageMimeType(path: string): string | undefined {
   if (lower.endsWith('.gif')) return 'image/gif';
   if (lower.endsWith('.png')) return 'image/png';
   return undefined;
+}
+
+function resolveAttachmentUrl(url: string): string {
+  if (!url) return '';
+  if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('asset://')) {
+    return url;
+  }
+  if (url.startsWith('/')) {
+    return convertFileSrc(url);
+  }
+  return url;
 }
 
 export function MessageInput() {
@@ -493,10 +505,18 @@ export function MessageInput() {
                   {attachments.map(item => (
                     <span
                       key={item.url}
-                      className="inline-flex h-7 max-w-[220px] items-center gap-1 rounded-md border bg-muted/40 px-2 text-xs"
+                      className="inline-flex h-9 max-w-[260px] items-center gap-1.5 rounded-md border bg-muted/40 px-2 text-xs"
                       title={item.url}
                     >
-                      <Paperclip className="h-3 w-3 shrink-0" />
+                      {item.kind === 'image' ? (
+                        <img
+                          src={resolveAttachmentUrl(item.url)}
+                          alt={item.title}
+                          className="h-6 w-6 shrink-0 rounded object-cover"
+                        />
+                      ) : (
+                        <Paperclip className="h-3 w-3 shrink-0" />
+                      )}
                       <span className="truncate">{item.title}</span>
                       <button
                         type="button"

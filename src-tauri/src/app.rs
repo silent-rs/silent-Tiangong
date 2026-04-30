@@ -109,7 +109,7 @@ impl TiangongApp {
         let mut cores = self.cores.lock().unwrap();
         if let Some(core) = cores.get(session_id) {
             let sent = if let Some(message_id) = message_id {
-                core.send_message_with_id(content, message_id)
+                core.send_message_with_id(content, message_id, Vec::new())
             } else {
                 core.send_message(content)
             };

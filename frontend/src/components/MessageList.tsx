@@ -661,9 +661,14 @@ export function MessageList() {
                           content={message.content}
                         />
                       ) : (
-                        <p className="whitespace-pre-wrap break-words text-sm">
-                          {message.content}
-                        </p>
+                        <div>
+                          {renderMessageMedia(message)}
+                          {message.content && (
+                            <p className="whitespace-pre-wrap break-words text-sm">
+                              {message.content}
+                            </p>
+                          )}
+                        </div>
                       )}
                     </div>
                   </div>

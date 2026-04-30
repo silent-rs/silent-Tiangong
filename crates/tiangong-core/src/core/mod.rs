@@ -264,6 +264,7 @@ pub(crate) enum Command {
     Message {
         content: String,
         message_id: Option<String>,
+        media: Vec<tiangong_types::MediaAsset>,
     },
     /// 更新当前会话工作目录
     UpdateCwd { cwd: String },
@@ -347,13 +348,20 @@ impl TiangongCore {
         self.send_cmd(Command::Message {
             content,
             message_id: None,
+            media: Vec::new(),
         })
     }
 
-    pub fn send_message_with_id(&self, content: String, message_id: String) -> bool {
+    pub fn send_message_with_id(
+        &self,
+        content: String,
+        message_id: String,
+        media: Vec<tiangong_types::MediaAsset>,
+    ) -> bool {
         self.send_cmd(Command::Message {
             content,
             message_id: Some(message_id),
+            media,
         })
     }
 
@@ -544,14 +552,22 @@ async fn worker_loop_async(
             Command::Message {
                 content,
                 message_id,
+                media,
             } => {
                 let turn_start_idx = session.messages.len();
                 // 记录用户消息
-                let user_msg_id = append_or_reuse_user_message(&mut session, &content, message_id);
+                let user_msg_id =
+                    append_or_reuse_user_message(&mut session, &content, message_id, media);
                 // 通知消费端：用户消息已记录（携带 session 中的 message_id）
                 let _ = stream_tx.send(StreamEvent::UserMessage {
                     message_id: user_msg_id.clone(),
                     content: content.clone(),
+                    media: session
+                        .messages
+                        .iter()
+                        .find(|message| message.id == user_msg_id)
+                        .map(|message| message.media.clone())
+                        .unwrap_or_default(),
                 });
 
                 // 执行对话轮次
@@ -846,13 +862,18 @@ async fn execute_turn_inner_async(
                         }
                         // 用户输入到来时不打断当前生成：立即落盘并回显给前端，
                         // 当前 assistant 继续输出；输出完成后马上进入下一轮规划处理新消息。
-                        Some(Command::Message { content, message_id }) => {
+                        Some(Command::Message {
+                            content,
+                            message_id,
+                            media,
+                        }) => {
                             append_user_message_to_loop_context(
                                 session,
                                 &mut loop_context,
                                 stream_tx,
                                 content,
                                 message_id,
+                                media,
                             );
                             user_message_injected_during_stream = true;
                         }
@@ -1096,6 +1117,7 @@ async fn execute_turn_inner_async(
                             Some(Command::Message {
                                 content,
                                 message_id,
+                                media,
                             }) => {
                                 append_user_message_to_loop_context(
                                     session,
@@ -1103,6 +1125,7 @@ async fn execute_turn_inner_async(
                                     stream_tx,
                                     content,
                                     message_id,
+                                    media,
                                 );
                             }
                             Some(Command::UpdateCwd { cwd }) => {
@@ -1357,6 +1380,7 @@ fn execute_turn_inner(
                     if let Command::Message {
                         content,
                         message_id,
+                        media,
                     } = cmd
                     {
                         has = true;
@@ -1366,6 +1390,7 @@ fn execute_turn_inner(
                             stream_tx,
                             content,
                             message_id,
+                            media,
                         );
                     }
                 }
@@ -1591,6 +1616,7 @@ fn execute_turn_inner(
                             Ok(Command::Message {
                                 content,
                                 message_id,
+                                media,
                             }) => {
                                 append_user_message_to_loop_context(
                                     session,
@@ -1598,6 +1624,7 @@ fn execute_turn_inner(
                                     stream_tx,
                                     content,
                                     message_id,
+                                    media,
                                 );
                             }
                             Ok(Command::UpdateCwd { cwd }) => {
@@ -1770,6 +1797,7 @@ fn drain_pending_commands_async(
             Command::Message {
                 content,
                 message_id,
+                media,
             } => {
                 append_user_message_to_loop_context(
                     session,
@@ -1777,6 +1805,7 @@ fn drain_pending_commands_async(
                     stream_tx,
                     content,
                     message_id,
+                    media,
                 );
                 injected_message = true;
             }
@@ -1816,6 +1845,7 @@ fn drain_pending_commands(
             Command::Message {
                 content,
                 message_id,
+                media,
             } => {
                 append_user_message_to_loop_context(
                     session,
@@ -1823,6 +1853,7 @@ fn drain_pending_commands(
                     stream_tx,
                     content,
                     message_id,
+                    media,
                 );
                 injected_message = true;
             }
@@ -1848,47 +1879,56 @@ fn append_user_message_to_loop_context(
     stream_tx: &StdSender<StreamEvent>,
     content: String,
     message_id: Option<String>,
+    media: Vec<tiangong_types::MediaAsset>,
 ) {
-    let loop_message_id = append_or_reuse_user_message(session, &content, message_id);
+    let loop_message_id = append_or_reuse_user_message(session, &content, message_id, media);
     let _ = stream_tx.send(StreamEvent::UserMessage {
         message_id: loop_message_id.clone(),
         content: content.clone(),
+        media: session
+            .messages
+            .iter()
+            .find(|message| message.id == loop_message_id)
+            .map(|message| message.media.clone())
+            .unwrap_or_default(),
     });
-    loop_context.push(Message {
-        id: loop_message_id,
-        role: MessageRole::User,
-        content,
-        reasoning_content: String::new(),
-        reasoning_signature: None,
-        worker_id: None,
-        media: Vec::new(),
-        tool_calls: Vec::new(),
-        tool_call_id: None,
-        tool_name: None,
-        tool_result_is_error: false,
-        compact: false,
-        created_at: now_text(),
-    });
+    if let Some(message) = session
+        .messages
+        .iter()
+        .find(|message| message.id == loop_message_id)
+    {
+        loop_context.push(message.clone());
+    }
 }
 
 fn append_or_reuse_user_message(
     session: &mut Session,
     content: &str,
     message_id: Option<String>,
+    media: Vec<tiangong_types::MediaAsset>,
 ) -> String {
     if let Some(message_id) = message_id {
-        if !session.messages.iter().any(|msg| msg.id == message_id) {
-            session.append_message_with_id(
+        if let Some(message) = session
+            .messages
+            .iter_mut()
+            .find(|message| message.id == message_id)
+        {
+            if message.media.is_empty() && !media.is_empty() {
+                message.media = media;
+            }
+        } else {
+            session.append_message_with_id_and_media(
                 message_id.clone(),
                 MessageRole::User,
                 content.to_string(),
                 String::new(),
+                media,
             );
         }
         return message_id;
     }
 
-    session.append_message(MessageRole::User, content.to_string());
+    session.append_message_with_media(MessageRole::User, content.to_string(), media);
     session
         .messages
         .last()

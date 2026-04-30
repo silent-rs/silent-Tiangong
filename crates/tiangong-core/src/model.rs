@@ -1022,7 +1022,14 @@ fn provider_message_from_session(msg: &Message) -> Option<ChatMessage> {
         content.push(LlmMessageContent::Text(msg.content.trim().to_string()));
     }
     if msg.role == MessageRole::User {
-        content.extend(message_image_contents(msg));
+        let image_contents = message_image_contents(msg);
+        if !image_contents.is_empty() {
+            content.push(LlmMessageContent::Text(format!(
+                "本条用户消息包含 {} 张图片附件，图片内容已随消息提供，请直接基于附件分析。",
+                image_contents.len()
+            )));
+        }
+        content.extend(image_contents);
     }
     content.extend(msg.tool_calls.iter().map(|call| {
         LlmMessageContent::ToolCall(LlmToolCall {

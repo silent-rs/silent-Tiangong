@@ -30,6 +30,7 @@
 - [x] 增加 Core 内置 `current_time` 工具。
 - [x] 配置 `multimodal` routing 时开放 GUI 附件入口。
 - [x] 支持图片附件和图片路径进入多模态模型请求。
+- [x] 用户输入图片附件由 Core 归档到本地后再写入会话。
 - [x] 图片生成结果优先归档到本地并在会话中引用本地图片。
 - [x] 使用 `yarn build` 和 `cargo check --workspace` 验证。
 
