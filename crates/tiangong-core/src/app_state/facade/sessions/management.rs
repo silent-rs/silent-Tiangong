@@ -31,6 +31,11 @@ impl TiangongState {
     pub fn create_session(&mut self) {
         let mut session = Session::new("新对话");
         session.cwd = self.store.session.workspace_dir.clone();
+        self.store.agent.agent_config.trust_mode = self.store.agent.agent_config.default_trust_mode;
+        self.services
+            .runtime
+            .permission_gate()
+            .set_trust_mode(self.store.agent.agent_config.trust_mode);
         self.store.session.active_session_id = session.id.clone();
         self.store.session.session_title_draft = session.title.clone();
         self.store.session.sessions.push(session);

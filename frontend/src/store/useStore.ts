@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { api, Session, Message, RunSnapshot, McpServer, Skill, TaskPlan } from '../api/tauri';
+import { api, Session, Message, RunSnapshot, McpServer, Skill, TaskPlan, MediaAsset } from '../api/tauri';
 import { notifyBackgroundSessionCompleted } from '../utils/desktopNotification';
 
 function sameJsonValue(left: unknown, right: unknown): boolean {
@@ -87,7 +87,8 @@ interface AppState {
   switchSession: (id: string) => Promise<void>;
   deleteSession: () => Promise<void>;
 
-  sendMessage: (content: string) => Promise<void>;
+  sendMessage: (content: string, media?: MediaAsset[]) => Promise<void>;
+  editAndResend: (messageId: string, newContent: string) => Promise<void>;
   cancelTurn: () => Promise<boolean>;
 
   setInputContent: (content: string) => void;
@@ -242,7 +243,7 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   // 发送消息
-  sendMessage: async (content: string) => {
+  sendMessage: async (content: string, media: MediaAsset[] = []) => {
     const { isDraft, activeSessionId, sessionRunStatuses } = get();
 
     // 草稿模式时先创建后端会话
@@ -275,7 +276,11 @@ export const useStore = create<AppState>((set, get) => ({
     set({ inputContent: '', isSending: true });
 
     try {
-      await api.sendMessage(content);
+      if (media.length > 0) {
+        await api.sendMessageWithMedia(content, media);
+      } else {
+        await api.sendMessage(content);
+      }
       // 消息已提交到后端，释放发送锁，允许用户切换对话等操作
       const runningSessionId = get().activeSessionId;
       set(state => ({
@@ -288,6 +293,26 @@ export const useStore = create<AppState>((set, get) => ({
     } catch (error) {
       console.error('发送消息失败:', error);
       set({ inputContent: content, isSending: false });
+    }
+  },
+
+  // 编辑用户消息并从该节点重新发送
+  editAndResend: async (messageId: string, newContent: string) => {
+    set({ isSending: true });
+    try {
+      await api.editAndResend(messageId, newContent);
+      const runningSessionId = get().activeSessionId;
+      set(state => ({
+        runStatus: 'executing',
+        isSending: false,
+        inputContent: '',
+        sessionRunStatuses: runningSessionId
+          ? { ...state.sessionRunStatuses, [runningSessionId]: 'executing' }
+          : state.sessionRunStatuses,
+      }));
+    } catch (error) {
+      console.error('编辑重发失败:', error);
+      set({ isSending: false });
     }
   },
 

@@ -65,6 +65,8 @@ pub struct RuntimeEngine {
     client: SingleProviderClient,
     /// 轻量级文本模型客户端（标题生成等简单任务，未配置时为 None，回退到 client）
     lite_client: Option<SingleProviderClient>,
+    /// 多模态模型客户端（输入包含图片时优先使用）
+    multimodal_client: Option<SingleProviderClient>,
     tool_executor: LocalToolExecutor,
     pub context_limit: usize,
     agent_config: AgentConfig,
@@ -87,6 +89,7 @@ impl RuntimeEngine {
         Self {
             client,
             lite_client: None,
+            multimodal_client: None,
             tool_executor: LocalToolExecutor::from_agent_config(&agent_config),
             context_limit,
             agent_config,
@@ -113,6 +116,7 @@ impl RuntimeEngine {
         Self {
             client,
             lite_client: None,
+            multimodal_client: None,
             tool_executor: LocalToolExecutor::from_agent_config(&agent_config)
                 .with_shared_trust_mode(shared_trust_mode),
             context_limit,
@@ -126,6 +130,11 @@ impl RuntimeEngine {
     /// 设置轻量级文本模型客户端
     pub fn with_lite_client(mut self, client: SingleProviderClient) -> Self {
         self.lite_client = Some(client);
+        self
+    }
+
+    pub fn with_multimodal_client(mut self, client: SingleProviderClient) -> Self {
+        self.multimodal_client = Some(client);
         self
     }
 
@@ -151,6 +160,9 @@ impl RuntimeEngine {
     /// 获取轻量级模型客户端（未配置时回退到主客户端）
     pub fn lite_client(&self) -> &SingleProviderClient {
         self.lite_client.as_ref().unwrap_or(&self.client)
+    }
+    pub fn multimodal_client(&self) -> &SingleProviderClient {
+        self.multimodal_client.as_ref().unwrap_or(&self.client)
     }
     /// 获取 AgentConfig 引用
     pub fn agent_config(&self) -> &AgentConfig {

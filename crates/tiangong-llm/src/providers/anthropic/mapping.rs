@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 use tiangong_anthropic::types::{
     ContentBlock, ContentBlockDeltaData, ContentBlockParam, ContentBlockStartData,
-    Message as AnthropicMessage, MessageRole as AnthropicMessageRole, MessagesCreateRequest,
-    MessagesCreateResponse, StreamEvent, ThinkingConfig, Tool as AnthropicTool,
-    ToolChoice as AnthropicToolChoice, Usage,
+    ImageSourceParam, Message as AnthropicMessage, MessageRole as AnthropicMessageRole,
+    MessagesCreateRequest, MessagesCreateResponse, StreamEvent, ThinkingConfig,
+    Tool as AnthropicTool, ToolChoice as AnthropicToolChoice, Usage,
 };
 
 use crate::error::LlmError;
@@ -121,9 +121,36 @@ fn map_content(content: &MessageContent) -> Result<ContentBlockParam, LlmError> 
             }),
             is_error: Some(tool_result.is_error),
         }),
-        MessageContent::Image(_) => Err(LlmError::UnsupportedFeature(
-            "Anthropic 图片输入映射暂未实现".to_string(),
-        )),
+        MessageContent::Image(image) => {
+            let data = image
+                .data
+                .split_once(',')
+                .map(|(_, data)| data)
+                .unwrap_or(&image.data)
+                .to_string();
+            Ok(ContentBlockParam::Image {
+                source: ImageSourceParam {
+                    source_type: "base64".to_string(),
+                    media_type: image.mime_type.clone(),
+                    data,
+                },
+            })
+        }
+        MessageContent::File(file) => {
+            let data = file
+                .data
+                .split_once(',')
+                .map(|(_, data)| data)
+                .unwrap_or(&file.data)
+                .to_string();
+            Ok(ContentBlockParam::Document {
+                source: ImageSourceParam {
+                    source_type: "base64".to_string(),
+                    media_type: file.mime_type.clone(),
+                    data,
+                },
+            })
+        }
     }
 }
 

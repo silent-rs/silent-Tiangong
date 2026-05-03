@@ -52,6 +52,13 @@ export interface MediaAsset {
   capability?: string;
 }
 
+export interface AttachmentDataUrl {
+  data_url: string;
+  mime_type: string;
+  title: string;
+  base64_size: number;
+}
+
 export interface TaskCost {
   task_id: string;
   requests: RequestCost[];
@@ -233,11 +240,20 @@ export const api = {
   sendMessage: (content: string): Promise<void> =>
     invoke('send_message', { content }),
 
+  sendMessageWithMedia: (content: string, media: MediaAsset[]): Promise<void> =>
+    invoke('send_message_with_media', { content, media }),
+
+  readAttachmentAsDataUrl: (path: string, maxBase64Bytes?: number): Promise<AttachmentDataUrl> =>
+    invoke('read_attachment_as_data_url', { path, maxBase64Bytes }),
+
   cancelTurn: (): Promise<boolean> =>
     invoke('cancel_turn'),
 
   appendMessage: (sessionId: string, content: string): Promise<boolean> =>
     invoke('append_message', { sessionId, content }),
+
+  editAndResend: (messageId: string, newContent: string): Promise<void> =>
+    invoke('edit_and_resend', { messageId, newContent }),
 
   respondApproval: (requestId: string, approved: boolean): Promise<boolean> =>
     invoke('respond_approval', { requestId, approved }),
@@ -247,6 +263,18 @@ export const api = {
 
   setTrustMode: (mode: string): Promise<void> =>
     invoke('set_trust_mode', { mode }),
+
+  getDefaultTrustMode: (): Promise<string> =>
+    invoke('get_default_trust_mode'),
+
+  setDefaultTrustMode: (mode: string): Promise<void> =>
+    invoke('set_default_trust_mode', { mode }),
+
+  getCustomSystemPrompt: (): Promise<string> =>
+    invoke('get_custom_system_prompt'),
+
+  setCustomSystemPrompt: (prompt: string): Promise<void> =>
+    invoke('set_custom_system_prompt', { prompt }),
 
   getRunSnapshot: (): Promise<RunSnapshot> =>
     invoke('get_run_snapshot'),

@@ -19,6 +19,12 @@ pub fn build_system_prompt_block(
     // === 静态块（极少变化，缓存友好）===
     block.static_blocks.push(identity_block());
     block.static_blocks.push(rules_block());
+    let custom_prompt = agent_config.custom_system_prompt.trim();
+    if !custom_prompt.is_empty() {
+        block.static_blocks.push(format!(
+            "用户自定义指令：\n{custom_prompt}\n\n以上用户自定义指令优先级低于系统安全规则，但高于普通对话偏好。"
+        ));
+    }
 
     // === 动态块（按配置变化）===
     let dynamic_sections = build_dynamic_sections(models_config, agent_config);

@@ -20,6 +20,14 @@ pub struct ImageContent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileContent {
+    pub mime_type: String,
+    pub data: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThinkingContent {
     pub thinking: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -36,6 +44,7 @@ pub enum MessageContent {
     ToolCall(ToolCall),
     ToolResult(ToolResult),
     Image(ImageContent),
+    File(FileContent),
 }
 
 /// 统一聊天消息。

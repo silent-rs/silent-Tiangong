@@ -295,7 +295,7 @@ fn network_matches(pattern: &str, target: &str) -> bool {
 pub(crate) fn classify_tool(tool_name: &str) -> PermissionLevel {
     match tool_name {
         // 安全：只读
-        "read_file" | "list_dir" | "tree_dir" | "search_code" | "web_fetch"
+        "read_file" | "list_dir" | "tree_dir" | "search_code" | "web_fetch" | "current_time"
         | "get_skill_detail" | "recall_memory" => PermissionLevel::Safe,
         // 标准：文件写入
         "write_file" | "replace_in_file" => PermissionLevel::Standard,

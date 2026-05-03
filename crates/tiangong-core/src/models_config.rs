@@ -364,6 +364,9 @@ impl ModelsConfig {
         if let Some(ref ep) = llm.video_generation {
             register("video", ep, ModelCapability::VideoGeneration);
         }
+        if let Some(ref ep) = llm.multimodal {
+            register("multimodal", ep, ModelCapability::Multimodal);
+        }
         if let Some(ref ep) = llm.embedding {
             register("embedding", ep, ModelCapability::Embedding);
         }

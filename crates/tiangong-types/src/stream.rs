@@ -98,6 +98,8 @@ pub enum StreamEvent {
         /// 该用户消息在 session 中的 ID
         message_id: String,
         content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        media: Vec<crate::MediaAsset>,
     },
 
     // ===== 记忆检索事件 =====

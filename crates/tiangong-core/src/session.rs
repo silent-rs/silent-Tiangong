@@ -699,6 +699,28 @@ impl Session {
         }
         self.messages[self.messages.len() - limit..].to_vec()
     }
+
+    /// 更新指定消息的内容
+    pub fn update_message_content(&mut self, message_id: &str, new_content: String) -> bool {
+        if let Some(msg) = self.messages.iter_mut().find(|m| m.id == message_id) {
+            msg.content = new_content;
+            self.updated_at = now_text();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 截断指定消息之后的所有消息（保留该消息本身），返回移除数量
+    pub fn truncate_after_message(&mut self, message_id: &str) -> usize {
+        let Some(idx) = self.messages.iter().position(|m| m.id == message_id) else {
+            return 0;
+        };
+        let remove_count = self.messages.len() - idx - 1;
+        self.messages.truncate(idx + 1);
+        self.updated_at = now_text();
+        remove_count
+    }
 }
 
 fn new_id() -> String {

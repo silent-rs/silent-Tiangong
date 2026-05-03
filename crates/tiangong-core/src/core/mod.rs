@@ -22,6 +22,7 @@ use crate::prompt::PromptAssembler;
 use crate::runtime::{LlmOutputRecord, RuntimeEngine, inject_enhanced_tools, use_stream_mode};
 use crate::session::{Message, MessageRole, MessageToolCall, Session, now_text};
 use crate::stream_throttle::ThrottledStreamSink;
+use base64::{Engine as _, engine::general_purpose};
 use tiangong_types::{SessionStreamEvent, StreamEvent, StreamToolCall};
 
 // 为了让 drain_pending_commands / execute_turn_standalone 继续使用 std Receiver
@@ -263,6 +264,7 @@ pub(crate) enum Command {
     Message {
         content: String,
         message_id: Option<String>,
+        media: Vec<tiangong_types::MediaAsset>,
     },
     /// 更新当前会话工作目录
     UpdateCwd { cwd: String },
@@ -346,13 +348,20 @@ impl TiangongCore {
         self.send_cmd(Command::Message {
             content,
             message_id: None,
+            media: Vec::new(),
         })
     }
 
-    pub fn send_message_with_id(&self, content: String, message_id: String) -> bool {
+    pub fn send_message_with_id(
+        &self,
+        content: String,
+        message_id: String,
+        media: Vec<tiangong_types::MediaAsset>,
+    ) -> bool {
         self.send_cmd(Command::Message {
             content,
             message_id: Some(message_id),
+            media,
         })
     }
 
@@ -543,14 +552,22 @@ async fn worker_loop_async(
             Command::Message {
                 content,
                 message_id,
+                media,
             } => {
                 let turn_start_idx = session.messages.len();
                 // 记录用户消息
-                let user_msg_id = append_or_reuse_user_message(&mut session, &content, message_id);
+                let user_msg_id =
+                    append_or_reuse_user_message(&mut session, &content, message_id, media);
                 // 通知消费端：用户消息已记录（携带 session 中的 message_id）
                 let _ = stream_tx.send(StreamEvent::UserMessage {
                     message_id: user_msg_id.clone(),
                     content: content.clone(),
+                    media: session
+                        .messages
+                        .iter()
+                        .find(|message| message.id == user_msg_id)
+                        .map(|message| message.media.clone())
+                        .unwrap_or_default(),
                 });
 
                 // 执行对话轮次
@@ -816,7 +833,7 @@ async fn execute_turn_inner_async(
         // ── 真正的 async 流式调用 + select! 取消 ──
         let (chunk_tx, mut chunk_rx) =
             tokio_mpsc::unbounded_channel::<crate::model::ModelStreamChunk>();
-        let client = engine.client().clone();
+        let client = select_client_for_request(engine, &req).clone();
         let req_clone = req.clone();
         let tools_clone = request_tools.clone();
         let llm_fut = tokio::task::spawn(async move {
@@ -845,13 +862,18 @@ async fn execute_turn_inner_async(
                         }
                         // 用户输入到来时不打断当前生成：立即落盘并回显给前端，
                         // 当前 assistant 继续输出；输出完成后马上进入下一轮规划处理新消息。
-                        Some(Command::Message { content, message_id }) => {
+                        Some(Command::Message {
+                            content,
+                            message_id,
+                            media,
+                        }) => {
                             append_user_message_to_loop_context(
                                 session,
                                 &mut loop_context,
                                 stream_tx,
                                 content,
                                 message_id,
+                                media,
                             );
                             user_message_injected_during_stream = true;
                         }
@@ -1095,6 +1117,7 @@ async fn execute_turn_inner_async(
                             Some(Command::Message {
                                 content,
                                 message_id,
+                                media,
                             }) => {
                                 append_user_message_to_loop_context(
                                     session,
@@ -1102,6 +1125,7 @@ async fn execute_turn_inner_async(
                                     stream_tx,
                                     content,
                                     message_id,
+                                    media,
                                 );
                             }
                             Some(Command::UpdateCwd { cwd }) => {
@@ -1158,7 +1182,7 @@ async fn execute_turn_inner_async(
                 args_summary: args_summary.clone(),
             });
 
-            let (result, memory_tool_usage, allow_memory_context) =
+            let (mut result, memory_tool_usage, allow_memory_context) =
                 tokio::task::block_in_place(|| {
                     if call.name == "recall_memory" {
                         if memory_recall_attempted {
@@ -1175,6 +1199,7 @@ async fn execute_turn_inner_async(
                         )
                     }
                 });
+            localize_tool_result_images(&call.name, &mut result);
             accumulated_usage.accumulate(&memory_tool_usage);
 
             audit_tool_execution(
@@ -1355,6 +1380,7 @@ fn execute_turn_inner(
                     if let Command::Message {
                         content,
                         message_id,
+                        media,
                     } = cmd
                     {
                         has = true;
@@ -1364,6 +1390,7 @@ fn execute_turn_inner(
                             stream_tx,
                             content,
                             message_id,
+                            media,
                         );
                     }
                 }
@@ -1589,6 +1616,7 @@ fn execute_turn_inner(
                             Ok(Command::Message {
                                 content,
                                 message_id,
+                                media,
                             }) => {
                                 append_user_message_to_loop_context(
                                     session,
@@ -1596,6 +1624,7 @@ fn execute_turn_inner(
                                     stream_tx,
                                     content,
                                     message_id,
+                                    media,
                                 );
                             }
                             Ok(Command::UpdateCwd { cwd }) => {
@@ -1656,21 +1685,22 @@ fn execute_turn_inner(
                 args_summary: args_summary.clone(),
             });
 
-            let (result, memory_tool_usage, allow_memory_context) = if call.name == "recall_memory"
-            {
-                if memory_recall_attempted {
-                    duplicate_memory_recall_tool_result()
+            let (mut result, memory_tool_usage, allow_memory_context) =
+                if call.name == "recall_memory" {
+                    if memory_recall_attempted {
+                        duplicate_memory_recall_tool_result()
+                    } else {
+                        memory_recall_attempted = true;
+                        execute_memory_recall_tool(call, memory_handle, session)
+                    }
                 } else {
-                    memory_recall_attempted = true;
-                    execute_memory_recall_tool(call, memory_handle, session)
-                }
-            } else {
-                (
-                    engine.execute_tool_call(call, mcp_targets, &engine.agent_config().mcp),
-                    tiangong_types::TokenUsage::default(),
-                    false,
-                )
-            };
+                    (
+                        engine.execute_tool_call(call, mcp_targets, &engine.agent_config().mcp),
+                        tiangong_types::TokenUsage::default(),
+                        false,
+                    )
+                };
+            localize_tool_result_images(&call.name, &mut result);
             // 累加 memory 阶段产生的 token 消耗
             accumulated_usage.accumulate(&memory_tool_usage);
 
@@ -1767,6 +1797,7 @@ fn drain_pending_commands_async(
             Command::Message {
                 content,
                 message_id,
+                media,
             } => {
                 append_user_message_to_loop_context(
                     session,
@@ -1774,6 +1805,7 @@ fn drain_pending_commands_async(
                     stream_tx,
                     content,
                     message_id,
+                    media,
                 );
                 injected_message = true;
             }
@@ -1813,6 +1845,7 @@ fn drain_pending_commands(
             Command::Message {
                 content,
                 message_id,
+                media,
             } => {
                 append_user_message_to_loop_context(
                     session,
@@ -1820,6 +1853,7 @@ fn drain_pending_commands(
                     stream_tx,
                     content,
                     message_id,
+                    media,
                 );
                 injected_message = true;
             }
@@ -1845,47 +1879,56 @@ fn append_user_message_to_loop_context(
     stream_tx: &StdSender<StreamEvent>,
     content: String,
     message_id: Option<String>,
+    media: Vec<tiangong_types::MediaAsset>,
 ) {
-    let loop_message_id = append_or_reuse_user_message(session, &content, message_id);
+    let loop_message_id = append_or_reuse_user_message(session, &content, message_id, media);
     let _ = stream_tx.send(StreamEvent::UserMessage {
         message_id: loop_message_id.clone(),
         content: content.clone(),
+        media: session
+            .messages
+            .iter()
+            .find(|message| message.id == loop_message_id)
+            .map(|message| message.media.clone())
+            .unwrap_or_default(),
     });
-    loop_context.push(Message {
-        id: loop_message_id,
-        role: MessageRole::User,
-        content,
-        reasoning_content: String::new(),
-        reasoning_signature: None,
-        worker_id: None,
-        media: Vec::new(),
-        tool_calls: Vec::new(),
-        tool_call_id: None,
-        tool_name: None,
-        tool_result_is_error: false,
-        compact: false,
-        created_at: now_text(),
-    });
+    if let Some(message) = session
+        .messages
+        .iter()
+        .find(|message| message.id == loop_message_id)
+    {
+        loop_context.push(message.clone());
+    }
 }
 
 fn append_or_reuse_user_message(
     session: &mut Session,
     content: &str,
     message_id: Option<String>,
+    media: Vec<tiangong_types::MediaAsset>,
 ) -> String {
     if let Some(message_id) = message_id {
-        if !session.messages.iter().any(|msg| msg.id == message_id) {
-            session.append_message_with_id(
+        if let Some(message) = session
+            .messages
+            .iter_mut()
+            .find(|message| message.id == message_id)
+        {
+            if message.media.is_empty() && !media.is_empty() {
+                message.media = media;
+            }
+        } else {
+            session.append_message_with_id_and_media(
                 message_id.clone(),
                 MessageRole::User,
                 content.to_string(),
                 String::new(),
+                media,
             );
         }
         return message_id;
     }
 
-    session.append_message(MessageRole::User, content.to_string());
+    session.append_message_with_media(MessageRole::User, content.to_string(), media);
     session
         .messages
         .last()
@@ -2018,6 +2061,52 @@ fn maybe_update_context_summary(
     }
 }
 
+fn select_client_for_request<'a>(
+    engine: &'a RuntimeEngine,
+    req: &ModelRequest,
+) -> &'a SingleProviderClient {
+    if req.context.iter().any(message_has_multimodal_input) {
+        engine.multimodal_client()
+    } else {
+        engine.client()
+    }
+}
+
+fn message_has_multimodal_input(message: &Message) -> bool {
+    !message.media.is_empty()
+        || extract_image_paths_from_text(&message.content)
+            .into_iter()
+            .next()
+            .is_some()
+}
+
+fn looks_like_image_reference(value: &str) -> bool {
+    let lower = value.trim().to_ascii_lowercase();
+    lower.starts_with("data:image/")
+        || lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.ends_with(".png")
+        || lower.ends_with(".jpg")
+        || lower.ends_with(".jpeg")
+        || lower.ends_with(".webp")
+        || lower.ends_with(".gif")
+}
+
+fn extract_image_paths_from_text(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(|part| {
+            part.trim_matches(|c: char| {
+                matches!(
+                    c,
+                    '"' | '\'' | '`' | ',' | ';' | ':' | ')' | '(' | '[' | ']'
+                )
+            })
+        })
+        .filter(|part| looks_like_image_reference(part))
+        .map(ToString::to_string)
+        .collect()
+}
+
 fn loop_context_with_memory(
     loop_context: &[Message],
     memory_context: Option<&str>,
@@ -2104,8 +2193,7 @@ fn force_final_response(
 
     let resp = if use_stream_mode() {
         let sink = ThrottledStreamSink::new(pending_msg_id.clone(), stream_tx.clone());
-        let response_result = engine
-            .client()
+        let response_result = select_client_for_request(engine, &req)
             .complete_stream_with_callback(&req, |delta| {
                 sink.push_chunk(delta);
             });
@@ -2121,7 +2209,7 @@ fn force_final_response(
         }
     } else {
         let msg_id_non_stream = pending_msg_id.clone();
-        match engine.client().complete(&req) {
+        match select_client_for_request(engine, &req).complete(&req) {
             Ok(r) => {
                 if !r.text.is_empty() {
                     let _ = stream_tx.send(StreamEvent::Delta {
@@ -2178,6 +2266,8 @@ fn build_engine_from_config(
         mcp: config.mcp.clone(),
         skills: config.skills.clone(),
         trust_mode: config.trust_mode,
+        default_trust_mode: config.default_trust_mode,
+        custom_system_prompt: config.custom_system_prompt.clone(),
     };
 
     // 构造重试回调：发送 StreamEvent::Retry 通知前端
@@ -2210,8 +2300,22 @@ fn build_engine_from_config(
             api_model: lite_endpoint.model.clone(),
             api_lite_model: lite_endpoint.model.clone(),
         };
-        engine =
-            engine.with_lite_client(SingleProviderClient::new(lite_config).with_on_retry(on_retry));
+        engine = engine.with_lite_client(
+            SingleProviderClient::new(lite_config).with_on_retry(on_retry.clone()),
+        );
+    }
+    if let Some(ref multimodal_endpoint) = config.llm.multimodal {
+        let multimodal_config = crate::model::ModelProviderConfig {
+            api_auth_token: multimodal_endpoint.api_key.clone(),
+            api_base_url: multimodal_endpoint.base_url.clone(),
+            api_timeout_ms: multimodal_endpoint.timeout_ms.to_string(),
+            api_protocol: multimodal_endpoint.protocol,
+            api_model: multimodal_endpoint.model.clone(),
+            api_lite_model: String::new(),
+        };
+        engine = engine.with_multimodal_client(
+            SingleProviderClient::new(multimodal_config).with_on_retry(on_retry),
+        );
     }
 
     engine
@@ -2744,10 +2848,182 @@ fn parse_media_assets_from_tool_result(
     stdout: &str,
     summary: &str,
 ) -> Vec<tiangong_types::MediaAsset> {
-    match tool_name {
-        "generate_image" => parse_image_assets(stdout),
-        "generate_video" => parse_video_assets(stdout, summary),
-        _ => Vec::new(),
+    if output_may_contain_generated_images(tool_name, stdout) {
+        return parse_image_assets(stdout);
+    }
+    if tool_name == "generate_video" {
+        parse_video_assets(stdout, summary)
+    } else {
+        Vec::new()
+    }
+}
+
+fn localize_tool_result_images(tool_name: &str, result: &mut crate::tool::ToolResult) {
+    if !result.ok || !output_may_contain_generated_images(tool_name, &result.stdout) {
+        return;
+    }
+    result.stdout = archive_image_markdown_output(&result.stdout);
+}
+
+fn output_may_contain_generated_images(tool_name: &str, output: &str) -> bool {
+    tool_name == "generate_image"
+        || looks_like_pure_image_markdown(output)
+        || (tool_name.to_ascii_lowercase().contains("image") && output.contains("]("))
+}
+
+fn looks_like_pure_image_markdown(output: &str) -> bool {
+    let trimmed = output.trim();
+    !trimmed.is_empty()
+        && trimmed.lines().all(|line| {
+            let line = line.trim();
+            line.is_empty()
+                || (line.starts_with("![") && line.contains("](") && line.ends_with(')'))
+        })
+}
+
+fn archive_image_markdown_output(output: &str) -> String {
+    output
+        .lines()
+        .map(|line| {
+            let Some((alt, url)) = parse_markdown_image_line(line.trim()) else {
+                return line.to_string();
+            };
+            match archive_image_reference(url) {
+                Ok(archived) => format!("![{alt}]({})", archived.path),
+                Err(err) => {
+                    tracing::warn!(url = %url, error = %err, "图片归档到本地失败，保留原始 URL");
+                    line.to_string()
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn parse_markdown_image_line(line: &str) -> Option<(&str, &str)> {
+    if !line.starts_with("![") || !line.ends_with(')') {
+        return None;
+    }
+    let close_alt = line.find("](")?;
+    let alt = line[2..close_alt].trim();
+    let url = line[close_alt + 2..line.len() - 1].trim();
+    (!url.is_empty()).then_some((alt, url))
+}
+
+struct ArchivedImage {
+    path: String,
+}
+
+fn archive_image_reference(reference: &str) -> Result<ArchivedImage, String> {
+    let trimmed = reference.trim();
+    if trimmed.starts_with("data:image/") {
+        return archive_data_image(trimmed);
+    }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return download_remote_image(trimmed);
+    }
+    Ok(ArchivedImage {
+        path: trimmed.to_string(),
+    })
+}
+
+fn media_images_dir() -> Result<std::path::PathBuf, String> {
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| "无法获取 HOME 目录".to_string())?;
+    let dir = home.join(".tiangong").join("media").join("images");
+    std::fs::create_dir_all(&dir).map_err(|err| format!("创建图片归档目录失败：{err}"))?;
+    Ok(dir)
+}
+
+fn archive_data_image(data_url: &str) -> Result<ArchivedImage, String> {
+    let (header, data) = data_url
+        .split_once(',')
+        .ok_or_else(|| "data:image 缺少 base64 内容".to_string())?;
+    let mime_type = header
+        .strip_prefix("data:")
+        .and_then(|raw| raw.split(';').next())
+        .filter(|raw| raw.starts_with("image/"))
+        .unwrap_or("image/png");
+    let bytes = general_purpose::STANDARD
+        .decode(data)
+        .map_err(|err| format!("解码 data:image 失败：{err}"))?;
+    write_archived_image(bytes, mime_type)
+}
+
+fn download_remote_image(url: &str) -> Result<ArchivedImage, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|err| format!("创建图片下载客户端失败：{err}"))?;
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|err| format!("下载图片失败：{err}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("下载图片失败：HTTP {status}"));
+    }
+    let mime_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|value| value.starts_with("image/"))
+        .map(str::to_string)
+        .or_else(|| image_mime_from_reference(url))
+        .unwrap_or_else(|| "image/png".to_string());
+    let bytes = response
+        .bytes()
+        .map_err(|err| format!("读取图片响应失败：{err}"))?
+        .to_vec();
+    write_archived_image(bytes, &mime_type)
+}
+
+fn write_archived_image(bytes: Vec<u8>, mime_type: &str) -> Result<ArchivedImage, String> {
+    const MAX_IMAGE_BYTES: usize = 50 * 1024 * 1024;
+    if bytes.is_empty() {
+        return Err("图片内容为空".to_string());
+    }
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err(format!("图片过大：{} bytes", bytes.len()));
+    }
+    let ext = image_extension_from_mime(mime_type);
+    let path = media_images_dir()?.join(format!("{}.{}", scru128::new(), ext));
+    std::fs::write(&path, bytes).map_err(|err| format!("写入图片归档失败：{err}"))?;
+    Ok(ArchivedImage {
+        path: path.to_string_lossy().to_string(),
+    })
+}
+
+fn image_extension_from_mime(mime_type: &str) -> &'static str {
+    match mime_type {
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/png" => "png",
+        _ => "png",
+    }
+}
+
+fn image_mime_from_reference(reference: &str) -> Option<String> {
+    let lower = reference.trim().to_ascii_lowercase();
+    if lower.starts_with("data:image/") {
+        return lower
+            .split_once(';')
+            .map(|(mime, _)| mime.trim_start_matches("data:").to_string());
+    }
+    if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        Some("image/jpeg".to_string())
+    } else if lower.ends_with(".webp") {
+        Some("image/webp".to_string())
+    } else if lower.ends_with(".gif") {
+        Some("image/gif".to_string())
+    } else if lower.ends_with(".png") {
+        Some("image/png".to_string())
+    } else {
+        None
     }
 }
 

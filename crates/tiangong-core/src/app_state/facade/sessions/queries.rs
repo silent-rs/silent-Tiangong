@@ -75,6 +75,8 @@ impl TiangongState {
             mcp_capabilities: base.mcp_capabilities.clone(),
             skills: self.agent_config().skills.clone(),
             trust_mode: self.agent_config().trust_mode,
+            default_trust_mode: self.agent_config().default_trust_mode,
+            custom_system_prompt: self.agent_config().custom_system_prompt.clone(),
             context_limit: base.context_limit,
         }
     }

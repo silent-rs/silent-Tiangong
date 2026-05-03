@@ -6210,6 +6210,7 @@ dependencies = [
  "arc-swap",
  "async-openai",
  "backoff",
+ "base64 0.22.1",
  "chrono",
  "diffy",
  "futures-util",

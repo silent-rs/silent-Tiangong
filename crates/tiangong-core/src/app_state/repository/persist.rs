@@ -25,11 +25,13 @@ impl AppRepository {
     pub(in crate::app_state) fn persist_app_only(&self, store: &AppStore) -> Result<()> {
         ensure_parent_dir(&self.paths.app_storage_path)?;
 
+        let mut app_agent_config = store.agent.agent_config.clone();
+        app_agent_config.skills.installed.clear();
         let payload = PersistedAppState {
             active_session_id: store.session.active_session_id.clone(),
             workspace_dir: store.session.workspace_dir.clone(),
             model_list: store.provider.model_list.clone(),
-            agent_config: None,
+            agent_config: Some(app_agent_config),
         };
         let content = serde_json::to_string_pretty(&payload).context("序列化应用存储失败")?;
         fs::write(&self.paths.app_storage_path, content).with_context(|| {
@@ -68,11 +70,13 @@ impl AppRepository {
             }
         }
 
+        let mut app_agent_config = store.agent.agent_config.clone();
+        app_agent_config.skills.installed.clear();
         let payload = PersistedAppState {
             active_session_id: store.session.active_session_id.clone(),
             workspace_dir: store.session.workspace_dir.clone(),
             model_list: store.provider.model_list.clone(),
-            agent_config: None,
+            agent_config: Some(app_agent_config),
         };
         let content = serde_json::to_string_pretty(&payload).context("序列化应用存储失败")?;
         fs::write(&self.paths.app_storage_path, content).with_context(|| {

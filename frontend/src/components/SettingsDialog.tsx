@@ -2,13 +2,14 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
+import { Textarea } from './ui/textarea';
 import { Label } from './ui/label';
 import { Badge } from './ui/badge';
 import { Card, CardContent } from './ui/card';
 import { Switch } from './ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Link, Edit2, KeyRound, RefreshCw, Info, Wrench, FolderOpen, Save } from 'lucide-react';
+import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Link, Edit2, KeyRound, RefreshCw, Info, Wrench, FolderOpen, Save, ShieldCheck } from 'lucide-react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { api } from '@/api/tauri';
 import type { McpServer, Skill, SkillDetail, ServerConfig, ConnectorInfo, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo } from '@/api/tauri';
@@ -52,6 +53,10 @@ export function SettingsDialog() {
                 <FolderOpen className="w-4 h-4 mr-2" />
                 工作区
               </TabsTrigger>
+              <TabsTrigger value="agent">
+                <ShieldCheck className="w-4 h-4 mr-2" />
+                Agent
+              </TabsTrigger>
               <TabsTrigger value="llm">
                 <Settings className="w-4 h-4 mr-2" />
                 LLM 配置
@@ -77,6 +82,9 @@ export function SettingsDialog() {
             <div className="flex-1 overflow-y-auto">
               <TabsContent value="workspace">
                 <WorkspaceSettings />
+              </TabsContent>
+              <TabsContent value="agent">
+                <AgentSettings onSaveStatusChange={setSaveStatus} />
               </TabsContent>
               <TabsContent value="llm">
                 <LLMSettings onSaveStatusChange={setSaveStatus} />
@@ -189,6 +197,97 @@ function WorkspaceSettings() {
             </>
           )}
         </Button>
+      </div>
+    </div>
+  );
+}
+
+function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: SaveStatus) => void }) {
+  const [defaultTrustMode, setDefaultTrustMode] = useState('full_trust');
+  const [customPrompt, setCustomPrompt] = useState('');
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { showError } = useToast();
+
+  useEffect(() => {
+    Promise.all([
+      api.getDefaultTrustMode(),
+      api.getCustomSystemPrompt(),
+    ])
+      .then(([mode, prompt]) => {
+        setDefaultTrustMode(mode);
+        setCustomPrompt(prompt);
+      })
+      .catch((error) => {
+        console.error('加载 Agent 配置失败:', error);
+        showError('加载失败', '无法加载 Agent 配置');
+      });
+  }, [showError]);
+
+  const saveCustomPrompt = useCallback(async (prompt: string) => {
+    onSaveStatusChange('saving');
+    try {
+      await api.setCustomSystemPrompt(prompt);
+      onSaveStatusChange('saved');
+      setTimeout(() => onSaveStatusChange('idle'), 2000);
+    } catch (error) {
+      console.error('保存自定义 Prompt 失败:', error);
+      onSaveStatusChange('error');
+      showError('保存失败', '无法保存自定义 Prompt');
+    }
+  }, [onSaveStatusChange, showError]);
+
+  const handlePromptChange = (value: string) => {
+    setCustomPrompt(value);
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+    }
+    saveTimerRef.current = setTimeout(() => saveCustomPrompt(value), 500);
+  };
+
+  const handleTrustModeChange = async (mode: string) => {
+    setDefaultTrustMode(mode);
+    onSaveStatusChange('saving');
+    try {
+      await api.setDefaultTrustMode(mode);
+      onSaveStatusChange('saved');
+      setTimeout(() => onSaveStatusChange('idle'), 2000);
+    } catch (error) {
+      console.error('保存默认审核模式失败:', error);
+      onSaveStatusChange('error');
+      showError('保存失败', '无法保存默认审核模式');
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    };
+  }, []);
+
+  return (
+    <div className="p-4 space-y-5">
+      <div className="space-y-2">
+        <Label>新对话默认审核权限</Label>
+        <Select value={defaultTrustMode} onValueChange={handleTrustModeChange}>
+          <SelectTrigger className="w-56">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="full_trust">完全信任</SelectItem>
+            <SelectItem value="supervised">监督审核</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="customSystemPrompt">用户自定义特色 Prompt</Label>
+        <Textarea
+          id="customSystemPrompt"
+          value={customPrompt}
+          onChange={(event) => handlePromptChange(event.target.value)}
+          className="min-h-40 resize-y"
+          placeholder="例如：回复时保持简洁，优先给出可执行步骤。"
+        />
       </div>
     </div>
   );

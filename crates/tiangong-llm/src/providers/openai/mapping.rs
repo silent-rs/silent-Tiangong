@@ -67,15 +67,8 @@ fn build_openai_messages(req: &ProviderRequest) -> Result<Vec<ChatCompletionRequ
         match message.role {
             MessageRole::System => {}
             MessageRole::User => {
-                let text = extract_message_text(message);
-                if !text.is_empty() {
-                    messages.push(
-                        ChatCompletionRequestUserMessageArgs::default()
-                            .content(text)
-                            .build()
-                            .context("构建 user 消息失败")?
-                            .into(),
-                    );
+                if let Some(message) = build_openai_user_message(message)? {
+                    messages.push(message);
                 }
             }
             MessageRole::Tool => {
@@ -132,6 +125,50 @@ fn build_openai_messages(req: &ProviderRequest) -> Result<Vec<ChatCompletionRequ
     Ok(messages)
 }
 
+fn build_openai_user_message(
+    message: &ChatMessage,
+) -> Result<Option<ChatCompletionRequestMessage>> {
+    let images = message
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            MessageContent::Image(image) => Some(image),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let text = extract_message_text(message);
+    if images.is_empty() {
+        if text.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(
+            ChatCompletionRequestUserMessageArgs::default()
+                .content(text)
+                .build()
+                .context("构建 user 消息失败")?
+                .into(),
+        ));
+    }
+
+    let mut content = Vec::new();
+    if !text.is_empty() {
+        content.push(json!({ "type": "text", "text": text }));
+    }
+    for image in images {
+        content.push(json!({
+            "type": "image_url",
+            "image_url": { "url": image.data }
+        }));
+    }
+    Ok(Some(
+        serde_json::from_value(json!({
+            "role": "user",
+            "content": content
+        }))
+        .context("构建 OpenAI 多模态 user 消息失败")?,
+    ))
+}
+
 fn extract_message_text(message: &ChatMessage) -> String {
     message
         .content
@@ -142,6 +179,12 @@ fn extract_message_text(message: &ChatMessage) -> String {
                 crate::tool::ToolResultContent::Text(text) => text.clone(),
                 crate::tool::ToolResultContent::Json(value) => value.to_string(),
             }),
+            MessageContent::File(file) => Some(format!(
+                "<attachment title=\"{}\" mime_type=\"{}\">\n{}\n</attachment>",
+                file.title.as_deref().unwrap_or("attachment"),
+                file.mime_type,
+                file.data
+            )),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -296,15 +339,30 @@ fn inject_function_tools(
         })
         .collect::<Vec<_>>();
     obj.insert("tools".to_string(), Value::Array(tools));
-    let tool_choice = match tool_choice {
-        Some(ToolChoice::Any) => Value::String("required".to_string()),
-        Some(ToolChoice::Tool(name)) => json!({
-            "type": "function",
-            "function": { "name": name },
-        }),
-        Some(ToolChoice::Auto) | None => Value::String("auto".to_string()),
-    };
-    obj.insert("tool_choice".to_string(), tool_choice);
+    match tool_choice {
+        Some(ToolChoice::Any) => {
+            obj.insert(
+                "tool_choice".to_string(),
+                Value::String("required".to_string()),
+            );
+        }
+        Some(ToolChoice::Tool(name)) => {
+            obj.insert(
+                "tool_choice".to_string(),
+                json!({
+                    "type": "function",
+                    "function": { "name": name },
+                }),
+            );
+        }
+        // 兼容 vLLM / 部分 OpenAI-compatible 后端：
+        // 显式 `tool_choice: "auto"` 可能要求服务端开启
+        // --enable-auto-tool-choice 和 --tool-call-parser。
+        // 省略该字段时，OpenAI Chat Completions 语义仍会在提供 tools 后
+        // 使用默认自动选择策略，且不会触发这些后端的 400。
+        Some(ToolChoice::Auto) => {}
+        None => {}
+    }
 }
 
 pub fn strip_think_tags(text: &str) -> String {

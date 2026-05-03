@@ -1,17 +1,124 @@
-import { useState, KeyboardEvent, useEffect, useRef, useCallback } from 'react';
+import { useState, KeyboardEvent, ClipboardEvent, DragEvent, useEffect, useRef, useCallback } from 'react';
 import { useStore } from '@/store/useStore';
 import { Textarea } from './ui/textarea';
 import { Button } from './ui/button';
-import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle } from 'lucide-react';
+import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
-import { api } from '@/api/tauri';
+import { convertFileSrc } from '@tauri-apps/api/core';
+import { getCurrentWebview } from '@tauri-apps/api/webview';
+import type { DragDropEvent } from '@tauri-apps/api/webview';
+import { api, type MediaAsset } from '@/api/tauri';
 import { useAudioRecording } from '@/hooks/useAudioRecording';
+
+const MAX_ATTACHMENT_BASE64_BYTES = 50 * 1024 * 1024;
 
 interface MentionCandidate {
   value: string;
   label: string;
   kind: string;
   hint: string;
+}
+
+type Attachment = {
+  kind: 'image' | 'file';
+  url: string;
+  title: string;
+  mime_type?: string;
+};
+
+function imageMimeType(path: string): string | undefined {
+  const lower = path.toLowerCase();
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  if (lower.endsWith('.png')) return 'image/png';
+  return undefined;
+}
+
+function fileMimeType(path: string): string | undefined {
+  const lower = path.toLowerCase();
+  const imageMime = imageMimeType(lower);
+  if (imageMime) return imageMime;
+  if (lower.endsWith('.pdf')) return 'application/pdf';
+  if (lower.endsWith('.txt')) return 'text/plain';
+  if (lower.endsWith('.md') || lower.endsWith('.markdown')) return 'text/markdown';
+  if (lower.endsWith('.json')) return 'application/json';
+  if (lower.endsWith('.csv')) return 'text/csv';
+  return undefined;
+}
+
+function imageExtFromMime(mimeType: string): string {
+  if (mimeType === 'image/jpeg' || mimeType === 'image/jpg') return 'jpg';
+  if (mimeType === 'image/webp') return 'webp';
+  if (mimeType === 'image/gif') return 'gif';
+  return 'png';
+}
+
+function resolveAttachmentUrl(url: string): string {
+  if (!url) return '';
+  if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('asset://')) {
+    return url;
+  }
+  if (url.startsWith('/')) {
+    return convertFileSrc(url);
+  }
+  return url;
+}
+
+function clipboardImagePaths(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .map(part => part.trim())
+    .map(part => part.replace(/^["']|["']$/g, ''))
+    .map(part => {
+      if (!part.startsWith('file://')) return part;
+      try {
+        return decodeURIComponent(part.replace(/^file:\/\//, ''));
+      } catch {
+        return part.replace(/^file:\/\//, '');
+      }
+    })
+    .filter(part => !!part && !!imageMimeType(part));
+}
+
+function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error || new Error('读取附件失败'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function attachmentFromPath(path: string): Attachment {
+  const lower = path.toLowerCase();
+  const isImage = /\.(png|jpe?g|webp|gif)$/.test(lower);
+  return {
+    kind: isImage ? 'image' : 'file',
+    url: path,
+    title: path.split('/').pop() || path,
+    mime_type: fileMimeType(path),
+  };
+}
+
+function base64SizeFromDataUrl(dataUrl: string): number {
+  return dataUrl.split(',', 2)[1]?.length ?? 0;
+}
+
+function mimeTypeFromDataUrl(dataUrl: string): string | undefined {
+  const header = dataUrl.split(',', 1)[0] || '';
+  const mime = header.match(/^data:([^;]+);/)?.[1];
+  return mime || undefined;
+}
+
+function assertBase64Size(dataUrl: string, title: string) {
+  if (base64SizeFromDataUrl(dataUrl) > MAX_ATTACHMENT_BASE64_BYTES) {
+    throw new Error(`附件“${title}”超过 50MB，已停止发送。`);
+  }
+}
+
+function estimatedBase64Size(rawBytes: number): number {
+  return Math.ceil(rawBytes / 3) * 4;
 }
 
 export function MessageInput() {
@@ -33,6 +140,8 @@ export function MessageInput() {
   const lastUsage = useStore((state) => state.lastUsage);
   const [isComposing, setIsComposing] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const inputAreaRef = useRef<HTMLDivElement>(null);
+  const lastNativeDropAtRef = useRef(0);
 
   // @提及补全状态
   const [mentionOpen, setMentionOpen] = useState(false);
@@ -44,6 +153,9 @@ export function MessageInput() {
 
   // 信任模式
   const [trustMode, setTrustMode] = useState('full_trust');
+  const [hasMultimodal, setHasMultimodal] = useState(false);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [isDraggingFiles, setIsDraggingFiles] = useState(false);
 
   const currentRunStatus = isDraft
     ? 'idle'
@@ -52,7 +164,15 @@ export function MessageInput() {
 
   useEffect(() => {
     api.getTrustMode().then(setTrustMode).catch(() => {});
+    api.hasModelCapability('multimodal').then(setHasMultimodal).catch(() => setHasMultimodal(false));
   }, []);
+
+  useEffect(() => {
+    if (!hasMultimodal) {
+      setAttachments([]);
+      setIsDraggingFiles(false);
+    }
+  }, [hasMultimodal]);
 
   const toggleTrustMode = async () => {
     const newMode = trustMode === 'full_trust' ? 'supervised' : 'full_trust';
@@ -81,7 +201,8 @@ export function MessageInput() {
     ? 'idle'
     : currentSessionRunStatus || runStatus;
   const isIdle = currentSessionStatus === 'idle';
-  const canSend = inputContent.trim().length > 0;  // 执行中也允许输入
+  const canSend = inputContent.trim().length > 0 || (hasMultimodal && attachments.length > 0);  // 执行中也允许输入
+  const isTextDropTargetActive = !voiceMode && hasMultimodal && isIdle;
 
   // 自动调整文本框高度
   useEffect(() => {
@@ -153,6 +274,232 @@ export function MessageInput() {
     }, 0);
   };
 
+  const addAttachments = useCallback((items: Attachment[]) => {
+    if (items.length === 0) return;
+    setAttachments(prev => {
+      const next = [...prev];
+      for (const item of items) {
+        if (!next.some(existing => existing.url === item.url)) {
+          next.push(item);
+        }
+      }
+      return next;
+    });
+  }, []);
+
+  const addAttachmentsFromPaths = useCallback((paths: string[]) => {
+    addAttachments(paths.map(attachmentFromPath));
+  }, [addAttachments]);
+
+  const attachmentToBase64Media = async (item: Attachment): Promise<MediaAsset> => {
+    if (item.url.startsWith('data:')) {
+      assertBase64Size(item.url, item.title);
+      return {
+        kind: item.kind,
+        url: item.url,
+        title: item.title,
+        mime_type: item.mime_type || mimeTypeFromDataUrl(item.url),
+        capability: 'multimodal',
+      };
+    }
+
+    const encoded = await api.readAttachmentAsDataUrl(item.url, MAX_ATTACHMENT_BASE64_BYTES);
+    return {
+      kind: item.kind,
+      url: encoded.data_url,
+      title: item.title || encoded.title,
+      mime_type: item.mime_type || encoded.mime_type,
+      capability: 'multimodal',
+    };
+  };
+
+  const attachmentsToBase64Media = async (): Promise<MediaAsset[]> => {
+    const media: MediaAsset[] = [];
+    for (const item of attachments) {
+      media.push(await attachmentToBase64Media(item));
+    }
+    return media;
+  };
+
+  useEffect(() => {
+    if (!isTextDropTargetActive) {
+      setIsDraggingFiles(false);
+      return;
+    }
+
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    getCurrentWebview().onDragDropEvent((event) => {
+      const payload = event.payload as DragDropEvent;
+      if (payload.type === 'leave') {
+        setIsDraggingFiles(false);
+        return;
+      }
+      if (payload.type === 'enter' || payload.type === 'over') {
+        setIsDraggingFiles(true);
+        return;
+      }
+      if (payload.type === 'drop') {
+        setIsDraggingFiles(false);
+        if (payload.paths.length > 0) {
+          lastNativeDropAtRef.current = Date.now();
+          addAttachmentsFromPaths(payload.paths);
+          textareaRef.current?.focus();
+        }
+      }
+    }).then((stopListening) => {
+      if (disposed) {
+        stopListening();
+      } else {
+        unlisten = stopListening;
+      }
+    }).catch((err) => {
+      console.error('监听文件拖放失败:', err);
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [addAttachmentsFromPaths, isTextDropTargetActive]);
+
+  const filesToAttachments = async (files: File[]) => {
+    const items = await Promise.all(files.map(async (file, index): Promise<Attachment> => {
+      const title = file.name || `dropped-file-${index + 1}`;
+      if (estimatedBase64Size(file.size) > MAX_ATTACHMENT_BASE64_BYTES) {
+        throw new Error(`附件“${title}”超过 50MB，已停止添加。`);
+      }
+      const fileWithPath = file as File & { path?: string };
+      if (fileWithPath.path) {
+        return attachmentFromPath(fileWithPath.path);
+      }
+      if (file.type.startsWith('image/')) {
+        const mimeType = file.type || 'image/png';
+        return {
+          kind: 'image',
+          url: await fileToDataUrl(file),
+          title: file.name || `dropped-image-${Date.now()}-${index + 1}.${imageExtFromMime(mimeType)}`,
+          mime_type: mimeType,
+        };
+      }
+      return {
+        kind: 'file',
+        url: await fileToDataUrl(file),
+        title,
+        mime_type: file.type || 'application/octet-stream',
+      };
+    }));
+    addAttachments(items);
+  };
+
+  const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
+    if (!hasMultimodal || !isIdle) return;
+    if (Array.from(e.dataTransfer.types).includes('Files')) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      setIsDraggingFiles(true);
+    }
+  };
+
+  const handleDragLeave = (e: DragEvent<HTMLDivElement>) => {
+    if (!inputAreaRef.current?.contains(e.relatedTarget as Node | null)) {
+      setIsDraggingFiles(false);
+    }
+  };
+
+  const handleDrop = async (e: DragEvent<HTMLDivElement>) => {
+    if (!hasMultimodal || !isIdle) return;
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length === 0) return;
+    e.preventDefault();
+    setIsDraggingFiles(false);
+    if (Date.now() - lastNativeDropAtRef.current < 500) return;
+    try {
+      await filesToAttachments(files);
+      textareaRef.current?.focus();
+    } catch (err) {
+      console.error('读取拖放文件失败:', err);
+      alert(err instanceof Error ? err.message : '读取拖放文件失败');
+    }
+  };
+
+  const handlePaste = async (e: ClipboardEvent<HTMLTextAreaElement>) => {
+    if (!hasMultimodal || !isIdle) return;
+
+    const files = Array.from(e.clipboardData.files).filter(file =>
+      file.type.startsWith('image/')
+    );
+    if (files.length > 0) {
+      e.preventDefault();
+      try {
+        const pasted = await Promise.all(files.map(async (file, index) => {
+          const mimeType = file.type || 'image/png';
+          const title = file.name || `pasted-image-${Date.now()}-${index + 1}.${imageExtFromMime(mimeType)}`;
+          if (estimatedBase64Size(file.size) > MAX_ATTACHMENT_BASE64_BYTES) {
+            throw new Error(`附件“${title}”超过 50MB，已停止添加。`);
+          }
+          return {
+            kind: 'image' as const,
+            url: await fileToDataUrl(file),
+            title,
+            mime_type: mimeType,
+          };
+        }));
+        addAttachments(pasted);
+      } catch (err) {
+        console.error('读取粘贴图片失败:', err);
+        alert(err instanceof Error ? err.message : '读取粘贴图片失败');
+      }
+      return;
+    }
+
+    const imageItems = Array.from(e.clipboardData.items).filter(item =>
+      item.kind === 'file' && item.type.startsWith('image/')
+    );
+    if (imageItems.length > 0) {
+      e.preventDefault();
+      try {
+        const pasted = await Promise.all(imageItems.map(async (item, index): Promise<Attachment | null> => {
+          const file = item.getAsFile();
+          if (!file) return null;
+          const mimeType = file.type || item.type || 'image/png';
+          const title = file.name || `pasted-image-${Date.now()}-${index + 1}.${imageExtFromMime(mimeType)}`;
+          if (estimatedBase64Size(file.size) > MAX_ATTACHMENT_BASE64_BYTES) {
+            throw new Error(`附件“${title}”超过 50MB，已停止添加。`);
+          }
+          return {
+            kind: 'image' as const,
+            url: await fileToDataUrl(file),
+            title,
+            mime_type: mimeType,
+          };
+        }));
+        addAttachments(pasted.filter((item): item is Attachment => item !== null));
+      } catch (err) {
+        console.error('读取粘贴图片失败:', err);
+        alert(err instanceof Error ? err.message : '读取粘贴图片失败');
+      }
+      return;
+    }
+
+    const text = e.clipboardData.getData('text/plain');
+    const paths = clipboardImagePaths(text);
+    const nonEmptyLines = text
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean);
+    if (paths.length > 0 && paths.length === nonEmptyLines.length) {
+      e.preventDefault();
+      addAttachments(paths.map(path => ({
+        kind: 'image',
+        url: path,
+        title: path.split('/').pop() || path,
+        mime_type: imageMimeType(path),
+      })));
+    }
+  };
+
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (mentionOpen && filteredCandidates.length > 0) {
       if (e.key === 'ArrowDown') { e.preventDefault(); setMentionIndex(i => (i + 1) % filteredCandidates.length); return; }
@@ -170,15 +517,31 @@ export function MessageInput() {
   const handleSend = async () => {
     if (!canSend) return;
     setMentionOpen(false);
+    if (attachments.length > 0 && !hasMultimodal) {
+      setAttachments([]);
+      alert('未配置多模态模型，文件上传能力已关闭。');
+      return;
+    }
+    let media: MediaAsset[];
+    try {
+      media = await attachmentsToBase64Media();
+    } catch (err) {
+      console.error('附件转换失败:', err);
+      alert(err instanceof Error ? err.message : '附件转换失败');
+      return;
+    }
+    const content = inputContent.trim() || (attachments.length > 0 ? '请处理这些附件。' : inputContent);
     if (isIdle) {
-      sendMessage(inputContent);
+      await sendMessage(content, media);
+      setAttachments([]);
     } else {
       // 执行中：追加消息到正在执行的 turn
       if (!activeSessionId) return;
       try {
-        const appended = await api.appendMessage(activeSessionId, inputContent);
+        const appended = await api.appendMessage(activeSessionId, content);
         if (appended) {
           setInputContent('');
+          setAttachments([]);
         } else {
           console.warn('当前会话没有正在执行的任务，追加消息未发送');
         }
@@ -189,6 +552,29 @@ export function MessageInput() {
   };
 
   const handleCancel = () => { cancelTurn(); };
+
+  const handleAttachFiles = async () => {
+    if (!hasMultimodal) return;
+    try {
+      const selected = await open({
+        multiple: true,
+        directory: false,
+        title: '选择图片或文件',
+        filters: [
+          { name: '图片和文件', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'pdf', 'txt', 'md', 'json', 'csv'] },
+        ],
+      });
+      const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
+      if (paths.length === 0) return;
+      addAttachmentsFromPaths(paths);
+    } catch (e) {
+      console.error('选择附件失败:', e);
+    }
+  };
+
+  const removeAttachment = (url: string) => {
+    setAttachments(prev => prev.filter(item => item.url !== url));
+  };
 
   const handleChangeCwd = async () => {
     try {
@@ -397,7 +783,13 @@ export function MessageInput() {
         ) : (
           // ===== 文字模式 =====
           <div>
-            <div className="relative">
+            <div
+              ref={inputAreaRef}
+              className="relative"
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+            >
               {/* @提及补全下拉列表 */}
               {mentionOpen && filteredCandidates.length > 0 && (
                 <div
@@ -427,11 +819,43 @@ export function MessageInput() {
                 </div>
               )}
 
+              {attachments.length > 0 && (
+                <div className="mb-2 flex flex-wrap gap-1.5">
+                  {attachments.map(item => (
+                    <span
+                      key={item.url}
+                      className="inline-flex h-9 max-w-[260px] items-center gap-1.5 rounded-md border bg-muted/40 px-2 text-xs"
+                      title={item.url}
+                    >
+                      {item.kind === 'image' ? (
+                        <img
+                          src={resolveAttachmentUrl(item.url)}
+                          alt={item.title}
+                          className="h-6 w-6 shrink-0 rounded object-cover"
+                        />
+                      ) : (
+                        <Paperclip className="h-3 w-3 shrink-0" />
+                      )}
+                      <span className="truncate">{item.title}</span>
+                      <button
+                        type="button"
+                        onClick={() => removeAttachment(item.url)}
+                        className="ml-1 text-muted-foreground hover:text-foreground"
+                        title="移除附件"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+
               <Textarea
                 ref={textareaRef}
                 value={inputContent}
                 onChange={(e) => handleInputChange(e.target.value)}
                 onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
                 onCompositionStart={() => setIsComposing(true)}
                 onCompositionEnd={() => setIsComposing(false)}
                 onBlur={() => setTimeout(() => setMentionOpen(false), 150)}
@@ -440,10 +864,26 @@ export function MessageInput() {
                     ? '输入消息... (⌘+Enter 发送，@ 引用 Skill/MCP)'
                     : '追加指示... (⌘+Enter 发送)'
                 }
-                className="min-h-[60px] max-h-[200px] resize-none pr-24 bg-muted/50 focus-visible:ring-ring"
+                className="min-h-[60px] max-h-[200px] resize-none pr-32 bg-muted/50 focus-visible:ring-ring"
               />
+              {isDraggingFiles && (
+                <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-md border border-dashed border-primary bg-background/80 text-sm text-primary">
+                  松开添加文件
+                </div>
+              )}
               {/* 按钮区域 */}
               <div className="absolute right-2 bottom-2 flex items-center gap-1">
+                {hasMultimodal && isIdle && (
+                  <Button
+                    onClick={handleAttachFiles}
+                    size="icon"
+                    variant="ghost"
+                    className="h-8 w-8 rounded-md text-muted-foreground hover:text-foreground"
+                    title="添加图片或文件"
+                  >
+                    <Paperclip className="w-4 h-4" />
+                  </Button>
+                )}
                 {hasStt && isIdle && (
                   <Button
                     onClick={() => setVoiceMode(true)}

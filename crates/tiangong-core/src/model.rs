@@ -1,9 +1,11 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::mcp::build_mcp_tools_system_prompt;
 use crate::session::{Message, MessageRole};
 use anyhow::{Context, Result, anyhow};
+use base64::{Engine as _, engine::general_purpose};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1019,6 +1021,24 @@ fn provider_message_from_session(msg: &Message) -> Option<ChatMessage> {
     if !msg.content.trim().is_empty() {
         content.push(LlmMessageContent::Text(msg.content.trim().to_string()));
     }
+    if msg.role == MessageRole::User {
+        let image_contents = message_image_contents(msg);
+        if !image_contents.is_empty() {
+            content.push(LlmMessageContent::Text(format!(
+                "本条用户消息包含 {} 张图片附件，图片内容已随消息提供，请直接基于附件分析。",
+                image_contents.len()
+            )));
+        }
+        content.extend(image_contents);
+        let file_contents = message_file_contents(msg);
+        if !file_contents.is_empty() {
+            content.push(LlmMessageContent::Text(format!(
+                "本条用户消息包含 {} 个文件附件，文件内容已以 base64 data URL 随消息提供，请直接基于附件分析。",
+                file_contents.len()
+            )));
+        }
+        content.extend(file_contents);
+    }
     content.extend(msg.tool_calls.iter().map(|call| {
         LlmMessageContent::ToolCall(LlmToolCall {
             id: call.id.clone(),
@@ -1031,6 +1051,125 @@ fn provider_message_from_session(msg: &Message) -> Option<ChatMessage> {
     }
 
     Some(ChatMessage::new(role, content))
+}
+
+fn message_image_contents(msg: &Message) -> Vec<LlmMessageContent> {
+    let mut refs = Vec::new();
+    for asset in &msg.media {
+        if matches!(
+            asset.kind,
+            tiangong_types::MediaKind::Image | tiangong_types::MediaKind::File
+        ) && looks_like_image_reference(&asset.url)
+        {
+            refs.push(asset.url.clone());
+        }
+    }
+    refs.extend(extract_image_paths_from_text(&msg.content));
+    refs.sort();
+    refs.dedup();
+
+    refs.into_iter()
+        .filter_map(|value| image_content_from_reference(&value))
+        .map(LlmMessageContent::Image)
+        .collect()
+}
+
+fn message_file_contents(msg: &Message) -> Vec<LlmMessageContent> {
+    msg.media
+        .iter()
+        .filter(|asset| matches!(asset.kind, tiangong_types::MediaKind::File))
+        .filter(|asset| asset.url.trim_start().starts_with("data:"))
+        .filter(|asset| !looks_like_image_reference(&asset.url))
+        .map(|asset| {
+            LlmMessageContent::File(tiangong_llm::message::FileContent {
+                mime_type: asset
+                    .mime_type
+                    .clone()
+                    .or_else(|| mime_from_data_url(&asset.url))
+                    .unwrap_or_else(|| "application/octet-stream".to_string()),
+                data: asset.url.clone(),
+                title: asset.title.clone(),
+            })
+        })
+        .collect()
+}
+
+fn image_content_from_reference(value: &str) -> Option<tiangong_llm::message::ImageContent> {
+    let trimmed = value.trim();
+    if trimmed.starts_with("data:image/")
+        || trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+    {
+        return Some(tiangong_llm::message::ImageContent {
+            mime_type: image_mime_from_reference(trimmed)
+                .unwrap_or_else(|| "image/png".to_string()),
+            data: trimmed.to_string(),
+        });
+    }
+
+    let bytes = std::fs::read(Path::new(trimmed)).ok()?;
+    let mime_type = image_mime_from_reference(trimmed).unwrap_or_else(|| "image/png".to_string());
+    let data = format!(
+        "data:{mime_type};base64,{}",
+        general_purpose::STANDARD.encode(bytes)
+    );
+    Some(tiangong_llm::message::ImageContent { mime_type, data })
+}
+
+fn looks_like_image_reference(value: &str) -> bool {
+    let lower = value.trim().to_ascii_lowercase();
+    lower.starts_with("data:image/")
+        || lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.ends_with(".png")
+        || lower.ends_with(".jpg")
+        || lower.ends_with(".jpeg")
+        || lower.ends_with(".webp")
+        || lower.ends_with(".gif")
+}
+
+fn extract_image_paths_from_text(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(|part| {
+            part.trim_matches(|c: char| {
+                matches!(
+                    c,
+                    '"' | '\'' | '`' | ',' | ';' | ':' | ')' | '(' | '[' | ']'
+                )
+            })
+        })
+        .filter(|part| looks_like_image_reference(part))
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn image_mime_from_reference(value: &str) -> Option<String> {
+    let lower = value.trim().to_ascii_lowercase();
+    if lower.starts_with("data:image/") {
+        return lower
+            .split_once(';')
+            .map(|(mime, _)| mime.trim_start_matches("data:").to_string());
+    }
+    if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        Some("image/jpeg".to_string())
+    } else if lower.ends_with(".webp") {
+        Some("image/webp".to_string())
+    } else if lower.ends_with(".gif") {
+        Some("image/gif".to_string())
+    } else if lower.ends_with(".png") {
+        Some("image/png".to_string())
+    } else {
+        None
+    }
+}
+
+fn mime_from_data_url(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    trimmed
+        .strip_prefix("data:")
+        .and_then(|raw| raw.split(';').next())
+        .filter(|mime| !mime.trim().is_empty())
+        .map(str::to_string)
 }
 
 fn sanitize_provider_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {

@@ -1,23 +1,42 @@
 # TODO - 天工当前开发任务
 
-> 最后更新：2026-04-30
-> 当前主线：Desktop 后台对话完成系统通知
+> 最后更新：2026-05-03
+> 当前主线：Agent 偏好与多模态输入能力
 > 参考：`PLAN.md`、`docs/requirements.md`
 
 ---
 
 ## 当前结论
 
-接下来基于 RFC-0010 实现 Desktop 后台对话完成系统通知。该能力作为 Desktop 友好交互体验补充，在非当前查看会话于后台完成时使用系统通知提醒用户，并保证权限拒绝或通知发送失败不影响对话执行与快照同步。
+接下来实现 Agent 偏好与多模态输入能力，覆盖默认审核权限、用户自定义特色 Prompt、Core 当前时间工具，以及 GUI 输入图片/文件后调用多模态模型处理的主链路。
 
 能力边界：
 
-- 首期仅覆盖 Desktop 模式，不扩展到 Server / Connector。
-- 后台会话完成时发送系统通知，当前查看会话完成不重复通知。
-- 通知主链路使用 Tauri 原生 notification 插件，不再依赖浏览器 Notification API。
-- 权限拒绝、插件不可用或发送失败时静默降级，不影响运行时状态同步。
+- 默认审核权限作为持久化配置，创建新对话时使用，当前对话仍允许临时调整。
+- 用户自定义特色 Prompt 注入 system prompt，保证新对话和上下文压缩后的请求继续生效。
+- `current_time` 作为 Core 内置工具提供，不依赖外部 MCP。
+- GUI 仅在配置 `multimodal` routing 时展示附件入口。
+- 首期多模态输入重点支持图片；普通文件先以结构化附件和路径上下文进入会话，后续再扩展文件内容抽取。
 
-旧 `web_fetch` 基础能力主线已完成，本文档切换到 Desktop 后台通知能力。
+旧 Desktop 后台通知主线已完成，本文档切换到 Agent 偏好与多模态输入能力。
+
+## P0 - Agent 偏好与多模态输入能力
+
+- [x] 在 `docs/requirements.md` 中补充默认审核、自定义 Prompt、current_time 和多模态输入要求。
+- [x] 创建独立功能分支 `feature/multimodal-default-approval-prompt`。
+- [x] 持久化默认审核权限和用户自定义特色 Prompt。
+- [x] 新对话使用默认审核权限，当前会话允许继续调整。
+- [x] 自定义 Prompt 注入 system prompt。
+- [x] 增加 Core 内置 `current_time` 工具。
+- [x] 配置 `multimodal` routing 时开放 GUI 附件入口。
+- [x] 支持图片附件和图片路径进入多模态模型请求。
+- [x] 支持将文件拖动到 GUI 用户输入框添加为附件，并在输入框上方预览。
+- [x] Desktop 发送附件前统一转为 base64 data URL，任一附件超过 50MB 时停止请求并提示。
+- [x] 包含任意附件的用户消息优先使用多模态模型解析后再回答。
+- [x] 未配置多模态模型时关闭文件上传能力，并在后端拒绝带附件消息。
+- [x] 用户输入图片附件由 Core 归档到本地后再写入会话。
+- [x] 图片生成结果优先归档到本地并在会话中引用本地图片。
+- [x] 使用 `yarn build` 和 `cargo check --workspace` 验证。
 
 ## P0 - Desktop 后台对话完成系统通知
 

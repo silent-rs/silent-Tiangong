@@ -61,6 +61,15 @@ pub(crate) fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
             }),
         },
         FunctionToolSpec {
+            name: "current_time".to_string(),
+            description: "获取当前本地时间、RFC3339 时间、Unix 时间戳和时区偏移。涉及今天、现在、当前时间、日期换算等请求时使用。".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
+        },
+        FunctionToolSpec {
             name: "web_fetch".to_string(),
             description: "受控获取 HTTP/HTTPS URL。text 模式读取网页/文本正文；download 模式下载在线文件到允许写入目录，可替代 curl/wget。".to_string(),
             parameters: serde_json::json!({
@@ -402,6 +411,10 @@ pub(crate) fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<
                 args,
             })
         }
+        "current_time" => Ok(ToolCall {
+            name: ToolName::CurrentTime,
+            args,
+        }),
         "replace_in_file" => {
             let path = call
                 .arguments
