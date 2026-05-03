@@ -179,6 +179,12 @@ fn extract_message_text(message: &ChatMessage) -> String {
                 crate::tool::ToolResultContent::Text(text) => text.clone(),
                 crate::tool::ToolResultContent::Json(value) => value.to_string(),
             }),
+            MessageContent::File(file) => Some(format!(
+                "<attachment title=\"{}\" mime_type=\"{}\">\n{}\n</attachment>",
+                file.title.as_deref().unwrap_or("attachment"),
+                file.mime_type,
+                file.data
+            )),
             _ => None,
         })
         .collect::<Vec<_>>()

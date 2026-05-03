@@ -52,6 +52,13 @@ export interface MediaAsset {
   capability?: string;
 }
 
+export interface AttachmentDataUrl {
+  data_url: string;
+  mime_type: string;
+  title: string;
+  base64_size: number;
+}
+
 export interface TaskCost {
   task_id: string;
   requests: RequestCost[];
@@ -235,6 +242,9 @@ export const api = {
 
   sendMessageWithMedia: (content: string, media: MediaAsset[]): Promise<void> =>
     invoke('send_message_with_media', { content, media }),
+
+  readAttachmentAsDataUrl: (path: string, maxBase64Bytes?: number): Promise<AttachmentDataUrl> =>
+    invoke('read_attachment_as_data_url', { path, maxBase64Bytes }),
 
   cancelTurn: (): Promise<boolean> =>
     invoke('cancel_turn'),

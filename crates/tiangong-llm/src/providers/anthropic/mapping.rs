@@ -136,6 +136,21 @@ fn map_content(content: &MessageContent) -> Result<ContentBlockParam, LlmError> 
                 },
             })
         }
+        MessageContent::File(file) => {
+            let data = file
+                .data
+                .split_once(',')
+                .map(|(_, data)| data)
+                .unwrap_or(&file.data)
+                .to_string();
+            Ok(ContentBlockParam::Document {
+                source: ImageSourceParam {
+                    source_type: "base64".to_string(),
+                    media_type: file.mime_type.clone(),
+                    data,
+                },
+            })
+        }
     }
 }
 

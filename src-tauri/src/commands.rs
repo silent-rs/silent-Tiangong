@@ -1,9 +1,99 @@
 use crate::app::TiangongApp;
 use crate::view::*;
+use base64::{Engine as _, engine::general_purpose};
 use std::path::PathBuf;
 use std::thread;
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 use tauri_plugin_notification::{NotificationExt, PermissionState};
+
+const MAX_ATTACHMENT_BASE64_BYTES: u64 = 50 * 1024 * 1024;
+
+#[derive(Debug, serde::Serialize)]
+pub struct AttachmentDataUrl {
+    pub data_url: String,
+    pub mime_type: String,
+    pub title: String,
+    pub base64_size: u64,
+}
+
+#[tauri::command]
+pub fn read_attachment_as_data_url(
+    path: String,
+    max_base64_bytes: Option<u64>,
+    state: State<TiangongApp>,
+) -> Result<AttachmentDataUrl, String> {
+    ensure_multimodal_enabled(&state)?;
+
+    let path_buf = PathBuf::from(&path);
+    if !path_buf.is_file() {
+        return Err(format!("附件不是可读取文件：{path}"));
+    }
+
+    let max_base64_bytes = max_base64_bytes.unwrap_or(MAX_ATTACHMENT_BASE64_BYTES);
+    let metadata = std::fs::metadata(&path_buf).map_err(|e| format!("读取附件信息失败：{e}"))?;
+    let estimated_base64_size = metadata.len().div_ceil(3) * 4;
+    if estimated_base64_size > max_base64_bytes {
+        return Err(format!(
+            "附件过大：base64 编码后约 {:.1}MB，超过 50MB 限制",
+            estimated_base64_size as f64 / 1024.0 / 1024.0
+        ));
+    }
+
+    let bytes = std::fs::read(&path_buf).map_err(|e| format!("读取附件失败：{e}"))?;
+    let encoded = general_purpose::STANDARD.encode(bytes);
+    if encoded.len() as u64 > max_base64_bytes {
+        return Err("附件过大：base64 编码后超过 50MB 限制".to_string());
+    }
+
+    let mime_type = mime_type_from_path(&path_buf);
+    let title = path_buf
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(path.as_str())
+        .to_string();
+    Ok(AttachmentDataUrl {
+        data_url: format!("data:{mime_type};base64,{encoded}"),
+        mime_type,
+        title,
+        base64_size: encoded.len() as u64,
+    })
+}
+
+fn mime_type_from_path(path: &std::path::Path) -> String {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "pdf" => "application/pdf",
+        "txt" => "text/plain",
+        "md" | "markdown" => "text/markdown",
+        "json" => "application/json",
+        "csv" => "text/csv",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
+fn ensure_multimodal_enabled(state: &State<TiangongApp>) -> Result<(), String> {
+    state.with_state_read(|core_state| {
+        let enabled = has_capability_in_state(
+            core_state,
+            tiangong_core::models_config::ModelCapability::Multimodal,
+        );
+        if enabled {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("未配置多模态模型，文件上传能力已关闭。"))
+        }
+    })
+}
 
 #[tauri::command]
 pub fn request_desktop_notification_permission(app: AppHandle) -> Result<bool, String> {
@@ -625,6 +715,9 @@ pub fn send_message_with_media(
     _window: Window,
     state: State<TiangongApp>,
 ) -> Result<(), String> {
+    if !media.is_empty() {
+        ensure_multimodal_enabled(&state)?;
+    }
     send_message_inner(content, media, app, state)
 }
 

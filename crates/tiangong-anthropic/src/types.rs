@@ -34,6 +34,9 @@ pub enum ContentBlockParam {
     Image {
         source: ImageSourceParam,
     },
+    Document {
+        source: ImageSourceParam,
+    },
     ToolUse {
         id: String,
         name: String,

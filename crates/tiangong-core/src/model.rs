@@ -1030,6 +1030,14 @@ fn provider_message_from_session(msg: &Message) -> Option<ChatMessage> {
             )));
         }
         content.extend(image_contents);
+        let file_contents = message_file_contents(msg);
+        if !file_contents.is_empty() {
+            content.push(LlmMessageContent::Text(format!(
+                "本条用户消息包含 {} 个文件附件，文件内容已以 base64 data URL 随消息提供，请直接基于附件分析。",
+                file_contents.len()
+            )));
+        }
+        content.extend(file_contents);
     }
     content.extend(msg.tool_calls.iter().map(|call| {
         LlmMessageContent::ToolCall(LlmToolCall {
@@ -1063,6 +1071,26 @@ fn message_image_contents(msg: &Message) -> Vec<LlmMessageContent> {
     refs.into_iter()
         .filter_map(|value| image_content_from_reference(&value))
         .map(LlmMessageContent::Image)
+        .collect()
+}
+
+fn message_file_contents(msg: &Message) -> Vec<LlmMessageContent> {
+    msg.media
+        .iter()
+        .filter(|asset| matches!(asset.kind, tiangong_types::MediaKind::File))
+        .filter(|asset| asset.url.trim_start().starts_with("data:"))
+        .filter(|asset| !looks_like_image_reference(&asset.url))
+        .map(|asset| {
+            LlmMessageContent::File(tiangong_llm::message::FileContent {
+                mime_type: asset
+                    .mime_type
+                    .clone()
+                    .or_else(|| mime_from_data_url(&asset.url))
+                    .unwrap_or_else(|| "application/octet-stream".to_string()),
+                data: asset.url.clone(),
+                title: asset.title.clone(),
+            })
+        })
         .collect()
 }
 
@@ -1133,6 +1161,15 @@ fn image_mime_from_reference(value: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+fn mime_from_data_url(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    trimmed
+        .strip_prefix("data:")
+        .and_then(|raw| raw.split(';').next())
+        .filter(|mime| !mime.trim().is_empty())
+        .map(str::to_string)
 }
 
 fn sanitize_provider_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {

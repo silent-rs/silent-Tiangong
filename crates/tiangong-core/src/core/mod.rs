@@ -2065,23 +2065,19 @@ fn select_client_for_request<'a>(
     engine: &'a RuntimeEngine,
     req: &ModelRequest,
 ) -> &'a SingleProviderClient {
-    if req.context.iter().any(message_has_image_input) {
+    if req.context.iter().any(message_has_multimodal_input) {
         engine.multimodal_client()
     } else {
         engine.client()
     }
 }
 
-fn message_has_image_input(message: &Message) -> bool {
-    message.media.iter().any(|asset| {
-        matches!(
-            asset.kind,
-            tiangong_types::MediaKind::Image | tiangong_types::MediaKind::File
-        ) && looks_like_image_reference(&asset.url)
-    }) || extract_image_paths_from_text(&message.content)
-        .into_iter()
-        .next()
-        .is_some()
+fn message_has_multimodal_input(message: &Message) -> bool {
+    !message.media.is_empty()
+        || extract_image_paths_from_text(&message.content)
+            .into_iter()
+            .next()
+            .is_some()
 }
 
 fn looks_like_image_reference(value: &str) -> bool {
