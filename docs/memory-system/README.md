@@ -27,6 +27,8 @@
 | [08-并发安全策略.md](08-并发安全策略.md) | 并发安全策略 |
 | [09-分阶段落地路径.md](09-分阶段落地路径.md) | 分阶段落地路径 |
 | [10-预算控制与性能策略.md](10-预算控制与性能策略.md) | 预算控制与性能策略 |
+| [11-当前开发状态与接手指南.md](11-当前开发状态与接手指南.md) | 当前开发状态与接手指南 |
+| [12-缺口清单与专用MemoryLLM.md](12-缺口清单与专用MemoryLLM.md) | 缺口清单与专用 Memory LLM 约束 |
 
 ## 与现有架构的关系
 
@@ -42,6 +44,12 @@ Memory 系统作为独立 crate `tiangong-memory` 实现，采用 **Actor 模型
 | Injection 层 | Markdown 文件 | 人类可读的注入内容 |
 
 > **降级策略**：当 `LlmConfig.embedding` 未配置时，Qdrant 引擎不初始化，向量语义检索和存储自动跳过，系统降级为"SQLite + Tantivy"双层架构，仅依赖全文检索召回。
+
+## 专用 Memory LLM
+
+Memory 内部的文本生成任务必须使用专用 `memory` capability 对应的 LLM，不得静默复用主 `chat` 模型或旧 `lite` 模型。涉及的任务包括 Episode 提取、Recall anchor 规划、Deep Recall 裁决、Recall 结果整理和 Meso Entity/Decision 提炼。
+
+当 `models.json` 未配置 `routing.memory` 时，Memory 只能降级到规则策略，并记录可诊断日志；主对话链路继续运行，但 Memory 的 LLM 增强能力视为关闭。
 
 ```
 crates/
@@ -71,7 +79,7 @@ tiangong-cli、tiangong-server、src-tauri
         └─→ tiangong-llm     ← EmbeddingProvider / RerankProvider
 
 tiangong-memory
-  └─→ tiangong-llm     ← Embedding/Rerank trait 引用
+  └─→ tiangong-llm     ← Memory LLM / Embedding / Rerank trait 引用
 ```
 
 **通讯模型**：
