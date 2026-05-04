@@ -2,7 +2,7 @@
 
 > 更新日期：2026-05-03
 
-本文档记录当前 Memory 系统相对设计目标的剩余缺口，并冻结一条新的模型配置约束：Memory 内部所有文本生成任务必须使用专用 `memory` LLM，不再复用主 `chat` 模型。
+本文档记录当前 Memory 系统相对设计目标的剩余缺口，并冻结模型配置约束：Memory 内部所有模型调用必须使用独立 Memory 配置，不再复用主 `chat` 模型，也不挂在主 `models.json` routing 上。
 
 ## 当前完成度判断
 
@@ -31,21 +31,32 @@ Memory 不能再把主对话模型当成内部推理模型使用。主 `chat` �
 
 ### 配置要求
 
-`models.json` 必须支持 `memory` capability，并在 `routing.memory` 中指定专用模型。
+Memory runtime 模型配置必须独立保存在 `~/.tiangong/memory/config.json`，由 `tiangong-memory` 提供配置类型、加载、保存和 `MemoryOptions` 转换能力。主 `models.json` 不再包含 `memory` capability 或 `routing.memory`；前端配置入口放在 LLM 配置下，选择项来自已有 Models，保存时由 Tauri 解析为 Memory runtime 端点配置。
 
 示例：
 
 ```json
 {
-  "routing": {
-    "chat": "main-chat",
-    "memory": "memory-small",
-    "embedding": "embedding-model"
-  }
+  "model": {
+    "base_url": "https://api.example.com/v1",
+    "api_key": "${MEMORY_API_KEY}",
+    "model": "memory-small",
+    "protocol": "openai_compatible",
+    "timeout_ms": 60000
+  },
+  "embedding": {
+    "base_url": "https://api.example.com/v1",
+    "api_key": "${MEMORY_API_KEY}",
+    "model": "bge-m3",
+    "protocol": "openai_compatible",
+    "timeout_ms": 60000,
+    "dimension": 1024
+  },
+  "vector_mode": "embedded"
 }
 ```
 
-Memory 内部文本生成任务只允许读取 `routing.memory`：
+Memory 内部文本生成任务只允许读取独立 Memory LLM 配置：
 
 - EpisodeWriter 结构化提取。
 - Recall anchor 规划。
@@ -55,9 +66,9 @@ Memory 内部文本生成任务只允许读取 `routing.memory`：
 
 ### 降级规则
 
-- 已配置 `memory`：使用专用 Memory LLM。
-- 未配置 `memory`：Memory LLM 步骤降级为规则策略，并记录日志提示缺少 `memory` routing。
-- 禁止行为：未配置 `memory` 时静默复用 `chat` 主模型或旧 `lite` 模型。
+- 已配置 Memory LLM：使用专用 Memory LLM。
+- 未配置 Memory LLM：Memory LLM 步骤降级为规则策略，并记录日志提示缺少 Memory LLM 配置。
+- 禁止行为：未配置 Memory LLM 时静默复用 `chat` 主模型或旧 `lite` 模型。
 
 ### 设计动机
 
@@ -80,18 +91,18 @@ Memory 内部文本生成任务只允许读取 `routing.memory`：
 - 同一 workspace 同时启动多个入口时只有一个 leader，其余入口使用 remote handle。
 - leader 退出后 follower 自动接替，并且接替前后写入/召回都可用。
 
-### P0：专用 Memory LLM 配置缺口
+### P0：Memory 独立模型配置缺口（已完成）
 
-1. 当前 Core 配置转换仍倾向使用 `lite` 或 `chat` 端点构造 Memory model。
-2. `models.json` 的 capability 列表和 routing 语义尚未正式纳入 `memory`。
-3. Memory 内部 LLM 调用缺少“禁止回退到主模型”的硬约束。
+已完成：
 
-验收标准：
-
-- `ModelCapability` 增加 `memory`。
-- `CoreConfig::to_memory_options()` 只从 `routing.memory` 读取文本模型。
-- 未配置 `memory` 时，EpisodeWriter、Recall anchor、Deep Recall、Recall synthesis、Meso 提炼全部走规则 fallback。
-- 日志能明确提示 Memory LLM 未配置，而不是误报为普通模型失败。
+- `tiangong-memory` 已增加独立 `MemoryConfig`，持久化到 `~/.tiangong/memory/config.json`。
+- Memory LLM、Embedding、Rerank 配置已从主 `models.json` / routing 拆出。
+- `CoreConfig::to_memory_options()` 只读取 Memory 独立配置，不再从主模型配置派生。
+- Tauri 已提供 `get_memory_config` / `set_memory_config`。
+- 前端已将 Memory 配置放到 LLM 配置下，并从已有 Models 中选择 Memory LLM、Embedding、Rerank。
+- EpisodeWriter、Recall anchor 规划、Deep Recall 裁决、Recall synthesis 和 Meso 提炼共享的 Memory model 来源已收口到专用 Memory LLM。
+- 未配置 Memory LLM 时，MemoryOptions 不再携带文本模型，上述步骤全部走规则 fallback。
+- 已补测试禁止未配置 Memory LLM 时静默复用 `chat` 主模型或旧 `lite` 模型。
 
 ### P1：真实模型路径验证不足
 
@@ -143,7 +154,7 @@ Memory 内部文本生成任务只允许读取 `routing.memory`：
 
 ## 建议推进顺序
 
-1. 先实现专用 `memory` capability 与配置转换，阻断继续复用主模型。
+1. 先实现 Memory 独立模型配置，阻断继续复用主模型。
 2. 将 Core Memory 启动入口切换为 `start_or_connect()`，让 IPC/election 真正进入主链路。
 3. 补真实 Memory LLM smoke test 和固定回忆样例集。
 4. 补 embedded vector 的可重复测试，再处理 Qdrant 删除和服务化配置。

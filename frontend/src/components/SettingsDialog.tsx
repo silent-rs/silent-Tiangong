@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import type { ReactNode } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -12,7 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Link, Edit2, KeyRound, RefreshCw, Info, Wrench, FolderOpen, Save, ShieldCheck } from 'lucide-react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { api } from '@/api/tauri';
-import type { McpServer, Skill, SkillDetail, ServerConfig, ConnectorInfo, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo } from '@/api/tauri';
+import type { McpServer, Skill, SkillDetail, ServerConfig, ConnectorInfo, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo, MemoryConfigView } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
 import { useToast } from './Toast';
 
@@ -297,7 +298,7 @@ function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Sa
 // LLM 设置组件（三层架构：Providers / Models / Routing）
 // ============================================================================
 
-type LLMSubTab = 'providers' | 'models' | 'routing';
+type LLMSubTab = 'providers' | 'models' | 'routing' | 'memory';
 
 function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: SaveStatus) => void }) {
   const [subTab, setSubTab] = useState<LLMSubTab>('providers');
@@ -379,7 +380,7 @@ function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Save
     <div className="p-4 space-y-4">
       {/* 子标签栏 — 固定不动 */}
       <div className="flex gap-1">
-        {(['providers', 'models', 'routing'] as const).map((tab) => (
+        {(['providers', 'models', 'routing', 'memory'] as const).map((tab) => (
           <button
             key={tab}
             className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
@@ -389,7 +390,7 @@ function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Save
             }`}
             onClick={() => setSubTab(tab)}
           >
-            {tab === 'providers' ? 'Providers' : tab === 'models' ? 'Models' : 'Routing'}
+            {tab === 'providers' ? 'Providers' : tab === 'models' ? 'Models' : tab === 'routing' ? 'Routing' : 'Memory'}
           </button>
         ))}
       </div>
@@ -405,8 +406,238 @@ function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Save
         {subTab === 'routing' && (
           <RoutingSection config={modelsConfig} onChange={handleChange} capabilities={capabilities} />
         )}
+        {subTab === 'memory' && (
+          <MemorySettings
+            modelsConfig={modelsConfig}
+            onSaveStatusChange={onSaveStatusChange}
+          />
+        )}
       </div>
     </div>
+  );
+}
+
+// ============================================================================
+// Memory 设置组件（独立模型配置）
+// ============================================================================
+
+function MemorySettings({
+  modelsConfig,
+  onSaveStatusChange,
+}: {
+  modelsConfig: ModelsConfigView;
+  onSaveStatusChange: (status: SaveStatus) => void;
+}) {
+  const [config, setConfig] = useState<MemoryConfigView>({ vector_mode: 'auto' });
+  const [isLoading, setIsLoading] = useState(false);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { showError } = useToast();
+
+  const loadConfig = async () => {
+    setIsLoading(true);
+    try {
+      const cfg = await api.getMemoryConfig();
+      setConfig({ ...cfg, vector_mode: cfg.vector_mode || 'auto' });
+    } catch (error) {
+      console.error('加载 Memory 配置失败:', error);
+      showError('加载失败', '无法加载 Memory 配置');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadConfig();
+  }, []);
+
+  const autoSave = useCallback(async (nextConfig: MemoryConfigView) => {
+    onSaveStatusChange('saving');
+    try {
+      await api.setMemoryConfig(nextConfig);
+      onSaveStatusChange('saved');
+      setTimeout(() => onSaveStatusChange('idle'), 2000);
+    } catch (error) {
+      console.error('保存 Memory 配置失败:', error);
+      onSaveStatusChange('error');
+      showError('保存失败', '无法保存 Memory 配置');
+    }
+  }, [onSaveStatusChange, showError]);
+
+  const handleChange = useCallback((nextConfig: MemoryConfigView) => {
+    setConfig(nextConfig);
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+    }
+    saveTimerRef.current = setTimeout(() => autoSave(nextConfig), 500);
+  }, [autoSave]);
+
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+      }
+    };
+  }, []);
+
+  const modelKeysFor = (acceptedCapabilities: string[]) =>
+    Object.entries(modelsConfig.models)
+      .filter(([, model]) => {
+        if (model.capabilities.length === 0) return true;
+        return acceptedCapabilities.some((capability) => model.capabilities.includes(capability));
+      })
+      .map(([key]) => key);
+
+  const modelLabel = (modelKey: string) => {
+    const model = modelsConfig.models[modelKey];
+    if (!model) return modelKey;
+    return `${model.provider} / ${model.model}`;
+  };
+
+  const setModelKey = (
+    key: 'model_key' | 'embedding_key' | 'rerank_key',
+    modelKey: string | undefined,
+  ) => {
+    handleChange({ ...config, [key]: modelKey });
+  };
+
+  const embeddingDimension = config.embedding_key
+    ? Number(modelsConfig.models[config.embedding_key]?.options?.dimension || 0)
+    : 0;
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-8">
+        <Loader2 className="w-6 h-6 animate-spin text-primary mr-2" />
+        <span className="text-sm text-muted-foreground">加载 Memory 配置中...</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <MemoryModelSelectSection
+        title="Memory LLM"
+        description="Episode 提取、Recall 规划和结果整理使用的文本模型"
+        selectedKey={config.model_key}
+        candidates={modelKeysFor(['chat', 'lite'])}
+        modelLabel={modelLabel}
+        onChange={(modelKey) => setModelKey('model_key', modelKey)}
+      />
+
+      <MemoryModelSelectSection
+        title="Memory Embedding"
+        description="语义检索和向量索引使用的 Embedding 模型"
+        selectedKey={config.embedding_key}
+        candidates={modelKeysFor(['embedding'])}
+        modelLabel={modelLabel}
+        onChange={(modelKey) => setModelKey('embedding_key', modelKey)}
+        footer={
+          config.embedding_key ? (
+            <div className={`text-xs ${embeddingDimension > 0 ? 'text-muted-foreground' : 'text-destructive'}`}>
+              {embeddingDimension > 0
+                ? `当前维度：${embeddingDimension}`
+                : '选中的 Embedding 模型缺少 options.dimension，请先在 Models 页补齐。'}
+            </div>
+          ) : null
+        }
+      />
+
+      <MemoryModelSelectSection
+        title="Memory Rerank"
+        description="召回结果精排模型，当前保存为独立配置供后续召回链路消费"
+        selectedKey={config.rerank_key}
+        candidates={modelKeysFor(['rerank'])}
+        modelLabel={modelLabel}
+        onChange={(modelKey) => setModelKey('rerank_key', modelKey)}
+      />
+
+      <Card>
+        <CardContent className="p-4 space-y-3">
+          <div>
+            <h4 className="text-sm font-medium">向量模式</h4>
+            <p className="text-xs text-muted-foreground mt-1">
+              控制 Memory 语义检索使用内置向量索引、外部 Qdrant 或完全关闭。
+            </p>
+          </div>
+          <Select
+            value={config.vector_mode || 'auto'}
+            onValueChange={(value) => handleChange({ ...config, vector_mode: value })}
+          >
+            <SelectTrigger className="w-60 h-8 text-sm">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="auto">自动</SelectItem>
+              <SelectItem value="embedded">内置向量索引</SelectItem>
+              <SelectItem value="external_qdrant">外部 Qdrant</SelectItem>
+              <SelectItem value="disabled">禁用向量层</SelectItem>
+            </SelectContent>
+          </Select>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function MemoryModelSelectSection({
+  title,
+  description,
+  selectedKey,
+  candidates,
+  modelLabel,
+  onChange,
+  footer,
+}: {
+  title: string;
+  description: string;
+  selectedKey?: string;
+  candidates: string[];
+  modelLabel: (modelKey: string) => string;
+  onChange: (modelKey: string | undefined) => void;
+  footer?: ReactNode;
+}) {
+  const enabled = !!selectedKey;
+
+  return (
+    <Card>
+      <CardContent className="p-4 space-y-3">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h4 className="text-sm font-medium">{title}</h4>
+            <p className="text-xs text-muted-foreground mt-1">{description}</p>
+          </div>
+          <Switch
+            checked={enabled}
+            onCheckedChange={(checked) => onChange(checked ? candidates[0] : undefined)}
+            disabled={candidates.length === 0}
+          />
+        </div>
+        {enabled && (
+          <Select
+            value={selectedKey || '__none__'}
+            onValueChange={(value) => onChange(value === '__none__' ? undefined : value)}
+          >
+            <SelectTrigger className="h-8 text-sm">
+              <SelectValue placeholder="选择模型" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__none__">-- 未配置 --</SelectItem>
+              {candidates.map((modelKey) => (
+                <SelectItem key={modelKey} value={modelKey}>
+                  {modelLabel(modelKey)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+        {candidates.length === 0 && (
+          <div className="text-xs text-muted-foreground">
+            请先在 Models 页添加对应能力的模型。
+          </div>
+        )}
+        {footer}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -995,15 +1226,14 @@ function ModelsSection({
             placeholder="例如 1536、1024、768"
           />
           <p className="text-xs text-muted-foreground mt-1">
-            用于 Memory 向量索引初始化；不同 embedding 模型需要填写对应维度。
+            不同 embedding 模型需要填写对应维度。
           </p>
         </div>
       )}
       {/* Rerank 模型说明 */}
       {draft.capabilities.includes('rerank') && (
         <div className="rounded-md border border-dashed p-2 text-xs text-muted-foreground">
-          Rerank 模型用于 Memory 召回结果精排。若服务需要额外参数，可在 models.json 的
-          options 中继续扩展。
+          Rerank 模型用于通用召回结果精排。若服务需要额外参数，可在 models.json 的 options 中继续扩展。
         </div>
       )}
       <div className="flex justify-end gap-2 pt-1">
@@ -1126,7 +1356,7 @@ function RoutingSection({
       <div className="mb-3">
         <h4 className="text-sm font-medium text-muted-foreground">Routing (能力路由)</h4>
         <p className="text-xs text-muted-foreground mt-1">
-          为每种能力选择对应的模型，多媒体（图片/视频/STT/TTS）和 Memory（Embedding/Rerank）也通过此处配置
+          为每种能力选择对应的模型，多媒体（图片/视频/STT/TTS）通过此处配置；Memory 使用独立设置页。
         </p>
       </div>
 

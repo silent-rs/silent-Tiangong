@@ -82,6 +82,8 @@ fn run_gui() {
             tiangong_app::commands::set_connector_enabled,
             tiangong_app::commands::get_models_config,
             tiangong_app::commands::set_models_config,
+            tiangong_app::commands::get_memory_config,
+            tiangong_app::commands::set_memory_config,
             tiangong_app::commands::get_model_capabilities,
             tiangong_app::commands::get_model_list,
             tiangong_app::commands::fetch_provider_models,

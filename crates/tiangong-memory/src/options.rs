@@ -1,8 +1,9 @@
 //! Memory 启动参数。
 //!
-//! 配置文件加载由 `tiangong-config` 等上层 crate 负责；Memory 只接收
-//! 已解析好的端点参数，保持自身不依赖 core/config。
+//! Memory 的独立磁盘配置定义在 `config` 模块；这里保留 actor
+//! 启动时消费的已解析参数。
 
+use serde::{Deserialize, Serialize};
 use tiangong_llm::{EmbeddingEndpointConfig, LlmEndpointConfig};
 
 #[derive(Debug, Clone, Default)]
@@ -39,7 +40,8 @@ impl MemoryOptions {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MemoryVectorMode {
     /// 有 embedding 配置时默认使用内置 flat 向量索引。
     #[default]

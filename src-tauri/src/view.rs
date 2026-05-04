@@ -432,3 +432,193 @@ impl ModelsConfigView {
         }
     }
 }
+
+/// Memory 独立配置（前端使用）
+///
+/// 前端只保存对主 LLM Models 配置中 model key 的选择；后端在保存时
+/// 将 model key 解析为 Memory runtime 需要的独立端点配置。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryConfigView {
+    pub model_key: Option<String>,
+    pub embedding_key: Option<String>,
+    pub rerank_key: Option<String>,
+    pub vector_mode: String,
+}
+
+impl MemoryConfigView {
+    pub fn from_memory(
+        config: &tiangong_memory::MemoryConfig,
+        models: &tiangong_core::models_config::ModelsConfig,
+    ) -> Self {
+        Self {
+            model_key: config
+                .model
+                .as_ref()
+                .and_then(|endpoint| find_model_key_for_endpoint(models, endpoint)),
+            embedding_key: config
+                .embedding
+                .as_ref()
+                .and_then(|endpoint| find_embedding_key_for_endpoint(models, endpoint)),
+            rerank_key: config
+                .rerank
+                .as_ref()
+                .and_then(|endpoint| find_rerank_key_for_endpoint(models, endpoint)),
+            vector_mode: memory_vector_mode_to_string(config.vector_mode).to_string(),
+        }
+    }
+
+    pub fn to_memory(
+        &self,
+        models: &tiangong_core::models_config::ModelsConfig,
+    ) -> Result<tiangong_memory::MemoryConfig, String> {
+        Ok(tiangong_memory::MemoryConfig {
+            model: self
+                .model_key
+                .as_deref()
+                .filter(|key| !key.trim().is_empty())
+                .map(|key| resolve_memory_llm(models, key))
+                .transpose()?,
+            embedding: self
+                .embedding_key
+                .as_deref()
+                .filter(|key| !key.trim().is_empty())
+                .map(|key| resolve_memory_embedding(models, key))
+                .transpose()?,
+            rerank: self
+                .rerank_key
+                .as_deref()
+                .filter(|key| !key.trim().is_empty())
+                .map(|key| resolve_memory_rerank(models, key))
+                .transpose()?,
+            vector_mode: memory_vector_mode_from_string(&self.vector_mode),
+        })
+    }
+}
+
+fn resolved_model_by_key(
+    models: &tiangong_core::models_config::ModelsConfig,
+    model_key: &str,
+) -> Result<tiangong_core::models_config::ResolvedModel, String> {
+    let model_entry = models
+        .models
+        .get(model_key)
+        .ok_or_else(|| format!("模型不存在：{model_key}"))?;
+    let provider = models
+        .providers
+        .get(&model_entry.provider)
+        .ok_or_else(|| format!("模型 {model_key} 引用的 Provider 不存在：{}", model_entry.provider))?;
+
+    Ok(tiangong_core::models_config::ResolvedModel {
+        base_url: provider.base_url.clone(),
+        api_key: tiangong_core::models_config::ModelsConfig::resolve_api_key(&provider.api_key),
+        timeout_ms: provider.timeout_ms,
+        protocol: provider.protocol,
+        model: model_entry.model.clone(),
+        options: model_entry.options.clone(),
+    })
+}
+
+fn resolve_memory_llm(
+    models: &tiangong_core::models_config::ModelsConfig,
+    model_key: &str,
+) -> Result<tiangong_memory::MemoryLlmConfig, String> {
+    let resolved = resolved_model_by_key(models, model_key)?;
+    Ok(tiangong_memory::MemoryLlmConfig {
+        base_url: resolved.base_url,
+        api_key: resolved.api_key,
+        model: resolved.model,
+        protocol: resolved.protocol,
+        timeout_ms: resolved.timeout_ms,
+    })
+}
+
+fn resolve_memory_embedding(
+    models: &tiangong_core::models_config::ModelsConfig,
+    model_key: &str,
+) -> Result<tiangong_memory::MemoryEmbeddingConfig, String> {
+    let resolved = resolved_model_by_key(models, model_key)?;
+    let dimension = resolved
+        .options
+        .get("dimension")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| format!("Embedding 模型 {model_key} 缺少 options.dimension"))?;
+    Ok(tiangong_memory::MemoryEmbeddingConfig {
+        base_url: resolved.base_url,
+        api_key: resolved.api_key,
+        model: resolved.model,
+        protocol: resolved.protocol,
+        timeout_ms: resolved.timeout_ms,
+        dimension,
+    })
+}
+
+fn resolve_memory_rerank(
+    models: &tiangong_core::models_config::ModelsConfig,
+    model_key: &str,
+) -> Result<tiangong_memory::MemoryRerankConfig, String> {
+    let resolved = resolved_model_by_key(models, model_key)?;
+    Ok(tiangong_memory::MemoryRerankConfig {
+        base_url: resolved.base_url,
+        api_key: resolved.api_key,
+        model: resolved.model,
+        protocol: resolved.protocol,
+        timeout_ms: resolved.timeout_ms,
+    })
+}
+
+fn find_model_key_for_endpoint(
+    models: &tiangong_core::models_config::ModelsConfig,
+    endpoint: &tiangong_memory::MemoryLlmConfig,
+) -> Option<String> {
+    find_model_key(models, &endpoint.base_url, &endpoint.model, endpoint.protocol)
+}
+
+fn find_embedding_key_for_endpoint(
+    models: &tiangong_core::models_config::ModelsConfig,
+    endpoint: &tiangong_memory::MemoryEmbeddingConfig,
+) -> Option<String> {
+    find_model_key(models, &endpoint.base_url, &endpoint.model, endpoint.protocol)
+}
+
+fn find_rerank_key_for_endpoint(
+    models: &tiangong_core::models_config::ModelsConfig,
+    endpoint: &tiangong_memory::MemoryRerankConfig,
+) -> Option<String> {
+    find_model_key(models, &endpoint.base_url, &endpoint.model, endpoint.protocol)
+}
+
+fn find_model_key(
+    models: &tiangong_core::models_config::ModelsConfig,
+    base_url: &str,
+    model_name: &str,
+    protocol: tiangong_core::model::ProviderProtocol,
+) -> Option<String> {
+    models.models.iter().find_map(|(model_key, model)| {
+        let provider = models.providers.get(&model.provider)?;
+        if provider.base_url == base_url && provider.protocol == protocol && model.model == model_name {
+            Some(model_key.clone())
+        } else {
+            None
+        }
+    })
+}
+
+fn memory_vector_mode_to_string(mode: tiangong_memory::MemoryVectorMode) -> &'static str {
+    match mode {
+        tiangong_memory::MemoryVectorMode::Auto => "auto",
+        tiangong_memory::MemoryVectorMode::Disabled => "disabled",
+        tiangong_memory::MemoryVectorMode::Embedded => "embedded",
+        tiangong_memory::MemoryVectorMode::ExternalQdrant => "external_qdrant",
+    }
+}
+
+fn memory_vector_mode_from_string(value: &str) -> tiangong_memory::MemoryVectorMode {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "disabled" => tiangong_memory::MemoryVectorMode::Disabled,
+        "embedded" => tiangong_memory::MemoryVectorMode::Embedded,
+        "external_qdrant" | "qdrant" => tiangong_memory::MemoryVectorMode::ExternalQdrant,
+        _ => tiangong_memory::MemoryVectorMode::Auto,
+    }
+}

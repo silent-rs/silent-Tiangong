@@ -165,8 +165,8 @@ fn memory_config_changed(running: &MemoryConfigSummary, latest: &MemoryConfigSum
 }
 
 #[cfg(test)]
-fn memory_config_summary(config: &CoreConfig) -> MemoryConfigSummary {
-    let options = config.to_memory_options(None);
+fn memory_config_summary(_config: &CoreConfig) -> MemoryConfigSummary {
+    let options = tiangong_memory::MemoryConfig::load_or_default().to_options(None);
     memory_config_summary_from_options(&options)
 }
 
@@ -3393,25 +3393,31 @@ mod tests {
 
     #[test]
     fn memory_config_summary_tracks_memory_relevant_fields() {
-        let config = memory_test_config(768, "embedded");
+        let _lock = memory_registry_test_lock();
+        let _env = MemoryRegistryEnvGuard::enter();
+        write_memory_test_config(768, tiangong_memory::MemoryVectorMode::Embedded);
+        let config = CoreConfig::default();
         let summary = memory_config_summary(&config);
 
         let model = summary.model.as_ref().expect("应包含 memory model 摘要");
-        assert_eq!(model.base_url, "http://chat.example");
-        assert_eq!(model.model, "chat-model");
+        assert_eq!(model.base_url, "http://memory.example");
+        assert_eq!(model.model, "memory-model");
         let embedding = summary.embedding.as_ref().expect("应包含 embedding 摘要");
         assert_eq!(embedding.base_url, "http://embed.example");
         assert_eq!(embedding.model, "embed-model");
         assert_eq!(embedding.dimension, 768);
         assert_eq!(summary.vector_mode, "Embedded");
 
-        let changed_dimension = memory_config_summary(&memory_test_config(1024, "embedded"));
+        write_memory_test_config(1024, tiangong_memory::MemoryVectorMode::Embedded);
+        let changed_dimension = memory_config_summary(&CoreConfig::default());
         assert!(memory_config_changed(&summary, &changed_dimension));
 
-        let changed_vector_mode = memory_config_summary(&memory_test_config(768, "disabled"));
+        write_memory_test_config(768, tiangong_memory::MemoryVectorMode::Disabled);
+        let changed_vector_mode = memory_config_summary(&CoreConfig::default());
         assert!(memory_config_changed(&summary, &changed_vector_mode));
 
-        let same_memory_config = memory_config_summary(&memory_test_config(768, "embedded"));
+        write_memory_test_config(768, tiangong_memory::MemoryVectorMode::Embedded);
+        let same_memory_config = memory_config_summary(&CoreConfig::default());
         assert!(!memory_config_changed(&summary, &same_memory_config));
         assert!(memory_config_can_update_in_place(
             &summary,
@@ -3456,11 +3462,12 @@ mod tests {
 
         let workspace = format!("ws-hot-update-{}", scru128::new());
         let initial = CoreConfig::default();
-        let updated = memory_test_config(1024, "embedded");
-        let expected_summary = memory_config_summary(&updated);
-
         let initial_handle = get_or_init_memory(&initial, 1, Some(workspace.clone()))
             .expect("初始 MemoryHandle 应启动成功");
+
+        write_memory_test_config(1024, tiangong_memory::MemoryVectorMode::Embedded);
+        let updated = CoreConfig::default();
+        let expected_summary = memory_config_summary(&updated);
         let updated_handle = get_or_init_memory(&updated, 2, Some(workspace.clone()))
             .expect("MemoryHandle 应支持热更新后继续可用");
 
@@ -3498,9 +3505,9 @@ mod tests {
         )
         .expect("初始 MemoryHandle 应启动成功");
 
-        let hot_config = memory_test_config(2048, "embedded");
+        write_memory_test_config(2048, tiangong_memory::MemoryVectorMode::Embedded);
         provider.update(|config| {
-            config.llm = hot_config.llm.clone();
+            config.context_limit += 1;
         });
         let updated_snapshot = provider.snapshot();
         let expected_summary = memory_config_summary(&updated_snapshot);
@@ -3539,25 +3546,25 @@ mod tests {
         shutdown_memory_registry_blocking();
     }
 
-    fn memory_test_config(dimension: usize, vector_mode: &str) -> CoreConfig {
-        let mut config = CoreConfig::default();
-        config.llm.chat = crate::core_config::ModelEndpoint {
-            base_url: "http://chat.example".to_string(),
-            api_key: "secret".to_string(),
-            model: "chat-model".to_string(),
+    fn write_memory_test_config(dimension: usize, vector_mode: tiangong_memory::MemoryVectorMode) {
+        let config = tiangong_memory::MemoryConfig {
+            model: Some(tiangong_memory::MemoryLlmConfig {
+                base_url: "http://memory.example".to_string(),
+                api_key: "secret".to_string(),
+                model: "memory-model".to_string(),
+                ..Default::default()
+            }),
+            embedding: Some(tiangong_memory::MemoryEmbeddingConfig {
+                base_url: "http://embed.example".to_string(),
+                api_key: "secret".to_string(),
+                model: "embed-model".to_string(),
+                dimension,
+                ..Default::default()
+            }),
+            vector_mode,
             ..Default::default()
         };
-        config.llm.embedding = Some(crate::core_config::ModelEndpoint {
-            base_url: "http://embed.example".to_string(),
-            api_key: "secret".to_string(),
-            model: "embed-model".to_string(),
-            options: serde_json::json!({
-                "dimension": dimension,
-                "vector_mode": vector_mode,
-            }),
-            ..Default::default()
-        });
-        config
+        config.save().expect("写入 Memory 测试配置失败");
     }
 
     struct MemoryRegistryEnvGuard {

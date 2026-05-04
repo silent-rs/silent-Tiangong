@@ -2050,6 +2050,34 @@ pub fn set_models_config(
     Ok(())
 }
 
+/// 获取 Memory 独立模型配置
+#[tauri::command]
+pub fn get_memory_config(state: State<TiangongApp>) -> Result<MemoryConfigView, String> {
+    let config = tiangong_memory::MemoryConfig::load_or_default();
+    state.with_state_read(|core_state| {
+        Ok(MemoryConfigView::from_memory(
+            &config,
+            core_state.models_config(),
+        ))
+    })
+}
+
+/// 设置 Memory 独立模型配置
+#[tauri::command]
+pub fn set_memory_config(
+    config: MemoryConfigView,
+    state: State<TiangongApp>,
+) -> Result<(), String> {
+    let memory_config = state.with_state_read(|core_state| {
+        config
+            .to_memory(core_state.models_config())
+            .map_err(anyhow::Error::msg)
+    })?;
+    memory_config.save().map_err(|err| err.to_string())?;
+    state.sync_core_config_from_state()?;
+    Ok(())
+}
+
 /// 获取所有可用的模型能力列表
 #[tauri::command]
 pub fn get_model_capabilities() -> Result<Vec<ModelCapabilityInfo>, String> {

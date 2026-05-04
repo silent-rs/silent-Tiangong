@@ -13,6 +13,7 @@
 //! ```
 
 pub mod command;
+pub mod config;
 pub mod election;
 pub mod handle;
 pub mod ipc;
@@ -31,6 +32,10 @@ mod store;
 mod writer;
 
 pub use actor::{start_memory as start, start_memory_with_options as start_with_options};
+pub use config::{
+    MemoryConfig, MemoryEmbeddingConfig, MemoryLlmConfig, MemoryRerankConfig,
+    default_memory_config_path,
+};
 pub use election::{
     LeaderInfo, LeaderState, ManagedMemory, ProcessType, leader_info_path, leader_lock_path,
     memory_service_name, read_leader_info, start_or_connect, start_or_connect_with_service,

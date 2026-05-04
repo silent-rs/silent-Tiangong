@@ -47,9 +47,9 @@ Memory 系统作为独立 crate `tiangong-memory` 实现，采用 **Actor 模型
 
 ## 专用 Memory LLM
 
-Memory 内部的文本生成任务必须使用专用 `memory` capability 对应的 LLM，不得静默复用主 `chat` 模型或旧 `lite` 模型。涉及的任务包括 Episode 提取、Recall anchor 规划、Deep Recall 裁决、Recall 结果整理和 Meso Entity/Decision 提炼。
+Memory 内部的文本生成任务必须使用 `~/.tiangong/memory/config.json` 中的独立 Memory LLM，不得静默复用主 `chat` 模型或旧 `lite` 模型。涉及的任务包括 Episode 提取、Recall anchor 规划、Deep Recall 裁决、Recall 结果整理和 Meso Entity/Decision 提炼。
 
-当 `models.json` 未配置 `routing.memory` 时，Memory 只能降级到规则策略，并记录可诊断日志；主对话链路继续运行，但 Memory 的 LLM 增强能力视为关闭。
+当独立 Memory LLM 未配置时，Memory 只能降级到规则策略，并记录可诊断日志；主对话链路继续运行，但 Memory 的 LLM 增强能力视为关闭。
 
 ```
 crates/

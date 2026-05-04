@@ -1,6 +1,6 @@
 # TODO - 天工当前开发任务
 
-> 最后更新：2026-05-03
+> 最后更新：2026-05-04
 > 当前主线：Memory 系统缺口收口
 > 参考：`PLAN.md`、`docs/requirements.md`、`docs/memory-system/12-缺口清单与专用MemoryLLM.md`
 
@@ -12,8 +12,8 @@
 
 能力边界：
 
-- Memory 内部所有文本生成任务必须使用专用 `memory` LLM，不再复用主 `chat` 模型。
-- 未配置 `memory` routing 时降级为规则策略，禁止静默回退到主模型。
+- Memory 内部所有文本生成任务必须使用独立 Memory LLM 配置，不再复用主 `chat` 模型。
+- 未配置 Memory LLM 时降级为规则策略，禁止静默回退到主模型。
 - 所有入口统一通过 `start_or_connect()` 获取 Memory，确保多进程共享同一 workspace leader。
 - Workspace Index 首期仅覆盖最小文件树索引和 Rust 符号索引。
 
@@ -27,19 +27,21 @@
 - [ ] leader 退出后 follower 自动接替，接替前后写入/召回都可用。
 - [ ] 验证多进程并发场景（GUI + CLI + Server）下 Memory 行为正确。
 
-## P0 - 专用 Memory LLM 配置
+## P0 - Memory 独立模型配置
 
-- [ ] `ModelCapability` 增加 `memory`。
-- [ ] `models.json` 的 capability 列表和 routing 语义正式纳入 `memory`。
-- [ ] `CoreConfig::to_memory_options()` 只从 `routing.memory` 读取文本模型。
-- [ ] EpisodeWriter 结构化提取使用专用 Memory LLM。
-- [ ] Recall anchor 规划使用专用 Memory LLM。
-- [ ] Deep Recall 裁决使用专用 Memory LLM。
-- [ ] Recall 结果整理使用专用 Memory LLM。
-- [ ] Meso Entity/Decision 提炼使用专用 Memory LLM。
-- [ ] 未配置 `memory` 时，上述步骤全部走规则 fallback。
-- [ ] 日志明确提示 Memory LLM 未配置，不误报为普通模型失败。
-- [ ] 禁止未配置 `memory` 时静默复用 `chat` 主模型或旧 `lite` 模型。
+- [x] `tiangong-memory` 增加独立 `MemoryConfig`，持久化到 `~/.tiangong/memory/config.json`。
+- [x] Memory LLM、Embedding、Rerank 配置从主 `models.json` / routing 中拆出。
+- [x] `CoreConfig::to_memory_options()` 只读取 Memory 独立配置，不再从主模型配置派生。
+- [x] 前端将 Memory 配置放到 LLM 配置下，并从已有 Models 中选择模型。
+- [x] Tauri 增加 `get_memory_config` / `set_memory_config` 命令。
+- [x] EpisodeWriter 结构化提取使用专用 Memory LLM。
+- [x] Recall anchor 规划使用专用 Memory LLM。
+- [x] Deep Recall 裁决使用专用 Memory LLM。
+- [x] Recall 结果整理使用专用 Memory LLM。
+- [x] Meso Entity/Decision 提炼使用专用 Memory LLM。
+- [x] 未配置 Memory LLM 时，上述步骤全部走规则 fallback。
+- [x] 日志明确提示 Memory LLM 未配置，不误报为普通模型失败。
+- [x] 禁止未配置 Memory LLM 时静默复用 `chat` 主模型或旧 `lite` 模型。
 
 ## P1 - 真实模型路径验证
 
@@ -74,7 +76,7 @@
 
 ## 推荐执行顺序
 
-1. 先实现专用 `memory` capability 与配置转换，阻断继续复用主模型。
+1. 先实现 Memory 独立模型配置，阻断继续复用主模型。
 2. 将 Core Memory 启动入口切换为 `start_or_connect()`，让 IPC/election 真正进入主链路。
 3. 补真实 Memory LLM smoke test 和固定回忆样例集。
 4. 补 embedded vector 的可重复测试，再处理 Qdrant 删除和服务化配置。

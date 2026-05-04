@@ -205,6 +205,13 @@ export interface CapabilityAvailabilityInfo {
   routed_model?: string;
 }
 
+export interface MemoryConfigView {
+  model_key?: string;
+  embedding_key?: string;
+  rerank_key?: string;
+  vector_mode: string;
+}
+
 // ============================================================================
 // API 方法
 // ============================================================================
@@ -374,6 +381,12 @@ export const api = {
 
   setModelsConfig: (config: ModelsConfigView): Promise<void> =>
     invoke('set_models_config', { config }),
+
+  getMemoryConfig: (): Promise<MemoryConfigView> =>
+    invoke('get_memory_config'),
+
+  setMemoryConfig: (config: MemoryConfigView): Promise<void> =>
+    invoke('set_memory_config', { config }),
 
   getModelCapabilities: (): Promise<ModelCapabilityInfo[]> =>
     invoke('get_model_capabilities'),

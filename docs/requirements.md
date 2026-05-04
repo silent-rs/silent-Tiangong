@@ -30,11 +30,11 @@
 - Provider 层只定义连接信息（`base_url`、`api_key`、`timeout_ms`），可被多个模型共享。
 - Provider 层必须支持声明请求协议类型，至少包含 `openai_compatible` 与 `anthropic` 两种协议；未显式配置时默认按 `openai_compatible` 处理。
 - Model 层引用 Provider，声明实际模型 ID 和能力列表（`capabilities`），携带专属参数（`options`）。
-- 能力类型包括：`chat`（常规对话/推理）、`memory`（Memory 内部规划/提取/整理）、`multimodal`（多模态理解）、`image_generation`（图片生成）、`video_generation`（视频生成）、`stt`（语音识别）、`tts`（语音合成）。
+- 能力类型包括：`chat`（常规对话/推理）、`lite`（轻量文本）、`multimodal`（多模态理解）、`embedding`（通用向量嵌入）、`rerank`（通用结果重排）、`image_generation`（图片生成）、`video_generation`（视频生成）、`stt`（语音识别）、`tts`（语音合成）。
 - 一个模型可声明多种能力（如 gpt-4o 同时支持 chat 和 multimodal）。
 - 必须通过 `routing` 表为每种能力指定默认使用的模型。
 - `chat` 为基础必选能力，routing 中未配置 `chat` 时程序必须在所有模式（GUI/CLI/Server）下持续提示用户完成模型设置，在设置完成前不执行对话任务。
-- `memory` 为 Memory 专用文本模型能力；Memory 的 Episode 提取、Recall anchor 规划、Deep Recall 裁决、Recall 结果整理和 Meso 结构化提炼必须优先使用 `memory` routing 指定的模型，不允许静默复用 `chat` 主模型。未配置 `memory` 时，Memory 只能降级到规则模式或提示用户补充配置，不得自动消耗主对话模型。
+- Memory 模型配置不属于主 `models.json` routing；前端必须放在 LLM 配置下，通过已有 Models 选择 Memory LLM、Embedding、Rerank，并由后端解析后写入 `~/.tiangong/memory/config.json`。
 - 其余能力（multimodal/image_generation/video_generation/stt/tts）未在 routing 中配置时视为关闭，对应功能不可用但不影响其他功能正常运行。
 - 当配置 `multimodal` routing 时，GUI 输入区必须开放图片/文件附件入口；包含任意附件或图片路径的用户消息必须优先路由到多模态模型，先由多模态模型解析附件后再回答，并将本地附件转换为模型协议可识别的内容。
 - `api_key` 必须支持环境变量引用（`${ENV_VAR}` 语法），避免明文存储。
@@ -105,8 +105,9 @@
 #### Memory 系统
 - Memory 功能必须可关闭，未启动或启动失败时主对话链路必须降级继续运行。
 - Memory 必须保持独立 crate，不能依赖 `tiangong-core` 或 UI 层。
-- Memory 必须复用 `tiangong-llm` 的文本生成与 embedding 能力，不在内部重复实现模型配置和 Provider 协议适配。
-- Memory 的文本生成必须使用专用 `memory` LLM 配置，不得使用主 `chat` 模型或轻量 `lite` 模型作为隐式回退；未配置专用 memory LLM 时，Memory 相关 LLM 步骤必须降级为规则策略并记录可诊断日志。
+- Memory 必须复用 `tiangong-llm` 的文本生成与 embedding 能力，不在内部重复实现 Provider 协议适配。
+- Memory runtime 的模型配置必须独立于主对话 routing，由 `tiangong-memory` 自己定义配置类型并持久化到 `~/.tiangong/memory/config.json`；GUI 配置入口位于 LLM 配置下，模型选择复用主 LLM 的 Provider/Model 定义。
+- Memory 的文本生成必须使用独立 Memory LLM 配置，不得使用主 `chat` 模型或轻量 `lite` 模型作为隐式回退；未配置专用 Memory LLM 时，Memory 相关 LLM 步骤必须降级为规则策略并记录可诊断日志。
 - Memory 必须支持主模型按需调用的 Tool 化回忆，不能在每个 turn 前强制自动注入 recall 结果。
 - Memory 收到 Tool 化回忆刺激后，必须先执行初始回忆，再基于初始结果判断是否需要 deep recall，不能把一次 `recall_memory` 调用等同为深度回忆。
 - Memory 必须支持 workspace 隔离，长生命周期 GUI/Server 进程不得把不同 workspace 的记忆写入同一 scope。
