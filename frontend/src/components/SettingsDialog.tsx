@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import type { ReactNode } from 'react';
+import Graph from 'graphology';
+import Sigma from 'sigma';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -683,6 +685,52 @@ function relationKindLabel(value: MemoryRelationKind) {
   return MEMORY_RELATION_OPTIONS.find((item) => item.value === value)?.label ?? value;
 }
 
+function memoryGraphColor(memoryType: MemoryCognitiveType) {
+  switch (memoryType) {
+    case 'user_preference':
+      return '#3b82f6';
+    case 'user_habit':
+      return '#14b8a6';
+    case 'skill':
+      return '#22c55e';
+    case 'project_structure':
+      return '#f59e0b';
+    case 'architecture_decision':
+      return '#8b5cf6';
+    case 'problem_incident':
+      return '#ef4444';
+    case 'domain_knowledge':
+      return '#06b6d4';
+    default:
+      return '#64748b';
+  }
+}
+
+function relationGraphColor(relationKind: MemoryRelationKind) {
+  if (relationKind === 'contradicts' || relationKind === 'supersedes') {
+    return '#ef4444';
+  }
+  if (relationKind === 'depends_on' || relationKind === 'caused_by') {
+    return '#f59e0b';
+  }
+  if (relationKind === 'supports' || relationKind === 'validated_by') {
+    return '#22c55e';
+  }
+  return '#64748b';
+}
+
+function memoryGraphPosition(index: number, total: number, selected: boolean) {
+  if (selected || total <= 1) {
+    return { x: 0, y: 0 };
+  }
+  const angle = (Math.PI * 2 * index) / Math.max(1, total) - Math.PI / 2;
+  const radius = Math.max(4, Math.min(14, total * 1.45));
+  return {
+    x: Math.cos(angle) * radius,
+    y: Math.sin(angle) * radius,
+  };
+}
+
 function emptyMemoryDraft(): ManualMemoryDraft {
   return {
     memory_type: 'factual',
@@ -691,6 +739,164 @@ function emptyMemoryDraft(): ManualMemoryDraft {
     keywords: [],
     importance: 0.6,
   };
+}
+
+function MemoryGraphCanvas({
+  nodes,
+  relations,
+  selectedId,
+  isLoading,
+  onSelect,
+}: {
+  nodes: MemoryNode[];
+  relations: MemoryRelation[];
+  selectedId?: string;
+  isLoading: boolean;
+  onSelect: (node: MemoryNode) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const nodeMapRef = useRef<Map<string, MemoryNode>>(new Map());
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || nodes.length === 0) {
+      return;
+    }
+
+    const selectedNode = nodes.find((node) => node.id === selectedId);
+    const orderedNodes = selectedNode
+      ? [selectedNode, ...nodes.filter((node) => node.id !== selectedNode.id)]
+      : nodes;
+    const graph = new Graph();
+    const nodeMap = new Map<string, MemoryNode>();
+    const ringCount = selectedNode ? orderedNodes.length - 1 : orderedNodes.length;
+
+    orderedNodes.forEach((node, index) => {
+      const selected = node.id === selectedId;
+      const ringIndex = selectedNode ? index - 1 : index;
+      const position = memoryGraphPosition(ringIndex, ringCount, selected);
+      nodeMap.set(node.id, node);
+      graph.addNode(node.id, {
+        label: `${node.title} · ${memoryTypeLabel(node.memory_type)}`,
+        x: position.x,
+        y: position.y,
+        size: selected ? 18 : 11 + Math.round(node.importance * 6),
+        color: selected ? '#ffffff' : memoryGraphColor(node.memory_type),
+        borderColor: memoryGraphColor(node.memory_type),
+        highlighted: selected,
+        forceLabel: selected || nodes.length <= 24,
+        zIndex: selected ? 2 : 1,
+      });
+    });
+
+    const visibleNodeIds = new Set(nodes.map((node) => node.id));
+    const edgeKeys = new Set<string>();
+    relations.forEach((relation) => {
+      if (!visibleNodeIds.has(relation.from_node_id) || !visibleNodeIds.has(relation.to_node_id)) {
+        return;
+      }
+      const edgeKey = relation.id || `${relation.from_node_id}:${relation.to_node_id}:${relation.relation_kind}`;
+      if (edgeKeys.has(edgeKey) || graph.hasEdge(edgeKey)) {
+        return;
+      }
+      edgeKeys.add(edgeKey);
+      const selected = relation.from_node_id === selectedId || relation.to_node_id === selectedId;
+      graph.addDirectedEdgeWithKey(edgeKey, relation.from_node_id, relation.to_node_id, {
+        label: relationKindLabel(relation.relation_kind),
+        color: selected ? relationGraphColor(relation.relation_kind) : '#475569',
+        size: selected ? 2.4 : 1.2,
+        zIndex: selected ? 2 : 1,
+      });
+    });
+
+    nodeMapRef.current = nodeMap;
+    const renderer = new Sigma(graph, container, {
+      allowInvalidContainer: true,
+      autoCenter: true,
+      autoRescale: true,
+      defaultEdgeType: 'arrow',
+      enableEdgeEvents: true,
+      hideEdgesOnMove: false,
+      hideLabelsOnMove: true,
+      labelColor: { color: '#cbd5e1' },
+      labelDensity: 0.08,
+      labelRenderedSizeThreshold: 7,
+      labelSize: 12,
+      minCameraRatio: 0.45,
+      maxCameraRatio: 2.6,
+      renderEdgeLabels: false,
+      renderLabels: true,
+      stagePadding: 24,
+      zIndex: true,
+      nodeReducer: (nodeId, data) => {
+        if (!selectedId) {
+          return data;
+        }
+        if (nodeId === selectedId) {
+          return {
+            ...data,
+            color: '#ffffff',
+            highlighted: true,
+            forceLabel: true,
+            size: Math.max(data.size ?? 14, 18),
+            zIndex: 3,
+          };
+        }
+        const linked = relations.some((relation) =>
+          (relation.from_node_id === selectedId && relation.to_node_id === nodeId) ||
+          (relation.to_node_id === selectedId && relation.from_node_id === nodeId),
+        );
+        return {
+          ...data,
+          color: linked ? data.color : '#334155',
+          forceLabel: linked && nodes.length <= 40,
+          zIndex: linked ? 2 : 1,
+        };
+      },
+      edgeReducer: (_edgeId, data) => {
+        if (!selectedId) {
+          return data;
+        }
+        const source = graph.source(_edgeId);
+        const target = graph.target(_edgeId);
+        const linked = source === selectedId || target === selectedId;
+        return {
+          ...data,
+          color: linked ? data.color : '#1e293b',
+          size: linked ? data.size : 0.7,
+          zIndex: linked ? 2 : 1,
+        };
+      },
+    });
+
+    renderer.on('clickNode', ({ node }) => {
+      const selected = nodeMapRef.current.get(node);
+      if (selected) {
+        onSelect(selected);
+      }
+    });
+
+    return () => {
+      renderer.kill();
+      graph.clear();
+    };
+  }, [nodes, onSelect, relations, selectedId]);
+
+  return (
+    <div className="relative h-[420px]">
+      <div ref={containerRef} className="absolute inset-0" />
+      {!isLoading && nodes.length === 0 && (
+        <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
+          暂无匹配记忆
+        </div>
+      )}
+      {isLoading && (
+        <div className="absolute right-3 top-3 rounded-md border bg-background/80 px-2 py-1 text-xs text-muted-foreground">
+          加载中...
+        </div>
+      )}
+    </div>
+  );
 }
 
 function MemoryManagementSettings() {
@@ -702,6 +908,7 @@ function MemoryManagementSettings() {
   const [draft, setDraft] = useState<ManualMemoryDraft>(emptyMemoryDraft());
   const [keywordsText, setKeywordsText] = useState('');
   const [relations, setRelations] = useState<MemoryRelation[]>([]);
+  const [graphRelations, setGraphRelations] = useState<MemoryRelation[]>([]);
   const [relationTargetId, setRelationTargetId] = useState('');
   const [relationKind, setRelationKind] = useState<MemoryRelationKind>('related_to');
   const [relationNote, setRelationNote] = useState('');
@@ -710,18 +917,32 @@ function MemoryManagementSettings() {
   const [isRecalling, setIsRecalling] = useState(false);
   const { showSuccess, showError } = useToast();
 
+  const loadGraphRelations = useCallback(async (items: MemoryNode[]) => {
+    if (items.length === 0) {
+      setGraphRelations([]);
+      return;
+    }
+    const relationGroups = await Promise.all(items.map((node) => api.listMemoryRelations(node.id)));
+    const relationMap = new Map<string, MemoryRelation>();
+    relationGroups.flat().forEach((relation) => {
+      relationMap.set(relation.id, relation);
+    });
+    setGraphRelations(Array.from(relationMap.values()));
+  }, []);
+
   const loadNodes = useCallback(async () => {
     setIsLoading(true);
     try {
       const data = await api.listMemoryNodes(query.trim() || undefined, status, 120);
       setNodes(data);
+      await loadGraphRelations(data);
     } catch (error) {
       console.error('加载记忆失败:', error);
       showError('加载失败', `无法加载 Memory 记忆：${error}`);
     } finally {
       setIsLoading(false);
     }
-  }, [query, status, showError]);
+  }, [loadGraphRelations, query, status, showError]);
 
   useEffect(() => {
     loadNodes();
@@ -736,7 +957,7 @@ function MemoryManagementSettings() {
     setRelationNote('');
   };
 
-  const editNode = (node: MemoryNode) => {
+  const editNode = useCallback((node: MemoryNode) => {
     setDraft({
       id: node.id,
       memory_type: node.memory_type,
@@ -754,7 +975,7 @@ function MemoryManagementSettings() {
         console.error('加载记忆关系失败:', error);
         setRelations([]);
       });
-  };
+  }, []);
 
   const saveDraft = async () => {
     const title = draft.title.trim();
@@ -777,7 +998,7 @@ function MemoryManagementSettings() {
       });
       editNode(saved);
       showSuccess('记忆已保存', saved.title);
-      loadNodes();
+      await loadNodes();
     } catch (error) {
       console.error('保存记忆失败:', error);
       showError('保存失败', `无法保存记忆：${error}`);
@@ -790,7 +1011,7 @@ function MemoryManagementSettings() {
     try {
       await api.setMemoryNodeStatus(node.id, nextStatus);
       showSuccess(nextStatus === 'archived' ? '记忆已归档' : '记忆已恢复', node.title);
-      loadNodes();
+      await loadNodes();
     } catch (error) {
       console.error('更新记忆状态失败:', error);
       showError('操作失败', `无法更新记忆状态：${error}`);
@@ -815,6 +1036,7 @@ function MemoryManagementSettings() {
         note: relationNote.trim() || undefined,
       });
       setRelations(await api.listMemoryRelations(draft.id));
+      await loadGraphRelations(nodes);
       setRelationTargetId('');
       setRelationNote('');
       showSuccess('关联已保存', relationKindLabel(relationKind));
@@ -830,6 +1052,7 @@ function MemoryManagementSettings() {
       if (draft.id) {
         setRelations(await api.listMemoryRelations(draft.id));
       }
+      await loadGraphRelations(nodes);
       showSuccess('关联已删除', relationKindLabel(relation.relation_kind));
     } catch (error) {
       console.error('删除记忆关系失败:', error);
@@ -854,10 +1077,16 @@ function MemoryManagementSettings() {
     }
   };
 
+  const selectedNode = draft.id ? nodes.find((node) => node.id === draft.id) : undefined;
+  const visibleRelationCount = graphRelations.filter((relation) =>
+    nodes.some((node) => node.id === relation.from_node_id) &&
+    nodes.some((node) => node.id === relation.to_node_id),
+  ).length;
+
   return (
-    <div className="p-4 space-y-4">
+    <div className="p-4 flex flex-col gap-4">
       <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_340px] gap-4">
-        <div className="space-y-3">
+        <div className="flex flex-col gap-3">
           <div className="flex gap-2">
             <Input
               value={query}
@@ -879,61 +1108,46 @@ function MemoryManagementSettings() {
             </Button>
           </div>
 
-          <div className="space-y-2 max-h-[calc(80vh-280px)] overflow-y-auto">
-            {nodes.map((node) => (
-              <Card key={node.id}>
-                <CardContent className="p-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <button className="min-w-0 text-left flex-1" onClick={() => editNode(node)}>
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium text-sm truncate">{node.title}</span>
-                        <Badge variant="secondary" className="text-[10px] h-5">
-                          {node.kind}
-                        </Badge>
-                        <Badge variant="outline" className="text-[10px] h-5">
-                          {memoryTypeLabel(node.memory_type)}
-                        </Badge>
-                      </div>
-                      <div className="text-xs text-muted-foreground mt-1 line-clamp-2">
-                        {node.summary}
-                      </div>
-                      {node.keywords.length > 0 && (
-                        <div className="flex gap-1 mt-2 flex-wrap">
-                          {node.keywords.slice(0, 5).map((keyword) => (
-                            <Badge key={keyword} variant="outline" className="text-[10px] h-5">
-                              {keyword}
-                            </Badge>
-                          ))}
-                        </div>
-                      )}
-                    </button>
-                    <div className="flex items-center gap-1 shrink-0">
-                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => editNode(node)} title="编辑">
-                        <Edit2 className="w-3.5 h-3.5" />
-                      </Button>
-                      {node.status === 'active' ? (
-                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setNodeStatus(node, 'archived')} title="归档">
-                          <Archive className="w-3.5 h-3.5" />
-                        </Button>
-                      ) : (
-                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setNodeStatus(node, 'active')} title="恢复">
-                          <RotateCcw className="w-3.5 h-3.5" />
-                        </Button>
-                      )}
-                    </div>
+          <div className="rounded-md border min-h-[420px] max-h-[calc(80vh-250px)] overflow-hidden bg-background">
+            {nodes.length > 0 && (
+              <div className="flex items-center justify-between gap-3 border-b px-3 py-2">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium truncate">
+                    {selectedNode?.title ?? 'Memory 图谱'}
                   </div>
-                </CardContent>
-              </Card>
-            ))}
-            {!isLoading && nodes.length === 0 && (
-              <div className="text-center text-muted-foreground py-8 text-sm">
-                暂无匹配记忆
+                  <div className="text-xs text-muted-foreground">
+                    {nodes.length} 个节点 · {visibleRelationCount} 条连接
+                  </div>
+                </div>
+                {selectedNode && (
+                  <div className="flex items-center gap-1 shrink-0">
+                    <Button variant="ghost" size="icon" className="size-8" onClick={() => editNode(selectedNode)} title="编辑">
+                      <Edit2 className="size-4" />
+                    </Button>
+                    {selectedNode.status === 'active' ? (
+                      <Button variant="ghost" size="icon" className="size-8" onClick={() => setNodeStatus(selectedNode, 'archived')} title="归档">
+                        <Archive className="size-4" />
+                      </Button>
+                    ) : (
+                      <Button variant="ghost" size="icon" className="size-8" onClick={() => setNodeStatus(selectedNode, 'active')} title="恢复">
+                        <RotateCcw className="size-4" />
+                      </Button>
+                    )}
+                  </div>
+                )}
               </div>
             )}
+            <MemoryGraphCanvas
+              nodes={nodes}
+              relations={graphRelations}
+              selectedId={draft.id}
+              isLoading={isLoading}
+              onSelect={editNode}
+            />
           </div>
         </div>
 
-        <div className="space-y-3">
+        <div className="flex flex-col gap-3">
           <Card>
             <CardContent className="p-4 space-y-3">
               <div className="flex items-center justify-between">
