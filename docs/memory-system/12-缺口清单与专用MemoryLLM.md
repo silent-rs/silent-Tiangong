@@ -31,7 +31,7 @@ Memory 不能再把主对话模型当成内部推理模型使用。主 `chat` �
 
 ### 配置要求
 
-Memory runtime 模型配置必须独立保存在 `~/.tiangong/memory/config.json`，由 `tiangong-memory` 提供配置类型、加载、保存和 `MemoryOptions` 转换能力。主 `models.json` 不再包含 `memory` capability 或 `routing.memory`；前端配置入口放在 LLM 配置下，选择项来自已有 Models，保存时由 Tauri 解析为 Memory runtime 端点配置。
+Memory runtime 模型配置必须独立保存在 `~/.tiangong/memory/config.json`，由 `tiangong-memory` 提供配置类型、加载、保存和 `MemoryOptions` 转换能力。主 `models.json` 不再包含 `memory` capability 或 `routing.memory`；前端配置入口放在 LLM 配置下，选择项来自已有 Models，保存时由 Tauri 解析为 Memory runtime 端点配置。`embedding` 和 `rerank` 只作为 Models 能力标签供 Memory 选择，不进入 Routing 页。
 
 示例：
 

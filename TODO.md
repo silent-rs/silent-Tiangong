@@ -31,6 +31,7 @@
 
 - [x] `tiangong-memory` 增加独立 `MemoryConfig`，持久化到 `~/.tiangong/memory/config.json`。
 - [x] Memory LLM、Embedding、Rerank 配置从主 `models.json` / routing 中拆出。
+- [x] Routing 页不再展示 Embedding / Rerank，二者只在 Memory 子页选择。
 - [x] `CoreConfig::to_memory_options()` 只读取 Memory 独立配置，不再从主模型配置派生。
 - [x] 前端将 Memory 配置放到 LLM 配置下，并从已有 Models 中选择模型。
 - [x] Tauri 增加 `get_memory_config` / `set_memory_config` 命令。

@@ -32,9 +32,9 @@
 - Model 层引用 Provider，声明实际模型 ID 和能力列表（`capabilities`），携带专属参数（`options`）。
 - 能力类型包括：`chat`（常规对话/推理）、`lite`（轻量文本）、`multimodal`（多模态理解）、`embedding`（通用向量嵌入）、`rerank`（通用结果重排）、`image_generation`（图片生成）、`video_generation`（视频生成）、`stt`（语音识别）、`tts`（语音合成）。
 - 一个模型可声明多种能力（如 gpt-4o 同时支持 chat 和 multimodal）。
-- 必须通过 `routing` 表为每种能力指定默认使用的模型。
+- `routing` 表只管理对话和多媒体运行能力的默认模型，不包含 `embedding` 和 `rerank`。
 - `chat` 为基础必选能力，routing 中未配置 `chat` 时程序必须在所有模式（GUI/CLI/Server）下持续提示用户完成模型设置，在设置完成前不执行对话任务。
-- Memory 模型配置不属于主 `models.json` routing；前端必须放在 LLM 配置下，通过已有 Models 选择 Memory LLM、Embedding、Rerank，并由后端解析后写入 `~/.tiangong/memory/config.json`。
+- Memory 模型配置不属于主 `models.json` routing；前端必须放在 LLM 配置下，通过已有 Models 选择 Memory LLM、Embedding、Rerank，并由后端解析后写入 `~/.tiangong/memory/config.json`。其中 `embedding` 和 `rerank` 只作为 Models 能力标签供 Memory 选择，不进入 Routing 页。
 - 其余能力（multimodal/image_generation/video_generation/stt/tts）未在 routing 中配置时视为关闭，对应功能不可用但不影响其他功能正常运行。
 - 当配置 `multimodal` routing 时，GUI 输入区必须开放图片/文件附件入口；包含任意附件或图片路径的用户消息必须优先路由到多模态模型，先由多模态模型解析附件后再回答，并将本地附件转换为模型协议可识别的内容。
 - `api_key` 必须支持环境变量引用（`${ENV_VAR}` 语法），避免明文存储。

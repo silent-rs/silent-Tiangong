@@ -1333,6 +1333,9 @@ function RoutingSection({
   capabilities: ModelCapabilityInfo[];
 }) {
   const modelKeys = Object.keys(config.models);
+  const routingCapabilities = capabilities.filter(
+    (cap) => cap.key !== 'embedding' && cap.key !== 'rerank',
+  );
   const modelLabel = (modelKey: string) => {
     const model = config.models[modelKey];
     if (!model) return modelKey;
@@ -1356,12 +1359,12 @@ function RoutingSection({
       <div className="mb-3">
         <h4 className="text-sm font-medium text-muted-foreground">Routing (能力路由)</h4>
         <p className="text-xs text-muted-foreground mt-1">
-          为每种能力选择对应的模型，多媒体（图片/视频/STT/TTS）通过此处配置；Memory 使用独立设置页。
+          为对话和多媒体能力选择默认模型；Embedding 和 Rerank 在 Memory 子页中选择。
         </p>
       </div>
 
       <div className="space-y-2 max-h-[calc(80vh-280px)] overflow-y-auto">
-        {capabilities.map((cap) => (
+        {routingCapabilities.map((cap) => (
           <Card key={cap.key}>
             <CardContent className="p-3">
               <div className="flex items-center gap-4">

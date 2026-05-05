@@ -357,6 +357,13 @@ impl ModelsConfigView {
         let routing = config
             .routing
             .iter()
+            .filter(|(k, _)| {
+                !matches!(
+                    k,
+                    tiangong_core::models_config::ModelCapability::Embedding
+                        | tiangong_core::models_config::ModelCapability::Rerank
+                )
+            })
             .map(|(k, v)| {
                 let key = serde_json::to_value(k).unwrap_or_default();
                 (key.as_str().unwrap_or_default().to_string(), v.clone())
@@ -421,6 +428,9 @@ impl ModelsConfigView {
             .filter_map(|(k, v)| {
                 let json_str = format!("\"{}\"", k);
                 let cap: ModelCapability = serde_json::from_str(&json_str).ok()?;
+                if matches!(cap, ModelCapability::Embedding | ModelCapability::Rerank) {
+                    return None;
+                }
                 Some((cap, v.clone()))
             })
             .collect();
