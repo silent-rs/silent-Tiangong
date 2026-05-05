@@ -93,6 +93,44 @@ impl MemoryActor {
                 }
             }
 
+            MemoryCommand::UpsertManualMemory { draft, reply } => {
+                let result = if draft.id.as_deref().is_some_and(|id| !id.trim().is_empty()) {
+                    self.store.update_manual_memory(draft).await
+                } else {
+                    self.store.upsert_manual_memory(draft).await
+                }
+                .map_err(|err| err.to_string());
+                let _ = reply.send(result);
+            }
+
+            MemoryCommand::SetNodeStatus {
+                node_id,
+                status,
+                reply,
+            } => {
+                let result = self
+                    .store
+                    .set_node_status(&node_id, status)
+                    .map_err(|err| err.to_string());
+                let _ = reply.send(result);
+            }
+
+            MemoryCommand::UpsertRelation { draft, reply } => {
+                let result = self
+                    .store
+                    .upsert_relation(draft)
+                    .map_err(|err| err.to_string());
+                let _ = reply.send(result);
+            }
+
+            MemoryCommand::DeleteRelation { relation_id, reply } => {
+                let result = self
+                    .store
+                    .delete_relation(&relation_id)
+                    .map_err(|err| err.to_string());
+                let _ = reply.send(result);
+            }
+
             // Phase C：双引擎召回（Tantivy BM25 + Qdrant 语义）
             MemoryCommand::Recall {
                 anchors,
@@ -115,6 +153,16 @@ impl MemoryActor {
 
             MemoryCommand::LoadDepth2 { node_ids, reply } => {
                 let items = self.store.load_depth2(&node_ids);
+                let _ = reply.send(items);
+            }
+
+            MemoryCommand::ListNodes { query, reply } => {
+                let items = self.store.list_nodes(&query);
+                let _ = reply.send(items);
+            }
+
+            MemoryCommand::ListRelations { node_id, reply } => {
+                let items = self.store.list_relations(&node_id);
                 let _ = reply.send(items);
             }
 

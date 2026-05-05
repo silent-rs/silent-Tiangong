@@ -339,7 +339,13 @@ fn expand_related_memories(
     let mut frontier = seed_expanded.to_vec();
 
     for round in 0..max_rounds.clamp(1, 2) {
+        let frontier_node_ids = frontier
+            .iter()
+            .map(|item| item.node_id.clone())
+            .collect::<Vec<_>>();
         let related_ids = related_node_ids_from_expanded(&frontier)
+            .into_iter()
+            .chain(store.related_node_ids(&frontier_node_ids))
             .into_iter()
             .filter(|id| seen_ids.insert(id.clone()))
             .collect::<Vec<_>>();

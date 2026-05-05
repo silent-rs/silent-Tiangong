@@ -2078,6 +2078,161 @@ pub fn set_memory_config(
     Ok(())
 }
 
+fn current_memory_workspace_id(state: &State<TiangongApp>) -> Result<Option<String>, String> {
+    let cwd = state.with_state_read(|core_state| Ok(core_state.active_session_effective_cwd()))?;
+    let trimmed = cwd.trim();
+    if trimmed.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(tiangong_memory::workspace_id_from_path(
+            &std::path::PathBuf::from(trimmed),
+        )))
+    }
+}
+
+fn current_memory_handle(state: &State<TiangongApp>) -> Result<tiangong_memory::MemoryHandle, String> {
+    let workspace_id = current_memory_workspace_id(state)?;
+    tiangong_core::core::get_or_init_memory_handle(&state.config, workspace_id)
+        .ok_or_else(|| "Memory 未启动或初始化失败".to_string())
+}
+
+/// 列出当前 workspace 的记忆节点。
+#[tauri::command]
+pub async fn list_memory_nodes(
+    query: Option<String>,
+    status: Option<String>,
+    limit: Option<usize>,
+    state: State<'_, TiangongApp>,
+) -> Result<Vec<tiangong_memory::MemoryNode>, String> {
+    let workspace_id = current_memory_workspace_id(&state)?;
+    let status = match status.as_deref() {
+        Some("archived") => Some(tiangong_memory::MemoryStatus::Archived),
+        Some("active") | None | Some("") => Some(tiangong_memory::MemoryStatus::Active),
+        Some(other) => return Err(format!("不支持的记忆状态：{other}")),
+    };
+    let handle = current_memory_handle(&state)?;
+    Ok(handle
+        .list_nodes(tiangong_memory::MemoryListQuery {
+            workspace_id,
+            query,
+            status,
+            limit: limit.unwrap_or(100),
+        })
+        .await)
+}
+
+/// 手动新增或调整一条记忆。
+#[tauri::command]
+pub async fn upsert_manual_memory(
+    mut draft: tiangong_memory::ManualMemoryDraft,
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_memory::MemoryNode, String> {
+    if draft.title.trim().is_empty() {
+        return Err("记忆标题不能为空".to_string());
+    }
+    if draft.summary.trim().is_empty() {
+        return Err("记忆内容不能为空".to_string());
+    }
+    if draft.workspace_id.is_none() {
+        draft.workspace_id = current_memory_workspace_id(&state)?;
+    }
+    let handle = current_memory_handle(&state)?;
+    handle
+        .upsert_manual_memory(draft)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// 归档或恢复记忆节点。
+#[tauri::command]
+pub async fn set_memory_node_status(
+    node_id: String,
+    status: String,
+    state: State<'_, TiangongApp>,
+) -> Result<(), String> {
+    let status = match status.as_str() {
+        "active" => tiangong_memory::MemoryStatus::Active,
+        "archived" => tiangong_memory::MemoryStatus::Archived,
+        other => return Err(format!("不支持的记忆状态：{other}")),
+    };
+    let handle = current_memory_handle(&state)?;
+    handle
+        .set_node_status(node_id, status)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// 列出指定记忆节点的图关系。
+#[tauri::command]
+pub async fn list_memory_relations(
+    node_id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<Vec<tiangong_memory::MemoryRelation>, String> {
+    if node_id.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let handle = current_memory_handle(&state)?;
+    Ok(handle.list_relations(node_id).await)
+}
+
+/// 新增或调整记忆图关系。
+#[tauri::command]
+pub async fn upsert_memory_relation(
+    draft: tiangong_memory::MemoryRelationDraft,
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_memory::MemoryRelation, String> {
+    if draft.from_node_id.trim().is_empty() || draft.to_node_id.trim().is_empty() {
+        return Err("关联的起点和终点记忆不能为空".to_string());
+    }
+    if draft.from_node_id == draft.to_node_id {
+        return Err("记忆不能关联到自身".to_string());
+    }
+    let handle = current_memory_handle(&state)?;
+    handle
+        .upsert_relation(draft)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// 删除记忆图关系。
+#[tauri::command]
+pub async fn delete_memory_relation(
+    relation_id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<(), String> {
+    if relation_id.trim().is_empty() {
+        return Ok(());
+    }
+    let handle = current_memory_handle(&state)?;
+    handle
+        .delete_relation(relation_id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// 手动测试记忆召回，不写入会话消息链。
+#[tauri::command]
+pub async fn test_memory_recall(
+    query: String,
+    limit: Option<usize>,
+    state: State<'_, TiangongApp>,
+) -> Result<Vec<tiangong_memory::RecallHit>, String> {
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let handle = current_memory_handle(&state)?;
+    Ok(handle
+        .recall(
+            tiangong_memory::RecallAnchors {
+                keywords: Vec::new(),
+                query,
+                strategy: None,
+            },
+            limit.unwrap_or(8),
+        )
+        .await)
+}
+
 /// 获取所有可用的模型能力列表
 #[tauri::command]
 pub fn get_model_capabilities() -> Result<Vec<ModelCapabilityInfo>, String> {

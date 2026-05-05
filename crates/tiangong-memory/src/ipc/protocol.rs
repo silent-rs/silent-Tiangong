@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::command::InjectionLevel;
 use crate::types::{
-    Episode, ExpandedMemory, MemoryRecallRequest, MemoryRecallResponse, RecallAnchors, RecallHit,
-    TurnResult,
+    Episode, ExpandedMemory, ManualMemoryDraft, MemoryListQuery, MemoryNode, MemoryRecallRequest,
+    MemoryRecallResponse, MemoryRelation, MemoryRelationDraft, MemoryStatus, RecallAnchors,
+    RecallHit, TurnResult,
 };
 
 /// Endpoint 发现信息，写入本地 runtime 文件供 follower 读取。
@@ -67,9 +68,28 @@ pub enum MemoryIpcRequestPayload {
     LoadDepth2 {
         node_ids: Vec<String>,
     },
+    ListNodes {
+        query: MemoryListQuery,
+    },
+    ListRelations {
+        node_id: String,
+    },
     WriteEpisode {
         episode: Episode,
         workspace_id: Option<String>,
+    },
+    UpsertManualMemory {
+        draft: ManualMemoryDraft,
+    },
+    SetNodeStatus {
+        node_id: String,
+        status: MemoryStatus,
+    },
+    UpsertRelation {
+        draft: MemoryRelationDraft,
+    },
+    DeleteRelation {
+        relation_id: String,
     },
     UpdateInjection {
         level: InjectionLevel,
@@ -96,4 +116,8 @@ pub enum MemoryIpcResponsePayload {
     Recall { hits: Vec<RecallHit> },
     RecallContext { response: MemoryRecallResponse },
     Depth2 { items: Vec<ExpandedMemory> },
+    Nodes { items: Vec<MemoryNode> },
+    Node { item: MemoryNode },
+    Relations { items: Vec<MemoryRelation> },
+    Relation { item: MemoryRelation },
 }

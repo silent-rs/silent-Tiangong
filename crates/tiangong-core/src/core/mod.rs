@@ -160,6 +160,15 @@ fn get_or_init_memory(
     }
 }
 
+/// 获取或初始化 workspace 级 Memory Handle，供 GUI/Server 侧管理入口复用。
+pub fn get_or_init_memory_handle(
+    config_provider: &CoreConfigProvider,
+    workspace_id: Option<String>,
+) -> Option<tiangong_memory::MemoryHandle> {
+    let config = config_provider.snapshot();
+    get_or_init_memory(&config, config_provider.generation(), workspace_id)
+}
+
 fn memory_config_changed(running: &MemoryConfigSummary, latest: &MemoryConfigSummary) -> bool {
     running != latest
 }

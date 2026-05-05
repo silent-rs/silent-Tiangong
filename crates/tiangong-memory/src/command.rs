@@ -4,8 +4,9 @@ use tokio::sync::oneshot;
 
 use crate::options::MemoryOptions;
 use crate::types::{
-    Episode, ExpandedMemory, MemoryRecallRequest, MemoryRecallResponse, RecallAnchors, RecallHit,
-    TurnResult,
+    Episode, ExpandedMemory, ManualMemoryDraft, MemoryListQuery, MemoryNode, MemoryRecallRequest,
+    MemoryRecallResponse, MemoryRelation, MemoryRelationDraft, MemoryStatus, RecallAnchors,
+    RecallHit, TurnResult,
 };
 
 /// 注入级别
@@ -37,6 +38,14 @@ pub enum MemoryCommand {
         node_ids: Vec<String>,
         reply: oneshot::Sender<Vec<ExpandedMemory>>,
     },
+    ListNodes {
+        query: MemoryListQuery,
+        reply: oneshot::Sender<Vec<MemoryNode>>,
+    },
+    ListRelations {
+        node_id: String,
+        reply: oneshot::Sender<Vec<MemoryRelation>>,
+    },
 
     // ── 写入类（fire-and-forget）──
     WriteEpisode {
@@ -48,6 +57,23 @@ pub enum MemoryCommand {
         level: InjectionLevel,
         target_id: String,
         content: String,
+    },
+    UpsertManualMemory {
+        draft: ManualMemoryDraft,
+        reply: oneshot::Sender<Result<MemoryNode, String>>,
+    },
+    SetNodeStatus {
+        node_id: String,
+        status: MemoryStatus,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    UpsertRelation {
+        draft: MemoryRelationDraft,
+        reply: oneshot::Sender<Result<MemoryRelation, String>>,
+    },
+    DeleteRelation {
+        relation_id: String,
+        reply: oneshot::Sender<Result<(), String>>,
     },
 
     // ── 反刍类（fire-and-forget）──

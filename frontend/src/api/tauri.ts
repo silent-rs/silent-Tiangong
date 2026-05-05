@@ -212,6 +212,88 @@ export interface MemoryConfigView {
   vector_mode: string;
 }
 
+export type MemoryKind = 'episode' | 'entity' | 'decision' | 'evidence';
+export type MemoryCognitiveType =
+  | 'factual'
+  | 'user_preference'
+  | 'user_habit'
+  | 'skill'
+  | 'project_structure'
+  | 'architecture_decision'
+  | 'problem_incident'
+  | 'domain_knowledge';
+export type MemoryStatus = 'active' | 'archived';
+export type MemoryRelationKind =
+  | 'related_to'
+  | 'depends_on'
+  | 'supports'
+  | 'contradicts'
+  | 'supersedes'
+  | 'caused_by'
+  | 'belongs_to'
+  | 'learned_from'
+  | 'validated_by';
+
+export interface MemoryNode {
+  id: string;
+  kind: MemoryKind;
+  memory_type: MemoryCognitiveType;
+  scope_type: string;
+  scope_id?: string;
+  title: string;
+  summary: string;
+  keywords: string[];
+  importance: number;
+  confidence: number;
+  status: MemoryStatus;
+  source?: string;
+  usage_count: number;
+  last_used_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ManualMemoryDraft {
+  id?: string;
+  memory_type: MemoryCognitiveType;
+  title: string;
+  summary: string;
+  keywords: string[];
+  importance: number;
+  workspace_id?: string;
+  session_id?: string;
+}
+
+export interface MemoryRelation {
+  id: string;
+  from_node_id: string;
+  to_node_id: string;
+  relation_kind: MemoryRelationKind;
+  weight: number;
+  note?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MemoryRelationDraft {
+  id?: string;
+  from_node_id: string;
+  to_node_id: string;
+  relation_kind: MemoryRelationKind;
+  weight: number;
+  note?: string;
+}
+
+export interface RecallHit {
+  node_id: string;
+  title: string;
+  summary: string;
+  score: number;
+  kind: MemoryKind;
+  importance: number;
+  depth1_loaded: boolean;
+}
+
 // ============================================================================
 // API 方法
 // ============================================================================
@@ -387,6 +469,27 @@ export const api = {
 
   setMemoryConfig: (config: MemoryConfigView): Promise<void> =>
     invoke('set_memory_config', { config }),
+
+  listMemoryNodes: (query?: string, status?: MemoryStatus, limit?: number): Promise<MemoryNode[]> =>
+    invoke('list_memory_nodes', { query, status, limit }),
+
+  upsertManualMemory: (draft: ManualMemoryDraft): Promise<MemoryNode> =>
+    invoke('upsert_manual_memory', { draft }),
+
+  setMemoryNodeStatus: (nodeId: string, status: MemoryStatus): Promise<void> =>
+    invoke('set_memory_node_status', { nodeId, status }),
+
+  listMemoryRelations: (nodeId: string): Promise<MemoryRelation[]> =>
+    invoke('list_memory_relations', { nodeId }),
+
+  upsertMemoryRelation: (draft: MemoryRelationDraft): Promise<MemoryRelation> =>
+    invoke('upsert_memory_relation', { draft }),
+
+  deleteMemoryRelation: (relationId: string): Promise<void> =>
+    invoke('delete_memory_relation', { relationId }),
+
+  testMemoryRecall: (query: string, limit?: number): Promise<RecallHit[]> =>
+    invoke('test_memory_recall', { query, limit }),
 
   getModelCapabilities: (): Promise<ModelCapabilityInfo[]> =>
     invoke('get_model_capabilities'),

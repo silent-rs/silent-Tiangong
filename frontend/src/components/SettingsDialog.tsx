@@ -10,10 +10,10 @@ import { Card, CardContent } from './ui/card';
 import { Switch } from './ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Link, Edit2, KeyRound, RefreshCw, Info, Wrench, FolderOpen, Save, ShieldCheck } from 'lucide-react';
+import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Link, Edit2, KeyRound, RefreshCw, Info, Wrench, FolderOpen, Save, ShieldCheck, Database, Search, Archive, RotateCcw } from 'lucide-react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { api } from '@/api/tauri';
-import type { McpServer, Skill, SkillDetail, ServerConfig, ConnectorInfo, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo, MemoryConfigView } from '@/api/tauri';
+import type { McpServer, Skill, SkillDetail, ServerConfig, ConnectorInfo, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo, MemoryConfigView, MemoryNode, ManualMemoryDraft, MemoryStatus, RecallHit, MemoryCognitiveType, MemoryRelation, MemoryRelationKind } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
 import { useToast } from './Toast';
 
@@ -62,6 +62,10 @@ export function SettingsDialog() {
                 <Settings className="w-4 h-4 mr-2" />
                 LLM 配置
               </TabsTrigger>
+              <TabsTrigger value="memory">
+                <Database className="w-4 h-4 mr-2" />
+                Memory
+              </TabsTrigger>
               <TabsTrigger value="mcp">
                 <Server className="w-4 h-4 mr-2" />
                 MCP 服务器
@@ -89,6 +93,9 @@ export function SettingsDialog() {
               </TabsContent>
               <TabsContent value="llm">
                 <LLMSettings onSaveStatusChange={setSaveStatus} />
+              </TabsContent>
+              <TabsContent value="memory">
+                <MemoryManagementSettings />
               </TabsContent>
               <TabsContent value="mcp">
                 <McpSettings />
@@ -638,6 +645,464 @@ function MemoryModelSelectSection({
         {footer}
       </CardContent>
     </Card>
+  );
+}
+
+// ============================================================================
+// Memory 手动管理组件
+// ============================================================================
+
+const MEMORY_TYPE_OPTIONS: { value: MemoryCognitiveType; label: string }[] = [
+  { value: 'factual', label: '事实性' },
+  { value: 'user_preference', label: '用户偏好' },
+  { value: 'user_habit', label: '用户习惯' },
+  { value: 'skill', label: '技能型' },
+  { value: 'project_structure', label: '项目结构' },
+  { value: 'architecture_decision', label: '架构决策' },
+  { value: 'problem_incident', label: '问题故障' },
+  { value: 'domain_knowledge', label: '领域知识' },
+];
+
+const MEMORY_RELATION_OPTIONS: { value: MemoryRelationKind; label: string }[] = [
+  { value: 'related_to', label: '相关' },
+  { value: 'depends_on', label: '依赖' },
+  { value: 'supports', label: '支撑' },
+  { value: 'contradicts', label: '冲突' },
+  { value: 'supersedes', label: '替代' },
+  { value: 'caused_by', label: '源于' },
+  { value: 'belongs_to', label: '归属' },
+  { value: 'learned_from', label: '学习自' },
+  { value: 'validated_by', label: '验证自' },
+];
+
+function memoryTypeLabel(value: MemoryCognitiveType) {
+  return MEMORY_TYPE_OPTIONS.find((item) => item.value === value)?.label ?? value;
+}
+
+function relationKindLabel(value: MemoryRelationKind) {
+  return MEMORY_RELATION_OPTIONS.find((item) => item.value === value)?.label ?? value;
+}
+
+function emptyMemoryDraft(): ManualMemoryDraft {
+  return {
+    memory_type: 'factual',
+    title: '',
+    summary: '',
+    keywords: [],
+    importance: 0.6,
+  };
+}
+
+function MemoryManagementSettings() {
+  const [nodes, setNodes] = useState<MemoryNode[]>([]);
+  const [query, setQuery] = useState('');
+  const [status, setStatus] = useState<MemoryStatus>('active');
+  const [isLoading, setIsLoading] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [draft, setDraft] = useState<ManualMemoryDraft>(emptyMemoryDraft());
+  const [keywordsText, setKeywordsText] = useState('');
+  const [relations, setRelations] = useState<MemoryRelation[]>([]);
+  const [relationTargetId, setRelationTargetId] = useState('');
+  const [relationKind, setRelationKind] = useState<MemoryRelationKind>('related_to');
+  const [relationNote, setRelationNote] = useState('');
+  const [recallQuery, setRecallQuery] = useState('');
+  const [recallHits, setRecallHits] = useState<RecallHit[]>([]);
+  const [isRecalling, setIsRecalling] = useState(false);
+  const { showSuccess, showError } = useToast();
+
+  const loadNodes = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const data = await api.listMemoryNodes(query.trim() || undefined, status, 120);
+      setNodes(data);
+    } catch (error) {
+      console.error('加载记忆失败:', error);
+      showError('加载失败', `无法加载 Memory 记忆：${error}`);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [query, status, showError]);
+
+  useEffect(() => {
+    loadNodes();
+  }, [loadNodes]);
+
+  const startNew = () => {
+    setDraft(emptyMemoryDraft());
+    setKeywordsText('');
+    setRelations([]);
+    setRelationTargetId('');
+    setRelationKind('related_to');
+    setRelationNote('');
+  };
+
+  const editNode = (node: MemoryNode) => {
+    setDraft({
+      id: node.id,
+      memory_type: node.memory_type,
+      title: node.title,
+      summary: node.summary,
+      keywords: node.keywords,
+      importance: node.importance,
+    });
+    setKeywordsText(node.keywords.join(', '));
+    setRelationTargetId('');
+    setRelationNote('');
+    api.listMemoryRelations(node.id)
+      .then(setRelations)
+      .catch((error) => {
+        console.error('加载记忆关系失败:', error);
+        setRelations([]);
+      });
+  };
+
+  const saveDraft = async () => {
+    const title = draft.title.trim();
+    const summary = draft.summary.trim();
+    if (!title || !summary) {
+      showError('内容不完整', '标题和内容都不能为空');
+      return;
+    }
+    setIsSaving(true);
+    try {
+      const saved = await api.upsertManualMemory({
+        ...draft,
+        title,
+        summary,
+        keywords: keywordsText
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean),
+        importance: Number(draft.importance) || 0.6,
+      });
+      editNode(saved);
+      showSuccess('记忆已保存', saved.title);
+      loadNodes();
+    } catch (error) {
+      console.error('保存记忆失败:', error);
+      showError('保存失败', `无法保存记忆：${error}`);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const setNodeStatus = async (node: MemoryNode, nextStatus: MemoryStatus) => {
+    try {
+      await api.setMemoryNodeStatus(node.id, nextStatus);
+      showSuccess(nextStatus === 'archived' ? '记忆已归档' : '记忆已恢复', node.title);
+      loadNodes();
+    } catch (error) {
+      console.error('更新记忆状态失败:', error);
+      showError('操作失败', `无法更新记忆状态：${error}`);
+    }
+  };
+
+  const saveRelation = async () => {
+    if (!draft.id) {
+      showError('请先保存记忆', '新增记忆保存后才能建立关联');
+      return;
+    }
+    if (!relationTargetId || relationTargetId === draft.id) {
+      showError('关联目标无效', '请选择另一条记忆作为关联目标');
+      return;
+    }
+    try {
+      await api.upsertMemoryRelation({
+        from_node_id: draft.id,
+        to_node_id: relationTargetId,
+        relation_kind: relationKind,
+        weight: 1,
+        note: relationNote.trim() || undefined,
+      });
+      setRelations(await api.listMemoryRelations(draft.id));
+      setRelationTargetId('');
+      setRelationNote('');
+      showSuccess('关联已保存', relationKindLabel(relationKind));
+    } catch (error) {
+      console.error('保存记忆关系失败:', error);
+      showError('关联失败', `无法保存记忆关系：${error}`);
+    }
+  };
+
+  const removeRelation = async (relation: MemoryRelation) => {
+    try {
+      await api.deleteMemoryRelation(relation.id);
+      if (draft.id) {
+        setRelations(await api.listMemoryRelations(draft.id));
+      }
+      showSuccess('关联已删除', relationKindLabel(relation.relation_kind));
+    } catch (error) {
+      console.error('删除记忆关系失败:', error);
+      showError('删除失败', `无法删除记忆关系：${error}`);
+    }
+  };
+
+  const runRecall = async () => {
+    const value = recallQuery.trim();
+    if (!value) {
+      setRecallHits([]);
+      return;
+    }
+    setIsRecalling(true);
+    try {
+      setRecallHits(await api.testMemoryRecall(value, 8));
+    } catch (error) {
+      console.error('召回测试失败:', error);
+      showError('召回失败', `无法执行 Memory 召回：${error}`);
+    } finally {
+      setIsRecalling(false);
+    }
+  };
+
+  return (
+    <div className="p-4 space-y-4">
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_340px] gap-4">
+        <div className="space-y-3">
+          <div className="flex gap-2">
+            <Input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="搜索标题、内容或关键词"
+              className="h-9"
+            />
+            <Select value={status} onValueChange={(value) => setStatus(value as MemoryStatus)}>
+              <SelectTrigger className="w-28 h-9">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="active">活跃</SelectItem>
+                <SelectItem value="archived">归档</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button variant="outline" size="icon" className="h-9 w-9" onClick={loadNodes} disabled={isLoading}>
+              {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+            </Button>
+          </div>
+
+          <div className="space-y-2 max-h-[calc(80vh-280px)] overflow-y-auto">
+            {nodes.map((node) => (
+              <Card key={node.id}>
+                <CardContent className="p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <button className="min-w-0 text-left flex-1" onClick={() => editNode(node)}>
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-sm truncate">{node.title}</span>
+                        <Badge variant="secondary" className="text-[10px] h-5">
+                          {node.kind}
+                        </Badge>
+                        <Badge variant="outline" className="text-[10px] h-5">
+                          {memoryTypeLabel(node.memory_type)}
+                        </Badge>
+                      </div>
+                      <div className="text-xs text-muted-foreground mt-1 line-clamp-2">
+                        {node.summary}
+                      </div>
+                      {node.keywords.length > 0 && (
+                        <div className="flex gap-1 mt-2 flex-wrap">
+                          {node.keywords.slice(0, 5).map((keyword) => (
+                            <Badge key={keyword} variant="outline" className="text-[10px] h-5">
+                              {keyword}
+                            </Badge>
+                          ))}
+                        </div>
+                      )}
+                    </button>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => editNode(node)} title="编辑">
+                        <Edit2 className="w-3.5 h-3.5" />
+                      </Button>
+                      {node.status === 'active' ? (
+                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setNodeStatus(node, 'archived')} title="归档">
+                          <Archive className="w-3.5 h-3.5" />
+                        </Button>
+                      ) : (
+                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setNodeStatus(node, 'active')} title="恢复">
+                          <RotateCcw className="w-3.5 h-3.5" />
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+            {!isLoading && nodes.length === 0 && (
+              <div className="text-center text-muted-foreground py-8 text-sm">
+                暂无匹配记忆
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          <Card>
+            <CardContent className="p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <h4 className="text-sm font-medium">手动附加 / 调整</h4>
+                <Button variant="ghost" size="sm" onClick={startNew}>
+                  <Plus className="w-3.5 h-3.5 mr-1" />
+                  新增
+                </Button>
+              </div>
+              <div>
+                <Label className="text-xs">类型</Label>
+                <Select
+                  value={draft.memory_type}
+                  onValueChange={(value) => setDraft({ ...draft, memory_type: value as MemoryCognitiveType })}
+                >
+                  <SelectTrigger className="h-8 text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {MEMORY_TYPE_OPTIONS.map((item) => (
+                      <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <Label className="text-xs">标题</Label>
+                <Input
+                  value={draft.title}
+                  onChange={(event) => setDraft({ ...draft, title: event.target.value })}
+                  className="h-8 text-sm"
+                  placeholder="记忆标题"
+                />
+              </div>
+              <div>
+                <Label className="text-xs">内容</Label>
+                <Textarea
+                  value={draft.summary}
+                  onChange={(event) => setDraft({ ...draft, summary: event.target.value })}
+                  className="min-h-28 resize-y text-sm"
+                  placeholder="需要长期保存或修正的记忆内容"
+                />
+              </div>
+              <div>
+                <Label className="text-xs">关键词</Label>
+                <Input
+                  value={keywordsText}
+                  onChange={(event) => setKeywordsText(event.target.value)}
+                  className="h-8 text-sm"
+                  placeholder="用逗号分隔"
+                />
+              </div>
+              <div>
+                <Label className="text-xs">重要度</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  max={1}
+                  step={0.1}
+                  value={draft.importance}
+                  onChange={(event) => setDraft({ ...draft, importance: Number(event.target.value) || 0.6 })}
+                  className="h-8 text-sm"
+                />
+              </div>
+              <Button onClick={saveDraft} disabled={isSaving} className="w-full">
+                {isSaving ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Save className="w-4 h-4 mr-2" />}
+                保存记忆
+              </Button>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardContent className="p-4 space-y-3">
+              <h4 className="text-sm font-medium">记忆关联</h4>
+              <div className="grid grid-cols-[minmax(0,1fr)_104px] gap-2">
+                <Select value={relationTargetId} onValueChange={setRelationTargetId} disabled={!draft.id}>
+                  <SelectTrigger className="h-8 text-sm">
+                    <SelectValue placeholder="选择关联目标" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {nodes.filter((node) => node.id !== draft.id).map((node) => (
+                      <SelectItem key={node.id} value={node.id}>{node.title}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Select value={relationKind} onValueChange={(value) => setRelationKind(value as MemoryRelationKind)} disabled={!draft.id}>
+                  <SelectTrigger className="h-8 text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {MEMORY_RELATION_OPTIONS.map((item) => (
+                      <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <Input
+                value={relationNote}
+                onChange={(event) => setRelationNote(event.target.value)}
+                className="h-8 text-sm"
+                placeholder="关联备注"
+                disabled={!draft.id}
+              />
+              <Button variant="outline" onClick={saveRelation} disabled={!draft.id} className="w-full">
+                <Link className="w-4 h-4 mr-2" />
+                保存关联
+              </Button>
+              <div className="space-y-2 max-h-40 overflow-y-auto">
+                {relations.map((relation) => {
+                  const otherId = relation.from_node_id === draft.id ? relation.to_node_id : relation.from_node_id;
+                  const otherNode = nodes.find((node) => node.id === otherId);
+                  return (
+                    <div key={relation.id} className="rounded-md border p-2 flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="text-xs font-medium truncate">
+                          {relationKindLabel(relation.relation_kind)}：{otherNode?.title ?? otherId}
+                        </div>
+                        {relation.note && (
+                          <div className="text-xs text-muted-foreground mt-1 line-clamp-2">{relation.note}</div>
+                        )}
+                      </div>
+                      <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={() => removeRelation(relation)} title="删除关联">
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </Button>
+                    </div>
+                  );
+                })}
+                {draft.id && relations.length === 0 && (
+                  <div className="text-xs text-muted-foreground">暂无关联</div>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardContent className="p-4 space-y-3">
+              <h4 className="text-sm font-medium">召回测试</h4>
+              <div className="flex gap-2">
+                <Input
+                  value={recallQuery}
+                  onChange={(event) => setRecallQuery(event.target.value)}
+                  placeholder="输入要测试的回忆问题"
+                  className="h-8 text-sm"
+                />
+                <Button size="icon" className="h-8 w-8" onClick={runRecall} disabled={isRecalling}>
+                  {isRecalling ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+                </Button>
+              </div>
+              <div className="space-y-2 max-h-48 overflow-y-auto">
+                {recallHits.map((hit) => (
+                  <div key={hit.node_id} className="rounded-md border p-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-medium truncate">{hit.title}</span>
+                      <span className="text-[10px] text-muted-foreground">{hit.score.toFixed(2)}</span>
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-1 line-clamp-2">
+                      {hit.summary}
+                    </div>
+                  </div>
+                ))}
+                {!isRecalling && recallQuery.trim() && recallHits.length === 0 && (
+                  <div className="text-xs text-muted-foreground">暂无召回结果</div>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    </div>
   );
 }
 

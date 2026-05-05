@@ -47,6 +47,13 @@
 ## P1 - 真实模型路径验证
 
 - [ ] 增加可手动运行的 Memory LLM smoke test。
+- [x] 增加 GUI Memory 管理界面，支持查看、新增、调整、归档记忆。
+- [x] 增加 GUI 记忆召回测试入口，手动输入 query 后查看 Recall 命中。
+- [x] 手动新增或调整记忆通过 Memory Actor 写入，保持 SQLite / Tantivy / 向量索引一致。
+- [x] 增加 8 类核心记忆类型：事实性、用户偏好、用户习惯、技能型、项目结构、架构决策、问题故障、领域知识。
+- [x] 增加 Memory 图关系结构，支持记忆节点之间建立关联关系。
+- [x] GUI Memory 管理界面支持手动设置记忆类型和维护记忆关联。
+- [x] Deep Recall 支持沿 Memory 图关系加载邻接记忆。
 - [ ] 固定 5-10 个历史指代样例，验证输出只包含增量记忆。
 - [ ] 记录 Memory LLM token 使用和延迟，确认不拖慢主对话链路。
 - [ ] Deep Recall 真实效果通过跨会话、跨产物、跨 Entity/Decision 固定场景评测。

@@ -19,8 +19,9 @@ use crate::search::TantivyIndex;
 use crate::search::qdrant_search::QdrantIndex;
 use crate::search::vector::{EmbeddedFlatVectorIndex, VectorIndex};
 use crate::types::{
-    Decision, Entity, Episode, ExpandedMemory, MemoryKind, MemoryNode, MemoryScopeType,
-    MemoryStatus, RecallAnchors, RecallHit,
+    Decision, Entity, Episode, EpisodeOutcome, ExpandedMemory, ManualMemoryDraft,
+    MemoryCognitiveType, MemoryKind, MemoryListQuery, MemoryNode, MemoryRelation,
+    MemoryRelationDraft, MemoryScopeType, MemoryStatus, RecallAnchors, RecallHit,
 };
 
 /// Memory 存储协调器
@@ -244,6 +245,104 @@ impl MemoryStore {
         }
     }
 
+    /// 列出记忆节点，供 GUI 手动管理使用。
+    pub(crate) fn list_nodes(&self, query: &MemoryListQuery) -> Vec<MemoryNode> {
+        let workspace_id = query
+            .workspace_id
+            .as_deref()
+            .or(self.workspace_id.as_deref());
+        self.db
+            .list_memory_nodes(
+                workspace_id,
+                query.query.as_deref(),
+                query.status.as_ref(),
+                query.limit,
+            )
+            .unwrap_or_default()
+    }
+
+    /// 手动新增或调整一条 Episode 记忆。
+    pub(crate) async fn upsert_manual_memory(
+        &mut self,
+        draft: ManualMemoryDraft,
+    ) -> Result<MemoryNode> {
+        let workspace_id = draft
+            .workspace_id
+            .as_deref()
+            .or(self.workspace_id.as_deref())
+            .map(str::to_string);
+        let keywords = normalize_keywords(draft.keywords);
+        let importance = if draft.importance > 0.0 {
+            draft.importance.clamp(0.0, 1.0)
+        } else {
+            0.6
+        };
+        let session_id = draft
+            .session_id
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| Some("manual".to_string()))
+            .unwrap_or_else(|| "manual".to_string());
+
+        let episode = Episode {
+            id: draft.id.unwrap_or_else(|| scru128::new().to_string()),
+            session_id,
+            title: draft.title.trim().to_string(),
+            summary: draft.summary.trim().to_string(),
+            outcome: EpisodeOutcome::Success,
+            keywords,
+            tool_calls: Vec::new(),
+            importance,
+            created_at: chrono::Local::now().naive_local().to_string(),
+        };
+        let mut node = self.write_episode_metadata(episode, workspace_id.as_deref())?;
+        node = self.db.update_memory_node_details(
+            &node.id,
+            &node.title,
+            &node.summary,
+            &node.keywords,
+            node.importance,
+            &draft.memory_type,
+        )?;
+        if let Err(err) = self.tantivy.index_node(&node, "") {
+            tracing::warn!("Tantivy 手动记忆类型索引更新失败（非致命）: {err}");
+        }
+        if let Err(err) = self.recall_engine.upsert_node(&node).await {
+            tracing::warn!("Memory 手动记忆向量写入失败（非致命）: {err}");
+        }
+        Ok(node)
+    }
+
+    /// 手动调整已有节点元信息。
+    pub(crate) async fn update_manual_memory(
+        &mut self,
+        draft: ManualMemoryDraft,
+    ) -> Result<MemoryNode> {
+        let Some(node_id) = draft.id.as_deref().filter(|value| !value.trim().is_empty()) else {
+            return self.upsert_manual_memory(draft).await;
+        };
+        let keywords = normalize_keywords(draft.keywords);
+        let importance = if draft.importance > 0.0 {
+            draft.importance.clamp(0.0, 1.0)
+        } else {
+            0.6
+        };
+        let node = self.db.update_memory_node_details(
+            node_id,
+            draft.title.trim(),
+            draft.summary.trim(),
+            &keywords,
+            importance,
+            &draft.memory_type,
+        )?;
+        if let Err(err) = self.tantivy.index_node(&node, "") {
+            tracing::warn!("Tantivy 手动记忆重建索引失败（非致命）: {err}");
+        }
+        if let Err(err) = self.recall_engine.upsert_node(&node).await {
+            tracing::warn!("Memory 手动记忆向量更新失败（非致命）: {err}");
+        }
+        Ok(node)
+    }
+
     /// 按节点 ID 加载 RecallHit 元数据，供 deep recall 关系追溯使用。
     pub(crate) fn load_hits_by_ids(&self, node_ids: &[String]) -> Vec<RecallHit> {
         if node_ids.is_empty() {
@@ -256,6 +355,26 @@ impl MemoryStore {
                 Vec::new()
             }
         }
+    }
+
+    /// 新增或调整记忆图关系。
+    pub(crate) fn upsert_relation(&self, draft: MemoryRelationDraft) -> Result<MemoryRelation> {
+        self.db.upsert_memory_relation(draft)
+    }
+
+    /// 列出某个节点的入边和出边关系。
+    pub(crate) fn list_relations(&self, node_id: &str) -> Vec<MemoryRelation> {
+        self.db.list_memory_relations(node_id).unwrap_or_default()
+    }
+
+    /// 删除记忆图关系。
+    pub(crate) fn delete_relation(&self, relation_id: &str) -> Result<()> {
+        self.db.delete_memory_relation(relation_id)
+    }
+
+    /// 读取图邻接节点，供 deep recall 关系追溯使用。
+    pub(crate) fn related_node_ids(&self, node_ids: &[String]) -> Vec<String> {
+        self.db.list_related_node_ids(node_ids).unwrap_or_default()
     }
 
     /// 查询最近 Episode 摘要（用于 MesoRumination 提炼关键词）
@@ -346,6 +465,26 @@ impl MemoryStore {
         }
     }
 
+    /// 设置节点状态，供 GUI 手动管理使用。
+    pub(crate) fn set_node_status(&mut self, node_id: &str, status: MemoryStatus) -> Result<()> {
+        self.db.update_node_status(node_id, &status)?;
+        match status {
+            MemoryStatus::Archived => {
+                if let Err(e) = self.tantivy.delete_node(node_id) {
+                    tracing::warn!("从 Tantivy 删除节点 {} 失败（非致命）: {}", node_id, e);
+                }
+            }
+            MemoryStatus::Active => {
+                if let Some(node) = self.db.get_memory_node(node_id)?
+                    && let Err(e) = self.tantivy.index_node(&node, "")
+                {
+                    tracing::warn!("恢复 Tantivy 节点 {} 失败（非致命）: {}", node_id, e);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// 全文搜索（Tantivy BM25，同步版，供兼容使用）
     #[allow(dead_code)]
     pub(crate) fn search(&self, query: &str, limit: usize) -> Vec<RecallHit> {
@@ -363,12 +502,25 @@ impl MemoryStore {
     }
 }
 
+fn normalize_keywords(keywords: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for keyword in keywords {
+        let keyword = keyword.trim();
+        if keyword.is_empty() || normalized.iter().any(|item| item == keyword) {
+            continue;
+        }
+        normalized.push(keyword.to_string());
+    }
+    normalized
+}
+
 /// 将 Episode 转换为 MemoryNode（用于 Tantivy 索引）
 fn episode_to_node(ep: &Episode, workspace_id: Option<&str>) -> MemoryNode {
     let now = chrono::Local::now().naive_local().to_string();
     MemoryNode {
         id: ep.id.clone(),
         kind: MemoryKind::Episode,
+        memory_type: MemoryCognitiveType::Factual,
         scope_type: MemoryScopeType::Workspace,
         scope_id: workspace_id.map(String::from),
         title: ep.title.clone(),
@@ -389,6 +541,7 @@ fn entity_to_node(entity: &Entity, workspace_id: Option<&str>) -> MemoryNode {
     MemoryNode {
         id: entity.id.clone(),
         kind: MemoryKind::Entity,
+        memory_type: MemoryCognitiveType::ProjectStructure,
         scope_type: MemoryScopeType::Workspace,
         scope_id: workspace_id.map(String::from),
         title: entity.name.clone(),
@@ -409,6 +562,7 @@ fn decision_to_node(decision: &Decision, workspace_id: Option<&str>) -> MemoryNo
     MemoryNode {
         id: decision.id.clone(),
         kind: MemoryKind::Decision,
+        memory_type: MemoryCognitiveType::ArchitectureDecision,
         scope_type: MemoryScopeType::Workspace,
         scope_id: workspace_id.map(String::from),
         title: decision.title.clone(),
