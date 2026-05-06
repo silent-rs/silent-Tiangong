@@ -111,6 +111,7 @@
 - Memory 必须支持主模型按需调用的 Tool 化回忆，不能在每个 turn 前强制自动注入 recall 结果。
 - Memory 收到 Tool 化回忆刺激后，必须先执行初始回忆，再基于初始结果判断是否需要 deep recall，不能把一次 `recall_memory` 调用等同为深度回忆。
 - Memory 必须支持 workspace 隔离，长生命周期 GUI/Server 进程不得把不同 workspace 的记忆写入同一 scope。
+- GUI、CLI、Server 必须通过 Memory leader election / IPC 获取当前 workspace 的 Memory handle；同一 workspace 只能有一个 leader，不同 workspace 的 leader 运行文件必须相互隔离。
 - Memory 必须支持产物记忆，至少覆盖媒体 URL、文件路径、工具结果摘要和可继续使用的产物引用。
 - GUI 必须提供 Memory 手动管理界面，允许用户查看当前 workspace 的记忆、手动新增或调整记忆摘要、归档记忆，并执行手动召回测试。
 - 手动新增或调整的记忆必须通过 Memory Actor 写入，保证 SQLite、Tantivy 和可用向量索引一致；召回测试不得写入会话消息链。

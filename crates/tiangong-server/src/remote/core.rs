@@ -97,7 +97,7 @@ impl ServerCoreManager {
         }
 
         let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
-        let core = tiangong_core::core::TiangongCore::with_session(
+        let core = tiangong_core::core::TiangongCore::with_session_for_server(
             self.config.clone(),
             session.clone(),
             stream_tx,

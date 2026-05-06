@@ -16,9 +16,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::actor::start_memory;
+use crate::actor::start_memory_with_options;
 use crate::handle::MemoryHandle;
 use crate::ipc::{IpcBridge, spawn_memory_bridge};
+use crate::options::MemoryOptions;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 const FOLLOWER_WATCH_INTERVAL: Duration = Duration::from_millis(250);
@@ -146,11 +147,18 @@ pub fn leader_info_path() -> PathBuf {
 
 /// 读取当前 leader 信息。
 pub fn read_leader_info() -> Result<Option<LeaderInfo>> {
-    let path = leader_info_path();
+    read_leader_info_from_path(&leader_info_path())
+}
+
+fn read_leader_info_for_workspace(workspace_id: Option<&str>) -> Result<Option<LeaderInfo>> {
+    read_leader_info_from_path(&leader_info_path_for_workspace(workspace_id))
+}
+
+fn read_leader_info_from_path(path: &PathBuf) -> Result<Option<LeaderInfo>> {
     if !path.exists() {
         return Ok(None);
     }
-    let content = std::fs::read_to_string(&path)
+    let content = std::fs::read_to_string(path)
         .with_context(|| format!("读取 leader 信息失败: {}", path.display()))?;
     let info = serde_json::from_str(&content)
         .with_context(|| format!("解析 leader 信息失败: {}", path.display()))?;
@@ -173,8 +181,7 @@ pub async fn start_or_connect(
     workspace_id: Option<String>,
     process_type: ProcessType,
 ) -> Result<ManagedMemory> {
-    let service = memory_service_name(workspace_id.as_deref());
-    start_or_connect_with_service(workspace_id, process_type, service).await
+    start_or_connect_with_options(MemoryOptions::new(workspace_id), process_type).await
 }
 
 /// 使用自定义 service 名称执行选举或连接。
@@ -183,14 +190,36 @@ pub async fn start_or_connect_with_service(
     process_type: ProcessType,
     service: impl Into<String>,
 ) -> Result<ManagedMemory> {
+    start_or_connect_with_options_and_service(
+        MemoryOptions::new(workspace_id),
+        process_type,
+        service,
+    )
+    .await
+}
+
+/// 使用显式启动参数执行选举或连接，保留专用 Memory LLM / Embedding 配置。
+pub async fn start_or_connect_with_options(
+    options: MemoryOptions,
+    process_type: ProcessType,
+) -> Result<ManagedMemory> {
+    let service = memory_service_name(options.workspace_id.as_deref());
+    start_or_connect_with_options_and_service(options, process_type, service).await
+}
+
+/// 使用显式启动参数和自定义 service 名称执行选举或连接。
+pub async fn start_or_connect_with_options_and_service(
+    options: MemoryOptions,
+    process_type: ProcessType,
+    service: impl Into<String>,
+) -> Result<ManagedMemory> {
     let service = service.into();
     let inner =
-        start_or_connect_inner(workspace_id.clone(), process_type.clone(), service.clone()).await?;
+        start_or_connect_inner(options.clone(), process_type.clone(), service.clone()).await?;
     let should_watch = matches!(inner.state, LeaderState::Follower { .. });
     let inner = Arc::new(Mutex::new(inner));
     let (watcher_tx, watcher_join) = if should_watch {
-        let (tx, join) =
-            spawn_follower_watcher(inner.clone(), workspace_id, process_type, service)?;
+        let (tx, join) = spawn_follower_watcher(inner.clone(), options, process_type, service)?;
         (Some(tx), Some(join))
     } else {
         (None, None)
@@ -204,14 +233,15 @@ pub async fn start_or_connect_with_service(
 }
 
 async fn start_or_connect_inner(
-    workspace_id: Option<String>,
+    options: MemoryOptions,
     process_type: ProcessType,
     service: String,
 ) -> Result<ManagedMemoryInner> {
-    ensure_memory_base_dir()?;
+    let workspace_id = options.workspace_id.clone();
+    ensure_memory_runtime_dir(workspace_id.as_deref())?;
 
     for _ in 0..2 {
-        if let Some(leader) = read_leader_info()? {
+        if let Some(leader) = read_leader_info_for_workspace(workspace_id.as_deref())? {
             ensure_workspace_compatible(&leader, workspace_id.as_deref())?;
             if is_leader_alive(&leader) {
                 match MemoryHandle::connect_tcp(&leader.service).await {
@@ -237,7 +267,7 @@ async fn start_or_connect_inner(
         match try_acquire_leader_lease(workspace_id.clone(), process_type.clone(), service.clone())?
         {
             Some(lease) => {
-                let handle = start_memory(workspace_id.clone())?;
+                let handle = start_memory_with_options(options.clone())?;
                 let bridge = spawn_memory_bridge(service.clone(), handle.clone())?;
                 let (heartbeat_tx, heartbeat_join) = spawn_heartbeat(lease.info.clone());
 
@@ -251,7 +281,7 @@ async fn start_or_connect_inner(
                 });
             }
             None => {
-                if let Some(leader) = read_leader_info()? {
+                if let Some(leader) = read_leader_info_for_workspace(workspace_id.as_deref())? {
                     ensure_workspace_compatible(&leader, workspace_id.as_deref())?;
                     if is_leader_alive(&leader) {
                         let handle = MemoryHandle::connect_tcp(&leader.service)
@@ -267,8 +297,11 @@ async fn start_or_connect_inner(
                         });
                     }
                     clear_stale_registration(&leader)?;
-                } else if leader_lock_path().exists() {
-                    let _ = std::fs::remove_file(leader_lock_path());
+                } else {
+                    let lock_path = leader_lock_path_for_workspace(workspace_id.as_deref());
+                    if lock_path.exists() {
+                        let _ = std::fs::remove_file(lock_path);
+                    }
                 }
             }
         }
@@ -279,7 +312,7 @@ async fn start_or_connect_inner(
 
 fn spawn_follower_watcher(
     inner: Arc<Mutex<ManagedMemoryInner>>,
-    workspace_id: Option<String>,
+    options: MemoryOptions,
     process_type: ProcessType,
     service: String,
 ) -> Result<(std_mpsc::Sender<()>, thread::JoinHandle<()>)> {
@@ -304,7 +337,7 @@ fn spawn_follower_watcher(
                     break;
                 }
 
-                if !should_attempt_failover(workspace_id.as_deref()) {
+                if !should_attempt_failover(options.workspace_id.as_deref()) {
                     continue;
                 }
 
@@ -321,7 +354,7 @@ fn spawn_follower_watcher(
                 };
 
                 match rt.block_on(start_or_connect_inner(
-                    workspace_id.clone(),
+                    options.clone(),
                     process_type.clone(),
                     service.clone(),
                 )) {
@@ -349,7 +382,7 @@ fn spawn_follower_watcher(
 }
 
 fn should_attempt_failover(workspace_id: Option<&str>) -> bool {
-    match read_leader_info() {
+    match read_leader_info_for_workspace(workspace_id) {
         Ok(Some(leader)) => {
             if ensure_workspace_compatible(&leader, workspace_id).is_err() {
                 return false;
@@ -373,8 +406,12 @@ fn try_acquire_leader_lease(
     process_type: ProcessType,
     service: String,
 ) -> Result<Option<LeaderLease>> {
-    let lock_path = leader_lock_path();
-    let leader_info_path = leader_info_path();
+    let lock_path = leader_lock_path_for_workspace(workspace_id.as_deref());
+    let leader_info_path = leader_info_path_for_workspace(workspace_id.as_deref());
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("创建 leader 运行目录失败: {}", parent.display()))?;
+    }
     let opened = OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -417,8 +454,8 @@ fn write_leader_info(info: &LeaderInfo, path: &PathBuf) -> Result<()> {
 }
 
 fn update_heartbeat(info: &LeaderInfo) -> Result<()> {
-    let path = leader_info_path();
-    let mut current = match read_leader_info()? {
+    let path = leader_info_path_for_workspace(info.workspace_id.as_deref());
+    let mut current = match read_leader_info_from_path(&path)? {
         Some(current) => current,
         None => bail!("leader 信息不存在"),
     };
@@ -455,13 +492,16 @@ fn clear_stale_registration(info: &LeaderInfo) -> Result<()> {
     if is_leader_alive(info) {
         return Ok(());
     }
-    clear_leader_registration_if_matches(info, &leader_info_path())?;
-    let _ = std::fs::remove_file(leader_lock_path());
+    clear_leader_registration_if_matches(
+        info,
+        &leader_info_path_for_workspace(info.workspace_id.as_deref()),
+    )?;
+    let _ = std::fs::remove_file(leader_lock_path_for_workspace(info.workspace_id.as_deref()));
     Ok(())
 }
 
 fn clear_leader_registration_if_matches(info: &LeaderInfo, path: &PathBuf) -> Result<()> {
-    let Some(current) = read_leader_info()? else {
+    let Some(current) = read_leader_info_from_path(path)? else {
         return Ok(());
     };
     if current.pid == info.pid && current.service == info.service {
@@ -481,10 +521,33 @@ fn ensure_workspace_compatible(leader: &LeaderInfo, workspace_id: Option<&str>) 
     ))
 }
 
+#[cfg(test)]
 fn ensure_memory_base_dir() -> Result<()> {
     let base = memory_base_dir();
     std::fs::create_dir_all(&base)
         .with_context(|| format!("创建 memory 运行目录失败: {}", base.display()))
+}
+
+fn ensure_memory_runtime_dir(workspace_id: Option<&str>) -> Result<()> {
+    let dir = leader_runtime_dir(workspace_id);
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("创建 memory 运行目录失败: {}", dir.display()))
+}
+
+fn leader_lock_path_for_workspace(workspace_id: Option<&str>) -> PathBuf {
+    leader_runtime_dir(workspace_id).join("leader.lock")
+}
+
+fn leader_info_path_for_workspace(workspace_id: Option<&str>) -> PathBuf {
+    leader_runtime_dir(workspace_id).join("leader.json")
+}
+
+fn leader_runtime_dir(workspace_id: Option<&str>) -> PathBuf {
+    let base = memory_base_dir();
+    match workspace_id.filter(|workspace_id| !workspace_id.trim().is_empty()) {
+        Some(workspace_id) => base.join("workspaces").join(workspace_id).join("runtime"),
+        None => base,
+    }
 }
 
 fn memory_base_dir() -> PathBuf {
@@ -613,22 +676,19 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     #[serial]
-    async fn start_or_connect_rejects_workspace_mismatch() {
+    async fn start_or_connect_keeps_workspace_leaders_separate() {
         let home = TempDir::new().expect("创建 fake home 失败");
         let _env = EnvGuard::enter(home.path());
 
-        let _leader = start_or_connect(Some("ws-a".to_string()), ProcessType::Cli)
+        let leader_a = start_or_connect(Some("ws-a".to_string()), ProcessType::Cli)
             .await
-            .expect("启动 leader 失败");
+            .expect("启动 workspace A leader 失败");
+        let leader_b = start_or_connect(Some("ws-b".to_string()), ProcessType::Server)
+            .await
+            .expect("启动 workspace B leader 失败");
 
-        let err = match start_or_connect(Some("ws-b".to_string()), ProcessType::Server).await {
-            Ok(_) => panic!("不同 workspace 不应复用同一个 leader"),
-            Err(err) => err,
-        };
-        assert!(
-            err.to_string().contains("workspace"),
-            "错误信息应明确指出 workspace 不一致"
-        );
+        assert!(leader_a.is_leader(), "workspace A 应持有独立 leader");
+        assert!(leader_b.is_leader(), "workspace B 应持有独立 leader");
     }
 
     #[tokio::test(flavor = "current_thread")]

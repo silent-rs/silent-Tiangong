@@ -22,7 +22,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
 
     let mut state = TiangongState::load_or_default();
     let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
-    let core = TiangongCore::new(config.clone(), stream_tx);
+    let core = TiangongCore::new_for_cli(config.clone(), stream_tx);
 
     // CLI --trust-mode 参数覆盖
     if let Some(mode) = trust_mode {

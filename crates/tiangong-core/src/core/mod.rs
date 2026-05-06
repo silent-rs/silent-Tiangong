@@ -42,8 +42,8 @@ static MEMORY_HANDLES: OnceLock<Mutex<HashMap<String, MemoryRegistryEntry>>> = O
 
 const GLOBAL_MEMORY_WORKSPACE_KEY: &str = "__global__";
 
-#[derive(Clone)]
 struct MemoryRegistryEntry {
+    managed: tiangong_memory::ManagedMemory,
     handle: tiangong_memory::MemoryHandle,
     workspace_id: Option<String>,
     config_summary: MemoryConfigSummary,
@@ -75,11 +75,18 @@ struct MemoryEmbeddingSummary {
     dimension: usize,
 }
 
+struct WorkerMemoryContext {
+    handle: Option<tiangong_memory::MemoryHandle>,
+    workspace_id: Option<String>,
+    process_type: tiangong_memory::ProcessType,
+}
+
 /// 获取或初始化 workspace 级 Memory Handle。
 fn get_or_init_memory(
     config: &CoreConfig,
     config_generation: u64,
     workspace_id: Option<String>,
+    process_type: tiangong_memory::ProcessType,
 ) -> Option<tiangong_memory::MemoryHandle> {
     let key = memory_registry_key(workspace_id.as_deref());
     let options = config.to_memory_options(workspace_id.clone());
@@ -135,13 +142,16 @@ fn get_or_init_memory(
         return Some(entry.handle.clone());
     }
 
-    match tiangong_memory::start_with_options(options) {
-        Ok(handle) => {
-            tracing::info!(workspace_id = ?workspace_id, "Memory Actor 已启动");
+    match start_or_connect_memory(options, process_type) {
+        Ok(managed) => {
+            let handle = managed.handle();
+            let is_leader = managed.is_leader();
+            tracing::info!(workspace_id = ?workspace_id, is_leader, "Memory 已启动或连接");
             let now = now_text();
             guard.insert(
                 key,
                 MemoryRegistryEntry {
+                    managed,
                     handle: handle.clone(),
                     workspace_id,
                     config_summary,
@@ -154,10 +164,23 @@ fn get_or_init_memory(
             Some(handle)
         }
         Err(err) => {
-            tracing::warn!(workspace_id = ?workspace_id, "Memory Actor 启动失败（非致命）: {}", err);
+            tracing::warn!(workspace_id = ?workspace_id, "Memory 启动或连接失败（非致命）: {}", err);
             None
         }
     }
+}
+
+fn start_or_connect_memory(
+    options: tiangong_memory::MemoryOptions,
+    process_type: tiangong_memory::ProcessType,
+) -> anyhow::Result<tiangong_memory::ManagedMemory> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(tiangong_memory::start_or_connect_with_options(
+        options,
+        process_type,
+    ))
 }
 
 /// 获取或初始化 workspace 级 Memory Handle，供 GUI/Server 侧管理入口复用。
@@ -166,7 +189,12 @@ pub fn get_or_init_memory_handle(
     workspace_id: Option<String>,
 ) -> Option<tiangong_memory::MemoryHandle> {
     let config = config_provider.snapshot();
-    get_or_init_memory(&config, config_provider.generation(), workspace_id)
+    get_or_init_memory(
+        &config,
+        config_provider.generation(),
+        workspace_id,
+        tiangong_memory::ProcessType::Gui,
+    )
 }
 
 fn memory_config_changed(running: &MemoryConfigSummary, latest: &MemoryConfigSummary) -> bool {
@@ -226,10 +254,7 @@ pub fn shutdown_memory_registry_blocking() {
         return;
     };
     let entries = match registry.lock() {
-        Ok(mut guard) => guard
-            .drain()
-            .map(|(_, entry)| entry.handle)
-            .collect::<Vec<_>>(),
+        Ok(mut guard) => guard.drain().map(|(_, entry)| entry).collect::<Vec<_>>(),
         Err(err) => {
             tracing::warn!("Memory Handle registry 已污染，无法统一关闭: {}", err);
             return;
@@ -249,8 +274,10 @@ pub fn shutdown_memory_registry_blocking() {
         }
     };
     runtime.block_on(async move {
-        for handle in entries {
-            handle.shutdown().await;
+        for entry in entries {
+            if entry.managed.is_leader() {
+                entry.handle.shutdown().await;
+            }
         }
     });
 }
@@ -303,8 +330,20 @@ pub struct TiangongCore {
 impl TiangongCore {
     /// 创建新对话
     pub fn new(config: CoreConfigProvider, stream_tx: Sender<SessionStreamEvent>) -> Self {
+        Self::new_for_process(config, stream_tx, tiangong_memory::ProcessType::Cli)
+    }
+
+    pub fn new_for_cli(config: CoreConfigProvider, stream_tx: Sender<SessionStreamEvent>) -> Self {
+        Self::new_for_process(config, stream_tx, tiangong_memory::ProcessType::Cli)
+    }
+
+    pub fn new_for_process(
+        config: CoreConfigProvider,
+        stream_tx: Sender<SessionStreamEvent>,
+        process_type: tiangong_memory::ProcessType,
+    ) -> Self {
         let session = Session::new("新对话");
-        Self::with_session(config, session, stream_tx)
+        Self::with_session_for_process(config, session, stream_tx, process_type)
     }
 
     /// 从已有 session 创建
@@ -313,12 +352,54 @@ impl TiangongCore {
         session: Session,
         stream_tx: Sender<SessionStreamEvent>,
     ) -> Self {
+        Self::with_session_for_process(
+            config,
+            session,
+            stream_tx,
+            tiangong_memory::ProcessType::Cli,
+        )
+    }
+
+    pub fn with_session_for_gui(
+        config: CoreConfigProvider,
+        session: Session,
+        stream_tx: Sender<SessionStreamEvent>,
+    ) -> Self {
+        Self::with_session_for_process(
+            config,
+            session,
+            stream_tx,
+            tiangong_memory::ProcessType::Gui,
+        )
+    }
+
+    pub fn with_session_for_server(
+        config: CoreConfigProvider,
+        session: Session,
+        stream_tx: Sender<SessionStreamEvent>,
+    ) -> Self {
+        Self::with_session_for_process(
+            config,
+            session,
+            stream_tx,
+            tiangong_memory::ProcessType::Server,
+        )
+    }
+
+    /// 从已有 session 创建，并显式标记入口进程类型。
+    pub fn with_session_for_process(
+        config: CoreConfigProvider,
+        session: Session,
+        stream_tx: Sender<SessionStreamEvent>,
+        process_type: tiangong_memory::ProcessType,
+    ) -> Self {
         let config_snapshot = config.snapshot();
         let memory_workspace_id = resolve_memory_workspace_id(&session.cwd);
         let memory_handle = get_or_init_memory(
             &config_snapshot,
             config.generation(),
             memory_workspace_id.clone(),
+            process_type.clone(),
         );
         let initial_trust_mode = config_snapshot.trust_mode;
         let shared_trust_mode = Arc::new(RwLock::new(initial_trust_mode));
@@ -326,15 +407,20 @@ impl TiangongCore {
         let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel::<Command>();
 
         let worker_trust_mode = shared_trust_mode.clone();
+        let worker_process_type = process_type.clone();
         let worker = thread::spawn(move || {
+            let memory = WorkerMemoryContext {
+                handle: memory_handle,
+                workspace_id: memory_workspace_id,
+                process_type: worker_process_type,
+            };
             worker_loop(
                 config,
                 session,
                 stream_tx,
                 cmd_rx,
                 worker_trust_mode,
-                memory_handle,
-                memory_workspace_id,
+                memory,
             )
         });
 
@@ -443,8 +529,7 @@ fn worker_loop(
     external_tx: StdSender<SessionStreamEvent>,
     cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
-    memory_handle: Option<tiangong_memory::MemoryHandle>,
-    memory_workspace_id: Option<String>,
+    memory: WorkerMemoryContext,
 ) -> Session {
     // 在专用的 tokio runtime 上运行 async 工作循环，
     // 使 execute_turn_inner 可以用 select! + stream_function_calls 实现真正取消。
@@ -462,8 +547,7 @@ fn worker_loop(
         external_tx,
         cmd_rx,
         shared_trust_mode,
-        memory_handle,
-        memory_workspace_id,
+        memory,
     ))
 }
 
@@ -474,8 +558,7 @@ async fn worker_loop_async(
     external_tx: StdSender<SessionStreamEvent>,
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
-    mut memory_handle: Option<tiangong_memory::MemoryHandle>,
-    mut memory_workspace_id: Option<String>,
+    mut memory: WorkerMemoryContext,
 ) -> Session {
     let session_id = session.id.clone();
     let mut last_cfg_gen = 0u64;
@@ -524,7 +607,12 @@ async fn worker_loop_async(
         let cfg_gen = config.generation();
         if engine.is_none() || cfg_gen != last_cfg_gen {
             let cfg = config.snapshot();
-            memory_handle = get_or_init_memory(&cfg, cfg_gen, memory_workspace_id.clone());
+            memory.handle = get_or_init_memory(
+                &cfg,
+                cfg_gen,
+                memory.workspace_id.clone(),
+                memory.process_type.clone(),
+            );
             engine = Some(build_engine_from_config(
                 &cfg,
                 &stream_tx,
@@ -537,7 +625,7 @@ async fn worker_loop_async(
                 .filter(|t| t.name != "mark_step_completed")
                 .collect();
             inject_enhanced_tools(&mut new_tools, e);
-            if memory_handle.is_some() {
+            if memory.handle.is_some() {
                 inject_memory_recall_tool(&mut new_tools);
             }
             tools = new_tools;
@@ -549,10 +637,14 @@ async fn worker_loop_async(
             Command::UpdateCwd { cwd } => {
                 session.cwd = cwd;
                 apply_session_cwd(&session);
-                memory_workspace_id = resolve_memory_workspace_id(&session.cwd);
+                memory.workspace_id = resolve_memory_workspace_id(&session.cwd);
                 let cfg = config.snapshot();
-                memory_handle =
-                    get_or_init_memory(&cfg, config.generation(), memory_workspace_id.clone());
+                memory.handle = get_or_init_memory(
+                    &cfg,
+                    config.generation(),
+                    memory.workspace_id.clone(),
+                    memory.process_type.clone(),
+                );
                 continue;
             }
             Command::ReloadConfig => {
@@ -588,16 +680,16 @@ async fn worker_loop_async(
                     &mcp_targets,
                     &stream_tx,
                     &mut cmd_rx,
-                    memory_handle.as_ref(),
+                    memory.handle.as_ref(),
                 )
                 .await;
 
                 // turn 完成后触发 Micro 反刍（fire-and-forget）
-                if let Some(handle) = memory_handle.as_ref() {
+                if let Some(handle) = memory.handle.as_ref() {
                     // 显式携带 workspace_id，避免 Actor 固化到启动时工作区造成跨工作区串写
                     let mut turn_result =
                         build_memory_turn_result(&session, turn_start_idx, &content);
-                    turn_result.workspace_id = memory_workspace_id.clone();
+                    turn_result.workspace_id = memory.workspace_id.clone();
                     handle.run_micro_rumination(turn_result);
 
                     // 每 10 个 turn 触发一次 Meta 反刍（归档低活跃节点）
@@ -645,8 +737,8 @@ async fn worker_loop_async(
 
     // 会话结束 → 触发 Meso 反刍（提炼 Entity/Decision，更新 Workspace Injection）
     // fire-and-forget：handle 仍可使用（Memory Actor 在 registry 中持续运行）
-    if let Some(handle) = memory_handle.as_ref()
-        && let Some(wid) = &memory_workspace_id
+    if let Some(handle) = memory.handle.as_ref()
+        && let Some(wid) = &memory.workspace_id
     {
         handle.run_meso_rumination(session_id.clone(), wid.clone());
         tracing::info!(session_id = %session_id, workspace_id = %wid, "Meso 反刍已触发（会话结束）");
@@ -3444,12 +3536,27 @@ mod tests {
         let workspace_a = format!("ws-registry-a-{}", scru128::new());
         let workspace_b = format!("ws-registry-b-{}", scru128::new());
 
-        let handle_a = get_or_init_memory(&config, 1, Some(workspace_a.clone()))
-            .expect("workspace A memory handle 应启动成功");
-        let handle_a_again = get_or_init_memory(&config, 1, Some(workspace_a))
-            .expect("workspace A memory handle 应可复用");
-        let handle_b = get_or_init_memory(&config, 1, Some(workspace_b))
-            .expect("workspace B memory handle 应启动成功");
+        let handle_a = get_or_init_memory(
+            &config,
+            1,
+            Some(workspace_a.clone()),
+            tiangong_memory::ProcessType::Cli,
+        )
+        .expect("workspace A memory handle 应启动成功");
+        let handle_a_again = get_or_init_memory(
+            &config,
+            1,
+            Some(workspace_a),
+            tiangong_memory::ProcessType::Cli,
+        )
+        .expect("workspace A memory handle 应可复用");
+        let handle_b = get_or_init_memory(
+            &config,
+            1,
+            Some(workspace_b),
+            tiangong_memory::ProcessType::Cli,
+        )
+        .expect("workspace B memory handle 应启动成功");
 
         assert!(
             handle_a.is_same_handle(&handle_a_again),
@@ -3471,14 +3578,24 @@ mod tests {
 
         let workspace = format!("ws-hot-update-{}", scru128::new());
         let initial = CoreConfig::default();
-        let initial_handle = get_or_init_memory(&initial, 1, Some(workspace.clone()))
-            .expect("初始 MemoryHandle 应启动成功");
+        let initial_handle = get_or_init_memory(
+            &initial,
+            1,
+            Some(workspace.clone()),
+            tiangong_memory::ProcessType::Cli,
+        )
+        .expect("初始 MemoryHandle 应启动成功");
 
         write_memory_test_config(1024, tiangong_memory::MemoryVectorMode::Embedded);
         let updated = CoreConfig::default();
         let expected_summary = memory_config_summary(&updated);
-        let updated_handle = get_or_init_memory(&updated, 2, Some(workspace.clone()))
-            .expect("MemoryHandle 应支持热更新后继续可用");
+        let updated_handle = get_or_init_memory(
+            &updated,
+            2,
+            Some(workspace.clone()),
+            tiangong_memory::ProcessType::Cli,
+        )
+        .expect("MemoryHandle 应支持热更新后继续可用");
 
         assert!(
             initial_handle.is_same_handle(&updated_handle),
@@ -3511,6 +3628,7 @@ mod tests {
             &initial_snapshot,
             provider.generation(),
             Some(workspace.clone()),
+            tiangong_memory::ProcessType::Cli,
         )
         .expect("初始 MemoryHandle 应启动成功");
 
@@ -3524,6 +3642,7 @@ mod tests {
             &updated_snapshot,
             provider.generation(),
             Some(workspace.clone()),
+            tiangong_memory::ProcessType::Cli,
         )
         .expect("配置热重载后 MemoryHandle 应继续可用");
 

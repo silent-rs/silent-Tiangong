@@ -79,17 +79,25 @@ Memory 内部文本生成任务只允许读取独立 Memory LLM 配置：
 
 ## 当前缺口清单
 
-### P0：入口运行时缺口
+### P0：入口运行时缺口（主链路已接入，待真实多进程验证）
 
-1. Core 当前按 workspace 缓存 `MemoryHandle`，但仍直接调用 `start_with_options()`。
-2. `tiangong-memory::start_or_connect()`、TCP bridge、leader election 和 follower failover 已可用，但尚未成为 CLI/GUI/Server 主入口默认路径。
-3. 多进程同时运行 GUI + CLI + Server 时，理论上仍可能各自启动本地 Actor，而不是统一连接同一个 workspace leader。
+已完成：
+
+1. Core workspace 级 Memory registry 已从直接调用 `start_with_options()` 切换为 `start_or_connect_with_options()`，保留专用 Memory LLM / Embedding / Vector 配置。
+2. GUI、CLI、Server 创建 `TiangongCore` 时会显式传入入口类型，默认通过同一套 Memory election / IPC 路径获取 handle。
+3. `tiangong-memory` 的 leader 运行文件已按 workspace 分区，同一 workspace 内仍保持单 leader，不同 workspace 不互相阻塞。
+4. 已有测试覆盖同 workspace leader/follower、follower failover、Core registry workspace 隔离和配置热更新。
+
+剩余：
+
+- 仍需真实运行 GUI + CLI + Server 的多进程组合，确认同一 workspace 下 follower 连接、leader 退出后接替和写入/召回链路都符合预期。
 
 验收标准：
 
-- 所有入口统一通过 `start_or_connect()` 获取 Memory。
+- 所有入口统一通过 `start_or_connect_with_options()` 获取 Memory。
 - 同一 workspace 同时启动多个入口时只有一个 leader，其余入口使用 remote handle。
 - leader 退出后 follower 自动接替，并且接替前后写入/召回都可用。
+- 不同 workspace 的 Memory leader 运行文件相互隔离。
 
 ### P0：Memory 独立模型配置缺口（已完成）
 
@@ -155,10 +163,10 @@ Memory 内部文本生成任务只允许读取独立 Memory LLM 配置：
 ## 建议推进顺序
 
 1. 先实现 Memory 独立模型配置，阻断继续复用主模型。
-2. 将 Core Memory 启动入口切换为 `start_or_connect()`，让 IPC/election 真正进入主链路。
-3. 补真实 Memory LLM smoke test 和固定回忆样例集。
-4. 补 embedded vector 的可重复测试，再处理 Qdrant 删除和服务化配置。
-5. 最后推进 Meta 完整生命周期与 Workspace Index。
+1. 运行 GUI + CLI + Server 的真实多进程组合验证，确认同 workspace leader/follower 行为。
+2. 补真实 Memory LLM smoke test 和固定回忆样例集。
+3. 补 embedded vector 的可重复测试，再处理 Qdrant 删除和服务化配置。
+4. 最后推进 Meta 完整生命周期与 Workspace Index。
 
 ## 文档同步要求
 
