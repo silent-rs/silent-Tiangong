@@ -36,7 +36,7 @@ export function MemoryList({
   const nextStatus: MemoryStatus = status === 'active' ? 'archived' : 'active';
 
   return (
-    <div className="rounded-md border bg-background">
+    <div className="h-full min-h-0 rounded-md border bg-background flex flex-col">
       <div className="flex items-center justify-between gap-3 border-b px-3 py-2">
         <div className="flex items-center gap-2 min-w-0">
           <input
@@ -68,7 +68,7 @@ export function MemoryList({
           {status === 'active' ? '批量归档' : '批量恢复'}
         </Button>
       </div>
-      <div className="max-h-72 overflow-y-auto divide-y">
+      <div className="min-h-0 flex-1 overflow-y-auto divide-y">
         {nodes.map((node) => {
           const checked = selectedSet.has(node.id);
           const active = node.id === selectedId;

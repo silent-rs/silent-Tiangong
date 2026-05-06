@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { RefreshCw, Archive, RotateCcw, Edit2, Database, Activity, TrendingUp, Target, Loader2 } from 'lucide-react';
+import { RefreshCw, Archive, RotateCcw, Edit2, Database, Activity, TrendingUp, Target, Loader2, Network, List } from 'lucide-react';
 import { api } from '@/api/tauri';
 import type { MemoryNode, MemoryRelation, MemoryStatus, ManualMemoryDraft, MemoryRelationKind } from '@/api/tauri';
 import { useToast } from '@/components/Toast';
@@ -33,7 +33,7 @@ function MemoryStats({ nodes, relations }: MemoryStatsProps) {
   const weekNew = nodes.filter(n => new Date(n.created_at) > weekAgo).length;
 
   return (
-    <div className="grid grid-cols-4 gap-2 mb-4">
+    <div className="grid grid-cols-4 gap-2 shrink-0">
       <div className="rounded-md border p-3 text-center">
         <div className="flex items-center justify-center gap-1 text-muted-foreground mb-1">
           <Database className="w-3 h-3" />
@@ -70,10 +70,13 @@ function MemoryStats({ nodes, relations }: MemoryStatsProps) {
 // 主组件
 // ============================================================================
 
+type MemoryViewMode = 'graph' | 'list';
+
 export function MemoryManagementSettings() {
   const [nodes, setNodes] = useState<MemoryNode[]>([]);
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState<MemoryStatus>('active');
+  const [viewMode, setViewMode] = useState<MemoryViewMode>('graph');
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isBulkBusy, setIsBulkBusy] = useState(false);
@@ -279,18 +282,18 @@ export function MemoryManagementSettings() {
   ).length;
 
   return (
-    <div className="p-4 flex flex-col gap-4">
+    <div className="h-full min-h-0 p-4 flex flex-col gap-4">
       {/* 统计概览 */}
       <MemoryStats nodes={nodes} relations={graphRelations} />
 
-      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_340px] gap-4">
-        <div className="flex flex-col gap-3">
-          <div className="flex gap-2">
+      <div className="min-h-0 flex-1 grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_340px] gap-4">
+        <div className="min-h-0 flex flex-col gap-3">
+          <div className="flex flex-wrap gap-2">
             <Input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder="搜索标题、内容或关键词"
-              className="h-9"
+              className="h-9 min-w-64 flex-1"
             />
             <Select value={status} onValueChange={(value) => setStatus(value as MemoryStatus)}>
               <SelectTrigger className="w-28 h-9">
@@ -301,64 +304,93 @@ export function MemoryManagementSettings() {
                 <SelectItem value="archived">归档</SelectItem>
               </SelectContent>
             </Select>
+            <div className="flex rounded-md border p-0.5 h-9">
+              <Button
+                variant={viewMode === 'graph' ? 'secondary' : 'ghost'}
+                size="sm"
+                className="h-7 px-2"
+                onClick={() => setViewMode('graph')}
+              >
+                <Network className="w-4 h-4 mr-1.5" />
+                图谱
+              </Button>
+              <Button
+                variant={viewMode === 'list' ? 'secondary' : 'ghost'}
+                size="sm"
+                className="h-7 px-2"
+                onClick={() => setViewMode('list')}
+              >
+                <List className="w-4 h-4 mr-1.5" />
+                列表
+              </Button>
+            </div>
             <Button variant="outline" size="icon" className="h-9 w-9" onClick={loadNodes} disabled={isLoading}>
               {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
             </Button>
+            <div className="h-9">
+              <RecallTestPanel />
+            </div>
           </div>
 
-          <div className="rounded-md border min-h-[420px] max-h-[calc(80vh-250px)] overflow-hidden bg-background">
-            {nodes.length > 0 && (
-              <div className="flex items-center justify-between gap-3 border-b px-3 py-2">
-                <div className="min-w-0">
-                  <div className="text-sm font-medium truncate">
-                    {selectedNode?.title ?? 'Memory 图谱'}
-                  </div>
-                  <div className="text-xs text-muted-foreground">
-                    {nodes.length} 个节点 · {visibleRelationCount} 条连接
-                  </div>
-                </div>
-                {selectedNode && (
-                  <div className="flex items-center gap-1 shrink-0">
-                    <Button variant="ghost" size="icon" className="size-8" onClick={() => editNode(selectedNode)} title="编辑">
-                      <Edit2 className="size-4" />
-                    </Button>
-                    {selectedNode.status === 'active' ? (
-                      <Button variant="ghost" size="icon" className="size-8" onClick={() => setNodeStatus(selectedNode, 'archived')} title="归档">
-                        <Archive className="size-4" />
-                      </Button>
-                    ) : (
-                      <Button variant="ghost" size="icon" className="size-8" onClick={() => setNodeStatus(selectedNode, 'active')} title="恢复">
-                        <RotateCcw className="size-4" />
-                      </Button>
+          <div className="min-h-0 flex-1">
+            {viewMode === 'graph' ? (
+              <div className="h-full min-h-0 rounded-md border overflow-hidden bg-background flex flex-col">
+                {nodes.length > 0 && (
+                  <div className="flex items-center justify-between gap-3 border-b px-3 py-2">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium truncate">
+                        {selectedNode?.title ?? 'Memory 图谱'}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {nodes.length} 个节点 · {visibleRelationCount} 条连接
+                      </div>
+                    </div>
+                    {selectedNode && (
+                      <div className="flex items-center gap-1 shrink-0">
+                        <Button variant="ghost" size="icon" className="size-8" onClick={() => editNode(selectedNode)} title="编辑">
+                          <Edit2 className="size-4" />
+                        </Button>
+                        {selectedNode.status === 'active' ? (
+                          <Button variant="ghost" size="icon" className="size-8" onClick={() => setNodeStatus(selectedNode, 'archived')} title="归档">
+                            <Archive className="size-4" />
+                          </Button>
+                        ) : (
+                          <Button variant="ghost" size="icon" className="size-8" onClick={() => setNodeStatus(selectedNode, 'active')} title="恢复">
+                            <RotateCcw className="size-4" />
+                          </Button>
+                        )}
+                      </div>
                     )}
                   </div>
                 )}
+                <div className="min-h-0 flex-1">
+                  <MemoryGraphCanvas
+                    nodes={nodes}
+                    relations={graphRelations}
+                    selectedId={draft.id}
+                    isLoading={isLoading}
+                    onSelect={editNode}
+                  />
+                </div>
               </div>
+            ) : (
+              <MemoryList
+                nodes={nodes}
+                selectedId={draft.id}
+                selectedIds={selectedNodeIds}
+                status={status}
+                isBulkBusy={isBulkBusy}
+                onSelectNode={editNode}
+                onToggleSelection={toggleNodeSelection}
+                onToggleAll={toggleAllNodes}
+                onSetStatus={setNodeStatus}
+                onBulkStatus={setSelectedNodesStatus}
+              />
             )}
-            <MemoryGraphCanvas
-              nodes={nodes}
-              relations={graphRelations}
-              selectedId={draft.id}
-              isLoading={isLoading}
-              onSelect={editNode}
-            />
           </div>
-
-          <MemoryList
-            nodes={nodes}
-            selectedId={draft.id}
-            selectedIds={selectedNodeIds}
-            status={status}
-            isBulkBusy={isBulkBusy}
-            onSelectNode={editNode}
-            onToggleSelection={toggleNodeSelection}
-            onToggleAll={toggleAllNodes}
-            onSetStatus={setNodeStatus}
-            onBulkStatus={setSelectedNodesStatus}
-          />
         </div>
 
-        <div className="flex flex-col gap-3">
+        <div className="min-h-0 overflow-y-auto pr-1 flex flex-col gap-3">
           <MemoryEditor
             draft={draft}
             keywordsText={keywordsText}
@@ -382,8 +414,6 @@ export function MemoryManagementSettings() {
             onSave={saveRelation}
             onRemove={removeRelation}
           />
-
-          <RecallTestPanel />
         </div>
       </div>
     </div>

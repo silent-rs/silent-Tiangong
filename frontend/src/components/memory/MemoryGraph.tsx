@@ -272,7 +272,7 @@ export function MemoryGraphCanvas({
   }, [nodes, onSelect, relations, selectedId]);
 
   return (
-    <div className="relative h-[420px]">
+    <div className="relative h-full min-h-[360px]">
       <div ref={containerRef} className="absolute inset-0" />
       {!isLoading && nodes.length === 0 && (
         <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">

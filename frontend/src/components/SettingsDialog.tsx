@@ -10,7 +10,7 @@ import { Card, CardContent } from './ui/card';
 import { Switch } from './ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Link, Edit2, KeyRound, RefreshCw, Info, Wrench, FolderOpen, Save, ShieldCheck, Database } from 'lucide-react';
+import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Link, Edit2, KeyRound, RefreshCw, Info, Wrench, FolderOpen, Save, ShieldCheck, Database, X } from 'lucide-react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { api } from '@/api/tauri';
 import type { McpServer, Skill, SkillDetail, ServerConfig, ConnectorInfo, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo, MemoryConfigView } from '@/api/tauri';
@@ -36,7 +36,7 @@ export function SettingsDialog() {
       </Button>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="w-screen max-w-none h-screen max-h-screen overflow-hidden flex flex-col rounded-none border-0 p-0">
+        <DialogContent showCloseButton={false} className="w-screen max-w-none h-screen max-h-screen overflow-hidden flex flex-col rounded-none border-0 p-0">
           {/* 保存状态 - absolute 定位到关闭按钮左侧 */}
           <span className={`absolute right-12 top-[18px] z-10 text-xs flex items-center transition-opacity ${saveStatus === 'idle' ? 'opacity-0' : 'opacity-100'} ${saveStatus === 'error' ? 'text-destructive' : 'text-muted-foreground'}`}>
             {saveStatus === 'saving' && (
@@ -48,8 +48,8 @@ export function SettingsDialog() {
 
           <Tabs defaultValue="workspace" className="flex-1 overflow-hidden flex">
             <aside className="w-60 shrink-0 border-r bg-muted/30 flex flex-col">
-              <DialogHeader className="p-5 pr-10 mb-0 border-b">
-                <DialogTitle>系统设置</DialogTitle>
+              <DialogHeader className="px-5 pb-5 pt-14 pr-10 mb-0 border-b">
+                <DialogTitle>设置</DialogTitle>
               </DialogHeader>
               <TabsList className="h-auto w-full flex-1 flex-col items-stretch justify-start rounded-none bg-transparent p-2">
                 <TabsTrigger value="workspace" className="w-full justify-start px-3 py-2">
@@ -85,31 +85,41 @@ export function SettingsDialog() {
                   Connectors
                 </TabsTrigger>
               </TabsList>
+              <div className="border-t p-2">
+                <Button
+                  variant="ghost"
+                  className="w-full justify-start"
+                  onClick={() => setOpen(false)}
+                >
+                  <X className="w-4 h-4 mr-2" />
+                  退出设置
+                </Button>
+              </div>
             </aside>
 
-            <div className="min-w-0 flex-1 overflow-y-auto">
-              <TabsContent value="workspace" className="m-0">
+            <div className="min-w-0 flex-1 overflow-hidden">
+              <TabsContent value="workspace" className="m-0 h-full overflow-y-auto">
                 <WorkspaceSettings />
               </TabsContent>
-              <TabsContent value="agent" className="m-0">
+              <TabsContent value="agent" className="m-0 h-full overflow-y-auto">
                 <AgentSettings onSaveStatusChange={setSaveStatus} />
               </TabsContent>
-              <TabsContent value="llm" className="m-0">
+              <TabsContent value="llm" className="m-0 h-full overflow-y-auto">
                 <LLMSettings onSaveStatusChange={setSaveStatus} />
               </TabsContent>
-              <TabsContent value="memory" className="m-0">
+              <TabsContent value="memory" className="m-0 h-full overflow-hidden">
                 <MemoryManagementSettings />
               </TabsContent>
-              <TabsContent value="mcp" className="m-0">
+              <TabsContent value="mcp" className="m-0 h-full overflow-y-auto">
                 <McpSettings />
               </TabsContent>
-              <TabsContent value="skill" className="m-0">
+              <TabsContent value="skill" className="m-0 h-full overflow-y-auto">
                 <SkillSettings />
               </TabsContent>
-              <TabsContent value="server" className="m-0">
+              <TabsContent value="server" className="m-0 h-full overflow-y-auto">
                 <ServerSettings />
               </TabsContent>
-              <TabsContent value="connector" className="m-0">
+              <TabsContent value="connector" className="m-0 h-full overflow-y-auto">
                 <ConnectorSettings />
               </TabsContent>
             </div>
