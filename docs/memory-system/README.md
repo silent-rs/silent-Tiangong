@@ -88,7 +88,7 @@ tiangong-memory
        ←(oneshot channel / IPC)── 查询响应
 ```
 
-**所有运行模式都必须接入 Memory**，包括 GUI、TUI、Server、CLI，不允许任何模式跳过。当前 GUI、CLI、Server 创建 Core 时已统一通过 Memory election / IPC 获取 handle，同一 workspace 共享 leader，不同 workspace 使用独立运行文件。
+**所有运行模式都必须接入 Memory**，包括 GUI、TUI、Server、CLI，不允许任何模式跳过。当前 GUI、CLI、Server 创建 Core 时已统一通过 Memory election / IPC 获取 handle，同一 workspace 共享 leader，不同 workspace 使用独立运行文件；真实多进程集成测试已覆盖 CLI、GUI、Server 三入口共享 leader 与 follower 写入召回。
 
 ## 磁盘目录结构
 

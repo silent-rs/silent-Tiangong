@@ -79,7 +79,7 @@ Memory 内部文本生成任务只允许读取独立 Memory LLM 配置：
 
 ## 当前缺口清单
 
-### P0：入口运行时缺口（主链路已接入，待真实多进程验证）
+### P0：入口运行时缺口（已完成）
 
 已完成：
 
@@ -87,10 +87,7 @@ Memory 内部文本生成任务只允许读取独立 Memory LLM 配置：
 2. GUI、CLI、Server 创建 `TiangongCore` 时会显式传入入口类型，默认通过同一套 Memory election / IPC 路径获取 handle。
 3. `tiangong-memory` 的 leader 运行文件已按 workspace 分区，同一 workspace 内仍保持单 leader，不同 workspace 不互相阻塞。
 4. 已有测试覆盖同 workspace leader/follower、follower failover、Core registry workspace 隔离和配置热更新。
-
-剩余：
-
-- 仍需真实运行 GUI + CLI + Server 的多进程组合，确认同一 workspace 下 follower 连接、leader 退出后接替和写入/召回链路都符合预期。
+5. 已增加真实多进程验证：CLI、GUI、Server 三个子进程共享同一 workspace leader，follower 写入后可由父进程召回。
 
 验收标准：
 

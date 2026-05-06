@@ -25,7 +25,7 @@
 - [x] CLI/GUI/Server 主入口默认使用 `start_or_connect()` 获取 Memory。
 - [x] 同一 workspace 同时启动多个入口时只有一个 leader，其余入口使用 remote handle。
 - [x] leader 退出后 follower 自动接替，接替前后写入/召回都可用。
-- [ ] 验证多进程并发场景（GUI + CLI + Server）下 Memory 行为正确。
+- [x] 验证多进程并发场景（GUI + CLI + Server）下 Memory 行为正确。
 
 ## P0 - Memory 独立模型配置
 
@@ -85,10 +85,9 @@
 ## 推荐执行顺序
 
 1. 先实现 Memory 独立模型配置，阻断继续复用主模型。
-2. 运行 GUI + CLI + Server 的真实多进程组合验证，确认同 workspace leader/follower 行为。
-3. 补真实 Memory LLM smoke test 和固定回忆样例集。
-4. 补 embedded vector 的可重复测试，再处理 Qdrant 删除和服务化配置。
-5. 最后推进 Meta 完整生命周期与 Workspace Index。
+2. 补真实 Memory LLM smoke test 和固定回忆样例集。
+3. 补 embedded vector 的可重复测试，再处理 Qdrant 删除和服务化配置。
+4. 最后推进 Meta 完整生命周期与 Workspace Index。
 
 ---
 
