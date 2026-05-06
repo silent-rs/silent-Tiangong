@@ -56,7 +56,7 @@
 - [x] Deep Recall 支持沿 Memory 图关系加载邻接记忆。
 - [x] 固定 5-10 个历史指代样例，验证输出只包含增量记忆。
 - [x] 记录 Memory LLM token 使用和延迟，确认不拖慢主对话链路。
-- [ ] Deep Recall 真实效果通过跨会话、跨产物、跨 Entity/Decision 固定场景评测。
+- [x] Deep Recall 真实效果通过跨会话、跨产物、跨 Entity/Decision 固定场景评测。
 
 ## P1 - 混合检索质量
 
@@ -85,9 +85,8 @@
 ## 推荐执行顺序
 
 1. 先实现 Memory 独立模型配置，阻断继续复用主模型。
-2. 补固定回忆样例集和真实 Memory LLM 路径质量验证。
-3. 补 embedded vector 的可重复测试，再处理 Qdrant 删除和服务化配置。
-4. 最后推进 Meta 完整生命周期与 Workspace Index。
+2. 补 embedded vector 的可重复测试，再处理 Qdrant 删除和服务化配置。
+3. 最后推进 Meta 完整生命周期与 Workspace Index。
 
 ---
 

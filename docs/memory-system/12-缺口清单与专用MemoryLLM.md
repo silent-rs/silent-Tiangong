@@ -109,20 +109,21 @@ Memory 内部文本生成任务只允许读取独立 Memory LLM 配置：
 - 未配置 Memory LLM 时，MemoryOptions 不再携带文本模型，上述步骤全部走规则 fallback。
 - 已补测试禁止未配置 Memory LLM 时静默复用 `chat` 主模型或旧 `lite` 模型。
 
-### P1：真实模型路径验证不足
+### P1：真实模型路径验证（已完成固定链路）
 
-1. EpisodeWriter、Deep Recall、Recall synthesis、Meso LLM 提炼已有代码路径，但缺少默认测试链覆盖。
+1. EpisodeWriter、Deep Recall、Recall synthesis、Meso LLM 提炼已有代码路径。
 2. 已增加 `crates/tiangong-memory/examples/memory_llm_smoke.rs`，可手动读取 `~/.tiangong/memory/config.json` 调用专用 Memory LLM，并校验 JSON 标记、打印 token 用量和耗时。
 3. 已补 6 个历史指代固定样例，覆盖导出产物、迁移文件、图片、配置、性能排查和技能模板，验证 Tool 化回忆只输出当前上下文之外的增量引用。
 4. Memory LLM 调用点已统一记录任务名、模型、协议、耗时和 token 用量，覆盖 EpisodeWriter、Recall anchor、Deep Recall 裁决、Recall synthesis 和 Meso 提炼。
-5. 当前集成测试主要验证规则 fallback 和结构链路，真实 LLM 的 JSON 稳定性和失败回退还缺少样例集。
-6. Deep Recall 的真实效果还没有通过跨会话、跨产物、跨 Entity/Decision 的固定场景评测。
+5. 已增加本地 OpenAI-compatible mock Memory LLM 固定评测，覆盖跨会话产物、Meso Entity、Meso Decision、图关系和 Deep Recall 结果整理。
+6. 剩余风险主要是真实第三方模型 JSON 稳定性和失败回退仍需要长期样例观察。
 
 验收标准：
 
 - 增加可手动运行的 Memory LLM smoke test。
 - 固定 5-10 个历史指代样例，验证输出只包含增量记忆。
 - 记录 Memory LLM token 使用和延迟，确认不会拖慢主对话链路。
+- Deep Recall 能通过固定场景追溯跨会话、跨产物、跨 Entity/Decision 的上下文。
 
 ### P1：混合检索质量缺口
 
@@ -164,9 +165,8 @@ Memory 内部文本生成任务只允许读取独立 Memory LLM 配置：
 
 1. 先实现 Memory 独立模型配置，阻断继续复用主模型。
 1. 运行 GUI + CLI + Server 的真实多进程组合验证，确认同 workspace leader/follower 行为。
-2. 补固定回忆样例集和真实 Memory LLM 路径质量验证。
-3. 补 embedded vector 的可重复测试，再处理 Qdrant 删除和服务化配置。
-4. 最后推进 Meta 完整生命周期与 Workspace Index。
+2. 补 embedded vector 的可重复测试，再处理 Qdrant 删除和服务化配置。
+3. 最后推进 Meta 完整生命周期与 Workspace Index。
 
 ## 文档同步要求
 

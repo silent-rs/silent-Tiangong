@@ -63,6 +63,8 @@ cargo run -p tiangong-memory --example memory_llm_smoke
 
 Memory LLM 调用点会在日志中记录任务名、模型、协议、耗时和 token 用量，方便单独观察 Memory 成本和延迟。
 
+Deep Recall 已有固定评测覆盖跨会话产物、Meso Entity、Meso Decision 和图关系追溯，确保需要深挖时能返回当前上下文之外的可执行线索。
+
 ```
 crates/
   tiangong-memory/           ← 【独立 crate】Memory 基础设施
