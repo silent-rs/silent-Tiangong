@@ -482,6 +482,9 @@ export const api = {
   listMemoryRelations: (nodeId: string): Promise<MemoryRelation[]> =>
     invoke('list_memory_relations', { nodeId }),
 
+  listMemoryRelationsBatch: (nodeIds: string[]): Promise<MemoryRelation[]> =>
+    invoke('list_memory_relations_batch', { nodeIds }),
+
   upsertMemoryRelation: (draft: MemoryRelationDraft): Promise<MemoryRelation> =>
     invoke('upsert_memory_relation', { draft }),
 

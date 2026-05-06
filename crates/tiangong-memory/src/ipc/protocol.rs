@@ -74,6 +74,9 @@ pub enum MemoryIpcRequestPayload {
     ListRelations {
         node_id: String,
     },
+    ListRelationsBatch {
+        node_ids: Vec<String>,
+    },
     WriteEpisode {
         episode: Episode,
         workspace_id: Option<String>,

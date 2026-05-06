@@ -27,17 +27,27 @@ use crate::types::{
 /// Memory 存储协调器
 pub(crate) struct MemoryStore {
     db: MemoryDb,
-    tantivy: TantivyIndex,
+    /// Tantivy 全文索引，多实例锁冲突时降级为 None（纯 SQLite 模式）
+    tantivy: Option<TantivyIndex>,
     recall_engine: RecallEngine,
     workspace_id: Option<String>,
 }
 
 impl MemoryStore {
-    /// 打开存储（初始化 SQLite + Tantivy，无向量索引时降级为 BM25）
+    /// 打开存储（初始化 SQLite + Tantivy，Tantivy 锁冲突时降级为纯 SQLite 模式）
     pub(crate) fn open(workspace_id: Option<String>) -> Result<Self> {
         let base = memory_index_base_dir(workspace_id.as_deref());
         let db = MemoryDb::open()?;
-        let tantivy = TantivyIndex::open(&base)?;
+
+        // Tantivy 初始化失败时优雅降级（多实例锁冲突等场景）
+        let tantivy = match TantivyIndex::open(&base) {
+            Ok(idx) => Some(idx),
+            Err(e) => {
+                tracing::warn!("Tantivy 全文索引初始化失败，降级为纯 SQLite 模式: {}", e);
+                None
+            }
+        };
+
         // RecallEngine 不持有 TantivyIndex，避免同一索引目录双 writer 锁冲突
         let recall_engine = RecallEngine::bm25_only();
         Ok(Self {
@@ -195,10 +205,12 @@ impl MemoryStore {
             "Memory Episode 元数据写入完成"
         );
 
-        // 2. 写入 Tantivy 索引
+        // 2. 写入 Tantivy 索引（可选，降级时跳过）
         let body_extra = episode.tool_calls.join(" ");
-        if let Err(e) = self.tantivy.index_node(&node, &body_extra) {
-            tracing::warn!("Tantivy 索引写入失败（非致命）: {}", e);
+        if let Some(ref mut tantivy) = self.tantivy {
+            if let Err(e) = tantivy.index_node(&node, &body_extra) {
+                tracing::warn!("Tantivy 索引写入失败（非致命）: {}", e);
+            }
         }
 
         // Phase C：Qdrant upsert 在 actor 层触发（异步，通过 RunEmbedAndUpsert 命令）
@@ -217,7 +229,8 @@ impl MemoryStore {
         // BM25 由 MemoryStore 统一执行，保证只有一个 IndexWriter
         let bm25_hits = self
             .tantivy
-            .search(&anchors.query, limit * 2)
+            .as_ref()
+            .and_then(|tantivy| tantivy.search(&anchors.query, limit * 2).ok())
             .unwrap_or_default();
         tracing::debug!(
             query = %anchors.query,
@@ -303,8 +316,10 @@ impl MemoryStore {
             node.importance,
             &draft.memory_type,
         )?;
-        if let Err(err) = self.tantivy.index_node(&node, "") {
-            tracing::warn!("Tantivy 手动记忆类型索引更新失败（非致命）: {err}");
+        if let Some(ref mut tantivy) = self.tantivy {
+            if let Err(err) = tantivy.index_node(&node, "") {
+                tracing::warn!("Tantivy 手动记忆类型索引更新失败（非致命）: {err}");
+            }
         }
         if let Err(err) = self.recall_engine.upsert_node(&node).await {
             tracing::warn!("Memory 手动记忆向量写入失败（非致命）: {err}");
@@ -334,8 +349,10 @@ impl MemoryStore {
             importance,
             &draft.memory_type,
         )?;
-        if let Err(err) = self.tantivy.index_node(&node, "") {
-            tracing::warn!("Tantivy 手动记忆重建索引失败（非致命）: {err}");
+        if let Some(ref mut tantivy) = self.tantivy {
+            if let Err(err) = tantivy.index_node(&node, "") {
+                tracing::warn!("Tantivy 手动记忆重建索引失败（非致命）: {err}");
+            }
         }
         if let Err(err) = self.recall_engine.upsert_node(&node).await {
             tracing::warn!("Memory 手动记忆向量更新失败（非致命）: {err}");
@@ -365,6 +382,13 @@ impl MemoryStore {
     /// 列出某个节点的入边和出边关系。
     pub(crate) fn list_relations(&self, node_id: &str) -> Vec<MemoryRelation> {
         self.db.list_memory_relations(node_id).unwrap_or_default()
+    }
+
+    /// 批量列出多个节点的关联关系（去重）。
+    pub(crate) fn list_relations_batch(&self, node_ids: &[String]) -> Vec<MemoryRelation> {
+        self.db
+            .list_memory_relations_batch(node_ids)
+            .unwrap_or_default()
     }
 
     /// 删除记忆图关系。
@@ -410,8 +434,10 @@ impl MemoryStore {
     ) -> Result<()> {
         let node = entity_to_node(&entity, workspace_id);
         self.db.upsert_entity(&entity, workspace_id)?;
-        if let Err(e) = self.tantivy.index_node(&node, &entity.name) {
-            tracing::warn!("Tantivy Entity 索引写入失败（非致命）: {}", e);
+        if let Some(ref mut tantivy) = self.tantivy {
+            if let Err(e) = tantivy.index_node(&node, &entity.name) {
+                tracing::warn!("Tantivy Entity 索引写入失败（非致命）: {}", e);
+            }
         }
         Ok(())
     }
@@ -424,8 +450,10 @@ impl MemoryStore {
     ) -> Result<()> {
         let node = decision_to_node(&decision, workspace_id);
         self.db.upsert_decision(&decision, workspace_id)?;
-        if let Err(e) = self.tantivy.index_node(&node, &decision.chosen) {
-            tracing::warn!("Tantivy Decision 索引写入失败（非致命）: {}", e);
+        if let Some(ref mut tantivy) = self.tantivy {
+            if let Err(e) = tantivy.index_node(&node, &decision.chosen) {
+                tracing::warn!("Tantivy Decision 索引写入失败（非致命）: {}", e);
+            }
         }
         Ok(())
     }
@@ -460,8 +488,10 @@ impl MemoryStore {
             tracing::warn!("归档节点 {} 失败: {}", node_id, e);
         }
         // 从 Tantivy 中删除
-        if let Err(e) = self.tantivy.delete_node(node_id) {
-            tracing::warn!("从 Tantivy 删除节点 {} 失败（非致命）: {}", node_id, e);
+        if let Some(ref mut tantivy) = self.tantivy {
+            if let Err(e) = tantivy.delete_node(node_id) {
+                tracing::warn!("从 Tantivy 删除节点 {} 失败（非致命）: {}", node_id, e);
+            }
         }
     }
 
@@ -470,15 +500,19 @@ impl MemoryStore {
         self.db.update_node_status(node_id, &status)?;
         match status {
             MemoryStatus::Archived => {
-                if let Err(e) = self.tantivy.delete_node(node_id) {
-                    tracing::warn!("从 Tantivy 删除节点 {} 失败（非致命）: {}", node_id, e);
+                if let Some(ref mut tantivy) = self.tantivy {
+                    if let Err(e) = tantivy.delete_node(node_id) {
+                        tracing::warn!("从 Tantivy 删除节点 {} 失败（非致命）: {}", node_id, e);
+                    }
                 }
             }
             MemoryStatus::Active => {
-                if let Some(node) = self.db.get_memory_node(node_id)?
-                    && let Err(e) = self.tantivy.index_node(&node, "")
-                {
-                    tracing::warn!("恢复 Tantivy 节点 {} 失败（非致命）: {}", node_id, e);
+                if let Some(ref mut tantivy) = self.tantivy {
+                    if let Some(node) = self.db.get_memory_node(node_id)?
+                        && let Err(e) = tantivy.index_node(&node, "")
+                    {
+                        tracing::warn!("恢复 Tantivy 节点 {} 失败（非致命）: {}", node_id, e);
+                    }
                 }
             }
         }
@@ -488,7 +522,10 @@ impl MemoryStore {
     /// 全文搜索（Tantivy BM25，同步版，供兼容使用）
     #[allow(dead_code)]
     pub(crate) fn search(&self, query: &str, limit: usize) -> Vec<RecallHit> {
-        self.tantivy.search(query, limit).unwrap_or_default()
+        self.tantivy
+            .as_ref()
+            .and_then(|tantivy| tantivy.search(query, limit).ok())
+            .unwrap_or_default()
     }
 
     /// 更新注入文件

@@ -335,6 +335,46 @@ impl MemoryHandle {
         }
     }
 
+    /// 批量列出多个记忆节点的关联关系（去重，修复 N+1 性能问题）。
+    pub async fn list_relations_batch(&self, node_ids: Vec<String>) -> Vec<MemoryRelation> {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                if tx
+                    .send(MemoryCommand::ListRelationsBatch {
+                        node_ids,
+                        reply: reply_tx,
+                    })
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("Memory list_relations_batch 发送失败");
+                    return Vec::new();
+                }
+                reply_rx.await.unwrap_or_default()
+            }
+            HandleInner::Remote { .. } => {
+                match self
+                    .send_remote_request(MemoryIpcRequestPayload::ListRelationsBatch { node_ids })
+                    .await
+                {
+                    Ok(MemoryIpcResponsePayload::Relations { items }) => items,
+                    Ok(other) => {
+                        tracing::warn!(
+                            "Memory IPC list_relations_batch 返回了非预期响应: {:?}",
+                            other
+                        );
+                        Vec::new()
+                    }
+                    Err(e) => {
+                        tracing::warn!("Memory IPC list_relations_batch 失败: {}", e);
+                        Vec::new()
+                    }
+                }
+            }
+        }
+    }
+
     /// 新增或调整记忆图关系。
     pub async fn upsert_relation(&self, draft: MemoryRelationDraft) -> Result<MemoryRelation> {
         match self.inner.as_ref() {

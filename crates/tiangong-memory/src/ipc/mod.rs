@@ -296,6 +296,11 @@ async fn handle_memory_request(
                 items: handle.list_relations(node_id).await,
             })
         }
+        MemoryIpcRequestPayload::ListRelationsBatch { node_ids } => {
+            Ok(MemoryIpcResponsePayload::Relations {
+                items: handle.list_relations_batch(node_ids).await,
+            })
+        }
         MemoryIpcRequestPayload::WriteEpisode {
             episode,
             workspace_id,

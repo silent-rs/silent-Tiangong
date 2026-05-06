@@ -88,6 +88,7 @@ fn run_gui() {
             tiangong_app::commands::upsert_manual_memory,
             tiangong_app::commands::set_memory_node_status,
             tiangong_app::commands::list_memory_relations,
+            tiangong_app::commands::list_memory_relations_batch,
             tiangong_app::commands::upsert_memory_relation,
             tiangong_app::commands::delete_memory_relation,
             tiangong_app::commands::test_memory_recall,

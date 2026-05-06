@@ -46,6 +46,11 @@ pub enum MemoryCommand {
         node_id: String,
         reply: oneshot::Sender<Vec<MemoryRelation>>,
     },
+    /// 批量查询多个节点的关联关系（修复 N+1 性能问题）
+    ListRelationsBatch {
+        node_ids: Vec<String>,
+        reply: oneshot::Sender<Vec<MemoryRelation>>,
+    },
 
     // ── 写入类（fire-and-forget）──
     WriteEpisode {

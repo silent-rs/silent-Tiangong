@@ -659,6 +659,41 @@ impl MemoryDb {
         Ok(relations)
     }
 
+    /// 批量列出多个节点的关联关系（去重）。
+    pub(crate) fn list_memory_relations_batch(
+        &self,
+        node_ids: &[String],
+    ) -> Result<Vec<MemoryRelation>> {
+        if node_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // 构建 IN 子句的占位符
+        let placeholders: Vec<String> = node_ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect();
+        let sql = format!(
+            "SELECT DISTINCT id, from_node_id, to_node_id, relation_kind, weight, note, created_at, updated_at
+             FROM memory_relations
+             WHERE from_node_id IN ({}) OR to_node_id IN ({})
+             ORDER BY updated_at DESC",
+            placeholders.join(", "),
+            placeholders.join(", ")
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::types::ToSql> = node_ids
+            .iter()
+            .map(|id| id as &dyn rusqlite::types::ToSql)
+            .collect();
+        let rows = stmt.query_map(params.as_slice(), row_to_memory_relation)?;
+        let mut relations = Vec::new();
+        for row in rows {
+            relations.push(row.with_context(|| "批量读取 memory_relations 行失败")?);
+        }
+        Ok(relations)
+    }
+
     /// 删除指定记忆关系。
     pub(crate) fn delete_memory_relation(&self, relation_id: &str) -> Result<()> {
         self.conn

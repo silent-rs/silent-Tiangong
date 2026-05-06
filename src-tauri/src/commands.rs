@@ -2175,6 +2175,20 @@ pub async fn list_memory_relations(
     Ok(handle.list_relations(node_id).await)
 }
 
+/// 批量列出多个记忆节点的关联关系（去重，修复 N+1 性能问题）。
+#[tauri::command]
+pub async fn list_memory_relations_batch(
+    node_ids: Vec<String>,
+    state: State<'_, TiangongApp>,
+) -> Result<Vec<tiangong_memory::MemoryRelation>, String> {
+    let valid_ids: Vec<String> = node_ids.into_iter().filter(|id| !id.trim().is_empty()).collect();
+    if valid_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let handle = current_memory_handle(&state)?;
+    Ok(handle.list_relations_batch(valid_ids).await)
+}
+
 /// 新增或调整记忆图关系。
 #[tauri::command]
 pub async fn upsert_memory_relation(

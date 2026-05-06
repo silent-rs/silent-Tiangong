@@ -166,6 +166,11 @@ impl MemoryActor {
                 let _ = reply.send(items);
             }
 
+            MemoryCommand::ListRelationsBatch { node_ids, reply } => {
+                let items = self.store.list_relations_batch(&node_ids);
+                let _ = reply.send(items);
+            }
+
             // Phase B：Micro 反刍
             MemoryCommand::RunMicroRumination { turn_result } => {
                 // 优先使用 turn 携带的 workspace_id，避免跨工作区串写
