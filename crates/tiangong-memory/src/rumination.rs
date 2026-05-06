@@ -4,6 +4,8 @@
 //! Phase C：MesoRumination — 会话结束时提炼 Entity/Decision + 更新 Workspace Injection。
 //! Phase D：MetaRumination — 定期过时检测、归档、Profile 更新。
 
+use std::collections::HashSet;
+use std::path::Path;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -11,7 +13,9 @@ use anyhow::Result;
 use crate::command::InjectionLevel;
 use crate::llm_metrics::log_memory_llm_call;
 use crate::store::MemoryStore;
-use crate::types::{Decision, Entity, EntityType, Episode, TurnResult};
+use crate::types::{
+    Decision, Entity, EntityType, Episode, MemoryListQuery, MemoryNode, MemoryStatus, TurnResult,
+};
 use crate::writer;
 use tiangong_llm::{LlmEndpointConfig, complete_text_with_usage};
 
@@ -712,27 +716,233 @@ fn dedupe_strings(items: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+#[derive(Debug, Default)]
+struct MetaRuminationReport {
+    checked_nodes: usize,
+    checked_paths: usize,
+    checked_urls: usize,
+    low_activity_archived: usize,
+    invalid_reference_archived: usize,
+    missing_paths: usize,
+    expired_urls: usize,
+    project_archived: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetaArchiveReason {
+    MissingPath,
+    ExpiredUrl,
+    ProjectArchived,
+}
+
 /// Meta 反刍（Phase D）：定期调度（启动时检测，距上次超过 24h 才执行）
 ///
 /// 1. 检测低活跃（30天未使用，importance < 0.3）节点并归档
-/// 2. Profile 更新（Phase D 高级功能预留）
-pub(crate) fn process_meta(store: &mut MemoryStore) -> Result<()> {
+/// 2. 检查文件路径、产物 URL 和项目归档标记，归档过时节点
+/// 3. Profile 更新（Phase D 高级功能预留）
+pub(crate) async fn process_meta(store: &mut MemoryStore) -> Result<()> {
     tracing::debug!("Meta 反刍开始");
+    let mut report = MetaRuminationReport::default();
 
     // 归档低活跃节点（30天未使用 + importance < 0.3）
     let stale = store.list_stale_nodes(30, 0.3);
-    let archived_count = stale.len();
+    let mut archived_node_ids = HashSet::new();
+    report.low_activity_archived = stale.len();
     for (node_id, _importance) in stale {
-        store.archive_node(&node_id);
+        archived_node_ids.insert(node_id.clone());
+        store.archive_node(&node_id).await;
     }
 
-    if archived_count > 0 {
-        tracing::info!("Meta 反刍：归档 {} 个低活跃节点", archived_count);
-    } else {
-        tracing::debug!("Meta 反刍：无需归档");
+    let active_nodes = store.list_nodes(&MemoryListQuery {
+        status: Some(MemoryStatus::Active),
+        limit: 500,
+        ..Default::default()
+    });
+    report.checked_nodes = active_nodes.len();
+
+    for node in active_nodes {
+        if archived_node_ids.contains(&node.id) {
+            continue;
+        }
+        let evaluation = evaluate_node_references(&node);
+        report.checked_paths += evaluation.checked_paths;
+        report.checked_urls += evaluation.checked_urls;
+
+        if let Some(reason) = evaluation.archive_reason {
+            match reason {
+                MetaArchiveReason::MissingPath => report.missing_paths += 1,
+                MetaArchiveReason::ExpiredUrl => report.expired_urls += 1,
+                MetaArchiveReason::ProjectArchived => report.project_archived += 1,
+            }
+            report.invalid_reference_archived += 1;
+            archived_node_ids.insert(node.id.clone());
+            tracing::info!(
+                node_id = %node.id,
+                title = %node.title,
+                reason = ?reason,
+                "Meta 反刍归档过时引用节点"
+            );
+            store.archive_node(&node.id).await;
+        }
     }
+
+    tracing::info!(
+        checked_nodes = report.checked_nodes,
+        checked_paths = report.checked_paths,
+        checked_urls = report.checked_urls,
+        low_activity_archived = report.low_activity_archived,
+        invalid_reference_archived = report.invalid_reference_archived,
+        missing_paths = report.missing_paths,
+        expired_urls = report.expired_urls,
+        project_archived = report.project_archived,
+        "Meta 反刍完成"
+    );
 
     Ok(())
+}
+
+#[derive(Debug, Default)]
+struct MetaReferenceEvaluation {
+    checked_paths: usize,
+    checked_urls: usize,
+    archive_reason: Option<MetaArchiveReason>,
+}
+
+fn evaluate_node_references(node: &MemoryNode) -> MetaReferenceEvaluation {
+    let text = node_reference_text(node);
+    let mut evaluation = MetaReferenceEvaluation::default();
+
+    if contains_project_archived_marker(&text) {
+        evaluation.archive_reason = Some(MetaArchiveReason::ProjectArchived);
+        return evaluation;
+    }
+
+    let paths = extract_reference_paths(&text);
+    evaluation.checked_paths = paths.len();
+    if paths.iter().any(|path| !Path::new(path).exists()) {
+        evaluation.archive_reason = Some(MetaArchiveReason::MissingPath);
+        return evaluation;
+    }
+
+    let urls = extract_reference_urls(&text);
+    evaluation.checked_urls = urls.len();
+    if urls.iter().any(|url| is_expired_reference_url(url)) {
+        evaluation.archive_reason = Some(MetaArchiveReason::ExpiredUrl);
+    }
+
+    evaluation
+}
+
+fn node_reference_text(node: &MemoryNode) -> String {
+    let mut parts = vec![node.title.as_str(), node.summary.as_str()];
+    if let Some(source) = node.source.as_deref() {
+        parts.push(source);
+    }
+    let mut text = parts.join("\n");
+    if !node.keywords.is_empty() {
+        text.push('\n');
+        text.push_str(&node.keywords.join(" "));
+    }
+    text
+}
+
+fn contains_project_archived_marker(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("project archived")
+        || lower.contains("workspace archived")
+        || text.contains("项目归档")
+        || text.contains("项目已归档")
+        || text.contains("工作区归档")
+        || text.contains("工作区已归档")
+}
+
+fn extract_reference_paths(text: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    text.split_whitespace()
+        .filter_map(clean_reference_token)
+        .filter(|token| is_probable_path(token))
+        .filter(|token| seen.insert(token.to_ascii_lowercase()))
+        .map(str::to_string)
+        .collect()
+}
+
+fn extract_reference_urls(text: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    text.split_whitespace()
+        .filter_map(clean_reference_token)
+        .filter(|token| {
+            token.starts_with("http://")
+                || token.starts_with("https://")
+                || token.starts_with("data:image/")
+        })
+        .filter(|token| seen.insert(token.to_ascii_lowercase()))
+        .map(str::to_string)
+        .collect()
+}
+
+fn clean_reference_token(token: &str) -> Option<&str> {
+    let cleaned = token.trim_matches(|ch: char| {
+        matches!(
+            ch,
+            '"' | '\''
+                | '`'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '<'
+                | '>'
+                | ','
+                | '.'
+                | ';'
+                | ':'
+                | '，'
+                | '。'
+                | '；'
+                | '、'
+        )
+    });
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+fn is_probable_path(token: &str) -> bool {
+    if token.starts_with("http://")
+        || token.starts_with("https://")
+        || token.starts_with("data:image/")
+    {
+        return false;
+    }
+    if token.starts_with('/') || token.starts_with("./") || token.starts_with("../") {
+        return true;
+    }
+    let lower = token.to_ascii_lowercase();
+    (token.contains('/') || token.contains('\\'))
+        && [
+            ".rs", ".ts", ".tsx", ".js", ".jsx", ".vue", ".md", ".json", ".toml", ".yaml", ".yml",
+            ".sql", ".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif", ".mp4", ".mov", ".pdf",
+        ]
+        .iter()
+        .any(|ext| lower.contains(ext))
+}
+
+fn is_expired_reference_url(url: &str) -> bool {
+    if url.starts_with("data:image/") {
+        return false;
+    }
+    let lower = url.to_ascii_lowercase();
+    lower.contains(".invalid")
+        || lower.contains("/expired")
+        || lower.contains("/404")
+        || lower.contains("/410")
+        || lower.contains("not-found")
+        || lower.contains("missing")
+        || lower.contains("gone")
 }
 
 #[cfg(test)]

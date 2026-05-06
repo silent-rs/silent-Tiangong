@@ -72,6 +72,20 @@ impl RecallEngine {
         Ok(())
     }
 
+    /// 从可选语义索引删除节点。未启用向量索引时直接跳过。
+    pub(crate) async fn delete_node(&self, node_id: &str) -> anyhow::Result<()> {
+        let Some(vector_index) = self.vector_index.as_ref() else {
+            return Ok(());
+        };
+        vector_index.delete(node_id).await?;
+        tracing::debug!(
+            node_id = %node_id,
+            backend = "vector",
+            "Memory vector delete 完成"
+        );
+        Ok(())
+    }
+
     /// 执行召回：接受已完成的 BM25 结果，可选地用向量检索增强后融合重排
     ///
     /// `strategy` 为外部（Core/LLM）传入的检索策略，为 None 时内部自动判断。

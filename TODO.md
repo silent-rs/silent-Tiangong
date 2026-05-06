@@ -60,33 +60,32 @@
 
 ## P1 - 混合检索质量
 
-- [ ] 默认测试链覆盖无外部服务的 embedded vector mock 或 deterministic provider。
-- [ ] ignored 的真实 embedding 测试保留为手动验证，补充运行说明。
-- [ ] 建立小型 recall benchmark，比较 BM25-only 与 hybrid 命中率。
-- [ ] Qdrant 后端补齐归档删除同步和服务配置说明。
+- [x] 默认测试链覆盖无外部服务的 embedded vector mock 或 deterministic provider。
+- [x] ignored 的真实 embedding 测试保留为手动验证，补充运行说明。
+- [x] 建立小型 recall benchmark，比较 BM25-only 与 hybrid 命中率。
+- [x] Qdrant 后端补齐归档删除同步和服务配置说明。
 
 ## P1 - Meta 与生命周期
 
-- [ ] 归档时 SQLite、Tantivy、embedded vector、Qdrant 状态一致。
-- [ ] 已归档节点从向量索引删除能力补齐（含外部 Qdrant delete）。
-- [ ] 文件路径和媒体产物基本可达性检查。
-- [ ] 过时检测覆盖文件删除、路径失效、项目归档、产物 URL 过期。
-- [ ] Meta 执行结果进入可观测日志和指标。
+- [x] 归档时 SQLite、Tantivy、embedded vector、Qdrant 状态一致。
+- [x] 已归档节点从向量索引删除能力补齐（含外部 Qdrant delete）。
+- [x] 文件路径和媒体产物基本可达性检查。
+- [x] 过时检测覆盖文件删除、路径失效、项目归档、产物 URL 过期。
+- [x] Meta 执行结果进入可观测日志和指标。
 
 ## P2 - Workspace Index
 
-- [ ] 最小文件树索引可生成、可查询、可按 workspace 隔离。
-- [ ] Rust 符号索引至少覆盖 `mod/fn/struct/enum/trait`。
-- [ ] Recall 可结合 Memory 与 workspace index 返回线索。
-- [ ] 文件变更后的增量更新策略落地。
+- [x] 最小文件树索引可生成、可查询、可按 workspace 隔离。
+- [x] Rust 符号索引至少覆盖 `mod/fn/struct/enum/trait`。
+- [x] Recall 可结合 Memory 与 workspace index 返回线索。
+- [x] 文件变更后的增量更新策略落地。
 
 ---
 
 ## 推荐执行顺序
 
 1. 先实现 Memory 独立模型配置，阻断继续复用主模型。
-2. 补 embedded vector 的可重复测试，再处理 Qdrant 删除和服务化配置。
-3. 最后推进 Meta 完整生命周期与 Workspace Index。
+2. 进入下一轮规划，补充新的 TODO 后再继续开发。
 
 ---
 

@@ -34,16 +34,39 @@
 
 Memory 系统作为独立 crate `tiangong-memory` 实现，采用 **Actor 模型**独立运行，外部通过 `MemoryHandle` 消息通讯访问。
 
-存储采用“**SQLite（加密）+ Tantivy（全文检索）+ Qdrant（向量语义）**”三层架构：
+存储采用“**SQLite（加密）+ Tantivy（全文检索）+ 内置向量 / Qdrant（向量语义）**”三层架构：
 
 | 层次 | 引擎 | 职责 |
 |------|------|------|
 | 元数据层 | SQLite（sqlcipher 加密） | 记忆管理、CRUD、生命周期 |
 | 全文检索层 | Tantivy | BM25 关键词/短语召回 |
-| 向量语义层 | Qdrant（**可选**） | 语义相似度召回、跨措辞匹配 |
+| 向量语义层 | Embedded flat vector（默认）或 Qdrant（可选） | 语义相似度召回、跨措辞匹配 |
 | Injection 层 | Markdown 文件 | 人类可读的注入内容 |
 
-> **降级策略**：当 `LlmConfig.embedding` 未配置时，Qdrant 引擎不初始化，向量语义检索和存储自动跳过，系统降级为"SQLite + Tantivy"双层架构，仅依赖全文检索召回。
+> **降级策略**：当 Memory embedding 未配置时，向量语义检索和存储自动跳过，系统降级为"SQLite + Tantivy"双层架构，仅依赖全文检索召回。
+
+## 混合检索
+
+默认测试链使用本地 deterministic embedding mock，不依赖外部服务：
+
+```bash
+cargo test -p tiangong-memory --test hybrid_retrieval_integration -- --nocapture
+```
+
+真实 embedding 路径保留为手动验证：
+
+```bash
+cargo test -p tiangong-memory --test hybrid_retrieval_integration embedded_hybrid_retrieval_loads_configured_embedding_and_recalls_semantic_episode -- --ignored --nocapture
+```
+
+可选 Qdrant 后端通过环境变量配置：
+
+```bash
+export QDRANT_URL=http://127.0.0.1:6334
+export TIANGONG_MEMORY_QDRANT_COLLECTION=tiangong_memory
+```
+
+Memory 配置中将 `vector_mode` 设为 `external_qdrant` 后，写入、召回和归档删除会通过同一 Memory Actor 同步到 Qdrant。默认 `auto` 使用内置 embedded flat vector，无需启动外部服务。
 
 ## 专用 Memory LLM
 
@@ -65,6 +88,16 @@ Memory LLM 调用点会在日志中记录任务名、模型、协议、耗时和
 
 Deep Recall 已有固定评测覆盖跨会话产物、Meso Entity、Meso Decision 和图关系追溯，确保需要深挖时能返回当前上下文之外的可执行线索。
 
+## Workspace Index
+
+Workspace Index 首期已落地在 `tiangong-memory` 中，支持：
+
+- 生成并持久化最小文件树索引，按 `workspace_id` 隔离。
+- 提取 Rust `mod/fn/struct/enum/trait` 符号。
+- 查询文件和符号命中。
+- 对单个文件执行增量更新。
+- 在 `recall_memory` 输出中补充相关文件和符号线索。
+
 ```
 crates/
   tiangong-memory/           ← 【独立 crate】Memory 基础设施
@@ -78,6 +111,7 @@ crates/
       recall.rs              ← Progressive Recall（双引擎召回 + 融合重排）
       writer.rs              ← Episode/Decision 写入
       rumination.rs          ← 反刍（后期）
+      workspace_index.rs     ← 工作区文件树与 Rust 符号索引
       db/                    ← SQLite 加密元数据库
       search/                ← 双引擎检索（Tantivy + Qdrant + Reranker）
       ipc/                   ← 跨进程 IPC 服务端/客户端

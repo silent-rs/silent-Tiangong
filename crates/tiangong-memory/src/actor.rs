@@ -111,6 +111,7 @@ impl MemoryActor {
                 let result = self
                     .store
                     .set_node_status(&node_id, status)
+                    .await
                     .map_err(|err| err.to_string());
                 let _ = reply.send(result);
             }
@@ -209,7 +210,7 @@ impl MemoryActor {
 
             // Phase D 实现
             MemoryCommand::RunMetaRumination => {
-                if let Err(e) = rumination::process_meta(&mut self.store) {
+                if let Err(e) = rumination::process_meta(&mut self.store).await {
                     tracing::warn!("Meta 反刍失败: {}", e);
                 }
             }

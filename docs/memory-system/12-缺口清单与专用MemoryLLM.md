@@ -23,7 +23,7 @@
 | Phase A | 已完成 | 独立 crate、Injection、SQLite、Actor/Handle 主体均可用 |
 | Phase B | 基本完成 | Episode 写入、Tantivy、IPC/election 已闭环，仍需主入口切换到选举模式 |
 | Phase C | 约 65%-75% | 内置向量索引、可选 Qdrant、Deep Recall、Meso 均已有实现，但真实模型路径和质量评测不足 |
-| Phase D | 刚起步 | Meta 仅有低活跃归档，RerankProvider、Workspace Index、过时检测尚未完整实现 |
+| Phase D | 部分推进 | Meta 生命周期和 Workspace Index 首期已落地，RerankProvider 仍待接入 |
 
 ## 专用 Memory LLM 约束
 
@@ -125,23 +125,27 @@ Memory 内部文本生成任务只允许读取独立 Memory LLM 配置：
 - 记录 Memory LLM token 使用和延迟，确认不会拖慢主对话链路。
 - Deep Recall 能通过固定场景追溯跨会话、跨产物、跨 Entity/Decision 的上下文。
 
-### P1：混合检索质量缺口
+### P1：混合检索质量缺口（已完成基础收口）
 
-1. 内置 flat 向量索引已实现，但真实 embedding 测试被标记为 ignored。
-2. Qdrant 后端具备 connect/upsert/search，但还缺少归档删除同步、服务配置说明和主链路验证。
-3. 召回质量缺少评测集，当前只能证明链路可运行，不能证明排序质量稳定。
+1. 内置 flat 向量索引已实现，并补充无外部服务的 deterministic embedding mock 集成测试。
+2. 真实 embedding 测试继续保留为 ignored 手动验证，运行说明已补充到 README。
+3. 已建立小型 recall benchmark，对比 BM25-only 与 hybrid 在固定语义样例上的命中率。
+4. Qdrant 后端已具备 connect/upsert/search/delete，归档时通过统一 `VectorIndex::delete` 清理 point。
+5. 服务配置通过 `QDRANT_URL` 和 `TIANGONG_MEMORY_QDRANT_COLLECTION` 控制，`vector_mode=external_qdrant` 时启用。
 
 验收标准：
 
 - 默认测试链覆盖无外部服务的 embedded vector mock 或 deterministic provider。
 - ignored 的真实 embedding 测试保留为手动验证，并补充运行说明。
 - 建立小型 recall benchmark，比较 BM25-only 与 hybrid 的命中率。
+- Qdrant 后端补齐归档删除同步和服务配置说明。
 
-### P1：Meta 与生命周期缺口
+### P1：Meta 与生命周期缺口（已完成基础收口）
 
-1. Meta 当前只有低活跃节点归档。
-2. 已归档节点从向量索引删除的能力不完整，外部 Qdrant delete 仍是占位。
-3. 过时检测尚未覆盖文件删除、路径失效、项目归档、产物 URL 过期。
+1. Meta 已覆盖低活跃节点归档。
+2. 归档链路已能同步 SQLite 状态、Tantivy、embedded vector 和 Qdrant point 删除。
+3. 过时检测已覆盖文件删除、路径失效、项目归档、产物 URL 过期等本地可判断场景。
+4. Meta 执行结果通过结构化 tracing 字段输出 checked、archived、missing、expired 等计数。
 
 验收标准：
 
@@ -149,11 +153,12 @@ Memory 内部文本生成任务只允许读取独立 Memory LLM 配置：
 - 文件路径和媒体产物能做基本可达性检查。
 - Meta 执行结果进入可观测日志和指标。
 
-### P2：Workspace Index 缺口
+### P2：Workspace Index 缺口（首期已完成）
 
-1. 工作区文件索引和符号索引仍停留在设计文档。
-2. Recall 尚不能从文件树、符号表、模块关系中补充上下文。
-3. 文件变更后的增量更新策略尚未落地。
+1. 已提供最小文件树索引，可生成、持久化、查询，并按 workspace_id 隔离。
+2. Rust 符号索引已覆盖 `mod/fn/struct/enum/trait`。
+3. `recall_memory` 无历史记忆或有历史记忆时，均可补充 workspace index 文件和符号线索。
+4. 已提供单文件增量更新入口，文件变更后可刷新受影响的 file entry 与 Rust symbols。
 
 验收标准：
 
@@ -166,7 +171,7 @@ Memory 内部文本生成任务只允许读取独立 Memory LLM 配置：
 1. 先实现 Memory 独立模型配置，阻断继续复用主模型。
 1. 运行 GUI + CLI + Server 的真实多进程组合验证，确认同 workspace leader/follower 行为。
 2. 补 embedded vector 的可重复测试，再处理 Qdrant 删除和服务化配置。
-3. 最后推进 Meta 完整生命周期与 Workspace Index。
+3. 下一步补充 RerankProvider 和新的质量评测任务。
 
 ## 文档同步要求
 

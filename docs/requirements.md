@@ -120,6 +120,10 @@
 - GUI Memory 手动管理界面必须支持设置记忆类型、维护记忆之间的关联关系，并以高性能图谱渲染库展示当前 workspace 的圆形记忆节点和连接线；所有写入必须通过 Memory Actor，避免绕过 SQLite/索引一致性边界。
 - Memory 必须具备独立集成测试，覆盖写入、召回、IPC、workspace 隔离、混合检索、产物记忆和配置热更新。
 - Memory recall 输出必须有统一预算和去重策略，避免重复当前上下文、重复 URL、重复路径或重复工具结果摘要。
+- Memory 归档必须同步 SQLite 状态、Tantivy、内置向量索引和可选外部 Qdrant，避免已归档记忆继续被召回。
+- Meta 反刍必须覆盖低活跃记忆、失效文件路径、过期产物 URL 和项目归档标记，并输出可观测计数。
+- Workspace Index 必须支持最小文件树索引、Rust `mod/fn/struct/enum/trait` 符号索引、按 workspace 隔离查询和单文件增量更新。
+- Tool 化回忆在返回长期记忆时应能补充相关 workspace 文件和符号线索；没有历史记忆但存在相关文件线索时，也应返回 workspace index 结果。
 
 #### 工作空间与文件操作边界
 - Desktop 模式必须支持在界面中设置当前会话工作空间。

@@ -30,6 +30,7 @@ mod recall_context;
 mod rumination;
 mod search;
 mod store;
+mod workspace_index;
 mod writer;
 
 pub use actor::{start_memory as start, start_memory_with_options as start_with_options};
@@ -45,6 +46,9 @@ pub use election::{
 pub use handle::MemoryHandle;
 pub use options::{MemoryOptions, MemoryVectorMode};
 pub use types::*;
+pub use workspace_index::{
+    query_workspace_index, refresh_workspace_index, touch_workspace_index_file,
+};
 
 /// 同步加载三级注入上下文（不经过 Actor，直接读文件）
 ///

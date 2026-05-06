@@ -11,7 +11,8 @@ use tiangong_llm::{LlmEndpointConfig, ProviderProtocol};
 use tiangong_memory::{
     Episode, EpisodeOutcome, MemoryKind, MemoryOptions, MemoryRecallRequest, MemoryRelationDraft,
     MemoryRelationKind, RecallAnchors, RecallDepth, TurnArtifact, TurnArtifactKind, TurnResult,
-    load_injection_sync, start, start_with_options, workspace_id_from_path,
+    load_injection_sync, refresh_workspace_index, start, start_with_options,
+    workspace_id_from_path,
 };
 
 struct EnvGuard {
@@ -353,6 +354,30 @@ async fn wait_for_recall_hit(
     Vec::new()
 }
 
+async fn wait_for_recall_title_absent(
+    handle: &tiangong_memory::MemoryHandle,
+    query: &str,
+    title: &str,
+) -> bool {
+    for _ in 0..30 {
+        let hits = handle
+            .recall(
+                RecallAnchors {
+                    query: query.to_string(),
+                    keywords: Vec::new(),
+                    strategy: None,
+                },
+                5,
+            )
+            .await;
+        if !hits.iter().any(|hit| hit.title == title) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
 async fn wait_for_recall_kind(
     handle: &tiangong_memory::MemoryHandle,
     query: &str,
@@ -496,6 +521,138 @@ async fn runtime_can_write_episode_and_recall_without_core() {
         }),
         "命中结果应包含已写入 Episode 的标题或摘要"
     );
+
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn meta_rumination_archives_missing_paths_expired_urls_and_project_archived_markers() {
+    let (home, _workspace, workspace_path, workspace_id) = setup_workspace();
+    let _env = EnvGuard::enter(home.path(), &workspace_path);
+
+    let alive_path = workspace_path.join("docs/alive-meta-reference.md");
+    write_file(&alive_path, "alive reference");
+    let missing_path = workspace_path.join("artifacts/missing-meta-reference.png");
+
+    let handle = start(Some(workspace_id.clone())).expect("启动 memory 失败");
+    let cases = [
+        (
+            "meta alive file alpha",
+            format!(
+                "meta alive file alpha keeps valid local reference {}",
+                alive_path.display()
+            ),
+            vec!["meta-alive-alpha".to_string()],
+        ),
+        (
+            "meta missing path beta",
+            format!(
+                "meta missing path beta points to removed artifact {}",
+                missing_path.display()
+            ),
+            vec!["meta-missing-beta".to_string()],
+        ),
+        (
+            "meta expired url gamma",
+            "meta expired url gamma references https://example.invalid/expired/media.png"
+                .to_string(),
+            vec!["meta-expired-gamma".to_string()],
+        ),
+        (
+            "meta archived workspace delta",
+            "meta archived workspace delta belongs to project archived workspace".to_string(),
+            vec!["meta-archived-delta".to_string()],
+        ),
+    ];
+
+    for (title, summary, keywords) in cases {
+        handle.write_episode(
+            Episode::new(
+                "session-meta-lifecycle".to_string(),
+                title.to_string(),
+                summary,
+                EpisodeOutcome::Success,
+                keywords,
+                vec!["meta_rumination".to_string()],
+                0.8,
+            ),
+            Some(workspace_id.clone()),
+        );
+    }
+
+    for title in [
+        "meta alive file alpha",
+        "meta missing path beta",
+        "meta expired url gamma",
+        "meta archived workspace delta",
+    ] {
+        let hits = wait_for_recall_hit(&handle, title).await;
+        assert!(
+            hits.iter().any(|hit| hit.title == title),
+            "Meta 执行前应能召回 {title}"
+        );
+    }
+
+    handle.run_meta_rumination();
+
+    let alive_hits = wait_for_recall_hit(&handle, "meta alive file alpha").await;
+    assert!(
+        alive_hits
+            .iter()
+            .any(|hit| hit.title == "meta alive file alpha"),
+        "可达本地路径不应被 Meta 归档"
+    );
+    for title in [
+        "meta missing path beta",
+        "meta expired url gamma",
+        "meta archived workspace delta",
+    ] {
+        assert!(
+            wait_for_recall_title_absent(&handle, title, title).await,
+            "Meta 应归档过时引用 {title}"
+        );
+    }
+
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn recall_context_returns_workspace_index_hints_without_memory_hits() {
+    let (home, _workspace, workspace_path, workspace_id) = setup_workspace();
+    let _env = EnvGuard::enter(home.path(), &workspace_path);
+    write_file(
+        &workspace_path.join("src/billing.rs"),
+        r#"
+pub mod nested;
+pub struct BillingWorkspaceClue;
+pub enum BillingMode { Active }
+pub trait BillingLookup {}
+pub fn billing_workspace_clue() {}
+"#,
+    );
+    refresh_workspace_index(&workspace_path).expect("刷新 workspace index 失败");
+
+    let handle = start(Some(workspace_id.clone())).expect("启动 memory 失败");
+    let response = handle
+        .recall_context(MemoryRecallRequest {
+            query: "billing workspace clue".to_string(),
+            limit: 3,
+            ..Default::default()
+        })
+        .await;
+
+    assert!(
+        response.content.contains("[工作区线索]"),
+        "没有历史记忆时仍应返回工作区索引线索"
+    );
+    assert!(
+        response.content.contains("billing_workspace_clue")
+            || response.content.contains("src/billing.rs"),
+        "工作区线索应包含相关 Rust 符号或文件"
+    );
+    assert!(response.hits.is_empty(), "该场景不应伪造 Memory 命中");
 
     handle.shutdown().await;
 }
