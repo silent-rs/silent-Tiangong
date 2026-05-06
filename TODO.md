@@ -46,7 +46,7 @@
 
 ## P1 - 真实模型路径验证
 
-- [ ] 增加可手动运行的 Memory LLM smoke test。
+- [x] 增加可手动运行的 Memory LLM smoke test。
 - [x] 增加 GUI Memory 管理界面，支持查看、新增、调整、归档记忆。
 - [x] 增加 GUI 记忆召回测试入口，手动输入 query 后查看 Recall 命中。
 - [x] 手动新增或调整记忆通过 Memory Actor 写入，保持 SQLite / Tantivy / 向量索引一致。
@@ -54,8 +54,8 @@
 - [x] 增加 Memory 图关系结构，支持记忆节点之间建立关联关系。
 - [x] GUI Memory 管理界面支持手动设置记忆类型和维护记忆关联。
 - [x] Deep Recall 支持沿 Memory 图关系加载邻接记忆。
-- [ ] 固定 5-10 个历史指代样例，验证输出只包含增量记忆。
-- [ ] 记录 Memory LLM token 使用和延迟，确认不拖慢主对话链路。
+- [x] 固定 5-10 个历史指代样例，验证输出只包含增量记忆。
+- [x] 记录 Memory LLM token 使用和延迟，确认不拖慢主对话链路。
 - [ ] Deep Recall 真实效果通过跨会话、跨产物、跨 Entity/Decision 固定场景评测。
 
 ## P1 - 混合检索质量
@@ -85,7 +85,7 @@
 ## 推荐执行顺序
 
 1. 先实现 Memory 独立模型配置，阻断继续复用主模型。
-2. 补真实 Memory LLM smoke test 和固定回忆样例集。
+2. 补固定回忆样例集和真实 Memory LLM 路径质量验证。
 3. 补 embedded vector 的可重复测试，再处理 Qdrant 删除和服务化配置。
 4. 最后推进 Meta 完整生命周期与 Workspace Index。
 

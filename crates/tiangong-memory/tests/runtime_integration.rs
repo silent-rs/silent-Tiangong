@@ -501,6 +501,208 @@ async fn contextual_recall_returns_incremental_memory_without_repeating_prompt_c
 
 #[tokio::test(flavor = "current_thread")]
 #[serial]
+async fn contextual_recall_fixed_reference_cases_return_only_incremental_memory() {
+    let cases = incremental_recall_cases();
+
+    for case in &cases {
+        let (home, _workspace, workspace_path, workspace_id) = setup_workspace();
+        let _env = EnvGuard::enter(home.path(), &workspace_path);
+        let handle = start(Some(workspace_id.clone())).expect("启动 memory 失败");
+
+        handle.write_episode(
+            Episode::new(
+                format!("session-incremental-{}", case.slug),
+                format!("{} current context", case.slug),
+                case.current_context.to_string(),
+                EpisodeOutcome::Success,
+                case.keywords(),
+                vec!["recall_memory".to_string()],
+                0.5,
+            ),
+            Some(workspace_id.clone()),
+        );
+        handle.write_episode(
+            Episode::new(
+                format!("session-incremental-{}", case.slug),
+                format!("{} incremental memory", case.slug),
+                case.incremental_memory.to_string(),
+                EpisodeOutcome::Success,
+                case.keywords(),
+                case.tool_calls
+                    .iter()
+                    .map(|item| item.to_string())
+                    .collect(),
+                0.8,
+            ),
+            Some(workspace_id.clone()),
+        );
+
+        let hits = wait_for_recall_hit(&handle, case.query).await;
+        assert!(
+            hits.iter()
+                .any(|hit| hit.summary.contains(case.expected_refs[0])),
+            "固定样例 {} 应先能召回增量记忆",
+            case.slug
+        );
+
+        let contextual = handle
+            .recall_context(MemoryRecallRequest {
+                query: case.query.to_string(),
+                reason: Some(case.reason.to_string()),
+                expected: case.expected.iter().map(|item| item.to_string()).collect(),
+                context: vec![
+                    format!("user: {}", case.user_context),
+                    format!("assistant: {}", case.current_context),
+                ],
+                limit: 5,
+            })
+            .await;
+        eprintln!(
+            "[incremental-case:{}] used_llm={} hit_count={} content=\n{}",
+            case.slug,
+            contextual.used_llm,
+            contextual.hits.len(),
+            contextual.content
+        );
+
+        assert!(
+            !contextual.content.contains(case.current_context),
+            "固定样例 {} 不应重复当前上下文已包含的摘要",
+            case.slug
+        );
+        for expected_ref in case.expected_refs {
+            assert!(
+                contextual.content.contains(expected_ref),
+                "固定样例 {} 应返回增量引用 {}",
+                case.slug,
+                expected_ref
+            );
+            assert_eq!(
+                contextual.content.matches(expected_ref).count(),
+                1,
+                "固定样例 {} 的增量引用 {} 应只出现一次",
+                case.slug,
+                expected_ref
+            );
+        }
+
+        handle.shutdown().await;
+    }
+}
+
+struct IncrementalRecallCase {
+    slug: &'static str,
+    query: &'static str,
+    user_context: &'static str,
+    current_context: &'static str,
+    incremental_memory: &'static str,
+    expected_refs: &'static [&'static str],
+    expected: &'static [&'static str],
+    tool_calls: &'static [&'static str],
+    reason: &'static str,
+}
+
+impl IncrementalRecallCase {
+    fn keywords(&self) -> Vec<String> {
+        self.query
+            .split_whitespace()
+            .chain([self.slug])
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+fn incremental_recall_cases() -> Vec<IncrementalRecallCase> {
+    vec![
+        IncrementalRecallCase {
+            slug: "flamingo-export",
+            query: "继续 flamingo-export dashboard 的导出产物",
+            user_context: "继续 flamingo-export dashboard",
+            current_context: "flamingo-export 已确定 coral teal palette",
+            incremental_memory: "flamingo-export 导出产物位于 https://example.invalid/artifacts/flamingo-export.svg path=/tmp/tiangong/flamingo-export.svg",
+            expected_refs: &[
+                "https://example.invalid/artifacts/flamingo-export.svg",
+                "/tmp/tiangong/flamingo-export.svg",
+            ],
+            expected: &["media", "file"],
+            tool_calls: &["generate_image", "write_file"],
+            reason: "用户用历史指代继续使用刚生成的 dashboard 产物",
+        },
+        IncrementalRecallCase {
+            slug: "profile-migration",
+            query: "继续 profile-migration 上次那个迁移文件",
+            user_context: "继续 profile-migration 上次那个迁移",
+            current_context: "profile-migration 决定拆成 schema 和 backfill 两步",
+            incremental_memory: "profile-migration 迁移文件保存为 /workspace/migrations/20260506_profile_migration.sql，回滚说明在 /workspace/docs/profile_migration_rollback.md",
+            expected_refs: &[
+                "/workspace/migrations/20260506_profile_migration.sql",
+                "/workspace/docs/profile_migration_rollback.md",
+            ],
+            expected: &["file"],
+            tool_calls: &["write_file"],
+            reason: "用户提到上次那个迁移，需要补回当前上下文缺失的文件路径",
+        },
+        IncrementalRecallCase {
+            slug: "raven-poster",
+            query: "把 raven-poster 刚才那张图再导出一次",
+            user_context: "把 raven-poster 刚才那张图再导出一次",
+            current_context: "raven-poster 使用 night garden prompt",
+            incremental_memory: "raven-poster 图片地址是 https://example.invalid/media/raven-poster.png，本地副本 path=/tmp/tiangong/raven-poster.png",
+            expected_refs: &[
+                "https://example.invalid/media/raven-poster.png",
+                "/tmp/tiangong/raven-poster.png",
+            ],
+            expected: &["media", "file"],
+            tool_calls: &["generate_image"],
+            reason: "用户用刚才那张图指代历史图片产物",
+        },
+        IncrementalRecallCase {
+            slug: "mcp-config",
+            query: "沿用 mcp-config 之前那个服务器配置",
+            user_context: "沿用 mcp-config 之前那个服务器配置",
+            current_context: "mcp-config 选择 stdio transport",
+            incremental_memory: "mcp-config 配置文件在 /workspace/.tiangong/mcp/linear-server.json，endpoint 说明见 /workspace/docs/mcp-linear.md",
+            expected_refs: &[
+                "/workspace/.tiangong/mcp/linear-server.json",
+                "/workspace/docs/mcp-linear.md",
+            ],
+            expected: &["file"],
+            tool_calls: &["write_file"],
+            reason: "用户提到之前那个服务器配置，需要返回可继续使用的配置文件",
+        },
+        IncrementalRecallCase {
+            slug: "latency-trace",
+            query: "继续 latency-trace 上次的性能排查",
+            user_context: "继续 latency-trace 上次的性能排查",
+            current_context: "latency-trace 判定瓶颈在 recall rerank 阶段",
+            incremental_memory: "latency-trace profile 数据位于 /tmp/tiangong/latency-trace.json，火焰图为 https://example.invalid/perf/latency-trace.html",
+            expected_refs: &[
+                "/tmp/tiangong/latency-trace.json",
+                "https://example.invalid/perf/latency-trace.html",
+            ],
+            expected: &["file"],
+            tool_calls: &["run_command", "write_file"],
+            reason: "用户继续性能排查，需要补回 profile 和火焰图引用",
+        },
+        IncrementalRecallCase {
+            slug: "skill-template",
+            query: "用 skill-template 上次那个技能模板继续生成",
+            user_context: "用 skill-template 上次那个技能模板继续生成",
+            current_context: "skill-template 采用 plan first 的写法",
+            incremental_memory: "skill-template 模板文件保存为 /workspace/.tiangong/skills/memory-review/SKILL.md，示例输入在 /workspace/docs/skill-template-example.md",
+            expected_refs: &[
+                "/workspace/.tiangong/skills/memory-review/SKILL.md",
+                "/workspace/docs/skill-template-example.md",
+            ],
+            expected: &["file"],
+            tool_calls: &["write_file"],
+            reason: "用户用上次那个技能模板指代历史文件产物",
+        },
+    ]
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
 async fn meso_rumination_extracts_entity_and_decision_memories() {
     let (home, _workspace, workspace_path, workspace_id) = setup_workspace();
     let _env = EnvGuard::enter(home.path(), &workspace_path);

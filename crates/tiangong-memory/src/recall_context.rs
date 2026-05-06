@@ -3,6 +3,9 @@
 //! Core 只把当前请求和最近语境传进来；Memory 内部自行规划检索锚点、
 //! 调用召回、加载二跳内容，并输出去重后的增量信息。
 
+use std::time::Instant;
+
+use crate::llm_metrics::log_memory_llm_call;
 use crate::recall_anchor::extract_recall_anchors;
 use crate::store::MemoryStore;
 use crate::types::{
@@ -229,8 +232,15 @@ async fn decide_deep_recall(
         request.context.join("\n---\n"),
         format_candidates(hits, expanded),
     );
+    let started = Instant::now();
     match complete_text_with_usage(config, DEEP_RECALL_DECISION_SYSTEM, &prompt, 512).await {
         Ok((text, usage)) => {
+            log_memory_llm_call(
+                "deep_recall_decision",
+                config,
+                started.elapsed(),
+                usage.as_ref(),
+            );
             let decision = parse_deep_recall_decision(&text).unwrap_or_else(|err| {
                 tracing::warn!("Memory deep recall 裁决解析失败，跳过深挖: {err}");
                 DeepRecallDecision::default()
@@ -384,8 +394,15 @@ async fn synthesize_with_model(
         request.context.join("\n---\n"),
         format_candidates(hits, expanded),
     );
+    let started = Instant::now();
     let (text, usage) =
         complete_text_with_usage(config, RECALL_SYNTHESIS_SYSTEM, &prompt, 1200).await?;
+    log_memory_llm_call(
+        "recall_synthesis",
+        config,
+        started.elapsed(),
+        usage.as_ref(),
+    );
     let compacted = compact_text(&text, DEFAULT_RECALL_OUTPUT_BUDGET_CHARS * 2);
     if compacted.is_empty() {
         Ok(("没有发现当前上下文之外的增量记忆。".to_string(), usage))

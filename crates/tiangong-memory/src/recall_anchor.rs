@@ -2,8 +2,11 @@
 //!
 //! 统一 Tool 化回忆、粗召回和后续主动回忆的检索锚点生成逻辑。
 
+use std::time::Instant;
+
 use tiangong_llm::{LlmEndpointConfig, TokenUsageData, complete_text_with_usage};
 
+use crate::llm_metrics::log_memory_llm_call;
 use crate::types::{MemoryRecallRequest, RecallAnchors, SearchStrategy};
 
 const RECALL_ANCHOR_SYSTEM: &str = "\
@@ -69,8 +72,15 @@ async fn plan_with_model(
         request.expected.join(", "),
         request.context.join("\n---\n")
     );
+    let started = Instant::now();
     let (response, llm_usage) =
         complete_text_with_usage(config, RECALL_ANCHOR_SYSTEM, &prompt, 512).await?;
+    log_memory_llm_call(
+        "recall_anchor",
+        config,
+        started.elapsed(),
+        llm_usage.as_ref(),
+    );
     let json = extract_json_object(&response).unwrap_or(response.as_str());
     let parsed: RecallAnchorPlan = serde_json::from_str(json)?;
     let query = parsed

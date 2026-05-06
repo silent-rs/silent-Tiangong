@@ -51,6 +51,18 @@ Memory 内部的文本生成任务必须使用 `~/.tiangong/memory/config.json` 
 
 当独立 Memory LLM 未配置时，Memory 只能降级到规则策略，并记录可诊断日志；主对话链路继续运行，但 Memory 的 LLM 增强能力视为关闭。
 
+可手动运行 smoke test 验证真实 Memory LLM 配置是否可用：
+
+```bash
+cargo run -p tiangong-memory --example memory_llm_smoke
+```
+
+该命令默认读取 `~/.tiangong/memory/config.json`，校验模型返回的结构化标记，并打印 token 用量和耗时。没有配置真实模型时，可用 `--allow-missing-config` 只验证命令链路。
+
+增量回忆已有固定样例集覆盖导出产物、迁移文件、图片、配置、性能排查和技能模板，确保 Tool 化回忆不会重复当前上下文已包含的内容。
+
+Memory LLM 调用点会在日志中记录任务名、模型、协议、耗时和 token 用量，方便单独观察 Memory 成本和延迟。
+
 ```
 crates/
   tiangong-memory/           ← 【独立 crate】Memory 基础设施

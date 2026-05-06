@@ -22,6 +22,7 @@ pub mod types;
 mod actor;
 mod db;
 mod injection;
+mod llm_metrics;
 mod options;
 mod recall;
 mod recall_anchor;

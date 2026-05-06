@@ -4,13 +4,16 @@
 //! Phase C：MesoRumination — 会话结束时提炼 Entity/Decision + 更新 Workspace Injection。
 //! Phase D：MetaRumination — 定期过时检测、归档、Profile 更新。
 
+use std::time::Instant;
+
 use anyhow::Result;
 
 use crate::command::InjectionLevel;
+use crate::llm_metrics::log_memory_llm_call;
 use crate::store::MemoryStore;
 use crate::types::{Decision, Entity, EntityType, Episode, TurnResult};
 use crate::writer;
-use tiangong_llm::{LlmEndpointConfig, complete_text};
+use tiangong_llm::{LlmEndpointConfig, complete_text_with_usage};
 
 const MESO_RUMINATION_SYSTEM: &str = "\
 你是独立记忆系统的 MesoRumination 结构化提炼器。根据近期 Episode 提炼可长期复用的工作区 Entity 和 Decision。
@@ -280,7 +283,10 @@ async fn extract_meso_memories_with_model(
     existing_decisions: &[Decision],
 ) -> anyhow::Result<MesoMemorySet> {
     let prompt = build_meso_prompt(episodes);
-    let response = complete_text(model, MESO_RUMINATION_SYSTEM, &prompt, 1600).await?;
+    let started = Instant::now();
+    let (response, usage) =
+        complete_text_with_usage(model, MESO_RUMINATION_SYSTEM, &prompt, 1600).await?;
+    log_memory_llm_call("meso_rumination", model, started.elapsed(), usage.as_ref());
     let json = extract_json_object(&response).unwrap_or(response.as_str());
     let extraction: MesoExtraction = serde_json::from_str(json)?;
     build_meso_memories_from_extraction(extraction, episodes, existing_entities, existing_decisions)
