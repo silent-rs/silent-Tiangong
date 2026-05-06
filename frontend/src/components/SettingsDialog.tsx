@@ -36,78 +36,80 @@ export function SettingsDialog() {
       </Button>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-w-4xl max-h-[80vh] overflow-hidden flex flex-col">
+        <DialogContent className="w-screen max-w-none h-screen max-h-screen overflow-hidden flex flex-col rounded-none border-0 p-0">
           {/* 保存状态 - absolute 定位到关闭按钮左侧 */}
-          <span className={`absolute right-12 top-[18px] text-xs flex items-center transition-opacity ${saveStatus === 'idle' ? 'opacity-0' : 'opacity-100'} ${saveStatus === 'error' ? 'text-destructive' : 'text-muted-foreground'}`}>
+          <span className={`absolute right-12 top-[18px] z-10 text-xs flex items-center transition-opacity ${saveStatus === 'idle' ? 'opacity-0' : 'opacity-100'} ${saveStatus === 'error' ? 'text-destructive' : 'text-muted-foreground'}`}>
             {saveStatus === 'saving' && (
               <><Loader2 className="w-3 h-3 mr-1 animate-spin" />保存中...</>
             )}
             {(saveStatus === 'saved' || saveStatus === 'idle') && '已自动保存'}
             {saveStatus === 'error' && '保存失败'}
           </span>
-          <DialogHeader>
-            <DialogTitle>系统设置</DialogTitle>
-          </DialogHeader>
 
-          <Tabs defaultValue="workspace" className="flex-1 overflow-hidden flex flex-col">
-            <TabsList className="w-full justify-start">
-              <TabsTrigger value="workspace">
-                <FolderOpen className="w-4 h-4 mr-2" />
-                工作区
-              </TabsTrigger>
-              <TabsTrigger value="agent">
-                <ShieldCheck className="w-4 h-4 mr-2" />
-                Agent
-              </TabsTrigger>
-              <TabsTrigger value="llm">
-                <Settings className="w-4 h-4 mr-2" />
-                LLM 配置
-              </TabsTrigger>
-              <TabsTrigger value="memory">
-                <Database className="w-4 h-4 mr-2" />
-                Memory
-              </TabsTrigger>
-              <TabsTrigger value="mcp">
-                <Server className="w-4 h-4 mr-2" />
-                MCP 服务器
-              </TabsTrigger>
-              <TabsTrigger value="skill">
-                <Puzzle className="w-4 h-4 mr-2" />
-                Skills
-              </TabsTrigger>
-              <TabsTrigger value="server">
-                <Globe className="w-4 h-4 mr-2" />
-                Server
-              </TabsTrigger>
-              <TabsTrigger value="connector">
-                <Link className="w-4 h-4 mr-2" />
-                Connectors
-              </TabsTrigger>
-            </TabsList>
+          <Tabs defaultValue="workspace" className="flex-1 overflow-hidden flex">
+            <aside className="w-60 shrink-0 border-r bg-muted/30 flex flex-col">
+              <DialogHeader className="p-5 pr-10 mb-0 border-b">
+                <DialogTitle>系统设置</DialogTitle>
+              </DialogHeader>
+              <TabsList className="h-auto w-full flex-1 flex-col items-stretch justify-start rounded-none bg-transparent p-2">
+                <TabsTrigger value="workspace" className="w-full justify-start px-3 py-2">
+                  <FolderOpen className="w-4 h-4 mr-2" />
+                  工作区
+                </TabsTrigger>
+                <TabsTrigger value="agent" className="w-full justify-start px-3 py-2">
+                  <ShieldCheck className="w-4 h-4 mr-2" />
+                  Agent
+                </TabsTrigger>
+                <TabsTrigger value="llm" className="w-full justify-start px-3 py-2">
+                  <Settings className="w-4 h-4 mr-2" />
+                  LLM 配置
+                </TabsTrigger>
+                <TabsTrigger value="memory" className="w-full justify-start px-3 py-2">
+                  <Database className="w-4 h-4 mr-2" />
+                  Memory
+                </TabsTrigger>
+                <TabsTrigger value="mcp" className="w-full justify-start px-3 py-2">
+                  <Server className="w-4 h-4 mr-2" />
+                  MCP 服务器
+                </TabsTrigger>
+                <TabsTrigger value="skill" className="w-full justify-start px-3 py-2">
+                  <Puzzle className="w-4 h-4 mr-2" />
+                  Skills
+                </TabsTrigger>
+                <TabsTrigger value="server" className="w-full justify-start px-3 py-2">
+                  <Globe className="w-4 h-4 mr-2" />
+                  Server
+                </TabsTrigger>
+                <TabsTrigger value="connector" className="w-full justify-start px-3 py-2">
+                  <Link className="w-4 h-4 mr-2" />
+                  Connectors
+                </TabsTrigger>
+              </TabsList>
+            </aside>
 
-            <div className="flex-1 overflow-y-auto">
-              <TabsContent value="workspace">
+            <div className="min-w-0 flex-1 overflow-y-auto">
+              <TabsContent value="workspace" className="m-0">
                 <WorkspaceSettings />
               </TabsContent>
-              <TabsContent value="agent">
+              <TabsContent value="agent" className="m-0">
                 <AgentSettings onSaveStatusChange={setSaveStatus} />
               </TabsContent>
-              <TabsContent value="llm">
+              <TabsContent value="llm" className="m-0">
                 <LLMSettings onSaveStatusChange={setSaveStatus} />
               </TabsContent>
-              <TabsContent value="memory">
+              <TabsContent value="memory" className="m-0">
                 <MemoryManagementSettings />
               </TabsContent>
-              <TabsContent value="mcp">
+              <TabsContent value="mcp" className="m-0">
                 <McpSettings />
               </TabsContent>
-              <TabsContent value="skill">
+              <TabsContent value="skill" className="m-0">
                 <SkillSettings />
               </TabsContent>
-              <TabsContent value="server">
+              <TabsContent value="server" className="m-0">
                 <ServerSettings />
               </TabsContent>
-              <TabsContent value="connector">
+              <TabsContent value="connector" className="m-0">
                 <ConnectorSettings />
               </TabsContent>
             </div>
