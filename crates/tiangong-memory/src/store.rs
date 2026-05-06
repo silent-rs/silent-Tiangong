@@ -207,10 +207,10 @@ impl MemoryStore {
 
         // 2. 写入 Tantivy 索引（可选，降级时跳过）
         let body_extra = episode.tool_calls.join(" ");
-        if let Some(ref mut tantivy) = self.tantivy {
-            if let Err(e) = tantivy.index_node(&node, &body_extra) {
-                tracing::warn!("Tantivy 索引写入失败（非致命）: {}", e);
-            }
+        if let Some(ref mut tantivy) = self.tantivy
+            && let Err(e) = tantivy.index_node(&node, &body_extra)
+        {
+            tracing::warn!("Tantivy 索引写入失败（非致命）: {}", e);
         }
 
         // Phase C：Qdrant upsert 在 actor 层触发（异步，通过 RunEmbedAndUpsert 命令）
@@ -316,10 +316,10 @@ impl MemoryStore {
             node.importance,
             &draft.memory_type,
         )?;
-        if let Some(ref mut tantivy) = self.tantivy {
-            if let Err(err) = tantivy.index_node(&node, "") {
-                tracing::warn!("Tantivy 手动记忆类型索引更新失败（非致命）: {err}");
-            }
+        if let Some(ref mut tantivy) = self.tantivy
+            && let Err(err) = tantivy.index_node(&node, "")
+        {
+            tracing::warn!("Tantivy 手动记忆类型索引更新失败（非致命）: {err}");
         }
         if let Err(err) = self.recall_engine.upsert_node(&node).await {
             tracing::warn!("Memory 手动记忆向量写入失败（非致命）: {err}");
@@ -349,10 +349,10 @@ impl MemoryStore {
             importance,
             &draft.memory_type,
         )?;
-        if let Some(ref mut tantivy) = self.tantivy {
-            if let Err(err) = tantivy.index_node(&node, "") {
-                tracing::warn!("Tantivy 手动记忆重建索引失败（非致命）: {err}");
-            }
+        if let Some(ref mut tantivy) = self.tantivy
+            && let Err(err) = tantivy.index_node(&node, "")
+        {
+            tracing::warn!("Tantivy 手动记忆重建索引失败（非致命）: {err}");
         }
         if let Err(err) = self.recall_engine.upsert_node(&node).await {
             tracing::warn!("Memory 手动记忆向量更新失败（非致命）: {err}");
@@ -434,10 +434,10 @@ impl MemoryStore {
     ) -> Result<()> {
         let node = entity_to_node(&entity, workspace_id);
         self.db.upsert_entity(&entity, workspace_id)?;
-        if let Some(ref mut tantivy) = self.tantivy {
-            if let Err(e) = tantivy.index_node(&node, &entity.name) {
-                tracing::warn!("Tantivy Entity 索引写入失败（非致命）: {}", e);
-            }
+        if let Some(ref mut tantivy) = self.tantivy
+            && let Err(e) = tantivy.index_node(&node, &entity.name)
+        {
+            tracing::warn!("Tantivy Entity 索引写入失败（非致命）: {}", e);
         }
         Ok(())
     }
@@ -450,10 +450,10 @@ impl MemoryStore {
     ) -> Result<()> {
         let node = decision_to_node(&decision, workspace_id);
         self.db.upsert_decision(&decision, workspace_id)?;
-        if let Some(ref mut tantivy) = self.tantivy {
-            if let Err(e) = tantivy.index_node(&node, &decision.chosen) {
-                tracing::warn!("Tantivy Decision 索引写入失败（非致命）: {}", e);
-            }
+        if let Some(ref mut tantivy) = self.tantivy
+            && let Err(e) = tantivy.index_node(&node, &decision.chosen)
+        {
+            tracing::warn!("Tantivy Decision 索引写入失败（非致命）: {}", e);
         }
         Ok(())
     }
@@ -488,10 +488,10 @@ impl MemoryStore {
             tracing::warn!("归档节点 {} 失败: {}", node_id, e);
         }
         // 从 Tantivy 中删除
-        if let Some(ref mut tantivy) = self.tantivy {
-            if let Err(e) = tantivy.delete_node(node_id) {
-                tracing::warn!("从 Tantivy 删除节点 {} 失败（非致命）: {}", node_id, e);
-            }
+        if let Some(ref mut tantivy) = self.tantivy
+            && let Err(e) = tantivy.delete_node(node_id)
+        {
+            tracing::warn!("从 Tantivy 删除节点 {} 失败（非致命）: {}", node_id, e);
         }
     }
 
@@ -500,19 +500,18 @@ impl MemoryStore {
         self.db.update_node_status(node_id, &status)?;
         match status {
             MemoryStatus::Archived => {
-                if let Some(ref mut tantivy) = self.tantivy {
-                    if let Err(e) = tantivy.delete_node(node_id) {
-                        tracing::warn!("从 Tantivy 删除节点 {} 失败（非致命）: {}", node_id, e);
-                    }
+                if let Some(ref mut tantivy) = self.tantivy
+                    && let Err(e) = tantivy.delete_node(node_id)
+                {
+                    tracing::warn!("从 Tantivy 删除节点 {} 失败（非致命）: {}", node_id, e);
                 }
             }
             MemoryStatus::Active => {
-                if let Some(ref mut tantivy) = self.tantivy {
-                    if let Some(node) = self.db.get_memory_node(node_id)?
-                        && let Err(e) = tantivy.index_node(&node, "")
-                    {
-                        tracing::warn!("恢复 Tantivy 节点 {} 失败（非致命）: {}", node_id, e);
-                    }
+                if let Some(ref mut tantivy) = self.tantivy
+                    && let Some(node) = self.db.get_memory_node(node_id)?
+                    && let Err(e) = tantivy.index_node(&node, "")
+                {
+                    tracing::warn!("恢复 Tantivy 节点 {} 失败（非致命）: {}", node_id, e);
                 }
             }
         }

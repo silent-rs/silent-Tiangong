@@ -346,7 +346,6 @@ fn expand_related_memories(
         let related_ids = related_node_ids_from_expanded(&frontier)
             .into_iter()
             .chain(store.related_node_ids(&frontier_node_ids))
-            .into_iter()
             .filter(|id| seen_ids.insert(id.clone()))
             .collect::<Vec<_>>();
         if related_ids.is_empty() {
