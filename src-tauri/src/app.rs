@@ -88,7 +88,7 @@ impl TiangongApp {
             eprintln!("移除已停止的 TiangongCore：{session_id}");
             cores.remove(session_id);
         }
-        let core = TiangongCore::with_session(self.config.clone(), session, stream_tx);
+        let core = TiangongCore::with_session_for_gui(self.config.clone(), session, stream_tx);
         let id = core.session_id().to_string();
         cores.insert(id.clone(), core);
         (id, true) // 新创建

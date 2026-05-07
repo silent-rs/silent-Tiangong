@@ -3,11 +3,14 @@
 //! Core 只把当前请求和最近语境传进来；Memory 内部自行规划检索锚点、
 //! 调用召回、加载二跳内容，并输出去重后的增量信息。
 
+use std::time::Instant;
+
+use crate::llm_metrics::log_memory_llm_call;
 use crate::recall_anchor::extract_recall_anchors;
 use crate::store::MemoryStore;
 use crate::types::{
     ExpandedMemory, MemoryKind, MemoryRecallRequest, MemoryRecallResponse, RecallDepth, RecallHit,
-    SearchStrategy,
+    SearchStrategy, WorkspaceIndexHit, WorkspaceIndexHitKind,
 };
 use tiangong_llm::{LlmEndpointConfig, TokenUsageData, complete_text_with_usage};
 
@@ -107,9 +110,11 @@ pub(crate) async fn recall_context(
     }
 
     let initial_hits = dedupe_hits(store.recall_async(&plan.anchors, plan.limit).await);
+    let workspace_hints = store.workspace_index_hints(&request.query, 5);
     tracing::debug!(
         query = %request.query,
         hit_count = initial_hits.len(),
+        workspace_hint_count = workspace_hints.len(),
         "内存 recall 初始召回完成"
     );
     let initial_expanded = store.load_depth2(
@@ -149,10 +154,27 @@ pub(crate) async fn recall_context(
         }
     }
 
-    if hits.is_empty() {
+    if hits.is_empty() && workspace_hints.is_empty() {
         return MemoryRecallResponse {
             content: apply_output_budget(
                 format!("未找到与「{}」相关的历史记忆。", request.query),
+                DEFAULT_RECALL_OUTPUT_BUDGET_CHARS,
+            ),
+            hits,
+            used_llm: plan.used_llm || model.is_some(),
+            recall_depth,
+            usage: total_usage,
+            deep_queries,
+        };
+    }
+    if hits.is_empty() {
+        return MemoryRecallResponse {
+            content: apply_output_budget(
+                format!(
+                    "未找到与「{}」相关的历史记忆。\n\n{}",
+                    request.query,
+                    format_workspace_index_hints(&workspace_hints)
+                ),
                 DEFAULT_RECALL_OUTPUT_BUDGET_CHARS,
             ),
             hits,
@@ -175,6 +197,7 @@ pub(crate) async fn recall_context(
     if let Some(usage) = synthesis_usage {
         accumulate_usage(&mut total_usage, &usage);
     }
+    let raw_content = append_workspace_index_hints(raw_content, &workspace_hints);
     let content =
         finalize_recall_content(&raw_content, &request, DEFAULT_RECALL_OUTPUT_BUDGET_CHARS);
     tracing::debug!(
@@ -193,6 +216,39 @@ pub(crate) async fn recall_context(
         deep_queries,
         usage: total_usage,
     }
+}
+
+fn append_workspace_index_hints(content: String, hints: &[WorkspaceIndexHit]) -> String {
+    if hints.is_empty() {
+        return content;
+    }
+    format!("{content}\n\n{}", format_workspace_index_hints(hints))
+}
+
+fn format_workspace_index_hints(hints: &[WorkspaceIndexHit]) -> String {
+    if hints.is_empty() {
+        return String::new();
+    }
+    let mut lines = vec!["[工作区线索]".to_string()];
+    for hint in hints.iter().take(5) {
+        match hint.hit_kind {
+            WorkspaceIndexHitKind::File => {
+                lines.push(format!("- 文件：{}", hint.path));
+            }
+            WorkspaceIndexHitKind::Directory => {
+                lines.push(format!("- 目录：{}", hint.path));
+            }
+            WorkspaceIndexHitKind::Symbol => {
+                let name = hint.name.as_deref().unwrap_or("未知符号");
+                let line = hint
+                    .line
+                    .map(|value| format!(":{}", value))
+                    .unwrap_or_default();
+                lines.push(format!("- 符号：{}（{}{}）", name, hint.path, line));
+            }
+        }
+    }
+    lines.join("\n")
 }
 
 fn normalize_request(mut request: MemoryRecallRequest) -> MemoryRecallRequest {
@@ -229,8 +285,15 @@ async fn decide_deep_recall(
         request.context.join("\n---\n"),
         format_candidates(hits, expanded),
     );
+    let started = Instant::now();
     match complete_text_with_usage(config, DEEP_RECALL_DECISION_SYSTEM, &prompt, 512).await {
         Ok((text, usage)) => {
+            log_memory_llm_call(
+                "deep_recall_decision",
+                config,
+                started.elapsed(),
+                usage.as_ref(),
+            );
             let decision = parse_deep_recall_decision(&text).unwrap_or_else(|err| {
                 tracing::warn!("Memory deep recall 裁决解析失败，跳过深挖: {err}");
                 DeepRecallDecision::default()
@@ -339,8 +402,13 @@ fn expand_related_memories(
     let mut frontier = seed_expanded.to_vec();
 
     for round in 0..max_rounds.clamp(1, 2) {
+        let frontier_node_ids = frontier
+            .iter()
+            .map(|item| item.node_id.clone())
+            .collect::<Vec<_>>();
         let related_ids = related_node_ids_from_expanded(&frontier)
             .into_iter()
+            .chain(store.related_node_ids(&frontier_node_ids))
             .filter(|id| seen_ids.insert(id.clone()))
             .collect::<Vec<_>>();
         if related_ids.is_empty() {
@@ -379,8 +447,15 @@ async fn synthesize_with_model(
         request.context.join("\n---\n"),
         format_candidates(hits, expanded),
     );
+    let started = Instant::now();
     let (text, usage) =
         complete_text_with_usage(config, RECALL_SYNTHESIS_SYSTEM, &prompt, 1200).await?;
+    log_memory_llm_call(
+        "recall_synthesis",
+        config,
+        started.elapsed(),
+        usage.as_ref(),
+    );
     let compacted = compact_text(&text, DEFAULT_RECALL_OUTPUT_BUDGET_CHARS * 2);
     if compacted.is_empty() {
         Ok(("没有发现当前上下文之外的增量记忆。".to_string(), usage))

@@ -3,8 +3,11 @@
 //! 负责从 TurnResult 提取 Episode 并写入 Memory 存储。
 //! 优先使用 Memory 模型端点抽取结构化 Episode，失败时回退到规则提取。
 
+use std::time::Instant;
+
+use crate::llm_metrics::log_memory_llm_call;
 use crate::types::{Episode, EpisodeOutcome, TurnResult};
-use tiangong_llm::{LlmEndpointConfig, complete_text};
+use tiangong_llm::{LlmEndpointConfig, complete_text_with_usage};
 
 const EPISODE_WRITER_SYSTEM: &str = "\
 你是独立记忆系统的 EpisodeWriter。根据一个 turn 的执行结果提取可长期保存的事件记忆。
@@ -73,7 +76,10 @@ async fn extract_episode_with_model_inner(
     model: &LlmEndpointConfig,
 ) -> anyhow::Result<Episode> {
     let prompt = build_writer_prompt(turn_result);
-    let response = complete_text(model, EPISODE_WRITER_SYSTEM, &prompt, 900).await?;
+    let started = Instant::now();
+    let (response, usage) =
+        complete_text_with_usage(model, EPISODE_WRITER_SYSTEM, &prompt, 900).await?;
+    log_memory_llm_call("episode_writer", model, started.elapsed(), usage.as_ref());
     let json = extract_json_object(&response).unwrap_or(response.as_str());
     let extracted: EpisodeExtraction = serde_json::from_str(json)?;
     Ok(build_episode_from_extraction(turn_result, extracted))

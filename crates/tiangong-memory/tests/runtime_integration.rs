@@ -1,12 +1,18 @@
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::Duration;
 
 use serial_test::serial;
 use tempfile::TempDir;
+use tiangong_llm::{LlmEndpointConfig, ProviderProtocol};
 use tiangong_memory::{
-    Episode, EpisodeOutcome, MemoryKind, MemoryRecallRequest, RecallAnchors, TurnArtifact,
-    TurnArtifactKind, TurnResult, load_injection_sync, start, workspace_id_from_path,
+    Episode, EpisodeOutcome, MemoryKind, MemoryOptions, MemoryRecallRequest, MemoryRelationDraft,
+    MemoryRelationKind, RecallAnchors, RecallDepth, TurnArtifact, TurnArtifactKind, TurnResult,
+    load_injection_sync, refresh_workspace_index, start, start_with_options,
+    workspace_id_from_path,
 };
 
 struct EnvGuard {
@@ -66,6 +72,265 @@ fn setup_workspace() -> (TempDir, TempDir, PathBuf, String) {
     (home, workspace, workspace_path, workspace_id)
 }
 
+struct MockMemoryLlmServer {
+    base_url: String,
+    shutdown_tx: Option<mpsc::Sender<()>>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl MockMemoryLlmServer {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("绑定 mock Memory LLM 失败");
+        let addr = listener
+            .local_addr()
+            .expect("读取 mock Memory LLM 地址失败");
+        listener
+            .set_nonblocking(true)
+            .expect("设置 mock Memory LLM 非阻塞失败");
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let join = std::thread::spawn(move || {
+            loop {
+                if shutdown_rx.try_recv().is_ok() {
+                    break;
+                }
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let request = read_http_request(&mut stream);
+                        let body = request
+                            .as_deref()
+                            .map(memory_llm_mock_response)
+                            .unwrap_or_else(|| serde_json::json!({"error": "bad request"}));
+                        let payload = body.to_string();
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                            payload.len(),
+                            payload
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            base_url: format!("http://{addr}/v1"),
+            shutdown_tx: Some(shutdown_tx),
+            join: Some(join),
+        }
+    }
+
+    fn base_url(&self) -> String {
+        self.base_url.clone()
+    }
+}
+
+impl Drop for MockMemoryLlmServer {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+fn read_http_request(stream: &mut std::net::TcpStream) -> Option<String> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0; 4096];
+    loop {
+        let read = stream.read(&mut chunk).ok()?;
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+    let header_end = buffer.windows(4).position(|window| window == b"\r\n\r\n")? + 4;
+    let headers = String::from_utf8_lossy(&buffer[..header_end]);
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+    while buffer.len() < header_end + content_length {
+        let read = stream.read(&mut chunk).ok()?;
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+    }
+    String::from_utf8(buffer[header_end..header_end + content_length].to_vec()).ok()
+}
+
+fn memory_llm_mock_response(request_body: &str) -> serde_json::Value {
+    let request = serde_json::from_str::<serde_json::Value>(request_body)
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let (system, prompt) = openai_messages_text(&request);
+    let content = if system.contains("MesoRumination") {
+        mock_meso_response(&prompt)
+    } else if system.contains("检索锚点规划器") {
+        mock_recall_anchor_response(&prompt)
+    } else if system.contains("深度回忆裁决器") {
+        serde_json::json!({
+            "need_deep_recall": true,
+            "reason": "需要跨会话追溯产物、Entity 和 Decision",
+            "followup_queries": [
+                "nebula artifact export",
+                "nebula-billing-provider.rs",
+                "event ledger queue decision"
+            ],
+            "target_kinds": ["episode", "entity", "decision"],
+            "max_rounds": 2
+        })
+        .to_string()
+    } else if system.contains("结果整理器") {
+        mock_recall_synthesis_response(&prompt)
+    } else {
+        serde_json::json!({"marker": "memory_llm_smoke_ok", "summary": "mock ok"}).to_string()
+    };
+    serde_json::json!({
+        "id": "chatcmpl-memory-mock",
+        "object": "chat.completion",
+        "model": "memory-deep-recall-mock",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": content},
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "total_tokens": 150
+        }
+    })
+}
+
+fn openai_messages_text(request: &serde_json::Value) -> (String, String) {
+    let mut system = String::new();
+    let mut user = String::new();
+    for message in request
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let role = message
+            .get("role")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let content =
+            message_content_text(message.get("content").unwrap_or(&serde_json::Value::Null));
+        match role {
+            "system" => system.push_str(&content),
+            "user" => user.push_str(&content),
+            _ => {}
+        }
+    }
+    (system, user)
+}
+
+fn message_content_text(content: &serde_json::Value) -> String {
+    if let Some(text) = content.as_str() {
+        return text.to_string();
+    }
+    content
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("text").and_then(serde_json::Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn mock_meso_response(prompt: &str) -> String {
+    let module_episode_id =
+        episode_id_for_title(prompt, "nebula billing provider module").unwrap_or_default();
+    let decision_episode_id =
+        episode_id_for_title(prompt, "choose event ledger queue for nebula").unwrap_or_default();
+    serde_json::json!({
+        "entities": [{
+            "name": "nebula-billing-provider.rs",
+            "entity_type": "module",
+            "description": "Nebula billing provider module keeps handoff rules in /workspace/src/nebula/billing_provider.rs",
+            "file_path": "/workspace/src/nebula/billing_provider.rs",
+            "related_episode_ids": [module_episode_id],
+            "importance": 0.82
+        }],
+        "decisions": [{
+            "title": "event ledger queue for nebula release",
+            "context": "Nebula release chose event ledger queue instead of direct webhook fanout.",
+            "alternatives": ["direct webhook fanout", "event ledger queue"],
+            "chosen": "event ledger queue",
+            "reasons": ["preserve retry trace", "support idempotency"],
+            "episode_ids": [decision_episode_id]
+        }]
+    })
+    .to_string()
+}
+
+fn episode_id_for_title(prompt: &str, title_fragment: &str) -> Option<String> {
+    let mut last_id = None;
+    for line in prompt.lines() {
+        if let Some(id) = line.trim().strip_prefix("- id=") {
+            last_id = Some(id.trim().to_string());
+            continue;
+        }
+        if line.trim().starts_with("title=") && line.contains(title_fragment) {
+            return last_id;
+        }
+    }
+    None
+}
+
+fn mock_recall_anchor_response(prompt: &str) -> String {
+    let query = if prompt.contains("deep recall:") && prompt.contains("artifact") {
+        "nebula artifact export"
+    } else if prompt.contains("deep recall:") && prompt.contains("nebula-billing-provider.rs") {
+        "nebula-billing-provider.rs"
+    } else if prompt.contains("deep recall:") && prompt.contains("event ledger") {
+        "event ledger queue decision"
+    } else {
+        "nebula release overview"
+    };
+    serde_json::json!({
+        "query": query,
+        "keywords": ["nebula", "release", "artifact", "decision"],
+        "strategy": "keyword",
+        "limit": 3
+    })
+    .to_string()
+}
+
+fn mock_recall_synthesis_response(prompt: &str) -> String {
+    let mut lines = Vec::new();
+    if prompt.contains("https://example.invalid/artifacts/nebula-release-plan.svg") {
+        lines.push(
+            "产物: https://example.invalid/artifacts/nebula-release-plan.svg /tmp/tiangong/nebula-release-plan.svg",
+        );
+    }
+    if prompt.contains("/workspace/src/nebula/billing_provider.rs") {
+        lines.push("Entity: nebula-billing-provider.rs /workspace/src/nebula/billing_provider.rs");
+    }
+    if prompt.contains("event ledger queue") {
+        lines.push("Decision: event ledger queue rather than direct webhook fanout");
+    }
+    if lines.is_empty() {
+        "没有发现当前上下文之外的增量记忆。".to_string()
+    } else {
+        lines.join("\n")
+    }
+}
+
 async fn wait_for_recall_hit(
     handle: &tiangong_memory::MemoryHandle,
     query: &str,
@@ -87,6 +352,30 @@ async fn wait_for_recall_hit(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     Vec::new()
+}
+
+async fn wait_for_recall_title_absent(
+    handle: &tiangong_memory::MemoryHandle,
+    query: &str,
+    title: &str,
+) -> bool {
+    for _ in 0..30 {
+        let hits = handle
+            .recall(
+                RecallAnchors {
+                    query: query.to_string(),
+                    keywords: Vec::new(),
+                    strategy: None,
+                },
+                5,
+            )
+            .await;
+        if !hits.iter().any(|hit| hit.title == title) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
 }
 
 async fn wait_for_recall_kind(
@@ -232,6 +521,138 @@ async fn runtime_can_write_episode_and_recall_without_core() {
         }),
         "命中结果应包含已写入 Episode 的标题或摘要"
     );
+
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn meta_rumination_archives_missing_paths_expired_urls_and_project_archived_markers() {
+    let (home, _workspace, workspace_path, workspace_id) = setup_workspace();
+    let _env = EnvGuard::enter(home.path(), &workspace_path);
+
+    let alive_path = workspace_path.join("docs/alive-meta-reference.md");
+    write_file(&alive_path, "alive reference");
+    let missing_path = workspace_path.join("artifacts/missing-meta-reference.png");
+
+    let handle = start(Some(workspace_id.clone())).expect("启动 memory 失败");
+    let cases = [
+        (
+            "meta alive file alpha",
+            format!(
+                "meta alive file alpha keeps valid local reference {}",
+                alive_path.display()
+            ),
+            vec!["meta-alive-alpha".to_string()],
+        ),
+        (
+            "meta missing path beta",
+            format!(
+                "meta missing path beta points to removed artifact {}",
+                missing_path.display()
+            ),
+            vec!["meta-missing-beta".to_string()],
+        ),
+        (
+            "meta expired url gamma",
+            "meta expired url gamma references https://example.invalid/expired/media.png"
+                .to_string(),
+            vec!["meta-expired-gamma".to_string()],
+        ),
+        (
+            "meta archived workspace delta",
+            "meta archived workspace delta belongs to project archived workspace".to_string(),
+            vec!["meta-archived-delta".to_string()],
+        ),
+    ];
+
+    for (title, summary, keywords) in cases {
+        handle.write_episode(
+            Episode::new(
+                "session-meta-lifecycle".to_string(),
+                title.to_string(),
+                summary,
+                EpisodeOutcome::Success,
+                keywords,
+                vec!["meta_rumination".to_string()],
+                0.8,
+            ),
+            Some(workspace_id.clone()),
+        );
+    }
+
+    for title in [
+        "meta alive file alpha",
+        "meta missing path beta",
+        "meta expired url gamma",
+        "meta archived workspace delta",
+    ] {
+        let hits = wait_for_recall_hit(&handle, title).await;
+        assert!(
+            hits.iter().any(|hit| hit.title == title),
+            "Meta 执行前应能召回 {title}"
+        );
+    }
+
+    handle.run_meta_rumination();
+
+    let alive_hits = wait_for_recall_hit(&handle, "meta alive file alpha").await;
+    assert!(
+        alive_hits
+            .iter()
+            .any(|hit| hit.title == "meta alive file alpha"),
+        "可达本地路径不应被 Meta 归档"
+    );
+    for title in [
+        "meta missing path beta",
+        "meta expired url gamma",
+        "meta archived workspace delta",
+    ] {
+        assert!(
+            wait_for_recall_title_absent(&handle, title, title).await,
+            "Meta 应归档过时引用 {title}"
+        );
+    }
+
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn recall_context_returns_workspace_index_hints_without_memory_hits() {
+    let (home, _workspace, workspace_path, workspace_id) = setup_workspace();
+    let _env = EnvGuard::enter(home.path(), &workspace_path);
+    write_file(
+        &workspace_path.join("src/billing.rs"),
+        r#"
+pub mod nested;
+pub struct BillingWorkspaceClue;
+pub enum BillingMode { Active }
+pub trait BillingLookup {}
+pub fn billing_workspace_clue() {}
+"#,
+    );
+    refresh_workspace_index(&workspace_path).expect("刷新 workspace index 失败");
+
+    let handle = start(Some(workspace_id.clone())).expect("启动 memory 失败");
+    let response = handle
+        .recall_context(MemoryRecallRequest {
+            query: "billing workspace clue".to_string(),
+            limit: 3,
+            ..Default::default()
+        })
+        .await;
+
+    assert!(
+        response.content.contains("[工作区线索]"),
+        "没有历史记忆时仍应返回工作区索引线索"
+    );
+    assert!(
+        response.content.contains("billing_workspace_clue")
+            || response.content.contains("src/billing.rs"),
+        "工作区线索应包含相关 Rust 符号或文件"
+    );
+    assert!(response.hits.is_empty(), "该场景不应伪造 Memory 命中");
 
     handle.shutdown().await;
 }
@@ -501,6 +922,208 @@ async fn contextual_recall_returns_incremental_memory_without_repeating_prompt_c
 
 #[tokio::test(flavor = "current_thread")]
 #[serial]
+async fn contextual_recall_fixed_reference_cases_return_only_incremental_memory() {
+    let cases = incremental_recall_cases();
+
+    for case in &cases {
+        let (home, _workspace, workspace_path, workspace_id) = setup_workspace();
+        let _env = EnvGuard::enter(home.path(), &workspace_path);
+        let handle = start(Some(workspace_id.clone())).expect("启动 memory 失败");
+
+        handle.write_episode(
+            Episode::new(
+                format!("session-incremental-{}", case.slug),
+                format!("{} current context", case.slug),
+                case.current_context.to_string(),
+                EpisodeOutcome::Success,
+                case.keywords(),
+                vec!["recall_memory".to_string()],
+                0.5,
+            ),
+            Some(workspace_id.clone()),
+        );
+        handle.write_episode(
+            Episode::new(
+                format!("session-incremental-{}", case.slug),
+                format!("{} incremental memory", case.slug),
+                case.incremental_memory.to_string(),
+                EpisodeOutcome::Success,
+                case.keywords(),
+                case.tool_calls
+                    .iter()
+                    .map(|item| item.to_string())
+                    .collect(),
+                0.8,
+            ),
+            Some(workspace_id.clone()),
+        );
+
+        let hits = wait_for_recall_hit(&handle, case.query).await;
+        assert!(
+            hits.iter()
+                .any(|hit| hit.summary.contains(case.expected_refs[0])),
+            "固定样例 {} 应先能召回增量记忆",
+            case.slug
+        );
+
+        let contextual = handle
+            .recall_context(MemoryRecallRequest {
+                query: case.query.to_string(),
+                reason: Some(case.reason.to_string()),
+                expected: case.expected.iter().map(|item| item.to_string()).collect(),
+                context: vec![
+                    format!("user: {}", case.user_context),
+                    format!("assistant: {}", case.current_context),
+                ],
+                limit: 5,
+            })
+            .await;
+        eprintln!(
+            "[incremental-case:{}] used_llm={} hit_count={} content=\n{}",
+            case.slug,
+            contextual.used_llm,
+            contextual.hits.len(),
+            contextual.content
+        );
+
+        assert!(
+            !contextual.content.contains(case.current_context),
+            "固定样例 {} 不应重复当前上下文已包含的摘要",
+            case.slug
+        );
+        for expected_ref in case.expected_refs {
+            assert!(
+                contextual.content.contains(expected_ref),
+                "固定样例 {} 应返回增量引用 {}",
+                case.slug,
+                expected_ref
+            );
+            assert_eq!(
+                contextual.content.matches(expected_ref).count(),
+                1,
+                "固定样例 {} 的增量引用 {} 应只出现一次",
+                case.slug,
+                expected_ref
+            );
+        }
+
+        handle.shutdown().await;
+    }
+}
+
+struct IncrementalRecallCase {
+    slug: &'static str,
+    query: &'static str,
+    user_context: &'static str,
+    current_context: &'static str,
+    incremental_memory: &'static str,
+    expected_refs: &'static [&'static str],
+    expected: &'static [&'static str],
+    tool_calls: &'static [&'static str],
+    reason: &'static str,
+}
+
+impl IncrementalRecallCase {
+    fn keywords(&self) -> Vec<String> {
+        self.query
+            .split_whitespace()
+            .chain([self.slug])
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+fn incremental_recall_cases() -> Vec<IncrementalRecallCase> {
+    vec![
+        IncrementalRecallCase {
+            slug: "flamingo-export",
+            query: "继续 flamingo-export dashboard 的导出产物",
+            user_context: "继续 flamingo-export dashboard",
+            current_context: "flamingo-export 已确定 coral teal palette",
+            incremental_memory: "flamingo-export 导出产物位于 https://example.invalid/artifacts/flamingo-export.svg path=/tmp/tiangong/flamingo-export.svg",
+            expected_refs: &[
+                "https://example.invalid/artifacts/flamingo-export.svg",
+                "/tmp/tiangong/flamingo-export.svg",
+            ],
+            expected: &["media", "file"],
+            tool_calls: &["generate_image", "write_file"],
+            reason: "用户用历史指代继续使用刚生成的 dashboard 产物",
+        },
+        IncrementalRecallCase {
+            slug: "profile-migration",
+            query: "继续 profile-migration 上次那个迁移文件",
+            user_context: "继续 profile-migration 上次那个迁移",
+            current_context: "profile-migration 决定拆成 schema 和 backfill 两步",
+            incremental_memory: "profile-migration 迁移文件保存为 /workspace/migrations/20260506_profile_migration.sql，回滚说明在 /workspace/docs/profile_migration_rollback.md",
+            expected_refs: &[
+                "/workspace/migrations/20260506_profile_migration.sql",
+                "/workspace/docs/profile_migration_rollback.md",
+            ],
+            expected: &["file"],
+            tool_calls: &["write_file"],
+            reason: "用户提到上次那个迁移，需要补回当前上下文缺失的文件路径",
+        },
+        IncrementalRecallCase {
+            slug: "raven-poster",
+            query: "把 raven-poster 刚才那张图再导出一次",
+            user_context: "把 raven-poster 刚才那张图再导出一次",
+            current_context: "raven-poster 使用 night garden prompt",
+            incremental_memory: "raven-poster 图片地址是 https://example.invalid/media/raven-poster.png，本地副本 path=/tmp/tiangong/raven-poster.png",
+            expected_refs: &[
+                "https://example.invalid/media/raven-poster.png",
+                "/tmp/tiangong/raven-poster.png",
+            ],
+            expected: &["media", "file"],
+            tool_calls: &["generate_image"],
+            reason: "用户用刚才那张图指代历史图片产物",
+        },
+        IncrementalRecallCase {
+            slug: "mcp-config",
+            query: "沿用 mcp-config 之前那个服务器配置",
+            user_context: "沿用 mcp-config 之前那个服务器配置",
+            current_context: "mcp-config 选择 stdio transport",
+            incremental_memory: "mcp-config 配置文件在 /workspace/.tiangong/mcp/linear-server.json，endpoint 说明见 /workspace/docs/mcp-linear.md",
+            expected_refs: &[
+                "/workspace/.tiangong/mcp/linear-server.json",
+                "/workspace/docs/mcp-linear.md",
+            ],
+            expected: &["file"],
+            tool_calls: &["write_file"],
+            reason: "用户提到之前那个服务器配置，需要返回可继续使用的配置文件",
+        },
+        IncrementalRecallCase {
+            slug: "latency-trace",
+            query: "继续 latency-trace 上次的性能排查",
+            user_context: "继续 latency-trace 上次的性能排查",
+            current_context: "latency-trace 判定瓶颈在 recall rerank 阶段",
+            incremental_memory: "latency-trace profile 数据位于 /tmp/tiangong/latency-trace.json，火焰图为 https://example.invalid/perf/latency-trace.html",
+            expected_refs: &[
+                "/tmp/tiangong/latency-trace.json",
+                "https://example.invalid/perf/latency-trace.html",
+            ],
+            expected: &["file"],
+            tool_calls: &["run_command", "write_file"],
+            reason: "用户继续性能排查，需要补回 profile 和火焰图引用",
+        },
+        IncrementalRecallCase {
+            slug: "skill-template",
+            query: "用 skill-template 上次那个技能模板继续生成",
+            user_context: "用 skill-template 上次那个技能模板继续生成",
+            current_context: "skill-template 采用 plan first 的写法",
+            incremental_memory: "skill-template 模板文件保存为 /workspace/.tiangong/skills/memory-review/SKILL.md，示例输入在 /workspace/docs/skill-template-example.md",
+            expected_refs: &[
+                "/workspace/.tiangong/skills/memory-review/SKILL.md",
+                "/workspace/docs/skill-template-example.md",
+            ],
+            expected: &["file"],
+            tool_calls: &["write_file"],
+            reason: "用户用上次那个技能模板指代历史文件产物",
+        },
+    ]
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
 async fn meso_rumination_extracts_entity_and_decision_memories() {
     let (home, _workspace, workspace_path, workspace_id) = setup_workspace();
     let _env = EnvGuard::enter(home.path(), &workspace_path);
@@ -648,6 +1271,210 @@ async fn meso_rumination_extracts_entity_and_decision_memories() {
         unique_decision_ids.len(),
         1,
         "同一 Episode 的决策记忆重复反刍后仍应保持单个 Decision 节点"
+    );
+
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn deep_recall_fixed_scenario_traces_cross_session_artifact_entity_and_decision() {
+    let (home, _workspace, workspace_path, workspace_id) = setup_workspace();
+    let _env = EnvGuard::enter(home.path(), &workspace_path);
+    let mock_llm = MockMemoryLlmServer::start();
+    let model = LlmEndpointConfig {
+        api_key: "test-memory-key".to_string(),
+        base_url: mock_llm.base_url(),
+        model: "memory-deep-recall-mock".to_string(),
+        protocol: ProviderProtocol::OpenAiCompatible,
+        timeout: Duration::from_secs(5),
+        max_retries: 0,
+    };
+    let handle =
+        start_with_options(MemoryOptions::new(Some(workspace_id.clone())).with_model(model))
+            .expect("启动带 mock Memory LLM 的 memory 失败");
+
+    let current_context =
+        "Nebula release overview mentions billing provider and event ledger decision";
+    let artifact_url = "https://example.invalid/artifacts/nebula-release-plan.svg";
+    let artifact_path = "/tmp/tiangong/nebula-release-plan.svg";
+    let module_path = "/workspace/src/nebula/billing_provider.rs";
+
+    handle.write_episode(
+        Episode::new(
+            "session-nebula-overview".to_string(),
+            "nebula release overview".to_string(),
+            format!("{current_context}, but current context omits artifact URL and module path."),
+            EpisodeOutcome::Success,
+            vec![
+                "nebula".to_string(),
+                "release".to_string(),
+                "overview".to_string(),
+            ],
+            vec!["recall_memory".to_string()],
+            0.6,
+        ),
+        Some(workspace_id.clone()),
+    );
+    handle.write_episode(
+        Episode::new(
+            "session-nebula-artifact".to_string(),
+            "nebula artifact export".to_string(),
+            format!("Nebula release artifact exported at {artifact_url} path={artifact_path}"),
+            EpisodeOutcome::Success,
+            vec![
+                "nebula".to_string(),
+                "artifact".to_string(),
+                "export".to_string(),
+            ],
+            vec!["generate_image".to_string(), "write_file".to_string()],
+            0.8,
+        ),
+        Some(workspace_id.clone()),
+    );
+    handle.write_episode(
+        Episode::new(
+            "session-nebula-module".to_string(),
+            "nebula billing provider module".to_string(),
+            format!(
+                "nebula-billing-provider.rs keeps billing provider handoff rules in {module_path}"
+            ),
+            EpisodeOutcome::Success,
+            vec![
+                "nebula".to_string(),
+                "billing".to_string(),
+                "provider".to_string(),
+                "nebula-billing-provider.rs".to_string(),
+            ],
+            vec!["write_file".to_string()],
+            0.8,
+        ),
+        Some(workspace_id.clone()),
+    );
+    handle.write_episode(
+        Episode::new(
+            "session-nebula-decision".to_string(),
+            "choose event ledger queue for nebula".to_string(),
+            "We decided to choose event ledger queue instead of direct webhook fanout for nebula release because retry trace and idempotency are required."
+                .to_string(),
+            EpisodeOutcome::Success,
+            vec![
+                "nebula".to_string(),
+                "decision".to_string(),
+                "event".to_string(),
+                "ledger".to_string(),
+            ],
+            vec!["architecture_decision".to_string()],
+            0.85,
+        ),
+        Some(workspace_id.clone()),
+    );
+
+    handle.run_meso_rumination("session-nebula-decision".to_string(), workspace_id.clone());
+
+    let overview = wait_for_recall_hit(&handle, "nebula release overview")
+        .await
+        .into_iter()
+        .find(|hit| hit.title.contains("nebula release overview"))
+        .expect("应召回 overview Episode");
+    let artifact = wait_for_recall_hit(&handle, "nebula artifact export")
+        .await
+        .into_iter()
+        .find(|hit| hit.summary.contains(artifact_url))
+        .expect("应召回 artifact Episode");
+    let entity = wait_for_recall_kind(&handle, "nebula-billing-provider.rs", MemoryKind::Entity)
+        .await
+        .into_iter()
+        .find(|hit| hit.kind == MemoryKind::Entity)
+        .expect("Meso 应提炼 Entity");
+    let decision =
+        wait_for_recall_kind(&handle, "event ledger queue decision", MemoryKind::Decision)
+            .await
+            .into_iter()
+            .find(|hit| hit.kind == MemoryKind::Decision)
+            .expect("Meso 应提炼 Decision");
+
+    for target in [&artifact, &entity, &decision] {
+        handle
+            .upsert_relation(MemoryRelationDraft {
+                from_node_id: overview.node_id.clone(),
+                to_node_id: target.node_id.clone(),
+                relation_kind: MemoryRelationKind::RelatedTo,
+                weight: 0.9,
+                note: Some("deep recall fixed scenario trace".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("写入 Deep Recall 图关系失败");
+    }
+
+    let response = handle
+        .recall_context(MemoryRecallRequest {
+            query: "继续 nebula release，找上次产物、billing provider 模块和 event ledger 决策"
+                .to_string(),
+            reason: Some("固定评测：跨会话追溯产物、Entity 和 Decision".to_string()),
+            expected: vec![
+                "media".to_string(),
+                "file".to_string(),
+                "entity".to_string(),
+                "decision".to_string(),
+            ],
+            context: vec![
+                "user: 继续 nebula release".to_string(),
+                format!("assistant: {current_context}"),
+            ],
+            limit: 2,
+        })
+        .await;
+    eprintln!(
+        "[deep-fixed] used_llm={} depth={:?} deep_queries={:?} usage={} content=\n{}",
+        response.used_llm,
+        response.recall_depth,
+        response.deep_queries,
+        response.usage.total_tokens,
+        response.content
+    );
+
+    assert!(
+        response.used_llm,
+        "Deep Recall 固定评测应走 Memory LLM 路径"
+    );
+    assert_eq!(response.recall_depth, RecallDepth::Deep);
+    assert!(
+        response
+            .deep_queries
+            .iter()
+            .any(|query| query.contains("artifact")),
+        "应记录 Deep Recall 追溯查询"
+    );
+    assert!(
+        response
+            .hits
+            .iter()
+            .any(|hit| hit.kind == MemoryKind::Entity),
+        "Deep Recall 结果应包含 Entity 命中"
+    );
+    assert!(
+        response
+            .hits
+            .iter()
+            .any(|hit| hit.kind == MemoryKind::Decision),
+        "Deep Recall 结果应包含 Decision 命中"
+    );
+    for expected in [
+        artifact_url,
+        artifact_path,
+        module_path,
+        "event ledger queue",
+    ] {
+        assert!(
+            response.content.contains(expected),
+            "Deep Recall 输出应包含跨层线索：{expected}"
+        );
+    }
+    assert!(
+        !response.content.contains(current_context),
+        "Deep Recall 输出不应重复当前上下文已有内容"
     );
 
     handle.shutdown().await;

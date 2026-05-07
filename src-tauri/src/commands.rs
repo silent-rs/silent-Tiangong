@@ -382,12 +382,11 @@ fn parse_video_url_assets(output: &str) -> Vec<tiangong_types::MediaAsset> {
 
 fn extract_video_urls_from_json(value: &serde_json::Value, urls: &mut Vec<String>) {
     match value {
-        serde_json::Value::String(s) => {
+        serde_json::Value::String(s)
             if (s.starts_with("http://") || s.starts_with("https://"))
-                && (s.contains(".mp4") || s.contains("video"))
-            {
-                urls.push(s.clone());
-            }
+                && (s.contains(".mp4") || s.contains("video")) =>
+        {
+            urls.push(s.clone());
         }
         serde_json::Value::Object(map) => {
             for v in map.values() {
@@ -2048,6 +2047,169 @@ pub fn set_models_config(
     })?;
     state.sync_core_config_from_state()?;
     Ok(())
+}
+
+/// 获取 Memory 独立模型配置
+#[tauri::command]
+pub fn get_memory_config(state: State<TiangongApp>) -> Result<MemoryConfigView, String> {
+    let config = tiangong_core::core::load_memory_config();
+    state.with_state_read(|core_state| {
+        Ok(MemoryConfigView::from_memory(
+            &config,
+            core_state.models_config(),
+        ))
+    })
+}
+
+/// 设置 Memory 独立模型配置
+#[tauri::command]
+pub fn set_memory_config(
+    config: MemoryConfigView,
+    state: State<TiangongApp>,
+) -> Result<(), String> {
+    let memory_config = state.with_state_read(|core_state| {
+        config
+            .to_memory(core_state.models_config())
+            .map_err(anyhow::Error::msg)
+    })?;
+    tiangong_core::core::save_memory_config(memory_config).map_err(|err| err.to_string())?;
+    state.sync_core_config_from_state()?;
+    Ok(())
+}
+
+fn current_memory_workspace_id(state: &State<TiangongApp>) -> Result<Option<String>, String> {
+    let cwd = state.with_state_read(|core_state| Ok(core_state.active_session_effective_cwd()))?;
+    let trimmed = cwd.trim();
+    if trimmed.is_empty() {
+        Ok(None)
+    } else {
+        Ok(tiangong_core::core::memory_workspace_id_from_cwd(trimmed))
+    }
+}
+
+/// 列出当前 workspace 的记忆节点。
+#[tauri::command]
+pub async fn list_memory_nodes(
+    query: Option<String>,
+    status: Option<String>,
+    limit: Option<usize>,
+    state: State<'_, TiangongApp>,
+) -> Result<Vec<tiangong_memory::MemoryNode>, String> {
+    let workspace_id = current_memory_workspace_id(&state)?;
+    tiangong_core::core::list_memory_nodes_for_gui(
+        &state.config,
+        workspace_id,
+        query,
+        status,
+        limit,
+    )
+    .await
+    .map_err(|err| err.to_string())
+}
+
+/// 手动新增或调整一条记忆。
+#[tauri::command]
+pub async fn upsert_manual_memory(
+    draft: tiangong_memory::ManualMemoryDraft,
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_memory::MemoryNode, String> {
+    if draft.title.trim().is_empty() {
+        return Err("记忆标题不能为空".to_string());
+    }
+    if draft.summary.trim().is_empty() {
+        return Err("记忆内容不能为空".to_string());
+    }
+    let workspace_id = current_memory_workspace_id(&state)?;
+    tiangong_core::core::upsert_manual_memory_for_gui(&state.config, workspace_id, draft)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// 归档或恢复记忆节点。
+#[tauri::command]
+pub async fn set_memory_node_status(
+    node_id: String,
+    status: String,
+    state: State<'_, TiangongApp>,
+) -> Result<(), String> {
+    let workspace_id = current_memory_workspace_id(&state)?;
+    tiangong_core::core::set_memory_node_status_for_gui(
+        &state.config,
+        workspace_id,
+        node_id,
+        status,
+    )
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// 列出指定记忆节点的图关系。
+#[tauri::command]
+pub async fn list_memory_relations(
+    node_id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<Vec<tiangong_memory::MemoryRelation>, String> {
+    let workspace_id = current_memory_workspace_id(&state)?;
+    tiangong_core::core::list_memory_relations_for_gui(&state.config, workspace_id, node_id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// 批量列出多个记忆节点的关联关系（去重，修复 N+1 性能问题）。
+#[tauri::command]
+pub async fn list_memory_relations_batch(
+    node_ids: Vec<String>,
+    state: State<'_, TiangongApp>,
+) -> Result<Vec<tiangong_memory::MemoryRelation>, String> {
+    let workspace_id = current_memory_workspace_id(&state)?;
+    tiangong_core::core::list_memory_relations_batch_for_gui(
+        &state.config,
+        workspace_id,
+        node_ids,
+    )
+    .await
+    .map_err(|err| err.to_string())
+}
+
+/// 新增或调整记忆图关系。
+#[tauri::command]
+pub async fn upsert_memory_relation(
+    draft: tiangong_memory::MemoryRelationDraft,
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_memory::MemoryRelation, String> {
+    let workspace_id = current_memory_workspace_id(&state)?;
+    tiangong_core::core::upsert_memory_relation_for_gui(&state.config, workspace_id, draft)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// 删除记忆图关系。
+#[tauri::command]
+pub async fn delete_memory_relation(
+    relation_id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<(), String> {
+    let workspace_id = current_memory_workspace_id(&state)?;
+    tiangong_core::core::delete_memory_relation_for_gui(
+        &state.config,
+        workspace_id,
+        relation_id,
+    )
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// 手动测试记忆召回，不写入会话消息链。
+#[tauri::command]
+pub async fn test_memory_recall(
+    query: String,
+    limit: Option<usize>,
+    state: State<'_, TiangongApp>,
+) -> Result<Vec<tiangong_memory::RecallHit>, String> {
+    let workspace_id = current_memory_workspace_id(&state)?;
+    tiangong_core::core::test_memory_recall_for_gui(&state.config, workspace_id, query, limit)
+        .await
+        .map_err(|err| err.to_string())
 }
 
 /// 获取所有可用的模型能力列表

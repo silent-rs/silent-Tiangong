@@ -14,8 +14,9 @@ use crate::ipc::IpcClient;
 use crate::ipc::protocol::{IpcRequest, MemoryIpcRequestPayload, MemoryIpcResponsePayload};
 use crate::options::MemoryOptions;
 use crate::types::{
-    Episode, ExpandedMemory, MemoryRecallRequest, MemoryRecallResponse, RecallAnchors, RecallHit,
-    TurnResult,
+    Episode, ExpandedMemory, ManualMemoryDraft, MemoryListQuery, MemoryNode, MemoryRecallRequest,
+    MemoryRecallResponse, MemoryRelation, MemoryRelationDraft, MemoryStatus, RecallAnchors,
+    RecallHit, TurnResult,
 };
 
 /// Memory 系统的客户端句柄，可任意 Clone 跨线程使用
@@ -70,6 +71,30 @@ impl MemoryHandle {
                     .recv_timeout(Duration::from_secs(30))
                     .with_context(|| "等待 Memory 热更新结果超时或失败")?
                     .map_err(|err| anyhow!(err))
+            }
+            HandleInner::Remote { .. } => Err(anyhow!("远程 MemoryHandle 暂不支持配置热更新")),
+        }
+    }
+
+    /// 异步热更新 Memory Actor 配置。
+    pub async fn reconfigure(&self, options: MemoryOptions) -> Result<()> {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+                tx.send(MemoryCommand::Reconfigure {
+                    options: Box::new(options),
+                    reply: reply_tx,
+                })
+                .await
+                .with_context(|| "发送 Memory 热更新命令失败")?;
+                tokio::task::spawn_blocking(move || {
+                    reply_rx
+                        .recv_timeout(Duration::from_secs(30))
+                        .with_context(|| "等待 Memory 热更新结果超时或失败")?
+                        .map_err(|err| anyhow!(err))
+                })
+                .await
+                .with_context(|| "等待 Memory 热更新任务失败")?
             }
             HandleInner::Remote { .. } => Err(anyhow!("远程 MemoryHandle 暂不支持配置热更新")),
         }
@@ -197,6 +222,239 @@ impl MemoryHandle {
                     },
                     "update_injection",
                 );
+            }
+        }
+    }
+
+    /// 列出记忆节点（查询，等待响应）。
+    pub async fn list_nodes(&self, query: MemoryListQuery) -> Vec<MemoryNode> {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                if tx
+                    .send(MemoryCommand::ListNodes {
+                        query,
+                        reply: reply_tx,
+                    })
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("Memory list_nodes 发送失败");
+                    return Vec::new();
+                }
+                reply_rx.await.unwrap_or_default()
+            }
+            HandleInner::Remote { .. } => {
+                match self
+                    .send_remote_request(MemoryIpcRequestPayload::ListNodes { query })
+                    .await
+                {
+                    Ok(MemoryIpcResponsePayload::Nodes { items }) => items,
+                    Ok(other) => {
+                        tracing::warn!("Memory IPC list_nodes 返回了非预期响应: {:?}", other);
+                        Vec::new()
+                    }
+                    Err(e) => {
+                        tracing::warn!("Memory IPC list_nodes 失败: {}", e);
+                        Vec::new()
+                    }
+                }
+            }
+        }
+    }
+
+    /// 手动新增或调整记忆。
+    pub async fn upsert_manual_memory(&self, draft: ManualMemoryDraft) -> Result<MemoryNode> {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                tx.send(MemoryCommand::UpsertManualMemory {
+                    draft,
+                    reply: reply_tx,
+                })
+                .await
+                .with_context(|| "发送 Memory 手动记忆写入命令失败")?;
+                reply_rx
+                    .await
+                    .with_context(|| "等待 Memory 手动记忆写入结果失败")?
+                    .map_err(|err| anyhow!(err))
+            }
+            HandleInner::Remote { .. } => {
+                match self
+                    .send_remote_request(MemoryIpcRequestPayload::UpsertManualMemory { draft })
+                    .await?
+                {
+                    MemoryIpcResponsePayload::Node { item } => Ok(item),
+                    other => Err(anyhow!("Memory IPC upsert 返回了非预期响应: {other:?}")),
+                }
+            }
+        }
+    }
+
+    /// 手动设置记忆状态。
+    pub async fn set_node_status(&self, node_id: String, status: MemoryStatus) -> Result<()> {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                tx.send(MemoryCommand::SetNodeStatus {
+                    node_id,
+                    status,
+                    reply: reply_tx,
+                })
+                .await
+                .with_context(|| "发送 Memory 状态更新命令失败")?;
+                reply_rx
+                    .await
+                    .with_context(|| "等待 Memory 状态更新结果失败")?
+                    .map_err(|err| anyhow!(err))
+            }
+            HandleInner::Remote { .. } => {
+                match self
+                    .send_remote_request(MemoryIpcRequestPayload::SetNodeStatus { node_id, status })
+                    .await?
+                {
+                    MemoryIpcResponsePayload::Ack => Ok(()),
+                    other => Err(anyhow!(
+                        "Memory IPC set_node_status 返回了非预期响应: {other:?}"
+                    )),
+                }
+            }
+        }
+    }
+
+    /// 列出某个记忆节点的图关系。
+    pub async fn list_relations(&self, node_id: String) -> Vec<MemoryRelation> {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                if tx
+                    .send(MemoryCommand::ListRelations {
+                        node_id,
+                        reply: reply_tx,
+                    })
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("Memory list_relations 发送失败");
+                    return Vec::new();
+                }
+                reply_rx.await.unwrap_or_default()
+            }
+            HandleInner::Remote { .. } => {
+                match self
+                    .send_remote_request(MemoryIpcRequestPayload::ListRelations { node_id })
+                    .await
+                {
+                    Ok(MemoryIpcResponsePayload::Relations { items }) => items,
+                    Ok(other) => {
+                        tracing::warn!("Memory IPC list_relations 返回了非预期响应: {:?}", other);
+                        Vec::new()
+                    }
+                    Err(e) => {
+                        tracing::warn!("Memory IPC list_relations 失败: {}", e);
+                        Vec::new()
+                    }
+                }
+            }
+        }
+    }
+
+    /// 批量列出多个记忆节点的关联关系（去重，修复 N+1 性能问题）。
+    pub async fn list_relations_batch(&self, node_ids: Vec<String>) -> Vec<MemoryRelation> {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                if tx
+                    .send(MemoryCommand::ListRelationsBatch {
+                        node_ids,
+                        reply: reply_tx,
+                    })
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("Memory list_relations_batch 发送失败");
+                    return Vec::new();
+                }
+                reply_rx.await.unwrap_or_default()
+            }
+            HandleInner::Remote { .. } => {
+                match self
+                    .send_remote_request(MemoryIpcRequestPayload::ListRelationsBatch { node_ids })
+                    .await
+                {
+                    Ok(MemoryIpcResponsePayload::Relations { items }) => items,
+                    Ok(other) => {
+                        tracing::warn!(
+                            "Memory IPC list_relations_batch 返回了非预期响应: {:?}",
+                            other
+                        );
+                        Vec::new()
+                    }
+                    Err(e) => {
+                        tracing::warn!("Memory IPC list_relations_batch 失败: {}", e);
+                        Vec::new()
+                    }
+                }
+            }
+        }
+    }
+
+    /// 新增或调整记忆图关系。
+    pub async fn upsert_relation(&self, draft: MemoryRelationDraft) -> Result<MemoryRelation> {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                tx.send(MemoryCommand::UpsertRelation {
+                    draft,
+                    reply: reply_tx,
+                })
+                .await
+                .with_context(|| "发送 Memory 关系写入命令失败")?;
+                reply_rx
+                    .await
+                    .with_context(|| "等待 Memory 关系写入结果失败")?
+                    .map_err(|err| anyhow!(err))
+            }
+            HandleInner::Remote { .. } => {
+                match self
+                    .send_remote_request(MemoryIpcRequestPayload::UpsertRelation { draft })
+                    .await?
+                {
+                    MemoryIpcResponsePayload::Relation { item } => Ok(item),
+                    other => Err(anyhow!(
+                        "Memory IPC upsert_relation 返回了非预期响应: {other:?}"
+                    )),
+                }
+            }
+        }
+    }
+
+    /// 删除记忆图关系。
+    pub async fn delete_relation(&self, relation_id: String) -> Result<()> {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                tx.send(MemoryCommand::DeleteRelation {
+                    relation_id,
+                    reply: reply_tx,
+                })
+                .await
+                .with_context(|| "发送 Memory 关系删除命令失败")?;
+                reply_rx
+                    .await
+                    .with_context(|| "等待 Memory 关系删除结果失败")?
+                    .map_err(|err| anyhow!(err))
+            }
+            HandleInner::Remote { .. } => {
+                match self
+                    .send_remote_request(MemoryIpcRequestPayload::DeleteRelation { relation_id })
+                    .await?
+                {
+                    MemoryIpcResponsePayload::Ack => Ok(()),
+                    other => Err(anyhow!(
+                        "Memory IPC delete_relation 返回了非预期响应: {other:?}"
+                    )),
+                }
             }
         }
     }

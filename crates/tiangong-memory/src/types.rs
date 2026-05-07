@@ -15,6 +15,37 @@ pub enum MemoryKind {
     Evidence,
 }
 
+/// 认知层面的记忆分类，用于决定记忆整理、召回和图关系展开策略。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryCognitiveType {
+    #[default]
+    Factual,
+    UserPreference,
+    UserHabit,
+    Skill,
+    ProjectStructure,
+    ArchitectureDecision,
+    ProblemIncident,
+    DomainKnowledge,
+}
+
+/// 记忆节点之间的图关系类型。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryRelationKind {
+    #[default]
+    RelatedTo,
+    DependsOn,
+    Supports,
+    Contradicts,
+    Supersedes,
+    CausedBy,
+    BelongsTo,
+    LearnedFrom,
+    ValidatedBy,
+}
+
 /// 记忆范围类型
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -38,6 +69,8 @@ pub enum MemoryStatus {
 pub struct MemoryNode {
     pub id: String,
     pub kind: MemoryKind,
+    #[serde(default)]
+    pub memory_type: MemoryCognitiveType,
     pub scope_type: MemoryScopeType,
     pub scope_id: Option<String>,
     pub title: String,
@@ -51,6 +84,66 @@ pub struct MemoryNode {
     pub last_used_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// 手动新增或调整记忆的输入。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ManualMemoryDraft {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub memory_type: MemoryCognitiveType,
+    pub title: String,
+    pub summary: String,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    #[serde(default)]
+    pub importance: f32,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+/// 手动记忆列表过滤条件。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemoryListQuery {
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub status: Option<MemoryStatus>,
+    #[serde(default)]
+    pub limit: usize,
+}
+
+/// 记忆图关系，近似图数据库中的边。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryRelation {
+    pub id: String,
+    pub from_node_id: String,
+    pub to_node_id: String,
+    pub relation_kind: MemoryRelationKind,
+    pub weight: f32,
+    pub note: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// 手动新增或调整记忆关系的输入。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemoryRelationDraft {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub from_node_id: String,
+    pub to_node_id: String,
+    #[serde(default)]
+    pub relation_kind: MemoryRelationKind,
+    #[serde(default)]
+    pub weight: f32,
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// Episode 结果状态
@@ -260,6 +353,96 @@ pub struct VectorPoint {
 pub struct ExpandedMemory {
     pub node_id: String,
     pub full_content: String,
+}
+
+/// 工作区文件树索引。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FileTreeIndex {
+    pub workspace_id: String,
+    pub root_path: String,
+    pub updated_at: String,
+    #[serde(default)]
+    pub entries: Vec<FileEntry>,
+}
+
+/// 工作区文件或目录条目。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileEntry {
+    pub path: String,
+    pub entry_type: FileType,
+    pub size_bytes: u64,
+    pub modified_at: String,
+    #[serde(default)]
+    pub annotation: Option<String>,
+}
+
+/// 文件树条目类型。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileType {
+    File,
+    Directory,
+}
+
+/// Rust 符号索引。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SymbolIndex {
+    pub workspace_id: String,
+    pub updated_at: String,
+    #[serde(default)]
+    pub symbols: Vec<SymbolEntry>,
+}
+
+/// Rust 代码符号条目。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymbolEntry {
+    pub name: String,
+    pub kind: SymbolKind,
+    pub file_path: String,
+    pub line_range: (u32, u32),
+    #[serde(default)]
+    pub signature: Option<String>,
+}
+
+/// Rust 代码符号类型。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SymbolKind {
+    Module,
+    Function,
+    Struct,
+    Enum,
+    Trait,
+}
+
+/// 完整工作区索引快照。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkspaceIndexSnapshot {
+    pub file_tree: FileTreeIndex,
+    pub symbols: SymbolIndex,
+}
+
+/// 工作区索引查询命中类型。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceIndexHitKind {
+    File,
+    Directory,
+    Symbol,
+}
+
+/// 工作区索引查询命中项。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceIndexHit {
+    pub hit_kind: WorkspaceIndexHitKind,
+    pub path: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub symbol_kind: Option<SymbolKind>,
+    #[serde(default)]
+    pub line: Option<u32>,
+    pub score: f64,
 }
 
 /// Turn 中可被长期记忆保存的结构化产物类型。

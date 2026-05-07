@@ -6,6 +6,21 @@ use rusqlite::Connection;
 /// 初始化数据库 Schema（幂等，IF NOT EXISTS）
 pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA_SQL)?;
+    migrate_existing_schema(conn)?;
+    conn.execute_batch(POST_MIGRATION_SQL)?;
+    Ok(())
+}
+
+fn migrate_existing_schema(conn: &Connection) -> Result<()> {
+    if let Err(err) = conn.execute(
+        "ALTER TABLE memory_nodes ADD COLUMN memory_type TEXT NOT NULL DEFAULT 'factual'",
+        [],
+    ) {
+        let message = err.to_string();
+        if !message.contains("duplicate column name") {
+            return Err(err.into());
+        }
+    }
     Ok(())
 }
 
@@ -13,6 +28,7 @@ const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS memory_nodes (
     id            TEXT PRIMARY KEY,
     kind          TEXT NOT NULL,
+    memory_type   TEXT NOT NULL DEFAULT 'factual',
     scope_type    TEXT NOT NULL,
     scope_id      TEXT,
     title         TEXT NOT NULL,
@@ -32,6 +48,22 @@ CREATE INDEX IF NOT EXISTS idx_nodes_scope ON memory_nodes(scope_type, scope_id)
 CREATE INDEX IF NOT EXISTS idx_nodes_kind ON memory_nodes(kind);
 CREATE INDEX IF NOT EXISTS idx_nodes_status ON memory_nodes(status);
 CREATE INDEX IF NOT EXISTS idx_nodes_importance ON memory_nodes(importance DESC);
+
+CREATE TABLE IF NOT EXISTS memory_relations (
+    id             TEXT PRIMARY KEY,
+    from_node_id   TEXT NOT NULL REFERENCES memory_nodes(id),
+    to_node_id     TEXT NOT NULL REFERENCES memory_nodes(id),
+    relation_kind  TEXT NOT NULL,
+    weight         REAL NOT NULL DEFAULT 1.0,
+    note           TEXT,
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL,
+    UNIQUE(from_node_id, to_node_id, relation_kind)
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_relations_from ON memory_relations(from_node_id);
+CREATE INDEX IF NOT EXISTS idx_memory_relations_to ON memory_relations(to_node_id);
+CREATE INDEX IF NOT EXISTS idx_memory_relations_kind ON memory_relations(relation_kind);
 
 CREATE TABLE IF NOT EXISTS episodes (
     id            TEXT PRIMARY KEY REFERENCES memory_nodes(id),
@@ -77,4 +109,8 @@ CREATE TABLE IF NOT EXISTS memory_vectors (
 );
 
 CREATE INDEX IF NOT EXISTS idx_vectors_dimension ON memory_vectors(dimension);
+"#;
+
+const POST_MIGRATION_SQL: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_nodes_memory_type ON memory_nodes(memory_type);
 "#;

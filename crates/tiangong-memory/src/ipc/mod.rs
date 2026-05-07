@@ -288,11 +288,42 @@ async fn handle_memory_request(
         MemoryIpcRequestPayload::LoadDepth2 { node_ids } => Ok(MemoryIpcResponsePayload::Depth2 {
             items: handle.load_depth2(node_ids).await,
         }),
+        MemoryIpcRequestPayload::ListNodes { query } => Ok(MemoryIpcResponsePayload::Nodes {
+            items: handle.list_nodes(query).await,
+        }),
+        MemoryIpcRequestPayload::ListRelations { node_id } => {
+            Ok(MemoryIpcResponsePayload::Relations {
+                items: handle.list_relations(node_id).await,
+            })
+        }
+        MemoryIpcRequestPayload::ListRelationsBatch { node_ids } => {
+            Ok(MemoryIpcResponsePayload::Relations {
+                items: handle.list_relations_batch(node_ids).await,
+            })
+        }
         MemoryIpcRequestPayload::WriteEpisode {
             episode,
             workspace_id,
         } => {
             handle.write_episode(episode, workspace_id);
+            Ok(MemoryIpcResponsePayload::Ack)
+        }
+        MemoryIpcRequestPayload::UpsertManualMemory { draft } => {
+            Ok(MemoryIpcResponsePayload::Node {
+                item: handle.upsert_manual_memory(draft).await?,
+            })
+        }
+        MemoryIpcRequestPayload::SetNodeStatus { node_id, status } => {
+            handle.set_node_status(node_id, status).await?;
+            Ok(MemoryIpcResponsePayload::Ack)
+        }
+        MemoryIpcRequestPayload::UpsertRelation { draft } => {
+            Ok(MemoryIpcResponsePayload::Relation {
+                item: handle.upsert_relation(draft).await?,
+            })
+        }
+        MemoryIpcRequestPayload::DeleteRelation { relation_id } => {
+            handle.delete_relation(relation_id).await?;
             Ok(MemoryIpcResponsePayload::Ack)
         }
         MemoryIpcRequestPayload::UpdateInjection {

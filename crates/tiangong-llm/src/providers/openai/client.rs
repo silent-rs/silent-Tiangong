@@ -2,11 +2,12 @@ use std::time::Duration;
 
 use anyhow::Context;
 use futures_util::Stream;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::time::timeout;
 
 use crate::error::LlmError;
 use crate::model::ProviderModelInfo;
+use crate::rerank::RerankRequest;
 
 use super::config::OpenAiCompatibleConfig;
 use super::error::{is_retryable_openai_error, map_openai_error};
@@ -52,6 +53,79 @@ impl OpenAiClient {
         )
         .await
         .map_err(|_| LlmError::Timeout(self.config.timeout.as_millis() as u64))?
+    }
+
+    pub async fn rerank(&self, model: &str, request: &RerankRequest) -> Result<Value, LlmError> {
+        if request.documents.is_empty() {
+            return Ok(json!({ "results": [] }));
+        }
+
+        let base = normalize_rerank_api_base(&self.config.base_url)
+            .map_err(|err| LlmError::Configuration(err.to_string()))?;
+        let url = format!("{base}/rerank");
+        let payload = json!({
+            "model": model,
+            "query": &request.query,
+            "documents": &request.documents,
+            "top_n": request.top_n.max(1).min(request.documents.len()),
+        });
+        let client = reqwest::Client::builder()
+            .timeout(self.config.timeout)
+            .build()
+            .map_err(|err| LlmError::Transport(err.to_string()))?;
+
+        let mut req = client.post(&url).json(&payload);
+        if !self.config.api_key.trim().is_empty() {
+            req = req.bearer_auth(&self.config.api_key);
+        }
+
+        let start = std::time::Instant::now();
+        tracing::info!(
+            operation = "openai_rerank",
+            provider = "openai_compatible",
+            model,
+            stream = false,
+            attempt = 0,
+            "开始 OpenAI 兼容请求"
+        );
+        let response = req
+            .send()
+            .await
+            .with_context(|| format!("Rerank 请求失败：{url}"))
+            .map_err(|err| LlmError::Transport(err.to_string()))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            tracing::warn!(
+                operation = "openai_rerank",
+                provider = "openai_compatible",
+                model,
+                stream = false,
+                attempt = 0,
+                latency_ms = start.elapsed().as_millis() as u64,
+                status = status.as_u16(),
+                "OpenAI 兼容请求失败"
+            );
+            return Err(LlmError::Provider {
+                provider: "openai_compatible",
+                message: format!("Rerank API 返回错误 {status}: {body}"),
+            });
+        }
+
+        let body = response
+            .json::<Value>()
+            .await
+            .map_err(|err| LlmError::Serialization(err.to_string()))?;
+        tracing::info!(
+            operation = "openai_rerank",
+            provider = "openai_compatible",
+            model,
+            stream = false,
+            attempt = 0,
+            latency_ms = start.elapsed().as_millis() as u64,
+            "OpenAI 兼容请求完成"
+        );
+        Ok(body)
     }
 
     pub async fn list_models(&self) -> Result<Vec<ProviderModelInfo>, LlmError> {
@@ -225,5 +299,33 @@ impl OpenAiClient {
                 }
             }
         }
+    }
+}
+
+fn normalize_rerank_api_base(base_url: &str) -> anyhow::Result<String> {
+    let base = normalize_api_base(base_url)?;
+    let cleaned = base.trim_end_matches('/');
+    let cleaned = cleaned.strip_suffix("/rerank").unwrap_or(cleaned);
+    Ok(cleaned.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_rerank_api_base;
+
+    #[test]
+    fn normalizes_openai_compatible_rerank_api_base() {
+        assert_eq!(
+            normalize_rerank_api_base("http://127.0.0.1:8000/v1").unwrap(),
+            "http://127.0.0.1:8000/v1"
+        );
+        assert_eq!(
+            normalize_rerank_api_base("http://127.0.0.1:8000/v1/rerank").unwrap(),
+            "http://127.0.0.1:8000/v1"
+        );
+        assert_eq!(
+            normalize_rerank_api_base("http://127.0.0.1:8000/rerank").unwrap(),
+            "http://127.0.0.1:8000"
+        );
     }
 }

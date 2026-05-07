@@ -165,7 +165,8 @@
 - 已完成结构化产物记忆：媒体 URL、文件路径、工具结果摘要进入 Episode，支持“刚刚生成的图片/文件”等跨会话回忆。
 - 已完成 Meso 反刍第一阶段：从近期 Episode 提炼 Entity/Decision，写入 SQLite/Tantivy 并更新 Workspace Injection。
 - 已完成 workspace 级 runtime/handle registry，长生命周期 GUI/Server 进程会按 workspace_id 缓存 Memory Handle，避免误复用首个工作区。
-- 下一步针对 deep recall 的真实 LLM 配置路径进行观察验证，并基于观察结果决定是否继续加强多跳关系追溯。
+- 已冻结专用 Memory LLM 约束：Memory 内部 Episode 提取、Recall 规划、Deep Recall 裁决、结果整理和 Meso 提炼必须使用 `routing.memory`，不再静默复用主 `chat` 模型。
+- 下一步先实现 `memory` capability 配置接线，并针对 deep recall 的真实 Memory LLM 路径进行观察验证，再决定是否继续加强多跳关系追溯。
 
 ## 参考文档
 - 项目说明：`README.md`

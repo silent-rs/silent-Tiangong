@@ -1,10 +1,12 @@
 use async_trait::async_trait;
 use futures_util::{StreamExt, stream};
+use serde::Deserialize;
 
 use crate::error::LlmError;
 use crate::model::ProviderModelInfo;
 use crate::provider::{LlmProvider, ProviderCapabilities};
 use crate::request::ProviderRequest;
+use crate::rerank::{RerankProvider, RerankRequest, RerankResponse, RerankResult};
 use crate::response::ProviderResponse;
 use crate::stream::ProviderStream;
 
@@ -18,10 +20,38 @@ pub struct OpenAiCompatibleProvider {
     client: OpenAiClient,
 }
 
+#[derive(Clone)]
+pub struct OpenAiCompatibleRerankProvider {
+    client: OpenAiClient,
+    model: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiRerankResponse {
+    #[serde(default)]
+    results: Vec<OpenAiRerankResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiRerankResult {
+    index: usize,
+    #[serde(alias = "score")]
+    relevance_score: f64,
+}
+
 impl OpenAiCompatibleProvider {
     pub fn new(config: OpenAiCompatibleConfig) -> Self {
         Self {
             client: OpenAiClient::new(config),
+        }
+    }
+}
+
+impl OpenAiCompatibleRerankProvider {
+    pub fn new(config: OpenAiCompatibleConfig, model: impl Into<String>) -> Self {
+        Self {
+            client: OpenAiClient::new(config),
+            model: model.into(),
         }
     }
 }
@@ -64,5 +94,27 @@ impl LlmProvider for OpenAiCompatibleProvider {
 
     async fn list_models(&self) -> Result<Vec<ProviderModelInfo>, LlmError> {
         self.client.list_models().await
+    }
+}
+
+#[async_trait]
+impl RerankProvider for OpenAiCompatibleRerankProvider {
+    async fn rerank(&self, request: RerankRequest) -> anyhow::Result<RerankResponse> {
+        let response = self.client.rerank(&self.model, &request).await?;
+        let parsed: OpenAiRerankResponse = serde_json::from_value(response)?;
+        Ok(RerankResponse {
+            results: parsed
+                .results
+                .into_iter()
+                .map(|item| RerankResult {
+                    index: item.index,
+                    relevance_score: item.relevance_score,
+                })
+                .collect(),
+        })
+    }
+
+    fn model(&self) -> &str {
+        &self.model
     }
 }

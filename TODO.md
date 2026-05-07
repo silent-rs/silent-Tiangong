@@ -1,278 +1,102 @@
 # TODO - 天工当前开发任务
 
-> 最后更新：2026-05-03
-> 当前主线：Agent 偏好与多模态输入能力
-> 参考：`PLAN.md`、`docs/requirements.md`
+> 最后更新：2026-05-07
+> 当前主线：Memory 系统缺口收口
+> 参考：`PLAN.md`、`docs/requirements.md`、`docs/memory-system/12-缺口清单与专用MemoryLLM.md`
 
 ---
 
 ## 当前结论
 
-接下来实现 Agent 偏好与多模态输入能力，覆盖默认审核权限、用户自定义特色 Prompt、Core 当前时间工具，以及 GUI 输入图片/文件后调用多模态模型处理的主链路。
+接下来推进 Memory 系统缺口收口，覆盖专用 Memory LLM 配置、入口运行时统一、模型路径验证、检索质量补齐和生命周期完善。
 
 能力边界：
 
-- 默认审核权限作为持久化配置，创建新对话时使用，当前对话仍允许临时调整。
-- 用户自定义特色 Prompt 注入 system prompt，保证新对话和上下文压缩后的请求继续生效。
-- `current_time` 作为 Core 内置工具提供，不依赖外部 MCP。
-- GUI 仅在配置 `multimodal` routing 时展示附件入口。
-- 首期多模态输入重点支持图片；普通文件先以结构化附件和路径上下文进入会话，后续再扩展文件内容抽取。
-
-旧 Desktop 后台通知主线已完成，本文档切换到 Agent 偏好与多模态输入能力。
-
-## P0 - Agent 偏好与多模态输入能力
-
-- [x] 在 `docs/requirements.md` 中补充默认审核、自定义 Prompt、current_time 和多模态输入要求。
-- [x] 创建独立功能分支 `feature/multimodal-default-approval-prompt`。
-- [x] 持久化默认审核权限和用户自定义特色 Prompt。
-- [x] 新对话使用默认审核权限，当前会话允许继续调整。
-- [x] 自定义 Prompt 注入 system prompt。
-- [x] 增加 Core 内置 `current_time` 工具。
-- [x] 配置 `multimodal` routing 时开放 GUI 附件入口。
-- [x] 支持图片附件和图片路径进入多模态模型请求。
-- [x] 支持将文件拖动到 GUI 用户输入框添加为附件，并在输入框上方预览。
-- [x] Desktop 发送附件前统一转为 base64 data URL，任一附件超过 50MB 时停止请求并提示。
-- [x] 包含任意附件的用户消息优先使用多模态模型解析后再回答。
-- [x] 未配置多模态模型时关闭文件上传能力，并在后端拒绝带附件消息。
-- [x] 用户输入图片附件由 Core 归档到本地后再写入会话。
-- [x] 图片生成结果优先归档到本地并在会话中引用本地图片。
-- [x] 使用 `yarn build` 和 `cargo check --workspace` 验证。
-
-## P0 - Desktop 后台对话完成系统通知
-
-- [x] 创建 RFC：`docs/rfc/0010-desktop-background-notification.md`。
-- [x] 在 `docs/requirements.md` 中补充 Desktop 后台通知要求。
-- [x] 提交 RFC 与需求文档。
-- [x] 接入 Tauri notification 插件依赖、初始化和 capability 权限。
-- [x] 应用启动时请求系统通知权限。
-- [x] 替换后台会话完成检测中的浏览器 Notification 调用。
-- [x] 使用 `yarn build` 验证前端构建。
-- [x] 使用 `cargo check --manifest-path src-tauri/Cargo.toml` 验证 Tauri 侧构建。
-
-## P0 - web_fetch 基础能力
-
-- [x] 创建 RFC：`docs/rfc/0009-web-fetch-basic-capability.md`。
-- [x] 在 `docs/requirements.md` 中补充 `web_fetch` 基础能力要求。
-- [x] 在 Core 内置工具集中注册 `web_fetch` 工具 schema。
-- [x] 实现 `text` 模式 URL 校验、权限策略、超时、重定向、响应体大小限制和 HTML / 文本提取。
-- [x] 实现 `download` 模式路径校验、覆盖控制、流式写入、大小限制和摘要计算。
-- [x] 接入工具调用参数解析与权限分类。
-- [x] 使用 `cargo check --workspace` 验证。
-
-## P0 - Core 多轮对话上下文整理
-
-- [x] 在 `docs/requirements.md` 中补充无状态 Chat API 多轮对话上下文要求。
-- [x] Core 层将 recall_memory 结果作为消息上下文注入，不再追加到 system prompt。
-- [x] Core 层停止把动态 `MessageRole::System` 上下文折叠进 system prompt。
-- [x] 非用户提交的运行时上下文统一改为 `MessageRole::Tool`。
-- [x] MCP 摘要改为 `tool` 类型附件，不再作为 system role 附件被折叠。
-- [x] 无 `tool_call_id` 的内部 tool 上下文发送给 Provider 时转换为兼容文本上下文。
-- [x] 对话历史达到上下文限制 95% 时启动滚动摘要压缩。
-- [x] 上下文压缩摘要注入 system prompt，不作为普通 `tool` 消息发送。
-- [x] 暂缓 LLM 请求层 `cache_control` / `system_blocks` 改造。
-- [x] 使用 `cargo check --workspace` 验证。
+- Memory 内部所有文本生成任务必须使用独立 Memory LLM 配置，不再复用主 `chat` 模型。
+- 未配置 Memory LLM 时降级为规则策略，禁止静默回退到主模型。
+- 所有入口统一通过 `start_or_connect()` 获取 Memory，确保多进程共享同一 workspace leader。
+- Workspace Index 首期仅覆盖最小文件树索引和 Rust 符号索引。
 
 ---
 
-## 已完成：Phase A 工作空间边界收口
+## P0 - 入口运行时统一
 
-### 1. 同步需求边界
+- [x] Core 启动入口从直接调用 `start_with_options()` 切换为 `start_or_connect()`。
+- [x] CLI/GUI/Server 主入口默认使用 `start_or_connect()` 获取 Memory。
+- [x] 同一 workspace 同时启动多个入口时只有一个 leader，其余入口使用 remote handle。
+- [x] leader 退出后 follower 自动接替，接替前后写入/召回都可用。
+- [x] 验证多进程并发场景（GUI + CLI + Server）下 Memory 行为正确。
+- [x] 修复同一 workspace 并发写入 `leader.json` 时临时文件冲突导致的误报警。
 
-- [x] 在 `docs/requirements.md` 中补充工作空间与文件操作边界。
-- [x] 明确 `~/.tiangong/skills` 是特殊可写范围。
-- [x] 明确工作空间与当前对话目录分离，`session_cwd` 只表示当前对话目录。
+## P0 - Memory 独立模型配置
 
-### 2. 调整工具路径策略
+- [x] `tiangong-memory` 增加独立 `MemoryConfig`，持久化到 `~/.tiangong/memory/config.json`。
+- [x] Memory LLM、Embedding、Rerank 配置从主 `models.json` / routing 中拆出。
+- [x] Routing 页不再展示 Embedding / Rerank，二者只在 Memory 子页选择。
+- [x] `CoreConfig::to_memory_options()` 只读取 Memory 独立配置，不再从主模型配置派生。
+- [x] 前端将 Memory 配置放到 LLM 配置下，并从已有 Models 中选择模型。
+- [x] Tauri 增加 `get_memory_config` / `set_memory_config` 命令。
+- [x] EpisodeWriter 结构化提取使用专用 Memory LLM。
+- [x] Recall anchor 规划使用专用 Memory LLM。
+- [x] Deep Recall 裁决使用专用 Memory LLM。
+- [x] Recall 结果整理使用专用 Memory LLM。
+- [x] Meso Entity/Decision 提炼使用专用 Memory LLM。
+- [x] 未配置 Memory LLM 时，上述步骤全部走规则 fallback。
+- [x] 日志明确提示 Memory LLM 未配置，不误报为普通模型失败。
+- [x] 禁止未配置 Memory LLM 时静默复用 `chat` 主模型或旧 `lite` 模型。
 
-- [x] Desktop 系统设置弹窗提供工作区目录设置入口。
-- [x] Desktop 工作空间独立持久化到应用级状态，不复用 `session_cwd`。
-- [x] 新对话默认复制当前工作空间作为对话目录。
-- [x] 读取类工具允许访问工作空间外路径。
-- [x] 写入类工具只允许当前工作空间和 `~/.tiangong/skills`。
-- [x] 命令执行 cwd 必须限制在写入允许范围内。
-- [x] shell 文件副作用命令的路径参数必须限制在写入允许范围内。
-- [x] 保持用户未指定目录时默认使用当前工作空间。
+## P1 - 真实模型路径验证
 
-### 3. 验证
+- [x] 增加可手动运行的 Memory LLM smoke test。
+- [x] 增加 GUI Memory 管理界面，支持查看、新增、调整、归档记忆。
+- [x] 增加 GUI 记忆召回测试入口，手动输入 query 后查看 Recall 命中。
+- [x] 手动新增或调整记忆通过 Memory Actor 写入，保持 SQLite / Tantivy / 向量索引一致。
+- [x] 增加 8 类核心记忆类型：事实性、用户偏好、用户习惯、技能型、项目结构、架构决策、问题故障、领域知识。
+- [x] 增加 Memory 图关系结构，支持记忆节点之间建立关联关系。
+- [x] GUI Memory 管理界面支持手动设置记忆类型和维护记忆关联。
+- [x] Deep Recall 支持沿 Memory 图关系加载邻接记忆。
+- [x] 固定 5-10 个历史指代样例，验证输出只包含增量记忆。
+- [x] 记录 Memory LLM token 使用和延迟，确认不拖慢主对话链路。
+- [x] Deep Recall 真实效果通过跨会话、跨产物、跨 Entity/Decision 固定场景评测。
 
-- [x] `cargo check --workspace` 通过。
+## P1 - 混合检索质量
 
----
+- [x] 默认测试链覆盖无外部服务的 embedded vector mock 或 deterministic provider。
+- [x] ignored 的真实 embedding 测试保留为手动验证，补充运行说明。
+- [x] 建立小型 recall benchmark，比较 BM25-only 与 hybrid 命中率。
+- [x] Qdrant 后端补齐归档删除同步和服务配置说明。
+- [x] Recall 精排接入 `tiangong-llm` RerankProvider，Memory 内部不再直接实现 rerank 协议适配。
 
-## 已完成：RFC-0007 Skill 文件系统注册表
+## P1 - Meta 与生命周期
 
-### Phase A：设计冻结与基础结构
+- [x] 归档时 SQLite、Tantivy、embedded vector、Qdrant 状态一致。
+- [x] 已归档节点从向量索引删除能力补齐（含外部 Qdrant delete）。
+- [x] 文件路径和媒体产物基本可达性检查。
+- [x] 过时检测覆盖文件删除、路径失效、项目归档、产物 URL 过期。
+- [x] Meta 执行结果进入可观测日志和指标。
 
-### 1. 接受 RFC-0007 并同步需求边界
+## P2 - Workspace Index
 
-- [x] 将 `docs/rfc/0007-skill-filesystem-registry.md` 状态从 Draft 调整为 Accepted。
-- [x] 在 `docs/requirements.md` 中补充 Skill 文件系统注册表要求。
-- [x] 在 `PLAN.md` 中把当前主目标切换到 RFC-0007。
-- [x] 明确首期不引入文件系统通知，仅使用扫描 + mtime 缓存。
-- [x] 明确 MCP 侧 `mcp-lock.json` 机制保持不变。
-
-### 2. 定义 Skill 文件系统注册表数据结构
-
-- [x] 新增或改造 `SkillEntry`，字段至少包含 `id`、`dir`、`manifest_mtime`。
-- [x] 新增或改造 `SkillRegistryView`，只保存轻量索引，不保存 `SKILL.md` 全文。
-- [x] 新增或改造 `LoadedSkill`，字段至少包含 `manifest`、`readme`、`loaded_at`、`source_mtime`。
-- [x] 为注册表扫描结果定义非法目录、manifest 缺失、id 不一致等错误/告警类型。
-- [x] 明确缓存阈值默认 2 秒，支持强制刷新绕过缓存。
-
-### 3. 支持 `skill.toml.available`
-
-- [x] 为 Skill manifest 增加 `available: bool` 字段。
-- [x] `available` 缺失时按 `true` 处理。
-- [x] manifest 序列化时保留或写入 `available`。
-- [x] 注册表层提供 `set_available` / `write_skill_available` 写入能力。
-- [x] `set_skill_enabled(id, enabled)` 只修改 `skills/<id>/skill.toml`。
-- [x] `available=false` 时按需加载不读取 `SKILL.md` 正文。
-- [x] 禁用 Skill 不参与 `@skill` 激活、检索匹配和 Agent 可用工具列表。
-
-### 4. 实现轻量扫描与按需加载
-
-- [x] 扫描 `~/.tiangong/skills/<id>/` 平铺目录。
-- [x] 跳过 `mcp-lock.json`、隐藏文件、非目录和非法目录。
-- [x] 校验目录名必须等于 `skill.toml.id`，不一致时跳过并记录告警。
-- [x] `list_skills()` 返回轻量 `SkillEntry` / 摘要，不读取 `SKILL.md` 全文。
-- [x] `get_skill_detail(id)` 触发 `skill.toml` + `SKILL.md` 实时加载。
-- [x] 已加载 Skill 在 `manifest_mtime` 未变化时命中缓存。
-- [x] 缓存容量默认 32，超出后按 `loaded_at` 做 LRU 淘汰。
-
-### 5. Phase A 测试
-
-- [x] 单元测试：扫描合法 `skills/<id>/skill.toml`。
-- [x] 单元测试：跳过目录名与 manifest id 不一致的目录。
-- [x] 单元测试：`available` 缺失默认 true。
-- [x] 单元测试：`available=false` 不可激活。
-- [x] 单元测试：mtime 变化后重新加载。
-- [x] 单元测试：强制 refresh 绕过缓存。
+- [x] 最小文件树索引可生成、可查询、可按 workspace 隔离。
+- [x] Rust 符号索引至少覆盖 `mod/fn/struct/enum/trait`。
+- [x] Recall 可结合 Memory 与 workspace index 返回线索。
+- [x] 文件变更后的增量更新策略落地。
 
 ---
 
-## P1 - Phase B：运行时接入与迁移
+## 推荐执行顺序
 
-### 6. 改造 SkillService 主链路
-
-- [x] `install_skill(path, enabled)` 改为复制到 `skills/<id>/`。
-- [x] 安装时目标目录已存在则保留 `.env.local`。
-- [x] 安装时目标目录已存在则保留原 `available`，避免覆盖用户禁用状态。
-- [x] 安装完成后触发 `SkillRegistryView` 重扫。
-- [x] `remove_skill(id)` 改为删除 `skills/<id>/` 并驱逐缓存。
-- [x] `list/get/enable/remove/install` 全部走文件系统注册表，不再依赖 `skills.json.installed[]`。
-
-### 7. 移除 `skills.installed[]` 持久化写入
-
-- [x] 删除或旁路 `persist_app_only()` 中对 `skills.installed[]` 的写入。
-- [x] `app.json` / `skills.json` 只保留非注册状态配置，例如 `enabled`、`dirs`、`max_matches`。
-- [x] 外部手动修改 `skills/` 目录后不会被下一次全局持久化覆盖。
-- [x] 启动时优先使用新布局 `skills/<id>/`。
-
-### 8. 实现旧布局迁移器
-
-- [x] 检测 `skills/installed/<id>/<version>/skill.toml` 旧目录。
-- [x] 检测旧 `skills.json.installed[]`。
-- [x] 旧 `skills/skills-lock.json` 仅作为旧布局伴随文件处理，不单独触发迁移。
-- [x] 多版本并存时优先选择 `skills.json` 登记版本。
-- [x] 将选中版本平铺迁移到 `skills/<id>/`。
-- [x] 将旧 `enabled` 写入新 `skill.toml.available`。
-- [x] 将 `skills.json` 备份为 `skills.json.legacy`。
-- [x] 将旧布局伴随的 `skills-lock.json` 备份为 `skills-lock.json.legacy` 后移除原文件。
-- [x] 从 app 配置中移除 `agent_config.skills.installed[]`。
-- [x] 迁移失败时写入 `migration-failed.lock`，不删除旧文件。
-- [x] 生成 `skill_migration` 审计事件，记录新旧路径与结果。
-
-### 9. Phase B 测试
-
-- [x] 集成测试：命令式安装后目录落在 `skills/<id>/`。
-- [x] 集成测试：手动拷贝目录后下一次扫描可见。
-- [x] 集成测试：删除目录后下一次扫描不可见。
-- [x] 集成测试：禁用状态通过 `skill.toml.available=false` 持久化。
-- [x] 集成测试：旧 `<id>/<version>` 布局自动迁移。
-- [x] 集成测试：迁移失败保留旧文件并写入失败锁。
+1. 先实现 Memory 独立模型配置，阻断继续复用主模型。
+2. 进入下一轮规划，补充新的 TODO 后再继续开发。
 
 ---
 
-## P2 - Phase C：外围命令、UI 与一致性修复
+## 文档同步要求
 
-### 10. 刷新与 GC 命令
+后续实现上述任一缺口时，需要同步更新：
 
-- [x] 新增 Tauri command：`refresh_skills()`。
-- [x] 新增 Tauri command：`gc_skills()`。
-- [x] 新增 CLI 子命令：`tiangong skill refresh`。
-- [x] 新增 CLI 子命令：`tiangong skill gc`。
-- [x] `gc_skills()` 能识别 orphan `skill::*::*` MCP server。
-- [x] `gc_skills()` 能识别 `mcp-lock.json` 中无 Skill 引用的孤儿锁条目。
-- [x] GC 默认只报告，用户确认后才删除 MCP server 或递减引用计数。
-
-### 11. Skill 激活期 MCP 缺失处理
-
-- [x] 从 `skills/<id>/skill.toml` 的 `[mcp]` / `requires.mcp` 读取托管 MCP 声明。
-- [x] 手动安装 Skill 时不自动安装 MCP。
-- [x] 激活时发现缺失托管 MCP，返回 `SkillActivationError::MissingMcp`。
-- [x] GUI/CLI 收到缺失 MCP 错误后提示用户确认补装。
-- [x] 托管 MCP server 命名继续使用 `skill::<id>::<mcp_id>`。
-
-### 12. UI 管理面板懒加载
-
-- [x] Skill 列表页只调用轻量 `list_skills()`。
-- [x] 打开详情时调用 `get_skill_detail(id)`。
-- [x] 列表页展示非法目录 / orphan MCP 的非阻塞告警。
-- [x] 启停开关直接写 `skill.toml.available`。
-- [x] 手动拷贝 Skill 后点击刷新即可出现，无需重启。
-
-### 13. `skill doctor` 诊断工具
-
-- [x] 新增 CLI 子命令：`tiangong skill doctor`。
-- [x] 诊断缺失 `skill.toml` 的目录。
-- [x] 诊断目录名与 `skill.toml.id` 不一致。
-- [x] 诊断 `SKILL.md` 缺失或 entry 指向不存在。
-- [x] 诊断托管 MCP 引用缺失或孤儿。
-
----
-
-## P3 - Phase D：清理与文档
-
-### 14. 删除旧注册机制
-
-- [x] 删除 `skills-lock.json` 相关 Skill 注册读写代码（仅保留旧布局迁移备份）。
-- [x] 删除 `skills.json.installed[]` 作为注册事实源的代码路径。
-- [x] 删除 `installed/<id>/<version>/` 新写入路径。
-- [x] 保留 `mcp-lock.json` 相关代码。
-- [x] 清理不再使用的类型、字段和迁移兼容分支。
-
-### 15. 文档与示例更新
-
-- [x] 更新用户文档：手动安装 Skill = 拷贝目录到 `~/.tiangong/skills/<id>/`。
-- [x] 更新开发文档：`skill.toml.available` 字段语义。
-- [x] 更新示例 Skill 为新平铺布局。
-- [x] 更新 Tauri command 契约说明。
-- [x] 更新 RFC-0003 中被 RFC-0007 修订的章节引用。
-
-### 16. `.legacy` 备份清理
-
-- [x] `tiangong skill gc` 支持列出超过 30 天的 `.legacy` 备份。
-- [x] 用户确认后清理过期 `.legacy` 文件。
-- [x] 保证 GC 清理失败不影响主程序启动或 Skill 激活。
-
----
-
-## 当前推荐执行顺序
-
-1. 先同步 `PLAN.md` 和 `docs/requirements.md`，确认 RFC-0007 已进入当前开发主线。
-2. 实现 Phase A 的数据结构、manifest `available` 字段、轻量扫描和按需加载。
-3. 为 Phase A 补齐单元测试，确保无需改动 UI 即可验证核心行为。
-4. 再改造 SkillService 的 install/remove/enable/list/get 主链路。
-5. 最后处理迁移器、GC、Tauri/CLI/UI 外围能力。
-
----
-
-## 验收标准
-
-- [x] `skills/<id>/` 目录存在性唯一决定 Skill 是否安装。
-- [x] 手动拷贝/删除 Skill 目录后，下一次扫描或激活可立即感知。
-- [x] `skill.toml.available` 完整表达 Skill 启停状态。
-- [x] `SKILL.md` 仅在激活、详情查看或检索命中时读入内存。
-- [x] 从 RFC-0003 旧布局到 RFC-0007 新布局可自动迁移，失败可回退。
-- [x] `mcp-lock.json` 引用计数与所有 Skill 声明的 MCP 依赖汇总一致。
-- [x] `tiangong skill gc` 可清理删除 Skill 后遗留的孤儿 MCP 托管条目。
+- `docs/requirements.md`
+- `docs/memory-system/README.md`
+- `docs/memory-system/09-分阶段落地路径.md`
+- `docs/memory-system/11-当前开发状态与接手指南.md`
+- `docs/memory-system/12-缺口清单与专用MemoryLLM.md`

@@ -1,11 +1,19 @@
+use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
 use std::time::Duration;
 
 use serial_test::serial;
 use tempfile::TempDir;
 use tiangong_memory::{
-    Episode, EpisodeOutcome, LeaderState, ManagedMemory, ProcessType, RecallAnchors,
-    read_leader_info, start_or_connect,
+    Episode, EpisodeOutcome, LeaderState, ManagedMemory, MemoryHandle, ProcessType, RecallAnchors,
+    memory_service_name, read_leader_info, start_or_connect,
 };
+
+const MULTIPROCESS_CHILD_ROLE_ENV: &str = "TIANGONG_MEMORY_MULTIPROCESS_CHILD_ROLE";
+const MULTIPROCESS_CHILD_WORKSPACE_ENV: &str = "TIANGONG_MEMORY_MULTIPROCESS_CHILD_WORKSPACE";
+const MULTIPROCESS_READY_PREFIX: &str = "TIANGONG_MEMORY_CHILD_READY";
 
 struct EnvGuard {
     prev_home: Option<std::ffi::OsString>,
@@ -106,6 +114,94 @@ async fn follower_continues_memory_after_leader_disappears() {
     log_step("测试完成：自动接续链路验证通过");
 }
 
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn gui_cli_server_processes_share_one_workspace_leader() {
+    let home = TempDir::new().expect("创建 fake home 失败");
+    let _env = EnvGuard::enter(home.path());
+    let workspace_id = format!("ws-multiprocess-{}", scru128::new());
+
+    log_step(format!(
+        "多进程验证开始：home={} workspace={workspace_id}",
+        home.path().display()
+    ));
+
+    let mut children = Vec::new();
+    let mut ready_states = Vec::new();
+    for role in ["cli", "gui", "server"] {
+        let (child, ready) = spawn_multiprocess_child(home.path(), &workspace_id, role);
+        log_step(format!(
+            "子进程就绪：role={} state={} title={}",
+            ready.role, ready.state, ready.title
+        ));
+        children.push(child);
+        ready_states.push(ready);
+    }
+
+    let leader_count = ready_states
+        .iter()
+        .filter(|ready| ready.state == "leader")
+        .count();
+    assert_eq!(
+        leader_count, 1,
+        "GUI + CLI + Server 同一 workspace 只能产生一个 leader"
+    );
+    assert!(
+        ready_states.iter().any(|ready| ready.state == "follower"),
+        "至少一个入口应作为 follower 连接已有 leader"
+    );
+
+    let service = memory_service_name(Some(&workspace_id));
+    let remote_handle = MemoryHandle::connect_tcp(&service)
+        .await
+        .expect("父进程应能连接多进程 leader");
+
+    for ready in &ready_states {
+        assert_handle_recall_contains(
+            &remote_handle,
+            &format!("multiprocess {}", ready.role),
+            &ready.title,
+        )
+        .await;
+    }
+
+    drop(children);
+    log_step("多进程验证完成：三个入口共享同一 workspace leader 且写入可召回");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn multiprocess_memory_actor_child_entry() {
+    let Ok(role) = std::env::var(MULTIPROCESS_CHILD_ROLE_ENV) else {
+        return;
+    };
+    let workspace_id =
+        std::env::var(MULTIPROCESS_CHILD_WORKSPACE_ENV).expect("子进程缺少 workspace 环境变量");
+    let process_type = process_type_for_role(&role);
+    let memory = start_or_connect(Some(workspace_id.clone()), process_type)
+        .await
+        .expect("子进程启动或连接 Memory 失败");
+
+    let state = if memory.is_leader() {
+        "leader"
+    } else {
+        "follower"
+    };
+    let title = format!("multiprocess {role} memory write");
+    memory.handle().write_episode(
+        make_episode(
+            &format!("session-multiprocess-{role}"),
+            &title,
+            &format!("multiprocess {role} writes through {state} memory handle"),
+            vec!["multiprocess".to_string(), role.clone(), state.to_string()],
+        ),
+        Some(workspace_id),
+    );
+
+    println!("{MULTIPROCESS_READY_PREFIX} role={role} state={state} title={title}");
+    std::io::stdout().flush().expect("刷新子进程输出失败");
+    tokio::time::sleep(Duration::from_secs(30)).await;
+}
+
 fn make_episode(session_id: &str, title: &str, summary: &str, keywords: Vec<String>) -> Episode {
     Episode::new(
         session_id.to_string(),
@@ -116,6 +212,112 @@ fn make_episode(session_id: &str, title: &str, summary: &str, keywords: Vec<Stri
         vec!["memory_failover_integration".to_string()],
         0.9,
     )
+}
+
+#[derive(Debug)]
+struct ChildReady {
+    role: String,
+    state: String,
+    title: String,
+}
+
+struct MultiprocessChild {
+    child: Child,
+}
+
+impl Drop for MultiprocessChild {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn spawn_multiprocess_child(
+    home: &Path,
+    workspace_id: &str,
+    role: &str,
+) -> (MultiprocessChild, ChildReady) {
+    let exe = std::env::current_exe().expect("读取当前测试二进制失败");
+    let mut child = Command::new(exe)
+        .arg("--exact")
+        .arg("multiprocess_memory_actor_child_entry")
+        .arg("--nocapture")
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env(MULTIPROCESS_CHILD_ROLE_ENV, role)
+        .env(MULTIPROCESS_CHILD_WORKSPACE_ENV, workspace_id)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap_or_else(|err| panic!("启动 {role} 子进程失败: {err}"));
+
+    let stdout = child.stdout.take().expect("子进程 stdout 未开启");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            match line {
+                Ok(line) if line.contains(MULTIPROCESS_READY_PREFIX) => {
+                    let _ = tx.send(parse_child_ready_line(&line));
+                    return;
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    let _ = tx.send(Err(format!("读取子进程输出失败: {err}")));
+                    return;
+                }
+            }
+        }
+        let _ = tx.send(Err("子进程退出前未输出 ready 状态".to_string()));
+    });
+
+    let ready = match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(ready)) => ready,
+        Ok(Err(err)) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{role} 子进程 ready 失败: {err}");
+        }
+        Err(err) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{role} 子进程 ready 超时: {err}");
+        }
+    };
+    (MultiprocessChild { child }, ready)
+}
+
+fn parse_child_ready_line(line: &str) -> Result<ChildReady, String> {
+    let start = line
+        .find(MULTIPROCESS_READY_PREFIX)
+        .ok_or_else(|| format!("ready 行缺少前缀: {line}"))?;
+    let fields = line[start + MULTIPROCESS_READY_PREFIX.len()..].trim();
+    let role = parse_ready_field(fields, "role")?;
+    let state = parse_ready_field(fields, "state")?;
+    let title = fields
+        .split_once("title=")
+        .map(|(_, title)| title.trim().to_string())
+        .filter(|title| !title.is_empty())
+        .ok_or_else(|| format!("ready 行缺少 title: {line}"))?;
+    Ok(ChildReady { role, state, title })
+}
+
+fn parse_ready_field(fields: &str, key: &str) -> Result<String, String> {
+    fields
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix(&format!("{key}=")))
+        .map(ToString::to_string)
+        .ok_or_else(|| format!("ready 行缺少 {key}: {fields}"))
+}
+
+fn process_type_for_role(role: &str) -> ProcessType {
+    match role {
+        "cli" => ProcessType::Cli,
+        "gui" => ProcessType::Gui,
+        "server" => ProcessType::Server,
+        other => panic!("未知多进程角色: {other}"),
+    }
 }
 
 async fn wait_until_leader(memory: &ManagedMemory) {
@@ -171,6 +373,39 @@ async fn assert_recall_contains(memory: &ManagedMemory, query: &str, expected_ti
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("未召回预期记忆：query={query}, title={expected_title}");
+}
+
+async fn assert_handle_recall_contains(handle: &MemoryHandle, query: &str, expected_title: &str) {
+    for attempt in 0..30 {
+        let hits = handle
+            .recall(
+                RecallAnchors {
+                    query: query.to_string(),
+                    keywords: Vec::new(),
+                    strategy: None,
+                },
+                8,
+            )
+            .await;
+        if attempt == 0 || !hits.is_empty() {
+            let titles = hits
+                .iter()
+                .map(|hit| format!("{}({:.3})", hit.title, hit.score))
+                .collect::<Vec<_>>()
+                .join(", ");
+            log_step(format!(
+                "父进程召回检查：query={query} attempt={} hits=[{}]",
+                attempt + 1,
+                titles
+            ));
+        }
+        if hits.iter().any(|hit| hit.title.contains(expected_title)) {
+            log_step(format!("父进程召回命中预期记忆：title={expected_title}"));
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("父进程未召回预期记忆：query={query}, title={expected_title}");
 }
 
 fn log_step(message: impl AsRef<str>) {

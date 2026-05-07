@@ -183,6 +183,7 @@ mod tests {
         MemoryNode {
             id: "node-1".to_string(),
             kind: MemoryKind::Episode,
+            memory_type: crate::types::MemoryCognitiveType::Factual,
             scope_type: MemoryScopeType::Workspace,
             scope_id: Some("ws-1".to_string()),
             title: "Fix login timeout".to_string(),

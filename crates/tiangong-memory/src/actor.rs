@@ -38,7 +38,11 @@ impl MemoryActor {
     /// 启动 Actor 消息循环
     pub(crate) async fn run(mut self) {
         self.store
-            .try_enable_vector(self.options.embedding.as_ref(), self.options.vector_mode)
+            .try_enable_recall_engine(
+                self.options.embedding.as_ref(),
+                self.options.rerank.as_ref(),
+                self.options.vector_mode,
+            )
             .await;
         tracing::info!("Memory Actor 已启动");
         loop {
@@ -93,6 +97,45 @@ impl MemoryActor {
                 }
             }
 
+            MemoryCommand::UpsertManualMemory { draft, reply } => {
+                let result = if draft.id.as_deref().is_some_and(|id| !id.trim().is_empty()) {
+                    self.store.update_manual_memory(draft).await
+                } else {
+                    self.store.upsert_manual_memory(draft).await
+                }
+                .map_err(|err| err.to_string());
+                let _ = reply.send(result);
+            }
+
+            MemoryCommand::SetNodeStatus {
+                node_id,
+                status,
+                reply,
+            } => {
+                let result = self
+                    .store
+                    .set_node_status(&node_id, status)
+                    .await
+                    .map_err(|err| err.to_string());
+                let _ = reply.send(result);
+            }
+
+            MemoryCommand::UpsertRelation { draft, reply } => {
+                let result = self
+                    .store
+                    .upsert_relation(draft)
+                    .map_err(|err| err.to_string());
+                let _ = reply.send(result);
+            }
+
+            MemoryCommand::DeleteRelation { relation_id, reply } => {
+                let result = self
+                    .store
+                    .delete_relation(&relation_id)
+                    .map_err(|err| err.to_string());
+                let _ = reply.send(result);
+            }
+
             // Phase C：双引擎召回（Tantivy BM25 + Qdrant 语义）
             MemoryCommand::Recall {
                 anchors,
@@ -115,6 +158,21 @@ impl MemoryActor {
 
             MemoryCommand::LoadDepth2 { node_ids, reply } => {
                 let items = self.store.load_depth2(&node_ids);
+                let _ = reply.send(items);
+            }
+
+            MemoryCommand::ListNodes { query, reply } => {
+                let items = self.store.list_nodes(&query);
+                let _ = reply.send(items);
+            }
+
+            MemoryCommand::ListRelations { node_id, reply } => {
+                let items = self.store.list_relations(&node_id);
+                let _ = reply.send(items);
+            }
+
+            MemoryCommand::ListRelationsBatch { node_ids, reply } => {
+                let items = self.store.list_relations_batch(&node_ids);
                 let _ = reply.send(items);
             }
 
@@ -156,7 +214,7 @@ impl MemoryActor {
 
             // Phase D 实现
             MemoryCommand::RunMetaRumination => {
-                if let Err(e) = rumination::process_meta(&mut self.store) {
+                if let Err(e) = rumination::process_meta(&mut self.store).await {
                     tracing::warn!("Meta 反刍失败: {}", e);
                 }
             }
@@ -185,7 +243,11 @@ impl MemoryActor {
         }
 
         self.store
-            .reconfigure_vector_index(options.embedding.as_ref(), options.vector_mode)
+            .reconfigure_recall_engine(
+                options.embedding.as_ref(),
+                options.rerank.as_ref(),
+                options.vector_mode,
+            )
             .await;
         self.options = options;
         tracing::info!("Memory Actor 配置热更新完成");

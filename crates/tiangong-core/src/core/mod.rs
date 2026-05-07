@@ -42,8 +42,8 @@ static MEMORY_HANDLES: OnceLock<Mutex<HashMap<String, MemoryRegistryEntry>>> = O
 
 const GLOBAL_MEMORY_WORKSPACE_KEY: &str = "__global__";
 
-#[derive(Clone)]
 struct MemoryRegistryEntry {
+    managed: tiangong_memory::ManagedMemory,
     handle: tiangong_memory::MemoryHandle,
     workspace_id: Option<String>,
     config_summary: MemoryConfigSummary,
@@ -57,6 +57,7 @@ struct MemoryRegistryEntry {
 struct MemoryConfigSummary {
     model: Option<MemoryModelSummary>,
     embedding: Option<MemoryEmbeddingSummary>,
+    rerank: Option<MemoryRerankSummary>,
     vector_mode: String,
 }
 
@@ -75,11 +76,25 @@ struct MemoryEmbeddingSummary {
     dimension: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemoryRerankSummary {
+    base_url: String,
+    model: String,
+    protocol: String,
+}
+
+struct WorkerMemoryContext {
+    handle: Option<tiangong_memory::MemoryHandle>,
+    workspace_id: Option<String>,
+    process_type: tiangong_memory::ProcessType,
+}
+
 /// 获取或初始化 workspace 级 Memory Handle。
 fn get_or_init_memory(
     config: &CoreConfig,
     config_generation: u64,
     workspace_id: Option<String>,
+    process_type: tiangong_memory::ProcessType,
 ) -> Option<tiangong_memory::MemoryHandle> {
     let key = memory_registry_key(workspace_id.as_deref());
     let options = config.to_memory_options(workspace_id.clone());
@@ -88,8 +103,8 @@ fn get_or_init_memory(
     let mut guard = match registry.lock() {
         Ok(guard) => guard,
         Err(err) => {
-            tracing::warn!("Memory Handle registry 已污染，跳过 Memory 启动: {}", err);
-            return None;
+            tracing::warn!("Memory Handle registry 已污染，尝试恢复: {}", err);
+            err.into_inner()
         }
     };
     if let Some(entry) = guard.get_mut(&key) {
@@ -135,13 +150,16 @@ fn get_or_init_memory(
         return Some(entry.handle.clone());
     }
 
-    match tiangong_memory::start_with_options(options) {
-        Ok(handle) => {
-            tracing::info!(workspace_id = ?workspace_id, "Memory Actor 已启动");
+    match start_or_connect_memory(options, process_type) {
+        Ok(managed) => {
+            let handle = managed.handle();
+            let is_leader = managed.is_leader();
+            tracing::info!(workspace_id = ?workspace_id, is_leader, "Memory 已启动或连接");
             let now = now_text();
             guard.insert(
                 key,
                 MemoryRegistryEntry {
+                    managed,
                     handle: handle.clone(),
                     workspace_id,
                     config_summary,
@@ -154,9 +172,379 @@ fn get_or_init_memory(
             Some(handle)
         }
         Err(err) => {
-            tracing::warn!(workspace_id = ?workspace_id, "Memory Actor 启动失败（非致命）: {}", err);
+            tracing::warn!(workspace_id = ?workspace_id, "Memory 启动或连接失败（非致命）: {}", err);
             None
         }
+    }
+}
+
+async fn get_or_init_memory_async(
+    config: &CoreConfig,
+    config_generation: u64,
+    workspace_id: Option<String>,
+    process_type: tiangong_memory::ProcessType,
+) -> Option<tiangong_memory::MemoryHandle> {
+    let key = memory_registry_key(workspace_id.as_deref());
+    let options = config.to_memory_options(workspace_id.clone());
+    let config_summary = memory_config_summary_from_options(&options);
+    let registry = MEMORY_HANDLES.get_or_init(|| Mutex::new(HashMap::new()));
+
+    let existing = {
+        let mut guard = match registry.lock() {
+            Ok(guard) => guard,
+            Err(err) => {
+                tracing::warn!("Memory Handle registry 已污染，尝试恢复: {}", err);
+                err.into_inner()
+            }
+        };
+        if let Some(entry) = guard.get_mut(&key) {
+            entry.last_used_at = now_text();
+            let summary_changed = memory_config_changed(&entry.config_summary, &config_summary);
+            let generation_changed = entry.config_generation != config_generation;
+            if generation_changed {
+                entry.config_generation = config_generation;
+            }
+            let handle = entry.handle.clone();
+            if summary_changed
+                && memory_config_can_update_in_place(&entry.config_summary, &config_summary)
+            {
+                Some((handle, true))
+            } else {
+                if summary_changed {
+                    entry.restart_required = true;
+                    tracing::warn!(
+                        workspace_id = ?entry.workspace_id,
+                        created_at = %entry.created_at,
+                        last_used_at = %entry.last_used_at,
+                        "Memory 配置变化需要重启 actor，当前继续复用旧 handle 并标记待重启"
+                    );
+                }
+                Some((handle, false))
+            }
+        } else {
+            None
+        }
+    };
+
+    if let Some((handle, should_reconfigure)) = existing {
+        if should_reconfigure {
+            match handle.reconfigure(options).await {
+                Ok(()) => {
+                    let mut guard = match registry.lock() {
+                        Ok(guard) => guard,
+                        Err(err) => {
+                            tracing::warn!("Memory Handle registry 已污染，尝试恢复: {}", err);
+                            err.into_inner()
+                        }
+                    };
+                    if let Some(entry) = guard.get_mut(&key)
+                        && entry.handle.is_same_handle(&handle)
+                    {
+                        entry.config_summary = config_summary;
+                        entry.restart_required = false;
+                        tracing::info!(
+                            workspace_id = ?entry.workspace_id,
+                            created_at = %entry.created_at,
+                            last_used_at = %entry.last_used_at,
+                            "Memory 配置已原地热更新"
+                        );
+                    }
+                }
+                Err(err) => {
+                    let mut guard = match registry.lock() {
+                        Ok(guard) => guard,
+                        Err(err) => {
+                            tracing::warn!("Memory Handle registry 已污染，尝试恢复: {}", err);
+                            err.into_inner()
+                        }
+                    };
+                    if let Some(entry) = guard.get_mut(&key)
+                        && entry.handle.is_same_handle(&handle)
+                    {
+                        entry.restart_required = true;
+                        tracing::warn!(
+                            workspace_id = ?entry.workspace_id,
+                            created_at = %entry.created_at,
+                            last_used_at = %entry.last_used_at,
+                            "Memory 配置热更新失败，继续复用旧 handle 并标记待重启: {}", err
+                        );
+                    }
+                }
+            }
+        }
+        return Some(handle);
+    }
+
+    match tiangong_memory::start_or_connect_with_options(options, process_type).await {
+        Ok(managed) => {
+            let handle = managed.handle();
+            let is_leader = managed.is_leader();
+            tracing::info!(workspace_id = ?workspace_id, is_leader, "Memory 已启动或连接");
+            let mut guard = match registry.lock() {
+                Ok(guard) => guard,
+                Err(err) => {
+                    tracing::warn!("Memory Handle registry 已污染，尝试恢复: {}", err);
+                    err.into_inner()
+                }
+            };
+            if let Some(entry) = guard.get_mut(&key) {
+                entry.last_used_at = now_text();
+                return Some(entry.handle.clone());
+            }
+            let now = now_text();
+            guard.insert(
+                key,
+                MemoryRegistryEntry {
+                    managed,
+                    handle: handle.clone(),
+                    workspace_id,
+                    config_summary,
+                    config_generation,
+                    created_at: now.clone(),
+                    last_used_at: now,
+                    restart_required: false,
+                },
+            );
+            Some(handle)
+        }
+        Err(err) => {
+            tracing::warn!(workspace_id = ?workspace_id, "Memory 启动或连接失败（非致命）: {}", err);
+            None
+        }
+    }
+}
+
+fn start_or_connect_memory(
+    options: tiangong_memory::MemoryOptions,
+    process_type: tiangong_memory::ProcessType,
+) -> anyhow::Result<tiangong_memory::ManagedMemory> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return std::thread::Builder::new()
+            .name("memory-start-or-connect".to_string())
+            .spawn(move || start_or_connect_memory_blocking(options, process_type))?
+            .join()
+            .map_err(|_| anyhow::anyhow!("Memory 启动线程 panic"))?;
+    }
+    start_or_connect_memory_blocking(options, process_type)
+}
+
+fn start_or_connect_memory_blocking(
+    options: tiangong_memory::MemoryOptions,
+    process_type: tiangong_memory::ProcessType,
+) -> anyhow::Result<tiangong_memory::ManagedMemory> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(tiangong_memory::start_or_connect_with_options(
+        options,
+        process_type,
+    ))
+}
+
+/// 获取或初始化 workspace 级 Memory Handle，供 GUI/Server 侧管理入口复用。
+pub fn get_or_init_memory_handle(
+    config_provider: &CoreConfigProvider,
+    workspace_id: Option<String>,
+) -> Option<tiangong_memory::MemoryHandle> {
+    let config = config_provider.snapshot();
+    get_or_init_memory(
+        &config,
+        config_provider.generation(),
+        workspace_id,
+        tiangong_memory::ProcessType::Gui,
+    )
+}
+
+/// 异步获取或初始化 workspace 级 Memory Handle，供 Tauri async command 复用。
+pub async fn get_or_init_memory_handle_async(
+    config_provider: &CoreConfigProvider,
+    workspace_id: Option<String>,
+) -> Option<tiangong_memory::MemoryHandle> {
+    let config = config_provider.snapshot();
+    get_or_init_memory_async(
+        &config,
+        config_provider.generation(),
+        workspace_id,
+        tiangong_memory::ProcessType::Gui,
+    )
+    .await
+}
+
+/// 通过 Core 读取 Memory 独立配置，供 GUI 配置页展示。
+pub fn load_memory_config() -> tiangong_memory::MemoryConfig {
+    tiangong_memory::MemoryConfig::load_or_default()
+}
+
+/// 通过 Core 保存 Memory 独立配置，避免 GUI 入口直接操作 Memory 配置文件。
+pub fn save_memory_config(config: tiangong_memory::MemoryConfig) -> anyhow::Result<()> {
+    config.save()
+}
+
+/// 根据当前会话工作目录解析 Memory workspace id。
+pub fn memory_workspace_id_from_cwd(cwd: &str) -> Option<String> {
+    resolve_memory_workspace_id(cwd)
+}
+
+/// GUI Memory 管理：列出当前 workspace 的记忆节点。
+pub async fn list_memory_nodes_for_gui(
+    config_provider: &CoreConfigProvider,
+    workspace_id: Option<String>,
+    query: Option<String>,
+    status: Option<String>,
+    limit: Option<usize>,
+) -> anyhow::Result<Vec<tiangong_memory::MemoryNode>> {
+    let status = parse_memory_status(status.as_deref())?;
+    let handle = get_or_init_memory_handle_async(config_provider, workspace_id.clone())
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Memory 未启动或初始化失败"))?;
+    Ok(handle
+        .list_nodes(tiangong_memory::MemoryListQuery {
+            workspace_id,
+            query,
+            status,
+            limit: limit.unwrap_or(100),
+        })
+        .await)
+}
+
+/// GUI Memory 管理：手动新增或调整一条记忆。
+pub async fn upsert_manual_memory_for_gui(
+    config_provider: &CoreConfigProvider,
+    workspace_id: Option<String>,
+    mut draft: tiangong_memory::ManualMemoryDraft,
+) -> anyhow::Result<tiangong_memory::MemoryNode> {
+    if draft.title.trim().is_empty() {
+        anyhow::bail!("记忆标题不能为空");
+    }
+    if draft.summary.trim().is_empty() {
+        anyhow::bail!("记忆内容不能为空");
+    }
+    if draft.workspace_id.is_none() {
+        draft.workspace_id = workspace_id.clone();
+    }
+    let handle = get_or_init_memory_handle_async(config_provider, workspace_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Memory 未启动或初始化失败"))?;
+    handle.upsert_manual_memory(draft).await
+}
+
+/// GUI Memory 管理：归档或恢复记忆节点。
+pub async fn set_memory_node_status_for_gui(
+    config_provider: &CoreConfigProvider,
+    workspace_id: Option<String>,
+    node_id: String,
+    status: String,
+) -> anyhow::Result<()> {
+    let status = match status.as_str() {
+        "active" => tiangong_memory::MemoryStatus::Active,
+        "archived" => tiangong_memory::MemoryStatus::Archived,
+        other => anyhow::bail!("不支持的记忆状态：{other}"),
+    };
+    let handle = get_or_init_memory_handle_async(config_provider, workspace_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Memory 未启动或初始化失败"))?;
+    handle.set_node_status(node_id, status).await
+}
+
+/// GUI Memory 管理：列出指定记忆节点的图关系。
+pub async fn list_memory_relations_for_gui(
+    config_provider: &CoreConfigProvider,
+    workspace_id: Option<String>,
+    node_id: String,
+) -> anyhow::Result<Vec<tiangong_memory::MemoryRelation>> {
+    if node_id.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let handle = get_or_init_memory_handle_async(config_provider, workspace_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Memory 未启动或初始化失败"))?;
+    Ok(handle.list_relations(node_id).await)
+}
+
+/// GUI Memory 管理：批量列出多个记忆节点的关联关系。
+pub async fn list_memory_relations_batch_for_gui(
+    config_provider: &CoreConfigProvider,
+    workspace_id: Option<String>,
+    node_ids: Vec<String>,
+) -> anyhow::Result<Vec<tiangong_memory::MemoryRelation>> {
+    let valid_ids = node_ids
+        .into_iter()
+        .filter(|id| !id.trim().is_empty())
+        .collect::<Vec<_>>();
+    if valid_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let handle = get_or_init_memory_handle_async(config_provider, workspace_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Memory 未启动或初始化失败"))?;
+    Ok(handle.list_relations_batch(valid_ids).await)
+}
+
+/// GUI Memory 管理：新增或调整记忆图关系。
+pub async fn upsert_memory_relation_for_gui(
+    config_provider: &CoreConfigProvider,
+    workspace_id: Option<String>,
+    draft: tiangong_memory::MemoryRelationDraft,
+) -> anyhow::Result<tiangong_memory::MemoryRelation> {
+    if draft.from_node_id.trim().is_empty() || draft.to_node_id.trim().is_empty() {
+        anyhow::bail!("关联的起点和终点记忆不能为空");
+    }
+    if draft.from_node_id == draft.to_node_id {
+        anyhow::bail!("记忆不能关联到自身");
+    }
+    let handle = get_or_init_memory_handle_async(config_provider, workspace_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Memory 未启动或初始化失败"))?;
+    handle.upsert_relation(draft).await
+}
+
+/// GUI Memory 管理：删除记忆图关系。
+pub async fn delete_memory_relation_for_gui(
+    config_provider: &CoreConfigProvider,
+    workspace_id: Option<String>,
+    relation_id: String,
+) -> anyhow::Result<()> {
+    if relation_id.trim().is_empty() {
+        return Ok(());
+    }
+    let handle = get_or_init_memory_handle_async(config_provider, workspace_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Memory 未启动或初始化失败"))?;
+    handle.delete_relation(relation_id).await
+}
+
+/// GUI Memory 管理：手动测试记忆召回，不写入会话消息链。
+pub async fn test_memory_recall_for_gui(
+    config_provider: &CoreConfigProvider,
+    workspace_id: Option<String>,
+    query: String,
+    limit: Option<usize>,
+) -> anyhow::Result<Vec<tiangong_memory::RecallHit>> {
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let handle = get_or_init_memory_handle_async(config_provider, workspace_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Memory 未启动或初始化失败"))?;
+    Ok(handle
+        .recall(
+            tiangong_memory::RecallAnchors {
+                keywords: Vec::new(),
+                query,
+                strategy: None,
+            },
+            limit.unwrap_or(8),
+        )
+        .await)
+}
+
+fn parse_memory_status(
+    status: Option<&str>,
+) -> anyhow::Result<Option<tiangong_memory::MemoryStatus>> {
+    match status {
+        Some("archived") => Ok(Some(tiangong_memory::MemoryStatus::Archived)),
+        Some("active") | None | Some("") => Ok(Some(tiangong_memory::MemoryStatus::Active)),
+        Some(other) => anyhow::bail!("不支持的记忆状态：{other}"),
     }
 }
 
@@ -165,8 +553,8 @@ fn memory_config_changed(running: &MemoryConfigSummary, latest: &MemoryConfigSum
 }
 
 #[cfg(test)]
-fn memory_config_summary(config: &CoreConfig) -> MemoryConfigSummary {
-    let options = config.to_memory_options(None);
+fn memory_config_summary(_config: &CoreConfig) -> MemoryConfigSummary {
+    let options = tiangong_memory::MemoryConfig::load_or_default().to_options(None);
     memory_config_summary_from_options(&options)
 }
 
@@ -188,6 +576,11 @@ fn memory_config_summary_from_options(
                 protocol: format!("{:?}", embedding.protocol),
                 dimension: embedding.dimension,
             }),
+        rerank: options.rerank.as_ref().map(|rerank| MemoryRerankSummary {
+            base_url: rerank.base_url.clone(),
+            model: rerank.model.clone(),
+            protocol: format!("{:?}", rerank.protocol),
+        }),
         vector_mode: format!("{:?}", options.vector_mode),
     }
 }
@@ -217,18 +610,36 @@ pub fn shutdown_memory_registry_blocking() {
         return;
     };
     let entries = match registry.lock() {
-        Ok(mut guard) => guard
-            .drain()
-            .map(|(_, entry)| entry.handle)
-            .collect::<Vec<_>>(),
+        Ok(mut guard) => guard.drain().map(|(_, entry)| entry).collect::<Vec<_>>(),
         Err(err) => {
-            tracing::warn!("Memory Handle registry 已污染，无法统一关闭: {}", err);
-            return;
+            tracing::warn!("Memory Handle registry 已污染，尝试恢复后统一关闭: {}", err);
+            err.into_inner()
+                .drain()
+                .map(|(_, entry)| entry)
+                .collect::<Vec<_>>()
         }
     };
     if entries.is_empty() {
         return;
     }
+    if tokio::runtime::Handle::try_current().is_ok() {
+        match std::thread::Builder::new()
+            .name("memory-shutdown".to_string())
+            .spawn(move || shutdown_memory_entries_blocking(entries))
+        {
+            Ok(join) => {
+                if join.join().is_err() {
+                    tracing::warn!("Memory shutdown 线程 panic");
+                }
+            }
+            Err(err) => tracing::warn!("Memory shutdown 线程创建失败: {}", err),
+        }
+        return;
+    }
+    shutdown_memory_entries_blocking(entries);
+}
+
+fn shutdown_memory_entries_blocking(entries: Vec<MemoryRegistryEntry>) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -240,8 +651,10 @@ pub fn shutdown_memory_registry_blocking() {
         }
     };
     runtime.block_on(async move {
-        for handle in entries {
-            handle.shutdown().await;
+        for entry in entries {
+            if entry.managed.is_leader() {
+                entry.handle.shutdown().await;
+            }
         }
     });
 }
@@ -294,8 +707,20 @@ pub struct TiangongCore {
 impl TiangongCore {
     /// 创建新对话
     pub fn new(config: CoreConfigProvider, stream_tx: Sender<SessionStreamEvent>) -> Self {
+        Self::new_for_process(config, stream_tx, tiangong_memory::ProcessType::Cli)
+    }
+
+    pub fn new_for_cli(config: CoreConfigProvider, stream_tx: Sender<SessionStreamEvent>) -> Self {
+        Self::new_for_process(config, stream_tx, tiangong_memory::ProcessType::Cli)
+    }
+
+    pub fn new_for_process(
+        config: CoreConfigProvider,
+        stream_tx: Sender<SessionStreamEvent>,
+        process_type: tiangong_memory::ProcessType,
+    ) -> Self {
         let session = Session::new("新对话");
-        Self::with_session(config, session, stream_tx)
+        Self::with_session_for_process(config, session, stream_tx, process_type)
     }
 
     /// 从已有 session 创建
@@ -304,12 +729,54 @@ impl TiangongCore {
         session: Session,
         stream_tx: Sender<SessionStreamEvent>,
     ) -> Self {
+        Self::with_session_for_process(
+            config,
+            session,
+            stream_tx,
+            tiangong_memory::ProcessType::Cli,
+        )
+    }
+
+    pub fn with_session_for_gui(
+        config: CoreConfigProvider,
+        session: Session,
+        stream_tx: Sender<SessionStreamEvent>,
+    ) -> Self {
+        Self::with_session_for_process(
+            config,
+            session,
+            stream_tx,
+            tiangong_memory::ProcessType::Gui,
+        )
+    }
+
+    pub fn with_session_for_server(
+        config: CoreConfigProvider,
+        session: Session,
+        stream_tx: Sender<SessionStreamEvent>,
+    ) -> Self {
+        Self::with_session_for_process(
+            config,
+            session,
+            stream_tx,
+            tiangong_memory::ProcessType::Server,
+        )
+    }
+
+    /// 从已有 session 创建，并显式标记入口进程类型。
+    pub fn with_session_for_process(
+        config: CoreConfigProvider,
+        session: Session,
+        stream_tx: Sender<SessionStreamEvent>,
+        process_type: tiangong_memory::ProcessType,
+    ) -> Self {
         let config_snapshot = config.snapshot();
         let memory_workspace_id = resolve_memory_workspace_id(&session.cwd);
         let memory_handle = get_or_init_memory(
             &config_snapshot,
             config.generation(),
             memory_workspace_id.clone(),
+            process_type.clone(),
         );
         let initial_trust_mode = config_snapshot.trust_mode;
         let shared_trust_mode = Arc::new(RwLock::new(initial_trust_mode));
@@ -317,15 +784,20 @@ impl TiangongCore {
         let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel::<Command>();
 
         let worker_trust_mode = shared_trust_mode.clone();
+        let worker_process_type = process_type.clone();
         let worker = thread::spawn(move || {
+            let memory = WorkerMemoryContext {
+                handle: memory_handle,
+                workspace_id: memory_workspace_id,
+                process_type: worker_process_type,
+            };
             worker_loop(
                 config,
                 session,
                 stream_tx,
                 cmd_rx,
                 worker_trust_mode,
-                memory_handle,
-                memory_workspace_id,
+                memory,
             )
         });
 
@@ -434,8 +906,7 @@ fn worker_loop(
     external_tx: StdSender<SessionStreamEvent>,
     cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
-    memory_handle: Option<tiangong_memory::MemoryHandle>,
-    memory_workspace_id: Option<String>,
+    memory: WorkerMemoryContext,
 ) -> Session {
     // 在专用的 tokio runtime 上运行 async 工作循环，
     // 使 execute_turn_inner 可以用 select! + stream_function_calls 实现真正取消。
@@ -453,8 +924,7 @@ fn worker_loop(
         external_tx,
         cmd_rx,
         shared_trust_mode,
-        memory_handle,
-        memory_workspace_id,
+        memory,
     ))
 }
 
@@ -465,8 +935,7 @@ async fn worker_loop_async(
     external_tx: StdSender<SessionStreamEvent>,
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
-    mut memory_handle: Option<tiangong_memory::MemoryHandle>,
-    mut memory_workspace_id: Option<String>,
+    mut memory: WorkerMemoryContext,
 ) -> Session {
     let session_id = session.id.clone();
     let mut last_cfg_gen = 0u64;
@@ -515,7 +984,13 @@ async fn worker_loop_async(
         let cfg_gen = config.generation();
         if engine.is_none() || cfg_gen != last_cfg_gen {
             let cfg = config.snapshot();
-            memory_handle = get_or_init_memory(&cfg, cfg_gen, memory_workspace_id.clone());
+            memory.handle = get_or_init_memory_async(
+                &cfg,
+                cfg_gen,
+                memory.workspace_id.clone(),
+                memory.process_type.clone(),
+            )
+            .await;
             engine = Some(build_engine_from_config(
                 &cfg,
                 &stream_tx,
@@ -528,7 +1003,7 @@ async fn worker_loop_async(
                 .filter(|t| t.name != "mark_step_completed")
                 .collect();
             inject_enhanced_tools(&mut new_tools, e);
-            if memory_handle.is_some() {
+            if memory.handle.is_some() {
                 inject_memory_recall_tool(&mut new_tools);
             }
             tools = new_tools;
@@ -540,10 +1015,15 @@ async fn worker_loop_async(
             Command::UpdateCwd { cwd } => {
                 session.cwd = cwd;
                 apply_session_cwd(&session);
-                memory_workspace_id = resolve_memory_workspace_id(&session.cwd);
+                memory.workspace_id = resolve_memory_workspace_id(&session.cwd);
                 let cfg = config.snapshot();
-                memory_handle =
-                    get_or_init_memory(&cfg, config.generation(), memory_workspace_id.clone());
+                memory.handle = get_or_init_memory_async(
+                    &cfg,
+                    config.generation(),
+                    memory.workspace_id.clone(),
+                    memory.process_type.clone(),
+                )
+                .await;
                 continue;
             }
             Command::ReloadConfig => {
@@ -579,16 +1059,16 @@ async fn worker_loop_async(
                     &mcp_targets,
                     &stream_tx,
                     &mut cmd_rx,
-                    memory_handle.as_ref(),
+                    memory.handle.as_ref(),
                 )
                 .await;
 
                 // turn 完成后触发 Micro 反刍（fire-and-forget）
-                if let Some(handle) = memory_handle.as_ref() {
+                if let Some(handle) = memory.handle.as_ref() {
                     // 显式携带 workspace_id，避免 Actor 固化到启动时工作区造成跨工作区串写
                     let mut turn_result =
                         build_memory_turn_result(&session, turn_start_idx, &content);
-                    turn_result.workspace_id = memory_workspace_id.clone();
+                    turn_result.workspace_id = memory.workspace_id.clone();
                     handle.run_micro_rumination(turn_result);
 
                     // 每 10 个 turn 触发一次 Meta 反刍（归档低活跃节点）
@@ -636,8 +1116,8 @@ async fn worker_loop_async(
 
     // 会话结束 → 触发 Meso 反刍（提炼 Entity/Decision，更新 Workspace Injection）
     // fire-and-forget：handle 仍可使用（Memory Actor 在 registry 中持续运行）
-    if let Some(handle) = memory_handle.as_ref()
-        && let Some(wid) = &memory_workspace_id
+    if let Some(handle) = memory.handle.as_ref()
+        && let Some(wid) = &memory.workspace_id
     {
         handle.run_meso_rumination(session_id.clone(), wid.clone());
         tracing::info!(session_id = %session_id, workspace_id = %wid, "Meso 反刍已触发（会话结束）");
@@ -3393,25 +3873,34 @@ mod tests {
 
     #[test]
     fn memory_config_summary_tracks_memory_relevant_fields() {
-        let config = memory_test_config(768, "embedded");
+        let _lock = memory_registry_test_lock();
+        let _env = MemoryRegistryEnvGuard::enter();
+        write_memory_test_config(768, tiangong_memory::MemoryVectorMode::Embedded);
+        let config = CoreConfig::default();
         let summary = memory_config_summary(&config);
 
         let model = summary.model.as_ref().expect("应包含 memory model 摘要");
-        assert_eq!(model.base_url, "http://chat.example");
-        assert_eq!(model.model, "chat-model");
+        assert_eq!(model.base_url, "http://memory.example");
+        assert_eq!(model.model, "memory-model");
         let embedding = summary.embedding.as_ref().expect("应包含 embedding 摘要");
         assert_eq!(embedding.base_url, "http://embed.example");
         assert_eq!(embedding.model, "embed-model");
         assert_eq!(embedding.dimension, 768);
+        let rerank = summary.rerank.as_ref().expect("应包含 rerank 摘要");
+        assert_eq!(rerank.base_url, "http://rerank.example");
+        assert_eq!(rerank.model, "rerank-model");
         assert_eq!(summary.vector_mode, "Embedded");
 
-        let changed_dimension = memory_config_summary(&memory_test_config(1024, "embedded"));
+        write_memory_test_config(1024, tiangong_memory::MemoryVectorMode::Embedded);
+        let changed_dimension = memory_config_summary(&CoreConfig::default());
         assert!(memory_config_changed(&summary, &changed_dimension));
 
-        let changed_vector_mode = memory_config_summary(&memory_test_config(768, "disabled"));
+        write_memory_test_config(768, tiangong_memory::MemoryVectorMode::Disabled);
+        let changed_vector_mode = memory_config_summary(&CoreConfig::default());
         assert!(memory_config_changed(&summary, &changed_vector_mode));
 
-        let same_memory_config = memory_config_summary(&memory_test_config(768, "embedded"));
+        write_memory_test_config(768, tiangong_memory::MemoryVectorMode::Embedded);
+        let same_memory_config = memory_config_summary(&CoreConfig::default());
         assert!(!memory_config_changed(&summary, &same_memory_config));
         assert!(memory_config_can_update_in_place(
             &summary,
@@ -3429,12 +3918,27 @@ mod tests {
         let workspace_a = format!("ws-registry-a-{}", scru128::new());
         let workspace_b = format!("ws-registry-b-{}", scru128::new());
 
-        let handle_a = get_or_init_memory(&config, 1, Some(workspace_a.clone()))
-            .expect("workspace A memory handle 应启动成功");
-        let handle_a_again = get_or_init_memory(&config, 1, Some(workspace_a))
-            .expect("workspace A memory handle 应可复用");
-        let handle_b = get_or_init_memory(&config, 1, Some(workspace_b))
-            .expect("workspace B memory handle 应启动成功");
+        let handle_a = get_or_init_memory(
+            &config,
+            1,
+            Some(workspace_a.clone()),
+            tiangong_memory::ProcessType::Cli,
+        )
+        .expect("workspace A memory handle 应启动成功");
+        let handle_a_again = get_or_init_memory(
+            &config,
+            1,
+            Some(workspace_a),
+            tiangong_memory::ProcessType::Cli,
+        )
+        .expect("workspace A memory handle 应可复用");
+        let handle_b = get_or_init_memory(
+            &config,
+            1,
+            Some(workspace_b),
+            tiangong_memory::ProcessType::Cli,
+        )
+        .expect("workspace B memory handle 应启动成功");
 
         assert!(
             handle_a.is_same_handle(&handle_a_again),
@@ -3448,6 +3952,40 @@ mod tests {
         shutdown_memory_registry_blocking();
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn memory_registry_async_path_starts_or_connects_inside_runtime() {
+        let _lock = memory_registry_test_lock();
+        let _env = MemoryRegistryEnvGuard::enter();
+        shutdown_memory_registry_blocking();
+
+        let config = CoreConfig::default();
+        let workspace = format!("ws-async-registry-{}", scru128::new());
+        let handle = get_or_init_memory_async(
+            &config,
+            1,
+            Some(workspace.clone()),
+            tiangong_memory::ProcessType::Gui,
+        )
+        .await
+        .expect("tokio runtime 内应能初始化 MemoryHandle");
+        let same_handle = get_or_init_memory_async(
+            &config,
+            1,
+            Some(workspace),
+            tiangong_memory::ProcessType::Gui,
+        )
+        .await
+        .expect("tokio runtime 内应能复用 MemoryHandle");
+
+        assert!(
+            handle.is_same_handle(&same_handle),
+            "异步路径应复用同一个 workspace MemoryHandle"
+        );
+
+        shutdown_memory_registry_blocking();
+    }
+
     #[test]
     fn memory_registry_hot_updates_memory_config_in_place() {
         let _lock = memory_registry_test_lock();
@@ -3456,13 +3994,24 @@ mod tests {
 
         let workspace = format!("ws-hot-update-{}", scru128::new());
         let initial = CoreConfig::default();
-        let updated = memory_test_config(1024, "embedded");
-        let expected_summary = memory_config_summary(&updated);
+        let initial_handle = get_or_init_memory(
+            &initial,
+            1,
+            Some(workspace.clone()),
+            tiangong_memory::ProcessType::Cli,
+        )
+        .expect("初始 MemoryHandle 应启动成功");
 
-        let initial_handle = get_or_init_memory(&initial, 1, Some(workspace.clone()))
-            .expect("初始 MemoryHandle 应启动成功");
-        let updated_handle = get_or_init_memory(&updated, 2, Some(workspace.clone()))
-            .expect("MemoryHandle 应支持热更新后继续可用");
+        write_memory_test_config(1024, tiangong_memory::MemoryVectorMode::Embedded);
+        let updated = CoreConfig::default();
+        let expected_summary = memory_config_summary(&updated);
+        let updated_handle = get_or_init_memory(
+            &updated,
+            2,
+            Some(workspace.clone()),
+            tiangong_memory::ProcessType::Cli,
+        )
+        .expect("MemoryHandle 应支持热更新后继续可用");
 
         assert!(
             initial_handle.is_same_handle(&updated_handle),
@@ -3495,12 +4044,13 @@ mod tests {
             &initial_snapshot,
             provider.generation(),
             Some(workspace.clone()),
+            tiangong_memory::ProcessType::Cli,
         )
         .expect("初始 MemoryHandle 应启动成功");
 
-        let hot_config = memory_test_config(2048, "embedded");
+        write_memory_test_config(2048, tiangong_memory::MemoryVectorMode::Embedded);
         provider.update(|config| {
-            config.llm = hot_config.llm.clone();
+            config.context_limit += 1;
         });
         let updated_snapshot = provider.snapshot();
         let expected_summary = memory_config_summary(&updated_snapshot);
@@ -3508,6 +4058,7 @@ mod tests {
             &updated_snapshot,
             provider.generation(),
             Some(workspace.clone()),
+            tiangong_memory::ProcessType::Cli,
         )
         .expect("配置热重载后 MemoryHandle 应继续可用");
 
@@ -3539,25 +4090,30 @@ mod tests {
         shutdown_memory_registry_blocking();
     }
 
-    fn memory_test_config(dimension: usize, vector_mode: &str) -> CoreConfig {
-        let mut config = CoreConfig::default();
-        config.llm.chat = crate::core_config::ModelEndpoint {
-            base_url: "http://chat.example".to_string(),
-            api_key: "secret".to_string(),
-            model: "chat-model".to_string(),
-            ..Default::default()
-        };
-        config.llm.embedding = Some(crate::core_config::ModelEndpoint {
-            base_url: "http://embed.example".to_string(),
-            api_key: "secret".to_string(),
-            model: "embed-model".to_string(),
-            options: serde_json::json!({
-                "dimension": dimension,
-                "vector_mode": vector_mode,
+    fn write_memory_test_config(dimension: usize, vector_mode: tiangong_memory::MemoryVectorMode) {
+        let config = tiangong_memory::MemoryConfig {
+            model: Some(tiangong_memory::MemoryLlmConfig {
+                base_url: "http://memory.example".to_string(),
+                api_key: "secret".to_string(),
+                model: "memory-model".to_string(),
+                ..Default::default()
             }),
-            ..Default::default()
-        });
-        config
+            embedding: Some(tiangong_memory::MemoryEmbeddingConfig {
+                base_url: "http://embed.example".to_string(),
+                api_key: "secret".to_string(),
+                model: "embed-model".to_string(),
+                dimension,
+                ..Default::default()
+            }),
+            rerank: Some(tiangong_memory::MemoryRerankConfig {
+                base_url: "http://rerank.example".to_string(),
+                api_key: "secret".to_string(),
+                model: "rerank-model".to_string(),
+                ..Default::default()
+            }),
+            vector_mode,
+        };
+        config.save().expect("写入 Memory 测试配置失败");
     }
 
     struct MemoryRegistryEnvGuard {

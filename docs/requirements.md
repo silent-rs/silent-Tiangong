@@ -30,10 +30,11 @@
 - Provider 层只定义连接信息（`base_url`、`api_key`、`timeout_ms`），可被多个模型共享。
 - Provider 层必须支持声明请求协议类型，至少包含 `openai_compatible` 与 `anthropic` 两种协议；未显式配置时默认按 `openai_compatible` 处理。
 - Model 层引用 Provider，声明实际模型 ID 和能力列表（`capabilities`），携带专属参数（`options`）。
-- 能力类型包括：`chat`（常规对话/推理）、`multimodal`（多模态理解）、`image_generation`（图片生成）、`video_generation`（视频生成）、`stt`（语音识别）、`tts`（语音合成）。
+- 能力类型包括：`chat`（常规对话/推理）、`lite`（轻量文本）、`multimodal`（多模态理解）、`embedding`（通用向量嵌入）、`rerank`（通用结果重排）、`image_generation`（图片生成）、`video_generation`（视频生成）、`stt`（语音识别）、`tts`（语音合成）。
 - 一个模型可声明多种能力（如 gpt-4o 同时支持 chat 和 multimodal）。
-- 必须通过 `routing` 表为每种能力指定默认使用的模型。
+- `routing` 表只管理对话和多媒体运行能力的默认模型，不包含 `embedding` 和 `rerank`。
 - `chat` 为基础必选能力，routing 中未配置 `chat` 时程序必须在所有模式（GUI/CLI/Server）下持续提示用户完成模型设置，在设置完成前不执行对话任务。
+- Memory 模型配置不属于主 `models.json` routing；前端必须放在 LLM 配置下，通过已有 Models 选择 Memory LLM、Embedding、Rerank，并由后端解析后写入 `~/.tiangong/memory/config.json`。其中 `embedding` 和 `rerank` 只作为 Models 能力标签供 Memory 选择，不进入 Routing 页。
 - 其余能力（multimodal/image_generation/video_generation/stt/tts）未在 routing 中配置时视为关闭，对应功能不可用但不影响其他功能正常运行。
 - 当配置 `multimodal` routing 时，GUI 输入区必须开放图片/文件附件入口；包含任意附件或图片路径的用户消息必须优先路由到多模态模型，先由多模态模型解析附件后再回答，并将本地附件转换为模型协议可识别的内容。
 - `api_key` 必须支持环境变量引用（`${ENV_VAR}` 语法），避免明文存储。
@@ -104,13 +105,25 @@
 #### Memory 系统
 - Memory 功能必须可关闭，未启动或启动失败时主对话链路必须降级继续运行。
 - Memory 必须保持独立 crate，不能依赖 `tiangong-core` 或 UI 层。
-- Memory 必须复用 `tiangong-llm` 的文本生成与 embedding 能力，不在内部重复实现模型配置和 Provider 协议适配。
+- Memory 必须复用 `tiangong-llm` 的文本生成、embedding 与 rerank 能力，不在内部重复实现 Provider 协议适配。
+- Memory runtime 的模型配置必须独立于主对话 routing，由 `tiangong-memory` 自己定义配置类型并持久化到 `~/.tiangong/memory/config.json`；GUI 配置入口位于 LLM 配置下，模型选择复用主 LLM 的 Provider/Model 定义。
+- Memory 的文本生成必须使用独立 Memory LLM 配置，不得使用主 `chat` 模型或轻量 `lite` 模型作为隐式回退；未配置专用 Memory LLM 时，Memory 相关 LLM 步骤必须降级为规则策略并记录可诊断日志。
 - Memory 必须支持主模型按需调用的 Tool 化回忆，不能在每个 turn 前强制自动注入 recall 结果。
 - Memory 收到 Tool 化回忆刺激后，必须先执行初始回忆，再基于初始结果判断是否需要 deep recall，不能把一次 `recall_memory` 调用等同为深度回忆。
 - Memory 必须支持 workspace 隔离，长生命周期 GUI/Server 进程不得把不同 workspace 的记忆写入同一 scope。
+- GUI、CLI、Server 必须通过 Memory leader election / IPC 获取当前 workspace 的 Memory handle；同一 workspace 只能有一个 leader，不同 workspace 的 leader 运行文件必须相互隔离。
 - Memory 必须支持产物记忆，至少覆盖媒体 URL、文件路径、工具结果摘要和可继续使用的产物引用。
+- GUI 必须提供 Memory 手动管理界面，允许用户查看当前 workspace 的记忆、手动新增或调整记忆摘要、归档记忆，并执行手动召回测试。
+- 手动新增或调整的记忆必须通过 Memory Actor 写入，保证 SQLite、Tantivy 和可用向量索引一致；召回测试不得写入会话消息链。
+- Memory 必须围绕 8 类核心记忆展开能力：事实性记忆、用户偏好记忆、用户习惯性记忆、技能型记忆、项目结构记忆、架构决策记忆、问题与故障记忆、领域知识记忆。
+- Memory 必须具备类似图数据库的关系结构，允许不同记忆节点之间建立有向关系边，并在 deep recall 中沿关系边加载邻接记忆以支持深入回忆。
+- GUI Memory 手动管理界面必须支持设置记忆类型、维护记忆之间的关联关系，并以高性能图谱渲染库展示当前 workspace 的圆形记忆节点和连接线；所有写入必须通过 Memory Actor，避免绕过 SQLite/索引一致性边界。
 - Memory 必须具备独立集成测试，覆盖写入、召回、IPC、workspace 隔离、混合检索、产物记忆和配置热更新。
 - Memory recall 输出必须有统一预算和去重策略，避免重复当前上下文、重复 URL、重复路径或重复工具结果摘要。
+- Memory 归档必须同步 SQLite 状态、Tantivy、内置向量索引和可选外部 Qdrant，避免已归档记忆继续被召回。
+- Meta 反刍必须覆盖低活跃记忆、失效文件路径、过期产物 URL 和项目归档标记，并输出可观测计数。
+- Workspace Index 必须支持最小文件树索引、Rust `mod/fn/struct/enum/trait` 符号索引、按 workspace 隔离查询和单文件增量更新。
+- Tool 化回忆在返回长期记忆时应能补充相关 workspace 文件和符号线索；没有历史记忆但存在相关文件线索时，也应返回 workspace index 结果。
 
 #### 工作空间与文件操作边界
 - Desktop 模式必须支持在界面中设置当前会话工作空间。

@@ -6,4 +6,4 @@ mod provider;
 mod stream;
 
 pub use config::OpenAiCompatibleConfig;
-pub use provider::OpenAiCompatibleProvider;
+pub use provider::{OpenAiCompatibleProvider, OpenAiCompatibleRerankProvider};

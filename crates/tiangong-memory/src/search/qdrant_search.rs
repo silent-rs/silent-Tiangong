@@ -6,8 +6,8 @@
 use anyhow::{Context, Result};
 use qdrant_client::Qdrant;
 use qdrant_client::qdrant::{
-    CreateCollectionBuilder, Distance, PointStruct, SearchPointsBuilder, UpsertPointsBuilder,
-    VectorParamsBuilder,
+    CreateCollectionBuilder, DeletePointsBuilder, Distance, PointStruct, SearchPointsBuilder,
+    UpsertPointsBuilder, VectorParamsBuilder,
 };
 
 use crate::search::vector::VectorIndex;
@@ -204,8 +204,15 @@ impl VectorIndex for QdrantIndex {
         self.search_points(query_vector, limit).await
     }
 
-    async fn delete(&self, _node_id: &str) -> Result<()> {
-        // Qdrant 删除将在后续归档链路中补齐；当前归档仍以 SQLite/Tantivy 为主。
+    async fn delete(&self, node_id: &str) -> Result<()> {
+        self.client
+            .delete_points(
+                DeletePointsBuilder::new(&self.collection_name)
+                    .points([hash_id_to_u64(node_id)])
+                    .wait(true),
+            )
+            .await
+            .with_context(|| format!("Qdrant 删除节点失败: {node_id}"))?;
         Ok(())
     }
 }
