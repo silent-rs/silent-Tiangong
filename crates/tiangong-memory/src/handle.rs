@@ -76,6 +76,30 @@ impl MemoryHandle {
         }
     }
 
+    /// 异步热更新 Memory Actor 配置。
+    pub async fn reconfigure(&self, options: MemoryOptions) -> Result<()> {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+                tx.send(MemoryCommand::Reconfigure {
+                    options: Box::new(options),
+                    reply: reply_tx,
+                })
+                .await
+                .with_context(|| "发送 Memory 热更新命令失败")?;
+                tokio::task::spawn_blocking(move || {
+                    reply_rx
+                        .recv_timeout(Duration::from_secs(30))
+                        .with_context(|| "等待 Memory 热更新结果超时或失败")?
+                        .map_err(|err| anyhow!(err))
+                })
+                .await
+                .with_context(|| "等待 Memory 热更新任务失败")?
+            }
+            HandleInner::Remote { .. } => Err(anyhow!("远程 MemoryHandle 暂不支持配置热更新")),
+        }
+    }
+
     /// 加载注入上下文（查询，等待响应）
     pub async fn load_injection(
         &self,

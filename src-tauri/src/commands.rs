@@ -382,12 +382,11 @@ fn parse_video_url_assets(output: &str) -> Vec<tiangong_types::MediaAsset> {
 
 fn extract_video_urls_from_json(value: &serde_json::Value, urls: &mut Vec<String>) {
     match value {
-        serde_json::Value::String(s) => {
+        serde_json::Value::String(s)
             if (s.starts_with("http://") || s.starts_with("https://"))
-                && (s.contains(".mp4") || s.contains("video"))
-            {
-                urls.push(s.clone());
-            }
+                && (s.contains(".mp4") || s.contains("video")) =>
+        {
+            urls.push(s.clone());
         }
         serde_json::Value::Object(map) => {
             for v in map.values() {
@@ -2053,7 +2052,7 @@ pub fn set_models_config(
 /// 获取 Memory 独立模型配置
 #[tauri::command]
 pub fn get_memory_config(state: State<TiangongApp>) -> Result<MemoryConfigView, String> {
-    let config = tiangong_memory::MemoryConfig::load_or_default();
+    let config = tiangong_core::core::load_memory_config();
     state.with_state_read(|core_state| {
         Ok(MemoryConfigView::from_memory(
             &config,
@@ -2073,7 +2072,7 @@ pub fn set_memory_config(
             .to_memory(core_state.models_config())
             .map_err(anyhow::Error::msg)
     })?;
-    memory_config.save().map_err(|err| err.to_string())?;
+    tiangong_core::core::save_memory_config(memory_config).map_err(|err| err.to_string())?;
     state.sync_core_config_from_state()?;
     Ok(())
 }
@@ -2084,16 +2083,8 @@ fn current_memory_workspace_id(state: &State<TiangongApp>) -> Result<Option<Stri
     if trimmed.is_empty() {
         Ok(None)
     } else {
-        Ok(Some(tiangong_memory::workspace_id_from_path(
-            &std::path::PathBuf::from(trimmed),
-        )))
+        Ok(tiangong_core::core::memory_workspace_id_from_cwd(trimmed))
     }
-}
-
-fn current_memory_handle(state: &State<TiangongApp>) -> Result<tiangong_memory::MemoryHandle, String> {
-    let workspace_id = current_memory_workspace_id(state)?;
-    tiangong_core::core::get_or_init_memory_handle(&state.config, workspace_id)
-        .ok_or_else(|| "Memory 未启动或初始化失败".to_string())
 }
 
 /// 列出当前 workspace 的记忆节点。
@@ -2105,26 +2096,21 @@ pub async fn list_memory_nodes(
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<tiangong_memory::MemoryNode>, String> {
     let workspace_id = current_memory_workspace_id(&state)?;
-    let status = match status.as_deref() {
-        Some("archived") => Some(tiangong_memory::MemoryStatus::Archived),
-        Some("active") | None | Some("") => Some(tiangong_memory::MemoryStatus::Active),
-        Some(other) => return Err(format!("不支持的记忆状态：{other}")),
-    };
-    let handle = current_memory_handle(&state)?;
-    Ok(handle
-        .list_nodes(tiangong_memory::MemoryListQuery {
-            workspace_id,
-            query,
-            status,
-            limit: limit.unwrap_or(100),
-        })
-        .await)
+    tiangong_core::core::list_memory_nodes_for_gui(
+        &state.config,
+        workspace_id,
+        query,
+        status,
+        limit,
+    )
+    .await
+    .map_err(|err| err.to_string())
 }
 
 /// 手动新增或调整一条记忆。
 #[tauri::command]
 pub async fn upsert_manual_memory(
-    mut draft: tiangong_memory::ManualMemoryDraft,
+    draft: tiangong_memory::ManualMemoryDraft,
     state: State<'_, TiangongApp>,
 ) -> Result<tiangong_memory::MemoryNode, String> {
     if draft.title.trim().is_empty() {
@@ -2133,12 +2119,8 @@ pub async fn upsert_manual_memory(
     if draft.summary.trim().is_empty() {
         return Err("记忆内容不能为空".to_string());
     }
-    if draft.workspace_id.is_none() {
-        draft.workspace_id = current_memory_workspace_id(&state)?;
-    }
-    let handle = current_memory_handle(&state)?;
-    handle
-        .upsert_manual_memory(draft)
+    let workspace_id = current_memory_workspace_id(&state)?;
+    tiangong_core::core::upsert_manual_memory_for_gui(&state.config, workspace_id, draft)
         .await
         .map_err(|err| err.to_string())
 }
@@ -2150,14 +2132,13 @@ pub async fn set_memory_node_status(
     status: String,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
-    let status = match status.as_str() {
-        "active" => tiangong_memory::MemoryStatus::Active,
-        "archived" => tiangong_memory::MemoryStatus::Archived,
-        other => return Err(format!("不支持的记忆状态：{other}")),
-    };
-    let handle = current_memory_handle(&state)?;
-    handle
-        .set_node_status(node_id, status)
+    let workspace_id = current_memory_workspace_id(&state)?;
+    tiangong_core::core::set_memory_node_status_for_gui(
+        &state.config,
+        workspace_id,
+        node_id,
+        status,
+    )
         .await
         .map_err(|err| err.to_string())
 }
@@ -2168,11 +2149,10 @@ pub async fn list_memory_relations(
     node_id: String,
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<tiangong_memory::MemoryRelation>, String> {
-    if node_id.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    let handle = current_memory_handle(&state)?;
-    Ok(handle.list_relations(node_id).await)
+    let workspace_id = current_memory_workspace_id(&state)?;
+    tiangong_core::core::list_memory_relations_for_gui(&state.config, workspace_id, node_id)
+        .await
+        .map_err(|err| err.to_string())
 }
 
 /// 批量列出多个记忆节点的关联关系（去重，修复 N+1 性能问题）。
@@ -2181,12 +2161,14 @@ pub async fn list_memory_relations_batch(
     node_ids: Vec<String>,
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<tiangong_memory::MemoryRelation>, String> {
-    let valid_ids: Vec<String> = node_ids.into_iter().filter(|id| !id.trim().is_empty()).collect();
-    if valid_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let handle = current_memory_handle(&state)?;
-    Ok(handle.list_relations_batch(valid_ids).await)
+    let workspace_id = current_memory_workspace_id(&state)?;
+    tiangong_core::core::list_memory_relations_batch_for_gui(
+        &state.config,
+        workspace_id,
+        node_ids,
+    )
+    .await
+    .map_err(|err| err.to_string())
 }
 
 /// 新增或调整记忆图关系。
@@ -2195,15 +2177,8 @@ pub async fn upsert_memory_relation(
     draft: tiangong_memory::MemoryRelationDraft,
     state: State<'_, TiangongApp>,
 ) -> Result<tiangong_memory::MemoryRelation, String> {
-    if draft.from_node_id.trim().is_empty() || draft.to_node_id.trim().is_empty() {
-        return Err("关联的起点和终点记忆不能为空".to_string());
-    }
-    if draft.from_node_id == draft.to_node_id {
-        return Err("记忆不能关联到自身".to_string());
-    }
-    let handle = current_memory_handle(&state)?;
-    handle
-        .upsert_relation(draft)
+    let workspace_id = current_memory_workspace_id(&state)?;
+    tiangong_core::core::upsert_memory_relation_for_gui(&state.config, workspace_id, draft)
         .await
         .map_err(|err| err.to_string())
 }
@@ -2214,12 +2189,12 @@ pub async fn delete_memory_relation(
     relation_id: String,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
-    if relation_id.trim().is_empty() {
-        return Ok(());
-    }
-    let handle = current_memory_handle(&state)?;
-    handle
-        .delete_relation(relation_id)
+    let workspace_id = current_memory_workspace_id(&state)?;
+    tiangong_core::core::delete_memory_relation_for_gui(
+        &state.config,
+        workspace_id,
+        relation_id,
+    )
         .await
         .map_err(|err| err.to_string())
 }
@@ -2231,20 +2206,10 @@ pub async fn test_memory_recall(
     limit: Option<usize>,
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<tiangong_memory::RecallHit>, String> {
-    if query.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    let handle = current_memory_handle(&state)?;
-    Ok(handle
-        .recall(
-            tiangong_memory::RecallAnchors {
-                keywords: Vec::new(),
-                query,
-                strategy: None,
-            },
-            limit.unwrap_or(8),
-        )
-        .await)
+    let workspace_id = current_memory_workspace_id(&state)?;
+    tiangong_core::core::test_memory_recall_for_gui(&state.config, workspace_id, query, limit)
+        .await
+        .map_err(|err| err.to_string())
 }
 
 /// 获取所有可用的模型能力列表
