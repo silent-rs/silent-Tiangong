@@ -105,7 +105,7 @@
 #### Memory 系统
 - Memory 功能必须可关闭，未启动或启动失败时主对话链路必须降级继续运行。
 - Memory 必须保持独立 crate，不能依赖 `tiangong-core` 或 UI 层。
-- Memory 必须复用 `tiangong-llm` 的文本生成与 embedding 能力，不在内部重复实现 Provider 协议适配。
+- Memory 必须复用 `tiangong-llm` 的文本生成、embedding 与 rerank 能力，不在内部重复实现 Provider 协议适配。
 - Memory runtime 的模型配置必须独立于主对话 routing，由 `tiangong-memory` 自己定义配置类型并持久化到 `~/.tiangong/memory/config.json`；GUI 配置入口位于 LLM 配置下，模型选择复用主 LLM 的 Provider/Model 定义。
 - Memory 的文本生成必须使用独立 Memory LLM 配置，不得使用主 `chat` 模型或轻量 `lite` 模型作为隐式回退；未配置专用 Memory LLM 时，Memory 相关 LLM 步骤必须降级为规则策略并记录可诊断日志。
 - Memory 必须支持主模型按需调用的 Tool 化回忆，不能在每个 turn 前强制自动注入 recall 结果。

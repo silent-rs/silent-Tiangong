@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use tiangong_llm::{EmbeddingEndpointConfig, LlmEndpointConfig, ProviderProtocol};
+use tiangong_llm::{
+    EmbeddingEndpointConfig, LlmEndpointConfig, ProviderProtocol, RerankEndpointConfig,
+};
 
 use crate::{MemoryOptions, MemoryVectorMode};
 
@@ -219,6 +221,18 @@ impl MemoryConfig {
             });
         }
 
+        if let Some(rerank) = self.rerank.as_ref().filter(|rerank| {
+            is_text_endpoint_valid(&rerank.base_url, &rerank.api_key, &rerank.model)
+        }) {
+            options = options.with_rerank(RerankEndpointConfig {
+                base_url: rerank.base_url.clone(),
+                api_key: resolve_api_key(&rerank.api_key),
+                model: rerank.model.clone(),
+                protocol: rerank.protocol,
+                timeout: Duration::from_millis(rerank.timeout_ms),
+            });
+        }
+
         options.with_vector_mode(self.vector_mode)
     }
 }
@@ -260,6 +274,7 @@ mod tests {
         assert_eq!(options.vector_mode, MemoryVectorMode::Embedded);
         assert_eq!(options.model.expect("model 应存在").model, "memory-small");
         assert_eq!(options.embedding.expect("embedding 应存在").dimension, 1024);
+        assert_eq!(options.rerank.expect("rerank 应存在").model, "bge-reranker");
     }
 
     #[test]
@@ -278,6 +293,12 @@ mod tests {
                 dimension: 0,
                 ..Default::default()
             }),
+            rerank: Some(MemoryRerankConfig {
+                base_url: "https://rerank.example/v1".into(),
+                api_key: String::new(),
+                model: "bge-reranker".into(),
+                ..Default::default()
+            }),
             ..Default::default()
         };
 
@@ -285,5 +306,6 @@ mod tests {
 
         assert!(options.model.is_none());
         assert!(options.embedding.is_none());
+        assert!(options.rerank.is_none());
     }
 }

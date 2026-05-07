@@ -43,7 +43,7 @@ Memory 系统作为独立 crate `tiangong-memory` 实现，采用 **Actor 模型
 | 向量语义层 | Embedded flat vector（默认）或 Qdrant（可选） | 语义相似度召回、跨措辞匹配 |
 | Injection 层 | Markdown 文件 | 人类可读的注入内容 |
 
-> **降级策略**：当 Memory embedding 未配置时，向量语义检索和存储自动跳过，系统降级为"SQLite + Tantivy"双层架构，仅依赖全文检索召回。
+> **降级策略**：当 Memory embedding 未配置时，向量语义检索和存储自动跳过；若配置了 rerank，则使用"SQLite + Tantivy + 模型精排"，否则降级为"SQLite + Tantivy"双层架构。
 
 ## 混合检索
 
@@ -71,6 +71,8 @@ Memory 配置中将 `vector_mode` 设为 `external_qdrant` 后，写入、召回
 ## 专用 Memory LLM
 
 Memory 内部的文本生成任务必须使用 `~/.tiangong/memory/config.json` 中的独立 Memory LLM，不得静默复用主 `chat` 模型或旧 `lite` 模型。涉及的任务包括 Episode 提取、Recall anchor 规划、Deep Recall 裁决、Recall 结果整理和 Meso Entity/Decision 提炼。
+
+Embedding 与 Rerank 也必须通过 `tiangong-llm` 的 Provider 能力接入。`tiangong-memory` 只负责读取 Memory 独立配置、初始化召回引擎和处理降级，不直接实现向量或精排服务的协议适配。
 
 当独立 Memory LLM 未配置时，Memory 只能降级到规则策略，并记录可诊断日志；主对话链路继续运行，但 Memory 的 LLM 增强能力视为关闭。
 

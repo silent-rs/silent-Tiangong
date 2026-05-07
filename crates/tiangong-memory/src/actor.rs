@@ -38,7 +38,11 @@ impl MemoryActor {
     /// 启动 Actor 消息循环
     pub(crate) async fn run(mut self) {
         self.store
-            .try_enable_vector(self.options.embedding.as_ref(), self.options.vector_mode)
+            .try_enable_recall_engine(
+                self.options.embedding.as_ref(),
+                self.options.rerank.as_ref(),
+                self.options.vector_mode,
+            )
             .await;
         tracing::info!("Memory Actor 已启动");
         loop {
@@ -239,7 +243,11 @@ impl MemoryActor {
         }
 
         self.store
-            .reconfigure_vector_index(options.embedding.as_ref(), options.vector_mode)
+            .reconfigure_recall_engine(
+                options.embedding.as_ref(),
+                options.rerank.as_ref(),
+                options.vector_mode,
+            )
             .await;
         self.options = options;
         tracing::info!("Memory Actor 配置热更新完成");

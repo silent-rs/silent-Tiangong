@@ -4,13 +4,14 @@
 //! 启动时消费的已解析参数。
 
 use serde::{Deserialize, Serialize};
-use tiangong_llm::{EmbeddingEndpointConfig, LlmEndpointConfig};
+use tiangong_llm::{EmbeddingEndpointConfig, LlmEndpointConfig, RerankEndpointConfig};
 
 #[derive(Debug, Clone, Default)]
 pub struct MemoryOptions {
     pub workspace_id: Option<String>,
     pub model: Option<LlmEndpointConfig>,
     pub embedding: Option<EmbeddingEndpointConfig>,
+    pub rerank: Option<RerankEndpointConfig>,
     pub vector_mode: MemoryVectorMode,
 }
 
@@ -20,6 +21,7 @@ impl MemoryOptions {
             workspace_id,
             model: None,
             embedding: None,
+            rerank: None,
             vector_mode: MemoryVectorMode::default(),
         }
     }
@@ -31,6 +33,11 @@ impl MemoryOptions {
 
     pub fn with_embedding(mut self, embedding: EmbeddingEndpointConfig) -> Self {
         self.embedding = Some(embedding);
+        self
+    }
+
+    pub fn with_rerank(mut self, rerank: RerankEndpointConfig) -> Self {
+        self.rerank = Some(rerank);
         self
     }
 

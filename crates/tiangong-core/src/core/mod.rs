@@ -57,6 +57,7 @@ struct MemoryRegistryEntry {
 struct MemoryConfigSummary {
     model: Option<MemoryModelSummary>,
     embedding: Option<MemoryEmbeddingSummary>,
+    rerank: Option<MemoryRerankSummary>,
     vector_mode: String,
 }
 
@@ -73,6 +74,13 @@ struct MemoryEmbeddingSummary {
     model: String,
     protocol: String,
     dimension: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemoryRerankSummary {
+    base_url: String,
+    model: String,
+    protocol: String,
 }
 
 struct WorkerMemoryContext {
@@ -568,6 +576,11 @@ fn memory_config_summary_from_options(
                 protocol: format!("{:?}", embedding.protocol),
                 dimension: embedding.dimension,
             }),
+        rerank: options.rerank.as_ref().map(|rerank| MemoryRerankSummary {
+            base_url: rerank.base_url.clone(),
+            model: rerank.model.clone(),
+            protocol: format!("{:?}", rerank.protocol),
+        }),
         vector_mode: format!("{:?}", options.vector_mode),
     }
 }
@@ -3873,6 +3886,9 @@ mod tests {
         assert_eq!(embedding.base_url, "http://embed.example");
         assert_eq!(embedding.model, "embed-model");
         assert_eq!(embedding.dimension, 768);
+        let rerank = summary.rerank.as_ref().expect("应包含 rerank 摘要");
+        assert_eq!(rerank.base_url, "http://rerank.example");
+        assert_eq!(rerank.model, "rerank-model");
         assert_eq!(summary.vector_mode, "Embedded");
 
         write_memory_test_config(1024, tiangong_memory::MemoryVectorMode::Embedded);
@@ -4089,8 +4105,13 @@ mod tests {
                 dimension,
                 ..Default::default()
             }),
+            rerank: Some(tiangong_memory::MemoryRerankConfig {
+                base_url: "http://rerank.example".to_string(),
+                api_key: "secret".to_string(),
+                model: "rerank-model".to_string(),
+                ..Default::default()
+            }),
             vector_mode,
-            ..Default::default()
         };
         config.save().expect("写入 Memory 测试配置失败");
     }

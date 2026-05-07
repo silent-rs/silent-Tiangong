@@ -8,7 +8,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use tiangong_llm::{EmbeddingEndpointConfig, EmbeddingProvider, embedding_provider_from_config};
+use tiangong_llm::{
+    EmbeddingEndpointConfig, EmbeddingProvider, RerankEndpointConfig, RerankProvider,
+    embedding_provider_from_config, rerank_provider_from_config,
+};
 
 use crate::command::InjectionLevel;
 use crate::db::MemoryDb;
@@ -65,45 +68,85 @@ impl MemoryStore {
         &mut self,
         vector_index: Box<dyn VectorIndex>,
         embedding: Arc<dyn EmbeddingProvider>,
+        rerank: Option<Arc<dyn RerankProvider>>,
     ) {
-        self.recall_engine = RecallEngine::dual(vector_index, embedding);
+        self.recall_engine = RecallEngine::dual(vector_index, embedding, rerank);
     }
 
-    /// 重新配置向量层。
+    pub(crate) fn enable_rerank_only(&mut self, rerank: Arc<dyn RerankProvider>) {
+        self.recall_engine = RecallEngine::rerank_only(rerank);
+    }
+
+    /// 重新配置召回增强层。
     ///
     /// 热更新时先回到 BM25-only，再尝试按新配置启用向量层。这样 embedding
     /// 维度或后端变化不会继续复用旧向量索引；新配置不可用时也能明确降级。
-    pub(crate) async fn reconfigure_vector_index(
+    pub(crate) async fn reconfigure_recall_engine(
         &mut self,
         embedding: Option<&EmbeddingEndpointConfig>,
+        rerank: Option<&RerankEndpointConfig>,
         vector_mode: MemoryVectorMode,
     ) {
         self.recall_engine = RecallEngine::bm25_only();
-        self.try_enable_vector(embedding, vector_mode).await;
+        self.try_enable_recall_engine(embedding, rerank, vector_mode)
+            .await;
     }
 
-    /// 基于上层传入的 embedding 配置启用向量索引。
+    /// 基于上层传入的 embedding / rerank 配置启用召回增强层。
     ///
     /// 失败时仅记录 warning，Memory 自动降级为 BM25-only。
-    pub(crate) async fn try_enable_vector(
+    pub(crate) async fn try_enable_recall_engine(
         &mut self,
         embedding: Option<&EmbeddingEndpointConfig>,
+        rerank: Option<&RerankEndpointConfig>,
         vector_mode: MemoryVectorMode,
     ) {
+        let rerank_provider = rerank.and_then(|rerank| match rerank_provider_from_config(rerank) {
+            Ok(provider) => Some(provider),
+            Err(err) => {
+                tracing::warn!("Memory rerank provider 初始化失败，跳过模型精排: {err}");
+                None
+            }
+        });
+
         let Some(embedding) = embedding else {
-            tracing::debug!("Memory embedding 未配置，使用 BM25-only 召回");
+            if let Some(rerank_provider) = rerank_provider {
+                let model = rerank_provider.model().to_string();
+                self.enable_rerank_only(rerank_provider);
+                tracing::info!(model = %model, "Memory rerank 已启用，使用 BM25 + 模型精排");
+            } else {
+                tracing::debug!("Memory embedding/rerank 未配置，使用 BM25-only 召回");
+            }
             return;
         };
 
         if embedding.dimension == 0 {
-            tracing::warn!("Memory embedding dimension 为 0，跳过向量层");
+            if let Some(rerank_provider) = rerank_provider {
+                let model = rerank_provider.model().to_string();
+                self.enable_rerank_only(rerank_provider);
+                tracing::warn!(
+                    model = %model,
+                    "Memory embedding dimension 为 0，跳过向量层，仅启用 rerank"
+                );
+            } else {
+                tracing::warn!("Memory embedding dimension 为 0，跳过向量层");
+            }
             return;
         }
 
         let embedding_provider = match embedding_provider_from_config(embedding) {
             Ok(provider) => provider,
             Err(err) => {
-                tracing::warn!("Memory embedding provider 初始化失败，跳过向量层: {err}");
+                if let Some(rerank_provider) = rerank_provider {
+                    let model = rerank_provider.model().to_string();
+                    self.enable_rerank_only(rerank_provider);
+                    tracing::warn!(
+                        model = %model,
+                        "Memory embedding provider 初始化失败，仅启用 rerank: {err}"
+                    );
+                } else {
+                    tracing::warn!("Memory embedding provider 初始化失败，跳过向量层: {err}");
+                }
                 return;
             }
         };
@@ -113,7 +156,13 @@ impl MemoryStore {
             mode => mode,
         };
         if vector_mode == MemoryVectorMode::Disabled {
-            tracing::info!("Memory 向量层已禁用，使用 BM25-only 召回");
+            if let Some(rerank_provider) = rerank_provider {
+                let model = rerank_provider.model().to_string();
+                self.enable_rerank_only(rerank_provider);
+                tracing::info!(model = %model, "Memory 向量层已禁用，使用 BM25 + 模型精排");
+            } else {
+                tracing::info!("Memory 向量层已禁用，使用 BM25-only 召回");
+            }
             return;
         }
 
@@ -122,7 +171,18 @@ impl MemoryStore {
                 match EmbeddedFlatVectorIndex::open(embedding.dimension) {
                     Ok(index) => Box::new(index),
                     Err(err) => {
-                        tracing::warn!("Memory 内置向量索引初始化失败，使用 BM25-only 召回: {err}");
+                        if let Some(rerank_provider) = rerank_provider {
+                            let model = rerank_provider.model().to_string();
+                            self.enable_rerank_only(rerank_provider);
+                            tracing::warn!(
+                                model = %model,
+                                "Memory 内置向量索引初始化失败，仅启用 rerank: {err}"
+                            );
+                        } else {
+                            tracing::warn!(
+                                "Memory 内置向量索引初始化失败，使用 BM25-only 召回: {err}"
+                            );
+                        }
                         return;
                     }
                 }
@@ -131,7 +191,16 @@ impl MemoryStore {
                 match QdrantIndex::connect(embedding.dimension).await {
                     Ok(index) => Box::new(index),
                     Err(err) => {
-                        tracing::warn!("Memory Qdrant 连接失败，使用 BM25-only 召回: {err}");
+                        if let Some(rerank_provider) = rerank_provider {
+                            let model = rerank_provider.model().to_string();
+                            self.enable_rerank_only(rerank_provider);
+                            tracing::warn!(
+                                model = %model,
+                                "Memory Qdrant 连接失败，仅启用 rerank: {err}"
+                            );
+                        } else {
+                            tracing::warn!("Memory Qdrant 连接失败，使用 BM25-only 召回: {err}");
+                        }
                         return;
                     }
                 }
@@ -140,7 +209,13 @@ impl MemoryStore {
         };
 
         if let Err(err) = vector_index.ensure_ready().await {
-            tracing::warn!("Memory 向量索引初始化失败，使用 BM25-only 召回: {err}");
+            if let Some(rerank_provider) = rerank_provider {
+                let model = rerank_provider.model().to_string();
+                self.enable_rerank_only(rerank_provider);
+                tracing::warn!(model = %model, "Memory 向量索引初始化失败，仅启用 rerank: {err}");
+            } else {
+                tracing::warn!("Memory 向量索引初始化失败，使用 BM25-only 召回: {err}");
+            }
             return;
         }
 
@@ -150,20 +225,24 @@ impl MemoryStore {
             MemoryVectorMode::Auto | MemoryVectorMode::Disabled => unreachable!(),
         };
 
-        self.enable_vector_index(vector_index, embedding_provider);
+        let rerank_model = rerank_provider
+            .as_ref()
+            .map(|provider| provider.model().to_string());
+        self.enable_vector_index(vector_index, embedding_provider, rerank_provider);
         tracing::info!(
-            "Memory 向量双引擎召回已启用: backend={} model={} dimension={} timeout_ms={}",
+            "Memory 向量双引擎召回已启用: backend={} embedding_model={} dimension={} timeout_ms={} rerank_model={}",
             backend,
             embedding.model,
             embedding.dimension,
-            embedding.timeout.as_millis()
+            embedding.timeout.as_millis(),
+            rerank_model.as_deref().unwrap_or("none")
         );
     }
 
     /// 显式启用外部 Qdrant，供后续兼容接口使用。
     #[allow(dead_code)]
     pub(crate) async fn try_enable_qdrant(&mut self, embedding: Option<&EmbeddingEndpointConfig>) {
-        self.try_enable_vector(embedding, MemoryVectorMode::ExternalQdrant)
+        self.try_enable_recall_engine(embedding, None, MemoryVectorMode::ExternalQdrant)
             .await;
     }
 

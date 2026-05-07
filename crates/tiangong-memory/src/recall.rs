@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use tiangong_llm::EmbeddingProvider;
+use tiangong_llm::{EmbeddingProvider, RerankProvider, RerankRequest};
 
 use crate::search::embedding::node_embedding_text;
 use crate::search::reranker::{Reranker, analyze_query};
@@ -19,6 +19,7 @@ use crate::types::{MemoryNode, RecallHit, SearchStrategy, VectorPoint};
 pub(crate) struct RecallEngine {
     vector_index: Option<Box<dyn VectorIndex>>,
     embedding: Option<Arc<dyn EmbeddingProvider>>,
+    rerank: Option<Arc<dyn RerankProvider>>,
 }
 
 impl RecallEngine {
@@ -27,6 +28,16 @@ impl RecallEngine {
         Self {
             vector_index: None,
             embedding: None,
+            rerank: None,
+        }
+    }
+
+    /// BM25 + 模型精排模式。
+    pub(crate) fn rerank_only(rerank: Arc<dyn RerankProvider>) -> Self {
+        Self {
+            vector_index: None,
+            embedding: None,
+            rerank: Some(rerank),
         }
     }
 
@@ -34,10 +45,12 @@ impl RecallEngine {
     pub(crate) fn dual(
         vector_index: Box<dyn VectorIndex>,
         embedding: Arc<dyn EmbeddingProvider>,
+        rerank: Option<Arc<dyn RerankProvider>>,
     ) -> Self {
         Self {
             vector_index: Some(vector_index),
             embedding: Some(embedding),
+            rerank,
         }
     }
 
@@ -96,6 +109,10 @@ impl RecallEngine {
         limit: usize,
         strategy: Option<&SearchStrategy>,
     ) -> Vec<RecallHit> {
+        if limit == 0 {
+            return Vec::new();
+        }
+
         let reranker = match strategy {
             Some(s) => Reranker::from_strategy(s),
             None => {
@@ -114,14 +131,20 @@ impl RecallEngine {
                     hit_count = bm25_hits.len().min(limit),
                     "Memory recall 使用 BM25-only 后端"
                 );
-                return bm25_hits.into_iter().take(limit).collect();
+                return self
+                    .apply_model_rerank(query, bm25_hits, limit, "bm25")
+                    .await;
             }
         };
 
         // 向量化 query
         let vectors = match emb_ref.embed(vec![query.to_string()]).await {
             Ok(v) if !v.is_empty() => v,
-            Ok(_) => return bm25_hits.into_iter().take(limit).collect(),
+            Ok(_) => {
+                return self
+                    .apply_model_rerank(query, bm25_hits, limit, "bm25_fallback")
+                    .await;
+            }
             Err(e) => {
                 tracing::warn!("Embedding 失败，退化为 BM25 召回: {}", e);
                 tracing::debug!(
@@ -130,7 +153,9 @@ impl RecallEngine {
                     hit_count = bm25_hits.len().min(limit),
                     "Memory recall 向量化失败后降级"
                 );
-                return bm25_hits.into_iter().take(limit).collect();
+                return self
+                    .apply_model_rerank(query, bm25_hits, limit, "bm25_fallback")
+                    .await;
             }
         };
 
@@ -145,23 +170,113 @@ impl RecallEngine {
                     hit_count = bm25_hits.len().min(limit),
                     "Memory recall 向量搜索失败后降级"
                 );
-                return bm25_hits.into_iter().take(limit).collect();
+                return self
+                    .apply_model_rerank(query, bm25_hits, limit, "bm25_fallback")
+                    .await;
             }
         };
 
         // 融合重排
         let bm25_count = bm25_hits.len();
         let semantic_count = semantic_hits.len();
-        let fused = reranker.fuse(bm25_hits, semantic_hits, limit);
+        let fused = reranker.fuse(bm25_hits, semantic_hits, limit.saturating_mul(2).max(limit));
+        let hit_count_before_rerank = fused.len();
+        let fused = self.apply_model_rerank(query, fused, limit, "hybrid").await;
         tracing::debug!(
             query = %query,
             backend = "hybrid",
             bm25_hit_count = bm25_count,
             semantic_hit_count = semantic_count,
+            candidate_count = hit_count_before_rerank,
             hit_count = fused.len(),
             "Memory recall 使用混合后端"
         );
         fused
+    }
+
+    async fn apply_model_rerank(
+        &self,
+        query: &str,
+        hits: Vec<RecallHit>,
+        limit: usize,
+        backend: &str,
+    ) -> Vec<RecallHit> {
+        if limit == 0 {
+            return Vec::new();
+        }
+
+        let Some(rerank) = self.rerank.as_ref() else {
+            return hits.into_iter().take(limit).collect();
+        };
+        if hits.len() <= 1 || query.trim().is_empty() {
+            return hits.into_iter().take(limit).collect();
+        }
+
+        let documents = hits
+            .iter()
+            .map(|hit| format!("{}\n{}", hit.title, hit.summary))
+            .collect::<Vec<_>>();
+        let response = match rerank
+            .rerank(RerankRequest {
+                query: query.to_string(),
+                documents,
+                top_n: limit.max(1).min(hits.len()),
+            })
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::warn!(
+                    query = %query,
+                    backend,
+                    model = %rerank.model(),
+                    "Memory rerank 失败，使用规则排序: {err}"
+                );
+                return hits.into_iter().take(limit).collect();
+            }
+        };
+
+        if response.results.is_empty() {
+            return hits.into_iter().take(limit).collect();
+        }
+
+        let mut used = std::collections::HashSet::new();
+        let mut reranked = Vec::new();
+        for result in response.results {
+            if result.index >= hits.len() || !used.insert(result.index) {
+                continue;
+            }
+            let mut hit = hits[result.index].clone();
+            hit.score = result.relevance_score;
+            reranked.push(hit);
+            if reranked.len() >= limit {
+                break;
+            }
+        }
+
+        if reranked.is_empty() {
+            return hits.into_iter().take(limit).collect();
+        }
+
+        if reranked.len() < limit {
+            for (index, hit) in hits.into_iter().enumerate() {
+                if used.insert(index) {
+                    reranked.push(hit);
+                    if reranked.len() >= limit {
+                        break;
+                    }
+                }
+            }
+        }
+
+        tracing::debug!(
+            query = %query,
+            backend,
+            model = %rerank.model(),
+            hit_count = reranked.len(),
+            "Memory recall 使用 tiangong-llm rerank 精排"
+        );
+        reranked
     }
 }
 
@@ -169,6 +284,46 @@ impl RecallEngine {
 mod tests {
     use super::*;
     use crate::types::MemoryKind;
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use tiangong_llm::{RerankResponse, RerankResult};
+
+    struct ReverseRerankProvider;
+    struct PartialRerankProvider;
+
+    #[async_trait]
+    impl RerankProvider for ReverseRerankProvider {
+        async fn rerank(&self, request: RerankRequest) -> Result<RerankResponse> {
+            let results = (0..request.documents.len())
+                .rev()
+                .map(|index| RerankResult {
+                    index,
+                    relevance_score: index as f64,
+                })
+                .collect();
+            Ok(RerankResponse { results })
+        }
+
+        fn model(&self) -> &str {
+            "reverse-rerank"
+        }
+    }
+
+    #[async_trait]
+    impl RerankProvider for PartialRerankProvider {
+        async fn rerank(&self, _request: RerankRequest) -> Result<RerankResponse> {
+            Ok(RerankResponse {
+                results: vec![RerankResult {
+                    index: 2,
+                    relevance_score: 0.9,
+                }],
+            })
+        }
+
+        fn model(&self) -> &str {
+            "partial-rerank"
+        }
+    }
 
     fn make_hits(count: usize) -> Vec<RecallHit> {
         (0..count)
@@ -216,5 +371,37 @@ mod tests {
         for (i, hit) in result.iter().enumerate() {
             assert_eq!(hit.node_id, format!("node-{i}"));
         }
+    }
+
+    #[tokio::test]
+    async fn rerank_only_uses_tiangong_llm_rerank_provider() {
+        let engine = RecallEngine::rerank_only(Arc::new(ReverseRerankProvider));
+        let hits = make_hits(4);
+        let result = engine.recall(hits, "测试查询", 3, None).await;
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].node_id, "node-3");
+        assert_eq!(result[1].node_id, "node-2");
+        assert_eq!(result[2].node_id, "node-1");
+    }
+
+    #[tokio::test]
+    async fn rerank_fills_missing_hits_with_rule_order() {
+        let engine = RecallEngine::rerank_only(Arc::new(PartialRerankProvider));
+        let hits = make_hits(4);
+        let result = engine.recall(hits, "测试查询", 3, None).await;
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].node_id, "node-2");
+        assert_eq!(result[1].node_id, "node-0");
+        assert_eq!(result[2].node_id, "node-1");
+    }
+
+    #[tokio::test]
+    async fn recall_returns_empty_when_limit_is_zero() {
+        let engine = RecallEngine::rerank_only(Arc::new(ReverseRerankProvider));
+        let result = engine.recall(make_hits(4), "测试查询", 0, None).await;
+
+        assert!(result.is_empty());
     }
 }

@@ -1,6 +1,6 @@
 # 12 - 缺口清单与专用 Memory LLM
 
-> 更新日期：2026-05-03
+> 更新日期：2026-05-07
 
 本文档记录当前 Memory 系统相对设计目标的剩余缺口，并冻结模型配置约束：Memory 内部所有模型调用必须使用独立 Memory 配置，不再复用主 `chat` 模型，也不挂在主 `models.json` routing 上。
 
@@ -23,7 +23,7 @@
 | Phase A | 已完成 | 独立 crate、Injection、SQLite、Actor/Handle 主体均可用 |
 | Phase B | 基本完成 | Episode 写入、Tantivy、IPC/election 已闭环，仍需主入口切换到选举模式 |
 | Phase C | 约 65%-75% | 内置向量索引、可选 Qdrant、Deep Recall、Meso 均已有实现，但真实模型路径和质量评测不足 |
-| Phase D | 部分推进 | Meta 生命周期和 Workspace Index 首期已落地，RerankProvider 仍待接入 |
+| Phase D | 部分推进 | Meta 生命周期、Workspace Index 首期和 RerankProvider 模型精排已落地 |
 
 ## 专用 Memory LLM 约束
 
@@ -106,6 +106,7 @@ Memory 内部文本生成任务只允许读取独立 Memory LLM 配置：
 - Tauri 已提供 `get_memory_config` / `set_memory_config`。
 - 前端已将 Memory 配置放到 LLM 配置下，并从已有 Models 中选择 Memory LLM、Embedding、Rerank。
 - EpisodeWriter、Recall anchor 规划、Deep Recall 裁决、Recall synthesis 和 Meso 提炼共享的 Memory model 来源已收口到专用 Memory LLM。
+- Embedding 与 Rerank 均通过 `tiangong-llm` Provider 接入，Memory 侧只保存独立配置并调度召回链路，不再重复实现协议适配。
 - 未配置 Memory LLM 时，MemoryOptions 不再携带文本模型，上述步骤全部走规则 fallback。
 - 已补测试禁止未配置 Memory LLM 时静默复用 `chat` 主模型或旧 `lite` 模型。
 
@@ -132,6 +133,7 @@ Memory 内部文本生成任务只允许读取独立 Memory LLM 配置：
 3. 已建立小型 recall benchmark，对比 BM25-only 与 hybrid 在固定语义样例上的命中率。
 4. Qdrant 后端已具备 connect/upsert/search/delete，归档时通过统一 `VectorIndex::delete` 清理 point。
 5. 服务配置通过 `QDRANT_URL` 和 `TIANGONG_MEMORY_QDRANT_COLLECTION` 控制，`vector_mode=external_qdrant` 时启用。
+6. Recall 已支持通过 `tiangong-llm::RerankProvider` 对 BM25 或 hybrid 候选做模型精排；Embedding 不可用时可降级为 BM25 + Rerank。
 
 验收标准：
 
@@ -171,7 +173,7 @@ Memory 内部文本生成任务只允许读取独立 Memory LLM 配置：
 1. 先实现 Memory 独立模型配置，阻断继续复用主模型。
 1. 运行 GUI + CLI + Server 的真实多进程组合验证，确认同 workspace leader/follower 行为。
 2. 补 embedded vector 的可重复测试，再处理 Qdrant 删除和服务化配置。
-3. 下一步补充 RerankProvider 和新的质量评测任务。
+3. 下一步补充 RerankProvider 真实模型质量评测和本地 ONNX embedding。
 
 ## 文档同步要求
 

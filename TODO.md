@@ -1,6 +1,6 @@
 # TODO - 天工当前开发任务
 
-> 最后更新：2026-05-06
+> 最后更新：2026-05-07
 > 当前主线：Memory 系统缺口收口
 > 参考：`PLAN.md`、`docs/requirements.md`、`docs/memory-system/12-缺口清单与专用MemoryLLM.md`
 
@@ -64,6 +64,7 @@
 - [x] ignored 的真实 embedding 测试保留为手动验证，补充运行说明。
 - [x] 建立小型 recall benchmark，比较 BM25-only 与 hybrid 命中率。
 - [x] Qdrant 后端补齐归档删除同步和服务配置说明。
+- [x] Recall 精排接入 `tiangong-llm` RerankProvider，Memory 内部不再直接实现 rerank 协议适配。
 
 ## P1 - Meta 与生命周期
 
