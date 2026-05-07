@@ -26,6 +26,7 @@
 - [x] 同一 workspace 同时启动多个入口时只有一个 leader，其余入口使用 remote handle。
 - [x] leader 退出后 follower 自动接替，接替前后写入/召回都可用。
 - [x] 验证多进程并发场景（GUI + CLI + Server）下 Memory 行为正确。
+- [x] 修复同一 workspace 并发写入 `leader.json` 时临时文件冲突导致的误报警。
 
 ## P0 - Memory 独立模型配置
 

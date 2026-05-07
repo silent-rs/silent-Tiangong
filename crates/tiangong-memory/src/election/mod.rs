@@ -7,7 +7,8 @@
 //! - 若检测到不同 workspace 的 leader 存在，则显式报错，避免串连
 
 use std::fs::OpenOptions;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -24,6 +25,7 @@ use crate::options::MemoryOptions;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 const FOLLOWER_WATCH_INTERVAL: Duration = Duration::from_millis(250);
 const HEARTBEAT_TIMEOUT_SECS: i64 = 10;
+static LEADER_INFO_WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// 进程类型（用于 Leader 选举，区分 GUI/CLI/Server）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -435,7 +437,10 @@ fn try_acquire_leader_lease(
         started_at: now.clone(),
         heartbeat_at: now,
     };
-    write_leader_info(&info, &leader_info_path)?;
+    if let Err(err) = write_leader_info(&info, &leader_info_path) {
+        let _ = std::fs::remove_file(&lock_path);
+        return Err(err);
+    }
 
     Ok(Some(LeaderLease {
         lock_path,
@@ -445,12 +450,28 @@ fn try_acquire_leader_lease(
 }
 
 fn write_leader_info(info: &LeaderInfo, path: &PathBuf) -> Result<()> {
-    let temp_path = path.with_extension("json.tmp");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("创建 leader 运行目录失败: {}", parent.display()))?;
+    }
+    let temp_path = leader_info_temp_path(path);
     let content = serde_json::to_string_pretty(info).with_context(|| "序列化 leader 信息失败")?;
     std::fs::write(&temp_path, content)
         .with_context(|| format!("写入临时 leader 信息失败: {}", temp_path.display()))?;
-    std::fs::rename(&temp_path, path)
-        .with_context(|| format!("替换 leader 信息失败: {}", path.display()))
+    if let Err(err) = std::fs::rename(&temp_path, path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(err).with_context(|| format!("替换 leader 信息失败: {}", path.display()));
+    }
+    Ok(())
+}
+
+fn leader_info_temp_path(path: &Path) -> PathBuf {
+    let seq = LEADER_INFO_WRITE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "leader.json".into());
+    path.with_file_name(format!(".{file_name}.{}.{}.tmp", std::process::id(), seq))
 }
 
 fn update_heartbeat(info: &LeaderInfo) -> Result<()> {
@@ -632,6 +653,49 @@ mod tests {
             .expect("leader 信息不存在");
         assert_eq!(loaded.service, "memory-ws-test");
         assert!(!is_leader_alive(&loaded), "过期心跳应判定为不存活");
+    }
+
+    #[test]
+    #[serial]
+    fn concurrent_leader_info_writes_do_not_share_temp_file() {
+        let home = TempDir::new().expect("创建 fake home 失败");
+        let _env = EnvGuard::enter(home.path());
+        ensure_memory_base_dir().expect("创建 memory 目录失败");
+        let path = leader_info_path_for_workspace(Some("ws-concurrent-write"));
+        let now = chrono::Local::now().naive_local().to_string();
+
+        let threads = (0..8)
+            .map(|index| {
+                let path = path.clone();
+                let now = now.clone();
+                thread::spawn(move || {
+                    let info = LeaderInfo {
+                        pid: 10_000 + index,
+                        process_type: ProcessType::Cli,
+                        workspace_id: Some("ws-concurrent-write".to_string()),
+                        service: format!("memory-concurrent-{index}"),
+                        started_at: now.clone(),
+                        heartbeat_at: now,
+                    };
+                    write_leader_info(&info, &path)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for join in threads {
+            join.join()
+                .expect("leader 写入线程 panic")
+                .expect("并发写入 leader 信息失败");
+        }
+
+        assert!(path.exists(), "leader.json 应写入成功");
+        let runtime_dir = path.parent().expect("leader 路径应有父目录");
+        let temp_files = std::fs::read_dir(runtime_dir)
+            .expect("读取 runtime 目录失败")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect::<Vec<_>>();
+        assert!(temp_files.is_empty(), "成功写入后不应残留临时文件");
     }
 
     #[tokio::test(flavor = "current_thread")]
