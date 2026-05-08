@@ -14,7 +14,8 @@ use crate::command::InjectionLevel;
 use crate::llm_metrics::log_memory_llm_call;
 use crate::store::MemoryStore;
 use crate::types::{
-    Decision, Entity, EntityType, Episode, MemoryListQuery, MemoryNode, MemoryStatus, TurnResult,
+    Decision, Entity, EntityType, Episode, MemoryListQuery, MemoryNode, MemoryRelationDraft,
+    MemoryRelationKind, MemoryStatus, TurnResult,
 };
 use crate::writer;
 use tiangong_llm::{LlmEndpointConfig, complete_text_with_usage};
@@ -105,12 +106,20 @@ pub(crate) async fn process_micro(
 ) -> Result<()> {
     // 1. 提取并写入 Episode（嵌套 if let 用 let-chains 合并以满足 clippy）
     if let Some(episode) = writer::extract_episode_with_model(turn_result, model).await {
-        store
-            .write_episode(episode, workspace_id)
-            .await
-            .unwrap_or_else(|e| {
+        let episode_for_links = episode.clone();
+        match store.write_episode(episode, workspace_id).await {
+            Ok(()) => {
+                store
+                    .link_episode_to_related_recent(&episode_for_links, workspace_id)
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("Micro 反刍：自动关联 Episode 失败: {}", e);
+                        0
+                    });
+            }
+            Err(e) => {
                 tracing::warn!("Micro 反刍：写入 Episode 失败: {}", e);
-            });
+            }
+        }
     }
 
     // 2. 更新 Session Injection（最近 3 条 Episode 摘要）
@@ -207,9 +216,11 @@ pub(crate) async fn process_meso(
     );
     for entity in &entities {
         store.upsert_entity(entity.clone(), Some(workspace_id))?;
+        link_entity_to_source_episodes(store, entity);
     }
     for decision in &decisions {
         store.upsert_decision(decision.clone(), Some(workspace_id))?;
+        link_decision_to_source_episodes(store, decision);
     }
 
     let now = chrono::Local::now().naive_local();
@@ -250,6 +261,36 @@ pub(crate) async fn process_meso(
     );
 
     Ok(())
+}
+
+fn link_entity_to_source_episodes(store: &MemoryStore, entity: &Entity) {
+    for episode_id in &entity.related_episodes {
+        if let Err(err) = store.upsert_relation(MemoryRelationDraft {
+            id: None,
+            from_node_id: entity.id.clone(),
+            to_node_id: episode_id.clone(),
+            relation_kind: MemoryRelationKind::LearnedFrom,
+            weight: entity.importance.clamp(0.4, 0.9),
+            note: Some("自动关联：实体由该 Episode 提炼".to_string()),
+        }) {
+            tracing::warn!("Meso 反刍：写入 Entity 关系失败: {err}");
+        }
+    }
+}
+
+fn link_decision_to_source_episodes(store: &MemoryStore, decision: &Decision) {
+    for episode_id in &decision.episode_ids {
+        if let Err(err) = store.upsert_relation(MemoryRelationDraft {
+            id: None,
+            from_node_id: decision.id.clone(),
+            to_node_id: episode_id.clone(),
+            relation_kind: MemoryRelationKind::LearnedFrom,
+            weight: 0.9,
+            note: Some("自动关联：决策由该 Episode 提炼".to_string()),
+        }) {
+            tracing::warn!("Meso 反刍：写入 Decision 关系失败: {err}");
+        }
+    }
 }
 
 async fn extract_meso_memories(

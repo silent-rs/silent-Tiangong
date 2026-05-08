@@ -3,7 +3,7 @@
 //! 单一线程完成所有工作：接收消息 → LLM 调用 → 工具执行 → session 更新 → 推送 StreamEvent
 //! CLI / GUI / Server / Connector 统一通过 TiangongCore 运行。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender, Sender as StdSender};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -778,7 +778,7 @@ impl TiangongCore {
             memory_workspace_id.clone(),
             process_type.clone(),
         );
-        let initial_trust_mode = config_snapshot.trust_mode;
+        let initial_trust_mode = session.trust_mode;
         let shared_trust_mode = Arc::new(RwLock::new(initial_trust_mode));
         let session_id = session.id.clone();
         let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel::<Command>();
@@ -1264,6 +1264,7 @@ async fn execute_turn_inner_async(
     let mut pending_media_assets: Vec<tiangong_types::MediaAsset> = Vec::new();
     let mut memory_context: Option<String> = None;
     let mut memory_recall_attempted = false;
+    let mut successful_tool_call_keys = HashSet::new();
 
     'react_loop: loop {
         match drain_pending_commands_async(session, &mut loop_context, stream_tx, cmd_rx) {
@@ -1271,6 +1272,7 @@ async fn execute_turn_inner_async(
             PendingCommandEffect::MessageInjected => {
                 memory_context = None;
                 memory_recall_attempted = false;
+                successful_tool_call_keys.clear();
             }
             PendingCommandEffect::None => {}
         }
@@ -1305,6 +1307,7 @@ async fn execute_turn_inner_async(
             thinking: Some(crate::model::ModelThinkingConfig {
                 budget_tokens: 4096,
             }),
+            include_media: false,
         };
 
         let pending_msg_id = scru128::new().to_string();
@@ -1434,6 +1437,7 @@ async fn execute_turn_inner_async(
                 // 新输入到来后，旧的 recall_memory 注入上下文可能不再相关，避免污染下一轮 prompt
                 memory_context = None;
                 memory_recall_attempted = false;
+                successful_tool_call_keys.clear();
                 continue 'react_loop;
             }
 
@@ -1494,6 +1498,7 @@ async fn execute_turn_inner_async(
                 PendingCommandEffect::MessageInjected => {
                     memory_context = None;
                     memory_recall_attempted = false;
+                    successful_tool_call_keys.clear();
                     session.persist_to_disk();
                     continue 'react_loop;
                 }
@@ -1507,6 +1512,11 @@ async fn execute_turn_inner_async(
                 target_scope.as_deref(),
                 target_summary.as_deref(),
             );
+            let tool_call_key = tool_call_dedupe_key(&call.name, &call.arguments);
+            if successful_tool_call_keys.contains(&tool_call_key) {
+                append_duplicate_tool_result(session, stream_tx, &call.id, &call.name);
+                continue;
+            }
 
             use crate::permission::PermissionDecision;
             let decision = evaluate_tool_permission(
@@ -1662,24 +1672,33 @@ async fn execute_turn_inner_async(
                 args_summary: args_summary.clone(),
             });
 
-            let (mut result, memory_tool_usage, allow_memory_context) =
+            let (result, memory_tool_usage, allow_memory_context) =
                 tokio::task::block_in_place(|| {
-                    if call.name == "recall_memory" {
+                    let (mut result, memory_tool_usage, allow_memory_context) = if call.name
+                        == "recall_memory"
+                    {
                         if memory_recall_attempted {
                             duplicate_memory_recall_tool_result()
                         } else {
                             memory_recall_attempted = true;
                             execute_memory_recall_tool(call, memory_handle, session)
                         }
+                    } else if call.name == "analyze_attachment" {
+                        (
+                            execute_attachment_analysis_tool(call, engine, session),
+                            tiangong_types::TokenUsage::default(),
+                            false,
+                        )
                     } else {
                         (
                             engine.execute_tool_call(call, mcp_targets, &engine.agent_config().mcp),
                             tiangong_types::TokenUsage::default(),
                             false,
                         )
-                    }
+                    };
+                    localize_tool_result_images(&call.name, &mut result);
+                    (result, memory_tool_usage, allow_memory_context)
                 });
-            localize_tool_result_images(&call.name, &mut result);
             accumulated_usage.accumulate(&memory_tool_usage);
 
             audit_tool_execution(
@@ -1708,6 +1727,7 @@ async fn execute_turn_inner_async(
             append_runtime_tool_message(session, &call.name, format_tool_trace_message(&result));
 
             if result.ok {
+                successful_tool_call_keys.insert(tool_call_key);
                 pending_media_assets.extend(parse_media_assets_from_tool_result(
                     &call.name,
                     &result.stdout,
@@ -1728,6 +1748,7 @@ async fn execute_turn_inner_async(
                 PendingCommandEffect::MessageInjected => {
                     memory_context = None;
                     memory_recall_attempted = false;
+                    successful_tool_call_keys.clear();
                     session.persist_to_disk();
                     continue 'react_loop;
                 }
@@ -1760,6 +1781,7 @@ fn execute_turn_inner(
     let mut pending_media_assets: Vec<tiangong_types::MediaAsset> = Vec::new();
     let mut memory_context: Option<String> = None;
     let mut memory_recall_attempted = false;
+    let mut successful_tool_call_keys = HashSet::new();
 
     'react_loop: loop {
         match drain_pending_commands(session, &mut loop_context, stream_tx, cmd_rx) {
@@ -1767,6 +1789,7 @@ fn execute_turn_inner(
             PendingCommandEffect::MessageInjected => {
                 memory_context = None;
                 memory_recall_attempted = false;
+                successful_tool_call_keys.clear();
             }
             PendingCommandEffect::None => {}
         }
@@ -1803,6 +1826,7 @@ fn execute_turn_inner(
             thinking: Some(crate::model::ModelThinkingConfig {
                 budget_tokens: 4096,
             }),
+            include_media: false,
         };
 
         // 预生成本轮 assistant 消息 ID（Delta/Reasoning 事件先于消息创建）
@@ -1881,6 +1905,7 @@ fn execute_turn_inner(
             if had_messages {
                 memory_context = None;
                 memory_recall_attempted = false;
+                successful_tool_call_keys.clear();
                 continue 'react_loop;
             }
         }
@@ -1989,6 +2014,7 @@ fn execute_turn_inner(
                 PendingCommandEffect::MessageInjected => {
                     memory_context = None;
                     memory_recall_attempted = false;
+                    successful_tool_call_keys.clear();
                     session.persist_to_disk();
                     continue 'react_loop;
                 }
@@ -2002,6 +2028,11 @@ fn execute_turn_inner(
                 target_scope.as_deref(),
                 target_summary.as_deref(),
             );
+            let tool_call_key = tool_call_dedupe_key(&call.name, &call.arguments);
+            if successful_tool_call_keys.contains(&tool_call_key) {
+                append_duplicate_tool_result(session, stream_tx, &call.id, &call.name);
+                continue;
+            }
 
             // 权限检查（在执行前完成，trust_mode 通过 shared Arc 实时生效）
             use crate::permission::PermissionDecision;
@@ -2173,6 +2204,12 @@ fn execute_turn_inner(
                         memory_recall_attempted = true;
                         execute_memory_recall_tool(call, memory_handle, session)
                     }
+                } else if call.name == "analyze_attachment" {
+                    (
+                        execute_attachment_analysis_tool(call, engine, session),
+                        tiangong_types::TokenUsage::default(),
+                        false,
+                    )
                 } else {
                     (
                         engine.execute_tool_call(call, mcp_targets, &engine.agent_config().mcp),
@@ -2215,6 +2252,7 @@ fn execute_turn_inner(
             // 记录到 loop_context（完整内容，截断由上下文压缩器处理）
             // 媒体生成工具使用摘要反馈（避免 base64 数据污染上下文）
             if result.ok {
+                successful_tool_call_keys.insert(tool_call_key);
                 pending_media_assets.extend(parse_media_assets_from_tool_result(
                     &call.name,
                     &result.stdout,
@@ -2235,6 +2273,7 @@ fn execute_turn_inner(
                 PendingCommandEffect::MessageInjected => {
                     memory_context = None;
                     memory_recall_attempted = false;
+                    successful_tool_call_keys.clear();
                     session.persist_to_disk();
                     continue 'react_loop;
                 }
@@ -2504,6 +2543,61 @@ fn tool_result_provider_text(
     }
 }
 
+fn tool_call_dedupe_key(tool_name: &str, arguments: &serde_json::Value) -> String {
+    format!("{tool_name}\n{}", canonical_json(arguments))
+}
+
+fn canonical_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => {
+            serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+        }
+        serde_json::Value::Array(values) => {
+            let items = values.iter().map(canonical_json).collect::<Vec<_>>();
+            format!("[{}]", items.join(","))
+        }
+        serde_json::Value::Object(map) => {
+            let mut entries = map.iter().collect::<Vec<_>>();
+            entries.sort_by_key(|(key, _)| *key);
+            let items = entries
+                .into_iter()
+                .map(|(key, value)| {
+                    let key = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
+                    format!("{key}:{}", canonical_json(value))
+                })
+                .collect::<Vec<_>>();
+            format!("{{{}}}", items.join(","))
+        }
+    }
+}
+
+fn append_duplicate_tool_result(
+    session: &mut Session,
+    stream_tx: &StdSender<StreamEvent>,
+    tool_call_id: &str,
+    tool_name: &str,
+) {
+    let message = format!(
+        "本轮已经成功执行过完全相同的 {tool_name} 工具调用，系统已跳过重复执行。请直接基于前一次工具结果继续完成用户目标，不要再次调用相同工具和参数。"
+    );
+    let _ = stream_tx.send(StreamEvent::ToolResult {
+        name: tool_name.to_string(),
+        tool_call_id: Some(tool_call_id.to_string()),
+        ok: true,
+        output: message.clone(),
+        full_output: Some(message.clone()),
+    });
+    append_tool_result_message(session, tool_call_id, tool_name, message.clone(), false);
+    append_runtime_tool_message(
+        session,
+        tool_name,
+        format!("跳过重复工具调用 [{tool_name}]\n{message}"),
+    );
+}
+
 fn is_media_tool_name(tool_name: &str) -> bool {
     matches!(
         tool_name,
@@ -2543,48 +2637,9 @@ fn maybe_update_context_summary(
 
 fn select_client_for_request<'a>(
     engine: &'a RuntimeEngine,
-    req: &ModelRequest,
+    _req: &ModelRequest,
 ) -> &'a SingleProviderClient {
-    if req.context.iter().any(message_has_multimodal_input) {
-        engine.multimodal_client()
-    } else {
-        engine.client()
-    }
-}
-
-fn message_has_multimodal_input(message: &Message) -> bool {
-    !message.media.is_empty()
-        || extract_image_paths_from_text(&message.content)
-            .into_iter()
-            .next()
-            .is_some()
-}
-
-fn looks_like_image_reference(value: &str) -> bool {
-    let lower = value.trim().to_ascii_lowercase();
-    lower.starts_with("data:image/")
-        || lower.starts_with("http://")
-        || lower.starts_with("https://")
-        || lower.ends_with(".png")
-        || lower.ends_with(".jpg")
-        || lower.ends_with(".jpeg")
-        || lower.ends_with(".webp")
-        || lower.ends_with(".gif")
-}
-
-fn extract_image_paths_from_text(text: &str) -> Vec<String> {
-    text.split_whitespace()
-        .map(|part| {
-            part.trim_matches(|c: char| {
-                matches!(
-                    c,
-                    '"' | '\'' | '`' | ',' | ';' | ':' | ')' | '(' | '[' | ']'
-                )
-            })
-        })
-        .filter(|part| looks_like_image_reference(part))
-        .map(ToString::to_string)
-        .collect()
+    engine.client()
 }
 
 fn loop_context_with_memory(
@@ -2666,6 +2721,7 @@ fn force_final_response(
         thinking: Some(crate::model::ModelThinkingConfig {
             budget_tokens: 4096,
         }),
+        include_media: false,
     };
 
     // 预生成 message_id
@@ -2980,6 +3036,165 @@ fn memory_recall_tool_result(
         execution: Some(crate::tool::ToolExecutionRecord {
             tool_name: "recall_memory".to_string(),
             args,
+            duration_ms: started.elapsed().as_millis() as u64,
+            ok,
+            exit_code,
+            summary,
+        }),
+    }
+}
+
+fn execute_attachment_analysis_tool(
+    call: &crate::model::ModelFunctionCall,
+    engine: &RuntimeEngine,
+    session: &Session,
+) -> crate::tool::ToolResult {
+    let started = std::time::Instant::now();
+    if !engine.has_multimodal_client() {
+        return attachment_tool_result(
+            false,
+            "未配置多模态模型",
+            String::new(),
+            "multimodal model is not configured".to_string(),
+            1,
+            started,
+        );
+    }
+
+    let instruction = call
+        .arguments
+        .get("instruction")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("请解析附件内容，并提取与用户问题有关的信息。");
+    let message_id = call
+        .arguments
+        .get("message_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let attachment_index = call
+        .arguments
+        .get("attachment_index")
+        .and_then(serde_json::Value::as_u64)
+        .map(|value| value as usize);
+
+    let Some(source_message) = find_attachment_source_message(session, message_id) else {
+        return attachment_tool_result(
+            false,
+            "未找到可解析的附件",
+            String::new(),
+            "no user message with attachments found".to_string(),
+            1,
+            started,
+        );
+    };
+
+    let media = if let Some(index) = attachment_index {
+        let Some(asset) = source_message.media.get(index) else {
+            return attachment_tool_result(
+                false,
+                "附件序号不存在",
+                String::new(),
+                format!("attachment_index {index} out of range"),
+                1,
+                started,
+            );
+        };
+        vec![asset.clone()]
+    } else {
+        source_message.media.clone()
+    };
+
+    if media.is_empty() {
+        return attachment_tool_result(
+            false,
+            "未找到可解析的附件",
+            String::new(),
+            "selected message has no attachments".to_string(),
+            1,
+            started,
+        );
+    }
+
+    let mut attachment_message = Message::new(
+        MessageRole::User,
+        format!(
+            "用户原始消息：{}\n\n解析要求：{}",
+            source_message.content.trim(),
+            instruction
+        ),
+    );
+    attachment_message.media = media;
+
+    let req = ModelRequest {
+        session_title: format!("{} · attachment-analysis", session.title),
+        user_input: String::new(),
+        context: vec![attachment_message],
+        assembled_system_prompt: Some(
+            "你是附件解析助手。只根据随消息提供的附件内容和解析要求回答，输出可供主模型直接使用的简洁中文结果。"
+                .to_string(),
+        ),
+        thinking: None,
+        include_media: true,
+    };
+
+    match engine.multimodal_client().complete(&req) {
+        Ok(response) => attachment_tool_result(
+            true,
+            "附件解析完成",
+            response.text,
+            String::new(),
+            0,
+            started,
+        ),
+        Err(err) => attachment_tool_result(
+            false,
+            "附件解析失败",
+            String::new(),
+            err.to_string(),
+            1,
+            started,
+        ),
+    }
+}
+
+fn find_attachment_source_message<'a>(
+    session: &'a Session,
+    message_id: Option<&str>,
+) -> Option<&'a Message> {
+    if let Some(message_id) = message_id {
+        return session
+            .messages
+            .iter()
+            .find(|message| message.id == message_id && !message.media.is_empty());
+    }
+    session
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == MessageRole::User && !message.media.is_empty())
+}
+
+fn attachment_tool_result(
+    ok: bool,
+    summary: impl Into<String>,
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+    started: std::time::Instant,
+) -> crate::tool::ToolResult {
+    let summary = summary.into();
+    crate::tool::ToolResult {
+        ok,
+        summary: summary.clone(),
+        stdout,
+        stderr,
+        exit_code,
+        execution: Some(crate::tool::ToolExecutionRecord {
+            tool_name: "analyze_attachment".to_string(),
+            args: Vec::new(),
             duration_ms: started.elapsed().as_millis() as u64,
             ok,
             exit_code,
@@ -3752,7 +3967,7 @@ fn infer_tool_name_scope(
     let scope = match tool_name {
         "read_file" | "write_file" | "replace_in_file" | "list_dir" | "tree_dir" => "path",
         "web_fetch" => "network",
-        "generate_image" | "speech_to_text" | "text_to_speech" => "external",
+        "analyze_attachment" | "generate_image" | "speech_to_text" | "text_to_speech" => "external",
         "run_command" | "run_shell" => "command",
         _ => return (None, summary),
     };

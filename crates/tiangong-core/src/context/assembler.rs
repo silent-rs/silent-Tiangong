@@ -169,6 +169,7 @@ mod tests {
             parent_session_id: None,
             cwd: String::new(),
             cwd_mode: Default::default(),
+            trust_mode: Default::default(),
             context_summary: None,
             summary_up_to: 0,
             created_at: String::new(),

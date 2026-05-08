@@ -16,11 +16,13 @@ impl TiangongState {
         {
             let existing_cwd = existing.cwd.clone();
             let existing_cwd_mode = existing.cwd_mode.clone();
+            let existing_trust_mode = existing.trust_mode;
             *existing = session;
             if existing_cwd_mode == crate::session::SessionCwdMode::Inherit {
                 existing.cwd = existing_cwd;
                 existing.cwd_mode = existing_cwd_mode;
             }
+            existing.trust_mode = existing_trust_mode;
         } else {
             self.store.session.sessions.insert(0, session);
             self.store.session.active_session_id = session_id.clone();
@@ -31,11 +33,12 @@ impl TiangongState {
     pub fn create_session(&mut self) {
         let mut session = Session::new("新对话");
         session.cwd = self.store.session.workspace_dir.clone();
-        self.store.agent.agent_config.trust_mode = self.store.agent.agent_config.default_trust_mode;
+        session.trust_mode = self.store.agent.agent_config.default_trust_mode;
+        self.store.agent.agent_config.trust_mode = session.trust_mode;
         self.services
             .runtime
             .permission_gate()
-            .set_trust_mode(self.store.agent.agent_config.trust_mode);
+            .set_trust_mode(session.trust_mode);
         self.store.session.active_session_id = session.id.clone();
         self.store.session.session_title_draft = session.title.clone();
         self.store.session.sessions.push(session);
@@ -54,6 +57,11 @@ impl TiangongState {
         {
             self.store.session.active_session_id = session_id.to_string();
             self.store.session.session_title_draft = session.title.clone();
+            self.store.agent.agent_config.trust_mode = session.trust_mode;
+            self.services
+                .runtime
+                .permission_gate()
+                .set_trust_mode(session.trust_mode);
             let _ = self.persist_app_only();
             let _ = self.try_auto_resume_unfinished_plan_for_active_session();
         }
@@ -99,6 +107,7 @@ impl TiangongState {
         if self.store.session.sessions.is_empty() {
             let mut session = Session::new(DEFAULT_SESSION_TITLE);
             session.cwd = self.store.session.workspace_dir.clone();
+            session.trust_mode = self.store.agent.agent_config.default_trust_mode;
             self.store.session.active_session_id = session.id.clone();
             self.store.session.session_title_draft = session.title.clone();
             self.store.session.sessions.push(session);
@@ -111,6 +120,13 @@ impl TiangongState {
             self.store.session.active_session_id = self.store.session.sessions[next_idx].id.clone();
             self.store.session.session_title_draft =
                 self.store.session.sessions[next_idx].title.clone();
+        }
+        if let Some(trust_mode) = self.active_session().map(|session| session.trust_mode) {
+            self.store.agent.agent_config.trust_mode = trust_mode;
+            self.services
+                .runtime
+                .permission_gate()
+                .set_trust_mode(trust_mode);
         }
 
         self.remove_session_file(&active_id)?;

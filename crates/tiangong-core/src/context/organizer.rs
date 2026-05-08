@@ -1,3 +1,6 @@
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
+
 use crate::context::compressor::ContextCompressor;
 use crate::model::SingleProviderClient;
 use crate::session::{Message, MessageRole, Session};
@@ -85,6 +88,7 @@ impl ContextOrganizer {
     }
 
     fn filter_execution_traces_vec(messages: &[Message]) -> Vec<Message> {
+        let mut seen_tool_result_keys = HashSet::new();
         messages
             .iter()
             .filter_map(|msg| {
@@ -107,6 +111,16 @@ impl ContextOrganizer {
                     || c.starts_with("执行已取消")
                 {
                     return None;
+                }
+                if msg.tool_call_id.is_some() {
+                    let mut summarized = msg.clone();
+                    let key = historical_tool_result_key(msg);
+                    if !key.is_empty() && !seen_tool_result_keys.insert(key) {
+                        summarized.content = duplicate_tool_result_summary(msg);
+                    } else if c.chars().count() > 5000 {
+                        summarized.content = summarize_historical_tool_result(msg);
+                    }
+                    return Some(summarized);
                 }
                 Some(msg.clone())
             })
@@ -135,10 +149,126 @@ fn summarize_tool_execution_trace(content: &str) -> String {
     format!("[工具执行摘要]\n{}", kept_lines.join("\n"))
 }
 
+fn summarize_historical_tool_result(msg: &Message) -> String {
+    let tool_name = msg.tool_name.as_deref().unwrap_or("unknown");
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&msg.content) {
+        let mut lines = vec![format!("[历史工具结果摘要]\ntool: {tool_name}")];
+        for key in [
+            "mode",
+            "url",
+            "final_url",
+            "status",
+            "content_type",
+            "title",
+            "truncated",
+            "bytes_read",
+            "saved_path",
+            "path",
+        ] {
+            if let Some(item) = value.get(key) {
+                lines.push(format!("{key}: {}", compact_json_value(item, 300)));
+            }
+        }
+        if let Some(text) = value.get("summary").and_then(serde_json::Value::as_str) {
+            lines.push(format!("summary: {}", truncate_chars(text, 1200)));
+        } else if let Some(text) = value.get("text").and_then(serde_json::Value::as_str) {
+            lines.push(format!("text_preview: {}", truncate_chars(text, 2200)));
+        } else if let Some(stdout) = value.get("stdout").and_then(serde_json::Value::as_str) {
+            lines.push(format!("stdout_preview: {}", truncate_chars(stdout, 2200)));
+        }
+        return lines.join("\n");
+    }
+
+    format!(
+        "[历史工具结果摘要]\ntool: {tool_name}\ncontent_preview: {}",
+        truncate_chars(&msg.content, 2600)
+    )
+}
+
+fn duplicate_tool_result_summary(msg: &Message) -> String {
+    let tool_name = msg.tool_name.as_deref().unwrap_or("unknown");
+    let key = historical_tool_result_display_key(msg);
+    if key.is_empty() {
+        format!("[重复工具结果已省略]\ntool: {tool_name}")
+    } else {
+        format!("[重复工具结果已省略]\ntool: {tool_name}\nkey: {key}")
+    }
+}
+
+fn historical_tool_result_key(msg: &Message) -> String {
+    let tool_name = msg.tool_name.as_deref().unwrap_or("unknown");
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&msg.content) {
+        let mode = value
+            .get("mode")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        for key in ["url", "final_url", "path", "saved_path"] {
+            if let Some(item) = value.get(key).and_then(serde_json::Value::as_str) {
+                let trimmed = item.trim();
+                if !trimmed.is_empty() {
+                    return format!("{tool_name}:mode:{mode}:{key}:{trimmed}");
+                }
+            }
+        }
+    }
+
+    let normalized = msg
+        .content
+        .split_whitespace()
+        .take(256)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if normalized.is_empty() {
+        return String::new();
+    }
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    tool_name.hash(&mut hasher);
+    normalized.hash(&mut hasher);
+    format!("{tool_name}:hash:{:x}", hasher.finish())
+}
+
+fn historical_tool_result_display_key(msg: &Message) -> String {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&msg.content) {
+        for key in ["url", "final_url", "path", "saved_path"] {
+            if let Some(item) = value.get(key).and_then(serde_json::Value::as_str) {
+                let trimmed = item.trim();
+                if !trimmed.is_empty() {
+                    return truncate_chars(trimmed, 240);
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+fn compact_json_value(value: &serde_json::Value, max_chars: usize) -> String {
+    match value {
+        serde_json::Value::String(text) => truncate_chars(text, max_chars),
+        other => truncate_chars(&other.to_string(), max_chars),
+    }
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let normalized = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if normalized.chars().count() <= max_chars {
+        return normalized;
+    }
+    let mut truncated = normalized.chars().take(max_chars).collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::session::now_text;
+    use serde_json::json;
 
     fn message(role: MessageRole, content: &str) -> Message {
         Message {
@@ -152,6 +282,24 @@ mod tests {
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
+            tool_result_is_error: false,
+            compact: false,
+            created_at: now_text(),
+        }
+    }
+
+    fn tool_result(tool_call_id: &str, tool_name: &str, content: String) -> Message {
+        Message {
+            id: scru128::new().to_string(),
+            role: MessageRole::Tool,
+            content,
+            reasoning_content: String::new(),
+            reasoning_signature: None,
+            worker_id: None,
+            media: Vec::new(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(tool_call_id.to_string()),
+            tool_name: Some(tool_name.to_string()),
             tool_result_is_error: false,
             compact: false,
             created_at: now_text(),
@@ -181,5 +329,48 @@ mod tests {
         );
         assert!(filtered[1].content.contains("stdout: ...(已省略原始输出)"));
         assert!(!filtered[1].content.contains("from duckduckgo_search"));
+    }
+
+    #[test]
+    fn filter_execution_traces_summarizes_large_historical_tool_results() {
+        let content = json!({
+            "url": "https://example.com/large",
+            "status": 200,
+            "title": "Large Page",
+            "text": "正文".repeat(4000),
+            "truncated": true,
+            "bytes_read": 120000
+        })
+        .to_string();
+
+        let filtered = ContextOrganizer::filter_execution_traces(&[tool_result(
+            "call_1",
+            "web_fetch",
+            content,
+        )]);
+
+        assert_eq!(filtered.len(), 1);
+        assert!(filtered[0].content.starts_with("[历史工具结果摘要]"));
+        assert!(filtered[0].content.contains("https://example.com/large"));
+        assert!(filtered[0].content.chars().count() < 5000);
+    }
+
+    #[test]
+    fn filter_execution_traces_deduplicates_repeated_historical_tool_results() {
+        let content = json!({
+            "url": "https://example.com/repeated",
+            "status": 200,
+            "text": "same"
+        })
+        .to_string();
+
+        let filtered = ContextOrganizer::filter_execution_traces(&[
+            tool_result("call_1", "web_fetch", content.clone()),
+            tool_result("call_2", "web_fetch", content),
+        ]);
+
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered[1].content.starts_with("[重复工具结果已省略]"));
+        assert!(filtered[1].content.contains("https://example.com/repeated"));
     }
 }

@@ -158,6 +158,7 @@ impl ContextCompressor {
             context: Vec::new(),
             assembled_system_prompt: None,
             thinking: None,
+            include_media: false,
         };
         let resp = client.complete(&req)?;
         Ok(resp.text)
@@ -238,6 +239,7 @@ pub fn compress_loop_messages(
         context: Vec::new(),
         assembled_system_prompt: None,
         thinking: None,
+        include_media: false,
     };
 
     let summary = match client.complete(&req) {

@@ -9,9 +9,13 @@ impl AppRepository {
             }
 
             let agent_config = self.load_agent_config_with_fallback(None)?;
+            let legacy_trust_mode = agent_config
+                .as_ref()
+                .map(|config| config.trust_mode)
+                .unwrap_or_default();
             let mut sessions = Vec::new();
             for session_id in &session_ids {
-                if let Some(session) = self.load_session_from_disk(session_id)?
+                if let Some(session) = self.load_session_from_disk(session_id, legacy_trust_mode)?
                     && session.parent_session_id.is_none()
                 {
                     sessions.push(session);
@@ -37,10 +41,15 @@ impl AppRepository {
         })?;
         let persisted: PersistedAppState =
             serde_json::from_str(&content).context("解析应用存储失败")?;
+        let agent_config = self.load_agent_config_with_fallback(persisted.agent_config)?;
+        let legacy_trust_mode = agent_config
+            .as_ref()
+            .map(|config| config.trust_mode)
+            .unwrap_or_default();
 
         let mut sessions = Vec::new();
         for session_id in &session_ids {
-            if let Some(session) = self.load_session_from_disk(session_id)?
+            if let Some(session) = self.load_session_from_disk(session_id, legacy_trust_mode)?
                 && session.parent_session_id.is_none()
             {
                 sessions.push(session);
@@ -48,7 +57,6 @@ impl AppRepository {
         }
         let active_session_id =
             resolve_active_session_id(&sessions, Some(&persisted.active_session_id));
-        let agent_config = self.load_agent_config_with_fallback(persisted.agent_config)?;
 
         Ok(Some(LoadedState {
             sessions,
@@ -143,6 +151,7 @@ impl AppRepository {
     pub(in crate::app_state) fn load_session_from_disk(
         &self,
         session_id: &str,
+        missing_trust_mode: crate::permission::TrustMode,
     ) -> Result<Option<Session>> {
         let session_path = session_storage_path(&self.paths.sessions_dir_path, session_id);
         if !session_path.exists() {
@@ -151,9 +160,16 @@ impl AppRepository {
 
         let content = fs::read_to_string(&session_path)
             .with_context(|| format!("读取会话文件失败：{}", session_path.display()))?;
+        let missing_session_trust_mode = serde_json::from_str::<serde_json::Value>(&content)
+            .ok()
+            .and_then(|value| value.get("trust_mode").cloned())
+            .is_none();
         let mut session: Session = serde_json::from_str(&content)
             .with_context(|| format!("解析会话文件失败：{}", session_path.display()))?;
         session.id = session_id.to_string();
+        if missing_session_trust_mode {
+            session.trust_mode = missing_trust_mode;
+        }
         Ok(Some(session))
     }
 

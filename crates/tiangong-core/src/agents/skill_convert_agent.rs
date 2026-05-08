@@ -35,6 +35,7 @@ pub fn convert_external_skill_with_agent(
         thinking: Some(crate::model::ModelThinkingConfig {
             budget_tokens: 4096,
         }),
+        include_media: false,
     };
     let response = client
         .complete(&request)

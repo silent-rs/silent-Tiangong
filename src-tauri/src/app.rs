@@ -83,6 +83,7 @@ impl TiangongApp {
             if core.is_running() {
                 let _ = core.reload_config();
                 let _ = core.update_cwd(session.cwd.clone());
+                core.set_trust_mode(session.trust_mode);
                 return (session_id.to_string(), false); // 已存在，复用
             }
             eprintln!("移除已停止的 TiangongCore：{session_id}");

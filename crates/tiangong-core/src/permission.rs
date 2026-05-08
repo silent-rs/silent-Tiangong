@@ -123,10 +123,6 @@ impl PermissionGate {
         policy: PermissionPolicy,
         shared: Arc<RwLock<TrustMode>>,
     ) -> Self {
-        // 同步初始值
-        if let Ok(mut guard) = shared.write() {
-            *guard = policy.trust_mode;
-        }
         Self {
             policy,
             shared_trust_mode: shared,

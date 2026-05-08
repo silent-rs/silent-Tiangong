@@ -123,13 +123,23 @@ impl TiangongState {
     }
 
     pub fn set_trust_mode(&mut self, mode: crate::permission::TrustMode) -> Result<()> {
+        let active_id = self.store.session.active_session_id.clone();
+        let Some(session) = self
+            .store
+            .session
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == active_id)
+        else {
+            return Err(anyhow::anyhow!("当前会话不存在，无法设置信任模式"));
+        };
+        session.trust_mode = mode;
+        session.updated_at = now_text();
+        // 兼容旧的状态读取；真实来源是当前会话。
         self.store.agent.agent_config.trust_mode = mode;
-        // 实时更新共享权限模式（运行中的任务立即生效，因为共享同一个 Arc<RwLock>）
         self.services.runtime.permission_gate().set_trust_mode(mode);
-        // 重建 RuntimeEngine（保留共享引用，新任务也使用同一个共享状态）
         self.rebuild_runtime_from_current_config();
-        // 持久化
-        self.persist_to_disk()
+        self.persist_session_and_app(&active_id)
     }
 
     pub fn set_default_trust_mode(&mut self, mode: crate::permission::TrustMode) -> Result<()> {

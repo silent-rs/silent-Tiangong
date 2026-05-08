@@ -6,7 +6,7 @@
 use std::time::Instant;
 
 use crate::llm_metrics::log_memory_llm_call;
-use crate::types::{Episode, EpisodeOutcome, TurnResult};
+use crate::types::{Episode, EpisodeOutcome, MemoryCognitiveType, TurnResult};
 use tiangong_llm::{LlmEndpointConfig, complete_text_with_usage};
 
 const EPISODE_WRITER_SYSTEM: &str = "\
@@ -19,12 +19,14 @@ const EPISODE_WRITER_SYSTEM: &str = "\
 - outcome 可取 success、partial_success、failed、abandoned。
 - keywords 只保留 3-10 个检索关键词。
 - tool_calls 只保留本 turn 中实际有记忆价值的工具名，不要包含 recall_memory。
+- memory_type 必须从 factual、user_preference、user_habit、skill、project_structure、architecture_decision、problem_incident、domain_knowledge 中选择最贴切的一类。
 - importance 为 0.0 到 1.0；包含媒体 URL、文件产物、代码变更、关键决策时提高到 0.7 以上。
 
 JSON 格式：
 {
   \"title\": \"...\",
   \"summary\": \"...\",
+  \"memory_type\": \"factual\",
   \"outcome\": \"success\",
   \"keywords\": [\"...\"],
   \"tool_calls\": [\"...\"],
@@ -35,6 +37,7 @@ JSON 格式：
 struct EpisodeExtraction {
     title: Option<String>,
     summary: Option<String>,
+    memory_type: Option<String>,
     outcome: Option<String>,
     keywords: Option<Vec<String>>,
     tool_calls: Option<Vec<String>>,
@@ -96,6 +99,7 @@ fn extract_episode_fallback(turn_result: &TurnResult) -> Episode {
     let outcome = EpisodeOutcome::Success; // Phase B 默认成功；Phase C 可由 LLM 判定
     let importance = estimate_importance(turn_result);
     let keywords = extract_keywords(&summary);
+    let memory_type = classify_memory_type(turn_result, &title, &summary, &keywords);
 
     Episode::new(
         turn_result.session_id.clone(),
@@ -106,6 +110,7 @@ fn extract_episode_fallback(turn_result: &TurnResult) -> Episode {
         turn_result.tool_calls.clone(),
         importance,
     )
+    .with_memory_type(memory_type)
 }
 
 fn build_episode_from_extraction(
@@ -142,6 +147,11 @@ fn build_episode_from_extraction(
         .importance
         .map(|value| value.clamp(0.0, 1.0))
         .unwrap_or(fallback.importance);
+    let memory_type = extracted
+        .memory_type
+        .as_deref()
+        .and_then(parse_memory_type)
+        .unwrap_or(fallback.memory_type);
     Episode::new(
         turn_result.session_id.clone(),
         title,
@@ -151,6 +161,7 @@ fn build_episode_from_extraction(
         tool_calls,
         importance,
     )
+    .with_memory_type(memory_type)
 }
 
 fn build_writer_prompt(turn_result: &TurnResult) -> String {
@@ -196,6 +207,125 @@ fn parse_outcome(raw: Option<&str>) -> Option<EpisodeOutcome> {
         "abandoned" | "cancelled" | "canceled" => Some(EpisodeOutcome::Abandoned),
         _ => None,
     }
+}
+
+fn parse_memory_type(raw: &str) -> Option<MemoryCognitiveType> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "factual" | "fact" => Some(MemoryCognitiveType::Factual),
+        "user_preference" | "preference" => Some(MemoryCognitiveType::UserPreference),
+        "user_habit" | "habit" => Some(MemoryCognitiveType::UserHabit),
+        "skill" | "skill_memory" => Some(MemoryCognitiveType::Skill),
+        "project_structure" | "project" | "structure" => {
+            Some(MemoryCognitiveType::ProjectStructure)
+        }
+        "architecture_decision" | "decision" | "architecture" => {
+            Some(MemoryCognitiveType::ArchitectureDecision)
+        }
+        "problem_incident" | "incident" | "problem" | "bug" | "failure" => {
+            Some(MemoryCognitiveType::ProblemIncident)
+        }
+        "domain_knowledge" | "knowledge" | "domain" => Some(MemoryCognitiveType::DomainKnowledge),
+        _ => None,
+    }
+}
+
+fn classify_memory_type(
+    turn_result: &TurnResult,
+    title: &str,
+    summary: &str,
+    keywords: &[String],
+) -> MemoryCognitiveType {
+    let text = format!(
+        "{}\n{}\n{}\n{}",
+        title,
+        summary,
+        turn_result.user_input,
+        keywords.join(" ")
+    )
+    .to_ascii_lowercase();
+
+    if contains_any(
+        &text,
+        &["偏好", "喜欢", "不喜欢", "倾向", "prefer", "preference"],
+    ) {
+        return MemoryCognitiveType::UserPreference;
+    }
+    if contains_any(
+        &text,
+        &["习惯", "通常", "总是", "每次", "默认", "habit", "usually"],
+    ) {
+        return MemoryCognitiveType::UserHabit;
+    }
+    if contains_any(
+        &text,
+        &["skill", "技能", "工具用法", "命令用法", "操作步骤"],
+    ) {
+        return MemoryCognitiveType::Skill;
+    }
+    if contains_any(
+        &text,
+        &[
+            "目录结构",
+            "项目结构",
+            "模块",
+            "crate",
+            ".rs",
+            ".toml",
+            ".md",
+            "workspace",
+            "frontend",
+            "src/",
+        ],
+    ) {
+        return MemoryCognitiveType::ProjectStructure;
+    }
+    if contains_any(
+        &text,
+        &[
+            "决定",
+            "选择",
+            "采用",
+            "取舍",
+            "架构",
+            "方案",
+            "decision",
+            "decided",
+            "choose",
+            "chosen",
+            "adopted",
+            "instead of",
+        ],
+    ) {
+        return MemoryCognitiveType::ArchitectureDecision;
+    }
+    if contains_any(
+        &text,
+        &[
+            "失败", "报错", "错误", "故障", "修复", "bug", "error", "failed", "failure", "panic",
+            "timeout",
+        ],
+    ) {
+        return MemoryCognitiveType::ProblemIncident;
+    }
+    if contains_any(
+        &text,
+        &[
+            "知识",
+            "概念",
+            "原理",
+            "规则",
+            "规范",
+            "domain",
+            "knowledge",
+        ],
+    ) {
+        return MemoryCognitiveType::DomainKnowledge;
+    }
+    MemoryCognitiveType::Factual
+}
+
+fn contains_any(text: &str, markers: &[&str]) -> bool {
+    markers.iter().any(|marker| text.contains(marker))
 }
 
 fn build_episode_summary(turn_result: &TurnResult) -> String {
