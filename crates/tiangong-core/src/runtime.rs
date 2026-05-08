@@ -8,8 +8,8 @@ use crate::agents::execution_mcp_agent::{
 };
 use crate::agents::execution_tool_agent::build_tool_call_from_function;
 use crate::app_state::ManagementCommand;
-use crate::model::FunctionToolSpec;
-use crate::model::{ModelClient, ModelFunctionCall, SingleProviderClient, TokenUsage};
+use crate::model::ToolSpec;
+use crate::model::{ModelClient, SingleProviderClient, TokenUsage, ToolCall};
 use crate::models_config::{ModelCapability, ModelsConfig};
 use crate::planner::TaskPlan;
 use crate::tool::{LocalToolExecutor, ToolExecutionRecord, ToolExecutor, ToolResult};
@@ -203,7 +203,7 @@ impl RuntimeEngine {
     /// 此方法内部的权限检查改为仅 Denied 拦截，NeedsApproval 由调用方处理。
     pub(crate) fn execute_tool_call(
         &self,
-        call: &ModelFunctionCall,
+        call: &ToolCall,
         mcp_targets: &HashMap<String, McpFunctionTarget>,
         mcp_config: &McpConfig,
     ) -> ToolResult {
@@ -308,7 +308,7 @@ impl RuntimeEngine {
     }
 
     /// 处理后台任务工具调用
-    fn handle_background_task(&self, call: &ModelFunctionCall) -> Option<ToolResult> {
+    fn handle_background_task(&self, call: &ToolCall) -> Option<ToolResult> {
         use crate::tool::background_task::{TaskStatus, task_registry};
 
         match call.name.as_str() {
@@ -552,7 +552,7 @@ impl RuntimeEngine {
 
     /// 解析管理命令
     #[allow(dead_code)]
-    fn parse_management_command(call: &ModelFunctionCall) -> Option<ManagementCommand> {
+    fn parse_management_command(call: &ToolCall) -> Option<ManagementCommand> {
         match call.name.as_str() {
             "register_mcp_server" => {
                 let name = call
@@ -692,7 +692,7 @@ impl RuntimeEngine {
         }
     }
 
-    fn handle_get_skill_detail(&self, call: &ModelFunctionCall) -> ToolResult {
+    fn handle_get_skill_detail(&self, call: &ToolCall) -> ToolResult {
         let skill_id = call
             .arguments
             .get("skill_id")
@@ -783,11 +783,7 @@ impl RuntimeEngine {
     }
 
     /// 处理多媒体生成工具调用（图片/视频）
-    fn handle_media_generation(
-        &self,
-        call: &ModelFunctionCall,
-        capability: ModelCapability,
-    ) -> ToolResult {
+    fn handle_media_generation(&self, call: &ToolCall, capability: ModelCapability) -> ToolResult {
         let prompt = call
             .arguments
             .get("prompt")
@@ -1026,7 +1022,7 @@ impl RuntimeEngine {
     }
 
     /// 处理语音合成（TTS）工具调用
-    fn handle_tts(&self, call: &ModelFunctionCall) -> ToolResult {
+    fn handle_tts(&self, call: &ToolCall) -> ToolResult {
         let text = call
             .arguments
             .get("text")
@@ -1150,7 +1146,7 @@ impl RuntimeEngine {
     }
 
     /// 处理语音识别（STT）工具调用
-    fn handle_stt(&self, call: &ModelFunctionCall) -> ToolResult {
+    fn handle_stt(&self, call: &ToolCall) -> ToolResult {
         let file_path = call
             .arguments
             .get("file_path")
@@ -1285,7 +1281,7 @@ impl RuntimeEngine {
 }
 
 /// 注入增强工具定义（多媒体、Skill、后台任务、MCP 管理）
-pub(crate) fn inject_enhanced_tools(tools: &mut Vec<FunctionToolSpec>, engine: &RuntimeEngine) {
+pub(crate) fn inject_enhanced_tools(tools: &mut Vec<ToolSpec>, engine: &RuntimeEngine) {
     let agent_config = engine.agent_config();
 
     // 多媒体能力判断：优先使用 LlmConfig（新路径），回退 ModelsConfig（旧路径）
@@ -1328,10 +1324,10 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<FunctionToolSpec>, engine: &
     let has_multimodal = engine.has_multimodal_client();
 
     if has_multimodal {
-        tools.push(FunctionToolSpec {
+        tools.push(ToolSpec {
             name: "analyze_attachment".to_string(),
             description: "按需调用多模态模型解析用户上传的图片或文件附件。只有当用户问题确实需要查看附件内容时才调用；普通文本对话不要调用。".to_string(),
-            parameters: serde_json::json!({
+            input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "instruction": {
@@ -1353,10 +1349,10 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<FunctionToolSpec>, engine: &
     }
 
     if has_image_gen {
-        tools.push(FunctionToolSpec {
+        tools.push(ToolSpec {
             name: "generate_image".to_string(),
             description: "根据文字描述生成图片".to_string(),
-            parameters: serde_json::json!({
+            input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "prompt": { "type": "string", "description": "图片描述" },
@@ -1369,10 +1365,10 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<FunctionToolSpec>, engine: &
         });
     }
     if has_video_gen {
-        tools.push(FunctionToolSpec {
+        tools.push(ToolSpec {
             name: "generate_video".to_string(),
             description: "根据文字描述生成视频，成功时返回结构化视频资源".to_string(),
-            parameters: serde_json::json!({
+            input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "prompt": { "type": "string", "description": "视频描述" },
@@ -1384,10 +1380,10 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<FunctionToolSpec>, engine: &
         });
     }
     if has_tts {
-        tools.push(FunctionToolSpec {
+        tools.push(ToolSpec {
             name: "text_to_speech".to_string(),
             description: "将文本转换为语音音频文件".to_string(),
-            parameters: serde_json::json!({
+            input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "text": { "type": "string", "description": "待合成文本" },
@@ -1400,10 +1396,10 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<FunctionToolSpec>, engine: &
         });
     }
     if has_stt {
-        tools.push(FunctionToolSpec {
+        tools.push(ToolSpec {
             name: "speech_to_text".to_string(),
             description: "将音频文件转录为文本".to_string(),
-            parameters: serde_json::json!({
+            input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "file_path": { "type": "string", "description": "音频文件路径" },
@@ -1414,10 +1410,10 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<FunctionToolSpec>, engine: &
         });
     }
     if agent_config.skills.installed.iter().any(|s| s.enabled) {
-        tools.push(FunctionToolSpec {
+        tools.push(ToolSpec {
             name: "get_skill_detail".to_string(),
             description: "获取已安装 Skill 的完整使用说明".to_string(),
-            parameters: serde_json::json!({"type": "object", "properties": {"skill_id": {"type": "string"}}, "required": ["skill_id"]}),
+            input_schema: serde_json::json!({"type": "object", "properties": {"skill_id": {"type": "string"}}, "required": ["skill_id"]}),
         });
     }
     // 后台任务管理
@@ -1448,10 +1444,10 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<FunctionToolSpec>, engine: &
             serde_json::json!({"type":"object","properties":{"task_ids":{"type":"array","items":{"type":"string"}},"timeout_ms":{"type":"integer"}},"required":["task_ids"]}),
         ),
     ] {
-        tools.push(FunctionToolSpec {
+        tools.push(ToolSpec {
             name: spec.0.to_string(),
             description: spec.1.to_string(),
-            parameters: spec.2,
+            input_schema: spec.2,
         });
     }
     // MCP/Skill 管理
@@ -1487,10 +1483,10 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<FunctionToolSpec>, engine: &
             serde_json::json!({"type":"object","properties":{"id":{"type":"string"},"enabled":{"type":"boolean"}},"required":["id","enabled"]}),
         ),
     ] {
-        tools.push(FunctionToolSpec {
+        tools.push(ToolSpec {
             name: spec.0.to_string(),
             description: spec.1.to_string(),
-            parameters: spec.2,
+            input_schema: spec.2,
         });
     }
 }

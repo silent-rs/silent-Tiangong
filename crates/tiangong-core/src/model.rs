@@ -16,18 +16,19 @@ use tiangong_llm::message::{
 use tiangong_llm::provider::LlmProvider;
 use tiangong_llm::providers::anthropic::{AnthropicConfig, AnthropicProvider};
 use tiangong_llm::providers::openai::{OpenAiCompatibleConfig, OpenAiCompatibleProvider};
-use tiangong_llm::request::{ProviderRequest, ThinkingConfig as LlmThinkingConfig};
+use tiangong_llm::request::ProviderRequest;
 use tiangong_llm::response::{ProviderResponse, StopReason};
 use tiangong_llm::stream::{ProviderStream, ProviderStreamEvent};
 use tiangong_llm::tool::{
     ToolCall as LlmToolCall, ToolChoice as LlmToolChoice, ToolResult as LlmToolResult,
-    ToolResultContent as LlmToolResultContent, ToolSpec,
+    ToolResultContent as LlmToolResultContent,
 };
 use tiangong_llm::usage::TokenUsageData;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 
 pub use tiangong_llm::ProviderProtocol;
-pub use tiangong_llm::tool::ToolChoice as ModelToolChoice;
+pub use tiangong_llm::request::ThinkingConfig;
+pub use tiangong_llm::tool::{ToolCall, ToolChoice, ToolSpec};
 pub use tiangong_types::TokenUsage;
 
 #[derive(Debug, Clone)]
@@ -37,14 +38,9 @@ pub struct ModelRequest {
     pub context: Vec<Message>,
     /// 已由 PromptAssembler 装配的 system prompt。
     pub assembled_system_prompt: Option<String>,
-    pub thinking: Option<ModelThinkingConfig>,
+    pub thinking: Option<ThinkingConfig>,
     /// 普通主模型请求不携带附件原始内容；只有显式的多模态解析工具会开启。
     pub include_media: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct ModelThinkingConfig {
-    pub budget_tokens: u32,
 }
 
 impl ModelRequest {
@@ -66,7 +62,7 @@ impl ModelRequest {
     }
 
     pub fn with_thinking_budget(mut self, budget_tokens: u32) -> Self {
-        self.thinking = Some(ModelThinkingConfig { budget_tokens });
+        self.thinking = Some(ThinkingConfig { budget_tokens });
         self
     }
 }
@@ -77,37 +73,16 @@ pub struct ModelResponse {
     pub reasoning_content: String,
     pub reasoning_signature: Option<String>,
     pub usage: TokenUsage,
-    pub output_mode: String,
-    pub output_chunk_count: usize,
+    pub tool_calls: Vec<ToolCall>,
 }
+
+/// 向后兼容别名
+pub type ModelFunctionResponse = ModelResponse;
 
 #[derive(Debug, Clone, Default)]
 pub struct ModelStreamChunk {
     pub content: String,
     pub reasoning_content: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct FunctionToolSpec {
-    pub name: String,
-    pub description: String,
-    pub parameters: Value,
-}
-
-#[derive(Debug, Clone)]
-pub struct ModelFunctionCall {
-    pub id: String,
-    pub name: String,
-    pub arguments: Value,
-}
-
-#[derive(Debug, Clone)]
-pub struct ModelFunctionResponse {
-    pub text: String,
-    pub reasoning_content: String,
-    pub reasoning_signature: Option<String>,
-    pub usage: TokenUsage,
-    pub tool_calls: Vec<ModelFunctionCall>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,22 +172,15 @@ pub trait ModelClient {
     fn complete_with_functions(
         &self,
         req: &ModelRequest,
-        _functions: &[FunctionToolSpec],
+        _functions: &[ToolSpec],
     ) -> Result<ModelFunctionResponse> {
-        let resp = self.complete(req)?;
-        Ok(ModelFunctionResponse {
-            text: resp.text,
-            reasoning_content: resp.reasoning_content,
-            reasoning_signature: resp.reasoning_signature,
-            usage: resp.usage,
-            tool_calls: Vec::new(),
-        })
+        self.complete(req)
     }
     /// 流式函数调用，通过 on_delta 实时回调 thinking chunk
     fn complete_with_functions_stream(
         &self,
         req: &ModelRequest,
-        functions: &[FunctionToolSpec],
+        functions: &[ToolSpec],
         on_delta: &mut dyn FnMut(&ModelStreamChunk),
     ) -> Result<ModelFunctionResponse> {
         let resp = self.complete_with_functions(req, functions)?;
@@ -346,21 +314,13 @@ impl SingleProviderClient {
     }
 
     fn complete_anthropic(&self, req: &ModelRequest) -> Result<ModelResponse> {
-        let response = self.complete_with_functions_anthropic(req, &[])?;
-        Ok(ModelResponse {
-            text: response.text,
-            reasoning_content: response.reasoning_content,
-            reasoning_signature: response.reasoning_signature,
-            usage: response.usage,
-            output_mode: "anthropic-non-stream".to_string(),
-            output_chunk_count: 1,
-        })
+        self.complete_with_functions_anthropic(req, &[])
     }
 
     fn complete_with_functions_anthropic(
         &self,
         req: &ModelRequest,
-        functions: &[FunctionToolSpec],
+        functions: &[ToolSpec],
     ) -> Result<ModelFunctionResponse> {
         self.complete_with_functions_anthropic_with_tool_choice(req, functions, None)
     }
@@ -368,8 +328,8 @@ impl SingleProviderClient {
     fn complete_with_functions_anthropic_with_tool_choice(
         &self,
         req: &ModelRequest,
-        functions: &[FunctionToolSpec],
-        tool_choice: Option<ModelToolChoice>,
+        functions: &[ToolSpec],
+        tool_choice: Option<ToolChoice>,
     ) -> Result<ModelFunctionResponse> {
         let timeout_ms = parse_function_timeout_ms(&self.cfg.api_timeout_ms)?;
         let model = self.cfg.api_model.trim();
@@ -378,8 +338,7 @@ impl SingleProviderClient {
         }
 
         let provider = self.build_anthropic_provider(timeout_ms)?;
-        let request =
-            build_provider_request(req, model, anthropic_max_tokens(), functions, tool_choice);
+        let request = build_provider_request(req, model, MAX_TOKENS_MAIN, functions, tool_choice);
         let response = self.block_on_llm(provider.complete(request))?;
         convert_provider_response_to_function_response(response)
     }
@@ -406,7 +365,7 @@ impl SingleProviderClient {
             messages: vec![ChatMessage::text(LlmMessageRole::User, prompt)],
             tools: Vec::new(),
             tool_choice: None,
-            max_tokens: Some(200),
+            max_tokens: MAX_TOKENS_LITE,
             temperature: Some(0.3),
             top_p: None,
             stop_sequences: Vec::new(),
@@ -433,7 +392,7 @@ impl SingleProviderClient {
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起流式模型请求"));
         }
-        let request = build_provider_request(req, model, anthropic_max_tokens(), &[], None);
+        let request = build_provider_request(req, model, MAX_TOKENS_MAIN, &[], None);
         let provider = self.build_provider_dispatch(timeout_ms)?;
         consume_provider_stream(provider, request, &mut on_delta)
     }
@@ -442,7 +401,7 @@ impl SingleProviderClient {
     pub fn complete_with_functions_stream_impl(
         &self,
         req: &ModelRequest,
-        functions: &[FunctionToolSpec],
+        functions: &[ToolSpec],
         on_delta: &mut dyn FnMut(&ModelStreamChunk),
     ) -> Result<ModelFunctionResponse> {
         self.complete_with_functions_stream_impl_with_tool_choice(req, functions, None, on_delta)
@@ -451,8 +410,8 @@ impl SingleProviderClient {
     pub fn complete_with_functions_stream_impl_with_tool_choice(
         &self,
         req: &ModelRequest,
-        functions: &[FunctionToolSpec],
-        tool_choice: Option<ModelToolChoice>,
+        functions: &[ToolSpec],
+        tool_choice: Option<ToolChoice>,
         on_delta: &mut dyn FnMut(&ModelStreamChunk),
     ) -> Result<ModelFunctionResponse> {
         let timeout_ms = parse_function_timeout_ms(&self.cfg.api_timeout_ms)?;
@@ -460,8 +419,7 @@ impl SingleProviderClient {
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起流式工具模型请求"));
         }
-        let request =
-            build_provider_request(req, model, anthropic_max_tokens(), functions, tool_choice);
+        let request = build_provider_request(req, model, MAX_TOKENS_MAIN, functions, tool_choice);
         let provider = self.build_provider_dispatch(timeout_ms)?;
         convert_stream_to_function_response(provider, request, on_delta)
     }
@@ -492,7 +450,7 @@ impl SingleProviderClient {
             messages: vec![ChatMessage::text(LlmMessageRole::User, prompt)],
             tools: Vec::new(),
             tool_choice: None,
-            max_tokens: Some(200),
+            max_tokens: MAX_TOKENS_LITE,
             temperature: Some(0.3),
             top_p: None,
             stop_sequences: Vec::new(),
@@ -518,7 +476,7 @@ impl SingleProviderClient {
             messages: vec![ChatMessage::text(LlmMessageRole::User, prompt)],
             tools: Vec::new(),
             tool_choice: None,
-            max_tokens: Some(200),
+            max_tokens: MAX_TOKENS_LITE,
             temperature: Some(0.1),
             top_p: None,
             stop_sequences: Vec::new(),
@@ -545,7 +503,7 @@ impl SingleProviderClient {
     pub async fn stream_function_calls(
         self,
         req: ModelRequest,
-        functions: Vec<FunctionToolSpec>,
+        functions: Vec<ToolSpec>,
         chunk_tx: tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
     ) -> Result<ModelFunctionResponse> {
         self.stream_function_calls_with_tool_choice(req, functions, None, chunk_tx)
@@ -555,8 +513,8 @@ impl SingleProviderClient {
     pub async fn stream_function_calls_with_tool_choice(
         self,
         req: ModelRequest,
-        functions: Vec<FunctionToolSpec>,
-        tool_choice: Option<ModelToolChoice>,
+        functions: Vec<ToolSpec>,
+        tool_choice: Option<ToolChoice>,
         chunk_tx: tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
     ) -> Result<ModelFunctionResponse> {
         let fallback_client = self.clone();
@@ -603,8 +561,8 @@ impl SingleProviderClient {
     async fn stream_function_calls_streaming(
         self,
         req: ModelRequest,
-        functions: Vec<FunctionToolSpec>,
-        tool_choice: Option<ModelToolChoice>,
+        functions: Vec<ToolSpec>,
+        tool_choice: Option<ToolChoice>,
         chunk_tx: tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
     ) -> Result<ModelFunctionResponse> {
         fn looks_like_complete_json(raw: &str) -> bool {
@@ -620,13 +578,8 @@ impl SingleProviderClient {
                 "API_MODEL 不能为空，无法发起 async 流式工具模型请求"
             ));
         }
-        let request = build_provider_request(
-            &req,
-            &model,
-            anthropic_max_tokens(),
-            &functions,
-            tool_choice,
-        );
+        let request =
+            build_provider_request(&req, &model, MAX_TOKENS_MAIN, &functions, tool_choice);
         let provider = self.build_provider_dispatch(timeout_ms)?;
 
         let mut text = String::new();
@@ -697,7 +650,7 @@ impl SingleProviderClient {
                 continue;
             }
             let arguments = parse_tool_arguments_or_error(&name, &id, &raw_args);
-            tool_calls_vec.push(ModelFunctionCall {
+            tool_calls_vec.push(ToolCall {
                 id,
                 name,
                 arguments,
@@ -723,8 +676,8 @@ impl SingleProviderClient {
     pub fn complete_with_functions_with_tool_choice(
         &self,
         req: &ModelRequest,
-        functions: &[FunctionToolSpec],
-        tool_choice: Option<ModelToolChoice>,
+        functions: &[ToolSpec],
+        tool_choice: Option<ToolChoice>,
     ) -> Result<ModelFunctionResponse> {
         if self.protocol() == ProviderProtocol::Anthropic {
             return self.complete_with_functions_anthropic_with_tool_choice(
@@ -741,8 +694,7 @@ impl SingleProviderClient {
         }
         let provider =
             build_openai_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())?;
-        let request =
-            build_provider_request(req, model, anthropic_max_tokens(), functions, tool_choice);
+        let request = build_provider_request(req, model, MAX_TOKENS_MAIN, functions, tool_choice);
         let response = self.block_on_llm(provider.complete(request))?;
         convert_provider_response_to_function_response(response)
     }
@@ -750,8 +702,8 @@ impl SingleProviderClient {
     pub fn complete_with_functions_stream_with_tool_choice(
         &self,
         req: &ModelRequest,
-        functions: &[FunctionToolSpec],
-        tool_choice: Option<ModelToolChoice>,
+        functions: &[ToolSpec],
+        tool_choice: Option<ToolChoice>,
         on_delta: &mut dyn FnMut(&ModelStreamChunk),
     ) -> Result<ModelFunctionResponse> {
         if use_stream_mode() {
@@ -834,22 +786,21 @@ impl ModelClient for SingleProviderClient {
         }
         let provider =
             build_openai_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())?;
-        let request = build_provider_request(req, model, anthropic_max_tokens(), &[], None);
+        let request = build_provider_request(req, model, MAX_TOKENS_MAIN, &[], None);
         let response = self.block_on_llm(provider.complete(request))?;
         Ok(ModelResponse {
             text: collect_provider_text(&response).trim().to_string(),
             reasoning_content: response.reasoning_content.unwrap_or_default(),
             reasoning_signature: None,
             usage: response.usage.unwrap_or_default().into(),
-            output_mode: "non-stream".to_string(),
-            output_chunk_count: 1,
+            tool_calls: Vec::new(),
         })
     }
 
     fn complete_with_functions(
         &self,
         req: &ModelRequest,
-        functions: &[FunctionToolSpec],
+        functions: &[ToolSpec],
     ) -> Result<ModelFunctionResponse> {
         SingleProviderClient::complete_with_functions_with_tool_choice(self, req, functions, None)
     }
@@ -857,7 +808,7 @@ impl ModelClient for SingleProviderClient {
     fn complete_with_functions_stream(
         &self,
         req: &ModelRequest,
-        functions: &[FunctionToolSpec],
+        functions: &[ToolSpec],
         on_delta: &mut dyn FnMut(&ModelStreamChunk),
     ) -> Result<ModelFunctionResponse> {
         SingleProviderClient::complete_with_functions_stream_with_tool_choice(
@@ -866,9 +817,18 @@ impl ModelClient for SingleProviderClient {
     }
 }
 
-fn anthropic_max_tokens() -> u32 {
-    configured_max_tokens().map(u32::from).unwrap_or(4096)
-}
+/// 主模型请求最大输出 token 数。
+///
+/// 规划/执行/响应等主模型请求统一使用此值。
+/// thinking 模式下 thinking tokens 与 output tokens 共享此预算，
+/// 因此 32k 确保 thinking 消耗 15-20k 后仍有 12-17k 给实际输出。
+/// 此值从 tiangong-core 到 tiangong-llm 再到 provider 逐层透传，不做任何修改。
+const MAX_TOKENS_MAIN: u32 = 32_768;
+
+/// 轻量级任务（标题生成、分类判断等）最大输出 token 数。
+/// 任务输出通常不超过几十个字，200 足够且能有效控制成本。
+const MAX_TOKENS_LITE: u32 = 200;
+
 fn build_anthropic_provider_from_config(
     cfg: &ModelProviderConfig,
     timeout_ms: u64,
@@ -907,27 +867,18 @@ fn build_provider_request(
     req: &ModelRequest,
     model: &str,
     max_tokens: u32,
-    functions: &[FunctionToolSpec],
-    tool_choice: Option<ModelToolChoice>,
+    functions: &[ToolSpec],
+    tool_choice: Option<ToolChoice>,
 ) -> ProviderRequest {
     let (system, messages) = build_provider_messages(req);
-    let thinking = req.thinking.as_ref().map(|thinking| LlmThinkingConfig {
-        budget_tokens: thinking.budget_tokens,
-    });
+    let thinking = req.thinking.clone();
     ProviderRequest {
         model: model.to_string(),
         system: (!system.trim().is_empty()).then_some(system),
         messages,
-        tools: functions
-            .iter()
-            .map(|tool| ToolSpec {
-                name: tool.name.clone(),
-                description: tool.description.clone(),
-                input_schema: tool.parameters.clone(),
-            })
-            .collect(),
+        tools: functions.to_vec(),
         tool_choice: tool_choice.or_else(|| (!functions.is_empty()).then_some(LlmToolChoice::Auto)),
-        max_tokens: Some(max_tokens),
+        max_tokens,
         temperature: configured_temperature_f32(),
         top_p: None,
         stop_sequences: Vec::new(),
@@ -1304,7 +1255,7 @@ fn convert_provider_response_to_function_response(
                 id,
                 name,
                 arguments,
-            }) if !name.is_empty() => Some(ModelFunctionCall {
+            }) if !name.is_empty() => Some(ToolCall {
                 id: id.clone(),
                 name: name.clone(),
                 arguments: arguments.clone(),
@@ -1509,7 +1460,7 @@ async fn consume_provider_stream_events_async(
     let tool_calls = tool_calls
         .into_iter()
         .filter(|(_, (name, _))| !name.is_empty())
-        .map(|(id, (name, raw_args))| ModelFunctionCall {
+        .map(|(id, (name, raw_args))| ToolCall {
             arguments: parse_tool_arguments_or_error(&name, &id, &raw_args),
             id,
             name,
@@ -1564,8 +1515,7 @@ fn consume_provider_stream(
         reasoning_content: response.reasoning_content,
         reasoning_signature: response.reasoning_signature,
         usage: response.usage,
-        output_mode: "stream".to_string(),
-        output_chunk_count: 1,
+        tool_calls: response.tool_calls,
     })
 }
 
@@ -1639,14 +1589,6 @@ fn configured_temperature_f32() -> Option<f32> {
     configured_temperature_number()
         .and_then(|value| value.as_f64())
         .map(|value| value as f32)
-}
-
-fn configured_max_tokens() -> Option<u16> {
-    std::env::var("API_MAX_TOKENS")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .and_then(|v| v.parse::<u16>().ok())
 }
 
 fn use_stream_mode() -> bool {

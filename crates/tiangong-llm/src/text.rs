@@ -64,7 +64,7 @@ pub async fn complete_text_with_usage(
         messages: vec![ChatMessage::text(MessageRole::User, prompt)],
         tools: Vec::new(),
         tool_choice: None,
-        max_tokens: Some(max_tokens),
+        max_tokens,
         temperature: Some(0.2),
         top_p: None,
         stop_sequences: Vec::new(),

@@ -128,7 +128,7 @@ impl TaskCoordinator {
             user_input: prompt,
             context: Vec::new(),
             assembled_system_prompt: None,
-            thinking: Some(crate::model::ModelThinkingConfig {
+            thinking: Some(crate::model::ThinkingConfig {
                 budget_tokens: 2048,
             }),
             include_media: false,
@@ -274,7 +274,7 @@ impl TaskCoordinator {
                 user_input: prompt,
                 context: Vec::new(),
                 assembled_system_prompt: None,
-                thinking: Some(crate::model::ModelThinkingConfig {
+                thinking: Some(crate::model::ThinkingConfig {
                     budget_tokens: 2048,
                 }),
                 include_media: false,

@@ -16,7 +16,7 @@ use crate::context::organizer::ContextOrganizer;
 use crate::coordinator::TaskCoordinator;
 use crate::coordinator::types::CoordinatorTask;
 use crate::core_config::{CoreConfig, CoreConfigProvider};
-use crate::model::{FunctionToolSpec, ModelClient, ModelRequest, SingleProviderClient, TokenUsage};
+use crate::model::{ModelClient, ModelRequest, SingleProviderClient, TokenUsage, ToolSpec};
 use crate::observe::{audit_permission_with_context, audit_tool_execution};
 use crate::prompt::PromptAssembler;
 use crate::runtime::{LlmOutputRecord, RuntimeEngine, inject_enhanced_tools, use_stream_mode};
@@ -940,7 +940,7 @@ async fn worker_loop_async(
     let session_id = session.id.clone();
     let mut last_cfg_gen = 0u64;
     let mut engine: Option<RuntimeEngine> = None;
-    let mut tools: Vec<FunctionToolSpec> = Vec::new();
+    let mut tools: Vec<ToolSpec> = Vec::new();
     let mut mcp_targets: HashMap<String, McpFunctionTarget> = HashMap::new();
     // turn 计数器：每 10 个 turn 触发一次 Meta 反刍（归档低活跃节点）
     let mut turn_count: u32 = 0;
@@ -998,7 +998,7 @@ async fn worker_loop_async(
             ));
             let e = engine.as_ref().unwrap();
             let (all_tools, new_mcp_targets) = execution_function_tools(&e.agent_config().mcp);
-            let mut new_tools: Vec<FunctionToolSpec> = all_tools
+            let mut new_tools: Vec<ToolSpec> = all_tools
                 .into_iter()
                 .filter(|t| t.name != "mark_step_completed")
                 .collect();
@@ -1148,7 +1148,7 @@ pub(crate) fn execute_turn_standalone(
     session: &mut Session,
     user_input: &str,
     engine: &RuntimeEngine,
-    tools: &[FunctionToolSpec],
+    tools: &[ToolSpec],
     mcp_targets: &HashMap<String, McpFunctionTarget>,
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &Receiver<Command>,
@@ -1177,7 +1177,7 @@ async fn execute_turn_async(
     session: &mut Session,
     user_input: &str,
     engine: &RuntimeEngine,
-    tools: &[FunctionToolSpec],
+    tools: &[ToolSpec],
     mcp_targets: &HashMap<String, McpFunctionTarget>,
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
@@ -1251,7 +1251,7 @@ async fn execute_turn_inner_async(
     session: &mut Session,
     _user_input: &str,
     engine: &RuntimeEngine,
-    tools: &[FunctionToolSpec],
+    tools: &[ToolSpec],
     mcp_targets: &HashMap<String, McpFunctionTarget>,
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
@@ -1304,7 +1304,7 @@ async fn execute_turn_inner_async(
             user_input: assembled.user_input.clone(),
             context: assembled.build_messages(),
             assembled_system_prompt: Some(system_prompt),
-            thinking: Some(crate::model::ModelThinkingConfig {
+            thinking: Some(crate::model::ThinkingConfig {
                 budget_tokens: 4096,
             }),
             include_media: false,
@@ -1431,7 +1431,7 @@ async fn execute_turn_inner_async(
             };
             append_runtime_tool_message(session, "llm_output", format_llm_output_message(&output));
             session.persist_to_disk();
-            maybe_update_context_summary(session, engine, response.usage.prompt_tokens);
+            maybe_update_context_summary(session, engine, response.usage.total_tokens);
 
             if user_message_injected_during_stream {
                 // 新输入到来后，旧的 recall_memory 注入上下文可能不再相关，避免污染下一轮 prompt
@@ -1741,7 +1741,7 @@ async fn execute_turn_inner_async(
             {
                 memory_context = Some(result.stdout.clone());
             }
-            maybe_update_context_summary(session, engine, response.usage.prompt_tokens);
+            maybe_update_context_summary(session, engine, response.usage.total_tokens);
 
             match drain_pending_commands_async(session, &mut loop_context, stream_tx, cmd_rx) {
                 PendingCommandEffect::Terminate => return accumulated_usage,
@@ -1768,7 +1768,7 @@ fn execute_turn_inner(
     session: &mut Session,
     _user_input: &str,
     engine: &RuntimeEngine,
-    tools: &[FunctionToolSpec],
+    tools: &[ToolSpec],
     mcp_targets: &HashMap<String, McpFunctionTarget>,
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &Receiver<Command>,
@@ -1823,7 +1823,7 @@ fn execute_turn_inner(
             user_input: assembled.user_input.clone(),
             context: assembled.build_messages(),
             assembled_system_prompt: Some(system_prompt),
-            thinking: Some(crate::model::ModelThinkingConfig {
+            thinking: Some(crate::model::ThinkingConfig {
                 budget_tokens: 4096,
             }),
             include_media: false,
@@ -1950,7 +1950,7 @@ fn execute_turn_inner(
 
             // 最终回复落盘（确保崩溃时不丢失）
             session.persist_to_disk();
-            maybe_update_context_summary(session, engine, response.usage.prompt_tokens);
+            maybe_update_context_summary(session, engine, response.usage.total_tokens);
 
             let _ = stream_tx.send(StreamEvent::Done {
                 usage: Some(accumulated_usage.clone()),
@@ -2266,7 +2266,7 @@ fn execute_turn_inner(
             {
                 memory_context = Some(result.stdout.clone());
             }
-            maybe_update_context_summary(session, engine, response.usage.prompt_tokens);
+            maybe_update_context_summary(session, engine, response.usage.total_tokens);
 
             match drain_pending_commands(session, &mut loop_context, stream_tx, cmd_rx) {
                 PendingCommandEffect::Terminate => return accumulated_usage,
@@ -2466,7 +2466,7 @@ fn append_assistant_tool_call_message(
     text: &str,
     reasoning_content: &str,
     reasoning_signature: Option<String>,
-    calls: &[&crate::model::ModelFunctionCall],
+    calls: &[&crate::model::ToolCall],
 ) {
     let tool_calls = calls
         .iter()
@@ -2608,20 +2608,20 @@ fn is_media_tool_name(tool_name: &str) -> bool {
 fn maybe_update_context_summary(
     session: &mut Session,
     engine: &RuntimeEngine,
-    actual_prompt_tokens: usize,
+    observed_total_tokens: usize,
 ) {
     let organizer = ContextOrganizer::new(engine.context_limit)
         .with_threshold(0.95)
         .with_keep_recent_turns(6);
-    match organizer.maybe_update_summary(session, engine.client(), actual_prompt_tokens) {
+    match organizer.maybe_update_summary(session, engine.client(), observed_total_tokens) {
         Ok(true) => {
             session.persist_to_disk();
             tracing::info!(
                 session_id = %session.id,
-                prompt_tokens = actual_prompt_tokens,
+                observed_total_tokens,
                 threshold_tokens = organizer.token_threshold(),
                 summary_up_to = session.summary_up_to,
-                "上下文达到压缩阈值，已更新早期对话摘要"
+                "上下文与本轮输出达到压缩阈值，已更新早期对话摘要"
             );
         }
         Ok(false) => {}
@@ -2718,7 +2718,7 @@ fn force_final_response(
         user_input: assembled.user_input.clone(),
         context: assembled.build_messages(),
         assembled_system_prompt: Some(system_prompt),
-        thinking: Some(crate::model::ModelThinkingConfig {
+        thinking: Some(crate::model::ThinkingConfig {
             budget_tokens: 4096,
         }),
         include_media: false,
@@ -2857,15 +2857,15 @@ fn build_engine_from_config(
     engine
 }
 
-fn inject_memory_recall_tool(tools: &mut Vec<FunctionToolSpec>) {
+fn inject_memory_recall_tool(tools: &mut Vec<ToolSpec>) {
     if tools.iter().any(|tool| tool.name == "recall_memory") {
         return;
     }
 
-    tools.push(FunctionToolSpec {
+    tools.push(ToolSpec {
         name: "recall_memory".to_string(),
         description: "按需回忆历史上下文、跨会话结果、之前的工具输出或生成产物。用户提到刚刚、刚才、上次、之前、那个、继续、这张图、生成的图片等历史指代时，应先调用此工具。".to_string(),
-        parameters: serde_json::json!({
+        input_schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "query": {
@@ -2892,7 +2892,7 @@ fn inject_memory_recall_tool(tools: &mut Vec<FunctionToolSpec>) {
 }
 
 fn execute_memory_recall_tool(
-    call: &crate::model::ModelFunctionCall,
+    call: &crate::model::ToolCall,
     memory_handle: Option<&tiangong_memory::MemoryHandle>,
     session: &Session,
 ) -> MemoryRecallToolOutput {
@@ -3045,7 +3045,7 @@ fn memory_recall_tool_result(
 }
 
 fn execute_attachment_analysis_tool(
-    call: &crate::model::ModelFunctionCall,
+    call: &crate::model::ToolCall,
     engine: &RuntimeEngine,
     session: &Session,
 ) -> crate::tool::ToolResult {
@@ -3815,7 +3815,7 @@ fn compact_single_memory_text(text: &str, max_chars: usize) -> String {
 }
 
 /// 格式化工具调用参数摘要（用于 ToolStart 和 ApprovalNeeded 事件）
-fn format_call_args_summary(call: &crate::model::ModelFunctionCall) -> String {
+fn format_call_args_summary(call: &crate::model::ToolCall) -> String {
     use serde_json::Value;
 
     let args = &call.arguments;
@@ -3886,7 +3886,7 @@ fn format_call_args_summary(call: &crate::model::ModelFunctionCall) -> String {
         .join(" ")
 }
 
-fn infer_audit_target(call: &crate::model::ModelFunctionCall) -> (Option<String>, Option<String>) {
+fn infer_audit_target(call: &crate::model::ToolCall) -> (Option<String>, Option<String>) {
     use serde_json::Value;
 
     let Some(obj) = call.arguments.as_object() else {

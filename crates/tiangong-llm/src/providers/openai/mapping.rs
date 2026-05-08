@@ -30,15 +30,13 @@ pub fn build_request_json(req: &ProviderRequest, stream: bool) -> Result<Value> 
         .model(req.model.clone())
         .messages(messages)
         .stream(stream);
-    if let Some(max_tokens) = req.max_tokens.map(|value| value as u16) {
-        request_args = request_args.max_tokens(max_tokens);
-    }
     if let Some(temperature) = req.temperature {
         request_args = request_args.temperature(temperature);
     }
     let request = request_args.build().context("构建 OpenAI 请求失败")?;
 
     let mut payload = serde_json::to_value(request).context("序列化 OpenAI 请求失败")?;
+    inject_max_tokens_config(&mut payload, req.max_tokens);
     if stream {
         inject_stream_usage_option(&mut payload);
     }
@@ -305,6 +303,13 @@ fn inject_stream_usage_option(payload: &mut Value) {
         return;
     };
     obj.insert("stream_options".to_string(), json!({"include_usage": true}));
+}
+
+fn inject_max_tokens_config(payload: &mut Value, max_tokens: u32) {
+    let Some(obj) = payload.as_object_mut() else {
+        return;
+    };
+    obj.insert("max_tokens".to_string(), json!(max_tokens));
 }
 
 fn inject_temperature_config(payload: &mut Value, temperature: f32) -> Result<()> {

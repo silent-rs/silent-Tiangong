@@ -2,7 +2,7 @@
 //!
 //! 管理单次 LLM 调用的 token 预算分配，确保上下文不超出模型限制。
 
-use crate::model::FunctionToolSpec;
+use crate::model::ToolSpec;
 
 /// Token 预算分配
 #[derive(Debug, Clone)]
@@ -29,13 +29,13 @@ impl TokenBudget {
     /// 估算工具定义占用的 token 数
     ///
     /// 每个工具定义约 150-300 tokens（名称、描述、参数 schema）
-    pub fn estimate_tools_tokens(tools: &[FunctionToolSpec]) -> usize {
+    pub fn estimate_tools_tokens(tools: &[ToolSpec]) -> usize {
         tools
             .iter()
             .map(|t| {
                 let name_len = t.name.len();
                 let desc_len = t.description.len();
-                let params_len = t.parameters.to_string().len();
+                let params_len = t.input_schema.to_string().len();
                 // 粗略估算：字符数 * 0.4（JSON schema 多为英文/符号）
                 ((name_len + desc_len + params_len) as f64 * 0.4) as usize + 20
             })
@@ -45,7 +45,7 @@ impl TokenBudget {
     /// 计算在给定工具和历史消息下的剩余可用 token
     pub fn remaining_for_input(
         &self,
-        tools: &[FunctionToolSpec],
+        tools: &[ToolSpec],
         messages: &[crate::session::Message],
     ) -> usize {
         let max = self.max_prompt_tokens();
@@ -83,15 +83,15 @@ mod tests {
 
     #[test]
     fn tool_cost_scales_with_content() {
-        let small = FunctionToolSpec {
+        let small = ToolSpec {
             name: "read".into(),
             description: "Read file".into(),
-            parameters: serde_json::json!({"type": "object"}),
+            input_schema: serde_json::json!({"type": "object"}),
         };
-        let large = FunctionToolSpec {
+        let large = ToolSpec {
             name: "run_command".into(),
             description: "Execute a shell command with arguments and environment variables".into(),
-            parameters: serde_json::json!({
+            input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "cmd": {"type": "string", "description": "Command to execute"},

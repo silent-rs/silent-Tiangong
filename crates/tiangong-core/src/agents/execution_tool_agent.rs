@@ -1,16 +1,16 @@
 use anyhow::{Result, anyhow};
 
-use crate::model::{FunctionToolSpec, ModelFunctionCall};
-use crate::tool::{ToolCall, ToolName};
+use crate::model::{ToolCall, ToolSpec};
+use crate::tool::{ToolCall as LocalToolCall, ToolName};
 
 const INTERNAL_SHELL_CMD: &str = "__tiangong_shell__";
 const INTERNAL_CWD_PREFIX: &str = "__tiangong_cwd=";
-pub(crate) fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
+pub(crate) fn basic_file_function_tools() -> Vec<ToolSpec> {
     vec![
-        FunctionToolSpec {
+        ToolSpec {
             name: "list_dir".to_string(),
             description: "列出目录中的文件和子目录".to_string(),
-            parameters: serde_json::json!({
+            input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "目录路径，默认当前目录" }
@@ -18,10 +18,10 @@ pub(crate) fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
                 "required": []
             }),
         },
-        FunctionToolSpec {
+        ToolSpec {
             name: "tree_dir".to_string(),
             description: "按目录树格式列出目录，支持通过 max_depth 限制遍历深度".to_string(),
-            parameters: serde_json::json!({
+            input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "目录路径，默认当前目录" },
@@ -35,10 +35,10 @@ pub(crate) fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
                 "required": []
             }),
         },
-        FunctionToolSpec {
+        ToolSpec {
             name: "read_file".to_string(),
             description: "读取文件内容，支持按行范围读取".to_string(),
-            parameters: serde_json::json!({
+            input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "文件路径" },
@@ -48,10 +48,10 @@ pub(crate) fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
                 "required": ["path"]
             }),
         },
-        FunctionToolSpec {
+        ToolSpec {
             name: "search_code".to_string(),
             description: "在目录中检索文本（优先使用 rg）".to_string(),
-            parameters: serde_json::json!({
+            input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "pattern": { "type": "string", "description": "检索文本或正则模式" },
@@ -60,19 +60,19 @@ pub(crate) fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
                 "required": ["pattern"]
             }),
         },
-        FunctionToolSpec {
+        ToolSpec {
             name: "current_time".to_string(),
             description: "获取当前本地时间、RFC3339 时间、Unix 时间戳和时区偏移。涉及今天、现在、当前时间、日期换算等请求时使用。".to_string(),
-            parameters: serde_json::json!({
+            input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
                 "required": []
             }),
         },
-        FunctionToolSpec {
+        ToolSpec {
             name: "web_fetch".to_string(),
             description: "受控获取 HTTP/HTTPS URL。text 模式读取网页/文本正文；download 模式下载在线文件到允许写入目录，可替代 curl/wget。".to_string(),
-            parameters: serde_json::json!({
+            input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "url": { "type": "string", "description": "要获取的 HTTP/HTTPS URL" },
@@ -114,10 +114,10 @@ pub(crate) fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
                 "required": ["url"]
             }),
         },
-        FunctionToolSpec {
+        ToolSpec {
             name: "write_file".to_string(),
             description: "写入文件内容（支持覆盖或追加）".to_string(),
-            parameters: serde_json::json!({
+            input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "文件路径" },
@@ -127,10 +127,10 @@ pub(crate) fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
                 "required": ["path", "content"]
             }),
         },
-        FunctionToolSpec {
+        ToolSpec {
             name: "replace_in_file".to_string(),
             description: "在文件中将旧文本替换为新文本，默认仅允许单点替换".to_string(),
-            parameters: serde_json::json!({
+            input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "文件路径" },
@@ -142,11 +142,11 @@ pub(crate) fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
                 "required": ["path", "old", "new"]
             }),
         },
-        FunctionToolSpec {
+        ToolSpec {
             name: "run_command".to_string(),
             description: "执行受控命令，支持 cwd 和超时设置。shell 脚本建议使用 run_shell"
                 .to_string(),
-            parameters: serde_json::json!({
+            input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "cmd": { "type": "string", "description": "命令名" },
@@ -161,10 +161,10 @@ pub(crate) fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
                 "required": ["cmd"]
             }),
         },
-        FunctionToolSpec {
+        ToolSpec {
             name: "run_shell".to_string(),
             description: "执行 shell 脚本，自动派生 bash/sh/powershell 参数".to_string(),
-            parameters: serde_json::json!({
+            input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "script": { "type": "string", "description": "shell 脚本文本" },
@@ -175,10 +175,10 @@ pub(crate) fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
                 "required": ["script"]
             }),
         },
-        FunctionToolSpec {
+        ToolSpec {
             name: "apply_patch".to_string(),
             description: "对文件应用补丁文本，仅支持 unified diff（---/+++/@@）".to_string(),
-            parameters: serde_json::json!({
+            input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "patch": { "type": "string", "description": "补丁内容文本（unified diff）" },
@@ -188,10 +188,10 @@ pub(crate) fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
                 "required": ["patch"]
             }),
         },
-        FunctionToolSpec {
+        ToolSpec {
             name: "mark_step_completed".to_string(),
             description: "标记当前执行步骤已完成。仅在本步骤真正完成后调用。".to_string(),
-            parameters: serde_json::json!({
+            input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "result": { "type": "string", "description": "本步骤完成结果摘要" },
@@ -214,7 +214,7 @@ pub(crate) fn basic_file_function_tools() -> Vec<FunctionToolSpec> {
     ]
 }
 
-pub(crate) fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<ToolCall> {
+pub(crate) fn build_tool_call_from_function(call: &ToolCall) -> Result<LocalToolCall> {
     if let Some(parse_error) = call
         .arguments
         .get("__parse_error")
@@ -233,7 +233,7 @@ pub(crate) fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<
                 .unwrap_or(".")
                 .to_string();
             args.push(path);
-            Ok(ToolCall {
+            Ok(LocalToolCall {
                 name: ToolName::ListDir,
                 args,
             })
@@ -259,7 +259,7 @@ pub(crate) fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<
                 .unwrap_or_else(|| "2".to_string());
             args.push(path);
             args.push(max_depth);
-            Ok(ToolCall {
+            Ok(LocalToolCall {
                 name: ToolName::TreeDir,
                 args,
             })
@@ -285,7 +285,7 @@ pub(crate) fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<
                 {
                     args.push(max_lines);
                 }
-                return Ok(ToolCall {
+                return Ok(LocalToolCall {
                     name: ToolName::ReadFile,
                     args,
                 });
@@ -299,7 +299,7 @@ pub(crate) fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<
                 args.push("1".to_string());
                 args.push(max_lines);
             }
-            Ok(ToolCall {
+            Ok(LocalToolCall {
                 name: ToolName::ReadFile,
                 args,
             })
@@ -326,7 +326,7 @@ pub(crate) fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<
             {
                 args.push(append);
             }
-            Ok(ToolCall {
+            Ok(LocalToolCall {
                 name: ToolName::WriteFile,
                 args,
             })
@@ -346,7 +346,7 @@ pub(crate) fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<
                 .to_string();
             args.push(pattern);
             args.push(path);
-            Ok(ToolCall {
+            Ok(LocalToolCall {
                 name: ToolName::SearchCode,
                 args,
             })
@@ -406,12 +406,12 @@ pub(crate) fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<
                 follow_redirects,
                 extract_mode,
             ]);
-            Ok(ToolCall {
+            Ok(LocalToolCall {
                 name: ToolName::WebFetch,
                 args,
             })
         }
-        "current_time" => Ok(ToolCall {
+        "current_time" => Ok(LocalToolCall {
             name: ToolName::CurrentTime,
             args,
         }),
@@ -454,7 +454,7 @@ pub(crate) fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<
                 }
                 args.push(expected_count);
             }
-            Ok(ToolCall {
+            Ok(LocalToolCall {
                 name: ToolName::ReplaceInFile,
                 args,
             })
@@ -507,7 +507,7 @@ pub(crate) fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<
             {
                 args.push(format!("__tiangong_timeout={}", timeout * 1000));
             }
-            Ok(ToolCall {
+            Ok(LocalToolCall {
                 name: ToolName::RunCommand,
                 args,
             })
@@ -548,7 +548,7 @@ pub(crate) fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<
             {
                 args.push(format!("__tiangong_timeout={}", timeout * 1000));
             }
-            Ok(ToolCall {
+            Ok(LocalToolCall {
                 name: ToolName::RunCommand,
                 args,
             })
@@ -563,7 +563,7 @@ pub(crate) fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<
             args.push(INTERNAL_SHELL_CMD.to_string());
             args.push(script);
             args.push("bash".to_string());
-            Ok(ToolCall {
+            Ok(LocalToolCall {
                 name: ToolName::RunCommand,
                 args,
             })
@@ -596,7 +596,7 @@ pub(crate) fn build_tool_call_from_function(call: &ModelFunctionCall) -> Result<
                 }
                 args.push(workdir.to_string());
             }
-            Ok(ToolCall {
+            Ok(LocalToolCall {
                 name: ToolName::ApplyPatch,
                 args,
             })

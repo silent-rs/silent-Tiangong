@@ -92,7 +92,7 @@ fn sample_request() -> ProviderRequest {
             }),
         }],
         tool_choice: Some(ToolChoice::Auto),
-        max_tokens: Some(1024),
+        max_tokens: 1024,
         temperature: Some(0.2),
         top_p: None,
         stop_sequences: vec!["STOP".to_string()],

@@ -65,7 +65,7 @@ pub fn execute_single_plan_step_with_execution_agent(
             user_input: round_prompt,
             context: loop_context.clone(),
             assembled_system_prompt: None,
-            thinking: Some(crate::model::ModelThinkingConfig {
+            thinking: Some(crate::model::ThinkingConfig {
                 budget_tokens: 4096,
             }),
             include_media: false,

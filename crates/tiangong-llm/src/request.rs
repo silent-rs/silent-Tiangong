@@ -24,8 +24,7 @@ pub struct ProviderRequest {
     pub tools: Vec<ToolSpec>,
     #[serde(default)]
     pub tool_choice: Option<ToolChoice>,
-    #[serde(default)]
-    pub max_tokens: Option<u32>,
+    pub max_tokens: u32,
     #[serde(default)]
     pub temperature: Option<f32>,
     #[serde(default)]

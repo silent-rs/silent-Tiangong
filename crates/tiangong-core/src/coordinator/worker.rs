@@ -8,7 +8,7 @@ use std::sync::mpsc::{self, Sender};
 use std::time::Instant;
 
 use crate::agents::execution_mcp_agent::execution_function_tools;
-use crate::model::FunctionToolSpec;
+use crate::model::ToolSpec;
 use crate::runtime::{RuntimeEngine, inject_enhanced_tools};
 use crate::session::{MessageRole, Session};
 use tiangong_types::StreamEvent;
@@ -55,7 +55,7 @@ impl Worker {
 
         // 初始化工具
         let (all_tools, mcp_targets) = execution_function_tools(&self.engine.agent_config().mcp);
-        let mut tools: Vec<FunctionToolSpec> = all_tools
+        let mut tools: Vec<ToolSpec> = all_tools
             .into_iter()
             .filter(|t| t.name != "mark_step_completed")
             .collect();
