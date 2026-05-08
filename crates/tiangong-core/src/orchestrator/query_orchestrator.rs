@@ -116,6 +116,7 @@ impl QueryOrchestrator {
             context: Vec::new(),
             assembled_system_prompt: None,
             thinking: None,
+            include_media: false,
         };
 
         let resp = client.complete(&req)?;
@@ -169,6 +170,7 @@ mod tests {
             parent_session_id: None,
             cwd: String::new(),
             cwd_mode: Default::default(),
+            trust_mode: Default::default(),
             context_summary: None,
             summary_up_to: 0,
             created_at: String::new(),

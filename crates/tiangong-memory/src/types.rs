@@ -161,6 +161,8 @@ pub enum EpisodeOutcome {
 pub struct Episode {
     pub id: String,
     pub session_id: String,
+    #[serde(default)]
+    pub memory_type: MemoryCognitiveType,
     pub title: String,
     pub summary: String,
     pub outcome: EpisodeOutcome,
@@ -184,6 +186,7 @@ impl Episode {
         Self {
             id: scru128::new().to_string(),
             session_id,
+            memory_type: MemoryCognitiveType::Factual,
             title,
             summary,
             outcome,
@@ -192,6 +195,12 @@ impl Episode {
             importance,
             created_at: chrono::Local::now().naive_local().to_string(),
         }
+    }
+
+    /// 设置认知分类，保留 `new` 的兼容签名。
+    pub fn with_memory_type(mut self, memory_type: MemoryCognitiveType) -> Self {
+        self.memory_type = memory_type;
+        self
     }
 }
 

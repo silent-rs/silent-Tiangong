@@ -43,6 +43,7 @@ impl TaskCoordinator {
             context: Vec::new(),
             assembled_system_prompt: None,
             thinking: None,
+            include_media: false,
         };
 
         match self.engine.client().complete(&req) {
@@ -130,6 +131,7 @@ impl TaskCoordinator {
             thinking: Some(crate::model::ModelThinkingConfig {
                 budget_tokens: 2048,
             }),
+            include_media: false,
         };
 
         let resp = self.engine.client().complete(&req)?;
@@ -275,6 +277,7 @@ impl TaskCoordinator {
                 thinking: Some(crate::model::ModelThinkingConfig {
                     budget_tokens: 2048,
                 }),
+                include_media: false,
             };
 
             // 流式合成，按固定节奏推送，避免高速模型压垮前端事件队列

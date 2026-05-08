@@ -95,6 +95,7 @@ impl TiangongState {
         if state.store.session.sessions.is_empty() {
             let mut session = Session::new(DEFAULT_SESSION_TITLE);
             session.cwd = state.store.session.workspace_dir.clone();
+            session.trust_mode = state.store.agent.agent_config.default_trust_mode;
             state.store.session.active_session_id = session.id.clone();
             state.store.session.sessions.push(session);
             let _ = state.persist_to_disk();
@@ -120,6 +121,14 @@ impl TiangongState {
             .active_session()
             .map(|session| session.title.clone())
             .unwrap_or_else(|| DEFAULT_SESSION_TITLE.to_string());
+        let active_trust_mode = state.active_session_trust_mode();
+        state.store.agent.agent_config.trust_mode = active_trust_mode;
+        state
+            .services
+            .runtime
+            .permission_gate()
+            .set_trust_mode(active_trust_mode);
+        state.rebuild_runtime_from_current_config();
         state.store.provider.model_list = normalize_model_list(
             state.store.provider.model_list.clone(),
             &state.store.provider.model_config.api_model,

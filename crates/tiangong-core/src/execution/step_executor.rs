@@ -68,6 +68,7 @@ pub fn execute_single_plan_step_with_execution_agent(
             thinking: Some(crate::model::ModelThinkingConfig {
                 budget_tokens: 4096,
             }),
+            include_media: false,
         };
         let response =
             client.complete_with_functions_stream(&request, &function_tools, on_chunk)?;

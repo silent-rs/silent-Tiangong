@@ -554,7 +554,11 @@ pub fn switch_session(session_id: String, state: State<TiangongApp>) -> Result<(
     state.with_state(|core_state| {
         core_state.switch_session(&session_id);
         Ok(())
-    })
+    })?;
+    state.sync_core_config_from_state()?;
+    let trust_mode = state.with_state_read(|core_state| Ok(core_state.active_session_trust_mode()))?;
+    state.set_core_trust_mode(&session_id, trust_mode);
+    Ok(())
 }
 
 /// 删除当前会话
@@ -609,6 +613,8 @@ fn send_message_inner(
 ) -> Result<(), String> {
     use std::sync::mpsc;
     use tiangong_types::SessionStreamEvent;
+
+    state.sync_core_config_from_state()?;
 
     // 准备 session
     let (session_id, user_message_id, session_snapshot) = state.with_state(|core_state| {
@@ -1244,7 +1250,7 @@ pub fn respond_approval(
 #[tauri::command]
 pub fn get_trust_mode(state: State<TiangongApp>) -> Result<String, String> {
     state.with_state_read(|core_state| {
-        let mode = core_state.agent_config().trust_mode;
+        let mode = core_state.active_session_trust_mode();
         Ok(serde_json::to_value(mode)
             .unwrap_or_default()
             .as_str()
@@ -1260,11 +1266,10 @@ pub fn set_trust_mode(mode: String, state: State<TiangongApp>) -> Result<(), Str
         serde_json::from_value(serde_json::Value::String(mode))
             .map_err(|e| format!("无效的信任模式: {e}"))?;
 
-    // 更新 TiangongState（持久化）
     state.with_state(|core_state| core_state.set_trust_mode(trust_mode))?;
     state.sync_core_config_from_state()?;
 
-    // 更新当前活跃会话的 core（session 级别）
+    // 会话级设置只影响当前会话；其他后台会话保留自己的信任模式。
     let session_id =
         state.with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))?;
     state.set_core_trust_mode(&session_id, trust_mode);

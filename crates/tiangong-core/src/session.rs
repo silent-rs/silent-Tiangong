@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::TokenUsage;
+use crate::permission::TrustMode;
 use crate::planner::{PlanItem, PlanStepSource, PlanStepStatus};
 
 pub use tiangong_types::{Message, MessageRole, MessageToolCall, now_text};
@@ -39,6 +40,9 @@ pub struct Session {
     /// 工作目录模式
     #[serde(default)]
     pub cwd_mode: SessionCwdMode,
+    /// 会话级信任模式；应用级默认值只在新建会话时复制到这里。
+    #[serde(default)]
+    pub trust_mode: TrustMode,
     /// 早期对话的滚动摘要（用于无限上下文压缩）
     ///
     /// 当对话历史超过模型上下文阈值时，早期消息被 LLM 压缩为摘要存储在此。
@@ -192,6 +196,7 @@ impl Session {
             task_plans: Vec::new(),
             cwd: String::new(),
             cwd_mode: SessionCwdMode::Inherit,
+            trust_mode: TrustMode::default(),
             context_summary: None,
             summary_up_to: 0,
             created_at: now.clone(),
@@ -219,6 +224,7 @@ impl Session {
             task_plans: Vec::new(),
             cwd: workspace_dir.to_string_lossy().to_string(),
             cwd_mode: SessionCwdMode::Isolated,
+            trust_mode: TrustMode::default(),
             context_summary: None,
             summary_up_to: 0,
             created_at: now.clone(),

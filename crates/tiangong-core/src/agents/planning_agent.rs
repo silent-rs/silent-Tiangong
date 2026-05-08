@@ -154,6 +154,7 @@ fn build_plan_with_agent_inner(
         thinking: Some(crate::model::ModelThinkingConfig {
             budget_tokens: 4096,
         }),
+        include_media: false,
     };
     let response = client
         .complete_stream(&request, on_delta)

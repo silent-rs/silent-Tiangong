@@ -53,9 +53,10 @@ impl MemoryDb {
                 "INSERT OR REPLACE INTO memory_nodes
                  (id, kind, memory_type, scope_type, scope_id, title, summary, keywords, importance,
                   confidence, status, source, usage_count, created_at, updated_at)
-                 VALUES (?1, 'episode', 'factual', 'workspace', ?2, ?3, ?4, ?5, ?6, 1.0, 'active', ?7, 0, ?8, ?8)",
+                 VALUES (?1, 'episode', ?2, 'workspace', ?3, ?4, ?5, ?6, ?7, 1.0, 'active', ?8, 0, ?9, ?9)",
                 rusqlite::params![
                     episode.id,
+                    memory_cognitive_type_to_str(&episode.memory_type),
                     workspace_id,
                     episode.title,
                     episode.summary,

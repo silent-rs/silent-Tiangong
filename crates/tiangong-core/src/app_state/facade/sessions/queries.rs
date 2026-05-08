@@ -21,6 +21,12 @@ impl TiangongState {
             .find(|session| session.id == self.store.session.active_session_id)
     }
 
+    pub fn active_session_trust_mode(&self) -> crate::permission::TrustMode {
+        self.active_session()
+            .map(|session| session.trust_mode)
+            .unwrap_or(self.store.agent.agent_config.default_trust_mode)
+    }
+
     pub fn active_task_plans(&self) -> Vec<SessionTaskPlan> {
         let Some(session) = self.active_session() else {
             return Vec::new();
@@ -74,7 +80,7 @@ impl TiangongState {
             mcp: self.agent_config().mcp.clone(),
             mcp_capabilities: base.mcp_capabilities.clone(),
             skills: self.agent_config().skills.clone(),
-            trust_mode: self.agent_config().trust_mode,
+            trust_mode: self.active_session_trust_mode(),
             default_trust_mode: self.agent_config().default_trust_mode,
             custom_system_prompt: self.agent_config().custom_system_prompt.clone(),
             context_limit: base.context_limit,

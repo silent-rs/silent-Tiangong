@@ -65,7 +65,7 @@ pub struct RuntimeEngine {
     client: SingleProviderClient,
     /// 轻量级文本模型客户端（标题生成等简单任务，未配置时为 None，回退到 client）
     lite_client: Option<SingleProviderClient>,
-    /// 多模态模型客户端（输入包含图片时优先使用）
+    /// 多模态模型客户端（由主模型通过附件解析工具按需调用）
     multimodal_client: Option<SingleProviderClient>,
     tool_executor: LocalToolExecutor,
     pub context_limit: usize,
@@ -163,6 +163,9 @@ impl RuntimeEngine {
     }
     pub fn multimodal_client(&self) -> &SingleProviderClient {
         self.multimodal_client.as_ref().unwrap_or(&self.client)
+    }
+    pub fn has_multimodal_client(&self) -> bool {
+        self.multimodal_client.is_some()
     }
     /// 获取 AgentConfig 引用
     pub fn agent_config(&self) -> &AgentConfig {
@@ -1322,6 +1325,32 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<FunctionToolSpec>, engine: &
                 .resolve_for_capability(crate::models_config::ModelCapability::Stt)
                 .is_some()
         });
+    let has_multimodal = engine.has_multimodal_client();
+
+    if has_multimodal {
+        tools.push(FunctionToolSpec {
+            name: "analyze_attachment".to_string(),
+            description: "按需调用多模态模型解析用户上传的图片或文件附件。只有当用户问题确实需要查看附件内容时才调用；普通文本对话不要调用。".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "instruction": {
+                        "type": "string",
+                        "description": "希望多模态模型如何解析附件，例如提取文字、描述画面、识别表格、回答与附件有关的问题"
+                    },
+                    "message_id": {
+                        "type": "string",
+                        "description": "包含附件的用户消息 ID。省略时使用最近一条包含附件的用户消息"
+                    },
+                    "attachment_index": {
+                        "type": "integer",
+                        "description": "附件序号，从 0 开始。省略时解析该消息中的全部附件"
+                    }
+                },
+                "required": ["instruction"]
+            }),
+        });
+    }
 
     if has_image_gen {
         tools.push(FunctionToolSpec {

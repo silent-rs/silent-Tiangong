@@ -17,7 +17,7 @@ use tiangong_llm::provider::LlmProvider;
 use tiangong_llm::providers::anthropic::{AnthropicConfig, AnthropicProvider};
 use tiangong_llm::providers::openai::{OpenAiCompatibleConfig, OpenAiCompatibleProvider};
 use tiangong_llm::request::{ProviderRequest, ThinkingConfig as LlmThinkingConfig};
-use tiangong_llm::response::ProviderResponse;
+use tiangong_llm::response::{ProviderResponse, StopReason};
 use tiangong_llm::stream::{ProviderStream, ProviderStreamEvent};
 use tiangong_llm::tool::{
     ToolCall as LlmToolCall, ToolChoice as LlmToolChoice, ToolResult as LlmToolResult,
@@ -38,6 +38,8 @@ pub struct ModelRequest {
     /// 已由 PromptAssembler 装配的 system prompt。
     pub assembled_system_prompt: Option<String>,
     pub thinking: Option<ModelThinkingConfig>,
+    /// 普通主模型请求不携带附件原始内容；只有显式的多模态解析工具会开启。
+    pub include_media: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +61,7 @@ impl ModelRequest {
             context,
             assembled_system_prompt: Some(system_prompt),
             thinking: None,
+            include_media: false,
         }
     }
 
@@ -939,7 +942,7 @@ fn build_provider_messages(req: &ModelRequest) -> (String, Vec<ChatMessage>) {
     let system_texts = if let Some(ref assembled) = req.assembled_system_prompt {
         let texts = vec![assembled.clone()];
         for msg in &req.context {
-            if let Some(message) = provider_message_from_session(msg) {
+            if let Some(message) = provider_message_from_session(msg, req.include_media) {
                 messages.push(message);
             }
         }
@@ -954,7 +957,7 @@ fn build_provider_messages(req: &ModelRequest) -> (String, Vec<ChatMessage>) {
             texts.push(mcp_tools_prompt);
         }
         for msg in &req.context {
-            if let Some(message) = provider_message_from_session(msg) {
+            if let Some(message) = provider_message_from_session(msg, req.include_media) {
                 messages.push(message);
             }
         }
@@ -981,7 +984,7 @@ fn build_provider_messages(req: &ModelRequest) -> (String, Vec<ChatMessage>) {
     (system_texts.join("\n"), messages)
 }
 
-fn provider_message_from_session(msg: &Message) -> Option<ChatMessage> {
+fn provider_message_from_session(msg: &Message, include_media: bool) -> Option<ChatMessage> {
     let role = match msg.role {
         MessageRole::User => LlmMessageRole::User,
         MessageRole::Assistant => LlmMessageRole::Assistant,
@@ -1021,7 +1024,7 @@ fn provider_message_from_session(msg: &Message) -> Option<ChatMessage> {
     if !msg.content.trim().is_empty() {
         content.push(LlmMessageContent::Text(msg.content.trim().to_string()));
     }
-    if msg.role == MessageRole::User {
+    if msg.role == MessageRole::User && include_media {
         let image_contents = message_image_contents(msg);
         if !image_contents.is_empty() {
             content.push(LlmMessageContent::Text(format!(
@@ -1038,6 +1041,8 @@ fn provider_message_from_session(msg: &Message) -> Option<ChatMessage> {
             )));
         }
         content.extend(file_contents);
+    } else if msg.role == MessageRole::User && !msg.media.is_empty() {
+        content.push(LlmMessageContent::Text(attachment_notice_text(msg)));
     }
     content.extend(msg.tool_calls.iter().map(|call| {
         LlmMessageContent::ToolCall(LlmToolCall {
@@ -1064,7 +1069,6 @@ fn message_image_contents(msg: &Message) -> Vec<LlmMessageContent> {
             refs.push(asset.url.clone());
         }
     }
-    refs.extend(extract_image_paths_from_text(&msg.content));
     refs.sort();
     refs.dedup();
 
@@ -1094,6 +1098,27 @@ fn message_file_contents(msg: &Message) -> Vec<LlmMessageContent> {
         .collect()
 }
 
+fn attachment_notice_text(msg: &Message) -> String {
+    let items = msg
+        .media
+        .iter()
+        .enumerate()
+        .map(|(index, asset)| {
+            let title = asset.title.as_deref().unwrap_or("未命名附件");
+            let mime = asset.mime_type.as_deref().unwrap_or("unknown");
+            format!(
+                "- index={index} kind={:?} title={title} mime_type={mime}",
+                asset.kind
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "本条用户消息包含附件，但主模型请求不会直接携带附件内容。需要查看附件内容时，请调用 analyze_attachment 工具，并指定 message_id={} 和附件 index。\n{}",
+        msg.id, items
+    )
+}
+
 fn image_content_from_reference(value: &str) -> Option<tiangong_llm::message::ImageContent> {
     let trimmed = value.trim();
     if trimmed.starts_with("data:image/")
@@ -1119,28 +1144,11 @@ fn image_content_from_reference(value: &str) -> Option<tiangong_llm::message::Im
 fn looks_like_image_reference(value: &str) -> bool {
     let lower = value.trim().to_ascii_lowercase();
     lower.starts_with("data:image/")
-        || lower.starts_with("http://")
-        || lower.starts_with("https://")
         || lower.ends_with(".png")
         || lower.ends_with(".jpg")
         || lower.ends_with(".jpeg")
         || lower.ends_with(".webp")
         || lower.ends_with(".gif")
-}
-
-fn extract_image_paths_from_text(text: &str) -> Vec<String> {
-    text.split_whitespace()
-        .map(|part| {
-            part.trim_matches(|c: char| {
-                matches!(
-                    c,
-                    '"' | '\'' | '`' | ',' | ';' | ':' | ')' | '(' | '[' | ']'
-                )
-            })
-        })
-        .filter(|part| looks_like_image_reference(part))
-        .map(ToString::to_string)
-        .collect()
 }
 
 fn image_mime_from_reference(value: &str) -> Option<String> {
@@ -1306,7 +1314,10 @@ fn convert_provider_response_to_function_response(
         .collect::<Vec<_>>();
 
     if text.trim().is_empty() && reasoning_content.trim().is_empty() && tool_calls.is_empty() {
-        return Err(anyhow!("Anthropic 响应缺少文本和工具调用"));
+        return Err(anyhow!(
+            "Anthropic 响应缺少文本和工具调用（{}）",
+            empty_provider_response_diagnostic(&response)
+        ));
     }
 
     Ok(ModelFunctionResponse {
@@ -1316,6 +1327,74 @@ fn convert_provider_response_to_function_response(
         usage: response.usage.unwrap_or_default().into(),
         tool_calls,
     })
+}
+
+fn empty_provider_response_diagnostic(response: &ProviderResponse) -> String {
+    let mut parts = Vec::new();
+    if let Some(model) = response.model.as_deref().filter(|model| !model.is_empty()) {
+        parts.push(format!("model={model}"));
+    }
+    if let Some(id) = response.id.as_deref().filter(|id| !id.is_empty()) {
+        parts.push(format!("id={id}"));
+    }
+    if let Some(stop_reason) = &response.stop_reason {
+        parts.push(format!("stop_reason={}", display_stop_reason(stop_reason)));
+    }
+    parts.push(format!(
+        "content_blocks={}",
+        response.assistant_message.content.len()
+    ));
+    if let Some(raw) = response.raw.as_ref()
+        && let Some(raw_summary) = summarize_provider_raw_response(raw)
+    {
+        parts.push(raw_summary);
+    }
+    parts.join(", ")
+}
+
+fn display_stop_reason(reason: &StopReason) -> String {
+    match reason {
+        StopReason::EndTurn => "end_turn".to_string(),
+        StopReason::ToolUse => "tool_use".to_string(),
+        StopReason::MaxTokens => "max_tokens".to_string(),
+        StopReason::StopSequence => "stop_sequence".to_string(),
+        StopReason::Other(value) => value.clone(),
+    }
+}
+
+fn summarize_provider_raw_response(raw: &Value) -> Option<String> {
+    let content = raw.get("content")?.as_array()?;
+    if content.is_empty() {
+        return Some("raw_content=[]".to_string());
+    }
+    let blocks = content
+        .iter()
+        .take(8)
+        .enumerate()
+        .map(|(index, block)| {
+            let block_type = block
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let keys = block
+                .as_object()
+                .map(|object| {
+                    object
+                        .keys()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .join("|")
+                })
+                .unwrap_or_default();
+            if keys.is_empty() {
+                format!("{index}:{block_type}")
+            } else {
+                format!("{index}:{block_type}[{keys}]")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    Some(format!("raw_content={blocks}"))
 }
 
 fn parse_tool_arguments_or_error(tool_name: &str, call_id: &str, raw_args: &str) -> Value {

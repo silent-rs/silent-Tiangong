@@ -24,8 +24,8 @@ use crate::search::vector::{EmbeddedFlatVectorIndex, VectorIndex};
 use crate::types::{
     Decision, Entity, Episode, EpisodeOutcome, ExpandedMemory, ManualMemoryDraft,
     MemoryCognitiveType, MemoryKind, MemoryListQuery, MemoryNode, MemoryRelation,
-    MemoryRelationDraft, MemoryScopeType, MemoryStatus, RecallAnchors, RecallHit,
-    WorkspaceIndexHit,
+    MemoryRelationDraft, MemoryRelationKind, MemoryScopeType, MemoryStatus, RecallAnchors,
+    RecallHit, WorkspaceIndexHit,
 };
 use crate::workspace_index;
 
@@ -389,6 +389,7 @@ impl MemoryStore {
         let episode = Episode {
             id: draft.id.unwrap_or_else(|| scru128::new().to_string()),
             session_id,
+            memory_type: draft.memory_type.clone(),
             title: draft.title.trim().to_string(),
             summary: draft.summary.trim().to_string(),
             outcome: EpisodeOutcome::Success,
@@ -489,6 +490,34 @@ impl MemoryStore {
     /// 读取图邻接节点，供 deep recall 关系追溯使用。
     pub(crate) fn related_node_ids(&self, node_ids: &[String]) -> Vec<String> {
         self.db.list_related_node_ids(node_ids).unwrap_or_default()
+    }
+
+    /// 为新写入的 Episode 自动关联近期相似记忆，避免图谱只出现孤立节点。
+    pub(crate) fn link_episode_to_related_recent(
+        &self,
+        episode: &Episode,
+        workspace_id: Option<&str>,
+    ) -> Result<usize> {
+        let recent = self.recent_episodes(workspace_id, 20);
+        let mut linked = 0;
+        for candidate in recent.iter().filter(|item| item.id != episode.id) {
+            let Some((weight, note)) = episode_relation_signal(episode, candidate) else {
+                continue;
+            };
+            self.upsert_relation(MemoryRelationDraft {
+                id: None,
+                from_node_id: episode.id.clone(),
+                to_node_id: candidate.id.clone(),
+                relation_kind: MemoryRelationKind::RelatedTo,
+                weight,
+                note: Some(note),
+            })?;
+            linked += 1;
+            if linked >= 5 {
+                break;
+            }
+        }
+        Ok(linked)
     }
 
     /// 查询最近 Episode 摘要（用于 MesoRumination 提炼关键词）
@@ -659,13 +688,41 @@ fn normalize_keywords(keywords: Vec<String>) -> Vec<String> {
     normalized
 }
 
+fn episode_relation_signal(current: &Episode, candidate: &Episode) -> Option<(f32, String)> {
+    let shared_keywords = current
+        .keywords
+        .iter()
+        .filter(|keyword| {
+            candidate
+                .keywords
+                .iter()
+                .any(|other| keyword.eq_ignore_ascii_case(other))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let same_session = current.session_id == candidate.session_id;
+    let same_type = current.memory_type == candidate.memory_type;
+
+    if shared_keywords.len() >= 2 {
+        let weight = (0.45 + shared_keywords.len() as f32 * 0.08).min(0.85);
+        return Some((
+            weight,
+            format!("自动关联：共享关键词 {}", shared_keywords.join(", ")),
+        ));
+    }
+    if same_session && same_type && current.memory_type != MemoryCognitiveType::Factual {
+        return Some((0.55, "自动关联：同一会话中的同类记忆".to_string()));
+    }
+    None
+}
+
 /// 将 Episode 转换为 MemoryNode（用于 Tantivy 索引）
 fn episode_to_node(ep: &Episode, workspace_id: Option<&str>) -> MemoryNode {
     let now = chrono::Local::now().naive_local().to_string();
     MemoryNode {
         id: ep.id.clone(),
         kind: MemoryKind::Episode,
-        memory_type: MemoryCognitiveType::Factual,
+        memory_type: ep.memory_type.clone(),
         scope_type: MemoryScopeType::Workspace,
         scope_id: workspace_id.map(String::from),
         title: ep.title.clone(),
