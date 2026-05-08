@@ -4,7 +4,7 @@
 //! 包括：历史消息选择、工具定义注入、环境信息注入、预算控制。
 
 use crate::agent_config::AgentConfig;
-use crate::model::{FunctionToolSpec, SingleProviderClient};
+use crate::model::{SingleProviderClient, ToolSpec};
 use crate::models_config::ModelsConfig;
 use crate::session::{Message, Session};
 
@@ -39,7 +39,7 @@ pub struct AssembledContext {
     /// 对话历史消息
     pub messages: Vec<Message>,
     /// 工具定义列表（可能为空）
-    pub tools: Vec<FunctionToolSpec>,
+    pub tools: Vec<ToolSpec>,
     /// 系统 prompt
     pub system_prompt: String,
     /// 使用的查询模式
@@ -79,7 +79,7 @@ impl ContextAssembler {
         &self,
         session: &Session,
         user_input: &str,
-        all_tools: Vec<FunctionToolSpec>,
+        all_tools: Vec<ToolSpec>,
         system_prompt: String,
         client: &SingleProviderClient,
         _models_config: &ModelsConfig,
@@ -121,11 +121,7 @@ impl ContextAssembler {
     }
 
     /// 选择要注入的工具（预算控制）
-    fn select_tools(
-        &self,
-        all_tools: Vec<FunctionToolSpec>,
-        messages: &[Message],
-    ) -> Vec<FunctionToolSpec> {
+    fn select_tools(&self, all_tools: Vec<ToolSpec>, messages: &[Message]) -> Vec<ToolSpec> {
         let remaining = self.budget.remaining_for_input(&all_tools, messages);
         if remaining > 0 {
             return all_tools;

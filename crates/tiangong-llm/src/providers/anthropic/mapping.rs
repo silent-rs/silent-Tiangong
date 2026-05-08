@@ -52,7 +52,7 @@ pub(super) fn to_anthropic_request(
 
     Ok(MessagesCreateRequest {
         model: request.model.clone(),
-        max_tokens: request.max_tokens.unwrap_or(4096),
+        max_tokens: request.max_tokens,
         system: request
             .system
             .clone()

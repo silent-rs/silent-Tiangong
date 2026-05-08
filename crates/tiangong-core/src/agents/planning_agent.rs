@@ -151,7 +151,7 @@ fn build_plan_with_agent_inner(
         user_input: build_planing_prompt(user_input, &input_list, &skill_hints, &mcp_hints),
         context: session.recent_messages(context_limit),
         assembled_system_prompt: None,
-        thinking: Some(crate::model::ModelThinkingConfig {
+        thinking: Some(crate::model::ThinkingConfig {
             budget_tokens: 4096,
         }),
         include_media: false,

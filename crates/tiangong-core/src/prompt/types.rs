@@ -1,6 +1,6 @@
 //! Prompt 类型定义
 
-use crate::model::FunctionToolSpec;
+use crate::model::ToolSpec;
 use crate::session::Message;
 
 /// System Prompt 块
@@ -66,7 +66,7 @@ pub struct AssembledPrompt {
     /// 当前用户输入
     pub user_input: String,
     /// 工具定义
-    pub tools: Vec<FunctionToolSpec>,
+    pub tools: Vec<ToolSpec>,
 }
 
 impl AssembledPrompt {

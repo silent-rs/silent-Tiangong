@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use serde_json::Value;
 
-use crate::model::ModelFunctionCall;
+use crate::model::ToolCall;
 
 #[derive(Debug, Clone)]
 pub(crate) struct CompletionSignal {
@@ -11,7 +11,7 @@ pub(crate) struct CompletionSignal {
     pub(crate) next_step_description: String,
 }
 
-pub(crate) fn parse_completion_signal(call: &ModelFunctionCall) -> Result<CompletionSignal> {
+pub(crate) fn parse_completion_signal(call: &ToolCall) -> Result<CompletionSignal> {
     if call.name != "mark_step_completed" {
         return Err(anyhow!(
             "内部错误：parse_completion_signal 收到非 mark_step_completed 调用"

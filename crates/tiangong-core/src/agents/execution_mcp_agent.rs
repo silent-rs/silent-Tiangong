@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::agent_config::{McpConfig, McpServerConfig};
 use crate::mcp::{LocalMcpClient, McpClient, McpToolMeta, cached_active_tools};
-use crate::model::{FunctionToolSpec, ModelFunctionCall};
+use crate::model::{ToolCall, ToolSpec};
 use crate::tool::{ToolExecutionRecord, ToolResult};
 
 use super::execution_tool_agent::{basic_file_function_tools, elapsed_ms_u64, split_command_parts};
@@ -18,7 +18,7 @@ pub(crate) struct McpFunctionTarget {
 }
 pub(crate) fn execution_function_tools(
     mcp_config: &McpConfig,
-) -> (Vec<FunctionToolSpec>, HashMap<String, McpFunctionTarget>) {
+) -> (Vec<ToolSpec>, HashMap<String, McpFunctionTarget>) {
     let mut tools = basic_file_function_tools();
     let mut reserved_names = tools
         .iter()
@@ -121,14 +121,14 @@ fn function_tool_from_mcp_tool(
     function_name: &str,
     server_name: &str,
     tool: &McpToolMeta,
-) -> FunctionToolSpec {
-    FunctionToolSpec {
+) -> ToolSpec {
+    ToolSpec {
         name: function_name.to_string(),
         description: format!(
             "MCP调用：server={} tool={} description={}",
             server_name, tool.name, tool.description
         ),
-        parameters: if tool.input_schema.is_object() {
+        input_schema: if tool.input_schema.is_object() {
             tool.input_schema.clone()
         } else {
             serde_json::json!({
@@ -141,7 +141,7 @@ fn function_tool_from_mcp_tool(
 }
 
 pub(crate) fn execute_mcp_tool_call(
-    call: &ModelFunctionCall,
+    call: &ToolCall,
     target: &McpFunctionTarget,
     mcp_config: &McpConfig,
 ) -> Result<ToolResult> {
@@ -232,7 +232,7 @@ pub(crate) fn build_internal_tool_error_result(tool_name: &str, error: &str) -> 
     }
 }
 
-pub(crate) fn normalize_mcp_call_arguments(call: &ModelFunctionCall) -> Value {
+pub(crate) fn normalize_mcp_call_arguments(call: &ToolCall) -> Value {
     if call.arguments.is_object() {
         call.arguments.clone()
     } else {
@@ -241,7 +241,7 @@ pub(crate) fn normalize_mcp_call_arguments(call: &ModelFunctionCall) -> Value {
 }
 
 pub(crate) fn resolve_mcp_tool_call_from_run_command(
-    call: &ModelFunctionCall,
+    call: &ToolCall,
     mcp_targets: &HashMap<String, McpFunctionTarget>,
     mcp_config: &McpConfig,
 ) -> Option<(McpFunctionTarget, Value)> {

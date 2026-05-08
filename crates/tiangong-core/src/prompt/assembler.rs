@@ -4,7 +4,7 @@
 
 use crate::agent_config::AgentConfig;
 use crate::context::organizer::ContextOrganizer;
-use crate::model::FunctionToolSpec;
+use crate::model::ToolSpec;
 use crate::models_config::ModelsConfig;
 use crate::session::{Message, Session};
 
@@ -29,7 +29,7 @@ impl PromptAssembler {
         &self,
         session: &Session,
         user_input: &str,
-        tools: Vec<FunctionToolSpec>,
+        tools: Vec<ToolSpec>,
         models_config: &ModelsConfig,
         agent_config: &AgentConfig,
         loop_context: &[Message],

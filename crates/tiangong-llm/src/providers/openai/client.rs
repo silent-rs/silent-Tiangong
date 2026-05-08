@@ -45,14 +45,10 @@ impl OpenAiClient {
     pub async fn stream(&self, model: &str, payload: Value) -> Result<OpenAiByotStream, LlmError> {
         let client = self.build_client();
         let chat = client.chat();
-        timeout(
-            self.config.timeout,
-            self.with_retry("openai_stream", model, true, || {
-                chat.create_stream_byot::<_, Value>(payload.clone())
-            }),
-        )
+        self.with_retry("openai_stream", model, true, || {
+            chat.create_stream_byot::<_, Value>(payload.clone())
+        })
         .await
-        .map_err(|_| LlmError::Timeout(self.config.timeout.as_millis() as u64))?
     }
 
     pub async fn rerank(&self, model: &str, request: &RerankRequest) -> Result<Value, LlmError> {

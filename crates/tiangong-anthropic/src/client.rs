@@ -13,6 +13,7 @@ use crate::types::{
 #[derive(Clone)]
 pub struct AnthropicClient {
     http_client: reqwest::Client,
+    stream_http_client: reqwest::Client,
     config: AnthropicConfig,
 }
 
@@ -22,8 +23,12 @@ impl AnthropicClient {
             .timeout(config.timeout)
             .build()
             .map_err(|err| AnthropicError::Transport(err.to_string()))?;
+        let stream_http_client = reqwest::Client::builder()
+            .build()
+            .map_err(|err| AnthropicError::Transport(err.to_string()))?;
         Ok(Self {
             http_client,
+            stream_http_client,
             config,
         })
     }
@@ -47,7 +52,7 @@ impl AnthropicClient {
     ) -> Result<EventStream, AnthropicError> {
         request.stream = Some(true);
         let response = self
-            .request_builder("/v1/messages")
+            .stream_request_builder("/v1/messages")
             .header(reqwest::header::ACCEPT, "text/event-stream")
             .json(&request)
             .send()
@@ -82,20 +87,30 @@ impl AnthropicClient {
     }
 
     fn request_builder(&self, path: &str) -> reqwest::RequestBuilder {
+        self.request_builder_with_client(&self.http_client, path)
+    }
+
+    fn stream_request_builder(&self, path: &str) -> reqwest::RequestBuilder {
+        self.request_builder_with_client(&self.stream_http_client, path)
+    }
+
+    fn request_builder_with_client(
+        &self,
+        client: &reqwest::Client,
+        path: &str,
+    ) -> reqwest::RequestBuilder {
         let url = format!(
             "{}/{}",
             self.config.base_url.trim_end_matches('/'),
             path.trim_start_matches('/')
         );
-        let mut builder = self
-            .http_client
+        let mut builder = client
             .post(url.clone())
             .header("x-api-key", &self.config.api_key)
             .header("anthropic-version", &self.config.api_version)
             .header(reqwest::header::ACCEPT, "application/json");
         if path == "/v1/models" {
-            builder = self
-                .http_client
+            builder = client
                 .get(url)
                 .header("x-api-key", &self.config.api_key)
                 .header("anthropic-version", &self.config.api_version)
