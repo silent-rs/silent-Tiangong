@@ -70,56 +70,61 @@ pub struct AssembledPrompt {
 }
 
 impl AssembledPrompt {
-    /// 构建最终的 system prompt 文本（static + dynamic + system_context）
+    /// 构建最终的 system prompt 文本。
+    ///
+    /// 压缩后的历史摘要、运行环境和系统级工具上下文统一放入
+    /// system prompt 动态段，避免它们作为普通上文消息参与对话链。
     pub fn final_system_prompt(&self) -> String {
         let mut parts = vec![self.system_prompt.clone()];
         parts.extend(self.system_context.iter().cloned());
+        if let Some(attachments) = self.system_attachment_text() {
+            parts.push(attachments);
+        }
         parts.join("\n\n")
     }
 
-    /// 构建 user context 文本（包装为 system-reminder）
+    /// 构建 user context 文本（作为 system prompt 动态段注入）
     pub fn user_context_text(&self) -> Option<String> {
         if self.user_context.is_empty() {
             return None;
         }
         Some(format!(
-            "<system-reminder>\n{}\n\nIMPORTANT: this context may or may not be relevant to your tasks.\n</system-reminder>",
+            "## 用户偏好与记忆上下文\n{}\n\nIMPORTANT: this context may or may not be relevant to your tasks.",
             self.user_context.join("\n")
         ))
     }
 
+    /// 构建系统级工具上下文文本（MCP 摘要、技能提示等）。
+    pub fn system_attachment_text(&self) -> Option<String> {
+        let sections = self
+            .attachment_messages
+            .iter()
+            .filter_map(|message| {
+                let content = message.content.trim();
+                if content.is_empty() {
+                    return None;
+                }
+                let name = message.tool_name.as_deref().unwrap_or("system_context");
+                Some(format!("### {name}\n{content}"))
+            })
+            .collect::<Vec<_>>();
+
+        if sections.is_empty() {
+            None
+        } else {
+            Some(format!("## 系统级工具上下文\n{}", sections.join("\n\n")))
+        }
+    }
+
     /// 构建完整的消息列表（按文档顺序）
     ///
-    /// 顺序：user_context_message → history → attachments
-    /// 用户输入统一通过 session history 传递，不在此处追加。
+    /// 顺序：history。
+    /// 用户输入统一通过 session history 传递，不在此处追加；系统级上下文已归并到
+    /// final_system_prompt()。
     pub fn build_messages(&self) -> Vec<Message> {
         let mut messages = Vec::new();
-
-        // User context 作为第一条 user 消息（system-reminder）
-        if let Some(ctx_text) = self.user_context_text() {
-            messages.push(Message {
-                id: scru128::new().to_string(),
-                role: crate::session::MessageRole::User,
-                content: ctx_text,
-                reasoning_content: String::new(),
-                reasoning_signature: None,
-                worker_id: None,
-                media: Vec::new(),
-                tool_calls: Vec::new(),
-                tool_call_id: None,
-                tool_name: None,
-                tool_result_is_error: false,
-                compact: false,
-                created_at: crate::session::now_text(),
-            });
-        }
-
         // 历史消息（包含用户输入）
         messages.extend(self.history_messages.iter().cloned());
-
-        // Attachment messages
-        messages.extend(self.attachment_messages.iter().cloned());
-
         messages
     }
 }
@@ -150,8 +155,41 @@ mod tests {
             tools: Vec::new(),
         };
         let ctx = prompt.user_context_text().unwrap();
-        assert!(ctx.contains("system-reminder"));
         assert!(ctx.contains("偏好中文"));
+    }
+
+    #[test]
+    fn final_system_prompt_includes_dynamic_system_context() {
+        let prompt = AssembledPrompt {
+            system_prompt: "基础提示".into(),
+            system_context: vec!["当前工作目录：/tmp".into()],
+            user_context: vec!["偏好中文".into()],
+            history_messages: Vec::new(),
+            attachment_messages: vec![Message {
+                id: "a1".into(),
+                role: crate::session::MessageRole::Tool,
+                content: "<mcp-tools>read_file</mcp-tools>".into(),
+                reasoning_content: String::new(),
+                reasoning_signature: None,
+                worker_id: None,
+                media: Vec::new(),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                tool_name: Some("mcp_tools_summary".into()),
+                tool_result_is_error: false,
+                compact: false,
+                created_at: String::new(),
+            }],
+            user_input: String::new(),
+            tools: Vec::new(),
+        };
+
+        let system_prompt = prompt.final_system_prompt();
+
+        assert!(system_prompt.contains("基础提示"));
+        assert!(system_prompt.contains("当前工作目录"));
+        assert!(!system_prompt.contains("偏好中文"));
+        assert!(system_prompt.contains("mcp_tools_summary"));
     }
 
     #[test]
@@ -194,9 +232,8 @@ mod tests {
             tools: Vec::new(),
         };
         let msgs = prompt.build_messages();
-        // user_context → history（用户输入已在 history 中，不再单独追加）
-        assert_eq!(msgs.len(), 2);
-        assert!(msgs[0].content.contains("system-reminder"));
-        assert_eq!(msgs[1].content, "历史");
+        // 系统级上下文进入 system prompt，消息链只保留历史（用户输入已在 history 中）
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "历史");
     }
 }

@@ -519,7 +519,10 @@ async fn execute_turn_async(
             user_input: user_input.to_string(),
             context: Vec::new(),
         };
-        match coordinator.coordinate_async(task, session, stream_tx).await {
+        match coordinator
+            .coordinate_split_async(task, session, stream_tx)
+            .await
+        {
             Ok(result) => {
                 session.append_message(MessageRole::Assistant, result.final_response);
                 let _ = stream_tx.send(StreamEvent::Done {

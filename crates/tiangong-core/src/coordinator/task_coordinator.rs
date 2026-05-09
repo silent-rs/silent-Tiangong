@@ -99,6 +99,16 @@ impl TaskCoordinator {
             return self.run_single_async(task, session, stream_tx).await;
         }
 
+        self.coordinate_split_async(task, session, stream_tx).await
+    }
+
+    /// async 协调执行，调用方已完成拆分判断时使用，避免同一任务二次询问模型。
+    pub async fn coordinate_split_async(
+        &self,
+        task: CoordinatorTask,
+        session: &Session,
+        stream_tx: &StdSender<StreamEvent>,
+    ) -> anyhow::Result<CoordinatorResult> {
         let sub_tasks = self.split_task(&task)?;
         if sub_tasks.len() <= 1 {
             let single_task = sub_tasks.into_iter().next().unwrap_or(task);
