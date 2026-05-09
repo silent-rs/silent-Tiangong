@@ -51,31 +51,20 @@ impl PromptAssembler {
             ));
         }
 
-        // 3. User Context（用户偏好/记忆，system-reminder 方式）
-        let workspace_path = if session.cwd.trim().is_empty() {
-            std::env::current_dir().ok()
-        } else {
-            Some(std::path::PathBuf::from(session.cwd.trim()))
-        };
-        let workspace_id = workspace_path
-            .as_deref()
-            .map(tiangong_memory::types::workspace_id_from_path);
-        let user_context = sections::build_user_context(&session.id, workspace_id.as_deref());
-
-        // 4. 历史消息（经过裁剪/压缩）
+        // 3. 历史消息（经过裁剪/压缩）
         let organizer = ContextOrganizer::new(self.context_limit).with_keep_recent_turns(6);
         let mut history_messages = organizer.build_context(session);
 
         // 追加 loop_context（当前事件循环的中间消息）
         history_messages.extend(loop_context.iter().cloned());
 
-        // 5. Attachment Messages（MCP 工具摘要等高波动内容）
+        // 4. System Attachments（MCP 工具摘要等系统级工具上下文）
         let attachment_messages = build_attachments(agent_config);
 
         AssembledPrompt {
             system_prompt,
             system_context,
-            user_context,
+            user_context: Vec::new(),
             history_messages,
             attachment_messages,
             user_input: user_input.to_string(),

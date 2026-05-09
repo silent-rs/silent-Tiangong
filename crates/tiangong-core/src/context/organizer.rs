@@ -3,7 +3,10 @@ use std::hash::{Hash, Hasher};
 
 use crate::context::compressor::ContextCompressor;
 use crate::model::SingleProviderClient;
-use crate::session::{Message, MessageRole, Session};
+use crate::session::{Message, MessageRole, Session, now_text};
+
+const KEEP_RECENT_EXECUTION_ROUNDS: usize = 4;
+const EXECUTION_ROUND_COMPACT_THRESHOLD: usize = 6;
 
 /// 上下文组织器
 ///
@@ -76,7 +79,8 @@ impl ContextOrganizer {
     /// 从 session 的摘要 + 最近消息构建，并过滤执行痕迹。
     pub fn build_context(&self, session: &Session) -> Vec<Message> {
         let raw = self.compressor.build_context(session);
-        Self::filter_execution_traces_vec(&raw)
+        let filtered = Self::filter_execution_traces_vec(&raw);
+        Self::compact_execution_rounds_for_prompt(&filtered)
     }
 
     /// 过滤执行阶段的内部 Tool 消息。
@@ -89,7 +93,7 @@ impl ContextOrganizer {
 
     fn filter_execution_traces_vec(messages: &[Message]) -> Vec<Message> {
         let mut seen_tool_result_keys = HashSet::new();
-        messages
+        let mut filtered = messages
             .iter()
             .filter_map(|msg| {
                 if msg.role != MessageRole::Tool {
@@ -124,8 +128,159 @@ impl ContextOrganizer {
                 }
                 Some(msg.clone())
             })
-            .collect()
+            .collect::<Vec<_>>();
+
+        Self::strip_stale_reasoning_for_prompt(&mut filtered);
+        filtered
     }
+
+    fn strip_stale_reasoning_for_prompt(messages: &mut [Message]) {
+        let keep_reasoning_index = messages.iter().rposition(|msg| {
+            msg.role == MessageRole::Assistant
+                && !msg.tool_calls.is_empty()
+                && !msg.reasoning_content.trim().is_empty()
+        });
+
+        for (index, msg) in messages.iter_mut().enumerate() {
+            if msg.role != MessageRole::Assistant || msg.reasoning_content.trim().is_empty() {
+                continue;
+            }
+            if Some(index) == keep_reasoning_index {
+                continue;
+            }
+            msg.reasoning_content.clear();
+            msg.reasoning_signature = None;
+        }
+    }
+
+    fn compact_execution_rounds_for_prompt(messages: &[Message]) -> Vec<Message> {
+        let mut result = Vec::with_capacity(messages.len());
+        let mut index = 0;
+
+        while index < messages.len() {
+            if messages[index].role != MessageRole::User {
+                result.push(messages[index].clone());
+                index += 1;
+                continue;
+            }
+
+            result.push(messages[index].clone());
+            index += 1;
+
+            let segment_start = index;
+            while index < messages.len() && messages[index].role != MessageRole::User {
+                index += 1;
+            }
+            let segment = &messages[segment_start..index];
+            result.extend(compact_execution_segment(segment));
+        }
+
+        result
+    }
+}
+
+fn compact_execution_segment(segment: &[Message]) -> Vec<Message> {
+    if segment.is_empty() {
+        return Vec::new();
+    }
+
+    let rounds = execution_rounds(segment);
+    if rounds.len() <= EXECUTION_ROUND_COMPACT_THRESHOLD {
+        return segment.to_vec();
+    }
+
+    let compact_round_count = rounds.len().saturating_sub(KEEP_RECENT_EXECUTION_ROUNDS);
+    if compact_round_count == 0 {
+        return segment.to_vec();
+    }
+
+    let compact_end = rounds[compact_round_count - 1].1;
+    let early_messages = &segment[..compact_end];
+    let recent_messages = &segment[compact_end..];
+
+    let mut compacted = vec![Message {
+        id: scru128::new().to_string(),
+        role: MessageRole::Tool,
+        content: summarize_execution_rounds(early_messages, compact_round_count),
+        reasoning_content: String::new(),
+        reasoning_signature: None,
+        worker_id: None,
+        media: Vec::new(),
+        tool_calls: Vec::new(),
+        tool_call_id: None,
+        tool_name: Some("react_context_compaction".to_string()),
+        tool_result_is_error: false,
+        compact: true,
+        created_at: now_text(),
+    }];
+    compacted.extend_from_slice(recent_messages);
+    compacted
+}
+
+fn execution_rounds(messages: &[Message]) -> Vec<(usize, usize)> {
+    let mut rounds = Vec::new();
+    let mut index = 0;
+    while index < messages.len() {
+        let start = index;
+        index += 1;
+
+        if messages[start].role == MessageRole::Assistant {
+            while index < messages.len() && messages[index].role == MessageRole::Tool {
+                index += 1;
+            }
+        }
+
+        rounds.push((start, index));
+    }
+    rounds
+}
+
+fn summarize_execution_rounds(messages: &[Message], round_count: usize) -> String {
+    let mut lines = vec![format!(
+        "[早期执行过程摘要]\n已压缩 {round_count} 轮早期执行过程，仅保留关键工具调用和结果线索。"
+    )];
+
+    for msg in messages {
+        match msg.role {
+            MessageRole::Assistant => {
+                let tools = msg
+                    .tool_calls
+                    .iter()
+                    .map(|call| call.name.as_str())
+                    .collect::<Vec<_>>();
+                if !tools.is_empty() {
+                    lines.push(format!("助手调用工具: {}", tools.join(", ")));
+                } else if !msg.content.trim().is_empty() {
+                    lines.push(format!("助手回复: {}", truncate_chars(&msg.content, 240)));
+                }
+            }
+            MessageRole::Tool => {
+                let tool_name = msg.tool_name.as_deref().unwrap_or("tool");
+                let status = if msg.tool_result_is_error {
+                    "失败"
+                } else {
+                    "成功"
+                };
+                lines.push(format!(
+                    "工具 {tool_name} {status}: {}",
+                    truncate_chars(&msg.content, 360)
+                ));
+            }
+            MessageRole::System => {
+                lines.push(format!("系统上下文: {}", truncate_chars(&msg.content, 240)));
+            }
+            MessageRole::User => {
+                lines.push(format!("用户补充: {}", truncate_chars(&msg.content, 240)));
+            }
+        }
+
+        if lines.len() >= 24 {
+            lines.push("...(更多早期执行细节已省略)".to_string());
+            break;
+        }
+    }
+
+    lines.join("\n")
 }
 
 fn summarize_tool_execution_trace(content: &str) -> String {
@@ -306,6 +461,28 @@ mod tests {
         }
     }
 
+    fn assistant_with_tool_call(id: &str, tool_name: &str, reasoning: &str) -> Message {
+        Message {
+            id: scru128::new().to_string(),
+            role: MessageRole::Assistant,
+            content: String::new(),
+            reasoning_content: reasoning.to_string(),
+            reasoning_signature: Some(format!("sig-{id}")),
+            worker_id: None,
+            media: Vec::new(),
+            tool_calls: vec![crate::session::MessageToolCall {
+                id: id.to_string(),
+                name: tool_name.to_string(),
+                arguments: serde_json::json!({}),
+            }],
+            tool_call_id: None,
+            tool_name: None,
+            tool_result_is_error: false,
+            compact: false,
+            created_at: now_text(),
+        }
+    }
+
     #[test]
     fn filter_execution_traces_keeps_tool_execution_summary_paths() {
         let messages = vec![
@@ -372,5 +549,38 @@ mod tests {
         assert_eq!(filtered.len(), 2);
         assert!(filtered[1].content.starts_with("[重复工具结果已省略]"));
         assert!(filtered[1].content.contains("https://example.com/repeated"));
+    }
+
+    #[test]
+    fn build_context_strips_stale_reasoning_and_compacts_old_rounds() {
+        let mut session = Session::new("上下文压缩验证");
+        session.append_message(MessageRole::User, "请连续读取多个文件".to_string());
+        for index in 0..8 {
+            let call_id = format!("call_{index}");
+            session.messages.push(assistant_with_tool_call(
+                &call_id,
+                "read_file",
+                &"思考".repeat(300),
+            ));
+            session.messages.push(tool_result(
+                &call_id,
+                "read_file",
+                format!("文件内容 {}", "正文".repeat(800)),
+            ));
+        }
+
+        let organizer = ContextOrganizer::new(32768);
+        let context = organizer.build_context(&session);
+
+        assert!(
+            context
+                .iter()
+                .any(|msg| msg.content.starts_with("[早期执行过程摘要]"))
+        );
+        let reasoning_count = context
+            .iter()
+            .filter(|msg| !msg.reasoning_content.is_empty())
+            .count();
+        assert_eq!(reasoning_count, 1);
     }
 }
