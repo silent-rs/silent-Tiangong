@@ -115,7 +115,7 @@ impl Worker {
             &tools,
             &mcp_targets,
             &inner_tx,
-            &dummy_cmd_rx,
+            dummy_cmd_rx,
             budget.max_rounds,
         );
 
