@@ -13,13 +13,11 @@ use crate::agents::execution_mcp_agent::{McpFunctionTarget, execution_function_t
 use crate::coordinator::TaskCoordinator;
 use crate::coordinator::types::CoordinatorTask;
 use crate::core_config::CoreConfigProvider;
-use crate::model::{ModelClient, ModelRequest, SingleProviderClient, TokenUsage, ToolSpec};
+use crate::model::{ModelClient, ModelRequest, SingleProviderClient, ToolSpec};
 use crate::react::message::{append_or_reuse_user_message, append_runtime_tool_message};
 use crate::runtime::{RuntimeEngine, inject_enhanced_tools};
 use crate::session::{Message, MessageRole, Session};
 use tiangong_types::{SessionStreamEvent, StreamEvent};
-
-use std::sync::mpsc::Receiver;
 
 const MAX_ROUNDS: usize = 20;
 
@@ -486,53 +484,9 @@ pub(crate) fn apply_session_cwd(session: &Session) {
     }
 }
 
-/// 供 Worker 调用的独立执行函数
-///
-/// 通过内部 tokio runtime 桥接到 ReactEngine（async），Worker 无需关心 async 细节。
-/// std::sync::mpsc::Receiver<Command> 通过桥接线程转发到 tokio channel。
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn execute_turn_standalone(
-    session: &mut Session,
-    user_input: &str,
-    engine: &RuntimeEngine,
-    tools: &[ToolSpec],
-    mcp_targets: &HashMap<String, McpFunctionTarget>,
-    stream_tx: &StdSender<StreamEvent>,
-    cmd_rx: Receiver<Command>,
-    max_rounds: usize,
-) -> TokenUsage {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("创建 execute_turn_standalone tokio runtime 失败");
-
-    let (tokio_tx, mut tokio_rx) = tokio_mpsc::unbounded_channel::<Command>();
-    let bridge_handle = std::thread::spawn(move || {
-        while let Ok(cmd) = cmd_rx.recv() {
-            if tokio_tx.send(cmd).is_err() {
-                break;
-            }
-        }
-    });
-
-    let react = crate::react::engine::ReactEngine::new(
-        engine.clone(),
-        tools.to_vec(),
-        mcp_targets.clone(),
-        max_rounds,
-    );
-    let usage =
-        rt.block_on(react.execute_turn(session, user_input, stream_tx, &mut tokio_rx, None));
-
-    drop(tokio_rx);
-    let _ = bridge_handle.join();
-
-    usage
-}
-
 /// 执行一个完整的对话轮次（可能多轮工具调用），async 版
 ///
-/// 首先判断是否需要多代理并行执行，如需要则拆分并行；
+/// 首先判断是否需要多代理并行执行，如需要则通过 async channel 拆分并行；
 /// 否则走标准的 ReAct 循环。
 #[allow(clippy::too_many_arguments)]
 async fn execute_turn_async(
@@ -565,7 +519,7 @@ async fn execute_turn_async(
             user_input: user_input.to_string(),
             context: Vec::new(),
         };
-        match tokio::task::block_in_place(|| coordinator.coordinate(task, session, stream_tx)) {
+        match coordinator.coordinate_async(task, session, stream_tx).await {
             Ok(result) => {
                 session.append_message(MessageRole::Assistant, result.final_response);
                 let _ = stream_tx.send(StreamEvent::Done {
