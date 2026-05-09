@@ -39,12 +39,18 @@ fn should_archive_input_asset(asset: &MediaAsset) -> bool {
                 || image_mime_from_reference(&asset.url).is_some())
 }
 
-struct ArchivedImage {
+pub(crate) struct ArchivedImage {
     path: String,
     mime_type: String,
 }
 
-fn archive_image_reference(
+impl ArchivedImage {
+    pub(crate) fn path(&self) -> &str {
+        &self.path
+    }
+}
+
+pub(crate) fn archive_image_reference(
     reference: &str,
     mime_hint: Option<&str>,
 ) -> Result<ArchivedImage, String> {
@@ -157,7 +163,7 @@ fn media_images_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn image_mime_from_reference(value: &str) -> Option<String> {
+pub(crate) fn image_mime_from_reference(value: &str) -> Option<String> {
     let lower = value.trim().to_ascii_lowercase();
     if lower.starts_with("data:image/") {
         return lower
