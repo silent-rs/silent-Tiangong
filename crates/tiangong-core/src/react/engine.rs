@@ -494,7 +494,10 @@ impl ReactEngine {
                                     false,
                                 )
                             };
-                        crate::core::localize_tool_result_images(&call.name, &mut result);
+                        crate::memory::turn_result::localize_tool_result_images(
+                            &call.name,
+                            &mut result,
+                        );
                         (result, memory_tool_usage, allow_memory_context)
                     });
                 accumulated_usage.accumulate(&memory_tool_usage);
@@ -530,11 +533,13 @@ impl ReactEngine {
 
                 if result.ok {
                     successful_tool_call_keys.insert(tool_call_key);
-                    pending_media_assets.extend(crate::core::parse_media_assets_from_tool_result(
-                        &call.name,
-                        &result.stdout,
-                        &result.summary,
-                    ));
+                    pending_media_assets.extend(
+                        crate::memory::turn_result::parse_media_assets_from_tool_result(
+                            &call.name,
+                            &result.stdout,
+                            &result.summary,
+                        ),
+                    );
                 }
                 if call.name == "recall_memory"
                     && result.ok
