@@ -10,7 +10,8 @@ use crate::recall_anchor::extract_recall_anchors;
 use crate::store::MemoryStore;
 use crate::types::{
     ExpandedMemory, MemoryKind, MemoryRecallRequest, MemoryRecallResponse, RecallDepth, RecallHit,
-    SearchStrategy, WorkspaceIndexHit, WorkspaceIndexHitKind,
+    RecallSufficiency, RuntimeRecallContext, SearchStrategy, WorkspaceIndexHit,
+    WorkspaceIndexHitKind,
 };
 use tiangong_llm::{LlmEndpointConfig, TokenUsageData, complete_text_with_usage};
 
@@ -216,6 +217,155 @@ pub(crate) async fn recall_context(
         deep_queries,
         usage: total_usage,
     }
+}
+
+pub(crate) fn evaluate_recall_sufficiency(
+    context: &RuntimeRecallContext,
+    rough_hits: &[RecallHit],
+) -> RecallSufficiency {
+    let query = context.query.trim();
+    if query.is_empty() {
+        return RecallSufficiency {
+            sufficient: true,
+            reason: "缺少运行时召回查询，跳过".to_string(),
+            missing: Vec::new(),
+            next_query: None,
+            should_upgrade_to_hybrid: false,
+        };
+    }
+
+    let combined = format!(
+        "{}\n{}\n{}\n{}",
+        query,
+        context.reason.as_deref().unwrap_or_default(),
+        context.trigger.as_deref().unwrap_or_default(),
+        context.next_action.as_deref().unwrap_or_default()
+    )
+    .to_ascii_lowercase();
+    let historical = contains_any(
+        &combined,
+        &[
+            "之前",
+            "上次",
+            "刚刚",
+            "刚才",
+            "继续",
+            "那个",
+            "历史",
+            "记得",
+            "remember",
+            "previous",
+            "last time",
+            "continue",
+        ],
+    );
+    let failure = contains_any(
+        &combined,
+        &[
+            "失败",
+            "报错",
+            "错误",
+            "panic",
+            "failed",
+            "failure",
+            "error",
+            "timeout",
+            "not found",
+            "依赖",
+            "权限",
+        ],
+    );
+    let needs_action_context = contains_any(
+        &combined,
+        &[
+            "read_file",
+            "write_file",
+            "replace_in_file",
+            "run_command",
+            "search_code",
+            "修改",
+            "修复",
+            "命令",
+            "模块",
+            "路径",
+            ".rs",
+            ".toml",
+            ".md",
+        ],
+    );
+
+    if rough_hits.is_empty() {
+        let should_upgrade = context.policy.enable_hybrid_on_demand
+            && (historical || failure || needs_action_context);
+        return RecallSufficiency {
+            sufficient: !should_upgrade,
+            reason: if should_upgrade {
+                "粗回忆无命中，但当前操作需要历史线索".to_string()
+            } else {
+                "粗回忆无命中，且未发现必须召回的历史信号".to_string()
+            },
+            missing: if should_upgrade {
+                vec!["historical_context".to_string()]
+            } else {
+                Vec::new()
+            },
+            next_query: should_upgrade.then(|| build_next_runtime_query(context)),
+            should_upgrade_to_hybrid: should_upgrade,
+        };
+    }
+
+    let best_score = rough_hits
+        .iter()
+        .map(|hit| hit.score)
+        .fold(0.0_f64, f64::max);
+    let has_action_signal = rough_hits.iter().any(|hit| {
+        let text = format!("{}\n{}", hit.title, hit.summary).to_ascii_lowercase();
+        contains_any(
+            &text,
+            &[
+                "路径", "文件", "命令", "决策", "原因", "修复", "error", "failed", ".rs", ".toml",
+                ".md",
+            ],
+        )
+    });
+    let weak_for_action = (failure || needs_action_context) && !has_action_signal;
+    let should_upgrade = context.policy.enable_hybrid_on_demand && weak_for_action;
+
+    RecallSufficiency {
+        sufficient: !should_upgrade,
+        reason: if should_upgrade {
+            "粗回忆命中较泛，缺少支撑下一步操作的文件、命令或决策线索".to_string()
+        } else {
+            format!(
+                "粗回忆已命中 {} 条候选，最高分 {:.2}",
+                rough_hits.len(),
+                best_score
+            )
+        },
+        missing: if should_upgrade {
+            vec!["actionable_evidence".to_string()]
+        } else {
+            Vec::new()
+        },
+        next_query: should_upgrade.then(|| build_next_runtime_query(context)),
+        should_upgrade_to_hybrid: should_upgrade,
+    }
+}
+
+fn build_next_runtime_query(context: &RuntimeRecallContext) -> String {
+    [
+        context.query.trim(),
+        context.next_action.as_deref().unwrap_or_default().trim(),
+        context.reason.as_deref().unwrap_or_default().trim(),
+    ]
+    .into_iter()
+    .filter(|item| !item.is_empty())
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
+fn contains_any(text: &str, markers: &[&str]) -> bool {
+    markers.iter().any(|marker| text.contains(marker))
 }
 
 fn append_workspace_index_hints(content: String, hints: &[WorkspaceIndexHit]) -> String {
@@ -916,6 +1066,43 @@ repeated context line
         let content = fallback_synthesis(&request, &hits, &[]);
 
         assert_eq!(content.matches("same tool output summary").count(), 1);
+    }
+
+    #[test]
+    fn runtime_sufficiency_upgrades_when_history_signal_has_no_hits() {
+        let context = RuntimeRecallContext {
+            query: "继续上次那个模块".to_string(),
+            trigger: Some("user_message".to_string()),
+            policy: Default::default(),
+            ..RuntimeRecallContext::default()
+        };
+
+        let result = evaluate_recall_sufficiency(&context, &[]);
+
+        assert!(!result.sufficient);
+        assert!(result.should_upgrade_to_hybrid);
+        assert_eq!(result.missing, vec!["historical_context"]);
+    }
+
+    #[test]
+    fn runtime_sufficiency_accepts_actionable_rough_hits() {
+        let context = RuntimeRecallContext {
+            query: "修复 memory recall".to_string(),
+            trigger: Some("tool_failure".to_string()),
+            next_action: Some("run_command cargo check failed".to_string()),
+            policy: Default::default(),
+            ..RuntimeRecallContext::default()
+        };
+        let hits = vec![hit(
+            "node-a",
+            "修复 cargo check 失败",
+            "文件 crates/tiangong-memory/src/recall_context.rs 中的命令失败已修复",
+        )];
+
+        let result = evaluate_recall_sufficiency(&context, &hits);
+
+        assert!(result.sufficient);
+        assert!(!result.should_upgrade_to_hybrid);
     }
 
     #[test]

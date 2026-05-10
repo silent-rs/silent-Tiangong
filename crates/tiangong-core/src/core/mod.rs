@@ -25,6 +25,7 @@ const MAX_ROUNDS: usize = 20;
 pub use crate::memory::gui_api::*;
 pub(crate) use crate::memory::recall::{
     duplicate_memory_recall_tool_result, execute_memory_recall_tool, inject_memory_recall_tool,
+    maybe_inject_runtime_memory_recall,
 };
 pub(crate) use crate::memory::registry::{
     WorkerMemoryContext, get_or_init_memory, get_or_init_memory_async, resolve_memory_workspace_id,
@@ -394,6 +395,19 @@ async fn worker_loop_async(
                         .map(|message| message.media.clone())
                         .unwrap_or_default(),
                 });
+
+                if memory.handle.is_some() {
+                    tokio::task::block_in_place(|| {
+                        maybe_inject_runtime_memory_recall(
+                            &mut session,
+                            memory.handle.as_ref(),
+                            &content,
+                            "user_message",
+                            "用户消息进入后执行低成本粗回忆",
+                            None,
+                        )
+                    });
+                }
 
                 // 执行对话轮次
                 execute_turn_async(

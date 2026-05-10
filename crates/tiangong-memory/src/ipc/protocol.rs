@@ -6,7 +6,7 @@ use crate::command::InjectionLevel;
 use crate::types::{
     Episode, ExpandedMemory, ManualMemoryDraft, MemoryListQuery, MemoryNode, MemoryRecallRequest,
     MemoryRecallResponse, MemoryRelation, MemoryRelationDraft, MemoryStatus, RecallAnchors,
-    RecallHit, TurnResult,
+    RecallHit, RecallSufficiency, RuntimeRecallContext, TurnResult,
 };
 
 /// Endpoint 发现信息，写入本地 runtime 文件供 follower 读取。
@@ -65,6 +65,13 @@ pub enum MemoryIpcRequestPayload {
     RecallContext {
         request: MemoryRecallRequest,
     },
+    RoughRecall {
+        context: RuntimeRecallContext,
+    },
+    EvaluateRecallSufficiency {
+        context: RuntimeRecallContext,
+        rough_hits: Vec<RecallHit>,
+    },
     LoadDepth2 {
         node_ids: Vec<String>,
     },
@@ -118,6 +125,7 @@ pub enum MemoryIpcResponsePayload {
     Injection { items: Vec<String> },
     Recall { hits: Vec<RecallHit> },
     RecallContext { response: MemoryRecallResponse },
+    RecallSufficiency { result: RecallSufficiency },
     Depth2 { items: Vec<ExpandedMemory> },
     Nodes { items: Vec<MemoryNode> },
     Node { item: MemoryNode },

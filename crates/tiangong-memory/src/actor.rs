@@ -156,6 +156,33 @@ impl MemoryActor {
                 let _ = reply.send(response);
             }
 
+            MemoryCommand::RoughRecall { context, reply } => {
+                let limit = context.policy.rough_limit.clamp(1, 10);
+                let hits = self.store.rough_recall(&context.query, limit);
+                tracing::debug!(
+                    query = %context.query,
+                    trigger = ?context.trigger,
+                    hit_count = hits.len(),
+                    "Memory 运行时粗回忆完成"
+                );
+                let _ = reply.send(hits);
+            }
+
+            MemoryCommand::EvaluateRecallSufficiency {
+                context,
+                rough_hits,
+                reply,
+            } => {
+                let result = recall_context::evaluate_recall_sufficiency(&context, &rough_hits);
+                tracing::debug!(
+                    query = %context.query,
+                    sufficient = result.sufficient,
+                    should_upgrade_to_hybrid = result.should_upgrade_to_hybrid,
+                    "Memory 运行时召回充分性评估完成"
+                );
+                let _ = reply.send(result);
+            }
+
             MemoryCommand::LoadDepth2 { node_ids, reply } => {
                 let items = self.store.load_depth2(&node_ids);
                 let _ = reply.send(items);

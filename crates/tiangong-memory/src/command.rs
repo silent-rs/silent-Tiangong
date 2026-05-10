@@ -6,7 +6,7 @@ use crate::options::MemoryOptions;
 use crate::types::{
     Episode, ExpandedMemory, ManualMemoryDraft, MemoryListQuery, MemoryNode, MemoryRecallRequest,
     MemoryRecallResponse, MemoryRelation, MemoryRelationDraft, MemoryStatus, RecallAnchors,
-    RecallHit, TurnResult,
+    RecallHit, RecallSufficiency, RuntimeRecallContext, TurnResult,
 };
 
 /// 注入级别
@@ -33,6 +33,15 @@ pub enum MemoryCommand {
     RecallContext {
         request: MemoryRecallRequest,
         reply: oneshot::Sender<MemoryRecallResponse>,
+    },
+    RoughRecall {
+        context: RuntimeRecallContext,
+        reply: oneshot::Sender<Vec<RecallHit>>,
+    },
+    EvaluateRecallSufficiency {
+        context: RuntimeRecallContext,
+        rough_hits: Vec<RecallHit>,
+        reply: oneshot::Sender<RecallSufficiency>,
     },
     LoadDepth2 {
         node_ids: Vec<String>,

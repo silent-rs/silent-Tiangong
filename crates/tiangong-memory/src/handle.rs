@@ -16,7 +16,7 @@ use crate::options::MemoryOptions;
 use crate::types::{
     Episode, ExpandedMemory, ManualMemoryDraft, MemoryListQuery, MemoryNode, MemoryRecallRequest,
     MemoryRecallResponse, MemoryRelation, MemoryRelationDraft, MemoryStatus, RecallAnchors,
-    RecallHit, TurnResult,
+    RecallHit, RecallSufficiency, RuntimeRecallContext, TurnResult,
 };
 
 /// Memory 系统的客户端句柄，可任意 Clone 跨线程使用
@@ -170,6 +170,91 @@ impl MemoryHandle {
                     Err(e) => {
                         tracing::warn!("Memory IPC recall_context 失败: {}", e);
                         MemoryRecallResponse::default()
+                    }
+                }
+            }
+        }
+    }
+
+    /// 运行时粗回忆：只使用本地全文搜索，避免触发 embedding/rerank/Memory LLM。
+    pub async fn rough_recall(&self, context: RuntimeRecallContext) -> Vec<RecallHit> {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                if tx
+                    .send(MemoryCommand::RoughRecall {
+                        context,
+                        reply: reply_tx,
+                    })
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("Memory rough_recall 发送失败");
+                    return Vec::new();
+                }
+                reply_rx.await.unwrap_or_default()
+            }
+            HandleInner::Remote { .. } => {
+                match self
+                    .send_remote_request(MemoryIpcRequestPayload::RoughRecall { context })
+                    .await
+                {
+                    Ok(MemoryIpcResponsePayload::Recall { hits }) => hits,
+                    Ok(other) => {
+                        tracing::warn!("Memory IPC rough_recall 返回了非预期响应: {:?}", other);
+                        Vec::new()
+                    }
+                    Err(e) => {
+                        tracing::warn!("Memory IPC rough_recall 失败: {}", e);
+                        Vec::new()
+                    }
+                }
+            }
+        }
+    }
+
+    /// 评估粗回忆是否足够支撑当前运行时操作。
+    pub async fn evaluate_recall_sufficiency(
+        &self,
+        context: RuntimeRecallContext,
+        rough_hits: Vec<RecallHit>,
+    ) -> RecallSufficiency {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                if tx
+                    .send(MemoryCommand::EvaluateRecallSufficiency {
+                        context,
+                        rough_hits,
+                        reply: reply_tx,
+                    })
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("Memory evaluate_recall_sufficiency 发送失败");
+                    return RecallSufficiency::default();
+                }
+                reply_rx.await.unwrap_or_default()
+            }
+            HandleInner::Remote { .. } => {
+                match self
+                    .send_remote_request(MemoryIpcRequestPayload::EvaluateRecallSufficiency {
+                        context,
+                        rough_hits,
+                    })
+                    .await
+                {
+                    Ok(MemoryIpcResponsePayload::RecallSufficiency { result }) => result,
+                    Ok(other) => {
+                        tracing::warn!(
+                            "Memory IPC evaluate_recall_sufficiency 返回了非预期响应: {:?}",
+                            other
+                        );
+                        RecallSufficiency::default()
+                    }
+                    Err(e) => {
+                        tracing::warn!("Memory IPC evaluate_recall_sufficiency 失败: {}", e);
+                        RecallSufficiency::default()
                     }
                 }
             }
@@ -565,6 +650,89 @@ impl MemoryHandle {
                 Err(e) => {
                     tracing::warn!("Memory IPC recall_context_blocking 失败: {}", e);
                     MemoryRecallResponse::default()
+                }
+            },
+        }
+    }
+
+    /// 运行时粗回忆（同步版）。
+    pub fn rough_recall_blocking(&self, context: RuntimeRecallContext) -> Vec<RecallHit> {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                if tx
+                    .blocking_send(MemoryCommand::RoughRecall {
+                        context,
+                        reply: reply_tx,
+                    })
+                    .is_err()
+                {
+                    tracing::warn!("Memory rough_recall_blocking 发送失败");
+                    return Vec::new();
+                }
+                reply_rx.blocking_recv().unwrap_or_default()
+            }
+            HandleInner::Remote { .. } => match self
+                .block_on_remote_request(MemoryIpcRequestPayload::RoughRecall { context })
+            {
+                Ok(MemoryIpcResponsePayload::Recall { hits }) => hits,
+                Ok(other) => {
+                    tracing::warn!(
+                        "Memory IPC rough_recall_blocking 返回了非预期响应: {:?}",
+                        other
+                    );
+                    Vec::new()
+                }
+                Err(e) => {
+                    tracing::warn!("Memory IPC rough_recall_blocking 失败: {}", e);
+                    Vec::new()
+                }
+            },
+        }
+    }
+
+    /// 召回充分性评估（同步版）。
+    pub fn evaluate_recall_sufficiency_blocking(
+        &self,
+        context: RuntimeRecallContext,
+        rough_hits: Vec<RecallHit>,
+    ) -> RecallSufficiency {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                if tx
+                    .blocking_send(MemoryCommand::EvaluateRecallSufficiency {
+                        context,
+                        rough_hits,
+                        reply: reply_tx,
+                    })
+                    .is_err()
+                {
+                    tracing::warn!("Memory evaluate_recall_sufficiency_blocking 发送失败");
+                    return RecallSufficiency::default();
+                }
+                reply_rx.blocking_recv().unwrap_or_default()
+            }
+            HandleInner::Remote { .. } => match self.block_on_remote_request(
+                MemoryIpcRequestPayload::EvaluateRecallSufficiency {
+                    context,
+                    rough_hits,
+                },
+            ) {
+                Ok(MemoryIpcResponsePayload::RecallSufficiency { result }) => result,
+                Ok(other) => {
+                    tracing::warn!(
+                        "Memory IPC evaluate_recall_sufficiency_blocking 返回了非预期响应: {:?}",
+                        other
+                    );
+                    RecallSufficiency::default()
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Memory IPC evaluate_recall_sufficiency_blocking 失败: {}",
+                        e
+                    );
+                    RecallSufficiency::default()
                 }
             },
         }

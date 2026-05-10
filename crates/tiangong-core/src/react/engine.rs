@@ -69,6 +69,7 @@ impl ReactEngine {
         let mut memory_context: Option<String> = None;
         let mut memory_recall_attempted = false;
         let mut successful_tool_call_keys = HashSet::new();
+        let mut runtime_recall_keys = HashSet::new();
 
         'react_loop: loop {
             match drain_pending_commands_async(session, &mut loop_context, stream_tx, cmd_rx) {
@@ -77,6 +78,7 @@ impl ReactEngine {
                     memory_context = None;
                     memory_recall_attempted = false;
                     successful_tool_call_keys.clear();
+                    runtime_recall_keys.clear();
                 }
                 PendingCommandEffect::None => {}
             }
@@ -148,6 +150,7 @@ impl ReactEngine {
                                     content, message_id, media,
                                 );
                                 user_message_injected_during_stream = true;
+                                runtime_recall_keys.clear();
                             }
                             Some(Command::UpdateCwd { cwd }) => {
                                 session.cwd = cwd;
@@ -227,6 +230,7 @@ impl ReactEngine {
                     memory_context = None;
                     memory_recall_attempted = false;
                     successful_tool_call_keys.clear();
+                    runtime_recall_keys.clear();
                     continue 'react_loop;
                 }
 
@@ -404,6 +408,7 @@ impl ReactEngine {
                                         message_id,
                                         media,
                                     );
+                                    runtime_recall_keys.clear();
                                 }
                                 Some(Command::UpdateCwd { cwd }) => {
                                     session.cwd = cwd;
@@ -452,6 +457,40 @@ impl ReactEngine {
                             return accumulated_usage;
                         }
                     }
+                }
+
+                if memory_handle.is_some()
+                    && runtime_recall_keys.insert(format!("before:{tool_call_key}"))
+                {
+                    let recall_query = format!(
+                        "{}\n即将执行工具 {}：{}\n目标：{}",
+                        latest_user_message(session),
+                        call.name,
+                        args_summary,
+                        normalized_target
+                            .as_deref()
+                            .or(target_summary.as_deref())
+                            .unwrap_or_default()
+                    );
+                    let next_action = format!(
+                        "tool={} args={} target={}",
+                        call.name,
+                        args_summary,
+                        normalized_target
+                            .as_deref()
+                            .or(target_summary.as_deref())
+                            .unwrap_or_default()
+                    );
+                    tokio::task::block_in_place(|| {
+                        crate::core::maybe_inject_runtime_memory_recall(
+                            session,
+                            memory_handle,
+                            &recall_query,
+                            "before_tool_call",
+                            "工具调用前检查当前上下文是否足够支撑下一步操作",
+                            Some(&next_action),
+                        )
+                    });
                 }
 
                 let _ = stream_tx.send(StreamEvent::ToolStart {
@@ -530,6 +569,29 @@ impl ReactEngine {
                     &call.name,
                     format_tool_trace_message(&result),
                 );
+                if !result.ok && memory_handle.is_some() {
+                    let recall_query = format!(
+                        "{}\n工具 {} 执行失败：{}\n{}",
+                        latest_user_message(session),
+                        call.name,
+                        result.summary,
+                        result.stderr
+                    );
+                    let next_action = format!(
+                        "tool={} args={} failure={}",
+                        call.name, args_summary, result.summary
+                    );
+                    tokio::task::block_in_place(|| {
+                        crate::core::maybe_inject_runtime_memory_recall(
+                            session,
+                            memory_handle,
+                            &recall_query,
+                            "tool_failure",
+                            "工具失败后重新回忆历史修复方式、依赖问题或环境约束",
+                            Some(&next_action),
+                        )
+                    });
+                }
 
                 if result.ok {
                     successful_tool_call_keys.insert(tool_call_key);
@@ -556,6 +618,7 @@ impl ReactEngine {
                         memory_context = None;
                         memory_recall_attempted = false;
                         successful_tool_call_keys.clear();
+                        runtime_recall_keys.clear();
                         session.persist_to_disk();
                         continue 'react_loop;
                     }

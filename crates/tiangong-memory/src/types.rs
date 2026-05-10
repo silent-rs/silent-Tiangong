@@ -346,6 +346,74 @@ pub struct MemoryRecallResponse {
     pub usage: tiangong_llm::TokenUsageData,
 }
 
+/// 运行时召回策略。
+///
+/// 先用纯搜索粗回忆；只有粗回忆不足时，调用方才升级到混合检索或
+/// Tool 化上下文回忆。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeRecallPolicy {
+    #[serde(default = "default_rough_recall_limit")]
+    pub rough_limit: usize,
+    #[serde(default = "default_deep_recall_limit")]
+    pub deep_limit: usize,
+    #[serde(default = "default_true")]
+    pub enable_hybrid_on_demand: bool,
+    #[serde(default = "default_true")]
+    pub enable_rerecall: bool,
+}
+
+impl Default for RuntimeRecallPolicy {
+    fn default() -> Self {
+        Self {
+            rough_limit: default_rough_recall_limit(),
+            deep_limit: default_deep_recall_limit(),
+            enable_hybrid_on_demand: true,
+            enable_rerecall: true,
+        }
+    }
+}
+
+/// 运行时召回上下文。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RuntimeRecallContext {
+    pub query: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub trigger: Option<String>,
+    #[serde(default)]
+    pub next_action: Option<String>,
+    #[serde(default)]
+    pub current_context: Vec<String>,
+    #[serde(default)]
+    pub policy: RuntimeRecallPolicy,
+}
+
+/// 粗回忆是否足够支撑当前操作。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RecallSufficiency {
+    pub sufficient: bool,
+    pub reason: String,
+    #[serde(default)]
+    pub missing: Vec<String>,
+    #[serde(default)]
+    pub next_query: Option<String>,
+    #[serde(default)]
+    pub should_upgrade_to_hybrid: bool,
+}
+
+fn default_rough_recall_limit() -> usize {
+    5
+}
+
+fn default_deep_recall_limit() -> usize {
+    10
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// 向量索引点。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorPoint {

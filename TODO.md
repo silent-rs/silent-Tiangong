@@ -1,111 +1,114 @@
 # TODO - 天工当前开发任务
 
-> 最后更新：2026-05-09
-> 当前主线：Memory 系统缺口收口
-> 参考：`PLAN.md`、`docs/requirements.md`、`docs/memory-system/12-缺口清单与专用MemoryLLM.md`
+> 最后更新：2026-05-10
+> 当前主线：Memory 系统多类型记忆与智能去重
+> 参考：`PLAN.md`、`docs/requirements.md`、`docs/memory-system/13-适时触发多类型记忆与去重.md`
 
 ---
 
-## 当前结论
+## 已完成
 
-接下来推进 Memory 系统缺口收口，覆盖专用 Memory LLM 配置、入口运行时统一、模型路径验证、检索质量补齐和生命周期完善。
-
-当前插队修复：
-
-- [x] 修复 Agent 主循环中 GLM 5.1 等长思考模型可能因流式生成超时或输出上限提前停止的问题。
-- [x] 主 Agent 流式生成不设置整体超时，主模型生成默认传入 `1024 * 1024` 的 `max_tokens` 高上限。
-- [x] LLM 输出后按输入与输出 token 总量触发上下文压缩，避免长输出影响后续任务继续执行。
-- [x] 修复上下文压缩后历史思考和同轮早期工具链继续膨胀下一次模型请求的问题。
-- [x] 上下文压缩后将 MCP 摘要等系统级工具上下文重新组织进 system prompt，不再作为普通上文消息携带。
-- [x] 修复多代理拆分在同一任务上重复判断导致日志和执行路径不一致的问题。
-
-能力边界：
-
-- Memory 内部所有文本生成任务必须使用独立 Memory LLM 配置，不再复用主 `chat` 模型。
-- 未配置 Memory LLM 时降级为规则策略，禁止静默回退到主模型。
-- 所有入口统一通过 `start_or_connect()` 获取 Memory，确保多进程共享同一 workspace leader。
-- Workspace Index 首期仅覆盖最小文件树索引和 Rust 符号索引。
+- [x] 运行时粗回忆（RuntimeRecallPolicy / RuntimeRecallContext / RecallSufficiency 类型）
+- [x] 粗回忆 Store 方法（rough_recall）
+- [x] 粗回忆命令分发（RoughRecall / EvaluateRecallSufficiency）
+- [x] 粗回忆 Handle 方法（async + blocking，含 IPC 支持）
+- [x] 召回充分性评估规则（evaluate_recall_sufficiency）
+- [x] 运行时重新回忆辅助（maybe_inject_runtime_memory_recall）
+- [x] 用户消息进入后粗回忆触发
+- [x] 工具调用前上下文充分性检查与重新回忆
+- [x] 工具失败后重新回忆
+- [x] 重新回忆结果作为运行时工具上下文进入消息链
 
 ---
 
-## P0 - 入口运行时统一
+## P0 - MemoryCandidate 与 EnhancedTurnResult 类型定义
 
-- [x] Core 启动入口从直接调用 `start_with_options()` 切换为 `start_or_connect()`。
-- [x] CLI/GUI/Server 主入口默认使用 `start_or_connect()` 获取 Memory。
-- [x] 同一 workspace 同时启动多个入口时只有一个 leader，其余入口使用 remote handle。
-- [x] leader 退出后 follower 自动接替，接替前后写入/召回都可用。
-- [x] 验证多进程并发场景（GUI + CLI + Server）下 Memory 行为正确。
-- [x] 修复同一 workspace 并发写入 `leader.json` 时临时文件冲突导致的误报警。
+- [ ] `tiangong-memory/src/types.rs` 新增 `MemoryCandidate` 结构体
+  - 字段：tool_name、step_index、hint、suggested_kinds（Episode/Entity/Decision/Evidence/UserPreference）、file_path、url、result_summary、success
+- [ ] `tiangong-memory/src/types.rs` 新增 `MemoryCandidateKind` 枚举
+- [ ] `tiangong-memory/src/types.rs` 新增 `TurnMessage` 结构体（角色 + 内容）
+- [ ] `tiangong-memory/src/types.rs` 新增 `EnhancedTurnResult` 结构体
+  - 复用 TurnResult 原有字段 + memory_candidates: Vec\<MemoryCandidate\> + turn_messages: Vec\<TurnMessage\>
 
-## P0 - Memory 独立模型配置
+## P0 - 候选提交 API
 
-- [x] `tiangong-memory` 增加独立 `MemoryConfig`，持久化到 `~/.tiangong/memory/config.json`。
-- [x] Memory LLM、Embedding、Rerank 配置从主 `models.json` / routing 中拆出。
-- [x] Routing 页不再展示 Embedding / Rerank，二者只在 Memory 子页选择。
-- [x] `CoreConfig::to_memory_options()` 只读取 Memory 独立配置，不再从主模型配置派生。
-- [x] 前端将 Memory 配置放到 LLM 配置下，并从已有 Models 中选择模型。
-- [x] Tauri 增加 `get_memory_config` / `set_memory_config` 命令。
-- [x] EpisodeWriter 结构化提取使用专用 Memory LLM。
-- [x] Recall anchor 规划使用专用 Memory LLM。
-- [x] Deep Recall 裁决使用专用 Memory LLM。
-- [x] Recall 结果整理使用专用 Memory LLM。
-- [x] Meso Entity/Decision 提炼使用专用 Memory LLM。
-- [x] 未配置 Memory LLM 时，上述步骤全部走规则 fallback。
-- [x] 日志明确提示 Memory LLM 未配置，不误报为普通模型失败。
-- [x] 禁止未配置 Memory LLM 时静默复用 `chat` 主模型或旧 `lite` 模型。
+- [ ] `tiangong-memory/src/command.rs` 新增 `MemoryCommand::SubmitCandidate { candidate, reply }`
+- [ ] `tiangong-memory/src/command.rs` 新增 `MemoryCommand::RunEnhancedMicroRumination { turn_result, reply }`
+- [ ] `tiangong-memory/src/actor.rs` 新增 `pending_candidates: Vec<MemoryCandidate>` 缓冲字段
+- [ ] `tiangong-memory/src/actor.rs` SubmitCandidate 命令分发：追加到 pending_candidates
+- [ ] `tiangong-memory/src/actor.rs` RunEnhancedMicroRumination 命令分发：合并 pending_candidates + EnhancedTurnResult，调用 process_enhanced_micro
+- [ ] `tiangong-memory/src/handle.rs` 新增 `submit_memory_candidate`（fire-and-forget）
+- [ ] `tiangong-memory/src/handle.rs` 新增 `run_enhanced_micro_rumination`（等待完成）
+- [ ] `tiangong-memory/src/ipc/protocol.rs` 新增 IPC payload 变体：SubmitCandidate、RunEnhancedMicroRumination
+- [ ] `tiangong-memory/src/ipc/mod.rs` 新增 IPC 请求处理
 
-## P1 - 真实模型路径验证
+## P0 - 工具执行候选评估（tiangong-core 侧）
 
-- [x] 增加可手动运行的 Memory LLM smoke test。
-- [x] 增加 GUI Memory 管理界面，支持查看、新增、调整、归档记忆。
-- [x] 增加 GUI 记忆召回测试入口，手动输入 query 后查看 Recall 命中。
-- [x] 手动新增或调整记忆通过 Memory Actor 写入，保持 SQLite / Tantivy / 向量索引一致。
-- [x] 增加 8 类核心记忆类型：事实性、用户偏好、用户习惯、技能型、项目结构、架构决策、问题故障、领域知识。
-- [x] 增加 Memory 图关系结构，支持记忆节点之间建立关联关系。
-- [x] GUI Memory 管理界面支持手动设置记忆类型和维护记忆关联。
-- [x] Deep Recall 支持沿 Memory 图关系加载邻接记忆。
-- [x] 固定 5-10 个历史指代样例，验证输出只包含增量记忆。
-- [x] 记录 Memory LLM token 使用和延迟，确认不拖慢主对话链路。
-- [x] Deep Recall 真实效果通过跨会话、跨产物、跨 Entity/Decision 固定场景评测。
+- [ ] `tiangong-core/src/memory/turn_result.rs` 新增 `evaluate_tool_result_for_memory(tool_name, success, result_summary, file_path) -> Option<MemoryCandidate>`
+  - write_file / replace_in_file 成功 → Episode + Evidence
+  - search_code 结果非空 → Entity
+  - run_command 涉及构建/测试 → Episode + Decision
+  - 其他 summary 超过 20 字符 → Episode
+- [ ] `tiangong-core/src/memory/turn_result.rs` 新增 `build_enhanced_memory_turn_result(session, candidates) -> EnhancedTurnResult`
+  - 复用现有 build_memory_turn_result 逻辑
+  - 附加 memory_candidates 和 turn_messages
+- [ ] `tiangong-core/src/react/engine.rs` 工具执行完成后调用 evaluate_tool_result_for_memory 并 submit_memory_candidate
+- [ ] `tiangong-core/src/core/mod.rs` worker_loop_async 轮次结束调用 run_enhanced_micro_rumination 替代 run_micro_rumination
 
-## P1 - 混合检索质量
+## P1 - 增强版 Micro 反刍管道
 
-- [x] 默认测试链覆盖无外部服务的 embedded vector mock 或 deterministic provider。
-- [x] ignored 的真实 embedding 测试保留为手动验证，补充运行说明。
-- [x] 建立小型 recall benchmark，比较 BM25-only 与 hybrid 命中率。
-- [x] Qdrant 后端补齐归档删除同步和服务配置说明。
-- [x] Recall 精排接入 `tiangong-llm` RerankProvider，Memory 内部不再直接实现 rerank 协议适配。
+- [ ] `tiangong-memory/src/rumination.rs`（或新模块）新增 `process_enhanced_micro(store, turn_result, candidates)`
+  - 调用 extract_multi_type_memories 提取多类型记忆
+  - 调用 write_extraction_with_dedup 去重写入
+  - 调用 link_written_memories 跨类型关联
+  - 更新 session_injection
+- [ ] Episode 去重检查 `check_episode_dedup(store, extraction) -> Option<existing_id>`
+  - 关键词重叠 ≥ 0.7 + 标题相似度 > 0.6 → 更新已有
+  - 否则新建
+- [ ] 跨类型关联 `link_written_memories(store, written_ids, extraction)`
+  - Episode → Entity: BelongsTo
+  - Decision → Episode: LearnedFrom
+  - Episode → Episode: RelatedTo（已有逻辑）
 
-## P1 - Meta 与生命周期
+## P1 - 多类型记忆提取
 
-- [x] 归档时 SQLite、Tantivy、embedded vector、Qdrant 状态一致。
-- [x] 已归档节点从向量索引删除能力补齐（含外部 Qdrant delete）。
-- [x] 文件路径和媒体产物基本可达性检查。
-- [x] 过时检测覆盖文件删除、路径失效、项目归档、产物 URL 过期。
-- [x] Meta 执行结果进入可观测日志和指标。
+- [ ] `tiangong-memory/src/writer.rs` 新增 `extract_multi_type_memories(store, enhanced_turn_result) -> ExtractionOutput`
+  - 检查决策信号 → 内联提取 Decision
+  - 检查实体信号 → 内联提取 Entity
+  - 始终提取至少一个 Episode
+- [ ] `ExtractionOutput` 类型定义：episodes、entities、decisions、evidences 及其字段
 
-## P2 - Workspace Index
+## P2 - Inline Entity/Decision 提取
 
-- [x] 最小文件树索引可生成、可查询、可按 workspace 隔离。
-- [x] Rust 符号索引至少覆盖 `mod/fn/struct/enum/trait`。
-- [x] Recall 可结合 Memory 与 workspace index 返回线索。
-- [x] 文件变更后的增量更新策略落地。
+- [ ] 轻量 LLM 提示从单轮中即时提取 Entity/Decision
+  - Memory LLM 已配置时使用 LLM 提取
+  - 未配置时走规则 fallback
+
+## P2 - 集成验证
+
+- [ ] 验证：用户问"继续上次那个模块"，粗回忆命中后提供文件/决策线索
+- [ ] 验证：工具运行失败，重新回忆命中过往同类失败和修复命令
+- [ ] 验证：简单普通问答不触发深度混合检索
+- [ ] 验证：多类型记忆写入后跨类型关联正确建立
+- [ ] 验证：相似记忆去重为更新而非新建
 
 ---
 
 ## 推荐执行顺序
 
-1. 先实现 Memory 独立模型配置，阻断继续复用主模型。
-2. 进入下一轮规划，补充新的 TODO 后再继续开发。
+1. P0 类型定义（MemoryCandidate / EnhancedTurnResult / ExtractionOutput）
+2. P0 候选提交 API（Command / Actor / Handle / IPC）
+3. P0 工具执行候选评估（tiangong-core 侧 evaluate + submit + engine 集成）
+4. P1 增强版 Micro 反刍管道（process_enhanced_micro + 去重 + 关联）
+5. P1 多类型记忆提取（extract_multi_type_memories）
+6. P2 Inline Entity/Decision 提取
+7. P2 集成验证
 
 ---
 
 ## 文档同步要求
 
-后续实现上述任一缺口时，需要同步更新：
+后续实现上述任一任务时，需要同步更新：
 
 - `docs/requirements.md`
-- `docs/memory-system/README.md`
-- `docs/memory-system/09-分阶段落地路径.md`
-- `docs/memory-system/11-当前开发状态与接手指南.md`
-- `docs/memory-system/12-缺口清单与专用MemoryLLM.md`
+- `docs/memory-system/13-适时触发多类型记忆与去重.md` 状态区

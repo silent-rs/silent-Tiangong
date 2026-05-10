@@ -665,6 +665,11 @@ impl MemoryStore {
             .unwrap_or_default()
     }
 
+    /// 运行时粗回忆：只使用本地全文搜索，不触发 embedding、rerank 或 Memory LLM。
+    pub(crate) fn rough_recall(&self, query: &str, limit: usize) -> Vec<RecallHit> {
+        self.search(query, limit)
+    }
+
     /// 更新注入文件
     pub(crate) fn update_injection(
         &self,

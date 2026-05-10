@@ -5,10 +5,13 @@
 use crate::memory::turn_result::compact_single_memory_text;
 use crate::model::ToolSpec;
 use crate::react::message::latest_user_message;
-use crate::session::{MessageRole, Session};
+use crate::session::{Message, MessageRole, Session, now_text};
 
 pub(crate) type MemoryRecallToolOutput =
     (crate::tool::ToolResult, tiangong_types::TokenUsage, bool);
+
+const RUNTIME_ROUGH_RECALL_MAX_HITS: usize = 5;
+const RUNTIME_RECALL_CONTEXT_MAX_ITEMS: usize = 24;
 
 // ── recall_memory 工具注入 ──
 
@@ -244,4 +247,171 @@ fn build_memory_recall_context(session: &Session) -> Vec<String> {
         .collect::<Vec<_>>();
     items.reverse();
     items
+}
+
+pub(crate) fn maybe_inject_runtime_memory_recall(
+    session: &mut Session,
+    memory_handle: Option<&tiangong_memory::MemoryHandle>,
+    query: &str,
+    trigger: &str,
+    reason: &str,
+    next_action: Option<&str>,
+) -> bool {
+    let Some(handle) = memory_handle else {
+        return false;
+    };
+    let query = query.trim();
+    if query.is_empty() {
+        return false;
+    }
+
+    let context = tiangong_memory::RuntimeRecallContext {
+        query: query.to_string(),
+        reason: (!reason.trim().is_empty()).then(|| reason.trim().to_string()),
+        trigger: (!trigger.trim().is_empty()).then(|| trigger.trim().to_string()),
+        next_action: next_action
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(String::from),
+        current_context: build_runtime_context(session),
+        policy: tiangong_memory::RuntimeRecallPolicy::default(),
+    };
+
+    let rough_hits = handle.rough_recall_blocking(context.clone());
+    let sufficiency =
+        handle.evaluate_recall_sufficiency_blocking(context.clone(), rough_hits.clone());
+
+    if sufficiency.should_upgrade_to_hybrid {
+        let response = handle.recall_context_blocking(tiangong_memory::MemoryRecallRequest {
+            query: sufficiency
+                .next_query
+                .clone()
+                .unwrap_or_else(|| query.to_string()),
+            reason: Some(format!("runtime:{trigger}; {reason}")),
+            expected: runtime_expected_items(trigger, next_action),
+            context: context.current_context.clone(),
+            limit: context.policy.deep_limit,
+        });
+        if inject_runtime_recall_response(session, trigger, &sufficiency.reason, &response) {
+            return true;
+        }
+    }
+
+    if rough_hits.is_empty() {
+        return false;
+    }
+    inject_runtime_rough_hits(session, trigger, &sufficiency.reason, &rough_hits)
+}
+
+fn build_runtime_context(session: &Session) -> Vec<String> {
+    let mut items = session
+        .messages
+        .iter()
+        .rev()
+        .filter_map(|message| {
+            let role = match message.role {
+                MessageRole::User => "user",
+                MessageRole::Assistant => "assistant",
+                MessageRole::System => return None,
+                MessageRole::Tool => message.tool_name.as_deref().unwrap_or("tool"),
+            };
+            let content = compact_single_memory_text(&message.content, 700);
+            (!content.is_empty()).then(|| format!("{role}: {content}"))
+        })
+        .take(RUNTIME_RECALL_CONTEXT_MAX_ITEMS)
+        .collect::<Vec<_>>();
+    items.reverse();
+    items
+}
+
+fn runtime_expected_items(trigger: &str, next_action: Option<&str>) -> Vec<String> {
+    let text = format!("{}\n{}", trigger, next_action.unwrap_or_default()).to_ascii_lowercase();
+    let mut expected = vec!["decision".to_string(), "tool_result".to_string()];
+    if text.contains("file")
+        || text.contains("path")
+        || text.contains("文件")
+        || text.contains(".rs")
+    {
+        expected.push("file".to_string());
+        expected.push("code_context".to_string());
+    }
+    if text.contains("command") || text.contains("run_command") || text.contains("命令") {
+        expected.push("command_usage".to_string());
+    }
+    expected
+}
+
+fn inject_runtime_recall_response(
+    session: &mut Session,
+    trigger: &str,
+    reason: &str,
+    response: &tiangong_memory::MemoryRecallResponse,
+) -> bool {
+    let content = response.content.trim();
+    if content.is_empty()
+        || content.starts_with("未找到与")
+        || content.starts_with("没有发现当前上下文之外的增量记忆")
+    {
+        return false;
+    }
+    append_runtime_recall_message(
+        session,
+        format!(
+            "[运行时深度回忆]\ntrigger: {trigger}\nreason: {reason}\ndepth: {:?}\n\n{}",
+            response.recall_depth, content
+        ),
+    );
+    true
+}
+
+fn inject_runtime_rough_hits(
+    session: &mut Session,
+    trigger: &str,
+    reason: &str,
+    hits: &[tiangong_memory::RecallHit],
+) -> bool {
+    let lines = hits
+        .iter()
+        .take(RUNTIME_ROUGH_RECALL_MAX_HITS)
+        .map(|hit| {
+            format!(
+                "- {:?}: {} — {}",
+                hit.kind,
+                compact_single_memory_text(&hit.title, 120),
+                compact_single_memory_text(&hit.summary, 260)
+            )
+        })
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return false;
+    }
+    append_runtime_recall_message(
+        session,
+        format!(
+            "[运行时粗回忆]\ntrigger: {trigger}\nreason: {reason}\n\n{}",
+            lines.join("\n")
+        ),
+    );
+    true
+}
+
+fn append_runtime_recall_message(session: &mut Session, content: String) {
+    let mut message = Message {
+        id: scru128::new().to_string(),
+        role: MessageRole::Tool,
+        content,
+        reasoning_content: String::new(),
+        reasoning_signature: None,
+        worker_id: None,
+        media: Vec::new(),
+        tool_calls: Vec::new(),
+        tool_call_id: None,
+        tool_name: Some("runtime_memory_recall".to_string()),
+        tool_result_is_error: false,
+        compact: true,
+        created_at: now_text(),
+    };
+    message.content = compact_single_memory_text(&message.content, 1800);
+    session.messages.push(message);
+    session.updated_at = now_text();
 }

@@ -285,6 +285,17 @@ async fn handle_memory_request(
                 response: handle.recall_context(request).await,
             })
         }
+        MemoryIpcRequestPayload::RoughRecall { context } => Ok(MemoryIpcResponsePayload::Recall {
+            hits: handle.rough_recall(context).await,
+        }),
+        MemoryIpcRequestPayload::EvaluateRecallSufficiency {
+            context,
+            rough_hits,
+        } => Ok(MemoryIpcResponsePayload::RecallSufficiency {
+            result: handle
+                .evaluate_recall_sufficiency(context, rough_hits)
+                .await,
+        }),
         MemoryIpcRequestPayload::LoadDepth2 { node_ids } => Ok(MemoryIpcResponsePayload::Depth2 {
             items: handle.load_depth2(node_ids).await,
         }),
