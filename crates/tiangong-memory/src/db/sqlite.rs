@@ -889,6 +889,38 @@ impl MemoryDb {
         Ok(hits)
     }
 
+    /// 批量查询节点的 created_at 时间戳
+    pub(crate) fn batch_load_created_at(
+        &self,
+        node_ids: &[&str],
+    ) -> Result<std::collections::HashMap<String, String>> {
+        if node_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let placeholders: Vec<String> = node_ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect();
+        let sql = format!(
+            "SELECT id, created_at FROM memory_nodes WHERE id IN ({}) AND status = 'active'",
+            placeholders.join(",")
+        );
+        let params: Vec<&dyn rusqlite::ToSql> = node_ids
+            .iter()
+            .map(|id| id as &dyn rusqlite::ToSql)
+            .collect();
+        let mut map = std::collections::HashMap::new();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query(params.as_slice())?;
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let created_at: String = row.get(1)?;
+            map.insert(id, created_at);
+        }
+        Ok(map)
+    }
+
     /// 删除内置向量索引点。
     #[allow(dead_code)]
     pub(crate) fn delete_vector(&self, node_id: &str) -> Result<()> {

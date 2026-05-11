@@ -683,8 +683,31 @@ impl MemoryStore {
     }
 
     /// 运行时粗回忆：只使用本地全文搜索，不触发 embedding、rerank 或 Memory LLM。
+    /// 结果按 BM25 相关性 × 时间衰减排序，较新记忆获得更高权重。
     pub(crate) fn rough_recall(&self, query: &str, limit: usize) -> Vec<RecallHit> {
-        self.search(query, limit)
+        let mut hits = self.search(query, limit);
+        if hits.is_empty() {
+            return hits;
+        }
+        let node_ids: Vec<&str> = hits.iter().map(|h| h.node_id.as_str()).collect();
+        let timestamps = self.db.batch_load_created_at(&node_ids).unwrap_or_default();
+        let now = chrono::Local::now().naive_local();
+        for hit in &mut hits {
+            if let Some(created_str) = timestamps.get(&hit.node_id)
+                && let Ok(created) =
+                    chrono::NaiveDateTime::parse_from_str(created_str, "%Y-%m-%d %H:%M:%S")
+            {
+                let age_days = (now - created).num_seconds() as f64 / 86400.0;
+                let decay = (-0.05 * age_days).exp();
+                hit.score *= decay;
+            }
+        }
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        hits
     }
 
     /// 更新注入文件
