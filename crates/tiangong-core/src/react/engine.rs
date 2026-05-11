@@ -69,7 +69,6 @@ impl ReactEngine {
         let mut memory_context: Option<String> = None;
         let mut memory_recall_attempted = false;
         let mut successful_tool_call_keys = HashSet::new();
-        let mut runtime_recall_keys = HashSet::new();
         let mut memory_candidate_count = 0usize;
 
         'react_loop: loop {
@@ -79,16 +78,13 @@ impl ReactEngine {
                     memory_context = None;
                     memory_recall_attempted = false;
                     successful_tool_call_keys.clear();
-                    runtime_recall_keys.clear();
                     memory_candidate_count = 0;
                 }
                 PendingCommandEffect::None => {}
             }
 
             if round >= self.max_rounds {
-                tokio::task::block_in_place(|| {
-                    force_final_response(session, &loop_context, &self.engine, stream_tx);
-                });
+                force_final_response(session, &loop_context, &self.engine, stream_tx);
                 break;
             }
 
@@ -152,7 +148,6 @@ impl ReactEngine {
                                     content, message_id, media,
                                 );
                                 user_message_injected_during_stream = true;
-                                runtime_recall_keys.clear();
                     memory_candidate_count = 0;
                             }
                             Some(Command::UpdateCwd { cwd }) => {
@@ -233,7 +228,6 @@ impl ReactEngine {
                     memory_context = None;
                     memory_recall_attempted = false;
                     successful_tool_call_keys.clear();
-                    runtime_recall_keys.clear();
                     memory_candidate_count = 0;
                     continue 'react_loop;
                 }
@@ -412,7 +406,6 @@ impl ReactEngine {
                                         message_id,
                                         media,
                                     );
-                                    runtime_recall_keys.clear();
                                     memory_candidate_count = 0;
                                 }
                                 Some(Command::UpdateCwd { cwd }) => {
@@ -464,40 +457,8 @@ impl ReactEngine {
                     }
                 }
 
-                if memory_handle.is_some()
-                    && runtime_recall_keys.insert(format!("before:{tool_call_key}"))
-                {
-                    if check_cancel(cmd_rx, stream_tx) {
-                        return accumulated_usage;
-                    }
-                    let recall_query = format!(
-                        "{}\n即将执行工具 {}：{}\n目标：{}",
-                        latest_user_message(session),
-                        call.name,
-                        args_summary,
-                        normalized_target
-                            .as_deref()
-                            .or(target_summary.as_deref())
-                            .unwrap_or_default()
-                    );
-                    let next_action = format!(
-                        "tool={} args={} target={}",
-                        call.name,
-                        args_summary,
-                        normalized_target
-                            .as_deref()
-                            .or(target_summary.as_deref())
-                            .unwrap_or_default()
-                    );
-                    crate::core::maybe_inject_runtime_memory_recall(
-                        session,
-                        memory_handle,
-                        &recall_query,
-                        "before_tool_call",
-                        "工具调用前检查当前上下文是否足够支撑下一步操作",
-                        Some(&next_action),
-                    )
-                    .await;
+                if check_cancel(cmd_rx, stream_tx) {
+                    return accumulated_usage;
                 }
 
                 let _ = stream_tx.send(StreamEvent::ToolStart {
@@ -505,47 +466,43 @@ impl ReactEngine {
                     args_summary: args_summary.clone(),
                 });
 
-                let (result, memory_tool_usage, allow_memory_context) =
-                    tokio::task::block_in_place(|| {
-                        let (mut result, memory_tool_usage, allow_memory_context) =
-                            if call.name == "recall_memory" {
-                                if memory_recall_attempted {
-                                    crate::core::duplicate_memory_recall_tool_result()
-                                } else {
-                                    memory_recall_attempted = true;
-                                    crate::core::execute_memory_recall_tool(
-                                        call,
-                                        memory_handle,
-                                        session,
-                                    )
-                                }
-                            } else if call.name == "analyze_attachment" {
-                                (
-                                    crate::core::execute_attachment_analysis_tool(
-                                        call,
-                                        &self.engine,
-                                        session,
-                                    ),
-                                    tiangong_types::TokenUsage::default(),
-                                    false,
-                                )
-                            } else {
-                                (
-                                    self.engine.execute_tool_call(
-                                        call,
-                                        &self.mcp_targets,
-                                        &self.engine.agent_config().mcp,
-                                    ),
-                                    tiangong_types::TokenUsage::default(),
-                                    false,
-                                )
-                            };
-                        crate::memory::turn_result::localize_tool_result_images(
-                            &call.name,
-                            &mut result,
-                        );
-                        (result, memory_tool_usage, allow_memory_context)
-                    });
+                let (result, memory_tool_usage, allow_memory_context) = {
+                    let (mut result, memory_tool_usage, allow_memory_context) = if call.name
+                        == "recall_memory"
+                    {
+                        if memory_recall_attempted {
+                            crate::core::duplicate_memory_recall_tool_result()
+                        } else {
+                            memory_recall_attempted = true;
+                            crate::core::execute_memory_recall_tool(call, memory_handle, session)
+                        }
+                    } else if call.name == "analyze_attachment" {
+                        (
+                            crate::core::execute_attachment_analysis_tool(
+                                call,
+                                &self.engine,
+                                session,
+                            ),
+                            tiangong_types::TokenUsage::default(),
+                            false,
+                        )
+                    } else {
+                        (
+                            self.engine.execute_tool_call(
+                                call,
+                                &self.mcp_targets,
+                                &self.engine.agent_config().mcp,
+                            ),
+                            tiangong_types::TokenUsage::default(),
+                            false,
+                        )
+                    };
+                    crate::memory::turn_result::localize_tool_result_images(
+                        &call.name,
+                        &mut result,
+                    );
+                    (result, memory_tool_usage, allow_memory_context)
+                };
                 accumulated_usage.accumulate(&memory_tool_usage);
 
                 audit_tool_execution(
@@ -576,30 +533,8 @@ impl ReactEngine {
                     &call.name,
                     format_tool_trace_message(&result),
                 );
-                if !result.ok && memory_handle.is_some() {
-                    if check_cancel(cmd_rx, stream_tx) {
-                        return accumulated_usage;
-                    }
-                    let recall_query = format!(
-                        "{}\n工具 {} 执行失败：{}\n{}",
-                        latest_user_message(session),
-                        call.name,
-                        result.summary,
-                        result.stderr
-                    );
-                    let next_action = format!(
-                        "tool={} args={} failure={}",
-                        call.name, args_summary, result.summary
-                    );
-                    crate::core::maybe_inject_runtime_memory_recall(
-                        session,
-                        memory_handle,
-                        &recall_query,
-                        "tool_failure",
-                        "工具失败后重新回忆历史修复方式、依赖问题或环境约束",
-                        Some(&next_action),
-                    )
-                    .await;
+                if !result.ok && check_cancel(cmd_rx, stream_tx) {
+                    return accumulated_usage;
                 }
 
                 if result.ok {
@@ -654,7 +589,6 @@ impl ReactEngine {
                         memory_context = None;
                         memory_recall_attempted = false;
                         successful_tool_call_keys.clear();
-                        runtime_recall_keys.clear();
                         memory_candidate_count = 0;
                         session.persist_to_disk();
                         continue 'react_loop;

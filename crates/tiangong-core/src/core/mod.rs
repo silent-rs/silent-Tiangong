@@ -397,15 +397,22 @@ async fn worker_loop_async(
                 });
 
                 if memory.handle.is_some() {
-                    maybe_inject_runtime_memory_recall(
-                        &mut session,
-                        memory.handle.as_ref(),
-                        &content,
-                        "user_message",
-                        "用户消息进入后执行低成本粗回忆",
-                        None,
-                    )
-                    .await;
+                    let is_first_user_message = !session.messages.iter().any(|message| {
+                        message.role == crate::session::MessageRole::User
+                            && message.id != user_msg_id
+                    });
+                    if is_first_user_message {
+                        maybe_inject_runtime_memory_recall(
+                            &mut session,
+                            memory.handle.as_ref(),
+                            &content,
+                            "first_user_message",
+                            "会话首条消息，主动触发记忆召回以获取历史上下文",
+                            None,
+                            Some(&stream_tx),
+                        )
+                        .await;
+                    }
                 }
 
                 // 执行对话轮次

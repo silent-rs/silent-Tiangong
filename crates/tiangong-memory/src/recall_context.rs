@@ -219,9 +219,10 @@ pub(crate) async fn recall_context(
     }
 }
 
-pub(crate) fn evaluate_recall_sufficiency(
+pub(crate) async fn evaluate_recall_sufficiency(
     context: &RuntimeRecallContext,
     rough_hits: &[RecallHit],
+    model: Option<&LlmEndpointConfig>,
 ) -> RecallSufficiency {
     let query = context.query.trim();
     if query.is_empty() {
@@ -234,75 +235,140 @@ pub(crate) fn evaluate_recall_sufficiency(
         };
     }
 
-    let combined = format!(
-        "{}\n{}\n{}\n{}",
-        query,
-        context.reason.as_deref().unwrap_or_default(),
-        context.trigger.as_deref().unwrap_or_default(),
-        context.next_action.as_deref().unwrap_or_default()
-    )
-    .to_ascii_lowercase();
-    let historical = contains_any(
-        &combined,
-        &[
-            "之前",
-            "上次",
-            "刚刚",
-            "刚才",
-            "继续",
-            "那个",
-            "历史",
-            "记得",
-            "remember",
-            "previous",
-            "last time",
-            "continue",
-        ],
-    );
-    let failure = contains_any(
-        &combined,
-        &[
-            "失败",
-            "报错",
-            "错误",
-            "panic",
-            "failed",
-            "failure",
-            "error",
-            "timeout",
-            "not found",
-            "依赖",
-            "权限",
-        ],
-    );
-    let needs_action_context = contains_any(
-        &combined,
-        &[
-            "read_file",
-            "write_file",
-            "replace_in_file",
-            "run_command",
-            "search_code",
-            "修改",
-            "修复",
-            "命令",
-            "模块",
-            "路径",
-            ".rs",
-            ".toml",
-            ".md",
-        ],
-    );
+    // 有 Memory LLM 时，用 LLM 判断是否需要深度回忆
+    if let Some(config) = model {
+        return evaluate_sufficiency_with_llm(context, rough_hits, config).await;
+    }
 
+    // 无 Memory LLM 时，用规则 fallback
+    evaluate_sufficiency_fallback(context, rough_hits)
+}
+
+const SUFFICIENCY_EVAL_SYSTEM: &str = "\
+你是独立 Memory 系统的运行时回忆充分性评估器。
+
+Core 在执行任务过程中触发了粗回忆。你需要根据当前对话上下文、触发原因和粗回忆结果，
+判断粗回忆是否已经足够支撑当前操作，还是需要升级到深度混合回忆。
+
+请只输出 JSON：
+{
+  \"sufficient\": true/false,
+  \"reason\": \"简短原因\",
+  \"missing\": [\"缺少的信息类型\"],
+  \"next_query\": \"升级查询（如不需要则为空字符串）\",
+  \"should_upgrade_to_hybrid\": true/false
+}
+
+判断规则：
+- 当前对话上下文中已包含回答所需信息时，sufficient=true。
+- 粗回忆命中内容与当前操作直接相关且信息完整时，sufficient=true。
+- 当前请求是简单寒暄、闲聊、常识问题时，sufficient=true，不需要深度回忆。
+- 粗回忆无命中但触发信号表明需要历史产物、决策或跨会话上下文时，should_upgrade_to_hybrid=true。
+- 粗回忆有命中但缺少文件路径、命令、决策等可操作线索时，should_upgrade_to_hybrid=true。
+- 不要对明显的初次请求或不依赖历史的操作升级深度回忆。
+- 不要输出 JSON 之外的文字。";
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct RawSufficiencyDecision {
+    sufficient: Option<bool>,
+    reason: Option<String>,
+    #[serde(default)]
+    missing: Vec<String>,
+    next_query: Option<String>,
+    should_upgrade_to_hybrid: Option<bool>,
+}
+
+async fn evaluate_sufficiency_with_llm(
+    context: &RuntimeRecallContext,
+    rough_hits: &[RecallHit],
+    config: &LlmEndpointConfig,
+) -> RecallSufficiency {
+    let hits_text = if rough_hits.is_empty() {
+        "无命中".to_string()
+    } else {
+        rough_hits
+            .iter()
+            .take(5)
+            .map(|hit| {
+                format!(
+                    "- [{:.2}] {}: {}",
+                    hit.score,
+                    hit.title,
+                    compact_text(&hit.summary, 200)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let context_text = context
+        .current_context
+        .iter()
+        .take(20)
+        .map(|item| compact_text(item, 300))
+        .filter(|item| !item.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n---\n");
+    let prompt = format!(
+        "当前查询: {}\n触发原因: {}\n操作类型: {}\n调用原因: {}\n\n当前对话上下文:\n{}\n\n粗回忆结果:\n{}",
+        context.query,
+        context.trigger.as_deref().unwrap_or("未知"),
+        context.next_action.as_deref().unwrap_or("无"),
+        context.reason.as_deref().unwrap_or("无"),
+        context_text,
+        hits_text,
+    );
+    let started = Instant::now();
+    match complete_text_with_usage(config, SUFFICIENCY_EVAL_SYSTEM, &prompt, 512).await {
+        Ok((text, usage)) => {
+            log_memory_llm_call(
+                "sufficiency_eval",
+                config,
+                started.elapsed(),
+                usage.as_ref(),
+            );
+            if text.trim().is_empty() {
+                return evaluate_sufficiency_fallback(context, rough_hits);
+            }
+            parse_sufficiency_decision(&text).unwrap_or_else(|| {
+                tracing::warn!("Memory 充分性评估结果解析失败，使用 fallback");
+                evaluate_sufficiency_fallback(context, rough_hits)
+            })
+        }
+        Err(err) => {
+            tracing::warn!("Memory 充分性评估 LLM 调用失败，使用 fallback: {err}");
+            evaluate_sufficiency_fallback(context, rough_hits)
+        }
+    }
+}
+
+fn parse_sufficiency_decision(text: &str) -> Option<RecallSufficiency> {
+    let json = extract_json_object(text)?;
+    let raw: RawSufficiencyDecision = serde_json::from_str(json).ok()?;
+    let sufficient = raw.sufficient.unwrap_or(true);
+    let should_upgrade = raw.should_upgrade_to_hybrid.unwrap_or(false);
+    let next_query = raw.next_query.filter(|q| !q.trim().is_empty());
+    Some(RecallSufficiency {
+        sufficient,
+        reason: raw.reason.unwrap_or_default(),
+        missing: raw.missing,
+        next_query,
+        should_upgrade_to_hybrid: should_upgrade,
+    })
+}
+
+fn evaluate_sufficiency_fallback(
+    context: &RuntimeRecallContext,
+    rough_hits: &[RecallHit],
+) -> RecallSufficiency {
     if rough_hits.is_empty() {
-        let should_upgrade = context.policy.enable_hybrid_on_demand
-            && (historical || failure || needs_action_context);
+        let should_upgrade =
+            context.policy.enable_hybrid_on_demand && !context.current_context.is_empty();
         return RecallSufficiency {
             sufficient: !should_upgrade,
             reason: if should_upgrade {
-                "粗回忆无命中，但当前操作需要历史线索".to_string()
+                "粗回忆无命中，但存在对话上下文，可能需要深度回忆".to_string()
             } else {
-                "粗回忆无命中，且未发现必须召回的历史信号".to_string()
+                "粗回忆无命中，无对话上下文".to_string()
             },
             missing: if should_upgrade {
                 vec!["historical_context".to_string()]
@@ -318,35 +384,16 @@ pub(crate) fn evaluate_recall_sufficiency(
         .iter()
         .map(|hit| hit.score)
         .fold(0.0_f64, f64::max);
-    let has_action_signal = rough_hits.iter().any(|hit| {
-        let text = format!("{}\n{}", hit.title, hit.summary).to_ascii_lowercase();
-        contains_any(
-            &text,
-            &[
-                "路径", "文件", "命令", "决策", "原因", "修复", "error", "failed", ".rs", ".toml",
-                ".md",
-            ],
-        )
-    });
-    let weak_for_action = (failure || needs_action_context) && !has_action_signal;
-    let should_upgrade = context.policy.enable_hybrid_on_demand && weak_for_action;
+    let should_upgrade = context.policy.enable_hybrid_on_demand && best_score < 0.3;
 
     RecallSufficiency {
         sufficient: !should_upgrade,
-        reason: if should_upgrade {
-            "粗回忆命中较泛，缺少支撑下一步操作的文件、命令或决策线索".to_string()
-        } else {
-            format!(
-                "粗回忆已命中 {} 条候选，最高分 {:.2}",
-                rough_hits.len(),
-                best_score
-            )
-        },
-        missing: if should_upgrade {
-            vec!["actionable_evidence".to_string()]
-        } else {
-            Vec::new()
-        },
+        reason: format!(
+            "粗回忆已命中 {} 条候选，最高分 {:.2}",
+            rough_hits.len(),
+            best_score
+        ),
+        missing: Vec::new(),
         next_query: should_upgrade.then(|| build_next_runtime_query(context)),
         should_upgrade_to_hybrid: should_upgrade,
     }
@@ -362,10 +409,6 @@ fn build_next_runtime_query(context: &RuntimeRecallContext) -> String {
     .filter(|item| !item.is_empty())
     .collect::<Vec<_>>()
     .join(" ")
-}
-
-fn contains_any(text: &str, markers: &[&str]) -> bool {
-    markers.iter().any(|marker| text.contains(marker))
 }
 
 fn append_workspace_index_hints(content: String, hints: &[WorkspaceIndexHit]) -> String {
@@ -444,6 +487,9 @@ async fn decide_deep_recall(
                 started.elapsed(),
                 usage.as_ref(),
             );
+            if text.trim().is_empty() {
+                return (DeepRecallDecision::default(), usage);
+            }
             let decision = parse_deep_recall_decision(&text).unwrap_or_else(|err| {
                 tracing::warn!("Memory deep recall 裁决解析失败，跳过深挖: {err}");
                 DeepRecallDecision::default()
@@ -1069,15 +1115,16 @@ repeated context line
     }
 
     #[test]
-    fn runtime_sufficiency_upgrades_when_history_signal_has_no_hits() {
+    fn sufficiency_fallback_upgrades_when_no_hits_with_context() {
         let context = RuntimeRecallContext {
             query: "继续上次那个模块".to_string(),
             trigger: Some("user_message".to_string()),
+            current_context: vec!["user: 帮我修复那个 bug".to_string()],
             policy: Default::default(),
             ..RuntimeRecallContext::default()
         };
 
-        let result = evaluate_recall_sufficiency(&context, &[]);
+        let result = evaluate_sufficiency_fallback(&context, &[]);
 
         assert!(!result.sufficient);
         assert!(result.should_upgrade_to_hybrid);
@@ -1085,7 +1132,7 @@ repeated context line
     }
 
     #[test]
-    fn runtime_sufficiency_accepts_actionable_rough_hits() {
+    fn sufficiency_fallback_sufficient_with_high_score_hits() {
         let context = RuntimeRecallContext {
             query: "修复 memory recall".to_string(),
             trigger: Some("tool_failure".to_string()),
@@ -1099,10 +1146,28 @@ repeated context line
             "文件 crates/tiangong-memory/src/recall_context.rs 中的命令失败已修复",
         )];
 
-        let result = evaluate_recall_sufficiency(&context, &hits);
+        let result = evaluate_sufficiency_fallback(&context, &hits);
 
         assert!(result.sufficient);
         assert!(!result.should_upgrade_to_hybrid);
+    }
+
+    #[test]
+    fn parse_sufficiency_decision_handles_valid_json() {
+        let result = parse_sufficiency_decision(
+            r#"{"sufficient": false, "reason": "需要更多上下文", "missing": ["decision"], "next_query": "查询决策历史", "should_upgrade_to_hybrid": true}"#,
+        )
+        .unwrap();
+
+        assert!(!result.sufficient);
+        assert!(result.should_upgrade_to_hybrid);
+        assert_eq!(result.missing, vec!["decision"]);
+        assert_eq!(result.next_query.as_deref(), Some("查询决策历史"));
+    }
+
+    #[test]
+    fn parse_sufficiency_decision_returns_none_on_invalid_json() {
+        assert!(parse_sufficiency_decision("not json").is_none());
     }
 
     #[test]

@@ -176,7 +176,12 @@ impl MemoryActor {
                 rough_hits,
                 reply,
             } => {
-                let result = recall_context::evaluate_recall_sufficiency(&context, &rough_hits);
+                let result = recall_context::evaluate_recall_sufficiency(
+                    &context,
+                    &rough_hits,
+                    self.options.model.as_ref(),
+                )
+                .await;
                 tracing::debug!(
                     query = %context.query,
                     sufficient = result.sufficient,

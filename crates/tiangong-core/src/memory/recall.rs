@@ -6,6 +6,8 @@ use crate::memory::turn_result::compact_single_memory_text;
 use crate::model::ToolSpec;
 use crate::react::message::latest_user_message;
 use crate::session::{Message, MessageRole, Session, now_text};
+use std::sync::mpsc::Sender as StdSender;
+use tiangong_types::{MemoryRecallHitSummary, StreamEvent};
 
 pub(crate) type MemoryRecallToolOutput =
     (crate::tool::ToolResult, tiangong_types::TokenUsage, bool);
@@ -256,6 +258,7 @@ pub(crate) async fn maybe_inject_runtime_memory_recall(
     trigger: &str,
     reason: &str,
     next_action: Option<&str>,
+    stream_tx: Option<&StdSender<StreamEvent>>,
 ) -> bool {
     let Some(handle) = memory_handle else {
         return false;
@@ -283,6 +286,12 @@ pub(crate) async fn maybe_inject_runtime_memory_recall(
         .await;
 
     if sufficiency.should_upgrade_to_hybrid {
+        send_stream_event(
+            stream_tx,
+            StreamEvent::MemoryRecallStart {
+                strategy: "runtime_deep".to_string(),
+            },
+        );
         let response = handle
             .recall_context(tiangong_memory::MemoryRecallRequest {
                 query: sufficiency
@@ -295,7 +304,18 @@ pub(crate) async fn maybe_inject_runtime_memory_recall(
                 limit: context.policy.deep_limit,
             })
             .await;
-        if inject_runtime_recall_response(session, trigger, &sufficiency.reason, &response) {
+        let hit_count = response.hits.len();
+        let hits = response
+            .hits
+            .iter()
+            .map(|h| MemoryRecallHitSummary {
+                title: h.title.clone(),
+                summary: compact_single_memory_text(&h.summary, 120),
+                score: h.score,
+            })
+            .collect::<Vec<_>>();
+        send_stream_event(stream_tx, StreamEvent::MemoryRecallDone { hit_count, hits });
+        if inject_runtime_recall_response(session, &response) {
             return true;
         }
     }
@@ -303,7 +323,31 @@ pub(crate) async fn maybe_inject_runtime_memory_recall(
     if rough_hits.is_empty() {
         return false;
     }
-    inject_runtime_rough_hits(session, trigger, &sufficiency.reason, &rough_hits)
+
+    send_stream_event(
+        stream_tx,
+        StreamEvent::MemoryRecallStart {
+            strategy: "runtime_rough".to_string(),
+        },
+    );
+    let result = inject_runtime_rough_hits(session, &rough_hits);
+    let hit_summaries = rough_hits
+        .iter()
+        .take(RUNTIME_ROUGH_RECALL_MAX_HITS)
+        .map(|h| MemoryRecallHitSummary {
+            title: h.title.clone(),
+            summary: compact_single_memory_text(&h.summary, 120),
+            score: h.score,
+        })
+        .collect::<Vec<_>>();
+    send_stream_event(
+        stream_tx,
+        StreamEvent::MemoryRecallDone {
+            hit_count: rough_hits.len(),
+            hits: hit_summaries,
+        },
+    );
+    result
 }
 
 fn build_runtime_context(session: &Session) -> Vec<String> {
@@ -346,8 +390,6 @@ fn runtime_expected_items(trigger: &str, next_action: Option<&str>) -> Vec<Strin
 
 fn inject_runtime_recall_response(
     session: &mut Session,
-    trigger: &str,
-    reason: &str,
     response: &tiangong_memory::MemoryRecallResponse,
 ) -> bool {
     let content = response.content.trim();
@@ -357,29 +399,35 @@ fn inject_runtime_recall_response(
     {
         return false;
     }
-    append_runtime_recall_message(
-        session,
-        format!(
-            "[运行时深度回忆]\ntrigger: {trigger}\nreason: {reason}\ndepth: {:?}\n\n{}",
-            response.recall_depth, content
-        ),
-    );
+    let hit_count = response.hits.len();
+    let hit_lines = response
+        .hits
+        .iter()
+        .map(|h| {
+            format!(
+                "- [{:.2}] {}: {}",
+                h.score,
+                compact_single_memory_text(&h.title, 120),
+                compact_single_memory_text(&h.summary, 260)
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut msg = format!("[记忆检索] 策略: runtime_deep\n命中 {hit_count} 条\n");
+    if !hit_lines.is_empty() {
+        msg.push_str(&hit_lines.join("\n"));
+    }
+    append_runtime_recall_message(session, msg);
     true
 }
 
-fn inject_runtime_rough_hits(
-    session: &mut Session,
-    trigger: &str,
-    reason: &str,
-    hits: &[tiangong_memory::RecallHit],
-) -> bool {
+fn inject_runtime_rough_hits(session: &mut Session, hits: &[tiangong_memory::RecallHit]) -> bool {
     let lines = hits
         .iter()
         .take(RUNTIME_ROUGH_RECALL_MAX_HITS)
         .map(|hit| {
             format!(
-                "- {:?}: {} — {}",
-                hit.kind,
+                "- [{:.2}] {}: {}",
+                hit.score,
                 compact_single_memory_text(&hit.title, 120),
                 compact_single_memory_text(&hit.summary, 260)
             )
@@ -388,10 +436,11 @@ fn inject_runtime_rough_hits(
     if lines.is_empty() {
         return false;
     }
+    let count = lines.len();
     append_runtime_recall_message(
         session,
         format!(
-            "[运行时粗回忆]\ntrigger: {trigger}\nreason: {reason}\n\n{}",
+            "[记忆检索] 策略: runtime_rough\n命中 {count} 条\n{}",
             lines.join("\n")
         ),
     );
@@ -417,4 +466,10 @@ fn append_runtime_recall_message(session: &mut Session, content: String) {
     message.content = compact_single_memory_text(&message.content, 1800);
     session.messages.push(message);
     session.updated_at = now_text();
+}
+
+fn send_stream_event(stream_tx: Option<&StdSender<StreamEvent>>, event: StreamEvent) {
+    if let Some(tx) = stream_tx {
+        let _ = tx.send(event);
+    }
 }

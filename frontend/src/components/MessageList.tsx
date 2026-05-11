@@ -1058,7 +1058,26 @@ function AgentTurnView({
     } else if (msg.role === "system" && (msg.content.includes("tool_name:") || msg.content.includes("exit_code") || msg.content.startsWith("工具执行 ["))) {
       pendingTools.push(msg);
     } else if (msg.role === "tool") {
-      // tool 消息用于还原 LLM 历史，UI 继续使用系统 trace 渲染工具过程，避免重复展示。
+      const toolName = msg.tool_name || "";
+      if (toolName === "runtime_memory_recall" || toolName === "recall_memory") {
+        flushTools();
+        const isStart = msg.content.startsWith("[记忆检索] 策略:");
+        if (isStart && !pendingRecall) {
+          flushRecall();
+          const strategyMatch = msg.content.match(/策略:\s*(\S+)/);
+          pendingRecall = {
+            strategy: strategyMatch ? strategyMatch[1] : "recall",
+            key: msg.id,
+          };
+        } else if (pendingRecall) {
+          flushRecall(msg);
+        } else {
+          flushRecall();
+          pendingRecall = { strategy: "recall", key: msg.id };
+          flushRecall(msg);
+        }
+      }
+      // 其他 tool 消息仍然跳过
       continue;
     } else if (msg.role === "assistant") {
       const isStreaming = msg.id === streamingMessageId;

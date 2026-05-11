@@ -106,35 +106,16 @@ impl LocalToolExecutor {
         let env_allowlist = command_env_allowlist();
         let runtime_env = self.runtime_env();
         let file_env = load_local_env(&effective_cwd);
-        let runtime = TokioRuntimeBuilder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("初始化命令执行运行时失败")?;
-        let output = runtime.block_on(async {
-            let mut command = Command::new(&cmd);
-            command
-                .args(&args)
-                .current_dir(&effective_cwd)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .env_clear();
-            for (key, value) in &env_allowlist {
-                command.env(key, value);
-            }
-            for (key, value) in runtime_env {
-                command.env(key, value);
-            }
-            for (key, value) in &file_env {
-                command.env(key, value);
-            }
-            if timeout_ms > 0 {
-                timeout(Duration::from_millis(timeout_ms), command.output()).await
-            } else {
-                // timeout_ms=0 表示不设超时，直接等待完成
-                Ok(command.output().await)
-            }
-        });
+
+        let output = run_command_async(
+            &cmd,
+            &args,
+            &effective_cwd,
+            &env_allowlist,
+            runtime_env.clone(),
+            &file_env,
+            timeout_ms,
+        )?;
 
         let (output, timed_out) = match output {
             Ok(Ok(payload)) => (payload, false),
@@ -254,4 +235,99 @@ fn extract_timeout_meta(args: &mut Vec<String>) -> Option<u64> {
         .trim()
         .parse::<u64>()
         .ok()
+}
+
+type CommandOutput = Result<std::process::Output, std::io::Error>;
+
+fn run_command_async(
+    cmd: &str,
+    args: &[String],
+    cwd: &Path,
+    env_allowlist: &[(String, String)],
+    runtime_env: BTreeMap<String, String>,
+    file_env: &[(String, String)],
+    timeout_ms: u64,
+) -> anyhow::Result<Result<CommandOutput, tokio::time::error::Elapsed>> {
+    let cmd = cmd.to_string();
+    let args = args.to_vec();
+    let cwd = cwd.to_path_buf();
+    let env_allowlist = env_allowlist.to_vec();
+    let file_env = file_env.to_vec();
+
+    let handle = tokio::runtime::Handle::try_current();
+    match handle {
+        Ok(h) => {
+            if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+                tokio::task::block_in_place(|| {
+                    h.block_on(exec_command(
+                        &cmd,
+                        &args,
+                        &cwd,
+                        &env_allowlist,
+                        runtime_env,
+                        &file_env,
+                        timeout_ms,
+                    ))
+                })
+            } else {
+                h.block_on(exec_command(
+                    &cmd,
+                    &args,
+                    &cwd,
+                    &env_allowlist,
+                    runtime_env,
+                    &file_env,
+                    timeout_ms,
+                ))
+            }
+        }
+        Err(_) => {
+            let rt = TokioRuntimeBuilder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("初始化命令执行运行时失败")?;
+            rt.block_on(exec_command(
+                &cmd,
+                &args,
+                &cwd,
+                &env_allowlist,
+                runtime_env,
+                &file_env,
+                timeout_ms,
+            ))
+        }
+    }
+}
+
+async fn exec_command(
+    cmd: &str,
+    args: &[String],
+    cwd: &Path,
+    env_allowlist: &[(String, String)],
+    runtime_env: BTreeMap<String, String>,
+    file_env: &[(String, String)],
+    timeout_ms: u64,
+) -> anyhow::Result<Result<CommandOutput, tokio::time::error::Elapsed>> {
+    let mut command = Command::new(cmd);
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env_clear();
+    for (key, value) in env_allowlist {
+        command.env(key, value);
+    }
+    for (key, value) in runtime_env {
+        command.env(key, value);
+    }
+    for (key, value) in file_env {
+        command.env(key, value);
+    }
+    if timeout_ms > 0 {
+        Ok(timeout(Duration::from_millis(timeout_ms), command.output()).await)
+    } else {
+        Ok(Ok(command.output().await))
+    }
 }
