@@ -70,6 +70,7 @@ impl ReactEngine {
         let mut memory_recall_attempted = false;
         let mut successful_tool_call_keys = HashSet::new();
         let mut runtime_recall_keys = HashSet::new();
+        let mut memory_candidate_count = 0usize;
 
         'react_loop: loop {
             match drain_pending_commands_async(session, &mut loop_context, stream_tx, cmd_rx) {
@@ -79,6 +80,7 @@ impl ReactEngine {
                     memory_recall_attempted = false;
                     successful_tool_call_keys.clear();
                     runtime_recall_keys.clear();
+                    memory_candidate_count = 0;
                 }
                 PendingCommandEffect::None => {}
             }
@@ -151,6 +153,7 @@ impl ReactEngine {
                                 );
                                 user_message_injected_during_stream = true;
                                 runtime_recall_keys.clear();
+                    memory_candidate_count = 0;
                             }
                             Some(Command::UpdateCwd { cwd }) => {
                                 session.cwd = cwd;
@@ -231,6 +234,7 @@ impl ReactEngine {
                     memory_recall_attempted = false;
                     successful_tool_call_keys.clear();
                     runtime_recall_keys.clear();
+                    memory_candidate_count = 0;
                     continue 'react_loop;
                 }
 
@@ -409,6 +413,7 @@ impl ReactEngine {
                                         media,
                                     );
                                     runtime_recall_keys.clear();
+                                    memory_candidate_count = 0;
                                 }
                                 Some(Command::UpdateCwd { cwd }) => {
                                     session.cwd = cwd;
@@ -603,6 +608,30 @@ impl ReactEngine {
                         ),
                     );
                 }
+
+                // 记忆候选评估
+                if let Some(handle) = memory_handle {
+                    let file_path =
+                        if matches!(call.name.as_str(), "write_file" | "replace_in_file") {
+                            call.arguments.as_object().and_then(|o| {
+                                o.get("path").and_then(|v| v.as_str()).map(String::from)
+                            })
+                        } else {
+                            None
+                        };
+                    if let Some(candidate) =
+                        crate::memory::turn_result::evaluate_tool_result_for_memory(
+                            &call.name,
+                            result.ok,
+                            &result.summary,
+                            file_path.as_deref(),
+                            memory_candidate_count,
+                        )
+                    {
+                        handle.submit_memory_candidate(candidate);
+                        memory_candidate_count += 1;
+                    }
+                }
                 if call.name == "recall_memory"
                     && result.ok
                     && allow_memory_context
@@ -619,6 +648,7 @@ impl ReactEngine {
                         memory_recall_attempted = false;
                         successful_tool_call_keys.clear();
                         runtime_recall_keys.clear();
+                        memory_candidate_count = 0;
                         session.persist_to_disk();
                         continue 'react_loop;
                     }

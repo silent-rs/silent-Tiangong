@@ -299,6 +299,23 @@ impl MemoryStore {
         Ok(node)
     }
 
+    /// 更新已有 Episode 的摘要和关键词（去重时使用）。
+    pub(crate) async fn update_episode_summary(
+        &mut self,
+        node_id: &str,
+        summary: &str,
+        keywords: &[String],
+    ) -> Result<()> {
+        self.db.update_episode_summary(node_id, summary, keywords)?;
+        if let Some(ref mut tantivy) = self.tantivy
+            && let Some(node) = self.db.load_node(node_id)?
+            && let Err(e) = tantivy.index_node(&node, summary)
+        {
+            tracing::warn!("Tantivy Episode 更新索引失败（非致命）: {}", e);
+        }
+        Ok(())
+    }
+
     /// 渐进式召回（自动选择单引擎或双引擎）
     ///
     /// 注意：此方法需要 async 运行时（在 tokio task 内调用）

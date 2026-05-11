@@ -11,6 +11,7 @@ use crate::options::MemoryOptions;
 use crate::recall_context;
 use crate::rumination;
 use crate::store::MemoryStore;
+use crate::types::MemoryCandidate;
 
 /// Memory Actor（独立运行时）
 pub(crate) struct MemoryActor {
@@ -18,6 +19,7 @@ pub(crate) struct MemoryActor {
     store: MemoryStore,
     workspace_id: Option<String>,
     options: MemoryOptions,
+    pending_candidates: Vec<MemoryCandidate>,
 }
 
 impl MemoryActor {
@@ -32,6 +34,7 @@ impl MemoryActor {
             store,
             workspace_id,
             options,
+            pending_candidates: Vec::new(),
         }
     }
 
@@ -204,6 +207,10 @@ impl MemoryActor {
             }
 
             // Phase B：Micro 反刍
+            MemoryCommand::SubmitCandidate { candidate } => {
+                self.pending_candidates.push(candidate);
+            }
+
             MemoryCommand::RunMicroRumination { turn_result } => {
                 // 优先使用 turn 携带的 workspace_id，避免跨工作区串写
                 let wid = turn_result
@@ -220,6 +227,30 @@ impl MemoryActor {
                 {
                     tracing::warn!("Micro 反刍失败: {}", e);
                 }
+            }
+
+            MemoryCommand::RunEnhancedMicroRumination { turn_result, reply } => {
+                let mut enhanced = *turn_result;
+                if !self.pending_candidates.is_empty() {
+                    enhanced
+                        .memory_candidates
+                        .append(&mut self.pending_candidates);
+                }
+                let wid = enhanced
+                    .workspace_id
+                    .as_deref()
+                    .or(self.workspace_id.as_deref());
+                if let Err(e) = rumination::process_enhanced_micro(
+                    &mut self.store,
+                    &enhanced,
+                    wid,
+                    self.options.model.as_ref(),
+                )
+                .await
+                {
+                    tracing::warn!("增强版 Micro 反刍失败: {}", e);
+                }
+                let _ = reply.send(());
             }
 
             // Phase C 实现

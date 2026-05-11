@@ -4,9 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::command::InjectionLevel;
 use crate::types::{
-    Episode, ExpandedMemory, ManualMemoryDraft, MemoryListQuery, MemoryNode, MemoryRecallRequest,
-    MemoryRecallResponse, MemoryRelation, MemoryRelationDraft, MemoryStatus, RecallAnchors,
-    RecallHit, RecallSufficiency, RuntimeRecallContext, TurnResult,
+    EnhancedTurnResult, Episode, ExpandedMemory, ManualMemoryDraft, MemoryCandidate,
+    MemoryListQuery, MemoryNode, MemoryRecallRequest, MemoryRecallResponse, MemoryRelation,
+    MemoryRelationDraft, MemoryStatus, RecallAnchors, RecallHit, RecallSufficiency,
+    RuntimeRecallContext, TurnResult,
 };
 
 /// Endpoint 发现信息，写入本地 runtime 文件供 follower 读取。
@@ -108,6 +109,12 @@ pub enum MemoryIpcRequestPayload {
     },
     RunMicroRumination {
         turn_result: TurnResult,
+    },
+    SubmitCandidate {
+        candidate: MemoryCandidate,
+    },
+    RunEnhancedMicroRumination {
+        turn_result: EnhancedTurnResult,
     },
     RunMesoRumination {
         session_id: String,

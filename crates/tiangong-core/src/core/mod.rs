@@ -422,13 +422,18 @@ async fn worker_loop_async(
                 )
                 .await;
 
-                // turn 完成后触发 Micro 反刍（fire-and-forget）
+                // turn 完成后触发增强版 Micro 反刍
                 if let Some(handle) = memory.handle.as_ref() {
-                    // 显式携带 workspace_id，避免 Actor 固化到启动时工作区造成跨工作区串写
-                    let mut turn_result =
-                        build_memory_turn_result(&session, turn_start_idx, &content);
-                    turn_result.workspace_id = memory.workspace_id.clone();
-                    handle.run_micro_rumination(turn_result);
+                    let mut enhanced_result = build_enhanced_memory_turn_result(
+                        &session,
+                        turn_start_idx,
+                        &content,
+                        vec![],
+                    );
+                    enhanced_result.workspace_id = memory.workspace_id.clone();
+                    tokio::task::block_in_place(|| {
+                        handle.run_enhanced_micro_rumination_blocking(enhanced_result);
+                    });
 
                     // 每 10 个 turn 触发一次 Meta 反刍（归档低活跃节点）
                     turn_count += 1;
@@ -806,4 +811,4 @@ fn attachment_tool_result(
 }
 
 // ── Turn 记忆记录函数（已迁移至 memory::turn_result） ──
-pub(crate) use crate::memory::turn_result::build_memory_turn_result;
+pub(crate) use crate::memory::turn_result::build_enhanced_memory_turn_result;

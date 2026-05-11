@@ -414,6 +414,87 @@ fn default_true() -> bool {
     true
 }
 
+/// 工具执行后产生的记忆候选类型。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryCandidateKind {
+    Episode,
+    Entity,
+    Decision,
+    Evidence,
+    UserPreference,
+}
+
+/// 工具执行后的轻量记忆候选（无 LLM 调用）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryCandidate {
+    pub tool_name: String,
+    pub step_index: usize,
+    pub hint: String,
+    #[serde(default)]
+    pub suggested_kinds: Vec<MemoryCandidateKind>,
+    #[serde(default)]
+    pub file_path: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub result_summary: Option<String>,
+    pub success: bool,
+}
+
+/// 轮次中的对话消息。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnMessage {
+    pub role: String,
+    pub content: String,
+}
+
+/// 扩展的轮次结果，在 TurnResult 基础上增加候选列表和对话消息。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EnhancedTurnResult {
+    pub session_id: String,
+    pub turn_id: String,
+    pub had_tool_calls: bool,
+    #[serde(default)]
+    pub user_input: String,
+    pub summary: String,
+    #[serde(default)]
+    pub tool_calls: Vec<String>,
+    #[serde(default)]
+    pub artifacts: Vec<TurnArtifact>,
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub memory_candidates: Vec<MemoryCandidate>,
+    #[serde(default)]
+    pub turn_messages: Vec<TurnMessage>,
+}
+
+/// 多类型记忆提取输出。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExtractionOutput {
+    #[serde(default)]
+    pub episodes: Vec<Episode>,
+    #[serde(default)]
+    pub entities: Vec<Entity>,
+    #[serde(default)]
+    pub decisions: Vec<Decision>,
+    #[serde(default)]
+    pub evidences: Vec<Evidence>,
+}
+
+/// 证据记忆，记录具体产物（文件路径、URL、工具结果摘要等）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Evidence {
+    pub title: String,
+    pub summary: String,
+    #[serde(default)]
+    pub file_path: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub source_tool: Option<String>,
+}
+
 /// 向量索引点。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorPoint {

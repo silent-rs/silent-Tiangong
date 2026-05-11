@@ -12,31 +12,6 @@ use crate::session::{Message, MessageRole};
 
 // ── Turn 记忆记录函数 ──
 
-/// 构建一轮对话的 TurnResult，提取工具调用、媒体/文件产物并生成摘要。
-///
-/// 从 `session.messages[turn_start_idx..]` 中提取当前轮次的所有信息，
-/// 生成唯一的 `turn_id`，组装为 `TurnResult` 供 Memory Actor 写入长期记忆。
-pub(crate) fn build_memory_turn_result(
-    session: &crate::session::Session,
-    turn_start_idx: usize,
-    user_input: &str,
-) -> tiangong_memory::TurnResult {
-    let messages = session.messages.get(turn_start_idx..).unwrap_or_default();
-    let tool_calls = extract_turn_tool_calls(messages);
-    let artifacts = extract_turn_artifacts(messages);
-    let summary = build_turn_memory_summary(messages, &artifacts);
-    tiangong_memory::TurnResult {
-        session_id: session.id.clone(),
-        turn_id: scru128::new().to_string(),
-        had_tool_calls: !tool_calls.is_empty(),
-        user_input: user_input.to_string(),
-        summary,
-        tool_calls,
-        artifacts,
-        workspace_id: None,
-    }
-}
-
 /// 从消息列表中提取所有去重的工具调用名称。
 ///
 /// 仅扫描 `Tool` 角色的消息，通过 `parse_tool_calls_line` 和 `parse_tool_trace_name`
@@ -479,4 +454,76 @@ fn should_record_tool_result(tool_name: &str) -> bool {
             | "recall_memory"
             | "get_skill_detail"
     )
+}
+
+// ── 记忆候选评估 ──
+
+/// 工具执行后生成记忆候选。
+///
+/// 将工具执行结果结构化记录，由 Memory LLM 在增强版反刍中判断
+/// 是否值得记忆以及提取哪些类型（Episode/Entity/Decision/Evidence）。
+pub(crate) fn evaluate_tool_result_for_memory(
+    tool_name: &str,
+    success: bool,
+    result_summary: &str,
+    file_path: Option<&str>,
+    step_index: usize,
+) -> Option<tiangong_memory::MemoryCandidate> {
+    let summary_trimmed = result_summary.trim();
+    if summary_trimmed.is_empty() {
+        return None;
+    }
+
+    Some(tiangong_memory::MemoryCandidate {
+        tool_name: tool_name.to_string(),
+        step_index,
+        hint: String::new(),
+        suggested_kinds: Vec::new(),
+        file_path: file_path.map(String::from),
+        url: None,
+        result_summary: Some(compact_single_memory_text(summary_trimmed, 240)),
+        success,
+    })
+}
+
+/// 构建增强版轮次结果，附加候选列表和对话消息。
+pub(crate) fn build_enhanced_memory_turn_result(
+    session: &crate::session::Session,
+    turn_start_idx: usize,
+    user_input: &str,
+    candidates: Vec<tiangong_memory::MemoryCandidate>,
+) -> tiangong_memory::EnhancedTurnResult {
+    let messages = session.messages.get(turn_start_idx..).unwrap_or_default();
+    let tool_calls = extract_turn_tool_calls(messages);
+    let artifacts = extract_turn_artifacts(messages);
+    let summary = build_turn_memory_summary(messages, &artifacts);
+    let turn_messages = messages
+        .iter()
+        .filter_map(|message| {
+            let role = match message.role {
+                MessageRole::User => "user",
+                MessageRole::Assistant => "assistant",
+                MessageRole::System => return None,
+                MessageRole::Tool => "tool",
+            };
+            let content = compact_single_memory_text(&message.content, 400);
+            (!content.is_empty()).then(|| tiangong_memory::TurnMessage {
+                role: role.to_string(),
+                content,
+            })
+        })
+        .collect();
+
+    tiangong_memory::EnhancedTurnResult {
+        session_id: session.id.clone(),
+        turn_id: scru128::new().to_string(),
+        had_tool_calls: !tool_calls.is_empty(),
+        user_input: user_input.to_string(),
+        summary,
+        tool_calls,
+        artifacts,
+        workspace_id: None,
+        memory_candidates: candidates,
+        turn_messages,
+    }
 }

@@ -14,9 +14,10 @@ use crate::ipc::IpcClient;
 use crate::ipc::protocol::{IpcRequest, MemoryIpcRequestPayload, MemoryIpcResponsePayload};
 use crate::options::MemoryOptions;
 use crate::types::{
-    Episode, ExpandedMemory, ManualMemoryDraft, MemoryListQuery, MemoryNode, MemoryRecallRequest,
-    MemoryRecallResponse, MemoryRelation, MemoryRelationDraft, MemoryStatus, RecallAnchors,
-    RecallHit, RecallSufficiency, RuntimeRecallContext, TurnResult,
+    EnhancedTurnResult, Episode, ExpandedMemory, ManualMemoryDraft, MemoryCandidate,
+    MemoryListQuery, MemoryNode, MemoryRecallRequest, MemoryRecallResponse, MemoryRelation,
+    MemoryRelationDraft, MemoryStatus, RecallAnchors, RecallHit, RecallSufficiency,
+    RuntimeRecallContext, TurnResult,
 };
 
 /// Memory 系统的客户端句柄，可任意 Clone 跨线程使用
@@ -255,6 +256,98 @@ impl MemoryHandle {
                     Err(e) => {
                         tracing::warn!("Memory IPC evaluate_recall_sufficiency 失败: {}", e);
                         RecallSufficiency::default()
+                    }
+                }
+            }
+        }
+    }
+
+    /// 提交记忆候选（fire-and-forget）。
+    ///
+    /// 工具执行完成后调用，候选累积在 Actor 内部，轮次结束时由
+    /// `run_enhanced_micro_rumination` 统一提炼。
+    pub fn submit_memory_candidate(&self, candidate: MemoryCandidate) {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                if let Err(e) = tx.try_send(MemoryCommand::SubmitCandidate { candidate }) {
+                    tracing::warn!("Memory submit_memory_candidate 发送失败: {}", e);
+                }
+            }
+            HandleInner::Remote { .. } => {
+                self.dispatch_remote_request(
+                    MemoryIpcRequestPayload::SubmitCandidate { candidate },
+                    "submit_memory_candidate",
+                );
+            }
+        }
+    }
+
+    /// 增强版 Micro 反刍（等待完成）。
+    ///
+    /// 合并累积候选与增强轮次结果，执行多类型提取、去重写入和跨类型关联。
+    pub async fn run_enhanced_micro_rumination(&self, turn_result: EnhancedTurnResult) {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                if tx
+                    .send(MemoryCommand::RunEnhancedMicroRumination {
+                        turn_result: Box::new(turn_result),
+                        reply: reply_tx,
+                    })
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("Memory run_enhanced_micro_rumination 发送失败");
+                    return;
+                }
+                let _ = reply_rx.await;
+            }
+            HandleInner::Remote { .. } => {
+                match self
+                    .send_remote_request(MemoryIpcRequestPayload::RunEnhancedMicroRumination {
+                        turn_result,
+                    })
+                    .await
+                {
+                    Ok(MemoryIpcResponsePayload::Ack) | Err(_) => {}
+                    Ok(other) => {
+                        tracing::warn!(
+                            "Memory IPC run_enhanced_micro_rumination 返回了非预期响应: {:?}",
+                            other
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// 增强版 Micro 反刍（同步版）。
+    pub fn run_enhanced_micro_rumination_blocking(&self, turn_result: EnhancedTurnResult) {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                if tx
+                    .blocking_send(MemoryCommand::RunEnhancedMicroRumination {
+                        turn_result: Box::new(turn_result),
+                        reply: reply_tx,
+                    })
+                    .is_err()
+                {
+                    tracing::warn!("Memory run_enhanced_micro_rumination_blocking 发送失败");
+                    return;
+                }
+                let _ = reply_rx.blocking_recv();
+            }
+            HandleInner::Remote { .. } => {
+                match self.block_on_remote_request(
+                    MemoryIpcRequestPayload::RunEnhancedMicroRumination { turn_result },
+                ) {
+                    Ok(MemoryIpcResponsePayload::Ack) | Err(_) => {}
+                    Ok(other) => {
+                        tracing::warn!(
+                            "Memory IPC run_enhanced_micro_rumination_blocking 返回了非预期响应: {:?}",
+                            other
+                        );
                     }
                 }
             }

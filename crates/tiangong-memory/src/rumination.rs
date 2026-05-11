@@ -14,8 +14,8 @@ use crate::command::InjectionLevel;
 use crate::llm_metrics::log_memory_llm_call;
 use crate::store::MemoryStore;
 use crate::types::{
-    Decision, Entity, EntityType, Episode, MemoryListQuery, MemoryNode, MemoryRelationDraft,
-    MemoryRelationKind, MemoryStatus, TurnResult,
+    Decision, EnhancedTurnResult, Entity, EntityType, Episode, MemoryListQuery, MemoryNode,
+    MemoryRelationDraft, MemoryRelationKind, MemoryStatus, TurnResult,
 };
 use crate::writer;
 use tiangong_llm::{LlmEndpointConfig, complete_text_with_usage};
@@ -145,6 +145,191 @@ fn build_session_injection(episodes: &[Episode], session_id: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!("# Session Memory ({session_id})\n更新时间: {now}\n\n## 本会话近期活动\n{items}\n")
+}
+
+/// 增强版 Micro 反刍。
+///
+/// 合并累积候选与增强轮次结果，执行多类型提取、去重写入和跨类型关联。
+/// 当候选列表为空时退化为普通 Micro 反刍。
+pub(crate) async fn process_enhanced_micro(
+    store: &mut MemoryStore,
+    enhanced: &EnhancedTurnResult,
+    workspace_id: Option<&str>,
+    model: Option<&LlmEndpointConfig>,
+) -> Result<()> {
+    let turn_result = TurnResult {
+        session_id: enhanced.session_id.clone(),
+        turn_id: enhanced.turn_id.clone(),
+        had_tool_calls: enhanced.had_tool_calls,
+        user_input: enhanced.user_input.clone(),
+        summary: enhanced.summary.clone(),
+        tool_calls: enhanced.tool_calls.clone(),
+        artifacts: enhanced.artifacts.clone(),
+        workspace_id: enhanced.workspace_id.clone(),
+    };
+
+    if enhanced.memory_candidates.is_empty() {
+        return process_micro(store, &turn_result, workspace_id, model).await;
+    }
+
+    tracing::debug!(
+        candidate_count = enhanced.memory_candidates.len(),
+        "增强版 Micro 反刍：执行多类型提取"
+    );
+
+    // 1. 多类型提取（由 Memory LLM 判断或规则 fallback）
+    let extraction = writer::extract_multi_type_memories_with_model(enhanced, model).await;
+
+    // 2. 去重写入 Episode
+    let mut written_episode_ids = Vec::new();
+    for episode in &extraction.episodes {
+        if let Some(existing_id) = check_episode_dedup(store, &episode.title, &episode.keywords) {
+            tracing::debug!(
+                existing_id = %existing_id,
+                title = %episode.title,
+                "Episode 去重：更新已有记忆"
+            );
+            if let Err(e) = store
+                .update_episode_summary(&existing_id, &episode.summary, &episode.keywords)
+                .await
+            {
+                tracing::warn!("Episode 去重更新失败: {}", e);
+            }
+            written_episode_ids.push(existing_id);
+        } else if let Err(e) = store.write_episode(episode.clone(), workspace_id).await {
+            tracing::warn!("Episode 写入失败: {}", e);
+        } else {
+            written_episode_ids.push(episode.id.clone());
+        }
+    }
+
+    // 3. 写入 Entity
+    let mut written_entity_ids = Vec::new();
+    for entity in &extraction.entities {
+        match store.upsert_entity(entity.clone(), workspace_id) {
+            Ok(()) => written_entity_ids.push(entity.id.clone()),
+            Err(e) => tracing::warn!("Entity 写入失败: {}", e),
+        }
+    }
+
+    // 4. 写入 Decision
+    let mut written_decision_ids = Vec::new();
+    for decision in &extraction.decisions {
+        match store.upsert_decision(decision.clone(), workspace_id) {
+            Ok(()) => written_decision_ids.push(decision.id.clone()),
+            Err(e) => tracing::warn!("Decision 写入失败: {}", e),
+        }
+    }
+
+    // 5. 跨类型关联
+    link_written_memories(
+        store,
+        &written_episode_ids,
+        &written_entity_ids,
+        &written_decision_ids,
+    );
+
+    // 6. 更新 Session Injection
+    let recent = store.recent_episodes_for_session(workspace_id, &enhanced.session_id, 3);
+    if !recent.is_empty() {
+        let content = build_session_injection(&recent, &enhanced.session_id);
+        store
+            .update_injection(InjectionLevel::Session, &enhanced.session_id, &content)
+            .unwrap_or_else(|e| {
+                tracing::warn!("增强版 Micro 反刍：更新 Session Injection 失败: {}", e);
+            });
+    }
+
+    Ok(())
+}
+
+/// Episode 去重检查。
+///
+/// 关键词重叠 ≥ 0.7 + 标题相似度 > 0.6 → 认为重复，返回已有 ID。
+fn check_episode_dedup(store: &MemoryStore, title: &str, keywords: &[String]) -> Option<String> {
+    if keywords.is_empty() {
+        return None;
+    }
+    let candidates = store.search(title, 5);
+    for hit in candidates {
+        let keyword_overlap = compute_keyword_overlap(keywords, &hit.title);
+        let title_sim = compute_title_similarity(title, &hit.title);
+        if keyword_overlap >= 0.7 && title_sim > 0.6 {
+            return Some(hit.node_id);
+        }
+    }
+    None
+}
+
+fn compute_keyword_overlap(query_keywords: &[String], target_text: &str) -> f64 {
+    if query_keywords.is_empty() {
+        return 0.0;
+    }
+    let lower = target_text.to_ascii_lowercase();
+    let matched = query_keywords
+        .iter()
+        .filter(|kw| lower.contains(&kw.to_ascii_lowercase()))
+        .count();
+    matched as f64 / query_keywords.len() as f64
+}
+
+fn compute_title_similarity(a: &str, b: &str) -> f64 {
+    let a_lower = a.to_ascii_lowercase();
+    let b_lower = b.to_ascii_lowercase();
+    if a_lower == b_lower {
+        return 1.0;
+    }
+    let a_chars: std::collections::HashSet<char> = a_lower.chars().collect();
+    let b_chars: std::collections::HashSet<char> = b_lower.chars().collect();
+    if a_chars.is_empty() && b_chars.is_empty() {
+        return 1.0;
+    }
+    let intersection = a_chars.intersection(&b_chars).count();
+    let union = a_chars.union(&b_chars).count();
+    if union == 0 {
+        return 0.0;
+    }
+    intersection as f64 / union as f64
+}
+
+/// 跨类型关联写入。
+///
+/// - Episode → Entity: BelongsTo
+/// - Decision → Episode: LearnedFrom
+fn link_written_memories(
+    store: &mut MemoryStore,
+    episode_ids: &[String],
+    entity_ids: &[String],
+    decision_ids: &[String],
+) {
+    for entity_id in entity_ids {
+        for episode_id in episode_ids {
+            if let Err(e) = store.upsert_relation(MemoryRelationDraft {
+                from_node_id: episode_id.clone(),
+                to_node_id: entity_id.clone(),
+                relation_kind: MemoryRelationKind::BelongsTo,
+                weight: 0.8,
+                note: None,
+                ..Default::default()
+            }) {
+                tracing::warn!("Episode→Entity 关联写入失败: {}", e);
+            }
+        }
+    }
+    for decision_id in decision_ids {
+        for episode_id in episode_ids {
+            if let Err(e) = store.upsert_relation(MemoryRelationDraft {
+                from_node_id: decision_id.clone(),
+                to_node_id: episode_id.clone(),
+                relation_kind: MemoryRelationKind::LearnedFrom,
+                weight: 0.8,
+                note: None,
+                ..Default::default()
+            }) {
+                tracing::warn!("Decision→Episode 关联写入失败: {}", e);
+            }
+        }
+    }
 }
 
 /// Meso 反刍（Phase C）：会话结束时调用

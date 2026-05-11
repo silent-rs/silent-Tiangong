@@ -86,6 +86,65 @@ impl MemoryDb {
         Ok(())
     }
 
+    /// 更新 Episode 的摘要和关键词。
+    pub(crate) fn update_episode_summary(
+        &self,
+        node_id: &str,
+        summary: &str,
+        keywords: &[String],
+    ) -> Result<()> {
+        let now = chrono::Local::now().naive_local().to_string();
+        let keywords_json = serde_json::to_string(keywords)?;
+        self.conn
+            .execute(
+                "UPDATE memory_nodes SET summary = ?1, keywords = ?2, updated_at = ?3 WHERE id = ?4",
+                rusqlite::params![summary, keywords_json, now, node_id],
+            )
+            .with_context(|| "更新 Episode 摘要失败")?;
+        Ok(())
+    }
+
+    /// 加载单个记忆节点。
+    pub(crate) fn load_node(&self, node_id: &str) -> Result<Option<MemoryNode>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, kind, memory_type, scope_type, scope_id, title, summary, keywords, importance, confidence, status, source, usage_count, last_used_at, created_at, updated_at FROM memory_nodes WHERE id = ?1")?;
+        let mut rows = stmt.query(rusqlite::params![node_id])?;
+        match rows.next()? {
+            Some(row) => {
+                let kind_str: String = row.get(1)?;
+                let kind = str_to_memory_kind(&kind_str);
+                let mt_str: String = row.get(2)?;
+                let memory_type = str_to_memory_cognitive_type(&mt_str);
+                let scope_str: String = row.get(3)?;
+                let scope_type = str_to_scope_type(&scope_str);
+                let status_str: String = row.get(10)?;
+                let status = str_to_memory_status(&status_str);
+                let kw_str: String = row.get(7)?;
+                let keywords: Vec<String> = serde_json::from_str(&kw_str).unwrap_or_default();
+                Ok(Some(MemoryNode {
+                    id: row.get(0)?,
+                    kind,
+                    memory_type,
+                    scope_type,
+                    scope_id: row.get(4)?,
+                    title: row.get(5)?,
+                    summary: row.get(6)?,
+                    keywords,
+                    importance: row.get(8)?,
+                    confidence: row.get(9)?,
+                    status,
+                    source: row.get(11)?,
+                    usage_count: row.get(12)?,
+                    last_used_at: row.get(13)?,
+                    created_at: row.get(14)?,
+                    updated_at: row.get(15)?,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// 插入或更新 Entity 到 memory_nodes 和 entities 表
     #[allow(dead_code)]
     pub(crate) fn upsert_entity(&self, entity: &Entity, workspace_id: Option<&str>) -> Result<()> {

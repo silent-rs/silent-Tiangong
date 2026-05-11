@@ -349,6 +349,14 @@ async fn handle_memory_request(
             handle.run_micro_rumination(turn_result);
             Ok(MemoryIpcResponsePayload::Ack)
         }
+        MemoryIpcRequestPayload::SubmitCandidate { candidate } => {
+            handle.submit_memory_candidate(candidate);
+            Ok(MemoryIpcResponsePayload::Ack)
+        }
+        MemoryIpcRequestPayload::RunEnhancedMicroRumination { turn_result } => {
+            handle.run_enhanced_micro_rumination(turn_result).await;
+            Ok(MemoryIpcResponsePayload::Ack)
+        }
         MemoryIpcRequestPayload::RunMesoRumination {
             session_id,
             workspace_id,

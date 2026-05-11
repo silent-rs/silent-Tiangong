@@ -6,7 +6,10 @@
 use std::time::Instant;
 
 use crate::llm_metrics::log_memory_llm_call;
-use crate::types::{Episode, EpisodeOutcome, MemoryCognitiveType, TurnResult};
+use crate::types::{
+    EnhancedTurnResult, Episode, EpisodeOutcome, Evidence, ExtractionOutput, MemoryCognitiveType,
+    TurnResult,
+};
 use tiangong_llm::{LlmEndpointConfig, complete_text_with_usage};
 
 const EPISODE_WRITER_SYSTEM: &str = "\
@@ -436,4 +439,343 @@ fn extract_keywords(text: &str) -> Vec<String> {
         .map(String::from)
         .collect();
     words
+}
+
+// ── 多类型记忆提取 ──
+
+const MULTI_TYPE_EXTRACTION_SYSTEM: &str = "\
+你是独立记忆系统的多类型记忆提取器。根据一个对话轮次的执行结果，判断哪些内容值得记忆并提取为结构化记忆。
+
+要求：
+- 只输出 JSON 对象，不要 Markdown，不要解释。
+- 仔细判断每条工具结果是否值得记忆：普通查询、日常操作（ls、cat、pwd 等）不值得记忆。
+- 值得记忆的信号包括：文件修改、架构/实现决策、构建测试结果、关键发现、错误修复、用户偏好表达。
+- episodes: 每个值得记忆的事件提取一个 Episode。没有值得记忆的事件时返回空数组。
+- entities: 发现的稳定实体（项目、模块、文档、服务）才提取，不要把临时搜索结果当实体。
+- decisions: 有明确的架构/实现/产品取舍时才提取 Decision，必须包含 chosen 和 reasons。
+- evidences: 有文件产物或工具结果摘要时提取 Evidence。
+
+JSON 格式：
+{
+  \"episodes\": [
+    {
+      \"title\": \"...\",
+      \"summary\": \"...\",
+      \"memory_type\": \"factual\",
+      \"outcome\": \"success\",
+      \"keywords\": [\"...\"],
+      \"tool_calls\": [\"...\"],
+      \"importance\": 0.8
+    }
+  ],
+  \"entities\": [
+    {
+      \"name\": \"...\",
+      \"entity_type\": \"module\",
+      \"description\": \"...\",
+      \"file_path\": \"...\"
+    }
+  ],
+  \"decisions\": [
+    {
+      \"title\": \"...\",
+      \"context\": \"...\",
+      \"alternatives\": [\"...\"],
+      \"chosen\": \"...\",
+      \"reasons\": [\"...\"]
+    }
+  ],
+  \"evidences\": [
+    {
+      \"title\": \"...\",
+      \"summary\": \"...\",
+      \"file_path\": \"...\",
+      \"source_tool\": \"...\"
+    }
+  ]
+}";
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct MultiTypeExtraction {
+    #[serde(default)]
+    episodes: Vec<ExtractedEpisode>,
+    #[serde(default)]
+    entities: Vec<ExtractedEntity>,
+    #[serde(default)]
+    decisions: Vec<ExtractedDecision>,
+    #[serde(default)]
+    evidences: Vec<ExtractedEvidence>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct ExtractedEpisode {
+    title: Option<String>,
+    summary: Option<String>,
+    memory_type: Option<String>,
+    outcome: Option<String>,
+    keywords: Option<Vec<String>>,
+    tool_calls: Option<Vec<String>>,
+    importance: Option<f32>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct ExtractedEntity {
+    name: Option<String>,
+    entity_type: Option<String>,
+    description: Option<String>,
+    file_path: Option<String>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct ExtractedDecision {
+    title: Option<String>,
+    context: Option<String>,
+    alternatives: Option<Vec<String>>,
+    chosen: Option<String>,
+    reasons: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct ExtractedEvidence {
+    title: Option<String>,
+    summary: Option<String>,
+    file_path: Option<String>,
+    source_tool: Option<String>,
+}
+
+/// 从增强版轮次结果中提取多种类型的记忆。
+///
+/// 优先使用 Memory LLM 判断哪些工具结果值得记忆并提取为结构化记忆；
+/// 未配置 Memory LLM 时走规则 fallback（只提取 Episode）。
+pub(crate) async fn extract_multi_type_memories_with_model(
+    enhanced: &EnhancedTurnResult,
+    model: Option<&LlmEndpointConfig>,
+) -> ExtractionOutput {
+    let turn_result = TurnResult {
+        session_id: enhanced.session_id.clone(),
+        turn_id: enhanced.turn_id.clone(),
+        had_tool_calls: enhanced.had_tool_calls,
+        user_input: enhanced.user_input.clone(),
+        summary: enhanced.summary.clone(),
+        tool_calls: enhanced.tool_calls.clone(),
+        artifacts: enhanced.artifacts.clone(),
+        workspace_id: enhanced.workspace_id.clone(),
+    };
+
+    let Some(model) = model else {
+        return extract_multi_type_fallback(&turn_result, enhanced);
+    };
+
+    match extract_multi_type_with_llm(enhanced, model).await {
+        Ok(output) => output,
+        Err(err) => {
+            tracing::warn!("多类型 LLM 提取失败，使用规则 fallback: {err}");
+            extract_multi_type_fallback(&turn_result, enhanced)
+        }
+    }
+}
+
+async fn extract_multi_type_with_llm(
+    enhanced: &EnhancedTurnResult,
+    model: &LlmEndpointConfig,
+) -> anyhow::Result<ExtractionOutput> {
+    let prompt = build_multi_type_prompt(enhanced);
+    let started = Instant::now();
+    let (response, usage) =
+        complete_text_with_usage(model, MULTI_TYPE_EXTRACTION_SYSTEM, &prompt, 1500).await?;
+    log_memory_llm_call(
+        "multi_type_extraction",
+        model,
+        started.elapsed(),
+        usage.as_ref(),
+    );
+
+    let json = extract_json_object(&response).unwrap_or(response.as_str());
+    let extracted: MultiTypeExtraction = serde_json::from_str(json)?;
+
+    let session_id = &enhanced.session_id;
+    let now = chrono::Local::now().naive_local().to_string();
+
+    let episodes = extracted
+        .episodes
+        .into_iter()
+        .filter_map(|e| {
+            let title = e.title?.trim().to_string();
+            let summary = e.summary?.trim().to_string();
+            if title.is_empty() || summary.is_empty() {
+                return None;
+            }
+            Some(Episode {
+                id: scru128::new().to_string(),
+                session_id: session_id.clone(),
+                memory_type: e
+                    .memory_type
+                    .as_deref()
+                    .and_then(parse_memory_type)
+                    .unwrap_or(MemoryCognitiveType::Factual),
+                title,
+                summary,
+                outcome: parse_outcome(e.outcome.as_deref()).unwrap_or(EpisodeOutcome::Success),
+                keywords: e.keywords.unwrap_or_default(),
+                tool_calls: e.tool_calls.unwrap_or_default(),
+                importance: e.importance.unwrap_or(0.5).clamp(0.0, 1.0),
+                created_at: now.clone(),
+            })
+        })
+        .collect();
+
+    let entities = extracted
+        .entities
+        .into_iter()
+        .filter_map(|e| {
+            let name = e.name?.trim().to_string();
+            if name.is_empty() {
+                return None;
+            }
+            Some(crate::types::Entity {
+                id: scru128::new().to_string(),
+                name,
+                entity_type: parse_entity_type(e.entity_type.as_deref()),
+                description: e.description.unwrap_or_default(),
+                file_path: e.file_path,
+                related_episodes: Vec::new(),
+                importance: 0.5,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            })
+        })
+        .collect();
+
+    let decisions = extracted
+        .decisions
+        .into_iter()
+        .filter_map(|e| {
+            let title = e.title?.trim().to_string();
+            let chosen = e.chosen?.trim().to_string();
+            if title.is_empty() || chosen.is_empty() {
+                return None;
+            }
+            Some(crate::types::Decision {
+                id: scru128::new().to_string(),
+                title,
+                context: e.context.unwrap_or_default(),
+                alternatives: e.alternatives.unwrap_or_default(),
+                chosen,
+                reasons: e.reasons.unwrap_or_default(),
+                episode_ids: Vec::new(),
+                created_at: now.clone(),
+            })
+        })
+        .collect();
+
+    let evidences = extracted
+        .evidences
+        .into_iter()
+        .filter_map(|e| {
+            let summary = e.summary.as_deref().unwrap_or_default().trim();
+            if summary.is_empty() {
+                return None;
+            }
+            Some(Evidence {
+                title: e.title.unwrap_or_default(),
+                summary: summary.to_string(),
+                file_path: e.file_path,
+                url: None,
+                source_tool: e.source_tool,
+            })
+        })
+        .collect();
+
+    Ok(ExtractionOutput {
+        episodes,
+        entities,
+        decisions,
+        evidences,
+    })
+}
+
+fn build_multi_type_prompt(enhanced: &EnhancedTurnResult) -> String {
+    let mut lines = vec![
+        format!("session_id: {}", enhanced.session_id),
+        format!("turn_id: {}", enhanced.turn_id),
+    ];
+    if !enhanced.user_input.trim().is_empty() {
+        lines.push(format!("user_input:\n{}", enhanced.user_input.trim()));
+    }
+    if !enhanced.summary.trim().is_empty() {
+        lines.push(format!("assistant_summary:\n{}", enhanced.summary.trim()));
+    }
+    if !enhanced.tool_calls.is_empty() {
+        lines.push(format!("tool_calls: {}", enhanced.tool_calls.join(", ")));
+    }
+    if !enhanced.artifacts.is_empty() {
+        lines.push("artifacts:".to_string());
+        for artifact in &enhanced.artifacts {
+            lines.push(format!(
+                "- kind={:?} tool={} url={} path={} summary={}",
+                artifact.kind,
+                artifact.tool_name.as_deref().unwrap_or(""),
+                artifact.url.as_deref().unwrap_or(""),
+                artifact.path.as_deref().unwrap_or(""),
+                artifact.summary.as_deref().unwrap_or("")
+            ));
+        }
+    }
+    if !enhanced.memory_candidates.is_empty() {
+        lines.push("tool_results:".to_string());
+        for candidate in &enhanced.memory_candidates {
+            lines.push(format!(
+                "- tool={} success={} path={} summary={}",
+                candidate.tool_name,
+                candidate.success,
+                candidate.file_path.as_deref().unwrap_or(""),
+                candidate.result_summary.as_deref().unwrap_or("")
+            ));
+        }
+    }
+    lines.join("\n\n")
+}
+
+fn parse_entity_type(raw: Option<&str>) -> crate::types::EntityType {
+    match raw.unwrap_or_default().trim().to_ascii_lowercase().as_str() {
+        "project" => crate::types::EntityType::Project,
+        "repository" | "repo" => crate::types::EntityType::Repository,
+        "server" => crate::types::EntityType::Server,
+        "skill" => crate::types::EntityType::Skill,
+        "provider" => crate::types::EntityType::Provider,
+        "document" | "doc" => crate::types::EntityType::Document,
+        _ => crate::types::EntityType::Module,
+    }
+}
+
+/// 规则 fallback：未配置 Memory LLM 时只提取 Episode。
+fn extract_multi_type_fallback(
+    turn_result: &TurnResult,
+    enhanced: &EnhancedTurnResult,
+) -> ExtractionOutput {
+    let episodes = if !enhanced.memory_candidates.is_empty() {
+        extract_episode(turn_result).into_iter().collect()
+    } else {
+        Vec::new()
+    };
+
+    let evidences: Vec<_> = enhanced
+        .memory_candidates
+        .iter()
+        .filter(|c| c.file_path.is_some() || c.url.is_some())
+        .map(|c| Evidence {
+            title: format!("{} 产物", c.tool_name),
+            summary: c.result_summary.clone().unwrap_or_default(),
+            file_path: c.file_path.clone(),
+            url: c.url.clone(),
+            source_tool: Some(c.tool_name.clone()),
+        })
+        .collect();
+
+    ExtractionOutput {
+        episodes,
+        entities: Vec::new(),
+        decisions: Vec::new(),
+        evidences,
+    }
 }

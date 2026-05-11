@@ -4,9 +4,10 @@ use tokio::sync::oneshot;
 
 use crate::options::MemoryOptions;
 use crate::types::{
-    Episode, ExpandedMemory, ManualMemoryDraft, MemoryListQuery, MemoryNode, MemoryRecallRequest,
-    MemoryRecallResponse, MemoryRelation, MemoryRelationDraft, MemoryStatus, RecallAnchors,
-    RecallHit, RecallSufficiency, RuntimeRecallContext, TurnResult,
+    EnhancedTurnResult, Episode, ExpandedMemory, ManualMemoryDraft, MemoryCandidate,
+    MemoryListQuery, MemoryNode, MemoryRecallRequest, MemoryRecallResponse, MemoryRelation,
+    MemoryRelationDraft, MemoryStatus, RecallAnchors, RecallHit, RecallSufficiency,
+    RuntimeRecallContext, TurnResult,
 };
 
 /// 注入级别
@@ -91,8 +92,15 @@ pub enum MemoryCommand {
     },
 
     // ── 反刍类（fire-and-forget）──
+    SubmitCandidate {
+        candidate: MemoryCandidate,
+    },
     RunMicroRumination {
         turn_result: Box<TurnResult>,
+    },
+    RunEnhancedMicroRumination {
+        turn_result: Box<EnhancedTurnResult>,
+        reply: oneshot::Sender<()>,
     },
     RunMesoRumination {
         session_id: String,
