@@ -737,9 +737,13 @@ export function MessageList() {
                 <div className="flex items-center gap-2">
                   <Loader2 className="w-4 h-4 animate-spin" />
                   <span className="text-sm text-muted-foreground">
-                    {runStatus === "planning" && "正在制定计划..."}
-                    {runStatus === "executing" && "正在执行任务..."}
-                    {runStatus === "responding" && "正在生成回复..."}
+                    {runSummary || (
+                      <>
+                        {runStatus === "planning" && "正在制定计划..."}
+                        {runStatus === "executing" && "正在执行任务..."}
+                        {runStatus === "responding" && "正在生成回复..."}
+                      </>
+                    )}
                   </span>
                 </div>
               </div>
@@ -1059,7 +1063,7 @@ function AgentTurnView({
       pendingTools.push(msg);
     } else if (msg.role === "tool") {
       const toolName = msg.tool_name || "";
-      if (toolName === "runtime_memory_recall" || toolName === "recall_memory") {
+      if (toolName === "recall_memory") {
         flushTools();
         const isStart = msg.content.startsWith("[记忆检索] 策略:");
         if (isStart && !pendingRecall) {
@@ -1077,6 +1081,7 @@ function AgentTurnView({
           flushRecall(msg);
         }
       }
+      // runtime_memory_recall 的 tool 消息仅用于 LLM 上下文，展示由系统消息驱动
       // 其他 tool 消息仍然跳过
       continue;
     } else if (msg.role === "assistant") {

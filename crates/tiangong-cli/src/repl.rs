@@ -285,6 +285,10 @@ impl ResponseState {
                 output::status(&format!("记忆检索 (策略: {strategy})..."));
             }
 
+            StreamEvent::MemoryRecallProgress { phase } => {
+                output::status(&format!("记忆检索: {phase}..."));
+            }
+
             StreamEvent::MemoryRecallDone { hit_count, hits } => {
                 if *hit_count == 0 {
                     output::status("记忆检索完成，无相关记忆");

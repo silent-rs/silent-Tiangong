@@ -475,6 +475,7 @@ impl ReactEngine {
                         } else {
                             memory_recall_attempted = true;
                             crate::core::execute_memory_recall_tool(call, memory_handle, session)
+                                .await
                         }
                     } else if call.name == "analyze_attachment" {
                         (

@@ -108,6 +108,11 @@ pub enum StreamEvent {
         /// 检索策略描述（如 "keyword" / "semantic" / "hybrid:0.6" / "skip"）
         strategy: String,
     },
+    /// 记忆检索进度更新
+    MemoryRecallProgress {
+        /// 当前阶段描述
+        phase: String,
+    },
     /// 记忆检索完成
     MemoryRecallDone {
         /// 命中条数

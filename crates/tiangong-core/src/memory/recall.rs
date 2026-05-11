@@ -14,6 +14,7 @@ pub(crate) type MemoryRecallToolOutput =
 
 const RUNTIME_ROUGH_RECALL_MAX_HITS: usize = 5;
 const RUNTIME_RECALL_CONTEXT_MAX_ITEMS: usize = 24;
+const RUNTIME_RECALL_MIN_SCORE: f64 = 0.3;
 
 // ── recall_memory 工具注入 ──
 
@@ -53,7 +54,7 @@ pub(crate) fn inject_memory_recall_tool(tools: &mut Vec<ToolSpec>) {
 
 // ── recall_memory 工具执行 ──
 
-pub(crate) fn execute_memory_recall_tool(
+pub(crate) async fn execute_memory_recall_tool(
     call: &crate::model::ToolCall,
     memory_handle: Option<&tiangong_memory::MemoryHandle>,
     session: &Session,
@@ -125,13 +126,15 @@ pub(crate) fn execute_memory_recall_tool(
         .unwrap_or(5)
         .clamp(1, 10) as usize;
 
-    let response = handle.recall_context_blocking(tiangong_memory::MemoryRecallRequest {
-        query: query.to_string(),
-        reason: (!reason.is_empty()).then(|| reason.to_string()),
-        expected,
-        context: build_memory_recall_context(session),
-        limit,
-    });
+    let response = handle
+        .recall_context(tiangong_memory::MemoryRecallRequest {
+            query: query.to_string(),
+            reason: (!reason.is_empty()).then(|| reason.to_string()),
+            expected,
+            context: build_memory_recall_context(session),
+            limit,
+        })
+        .await;
 
     let memory_usage = tiangong_types::TokenUsage::from(response.usage.clone());
 
@@ -268,6 +271,14 @@ pub(crate) async fn maybe_inject_runtime_memory_recall(
         return false;
     }
 
+    // 立即通知前端开始检索，避免用户看到空白等待
+    send_stream_event(
+        stream_tx,
+        StreamEvent::MemoryRecallStart {
+            strategy: "runtime".to_string(),
+        },
+    );
+
     let context = tiangong_memory::RuntimeRecallContext {
         query: query.to_string(),
         reason: (!reason.trim().is_empty()).then(|| reason.trim().to_string()),
@@ -280,16 +291,33 @@ pub(crate) async fn maybe_inject_runtime_memory_recall(
         policy: tiangong_memory::RuntimeRecallPolicy::default(),
     };
 
+    send_stream_event(
+        stream_tx,
+        StreamEvent::MemoryRecallProgress {
+            phase: "粗回忆".to_string(),
+        },
+    );
     let rough_hits = handle.rough_recall(context.clone()).await;
+    let filtered_rough: Vec<_> = rough_hits
+        .into_iter()
+        .filter(|h| h.score >= RUNTIME_RECALL_MIN_SCORE)
+        .collect();
+
+    send_stream_event(
+        stream_tx,
+        StreamEvent::MemoryRecallProgress {
+            phase: "评估充分性".to_string(),
+        },
+    );
     let sufficiency = handle
-        .evaluate_recall_sufficiency(context.clone(), rough_hits.clone())
+        .evaluate_recall_sufficiency(context.clone(), filtered_rough.clone())
         .await;
 
     if sufficiency.should_upgrade_to_hybrid {
         send_stream_event(
             stream_tx,
-            StreamEvent::MemoryRecallStart {
-                strategy: "runtime_deep".to_string(),
+            StreamEvent::MemoryRecallProgress {
+                phase: "深度回忆".to_string(),
             },
         );
         let response = handle
@@ -304,9 +332,22 @@ pub(crate) async fn maybe_inject_runtime_memory_recall(
                 limit: context.policy.deep_limit,
             })
             .await;
-        let hit_count = response.hits.len();
-        let hits = response
+
+        let filtered_deep: Vec<_> = response
             .hits
+            .iter()
+            .filter(|h| h.score >= RUNTIME_RECALL_MIN_SCORE)
+            .cloned()
+            .collect();
+
+        if filtered_deep.is_empty() {
+            send_no_result_event(stream_tx);
+            inject_no_result_message(session, query);
+            return false;
+        }
+
+        let hit_count = filtered_deep.len();
+        let hits = filtered_deep
             .iter()
             .map(|h| MemoryRecallHitSummary {
                 title: h.title.clone(),
@@ -315,23 +356,18 @@ pub(crate) async fn maybe_inject_runtime_memory_recall(
             })
             .collect::<Vec<_>>();
         send_stream_event(stream_tx, StreamEvent::MemoryRecallDone { hit_count, hits });
-        if inject_runtime_recall_response(session, &response) {
-            return true;
-        }
+        inject_runtime_recall_response(session, &filtered_deep);
+        return true;
     }
 
-    if rough_hits.is_empty() {
+    if filtered_rough.is_empty() {
+        send_no_result_event(stream_tx);
+        inject_no_result_message(session, query);
         return false;
     }
 
-    send_stream_event(
-        stream_tx,
-        StreamEvent::MemoryRecallStart {
-            strategy: "runtime_rough".to_string(),
-        },
-    );
-    let result = inject_runtime_rough_hits(session, &rough_hits);
-    let hit_summaries = rough_hits
+    let result = inject_runtime_rough_hits(session, &filtered_rough);
+    let hit_summaries = filtered_rough
         .iter()
         .take(RUNTIME_ROUGH_RECALL_MAX_HITS)
         .map(|h| MemoryRecallHitSummary {
@@ -343,7 +379,7 @@ pub(crate) async fn maybe_inject_runtime_memory_recall(
     send_stream_event(
         stream_tx,
         StreamEvent::MemoryRecallDone {
-            hit_count: rough_hits.len(),
+            hit_count: filtered_rough.len(),
             hits: hit_summaries,
         },
     );
@@ -388,20 +424,9 @@ fn runtime_expected_items(trigger: &str, next_action: Option<&str>) -> Vec<Strin
     expected
 }
 
-fn inject_runtime_recall_response(
-    session: &mut Session,
-    response: &tiangong_memory::MemoryRecallResponse,
-) -> bool {
-    let content = response.content.trim();
-    if content.is_empty()
-        || content.starts_with("未找到与")
-        || content.starts_with("没有发现当前上下文之外的增量记忆")
-    {
-        return false;
-    }
-    let hit_count = response.hits.len();
-    let hit_lines = response
-        .hits
+fn inject_runtime_recall_response(session: &mut Session, hits: &[tiangong_memory::RecallHit]) {
+    let hit_count = hits.len();
+    let hit_lines = hits
         .iter()
         .map(|h| {
             format!(
@@ -412,12 +437,11 @@ fn inject_runtime_recall_response(
             )
         })
         .collect::<Vec<_>>();
-    let mut msg = format!("[记忆检索] 策略: runtime_deep\n命中 {hit_count} 条\n");
+    let mut msg = format!("[记忆检索] 策略: deep\n命中 {hit_count} 条\n");
     if !hit_lines.is_empty() {
         msg.push_str(&hit_lines.join("\n"));
     }
     append_runtime_recall_message(session, msg);
-    true
 }
 
 fn inject_runtime_rough_hits(session: &mut Session, hits: &[tiangong_memory::RecallHit]) -> bool {
@@ -440,7 +464,7 @@ fn inject_runtime_rough_hits(session: &mut Session, hits: &[tiangong_memory::Rec
     append_runtime_recall_message(
         session,
         format!(
-            "[记忆检索] 策略: runtime_rough\n命中 {count} 条\n{}",
+            "[记忆检索] 策略: rough\n命中 {count} 条\n{}",
             lines.join("\n")
         ),
     );
@@ -466,6 +490,23 @@ fn append_runtime_recall_message(session: &mut Session, content: String) {
     message.content = compact_single_memory_text(&message.content, 1800);
     session.messages.push(message);
     session.updated_at = now_text();
+}
+
+fn send_no_result_event(stream_tx: Option<&StdSender<StreamEvent>>) {
+    send_stream_event(
+        stream_tx,
+        StreamEvent::MemoryRecallDone {
+            hit_count: 0,
+            hits: Vec::new(),
+        },
+    );
+}
+
+fn inject_no_result_message(session: &mut Session, query: &str) {
+    append_runtime_recall_message(
+        session,
+        format!("[记忆检索] 未检索到与「{query}」相关的有效记忆"),
+    );
 }
 
 fn send_stream_event(stream_tx: Option<&StdSender<StreamEvent>>, event: StreamEvent) {

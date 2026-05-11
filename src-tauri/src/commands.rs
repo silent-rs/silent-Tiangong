@@ -958,6 +958,10 @@ fn start_stream_consumer(
                     StreamEvent::MemoryRecallStart { .. } => {
                         core_state.store.runtime.run.summary = "正在检索记忆...".to_string();
                     }
+                    StreamEvent::MemoryRecallProgress { ref phase } => {
+                        core_state.store.runtime.run.summary =
+                            format!("正在检索记忆: {phase}");
+                    }
                     StreamEvent::MemoryRecallDone { hit_count, .. } => {
                         if *hit_count > 0 {
                             core_state.store.runtime.run.summary =
