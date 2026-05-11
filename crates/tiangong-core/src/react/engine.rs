@@ -467,6 +467,9 @@ impl ReactEngine {
                 if memory_handle.is_some()
                     && runtime_recall_keys.insert(format!("before:{tool_call_key}"))
                 {
+                    if check_cancel(cmd_rx, stream_tx) {
+                        return accumulated_usage;
+                    }
                     let recall_query = format!(
                         "{}\n即将执行工具 {}：{}\n目标：{}",
                         latest_user_message(session),
@@ -486,16 +489,15 @@ impl ReactEngine {
                             .or(target_summary.as_deref())
                             .unwrap_or_default()
                     );
-                    tokio::task::block_in_place(|| {
-                        crate::core::maybe_inject_runtime_memory_recall(
-                            session,
-                            memory_handle,
-                            &recall_query,
-                            "before_tool_call",
-                            "工具调用前检查当前上下文是否足够支撑下一步操作",
-                            Some(&next_action),
-                        )
-                    });
+                    crate::core::maybe_inject_runtime_memory_recall(
+                        session,
+                        memory_handle,
+                        &recall_query,
+                        "before_tool_call",
+                        "工具调用前检查当前上下文是否足够支撑下一步操作",
+                        Some(&next_action),
+                    )
+                    .await;
                 }
 
                 let _ = stream_tx.send(StreamEvent::ToolStart {
@@ -575,6 +577,9 @@ impl ReactEngine {
                     format_tool_trace_message(&result),
                 );
                 if !result.ok && memory_handle.is_some() {
+                    if check_cancel(cmd_rx, stream_tx) {
+                        return accumulated_usage;
+                    }
                     let recall_query = format!(
                         "{}\n工具 {} 执行失败：{}\n{}",
                         latest_user_message(session),
@@ -586,16 +591,15 @@ impl ReactEngine {
                         "tool={} args={} failure={}",
                         call.name, args_summary, result.summary
                     );
-                    tokio::task::block_in_place(|| {
-                        crate::core::maybe_inject_runtime_memory_recall(
-                            session,
-                            memory_handle,
-                            &recall_query,
-                            "tool_failure",
-                            "工具失败后重新回忆历史修复方式、依赖问题或环境约束",
-                            Some(&next_action),
-                        )
-                    });
+                    crate::core::maybe_inject_runtime_memory_recall(
+                        session,
+                        memory_handle,
+                        &recall_query,
+                        "tool_failure",
+                        "工具失败后重新回忆历史修复方式、依赖问题或环境约束",
+                        Some(&next_action),
+                    )
+                    .await;
                 }
 
                 if result.ok {
@@ -610,6 +614,9 @@ impl ReactEngine {
                 }
 
                 // 记忆候选评估
+                if check_cancel(cmd_rx, stream_tx) {
+                    return accumulated_usage;
+                }
                 if let Some(handle) = memory_handle {
                     let file_path =
                         if matches!(call.name.as_str(), "write_file" | "replace_in_file") {
@@ -709,4 +716,23 @@ fn drain_pending_commands_async(
     } else {
         PendingCommandEffect::None
     }
+}
+
+/// 非阻塞检查是否有取消或关闭命令待处理。
+fn check_cancel(
+    cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+    stream_tx: &StdSender<StreamEvent>,
+) -> bool {
+    while let Ok(cmd) = cmd_rx.try_recv() {
+        match cmd {
+            Command::Cancel | Command::Shutdown => {
+                let _ = stream_tx.send(StreamEvent::Error {
+                    message: "已取消".into(),
+                });
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
 }

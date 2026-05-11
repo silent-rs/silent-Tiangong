@@ -249,7 +249,7 @@ fn build_memory_recall_context(session: &Session) -> Vec<String> {
     items
 }
 
-pub(crate) fn maybe_inject_runtime_memory_recall(
+pub(crate) async fn maybe_inject_runtime_memory_recall(
     session: &mut Session,
     memory_handle: Option<&tiangong_memory::MemoryHandle>,
     query: &str,
@@ -277,21 +277,24 @@ pub(crate) fn maybe_inject_runtime_memory_recall(
         policy: tiangong_memory::RuntimeRecallPolicy::default(),
     };
 
-    let rough_hits = handle.rough_recall_blocking(context.clone());
-    let sufficiency =
-        handle.evaluate_recall_sufficiency_blocking(context.clone(), rough_hits.clone());
+    let rough_hits = handle.rough_recall(context.clone()).await;
+    let sufficiency = handle
+        .evaluate_recall_sufficiency(context.clone(), rough_hits.clone())
+        .await;
 
     if sufficiency.should_upgrade_to_hybrid {
-        let response = handle.recall_context_blocking(tiangong_memory::MemoryRecallRequest {
-            query: sufficiency
-                .next_query
-                .clone()
-                .unwrap_or_else(|| query.to_string()),
-            reason: Some(format!("runtime:{trigger}; {reason}")),
-            expected: runtime_expected_items(trigger, next_action),
-            context: context.current_context.clone(),
-            limit: context.policy.deep_limit,
-        });
+        let response = handle
+            .recall_context(tiangong_memory::MemoryRecallRequest {
+                query: sufficiency
+                    .next_query
+                    .clone()
+                    .unwrap_or_else(|| query.to_string()),
+                reason: Some(format!("runtime:{trigger}; {reason}")),
+                expected: runtime_expected_items(trigger, next_action),
+                context: context.current_context.clone(),
+                limit: context.policy.deep_limit,
+            })
+            .await;
         if inject_runtime_recall_response(session, trigger, &sufficiency.reason, &response) {
             return true;
         }

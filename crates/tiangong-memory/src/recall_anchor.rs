@@ -81,6 +81,9 @@ async fn plan_with_model(
         started.elapsed(),
         llm_usage.as_ref(),
     );
+    if response.trim().is_empty() {
+        anyhow::bail!("Memory LLM 返回空响应");
+    }
     let json = extract_json_object(&response).unwrap_or(response.as_str());
     let parsed: RecallAnchorPlan = serde_json::from_str(json)?;
     let query = parsed

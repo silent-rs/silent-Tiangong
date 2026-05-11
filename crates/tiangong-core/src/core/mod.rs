@@ -397,16 +397,15 @@ async fn worker_loop_async(
                 });
 
                 if memory.handle.is_some() {
-                    tokio::task::block_in_place(|| {
-                        maybe_inject_runtime_memory_recall(
-                            &mut session,
-                            memory.handle.as_ref(),
-                            &content,
-                            "user_message",
-                            "用户消息进入后执行低成本粗回忆",
-                            None,
-                        )
-                    });
+                    maybe_inject_runtime_memory_recall(
+                        &mut session,
+                        memory.handle.as_ref(),
+                        &content,
+                        "user_message",
+                        "用户消息进入后执行低成本粗回忆",
+                        None,
+                    )
+                    .await;
                 }
 
                 // 执行对话轮次
@@ -444,10 +443,8 @@ async fn worker_loop_async(
                 }
             }
             Command::Cancel => {
-                // 当前简单处理：发送错误事件
-                let _ = stream_tx.send(StreamEvent::Error {
-                    message: "已取消".into(),
-                });
+                // Cancel 信号通过 cmd_rx 传递到 engine 内部处理；
+                // engine 在每个 block_in_place 前后检查取消信号。
             }
             Command::Approval {
                 request_id,
