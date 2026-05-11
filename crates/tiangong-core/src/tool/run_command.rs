@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use tokio::process::Command;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::time::timeout;
@@ -256,20 +256,8 @@ fn run_command_async(
 
     let handle = tokio::runtime::Handle::try_current();
     match handle {
-        Ok(h) => {
-            if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
-                tokio::task::block_in_place(|| {
-                    h.block_on(exec_command(
-                        &cmd,
-                        &args,
-                        &cwd,
-                        &env_allowlist,
-                        runtime_env,
-                        &file_env,
-                        timeout_ms,
-                    ))
-                })
-            } else {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| {
                 h.block_on(exec_command(
                     &cmd,
                     &args,
@@ -279,22 +267,31 @@ fn run_command_async(
                     &file_env,
                     timeout_ms,
                 ))
-            }
+            })
         }
-        Err(_) => {
-            let rt = TokioRuntimeBuilder::new_current_thread()
-                .enable_all()
-                .build()
-                .context("初始化命令执行运行时失败")?;
-            rt.block_on(exec_command(
-                &cmd,
-                &args,
-                &cwd,
-                &env_allowlist,
-                runtime_env,
-                &file_env,
-                timeout_ms,
-            ))
+        _ => {
+            // current_thread 运行时或无运行时：在新线程中创建独立 runtime，
+            // 避免在 current_thread runtime 内调用 block_on 导致 panic
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        let rt = TokioRuntimeBuilder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("初始化命令执行运行时失败");
+                        rt.block_on(exec_command(
+                            &cmd,
+                            &args,
+                            &cwd,
+                            &env_allowlist,
+                            runtime_env,
+                            &file_env,
+                            timeout_ms,
+                        ))
+                    })
+                    .join()
+                    .expect("命令执行线程 panic")
+            })
         }
     }
 }
