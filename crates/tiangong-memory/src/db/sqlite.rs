@@ -921,6 +921,89 @@ impl MemoryDb {
         Ok(map)
     }
 
+    /// 加载最近的活跃记忆节点，按创建时间降序排列。
+    ///
+    /// 用于元查询（"上次做了什么"等）场景，跳过 BM25 直接返回最近记忆。
+    pub(crate) fn recent_active_nodes(&self, limit: usize) -> Result<Vec<MemoryNode>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, memory_type, scope_type, scope_id, title, summary,
+                    keywords, importance, confidence, source, status, created_at
+             FROM memory_nodes
+             WHERE status = 'active'
+             ORDER BY created_at DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
+            let id: String = row.get(0)?;
+            let kind: String = row.get(1)?;
+            let memory_type: String = row.get(2)?;
+            let scope_type: String = row.get(3)?;
+            let scope_id: Option<String> = row.get(4)?;
+            let title: String = row.get(5)?;
+            let summary: String = row.get(6)?;
+            let keywords_json: String = row.get(7)?;
+            let importance: f32 = row.get(8)?;
+            let confidence: f32 = row.get(9)?;
+            let source: Option<String> = row.get(10)?;
+            let status: String = row.get(11)?;
+            let created_at: String = row.get(12)?;
+            Ok((
+                id,
+                kind,
+                memory_type,
+                scope_type,
+                scope_id,
+                title,
+                summary,
+                keywords_json,
+                importance,
+                confidence,
+                source,
+                status,
+                created_at,
+            ))
+        })?;
+        let mut nodes = Vec::new();
+        for row in rows {
+            let (
+                id,
+                kind,
+                memory_type,
+                scope_type,
+                scope_id,
+                title,
+                summary,
+                keywords_json,
+                importance,
+                confidence,
+                source,
+                status,
+                created_at,
+            ) = row?;
+            let keywords: Vec<String> = serde_json::from_str(&keywords_json).unwrap_or_default();
+            let updated_at = created_at.clone();
+            nodes.push(MemoryNode {
+                id,
+                kind: str_to_memory_kind(&kind),
+                memory_type: str_to_memory_cognitive_type(&memory_type),
+                scope_type: str_to_scope_type(&scope_type),
+                scope_id,
+                title,
+                summary,
+                keywords,
+                importance,
+                confidence,
+                source,
+                status: str_to_memory_status(&status),
+                usage_count: 0,
+                last_used_at: None,
+                created_at,
+                updated_at,
+            });
+        }
+        Ok(nodes)
+    }
+
     /// 删除内置向量索引点。
     #[allow(dead_code)]
     pub(crate) fn delete_vector(&self, node_id: &str) -> Result<()> {

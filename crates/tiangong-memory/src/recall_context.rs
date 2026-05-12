@@ -1230,3 +1230,102 @@ repeated context line
         assert_eq!(ids, vec!["ep-1", "ep-2", "ep-3", "ep-4"]);
     }
 }
+
+// ── 运行时查询规划（LLM 驱动） ──
+
+const RUNTIME_QUERY_PLAN_SYSTEM: &str = "\
+你是记忆检索查询规划器。分析用户消息意图，决定检索策略。
+
+只输出 JSON：
+{
+  \"strategy\": \"keyword\" | \"recent\",
+  \"search_terms\": [\"关键词1\", \"关键词2\"],
+  \"reason\": \"简短原因\"
+}
+
+规则：
+- 用户询问近期活动、之前做过什么、上次做了什么 → strategy=\"recent\"
+- 用户提到具体工具、文件、技术、项目、命令等 → strategy=\"keyword\"，提取可搜索的关键词
+- 用户消息模糊且无法提取有效搜索词 → strategy=\"recent\"
+- search_terms 最多 5 个，用于全文检索匹配
+- 不要输出 JSON 之外的内容";
+
+#[derive(Debug, Clone)]
+pub(crate) enum RuntimeRecallStrategy {
+    /// 用扩展关键词重新做 BM25 搜索
+    Keyword { search_terms: Vec<String> },
+    /// 直接加载最近的记忆
+    Recent,
+}
+
+/// 使用 LLM 分析查询意图，决定运行时检索策略。
+///
+/// 如果没有配置 Memory LLM，回退到直接使用原始查询做 BM25。
+pub(crate) async fn plan_runtime_recall(
+    query: &str,
+    context: &[String],
+    model: Option<&LlmEndpointConfig>,
+) -> Option<RuntimeRecallStrategy> {
+    let config = model?;
+    let context_preview = context
+        .iter()
+        .take(5)
+        .map(|item| compact_text(item, 200))
+        .filter(|item| !item.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let prompt = format!(
+        "用户消息:\n{}\n\n当前对话上下文:\n{}",
+        query,
+        if context_preview.is_empty() {
+            "（新会话，无上下文）"
+        } else {
+            &context_preview
+        }
+    );
+    let started = Instant::now();
+    match complete_text_with_usage(config, RUNTIME_QUERY_PLAN_SYSTEM, &prompt, 256).await {
+        Ok((text, usage)) => {
+            log_memory_llm_call(
+                "runtime_query_plan",
+                config,
+                started.elapsed(),
+                usage.as_ref(),
+            );
+            parse_query_plan(&text)
+        }
+        Err(err) => {
+            tracing::warn!("运行时查询规划 LLM 调用失败: {err}");
+            None
+        }
+    }
+}
+
+fn parse_query_plan(text: &str) -> Option<RuntimeRecallStrategy> {
+    let json = extract_json_object(text)?;
+    let parsed: serde_json::Value = serde_json::from_str(json).ok()?;
+    let strategy = parsed.get("strategy")?.as_str()?.to_ascii_lowercase();
+    match strategy.as_str() {
+        "recent" => Some(RuntimeRecallStrategy::Recent),
+        "keyword" => {
+            let terms = parsed
+                .get("search_terms")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .filter(|s| !s.trim().is_empty())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if terms.is_empty() {
+                Some(RuntimeRecallStrategy::Recent)
+            } else {
+                Some(RuntimeRecallStrategy::Keyword {
+                    search_terms: terms,
+                })
+            }
+        }
+        _ => None,
+    }
+}

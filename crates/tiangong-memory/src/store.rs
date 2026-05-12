@@ -689,10 +689,34 @@ impl MemoryStore {
         if hits.is_empty() {
             return hits;
         }
+        self.apply_time_decay(&mut hits);
+        hits
+    }
+
+    /// 加载最近的活跃记忆节点并转换为 RecallHit。
+    pub(crate) fn recent_memory_hits(&self, limit: usize) -> Vec<RecallHit> {
+        self.db
+            .recent_active_nodes(limit)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|node| RecallHit {
+                node_id: node.id,
+                title: node.title.clone(),
+                summary: compact_text(&node.summary, 200),
+                score: 1.0,
+                kind: node.kind,
+                importance: node.importance as f64,
+                depth1_loaded: false,
+            })
+            .collect()
+    }
+
+    /// 对命中结果应用时间衰减排序。
+    fn apply_time_decay(&self, hits: &mut [RecallHit]) {
         let node_ids: Vec<&str> = hits.iter().map(|h| h.node_id.as_str()).collect();
         let timestamps = self.db.batch_load_created_at(&node_ids).unwrap_or_default();
         let now = chrono::Local::now().naive_local();
-        for hit in &mut hits {
+        for hit in hits.iter_mut() {
             if let Some(created_str) = timestamps.get(&hit.node_id)
                 && let Ok(created) =
                     chrono::NaiveDateTime::parse_from_str(created_str, "%Y-%m-%d %H:%M:%S")
@@ -707,7 +731,6 @@ impl MemoryStore {
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        hits
     }
 
     /// 更新注入文件
@@ -731,6 +754,21 @@ fn normalize_keywords(keywords: Vec<String>) -> Vec<String> {
         normalized.push(keyword.to_string());
     }
     normalized
+}
+
+fn compact_text(text: &str, max_chars: usize) -> String {
+    let normalized = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if normalized.chars().count() <= max_chars {
+        return normalized;
+    }
+    let mut clipped = normalized.chars().take(max_chars).collect::<String>();
+    clipped.push_str("...");
+    clipped
 }
 
 fn episode_relation_signal(current: &Episode, candidate: &Episode) -> Option<(f32, String)> {

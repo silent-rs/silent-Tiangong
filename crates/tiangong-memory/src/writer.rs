@@ -448,8 +448,10 @@ const MULTI_TYPE_EXTRACTION_SYSTEM: &str = "\
 
 要求：
 - 只输出 JSON 对象，不要 Markdown，不要解释。
-- 仔细判断每条工具结果是否值得记忆：普通查询、日常操作（ls、cat、pwd 等）不值得记忆。
-- 值得记忆的信号包括：文件修改、架构/实现决策、构建测试结果、关键发现、错误修复、用户偏好表达。
+- 仔细判断每条工具结果是否值得记忆：纯信息查询（天气、翻译、简单问答）和日常只读操作（ls、cat、pwd、read_file）不值得记忆。
+- 值得记忆的信号包括：文件修改、架构/实现决策、构建测试结果、关键发现、用户偏好表达。
+- 工具使用经验值得记忆：包括工具调用失败后的修正过程、成功发现的有效调用方式、skill 的正确使用方法。这些应提取为 memory_type=\"skill\" 的 Episode。
+- 用户透露的个人信息（所在城市、常用语言、偏好设置等）值得记忆为 user_preference 类型。
 - episodes: 每个值得记忆的事件提取一个 Episode。没有值得记忆的事件时返回空数组。
 - entities: 发现的稳定实体（项目、模块、文档、服务）才提取，不要把临时搜索结果当实体。
 - decisions: 有明确的架构/实现/产品取舍时才提取 Decision，必须包含 chosen 和 reasons。
@@ -731,6 +733,12 @@ fn build_multi_type_prompt(enhanced: &EnhancedTurnResult) -> String {
                 candidate.file_path.as_deref().unwrap_or(""),
                 candidate.result_summary.as_deref().unwrap_or("")
             ));
+        }
+    }
+    if !enhanced.turn_messages.is_empty() {
+        lines.push("messages:".to_string());
+        for msg in &enhanced.turn_messages {
+            lines.push(format!("{}: {}", msg.role, msg.content));
         }
     }
     lines.join("\n\n")

@@ -161,13 +161,53 @@ impl MemoryActor {
 
             MemoryCommand::RoughRecall { context, reply } => {
                 let limit = context.policy.rough_limit.clamp(1, 10);
-                let hits = self.store.rough_recall(&context.query, limit);
-                tracing::debug!(
-                    query = %context.query,
-                    trigger = ?context.trigger,
-                    hit_count = hits.len(),
-                    "Memory 运行时粗回忆完成"
-                );
+
+                // 首条消息的运行时回忆：优先使用 LLM 规划检索策略
+                let hits = if let Some(strategy) = recall_context::plan_runtime_recall(
+                    &context.query,
+                    &context.current_context,
+                    self.options.model.as_ref(),
+                )
+                .await
+                {
+                    match strategy {
+                        recall_context::RuntimeRecallStrategy::Recent => {
+                            let recent = self.store.recent_memory_hits(limit);
+                            tracing::debug!(
+                                query = %context.query,
+                                recent_count = recent.len(),
+                                "Memory 运行时粗回忆使用 LLM 规划的最近记忆策略"
+                            );
+                            recent
+                        }
+                        recall_context::RuntimeRecallStrategy::Keyword { search_terms } => {
+                            let expanded_query = search_terms.join(" ");
+                            let hits = self.store.rough_recall(&expanded_query, limit);
+                            tracing::debug!(
+                                query = %context.query,
+                                expanded_query = %expanded_query,
+                                expanded_count = hits.len(),
+                                "Memory 运行时粗回忆使用 LLM 规划的扩展关键词策略"
+                            );
+                            if hits.is_empty() {
+                                self.store.recent_memory_hits(limit)
+                            } else {
+                                hits
+                            }
+                        }
+                    }
+                } else {
+                    // 无 LLM 或规划失败，直接 BM25
+                    let hits = self.store.rough_recall(&context.query, limit);
+                    tracing::debug!(
+                        query = %context.query,
+                        trigger = ?context.trigger,
+                        hit_count = hits.len(),
+                        "Memory 运行时粗回忆 BM25 fallback"
+                    );
+                    hits
+                };
+
                 let _ = reply.send(hits);
             }
 
