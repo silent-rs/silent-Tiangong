@@ -78,6 +78,18 @@ struct DownloadOutput {
 impl LocalToolExecutor {
     pub(super) fn web_fetch(&self, call: &ToolCall) -> Result<ToolResult> {
         let request = WebFetchRequest::from_call(call)?;
+
+        // reqwest::blocking::Client 内部创建 tokio 运行时，
+        // 在 async 上下文中 drop 会 panic，用独立线程隔离。
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| self.web_fetch_inner(request))
+                .join()
+                .unwrap()
+        })
+    }
+
+    fn web_fetch_inner(&self, request: WebFetchRequest) -> Result<ToolResult> {
         let client = Client::builder()
             .timeout(Duration::from_millis(request.timeout_ms))
             .redirect(reqwest::redirect::Policy::none())

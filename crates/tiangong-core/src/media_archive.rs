@@ -114,6 +114,18 @@ fn archive_data_image(data_url: &str) -> Result<ArchivedImage, String> {
 }
 
 fn download_remote_image(url: &str) -> Result<ArchivedImage, String> {
+    // reqwest::blocking::Client 内部创建 tokio 运行时，
+    // 在 async 上下文中 drop 会 panic，用独立线程隔离。
+    let url = url.to_string();
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| download_remote_image_inner(&url))
+            .join()
+            .unwrap()
+    })
+}
+
+fn download_remote_image_inner(url: &str) -> Result<ArchivedImage, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .build()
