@@ -25,7 +25,6 @@ const MAX_ROUNDS: usize = 20;
 pub use crate::memory::gui_api::*;
 pub(crate) use crate::memory::recall::{
     duplicate_memory_recall_tool_result, execute_memory_recall_tool, inject_memory_recall_tool,
-    maybe_inject_runtime_memory_recall,
 };
 pub(crate) use crate::memory::registry::{
     WorkerMemoryContext, get_or_init_memory, get_or_init_memory_async, resolve_memory_workspace_id,
@@ -395,25 +394,6 @@ async fn worker_loop_async(
                         .map(|message| message.media.clone())
                         .unwrap_or_default(),
                 });
-
-                if memory.handle.is_some() {
-                    let is_first_user_message = !session.messages.iter().any(|message| {
-                        message.role == crate::session::MessageRole::User
-                            && message.id != user_msg_id
-                    });
-                    if is_first_user_message {
-                        maybe_inject_runtime_memory_recall(
-                            &mut session,
-                            memory.handle.as_ref(),
-                            &content,
-                            "first_user_message",
-                            "会话首条消息，主动触发记忆召回以获取历史上下文",
-                            None,
-                            Some(&stream_tx),
-                        )
-                        .await;
-                    }
-                }
 
                 // 执行对话轮次
                 execute_turn_async(
