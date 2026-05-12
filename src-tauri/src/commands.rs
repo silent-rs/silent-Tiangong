@@ -805,6 +805,8 @@ fn start_stream_consumer(
                                 !*ok,
                             );
                             last_tool_args_summary.clear();
+                            // 每次工具执行后立即持久化，防止中断丢失工具调用记录
+                            let _ = core_state.persist_session_and_app(&sid);
                         }
                         StreamEvent::ApprovalNeeded { .. } => {
                             // 审批请求不写入 session（前端通过 RunStatus 展示审批 UI）
