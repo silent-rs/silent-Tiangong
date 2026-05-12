@@ -120,6 +120,43 @@ pub enum StreamEvent {
         /// 命中摘要列表（每项为 "标题: 摘要"）
         hits: Vec<MemoryRecallHitSummary>,
     },
+
+    // ===== 多智能体团队事件 =====
+    /// Agent 创建
+    AgentCreated {
+        agent_id: String,
+        role: String,
+        label: String,
+        lifecycle: String,
+    },
+    /// Agent 状态变更
+    AgentStatusChanged {
+        agent_id: String,
+        label: String,
+        status: String,
+    },
+    /// Agent 向用户直接推送的通知
+    AgentNotification {
+        agent_id: String,
+        agent_label: String,
+        content: String,
+        level: String,
+    },
+    /// Agent 间消息
+    AgentMessage {
+        from_agent_id: String,
+        from_agent_label: String,
+        to_agent_id: String,
+        to_agent_label: String,
+        content: String,
+    },
+    /// 文件锁变更
+    FileLockChanged {
+        path: String,
+        holder_agent_id: Option<String>,
+        holder_agent_label: Option<String>,
+        action: String,
+    },
 }
 
 /// 记忆检索命中项摘要（前端展示用）
