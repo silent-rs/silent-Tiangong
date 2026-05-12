@@ -10,8 +10,6 @@ use std::thread::{self, JoinHandle};
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::agents::execution_mcp_agent::{McpFunctionTarget, execution_function_tools};
-use crate::coordinator::TaskCoordinator;
-use crate::coordinator::types::CoordinatorTask;
 use crate::core_config::CoreConfigProvider;
 use crate::model::{ModelClient, ModelRequest, SingleProviderClient, ToolSpec};
 use crate::react::message::{append_or_reuse_user_message, append_runtime_tool_message};
@@ -488,9 +486,6 @@ pub(crate) fn apply_session_cwd(session: &Session) {
 }
 
 /// 执行一个完整的对话轮次（可能多轮工具调用），async 版
-///
-/// 首先判断是否需要多代理并行执行，如需要则通过 async channel 拆分并行；
-/// 否则走标准的 ReAct 循环。
 #[allow(clippy::too_many_arguments)]
 async fn execute_turn_async(
     session: &mut Session,
@@ -502,52 +497,6 @@ async fn execute_turn_async(
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     memory_handle: Option<&tiangong_memory::MemoryHandle>,
 ) {
-    let should_split = {
-        let coordinator = TaskCoordinator::new(engine.clone());
-        let task = CoordinatorTask {
-            id: scru128::new().to_string(),
-            objective: user_input.to_string(),
-            user_input: user_input.to_string(),
-            context: Vec::new(),
-        };
-        tokio::task::block_in_place(|| coordinator.should_split(&task))
-    };
-
-    if should_split {
-        tracing::info!("任务需要拆分，启动多代理并行执行");
-        let coordinator = TaskCoordinator::new(engine.clone());
-        let task = CoordinatorTask {
-            id: scru128::new().to_string(),
-            objective: user_input.to_string(),
-            user_input: user_input.to_string(),
-            context: Vec::new(),
-        };
-        match coordinator
-            .coordinate_split_async(task, session, stream_tx)
-            .await
-        {
-            Ok(result) => {
-                session.append_message(MessageRole::Assistant, result.final_response);
-                let _ = stream_tx.send(StreamEvent::Done {
-                    usage: Some(result.total_usage.clone()),
-                });
-            }
-            Err(err) => {
-                tracing::warn!("多代理并行执行失败，回退单代理: {err}");
-                let react = crate::react::engine::ReactEngine::new(
-                    engine.clone(),
-                    tools.to_vec(),
-                    mcp_targets.clone(),
-                    MAX_ROUNDS,
-                );
-                react
-                    .execute_turn(session, user_input, stream_tx, cmd_rx, memory_handle)
-                    .await;
-            }
-        }
-        return;
-    }
-
     let react = crate::react::engine::ReactEngine::new(
         engine.clone(),
         tools.to_vec(),

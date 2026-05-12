@@ -4,7 +4,6 @@ pub mod app_state;
 pub mod approval_store;
 pub mod config_watch;
 pub mod context;
-pub mod coordinator;
 pub mod core;
 pub mod core_config;
 pub mod event;
