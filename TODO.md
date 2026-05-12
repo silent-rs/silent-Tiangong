@@ -1,38 +1,63 @@
 # TODO - 天工当前开发任务
 
-> 最后更新：2026-05-11
-> 当前主线：Memory 系统多类型记忆与智能去重
-> 参考：`PLAN.md`、`docs/requirements.md`、`docs/memory-system/13-适时触发多类型记忆与去重.md`
+> 最后更新：2026-05-12
+> 当前主线：多智能体协作系统（Phase 19）
+> 参考：`PLAN.md`、`docs/rfc/0011-multi-agent-collaboration.md`
 
 ---
 
-## 已完成
+## Phase A：基础框架
 
-- [x] 运行时粗回忆与召回充分性评估
-- [x] 用户消息进入、工具调用前、工具失败后的重新回忆
-- [x] 重新回忆结果作为运行时工具上下文进入消息链
-- [x] MemoryCandidate / EnhancedTurnResult / ExtractionOutput 等类型定义
-- [x] 候选提交 API（SubmitCandidate / RunEnhancedMicroRumination + Handle + IPC）
-- [x] 工具执行候选评估与 Engine 集成
-- [x] 增强版 Micro 反刍管道（多类型提取 + 去重 + 跨类型关联）
-- [x] 多类型记忆提取由 Memory LLM 判断（含 Inline Entity/Decision）
-- [x] Episode 去重（关键词重叠 ≥ 0.7 + 标题相似度 > 0.6）
-- [x] 跨类型关联（Episode→Entity: BelongsTo，Decision→Episode: LearnedFrom）
-- [x] 修复 async runtime 中 blocking_send panic
+- [ ] 定义 AgentDescriptor / AgentLifecycle / AgentStatus 类型（`agent_team/descriptor.rs`）
+- [ ] 实现 AgentRegistry — 会话级 Agent 注册表（`agent_team/registry.rs`）
+- [ ] 定义 `create_agent` / `dismiss_agent` 工具 Spec（`agent_team/tools.rs`）
+- [ ] 在 `inject_enhanced_tools` 中注册团队工具
+- [ ] 实现 Sub Agent ReactEngine 启动：独立 Session + 独立工具集 + 专属 system prompt
+- [ ] 实现 Sub Agent 生命周期管理：启动、停止、销毁（`agent_team/lifecycle.rs`）
+- [ ] 新增 StreamEvent：AgentCreated / AgentStatusChanged
+- [ ] ReactEngine 拦截 `create_agent` / `dismiss_agent` 工具调用
+- [ ] 前端：Agent Tab 栏基础展示（Agent 列表 + 状态指示器）
 
----
+## Phase B：消息通讯
 
-## 待验证
+- [ ] 定义 AgentMessage 类型（from / to / content / priority）
+- [ ] 实现 MessageBus 消息路由（`agent_team/message_bus.rs`）
+- [ ] 定义 `send_message` / `broadcast_message` 工具 Spec
+- [ ] 实现 Agent 收件箱：收到的消息作为用户消息注入 ReactEngine 上下文
+- [ ] 新增 StreamEvent：AgentMessage
+- [ ] 前端：Agent 间消息流展示
 
-- [ ] 用户问"继续上次那个模块"，粗回忆命中后提供文件/决策线索
-- [ ] 工具运行失败，重新回忆命中过往同类失败和修复命令
-- [ ] 简单普通问答不触发深度混合检索
-- [ ] 多类型记忆写入后跨类型关联正确建立
-- [ ] 相似记忆去重为更新而非新建
+## Phase C：文件编辑锁
+
+- [ ] 实现 FileLockManager（`agent_team/file_lock.rs`）
+- [ ] 定义 `lock_file` / `unlock_file` 工具 Spec
+- [ ] 集成到 `write_file` / `replace_in_file`：执行前检查锁状态
+- [ ] 锁超时机制（默认 300 秒）
+- [ ] Agent 销毁时自动释放所有持有锁
+- [ ] 主 Agent 拥有锁最高权限（可强制释放）
+- [ ] 新增 StreamEvent：FileLockChanged
+
+## Phase D：前端交互
+
+- [ ] 定义 `notify_user` 工具 Spec，Sub Agent 可直接推送消息到前端
+- [ ] 新增 StreamEvent：AgentNotification（携带 agent_id + agent_label）
+- [ ] 前端：Agent Tab 切换 — 用户可查看不同 Agent 的执行细节
+- [ ] 前端：@提及输入 — 支持 @dev / @test / @all 语法
+- [ ] 前端：Agent 面板 — 显示团队成员列表、状态、手动关闭按钮
+- [ ] Tauri commands 层处理 Worker/Agent 事件转发
+
+## Phase E：完善与优化
+
+- [ ] 临时 Agent 任务完成后自动销毁
+- [ ] 死锁检测：定期扫描锁等待图
+- [ ] Agent 错误恢复：单个 Agent 失败不影响团队
+- [ ] 并发限制：最大 8 个 Agent，同时运行 4 个 Sub Agent
+- [ ] Token 预算分配：主 Agent 60%，Sub Agent 共享 40%
+- [ ] system prompt 中补充团队工具使用指引
 
 ---
 
 ## 文档同步要求
 
-- `docs/requirements.md`
-- `docs/memory-system/13-适时触发多类型记忆与去重.md` 状态区
+- `docs/requirements.md`：补充多智能体协作相关需求
+- `docs/rfc/0011-multi-agent-collaboration.md`：实现过程中如有设计变更需同步更新

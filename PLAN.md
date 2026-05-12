@@ -9,17 +9,14 @@
 - 安全目标：Server 模式默认安全（本地绑定、Token 认证），Connector 鉴权白名单制。
 - 工程目标：按 Phase 增量交付，每个 Phase 保证功能不回退。
 
-## 当前执行策略（2026-04-22）
+## 当前执行策略（2026-05-12）
 - 架构 RFC：`docs/rfc/0004-full-stack-agent-platform.md`
 - 架构基准：`docs/desktop-agent-technical-architecture.md`
-- 差距分析：`docs/architecture-gap-analysis.md`
-- Phase 1~14 已完成，GUI 配置即时生效验证已收口。
-- Phase 15 已完成，Anthropic 协议抽象、独立 transport 与错误处理已接入。
-- Phase 16 已完成，入口统一、Server 信任语义、远程能力尾项和成本可见性已收口。
-- Phase 17 已完成图片/视频结构化媒体消息收口，`tiangong-media` 保持主链路，MCP 仅作为后端适配来源之一。
-- 当前主目标：基于 RFC-0009 实现 `web_fetch` 基础能力，补齐受控网页读取与在线文件下载工具。
-- 当前进展：RFC-0009 已创建，需求边界已明确为 Core 内置工具，覆盖 `text` 与 `download` 两种模式。
-- 当前风险：`web_fetch` 需要同时处理网络目标治理、私网拒绝、重定向复检和下载写入边界，必须避免绕过现有权限模型。
+- Phase 1~17 已完成。
+- Phase 18（Memory 系统）主链路已完成，待验证场景验证。
+- 当前主目标：基于 RFC-0011 实现多智能体协作系统。
+- 当前进展：RFC 已创建，Agent 生命周期、通讯机制、文件编辑锁、前端交互设计已明确。
+- 当前风险：多 Agent 并发执行需处理好消息路由正确性和文件锁死锁问题。
 
 ## 里程碑
 
@@ -155,18 +152,27 @@
 - 已在 Core/Tauri/Server 链路中保留结构化媒体资源，避免多媒体结果退化为工具文本。
 - 已补齐 Connector 对结构化视频结果的发送分支。
 
-### Phase 18（Memory 系统，进行中）
+### Phase 18（Memory 系统，已完成）
 > 设计说明：`docs/memory-system/`
 
 - 将长期记忆从 Core 中拆出为独立 `tiangong-memory` crate，保证可单独集成测试、可复用、可关闭。
-- Memory 依赖 `tiangong-llm` 获取文本生成与 embedding 能力，不在 Memory 内部重复实现模型配置和协议适配。
 - 已完成 Micro 写入主链路：TurnResult -> EpisodeWriter -> SQLite/Tantivy/向量索引。
-- 已完成 Tool 化按需回忆：主模型通过 `recall_memory` 主动触发 Memory，Memory 内部先做初始回忆，再根据初始结果判断是否进入 deep recall，最后返回去重后的增量记忆，并支持沿 Entity/Decision 追溯来源 Episode。
-- 已完成结构化产物记忆：媒体 URL、文件路径、工具结果摘要进入 Episode，支持“刚刚生成的图片/文件”等跨会话回忆。
-- 已完成 Meso 反刍第一阶段：从近期 Episode 提炼 Entity/Decision，写入 SQLite/Tantivy 并更新 Workspace Injection。
-- 已完成 workspace 级 runtime/handle registry，长生命周期 GUI/Server 进程会按 workspace_id 缓存 Memory Handle，避免误复用首个工作区。
-- 已冻结专用 Memory LLM 约束：Memory 内部 Episode 提取、Recall 规划、Deep Recall 裁决、结果整理和 Meso 提炼必须使用 `routing.memory`，不再静默复用主 `chat` 模型。
-- 下一步先实现 `memory` capability 配置接线，并针对 deep recall 的真实 Memory LLM 路径进行观察验证，再决定是否继续加强多跳关系追溯。
+- 已完成 Tool 化按需回忆：主模型通过 `recall_memory` 主动触发 Memory。
+- 已完成结构化产物记忆：媒体 URL、文件路径、工具结果摘要进入 Episode。
+- 已完成 Meso 反刍：从近期 Episode 提炼 Entity/Decision。
+- 已完成多类型记忆提取与智能去重。
+- 已完成运行时粗回忆与重新回忆机制。
+
+### Phase 19（多智能体协作系统，进行中）
+> RFC：`docs/rfc/0011-multi-agent-collaboration.md`
+
+主 Agent 在对话中动态组建团队，Sub Agent 之间通过工具调用互相通讯，共享工作区但通过文件编辑锁防止冲突。用户可直接与任意存活 Agent 交互。
+
+- Phase A：基础框架 — AgentDescriptor / AgentRegistry 数据结构，create_agent / dismiss_agent 工具，Sub Agent ReactEngine 启动与停止
+- Phase B：消息通讯 — send_message / broadcast_message 工具，MessageBus 消息路由，收件箱消息注入 ReactEngine 循环
+- Phase C：文件编辑锁 — FileLockManager 实现，lock_file / unlock_file 工具，write_file / replace_in_file 锁检查集成
+- Phase D：前端交互 — Agent Tab 切换，Sub Agent 直接推送，@提及输入，Agent 状态面板
+- Phase E：完善与优化 — 临时 Agent 自动销毁，锁超时与死锁检测，Agent 错误恢复
 
 ## 参考文档
 - 项目说明：`README.md`
@@ -175,6 +181,7 @@
 - RFC 0003：`docs/rfc/0003-skill-market.md`
 - RFC 0004：`docs/rfc/0004-full-stack-agent-platform.md`（全栈平台架构）
 - RFC 0006：`docs/rfc/0006-core-config-provider.md`（CoreConfig 配置注入）
+- RFC 0011：`docs/rfc/0011-multi-agent-collaboration.md`（多智能体协作系统）
 - 架构基准：`docs/desktop-agent-technical-architecture.md`
 - 架构差距分析：`docs/architecture-gap-analysis.md`
 - 需求基线：`docs/requirements.md`
