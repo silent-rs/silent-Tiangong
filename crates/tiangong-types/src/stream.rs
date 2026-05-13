@@ -150,6 +150,13 @@ pub enum StreamEvent {
         to_agent_label: String,
         content: String,
     },
+    /// Agent 执行输出快照
+    AgentOutput {
+        agent_id: String,
+        agent_role: String,
+        agent_label: String,
+        messages: Vec<crate::Message>,
+    },
     /// 文件锁变更
     FileLockChanged {
         path: String,

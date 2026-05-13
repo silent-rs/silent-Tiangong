@@ -592,6 +592,9 @@ export function MessageList() {
             groupMessages(messages).map((group, groupIdx, allGroups) => {
               // Worker 组
               if (group.type === "worker") {
+                if (selectedAgentTab && !group.worker_id?.startsWith(`agent:${selectedAgentTab}:`)) {
+                  return null;
+                }
                 const isLastGroup = groupIdx === allGroups.length - 1;
                 return (
                   <WorkerCard
@@ -605,6 +608,13 @@ export function MessageList() {
 
               // 智能体回合：系统消息 + assistant 消息统一展示
               if (group.type === "agent_turn") {
+                if (selectedAgentTab) {
+                  const hasRelatedAgentEvent = group.messages.some((message) =>
+                    message.role === "system"
+                    && extractAgentRoles(message.content, useStore.getState().agents).includes(selectedAgentTab)
+                  );
+                  if (!hasRelatedAgentEvent) return null;
+                }
                 return (
                   <div key={group.key} className="mt-3 first:mt-0">
                     <AgentTurn
@@ -621,6 +631,7 @@ export function MessageList() {
               }
 
               // 用户消息
+              if (selectedAgentTab) return null;
               const message = group.messages[0];
               const voiceInfo = voiceMessages[message.id];
               const isEditing = editingMessageId === message.id;
@@ -1205,6 +1216,9 @@ function AgentTurnView({
   return (
     <div className="space-y-1.5">
       {mergedFragments.map((frag, i) => {
+        if (selectedAgentTab && frag.type !== "agent_event") {
+          return null;
+        }
         // Agent Tab 过滤：选中特定 Agent 时，隐藏不相关的 agent_event
         if (selectedAgentTab && frag.type === "agent_event" && frag.agentRoles.length > 0 && !frag.agentRoles.includes(selectedAgentTab)) {
           return null;

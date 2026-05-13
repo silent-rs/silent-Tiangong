@@ -336,6 +336,15 @@ impl ResponseState {
                 ));
             }
 
+            StreamEvent::AgentOutput {
+                agent_label,
+                messages,
+                ..
+            } => {
+                self.end_active_stream();
+                output::status(&format!("[{agent_label}] 输出 {} 条消息", messages.len()));
+            }
+
             StreamEvent::FileLockChanged {
                 path,
                 holder_agent_label,

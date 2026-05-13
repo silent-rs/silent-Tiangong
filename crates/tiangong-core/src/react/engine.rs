@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::mpsc::Sender as StdSender;
+use std::sync::mpsc::{Receiver as StdReceiver, Sender as StdSender};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc as tokio_mpsc;
@@ -31,6 +31,42 @@ use crate::stream_throttle::ThrottledStreamSink;
 use tiangong_types::{StreamEvent, StreamToolCall};
 
 use crate::agent_team::lifecycle::TeamContext;
+
+#[derive(Default)]
+struct SubAgentDrainResult {
+    usage: TokenUsage,
+    ran: bool,
+}
+
+fn spawn_sub_agent_stream_forwarder(
+    agent_id: String,
+    agent_label: String,
+    parent_tx: StdSender<StreamEvent>,
+    child_rx: StdReceiver<StreamEvent>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        for event in child_rx {
+            match event {
+                StreamEvent::AgentCreated { .. }
+                | StreamEvent::AgentStatusChanged { .. }
+                | StreamEvent::AgentNotification { .. }
+                | StreamEvent::AgentMessage { .. }
+                | StreamEvent::FileLockChanged { .. } => {
+                    let _ = parent_tx.send(event);
+                }
+                StreamEvent::Error { message } => {
+                    let _ = parent_tx.send(StreamEvent::AgentNotification {
+                        agent_id: agent_id.clone(),
+                        agent_label: agent_label.clone(),
+                        content: format!("执行出错：{message}"),
+                        level: "error".to_string(),
+                    });
+                }
+                _ => {}
+            }
+        }
+    })
+}
 
 /// 单个 agent 的 async ReAct 执行引擎
 pub(crate) struct ReactEngine {
@@ -106,8 +142,8 @@ impl ReactEngine {
                 })
                 .unwrap_or(false);
             if routed {
-                let sub_usage = self.drain_sub_agent_inboxes(session, stream_tx).await;
-                accumulated_usage.accumulate(&sub_usage);
+                let sub_result = self.drain_sub_agent_inboxes(session, stream_tx).await;
+                accumulated_usage.accumulate(&sub_result.usage);
                 session.persist_to_disk();
                 let _ = stream_tx.send(StreamEvent::Done {
                     usage: Some(accumulated_usage.clone()),
@@ -328,6 +364,7 @@ impl ReactEngine {
             );
 
             // 执行工具
+            let mut used_team_tool = false;
             for call in executable_calls {
                 match drain_pending_commands_async(session, &mut loop_context, stream_tx, cmd_rx) {
                     PendingCommandEffect::Terminate => return accumulated_usage,
@@ -343,6 +380,7 @@ impl ReactEngine {
 
                 // 团队协作工具拦截
                 if crate::agent_team::lifecycle::is_team_tool(&call.name) {
+                    used_team_tool = true;
                     let args_summary = format_call_args_summary(call);
                     let _ = stream_tx.send(StreamEvent::ToolStart {
                         name: call.name.clone(),
@@ -728,13 +766,42 @@ impl ReactEngine {
             }
 
             // 执行有待处理任务的 Sub Agent
-            let sub_usage = self.drain_sub_agent_inboxes(session, stream_tx).await;
-            accumulated_usage.accumulate(&sub_usage);
+            let sub_result = self.drain_sub_agent_inboxes(session, stream_tx).await;
+            accumulated_usage.accumulate(&sub_result.usage);
+
+            let main_messages = self.drain_main_agent_messages();
+            if !main_messages.is_empty() {
+                for message in main_messages {
+                    loop_context.push(Message::new(
+                        MessageRole::User,
+                        format!(
+                            "[from:{} at {}]\n{}",
+                            message.from, message.created_at, message.content
+                        ),
+                    ));
+                }
+                continue 'react_loop;
+            }
+
+            if used_team_tool || sub_result.ran {
+                session.persist_to_disk();
+                let _ = stream_tx.send(StreamEvent::Done {
+                    usage: Some(accumulated_usage.clone()),
+                });
+                return accumulated_usage;
+            }
 
             session.persist_to_disk();
         }
 
         accumulated_usage
+    }
+
+    fn drain_main_agent_messages(&self) -> Vec<crate::agent_team::message_bus::AgentMessage> {
+        self.team
+            .as_ref()
+            .and_then(|team| team.lock().ok().map(|mut team| team.drain_main_inbox()))
+            .unwrap_or_default()
     }
 
     /// 轮询所有活跃 Sub Agent 的收件箱，为有待处理消息的 Agent 执行 ReactEngine。
@@ -743,11 +810,11 @@ impl ReactEngine {
         &mut self,
         parent_session: &mut Session,
         stream_tx: &StdSender<StreamEvent>,
-    ) -> TokenUsage {
-        let mut sub_usage = TokenUsage::default();
+    ) -> SubAgentDrainResult {
+        let mut result = SubAgentDrainResult::default();
 
         let Some(team_arc) = self.team.clone() else {
-            return sub_usage;
+            return result;
         };
 
         let max_concurrent = crate::agent_team::tools::MAX_CONCURRENT_SUB_AGENTS;
@@ -755,14 +822,14 @@ impl ReactEngine {
         let sub_max_rounds = crate::agent_team::tools::SUB_AGENT_MAX_ROUNDS;
 
         // 收集待执行的 Agent（有消息且未超限）
-        type PendingAgent = (String, String, String, Vec<String>, String, Session);
+        type PendingAgent = (String, String, String, String, Vec<String>, String, Session);
         let mut pending: Vec<PendingAgent> = Vec::new();
         {
             let Ok(mut team) = team_arc.lock() else {
                 let _ = stream_tx.send(StreamEvent::Error {
                     message: "团队状态锁定失败".to_string(),
                 });
-                return sub_usage;
+                return result;
             };
             let agent_infos: Vec<_> = team
                 .registry
@@ -773,23 +840,24 @@ impl ReactEngine {
                     (
                         a.agent_id.clone(),
                         a.label.clone(),
+                        a.role.clone(),
                         a.system_prompt.clone(),
                         a.tools.clone(),
                     )
                 })
                 .collect();
 
-            for (agent_id, agent_label, system_prompt, tool_names) in agent_infos {
+            for (agent_id, agent_label, agent_role, system_prompt, tool_names) in agent_infos {
                 if pending.len() >= max_concurrent {
                     break;
                 }
-                if sub_usage.total_tokens >= token_budget {
+                if result.usage.total_tokens >= token_budget {
                     let _ = stream_tx.send(StreamEvent::AgentNotification {
                         agent_id: "system".to_string(),
                         agent_label: "系统".to_string(),
                         content: format!(
                             "Sub Agent token 预算已用尽（{}/{}），剩余 Agent 将在下一轮执行",
-                            sub_usage.total_tokens, token_budget
+                            result.usage.total_tokens, token_budget
                         ),
                         level: "warning".to_string(),
                     });
@@ -819,6 +887,7 @@ impl ReactEngine {
                 pending.push((
                     agent_id,
                     agent_label,
+                    agent_role,
                     system_prompt,
                     tool_names,
                     combined,
@@ -828,16 +897,18 @@ impl ReactEngine {
         }
 
         if pending.is_empty() {
-            return sub_usage;
+            return result;
         }
+        result.ran = true;
 
         // 并行执行所有待执行的 Sub Agent（协作并发）
-        type SubResult = (String, String, Session, TokenUsage);
+        type SubResult = (String, String, String, Session, Vec<Message>, TokenUsage);
         let mut futures: Vec<Pin<Box<dyn Future<Output = SubResult>>>> = Vec::new();
 
         for (
             agent_id,
             agent_label,
+            agent_role,
             system_prompt,
             tool_names,
             combined_content,
@@ -870,19 +941,37 @@ impl ReactEngine {
             let stream_tx_clone = stream_tx.clone();
             let id = agent_id;
             let label = agent_label;
+            let role = agent_role;
             let prompt = system_prompt;
+            let start_message_len = child_session.messages.len();
 
             let fut = Box::pin(async move {
+                let (child_stream_tx, child_stream_rx) = std::sync::mpsc::channel();
+                let forwarder = spawn_sub_agent_stream_forwarder(
+                    id.clone(),
+                    label.clone(),
+                    stream_tx_clone,
+                    child_stream_rx,
+                );
+                let _keep_sub_cmd_tx_alive = sub_cmd_tx;
                 let usage = sub_engine
                     .execute_turn(
                         &mut child_session,
                         &prompt,
-                        &stream_tx_clone,
+                        &child_stream_tx,
                         &mut sub_cmd_rx,
                         None,
                     )
                     .await;
-                (id, label, child_session, usage)
+                drop(child_stream_tx);
+                let _ = forwarder.join();
+                let new_messages = child_session
+                    .messages
+                    .iter()
+                    .skip(start_message_len)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                (id, label, role, child_session, new_messages, usage)
             });
             futures.push(fut);
         }
@@ -891,7 +980,13 @@ impl ReactEngine {
         let results = futures_util::future::join_all(futures).await;
 
         // 处理结果
-        for (agent_id, agent_label, child_session, usage) in results {
+        for (agent_id, agent_label, agent_role, child_session, output_messages, usage) in results {
+            let _ = stream_tx.send(StreamEvent::AgentOutput {
+                agent_id: agent_id.clone(),
+                agent_role: agent_role.clone(),
+                agent_label: agent_label.clone(),
+                messages: output_messages,
+            });
             // 检查 Sub Agent 是否有错误输出
             let has_error = child_session
                 .messages
@@ -944,7 +1039,7 @@ impl ReactEngine {
                 }
             }
 
-            sub_usage.accumulate(&usage);
+            result.usage.accumulate(&usage);
 
             // 临时 Agent 执行完毕后自动销毁
             let Ok(mut team) = team_arc.lock() else {
@@ -985,7 +1080,7 @@ impl ReactEngine {
             }
         }
 
-        sub_usage
+        result
     }
 }
 

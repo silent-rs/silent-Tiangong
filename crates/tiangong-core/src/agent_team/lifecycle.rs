@@ -19,6 +19,8 @@ pub struct TeamContext {
     pub registry: AgentRegistry,
     /// 文件锁管理器
     pub file_locks: FileLockManager,
+    /// 发给主 Agent 的消息
+    pub main_inbox: Vec<AgentMessage>,
 }
 
 impl TeamContext {
@@ -26,7 +28,16 @@ impl TeamContext {
         Self {
             registry: AgentRegistry::new(),
             file_locks: FileLockManager::new(),
+            main_inbox: Vec::new(),
         }
+    }
+
+    pub fn deliver_main_message(&mut self, message: AgentMessage) {
+        self.main_inbox.push(message);
+    }
+
+    pub fn drain_main_inbox(&mut self) -> Vec<AgentMessage> {
+        std::mem::take(&mut self.main_inbox)
     }
 }
 
@@ -268,16 +279,50 @@ pub fn execute_send_message(
         return error_tool_result("send_message", "to 和 content 不能为空");
     }
 
-    let Some(target) = team.registry.find_by_role(&to).cloned() else {
-        return error_tool_result("send_message", &format!("未找到角色 '{to}'"));
-    };
-
     let from_label = team
         .registry
         .get(current_agent_id)
         .map(|d| d.label.as_str())
         .unwrap_or("Main Agent")
         .to_string();
+
+    if to == "main" {
+        let message = AgentMessage {
+            id: scru128::new().to_string(),
+            from: current_agent_id.to_string(),
+            to: "main".to_string(),
+            content: content.clone(),
+            priority: crate::agent_team::message_bus::MessagePriority::Normal,
+            created_at: now_text(),
+        };
+        team.deliver_main_message(message);
+        let _ = stream_tx.send(StreamEvent::AgentMessage {
+            from_agent_id: current_agent_id.to_string(),
+            from_agent_label: from_label.clone(),
+            to_agent_id: "main".to_string(),
+            to_agent_label: "Main Agent".to_string(),
+            content: content.clone(),
+        });
+        return ToolResult {
+            ok: true,
+            summary: "消息已发送给 Main Agent".to_string(),
+            stdout: "消息已送达 → @main (Main Agent)".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+            execution: Some(crate::tool::ToolExecutionRecord {
+                tool_name: "send_message".to_string(),
+                args: vec![to, content.chars().take(100).collect()],
+                duration_ms: 0,
+                ok: true,
+                exit_code: 0,
+                summary: "消息已发送给 Main Agent".to_string(),
+            }),
+        };
+    }
+
+    let Some(target) = team.registry.find_by_role(&to).cloned() else {
+        return error_tool_result("send_message", &format!("未找到角色 '{to}'"));
+    };
 
     let message = AgentMessage {
         id: scru128::new().to_string(),
@@ -909,6 +954,49 @@ mod tests {
                 ..
             } if from_agent_label == "Developer" && to_agent_label == "Tester"
         )));
+    }
+
+    #[test]
+    fn sub_agent_can_notify_main_agent_inbox() {
+        let (tx, _rx) = mpsc::channel();
+        let mut team = TeamContext::new();
+        let parent = Session::new("parent");
+        let result = execute_create_agent(
+            &mut team,
+            &call(
+                "create_agent",
+                json!({
+                    "role": "dev",
+                    "label": "Developer",
+                    "system_prompt": "agent"
+                }),
+            ),
+            &parent,
+            &[tool("send_message")],
+            &tx,
+        );
+        assert!(result.ok);
+        let dev_id = team.registry.find_by_role("dev").unwrap().agent_id.clone();
+
+        let result = execute_send_message(
+            &mut team,
+            &dev_id,
+            &call(
+                "send_message",
+                json!({
+                    "to": "main",
+                    "content": "实现完成，请汇总"
+                }),
+            ),
+            &tx,
+        );
+
+        assert!(result.ok);
+        let messages = team.drain_main_inbox();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].from, dev_id);
+        assert_eq!(messages[0].to, "main");
+        assert_eq!(messages[0].content, "实现完成，请汇总");
     }
 
     #[test]

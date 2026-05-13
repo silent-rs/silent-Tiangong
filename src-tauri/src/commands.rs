@@ -915,6 +915,47 @@ fn start_stream_consumer(
                                 format!("[Agent 消息] {from_agent_label} → {to_agent_label}: {content}"),
                             );
                         }
+                        StreamEvent::AgentOutput {
+                            ref agent_id,
+                            ref agent_role,
+                            ref agent_label,
+                            ref messages,
+                        } => {
+                            let worker_id =
+                                format!("agent:{agent_role}:{agent_id}:{}", session.messages.len());
+                            session.append_worker_message(
+                                tiangong_core::session::MessageRole::System,
+                                format!("🔧 Worker: {agent_label} (@{agent_role})"),
+                                &worker_id,
+                            );
+                            for message in messages {
+                                match message.role {
+                                    tiangong_core::session::MessageRole::Assistant => {
+                                        session.append_worker_message_with_reasoning(
+                                            tiangong_core::session::MessageRole::Assistant,
+                                            message.content.clone(),
+                                            message.reasoning_content.clone(),
+                                            &worker_id,
+                                        );
+                                    }
+                                    tiangong_core::session::MessageRole::System
+                                    | tiangong_core::session::MessageRole::Tool => {
+                                        session.append_worker_message(
+                                            tiangong_core::session::MessageRole::System,
+                                            message.content.clone(),
+                                            &worker_id,
+                                        );
+                                    }
+                                    tiangong_core::session::MessageRole::User => {
+                                        session.append_worker_message(
+                                            tiangong_core::session::MessageRole::User,
+                                            message.content.clone(),
+                                            &worker_id,
+                                        );
+                                    }
+                                }
+                            }
+                        }
                         StreamEvent::FileLockChanged {
                             ref path,
                             ref holder_agent_label,
@@ -1042,6 +1083,10 @@ fn start_stream_consumer(
                     StreamEvent::AgentMessage { ref from_agent_label, ref to_agent_label, .. } => {
                         core_state.store.runtime.run.summary =
                             format!("{from_agent_label} → {to_agent_label}");
+                    }
+                    StreamEvent::AgentOutput { ref agent_label, .. } => {
+                        core_state.store.runtime.run.summary =
+                            format!("Agent {agent_label} 输出已更新");
                     }
                     StreamEvent::FileLockChanged { ref path, ref action, ref holder_agent_label, .. } => {
                         core_state.store.runtime.run.summary =
