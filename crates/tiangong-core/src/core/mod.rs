@@ -192,6 +192,18 @@ impl TiangongCore {
         self.send_cmd(Command::Cancel)
     }
 
+    pub fn cancel_agent(&self, role: String) -> bool {
+        self.send_cmd(Command::CancelAgent { role })
+    }
+
+    pub fn compress_context(&self) -> bool {
+        self.send_cmd(Command::CompressContext)
+    }
+
+    pub fn reset_context(&self) -> bool {
+        self.send_cmd(Command::ResetContext)
+    }
+
     pub fn respond_approval(&self, request_id: String, approved: bool) -> bool {
         self.send_cmd(Command::Approval {
             request_id,
@@ -433,6 +445,9 @@ async fn worker_loop_async(
                 // Cancel 信号通过 cmd_rx 传递到 engine 内部处理；
                 // engine 在每个 block_in_place 前后检查取消信号。
             }
+            Command::CancelAgent { .. } => {
+                // 仅在多 Agent 执行等待期间由 ReactEngine 转发处理。
+            }
             Command::Approval {
                 request_id,
                 approved,
@@ -454,6 +469,14 @@ async fn worker_loop_async(
                 }
             }
             Command::Shutdown => break,
+            Command::CompressContext => {
+                compress_context_for_session(&mut session, engine.as_ref().unwrap(), &stream_tx);
+                continue;
+            }
+            Command::ResetContext => {
+                reset_context_for_session(&mut session, &stream_tx);
+                continue;
+            }
         }
     }
 
@@ -485,6 +508,42 @@ pub(crate) fn apply_session_cwd(session: &Session) {
     if path.is_dir() {
         crate::tool::set_session_cwd(Some(path));
     }
+}
+
+pub(crate) fn compress_context_for_session(
+    session: &mut Session,
+    engine: &RuntimeEngine,
+    stream_tx: &StdSender<StreamEvent>,
+) {
+    let organizer = crate::context::organizer::ContextOrganizer::new(engine.context_limit)
+        .with_keep_recent_turns(6);
+    match organizer.force_update_summary(session, engine.client()) {
+        Ok(_) => {
+            let remaining = session.messages.len().saturating_sub(session.summary_up_to);
+            let _ = stream_tx.send(StreamEvent::ContextCompressed {
+                action: "压缩".to_string(),
+                summary_up_to: session.summary_up_to,
+                remaining_messages: remaining,
+            });
+            session.persist_to_disk();
+        }
+        Err(err) => {
+            let _ = stream_tx.send(StreamEvent::Error {
+                message: format!("上下文压缩失败：{err}"),
+            });
+        }
+    }
+}
+
+pub(crate) fn reset_context_for_session(session: &mut Session, stream_tx: &StdSender<StreamEvent>) {
+    let total = session.messages.len();
+    session.summary_up_to = total;
+    let _ = stream_tx.send(StreamEvent::ContextCompressed {
+        action: "清理".to_string(),
+        summary_up_to: total,
+        remaining_messages: 0,
+    });
+    session.persist_to_disk();
 }
 
 /// 执行一个完整的对话轮次（可能多轮工具调用），async 版

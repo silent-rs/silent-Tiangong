@@ -1,5 +1,5 @@
 import { useStore, type AgentInfo } from '@/store/useStore';
-import { Users, Circle, ChevronDown, ChevronRight } from 'lucide-react';
+import { Users, Circle, ChevronDown, ChevronRight, Square } from 'lucide-react';
 import { useState } from 'react';
 
 const STATUS_STYLES: Record<string, string> = {
@@ -41,7 +41,7 @@ function StatusDot({ status }: { status: AgentInfo['status'] }) {
 }
 
 export function AgentPanel() {
-  const { agents, selectedAgentTab, setSelectedAgentTab } = useStore();
+  const { agents, selectedAgentTab, setSelectedAgentTab, cancelAgent } = useStore();
   const [expanded, setExpanded] = useState(false);
 
   if (agents.length === 0) {
@@ -98,6 +98,27 @@ export function AgentPanel() {
               >
                 <StatusDot status={agent.status} />
                 <span className="truncate max-w-[60px]">{agent.label}</span>
+                {agent.status === 'running' && (
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    className="ml-0.5 inline-flex h-4 w-4 items-center justify-center rounded text-red-400 hover:bg-red-500/10 hover:text-red-300"
+                    title={`停止 ${agent.label}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      cancelAgent(agent.role);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        cancelAgent(agent.role);
+                      }
+                    }}
+                  >
+                    <Square className="h-3 w-3" />
+                  </span>
+                )}
               </button>
             ))}
           </div>
@@ -124,6 +145,19 @@ export function AgentPanel() {
                 <span className={`ml-auto ${STATUS_TEXT_COLORS[agent.status] || 'text-muted-foreground'}`}>
                   {STATUS_LABELS[agent.status] || agent.status}
                 </span>
+                {agent.status === 'running' && (
+                  <button
+                    type="button"
+                    className="inline-flex h-5 w-5 items-center justify-center rounded text-red-400 hover:bg-red-500/10 hover:text-red-300"
+                    title={`停止 ${agent.label}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      cancelAgent(agent.role);
+                    }}
+                  >
+                    <Square className="h-3 w-3" />
+                  </button>
+                )}
               </div>
             ))}
           </div>

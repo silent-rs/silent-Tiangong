@@ -74,6 +74,15 @@ impl ContextOrganizer {
         self.compressor.update_summary(session, client)
     }
 
+    /// 强制压缩上下文（忽略 token 阈值检查）
+    pub fn force_update_summary(
+        &self,
+        session: &mut Session,
+        client: &SingleProviderClient,
+    ) -> anyhow::Result<bool> {
+        self.compressor.update_summary(session, client)
+    }
+
     /// 构建 LLM 请求上下文
     ///
     /// 从 session 的摘要 + 最近消息构建，并过滤执行痕迹。

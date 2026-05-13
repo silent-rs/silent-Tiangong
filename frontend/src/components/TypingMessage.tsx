@@ -1,11 +1,10 @@
 import { useEffect, useState, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import type { ReactNode } from 'react';
 
 import { ThinkingBlock } from './ThinkingBlock';
+import { CopyableCodeBlock } from './CopyableCodeBlock';
 
 interface TypingMessageProps {
   content: string;
@@ -36,28 +35,17 @@ export function TypingMessage({ content, reasoningContent, speed: _speed = 300, 
 
   // Markdown 渲染器
   const MarkdownComponents = {
-    pre({ children, ...rest }: any) {
-      return (
-        <pre className="rounded-md text-xs bg-background border border-border p-3 my-1.5 overflow-x-auto" {...rest}>
-          {children}
-        </pre>
-      );
+    pre({ children }: any) {
+      return <>{children}</>;
     },
     code({ className, children, node, ...rest }: any) {
       const match = /language-(\w+)/.exec(className || '');
       const isBlock = match || node?.parentNode?.tagName === 'pre';
-      const CodeHighlighter = SyntaxHighlighter as any;
       return isBlock ? (
-        <CodeHighlighter
-          style={vscDarkPlus}
+        <CopyableCodeBlock
+          code={String(children).replace(/\n$/, '')}
           language={match?.[1] || 'text'}
-          PreTag="div"
-          className="rounded-md text-xs !bg-background border border-border"
-          customStyle={{ padding: '12px', borderRadius: '6px', margin: '6px 0' }}
-          codeTagProps={{ style: {} }}
-        >
-          {String(children).replace(/\n$/, '')}
-        </CodeHighlighter>
+        />
       ) : (
         <code className="bg-muted text-foreground px-1 py-0.5 rounded text-xs font-mono" {...rest}>
           {children}

@@ -14,9 +14,17 @@ pub(crate) enum Command {
     ReloadConfig,
     /// 取消当前执行
     Cancel,
+    /// 取消指定 Agent 的当前执行
+    CancelAgent { role: String },
     /// 审批响应
     #[allow(dead_code)]
     Approval { request_id: String, approved: bool },
+    /// 手动触发上下文压缩
+    #[allow(dead_code)]
+    CompressContext,
+    /// 清理上下文（重置摘要，LLM 下次只看到 system prompt）
+    #[allow(dead_code)]
+    ResetContext,
     /// 关闭
     Shutdown,
 }

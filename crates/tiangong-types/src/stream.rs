@@ -164,6 +164,12 @@ pub enum StreamEvent {
         holder_agent_label: Option<String>,
         action: String,
     },
+    /// 上下文已压缩/清理
+    ContextCompressed {
+        action: String,
+        summary_up_to: usize,
+        remaining_messages: usize,
+    },
 }
 
 /// 记忆检索命中项摘要（前端展示用）

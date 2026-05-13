@@ -19,6 +19,33 @@ interface MentionCandidate {
   hint: string;
 }
 
+const SLASH_COMMANDS: MentionCandidate[] = [
+  {
+    value: '/compress',
+    label: '/compress',
+    kind: 'command',
+    hint: '压缩早期上下文',
+  },
+  {
+    value: '/压缩对话',
+    label: '/压缩对话',
+    kind: 'command',
+    hint: '压缩早期上下文',
+  },
+  {
+    value: '/reset',
+    label: '/reset',
+    kind: 'command',
+    hint: '清理当前上下文',
+  },
+  {
+    value: '/清理对话',
+    label: '/清理对话',
+    kind: 'command',
+    hint: '清理当前上下文',
+  },
+];
+
 type Attachment = {
   kind: 'image' | 'file';
   url: string;
@@ -150,7 +177,9 @@ export function MessageInput() {
   const [mentionFilter, setMentionFilter] = useState('');
   const [mentionIndex, setMentionIndex] = useState(0);
   const [mentionStart, setMentionStart] = useState(-1);
+  const [completionMode, setCompletionMode] = useState<'mention' | 'slash'>('mention');
   const mentionRef = useRef<HTMLDivElement>(null);
+  const candidateRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   // 信任模式
   const [trustMode, setTrustMode] = useState('full_trust');
@@ -225,6 +254,12 @@ export function MessageInput() {
   }, []);
 
   const filteredCandidates = (() => {
+    if (completionMode === 'slash') {
+      const filter = mentionFilter.toLowerCase();
+      if (!filter) return SLASH_COMMANDS;
+      return SLASH_COMMANDS.filter(c => c.value.toLowerCase().startsWith(filter));
+    }
+
     // 合并 API 候选和 Agent 候选
     const aliveAgents = agents.filter(a => a.status !== 'terminated');
     const agentCandidates: MentionCandidate[] = aliveAgents.map(a => ({
@@ -252,11 +287,55 @@ export function MessageInput() {
     );
   })();
 
+  useEffect(() => {
+    if (!mentionOpen) return;
+    candidateRefs.current[mentionIndex]?.scrollIntoView({
+      block: 'nearest',
+    });
+  }, [mentionIndex, mentionOpen, filteredCandidates.length]);
+
+  const executeSlashCommand = useCallback(async (command: string) => {
+    const trimmed = command.trim();
+    if (trimmed === '/压缩对话' || trimmed === '/compress') {
+      setInputContent('');
+      try {
+        const ok = await api.compressContext();
+        if (!ok) alert('压缩对话没有执行成功，请稍后重试。');
+      } catch (e) {
+        console.error('压缩对话失败:', e);
+        alert(e instanceof Error ? e.message : '压缩对话失败');
+      }
+      return true;
+    }
+    if (trimmed === '/清理对话' || trimmed === '/reset') {
+      setInputContent('');
+      try {
+        const ok = await api.resetContext();
+        if (!ok) alert('清理对话没有执行成功，请稍后重试。');
+      } catch (e) {
+        console.error('清理对话失败:', e);
+        alert(e instanceof Error ? e.message : '清理对话失败');
+      }
+      return true;
+    }
+    return false;
+  }, [setInputContent]);
+
   const handleInputChange = (value: string) => {
     setInputContent(value);
     const textarea = textareaRef.current;
     if (!textarea) return;
     const cursorPos = textarea.selectionStart;
+    const beforeCursor = value.slice(0, cursorPos);
+    if (beforeCursor.startsWith('/') && !/\s/.test(beforeCursor)) {
+      setMentionStart(0);
+      setMentionFilter(beforeCursor);
+      setMentionIndex(0);
+      setCompletionMode('slash');
+      setMentionOpen(true);
+      return;
+    }
+
     let atPos = -1;
     for (let i = cursorPos - 1; i >= 0; i--) {
       const ch = value[i];
@@ -271,6 +350,7 @@ export function MessageInput() {
       setMentionStart(atPos);
       setMentionFilter(filter);
       setMentionIndex(0);
+      setCompletionMode('mention');
       if (!mentionOpen) { loadCandidates(); setMentionOpen(true); }
     } else {
       setMentionOpen(false);
@@ -279,6 +359,11 @@ export function MessageInput() {
 
   const selectCandidate = (candidate: MentionCandidate) => {
     if (mentionStart < 0) return;
+    if (candidate.kind === 'command') {
+      setMentionOpen(false);
+      void executeSlashCommand(candidate.value);
+      return;
+    }
     const textarea = textareaRef.current;
     const cursorPos = textarea?.selectionStart ?? inputContent.length;
     const before = inputContent.slice(0, mentionStart);
@@ -538,6 +623,12 @@ export function MessageInput() {
   const handleSend = async () => {
     if (!canSend) return;
     setMentionOpen(false);
+
+    // slash command 拦截
+    const trimmed = inputContent.trim();
+    if (await executeSlashCommand(trimmed)) {
+      return;
+    }
     if (attachments.length > 0 && !hasMultimodal) {
       setAttachments([]);
       alert('未配置多模态模型，文件上传能力已关闭。');
@@ -820,6 +911,7 @@ export function MessageInput() {
                   {filteredCandidates.map((c, i) => (
                     <button
                       key={c.value}
+                      ref={(el) => { candidateRefs.current[i] = el; }}
                       className={`w-full flex items-center gap-2 px-3 py-1.5 text-sm text-left hover:bg-accent transition-colors ${
                         i === mentionIndex ? 'bg-accent' : ''
                       }`}
@@ -830,6 +922,8 @@ export function MessageInput() {
                         <Wrench className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
                       ) : c.kind === 'agent' ? (
                         <Users className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                      ) : c.kind === 'command' ? (
+                        <Keyboard className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
                       ) : (
                         <Cpu className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
                       )}

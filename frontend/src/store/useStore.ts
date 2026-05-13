@@ -167,6 +167,7 @@ interface AppState {
   sendMessage: (content: string, media?: MediaAsset[]) => Promise<void>;
   editAndResend: (messageId: string, newContent: string) => Promise<void>;
   cancelTurn: () => Promise<boolean>;
+  cancelAgent: (role: string) => Promise<boolean>;
 
   setInputContent: (content: string) => void;
 
@@ -421,6 +422,23 @@ export const useStore = create<AppState>((set, get) => ({
       return cancelled;
     } catch (error) {
       console.error('取消执行失败:', error);
+      return false;
+    }
+  },
+
+  cancelAgent: async (role: string) => {
+    try {
+      const cancelled = await api.cancelAgent(role);
+      if (cancelled) {
+        set((state) => ({
+          agents: state.agents.map((agent) =>
+            agent.role === role ? { ...agent, status: 'idle' } : agent
+          ),
+        }));
+      }
+      return cancelled;
+    } catch (error) {
+      console.error('取消 Agent 执行失败:', error);
       return false;
     }
   },

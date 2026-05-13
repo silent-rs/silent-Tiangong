@@ -24,12 +24,11 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { TypingMessage } from "./TypingMessage";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { AgentPanel } from "./AgentPanel";
 import { api } from "@/api/tauri";
+import { CopyableCodeBlock } from "./CopyableCodeBlock";
 
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -402,32 +401,18 @@ export function MessageList() {
   // 将本地文件路径转换为 Tauri asset URL
   // Markdown 渲染器（用于非流式消息）
   const MarkdownComponents = useMemo(() => ({
-    pre({ children, ...rest }: any) {
-      return (
-        <pre
-          className="rounded-md text-xs !bg-background border border-border p-3 my-1.5 overflow-x-auto"
-          {...rest}
-        >
-          {children}
-        </pre>
-      );
+    pre({ children }: any) {
+      return <>{children}</>;
     },
     code({ className, children, node, ...rest }: any) {
       const match = /language-(\w+)/.exec(className || "");
       // 判断是否是代码块：有语言标记，或者父节点是 pre
       const isBlock = match || node?.parentNode?.tagName === "pre";
-      const CodeHighlighter = SyntaxHighlighter as any;
       return isBlock ? (
-        <CodeHighlighter
-          style={vscDarkPlus}
+        <CopyableCodeBlock
+          code={String(children).replace(/\n$/, "")}
           language={match?.[1] || "text"}
-          PreTag="div"
-          className="rounded-md text-xs !bg-background"
-          customStyle={{ padding: "0", margin: "0" }}
-          codeTagProps={{ style: {} }}
-        >
-          {String(children).replace(/\n$/, "")}
-        </CodeHighlighter>
+        />
       ) : (
         <code
           className="bg-muted text-foreground px-1 py-0.5 rounded text-xs font-mono"

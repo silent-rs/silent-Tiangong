@@ -52,6 +52,7 @@ fn run_gui() {
             tiangong_app::commands::send_message_with_media,
             tiangong_app::commands::read_attachment_as_data_url,
             tiangong_app::commands::cancel_turn,
+            tiangong_app::commands::cancel_agent,
             tiangong_app::commands::get_background_tasks,
             tiangong_app::commands::cancel_background_task,
             tiangong_app::commands::get_run_snapshot,
@@ -117,6 +118,8 @@ fn run_gui() {
             tiangong_app::commands::play_audio_file,
             tiangong_app::commands::stop_audio,
             tiangong_app::commands::get_mention_candidates,
+            tiangong_app::commands::compress_context,
+            tiangong_app::commands::reset_context,
         ])
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())

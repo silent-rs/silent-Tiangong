@@ -354,6 +354,17 @@ impl ResponseState {
                 let holder = holder_agent_label.as_deref().unwrap_or("unknown");
                 output::status(&format!("文件锁 {action}: {} (by {holder})", path));
             }
+
+            StreamEvent::ContextCompressed {
+                action,
+                summary_up_to,
+                remaining_messages,
+            } => {
+                self.end_active_stream();
+                output::status(&format!(
+                    "上下文{action}: 已处理 {summary_up_to} 条，剩余 {remaining_messages} 条"
+                ));
+            }
         }
         false
     }

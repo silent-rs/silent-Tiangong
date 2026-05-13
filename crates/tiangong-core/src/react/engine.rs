@@ -8,6 +8,7 @@ use std::pin::Pin;
 use std::sync::mpsc::{Receiver as StdReceiver, Sender as StdSender};
 use std::sync::{Arc, Mutex};
 
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::agents::execution_mcp_agent::McpFunctionTarget;
@@ -36,6 +37,7 @@ use crate::agent_team::lifecycle::TeamContext;
 struct SubAgentDrainResult {
     usage: TokenUsage,
     ran: bool,
+    cancelled: bool,
 }
 
 fn sub_agent_stream_message(
@@ -347,8 +349,14 @@ impl ReactEngine {
                 })
                 .unwrap_or(false);
             if routed {
-                let sub_result = self.drain_sub_agent_inboxes(session, stream_tx).await;
+                let sub_result = self
+                    .drain_sub_agent_inboxes(session, stream_tx, cmd_rx)
+                    .await;
                 accumulated_usage.accumulate(&sub_result.usage);
+                if sub_result.cancelled {
+                    session.persist_to_disk();
+                    return accumulated_usage;
+                }
                 session.persist_to_disk();
                 let _ = stream_tx.send(StreamEvent::Done {
                     usage: Some(accumulated_usage.clone()),
@@ -358,7 +366,13 @@ impl ReactEngine {
         }
 
         'react_loop: loop {
-            match drain_pending_commands_async(session, &mut loop_context, stream_tx, cmd_rx) {
+            match drain_pending_commands_async(
+                session,
+                &self.engine,
+                &mut loop_context,
+                stream_tx,
+                cmd_rx,
+            ) {
                 PendingCommandEffect::Terminate => return accumulated_usage,
                 PendingCommandEffect::MessageInjected => {
                     memory_context = None;
@@ -442,6 +456,17 @@ impl ReactEngine {
                             }
                             Some(Command::ReloadConfig) => {}
                             Some(Command::Approval { .. }) => {}
+                            Some(Command::CancelAgent { .. }) => {}
+                            Some(Command::CompressContext) => {
+                                crate::core::compress_context_for_session(
+                                    session,
+                                    &self.engine,
+                                    stream_tx,
+                                );
+                            }
+                            Some(Command::ResetContext) => {
+                                crate::core::reset_context_for_session(session, stream_tx);
+                            }
                         }
                     }
                     chunk_opt = chunk_rx.recv() => {
@@ -570,7 +595,13 @@ impl ReactEngine {
 
             // 执行工具
             for call in executable_calls {
-                match drain_pending_commands_async(session, &mut loop_context, stream_tx, cmd_rx) {
+                match drain_pending_commands_async(
+                    session,
+                    &self.engine,
+                    &mut loop_context,
+                    stream_tx,
+                    cmd_rx,
+                ) {
                     PendingCommandEffect::Terminate => return accumulated_usage,
                     PendingCommandEffect::MessageInjected => {
                         memory_context = None;
@@ -750,6 +781,17 @@ impl ReactEngine {
                                 }
                                 Some(Command::ReloadConfig) => {}
                                 Some(Command::Approval { .. }) => {}
+                                Some(Command::CancelAgent { .. }) => {}
+                                Some(Command::CompressContext) => {
+                                    crate::core::compress_context_for_session(
+                                        session,
+                                        &self.engine,
+                                        stream_tx,
+                                    );
+                                }
+                                Some(Command::ResetContext) => {
+                                    crate::core::reset_context_for_session(session, stream_tx);
+                                }
                             }
                         };
 
@@ -793,7 +835,7 @@ impl ReactEngine {
                     }
                 }
 
-                if check_cancel(cmd_rx, stream_tx) {
+                if check_cancel(session, &self.engine, cmd_rx, stream_tx) {
                     return accumulated_usage;
                 }
 
@@ -904,7 +946,7 @@ impl ReactEngine {
                     &call.name,
                     format_tool_trace_message(&result),
                 );
-                if !result.ok && check_cancel(cmd_rx, stream_tx) {
+                if !result.ok && check_cancel(session, &self.engine, cmd_rx, stream_tx) {
                     return accumulated_usage;
                 }
 
@@ -920,7 +962,7 @@ impl ReactEngine {
                 }
 
                 // 记忆候选评估
-                if check_cancel(cmd_rx, stream_tx) {
+                if check_cancel(session, &self.engine, cmd_rx, stream_tx) {
                     return accumulated_usage;
                 }
                 if let Some(handle) = memory_handle {
@@ -954,7 +996,13 @@ impl ReactEngine {
                 }
                 maybe_update_context_summary(session, &self.engine, response.usage.total_tokens);
 
-                match drain_pending_commands_async(session, &mut loop_context, stream_tx, cmd_rx) {
+                match drain_pending_commands_async(
+                    session,
+                    &self.engine,
+                    &mut loop_context,
+                    stream_tx,
+                    cmd_rx,
+                ) {
                     PendingCommandEffect::Terminate => return accumulated_usage,
                     PendingCommandEffect::MessageInjected => {
                         memory_context = None;
@@ -969,8 +1017,14 @@ impl ReactEngine {
             }
 
             // 执行有待处理任务的 Sub Agent
-            let sub_result = self.drain_sub_agent_inboxes(session, stream_tx).await;
+            let sub_result = self
+                .drain_sub_agent_inboxes(session, stream_tx, cmd_rx)
+                .await;
             accumulated_usage.accumulate(&sub_result.usage);
+            if sub_result.cancelled {
+                session.persist_to_disk();
+                return accumulated_usage;
+            }
 
             let main_messages = self.drain_main_agent_messages();
             if !main_messages.is_empty() {
@@ -1013,6 +1067,7 @@ impl ReactEngine {
         &mut self,
         parent_session: &mut Session,
         stream_tx: &StdSender<StreamEvent>,
+        cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     ) -> SubAgentDrainResult {
         let mut result = SubAgentDrainResult::default();
 
@@ -1106,7 +1161,10 @@ impl ReactEngine {
 
         // 并行执行所有待执行的 Sub Agent（协作并发）
         type SubResult = (String, String, String, Session, Vec<Message>, TokenUsage);
-        let mut futures: Vec<Pin<Box<dyn Future<Output = SubResult>>>> = Vec::new();
+        type ActiveSubAgent = (String, String, String, tokio_mpsc::UnboundedSender<Command>);
+        let mut futures: FuturesUnordered<Pin<Box<dyn Future<Output = SubResult>>>> =
+            FuturesUnordered::new();
+        let mut active_sub_agents: Vec<ActiveSubAgent> = Vec::new();
 
         for (
             agent_id,
@@ -1140,6 +1198,12 @@ impl ReactEngine {
                 message_id: Some(scru128::new().to_string()),
                 media: Vec::new(),
             });
+            active_sub_agents.push((
+                agent_id.clone(),
+                agent_role.clone(),
+                agent_label.clone(),
+                sub_cmd_tx.clone(),
+            ));
 
             let stream_tx_clone = stream_tx.clone();
             let id = agent_id;
@@ -1180,8 +1244,100 @@ impl ReactEngine {
             futures.push(fut);
         }
 
-        // 并发执行所有 Sub Agent
-        let results = futures_util::future::join_all(futures).await;
+        let mut results = Vec::new();
+        while !futures.is_empty() {
+            tokio::select! {
+                maybe_result = futures.next() => {
+                    if let Some(sub_result) = maybe_result {
+                        active_sub_agents.retain(|(agent_id, _, _, _)| agent_id != &sub_result.0);
+                        results.push(sub_result);
+                    }
+                }
+                maybe_cmd = cmd_rx.recv() => {
+                    match maybe_cmd {
+                        Some(Command::Cancel) | Some(Command::Shutdown) => {
+                            result.cancelled = true;
+                            let _ = stream_tx.send(StreamEvent::Error {
+                                message: "已取消所有 Agent".to_string(),
+                            });
+                            for (_, _, _, tx) in &active_sub_agents {
+                                let _ = tx.send(Command::Cancel);
+                            }
+                        }
+                        Some(Command::CancelAgent { role }) => {
+                            let mut matched = false;
+                            for (agent_id, agent_role, agent_label, tx) in &active_sub_agents {
+                                if agent_role == &role {
+                                    matched = true;
+                                    let _ = tx.send(Command::Cancel);
+                                    let _ = stream_tx.send(StreamEvent::AgentStatusChanged {
+                                        agent_id: agent_id.clone(),
+                                        label: agent_label.clone(),
+                                        status: "idle".to_string(),
+                                    });
+                                    let _ = stream_tx.send(StreamEvent::AgentNotification {
+                                        agent_id: agent_id.clone(),
+                                        agent_label: agent_label.clone(),
+                                        content: "已请求停止当前执行".to_string(),
+                                        level: "warning".to_string(),
+                                    });
+                                }
+                            }
+                            if !matched {
+                                let _ = stream_tx.send(StreamEvent::AgentNotification {
+                                    agent_id: role.clone(),
+                                    agent_label: role,
+                                    content: "未找到正在执行的 Agent".to_string(),
+                                    level: "warning".to_string(),
+                                });
+                            }
+                        }
+                        Some(Command::Message { content, message_id, media }) => {
+                            let message_id = append_or_reuse_user_message(
+                                parent_session,
+                                &content,
+                                message_id,
+                                media,
+                            );
+                            let media = parent_session
+                                .messages
+                                .iter()
+                                .find(|message| message.id == message_id)
+                                .map(|message| message.media.clone())
+                                .unwrap_or_default();
+                            let _ = stream_tx.send(StreamEvent::UserMessage {
+                                message_id,
+                                content: content.clone(),
+                                media,
+                            });
+                            if let Ok(mut team) = team_arc.lock() {
+                                let _ = crate::agent_team::lifecycle::route_user_mentions(
+                                    &mut team,
+                                    &content,
+                                    stream_tx,
+                                );
+                            }
+                        }
+                        Some(Command::UpdateCwd { cwd }) => {
+                            parent_session.cwd = cwd;
+                            crate::core::apply_session_cwd(parent_session);
+                        }
+                        Some(Command::CompressContext) => {
+                            crate::core::compress_context_for_session(
+                                parent_session,
+                                &self.engine,
+                                stream_tx,
+                            );
+                        }
+                        Some(Command::ResetContext) => {
+                            crate::core::reset_context_for_session(parent_session, stream_tx);
+                        }
+                        Some(Command::ReloadConfig) | Some(Command::Approval { .. }) => {}
+                        None => break,
+                    }
+                }
+            }
+        }
 
         // 处理结果
         for (agent_id, agent_label, _agent_role, child_session, _output_messages, usage) in results
@@ -1285,6 +1441,7 @@ impl ReactEngine {
 
 fn drain_pending_commands_async(
     session: &mut Session,
+    engine: &crate::runtime::RuntimeEngine,
     loop_context: &mut Vec<Message>,
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
@@ -1299,6 +1456,7 @@ fn drain_pending_commands_async(
                 });
                 return PendingCommandEffect::Terminate;
             }
+            Command::CancelAgent { .. } => {}
             Command::Shutdown => return PendingCommandEffect::Terminate,
             Command::Message {
                 content,
@@ -1321,6 +1479,12 @@ fn drain_pending_commands_async(
             }
             Command::ReloadConfig => {}
             Command::Approval { .. } => {}
+            Command::CompressContext => {
+                crate::core::compress_context_for_session(session, engine, stream_tx);
+            }
+            Command::ResetContext => {
+                crate::core::reset_context_for_session(session, stream_tx);
+            }
         }
     }
 
@@ -1333,6 +1497,8 @@ fn drain_pending_commands_async(
 
 /// 非阻塞检查是否有取消或关闭命令待处理。
 fn check_cancel(
+    session: &mut Session,
+    engine: &crate::runtime::RuntimeEngine,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     stream_tx: &StdSender<StreamEvent>,
 ) -> bool {
@@ -1343,6 +1509,13 @@ fn check_cancel(
                     message: "已取消".into(),
                 });
                 return true;
+            }
+            Command::CancelAgent { .. } => {}
+            Command::CompressContext => {
+                crate::core::compress_context_for_session(session, engine, stream_tx);
+            }
+            Command::ResetContext => {
+                crate::core::reset_context_for_session(session, stream_tx);
             }
             _ => {}
         }
