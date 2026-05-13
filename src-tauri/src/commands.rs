@@ -921,39 +921,50 @@ fn start_stream_consumer(
                             ref agent_label,
                             ref messages,
                         } => {
-                            let worker_id =
-                                format!("agent:{agent_role}:{agent_id}:{}", session.messages.len());
-                            session.append_worker_message(
-                                tiangong_core::session::MessageRole::System,
-                                format!("🔧 Worker: {agent_label} (@{agent_role})"),
-                                &worker_id,
-                            );
+                            let worker_id = format!("agent:{agent_role}:{agent_id}");
+                            let header = format!("🔧 Worker: {agent_label} (@{agent_role})");
+                            if !session.messages.iter().any(|message| {
+                                message.worker_id.as_deref() == Some(worker_id.as_str())
+                                    && message.content == header
+                            }) {
+                                session.append_worker_message(
+                                    tiangong_core::session::MessageRole::System,
+                                    header,
+                                    &worker_id,
+                                );
+                            }
                             for message in messages {
-                                match message.role {
+                                let role = match message.role {
                                     tiangong_core::session::MessageRole::Assistant => {
-                                        session.append_worker_message_with_reasoning(
-                                            tiangong_core::session::MessageRole::Assistant,
-                                            message.content.clone(),
-                                            message.reasoning_content.clone(),
-                                            &worker_id,
-                                        );
+                                        tiangong_core::session::MessageRole::Assistant
                                     }
                                     tiangong_core::session::MessageRole::System
                                     | tiangong_core::session::MessageRole::Tool => {
-                                        session.append_worker_message(
-                                            tiangong_core::session::MessageRole::System,
-                                            message.content.clone(),
-                                            &worker_id,
-                                        );
+                                        tiangong_core::session::MessageRole::System
                                     }
                                     tiangong_core::session::MessageRole::User => {
-                                        session.append_worker_message(
-                                            tiangong_core::session::MessageRole::User,
-                                            message.content.clone(),
-                                            &worker_id,
-                                        );
+                                        tiangong_core::session::MessageRole::User
                                     }
+                                };
+
+                                if let Some(existing) = session.messages.iter_mut().find(|item| {
+                                    item.id == message.id
+                                        && item.worker_id.as_deref() == Some(worker_id.as_str())
+                                }) {
+                                    if role == tiangong_core::session::MessageRole::Assistant {
+                                        existing.content.push_str(&message.content);
+                                        existing
+                                            .reasoning_content
+                                            .push_str(&message.reasoning_content);
+                                    }
+                                    continue;
                                 }
+
+                                let mut worker_message = message.clone();
+                                worker_message.role = role;
+                                worker_message.worker_id = Some(worker_id.clone());
+                                session.messages.push(worker_message);
+                                session.updated_at = tiangong_core::session::now_text();
                             }
                         }
                         StreamEvent::FileLockChanged {

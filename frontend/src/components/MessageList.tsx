@@ -28,6 +28,7 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { TypingMessage } from "./TypingMessage";
 import { ThinkingBlock } from "./ThinkingBlock";
+import { AgentPanel } from "./AgentPanel";
 import { api } from "@/api/tauri";
 
 import { memo, useEffect, useMemo, useRef, useState } from "react";
@@ -339,6 +340,7 @@ export function MessageList() {
     streamingContent,
     streamingReasoningContent,
     selectedAgentTab,
+    agents,
     voiceMessages,
     approvalRequestId,
     editAndResend,
@@ -589,7 +591,13 @@ export function MessageList() {
               </p>
             </div>
           ) : (
-            groupMessages(messages).map((group, groupIdx, allGroups) => {
+            <>
+              {agents.length > 0 && (
+                <div className="sticky top-0 z-10 bg-background/95 py-1 backdrop-blur">
+                  <AgentPanel />
+                </div>
+              )}
+              {groupMessages(messages).map((group, groupIdx, allGroups) => {
               // Worker 组
               if (group.type === "worker") {
                 if (selectedAgentTab && !group.worker_id?.startsWith(`agent:${selectedAgentTab}:`)) {
@@ -704,7 +712,8 @@ export function MessageList() {
                   )}
                 </div>
               );
-            })
+              })}
+            </>
           )}
 
           {/* 审批请求 */}

@@ -53,8 +53,8 @@ export function AgentPanel() {
   const running = agents.filter((a) => a.status === 'running').length;
 
   return (
-    <div className="border-b border-border bg-card/50 select-none">
-      <div className="max-w-3xl mx-auto px-4 py-1">
+    <div className="rounded-md border border-border bg-card/50 select-none">
+      <div className="px-3 py-1.5">
         {/* 紧凑模式：Agent Tab 栏 */}
         <div className="flex items-center gap-1.5 text-xs">
           <button
@@ -72,7 +72,7 @@ export function AgentPanel() {
             )}
           </button>
 
-          {/* Tab 按钮：全部 + 每个 Agent */}
+          {/* Tab 按钮：主对话 + 每个 Agent */}
           <div className="flex items-center gap-0.5 overflow-x-auto">
             <button
               className={`px-2 py-0.5 rounded transition-colors whitespace-nowrap ${
@@ -82,7 +82,7 @@ export function AgentPanel() {
               }`}
               onClick={() => setSelectedAgentTab(null)}
             >
-              全部
+              主对话
             </button>
             {agents.map((agent) => (
               <button

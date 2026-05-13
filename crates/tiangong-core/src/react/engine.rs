@@ -38,8 +38,47 @@ struct SubAgentDrainResult {
     ran: bool,
 }
 
+fn sub_agent_stream_message(
+    id: impl Into<String>,
+    role: MessageRole,
+    content: impl Into<String>,
+    reasoning_content: impl Into<String>,
+) -> Message {
+    Message {
+        id: id.into(),
+        role,
+        content: content.into(),
+        reasoning_content: reasoning_content.into(),
+        reasoning_signature: None,
+        worker_id: None,
+        media: Vec::new(),
+        tool_calls: Vec::new(),
+        tool_call_id: None,
+        tool_name: None,
+        tool_result_is_error: false,
+        compact: false,
+        created_at: now_text(),
+    }
+}
+
+fn send_sub_agent_output(
+    parent_tx: &StdSender<StreamEvent>,
+    agent_id: &str,
+    agent_role: &str,
+    agent_label: &str,
+    message: Message,
+) {
+    let _ = parent_tx.send(StreamEvent::AgentOutput {
+        agent_id: agent_id.to_string(),
+        agent_role: agent_role.to_string(),
+        agent_label: agent_label.to_string(),
+        messages: vec![message],
+    });
+}
+
 fn spawn_sub_agent_stream_forwarder(
     agent_id: String,
+    agent_role: String,
     agent_label: String,
     parent_tx: StdSender<StreamEvent>,
     child_rx: StdReceiver<StreamEvent>,
@@ -47,6 +86,160 @@ fn spawn_sub_agent_stream_forwarder(
     std::thread::spawn(move || {
         for event in child_rx {
             match event {
+                StreamEvent::UserMessage {
+                    message_id,
+                    content,
+                    ..
+                } => send_sub_agent_output(
+                    &parent_tx,
+                    &agent_id,
+                    &agent_role,
+                    &agent_label,
+                    sub_agent_stream_message(
+                        format!("agent:{agent_id}:user:{message_id}"),
+                        MessageRole::User,
+                        content,
+                        "",
+                    ),
+                ),
+                StreamEvent::Delta {
+                    message_id,
+                    content,
+                } => send_sub_agent_output(
+                    &parent_tx,
+                    &agent_id,
+                    &agent_role,
+                    &agent_label,
+                    sub_agent_stream_message(
+                        format!("agent:{agent_id}:assistant:{message_id}"),
+                        MessageRole::Assistant,
+                        content,
+                        "",
+                    ),
+                ),
+                StreamEvent::Reasoning {
+                    message_id,
+                    content,
+                } => send_sub_agent_output(
+                    &parent_tx,
+                    &agent_id,
+                    &agent_role,
+                    &agent_label,
+                    sub_agent_stream_message(
+                        format!("agent:{agent_id}:assistant:{message_id}"),
+                        MessageRole::Assistant,
+                        "",
+                        content,
+                    ),
+                ),
+                StreamEvent::ToolCalls {
+                    message_id,
+                    names,
+                    usage,
+                    ..
+                } => {
+                    let usage_text = usage
+                        .map(|usage| {
+                            format!(
+                                "\ntokens: prompt={}, completion={}, total={}",
+                                usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
+                            )
+                        })
+                        .unwrap_or_default();
+                    send_sub_agent_output(
+                        &parent_tx,
+                        &agent_id,
+                        &agent_role,
+                        &agent_label,
+                        sub_agent_stream_message(
+                            format!("agent:{agent_id}:tool-calls:{message_id}"),
+                            MessageRole::System,
+                            format!("LLM 输出{usage_text}\ntool_calls: {}", names.join(", ")),
+                            "",
+                        ),
+                    );
+                }
+                StreamEvent::ToolStart { name, args_summary } => {
+                    let mut content = format!("工具开始 [{name}]");
+                    if !args_summary.is_empty() {
+                        content.push_str(&format!("\n命令: {args_summary}"));
+                    }
+                    send_sub_agent_output(
+                        &parent_tx,
+                        &agent_id,
+                        &agent_role,
+                        &agent_label,
+                        sub_agent_stream_message(
+                            format!("agent:{agent_id}:tool-start:{}", scru128::new()),
+                            MessageRole::System,
+                            content,
+                            "",
+                        ),
+                    );
+                }
+                StreamEvent::ToolResult {
+                    name,
+                    tool_call_id,
+                    ok,
+                    output,
+                    full_output,
+                } => {
+                    let persisted_output = full_output.unwrap_or(output);
+                    let mut content = format!(
+                        "工具执行 [{name}]\nok={} exit_code={}",
+                        ok,
+                        if ok { 0 } else { 1 }
+                    );
+                    if !persisted_output.trim().is_empty() {
+                        content.push_str(&format!("\nstdout:\n{persisted_output}"));
+                    }
+                    send_sub_agent_output(
+                        &parent_tx,
+                        &agent_id,
+                        &agent_role,
+                        &agent_label,
+                        sub_agent_stream_message(
+                            tool_call_id.unwrap_or_else(|| {
+                                format!("agent:{agent_id}:tool-result:{}", scru128::new())
+                            }),
+                            MessageRole::System,
+                            content,
+                            "",
+                        ),
+                    );
+                }
+                StreamEvent::Retry {
+                    message,
+                    attempt,
+                    max_attempts,
+                } => send_sub_agent_output(
+                    &parent_tx,
+                    &agent_id,
+                    &agent_role,
+                    &agent_label,
+                    sub_agent_stream_message(
+                        format!("agent:{agent_id}:retry:{}", scru128::new()),
+                        MessageRole::System,
+                        format!("LLM 请求重试中（{attempt}/{max_attempts}）：{message}"),
+                        "",
+                    ),
+                ),
+                StreamEvent::ApprovalNeeded {
+                    tool_name,
+                    args_summary,
+                    ..
+                } => send_sub_agent_output(
+                    &parent_tx,
+                    &agent_id,
+                    &agent_role,
+                    &agent_label,
+                    sub_agent_stream_message(
+                        format!("agent:{agent_id}:approval:{}", scru128::new()),
+                        MessageRole::System,
+                        format!("等待确认：{tool_name} {args_summary}"),
+                        "",
+                    ),
+                ),
                 StreamEvent::AgentCreated { .. }
                 | StreamEvent::AgentStatusChanged { .. }
                 | StreamEvent::AgentNotification { .. }
@@ -61,6 +254,18 @@ fn spawn_sub_agent_stream_forwarder(
                         content: format!("执行出错：{message}"),
                         level: "error".to_string(),
                     });
+                    send_sub_agent_output(
+                        &parent_tx,
+                        &agent_id,
+                        &agent_role,
+                        &agent_label,
+                        sub_agent_stream_message(
+                            format!("agent:{agent_id}:error:{}", scru128::new()),
+                            MessageRole::System,
+                            format!("执行出错：{message}"),
+                            "",
+                        ),
+                    );
                 }
                 _ => {}
             }
@@ -364,7 +569,6 @@ impl ReactEngine {
             );
 
             // 执行工具
-            let mut used_team_tool = false;
             for call in executable_calls {
                 match drain_pending_commands_async(session, &mut loop_context, stream_tx, cmd_rx) {
                     PendingCommandEffect::Terminate => return accumulated_usage,
@@ -380,7 +584,6 @@ impl ReactEngine {
 
                 // 团队协作工具拦截
                 if crate::agent_team::lifecycle::is_team_tool(&call.name) {
-                    used_team_tool = true;
                     let args_summary = format_call_args_summary(call);
                     let _ = stream_tx.send(StreamEvent::ToolStart {
                         name: call.name.clone(),
@@ -783,7 +986,7 @@ impl ReactEngine {
                 continue 'react_loop;
             }
 
-            if used_team_tool || sub_result.ran {
+            if sub_result.ran {
                 session.persist_to_disk();
                 let _ = stream_tx.send(StreamEvent::Done {
                     usage: Some(accumulated_usage.clone()),
@@ -949,6 +1152,7 @@ impl ReactEngine {
                 let (child_stream_tx, child_stream_rx) = std::sync::mpsc::channel();
                 let forwarder = spawn_sub_agent_stream_forwarder(
                     id.clone(),
+                    role.clone(),
                     label.clone(),
                     stream_tx_clone,
                     child_stream_rx,
@@ -980,13 +1184,8 @@ impl ReactEngine {
         let results = futures_util::future::join_all(futures).await;
 
         // 处理结果
-        for (agent_id, agent_label, agent_role, child_session, output_messages, usage) in results {
-            let _ = stream_tx.send(StreamEvent::AgentOutput {
-                agent_id: agent_id.clone(),
-                agent_role: agent_role.clone(),
-                agent_label: agent_label.clone(),
-                messages: output_messages,
-            });
+        for (agent_id, agent_label, _agent_role, child_session, _output_messages, usage) in results
+        {
             // 检查 Sub Agent 是否有错误输出
             let has_error = child_session
                 .messages
@@ -1026,8 +1225,8 @@ impl ReactEngine {
                     .join("\n");
 
                 if !summary.is_empty() {
-                    let brief = if summary.len() > 500 {
-                        format!("{}...", &summary[..500])
+                    let brief = if summary.chars().count() > 500 {
+                        format!("{}...", summary.chars().take(500).collect::<String>())
                     } else {
                         summary
                     };
@@ -1057,8 +1256,8 @@ impl ReactEngine {
                 for path in team.file_locks.release_all(&agent_id) {
                     let _ = stream_tx.send(StreamEvent::FileLockChanged {
                         path,
-                        holder_agent_id: None,
-                        holder_agent_label: None,
+                        holder_agent_id: Some(agent_id.clone()),
+                        holder_agent_label: Some(agent_label.clone()),
                         action: "unlocked".to_string(),
                     });
                 }

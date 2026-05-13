@@ -86,6 +86,11 @@ impl FileLockManager {
         }
     }
 
+    /// 获取指定文件当前锁持有者。
+    pub fn holder(&self, path: &PathBuf) -> Option<&str> {
+        self.locks.get(path).map(|lock| lock.holder.as_str())
+    }
+
     /// 检查文件是否被其他 Agent 锁定，返回持有者 ID（已超时的锁视为未锁定）
     pub fn is_locked_by_other(
         &self,

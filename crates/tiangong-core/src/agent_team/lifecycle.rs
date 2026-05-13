@@ -221,8 +221,8 @@ pub fn execute_dismiss_agent(
     for path in team.file_locks.release_all(&agent_id) {
         let _ = stream_tx.send(StreamEvent::FileLockChanged {
             path,
-            holder_agent_id: None,
-            holder_agent_label: None,
+            holder_agent_id: Some(agent_id.clone()),
+            holder_agent_label: Some(label.clone()),
             action: "unlocked".to_string(),
         });
     }
@@ -610,6 +610,12 @@ pub fn execute_unlock_file(
     }
 
     let path_buf = PathBuf::from(&path);
+    let holder_agent_id = team.file_locks.holder(&path_buf).map(str::to_string);
+    let holder_agent_label = holder_agent_id.as_deref().and_then(|holder| {
+        team.registry
+            .get(holder)
+            .map(|descriptor| descriptor.label.clone())
+    });
 
     let result = if current_agent_id == "main" {
         team.file_locks.force_unlock(&path_buf);
@@ -622,8 +628,8 @@ pub fn execute_unlock_file(
         Ok(()) => {
             let _ = stream_tx.send(StreamEvent::FileLockChanged {
                 path: path.clone(),
-                holder_agent_id: None,
-                holder_agent_label: None,
+                holder_agent_id,
+                holder_agent_label,
                 action: "unlocked".to_string(),
             });
             ToolResult {
@@ -1081,9 +1087,9 @@ mod tests {
             event,
             StreamEvent::FileLockChanged {
                 action,
-                holder_agent_id: None,
+                holder_agent_id: Some(holder),
                 ..
-            } if action == "unlocked"
+            } if action == "unlocked" && holder == dev_id
         )));
     }
 
