@@ -3,7 +3,7 @@ import { useStore } from '@/store/useStore';
 import { api } from '@/api/tauri';
 import { AppSidebar } from '@/components/AppSidebar';
 import { SidebarProvider } from '@/components/ui/sidebar';
-import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components/LazyComponents';
+import { LazyMessageList, LazyMessageInput, LazyStatusPanel, LazyAgentPanel } from '@/components/LazyComponents';
 import { ensureDesktopNotificationPermission } from '@/utils/desktopNotification';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 
@@ -72,6 +72,9 @@ export function MainApp() {
 
           {/* 主内容区 */}
           <main className="flex flex-1 flex-col min-w-0 bg-background">
+            {/* Agent 团队面板 */}
+            <LazyAgentPanel />
+
             {/* 消息列表 */}
             <div className="flex-1 overflow-hidden">
               <LazyMessageList />

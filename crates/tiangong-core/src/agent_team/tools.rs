@@ -2,8 +2,12 @@ use crate::model::ToolSpec;
 
 /// 团队工具最大 Agent 数量
 pub const MAX_AGENTS: usize = 8;
+/// 同时运行的 Sub Agent 数量上限
+pub const MAX_CONCURRENT_SUB_AGENTS: usize = 4;
 /// Sub Agent 最大执行轮次
 pub const SUB_AGENT_MAX_ROUNDS: usize = 10;
+/// Sub Agent 共享的 token 总预算（所有 Sub Agent 累计不超过此值）
+pub const SUB_AGENT_TOTAL_TOKEN_BUDGET: usize = 200_000;
 
 /// 注册所有团队协作工具
 pub fn inject_agent_team_tools(tools: &mut Vec<ToolSpec>) {

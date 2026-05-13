@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Sender, Sender as StdSender};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -285,6 +285,7 @@ async fn worker_loop_async(
     let mut engine: Option<RuntimeEngine> = None;
     let mut tools: Vec<ToolSpec> = Vec::new();
     let mut mcp_targets: HashMap<String, McpFunctionTarget> = HashMap::new();
+    let team_context = Arc::new(Mutex::new(crate::agent_team::lifecycle::TeamContext::new()));
     // turn 计数器：每 10 个 turn 触发一次 Meta 反刍（归档低活跃节点）
     let mut turn_count: u32 = 0;
 
@@ -403,6 +404,7 @@ async fn worker_loop_async(
                     &stream_tx,
                     &mut cmd_rx,
                     memory.handle.as_ref(),
+                    team_context.clone(),
                 )
                 .await;
 
@@ -496,13 +498,15 @@ async fn execute_turn_async(
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     memory_handle: Option<&tiangong_memory::MemoryHandle>,
+    team_context: Arc<Mutex<crate::agent_team::lifecycle::TeamContext>>,
 ) {
-    let react = crate::react::engine::ReactEngine::new(
+    let mut react = crate::react::engine::ReactEngine::new(
         engine.clone(),
         tools.to_vec(),
         mcp_targets.clone(),
         MAX_ROUNDS,
-    );
+    )
+    .with_shared_team(team_context, "main".to_string());
     react
         .execute_turn(session, user_input, stream_tx, cmd_rx, memory_handle)
         .await;

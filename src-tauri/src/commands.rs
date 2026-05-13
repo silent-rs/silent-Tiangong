@@ -872,6 +872,60 @@ fn start_stream_consumer(
                                 );
                             }
                         }
+                        StreamEvent::AgentCreated {
+                            ref agent_id,
+                            ref role,
+                            ref label,
+                            ref lifecycle,
+                        } => {
+                            session.append_message(
+                                tiangong_core::session::MessageRole::System,
+                                format!("[Agent] {label} ({role}) 已加入团队 [{lifecycle}] id={agent_id}"),
+                            );
+                        }
+                        StreamEvent::AgentStatusChanged {
+                            ref agent_id,
+                            ref label,
+                            ref status,
+                        } => {
+                            session.append_message(
+                                tiangong_core::session::MessageRole::System,
+                                format!("[Agent] {label} 状态变更: {status} id={agent_id}"),
+                            );
+                        }
+                        StreamEvent::AgentNotification {
+                            ref agent_label,
+                            ref content,
+                            ref level,
+                            ..
+                        } => {
+                            session.append_message(
+                                tiangong_core::session::MessageRole::System,
+                                format!("[Agent 通知] [{level}] {agent_label}: {content}"),
+                            );
+                        }
+                        StreamEvent::AgentMessage {
+                            ref from_agent_label,
+                            ref to_agent_label,
+                            ref content,
+                            ..
+                        } => {
+                            session.append_message(
+                                tiangong_core::session::MessageRole::System,
+                                format!("[Agent 消息] {from_agent_label} → {to_agent_label}: {content}"),
+                            );
+                        }
+                        StreamEvent::FileLockChanged {
+                            ref path,
+                            ref holder_agent_label,
+                            ref action,
+                            ..
+                        } => {
+                            session.append_message(
+                                tiangong_core::session::MessageRole::System,
+                                format!("[文件锁] {path} {action} by {}", holder_agent_label.as_deref().unwrap_or("未知")),
+                            );
+                        }
                         _ => {}
                     }
                 }
@@ -972,6 +1026,26 @@ fn start_stream_consumer(
                             core_state.store.runtime.run.summary =
                                 "记忆检索完成，无相关记忆".to_string();
                         }
+                    }
+                    StreamEvent::AgentCreated { ref label, .. } => {
+                        core_state.store.runtime.run.summary =
+                            format!("Agent {label} 已加入团队");
+                    }
+                    StreamEvent::AgentStatusChanged { ref label, ref status, .. } => {
+                        core_state.store.runtime.run.summary =
+                            format!("Agent {label}: {status}");
+                    }
+                    StreamEvent::AgentNotification { ref agent_label, .. } => {
+                        core_state.store.runtime.run.summary =
+                            format!("Agent {agent_label} 发送了通知");
+                    }
+                    StreamEvent::AgentMessage { ref from_agent_label, ref to_agent_label, .. } => {
+                        core_state.store.runtime.run.summary =
+                            format!("{from_agent_label} → {to_agent_label}");
+                    }
+                    StreamEvent::FileLockChanged { ref path, ref action, ref holder_agent_label, .. } => {
+                        core_state.store.runtime.run.summary =
+                            format!("文件锁 {action}: {path} ({})", holder_agent_label.as_deref().unwrap_or("未知"));
                     }
                     _ => {}
                 }

@@ -295,6 +295,7 @@ function WorkerCardView({ group, isActive, MarkdownComponents }: {
               streamingReasoningContent=""
               MarkdownComponents={MarkdownComponents}
               hasTts={false}
+              selectedAgentTab={null}
             />
           )}
           {assistantMsgs.map((msg) => (
@@ -337,6 +338,7 @@ export function MessageList() {
     streamingMessageId,
     streamingContent,
     streamingReasoningContent,
+    selectedAgentTab,
     voiceMessages,
     approvalRequestId,
     editAndResend,
@@ -612,6 +614,7 @@ export function MessageList() {
                       streamingReasoningContent={streamingReasoningContent}
                       MarkdownComponents={MarkdownComponents}
                       hasTts={hasTts}
+                      selectedAgentTab={selectedAgentTab}
                     />
                   </div>
                 );
@@ -953,6 +956,32 @@ interface AgentTurnProps {
   streamingReasoningContent: string;
   MarkdownComponents: any;
   hasTts: boolean;
+  selectedAgentTab: string | null;
+}
+
+/** 从 agent_event 内容中提取相关 agent role */
+function extractAgentRoles(content: string, agents: { role: string; label: string }[]): string[] {
+  const roles = new Set<string>();
+  const addByLabel = (label?: string) => {
+    if (!label || label === "User") return;
+    const agent = agents.find((item) => item.label === label);
+    if (agent) roles.add(agent.role);
+  };
+  const msgMatch = content.match(/^\[Agent 消息\] (.+?) → (.+?):/);
+  if (msgMatch) {
+    addByLabel(msgMatch[1]);
+    addByLabel(msgMatch[2]);
+  }
+  const notificationMatch = content.match(/^\[Agent 通知\] \[[^\]]+\] (.+?):/);
+  if (notificationMatch) addByLabel(notificationMatch[1]);
+  // [Agent] {label} ({role}) 已加入团队
+  const createMatch = content.match(/^\[Agent\] .+? \((.+?)\)/);
+  if (createMatch) roles.add(createMatch[1]);
+  const statusMatch = content.match(/^\[Agent\] (.+?) 状态变更:/);
+  if (statusMatch) addByLabel(statusMatch[1]);
+  const lockMatch = content.match(/^\[文件锁\] .+ by (.+)$/);
+  if (lockMatch) addByLabel(lockMatch[1]);
+  return Array.from(roles);
 }
 
 function AgentTurnView({
@@ -962,9 +991,11 @@ function AgentTurnView({
   streamingReasoningContent: _streamingReasoningContent,
   MarkdownComponents,
   hasTts,
+  selectedAgentTab,
 }: AgentTurnProps) {
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
   const [expandedToolGroups, setExpandedToolGroups] = useState<Set<string>>(new Set());
+  const agents = useStore((state) => state.agents);
 
   const toggleItem = (id: string) => {
     setExpandedItems((prev) => {
@@ -990,6 +1021,7 @@ function AgentTurnView({
     | { type: "assistant"; msg: MessageItem; isStreaming: boolean }
     | { type: "error_system"; msg: MessageItem }
     | { type: "retry_system"; msg: MessageItem }
+    | { type: "agent_event"; category: string; content: string; agentRoles: string[] }
     | { type: "other_system"; msg: MessageItem };
 
   const fragments: Fragment[] = [];
@@ -1115,6 +1147,18 @@ function AgentTurnView({
     } else if (msg.role === "system" && msg.content.startsWith("[重试]")) {
       flushTools();
       fragments.push({ type: "retry_system", msg });
+    } else if (msg.role === "system" && (
+      msg.content.startsWith("[Agent]")
+      || msg.content.startsWith("[Agent 通知]")
+      || msg.content.startsWith("[Agent 消息]")
+      || msg.content.startsWith("[文件锁]")
+    )) {
+      flushTools();
+      let category = "info";
+      if (msg.content.startsWith("[Agent 通知]")) category = "notification";
+      else if (msg.content.startsWith("[Agent 消息]")) category = "message";
+      else if (msg.content.startsWith("[文件锁]")) category = "lock";
+      fragments.push({ type: "agent_event", category, content: msg.content, agentRoles: extractAgentRoles(msg.content, agents) });
     } else if (msg.role === "system") {
       flushTools();
       fragments.push({ type: "other_system", msg });
@@ -1161,6 +1205,10 @@ function AgentTurnView({
   return (
     <div className="space-y-1.5">
       {mergedFragments.map((frag, i) => {
+        // Agent Tab 过滤：选中特定 Agent 时，隐藏不相关的 agent_event
+        if (selectedAgentTab && frag.type === "agent_event" && frag.agentRoles.length > 0 && !frag.agentRoles.includes(selectedAgentTab)) {
+          return null;
+        }
         if (frag.type === "thinking") {
           return (
             <div key={`think-${i}`} title={formatMessageTime(frag.time)}>
@@ -1265,6 +1313,19 @@ function AgentTurnView({
             </div>
           );
         }
+        if (frag.type === "agent_event") {
+          const colorMap: Record<string, string> = {
+            notification: "border-blue-500/30 bg-blue-500/5",
+            message: "border-green-500/30 bg-green-500/5",
+            lock: "border-yellow-500/30 bg-yellow-500/5",
+            info: "border-border bg-muted/30",
+          };
+          return (
+            <div key={`agent-${i}`} className={`text-xs text-muted-foreground border rounded px-2 py-1 my-0.5 ${colorMap[frag.category] || colorMap.info}`}>
+              {frag.content}
+            </div>
+          );
+        }
         if (frag.type === "other_system") {
           return (
             <p key={frag.msg.id} className="text-xs text-muted-foreground">
@@ -1295,6 +1356,7 @@ const AgentTurn = memo(AgentTurnView, (prev, next) => {
     prev.hasTts !== next.hasTts
     || prev.MarkdownComponents !== next.MarkdownComponents
     || !sameMessageRefs(prev.messages, next.messages)
+    || prev.selectedAgentTab !== next.selectedAgentTab
   ) {
     return false;
   }

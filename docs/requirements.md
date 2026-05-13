@@ -128,6 +128,15 @@
 - Workspace Index 必须支持最小文件树索引、Rust `mod/fn/struct/enum/trait` 符号索引、按 workspace 隔离查询和单文件增量更新。
 - Tool 化回忆在返回长期记忆时应能补充相关 workspace 文件和符号线索；没有历史记忆但存在相关文件线索时，也应返回 workspace index 结果。
 
+#### 多智能体协作
+- 主 Agent 必须能够在会话中动态创建、解散 Sub Agent，并为每个 Sub Agent 维护独立角色、状态、工具范围和会话上下文。
+- 持久 Sub Agent 必须在当前会话内跨用户消息保留，临时 Sub Agent 必须在单次任务完成后自动释放。
+- Sub Agent 之间必须支持定向消息和广播消息，用户也必须能够通过 `@role`、多角色 `@role @role` 和 `@all` 将消息直接路由给存活 Agent。
+- Sub Agent 必须能够通过通知事件直接向用户推送进度、阻塞、问题和错误信息，前端应能按 Agent 查看相关事件。
+- 多 Agent 共享同一工作区时，Sub Agent 编辑文件前必须先获取文件锁；未持有锁时不得执行写入或替换，主 Agent 保留最高释放权限。
+- 文件锁必须支持超时释放、Agent 销毁时释放和前端锁状态变更事件。
+- 多 Agent 并发执行必须有数量和 token 预算上限，单个 Sub Agent 失败不得导致其他 Agent 或主会话崩溃。
+
 #### 工作空间与文件操作边界
 - Desktop 模式必须支持在界面中设置当前会话工作空间。
 - CLI / Server 模式默认使用进程当前运行目录作为当前工作空间。

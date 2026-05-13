@@ -2,6 +2,64 @@ import { create } from 'zustand';
 import { api, Session, Message, RunSnapshot, McpServer, Skill, TaskPlan, MediaAsset } from '../api/tauri';
 import { notifyBackgroundSessionCompleted } from '../utils/desktopNotification';
 
+// ---------------------------------------------------------------------------
+// Agent 信息（从系统消息解析）
+// ---------------------------------------------------------------------------
+
+export interface AgentInfo {
+  role: string;
+  label: string;
+  status: 'idle' | 'running' | 'waiting_for_user' | 'waiting_for_lock' | 'terminated' | 'error';
+}
+
+/** 从系统消息中解析 Agent 列表 */
+export function parseAgentsFromMessages(messages: Message[]): AgentInfo[] {
+  const agents = new Map<string, AgentInfo>();
+  for (const msg of messages) {
+    if (msg.role !== 'system') continue;
+    // [Agent] {label} ({role}) 已加入团队
+    const createMatch = msg.content.match(/^\[Agent\] (.+?) \((.+?)\) 已加入团队/);
+    if (createMatch) {
+      const [, label, role] = createMatch;
+      agents.set(role, { role, label, status: 'running' });
+      continue;
+    }
+    // [Agent] {label} 状态变更: {status}
+    const statusMatch = msg.content.match(/^\[Agent\] .+? 状态变更: (\w+)/);
+    if (statusMatch) {
+      const status = statusMatch[1];
+      if (status === 'terminated') {
+        const labelMatch = msg.content.match(/^\[Agent\] (.+?) 状态变更/);
+        if (labelMatch) {
+          for (const [, info] of agents) {
+            if (info.label === labelMatch[1]) {
+              info.status = 'terminated';
+              break;
+            }
+          }
+        }
+      } else if (
+        status === 'idle'
+        || status === 'running'
+        || status === 'waiting_for_user'
+        || status === 'waiting_for_lock'
+        || status === 'error'
+      ) {
+        const labelMatch = msg.content.match(/^\[Agent\] (.+?) 状态变更/);
+        if (labelMatch) {
+          for (const [, info] of agents) {
+            if (info.label === labelMatch[1]) {
+              info.status = status;
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+  return Array.from(agents.values());
+}
+
 function sameJsonValue(left: unknown, right: unknown): boolean {
   if (left === right) return true;
   if (left == null || right == null) return left == right;
@@ -77,6 +135,10 @@ interface AppState {
   addVoiceMessage: (msgKey: string, audioPath: string, duration?: number) => void;
   toggleVoiceText: (msgKey: string) => void;
 
+  // Agent 团队
+  agents: AgentInfo[];
+  selectedAgentTab: string | null; // null = 全部, role = 指定 Agent
+
   // 加载状态
   isLoadingSessions: boolean;
   isSending: boolean;
@@ -98,6 +160,8 @@ interface AppState {
 
   loadMcpServers: () => Promise<void>;
   loadSkills: () => Promise<void>;
+
+  setSelectedAgentTab: (tab: string | null) => void;
 
   // 内部方法
   updateFromSnapshot: (snapshot: RunSnapshot) => void;
@@ -153,6 +217,8 @@ export const useStore = create<AppState>((set, get) => ({
   },
   isLoadingSessions: false,
   isSending: false,
+  agents: [],
+  selectedAgentTab: null,
 
   // 加载会话列表
   loadSessions: async () => {
@@ -186,6 +252,8 @@ export const useStore = create<AppState>((set, get) => ({
       streamingContent: '',
       streamingReasoningContent: '',
       sessionCwd: workspaceDir,
+      agents: [],
+      selectedAgentTab: null,
     });
   },
 
@@ -393,6 +461,10 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
+  setSelectedAgentTab: (tab: string | null) => {
+    set({ selectedAgentTab: tab });
+  },
+
   // 从快照更新状态
   updateFromSnapshot: (snapshot: RunSnapshot) => {
     const { activeSessionId, isDraft, sessionRunStatuses: prevStatuses } = get();
@@ -506,6 +578,7 @@ export const useStore = create<AppState>((set, get) => ({
       streamingMessageId: streamingId,
       streamingContent,
       streamingReasoningContent,
+      agents: parseAgentsFromMessages(newMessages),
     });
 
     // 状态变为 idle 时刷新会话列表（更新 message_count、标题等）

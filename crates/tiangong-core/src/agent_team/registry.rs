@@ -2,12 +2,15 @@ use std::collections::HashMap;
 
 use crate::agent_team::descriptor::{AgentDescriptor, AgentStatus};
 use crate::agent_team::message_bus::AgentMessage;
+use crate::session::Session;
 
 /// 会话级 Agent 注册表
 pub struct AgentRegistry {
     agents: HashMap<String, AgentDescriptor>,
     /// agent_id → 收件箱
     inboxes: HashMap<String, Vec<AgentMessage>>,
+    /// agent_id → 独立 Session
+    sessions: HashMap<String, Session>,
 }
 
 impl Default for AgentRegistry {
@@ -21,19 +24,28 @@ impl AgentRegistry {
         Self {
             agents: HashMap::new(),
             inboxes: HashMap::new(),
+            sessions: HashMap::new(),
         }
     }
 
     /// 注册 Agent
     pub fn register(&mut self, descriptor: AgentDescriptor) {
+        let session = Session::new(&descriptor.label);
+        self.register_with_session(descriptor, session);
+    }
+
+    /// 注册 Agent 及其独立会话
+    pub fn register_with_session(&mut self, descriptor: AgentDescriptor, session: Session) {
         let agent_id = descriptor.agent_id.clone();
         self.inboxes.insert(agent_id.clone(), Vec::new());
+        self.sessions.insert(agent_id.clone(), session);
         self.agents.insert(agent_id, descriptor);
     }
 
     /// 注销 Agent
     pub fn unregister(&mut self, agent_id: &str) -> Option<AgentDescriptor> {
         self.inboxes.remove(agent_id);
+        self.sessions.remove(agent_id);
         let mut descriptor = self.agents.remove(agent_id)?;
         descriptor.status = AgentStatus::Terminated;
         Some(descriptor)
@@ -47,6 +59,23 @@ impl AgentRegistry {
     /// 获取 Agent 描述符
     pub fn get(&self, agent_id: &str) -> Option<&AgentDescriptor> {
         self.agents.get(agent_id)
+    }
+
+    /// 获取 Agent 独立会话
+    pub fn get_session(&self, agent_id: &str) -> Option<&Session> {
+        self.sessions.get(agent_id)
+    }
+
+    /// 获取 Agent 独立会话（可变）
+    pub fn get_session_mut(&mut self, agent_id: &str) -> Option<&mut Session> {
+        self.sessions.get_mut(agent_id)
+    }
+
+    /// 替换 Agent 独立会话
+    pub fn set_session(&mut self, agent_id: &str, session: Session) {
+        if self.agents.contains_key(agent_id) {
+            self.sessions.insert(agent_id.to_string(), session);
+        }
     }
 
     /// 更新 Agent 状态

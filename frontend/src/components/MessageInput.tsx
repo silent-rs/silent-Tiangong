@@ -2,7 +2,7 @@ import { useState, KeyboardEvent, ClipboardEvent, DragEvent, useEffect, useRef, 
 import { useStore } from '@/store/useStore';
 import { Textarea } from './ui/textarea';
 import { Button } from './ui/button';
-import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X } from 'lucide-react';
+import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Users } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
@@ -138,6 +138,7 @@ export function MessageInput() {
   const addVoiceMessage = useStore((state) => state.addVoiceMessage);
   const lastDurationMs = useStore((state) => state.lastDurationMs);
   const lastUsage = useStore((state) => state.lastUsage);
+  const agents = useStore((state) => state.agents);
   const [isComposing, setIsComposing] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const inputAreaRef = useRef<HTMLDivElement>(null);
@@ -223,13 +224,33 @@ export function MessageInput() {
     }
   }, []);
 
-  const filteredCandidates = mentionCandidates.filter(c => {
-    if (!mentionFilter) return true;
+  const filteredCandidates = (() => {
+    // 合并 API 候选和 Agent 候选
+    const aliveAgents = agents.filter(a => a.status !== 'terminated');
+    const agentCandidates: MentionCandidate[] = aliveAgents.map(a => ({
+      value: `@${a.role}`,
+      label: a.label,
+      kind: 'agent',
+      hint: `Agent · ${a.status === 'running' ? '执行中' : a.status === 'idle' ? '空闲' : a.status === 'waiting_for_lock' ? '等待文件锁' : a.status === 'waiting_for_user' ? '等待用户' : '错误'}`,
+    }));
+    // 当存在活跃 Agent 时添加 @all 广播选项
+    if (aliveAgents.length > 0) {
+      agentCandidates.push({
+        value: '@all',
+        label: 'All',
+        kind: 'agent',
+        hint: `广播给全部 ${aliveAgents.length} 个 Agent`,
+      });
+    }
+    const all = [...agentCandidates, ...mentionCandidates];
+    if (!mentionFilter) return all;
     const lower = mentionFilter.toLowerCase();
-    return c.label.toLowerCase().includes(lower)
+    return all.filter(c =>
+      c.label.toLowerCase().includes(lower)
       || c.value.toLowerCase().includes(lower)
-      || c.hint.toLowerCase().includes(lower);
-  });
+      || c.hint.toLowerCase().includes(lower)
+    );
+  })();
 
   const handleInputChange = (value: string) => {
     setInputContent(value);
@@ -807,6 +828,8 @@ export function MessageInput() {
                     >
                       {c.kind === 'skill' ? (
                         <Wrench className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                      ) : c.kind === 'agent' ? (
+                        <Users className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
                       ) : (
                         <Cpu className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
                       )}
@@ -861,7 +884,9 @@ export function MessageInput() {
                 onBlur={() => setTimeout(() => setMentionOpen(false), 150)}
                 placeholder={
                   isIdle
-                    ? '输入消息... (⌘+Enter 发送，@ 引用 Skill/MCP)'
+                    ? agents.length > 0
+                      ? '输入消息... (⌘+Enter 发送，@ 引用 Agent/Skill/MCP)'
+                      : '输入消息... (⌘+Enter 发送，@ 引用 Skill/MCP)'
                     : '追加指示... (⌘+Enter 发送)'
                 }
                 className="min-h-[60px] max-h-[200px] resize-none pr-32 bg-muted/50 focus-visible:ring-ring"

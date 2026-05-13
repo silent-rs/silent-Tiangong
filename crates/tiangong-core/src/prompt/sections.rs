@@ -85,6 +85,13 @@ fn build_dynamic_sections(
         });
     }
 
+    // 团队协作工具指引
+    sections.push(PromptSection {
+        name: "agent_team_tools".into(),
+        content: build_agent_team_section(),
+        cached: true,
+    });
+
     sections
 }
 
@@ -172,6 +179,37 @@ fn session_working_directory(session: &Session) -> String {
 /// 通过 tiangong-memory 的三级 Injection 层（Profile / Workspace / Session）读取注入文件。
 pub fn build_user_context(session_id: &str, workspace_id: Option<&str>) -> Vec<String> {
     tiangong_memory::load_injection_sync(session_id, workspace_id)
+}
+
+/// 团队协作工具使用指引
+fn build_agent_team_section() -> String {
+    "团队协作能力（可选使用）：
+当任务复杂需要分工时，你可以创建团队来协作完成。以下是可用的团队工具：
+
+- create_agent(role, label, system_prompt, lifecycle, tools)：创建一个 Sub Agent
+  - role：角色标识（如 pm、dev、test），用于消息路由
+  - label：显示名称（如「项目经理」「开发者」）
+  - system_prompt：Agent 的专属指令
+  - lifecycle：persistent（持久，跨任务存在）或 temporary（单次任务后销毁）
+  - tools：可选，指定可用工具列表（默认继承你的工具集）
+  - 最多同时 8 个 Agent
+
+- send_message(to, content)：向指定角色的 Agent 发送消息，Agent 会自动执行任务
+- broadcast_message(content, exclude)：向所有 Agent 广播消息
+- notify_user(content, level)：向用户推送通知（info/warning/error）
+- dismiss_agent(role)：解散指定角色的 Agent，释放所有资源
+
+- lock_file(path) / unlock_file(path)：文件编辑锁，防止多 Agent 同时编辑同一文件
+  - 编辑文件前建议先获取锁，编辑完成后释放锁
+
+工作模式：
+1. 你作为主 Agent，负责理解用户需求、规划任务、分配工作
+2. 通过 create_agent 创建需要的角色，通过 send_message 分配具体任务
+3. Sub Agent 执行完毕后结果会自动回传给你
+4. 你汇总所有 Sub Agent 的结果后回复用户
+
+注意：简单任务不需要创建团队，直接使用工具完成即可。仅在任务确实需要并行分工时使用。"
+        .to_string()
 }
 
 #[cfg(test)]
