@@ -11,7 +11,7 @@ use std::time::Instant;
 use anyhow::Result;
 
 use crate::command::InjectionLevel;
-use crate::llm_metrics::log_memory_llm_call;
+use crate::llm_metrics::{log_memory_llm_call, log_memory_llm_failure};
 use crate::store::MemoryStore;
 use crate::types::{
     Decision, EnhancedTurnResult, Entity, EntityType, Episode, MemoryListQuery, MemoryNode,
@@ -495,7 +495,12 @@ async fn extract_meso_memories(
         .await
         {
             Ok(memories) => return memories,
-            Err(err) => tracing::warn!("MesoRumination LLM 提炼失败，使用规则 fallback: {err}"),
+            Err(err) => log_memory_llm_failure(
+                "meso_rumination",
+                model,
+                &err,
+                "MesoRumination LLM 提炼失败，使用规则 fallback",
+            ),
         }
     }
     extract_meso_memories_fallback(

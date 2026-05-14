@@ -20,12 +20,34 @@ pub(crate) fn log_memory_llm_call(
     tracing::info!(
         target: "tiangong_memory::llm",
         task,
+        provider = %model.protocol.as_str(),
+        configured_provider = %model.source_provider_label(),
         model = %model.model,
-        protocol = ?model.protocol,
+        protocol = %model.protocol.as_str(),
         elapsed_ms = elapsed.as_millis(),
         prompt_tokens,
         completion_tokens,
         total_tokens,
         "Memory LLM 调用完成"
+    );
+}
+
+pub(crate) fn log_memory_llm_failure<E>(
+    task: &str,
+    model: &LlmEndpointConfig,
+    err: &E,
+    message: &'static str,
+) where
+    E: std::fmt::Display + ?Sized,
+{
+    tracing::warn!(
+        target: "tiangong_memory::llm",
+        task,
+        provider = %model.protocol.as_str(),
+        configured_provider = %model.source_provider_label(),
+        model = %model.model,
+        protocol = %model.protocol.as_str(),
+        error = %err,
+        "{message}"
     );
 }

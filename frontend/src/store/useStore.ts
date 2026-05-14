@@ -173,6 +173,8 @@ interface AppState {
   loadSkills: () => Promise<void>;
 
   setSelectedAgentTab: (tab: string | null) => void;
+  beginContextManagement: (summary: string) => void;
+  endContextManagement: () => void;
 
   // 内部方法
   updateFromSnapshot: (snapshot: RunSnapshot) => void;
@@ -501,6 +503,35 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
+  beginContextManagement: (summary: string) => {
+    const { activeSessionId } = get();
+    set((state) => ({
+      runStatus: 'executing',
+      runSummary: summary,
+      streamingMessageId: null,
+      streamingContent: '',
+      streamingReasoningContent: '',
+      sessionRunStatuses: activeSessionId
+        ? { ...state.sessionRunStatuses, [activeSessionId]: 'executing' }
+        : state.sessionRunStatuses,
+    }));
+  },
+
+  endContextManagement: () => {
+    const { activeSessionId, runSummary } = get();
+    set((state) => {
+      const nextStatuses = { ...state.sessionRunStatuses };
+      if (activeSessionId) {
+        delete nextStatuses[activeSessionId];
+      }
+      return {
+        runStatus: 'idle',
+        runSummary: runSummary.includes('上下文') ? runSummary : '',
+        sessionRunStatuses: nextStatuses,
+      };
+    });
+  },
+
   // 从快照更新状态
   updateFromSnapshot: (snapshot: RunSnapshot) => {
     const { activeSessionId, isDraft, sessionRunStatuses: prevStatuses } = get();
@@ -539,6 +570,8 @@ export const useStore = create<AppState>((set, get) => ({
     const snapshotApprovalRequestId = (snapshot as any).approval_request_id
       || (snapshot as any).approvalRequestId
       || null;
+    const isContextManagementSnapshot = (snapshot.summary || '').includes('上下文')
+      || (snapshot.summary || '').includes('正在压缩');
     // 防止取消后被旧快照覆盖
     const effectiveStatus = (
       prevStatus === 'idle'
@@ -546,6 +579,7 @@ export const useStore = create<AppState>((set, get) => ({
       && snapshotStatus !== 'idle'
       && snapshotStatus !== 'waiting_approval'
       && !snapshotApprovalRequestId
+      && !isContextManagementSnapshot
     )
       ? 'idle'
       : snapshotStatus;

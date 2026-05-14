@@ -994,14 +994,20 @@ fn start_stream_consumer(
                                 format!("[文件锁] {path} {action} by {}", holder_agent_label.as_deref().unwrap_or("未知")),
                             );
                         }
+                        StreamEvent::ContextCompressing { .. } => {}
                         StreamEvent::ContextCompressed {
                             ref action,
-                            remaining_messages,
                             ..
                         } => {
+                            let message = match action.as_str() {
+                                "压缩" => "[上下文管理] 上下文已压缩".to_string(),
+                                "清理" => "[上下文管理] 上下文已清理".to_string(),
+                                "无需压缩" => "[上下文管理] 无需压缩上下文".to_string(),
+                                _ => format!("[上下文管理] 上下文{action}"),
+                            };
                             session.append_message(
                                 tiangong_core::session::MessageRole::System,
-                                format!("[上下文管理] {action}（剩余 {remaining_messages} 条消息）"),
+                                message,
                             );
                             let _ = core_state.persist_session_and_app(&sid);
                         }
@@ -1130,6 +1136,15 @@ fn start_stream_consumer(
                         core_state.store.runtime.run.summary =
                             format!("文件锁 {action}: {path} ({})", holder_agent_label.as_deref().unwrap_or("未知"));
                     }
+                    StreamEvent::ContextCompressing { .. } => {
+                        core_state.store.runtime.run.status =
+                            tiangong_core::runtime::RunStatus::Executing;
+                        core_state.store.runtime.run.summary =
+                            "正在压缩早期上下文...".to_string();
+                        core_state.store.runtime.run.last_session_id = Some(sid.clone());
+                        core_state.store.runtime.run.updated_at =
+                            tiangong_core::session::now_text();
+                    }
                     StreamEvent::ContextCompressed { ref action, .. } => {
                         if core_state.has_pending_turn_for(&sid) {
                             core_state.store.runtime.run.summary = format!("上下文{action}");
@@ -1144,9 +1159,14 @@ fn start_stream_consumer(
 
             // emit run_snapshot
             {
-                let is_context_event = matches!(event, StreamEvent::ContextCompressed { .. });
+                let is_context_event = matches!(
+                    &event,
+                    StreamEvent::ContextCompressing { .. } | StreamEvent::ContextCompressed { .. }
+                );
                 let is_exec = if is_done || is_error {
                     false
+                } else if matches!(&event, StreamEvent::ContextCompressing { .. }) {
+                    true
                 } else if is_context_event {
                     app.state::<TiangongApp>()
                         .with_state_read(|s| Ok(s.has_pending_turn_for(&sid)))
@@ -1879,7 +1899,12 @@ pub fn get_mention_candidates(state: State<TiangongApp>) -> Result<Vec<MentionCa
 #[tauri::command]
 pub fn get_run_snapshot(state: State<TiangongApp>) -> Result<RunSnapshotView, String> {
     let active_id = state.with_state_read(|s| Ok(s.active_session_id().to_string()))?;
-    let is_exec = state.with_state_read(|s| Ok(s.has_pending_turn_for(&active_id)))?;
+    let is_exec = state.with_state_read(|s| {
+        let snapshot = s.run_snapshot();
+        Ok(s.has_pending_turn_for(&active_id)
+            || (snapshot.last_session_id.as_deref() == Some(active_id.as_str())
+                && snapshot.status != tiangong_types::RunStatus::Idle))
+    })?;
     state.with_state_read(|core_state| Ok(build_full_snapshot_with_status(core_state, is_exec)))
 }
 

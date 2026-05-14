@@ -21,22 +21,10 @@ interface MentionCandidate {
 
 const SLASH_COMMANDS: MentionCandidate[] = [
   {
-    value: '/compress',
-    label: '/compress',
-    kind: 'command',
-    hint: '压缩早期上下文',
-  },
-  {
     value: '/压缩对话',
     label: '/压缩对话',
     kind: 'command',
     hint: '压缩早期上下文',
-  },
-  {
-    value: '/reset',
-    label: '/reset',
-    kind: 'command',
-    hint: '清理当前上下文',
   },
   {
     value: '/清理对话',
@@ -153,6 +141,8 @@ export function MessageInput() {
   const setInputContent = useStore((state) => state.setInputContent);
   const sendMessage = useStore((state) => state.sendMessage);
   const cancelTurn = useStore((state) => state.cancelTurn);
+  const beginContextManagement = useStore((state) => state.beginContextManagement);
+  const endContextManagement = useStore((state) => state.endContextManagement);
   const runStatus = useStore((state) => state.runStatus);
   const runSummary = useStore((state) => state.runSummary);
   const isDraft = useStore((state) => state.isDraft);
@@ -298,10 +288,15 @@ export function MessageInput() {
     const trimmed = command.trim();
     if (trimmed === '/压缩对话' || trimmed === '/compress') {
       setInputContent('');
+      beginContextManagement('正在压缩早期上下文...');
       try {
         const ok = await api.compressContext();
-        if (!ok) alert('压缩对话没有执行成功，请稍后重试。');
+        if (!ok) {
+          endContextManagement();
+          alert('压缩对话没有执行成功，请稍后重试。');
+        }
       } catch (e) {
+        endContextManagement();
         console.error('压缩对话失败:', e);
         alert(e instanceof Error ? e.message : '压缩对话失败');
       }
@@ -309,17 +304,22 @@ export function MessageInput() {
     }
     if (trimmed === '/清理对话' || trimmed === '/reset') {
       setInputContent('');
+      beginContextManagement('正在清理上下文...');
       try {
         const ok = await api.resetContext();
-        if (!ok) alert('清理对话没有执行成功，请稍后重试。');
+        if (!ok) {
+          endContextManagement();
+          alert('清理对话没有执行成功，请稍后重试。');
+        }
       } catch (e) {
+        endContextManagement();
         console.error('清理对话失败:', e);
         alert(e instanceof Error ? e.message : '清理对话失败');
       }
       return true;
     }
     return false;
-  }, [setInputContent]);
+  }, [beginContextManagement, endContextManagement, setInputContent]);
 
   const handleInputChange = (value: string) => {
     setInputContent(value);
@@ -906,13 +906,13 @@ export function MessageInput() {
               {mentionOpen && filteredCandidates.length > 0 && (
                 <div
                   ref={mentionRef}
-                  className="absolute bottom-full left-0 mb-1 w-72 max-h-48 overflow-y-auto rounded-md border bg-popover shadow-lg z-50"
+                  className="mention-completion-menu absolute bottom-full left-0 z-50 mb-1 max-h-72 w-[min(36rem,calc(100vw-2rem))] overflow-y-auto overflow-x-hidden rounded-md border bg-popover shadow-lg"
                 >
                   {filteredCandidates.map((c, i) => (
                     <button
                       key={c.value}
                       ref={(el) => { candidateRefs.current[i] = el; }}
-                      className={`w-full flex items-center gap-2 px-3 py-1.5 text-sm text-left hover:bg-accent transition-colors ${
+                      className={`flex w-full items-start gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-accent ${
                         i === mentionIndex ? 'bg-accent' : ''
                       }`}
                       onMouseDown={(e) => { e.preventDefault(); selectCandidate(c); }}
@@ -927,9 +927,18 @@ export function MessageInput() {
                       ) : (
                         <Cpu className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
                       )}
-                      <div className="flex-1 min-w-0">
-                        <span className="font-medium">{c.label}</span>
-                        <span className="ml-2 text-muted-foreground text-xs truncate">{c.hint}</span>
+                      <div className="min-w-0 flex-1 overflow-hidden">
+                        <div className="flex min-w-0 items-baseline gap-2">
+                          <span className="truncate font-medium">{c.label}</span>
+                          {c.kind === 'skill' && c.value.includes('@') && (
+                            <span className="shrink-0 text-xs text-muted-foreground">
+                              {c.value.replace(/^@/, '')}
+                            </span>
+                          )}
+                        </div>
+                        <span className="mt-0.5 block whitespace-normal break-words text-xs leading-5 text-muted-foreground">
+                          {c.hint}
+                        </span>
                       </div>
                     </button>
                   ))}

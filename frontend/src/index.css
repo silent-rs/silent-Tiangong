@@ -151,6 +151,35 @@
   .prose pre code {
     @apply bg-transparent p-0;
   }
+
+  .prose code.copyable-code-block__code {
+    @apply bg-transparent p-0 rounded-none;
+  }
+
+  .prose code.copyable-code-block__code span {
+    background: transparent !important;
+  }
+
+  .mention-completion-menu {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--muted-foreground) / 0.35) transparent;
+  }
+
+  .mention-completion-menu::-webkit-scrollbar {
+    width: 8px;
+    height: 0;
+  }
+
+  .mention-completion-menu::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .mention-completion-menu::-webkit-scrollbar-thumb {
+    background: hsl(var(--muted-foreground) / 0.35);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
 }
 
 /* 动画 */

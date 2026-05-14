@@ -182,6 +182,7 @@ pub struct ModelsConfig {
 /// 解析后的完整模型配置（Provider + Model 合并）
 #[derive(Debug, Clone)]
 pub struct ResolvedModel {
+    pub provider: String,
     pub base_url: String,
     pub api_key: String, // 已解析环境变量
     pub timeout_ms: u64,
@@ -402,6 +403,7 @@ impl ModelsConfig {
         let provider = self.providers.get(&model_entry.provider)?;
 
         Some(ResolvedModel {
+            provider: model_entry.provider.clone(),
             base_url: provider.base_url.clone(),
             api_key: Self::resolve_api_key(&provider.api_key),
             timeout_ms: provider.timeout_ms,

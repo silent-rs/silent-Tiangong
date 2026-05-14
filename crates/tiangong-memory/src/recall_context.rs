@@ -5,7 +5,7 @@
 
 use std::time::Instant;
 
-use crate::llm_metrics::log_memory_llm_call;
+use crate::llm_metrics::{log_memory_llm_call, log_memory_llm_failure};
 use crate::recall_anchor::extract_recall_anchors;
 use crate::store::MemoryStore;
 use crate::types::{
@@ -190,7 +190,12 @@ pub(crate) async fn recall_context(
         Some(config) => synthesize_with_model(config, &request, &hits, &expanded)
             .await
             .unwrap_or_else(|err| {
-                tracing::warn!("内存 recall 整理失败，使用规则 fallback: {err}");
+                log_memory_llm_failure(
+                    "recall_synthesis",
+                    config,
+                    &err,
+                    "内存 recall 整理失败，使用规则 fallback",
+                );
                 (fallback_synthesis(&request, &hits, &expanded), None)
             }),
         None => (fallback_synthesis(&request, &hits, &expanded), None),
@@ -335,7 +340,12 @@ async fn evaluate_sufficiency_with_llm(
             })
         }
         Err(err) => {
-            tracing::warn!("Memory 充分性评估 LLM 调用失败，使用 fallback: {err}");
+            log_memory_llm_failure(
+                "sufficiency_eval",
+                config,
+                &err,
+                "Memory 充分性评估 LLM 调用失败，使用 fallback",
+            );
             evaluate_sufficiency_fallback(context, rough_hits)
         }
     }
@@ -497,7 +507,12 @@ async fn decide_deep_recall(
             (decision, usage)
         }
         Err(err) => {
-            tracing::warn!("Memory deep recall 裁决失败，跳过深挖: {err}");
+            log_memory_llm_failure(
+                "deep_recall_decision",
+                config,
+                &err,
+                "Memory deep recall 裁决失败，跳过深挖",
+            );
             (DeepRecallDecision::default(), None)
         }
     }
@@ -1295,7 +1310,12 @@ pub(crate) async fn plan_runtime_recall(
             parse_query_plan(&text)
         }
         Err(err) => {
-            tracing::warn!("运行时查询规划 LLM 调用失败: {err}");
+            log_memory_llm_failure(
+                "runtime_query_plan",
+                config,
+                &err,
+                "运行时查询规划 LLM 调用失败",
+            );
             None
         }
     }
