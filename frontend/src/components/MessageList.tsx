@@ -250,6 +250,7 @@ export function MessageList() {
   }, []);
 
   const isThinking = runStatus !== "idle";
+  const isContextCompressing = runSummary.includes("正在压缩");
 
   const handleStartEdit = (messageId: string, text: string) => {
     if (runStatus !== "idle") return;
@@ -648,9 +649,12 @@ export function MessageList() {
             </div>
           )}
 
-          {/* 思考中/执行中指示器（仅在助手尚未回复时显示） */}
-          {isThinking && runStatus !== "waiting_approval" && !streamingMessageId && !streamingContent &&
-           !(messages.length > 0 && messages[messages.length - 1].role === "assistant") && (
+          {/* 思考中/执行中指示器；上下文压缩需要在对话流中即时可见 */}
+          {isThinking && runStatus !== "waiting_approval" && (
+            isContextCompressing ||
+            (!streamingMessageId && !streamingContent &&
+              !(messages.length > 0 && messages[messages.length - 1].role === "assistant"))
+          ) && (
             <div className="flex justify-start">
               <div className="text-foreground">
                 <div className="flex items-center gap-2">
@@ -1070,6 +1074,9 @@ function AgentTurnView({
       flushTools();
       fragments.push({ type: "retry_system", msg });
     } else if (msg.role === "system" && msg.content.startsWith("[上下文管理]")) {
+      if (msg.content.includes("正在压缩")) {
+        continue;
+      }
       flushTools();
       fragments.push({ type: "context_management", msg });
     } else if (msg.role === "system" && (
@@ -1269,15 +1276,13 @@ function AgentTurnView({
         }
         if (frag.type === "context_management") {
           const text = frag.msg.content.replace("[上下文管理] ", "");
-          const isCompressing = text.includes("正在");
-          const Icon = isCompressing ? Loader2 : FileText;
           return (
             <div
               key={frag.msg.id}
-              className="inline-flex max-w-full items-center gap-2 rounded-md border border-blue-500/20 bg-blue-500/10 px-3 py-1.5 text-xs text-blue-700 dark:text-blue-300"
+              className="inline-flex max-w-full items-center gap-2 rounded-md border border-border/70 bg-muted/30 px-2.5 py-1 text-xs text-muted-foreground"
               title={formatMessageTime(frag.msg.created_at)}
             >
-              <Icon className={`h-3.5 w-3.5 shrink-0 ${isCompressing ? "animate-spin" : ""}`} />
+              <FileText className="h-3.5 w-3.5 shrink-0" />
               <span className="truncate">{text}</span>
             </div>
           );
