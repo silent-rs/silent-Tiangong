@@ -519,6 +519,7 @@ fn resolved_model_by_key(
         .ok_or_else(|| format!("模型 {model_key} 引用的 Provider 不存在：{}", model_entry.provider))?;
 
     Ok(tiangong_core::models_config::ResolvedModel {
+        provider: model_entry.provider.clone(),
         base_url: provider.base_url.clone(),
         api_key: tiangong_core::models_config::ModelsConfig::resolve_api_key(&provider.api_key),
         timeout_ms: provider.timeout_ms,
@@ -534,6 +535,7 @@ fn resolve_memory_llm(
 ) -> Result<tiangong_memory::MemoryLlmConfig, String> {
     let resolved = resolved_model_by_key(models, model_key)?;
     Ok(tiangong_memory::MemoryLlmConfig {
+        provider_key: Some(resolved.provider),
         base_url: resolved.base_url,
         api_key: resolved.api_key,
         model: resolved.model,
@@ -555,6 +557,7 @@ fn resolve_memory_embedding(
         .filter(|value| *value > 0)
         .ok_or_else(|| format!("Embedding 模型 {model_key} 缺少 options.dimension"))?;
     Ok(tiangong_memory::MemoryEmbeddingConfig {
+        provider_key: Some(resolved.provider),
         base_url: resolved.base_url,
         api_key: resolved.api_key,
         model: resolved.model,
@@ -570,6 +573,7 @@ fn resolve_memory_rerank(
 ) -> Result<tiangong_memory::MemoryRerankConfig, String> {
     let resolved = resolved_model_by_key(models, model_key)?;
     Ok(tiangong_memory::MemoryRerankConfig {
+        provider_key: Some(resolved.provider),
         base_url: resolved.base_url,
         api_key: resolved.api_key,
         model: resolved.model,

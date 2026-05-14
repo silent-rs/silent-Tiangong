@@ -44,7 +44,10 @@ export function CopyableCodeBlock({ code, language = "text" }: CopyableCodeBlock
         PreTag="div"
         className="!m-0 !rounded-none !bg-background text-xs"
         customStyle={{ padding: "12px", margin: 0, background: "transparent" }}
-        codeTagProps={{ style: {} }}
+        codeTagProps={{
+          className: "copyable-code-block__code",
+          style: { background: "transparent", padding: 0 },
+        }}
       >
         {code}
       </CodeHighlighter>

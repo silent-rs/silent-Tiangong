@@ -151,6 +151,14 @@
   .prose pre code {
     @apply bg-transparent p-0;
   }
+
+  .prose code.copyable-code-block__code {
+    @apply bg-transparent p-0 rounded-none;
+  }
+
+  .prose code.copyable-code-block__code span {
+    background: transparent !important;
+  }
 }
 
 /* 动画 */

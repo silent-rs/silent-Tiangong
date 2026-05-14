@@ -938,6 +938,7 @@ function AgentTurnView({
     | { type: "assistant"; msg: MessageItem; isStreaming: boolean }
     | { type: "error_system"; msg: MessageItem }
     | { type: "retry_system"; msg: MessageItem }
+    | { type: "context_management"; msg: MessageItem }
     | { type: "agent_event"; category: string; content: string; agentRoles: string[] }
     | { type: "other_system"; msg: MessageItem };
 
@@ -1068,6 +1069,9 @@ function AgentTurnView({
     } else if (msg.role === "system" && msg.content.startsWith("[重试]")) {
       flushTools();
       fragments.push({ type: "retry_system", msg });
+    } else if (msg.role === "system" && msg.content.startsWith("[上下文管理]")) {
+      flushTools();
+      fragments.push({ type: "context_management", msg });
     } else if (msg.role === "system" && (
       msg.content.startsWith("[Agent]")
       || msg.content.startsWith("[文件锁]")
@@ -1260,6 +1264,21 @@ function AgentTurnView({
           return (
             <div key={frag.msg.id} className="text-xs text-yellow-600 dark:text-yellow-400 bg-yellow-500/10 rounded-md px-3 py-1.5 my-0.5">
               {frag.msg.content.replace("[重试] ", "")}
+            </div>
+          );
+        }
+        if (frag.type === "context_management") {
+          const text = frag.msg.content.replace("[上下文管理] ", "");
+          const isCompressing = text.includes("正在");
+          const Icon = isCompressing ? Loader2 : FileText;
+          return (
+            <div
+              key={frag.msg.id}
+              className="inline-flex max-w-full items-center gap-2 rounded-md border border-blue-500/20 bg-blue-500/10 px-3 py-1.5 text-xs text-blue-700 dark:text-blue-300"
+              title={formatMessageTime(frag.msg.created_at)}
+            >
+              <Icon className={`h-3.5 w-3.5 shrink-0 ${isCompressing ? "animate-spin" : ""}`} />
+              <span className="truncate">{text}</span>
             </div>
           );
         }

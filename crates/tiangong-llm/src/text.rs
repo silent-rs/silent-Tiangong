@@ -15,6 +15,7 @@ use crate::request::ProviderRequest;
 
 #[derive(Debug, Clone)]
 pub struct LlmEndpointConfig {
+    pub source_provider: Option<String>,
     pub api_key: String,
     pub base_url: String,
     pub model: String,
@@ -30,6 +31,7 @@ impl LlmEndpointConfig {
         model: impl Into<String>,
     ) -> Self {
         Self {
+            source_provider: None,
             api_key: api_key.into(),
             base_url: base_url.into(),
             model: model.into(),
@@ -37,6 +39,14 @@ impl LlmEndpointConfig {
             timeout: Duration::from_secs(60),
             max_retries: 3,
         }
+    }
+
+    pub fn source_provider_label(&self) -> &str {
+        self.source_provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|provider| !provider.is_empty())
+            .unwrap_or_else(|| self.protocol.as_str())
     }
 }
 

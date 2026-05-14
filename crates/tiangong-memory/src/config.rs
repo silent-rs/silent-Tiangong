@@ -42,6 +42,8 @@ impl Default for MemoryConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryLlmConfig {
+    #[serde(default, alias = "provider", skip_serializing_if = "Option::is_none")]
+    pub provider_key: Option<String>,
     pub base_url: String,
     pub api_key: String,
     pub model: String,
@@ -54,6 +56,7 @@ pub struct MemoryLlmConfig {
 impl Default for MemoryLlmConfig {
     fn default() -> Self {
         Self {
+            provider_key: None,
             base_url: String::new(),
             api_key: String::new(),
             model: String::new(),
@@ -65,6 +68,8 @@ impl Default for MemoryLlmConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryEmbeddingConfig {
+    #[serde(default, alias = "provider", skip_serializing_if = "Option::is_none")]
+    pub provider_key: Option<String>,
     pub base_url: String,
     pub api_key: String,
     pub model: String,
@@ -79,6 +84,7 @@ pub struct MemoryEmbeddingConfig {
 impl Default for MemoryEmbeddingConfig {
     fn default() -> Self {
         Self {
+            provider_key: None,
             base_url: String::new(),
             api_key: String::new(),
             model: String::new(),
@@ -91,6 +97,8 @@ impl Default for MemoryEmbeddingConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryRerankConfig {
+    #[serde(default, alias = "provider", skip_serializing_if = "Option::is_none")]
+    pub provider_key: Option<String>,
     pub base_url: String,
     pub api_key: String,
     pub model: String,
@@ -103,6 +111,7 @@ pub struct MemoryRerankConfig {
 impl Default for MemoryRerankConfig {
     fn default() -> Self {
         Self {
+            provider_key: None,
             base_url: String::new(),
             api_key: String::new(),
             model: String::new(),
@@ -198,6 +207,7 @@ impl MemoryConfig {
             .filter(|model| is_text_endpoint_valid(&model.base_url, &model.api_key, &model.model))
         {
             options = options.with_model(LlmEndpointConfig {
+                source_provider: model.provider_key.clone(),
                 base_url: model.base_url.clone(),
                 api_key: resolve_api_key(&model.api_key),
                 model: model.model.clone(),

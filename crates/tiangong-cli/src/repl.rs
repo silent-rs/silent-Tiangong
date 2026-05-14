@@ -355,6 +355,16 @@ impl ResponseState {
                 output::status(&format!("文件锁 {action}: {} (by {holder})", path));
             }
 
+            StreamEvent::ContextCompressing {
+                summary_up_to,
+                total_messages,
+            } => {
+                self.end_active_stream();
+                output::status(&format!(
+                    "正在压缩上下文: 已摘要 {summary_up_to} 条，当前 {total_messages} 条消息"
+                ));
+            }
+
             StreamEvent::ContextCompressed {
                 action,
                 summary_up_to,

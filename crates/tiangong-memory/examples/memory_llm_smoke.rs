@@ -161,6 +161,7 @@ fn parse_json_response(response: &str) -> Result<Value> {
 fn print_sample_config() -> Result<()> {
     let sample = MemoryConfig {
         model: Some(MemoryLlmConfig {
+            provider_key: None,
             base_url: "https://api.example.com/v1".to_string(),
             api_key: "${MEMORY_LLM_API_KEY}".to_string(),
             model: "memory-model-name".to_string(),

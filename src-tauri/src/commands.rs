@@ -994,6 +994,15 @@ fn start_stream_consumer(
                                 format!("[文件锁] {path} {action} by {}", holder_agent_label.as_deref().unwrap_or("未知")),
                             );
                         }
+                        StreamEvent::ContextCompressing {
+                            total_messages, ..
+                        } => {
+                            session.append_message(
+                                tiangong_core::session::MessageRole::System,
+                                format!("[上下文管理] 正在压缩早期上下文（当前 {total_messages} 条消息）"),
+                            );
+                            let _ = core_state.persist_session_and_app(&sid);
+                        }
                         StreamEvent::ContextCompressed {
                             ref action,
                             remaining_messages,
@@ -1130,6 +1139,12 @@ fn start_stream_consumer(
                         core_state.store.runtime.run.summary =
                             format!("文件锁 {action}: {path} ({})", holder_agent_label.as_deref().unwrap_or("未知"));
                     }
+                    StreamEvent::ContextCompressing { .. } => {
+                        core_state.store.runtime.run.status =
+                            tiangong_core::runtime::RunStatus::Executing;
+                        core_state.store.runtime.run.summary =
+                            "正在压缩早期上下文...".to_string();
+                    }
                     StreamEvent::ContextCompressed { ref action, .. } => {
                         if core_state.has_pending_turn_for(&sid) {
                             core_state.store.runtime.run.summary = format!("上下文{action}");
@@ -1144,7 +1159,10 @@ fn start_stream_consumer(
 
             // emit run_snapshot
             {
-                let is_context_event = matches!(event, StreamEvent::ContextCompressed { .. });
+                let is_context_event = matches!(
+                    event,
+                    StreamEvent::ContextCompressing { .. } | StreamEvent::ContextCompressed { .. }
+                );
                 let is_exec = if is_done || is_error {
                     false
                 } else if is_context_event {

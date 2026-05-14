@@ -5,7 +5,7 @@
 
 use std::time::Instant;
 
-use crate::llm_metrics::log_memory_llm_call;
+use crate::llm_metrics::{log_memory_llm_call, log_memory_llm_failure};
 use crate::types::{
     EnhancedTurnResult, Episode, EpisodeOutcome, Evidence, ExtractionOutput, MemoryCognitiveType,
     TurnResult,
@@ -71,7 +71,12 @@ pub(crate) async fn extract_episode_with_model(
     match extract_episode_with_model_inner(turn_result, model).await {
         Ok(episode) => Some(episode),
         Err(err) => {
-            tracing::warn!("EpisodeWriter LLM 抽取失败，使用规则 fallback: {err}");
+            log_memory_llm_failure(
+                "episode_writer",
+                model,
+                &err,
+                "EpisodeWriter LLM 抽取失败，使用规则 fallback",
+            );
             extract_episode(turn_result)
         }
     }
@@ -571,7 +576,12 @@ pub(crate) async fn extract_multi_type_memories_with_model(
     match extract_multi_type_with_llm(enhanced, model).await {
         Ok(output) => output,
         Err(err) => {
-            tracing::warn!("多类型 LLM 提取失败，使用规则 fallback: {err}");
+            log_memory_llm_failure(
+                "multi_type_extraction",
+                model,
+                &err,
+                "多类型 LLM 提取失败，使用规则 fallback",
+            );
             extract_multi_type_fallback(&turn_result, enhanced)
         }
     }

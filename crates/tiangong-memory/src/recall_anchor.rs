@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use tiangong_llm::{LlmEndpointConfig, TokenUsageData, complete_text_with_usage};
 
-use crate::llm_metrics::log_memory_llm_call;
+use crate::llm_metrics::{log_memory_llm_call, log_memory_llm_failure};
 use crate::types::{MemoryRecallRequest, RecallAnchors, SearchStrategy};
 
 const RECALL_ANCHOR_SYSTEM: &str = "\
@@ -54,7 +54,12 @@ pub(crate) async fn extract_recall_anchors(
     if let Some(config) = model {
         match plan_with_model(config, request).await {
             Ok(plan) => return plan,
-            Err(err) => tracing::warn!("Memory recall anchor 规划失败，使用规则 fallback: {err}"),
+            Err(err) => log_memory_llm_failure(
+                "recall_anchor",
+                config,
+                &err,
+                "Memory recall anchor 规划失败，使用规则 fallback",
+            ),
         }
     }
 

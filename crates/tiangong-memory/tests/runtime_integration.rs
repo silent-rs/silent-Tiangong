@@ -1283,6 +1283,7 @@ async fn deep_recall_fixed_scenario_traces_cross_session_artifact_entity_and_dec
     let _env = EnvGuard::enter(home.path(), &workspace_path);
     let mock_llm = MockMemoryLlmServer::start();
     let model = LlmEndpointConfig {
+        source_provider: Some("mock-memory".to_string()),
         api_key: "test-memory-key".to_string(),
         base_url: mock_llm.base_url(),
         model: "memory-deep-recall-mock".to_string(),

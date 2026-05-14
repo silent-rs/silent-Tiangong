@@ -528,13 +528,21 @@ pub(crate) fn compress_context_for_session(
     engine: &RuntimeEngine,
     stream_tx: &StdSender<StreamEvent>,
 ) {
+    let _ = stream_tx.send(StreamEvent::ContextCompressing {
+        summary_up_to: session.summary_up_to,
+        total_messages: session.messages.len(),
+    });
     let organizer = crate::context::organizer::ContextOrganizer::new(engine.context_limit)
-        .with_keep_recent_turns(6);
+        .with_keep_recent_turns(1);
     match organizer.force_update_summary(session, engine.client()) {
-        Ok(_) => {
+        Ok(compressed) => {
             let remaining = session.messages.len().saturating_sub(session.summary_up_to);
             let _ = stream_tx.send(StreamEvent::ContextCompressed {
-                action: "压缩".to_string(),
+                action: if compressed {
+                    "压缩".to_string()
+                } else {
+                    "无需压缩".to_string()
+                },
                 summary_up_to: session.summary_up_to,
                 remaining_messages: remaining,
             });
