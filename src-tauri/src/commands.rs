@@ -8,6 +8,13 @@ use tauri_plugin_notification::{NotificationExt, PermissionState};
 
 const MAX_ATTACHMENT_BASE64_BYTES: u64 = 50 * 1024 * 1024;
 
+fn format_agent_reply_message(agent_label: &str, content: &str) -> String {
+    let safe_label = agent_label
+        .replace(['\n', '\r'], " ")
+        .replace("--", "- -");
+    format!("<!-- tiangong-agent-reply -->\n<!-- label:{safe_label} -->\n\n{content}")
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct AttachmentDataUrl {
     pub data_url: String,
@@ -901,24 +908,28 @@ fn start_stream_consumer(
                         StreamEvent::AgentNotification {
                             ref agent_label,
                             ref content,
-                            ref level,
                             ..
                         } => {
                             session.append_message(
-                                tiangong_core::session::MessageRole::System,
-                                format!("[Agent 通知] [{level}] {agent_label}: {content}"),
+                                tiangong_core::session::MessageRole::Assistant,
+                                format_agent_reply_message(agent_label, content),
                             );
                         }
                         StreamEvent::AgentMessage {
+                            ref from_agent_id,
                             ref from_agent_label,
-                            ref to_agent_label,
+                            ref to_agent_id,
                             ref content,
                             ..
                         } => {
-                            session.append_message(
-                                tiangong_core::session::MessageRole::System,
-                                format!("[Agent 消息] {from_agent_label} → {to_agent_label}: {content}"),
-                            );
+                            if to_agent_id == "main" && from_agent_id != "user" {
+                                session.append_message(
+                                    tiangong_core::session::MessageRole::Assistant,
+                                    format_agent_reply_message(from_agent_label, content),
+                                );
+                            } else if from_agent_id == "user" {
+                                // 用户 @Agent 的原始输入已经作为用户消息存在，避免重复写入。
+                            }
                         }
                         StreamEvent::AgentOutput {
                             ref agent_id,

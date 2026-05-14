@@ -1,6 +1,6 @@
 import { useStore, type AgentInfo } from '@/store/useStore';
 import { Users, Circle, ChevronDown, ChevronRight, Square } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 const STATUS_STYLES: Record<string, string> = {
   running: 'bg-green-500',
@@ -44,9 +44,13 @@ export function AgentPanel() {
   const { agents, selectedAgentTab, setSelectedAgentTab, cancelAgent } = useStore();
   const [expanded, setExpanded] = useState(false);
 
+  useEffect(() => {
+    if (selectedAgentTab && !agents.some((agent) => agent.role === selectedAgentTab)) {
+      setSelectedAgentTab(null);
+    }
+  }, [agents, selectedAgentTab, setSelectedAgentTab]);
+
   if (agents.length === 0) {
-    // Agent 全部退出时重置 Tab
-    if (selectedAgentTab) setSelectedAgentTab(null);
     return null;
   }
 

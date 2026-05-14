@@ -47,6 +47,138 @@ impl Default for TeamContext {
     }
 }
 
+fn normalize_agent_role(role: &str) -> String {
+    role.trim().trim_start_matches('@').to_string()
+}
+
+#[derive(Debug, Clone)]
+struct RestoredAgent {
+    agent_id: String,
+    role: String,
+    label: String,
+    lifecycle: AgentLifecycle,
+    status: AgentStatus,
+}
+
+/// 从会话历史中的 Agent 事件恢复团队注册表。
+///
+/// GUI 的团队面板也是从同一批系统消息解析成员；Core 重建时必须同步恢复
+/// TeamContext，否则界面显示有成员但团队工具会认为注册表为空。
+pub fn restore_agents_from_session_history(
+    team: &mut TeamContext,
+    parent_session: &Session,
+    parent_tools: &[ToolSpec],
+) -> usize {
+    let mut restored: Vec<RestoredAgent> = Vec::new();
+
+    for message in &parent_session.messages {
+        if message.role != crate::session::MessageRole::System {
+            continue;
+        }
+
+        if let Some(agent) = parse_agent_created_message(&message.content) {
+            restored.retain(|existing| existing.role != agent.role);
+            restored.push(agent);
+            continue;
+        }
+
+        if let Some((label, status, agent_id)) = parse_agent_status_message(&message.content) {
+            for agent in &mut restored {
+                let id_matches = agent_id.as_deref() == Some(agent.agent_id.as_str());
+                if id_matches || agent.label == label {
+                    agent.status = status.clone();
+                }
+            }
+            restored.retain(|agent| agent.status != AgentStatus::Terminated);
+        }
+    }
+
+    let excluded = ["create_agent", "dismiss_agent"];
+    let tool_names: Vec<String> = parent_tools
+        .iter()
+        .map(|tool| tool.name.clone())
+        .filter(|name| !excluded.contains(&name.as_str()))
+        .collect();
+
+    let mut count = 0usize;
+    for agent in restored {
+        if team.registry.find_by_role(&agent.role).is_some() {
+            continue;
+        }
+
+        let descriptor = AgentDescriptor {
+            agent_id: agent.agent_id.clone(),
+            role: agent.role.clone(),
+            label: agent.label.clone(),
+            system_prompt: format!(
+                "你是从会话历史恢复的子 Agent，角色为 {}（{}）。请延续当前会话上下文，按该角色职责处理用户和主 Agent 分配的任务。",
+                agent.label, agent.role
+            ),
+            lifecycle: agent.lifecycle,
+            tools: tool_names.clone(),
+            status: AgentStatus::Idle,
+        };
+        let child_session = create_child_session(parent_session, &agent.label);
+        team.registry
+            .register_with_session(descriptor, child_session);
+        count += 1;
+    }
+
+    count
+}
+
+fn parse_agent_created_message(content: &str) -> Option<RestoredAgent> {
+    let rest = content.strip_prefix("[Agent] ")?;
+    let (label, after_label) = rest.split_once(" (")?;
+    let (role, after_role) = after_label.split_once(") 已加入团队")?;
+    let agent_id = after_role
+        .rsplit_once("id=")
+        .map(|(_, id)| id.split_whitespace().next().unwrap_or_default().trim())?
+        .to_string();
+    if agent_id.is_empty() || role.trim().is_empty() || label.trim().is_empty() {
+        return None;
+    }
+
+    let lifecycle = if after_role.contains("[temporary]") || after_role.contains("[临时]") {
+        AgentLifecycle::Temporary
+    } else {
+        AgentLifecycle::Persistent
+    };
+
+    Some(RestoredAgent {
+        agent_id,
+        role: role.trim().to_string(),
+        label: label.trim().to_string(),
+        lifecycle,
+        status: AgentStatus::Idle,
+    })
+}
+
+fn parse_agent_status_message(content: &str) -> Option<(String, AgentStatus, Option<String>)> {
+    let rest = content.strip_prefix("[Agent] ")?;
+    let (label, after_label) = rest.split_once(" 状态变更: ")?;
+    let status_text = after_label.split_whitespace().next().unwrap_or_default();
+    let status = match status_text {
+        "idle" => AgentStatus::Idle,
+        "running" => AgentStatus::Running,
+        "waiting_for_user" => AgentStatus::WaitingForUser,
+        "waiting_for_lock" => AgentStatus::WaitingForLock,
+        "terminated" => AgentStatus::Terminated,
+        _ => return None,
+    };
+    let agent_id = after_label
+        .rsplit_once("id=")
+        .map(|(_, id)| {
+            id.split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        })
+        .filter(|id| !id.is_empty());
+    Some((label.trim().to_string(), status, agent_id))
+}
+
 /// 处理 create_agent 工具调用
 pub fn execute_create_agent(
     team: &mut TeamContext,
@@ -260,13 +392,12 @@ pub fn execute_send_message(
     call: &ToolCall,
     stream_tx: &StdSender<StreamEvent>,
 ) -> ToolResult {
-    let to = call
-        .arguments
-        .get("to")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+    let to = normalize_agent_role(
+        call.arguments
+            .get("to")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default(),
+    );
     let content = call
         .arguments
         .get("content")
@@ -380,7 +511,8 @@ pub fn execute_broadcast_message(
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
+                .filter_map(|v| v.as_str().map(normalize_agent_role))
+                .filter(|role| !role.is_empty())
                 .collect()
         })
         .unwrap_or_default();
@@ -963,6 +1095,101 @@ mod tests {
     }
 
     #[test]
+    fn send_message_accepts_at_prefixed_role_alias() {
+        let (tx, _rx) = mpsc::channel();
+        let mut team = TeamContext::new();
+        let parent = Session::new("parent");
+        let tools = [tool("send_message")];
+
+        for (role, label) in [("dev", "Developer"), ("test", "Tester")] {
+            let result = execute_create_agent(
+                &mut team,
+                &call(
+                    "create_agent",
+                    json!({
+                        "role": role,
+                        "label": label,
+                        "system_prompt": "agent"
+                    }),
+                ),
+                &parent,
+                &tools,
+                &tx,
+            );
+            assert!(result.ok);
+        }
+
+        let dev_id = team.registry.find_by_role("dev").unwrap().agent_id.clone();
+        let test_id = team.registry.find_by_role("test").unwrap().agent_id.clone();
+        let result = execute_send_message(
+            &mut team,
+            &dev_id,
+            &call(
+                "send_message",
+                json!({
+                    "to": "@tester",
+                    "content": "please verify"
+                }),
+            ),
+            &tx,
+        );
+
+        assert!(result.ok);
+        let inbox = team.registry.drain_inbox(&test_id);
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].from, dev_id);
+        assert_eq!(inbox[0].to, test_id);
+        assert_eq!(inbox[0].content, "please verify");
+    }
+
+    #[test]
+    fn broadcast_message_accepts_at_prefixed_exclude_roles() {
+        let (tx, _rx) = mpsc::channel();
+        let mut team = TeamContext::new();
+        let parent = Session::new("parent");
+        let tools = [tool("broadcast_message")];
+
+        for (role, label) in [("dev", "Developer"), ("test", "Tester"), ("pm", "PM")] {
+            let result = execute_create_agent(
+                &mut team,
+                &call(
+                    "create_agent",
+                    json!({
+                        "role": role,
+                        "label": label,
+                        "system_prompt": "agent"
+                    }),
+                ),
+                &parent,
+                &tools,
+                &tx,
+            );
+            assert!(result.ok);
+        }
+
+        let dev_id = team.registry.find_by_role("dev").unwrap().agent_id.clone();
+        let test_id = team.registry.find_by_role("test").unwrap().agent_id.clone();
+        let pm_id = team.registry.find_by_role("pm").unwrap().agent_id.clone();
+        let result = execute_broadcast_message(
+            &mut team,
+            &dev_id,
+            &call(
+                "broadcast_message",
+                json!({
+                    "content": "sync status",
+                    "exclude": ["@dev"]
+                }),
+            ),
+            &tx,
+        );
+
+        assert!(result.ok);
+        assert!(team.registry.drain_inbox(&dev_id).is_empty());
+        assert_eq!(team.registry.drain_inbox(&test_id).len(), 1);
+        assert_eq!(team.registry.drain_inbox(&pm_id).len(), 1);
+    }
+
+    #[test]
     fn sub_agent_can_notify_main_agent_inbox() {
         let (tx, _rx) = mpsc::channel();
         let mut team = TeamContext::new();
@@ -1091,6 +1318,62 @@ mod tests {
                 ..
             } if action == "unlocked" && holder == dev_id
         )));
+    }
+
+    #[test]
+    fn restored_agent_from_session_history_can_be_dismissed() {
+        let (tx, _rx) = mpsc::channel();
+        let mut team = TeamContext::new();
+        let mut parent = Session::new("parent");
+        parent.append_message(
+            crate::session::MessageRole::System,
+            "[Agent] 开发者 (dev) 已加入团队 [persistent] id=agent-dev".to_string(),
+        );
+        parent.append_message(
+            crate::session::MessageRole::System,
+            "[Agent] 项目经理 (pm) 已加入团队 [persistent] id=agent-pm".to_string(),
+        );
+
+        let restored = restore_agents_from_session_history(
+            &mut team,
+            &parent,
+            &[
+                tool("read_file"),
+                tool("dismiss_agent"),
+                tool("create_agent"),
+            ],
+        );
+        assert_eq!(restored, 2);
+        assert!(team.registry.find_by_role("dev").is_some());
+        assert!(team.registry.find_by_role("pm").is_some());
+
+        let result = execute_dismiss_agent(
+            &mut team,
+            &call("dismiss_agent", json!({"role": "dev"})),
+            &tx,
+        );
+        assert!(result.ok);
+        assert!(team.registry.find_by_role("dev").is_none());
+        assert!(team.registry.find_by_role("pm").is_some());
+    }
+
+    #[test]
+    fn restore_agents_ignores_terminated_history_entries() {
+        let mut team = TeamContext::new();
+        let mut parent = Session::new("parent");
+        parent.append_message(
+            crate::session::MessageRole::System,
+            "[Agent] 开发者 (dev) 已加入团队 [persistent] id=agent-dev".to_string(),
+        );
+        parent.append_message(
+            crate::session::MessageRole::System,
+            "[Agent] 开发者 状态变更: terminated id=agent-dev".to_string(),
+        );
+
+        let restored =
+            restore_agents_from_session_history(&mut team, &parent, &[tool("read_file")]);
+        assert_eq!(restored, 0);
+        assert!(team.registry.find_by_role("dev").is_none());
     }
 
     #[test]

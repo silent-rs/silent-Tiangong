@@ -298,6 +298,7 @@ async fn worker_loop_async(
     let mut tools: Vec<ToolSpec> = Vec::new();
     let mut mcp_targets: HashMap<String, McpFunctionTarget> = HashMap::new();
     let team_context = Arc::new(Mutex::new(crate::agent_team::lifecycle::TeamContext::new()));
+    let mut team_restored = false;
     // turn 计数器：每 10 个 turn 触发一次 Meta 反刍（归档低活跃节点）
     let mut turn_count: u32 = 0;
 
@@ -364,6 +365,18 @@ async fn worker_loop_async(
             }
             tools = new_tools;
             mcp_targets = new_mcp_targets;
+            if !team_restored {
+                if let Ok(mut team) = team_context.lock() {
+                    let restored =
+                        crate::agent_team::lifecycle::restore_agents_from_session_history(
+                            &mut team, &session, &tools,
+                        );
+                    if restored > 0 {
+                        tracing::info!(count = restored, "已从会话历史恢复 Agent 团队");
+                    }
+                }
+                team_restored = true;
+            }
             last_cfg_gen = cfg_gen;
         }
 

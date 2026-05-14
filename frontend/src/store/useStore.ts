@@ -7,6 +7,7 @@ import { notifyBackgroundSessionCompleted } from '../utils/desktopNotification';
 // ---------------------------------------------------------------------------
 
 export interface AgentInfo {
+  agentId?: string;
   role: string;
   label: string;
   status: 'idle' | 'running' | 'waiting_for_user' | 'waiting_for_lock' | 'terminated' | 'error';
@@ -18,24 +19,21 @@ export function parseAgentsFromMessages(messages: Message[]): AgentInfo[] {
   for (const msg of messages) {
     if (msg.role !== 'system') continue;
     // [Agent] {label} ({role}) 已加入团队
-    const createMatch = msg.content.match(/^\[Agent\] (.+?) \((.+?)\) 已加入团队/);
+    const createMatch = msg.content.match(/^\[Agent\] (.+?) \((.+?)\) 已加入团队.*?id=([^\s]+)/);
     if (createMatch) {
-      const [, label, role] = createMatch;
-      agents.set(role, { role, label, status: 'running' });
+      const [, label, role, agentId] = createMatch;
+      agents.set(role, { agentId, role, label, status: 'running' });
       continue;
     }
     // [Agent] {label} 状态变更: {status}
-    const statusMatch = msg.content.match(/^\[Agent\] .+? 状态变更: (\w+)/);
+    const statusMatch = msg.content.match(/^\[Agent\] (.+?) 状态变更: (\w+).*?id=([^\s]+)/);
     if (statusMatch) {
-      const status = statusMatch[1];
+      const [, label, status, agentId] = statusMatch;
       if (status === 'terminated') {
-        const labelMatch = msg.content.match(/^\[Agent\] (.+?) 状态变更/);
-        if (labelMatch) {
-          for (const [, info] of agents) {
-            if (info.label === labelMatch[1]) {
-              info.status = 'terminated';
-              break;
-            }
+        for (const [role, info] of agents) {
+          if (info.agentId === agentId || info.label === label) {
+            agents.delete(role);
+            break;
           }
         }
       } else if (
@@ -45,13 +43,10 @@ export function parseAgentsFromMessages(messages: Message[]): AgentInfo[] {
         || status === 'waiting_for_lock'
         || status === 'error'
       ) {
-        const labelMatch = msg.content.match(/^\[Agent\] (.+?) 状态变更/);
-        if (labelMatch) {
-          for (const [, info] of agents) {
-            if (info.label === labelMatch[1]) {
-              info.status = status;
-              break;
-            }
+        for (const [, info] of agents) {
+          if (info.agentId === agentId || info.label === label) {
+            info.status = status;
+            break;
           }
         }
       }

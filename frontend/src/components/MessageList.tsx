@@ -218,117 +218,9 @@ function VoiceBubble({ messageId, audioPath, duration, showText, content }: {
   );
 }
 
-function WorkerCardView({ group, isActive, MarkdownComponents }: {
-  group: MessageGroup;
-  isActive: boolean;
-  MarkdownComponents: any;
-}) {
-  // 从 "🔧 Worker: xxx" 系统消息中提取标题
-  const workerStartMsg = group.messages.find(m => m.role === "system" && m.content.startsWith("🔧 Worker:"));
-  const workerTitle = workerStartMsg?.content?.replace("🔧 Worker: ", "") || "Worker";
-  // 过滤掉 Worker 标题系统消息（以 "🔧 Worker:" 开头的）
-  const contentMessages = group.messages.filter(m => !(m.role === "system" && m.content.startsWith("🔧 Worker:")));
-  const systemMsgs = contentMessages.filter(m => m.role === "system");
-  // 只显示有内容的 assistant 消息（content 或 reasoning_content 不为空）
-  const assistantMsgs = contentMessages.filter(m =>
-    m.role === "assistant"
-      && (m.content.trim().length > 0
-        || msgReasoning(m).length > 0
-        || !!m.media?.length)
-  );
-
-  // 计算 Worker 耗时（从第一条到最后一条消息的时间差）
-  const workerDuration = (() => {
-    if (group.messages.length < 2) return null;
-    const first = new Date(group.messages[0].created_at).getTime();
-    const last = new Date(group.messages[group.messages.length - 1].created_at).getTime();
-    const ms = last - first;
-    return ms > 0 ? ms : null;
-  })();
-
-  // Worker 完成后自动收缩（有 assistant 回复且不活跃时）
-  const hasResult = assistantMsgs.length > 0;
-  const [collapsed, setCollapsed] = useState(false);
-  const prevIsActiveRef = useRef(isActive);
-
-  useEffect(() => {
-    // 从活跃变为非活跃且有结果时自动收缩
-    if (prevIsActiveRef.current && !isActive && hasResult) {
-      setCollapsed(true);
-    }
-    prevIsActiveRef.current = isActive;
-  }, [isActive, hasResult]);
-
-  return (
-    <div className="mt-3 border border-border rounded-lg overflow-hidden">
-      <button
-        className="w-full px-3 py-1.5 bg-muted/50 border-b border-border flex items-center gap-2 hover:bg-muted/80 transition-colors text-left"
-        onClick={() => setCollapsed(!collapsed)}
-      >
-        {collapsed ? (
-          <ChevronRight className="w-3 h-3 text-muted-foreground" />
-        ) : (
-          <ChevronDown className="w-3 h-3 text-muted-foreground" />
-        )}
-        <Cpu className="w-3.5 h-3.5 text-muted-foreground" />
-        <span className="text-xs font-medium text-muted-foreground flex-1">{workerTitle}</span>
-        {collapsed && assistantMsgs.length > 0 && (
-          <span className="text-xs text-muted-foreground/60 truncate max-w-[200px]">
-            {assistantMsgs[assistantMsgs.length - 1].content
-              ? `${assistantMsgs[assistantMsgs.length - 1].content.slice(0, 50)}...`
-              : "[媒体结果]"}
-          </span>
-        )}
-        {hasResult && workerDuration && (
-          <span className="text-xs text-muted-foreground/50">
-            {(workerDuration / 1000).toFixed(1)}s
-          </span>
-        )}
-      </button>
-      {!collapsed && (
-        <div className="p-2">
-          {systemMsgs.length > 0 && (
-            <AgentTurn
-              messages={systemMsgs}
-              streamingMessageId={null}
-              streamingContent=""
-              streamingReasoningContent=""
-              MarkdownComponents={MarkdownComponents}
-              hasTts={false}
-              selectedAgentTab={null}
-            />
-          )}
-          {assistantMsgs.map((msg) => (
-            <div key={msg.id} className="mt-2">
-              <div className="flex justify-start">
-                <div className="max-w-[100%] text-foreground">
-                  {msg.reasoning_content && (
-                    <ThinkingBlock
-                      content={msg.reasoning_content}
-                      defaultExpanded={false}
-                    />
-                  )}
-                  {renderMessageMedia(msg)}
-                  <div className="prose prose-sm max-w-none break-words text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={MarkdownComponents as any}>
-                      {msg.content}
-                    </ReactMarkdown>
-                  </div>
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+function workerContentMessages(messages: MessageItem[]): MessageItem[] {
+  return messages.filter(m => !(m.role === "system" && m.content.startsWith("🔧 Worker:")));
 }
-
-const WorkerCard = memo(WorkerCardView, (prev, next) => (
-  prev.isActive === next.isActive
-  && prev.MarkdownComponents === next.MarkdownComponents
-  && sameMessageRefs(prev.group.messages, next.group.messages)
-));
 
 export function MessageList() {
   const {
@@ -347,6 +239,7 @@ export function MessageList() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevMessagesLengthRef = useRef(0);
   const prevStreamingIdRef = useRef<string | null>(null);
+  const prevSelectedAgentTabRef = useRef<string | null>(null);
   const [hasTts, setHasTts] = useState(false);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState("");
@@ -382,21 +275,27 @@ export function MessageList() {
   // 自动滚动到底部
   useEffect(() => {
     // 消息数量增加、流式状态变化、或消息内容增长（流式输出中）时自动滚动
+    const tabChanged = selectedAgentTab !== prevSelectedAgentTabRef.current;
     const shouldScroll =
       messages.length > prevMessagesLengthRef.current ||
       streamingMessageId !== prevStreamingIdRef.current ||
-      isThinking;
+      isThinking ||
+      tabChanged;
 
     if (shouldScroll) {
       // 使用 setTimeout 确保在 DOM 更新后滚动
       setTimeout(() => {
-        scrollRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+        scrollRef.current?.scrollIntoView({
+          behavior: tabChanged ? "auto" : "smooth",
+          block: "end",
+        });
       }, 100);
     }
 
     prevMessagesLengthRef.current = messages.length;
     prevStreamingIdRef.current = streamingMessageId;
-  }, [messages.length, streamingMessageId, totalContentLength, isThinking]);
+    prevSelectedAgentTabRef.current = selectedAgentTab;
+  }, [messages.length, streamingMessageId, totalContentLength, isThinking, selectedAgentTab]);
 
   // 将本地文件路径转换为 Tauri asset URL
   // Markdown 渲染器（用于非流式消息）
@@ -585,17 +484,29 @@ export function MessageList() {
               {groupMessages(messages).map((group, groupIdx, allGroups) => {
               // Worker 组
               if (group.type === "worker") {
-                if (selectedAgentTab && !group.worker_id?.startsWith(`agent:${selectedAgentTab}:`)) {
+                if (!selectedAgentTab) {
                   return null;
                 }
+                if (!group.worker_id?.startsWith(`agent:${selectedAgentTab}:`)) {
+                  return null;
+                }
+                const contentMessages = workerContentMessages(group.messages);
                 const isLastGroup = groupIdx === allGroups.length - 1;
                 return (
-                  <WorkerCard
-                    key={group.key}
-                    group={group}
-                    isActive={isLastGroup && isThinking}
-                    MarkdownComponents={MarkdownComponents}
-                  />
+                  <div key={group.key} className="mt-3 first:mt-0">
+                    <AgentTurn
+                      messages={contentMessages}
+                      streamingMessageId={null}
+                      streamingContent=""
+                      streamingReasoningContent=""
+                      MarkdownComponents={MarkdownComponents}
+                      hasTts={hasTts}
+                      selectedAgentTab={null}
+                    />
+                    {isLastGroup && isThinking && contentMessages.length === 0 && (
+                      <div className="text-xs text-muted-foreground">正在等待输出...</div>
+                    )}
+                  </div>
                 );
               }
 
@@ -880,18 +791,16 @@ function renderMessageMedia(message: MessageItem) {
 
 function groupMessages(messages: MessageItem[]): MessageGroup[] {
   const groups: MessageGroup[] = [];
-  const workerGroupMap = new Map<string, number>();
   let currentAgentTurn: MessageGroup | null = null;
 
   for (const msg of messages) {
     if (msg.worker_id) {
       if (currentAgentTurn) { groups.push(currentAgentTurn); currentAgentTurn = null; }
-      const idx = workerGroupMap.get(msg.worker_id);
-      if (idx !== undefined) {
-        groups[idx].messages.push(msg);
+      const previous = groups[groups.length - 1];
+      if (previous?.type === "worker" && previous.worker_id === msg.worker_id) {
+        previous.messages.push(msg);
       } else {
-        workerGroupMap.set(msg.worker_id, groups.length);
-        groups.push({ key: `worker-${msg.worker_id}`, type: "worker", worker_id: msg.worker_id, messages: [msg] });
+        groups.push({ key: `worker-${msg.worker_id}-${msg.id}`, type: "worker", worker_id: msg.worker_id, messages: [msg] });
       }
     } else if (msg.role === "user") {
       if (currentAgentTurn) { groups.push(currentAgentTurn); currentAgentTurn = null; }
@@ -972,13 +881,6 @@ function extractAgentRoles(content: string, agents: { role: string; label: strin
     const agent = agents.find((item) => item.label === label);
     if (agent) roles.add(agent.role);
   };
-  const msgMatch = content.match(/^\[Agent 消息\] (.+?) → (.+?):/);
-  if (msgMatch) {
-    addByLabel(msgMatch[1]);
-    addByLabel(msgMatch[2]);
-  }
-  const notificationMatch = content.match(/^\[Agent 通知\] \[[^\]]+\] (.+?):/);
-  if (notificationMatch) addByLabel(notificationMatch[1]);
   // [Agent] {label} ({role}) 已加入团队
   const createMatch = content.match(/^\[Agent\] .+? \((.+?)\)/);
   if (createMatch) roles.add(createMatch[1]);
@@ -987,6 +889,15 @@ function extractAgentRoles(content: string, agents: { role: string; label: strin
   const lockMatch = content.match(/^\[文件锁\] .+ by (.+)$/);
   if (lockMatch) addByLabel(lockMatch[1]);
   return Array.from(roles);
+}
+
+function parseAgentReply(content: string): { label: string; body: string } | null {
+  const match = content.match(/^<!-- tiangong-agent-reply -->\n<!-- label:([^\n]*) -->\n\n?([\s\S]*)$/);
+  if (!match) return null;
+  return {
+    label: match[1].trim() || "Agent",
+    body: match[2].trim(),
+  };
 }
 
 function AgentTurnView({
@@ -1023,6 +934,7 @@ function AgentTurnView({
     | { type: "thinking"; content: string; time?: string }
     | { type: "tool_group"; key: string; brief: string; tools: MessageItem[] }
     | { type: "memory_recall"; key: string; strategy: string; brief: string; hits: string[] }
+    | { type: "user"; msg: MessageItem }
     | { type: "assistant"; msg: MessageItem; isStreaming: boolean }
     | { type: "error_system"; msg: MessageItem }
     | { type: "retry_system"; msg: MessageItem }
@@ -1070,7 +982,11 @@ function AgentTurnView({
   };
 
   for (const msg of messages) {
-    if (msg.role === "system" && msg.content.startsWith("[记忆检索] 策略:")) {
+    if (msg.role === "user") {
+      flushTools();
+      flushRecall();
+      fragments.push({ type: "user", msg });
+    } else if (msg.role === "system" && msg.content.startsWith("[记忆检索] 策略:")) {
       flushTools();
       flushRecall();
       const strategyMatch = msg.content.match(/策略:\s*(.+)/);
@@ -1154,15 +1070,11 @@ function AgentTurnView({
       fragments.push({ type: "retry_system", msg });
     } else if (msg.role === "system" && (
       msg.content.startsWith("[Agent]")
-      || msg.content.startsWith("[Agent 通知]")
-      || msg.content.startsWith("[Agent 消息]")
       || msg.content.startsWith("[文件锁]")
     )) {
       flushTools();
       let category = "info";
-      if (msg.content.startsWith("[Agent 通知]")) category = "notification";
-      else if (msg.content.startsWith("[Agent 消息]")) category = "message";
-      else if (msg.content.startsWith("[文件锁]")) category = "lock";
+      if (msg.content.startsWith("[文件锁]")) category = "lock";
       fragments.push({ type: "agent_event", category, content: msg.content, agentRoles: extractAgentRoles(msg.content, agents) });
     } else if (msg.role === "system") {
       flushTools();
@@ -1287,8 +1199,38 @@ function AgentTurnView({
             </div>
           );
         }
+        if (frag.type === "user") {
+          return (
+            <div key={frag.msg.id} className="flex justify-end" title={formatMessageTime(frag.msg.created_at)}>
+              <div className="max-w-[92%] rounded-md border border-border/70 bg-muted/40 px-3 py-1.5 text-sm text-muted-foreground whitespace-pre-wrap break-words">
+                {frag.msg.content}
+              </div>
+            </div>
+          );
+        }
         if (frag.type === "assistant") {
           const { msg, isStreaming } = frag;
+          const agentReply = !isStreaming ? parseAgentReply(msg.content) : null;
+          if (agentReply) {
+            return (
+              <div key={msg.id} className="text-foreground" title={formatMessageTime(msg.created_at)}>
+                <div className="inline-flex items-center gap-1.5 rounded-full border border-green-500/30 bg-green-500/10 px-2 py-0.5 text-xs font-medium text-green-700 dark:text-green-300 mb-1">
+                  <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
+                  {agentReply.label}
+                </div>
+                <div className="border-l-2 border-green-500/50 pl-3">
+                  {agentReply.body ? (
+                    <div className="prose prose-sm max-w-none break-words text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={MarkdownComponents as any}>
+                        {agentReply.body}
+                      </ReactMarkdown>
+                    </div>
+                  ) : null}
+                </div>
+                {agentReply.body && <MessageActions text={agentReply.body} showTts={hasTts} />}
+              </div>
+            );
+          }
           return (
             <div key={msg.id} className="text-foreground" title={formatMessageTime(msg.created_at)}>
               {isStreaming ? (
@@ -1323,8 +1265,6 @@ function AgentTurnView({
         }
         if (frag.type === "agent_event") {
           const colorMap: Record<string, string> = {
-            notification: "border-blue-500/30 bg-blue-500/5",
-            message: "border-green-500/30 bg-green-500/5",
             lock: "border-yellow-500/30 bg-yellow-500/5",
             info: "border-border bg-muted/30",
           };

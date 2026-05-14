@@ -53,7 +53,24 @@ impl AgentRegistry {
 
     /// 按 role 查找 Agent
     pub fn find_by_role(&self, role: &str) -> Option<&AgentDescriptor> {
-        self.agents.values().find(|a| a.role == role)
+        let role = role.trim().trim_start_matches('@');
+        self.agents
+            .values()
+            .find(|a| a.role == role)
+            .or_else(|| {
+                self.agents
+                    .values()
+                    .find(|a| a.label.eq_ignore_ascii_case(role))
+            })
+            .or_else(|| {
+                let alias = match role {
+                    "developer" => "dev",
+                    "tester" => "test",
+                    "manager" | "project_manager" | "product_manager" => "pm",
+                    _ => return None,
+                };
+                self.agents.values().find(|a| a.role == alias)
+            })
     }
 
     /// 获取 Agent 描述符
