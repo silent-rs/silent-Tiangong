@@ -8,6 +8,34 @@ pub struct SpeechResult {
     pub mime_type: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TokenStatsView {
+    pub current_tokens: usize,
+    pub compression_threshold_tokens: usize,
+    pub context_limit_tokens: usize,
+    pub total_prompt_tokens: usize,
+    pub total_completion_tokens: usize,
+    pub total_tokens: usize,
+    pub active_agent_current_tokens: usize,
+    pub active_agent_id: Option<String>,
+}
+
+impl TokenStatsView {
+    pub fn from_session(core_session: &tiangong_core::session::Session) -> Self {
+        let usage = core_session.total_usage();
+        Self {
+            current_tokens: core_session.current_tokens,
+            compression_threshold_tokens: core_session.compression_threshold_tokens,
+            context_limit_tokens: core_session.context_limit_tokens,
+            total_prompt_tokens: usage.prompt_tokens,
+            total_completion_tokens: usage.completion_tokens,
+            total_tokens: usage.total_tokens,
+            active_agent_current_tokens: core_session.active_agent_current_tokens,
+            active_agent_id: core_session.active_agent_id.clone(),
+        }
+    }
+}
+
 /// 语音识别结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscribeResult {
@@ -60,6 +88,7 @@ pub struct RunSnapshotView {
     pub last_tool_result: Option<String>,
     pub last_error: Option<String>,
     pub last_usage: Option<tiangong_types::TokenUsage>,
+    pub token_stats: TokenStatsView,
     pub updated_at: String,
     pub messages: Vec<tiangong_types::Message>,
     pub input_draft: String,
@@ -75,6 +104,7 @@ impl RunSnapshotView {
         input_draft: String,
         current_plan: Option<TaskPlan>,
         pending_session_ids: Vec<String>,
+        token_stats: TokenStatsView,
     ) -> Self {
         Self {
             status: core_snapshot.status,
@@ -87,6 +117,7 @@ impl RunSnapshotView {
             last_tool_result: core_snapshot.last_tool_result.clone(),
             last_error: core_snapshot.last_error.clone(),
             last_usage: core_snapshot.last_usage.clone(),
+            token_stats,
             updated_at: core_snapshot.updated_at.clone(),
             messages,
             input_draft,

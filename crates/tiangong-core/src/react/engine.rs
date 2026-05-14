@@ -22,7 +22,7 @@ use crate::permission::{
 };
 use crate::prompt::PromptAssembler;
 use crate::react::context::{
-    force_final_response, loop_context_with_memory, maybe_update_context_summary,
+    emit_token_usage, force_final_response, loop_context_with_memory, maybe_update_context_summary,
     select_client_for_request,
 };
 use crate::react::message::*;
@@ -258,6 +258,23 @@ fn spawn_sub_agent_stream_forwarder(
                 | StreamEvent::AgentMessage { .. }
                 | StreamEvent::FileLockChanged { .. } => {
                     let _ = parent_tx.send(event);
+                }
+                StreamEvent::TokenUsage {
+                    usage,
+                    current_tokens,
+                    compression_threshold_tokens,
+                    context_limit_tokens,
+                    source,
+                    ..
+                } => {
+                    let _ = parent_tx.send(StreamEvent::TokenUsage {
+                        usage,
+                        current_tokens,
+                        compression_threshold_tokens,
+                        context_limit_tokens,
+                        source,
+                        agent_id: Some(agent_id.clone()),
+                    });
                 }
                 StreamEvent::Error { message } => {
                     let _ = parent_tx.send(StreamEvent::AgentNotification {
@@ -523,6 +540,14 @@ impl ReactEngine {
             };
 
             accumulated_usage.accumulate(&response.usage);
+            emit_token_usage(
+                stream_tx,
+                &response.usage,
+                Some(response.usage.prompt_tokens.max(session.current_tokens)),
+                self.engine.context_limit,
+                format!("react-round-{round}", round = round + 1),
+                None,
+            );
             round += 1;
 
             if response.tool_calls.is_empty() {
@@ -553,7 +578,12 @@ impl ReactEngine {
                     format_llm_output_message(&output),
                 );
                 session.persist_to_disk();
-                maybe_update_context_summary(session, &self.engine, response.usage.total_tokens);
+                maybe_update_context_summary(
+                    session,
+                    &self.engine,
+                    response.usage.prompt_tokens,
+                    stream_tx,
+                );
 
                 if user_message_injected_during_stream {
                     memory_context = None;
@@ -898,45 +928,58 @@ impl ReactEngine {
                     args_summary: args_summary.clone(),
                 });
 
-                let (result, memory_tool_usage, allow_memory_context) = {
-                    let (mut result, memory_tool_usage, allow_memory_context) = if call.name
-                        == "recall_memory"
-                    {
-                        if memory_recall_attempted {
-                            crate::core::duplicate_memory_recall_tool_result()
-                        } else {
-                            memory_recall_attempted = true;
-                            crate::core::execute_memory_recall_tool(call, memory_handle, session)
-                                .await
-                        }
-                    } else if call.name == "analyze_attachment" {
-                        (
-                            crate::core::execute_attachment_analysis_tool(
+                let (result, tool_llm_usage, allow_memory_context, usage_source) = {
+                    let (mut result, tool_llm_usage, allow_memory_context, usage_source) =
+                        if call.name == "recall_memory" {
+                            if memory_recall_attempted {
+                                let (result, usage, allow_context) =
+                                    crate::core::duplicate_memory_recall_tool_result();
+                                (result, usage, allow_context, "recall_memory")
+                            } else {
+                                memory_recall_attempted = true;
+                                let (result, usage, allow_context) =
+                                    crate::core::execute_memory_recall_tool(
+                                        call,
+                                        memory_handle,
+                                        session,
+                                    )
+                                    .await;
+                                (result, usage, allow_context, "recall_memory")
+                            }
+                        } else if call.name == "analyze_attachment" {
+                            let (result, usage) = crate::core::execute_attachment_analysis_tool(
                                 call,
                                 &self.engine,
                                 session,
-                            ),
-                            tiangong_types::TokenUsage::default(),
-                            false,
-                        )
-                    } else {
-                        (
-                            self.engine.execute_tool_call(
-                                call,
-                                &self.mcp_targets,
-                                &self.engine.agent_config().mcp,
-                            ),
-                            tiangong_types::TokenUsage::default(),
-                            false,
-                        )
-                    };
+                            );
+                            (result, usage, false, "analyze_attachment")
+                        } else {
+                            (
+                                self.engine.execute_tool_call(
+                                    call,
+                                    &self.mcp_targets,
+                                    &self.engine.agent_config().mcp,
+                                ),
+                                tiangong_types::TokenUsage::default(),
+                                false,
+                                "",
+                            )
+                        };
                     crate::memory::turn_result::localize_tool_result_images(
                         &call.name,
                         &mut result,
                     );
-                    (result, memory_tool_usage, allow_memory_context)
+                    (result, tool_llm_usage, allow_memory_context, usage_source)
                 };
-                accumulated_usage.accumulate(&memory_tool_usage);
+                accumulated_usage.accumulate(&tool_llm_usage);
+                emit_token_usage(
+                    stream_tx,
+                    &tool_llm_usage,
+                    None,
+                    self.engine.context_limit,
+                    usage_source,
+                    None,
+                );
 
                 audit_tool_execution(
                     &session.id,
@@ -1014,7 +1057,12 @@ impl ReactEngine {
                 {
                     memory_context = Some(result.stdout.clone());
                 }
-                maybe_update_context_summary(session, &self.engine, response.usage.total_tokens);
+                maybe_update_context_summary(
+                    session,
+                    &self.engine,
+                    response.usage.prompt_tokens,
+                    stream_tx,
+                );
 
                 match drain_pending_commands_async(
                     session,

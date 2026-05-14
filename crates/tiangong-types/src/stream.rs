@@ -54,6 +54,23 @@ pub enum StreamEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         usage: Option<crate::TokenUsage>,
     },
+    /// 单次 LLM 请求的 token 用量。
+    ///
+    /// 与 ToolCalls/Done 的聚合 usage 不同，此事件表示一次实际 LLM 请求，
+    /// 供 GUI / Server 进行精确累计与上下文压缩进度展示。
+    TokenUsage {
+        usage: crate::TokenUsage,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        current_tokens: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        compression_threshold_tokens: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_limit_tokens: Option<usize>,
+        source: String,
+        /// 归属 agent ID，None 表示主对话
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
+    },
     /// 需要用户审批
     ApprovalNeeded {
         request_id: String,

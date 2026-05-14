@@ -55,6 +55,7 @@
 - [x] Token 预算分配：Sub Agent 共享 200K token 预算，超出后暂停后续 Agent
 - [x] system prompt 中补充团队工具使用指引
 - [x] Sub Agent 并行执行（使用 futures::join_all 协作并发）
+- [x] 修复 token 消耗统计口径，展示当前 tokens、压缩进度和总 tokens
 
 ## 临时修复任务
 

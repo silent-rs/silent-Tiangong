@@ -7,8 +7,6 @@ use tiangong_core::mcp::McpToolMeta;
 use tiangong_core::models_config::ModelsConfig;
 use tiangong_core::permission::TrustMode;
 
-const DEFAULT_CONTEXT_LIMIT: usize = 32_768;
-
 /// Server 配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
@@ -63,7 +61,7 @@ pub struct ConnectorConfig {
 ///
 /// 包含 Core 所需的配置（models/mcp/skills/trust_mode）
 /// 以及应用层配置（server/connectors）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TiangongConfig {
     // ===== Core 所需配置 =====
     /// LLM 模型配置
@@ -76,29 +74,12 @@ pub struct TiangongConfig {
     pub skills: SkillsConfig,
     /// 权限信任模式
     pub trust_mode: TrustMode,
-    /// 上下文窗口大小
-    pub context_limit: usize,
 
     // ===== 应用层配置 =====
     /// Server 配置
     pub server: ServerConfig,
     /// Connector 配置列表
     pub connectors: Vec<ConnectorConfig>,
-}
-
-impl Default for TiangongConfig {
-    fn default() -> Self {
-        Self {
-            models: ModelsConfig::default(),
-            mcp: McpConfig::default(),
-            mcp_capabilities: Vec::new(),
-            skills: SkillsConfig::default(),
-            trust_mode: TrustMode::default(),
-            context_limit: DEFAULT_CONTEXT_LIMIT,
-            server: ServerConfig::default(),
-            connectors: Vec::new(),
-        }
-    }
 }
 
 impl TiangongConfig {
@@ -114,7 +95,7 @@ impl TiangongConfig {
             trust_mode: self.trust_mode,
             default_trust_mode: self.trust_mode,
             custom_system_prompt: String::new(),
-            context_limit: self.context_limit,
+            context_limit: 0, // 0 表示自动根据模型名称解析
         }
     }
 

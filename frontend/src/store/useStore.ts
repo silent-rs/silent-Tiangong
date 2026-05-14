@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { api, Session, Message, RunSnapshot, McpServer, Skill, TaskPlan, MediaAsset } from '../api/tauri';
+import { api, Session, Message, RunSnapshot, McpServer, Skill, TaskPlan, MediaAsset, TokenStats } from '../api/tauri';
 import { notifyBackgroundSessionCompleted } from '../utils/desktopNotification';
 
 // ---------------------------------------------------------------------------
@@ -119,6 +119,7 @@ interface AppState {
   runSummary: string;
   lastDurationMs: number | null;
   lastUsage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null;
+  tokenStats: TokenStats | null;
   approvalRequestId: string | null;
   currentPlan: TaskPlan | undefined;
   inputContent: string;
@@ -189,6 +190,7 @@ export const useStore = create<AppState>((set, get) => ({
   runSummary: '',
   lastDurationMs: null,
   lastUsage: null,
+  tokenStats: null,
   approvalRequestId: null,
   currentPlan: undefined,
   inputContent: '',
@@ -260,6 +262,9 @@ export const useStore = create<AppState>((set, get) => ({
       messages: [],
       inputContent: '',
       runStatus: 'idle',
+      runSummary: '',
+      lastUsage: null,
+      tokenStats: null,
       currentPlan: undefined,
       streamingMessageId: null,
       streamingContent: '',
@@ -287,6 +292,7 @@ export const useStore = create<AppState>((set, get) => ({
         runSummary: snapshot.summary || '',
         lastDurationMs: snapshot.last_duration_ms ?? null,
         lastUsage: snapshot.last_usage ?? null,
+        tokenStats: snapshot.token_stats ?? null,
         approvalRequestId: snapshot.approval_request_id || null,
         currentPlan: snapshot.current_plan,
         sessionCwd: cwd,
@@ -318,6 +324,7 @@ export const useStore = create<AppState>((set, get) => ({
         runSummary: snapshot.summary || '',
         lastDurationMs: snapshot.last_duration_ms ?? null,
         lastUsage: snapshot.last_usage ?? null,
+        tokenStats: snapshot.token_stats ?? null,
         approvalRequestId: snapshot.approval_request_id || null,
         agents: parseAgentsFromMessages(snapshot.messages),
         selectedAgentTab: null,
@@ -412,6 +419,8 @@ export const useStore = create<AppState>((set, get) => ({
           isSending: false,
           messages: snapshot.messages,
           currentPlan: snapshot.current_plan,
+          lastUsage: snapshot.last_usage ?? null,
+          tokenStats: snapshot.token_stats ?? null,
         });
         // 刷新会话列表
         api.getSessions().then((sessions) => set({ sessions })).catch(console.error);
@@ -588,6 +597,7 @@ export const useStore = create<AppState>((set, get) => ({
       runSummary: snapshot.summary || '',
       lastDurationMs: snapshot.last_duration_ms ?? null,
       lastUsage: snapshot.last_usage ?? null,
+      tokenStats: snapshot.token_stats ?? null,
       approvalRequestId: snapshotApprovalRequestId,
     });
 

@@ -83,7 +83,7 @@ impl TiangongState {
             trust_mode: self.active_session_trust_mode(),
             default_trust_mode: self.agent_config().default_trust_mode,
             custom_system_prompt: self.agent_config().custom_system_prompt.clone(),
-            context_limit: base.context_limit,
+            context_limit: 0,
         }
     }
 

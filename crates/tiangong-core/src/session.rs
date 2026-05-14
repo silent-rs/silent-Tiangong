@@ -30,6 +30,21 @@ pub struct Session {
     /// 存在这里，供 GUI 切换会话时恢复原先统计。
     #[serde(default)]
     pub token_usage: TokenUsage,
+    /// 最近一次主对话 LLM 请求的 prompt token 数，用于展示当前上下文大小。
+    #[serde(default)]
+    pub current_tokens: usize,
+    /// 当前模型配置下触发上下文压缩的 token 阈值。
+    #[serde(default)]
+    pub compression_threshold_tokens: usize,
+    /// 当前模型配置下的上下文窗口上限。
+    #[serde(default)]
+    pub context_limit_tokens: usize,
+    /// 当前活跃 sub agent 的上下文 token 数
+    #[serde(default)]
+    pub active_agent_current_tokens: usize,
+    /// 当前活跃 sub agent ID（None 表示主对话执行中）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_agent_id: Option<String>,
     #[serde(default)]
     pub task_records: Vec<SessionTaskRecord>,
     #[serde(default)]
@@ -192,6 +207,11 @@ impl Session {
             title: title.into(),
             messages: Vec::new(),
             token_usage: TokenUsage::default(),
+            current_tokens: 0,
+            compression_threshold_tokens: 0,
+            context_limit_tokens: 0,
+            active_agent_current_tokens: 0,
+            active_agent_id: None,
             task_records: Vec::new(),
             task_plans: Vec::new(),
             cwd: String::new(),
@@ -220,6 +240,11 @@ impl Session {
             title: title.into(),
             messages: Vec::new(),
             token_usage: TokenUsage::default(),
+            current_tokens: 0,
+            compression_threshold_tokens: 0,
+            context_limit_tokens: 0,
+            active_agent_current_tokens: 0,
+            active_agent_id: None,
             task_records: Vec::new(),
             task_plans: Vec::new(),
             cwd: workspace_dir.to_string_lossy().to_string(),

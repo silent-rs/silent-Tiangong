@@ -155,6 +155,7 @@ export function MessageInput() {
   const addVoiceMessage = useStore((state) => state.addVoiceMessage);
   const lastDurationMs = useStore((state) => state.lastDurationMs);
   const lastUsage = useStore((state) => state.lastUsage);
+  const tokenStats = useStore((state) => state.tokenStats);
   const agents = useStore((state) => state.agents);
   const [isComposing, setIsComposing] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -180,7 +181,18 @@ export function MessageInput() {
   const currentRunStatus = isDraft
     ? 'idle'
     : currentSessionRunStatus || runStatus;
-  const sessionTotalTokens = lastUsage?.total_tokens ?? 0;
+  const activeAgentId = tokenStats?.active_agent_id ?? null;
+  const displayTokens = activeAgentId
+    ? (tokenStats?.active_agent_current_tokens ?? 0)
+    : (tokenStats?.current_tokens ?? 0);
+  const compressionThreshold = tokenStats?.compression_threshold_tokens ?? 0;
+  const compressionProgress = compressionThreshold > 0
+    ? Math.min(100, Math.round((displayTokens / compressionThreshold) * 100))
+    : 0;
+  const sessionTotalTokens = tokenStats?.total_tokens ?? lastUsage?.total_tokens ?? 0;
+  const activeAgentLabel = activeAgentId
+    ? agents.find((a) => a.agentId === activeAgentId)?.label ?? activeAgentId
+    : null;
 
   useEffect(() => {
     api.getTrustMode().then(setTrustMode).catch(() => {});
@@ -1079,14 +1091,36 @@ export function MessageInput() {
                 )}
               </div>
               <div className="flex items-center gap-2 shrink-0">
-                {sessionTotalTokens > 0 && (
-                  <span className="text-muted-foreground/50 tabular-nums">
-                    {lastDurationMs ? `${(lastDurationMs / 1000).toFixed(1)}s · ` : ''}
-                    {sessionTotalTokens.toLocaleString()} tokens
-                    {false && (
-                      <span className="text-blue-400 ml-1">placeholder</span>
+                {(displayTokens > 0 || sessionTotalTokens > 0) && (
+                  <div
+                    className="flex items-center gap-2 text-muted-foreground/60 tabular-nums"
+                    title={
+                      activeAgentLabel
+                        ? `[${activeAgentLabel}] 当前 ${displayTokens.toLocaleString()} tokens / 压缩阈值 ${compressionThreshold.toLocaleString()} tokens / 总计 ${sessionTotalTokens.toLocaleString()} tokens`
+                        : `当前 ${displayTokens.toLocaleString()} tokens / 压缩阈值 ${compressionThreshold.toLocaleString()} tokens / 总计 ${sessionTotalTokens.toLocaleString()} tokens`
+                    }
+                  >
+                    {lastDurationMs ? <span>{(lastDurationMs / 1000).toFixed(1)}s</span> : null}
+                    {compressionThreshold > 0 && (
+                      <div className="h-1.5 w-20 overflow-hidden rounded-full bg-muted">
+                        <div
+                          className={`h-full rounded-full transition-all ${
+                            compressionProgress >= 95
+                              ? 'bg-destructive'
+                              : compressionProgress >= 80
+                                ? 'bg-amber-500'
+                                : 'bg-green-500'
+                          }`}
+                          style={{ width: `${compressionProgress}%` }}
+                        />
+                      </div>
                     )}
-                  </span>
+                    <span>
+                      {activeAgentLabel ? `[${activeAgentLabel}] ` : ''}
+                      {displayTokens.toLocaleString()}
+                    </span>
+                    <span>总计 {sessionTotalTokens.toLocaleString()}</span>
+                  </div>
                 )}
                 <button
                   onClick={toggleTrustMode}

@@ -19,7 +19,7 @@ use crate::model::ProviderProtocol;
 use crate::models_config::{ModelCapability, ModelsConfig};
 use crate::permission::TrustMode;
 
-const DEFAULT_CONTEXT_LIMIT: usize = 32_768;
+const DEFAULT_CONTEXT_LIMIT: usize = 200_000;
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
 /// 模型端点配置
@@ -300,6 +300,60 @@ impl std::fmt::Debug for CoreConfigProvider {
             .field("generation", &self.generation())
             .finish()
     }
+}
+
+/// 返回内嵌的默认 context_windows.json 内容，用于首次安装时释放到用户目录
+pub fn default_context_windows_json() -> &'static str {
+    include_str!("context/context_windows.json")
+}
+
+/// 根据模型名称从映射表解析 context_window
+pub fn resolve_context_limit(model_name: &str) -> usize {
+    const DEFAULT_MAP: &str = include_str!("context/context_windows.json");
+
+    let path = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".tiangong")
+        .join("context_windows.json");
+
+    let content = if path.exists() {
+        std::fs::read_to_string(&path).unwrap_or_else(|_| DEFAULT_MAP.to_string())
+    } else {
+        DEFAULT_MAP.to_string()
+    };
+
+    let map: std::collections::HashMap<String, Value> = match serde_json::from_str(&content) {
+        Ok(m) => m,
+        Err(err) => {
+            tracing::warn!(
+                "解析 context_windows.json 失败：{err}，使用默认值 {DEFAULT_CONTEXT_LIMIT}"
+            );
+            return DEFAULT_CONTEXT_LIMIT;
+        }
+    };
+
+    // 精确匹配
+    if let Some(Some(n)) = map.get(model_name).map(|v| v.as_u64()) {
+        return n as usize;
+    }
+
+    // 前缀匹配：用最长的匹配前缀
+    let mut best_match: Option<usize> = None;
+    let mut best_len = 0;
+    for (key, val) in &map {
+        if key.starts_with('_') {
+            continue;
+        }
+        if model_name.starts_with(key)
+            && key.len() > best_len
+            && let Some(n) = val.as_u64()
+        {
+            best_match = Some(n as usize);
+            best_len = key.len();
+        }
+    }
+    best_match.unwrap_or(DEFAULT_CONTEXT_LIMIT)
 }
 
 #[cfg(test)]

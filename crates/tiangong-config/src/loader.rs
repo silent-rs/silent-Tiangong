@@ -47,6 +47,9 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
         .map(|f| f.connectors)
         .unwrap_or_default();
 
+    // 首次安装：释放默认 context_windows.json
+    ensure_context_windows(dir);
+
     // MCP 能力缓存加载 + 异步刷新
     let cache_path = dir.join("mcp-tools-cache.json");
     let _ = tiangong_core::mcp::load_mcp_capabilities_cache(&cache_path);
@@ -95,5 +98,20 @@ fn load_json_config<T: serde::de::DeserializeOwned>(dir: &Path, filename: &str) 
             tracing::warn!("解析 {filename} 失败：{err}");
             None
         }
+    }
+}
+
+/// 如果用户目录下不存在 context_windows.json，则从内嵌默认内容创建
+fn ensure_context_windows(dir: &Path) {
+    let path = dir.join("context_windows.json");
+    if path.exists() {
+        return;
+    }
+    let default_content = tiangong_core::core_config::default_context_windows_json();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(err) = std::fs::write(&path, default_content) {
+        tracing::warn!("写入 context_windows.json 失败：{err}");
     }
 }
