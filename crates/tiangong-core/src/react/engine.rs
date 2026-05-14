@@ -3,8 +3,12 @@
 //! 所有执行路径统一经过 `ReactEngine::execute_turn`，消除 sync/async 双版本。
 
 use std::collections::{HashMap, HashSet};
-use std::sync::mpsc::Sender as StdSender;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::mpsc::{Receiver as StdReceiver, Sender as StdSender};
+use std::sync::{Arc, Mutex};
 
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::agents::execution_mcp_agent::McpFunctionTarget;
@@ -27,12 +31,268 @@ use crate::session::{Message, MessageRole, Session, now_text};
 use crate::stream_throttle::ThrottledStreamSink;
 use tiangong_types::{StreamEvent, StreamToolCall};
 
+use crate::agent_team::lifecycle::TeamContext;
+
+#[derive(Default)]
+struct SubAgentDrainResult {
+    usage: TokenUsage,
+    ran: bool,
+    cancelled: bool,
+}
+
+fn sub_agent_stream_message(
+    id: impl Into<String>,
+    role: MessageRole,
+    content: impl Into<String>,
+    reasoning_content: impl Into<String>,
+) -> Message {
+    Message {
+        id: id.into(),
+        role,
+        content: content.into(),
+        reasoning_content: reasoning_content.into(),
+        reasoning_signature: None,
+        worker_id: None,
+        media: Vec::new(),
+        tool_calls: Vec::new(),
+        tool_call_id: None,
+        tool_name: None,
+        tool_result_is_error: false,
+        compact: false,
+        created_at: now_text(),
+    }
+}
+
+fn send_sub_agent_output(
+    parent_tx: &StdSender<StreamEvent>,
+    agent_id: &str,
+    agent_role: &str,
+    agent_label: &str,
+    message: Message,
+) {
+    let _ = parent_tx.send(StreamEvent::AgentOutput {
+        agent_id: agent_id.to_string(),
+        agent_role: agent_role.to_string(),
+        agent_label: agent_label.to_string(),
+        messages: vec![message],
+    });
+}
+
+fn agent_status_label(status: &crate::agent_team::descriptor::AgentStatus) -> &'static str {
+    match status {
+        crate::agent_team::descriptor::AgentStatus::Idle => "idle",
+        crate::agent_team::descriptor::AgentStatus::Running => "running",
+        crate::agent_team::descriptor::AgentStatus::WaitingForUser => "waiting_for_user",
+        crate::agent_team::descriptor::AgentStatus::WaitingForLock => "waiting_for_lock",
+        crate::agent_team::descriptor::AgentStatus::Terminated => "terminated",
+    }
+}
+
+fn spawn_sub_agent_stream_forwarder(
+    agent_id: String,
+    agent_role: String,
+    agent_label: String,
+    parent_tx: StdSender<StreamEvent>,
+    child_rx: StdReceiver<StreamEvent>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        for event in child_rx {
+            match event {
+                StreamEvent::UserMessage {
+                    message_id,
+                    content,
+                    ..
+                } => send_sub_agent_output(
+                    &parent_tx,
+                    &agent_id,
+                    &agent_role,
+                    &agent_label,
+                    sub_agent_stream_message(
+                        format!("agent:{agent_id}:user:{message_id}"),
+                        MessageRole::User,
+                        content,
+                        "",
+                    ),
+                ),
+                StreamEvent::Delta {
+                    message_id,
+                    content,
+                } => send_sub_agent_output(
+                    &parent_tx,
+                    &agent_id,
+                    &agent_role,
+                    &agent_label,
+                    sub_agent_stream_message(
+                        format!("agent:{agent_id}:assistant:{message_id}"),
+                        MessageRole::Assistant,
+                        content,
+                        "",
+                    ),
+                ),
+                StreamEvent::Reasoning {
+                    message_id,
+                    content,
+                } => send_sub_agent_output(
+                    &parent_tx,
+                    &agent_id,
+                    &agent_role,
+                    &agent_label,
+                    sub_agent_stream_message(
+                        format!("agent:{agent_id}:assistant:{message_id}"),
+                        MessageRole::Assistant,
+                        "",
+                        content,
+                    ),
+                ),
+                StreamEvent::ToolCalls {
+                    message_id,
+                    names,
+                    usage,
+                    ..
+                } => {
+                    let usage_text = usage
+                        .map(|usage| {
+                            format!(
+                                "\ntokens: prompt={}, completion={}, total={}",
+                                usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
+                            )
+                        })
+                        .unwrap_or_default();
+                    send_sub_agent_output(
+                        &parent_tx,
+                        &agent_id,
+                        &agent_role,
+                        &agent_label,
+                        sub_agent_stream_message(
+                            format!("agent:{agent_id}:tool-calls:{message_id}"),
+                            MessageRole::System,
+                            format!("LLM 输出{usage_text}\ntool_calls: {}", names.join(", ")),
+                            "",
+                        ),
+                    );
+                }
+                StreamEvent::ToolStart { name, args_summary } => {
+                    let mut content = format!("工具开始 [{name}]");
+                    if !args_summary.is_empty() {
+                        content.push_str(&format!("\n命令: {args_summary}"));
+                    }
+                    send_sub_agent_output(
+                        &parent_tx,
+                        &agent_id,
+                        &agent_role,
+                        &agent_label,
+                        sub_agent_stream_message(
+                            format!("agent:{agent_id}:tool-start:{}", scru128::new()),
+                            MessageRole::System,
+                            content,
+                            "",
+                        ),
+                    );
+                }
+                StreamEvent::ToolResult {
+                    name,
+                    tool_call_id,
+                    ok,
+                    output,
+                    full_output,
+                } => {
+                    let persisted_output = full_output.unwrap_or(output);
+                    let mut content = format!(
+                        "工具执行 [{name}]\nok={} exit_code={}",
+                        ok,
+                        if ok { 0 } else { 1 }
+                    );
+                    if !persisted_output.trim().is_empty() {
+                        content.push_str(&format!("\nstdout:\n{persisted_output}"));
+                    }
+                    send_sub_agent_output(
+                        &parent_tx,
+                        &agent_id,
+                        &agent_role,
+                        &agent_label,
+                        sub_agent_stream_message(
+                            tool_call_id.unwrap_or_else(|| {
+                                format!("agent:{agent_id}:tool-result:{}", scru128::new())
+                            }),
+                            MessageRole::System,
+                            content,
+                            "",
+                        ),
+                    );
+                }
+                StreamEvent::Retry {
+                    message,
+                    attempt,
+                    max_attempts,
+                } => send_sub_agent_output(
+                    &parent_tx,
+                    &agent_id,
+                    &agent_role,
+                    &agent_label,
+                    sub_agent_stream_message(
+                        format!("agent:{agent_id}:retry:{}", scru128::new()),
+                        MessageRole::System,
+                        format!("LLM 请求重试中（{attempt}/{max_attempts}）：{message}"),
+                        "",
+                    ),
+                ),
+                StreamEvent::ApprovalNeeded {
+                    tool_name,
+                    args_summary,
+                    ..
+                } => send_sub_agent_output(
+                    &parent_tx,
+                    &agent_id,
+                    &agent_role,
+                    &agent_label,
+                    sub_agent_stream_message(
+                        format!("agent:{agent_id}:approval:{}", scru128::new()),
+                        MessageRole::System,
+                        format!("等待确认：{tool_name} {args_summary}"),
+                        "",
+                    ),
+                ),
+                StreamEvent::AgentCreated { .. }
+                | StreamEvent::AgentStatusChanged { .. }
+                | StreamEvent::AgentNotification { .. }
+                | StreamEvent::AgentMessage { .. }
+                | StreamEvent::FileLockChanged { .. } => {
+                    let _ = parent_tx.send(event);
+                }
+                StreamEvent::Error { message } => {
+                    let _ = parent_tx.send(StreamEvent::AgentNotification {
+                        agent_id: agent_id.clone(),
+                        agent_label: agent_label.clone(),
+                        content: format!("执行出错：{message}"),
+                        level: "error".to_string(),
+                    });
+                    send_sub_agent_output(
+                        &parent_tx,
+                        &agent_id,
+                        &agent_role,
+                        &agent_label,
+                        sub_agent_stream_message(
+                            format!("agent:{agent_id}:error:{}", scru128::new()),
+                            MessageRole::System,
+                            format!("执行出错：{message}"),
+                            "",
+                        ),
+                    );
+                }
+                _ => {}
+            }
+        }
+    })
+}
+
 /// 单个 agent 的 async ReAct 执行引擎
 pub(crate) struct ReactEngine {
     engine: crate::runtime::RuntimeEngine,
     tools: Vec<ToolSpec>,
     mcp_targets: HashMap<String, McpFunctionTarget>,
     max_rounds: usize,
+    team: Option<Arc<Mutex<TeamContext>>>,
+    agent_id: String,
 }
 
 impl ReactEngine {
@@ -47,7 +307,20 @@ impl ReactEngine {
             tools,
             mcp_targets,
             max_rounds,
+            team: None,
+            agent_id: "main".to_string(),
         }
+    }
+
+    /// 使用已有团队上下文执行指定 Agent。
+    pub(crate) fn with_shared_team(
+        mut self,
+        team: Arc<Mutex<TeamContext>>,
+        agent_id: String,
+    ) -> Self {
+        self.team = Some(team);
+        self.agent_id = agent_id;
+        self
     }
 
     /// 执行一个完整的对话轮次（可能多轮工具调用），async 版
@@ -55,7 +328,7 @@ impl ReactEngine {
     /// 每轮之间检查 cmd_rx：新消息注入上下文，cancel 立即生效。
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_turn(
-        &self,
+        &mut self,
         session: &mut Session,
         _user_input: &str,
         stream_tx: &StdSender<StreamEvent>,
@@ -71,8 +344,45 @@ impl ReactEngine {
         let mut successful_tool_call_keys = HashSet::new();
         let mut memory_candidate_count = 0usize;
 
+        if self.agent_id == "main" {
+            let routed = self
+                .team
+                .as_ref()
+                .and_then(|team| {
+                    team.lock().ok().map(|mut team| {
+                        crate::agent_team::lifecycle::route_user_mentions(
+                            &mut team,
+                            _user_input,
+                            stream_tx,
+                        )
+                    })
+                })
+                .unwrap_or(false);
+            if routed {
+                let sub_result = self
+                    .drain_sub_agent_inboxes(session, stream_tx, cmd_rx)
+                    .await;
+                accumulated_usage.accumulate(&sub_result.usage);
+                if sub_result.cancelled {
+                    session.persist_to_disk();
+                    return accumulated_usage;
+                }
+                session.persist_to_disk();
+                let _ = stream_tx.send(StreamEvent::Done {
+                    usage: Some(accumulated_usage.clone()),
+                });
+                return accumulated_usage;
+            }
+        }
+
         'react_loop: loop {
-            match drain_pending_commands_async(session, &mut loop_context, stream_tx, cmd_rx) {
+            match drain_pending_commands_async(
+                session,
+                &self.engine,
+                &mut loop_context,
+                stream_tx,
+                cmd_rx,
+            ) {
                 PendingCommandEffect::Terminate => return accumulated_usage,
                 PendingCommandEffect::MessageInjected => {
                     memory_context = None;
@@ -89,8 +399,18 @@ impl ReactEngine {
             }
 
             let request_tools = self.tools.to_vec();
+            let loop_context_with_team;
+            let context_for_request =
+                if let Some(team_context) = self.sub_agent_team_context_message() {
+                    loop_context_with_team = std::iter::once(team_context)
+                        .chain(loop_context.iter().cloned())
+                        .collect::<Vec<_>>();
+                    &loop_context_with_team
+                } else {
+                    &loop_context
+                };
             let loop_context_with_memory =
-                loop_context_with_memory(&loop_context, memory_context.as_deref());
+                loop_context_with_memory(context_for_request, memory_context.as_deref());
             let assembler = PromptAssembler::new(self.engine.context_limit);
             let assembled = assembler.assemble(
                 session,
@@ -156,6 +476,17 @@ impl ReactEngine {
                             }
                             Some(Command::ReloadConfig) => {}
                             Some(Command::Approval { .. }) => {}
+                            Some(Command::CancelAgent { .. }) => {}
+                            Some(Command::CompressContext) => {
+                                crate::core::compress_context_for_session(
+                                    session,
+                                    &self.engine,
+                                    stream_tx,
+                                );
+                            }
+                            Some(Command::ResetContext) => {
+                                crate::core::reset_context_for_session(session, stream_tx);
+                            }
                         }
                     }
                     chunk_opt = chunk_rx.recv() => {
@@ -284,7 +615,13 @@ impl ReactEngine {
 
             // 执行工具
             for call in executable_calls {
-                match drain_pending_commands_async(session, &mut loop_context, stream_tx, cmd_rx) {
+                match drain_pending_commands_async(
+                    session,
+                    &self.engine,
+                    &mut loop_context,
+                    stream_tx,
+                    cmd_rx,
+                ) {
                     PendingCommandEffect::Terminate => return accumulated_usage,
                     PendingCommandEffect::MessageInjected => {
                         memory_context = None;
@@ -294,6 +631,56 @@ impl ReactEngine {
                         continue 'react_loop;
                     }
                     PendingCommandEffect::None => {}
+                }
+
+                // 团队协作工具拦截
+                if crate::agent_team::lifecycle::is_team_tool(&call.name) {
+                    let args_summary = format_call_args_summary(call);
+                    let _ = stream_tx.send(StreamEvent::ToolStart {
+                        name: call.name.clone(),
+                        args_summary: args_summary.clone(),
+                    });
+                    let result = if let Some(team) = self.team.as_ref() {
+                        if let Ok(mut team) = team.lock() {
+                            crate::agent_team::lifecycle::execute_team_tool(
+                                &mut team,
+                                &self.agent_id,
+                                call,
+                                session,
+                                &self.tools,
+                                stream_tx,
+                            )
+                        } else {
+                            crate::agent_team::lifecycle::error_tool_result(
+                                &call.name,
+                                "团队状态锁定失败",
+                            )
+                        }
+                    } else {
+                        crate::agent_team::lifecycle::error_tool_result(
+                            &call.name,
+                            "团队功能未启用",
+                        )
+                    };
+                    let _ = stream_tx.send(StreamEvent::ToolResult {
+                        name: call.name.clone(),
+                        tool_call_id: Some(call.id.clone()),
+                        ok: result.ok,
+                        output: tool_result_stream_output(&result),
+                        full_output: Some(tool_result_full_output(&result)),
+                    });
+                    append_tool_result_message(
+                        session,
+                        &call.id,
+                        &call.name,
+                        tool_result_provider_text(&call.name, &result, false),
+                        !result.ok,
+                    );
+                    if result.ok {
+                        let tool_call_key = tool_call_dedupe_key(&call.name, &call.arguments);
+                        successful_tool_call_keys.insert(tool_call_key);
+                    }
+                    continue;
                 }
 
                 let args_summary = format_call_args_summary(call);
@@ -414,6 +801,17 @@ impl ReactEngine {
                                 }
                                 Some(Command::ReloadConfig) => {}
                                 Some(Command::Approval { .. }) => {}
+                                Some(Command::CancelAgent { .. }) => {}
+                                Some(Command::CompressContext) => {
+                                    crate::core::compress_context_for_session(
+                                        session,
+                                        &self.engine,
+                                        stream_tx,
+                                    );
+                                }
+                                Some(Command::ResetContext) => {
+                                    crate::core::reset_context_for_session(session, stream_tx);
+                                }
                             }
                         };
 
@@ -457,8 +855,42 @@ impl ReactEngine {
                     }
                 }
 
-                if check_cancel(cmd_rx, stream_tx) {
+                if check_cancel(session, &self.engine, cmd_rx, stream_tx) {
                     return accumulated_usage;
+                }
+
+                // 文件编辑锁检查
+                if matches!(call.name.as_str(), "write_file" | "replace_in_file")
+                    && let Some(team) = self.team.as_ref()
+                {
+                    let file_path = call
+                        .arguments
+                        .as_object()
+                        .and_then(|o| o.get("path").and_then(|v| v.as_str()).map(String::from));
+                    if let Some(ref path) = file_path {
+                        let path_buf = std::path::PathBuf::from(path);
+                        let now = chrono::Local::now().naive_local();
+                        let lock_error = team
+                            .lock()
+                            .map_err(|_| "团队状态锁定失败".to_string())
+                            .and_then(|mut team| {
+                                team.file_locks
+                                    .ensure_can_write(&path_buf, &self.agent_id, &now)
+                            });
+                        if let Err(message) = lock_error {
+                            let _ = stream_tx.send(StreamEvent::ToolResult {
+                                name: call.name.clone(),
+                                tool_call_id: Some(call.id.clone()),
+                                ok: false,
+                                output: message.clone(),
+                                full_output: None,
+                            });
+                            append_tool_result_message(
+                                session, &call.id, &call.name, message, true,
+                            );
+                            continue;
+                        }
+                    }
                 }
 
                 let _ = stream_tx.send(StreamEvent::ToolStart {
@@ -534,7 +966,7 @@ impl ReactEngine {
                     &call.name,
                     format_tool_trace_message(&result),
                 );
-                if !result.ok && check_cancel(cmd_rx, stream_tx) {
+                if !result.ok && check_cancel(session, &self.engine, cmd_rx, stream_tx) {
                     return accumulated_usage;
                 }
 
@@ -550,7 +982,7 @@ impl ReactEngine {
                 }
 
                 // 记忆候选评估
-                if check_cancel(cmd_rx, stream_tx) {
+                if check_cancel(session, &self.engine, cmd_rx, stream_tx) {
                     return accumulated_usage;
                 }
                 if let Some(handle) = memory_handle {
@@ -584,7 +1016,13 @@ impl ReactEngine {
                 }
                 maybe_update_context_summary(session, &self.engine, response.usage.total_tokens);
 
-                match drain_pending_commands_async(session, &mut loop_context, stream_tx, cmd_rx) {
+                match drain_pending_commands_async(
+                    session,
+                    &self.engine,
+                    &mut loop_context,
+                    stream_tx,
+                    cmd_rx,
+                ) {
                     PendingCommandEffect::Terminate => return accumulated_usage,
                     PendingCommandEffect::MessageInjected => {
                         memory_context = None;
@@ -598,15 +1036,480 @@ impl ReactEngine {
                 }
             }
 
+            // 执行有待处理任务的 Sub Agent
+            let sub_result = self
+                .drain_sub_agent_inboxes(session, stream_tx, cmd_rx)
+                .await;
+            accumulated_usage.accumulate(&sub_result.usage);
+            if sub_result.cancelled {
+                session.persist_to_disk();
+                return accumulated_usage;
+            }
+
+            let main_messages = self.drain_main_agent_messages();
+            if !main_messages.is_empty() {
+                for message in main_messages {
+                    loop_context.push(Message::new(
+                        MessageRole::User,
+                        format!(
+                            "[from:{} at {}]\n{}",
+                            message.from, message.created_at, message.content
+                        ),
+                    ));
+                }
+                continue 'react_loop;
+            }
+
+            if sub_result.ran {
+                session.persist_to_disk();
+                let _ = stream_tx.send(StreamEvent::Done {
+                    usage: Some(accumulated_usage.clone()),
+                });
+                return accumulated_usage;
+            }
+
             session.persist_to_disk();
         }
 
         accumulated_usage
     }
+
+    fn drain_main_agent_messages(&self) -> Vec<crate::agent_team::message_bus::AgentMessage> {
+        self.team
+            .as_ref()
+            .and_then(|team| team.lock().ok().map(|mut team| team.drain_main_inbox()))
+            .unwrap_or_default()
+    }
+
+    fn sub_agent_team_context_message(&self) -> Option<Message> {
+        if self.agent_id == "main" {
+            return None;
+        }
+
+        let team = self.team.as_ref()?.lock().ok()?;
+        let current = team.registry.get(&self.agent_id)?;
+        let mut agents = team.registry.alive_agents();
+        agents.sort_by(|a, b| a.role.cmp(&b.role));
+        if agents.is_empty() {
+            return None;
+        }
+
+        let roster = agents
+            .iter()
+            .map(|agent| {
+                let own = if agent.agent_id == self.agent_id {
+                    "（你）"
+                } else {
+                    ""
+                };
+                format!(
+                    "- {} (@{}) status={}{}",
+                    agent.label,
+                    agent.role,
+                    agent_status_label(&agent.status),
+                    own
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        Some(Message::new(
+            MessageRole::System,
+            format!(
+                "[团队上下文]\n\
+你的身份：{} (@{})。\n\
+当前可用团队成员：\n{}\n\
+协作规则：\n\
+- 需要其他角色补充信息、实现或验证时，使用 send_message(to=\"role\", content=\"...\") 主动沟通，role 必须来自上面的 @角色。\n\
+- 需要同步给所有成员时，使用 broadcast_message(content=\"...\", exclude=[\"{}\"]）。\n\
+- 子 Agent 不负责创建或解散成员；已有团队成员都列在上方。\n\
+- 需要向用户汇报时，使用 notify_user；内容直接用你的角色口吻输出结论和进展，不要带系统日志前缀。",
+                current.label, current.role, roster, current.role
+            ),
+        ))
+    }
+
+    /// 轮询所有活跃 Sub Agent 的收件箱，为有待处理消息的 Agent 执行 ReactEngine。
+    /// 返回 Sub Agent 执行消耗的 token 总量。
+    async fn drain_sub_agent_inboxes(
+        &mut self,
+        parent_session: &mut Session,
+        stream_tx: &StdSender<StreamEvent>,
+        cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+    ) -> SubAgentDrainResult {
+        let mut result = SubAgentDrainResult::default();
+
+        let Some(team_arc) = self.team.clone() else {
+            return result;
+        };
+
+        let max_concurrent = crate::agent_team::tools::MAX_CONCURRENT_SUB_AGENTS;
+        let token_budget = crate::agent_team::tools::SUB_AGENT_TOTAL_TOKEN_BUDGET;
+        let sub_max_rounds = crate::agent_team::tools::SUB_AGENT_MAX_ROUNDS;
+
+        // 收集待执行的 Agent（有消息且未超限）
+        type PendingAgent = (String, String, String, String, Vec<String>, String, Session);
+        let mut pending: Vec<PendingAgent> = Vec::new();
+        {
+            let Ok(mut team) = team_arc.lock() else {
+                let _ = stream_tx.send(StreamEvent::Error {
+                    message: "团队状态锁定失败".to_string(),
+                });
+                return result;
+            };
+            let agent_infos: Vec<_> = team
+                .registry
+                .alive_agents()
+                .iter()
+                .filter(|a| a.status == crate::agent_team::descriptor::AgentStatus::Idle)
+                .map(|a| {
+                    (
+                        a.agent_id.clone(),
+                        a.label.clone(),
+                        a.role.clone(),
+                        a.system_prompt.clone(),
+                        a.tools.clone(),
+                    )
+                })
+                .collect();
+
+            for (agent_id, agent_label, agent_role, system_prompt, tool_names) in agent_infos {
+                if pending.len() >= max_concurrent {
+                    break;
+                }
+                if result.usage.total_tokens >= token_budget {
+                    let _ = stream_tx.send(StreamEvent::AgentNotification {
+                        agent_id: "system".to_string(),
+                        agent_label: "系统".to_string(),
+                        content: format!(
+                            "Sub Agent token 预算已用尽（{}/{}），剩余 Agent 将在下一轮执行",
+                            result.usage.total_tokens, token_budget
+                        ),
+                        level: "warning".to_string(),
+                    });
+                    break;
+                }
+                let messages = team.registry.drain_inbox(&agent_id);
+                if messages.is_empty() {
+                    continue;
+                }
+                let Some(child_session) = team.registry.get_session(&agent_id).cloned() else {
+                    continue;
+                };
+                team.registry.update_status(
+                    &agent_id,
+                    crate::agent_team::descriptor::AgentStatus::Running,
+                );
+                let _ = stream_tx.send(StreamEvent::AgentStatusChanged {
+                    agent_id: agent_id.clone(),
+                    label: agent_label.clone(),
+                    status: "running".to_string(),
+                });
+                let combined = messages
+                    .into_iter()
+                    .map(|m| format!("[from:{} at {}]\n{}", m.from, m.created_at, m.content))
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                pending.push((
+                    agent_id,
+                    agent_label,
+                    agent_role,
+                    system_prompt,
+                    tool_names,
+                    combined,
+                    child_session,
+                ));
+            }
+        }
+
+        if pending.is_empty() {
+            return result;
+        }
+        result.ran = true;
+
+        // 并行执行所有待执行的 Sub Agent（协作并发）
+        type SubResult = (String, String, String, Session, Vec<Message>, TokenUsage);
+        type ActiveSubAgent = (String, String, String, tokio_mpsc::UnboundedSender<Command>);
+        let mut futures: FuturesUnordered<Pin<Box<dyn Future<Output = SubResult>>>> =
+            FuturesUnordered::new();
+        let mut active_sub_agents: Vec<ActiveSubAgent> = Vec::new();
+
+        for (
+            agent_id,
+            agent_label,
+            agent_role,
+            system_prompt,
+            tool_names,
+            combined_content,
+            mut child_session,
+        ) in pending
+        {
+            let sub_tools: Vec<ToolSpec> = self
+                .tools
+                .iter()
+                .filter(|t| tool_names.iter().any(|name| name == &t.name))
+                .filter(|t| !matches!(t.name.as_str(), "create_agent" | "dismiss_agent"))
+                .cloned()
+                .collect();
+
+            let mut sub_engine = ReactEngine::new(
+                self.engine.clone(),
+                sub_tools,
+                self.mcp_targets.clone(),
+                sub_max_rounds,
+            )
+            .with_shared_team(team_arc.clone(), agent_id.clone());
+
+            let (sub_cmd_tx, mut sub_cmd_rx) = tokio_mpsc::unbounded_channel();
+            let _ = sub_cmd_tx.send(Command::Message {
+                content: combined_content,
+                message_id: Some(scru128::new().to_string()),
+                media: Vec::new(),
+            });
+            active_sub_agents.push((
+                agent_id.clone(),
+                agent_role.clone(),
+                agent_label.clone(),
+                sub_cmd_tx.clone(),
+            ));
+
+            let stream_tx_clone = stream_tx.clone();
+            let id = agent_id;
+            let label = agent_label;
+            let role = agent_role;
+            let prompt = system_prompt;
+            let start_message_len = child_session.messages.len();
+
+            let fut = Box::pin(async move {
+                let (child_stream_tx, child_stream_rx) = std::sync::mpsc::channel();
+                let forwarder = spawn_sub_agent_stream_forwarder(
+                    id.clone(),
+                    role.clone(),
+                    label.clone(),
+                    stream_tx_clone,
+                    child_stream_rx,
+                );
+                let _keep_sub_cmd_tx_alive = sub_cmd_tx;
+                let usage = sub_engine
+                    .execute_turn(
+                        &mut child_session,
+                        &prompt,
+                        &child_stream_tx,
+                        &mut sub_cmd_rx,
+                        None,
+                    )
+                    .await;
+                drop(child_stream_tx);
+                let _ = forwarder.join();
+                let new_messages = child_session
+                    .messages
+                    .iter()
+                    .skip(start_message_len)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                (id, label, role, child_session, new_messages, usage)
+            });
+            futures.push(fut);
+        }
+
+        let mut results = Vec::new();
+        while !futures.is_empty() {
+            tokio::select! {
+                maybe_result = futures.next() => {
+                    if let Some(sub_result) = maybe_result {
+                        active_sub_agents.retain(|(agent_id, _, _, _)| agent_id != &sub_result.0);
+                        results.push(sub_result);
+                    }
+                }
+                maybe_cmd = cmd_rx.recv() => {
+                    match maybe_cmd {
+                        Some(Command::Cancel) | Some(Command::Shutdown) => {
+                            result.cancelled = true;
+                            let _ = stream_tx.send(StreamEvent::Error {
+                                message: "已取消所有 Agent".to_string(),
+                            });
+                            for (_, _, _, tx) in &active_sub_agents {
+                                let _ = tx.send(Command::Cancel);
+                            }
+                        }
+                        Some(Command::CancelAgent { role }) => {
+                            let mut matched = false;
+                            for (agent_id, agent_role, agent_label, tx) in &active_sub_agents {
+                                if agent_role == &role {
+                                    matched = true;
+                                    let _ = tx.send(Command::Cancel);
+                                    let _ = stream_tx.send(StreamEvent::AgentStatusChanged {
+                                        agent_id: agent_id.clone(),
+                                        label: agent_label.clone(),
+                                        status: "idle".to_string(),
+                                    });
+                                    let _ = stream_tx.send(StreamEvent::AgentNotification {
+                                        agent_id: agent_id.clone(),
+                                        agent_label: agent_label.clone(),
+                                        content: "已请求停止当前执行".to_string(),
+                                        level: "warning".to_string(),
+                                    });
+                                }
+                            }
+                            if !matched {
+                                let _ = stream_tx.send(StreamEvent::AgentNotification {
+                                    agent_id: role.clone(),
+                                    agent_label: role,
+                                    content: "未找到正在执行的 Agent".to_string(),
+                                    level: "warning".to_string(),
+                                });
+                            }
+                        }
+                        Some(Command::Message { content, message_id, media }) => {
+                            let message_id = append_or_reuse_user_message(
+                                parent_session,
+                                &content,
+                                message_id,
+                                media,
+                            );
+                            let media = parent_session
+                                .messages
+                                .iter()
+                                .find(|message| message.id == message_id)
+                                .map(|message| message.media.clone())
+                                .unwrap_or_default();
+                            let _ = stream_tx.send(StreamEvent::UserMessage {
+                                message_id,
+                                content: content.clone(),
+                                media,
+                            });
+                            if let Ok(mut team) = team_arc.lock() {
+                                let _ = crate::agent_team::lifecycle::route_user_mentions(
+                                    &mut team,
+                                    &content,
+                                    stream_tx,
+                                );
+                            }
+                        }
+                        Some(Command::UpdateCwd { cwd }) => {
+                            parent_session.cwd = cwd;
+                            crate::core::apply_session_cwd(parent_session);
+                        }
+                        Some(Command::CompressContext) => {
+                            crate::core::compress_context_for_session(
+                                parent_session,
+                                &self.engine,
+                                stream_tx,
+                            );
+                        }
+                        Some(Command::ResetContext) => {
+                            crate::core::reset_context_for_session(parent_session, stream_tx);
+                        }
+                        Some(Command::ReloadConfig) | Some(Command::Approval { .. }) => {}
+                        None => break,
+                    }
+                }
+            }
+        }
+
+        // 处理结果
+        for (agent_id, agent_label, _agent_role, child_session, _output_messages, usage) in results
+        {
+            // 检查 Sub Agent 是否有错误输出
+            let has_error = child_session
+                .messages
+                .iter()
+                .any(|m| m.role == MessageRole::System && m.content.starts_with("[错误]"));
+
+            let status = if has_error { "error" } else { "idle" };
+            let _ = stream_tx.send(StreamEvent::AgentStatusChanged {
+                agent_id: agent_id.clone(),
+                label: agent_label.clone(),
+                status: status.to_string(),
+            });
+
+            if has_error {
+                let error_content = child_session
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == MessageRole::System && m.content.starts_with("[错误]"))
+                    .map(|m| m.content.replace("[错误] ", ""))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                append_runtime_tool_message(
+                    parent_session,
+                    &format!("sub_agent_{agent_label}"),
+                    format!("[{agent_label}] 执行出错：{error_content}"),
+                );
+            } else {
+                let summary = child_session
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == MessageRole::Assistant)
+                    .filter_map(|m| {
+                        let c = m.content.trim().to_string();
+                        if c.is_empty() { None } else { Some(c) }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                if !summary.is_empty() {
+                    let brief = if summary.chars().count() > 500 {
+                        format!("{}...", summary.chars().take(500).collect::<String>())
+                    } else {
+                        summary
+                    };
+                    append_runtime_tool_message(
+                        parent_session,
+                        &format!("sub_agent_{agent_label}"),
+                        format!("[{agent_label}] 执行完成\n{brief}"),
+                    );
+                }
+            }
+
+            result.usage.accumulate(&usage);
+
+            // 临时 Agent 执行完毕后自动销毁
+            let Ok(mut team) = team_arc.lock() else {
+                let _ = stream_tx.send(StreamEvent::Error {
+                    message: "团队状态锁定失败".to_string(),
+                });
+                continue;
+            };
+            let should_dismiss = team
+                .registry
+                .get(&agent_id)
+                .map(|d| d.lifecycle == crate::agent_team::descriptor::AgentLifecycle::Temporary)
+                .unwrap_or(false);
+            if should_dismiss {
+                for path in team.file_locks.release_all(&agent_id) {
+                    let _ = stream_tx.send(StreamEvent::FileLockChanged {
+                        path,
+                        holder_agent_id: Some(agent_id.clone()),
+                        holder_agent_label: Some(agent_label.clone()),
+                        action: "unlocked".to_string(),
+                    });
+                }
+                team.registry.unregister(&agent_id);
+                let _ = stream_tx.send(StreamEvent::AgentStatusChanged {
+                    agent_id,
+                    label: agent_label.clone(),
+                    status: "terminated".to_string(),
+                });
+                append_runtime_tool_message(
+                    parent_session,
+                    &format!("sub_agent_{agent_label}"),
+                    format!("[{agent_label}] 临时 Agent 已自动销毁"),
+                );
+            } else {
+                team.registry.set_session(&agent_id, child_session);
+                team.registry
+                    .update_status(&agent_id, crate::agent_team::descriptor::AgentStatus::Idle);
+            }
+        }
+
+        result
+    }
 }
 
 fn drain_pending_commands_async(
     session: &mut Session,
+    engine: &crate::runtime::RuntimeEngine,
     loop_context: &mut Vec<Message>,
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
@@ -621,6 +1524,7 @@ fn drain_pending_commands_async(
                 });
                 return PendingCommandEffect::Terminate;
             }
+            Command::CancelAgent { .. } => {}
             Command::Shutdown => return PendingCommandEffect::Terminate,
             Command::Message {
                 content,
@@ -643,6 +1547,12 @@ fn drain_pending_commands_async(
             }
             Command::ReloadConfig => {}
             Command::Approval { .. } => {}
+            Command::CompressContext => {
+                crate::core::compress_context_for_session(session, engine, stream_tx);
+            }
+            Command::ResetContext => {
+                crate::core::reset_context_for_session(session, stream_tx);
+            }
         }
     }
 
@@ -655,6 +1565,8 @@ fn drain_pending_commands_async(
 
 /// 非阻塞检查是否有取消或关闭命令待处理。
 fn check_cancel(
+    session: &mut Session,
+    engine: &crate::runtime::RuntimeEngine,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     stream_tx: &StdSender<StreamEvent>,
 ) -> bool {
@@ -665,6 +1577,13 @@ fn check_cancel(
                     message: "已取消".into(),
                 });
                 return true;
+            }
+            Command::CancelAgent { .. } => {}
+            Command::CompressContext => {
+                crate::core::compress_context_for_session(session, engine, stream_tx);
+            }
+            Command::ResetContext => {
+                crate::core::reset_context_for_session(session, stream_tx);
             }
             _ => {}
         }

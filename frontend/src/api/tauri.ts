@@ -338,6 +338,9 @@ export const api = {
   cancelTurn: (): Promise<boolean> =>
     invoke('cancel_turn'),
 
+  cancelAgent: (role: string): Promise<boolean> =>
+    invoke('cancel_agent', { role }),
+
   appendMessage: (sessionId: string, content: string): Promise<boolean> =>
     invoke('append_message', { sessionId, content }),
 
@@ -528,6 +531,15 @@ export const api = {
   // ----------------------------------------------------------------
   getMentionCandidates: (): Promise<{ value: string; label: string; kind: string; hint: string }[]> =>
     invoke('get_mention_candidates'),
+
+  // ----------------------------------------------------------------
+  // 上下文管理
+  // ----------------------------------------------------------------
+  compressContext: (): Promise<boolean> =>
+    invoke('compress_context'),
+
+  resetContext: (): Promise<boolean> =>
+    invoke('reset_context'),
 
   // ----------------------------------------------------------------
   // 语音合成

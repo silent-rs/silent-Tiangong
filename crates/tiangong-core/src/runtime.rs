@@ -1489,6 +1489,9 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<ToolSpec>, engine: &RuntimeE
             input_schema: spec.2,
         });
     }
+
+    // 多智能体团队工具
+    crate::agent_team::tools::inject_agent_team_tools(tools);
 }
 
 fn missing_managed_mcp_servers(

@@ -1502,14 +1502,7 @@ fn consume_provider_stream(
     request: ProviderRequest,
     on_delta: &mut dyn FnMut(&ModelStreamChunk),
 ) -> Result<ModelResponse> {
-    let response = TokioRuntimeBuilder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("初始化异步运行时失败")?
-        .block_on(async {
-            let stream = provider.stream(request).await.map_err(map_llm_error)?;
-            consume_provider_stream_events_async(stream, on_delta).await
-        })?;
+    let response = block_on_provider_stream(provider, request, on_delta)?;
     Ok(ModelResponse {
         text: response.text,
         reasoning_content: response.reasoning_content,
@@ -1524,14 +1517,58 @@ fn convert_stream_to_function_response(
     request: ProviderRequest,
     on_delta: &mut dyn FnMut(&ModelStreamChunk),
 ) -> Result<ModelFunctionResponse> {
-    TokioRuntimeBuilder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("初始化异步运行时失败")?
-        .block_on(async {
-            let stream = provider.stream(request).await.map_err(map_llm_error)?;
-            consume_provider_stream_events_async(stream, on_delta).await
-        })
+    block_on_provider_stream(provider, request, on_delta)
+}
+
+fn block_on_provider_stream(
+    provider: ProviderDispatch,
+    request: ProviderRequest,
+    on_delta: &mut dyn FnMut(&ModelStreamChunk),
+) -> Result<ModelFunctionResponse> {
+    async fn run_stream(
+        provider: ProviderDispatch,
+        request: ProviderRequest,
+        on_delta: &mut dyn FnMut(&ModelStreamChunk),
+    ) -> Result<ModelFunctionResponse> {
+        let stream = provider.stream(request).await.map_err(map_llm_error)?;
+        consume_provider_stream_events_async(stream, on_delta).await
+    }
+
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| handle.block_on(run_stream(provider, request, on_delta)))
+        }
+        Ok(_) => {
+            let (response, chunks) = std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        let runtime = TokioRuntimeBuilder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .context("初始化异步运行时失败")?;
+                        let mut chunks = Vec::new();
+                        let response =
+                            runtime.block_on(run_stream(provider, request, &mut |chunk| {
+                                chunks.push(chunk.clone())
+                            }))?;
+                        Ok::<_, anyhow::Error>((response, chunks))
+                    })
+                    .join()
+                    .map_err(|_| anyhow!("LLM 流式请求线程 panic"))?
+            })?;
+            for chunk in chunks {
+                on_delta(&chunk);
+            }
+            Ok(response)
+        }
+        Err(_) => {
+            let runtime = TokioRuntimeBuilder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("初始化异步运行时失败")?;
+            runtime.block_on(run_stream(provider, request, on_delta))
+        }
+    }
 }
 
 fn map_llm_error(error: tiangong_llm::error::LlmError) -> anyhow::Error {

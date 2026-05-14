@@ -2,7 +2,7 @@ import { useState, KeyboardEvent, ClipboardEvent, DragEvent, useEffect, useRef, 
 import { useStore } from '@/store/useStore';
 import { Textarea } from './ui/textarea';
 import { Button } from './ui/button';
-import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X } from 'lucide-react';
+import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Users } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
@@ -18,6 +18,33 @@ interface MentionCandidate {
   kind: string;
   hint: string;
 }
+
+const SLASH_COMMANDS: MentionCandidate[] = [
+  {
+    value: '/compress',
+    label: '/compress',
+    kind: 'command',
+    hint: '压缩早期上下文',
+  },
+  {
+    value: '/压缩对话',
+    label: '/压缩对话',
+    kind: 'command',
+    hint: '压缩早期上下文',
+  },
+  {
+    value: '/reset',
+    label: '/reset',
+    kind: 'command',
+    hint: '清理当前上下文',
+  },
+  {
+    value: '/清理对话',
+    label: '/清理对话',
+    kind: 'command',
+    hint: '清理当前上下文',
+  },
+];
 
 type Attachment = {
   kind: 'image' | 'file';
@@ -138,6 +165,7 @@ export function MessageInput() {
   const addVoiceMessage = useStore((state) => state.addVoiceMessage);
   const lastDurationMs = useStore((state) => state.lastDurationMs);
   const lastUsage = useStore((state) => state.lastUsage);
+  const agents = useStore((state) => state.agents);
   const [isComposing, setIsComposing] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const inputAreaRef = useRef<HTMLDivElement>(null);
@@ -149,7 +177,9 @@ export function MessageInput() {
   const [mentionFilter, setMentionFilter] = useState('');
   const [mentionIndex, setMentionIndex] = useState(0);
   const [mentionStart, setMentionStart] = useState(-1);
+  const [completionMode, setCompletionMode] = useState<'mention' | 'slash'>('mention');
   const mentionRef = useRef<HTMLDivElement>(null);
+  const candidateRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   // 信任模式
   const [trustMode, setTrustMode] = useState('full_trust');
@@ -223,19 +253,89 @@ export function MessageInput() {
     }
   }, []);
 
-  const filteredCandidates = mentionCandidates.filter(c => {
-    if (!mentionFilter) return true;
+  const filteredCandidates = (() => {
+    if (completionMode === 'slash') {
+      const filter = mentionFilter.toLowerCase();
+      if (!filter) return SLASH_COMMANDS;
+      return SLASH_COMMANDS.filter(c => c.value.toLowerCase().startsWith(filter));
+    }
+
+    // 合并 API 候选和 Agent 候选
+    const aliveAgents = agents.filter(a => a.status !== 'terminated');
+    const agentCandidates: MentionCandidate[] = aliveAgents.map(a => ({
+      value: `@${a.role}`,
+      label: a.label,
+      kind: 'agent',
+      hint: `Agent · ${a.status === 'running' ? '执行中' : a.status === 'idle' ? '空闲' : a.status === 'waiting_for_lock' ? '等待文件锁' : a.status === 'waiting_for_user' ? '等待用户' : '错误'}`,
+    }));
+    // 当存在活跃 Agent 时添加 @all 广播选项
+    if (aliveAgents.length > 0) {
+      agentCandidates.push({
+        value: '@all',
+        label: 'All',
+        kind: 'agent',
+        hint: `广播给全部 ${aliveAgents.length} 个 Agent`,
+      });
+    }
+    const all = [...agentCandidates, ...mentionCandidates];
+    if (!mentionFilter) return all;
     const lower = mentionFilter.toLowerCase();
-    return c.label.toLowerCase().includes(lower)
+    return all.filter(c =>
+      c.label.toLowerCase().includes(lower)
       || c.value.toLowerCase().includes(lower)
-      || c.hint.toLowerCase().includes(lower);
-  });
+      || c.hint.toLowerCase().includes(lower)
+    );
+  })();
+
+  useEffect(() => {
+    if (!mentionOpen) return;
+    candidateRefs.current[mentionIndex]?.scrollIntoView({
+      block: 'nearest',
+    });
+  }, [mentionIndex, mentionOpen, filteredCandidates.length]);
+
+  const executeSlashCommand = useCallback(async (command: string) => {
+    const trimmed = command.trim();
+    if (trimmed === '/压缩对话' || trimmed === '/compress') {
+      setInputContent('');
+      try {
+        const ok = await api.compressContext();
+        if (!ok) alert('压缩对话没有执行成功，请稍后重试。');
+      } catch (e) {
+        console.error('压缩对话失败:', e);
+        alert(e instanceof Error ? e.message : '压缩对话失败');
+      }
+      return true;
+    }
+    if (trimmed === '/清理对话' || trimmed === '/reset') {
+      setInputContent('');
+      try {
+        const ok = await api.resetContext();
+        if (!ok) alert('清理对话没有执行成功，请稍后重试。');
+      } catch (e) {
+        console.error('清理对话失败:', e);
+        alert(e instanceof Error ? e.message : '清理对话失败');
+      }
+      return true;
+    }
+    return false;
+  }, [setInputContent]);
 
   const handleInputChange = (value: string) => {
     setInputContent(value);
     const textarea = textareaRef.current;
     if (!textarea) return;
     const cursorPos = textarea.selectionStart;
+    const beforeCursor = value.slice(0, cursorPos);
+    if (beforeCursor.startsWith('/') && !/\s/.test(beforeCursor)) {
+      setMentionStart(0);
+      setMentionFilter(beforeCursor);
+      setMentionIndex(0);
+      setCompletionMode('slash');
+      setMentionOpen(true);
+      return;
+    }
+
     let atPos = -1;
     for (let i = cursorPos - 1; i >= 0; i--) {
       const ch = value[i];
@@ -250,6 +350,7 @@ export function MessageInput() {
       setMentionStart(atPos);
       setMentionFilter(filter);
       setMentionIndex(0);
+      setCompletionMode('mention');
       if (!mentionOpen) { loadCandidates(); setMentionOpen(true); }
     } else {
       setMentionOpen(false);
@@ -258,6 +359,11 @@ export function MessageInput() {
 
   const selectCandidate = (candidate: MentionCandidate) => {
     if (mentionStart < 0) return;
+    if (candidate.kind === 'command') {
+      setMentionOpen(false);
+      void executeSlashCommand(candidate.value);
+      return;
+    }
     const textarea = textareaRef.current;
     const cursorPos = textarea?.selectionStart ?? inputContent.length;
     const before = inputContent.slice(0, mentionStart);
@@ -517,6 +623,12 @@ export function MessageInput() {
   const handleSend = async () => {
     if (!canSend) return;
     setMentionOpen(false);
+
+    // slash command 拦截
+    const trimmed = inputContent.trim();
+    if (await executeSlashCommand(trimmed)) {
+      return;
+    }
     if (attachments.length > 0 && !hasMultimodal) {
       setAttachments([]);
       alert('未配置多模态模型，文件上传能力已关闭。');
@@ -799,6 +911,7 @@ export function MessageInput() {
                   {filteredCandidates.map((c, i) => (
                     <button
                       key={c.value}
+                      ref={(el) => { candidateRefs.current[i] = el; }}
                       className={`w-full flex items-center gap-2 px-3 py-1.5 text-sm text-left hover:bg-accent transition-colors ${
                         i === mentionIndex ? 'bg-accent' : ''
                       }`}
@@ -807,6 +920,10 @@ export function MessageInput() {
                     >
                       {c.kind === 'skill' ? (
                         <Wrench className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                      ) : c.kind === 'agent' ? (
+                        <Users className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                      ) : c.kind === 'command' ? (
+                        <Keyboard className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
                       ) : (
                         <Cpu className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
                       )}
@@ -861,7 +978,9 @@ export function MessageInput() {
                 onBlur={() => setTimeout(() => setMentionOpen(false), 150)}
                 placeholder={
                   isIdle
-                    ? '输入消息... (⌘+Enter 发送，@ 引用 Skill/MCP)'
+                    ? agents.length > 0
+                      ? '输入消息... (⌘+Enter 发送，@ 引用 Agent/Skill/MCP)'
+                      : '输入消息... (⌘+Enter 发送，@ 引用 Skill/MCP)'
                     : '追加指示... (⌘+Enter 发送)'
                 }
                 className="min-h-[60px] max-h-[200px] resize-none pr-32 bg-muted/50 focus-visible:ring-ring"

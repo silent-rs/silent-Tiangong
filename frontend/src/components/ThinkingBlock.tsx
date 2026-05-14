@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+import { CopyableCodeBlock } from './CopyableCodeBlock';
 
 interface ThinkingBlockProps {
   content: string;
@@ -47,11 +48,24 @@ export function ThinkingBlock({ content, defaultExpanded = false }: ThinkingBloc
                     {props.children}
                   </ol>
                 ),
-                code: (props: any) => (
-                  <code className="bg-muted text-foreground/70 px-1 py-0.5 rounded text-xs font-mono">
-                    {props.children}
-                  </code>
-                ),
+                pre: (props: any) => <>{props.children}</>,
+                code: (props: any) => {
+                  const match = /language-(\w+)/.exec(props.className || '');
+                  const isBlock = match || props.node?.parentNode?.tagName === 'pre';
+                  if (isBlock) {
+                    return (
+                      <CopyableCodeBlock
+                        code={String(props.children).replace(/\n$/, '')}
+                        language={match?.[1] || 'text'}
+                      />
+                    );
+                  }
+                  return (
+                    <code className="bg-muted text-foreground/70 px-1 py-0.5 rounded text-xs font-mono">
+                      {props.children}
+                    </code>
+                  );
+                },
                 strong: (props: any) => (
                   <strong className="text-foreground/80 font-semibold">
                     {props.children}

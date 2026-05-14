@@ -1,4 +1,5 @@
 pub mod agent_config;
+pub mod agent_team;
 pub mod agents;
 pub mod app_state;
 pub mod approval_store;

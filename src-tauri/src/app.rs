@@ -145,6 +145,15 @@ impl TiangongApp {
         }
     }
 
+    /// 取消指定会话中某个 Agent 的当前执行
+    pub fn cancel_agent_core(&self, session_id: &str, role: String) -> bool {
+        let cores = self.cores.lock().unwrap();
+        cores
+            .get(session_id)
+            .map(|core| core.cancel_agent(role))
+            .unwrap_or(false)
+    }
+
     /// 向指定会话的 core 发送审批响应
     pub fn respond_approval_to_core(&self, session_id: &str, request_id: String, approved: bool) {
         let cores = self.cores.lock().unwrap();
@@ -177,5 +186,23 @@ impl TiangongApp {
     pub fn is_session_executing(&self, session_id: &str) -> bool {
         let cores = self.cores.lock().unwrap();
         cores.contains_key(session_id)
+    }
+
+    /// 手动触发上下文压缩
+    pub fn compress_context_core(&self, session_id: &str) -> bool {
+        let cores = self.cores.lock().unwrap();
+        cores
+            .get(session_id)
+            .map(|core| core.compress_context())
+            .unwrap_or(false)
+    }
+
+    /// 清理上下文（重置 LLM 上下文到初始 system prompt）
+    pub fn reset_context_core(&self, session_id: &str) -> bool {
+        let cores = self.cores.lock().unwrap();
+        cores
+            .get(session_id)
+            .map(|core| core.reset_context())
+            .unwrap_or(false)
     }
 }

@@ -2,6 +2,59 @@ import { create } from 'zustand';
 import { api, Session, Message, RunSnapshot, McpServer, Skill, TaskPlan, MediaAsset } from '../api/tauri';
 import { notifyBackgroundSessionCompleted } from '../utils/desktopNotification';
 
+// ---------------------------------------------------------------------------
+// Agent 信息（从系统消息解析）
+// ---------------------------------------------------------------------------
+
+export interface AgentInfo {
+  agentId?: string;
+  role: string;
+  label: string;
+  status: 'idle' | 'running' | 'waiting_for_user' | 'waiting_for_lock' | 'terminated' | 'error';
+}
+
+/** 从系统消息中解析 Agent 列表 */
+export function parseAgentsFromMessages(messages: Message[]): AgentInfo[] {
+  const agents = new Map<string, AgentInfo>();
+  for (const msg of messages) {
+    if (msg.role !== 'system') continue;
+    // [Agent] {label} ({role}) 已加入团队
+    const createMatch = msg.content.match(/^\[Agent\] (.+?) \((.+?)\) 已加入团队.*?id=([^\s]+)/);
+    if (createMatch) {
+      const [, label, role, agentId] = createMatch;
+      agents.set(role, { agentId, role, label, status: 'running' });
+      continue;
+    }
+    // [Agent] {label} 状态变更: {status}
+    const statusMatch = msg.content.match(/^\[Agent\] (.+?) 状态变更: (\w+).*?id=([^\s]+)/);
+    if (statusMatch) {
+      const [, label, status, agentId] = statusMatch;
+      if (status === 'terminated') {
+        for (const [role, info] of agents) {
+          if (info.agentId === agentId || info.label === label) {
+            agents.delete(role);
+            break;
+          }
+        }
+      } else if (
+        status === 'idle'
+        || status === 'running'
+        || status === 'waiting_for_user'
+        || status === 'waiting_for_lock'
+        || status === 'error'
+      ) {
+        for (const [, info] of agents) {
+          if (info.agentId === agentId || info.label === label) {
+            info.status = status;
+            break;
+          }
+        }
+      }
+    }
+  }
+  return Array.from(agents.values());
+}
+
 function sameJsonValue(left: unknown, right: unknown): boolean {
   if (left === right) return true;
   if (left == null || right == null) return left == right;
@@ -42,6 +95,21 @@ function mergeSnapshotMessages(oldMessages: Message[], newMessages: Message[]): 
   return changed ? merged : oldMessages;
 }
 
+function stripLeadingAgentMention(content: string, agents: AgentInfo[]): string {
+  const match = content.match(/^@([A-Za-z0-9_-]+)\s*/);
+  if (!match) return content;
+  const role = match[1];
+  const agentRoles = new Set([...agents.map((agent) => agent.role), 'all']);
+  if (!agentRoles.has(role)) return content;
+  return content.slice(match[0].length).trimStart();
+}
+
+function applyAgentMention(content: string, tab: string | null, agents: AgentInfo[]): string {
+  const body = stripLeadingAgentMention(content, agents);
+  if (!tab) return body;
+  return body.length > 0 ? `@${tab} ${body}` : `@${tab} `;
+}
+
 interface AppState {
   // 状态
   sessions: Session[];
@@ -77,6 +145,10 @@ interface AppState {
   addVoiceMessage: (msgKey: string, audioPath: string, duration?: number) => void;
   toggleVoiceText: (msgKey: string) => void;
 
+  // Agent 团队
+  agents: AgentInfo[];
+  selectedAgentTab: string | null; // null = 主对话, role = 指定 Agent
+
   // 加载状态
   isLoadingSessions: boolean;
   isSending: boolean;
@@ -90,6 +162,7 @@ interface AppState {
   sendMessage: (content: string, media?: MediaAsset[]) => Promise<void>;
   editAndResend: (messageId: string, newContent: string) => Promise<void>;
   cancelTurn: () => Promise<boolean>;
+  cancelAgent: (role: string) => Promise<boolean>;
 
   setInputContent: (content: string) => void;
 
@@ -98,6 +171,8 @@ interface AppState {
 
   loadMcpServers: () => Promise<void>;
   loadSkills: () => Promise<void>;
+
+  setSelectedAgentTab: (tab: string | null) => void;
 
   // 内部方法
   updateFromSnapshot: (snapshot: RunSnapshot) => void;
@@ -153,6 +228,8 @@ export const useStore = create<AppState>((set, get) => ({
   },
   isLoadingSessions: false,
   isSending: false,
+  agents: [],
+  selectedAgentTab: null,
 
   // 加载会话列表
   loadSessions: async () => {
@@ -186,6 +263,8 @@ export const useStore = create<AppState>((set, get) => ({
       streamingContent: '',
       streamingReasoningContent: '',
       sessionCwd: workspaceDir,
+      agents: [],
+      selectedAgentTab: null,
     });
   },
 
@@ -212,6 +291,8 @@ export const useStore = create<AppState>((set, get) => ({
         streamingMessageId: null,
         streamingContent: '',
         streamingReasoningContent: '',
+        agents: parseAgentsFromMessages(snapshot.messages),
+        selectedAgentTab: null,
       });
     } catch (error) {
       console.error('切换会话失败:', error);
@@ -236,6 +317,8 @@ export const useStore = create<AppState>((set, get) => ({
         lastDurationMs: snapshot.last_duration_ms ?? null,
         lastUsage: snapshot.last_usage ?? null,
         approvalRequestId: snapshot.approval_request_id || null,
+        agents: parseAgentsFromMessages(snapshot.messages),
+        selectedAgentTab: null,
       });
     } catch (error) {
       console.error('删除会话失败:', error);
@@ -244,7 +327,7 @@ export const useStore = create<AppState>((set, get) => ({
 
   // 发送消息
   sendMessage: async (content: string, media: MediaAsset[] = []) => {
-    const { isDraft, activeSessionId, sessionRunStatuses } = get();
+    const { isDraft } = get();
 
     // 草稿模式时先创建后端会话
     if (isDraft) {
@@ -264,16 +347,11 @@ export const useStore = create<AppState>((set, get) => ({
         console.error('创建会话失败:', error);
         return;
       }
-    } else {
-      // 非草稿模式下检查当前会话是否正在执行
-      const currentId = activeSessionId;
-      if (currentId && sessionRunStatuses[currentId]) {
-        console.warn('当前会话有任务正在执行，请等待完成或取消');
-        return;
-      }
     }
 
-    set({ inputContent: '', isSending: true });
+    const selectedTab = get().selectedAgentTab;
+    const nextDraft = selectedTab ? `@${selectedTab} ` : '';
+    set({ inputContent: nextDraft, isSending: true });
 
     try {
       if (media.length > 0) {
@@ -286,10 +364,14 @@ export const useStore = create<AppState>((set, get) => ({
       set(state => ({
         runStatus: 'executing',
         isSending: false,
+        inputContent: nextDraft,
         sessionRunStatuses: runningSessionId
           ? { ...state.sessionRunStatuses, [runningSessionId]: 'executing' }
           : state.sessionRunStatuses,
       }));
+      if (nextDraft) {
+        api.setInputDraft(nextDraft).catch(console.error);
+      }
     } catch (error) {
       console.error('发送消息失败:', error);
       set({ inputContent: content, isSending: false });
@@ -335,6 +417,23 @@ export const useStore = create<AppState>((set, get) => ({
       return cancelled;
     } catch (error) {
       console.error('取消执行失败:', error);
+      return false;
+    }
+  },
+
+  cancelAgent: async (role: string) => {
+    try {
+      const cancelled = await api.cancelAgent(role);
+      if (cancelled) {
+        set((state) => ({
+          agents: state.agents.map((agent) =>
+            agent.role === role ? { ...agent, status: 'idle' } : agent
+          ),
+        }));
+      }
+      return cancelled;
+    } catch (error) {
+      console.error('取消 Agent 执行失败:', error);
       return false;
     }
   },
@@ -390,6 +489,15 @@ export const useStore = create<AppState>((set, get) => ({
       set({ skills });
     } catch (error) {
       console.error('加载 Skills 失败:', error);
+    }
+  },
+
+  setSelectedAgentTab: (tab: string | null) => {
+    const { inputContent, agents, isDraft } = get();
+    const nextInput = applyAgentMention(inputContent, tab, agents);
+    set({ selectedAgentTab: tab, inputContent: nextInput });
+    if (!isDraft) {
+      api.setInputDraft(nextInput).catch(console.error);
     }
   },
 
@@ -506,6 +614,7 @@ export const useStore = create<AppState>((set, get) => ({
       streamingMessageId: streamingId,
       streamingContent,
       streamingReasoningContent,
+      agents: parseAgentsFromMessages(newMessages),
     });
 
     // 状态变为 idle 时刷新会话列表（更新 message_count、标题等）

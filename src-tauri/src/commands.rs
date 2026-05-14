@@ -8,6 +8,13 @@ use tauri_plugin_notification::{NotificationExt, PermissionState};
 
 const MAX_ATTACHMENT_BASE64_BYTES: u64 = 50 * 1024 * 1024;
 
+fn format_agent_reply_message(agent_label: &str, content: &str) -> String {
+    let safe_label = agent_label
+        .replace(['\n', '\r'], " ")
+        .replace("--", "- -");
+    format!("<!-- tiangong-agent-reply -->\n<!-- label:{safe_label} -->\n\n{content}")
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct AttachmentDataUrl {
     pub data_url: String,
@@ -599,7 +606,7 @@ pub fn send_message_with_media(
     _window: Window,
     state: State<TiangongApp>,
 ) -> Result<(), String> {
-    if !media.is_empty() {
+    if parse_context_slash_command(&content).is_none() && !media.is_empty() {
         ensure_multimodal_enabled(&state)?;
     }
     send_message_inner(content, media, app, state)
@@ -613,6 +620,11 @@ fn send_message_inner(
 ) -> Result<(), String> {
     use std::sync::mpsc;
     use tiangong_types::SessionStreamEvent;
+
+    if let Some(command) = parse_context_slash_command(&content) {
+        run_context_slash_command(command, app, &state)?;
+        return Ok(());
+    }
 
     state.sync_core_config_from_state()?;
 
@@ -872,6 +884,127 @@ fn start_stream_consumer(
                                 );
                             }
                         }
+                        StreamEvent::AgentCreated {
+                            ref agent_id,
+                            ref role,
+                            ref label,
+                            ref lifecycle,
+                        } => {
+                            session.append_message(
+                                tiangong_core::session::MessageRole::System,
+                                format!("[Agent] {label} ({role}) 已加入团队 [{lifecycle}] id={agent_id}"),
+                            );
+                        }
+                        StreamEvent::AgentStatusChanged {
+                            ref agent_id,
+                            ref label,
+                            ref status,
+                        } => {
+                            session.append_message(
+                                tiangong_core::session::MessageRole::System,
+                                format!("[Agent] {label} 状态变更: {status} id={agent_id}"),
+                            );
+                        }
+                        StreamEvent::AgentNotification {
+                            ref agent_label,
+                            ref content,
+                            ..
+                        } => {
+                            session.append_message(
+                                tiangong_core::session::MessageRole::Assistant,
+                                format_agent_reply_message(agent_label, content),
+                            );
+                        }
+                        StreamEvent::AgentMessage {
+                            ref from_agent_id,
+                            ref from_agent_label,
+                            ref to_agent_id,
+                            ref content,
+                            ..
+                        } => {
+                            if to_agent_id == "main" && from_agent_id != "user" {
+                                session.append_message(
+                                    tiangong_core::session::MessageRole::Assistant,
+                                    format_agent_reply_message(from_agent_label, content),
+                                );
+                            } else if from_agent_id == "user" {
+                                // 用户 @Agent 的原始输入已经作为用户消息存在，避免重复写入。
+                            }
+                        }
+                        StreamEvent::AgentOutput {
+                            ref agent_id,
+                            ref agent_role,
+                            ref agent_label,
+                            ref messages,
+                        } => {
+                            let worker_id = format!("agent:{agent_role}:{agent_id}");
+                            let header = format!("🔧 Worker: {agent_label} (@{agent_role})");
+                            if !session.messages.iter().any(|message| {
+                                message.worker_id.as_deref() == Some(worker_id.as_str())
+                                    && message.content == header
+                            }) {
+                                session.append_worker_message(
+                                    tiangong_core::session::MessageRole::System,
+                                    header,
+                                    &worker_id,
+                                );
+                            }
+                            for message in messages {
+                                let role = match message.role {
+                                    tiangong_core::session::MessageRole::Assistant => {
+                                        tiangong_core::session::MessageRole::Assistant
+                                    }
+                                    tiangong_core::session::MessageRole::System
+                                    | tiangong_core::session::MessageRole::Tool => {
+                                        tiangong_core::session::MessageRole::System
+                                    }
+                                    tiangong_core::session::MessageRole::User => {
+                                        tiangong_core::session::MessageRole::User
+                                    }
+                                };
+
+                                if let Some(existing) = session.messages.iter_mut().find(|item| {
+                                    item.id == message.id
+                                        && item.worker_id.as_deref() == Some(worker_id.as_str())
+                                }) {
+                                    if role == tiangong_core::session::MessageRole::Assistant {
+                                        existing.content.push_str(&message.content);
+                                        existing
+                                            .reasoning_content
+                                            .push_str(&message.reasoning_content);
+                                    }
+                                    continue;
+                                }
+
+                                let mut worker_message = message.clone();
+                                worker_message.role = role;
+                                worker_message.worker_id = Some(worker_id.clone());
+                                session.messages.push(worker_message);
+                                session.updated_at = tiangong_core::session::now_text();
+                            }
+                        }
+                        StreamEvent::FileLockChanged {
+                            ref path,
+                            ref holder_agent_label,
+                            ref action,
+                            ..
+                        } => {
+                            session.append_message(
+                                tiangong_core::session::MessageRole::System,
+                                format!("[文件锁] {path} {action} by {}", holder_agent_label.as_deref().unwrap_or("未知")),
+                            );
+                        }
+                        StreamEvent::ContextCompressed {
+                            ref action,
+                            remaining_messages,
+                            ..
+                        } => {
+                            session.append_message(
+                                tiangong_core::session::MessageRole::System,
+                                format!("[上下文管理] {action}（剩余 {remaining_messages} 条消息）"),
+                            );
+                            let _ = core_state.persist_session_and_app(&sid);
+                        }
                         _ => {}
                     }
                 }
@@ -973,6 +1106,37 @@ fn start_stream_consumer(
                                 "记忆检索完成，无相关记忆".to_string();
                         }
                     }
+                    StreamEvent::AgentCreated { ref label, .. } => {
+                        core_state.store.runtime.run.summary =
+                            format!("Agent {label} 已加入团队");
+                    }
+                    StreamEvent::AgentStatusChanged { ref label, ref status, .. } => {
+                        core_state.store.runtime.run.summary =
+                            format!("Agent {label}: {status}");
+                    }
+                    StreamEvent::AgentNotification { ref agent_label, .. } => {
+                        core_state.store.runtime.run.summary =
+                            format!("Agent {agent_label} 发送了通知");
+                    }
+                    StreamEvent::AgentMessage { ref from_agent_label, ref to_agent_label, .. } => {
+                        core_state.store.runtime.run.summary =
+                            format!("{from_agent_label} → {to_agent_label}");
+                    }
+                    StreamEvent::AgentOutput { ref agent_label, .. } => {
+                        core_state.store.runtime.run.summary =
+                            format!("Agent {agent_label} 输出已更新");
+                    }
+                    StreamEvent::FileLockChanged { ref path, ref action, ref holder_agent_label, .. } => {
+                        core_state.store.runtime.run.summary =
+                            format!("文件锁 {action}: {path} ({})", holder_agent_label.as_deref().unwrap_or("未知"));
+                    }
+                    StreamEvent::ContextCompressed { ref action, .. } => {
+                        if core_state.has_pending_turn_for(&sid) {
+                            core_state.store.runtime.run.summary = format!("上下文{action}");
+                        } else {
+                            core_state.report_run_idle(format!("上下文{action}"));
+                        }
+                    }
                     _ => {}
                 }
                 Ok(())
@@ -980,7 +1144,16 @@ fn start_stream_consumer(
 
             // emit run_snapshot
             {
-                let is_exec = !is_done && !is_error;
+                let is_context_event = matches!(event, StreamEvent::ContextCompressed { .. });
+                let is_exec = if is_done || is_error {
+                    false
+                } else if is_context_event {
+                    app.state::<TiangongApp>()
+                        .with_state_read(|s| Ok(s.has_pending_turn_for(&sid)))
+                        .unwrap_or(false)
+                } else {
+                    true
+                };
                 if let Ok(snapshot) = app
                     .state::<TiangongApp>()
                     .with_state_read(|s| Ok(build_full_snapshot_with_status(s, is_exec)))
@@ -1176,6 +1349,80 @@ pub fn cancel_turn(state: State<TiangongApp>) -> Result<bool, String> {
     Ok(true)
 }
 
+fn ensure_active_context_core(
+    app: AppHandle,
+    state: &State<'_, TiangongApp>,
+) -> Result<String, String> {
+    use std::sync::mpsc;
+
+    state.sync_core_config_from_state()?;
+
+    let (session_id, session_snapshot) = state.with_state(|core_state| {
+        let idx = core_state.ensure_active_session_index();
+        let session_id = core_state.sessions()[idx].id.clone();
+        let mut session_snapshot = core_state.sessions()[idx].clone();
+        if session_snapshot.cwd.trim().is_empty() {
+            session_snapshot.cwd = core_state.workspace_dir().to_string();
+        }
+        core_state.persist_session_and_app(&session_id)?;
+        Ok((session_id, session_snapshot))
+    })?;
+
+    let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::SessionStreamEvent>();
+    let (sid, is_new_core) = state.ensure_core(&session_id, session_snapshot, stream_tx);
+    if is_new_core {
+        start_stream_consumer(app, stream_rx);
+    }
+    Ok(sid)
+}
+
+#[derive(Clone, Copy)]
+enum ContextSlashCommand {
+    Compress,
+    Reset,
+}
+
+fn parse_context_slash_command(content: &str) -> Option<ContextSlashCommand> {
+    match content.trim() {
+        "/compress" | "/压缩对话" => Some(ContextSlashCommand::Compress),
+        "/reset" | "/清理对话" => Some(ContextSlashCommand::Reset),
+        _ => None,
+    }
+}
+
+fn run_context_slash_command(
+    command: ContextSlashCommand,
+    app: AppHandle,
+    state: &State<'_, TiangongApp>,
+) -> Result<bool, String> {
+    let session_id = ensure_active_context_core(app, state)?;
+    let ok = match command {
+        ContextSlashCommand::Compress => state.compress_context_core(&session_id),
+        ContextSlashCommand::Reset => state.reset_context_core(&session_id),
+    };
+    Ok(ok)
+}
+
+/// 手动触发上下文压缩
+#[tauri::command]
+pub fn compress_context(app: AppHandle, state: State<TiangongApp>) -> Result<bool, String> {
+    run_context_slash_command(ContextSlashCommand::Compress, app, &state)
+}
+
+/// 清理上下文（重置 LLM 上下文到初始 system prompt）
+#[tauri::command]
+pub fn reset_context(app: AppHandle, state: State<TiangongApp>) -> Result<bool, String> {
+    run_context_slash_command(ContextSlashCommand::Reset, app, &state)
+}
+
+/// 取消当前会话中指定 Agent 的执行
+#[tauri::command]
+pub fn cancel_agent(role: String, state: State<TiangongApp>) -> Result<bool, String> {
+    let session_id =
+        state.with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))?;
+    Ok(state.cancel_agent_core(&session_id, role))
+}
+
 /// 向正在执行的 turn 追加用户消息
 #[tauri::command]
 pub fn append_message(
@@ -1186,6 +1433,14 @@ pub fn append_message(
 ) -> Result<bool, String> {
     if session_id.trim().is_empty() {
         return Err("当前会话 ID 不能为空".to_string());
+    }
+
+    if let Some(command) = parse_context_slash_command(&content) {
+        let ok = match command {
+            ContextSlashCommand::Compress => state.compress_context_core(&session_id),
+            ContextSlashCommand::Reset => state.reset_context_core(&session_id),
+        };
+        return Ok(ok);
     }
 
     let message_id = scru128::new().to_string();

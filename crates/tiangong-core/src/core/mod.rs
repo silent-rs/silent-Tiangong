@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Sender, Sender as StdSender};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -192,6 +192,18 @@ impl TiangongCore {
         self.send_cmd(Command::Cancel)
     }
 
+    pub fn cancel_agent(&self, role: String) -> bool {
+        self.send_cmd(Command::CancelAgent { role })
+    }
+
+    pub fn compress_context(&self) -> bool {
+        self.send_cmd(Command::CompressContext)
+    }
+
+    pub fn reset_context(&self) -> bool {
+        self.send_cmd(Command::ResetContext)
+    }
+
     pub fn respond_approval(&self, request_id: String, approved: bool) -> bool {
         self.send_cmd(Command::Approval {
             request_id,
@@ -285,6 +297,8 @@ async fn worker_loop_async(
     let mut engine: Option<RuntimeEngine> = None;
     let mut tools: Vec<ToolSpec> = Vec::new();
     let mut mcp_targets: HashMap<String, McpFunctionTarget> = HashMap::new();
+    let team_context = Arc::new(Mutex::new(crate::agent_team::lifecycle::TeamContext::new()));
+    let mut team_restored = false;
     // turn 计数器：每 10 个 turn 触发一次 Meta 反刍（归档低活跃节点）
     let mut turn_count: u32 = 0;
 
@@ -351,6 +365,18 @@ async fn worker_loop_async(
             }
             tools = new_tools;
             mcp_targets = new_mcp_targets;
+            if !team_restored {
+                if let Ok(mut team) = team_context.lock() {
+                    let restored =
+                        crate::agent_team::lifecycle::restore_agents_from_session_history(
+                            &mut team, &session, &tools,
+                        );
+                    if restored > 0 {
+                        tracing::info!(count = restored, "已从会话历史恢复 Agent 团队");
+                    }
+                }
+                team_restored = true;
+            }
             last_cfg_gen = cfg_gen;
         }
 
@@ -403,6 +429,7 @@ async fn worker_loop_async(
                     &stream_tx,
                     &mut cmd_rx,
                     memory.handle.as_ref(),
+                    team_context.clone(),
                 )
                 .await;
 
@@ -431,6 +458,9 @@ async fn worker_loop_async(
                 // Cancel 信号通过 cmd_rx 传递到 engine 内部处理；
                 // engine 在每个 block_in_place 前后检查取消信号。
             }
+            Command::CancelAgent { .. } => {
+                // 仅在多 Agent 执行等待期间由 ReactEngine 转发处理。
+            }
             Command::Approval {
                 request_id,
                 approved,
@@ -452,6 +482,14 @@ async fn worker_loop_async(
                 }
             }
             Command::Shutdown => break,
+            Command::CompressContext => {
+                compress_context_for_session(&mut session, engine.as_ref().unwrap(), &stream_tx);
+                continue;
+            }
+            Command::ResetContext => {
+                reset_context_for_session(&mut session, &stream_tx);
+                continue;
+            }
         }
     }
 
@@ -485,6 +523,42 @@ pub(crate) fn apply_session_cwd(session: &Session) {
     }
 }
 
+pub(crate) fn compress_context_for_session(
+    session: &mut Session,
+    engine: &RuntimeEngine,
+    stream_tx: &StdSender<StreamEvent>,
+) {
+    let organizer = crate::context::organizer::ContextOrganizer::new(engine.context_limit)
+        .with_keep_recent_turns(6);
+    match organizer.force_update_summary(session, engine.client()) {
+        Ok(_) => {
+            let remaining = session.messages.len().saturating_sub(session.summary_up_to);
+            let _ = stream_tx.send(StreamEvent::ContextCompressed {
+                action: "压缩".to_string(),
+                summary_up_to: session.summary_up_to,
+                remaining_messages: remaining,
+            });
+            session.persist_to_disk();
+        }
+        Err(err) => {
+            let _ = stream_tx.send(StreamEvent::Error {
+                message: format!("上下文压缩失败：{err}"),
+            });
+        }
+    }
+}
+
+pub(crate) fn reset_context_for_session(session: &mut Session, stream_tx: &StdSender<StreamEvent>) {
+    let total = session.messages.len();
+    session.summary_up_to = total;
+    let _ = stream_tx.send(StreamEvent::ContextCompressed {
+        action: "清理".to_string(),
+        summary_up_to: total,
+        remaining_messages: 0,
+    });
+    session.persist_to_disk();
+}
+
 /// 执行一个完整的对话轮次（可能多轮工具调用），async 版
 #[allow(clippy::too_many_arguments)]
 async fn execute_turn_async(
@@ -496,13 +570,15 @@ async fn execute_turn_async(
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     memory_handle: Option<&tiangong_memory::MemoryHandle>,
+    team_context: Arc<Mutex<crate::agent_team::lifecycle::TeamContext>>,
 ) {
-    let react = crate::react::engine::ReactEngine::new(
+    let mut react = crate::react::engine::ReactEngine::new(
         engine.clone(),
         tools.to_vec(),
         mcp_targets.clone(),
         MAX_ROUNDS,
-    );
+    )
+    .with_shared_team(team_context, "main".to_string());
     react
         .execute_turn(session, user_input, stream_tx, cmd_rx, memory_handle)
         .await;

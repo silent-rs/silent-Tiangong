@@ -299,6 +299,72 @@ impl ResponseState {
                     }
                 }
             }
+
+            // ===== 多智能体团队事件 =====
+            StreamEvent::AgentCreated { role, label, .. } => {
+                self.end_active_stream();
+                output::status(&format!("[{role}] {label} 已加入团队"));
+            }
+
+            StreamEvent::AgentStatusChanged { label, status, .. } => {
+                output::status(&format!("[{label}] 状态: {status}"));
+            }
+
+            StreamEvent::AgentNotification {
+                agent_label,
+                content,
+                level,
+                ..
+            } => {
+                self.end_active_stream();
+                match level.as_str() {
+                    "error" => output::error(&format!("[{agent_label}] {content}")),
+                    "warning" => output::warn(&format!("[{agent_label}] {content}")),
+                    "question" => output::status(&format!("[{agent_label}] ❓ {content}")),
+                    _ => output::status(&format!("[{agent_label}] {content}")),
+                }
+            }
+
+            StreamEvent::AgentMessage {
+                from_agent_label,
+                to_agent_label,
+                content,
+                ..
+            } => {
+                output::status(&format!(
+                    "[{from_agent_label} → {to_agent_label}] {content}"
+                ));
+            }
+
+            StreamEvent::AgentOutput {
+                agent_label,
+                messages,
+                ..
+            } => {
+                self.end_active_stream();
+                output::status(&format!("[{agent_label}] 输出 {} 条消息", messages.len()));
+            }
+
+            StreamEvent::FileLockChanged {
+                path,
+                holder_agent_label,
+                action,
+                ..
+            } => {
+                let holder = holder_agent_label.as_deref().unwrap_or("unknown");
+                output::status(&format!("文件锁 {action}: {} (by {holder})", path));
+            }
+
+            StreamEvent::ContextCompressed {
+                action,
+                summary_up_to,
+                remaining_messages,
+            } => {
+                self.end_active_stream();
+                output::status(&format!(
+                    "上下文{action}: 已处理 {summary_up_to} 条，剩余 {remaining_messages} 条"
+                ));
+            }
         }
         false
     }
