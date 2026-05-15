@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::model::TokenUsage;
@@ -45,6 +47,9 @@ pub struct Session {
     /// 当前活跃 sub agent ID（None 表示主对话执行中）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_agent_id: Option<String>,
+    /// agent_id → 最近一次上下文 token 数，用于 GUI 按 Agent Tab 切换展示。
+    #[serde(default)]
+    pub agent_current_tokens: HashMap<String, usize>,
     #[serde(default)]
     pub task_records: Vec<SessionTaskRecord>,
     #[serde(default)]
@@ -212,6 +217,7 @@ impl Session {
             context_limit_tokens: 0,
             active_agent_current_tokens: 0,
             active_agent_id: None,
+            agent_current_tokens: HashMap::new(),
             task_records: Vec::new(),
             task_plans: Vec::new(),
             cwd: String::new(),
@@ -245,6 +251,7 @@ impl Session {
             context_limit_tokens: 0,
             active_agent_current_tokens: 0,
             active_agent_id: None,
+            agent_current_tokens: HashMap::new(),
             task_records: Vec::new(),
             task_plans: Vec::new(),
             cwd: workspace_dir.to_string_lossy().to_string(),

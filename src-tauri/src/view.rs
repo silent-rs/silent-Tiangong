@@ -18,6 +18,7 @@ pub struct TokenStatsView {
     pub total_tokens: usize,
     pub active_agent_current_tokens: usize,
     pub active_agent_id: Option<String>,
+    pub agent_current_tokens: HashMap<String, usize>,
 }
 
 impl TokenStatsView {
@@ -32,6 +33,7 @@ impl TokenStatsView {
             total_tokens: usage.total_tokens,
             active_agent_current_tokens: core_session.active_agent_current_tokens,
             active_agent_id: core_session.active_agent_id.clone(),
+            agent_current_tokens: core_session.agent_current_tokens.clone(),
         }
     }
 }

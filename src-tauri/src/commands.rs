@@ -434,9 +434,10 @@ fn record_session_token_usage(
     if let Some(current_tokens) = current_tokens {
         if let Some(aid) = agent_id {
             session.active_agent_id = Some(aid.to_string());
-            session.active_agent_current_tokens = current_tokens.max(session.active_agent_current_tokens);
+            session.active_agent_current_tokens = current_tokens;
+            session.agent_current_tokens.insert(aid.to_string(), current_tokens);
         } else {
-            session.current_tokens = current_tokens.max(session.current_tokens);
+            session.current_tokens = current_tokens;
         }
     }
     if let Some(compression_threshold_tokens) = compression_threshold_tokens {
@@ -909,6 +910,9 @@ fn start_stream_consumer(
                             ref label,
                             ref status,
                         } => {
+                            if status == "terminated" {
+                                session.agent_current_tokens.remove(agent_id);
+                            }
                             if status == "idle" || status == "terminated" {
                                 if session.active_agent_id.as_deref() == Some(agent_id.as_str()) {
                                     session.active_agent_id = None;

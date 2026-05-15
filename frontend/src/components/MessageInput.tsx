@@ -157,6 +157,7 @@ export function MessageInput() {
   const lastUsage = useStore((state) => state.lastUsage);
   const tokenStats = useStore((state) => state.tokenStats);
   const agents = useStore((state) => state.agents);
+  const selectedAgentTab = useStore((state) => state.selectedAgentTab);
   const [isComposing, setIsComposing] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const inputAreaRef = useRef<HTMLDivElement>(null);
@@ -181,18 +182,19 @@ export function MessageInput() {
   const currentRunStatus = isDraft
     ? 'idle'
     : currentSessionRunStatus || runStatus;
-  const activeAgentId = tokenStats?.active_agent_id ?? null;
-  const displayTokens = activeAgentId
-    ? (tokenStats?.active_agent_current_tokens ?? 0)
+  const selectedAgent = selectedAgentTab
+    ? agents.find((agent) => agent.role === selectedAgentTab)
+    : null;
+  const selectedAgentId = selectedAgent?.agentId ?? null;
+  const displayTokens = selectedAgentId
+    ? (tokenStats?.agent_current_tokens?.[selectedAgentId] ?? 0)
     : (tokenStats?.current_tokens ?? 0);
   const compressionThreshold = tokenStats?.compression_threshold_tokens ?? 0;
   const compressionProgress = compressionThreshold > 0
     ? Math.min(100, Math.round((displayTokens / compressionThreshold) * 100))
     : 0;
   const sessionTotalTokens = tokenStats?.total_tokens ?? lastUsage?.total_tokens ?? 0;
-  const activeAgentLabel = activeAgentId
-    ? agents.find((a) => a.agentId === activeAgentId)?.label ?? activeAgentId
-    : null;
+  const activeAgentLabel = selectedAgent?.label ?? null;
 
   useEffect(() => {
     api.getTrustMode().then(setTrustMode).catch(() => {});
