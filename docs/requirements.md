@@ -25,6 +25,15 @@
 - 重构后现有 GUI 和 CLI 功能必须完整保留，不允许功能回退。
 - 必须提供 `TiangongCore` 的正式对接文档，覆盖最小配置、初始化方式、事件流消费、会话恢复与热更新接入说明，供 CLI/GUI/Server 与第三方嵌入方统一参考。
 
+#### 发布与分发
+- 必须提供 GitHub Actions 发布流水线，支持手动触发和 `v*` 版本标签触发。
+- 发布流水线必须构建 Tauri 桌面安装包，并将 macOS、Windows、Linux 产物上传到 GitHub Release。
+- 发布流水线必须使用仓库内前端与 Tauri 配置完成构建，不依赖开发者本机环境。
+- 手动触发发布时必须默认创建草稿 Release，便于发布前检查安装包。
+- 应用必须通过 GitHub Release 的 updater JSON 检测新版本并执行应用内更新。
+- 设置界面必须展示当前应用版本，并提供检查更新与安装更新入口。
+- 更新包必须使用 Tauri updater 签名校验，私钥只能通过 GitHub Secrets 注入发布流水线。
+
 #### 模型配置
 - 模型配置必须独立为 `models.json`，采用 Provider 与 Model 分离设计。
 - Provider 层只定义连接信息（`base_url`、`api_key`、`timeout_ms`），可被多个模型共享。

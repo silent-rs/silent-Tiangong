@@ -12,6 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Link, Edit2, KeyRound, RefreshCw, Info, Wrench, FolderOpen, Save, ShieldCheck, Database, X } from 'lucide-react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater';
 import { api } from '@/api/tauri';
 import type { McpServer, Skill, SkillDetail, ServerConfig, ConnectorInfo, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo, MemoryConfigView } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
@@ -84,6 +85,10 @@ export function SettingsDialog() {
                   <Link className="w-4 h-4 mr-2" />
                   Connectors
                 </TabsTrigger>
+                <TabsTrigger value="about" className="w-full justify-start px-3 py-2">
+                  <Info className="w-4 h-4 mr-2" />
+                  关于与更新
+                </TabsTrigger>
               </TabsList>
               <div className="border-t p-2">
                 <Button
@@ -121,6 +126,9 @@ export function SettingsDialog() {
               </TabsContent>
               <TabsContent value="connector" className="m-0 h-full overflow-y-auto">
                 <ConnectorSettings />
+              </TabsContent>
+              <TabsContent value="about" className="m-0 h-full overflow-y-auto">
+                <AppUpdateSettings />
               </TabsContent>
             </div>
           </Tabs>
@@ -2213,6 +2221,196 @@ function ServerSettings() {
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+// ============================================================================
+// 关于与更新组件
+// ============================================================================
+
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let size = value;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  return `${size.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+function AppUpdateSettings() {
+  const [currentVersion, setCurrentVersion] = useState('');
+  const [availableUpdate, setAvailableUpdate] = useState<{
+    version: string;
+    currentVersion: string;
+    date?: string;
+    body?: string;
+  } | null>(null);
+  const [isChecking, setIsChecking] = useState(false);
+  const [isInstalling, setIsInstalling] = useState(false);
+  const [downloadedBytes, setDownloadedBytes] = useState(0);
+  const [contentLength, setContentLength] = useState<number | undefined>();
+  const updateRef = useRef<Update | null>(null);
+  const { showSuccess, showError, showInfo } = useToast();
+
+  useEffect(() => {
+    let mounted = true;
+    import('@tauri-apps/api/app')
+      .then(({ getVersion }) => getVersion())
+      .then((version) => {
+        if (mounted) setCurrentVersion(version);
+      })
+      .catch((error) => {
+        console.error('读取应用版本失败:', error);
+        if (mounted) setCurrentVersion('未知');
+      });
+    return () => {
+      mounted = false;
+      updateRef.current?.close().catch(() => undefined);
+      updateRef.current = null;
+    };
+  }, []);
+
+  const handleCheckUpdate = async () => {
+    setIsChecking(true);
+    setAvailableUpdate(null);
+    setDownloadedBytes(0);
+    setContentLength(undefined);
+    try {
+      const { check } = await import('@tauri-apps/plugin-updater');
+      const update = await check({ timeout: 30000 });
+      await updateRef.current?.close().catch(() => undefined);
+      updateRef.current = update;
+
+      if (!update) {
+        showInfo('已是最新版本', '当前没有可用更新');
+        return;
+      }
+
+      setAvailableUpdate({
+        version: update.version,
+        currentVersion: update.currentVersion,
+        date: update.date,
+        body: update.body,
+      });
+      showSuccess('发现新版本', `可更新到 ${update.version}`);
+    } catch (error) {
+      console.error('检查更新失败:', error);
+      showError('检查失败', `${error}`);
+    } finally {
+      setIsChecking(false);
+    }
+  };
+
+  const handleInstallUpdate = async () => {
+    const update = updateRef.current;
+    if (!update) {
+      showError('没有可安装更新', '请先检查更新');
+      return;
+    }
+
+    setIsInstalling(true);
+    setDownloadedBytes(0);
+    setContentLength(undefined);
+    try {
+      let downloaded = 0;
+      await update.downloadAndInstall((event: DownloadEvent) => {
+        if (event.event === 'Started') {
+          downloaded = 0;
+          setDownloadedBytes(0);
+          setContentLength(event.data.contentLength);
+        }
+        if (event.event === 'Progress') {
+          downloaded += event.data.chunkLength;
+          setDownloadedBytes(downloaded);
+        }
+      });
+      showSuccess('更新已安装', '应用将重新启动');
+      const { relaunch } = await import('@tauri-apps/plugin-process');
+      await relaunch();
+    } catch (error) {
+      console.error('安装更新失败:', error);
+      showError('安装失败', `${error}`);
+    } finally {
+      setIsInstalling(false);
+    }
+  };
+
+  const progressText = contentLength
+    ? `${formatBytes(downloadedBytes)} / ${formatBytes(contentLength)}`
+    : downloadedBytes > 0
+      ? formatBytes(downloadedBytes)
+      : '';
+
+  return (
+    <div className="space-y-4 p-4">
+      <div>
+        <h3 className="text-lg font-medium">关于与更新</h3>
+      </div>
+
+      <Card>
+        <CardContent className="space-y-4 p-4">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <div className="text-sm text-muted-foreground">当前版本</div>
+              <div className="mt-1 text-2xl font-semibold">{currentVersion || '读取中...'}</div>
+            </div>
+            <Badge variant="outline">GitHub Release</Badge>
+          </div>
+
+          {availableUpdate ? (
+            <div className="rounded-md border p-3 text-sm">
+              <div className="font-medium">发现新版本 {availableUpdate.version}</div>
+              <div className="mt-1 text-muted-foreground">
+                当前版本 {availableUpdate.currentVersion}
+                {availableUpdate.date ? ` · ${availableUpdate.date}` : ''}
+              </div>
+              {availableUpdate.body && (
+                <div className="mt-3 whitespace-pre-wrap text-muted-foreground">
+                  {availableUpdate.body}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="rounded-md border p-3 text-sm text-muted-foreground">
+              更新检查会从 GitHub Release 获取最新版本信息。
+            </div>
+          )}
+
+          {isInstalling && progressText && (
+            <div className="text-sm text-muted-foreground">正在下载：{progressText}</div>
+          )}
+
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button variant="outline" onClick={handleCheckUpdate} disabled={isChecking || isInstalling}>
+              {isChecking ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  检查中...
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="w-4 h-4 mr-2" />
+                  检查更新
+                </>
+              )}
+            </Button>
+            <Button onClick={handleInstallUpdate} disabled={!availableUpdate || isChecking || isInstalling}>
+              {isInstalling ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  安装中...
+                </>
+              ) : (
+                '下载并安装'
+              )}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }
