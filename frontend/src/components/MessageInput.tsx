@@ -193,7 +193,12 @@ export function MessageInput() {
   const compressionProgress = compressionThreshold > 0
     ? Math.min(100, Math.round((displayTokens / compressionThreshold) * 100))
     : 0;
-  const sessionTotalTokens = tokenStats?.total_tokens ?? lastUsage?.total_tokens ?? 0;
+  const selectedAgentTotalTokens = selectedAgentId
+    ? (tokenStats?.agent_token_usage?.[selectedAgentId]?.total_tokens ?? 0)
+    : 0;
+  const totalTokens = selectedAgentId
+    ? (selectedAgentTotalTokens || displayTokens)
+    : (tokenStats?.total_tokens ?? lastUsage?.total_tokens ?? 0);
   const activeAgentLabel = selectedAgent?.label ?? null;
 
   useEffect(() => {
@@ -1093,13 +1098,13 @@ export function MessageInput() {
                 )}
               </div>
               <div className="flex items-center gap-2 shrink-0">
-                {(displayTokens > 0 || sessionTotalTokens > 0) && (
+                {(displayTokens > 0 || totalTokens > 0) && (
                   <div
                     className="flex items-center gap-2 text-muted-foreground/60 tabular-nums"
                     title={
                       activeAgentLabel
-                        ? `[${activeAgentLabel}] 当前 ${displayTokens.toLocaleString()} tokens / 压缩阈值 ${compressionThreshold.toLocaleString()} tokens / 总计 ${sessionTotalTokens.toLocaleString()} tokens`
-                        : `当前 ${displayTokens.toLocaleString()} tokens / 压缩阈值 ${compressionThreshold.toLocaleString()} tokens / 总计 ${sessionTotalTokens.toLocaleString()} tokens`
+                        ? `[${activeAgentLabel}] 当前 ${displayTokens.toLocaleString()} tokens / 压缩阈值 ${compressionThreshold.toLocaleString()} tokens / 总计 ${totalTokens.toLocaleString()} tokens`
+                        : `当前 ${displayTokens.toLocaleString()} tokens / 压缩阈值 ${compressionThreshold.toLocaleString()} tokens / 总计 ${totalTokens.toLocaleString()} tokens`
                     }
                   >
                     {lastDurationMs ? <span>{(lastDurationMs / 1000).toFixed(1)}s</span> : null}
@@ -1121,7 +1126,7 @@ export function MessageInput() {
                       {activeAgentLabel ? `[${activeAgentLabel}] ` : ''}
                       {displayTokens.toLocaleString()}
                     </span>
-                    <span>总计 {sessionTotalTokens.toLocaleString()}</span>
+                    <span>总计 {totalTokens.toLocaleString()}</span>
                   </div>
                 )}
                 <button

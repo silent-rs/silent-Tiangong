@@ -1464,14 +1464,7 @@ impl ReactEngine {
                 .iter()
                 .any(|m| m.role == MessageRole::System && m.content.starts_with("[错误]"));
 
-            let status = if has_error { "error" } else { "idle" };
-            let _ = stream_tx.send(StreamEvent::AgentStatusChanged {
-                agent_id: agent_id.clone(),
-                label: agent_label.clone(),
-                status: status.to_string(),
-            });
-
-            if has_error {
+            let completion_content = if has_error {
                 let error_content = child_session
                     .messages
                     .iter()
@@ -1479,11 +1472,7 @@ impl ReactEngine {
                     .map(|m| m.content.replace("[错误] ", ""))
                     .collect::<Vec<_>>()
                     .join("; ");
-                append_runtime_tool_message(
-                    parent_session,
-                    &format!("sub_agent_{agent_label}"),
-                    format!("[{agent_label}] 执行出错：{error_content}"),
-                );
+                format!("[{agent_label}] 执行出错：{error_content}")
             } else {
                 let summary = child_session
                     .messages
@@ -1496,19 +1485,17 @@ impl ReactEngine {
                     .collect::<Vec<_>>()
                     .join("\n");
 
-                if !summary.is_empty() {
+                if summary.is_empty() {
+                    format!("[{agent_label}] 已完成本轮工作，但没有生成文本输出。")
+                } else {
                     let brief = if summary.chars().count() > 500 {
                         format!("{}...", summary.chars().take(500).collect::<String>())
                     } else {
                         summary
                     };
-                    append_runtime_tool_message(
-                        parent_session,
-                        &format!("sub_agent_{agent_label}"),
-                        format!("[{agent_label}] 执行完成\n{brief}"),
-                    );
+                    format!("[{agent_label}] 执行完成\n{brief}")
                 }
-            }
+            };
 
             result.usage.accumulate(&usage);
 
@@ -1519,6 +1506,33 @@ impl ReactEngine {
                 });
                 continue;
             };
+            team.deliver_main_message(crate::agent_team::message_bus::AgentMessage {
+                id: scru128::new().to_string(),
+                from: agent_id.clone(),
+                to: "main".to_string(),
+                content: completion_content.clone(),
+                priority: crate::agent_team::message_bus::MessagePriority::Normal,
+                created_at: now_text(),
+            });
+            let _ = stream_tx.send(StreamEvent::AgentMessage {
+                from_agent_id: agent_id.clone(),
+                from_agent_label: agent_label.clone(),
+                to_agent_id: "main".to_string(),
+                to_agent_label: "Main Agent".to_string(),
+                content: completion_content.clone(),
+            });
+            append_runtime_tool_message(
+                parent_session,
+                &format!("sub_agent_{agent_label}"),
+                completion_content,
+            );
+
+            let status = if has_error { "error" } else { "idle" };
+            let _ = stream_tx.send(StreamEvent::AgentStatusChanged {
+                agent_id: agent_id.clone(),
+                label: agent_label.clone(),
+                status: status.to_string(),
+            });
             let should_dismiss = team
                 .registry
                 .get(&agent_id)

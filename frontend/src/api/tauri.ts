@@ -38,6 +38,7 @@ export interface TokenStats {
   active_agent_current_tokens: number;
   active_agent_id: string | null;
   agent_current_tokens: Record<string, number>;
+  agent_token_usage: Record<string, TokenUsage>;
 }
 
 export interface CostSummary {

@@ -19,6 +19,7 @@ pub struct TokenStatsView {
     pub active_agent_current_tokens: usize,
     pub active_agent_id: Option<String>,
     pub agent_current_tokens: HashMap<String, usize>,
+    pub agent_token_usage: HashMap<String, tiangong_types::TokenUsage>,
 }
 
 impl TokenStatsView {
@@ -34,6 +35,7 @@ impl TokenStatsView {
             active_agent_current_tokens: core_session.active_agent_current_tokens,
             active_agent_id: core_session.active_agent_id.clone(),
             agent_current_tokens: core_session.agent_current_tokens.clone(),
+            agent_token_usage: core_session.agent_token_usage.clone(),
         }
     }
 }

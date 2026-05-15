@@ -428,16 +428,30 @@ fn record_session_token_usage(
     context_limit_tokens: Option<usize>,
     agent_id: Option<&str>,
 ) {
-    if usage.total_tokens > 0 {
-        session.token_usage.accumulate(usage);
+    let mut normalized_usage = usage.clone();
+    if normalized_usage.total_tokens == 0 {
+        normalized_usage.total_tokens =
+            normalized_usage.prompt_tokens + normalized_usage.completion_tokens;
+    }
+    if normalized_usage.total_tokens > 0 {
+        session.token_usage.accumulate(&normalized_usage);
+        if let Some(aid) = agent_id {
+            session
+                .agent_token_usage
+                .entry(aid.to_string())
+                .or_default()
+                .accumulate(&normalized_usage);
+        }
     }
     if let Some(current_tokens) = current_tokens {
         if let Some(aid) = agent_id {
             session.active_agent_id = Some(aid.to_string());
-            session.active_agent_current_tokens = current_tokens;
-            session.agent_current_tokens.insert(aid.to_string(), current_tokens);
+            session.active_agent_current_tokens =
+                current_tokens.max(session.active_agent_current_tokens);
+            let agent_current_tokens = session.agent_current_tokens.entry(aid.to_string()).or_default();
+            *agent_current_tokens = current_tokens.max(*agent_current_tokens);
         } else {
-            session.current_tokens = current_tokens;
+            session.current_tokens = current_tokens.max(session.current_tokens);
         }
     }
     if let Some(compression_threshold_tokens) = compression_threshold_tokens {
@@ -912,6 +926,7 @@ fn start_stream_consumer(
                         } => {
                             if status == "terminated" {
                                 session.agent_current_tokens.remove(agent_id);
+                                session.agent_token_usage.remove(agent_id);
                             }
                             if status == "idle" || status == "terminated" {
                                 if session.active_agent_id.as_deref() == Some(agent_id.as_str()) {

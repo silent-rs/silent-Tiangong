@@ -22,7 +22,7 @@ export function parseAgentsFromMessages(messages: Message[]): AgentInfo[] {
     const createMatch = msg.content.match(/^\[Agent\] (.+?) \((.+?)\) 已加入团队.*?id=([^\s]+)/);
     if (createMatch) {
       const [, label, role, agentId] = createMatch;
-      agents.set(role, { agentId, role, label, status: 'running' });
+      agents.set(role, { agentId, role, label, status: 'idle' });
       continue;
     }
     // [Agent] {label} 状态变更: {status}

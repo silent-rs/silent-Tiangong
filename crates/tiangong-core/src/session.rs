@@ -50,6 +50,9 @@ pub struct Session {
     /// agent_id → 最近一次上下文 token 数，用于 GUI 按 Agent Tab 切换展示。
     #[serde(default)]
     pub agent_current_tokens: HashMap<String, usize>,
+    /// agent_id → 累计 token 用量，用于 GUI 按 Agent Tab 切换展示。
+    #[serde(default)]
+    pub agent_token_usage: HashMap<String, TokenUsage>,
     #[serde(default)]
     pub task_records: Vec<SessionTaskRecord>,
     #[serde(default)]
@@ -218,6 +221,7 @@ impl Session {
             active_agent_current_tokens: 0,
             active_agent_id: None,
             agent_current_tokens: HashMap::new(),
+            agent_token_usage: HashMap::new(),
             task_records: Vec::new(),
             task_plans: Vec::new(),
             cwd: String::new(),
@@ -252,6 +256,7 @@ impl Session {
             active_agent_current_tokens: 0,
             active_agent_id: None,
             agent_current_tokens: HashMap::new(),
+            agent_token_usage: HashMap::new(),
             task_records: Vec::new(),
             task_plans: Vec::new(),
             cwd: workspace_dir.to_string_lossy().to_string(),

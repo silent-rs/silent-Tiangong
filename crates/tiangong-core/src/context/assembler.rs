@@ -166,6 +166,7 @@ mod tests {
             active_agent_current_tokens: 0,
             active_agent_id: None,
             agent_current_tokens: Default::default(),
+            agent_token_usage: Default::default(),
             task_records: Vec::new(),
             task_plans: Vec::new(),
             parent_session_id: None,
