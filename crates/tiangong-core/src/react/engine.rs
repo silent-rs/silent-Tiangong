@@ -1424,14 +1424,73 @@ impl ReactEngine {
                             let _ = stream_tx.send(StreamEvent::UserMessage {
                                 message_id,
                                 content: content.clone(),
-                                media,
+                                media: media.clone(),
                             });
-                            if let Ok(mut team) = team_arc.lock() {
-                                let _ = crate::agent_team::lifecycle::route_user_mentions(
-                                    &mut team,
-                                    &content,
-                                    stream_tx,
-                                );
+                            if let (Some(route), Ok(mut team)) = (
+                                crate::agent_team::lifecycle::parse_agent_mention_route(&content),
+                                team_arc.lock(),
+                            ) {
+                                if !route.content.trim().is_empty() {
+                                    let targets = if route.broadcast {
+                                        team.registry
+                                            .alive_agents()
+                                            .iter()
+                                            .map(|agent| {
+                                                (
+                                                    agent.agent_id.clone(),
+                                                    agent.role.clone(),
+                                                    agent.label.clone(),
+                                                )
+                                            })
+                                            .collect::<Vec<_>>()
+                                    } else {
+                                        route
+                                            .roles
+                                            .iter()
+                                            .filter_map(|role| {
+                                                team.registry.find_by_role(role).map(|agent| {
+                                                    (
+                                                        agent.agent_id.clone(),
+                                                        agent.role.clone(),
+                                                        agent.label.clone(),
+                                                    )
+                                                })
+                                            })
+                                            .collect::<Vec<_>>()
+                                    };
+
+                                    for (agent_id, _agent_role, agent_label) in targets {
+                                        if let Some((_, _, _, tx)) = active_sub_agents
+                                            .iter()
+                                            .find(|(active_id, _, _, _)| active_id == &agent_id)
+                                        {
+                                            let _ = tx.send(Command::Message {
+                                                content: route.content.clone(),
+                                                message_id: Some(scru128::new().to_string()),
+                                                media: media.clone(),
+                                            });
+                                        } else {
+                                            let message =
+                                                crate::agent_team::message_bus::AgentMessage {
+                                                    id: scru128::new().to_string(),
+                                                    from: "user".to_string(),
+                                                    to: agent_id.clone(),
+                                                    content: route.content.clone(),
+                                                    priority: crate::agent_team::message_bus::MessagePriority::Normal,
+                                                    created_at: now_text(),
+                                                };
+                                            team.registry.deliver_message(&agent_id, message);
+                                        }
+
+                                        let _ = stream_tx.send(StreamEvent::AgentMessage {
+                                            from_agent_id: "user".to_string(),
+                                            from_agent_label: "User".to_string(),
+                                            to_agent_id: agent_id,
+                                            to_agent_label: agent_label,
+                                            content: route.content.clone(),
+                                        });
+                                    }
+                                }
                             }
                         }
                         Some(Command::UpdateCwd { cwd }) => {
