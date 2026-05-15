@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::model::{ModelClient, ModelRequest, SingleProviderClient};
+use crate::model::{ModelClient, ModelRequest, SingleProviderClient, TokenUsage};
 use crate::session::{Message, MessageRole, Session, now_text};
 
 /// 上下文压缩器
@@ -10,6 +10,12 @@ use crate::session::{Message, MessageRole, Session, now_text};
 pub struct ContextCompressor {
     /// 保留最近的完整对话轮数
     keep_recent_turns: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CompressionUpdate {
+    pub compressed: bool,
+    pub usage: TokenUsage,
 }
 
 impl Default for ContextCompressor {
@@ -36,14 +42,22 @@ impl ContextCompressor {
         session: &mut Session,
         client: &SingleProviderClient,
     ) -> Result<bool> {
+        Ok(self.update_summary_with_usage(session, client)?.compressed)
+    }
+
+    pub fn update_summary_with_usage(
+        &self,
+        session: &mut Session,
+        client: &SingleProviderClient,
+    ) -> Result<CompressionUpdate> {
         let split_point = self.find_split_point(&session.messages);
         if split_point == 0 {
-            return Ok(false);
+            return Ok(CompressionUpdate::default());
         }
 
         // 已被摘要覆盖的部分不需要重新处理
         if split_point <= session.summary_up_to {
-            return Ok(false);
+            return Ok(CompressionUpdate::default());
         }
 
         // 需要新增摘要的消息范围：从上次摘要覆盖点到新分割点
@@ -51,11 +65,11 @@ impl ContextCompressor {
         let new_messages = &session.messages[new_messages_start..split_point];
 
         if new_messages.is_empty() {
-            return Ok(false);
+            return Ok(CompressionUpdate::default());
         }
 
         // 折叠：旧摘要 + 新溢出消息 → 新摘要
-        let summary =
+        let (summary, usage) =
             self.fold_summary(session.context_summary.as_deref(), new_messages, client)?;
 
         tracing::info!(
@@ -69,7 +83,10 @@ impl ContextCompressor {
         session.context_summary = Some(summary);
         session.summary_up_to = split_point;
         mark_compact_boundary(&mut session.messages, split_point);
-        Ok(true)
+        Ok(CompressionUpdate {
+            compressed: true,
+            usage,
+        })
     }
 
     /// 构建发送给 LLM 的上下文消息列表
@@ -116,7 +133,7 @@ impl ContextCompressor {
         old_summary: Option<&str>,
         new_messages: &[Message],
         client: &SingleProviderClient,
-    ) -> Result<String> {
+    ) -> Result<(String, TokenUsage)> {
         let mut input_text = String::new();
 
         // 旧摘要作为上文
@@ -161,7 +178,7 @@ impl ContextCompressor {
             include_media: false,
         };
         let resp = client.complete(&req)?;
-        Ok(resp.text)
+        Ok((resp.text, resp.usage))
     }
 }
 

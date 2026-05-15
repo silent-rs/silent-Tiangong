@@ -204,6 +204,8 @@ impl ResponseState {
                 output::tool_result(name, *ok, output);
             }
 
+            StreamEvent::TokenUsage { .. } => {}
+
             StreamEvent::ApprovalNeeded {
                 request_id,
                 tool_name,

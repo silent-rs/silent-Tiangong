@@ -31,6 +31,16 @@ pub use tiangong_llm::request::ThinkingConfig;
 pub use tiangong_llm::tool::{ToolCall, ToolChoice, ToolSpec};
 pub use tiangong_types::TokenUsage;
 
+fn merge_stream_usage(current: &mut TokenUsageData, next: TokenUsageData) {
+    current.prompt_tokens = current.prompt_tokens.max(next.prompt_tokens);
+    current.completion_tokens = current.completion_tokens.max(next.completion_tokens);
+    let computed_total = current.prompt_tokens + current.completion_tokens;
+    current.total_tokens = current
+        .total_tokens
+        .max(next.total_tokens)
+        .max(computed_total);
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelRequest {
     pub session_title: String,
@@ -636,7 +646,9 @@ impl SingleProviderClient {
                         entry.1.push_str(&partial_json);
                     }
                 }
-                ProviderStreamEvent::Usage(stream_usage) => usage = stream_usage,
+                ProviderStreamEvent::Usage(stream_usage) => {
+                    merge_stream_usage(&mut usage, stream_usage)
+                }
                 ProviderStreamEvent::Error(message) => return Err(anyhow!(message)),
                 ProviderStreamEvent::MessageStart
                 | ProviderStreamEvent::ToolCallEnd { .. }
@@ -1449,7 +1461,9 @@ async fn consume_provider_stream_events_async(
                     .or_insert_with(|| (String::new(), String::new()));
                 entry.1.push_str(&partial_json);
             }
-            ProviderStreamEvent::Usage(stream_usage) => usage = stream_usage,
+            ProviderStreamEvent::Usage(stream_usage) => {
+                merge_stream_usage(&mut usage, stream_usage)
+            }
             ProviderStreamEvent::Error(message) => return Err(anyhow!(message)),
             ProviderStreamEvent::MessageStart
             | ProviderStreamEvent::ToolCallEnd { .. }

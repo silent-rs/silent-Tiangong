@@ -420,31 +420,46 @@ fn append_assistant_media(
     );
 }
 
-fn usage_delta(
-    total: &tiangong_types::TokenUsage,
-    already_recorded: &tiangong_types::TokenUsage,
-) -> tiangong_types::TokenUsage {
-    tiangong_types::TokenUsage {
-        prompt_tokens: total
-            .prompt_tokens
-            .saturating_sub(already_recorded.prompt_tokens),
-        completion_tokens: total
-            .completion_tokens
-            .saturating_sub(already_recorded.completion_tokens),
-        total_tokens: total
-            .total_tokens
-            .saturating_sub(already_recorded.total_tokens),
-    }
-}
-
-fn add_session_usage(
+fn record_session_token_usage(
     session: &mut tiangong_core::session::Session,
     usage: &tiangong_types::TokenUsage,
+    current_tokens: Option<usize>,
+    compression_threshold_tokens: Option<usize>,
+    context_limit_tokens: Option<usize>,
+    agent_id: Option<&str>,
 ) {
-    if usage.total_tokens == 0 {
-        return;
+    let mut normalized_usage = usage.clone();
+    if normalized_usage.total_tokens == 0 {
+        normalized_usage.total_tokens =
+            normalized_usage.prompt_tokens + normalized_usage.completion_tokens;
     }
-    session.token_usage.accumulate(usage);
+    if normalized_usage.total_tokens > 0 {
+        session.token_usage.accumulate(&normalized_usage);
+        if let Some(aid) = agent_id {
+            session
+                .agent_token_usage
+                .entry(aid.to_string())
+                .or_default()
+                .accumulate(&normalized_usage);
+        }
+    }
+    if let Some(current_tokens) = current_tokens {
+        if let Some(aid) = agent_id {
+            session.active_agent_id = Some(aid.to_string());
+            session.active_agent_current_tokens =
+                current_tokens.max(session.active_agent_current_tokens);
+            let agent_current_tokens = session.agent_current_tokens.entry(aid.to_string()).or_default();
+            *agent_current_tokens = current_tokens.max(*agent_current_tokens);
+        } else {
+            session.current_tokens = current_tokens.max(session.current_tokens);
+        }
+    }
+    if let Some(compression_threshold_tokens) = compression_threshold_tokens {
+        session.compression_threshold_tokens = compression_threshold_tokens;
+    }
+    if let Some(context_limit_tokens) = context_limit_tokens {
+        session.context_limit_tokens = context_limit_tokens;
+    }
     session.updated_at = tiangong_core::session::now_text();
 }
 
@@ -501,6 +516,9 @@ fn build_session_snapshot(
         input_draft,
         current_plan,
         pending_session_ids,
+        selected_session
+            .map(TokenStatsView::from_session)
+            .unwrap_or_default(),
     );
     snapshot.last_usage = selected_session.and_then(|session| {
         let usage = session.total_usage();
@@ -673,7 +691,6 @@ fn start_stream_consumer(
         let mut assistant_msg_id: Option<String> = None;
         let mut last_tool_args_summary = String::new();
         let mut pending_final_media: Option<Vec<tiangong_types::MediaAsset>> = None;
-        let mut recorded_turn_usage = tiangong_types::TokenUsage::default();
         for session_event in stream_rx.iter() {
             // 先 emit 完整事件给前端，再解构
             let _ = app.emit("stream_event", &session_event);
@@ -692,7 +709,6 @@ fn start_stream_consumer(
                             content,
                             media,
                         } => {
-                            recorded_turn_usage = tiangong_types::TokenUsage::default();
                             // Core 已记录用户消息，同步到 TiangongState session
                             if !session.messages.iter().any(|msg| msg.id == *message_id) {
                                 session.append_message_with_id_and_media(
@@ -738,7 +754,7 @@ fn start_stream_consumer(
                             message_id,
                             names,
                             calls,
-                            usage,
+                            usage: _,
                         } => {
                             finalize_assistant_tool_calls(
                                 session,
@@ -750,10 +766,23 @@ fn start_stream_consumer(
                                 tiangong_core::session::MessageRole::System,
                                 format!("LLM 输出\ntool_calls: {}", names.join(", ")),
                             );
-                            if let Some(usage) = usage {
-                                add_session_usage(session, usage);
-                                recorded_turn_usage.accumulate(usage);
-                            }
+                        }
+                        StreamEvent::TokenUsage {
+                            usage,
+                            current_tokens,
+                            compression_threshold_tokens,
+                            context_limit_tokens,
+                            agent_id,
+                            ..
+                        } => {
+                            record_session_token_usage(
+                                session,
+                                usage,
+                                *current_tokens,
+                                *compression_threshold_tokens,
+                                *context_limit_tokens,
+                                agent_id.as_deref(),
+                            );
                         }
                         StreamEvent::ToolStart {
                             ref args_summary, ..
@@ -841,12 +870,7 @@ fn start_stream_consumer(
                         } => {
                             let _ = (message, attempt, max_attempts);
                         }
-                        StreamEvent::Done { usage } => {
-                            if let Some(usage) = usage {
-                                let delta = usage_delta(usage, &recorded_turn_usage);
-                                add_session_usage(session, &delta);
-                                recorded_turn_usage = tiangong_types::TokenUsage::default();
-                            }
+                        StreamEvent::Done { .. } => {
                             if let Some(media) = pending_final_media.take() {
                                 append_assistant_media(session, media);
                             }
@@ -900,6 +924,16 @@ fn start_stream_consumer(
                             ref label,
                             ref status,
                         } => {
+                            if status == "terminated" {
+                                session.agent_current_tokens.remove(agent_id);
+                                session.agent_token_usage.remove(agent_id);
+                            }
+                            if status == "idle" || status == "terminated" {
+                                if session.active_agent_id.as_deref() == Some(agent_id.as_str()) {
+                                    session.active_agent_id = None;
+                                    session.active_agent_current_tokens = 0;
+                                }
+                            }
                             session.append_message(
                                 tiangong_core::session::MessageRole::System,
                                 format!("[Agent] {label} 状态变更: {status} id={agent_id}"),
@@ -1048,29 +1082,18 @@ fn start_stream_consumer(
                         let s = if *ok { "✓" } else { "✗" };
                         core_state.store.runtime.run.summary = format!("{s} {name}");
                     }
-                    StreamEvent::ToolCalls { names, usage, .. } => {
+                    StreamEvent::ToolCalls { names, .. } => {
                         core_state.store.runtime.run.summary =
                             format!("正在执行：{}", names.join(", "));
-                        if usage.is_some() {
-                            if let Some(session) =
-                                core_state.sessions().iter().find(|s| s.id == sid)
-                            {
-                                let total = session.total_usage();
-                                core_state.store.runtime.run.last_usage =
-                                    (total.total_tokens > 0).then_some(total);
-                            }
+                    }
+                    StreamEvent::TokenUsage { .. } => {
+                        if let Some(session) = core_state.sessions().iter().find(|s| s.id == sid) {
+                            let total = session.total_usage();
+                            core_state.store.runtime.run.last_usage =
+                                (total.total_tokens > 0).then_some(total);
                         }
                     }
-                    StreamEvent::Done { ref usage } => {
-                        if usage.is_some() {
-                            if let Some(session) =
-                                core_state.sessions().iter().find(|s| s.id == sid)
-                            {
-                                let total = session.total_usage();
-                                core_state.store.runtime.run.last_usage =
-                                    (total.total_tokens > 0).then_some(total);
-                            }
-                        }
+                    StreamEvent::Done { .. } => {
                         core_state.report_run_idle(format!(
                             "模型供应商：{}",
                             core_state.provider_label()
@@ -1078,7 +1101,6 @@ fn start_stream_consumer(
                         core_state.clear_pending_turn_for(&sid);
                     }
                     StreamEvent::Error { ref message } => {
-                        recorded_turn_usage = tiangong_types::TokenUsage::default();
                         core_state.report_run_idle(format!("执行失败：{message}"));
                         core_state.clear_pending_turn_for(&sid);
                     }

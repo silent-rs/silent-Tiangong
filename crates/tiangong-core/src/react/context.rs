@@ -3,33 +3,87 @@
 use std::sync::mpsc::Sender as StdSender;
 
 use crate::context::organizer::ContextOrganizer;
-use crate::model::{ModelClient, ModelRequest, SingleProviderClient};
+use crate::model::{ModelClient, ModelRequest, SingleProviderClient, TokenUsage};
 use crate::prompt::PromptAssembler;
 use crate::runtime::{RuntimeEngine, use_stream_mode};
 use crate::session::{Message, MessageRole, Session, now_text};
 use crate::stream_throttle::ThrottledStreamSink;
 use tiangong_types::StreamEvent;
 
+pub(crate) fn compression_threshold_tokens(context_limit: usize) -> usize {
+    ContextOrganizer::new(context_limit)
+        .with_threshold(0.95)
+        .token_threshold()
+}
+
+pub(crate) fn emit_token_usage(
+    stream_tx: &StdSender<StreamEvent>,
+    usage: &TokenUsage,
+    current_tokens: Option<usize>,
+    context_limit: usize,
+    source: impl Into<String>,
+    agent_id: Option<&str>,
+) {
+    if usage.total_tokens == 0 {
+        return;
+    }
+    let _ = stream_tx.send(StreamEvent::TokenUsage {
+        usage: usage.clone(),
+        current_tokens,
+        compression_threshold_tokens: Some(compression_threshold_tokens(context_limit)),
+        context_limit_tokens: Some(context_limit),
+        source: source.into(),
+        agent_id: agent_id.map(|s| s.to_string()),
+    });
+}
+
 pub(crate) fn maybe_update_context_summary(
     session: &mut Session,
     engine: &RuntimeEngine,
-    observed_total_tokens: usize,
+    observed_prompt_tokens: usize,
+    stream_tx: &StdSender<StreamEvent>,
 ) {
     let organizer = ContextOrganizer::new(engine.context_limit)
         .with_threshold(0.95)
         .with_keep_recent_turns(6);
-    match organizer.maybe_update_summary(session, engine.client(), observed_total_tokens) {
-        Ok(true) => {
+    if !organizer.needs_compression(observed_prompt_tokens) {
+        return;
+    }
+    let total_messages = session.messages.len();
+    let _ = stream_tx.send(StreamEvent::ContextCompressing {
+        summary_up_to: session.summary_up_to,
+        total_messages,
+    });
+    match organizer.maybe_update_summary_with_usage(
+        session,
+        engine.client(),
+        observed_prompt_tokens,
+    ) {
+        Ok(update) if update.compressed => {
+            emit_token_usage(
+                stream_tx,
+                &update.usage,
+                None,
+                engine.context_limit,
+                "context_summary",
+                None,
+            );
+            let remaining = session.messages.len().saturating_sub(session.summary_up_to);
+            let _ = stream_tx.send(StreamEvent::ContextCompressed {
+                action: "自动压缩".to_string(),
+                summary_up_to: session.summary_up_to,
+                remaining_messages: remaining,
+            });
             session.persist_to_disk();
             tracing::info!(
                 session_id = %session.id,
-                observed_total_tokens,
+                observed_prompt_tokens,
                 threshold_tokens = organizer.token_threshold(),
                 summary_up_to = session.summary_up_to,
                 "上下文与本轮输出达到压缩阈值，已更新早期对话摘要"
             );
         }
-        Ok(false) => {}
+        Ok(_) => {}
         Err(err) => {
             tracing::warn!(
                 session_id = %session.id,
@@ -178,6 +232,14 @@ pub(crate) fn force_final_response(
         MessageRole::Assistant,
         resp.text,
         String::new(),
+    );
+    emit_token_usage(
+        stream_tx,
+        &resp.usage,
+        Some(resp.usage.prompt_tokens.max(session.current_tokens)),
+        engine.context_limit,
+        "force_final_response",
+        None,
     );
     let _ = stream_tx.send(StreamEvent::Done {
         usage: Some(resp.usage.clone()),

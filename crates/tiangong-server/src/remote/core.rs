@@ -363,6 +363,34 @@ fn sync_stream_event_to_state(
                 !*ok,
             );
         }
+        StreamEvent::TokenUsage {
+            usage,
+            current_tokens,
+            compression_threshold_tokens,
+            context_limit_tokens,
+            agent_id,
+            ..
+        } => {
+            if usage.total_tokens > 0 {
+                session.token_usage.accumulate(usage);
+            }
+            if let Some(current_tokens) = current_tokens {
+                if let Some(aid) = agent_id {
+                    session.active_agent_id = Some(aid.clone());
+                    session.active_agent_current_tokens =
+                        *current_tokens.max(&session.active_agent_current_tokens);
+                } else {
+                    session.current_tokens = (*current_tokens).max(session.current_tokens);
+                }
+            }
+            if let Some(compression_threshold_tokens) = compression_threshold_tokens {
+                session.compression_threshold_tokens = *compression_threshold_tokens;
+            }
+            if let Some(context_limit_tokens) = context_limit_tokens {
+                session.context_limit_tokens = *context_limit_tokens;
+            }
+            should_persist = true;
+        }
         StreamEvent::ApprovalNeeded { .. } => {
             session.append_message(
                 MessageRole::System,

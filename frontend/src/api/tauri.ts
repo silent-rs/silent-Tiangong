@@ -28,6 +28,19 @@ export interface TokenUsage {
   total_tokens: number;
 }
 
+export interface TokenStats {
+  current_tokens: number;
+  compression_threshold_tokens: number;
+  context_limit_tokens: number;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  total_tokens: number;
+  active_agent_current_tokens: number;
+  active_agent_id: string | null;
+  agent_current_tokens: Record<string, number>;
+  agent_token_usage: Record<string, TokenUsage>;
+}
+
 export interface CostSummary {
   total_prompt_tokens: number;
   total_completion_tokens: number;
@@ -92,6 +105,7 @@ export interface RunSnapshot {
   last_session_id?: string;
   last_duration_ms?: number;
   last_usage?: TokenUsage;
+  token_stats?: TokenStats;
   current_plan?: TaskPlan;
   messages: Message[];
   input_draft: string;

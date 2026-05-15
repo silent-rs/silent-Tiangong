@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
-use crate::context::compressor::ContextCompressor;
+use crate::context::compressor::{CompressionUpdate, ContextCompressor};
 use crate::model::SingleProviderClient;
 use crate::session::{Message, MessageRole, Session, now_text};
 
@@ -68,10 +68,21 @@ impl ContextOrganizer {
         client: &SingleProviderClient,
         actual_prompt_tokens: usize,
     ) -> anyhow::Result<bool> {
+        Ok(self
+            .maybe_update_summary_with_usage(session, client, actual_prompt_tokens)?
+            .compressed)
+    }
+
+    pub fn maybe_update_summary_with_usage(
+        &self,
+        session: &mut Session,
+        client: &SingleProviderClient,
+        actual_prompt_tokens: usize,
+    ) -> anyhow::Result<CompressionUpdate> {
         if actual_prompt_tokens == 0 || !self.needs_compression(actual_prompt_tokens) {
-            return Ok(false);
+            return Ok(CompressionUpdate::default());
         }
-        self.compressor.update_summary(session, client)
+        self.compressor.update_summary_with_usage(session, client)
     }
 
     /// 强制压缩上下文（忽略 token 阈值检查）
@@ -80,7 +91,17 @@ impl ContextOrganizer {
         session: &mut Session,
         client: &SingleProviderClient,
     ) -> anyhow::Result<bool> {
-        self.compressor.update_summary(session, client)
+        Ok(self
+            .force_update_summary_with_usage(session, client)?
+            .compressed)
+    }
+
+    pub fn force_update_summary_with_usage(
+        &self,
+        session: &mut Session,
+        client: &SingleProviderClient,
+    ) -> anyhow::Result<CompressionUpdate> {
+        self.compressor.update_summary_with_usage(session, client)
     }
 
     /// 构建 LLM 请求上下文

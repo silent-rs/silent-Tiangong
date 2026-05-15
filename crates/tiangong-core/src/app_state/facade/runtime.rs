@@ -10,9 +10,11 @@ impl TiangongState {
             .runtime
             .permission_gate()
             .shared_trust_mode_ref();
+        let context_limit =
+            crate::core_config::resolve_context_limit(&self.store.provider.model_config.api_model);
         self.services.runtime = RuntimeEngine::with_shared_trust_mode(
             SingleProviderClient::new(config),
-            DEFAULT_CONTEXT_LIMIT,
+            context_limit,
             self.store.agent.agent_config.clone(),
             shared_trust_mode,
         )

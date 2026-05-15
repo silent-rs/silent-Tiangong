@@ -533,12 +533,20 @@ pub(crate) fn compress_context_for_session(
         total_messages: session.messages.len(),
     });
     let organizer = crate::context::organizer::ContextOrganizer::new(engine.context_limit)
-        .with_keep_recent_turns(1);
-    match organizer.force_update_summary(session, engine.client()) {
-        Ok(compressed) => {
+        .with_keep_recent_turns(6);
+    match organizer.force_update_summary_with_usage(session, engine.client()) {
+        Ok(update) => {
+            crate::react::context::emit_token_usage(
+                stream_tx,
+                &update.usage,
+                None,
+                engine.context_limit,
+                "manual_context_compress",
+                None,
+            );
             let remaining = session.messages.len().saturating_sub(session.summary_up_to);
             let _ = stream_tx.send(StreamEvent::ContextCompressed {
-                action: if compressed {
+                action: if update.compressed {
                     "压缩".to_string()
                 } else {
                     "无需压缩".to_string()
@@ -628,9 +636,10 @@ fn build_engine_from_config(
             });
         });
 
+    let context_limit = crate::core_config::resolve_context_limit(&config.llm.chat.model);
     let mut engine = RuntimeEngine::with_shared_trust_mode(
         SingleProviderClient::new(model_config).with_on_retry(on_retry.clone()),
-        config.context_limit,
+        context_limit,
         agent_config,
         shared_trust_mode,
     )
@@ -672,16 +681,19 @@ pub(crate) fn execute_attachment_analysis_tool(
     call: &crate::model::ToolCall,
     engine: &RuntimeEngine,
     session: &Session,
-) -> crate::tool::ToolResult {
+) -> (crate::tool::ToolResult, crate::model::TokenUsage) {
     let started = std::time::Instant::now();
     if !engine.has_multimodal_client() {
-        return attachment_tool_result(
-            false,
-            "未配置多模态模型",
-            String::new(),
-            "multimodal model is not configured".to_string(),
-            1,
-            started,
+        return (
+            attachment_tool_result(
+                false,
+                "未配置多模态模型",
+                String::new(),
+                "multimodal model is not configured".to_string(),
+                1,
+                started,
+            ),
+            crate::model::TokenUsage::default(),
         );
     }
 
@@ -705,25 +717,31 @@ pub(crate) fn execute_attachment_analysis_tool(
         .map(|value| value as usize);
 
     let Some(source_message) = find_attachment_source_message(session, message_id) else {
-        return attachment_tool_result(
-            false,
-            "未找到可解析的附件",
-            String::new(),
-            "no user message with attachments found".to_string(),
-            1,
-            started,
+        return (
+            attachment_tool_result(
+                false,
+                "未找到可解析的附件",
+                String::new(),
+                "no user message with attachments found".to_string(),
+                1,
+                started,
+            ),
+            crate::model::TokenUsage::default(),
         );
     };
 
     let media = if let Some(index) = attachment_index {
         let Some(asset) = source_message.media.get(index) else {
-            return attachment_tool_result(
-                false,
-                "附件序号不存在",
-                String::new(),
-                format!("attachment_index {index} out of range"),
-                1,
-                started,
+            return (
+                attachment_tool_result(
+                    false,
+                    "附件序号不存在",
+                    String::new(),
+                    format!("attachment_index {index} out of range"),
+                    1,
+                    started,
+                ),
+                crate::model::TokenUsage::default(),
             );
         };
         vec![asset.clone()]
@@ -732,13 +750,16 @@ pub(crate) fn execute_attachment_analysis_tool(
     };
 
     if media.is_empty() {
-        return attachment_tool_result(
-            false,
-            "未找到可解析的附件",
-            String::new(),
-            "selected message has no attachments".to_string(),
-            1,
-            started,
+        return (
+            attachment_tool_result(
+                false,
+                "未找到可解析的附件",
+                String::new(),
+                "selected message has no attachments".to_string(),
+                1,
+                started,
+            ),
+            crate::model::TokenUsage::default(),
         );
     }
 
@@ -765,21 +786,27 @@ pub(crate) fn execute_attachment_analysis_tool(
     };
 
     match engine.multimodal_client().complete(&req) {
-        Ok(response) => attachment_tool_result(
-            true,
-            "附件解析完成",
-            response.text,
-            String::new(),
-            0,
-            started,
+        Ok(response) => (
+            attachment_tool_result(
+                true,
+                "附件解析完成",
+                response.text,
+                String::new(),
+                0,
+                started,
+            ),
+            response.usage,
         ),
-        Err(err) => attachment_tool_result(
-            false,
-            "附件解析失败",
-            String::new(),
-            err.to_string(),
-            1,
-            started,
+        Err(err) => (
+            attachment_tool_result(
+                false,
+                "附件解析失败",
+                String::new(),
+                err.to_string(),
+                1,
+                started,
+            ),
+            crate::model::TokenUsage::default(),
         ),
     }
 }
