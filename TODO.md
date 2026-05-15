@@ -1,7 +1,7 @@
 # TODO - 天工当前开发任务
 
-> 最后更新：2026-05-13
-> 当前主线：多智能体协作系统（Phase 19）
+> 最后更新：2026-05-15
+> 当前主线：发布准备与自动化
 > 参考：`PLAN.md`、`docs/rfc/0011-multi-agent-collaboration.md`
 
 ---
@@ -65,9 +65,19 @@
 - [x] 修复手动上下文压缩未真实触发 LLM 摘要的问题
 - [x] 调整上下文压缩完成后的前端痕迹展示
 
+## 发布准备任务
+
+- [x] 新增 GitHub Actions 发布流水线，支持手动触发和 `v*` 标签触发
+- [x] 自动构建 macOS、Windows、Linux Tauri 安装包
+- [x] 将安装包上传到 GitHub Release，手动触发默认保持草稿状态
+- [x] 验证发布 workflow 语法、前端构建和 Tauri shell 检查
+- [x] 接入 Tauri updater，通过 GitHub Release 检测和安装新版本
+- [x] 设置界面展示当前版本、检查更新和安装更新按钮
+- [x] 发布流水线注入 updater 签名私钥并生成更新元数据
+
 ---
 
 ## 文档同步要求
 
-- `docs/requirements.md`：补充多智能体协作相关需求
+- `docs/requirements.md`：补充多智能体协作和发布分发相关需求
 - `docs/rfc/0011-multi-agent-collaboration.md`：实现过程中如有设计变更需同步更新

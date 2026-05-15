@@ -1,0 +1,142 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "发布标签，留空时使用 app-v__VERSION__"
+        required: false
+        type: string
+      release_draft:
+        description: "创建草稿 Release"
+        required: true
+        default: true
+        type: boolean
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  publish-tauri:
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS Apple Silicon
+            platform: macos-latest
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            args: --target aarch64-apple-darwin
+          - label: macOS Intel
+            platform: macos-latest
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            args: --target x86_64-apple-darwin
+          - label: Linux
+            platform: ubuntu-22.04
+            rust_targets: ""
+            args: ""
+          - label: Windows
+            platform: windows-latest
+            rust_targets: ""
+            args: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release options
+        id: release
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            tag="$GITHUB_REF_NAME"
+            draft="false"
+          else
+            tag="${{ inputs.tag }}"
+            if [[ -z "$tag" ]]; then
+              tag="app-v__VERSION__"
+            fi
+            draft="${{ inputs.release_draft }}"
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "draft=$draft" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: yarn
+          cache-dependency-path: frontend/yarn.lock
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install frontend dependencies
+        run: yarn --cwd frontend install --frozen-lockfile
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            src-tauri -> target
+
+      - name: Install Tauri system dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Verify updater signing key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$TAURI_SIGNING_PRIVATE_KEY" ]]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY secret is required to build updater artifacts."
+            exit 1
+          fi
+
+      - name: Build and upload installers
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: src-tauri
+          tagName: ${{ steps.release.outputs.tag }}
+          releaseName: "天工 v__VERSION__"
+          releaseBody: |
+            自动构建的天工桌面安装包。
+
+            当前 Release 包含 macOS、Windows 和 Linux 安装产物，并上传应用内更新所需的 latest.json 与签名文件。macOS 构建暂未接入签名和公证，首次安装时可能需要手动允许打开。
+          releaseDraft: ${{ steps.release.outputs.draft }}
+          prerelease: false
+          uploadUpdaterJson: true
+          uploadWorkflowArtifacts: true
+          releaseAssetNamePattern: "[name]_[version]_[platform]_[arch][setup][ext]"
+          args: ${{ matrix.args }}

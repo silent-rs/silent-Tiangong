@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.silent.tiangong",
   "build": {
-    "beforeDevCommand": "yarn dev",
-    "beforeBuildCommand": "yarn build",
+    "beforeDevCommand": "yarn --cwd ../frontend dev",
+    "beforeBuildCommand": "yarn --cwd ../frontend build",
     "devUrl": "http://localhost:5173",
     "frontendDist": "../frontend/dist"
   },
@@ -36,6 +36,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -48,5 +49,15 @@
       "infoPlist": "Info.plist"
     }
   },
-  "plugins": {}
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERBQUE2RDc2MjQwN0I5QzMKUldURHVRY2tkbTJxMmtTTnJnZk9GSVd3amFmb3VoYjVmdFdGbHZCRHZ1VVZCeS9JcS8rUHBVVDgK",
+      "endpoints": [
+        "https://github.com/silent-rs/silent-Tiangong/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
 }
