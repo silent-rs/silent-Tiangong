@@ -1,5 +1,6 @@
 //! Sub Agent 生命周期管理
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender as StdSender;
 
@@ -8,10 +9,12 @@ use crate::agent_team::file_lock::FileLockManager;
 use crate::agent_team::message_bus::AgentMessage;
 use crate::agent_team::registry::AgentRegistry;
 use crate::agent_team::tools::MAX_AGENTS;
+use crate::core::command::Command;
 use crate::model::{ToolCall, ToolSpec};
 use crate::session::{Session, now_text};
 use crate::tool::ToolResult;
 use tiangong_types::StreamEvent;
+use tokio::sync::mpsc as tokio_mpsc;
 
 /// 团队执行上下文，随 ReactEngine 的 execute_turn 传递
 pub struct TeamContext {
@@ -21,6 +24,10 @@ pub struct TeamContext {
     pub file_locks: FileLockManager,
     /// 发给主 Agent 的消息
     pub main_inbox: Vec<AgentMessage>,
+    /// 正在运行的 Agent 实时命令通道
+    active_agent_senders: HashMap<String, tokio_mpsc::UnboundedSender<Command>>,
+    /// 空闲 Agent 收到新消息时唤醒调度器
+    dispatch_waker: Option<tokio_mpsc::UnboundedSender<()>>,
 }
 
 impl TeamContext {
@@ -29,6 +36,8 @@ impl TeamContext {
             registry: AgentRegistry::new(),
             file_locks: FileLockManager::new(),
             main_inbox: Vec::new(),
+            active_agent_senders: HashMap::new(),
+            dispatch_waker: None,
         }
     }
 
@@ -38,6 +47,46 @@ impl TeamContext {
 
     pub fn drain_main_inbox(&mut self) -> Vec<AgentMessage> {
         std::mem::take(&mut self.main_inbox)
+    }
+
+    pub(crate) fn register_active_agent(
+        &mut self,
+        agent_id: String,
+        tx: tokio_mpsc::UnboundedSender<Command>,
+    ) {
+        self.active_agent_senders.insert(agent_id, tx);
+    }
+
+    pub(crate) fn unregister_active_agent(&mut self, agent_id: &str) {
+        self.active_agent_senders.remove(agent_id);
+    }
+
+    pub(crate) fn set_dispatch_waker(&mut self, tx: tokio_mpsc::UnboundedSender<()>) {
+        self.dispatch_waker = Some(tx);
+    }
+
+    pub(crate) fn clear_dispatch_waker(&mut self) {
+        self.dispatch_waker = None;
+    }
+
+    pub(crate) fn dispatch_agent_message(
+        &mut self,
+        agent_id: &str,
+        message: AgentMessage,
+        media: Vec<tiangong_types::MediaAsset>,
+    ) {
+        if let Some(tx) = self.active_agent_senders.get(agent_id) {
+            let _ = tx.send(Command::Message {
+                content: format_agent_message_for_prompt(&message),
+                message_id: Some(message.id.clone()),
+                media,
+            });
+        } else {
+            self.registry.deliver_message(agent_id, message);
+            if let Some(waker) = &self.dispatch_waker {
+                let _ = waker.send(());
+            }
+        }
     }
 }
 
@@ -49,6 +98,13 @@ impl Default for TeamContext {
 
 fn normalize_agent_role(role: &str) -> String {
     role.trim().trim_start_matches('@').to_string()
+}
+
+fn format_agent_message_for_prompt(message: &AgentMessage) -> String {
+    format!(
+        "[from:{} at {}]\n{}",
+        message.from, message.created_at, message.content
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -464,7 +520,7 @@ pub fn execute_send_message(
         created_at: now_text(),
     };
 
-    team.registry.deliver_message(&target.agent_id, message);
+    team.dispatch_agent_message(&target.agent_id, message, Vec::new());
 
     let _ = stream_tx.send(StreamEvent::AgentMessage {
         from_agent_id: current_agent_id.to_string(),
@@ -565,7 +621,7 @@ pub fn execute_broadcast_message(
             to: agent_id.clone(),
             ..message.clone()
         };
-        team.registry.deliver_message(agent_id, msg);
+        team.dispatch_agent_message(agent_id, msg, Vec::new());
     }
 
     // 为每个目标发送事件
@@ -894,6 +950,17 @@ pub fn route_user_mentions(
     content: &str,
     stream_tx: &StdSender<StreamEvent>,
 ) -> bool {
+    route_user_mentions_with_media(team, content, Vec::new(), stream_tx)
+}
+
+/// 将用户 @提及消息投递给目标 Agent。运行中的 Agent 会实时注入当前循环，
+/// 空闲 Agent 会进入收件箱并唤醒调度器启动新一轮执行。
+pub fn route_user_mentions_with_media(
+    team: &mut TeamContext,
+    content: &str,
+    media: Vec<tiangong_types::MediaAsset>,
+    stream_tx: &StdSender<StreamEvent>,
+) -> bool {
     let Some(route) = parse_agent_mention_route(content) else {
         return false;
     };
@@ -942,7 +1009,7 @@ pub fn route_user_mentions(
             priority: crate::agent_team::message_bus::MessagePriority::Normal,
             created_at: now_text(),
         };
-        team.registry.deliver_message(&agent_id, message);
+        team.dispatch_agent_message(&agent_id, message, media.clone());
         let _ = stream_tx.send(StreamEvent::AgentMessage {
             from_agent_id: "user".to_string(),
             from_agent_label: "User".to_string(),

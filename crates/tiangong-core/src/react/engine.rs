@@ -40,6 +40,10 @@ struct SubAgentDrainResult {
     cancelled: bool,
 }
 
+type SubResult = (String, String, String, Session, Vec<Message>, TokenUsage);
+type SubAgentFuture = Pin<Box<dyn Future<Output = SubResult>>>;
+type ActiveSubAgent = (String, String, String, tokio_mpsc::UnboundedSender<Command>);
+
 fn sub_agent_stream_message(
     id: impl Into<String>,
     role: MessageRole,
@@ -1177,25 +1181,34 @@ impl ReactEngine {
         ))
     }
 
-    /// 轮询所有活跃 Sub Agent 的收件箱，为有待处理消息的 Agent 执行 ReactEngine。
-    /// 返回 Sub Agent 执行消耗的 token 总量。
-    async fn drain_sub_agent_inboxes(
-        &mut self,
-        parent_session: &mut Session,
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_ready_sub_agents(
+        &self,
+        team_arc: &Arc<Mutex<TeamContext>>,
         stream_tx: &StdSender<StreamEvent>,
-        cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-    ) -> SubAgentDrainResult {
-        let mut result = SubAgentDrainResult::default();
+        futures: &mut FuturesUnordered<SubAgentFuture>,
+        active_sub_agents: &mut Vec<ActiveSubAgent>,
+        used_tokens: usize,
+        max_concurrent: usize,
+        token_budget: usize,
+        sub_max_rounds: usize,
+    ) -> bool {
+        let remaining_slots = max_concurrent.saturating_sub(active_sub_agents.len());
+        if remaining_slots == 0 {
+            return false;
+        }
+        if used_tokens >= token_budget {
+            let _ = stream_tx.send(StreamEvent::AgentNotification {
+                agent_id: "system".to_string(),
+                agent_label: "系统".to_string(),
+                content: format!(
+                    "Sub Agent token 预算已用尽（{used_tokens}/{token_budget}），剩余 Agent 将在下一轮执行"
+                ),
+                level: "warning".to_string(),
+            });
+            return false;
+        }
 
-        let Some(team_arc) = self.team.clone() else {
-            return result;
-        };
-
-        let max_concurrent = crate::agent_team::tools::MAX_CONCURRENT_SUB_AGENTS;
-        let token_budget = crate::agent_team::tools::SUB_AGENT_TOTAL_TOKEN_BUDGET;
-        let sub_max_rounds = crate::agent_team::tools::SUB_AGENT_MAX_ROUNDS;
-
-        // 收集待执行的 Agent（有消息且未超限）
         type PendingAgent = (String, String, String, String, Vec<String>, String, Session);
         let mut pending: Vec<PendingAgent> = Vec::new();
         {
@@ -1203,7 +1216,7 @@ impl ReactEngine {
                 let _ = stream_tx.send(StreamEvent::Error {
                     message: "团队状态锁定失败".to_string(),
                 });
-                return result;
+                return false;
             };
             let agent_infos: Vec<_> = team
                 .registry
@@ -1222,19 +1235,7 @@ impl ReactEngine {
                 .collect();
 
             for (agent_id, agent_label, agent_role, system_prompt, tool_names) in agent_infos {
-                if pending.len() >= max_concurrent {
-                    break;
-                }
-                if result.usage.total_tokens >= token_budget {
-                    let _ = stream_tx.send(StreamEvent::AgentNotification {
-                        agent_id: "system".to_string(),
-                        agent_label: "系统".to_string(),
-                        content: format!(
-                            "Sub Agent token 预算已用尽（{}/{}），剩余 Agent 将在下一轮执行",
-                            result.usage.total_tokens, token_budget
-                        ),
-                        level: "warning".to_string(),
-                    });
+                if pending.len() >= remaining_slots {
                     break;
                 }
                 let messages = team.registry.drain_inbox(&agent_id);
@@ -1271,16 +1272,8 @@ impl ReactEngine {
         }
 
         if pending.is_empty() {
-            return result;
+            return false;
         }
-        result.ran = true;
-
-        // 并行执行所有待执行的 Sub Agent（协作并发）
-        type SubResult = (String, String, String, Session, Vec<Message>, TokenUsage);
-        type ActiveSubAgent = (String, String, String, tokio_mpsc::UnboundedSender<Command>);
-        let mut futures: FuturesUnordered<Pin<Box<dyn Future<Output = SubResult>>>> =
-            FuturesUnordered::new();
-        let mut active_sub_agents: Vec<ActiveSubAgent> = Vec::new();
 
         for (
             agent_id,
@@ -1314,6 +1307,9 @@ impl ReactEngine {
                 message_id: Some(scru128::new().to_string()),
                 media: Vec::new(),
             });
+            if let Ok(mut team) = team_arc.lock() {
+                team.register_active_agent(agent_id.clone(), sub_cmd_tx.clone());
+            }
             active_sub_agents.push((
                 agent_id.clone(),
                 agent_role.clone(),
@@ -1360,13 +1356,99 @@ impl ReactEngine {
             futures.push(fut);
         }
 
+        true
+    }
+
+    /// 轮询所有活跃 Sub Agent 的收件箱，为有待处理消息的 Agent 执行 ReactEngine。
+    /// 返回 Sub Agent 执行消耗的 token 总量。
+    async fn drain_sub_agent_inboxes(
+        &mut self,
+        parent_session: &mut Session,
+        stream_tx: &StdSender<StreamEvent>,
+        cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+    ) -> SubAgentDrainResult {
+        let mut result = SubAgentDrainResult::default();
+
+        let Some(team_arc) = self.team.clone() else {
+            return result;
+        };
+
+        let max_concurrent = crate::agent_team::tools::MAX_CONCURRENT_SUB_AGENTS;
+        let token_budget = crate::agent_team::tools::SUB_AGENT_TOTAL_TOKEN_BUDGET;
+        let sub_max_rounds = crate::agent_team::tools::SUB_AGENT_MAX_ROUNDS;
+
+        let (dispatch_wake_tx, mut dispatch_wake_rx) = tokio_mpsc::unbounded_channel();
+        {
+            let Ok(mut team) = team_arc.lock() else {
+                let _ = stream_tx.send(StreamEvent::Error {
+                    message: "团队状态锁定失败".to_string(),
+                });
+                return result;
+            };
+            team.set_dispatch_waker(dispatch_wake_tx);
+        }
+
+        // 并行执行所有待执行的 Sub Agent（协作并发）
+        let mut futures: FuturesUnordered<SubAgentFuture> = FuturesUnordered::new();
+        let mut active_sub_agents: Vec<ActiveSubAgent> = Vec::new();
+        if self.spawn_ready_sub_agents(
+            &team_arc,
+            stream_tx,
+            &mut futures,
+            &mut active_sub_agents,
+            result.usage.total_tokens,
+            max_concurrent,
+            token_budget,
+            sub_max_rounds,
+        ) {
+            result.ran = true;
+        }
+
+        if futures.is_empty() {
+            if let Ok(mut team) = team_arc.lock() {
+                team.clear_dispatch_waker();
+            }
+            return result;
+        }
+
         let mut results = Vec::new();
         while !futures.is_empty() {
             tokio::select! {
                 maybe_result = futures.next() => {
                     if let Some(sub_result) = maybe_result {
                         active_sub_agents.retain(|(agent_id, _, _, _)| agent_id != &sub_result.0);
+                        if let Ok(mut team) = team_arc.lock() {
+                            team.unregister_active_agent(&sub_result.0);
+                        }
                         results.push(sub_result);
+                        if self.spawn_ready_sub_agents(
+                            &team_arc,
+                            stream_tx,
+                            &mut futures,
+                            &mut active_sub_agents,
+                            result.usage.total_tokens,
+                            max_concurrent,
+                            token_budget,
+                            sub_max_rounds,
+                        ) {
+                            result.ran = true;
+                        }
+                    }
+                }
+                maybe_wake = dispatch_wake_rx.recv() => {
+                    if maybe_wake.is_some()
+                        && self.spawn_ready_sub_agents(
+                            &team_arc,
+                            stream_tx,
+                            &mut futures,
+                            &mut active_sub_agents,
+                            result.usage.total_tokens,
+                            max_concurrent,
+                            token_budget,
+                            sub_max_rounds,
+                        )
+                    {
+                        result.ran = true;
                     }
                 }
                 maybe_cmd = cmd_rx.recv() => {
@@ -1426,71 +1508,13 @@ impl ReactEngine {
                                 content: content.clone(),
                                 media: media.clone(),
                             });
-                            if let (Some(route), Ok(mut team)) = (
-                                crate::agent_team::lifecycle::parse_agent_mention_route(&content),
-                                team_arc.lock(),
-                            ) {
-                                if !route.content.trim().is_empty() {
-                                    let targets = if route.broadcast {
-                                        team.registry
-                                            .alive_agents()
-                                            .iter()
-                                            .map(|agent| {
-                                                (
-                                                    agent.agent_id.clone(),
-                                                    agent.role.clone(),
-                                                    agent.label.clone(),
-                                                )
-                                            })
-                                            .collect::<Vec<_>>()
-                                    } else {
-                                        route
-                                            .roles
-                                            .iter()
-                                            .filter_map(|role| {
-                                                team.registry.find_by_role(role).map(|agent| {
-                                                    (
-                                                        agent.agent_id.clone(),
-                                                        agent.role.clone(),
-                                                        agent.label.clone(),
-                                                    )
-                                                })
-                                            })
-                                            .collect::<Vec<_>>()
-                                    };
-
-                                    for (agent_id, _agent_role, agent_label) in targets {
-                                        if let Some((_, _, _, tx)) = active_sub_agents
-                                            .iter()
-                                            .find(|(active_id, _, _, _)| active_id == &agent_id)
-                                        {
-                                            let _ = tx.send(Command::Message {
-                                                content: route.content.clone(),
-                                                message_id: Some(scru128::new().to_string()),
-                                                media: media.clone(),
-                                            });
-                                        } else {
-                                            let message =
-                                                crate::agent_team::message_bus::AgentMessage {
-                                                    id: scru128::new().to_string(),
-                                                    from: "user".to_string(),
-                                                    to: agent_id.clone(),
-                                                    content: route.content.clone(),
-                                                    priority: crate::agent_team::message_bus::MessagePriority::Normal,
-                                                    created_at: now_text(),
-                                                };
-                                            team.registry.deliver_message(&agent_id, message);
-                                        }
-
-                                        let _ = stream_tx.send(StreamEvent::AgentMessage {
-                                            from_agent_id: "user".to_string(),
-                                            from_agent_label: "User".to_string(),
-                                            to_agent_id: agent_id,
-                                            to_agent_label: agent_label,
-                                            content: route.content.clone(),
-                                        });
-                                    }
-                                }
+                            if let Ok(mut team) = team_arc.lock() {
+                                let _ = crate::agent_team::lifecycle::route_user_mentions_with_media(
+                                    &mut team,
+                                    &content,
+                                    media,
+                                    stream_tx,
+                                );
                             }
                         }
                         Some(Command::UpdateCwd { cwd }) => {
@@ -1512,6 +1536,10 @@ impl ReactEngine {
                     }
                 }
             }
+        }
+
+        if let Ok(mut team) = team_arc.lock() {
+            team.clear_dispatch_waker();
         }
 
         // 处理结果
