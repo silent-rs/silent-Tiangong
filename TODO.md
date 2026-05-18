@@ -80,7 +80,7 @@
 
 ## Server 与飞书 Bot 互联
 
-- [x] 新增外部 Bot / Connector 统一消息入口
+- [x] 新增外部 Bot 统一消息入口
 - [x] 外部通道自动映射到独立 Server 会话
 - [x] Desktop 设置页支持运行时启动和停止后台 Server
 - [x] Desktop 菜单栏支持控制后台 Server，关闭主窗口后保持应用驻留
