@@ -6,7 +6,6 @@ license = "Apache-2.0"
 
 [dependencies]
 tiangong-core = { path = "../tiangong-core" }
-tiangong-connector = { path = "../tiangong-connector" }
 tiangong-config = { path = "../tiangong-config" }
 tiangong-media = { path = "../tiangong-media" }
 tiangong-types = { path = "../tiangong-types" }

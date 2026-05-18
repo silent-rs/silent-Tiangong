@@ -234,21 +234,6 @@ fn event_to_json(event: &TiangongEvent) -> String {
             }
         })
         .to_string(),
-        TiangongEvent::ConnectorStarted(name) => serde_json::json!({
-            "type": "connector_started",
-            "data": { "name": name }
-        })
-        .to_string(),
-        TiangongEvent::ConnectorStopped(name) => serde_json::json!({
-            "type": "connector_stopped",
-            "data": { "name": name }
-        })
-        .to_string(),
-        TiangongEvent::ConnectorError { name, error } => serde_json::json!({
-            "type": "connector_error",
-            "data": { "name": name, "error": error }
-        })
-        .to_string(),
         TiangongEvent::ConfigChanged => serde_json::json!({ "type": "config_changed" }).to_string(),
         TiangongEvent::Shutdown => serde_json::json!({ "type": "shutdown" }).to_string(),
     }
@@ -271,10 +256,6 @@ fn event_visible_to(event: &TiangongEvent, access: &RemoteAccessContext) -> bool
         TiangongEvent::MessageSent { session_id, .. } => session_id == session_scope,
         TiangongEvent::SessionCreated(session_id) => session_id == session_scope,
         TiangongEvent::TurnCompleted { session_id, .. } => session_id == session_scope,
-        TiangongEvent::ConnectorStarted(_)
-        | TiangongEvent::ConnectorStopped(_)
-        | TiangongEvent::ConnectorError { .. }
-        | TiangongEvent::ConfigChanged
-        | TiangongEvent::Shutdown => true,
+        TiangongEvent::ConfigChanged | TiangongEvent::Shutdown => true,
     }
 }

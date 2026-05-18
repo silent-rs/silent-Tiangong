@@ -6303,7 +6303,6 @@ dependencies = [
  "tauri-plugin-updater",
  "tiangong-cli",
  "tiangong-config",
- "tiangong-connector",
  "tiangong-core",
  "tiangong-entry",
  "tiangong-media",
@@ -6340,20 +6339,6 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "tiangong-connector"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "serde",
- "serde_json",
- "tiangong-core",
- "tiangong-types",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -6468,7 +6453,6 @@ dependencies = [
  "serde_json",
  "silent",
  "tiangong-config",
- "tiangong-connector",
  "tiangong-core",
  "tiangong-media",
  "tiangong-types",

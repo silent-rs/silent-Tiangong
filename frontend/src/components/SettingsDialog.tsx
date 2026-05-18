@@ -10,11 +10,11 @@ import { Card, CardContent } from './ui/card';
 import { Switch } from './ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Link, Edit2, KeyRound, RefreshCw, Info, Wrench, FolderOpen, Save, ShieldCheck, Database, X } from 'lucide-react';
+import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Edit2, KeyRound, RefreshCw, Info, Wrench, FolderOpen, Save, ShieldCheck, Database, X } from 'lucide-react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater';
 import { api } from '@/api/tauri';
-import type { McpServer, Skill, SkillDetail, ServerConfig, ConnectorInfo, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo, MemoryConfigView } from '@/api/tauri';
+import type { McpServer, Skill, SkillDetail, ServerConfig, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo, MemoryConfigView } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
 import { useToast } from './Toast';
 import { MemoryManagementSettings } from './memory';
@@ -81,10 +81,6 @@ export function SettingsDialog() {
                   <Globe className="w-4 h-4 mr-2" />
                   Server
                 </TabsTrigger>
-                <TabsTrigger value="connector" className="w-full justify-start px-3 py-2">
-                  <Link className="w-4 h-4 mr-2" />
-                  Connectors
-                </TabsTrigger>
                 <TabsTrigger value="about" className="w-full justify-start px-3 py-2">
                   <Info className="w-4 h-4 mr-2" />
                   关于与更新
@@ -123,9 +119,6 @@ export function SettingsDialog() {
               </TabsContent>
               <TabsContent value="server" className="m-0 h-full overflow-y-auto">
                 <ServerSettings />
-              </TabsContent>
-              <TabsContent value="connector" className="m-0 h-full overflow-y-auto">
-                <ConnectorSettings />
               </TabsContent>
               <TabsContent value="about" className="m-0 h-full overflow-y-auto">
                 <AppUpdateSettings />
@@ -2465,83 +2458,6 @@ function AppUpdateSettings() {
           </div>
         </CardContent>
       </Card>
-    </div>
-  );
-}
-
-// ============================================================================
-// Connector 设置组件
-// ============================================================================
-
-function ConnectorSettings() {
-  const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const { showSuccess, showError } = useToast();
-
-  const loadConnectors = async () => {
-    setIsLoading(true);
-    try {
-      const data = await api.getConnectors();
-      setConnectors(data);
-    } catch (error) {
-      console.error('加载 Connector 列表失败:', error);
-      showError('加载失败', '无法加载 Connector 列表');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadConnectors();
-  }, []);
-
-  const handleToggleEnabled = async (name: string, enabled: boolean) => {
-    try {
-      await api.setConnectorEnabled(name, enabled);
-      showSuccess('状态更新', `Connector "${name}" 已${enabled ? '启用' : '禁用'}`);
-      loadConnectors();
-    } catch (error) {
-      console.error('切换 Connector 状态失败:', error);
-      showError('操作失败', '无法更新 Connector 状态');
-    }
-  };
-
-  return (
-    <div className="p-4">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-lg font-medium">Connectors</h3>
-      </div>
-
-      {isLoading ? (
-        <div className="text-center text-muted-foreground py-8">加载中...</div>
-      ) : connectors.length === 0 ? (
-        <div className="text-center text-muted-foreground py-8">
-          <p>暂无已配置的 Connector</p>
-          <p className="text-xs mt-2">请在 ~/.tiangong/connectors.json 中添加配置</p>
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {connectors.map((connector) => (
-            <Card key={connector.name}>
-              <CardContent className="p-4 flex items-center justify-between">
-                <div className="flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium">{connector.name}</span>
-                    <Badge variant="outline">{connector.connector_type}</Badge>
-                    <Badge variant={connector.enabled ? 'default' : 'secondary'}>
-                      {connector.enabled ? '已启用' : '已禁用'}
-                    </Badge>
-                  </div>
-                </div>
-                <Switch
-                  checked={connector.enabled}
-                  onCheckedChange={(checked) => handleToggleEnabled(connector.name, checked)}
-                />
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

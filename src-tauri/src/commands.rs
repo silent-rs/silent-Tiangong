@@ -2447,28 +2447,6 @@ fn user_home_dir() -> Option<PathBuf> {
 }
 
 // ============================================================================
-// Connector 管理
-// ============================================================================
-
-/// 获取 Connector 列表
-#[tauri::command]
-pub fn get_connectors() -> Result<Vec<ConnectorInfoView>, String> {
-    let configs = tiangong_server::config::load_connectors_config();
-    Ok(configs.iter().map(ConnectorInfoView::from_config).collect())
-}
-
-/// 设置 Connector 启用状态
-#[tauri::command]
-pub fn set_connector_enabled(name: String, enabled: bool) -> Result<String, String> {
-    tiangong_server::config::set_connector_enabled(&name, enabled).map_err(|e| e.to_string())?;
-    Ok(format!(
-        "Connector \"{}\" 已{}",
-        name,
-        if enabled { "启用" } else { "禁用" }
-    ))
-}
-
-// ============================================================================
 // 模型配置（Provider + Model + Routing 三层架构）
 // ============================================================================
 
