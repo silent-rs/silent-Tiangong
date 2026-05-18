@@ -127,7 +127,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          projectPath: src-tauri
+          projectPath: .
           tagName: ${{ steps.release.outputs.tag }}
           releaseName: "天工 v__VERSION__"
           releaseBody: |
@@ -136,7 +136,6 @@ jobs:
             当前 Release 包含 macOS、Windows 和 Linux 安装产物，并上传应用内更新所需的 latest.json 与签名文件。macOS 构建暂未接入签名和公证，首次安装时可能需要手动允许打开。
           releaseDraft: ${{ steps.release.outputs.draft }}
           prerelease: false
-          uploadUpdaterJson: true
-          uploadWorkflowArtifacts: true
-          releaseAssetNamePattern: "[name]_[version]_[platform]_[arch][setup][ext]"
+          includeUpdaterJson: true
+          assetNamePattern: "[name]_[version]_[platform]_[arch][setup][ext]"
           args: ${{ matrix.args }}
