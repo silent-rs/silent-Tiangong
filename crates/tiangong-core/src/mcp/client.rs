@@ -17,6 +17,7 @@ use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::time::timeout;
 
 use crate::agent_config::{McpServerConfig, ResolvedMcpTransport};
+use crate::process::configure_tokio_no_window;
 
 const MAX_LIST_PAGES: usize = 8;
 
@@ -407,6 +408,7 @@ async fn run_stdio_mcp_request_async(
 ) -> Result<Value> {
     let command = server.command_text();
     let (transport, _stderr) = TokioChildProcess::builder(Command::new(command).configure(|cmd| {
+        configure_tokio_no_window(cmd);
         cmd.args(&server.args);
         if let Some(cwd) = server.cwd_text() {
             cmd.current_dir(cwd);

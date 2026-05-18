@@ -8,6 +8,17 @@ use tauri_plugin_notification::{NotificationExt, PermissionState};
 
 const MAX_ATTACHMENT_BASE64_BYTES: u64 = 50 * 1024 * 1024;
 
+#[allow(unused_mut)]
+fn configure_no_window(command: &mut tokio::process::Command) -> &mut tokio::process::Command {
+    #[cfg(target_os = "windows")]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 fn format_agent_reply_message(agent_label: &str, content: &str) -> String {
     let safe_label = agent_label
         .replace(['\n', '\r'], " ")
@@ -1829,32 +1840,29 @@ pub async fn play_audio_file(file_path: String) -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
-        tokio::process::Command::new("afplay")
-            .arg(&file_path)
-            .output()
-            .await
-            .map_err(|e| format!("播放失败：{e}"))?;
+        let mut command = tokio::process::Command::new("afplay");
+        command.arg(&file_path);
+        configure_no_window(&mut command);
+        command.output().await.map_err(|e| format!("播放失败：{e}"))?;
     }
 
     #[cfg(target_os = "windows")]
     {
-        tokio::process::Command::new("powershell")
-            .args([
-                "-c",
-                &format!("(New-Object Media.SoundPlayer '{}').PlaySync()", file_path),
-            ])
-            .output()
-            .await
-            .map_err(|e| format!("播放失败：{e}"))?;
+        let mut command = tokio::process::Command::new("powershell");
+        command.args([
+            "-c",
+            &format!("(New-Object Media.SoundPlayer '{}').PlaySync()", file_path),
+        ]);
+        configure_no_window(&mut command);
+        command.output().await.map_err(|e| format!("播放失败：{e}"))?;
     }
 
     #[cfg(target_os = "linux")]
     {
-        tokio::process::Command::new("aplay")
-            .arg(&file_path)
-            .output()
-            .await
-            .map_err(|e| format!("播放失败：{e}"))?;
+        let mut command = tokio::process::Command::new("aplay");
+        command.arg(&file_path);
+        configure_no_window(&mut command);
+        command.output().await.map_err(|e| format!("播放失败：{e}"))?;
     }
 
     Ok(())

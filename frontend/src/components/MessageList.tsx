@@ -24,7 +24,6 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { TypingMessage } from "./TypingMessage";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { AgentPanel } from "./AgentPanel";
 import { api } from "@/api/tauri";
@@ -270,8 +269,10 @@ export function MessageList() {
     setEditingContent("");
   };
 
-  // 计算消息内容总长度，用于检测内容增长
-  const totalContentLength = messages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
+  const messageGroups = useMemo(() => groupMessages(messages), [messages]);
+  const streamScrollKey = streamingMessageId
+    ? `${streamingMessageId}:${streamingContent.length}:${streamingReasoningContent.length}`
+    : "";
 
   // 自动滚动到底部
   useEffect(() => {
@@ -296,7 +297,7 @@ export function MessageList() {
     prevMessagesLengthRef.current = messages.length;
     prevStreamingIdRef.current = streamingMessageId;
     prevSelectedAgentTabRef.current = selectedAgentTab;
-  }, [messages.length, streamingMessageId, totalContentLength, isThinking, selectedAgentTab]);
+  }, [messages.length, streamingMessageId, streamScrollKey, isThinking, selectedAgentTab]);
 
   // 将本地文件路径转换为 Tauri asset URL
   // Markdown 渲染器（用于非流式消息）
@@ -482,7 +483,7 @@ export function MessageList() {
                   <AgentPanel />
                 </div>
               )}
-              {groupMessages(messages).map((group, groupIdx, allGroups) => {
+              {messageGroups.map((group, groupIdx, allGroups) => {
               // Worker 组
               if (group.type === "worker") {
                 if (!selectedAgentTab) {
@@ -793,6 +794,32 @@ function renderMessageMedia(message: MessageItem) {
   );
 }
 
+function StreamingMessage({
+  content,
+  reasoningContent,
+  MarkdownComponents,
+}: {
+  content: string;
+  reasoningContent: string;
+  MarkdownComponents: any;
+}) {
+  return (
+    <div>
+      {reasoningContent && (
+        <ThinkingBlock content={reasoningContent} defaultExpanded={false} />
+      )}
+      <div className="prose prose-sm max-w-none break-words text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
+        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={MarkdownComponents as any}>
+          {content}
+        </ReactMarkdown>
+        {content.length > 0 && (
+          <span className="inline-block w-1.5 h-4 bg-primary ml-0.5 animate-pulse align-text-bottom" />
+        )}
+      </div>
+    </div>
+  );
+}
+
 function groupMessages(messages: MessageItem[]): MessageGroup[] {
   const groups: MessageGroup[] = [];
   let currentAgentTurn: MessageGroup | null = null;
@@ -908,7 +935,7 @@ function AgentTurnView({
   messages,
   streamingMessageId,
   streamingContent,
-  streamingReasoningContent: _streamingReasoningContent,
+  streamingReasoningContent,
   MarkdownComponents,
   hasTts,
   selectedAgentTab,
@@ -1245,7 +1272,11 @@ function AgentTurnView({
           return (
             <div key={msg.id} className="text-foreground" title={formatMessageTime(msg.created_at)}>
               {isStreaming ? (
-                <TypingMessage content={streamingContent} reasoningContent={_streamingReasoningContent} speed={300} />
+                <StreamingMessage
+                  content={streamingContent}
+                  reasoningContent={streamingReasoningContent}
+                  MarkdownComponents={MarkdownComponents}
+                />
               ) : msg.content || (msg.media && msg.media.length > 0) ? (
                 <div>
                   {renderMessageMedia(msg)}

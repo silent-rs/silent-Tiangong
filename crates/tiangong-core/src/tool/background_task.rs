@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::process::configure_no_window;
+
 /// 全局后台任务注册表
 static TASK_REGISTRY: OnceLock<Arc<Mutex<TaskRegistry>>> = OnceLock::new();
 
@@ -97,6 +99,7 @@ impl TaskRegistry {
         let id = scru128::new().to_string();
 
         let mut command = Command::new(&cmd);
+        configure_no_window(&mut command);
         command
             .args(&args)
             .stdout(Stdio::piped())
