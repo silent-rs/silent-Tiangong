@@ -53,7 +53,7 @@ jobs:
           - label: Windows
             platform: windows-latest
             rust_targets: ""
-            args: ""
+            args: "--bundles nsis"
 
     steps:
       - name: Checkout
@@ -137,5 +137,6 @@ jobs:
           releaseDraft: ${{ steps.release.outputs.draft }}
           prerelease: false
           includeUpdaterJson: true
+          updaterJsonPreferNsis: true
           assetNamePattern: "[name]_[version]_[platform]_[arch][setup][ext]"
           args: ${{ matrix.args }}
