@@ -463,6 +463,12 @@ export const api = {
   setServerConfig: (host: string, port: number, authToken?: string): Promise<string> =>
     invoke('set_server_config', { host, port, authToken }),
 
+  startServer: (): Promise<string> =>
+    invoke('start_server'),
+
+  stopServer: (): Promise<string> =>
+    invoke('stop_server'),
+
   // ----------------------------------------------------------------
   // Connector 管理
   // ----------------------------------------------------------------

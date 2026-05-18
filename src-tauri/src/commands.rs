@@ -2267,13 +2267,39 @@ pub fn set_server_config(
     port: u16,
     auth_token: Option<String>,
 ) -> Result<String, String> {
+    let current = tiangong_server::config::load_server_config();
     let config = tiangong_server::config::ServerConfig {
         host,
         port,
-        auth_token,
+        auth_token: auth_token
+            .map(|token| token.trim().to_string())
+            .filter(|token| !token.is_empty())
+            .or(current.auth_token),
     };
     tiangong_server::config::save_server_config(&config).map_err(|e| e.to_string())?;
     Ok("Server 配置已保存".to_string())
+}
+
+/// 启动后台 Server
+#[tauri::command]
+pub fn start_server() -> Result<String, String> {
+    if is_server_running() {
+        return Ok("Server 已在运行".to_string());
+    }
+    let config = tiangong_server::config::load_server_config();
+    tiangong_server::run_daemon(&config.host, config.port, config.auth_token)
+        .map_err(|e| e.to_string())?;
+    Ok(format!("Server 已启动：{}:{}", config.host, config.port))
+}
+
+/// 停止后台 Server
+#[tauri::command]
+pub fn stop_server() -> Result<String, String> {
+    if !is_server_running() {
+        return Ok("Server 未运行".to_string());
+    }
+    tiangong_server::stop_daemon().map_err(|e| e.to_string())?;
+    Ok("Server 已停止".to_string())
 }
 
 /// 检查 Server 是否在运行（通过 PID 文件判断）

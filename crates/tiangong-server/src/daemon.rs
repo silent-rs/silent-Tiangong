@@ -5,6 +5,11 @@ use std::process::Command;
 
 use anyhow::{Context, Result, anyhow};
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 /// 获取用户 home 目录
 fn user_home_dir() -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
@@ -37,6 +42,18 @@ pub fn run_daemon(host: &str, port: u16, token: Option<String>) -> Result<()> {
 
     if let Some(ref t) = token {
         cmd.arg("--token").arg(t);
+    }
+
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
+
+    #[cfg(windows)]
+    {
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     }
 
     // 不加 --daemon，这样子进程会作为前台进程运行

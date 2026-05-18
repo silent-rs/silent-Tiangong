@@ -2110,6 +2110,7 @@ function ServerSettings() {
   const [editAuthToken, setEditAuthToken] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isToggling, setIsToggling] = useState(false);
   const { showSuccess, showError } = useToast();
 
   const loadConfig = async () => {
@@ -2152,6 +2153,38 @@ function ServerSettings() {
     }
   };
 
+  const saveCurrentConfig = async () => {
+    const port = parseInt(editPort, 10);
+    if (isNaN(port) || port < 1 || port > 65535) {
+      showError('端口无效', '请输入 1-65535 之间的端口号');
+      return false;
+    }
+    const authToken = editAuthToken.trim() || undefined;
+    await api.setServerConfig(editHost, port, authToken);
+    return true;
+  };
+
+  const handleToggleServer = async (enabled: boolean) => {
+    setIsToggling(true);
+    try {
+      if (enabled) {
+        const saved = await saveCurrentConfig();
+        if (!saved) return;
+        const message = await api.startServer();
+        showSuccess('启动成功', message);
+      } else {
+        const message = await api.stopServer();
+        showSuccess('已停止', message);
+      }
+      await loadConfig();
+    } catch (error) {
+      console.error('切换 Server 状态失败:', error);
+      showError(enabled ? '启动失败' : '停止失败', '无法切换 Server 运行状态');
+    } finally {
+      setIsToggling(false);
+    }
+  };
+
   return (
     <div className="space-y-4 p-4">
       {isLoading ? (
@@ -2162,11 +2195,21 @@ function ServerSettings() {
       ) : (
         <>
           {/* 运行状态 */}
-          <div className="flex items-center gap-2 mb-4">
-            <span className="text-sm text-muted-foreground">状态：</span>
-            <Badge variant={config.running ? 'default' : 'secondary'}>
-              {config.running ? '运行中' : '未运行'}
-            </Badge>
+          <div className="flex items-center justify-between gap-3 mb-4">
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-muted-foreground">状态：</span>
+              <Badge variant={config.running ? 'default' : 'secondary'}>
+                {config.running ? '运行中' : '未运行'}
+              </Badge>
+            </div>
+            <div className="flex items-center gap-2">
+              {isToggling && <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />}
+              <Switch
+                checked={config.running}
+                disabled={isSaving || isToggling}
+                onCheckedChange={handleToggleServer}
+              />
+            </div>
           </div>
 
           <div className="space-y-2">
@@ -2176,7 +2219,7 @@ function ServerSettings() {
               value={editHost}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditHost(e.target.value)}
               placeholder="127.0.0.1"
-              disabled={isSaving}
+              disabled={isSaving || isToggling || config.running}
             />
           </div>
 
@@ -2188,7 +2231,7 @@ function ServerSettings() {
               value={editPort}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditPort(e.target.value)}
               placeholder="8080"
-              disabled={isSaving}
+              disabled={isSaving || isToggling || config.running}
             />
           </div>
 
@@ -2200,7 +2243,7 @@ function ServerSettings() {
               value={editAuthToken}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditAuthToken(e.target.value)}
               placeholder={config.auth_token_masked || '留空表示不鉴权'}
-              disabled={isSaving}
+              disabled={isSaving || isToggling || config.running}
             />
             <p className="text-xs text-muted-foreground">
               当前: {config.auth_token_masked}（留空则保持不变）
@@ -2208,7 +2251,7 @@ function ServerSettings() {
           </div>
 
           <div className="flex justify-end gap-2 pt-4">
-            <Button onClick={handleSave} disabled={isSaving}>
+            <Button onClick={handleSave} disabled={isSaving || isToggling || config.running}>
               {isSaving ? (
                 <>
                   <Loader2 className="w-4 h-4 mr-2 animate-spin" />

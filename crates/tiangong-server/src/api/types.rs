@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use tiangong_types::MessageContent;
 
 /// POST /api/v1/chat 请求体
 #[derive(Debug, Deserialize)]
@@ -14,6 +15,101 @@ pub struct ChatRequest {
 pub struct ChatResponse {
     pub session_id: String,
     pub response: String,
+}
+
+/// 外部 Bot / Connector 消息入口请求体
+#[derive(Debug, Deserialize)]
+pub struct ConnectorMessageRequest {
+    /// Connector 名称，如 feishu-bot、telegram、webhook
+    #[serde(default)]
+    pub connector: Option<String>,
+    /// 外部通道 ID，如飞书 chat_id
+    pub channel_id: String,
+    /// 外部发送者 ID
+    #[serde(default)]
+    pub sender_id: Option<String>,
+    /// 外部消息 ID，不传时由 Server 生成
+    #[serde(default)]
+    pub message_id: Option<String>,
+    /// 文本消息快捷字段
+    #[serde(default)]
+    pub message: Option<String>,
+    /// 结构化消息内容
+    #[serde(default)]
+    pub content: Option<ApiMessageContent>,
+    #[serde(default)]
+    pub reply_to: Option<String>,
+}
+
+/// 外部 Bot / Connector 消息入口响应体
+#[derive(Debug, Serialize)]
+pub struct ConnectorMessageResponse {
+    pub session_id: String,
+    pub connector: String,
+    pub channel_id: String,
+    pub reply_to: Option<String>,
+    pub message: String,
+    pub content: ApiMessageContent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ApiMessageContent {
+    Text {
+        text: String,
+    },
+    Image {
+        url: String,
+        #[serde(default)]
+        caption: Option<String>,
+    },
+    File {
+        url: String,
+        name: String,
+    },
+    Audio {
+        url: String,
+        #[serde(default)]
+        duration: Option<u32>,
+    },
+    Video {
+        url: String,
+        #[serde(default)]
+        caption: Option<String>,
+    },
+}
+
+impl ApiMessageContent {
+    pub fn text(&self) -> String {
+        match self {
+            Self::Text { text } => text.clone(),
+            _ => String::new(),
+        }
+    }
+}
+
+impl From<ApiMessageContent> for MessageContent {
+    fn from(value: ApiMessageContent) -> Self {
+        match value {
+            ApiMessageContent::Text { text } => Self::Text(text),
+            ApiMessageContent::Image { url, caption } => Self::Image { url, caption },
+            ApiMessageContent::File { url, name } => Self::File { url, name },
+            ApiMessageContent::Audio { url, duration } => Self::Audio { url, duration },
+            ApiMessageContent::Video { url, caption } => Self::Video { url, caption },
+        }
+    }
+}
+
+impl From<MessageContent> for ApiMessageContent {
+    fn from(value: MessageContent) -> Self {
+        match value {
+            MessageContent::Text(text) => Self::Text { text },
+            MessageContent::Image { url, caption } => Self::Image { url, caption },
+            MessageContent::File { url, name } => Self::File { url, name },
+            MessageContent::Audio { url, duration } => Self::Audio { url, duration },
+            MessageContent::Video { url, caption } => Self::Video { url, caption },
+        }
+    }
 }
 
 /// 会话摘要（列表项）

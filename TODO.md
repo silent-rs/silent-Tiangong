@@ -78,6 +78,13 @@
 - [x] 发布流水线注入 updater 签名私钥并生成更新元数据
 - [x] 新增 `tiangong update` 命令，复用 GitHub Release 在线更新链路
 
+## Server 与飞书 Bot 互联
+
+- [x] 新增外部 Bot / Connector 统一消息入口
+- [x] 外部通道自动映射到独立 Server 会话
+- [x] Desktop 设置页支持运行时启动和停止后台 Server
+- [ ] 验证飞书 Bot 可通过 Server API 发送消息并接收回复
+
 ---
 
 ## 文档同步要求

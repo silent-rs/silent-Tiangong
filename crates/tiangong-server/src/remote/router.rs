@@ -40,22 +40,33 @@ impl MessageRouter {
     }
 
     pub async fn handle_incoming(&self, msg: IncomingMessage) -> Result<OutgoingMessage> {
+        let (_, outgoing) = self.handle_incoming_with_session(msg).await?;
+        Ok(outgoing)
+    }
+
+    pub async fn handle_incoming_with_session(
+        &self,
+        msg: IncomingMessage,
+    ) -> Result<(String, OutgoingMessage)> {
         if !msg.sender_role.can_send_message() {
             let denied_text = format!(
                 "权限不足：{}角色不允许发送消息",
                 msg.sender_role.display_name()
             );
-            return Ok(OutgoingMessage {
-                content: MessageContent::Text(denied_text),
-                reply_to: Some(msg.id.clone()),
-            });
+            return Ok((
+                msg.channel_id.clone(),
+                OutgoingMessage {
+                    content: MessageContent::Text(denied_text),
+                    reply_to: Some(msg.id.clone()),
+                },
+            ));
         }
 
         self.event_bus
             .publish(TiangongEvent::MessageReceived(msg.clone()));
 
         let text = self.extract_text(&msg).await;
-        let session_id = if msg.channel_id.trim().is_empty() {
+        let channel_id = if msg.channel_id.trim().is_empty() {
             let state = self.state.lock().await;
             state.active_session_id().to_string()
         } else {
@@ -63,7 +74,7 @@ impl MessageRouter {
         };
         let event = RuntimeEvent::new(
             RuntimeEventType::UserMessage,
-            session_id,
+            channel_id,
             EventSource::Connector,
             serde_json::json!({
                 "connector": msg.connector,
@@ -77,10 +88,13 @@ impl MessageRouter {
             .handle_runtime_event_with_reply(event, Some(msg.id.clone()))
             .await?
         else {
-            return Ok(OutgoingMessage {
-                content: MessageContent::Text("处理完成".to_string()),
-                reply_to: Some(msg.id.clone()),
-            });
+            return Ok((
+                msg.channel_id,
+                OutgoingMessage {
+                    content: MessageContent::Text("处理完成".to_string()),
+                    reply_to: Some(msg.id.clone()),
+                },
+            ));
         };
 
         Ok(outgoing)
@@ -90,7 +104,10 @@ impl MessageRouter {
         &self,
         event: RuntimeEvent,
     ) -> Result<Option<OutgoingMessage>> {
-        self.handle_runtime_event_with_reply(event, None).await
+        Ok(self
+            .handle_runtime_event_with_reply(event, None)
+            .await?
+            .map(|(_, outgoing)| outgoing))
     }
 
     pub async fn handle_task_notification(
@@ -192,10 +209,15 @@ impl MessageRouter {
         &self,
         event: RuntimeEvent,
         reply_to: Option<String>,
-    ) -> Result<Option<OutgoingMessage>> {
+    ) -> Result<Option<(String, OutgoingMessage)>> {
         match event.event_type {
             RuntimeEventType::UserMessage => {
                 let requested_session_id = event.session_id.clone();
+                let connector = event
+                    .payload
+                    .get("connector")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("server-api");
                 let text = event
                     .payload
                     .get("text")
@@ -209,14 +231,14 @@ impl MessageRouter {
 
                 let (actual_session_id, mut outgoing) = self
                     .core_manager
-                    .send_message_and_wait(&requested_session_id, text)
+                    .send_connector_message_and_wait(connector, &requested_session_id, text)
                     .await?;
                 outgoing.reply_to = reply_to;
                 self.event_bus.publish(TiangongEvent::MessageSent {
-                    session_id: actual_session_id,
+                    session_id: actual_session_id.clone(),
                     message: outgoing.clone(),
                 });
-                Ok(Some(outgoing))
+                Ok(Some((actual_session_id, outgoing)))
             }
             RuntimeEventType::TaskCompleted
             | RuntimeEventType::TaskFailed
@@ -239,11 +261,12 @@ impl MessageRouter {
                     content: MessageContent::Text(summary),
                     reply_to,
                 };
+                let session_id = event.session_id.clone();
                 self.event_bus.publish(TiangongEvent::MessageSent {
-                    session_id: event.session_id,
+                    session_id: session_id.clone(),
                     message: outgoing.clone(),
                 });
-                Ok(Some(outgoing))
+                Ok(Some((session_id, outgoing)))
             }
             _ => Ok(None),
         }

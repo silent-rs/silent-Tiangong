@@ -252,6 +252,8 @@ fn run_gui() {
             tiangong_app::commands::set_skill_enabled,
             tiangong_app::commands::get_server_config,
             tiangong_app::commands::set_server_config,
+            tiangong_app::commands::start_server,
+            tiangong_app::commands::stop_server,
             tiangong_app::commands::get_connectors,
             tiangong_app::commands::set_connector_enabled,
             tiangong_app::commands::get_models_config,
