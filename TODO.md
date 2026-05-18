@@ -76,6 +76,7 @@
 - [x] 接入 Tauri updater，通过 GitHub Release 检测和安装新版本
 - [x] 设置界面展示当前版本、检查更新和安装更新按钮
 - [x] 发布流水线注入 updater 签名私钥并生成更新元数据
+- [x] 新增 `tiangong update` 命令，复用 GitHub Release 在线更新链路
 
 ---
 

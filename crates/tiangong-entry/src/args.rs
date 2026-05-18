@@ -31,6 +31,18 @@ pub(crate) enum MainCommand {
     Mcp(McpArgs),
     #[command(about = "Skill 配置管理")]
     Skill(SkillArgs),
+    #[command(about = "检查并安装天工更新")]
+    Update(UpdateArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct UpdateArgs {
+    /// 只检查更新，不安装
+    #[arg(long, help = "只检查更新，不安装")]
+    pub(crate) check: bool,
+    /// 更新源地址，默认使用 GitHub Release updater JSON
+    #[arg(long, help = "覆盖更新源地址")]
+    pub(crate) endpoint: Option<String>,
 }
 
 #[derive(Debug, Args)]
