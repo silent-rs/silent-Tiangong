@@ -19,6 +19,11 @@ fn init_logging(terminal_output: bool) -> anyhow::Result<tiangong_config::loggin
 }
 
 fn main() {
+    if should_run_cli_update() {
+        run_cli_update();
+        return;
+    }
+
     // 无参数 → GUI
     if std::env::args().len() <= 1 {
         run_gui();
@@ -33,6 +38,174 @@ fn main() {
         eprintln!("错误：{err}");
         std::process::exit(1);
     }
+}
+
+fn should_run_cli_update() -> bool {
+    let mut args = std::env::args().skip(1);
+    let Some(command) = args.next() else {
+        return false;
+    };
+    if command != "update" {
+        return false;
+    }
+    !args.any(|arg| arg == "-h" || arg == "--help")
+}
+
+fn run_cli_update() {
+    let _guard = init_logging(false).expect("failed to initialize logging");
+    let options = match parse_cli_update_options() {
+        Ok(options) => options,
+        Err(err) => {
+            eprintln!("错误：{err}");
+            std::process::exit(1);
+        }
+    };
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .setup(move |app| {
+            use tauri::Manager;
+
+            for (_, window) in app.webview_windows() {
+                let _ = window.hide();
+            }
+
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                match run_cli_update_async(handle.clone(), options).await {
+                    Ok(CliUpdateOutcome::Done) => handle.exit(0),
+                    Ok(CliUpdateOutcome::RestartRequested) => {}
+                    Err(err) => {
+                        eprintln!("错误：{err}");
+                        handle.exit(1);
+                    }
+                }
+            });
+            Ok(())
+        })
+        .run(generate_tauri_context())
+        .expect("error while running updater");
+
+    drop(_guard);
+}
+
+#[derive(Debug)]
+struct CliUpdateOptions {
+    check_only: bool,
+    endpoint: Option<String>,
+}
+
+fn parse_cli_update_options() -> anyhow::Result<CliUpdateOptions> {
+    let mut check_only = false;
+    let mut endpoint = None;
+    let mut args = std::env::args().skip(2);
+    while let Some(arg) = args.next() {
+        if arg == "--check" {
+            check_only = true;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--endpoint=") {
+            endpoint = Some(non_empty_update_endpoint(value)?);
+            continue;
+        }
+        if arg == "--endpoint" {
+            let value = args
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--endpoint 缺少地址"))?;
+            endpoint = Some(non_empty_update_endpoint(&value)?);
+            continue;
+        }
+        return Err(anyhow::anyhow!("不支持的 update 参数：{arg}"));
+    }
+
+    Ok(CliUpdateOptions {
+        check_only,
+        endpoint,
+    })
+}
+
+fn non_empty_update_endpoint(value: &str) -> anyhow::Result<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(anyhow::anyhow!("--endpoint 不能为空"));
+    }
+    Ok(value.to_string())
+}
+
+enum CliUpdateOutcome {
+    Done,
+    RestartRequested,
+}
+
+async fn run_cli_update_async(
+    app: tauri::AppHandle,
+    options: CliUpdateOptions,
+) -> anyhow::Result<CliUpdateOutcome> {
+    use std::io::Write;
+
+    use tauri_plugin_updater::UpdaterExt;
+
+    let updater = if let Some(endpoint) = options.endpoint.as_deref() {
+        let endpoint = reqwest::Url::parse(endpoint)?;
+        app.updater_builder()
+            .endpoints(vec![endpoint])?
+            .build()?
+    } else {
+        app.updater()?
+    };
+    let update = match updater.check().await {
+        Ok(update) => update,
+        Err(tauri_plugin_updater::Error::ReleaseNotFound) => {
+            println!("当前没有可用的在线更新发布。");
+            return Ok(CliUpdateOutcome::Done);
+        }
+        Err(err) => return Err(err.into()),
+    };
+    let Some(update) = update else {
+        println!("当前已是最新版本。");
+        return Ok(CliUpdateOutcome::Done);
+    };
+
+    println!(
+        "发现新版本：{} -> {}",
+        update.current_version, update.version
+    );
+    if let Some(date) = update.date {
+        println!("发布时间：{date}");
+    }
+    if let Some(body) = update.body.as_deref().filter(|value| !value.trim().is_empty()) {
+        println!("\n更新说明：\n{}", body.trim());
+    }
+
+    if options.check_only {
+        return Ok(CliUpdateOutcome::Done);
+    }
+
+    println!("\n开始下载并安装更新...");
+    let mut downloaded = 0u64;
+    let mut last_percent = 0u64;
+    update
+        .download_and_install(
+            |chunk_len, content_len| {
+                downloaded = downloaded.saturating_add(chunk_len as u64);
+                if let Some(total) = content_len.filter(|value| *value > 0) {
+                    let percent = downloaded.saturating_mul(100) / total;
+                    if percent >= last_percent.saturating_add(10) || percent == 100 {
+                        last_percent = percent;
+                        print!("\r下载进度：{percent}%");
+                        let _ = std::io::stdout().flush();
+                    }
+                }
+            },
+            || {
+                println!("\n下载完成，正在安装...");
+            },
+        )
+        .await?;
+
+    println!("更新已安装，正在重启应用...");
+    app.request_restart();
+    Ok(CliUpdateOutcome::RestartRequested)
 }
 
 fn run_gui() {
@@ -127,8 +300,12 @@ fn run_gui() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .run(tauri::generate_context!())
+        .run(generate_tauri_context())
         .expect("error while running tauri application");
 
     drop(_guard);
+}
+
+fn generate_tauri_context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
 }

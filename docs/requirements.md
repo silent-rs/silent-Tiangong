@@ -32,6 +32,7 @@
 - 手动触发发布时必须默认创建草稿 Release，便于发布前检查安装包。
 - 应用必须通过 GitHub Release 的 updater JSON 检测新版本并执行应用内更新。
 - 设置界面必须展示当前应用版本，并提供检查更新与安装更新入口。
+- `tiangong update` 必须复用同一 GitHub Release 在线更新链路；桌面打包二进制应支持命令行触发检查、下载和安装更新。
 - 更新包必须使用 Tauri updater 签名校验，私钥只能通过 GitHub Secrets 注入发布流水线。
 
 #### 模型配置
