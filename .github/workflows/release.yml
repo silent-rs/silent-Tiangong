@@ -138,5 +138,5 @@ jobs:
           prerelease: false
           includeUpdaterJson: true
           updaterJsonPreferNsis: true
-          assetNamePattern: "[name]_[version]_[platform]_[arch][setup][ext]"
+          assetNamePattern: "Tiangong_[version]_[platform]_[arch][setup][ext]"
           args: ${{ matrix.args }}
