@@ -797,17 +797,21 @@ function renderMessageMedia(message: MessageItem) {
 function StreamingMessage({
   content,
   reasoningContent,
+  MarkdownComponents,
 }: {
   content: string;
   reasoningContent: string;
+  MarkdownComponents: any;
 }) {
   return (
     <div>
       {reasoningContent && (
         <ThinkingBlock content={reasoningContent} defaultExpanded={false} />
       )}
-      <div className="whitespace-pre-wrap break-words text-[13px] leading-6 text-foreground">
-        {content}
+      <div className="prose prose-sm max-w-none break-words text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
+        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={MarkdownComponents as any}>
+          {content}
+        </ReactMarkdown>
         {content.length > 0 && (
           <span className="inline-block w-1.5 h-4 bg-primary ml-0.5 animate-pulse align-text-bottom" />
         )}
@@ -1271,6 +1275,7 @@ function AgentTurnView({
                 <StreamingMessage
                   content={streamingContent}
                   reasoningContent={streamingReasoningContent}
+                  MarkdownComponents={MarkdownComponents}
                 />
               ) : msg.content || (msg.media && msg.media.length > 0) ? (
                 <div>
