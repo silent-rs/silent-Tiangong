@@ -66,6 +66,7 @@
 - Server 端不提供审批 API，不暴露远程审批事件，也不维护远程审批角色。
 - Server 远程角色收敛为 `controller` 与 `observer`：控制者可发消息和管理会话，观察者只读。
 - Desktop 设置页必须支持在应用运行时启动和停止后台 Server，并复用同一份 Server 监听地址、端口与认证 Token 配置。
+- Desktop 模式下必须提供菜单栏 / 系统托盘入口控制后台 Server 的启动和停止；关闭主窗口时应用应继续驻留在菜单栏，保证已启动的后台 Server 持续存活，只有用户显式停止 Server 时才停止 Server。
 
 #### Connector 机制
 - 必须定义标准化 Connector trait，支持消息收发、媒体传输、健康检查。

@@ -2113,24 +2113,32 @@ function ServerSettings() {
   const [isToggling, setIsToggling] = useState(false);
   const { showSuccess, showError } = useToast();
 
-  const loadConfig = async () => {
-    setIsLoading(true);
+  const loadConfig = async (showLoading = true) => {
+    if (showLoading) setIsLoading(true);
     try {
       const cfg = await api.getServerConfig();
       setConfig(cfg);
-      setEditHost(cfg.host);
-      setEditPort(String(cfg.port));
-      setEditAuthToken('');
+      if (showLoading) {
+        setEditHost(cfg.host);
+        setEditPort(String(cfg.port));
+        setEditAuthToken('');
+      }
     } catch (error) {
       console.error('加载 Server 配置失败:', error);
-      showError('加载失败', '无法加载 Server 配置');
+      if (showLoading) {
+        showError('加载失败', '无法加载 Server 配置');
+      }
     } finally {
-      setIsLoading(false);
+      if (showLoading) setIsLoading(false);
     }
   };
 
   useEffect(() => {
     loadConfig();
+    const timer = window.setInterval(() => {
+      loadConfig(false);
+    }, 3000);
+    return () => window.clearInterval(timer);
   }, []);
 
   const handleSave = async () => {
@@ -2179,7 +2187,10 @@ function ServerSettings() {
       await loadConfig();
     } catch (error) {
       console.error('切换 Server 状态失败:', error);
-      showError(enabled ? '启动失败' : '停止失败', '无法切换 Server 运行状态');
+      showError(
+        enabled ? '启动失败' : '停止失败',
+        error instanceof Error ? error.message : String(error || '无法切换 Server 运行状态')
+      );
     } finally {
       setIsToggling(false);
     }

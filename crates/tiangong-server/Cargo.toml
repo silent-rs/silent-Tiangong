@@ -20,3 +20,4 @@ async-channel = "2"
 async-lock = "3"
 scru128 = "3"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+libc = "0.2"

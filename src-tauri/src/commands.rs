@@ -1,8 +1,11 @@
 use crate::app::TiangongApp;
 use crate::view::*;
 use base64::{Engine as _, engine::general_purpose};
+use std::io::{Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::thread;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 use tauri_plugin_notification::{NotificationExt, PermissionState};
 
@@ -939,11 +942,11 @@ fn start_stream_consumer(
                                 session.agent_current_tokens.remove(agent_id);
                                 session.agent_token_usage.remove(agent_id);
                             }
-                            if status == "idle" || status == "terminated" {
-                                if session.active_agent_id.as_deref() == Some(agent_id.as_str()) {
-                                    session.active_agent_id = None;
-                                    session.active_agent_current_tokens = 0;
-                                }
+                            if (status == "idle" || status == "terminated")
+                                && session.active_agent_id.as_deref() == Some(agent_id.as_str())
+                            {
+                                session.active_agent_id = None;
+                                session.active_agent_current_tokens = 0;
                             }
                             session.append_message(
                                 tiangong_core::session::MessageRole::System,
@@ -2250,7 +2253,7 @@ pub fn set_skill_enabled(
 #[tauri::command]
 pub fn get_server_config() -> Result<ServerConfigView, String> {
     let config = tiangong_server::config::load_server_config();
-    let running = is_server_running();
+    let running = is_server_running(&config);
     let auth_token_masked = config.masked_auth_token();
     Ok(ServerConfigView {
         host: config.host,
@@ -2283,31 +2286,61 @@ pub fn set_server_config(
 /// 启动后台 Server
 #[tauri::command]
 pub fn start_server() -> Result<String, String> {
-    if is_server_running() {
+    let config = tiangong_server::config::load_server_config();
+    if server_health_check(&config) {
         return Ok("Server 已在运行".to_string());
     }
-    let config = tiangong_server::config::load_server_config();
-    tiangong_server::run_daemon(&config.host, config.port, config.auth_token)
+    cleanup_dead_server_pid();
+    if server_pid_alive() {
+        return Err("Server 进程存在但健康检查未通过，请先停止后再启动".to_string());
+    }
+    tiangong_server::run_daemon(&config.host, config.port, config.auth_token.clone())
         .map_err(|e| e.to_string())?;
+    if let Err(err) = wait_for_server_health(&config) {
+        cleanup_dead_server_pid();
+        return Err(err);
+    }
     Ok(format!("Server 已启动：{}:{}", config.host, config.port))
 }
 
 /// 停止后台 Server
 #[tauri::command]
 pub fn stop_server() -> Result<String, String> {
-    if !is_server_running() {
+    let config = tiangong_server::config::load_server_config();
+    let running_by_health = server_health_check(&config);
+    let running_by_pid = server_pid_alive();
+    if !running_by_health && !running_by_pid {
+        cleanup_dead_server_pid();
         return Ok("Server 未运行".to_string());
     }
+    if running_by_health && !running_by_pid {
+        cleanup_dead_server_pid();
+        return Err("Server 正在运行，但后台 PID 文件缺失或已失效，无法通过应用安全停止。请先手动关闭占用端口的 Server。".to_string());
+    }
     tiangong_server::stop_daemon().map_err(|e| e.to_string())?;
+    wait_for_server_stop(&config)?;
     Ok("Server 已停止".to_string())
 }
 
-/// 检查 Server 是否在运行（通过 PID 文件判断）
-fn is_server_running() -> bool {
-    let pid_path = user_home_dir()
+/// 检查 Server 是否在运行：优先访问健康检查，PID 仅作为兜底。
+fn is_server_running(config: &tiangong_server::config::ServerConfig) -> bool {
+    if server_health_check(config) {
+        return true;
+    }
+
+    cleanup_dead_server_pid();
+    false
+}
+
+fn server_pid_path() -> PathBuf {
+    user_home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".tiangong")
-        .join("server.pid");
+        .join("server.pid")
+}
+
+fn server_pid_alive() -> bool {
+    let pid_path = server_pid_path();
     if !pid_path.exists() {
         return false;
     }
@@ -2335,6 +2368,69 @@ fn is_server_running() -> bool {
             }
         }
         Err(_) => false,
+    }
+}
+
+fn cleanup_dead_server_pid() {
+    let pid_path = server_pid_path();
+    if pid_path.exists() && !server_pid_alive() {
+        let _ = std::fs::remove_file(pid_path);
+    }
+}
+
+fn wait_for_server_health(config: &tiangong_server::config::ServerConfig) -> Result<(), String> {
+    for _ in 0..30 {
+        if server_health_check(config) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    Err("Server 已启动但健康检查未通过".to_string())
+}
+
+fn wait_for_server_stop(config: &tiangong_server::config::ServerConfig) -> Result<(), String> {
+    for _ in 0..30 {
+        if !server_health_check(config) {
+            cleanup_dead_server_pid();
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Err("已发送停止信号，但 Server 仍在响应健康检查".to_string())
+}
+
+fn server_health_check(config: &tiangong_server::config::ServerConfig) -> bool {
+    let host = connect_host(&config.host);
+    let Ok(mut addrs) = (host.as_str(), config.port).to_socket_addrs() else {
+        return false;
+    };
+    let Some(addr) = addrs.next() else {
+        return false;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(150)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(150)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(150)));
+    let request = format!(
+        "GET /api/v1/health HTTP/1.1\r\nHost: {host}:{}\r\nConnection: close\r\n\r\n",
+        config.port
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut response = [0_u8; 1024];
+    let Ok(len) = stream.read(&mut response) else {
+        return false;
+    };
+    let response = String::from_utf8_lossy(&response[..len]);
+    response.starts_with("HTTP/") && response.contains(" 200 ") && response.contains("status")
+}
+
+fn connect_host(host: &str) -> String {
+    match host.trim() {
+        "" | "0.0.0.0" | "::" => "127.0.0.1".to_string(),
+        value => value.to_string(),
     }
 }
 

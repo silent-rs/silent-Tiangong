@@ -6461,6 +6461,7 @@ dependencies = [
  "anyhow",
  "async-channel",
  "async-lock",
+ "libc",
  "reqwest 0.12.28",
  "scru128",
  "serde",

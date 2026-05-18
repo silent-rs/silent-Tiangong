@@ -23,6 +23,11 @@ use self::remote::event::{EventBus, TiangongEvent};
 #[allow(deprecated)]
 pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let _runtime_guard = runtime.enter();
+
     let mut app_config = load_tiangong_config();
     app_config.trust_mode = TrustMode::FullTrust;
     let core_config = app_config.to_core_config();
@@ -95,8 +100,7 @@ fn load_and_start_connectors(event_bus: Arc<EventBus>) -> Option<ConnectorManage
     }
 
     // 异步启动所有已启用的 Connector
-    let rt = tokio::runtime::Handle::try_current();
-    if let Ok(handle) = rt {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
         let event_bus_clone = event_bus.clone();
         for name in enabled_names {
             let eb = event_bus_clone.clone();
