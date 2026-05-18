@@ -6,6 +6,7 @@ use std::{env, path::PathBuf};
 use anyhow::{Context, Result};
 
 use crate::agents::response_agent::VerifyExecutionRecord;
+use crate::process::configure_no_window;
 
 pub fn recommend_verify_commands(user_input: &str) -> Vec<String> {
     let text = user_input.to_ascii_lowercase();
@@ -203,6 +204,7 @@ fn normalize_path(path: PathBuf) -> PathBuf {
 }
 
 fn execute_command_with_timeout(command: &mut Command, timeout_ms: u64) -> Result<(Output, bool)> {
+    configure_no_window(command);
     let mut child = command.spawn().context("spawn 子进程失败")?;
     let timeout = Duration::from_millis(timeout_ms);
     let started = Instant::now();

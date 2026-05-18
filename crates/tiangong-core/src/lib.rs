@@ -20,6 +20,7 @@ pub mod orchestrator;
 pub mod permission;
 pub mod planner;
 pub mod plugin;
+mod process;
 pub mod prompt;
 pub mod react;
 pub mod runtime;

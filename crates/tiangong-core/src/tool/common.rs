@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 
+use crate::process::configure_no_window;
+
 thread_local! {
     /// 当前执行的会话工作目录，由 RuntimeEngine 在执行前设置
     static SESSION_CWD: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
@@ -620,6 +622,7 @@ pub(super) fn execute_command_with_timeout(
     command: &mut Command,
     timeout_ms: u64,
 ) -> Result<(Output, bool)> {
+    configure_no_window(command);
     let mut child = command.spawn().context("spawn 子进程失败")?;
 
     // timeout_ms=0 表示不设超时

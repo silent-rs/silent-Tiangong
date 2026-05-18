@@ -10,6 +10,7 @@ use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::time::timeout;
 
 use crate::agent_config::AgentConfig;
+use crate::process::configure_tokio_no_window;
 
 use super::common::{
     command_env_allowlist, command_timeout_ms, derive_shell_exec_args, is_allowed_command,
@@ -306,6 +307,7 @@ async fn exec_command(
     timeout_ms: u64,
 ) -> anyhow::Result<Result<CommandOutput, tokio::time::error::Elapsed>> {
     let mut command = Command::new(cmd);
+    configure_tokio_no_window(&mut command);
     command
         .args(args)
         .current_dir(cwd)

@@ -55,6 +55,31 @@ export function parseAgentsFromMessages(messages: Message[]): AgentInfo[] {
   return Array.from(agents.values());
 }
 
+function isAgentSystemMessage(message: Message): boolean {
+  if (message.role !== 'system') return false;
+  return message.content.startsWith('[Agent]') || message.content.startsWith('[文件锁]');
+}
+
+function shouldRefreshAgentsFromSnapshot(
+  oldMessages: Message[],
+  newMessages: Message[],
+): boolean {
+  if (oldMessages.length !== newMessages.length) {
+    return true;
+  }
+  for (let i = 0; i < newMessages.length; i += 1) {
+    const oldMessage = oldMessages[i];
+    const newMessage = newMessages[i];
+    if (oldMessage === newMessage) {
+      continue;
+    }
+    if (isAgentSystemMessage(oldMessage) || isAgentSystemMessage(newMessage)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function sameJsonValue(left: unknown, right: unknown): boolean {
   if (left === right) return true;
   if (left == null || right == null) return left == right;
@@ -608,6 +633,7 @@ export const useStore = create<AppState>((set, get) => ({
 
     const { messages: oldMessages, streamingMessageId: oldStreamingId } = get();
     const newMessages = mergeSnapshotMessages(oldMessages, snapshot.messages);
+    const shouldRefreshAgents = shouldRefreshAgentsFromSnapshot(oldMessages, newMessages);
 
     // 检测最后一条消息是否是新的或内容在更新
     let streamingId: string | null = null;
@@ -658,7 +684,7 @@ export const useStore = create<AppState>((set, get) => ({
       streamingMessageId: streamingId,
       streamingContent,
       streamingReasoningContent,
-      agents: parseAgentsFromMessages(newMessages),
+      agents: shouldRefreshAgents ? parseAgentsFromMessages(newMessages) : get().agents,
     });
 
     // 状态变为 idle 时刷新会话列表（更新 message_count、标题等）

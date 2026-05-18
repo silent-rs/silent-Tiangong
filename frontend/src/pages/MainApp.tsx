@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useStore } from '@/store/useStore';
-import { api } from '@/api/tauri';
+import { api, type RunSnapshot } from '@/api/tauri';
 import { AppSidebar } from '@/components/AppSidebar';
 import { SidebarProvider } from '@/components/ui/sidebar';
 import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components/LazyComponents';
@@ -10,15 +10,34 @@ import type { UnlistenFn } from '@tauri-apps/api/event';
 export function MainApp() {
   const { loadSessions, updateFromSnapshot } = useStore();
   const unlistenRef = useRef<UnlistenFn | null>(null);
+  const latestSnapshotRef = useRef<RunSnapshot | null>(null);
+  const snapshotTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     ensureDesktopNotificationPermission().catch(console.warn);
 
     loadSessions();
 
+    const flushSnapshot = () => {
+      snapshotTimerRef.current = null;
+      const snapshot = latestSnapshotRef.current;
+      latestSnapshotRef.current = null;
+      if (snapshot) {
+        updateFromSnapshot(snapshot);
+      }
+    };
+
+    const scheduleSnapshotUpdate = (snapshot: RunSnapshot) => {
+      latestSnapshotRef.current = snapshot;
+      if (snapshotTimerRef.current !== null) {
+        return;
+      }
+      snapshotTimerRef.current = window.setTimeout(flushSnapshot, 16);
+    };
+
     const setupListener = async () => {
       const unlisten = await api.onRunSnapshot((snapshot) => {
-        updateFromSnapshot(snapshot);
+        scheduleSnapshotUpdate(snapshot);
       });
       unlistenRef.current = unlisten;
 
@@ -56,6 +75,10 @@ export function MainApp() {
       .catch(console.error);
 
     return () => {
+      if (snapshotTimerRef.current !== null) {
+        window.clearTimeout(snapshotTimerRef.current);
+        snapshotTimerRef.current = null;
+      }
       unlistenRef.current?.();
     };
   }, []);
