@@ -107,6 +107,44 @@ src-tauri/              Tauri 桌面壳
 📨 send_message → @test "认证模块开发完成，已提测"
 ```
 
+## 安装
+
+### 安装发布包
+
+在 GitHub Releases 下载当前系统对应的安装包：
+
+- macOS：下载 `.dmg` 安装包，打开后将「天工」拖入「应用程序」目录。
+- Windows：下载 `.msi` 或 `.exe` 安装包，按安装向导完成安装。
+- Linux：下载 `.AppImage`、`.deb` 或 `.rpm`，按发行版习惯安装或直接运行。
+
+安装后可直接启动桌面应用。macOS 构建暂未接入签名和公证，首次打开时如被系统拦截，需要在「系统设置 → 隐私与安全性」中允许打开。
+
+### 命令行入口
+
+桌面安装包内包含同一个 `tiangong` 入口，可用于 CLI、Server 和更新命令。
+
+macOS 可创建软链接：
+
+```bash
+ln -s /Applications/天工.app/Contents/MacOS/天工 /usr/local/bin/tiangong
+```
+
+Windows 安装后可将安装目录加入 `PATH`。Linux 安装包通常会直接提供可执行入口。
+
+### 在线更新
+
+桌面应用设置页提供版本显示、检查更新和安装更新按钮。也可以通过命令行检查和安装：
+
+```bash
+# 只检查是否有新版本
+tiangong update --check
+
+# 检查、下载并安装更新
+tiangong update
+```
+
+在线更新复用 GitHub Release 的更新元数据和签名校验。只有正式发布且上传了 updater 元数据后，才会检测到可用更新。
+
 ## 运行
 
 ```bash
@@ -120,6 +158,9 @@ cargo run --release -- cli
 cargo run --release -- server
 cargo run --release -- server -d    # 后台运行
 cargo run --release -- server stop  # 停止
+
+# 检查更新（源码运行时只做检查提示）
+cargo run --release -- update --check
 ```
 
 ## 配置
