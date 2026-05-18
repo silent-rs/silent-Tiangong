@@ -8,7 +8,6 @@ members = [
     "crates/tiangong-cli",
     "crates/tiangong-entry",
     "crates/tiangong-server",
-    "crates/tiangong-connector",
     "crates/tiangong-media",
     "crates/tiangong-config",
 ]

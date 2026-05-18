@@ -57,7 +57,6 @@
 - 必须新增 `tiangong server` 命令，启动 HTTP REST + WebSocket 服务。
 - 必须支持 `-d` / `--daemon` 参数后台运行（fork 进程后主进程退出，PID 写入 `~/.tiangong/server.pid`）。
 - 必须支持 `tiangong server stop` 命令，读取 PID 文件停止后台 Server 进程。
-- Server 启动时必须自动加载并启动所有已启用的 Connector。
 - REST API 必须覆盖：对话、会话管理、Skill/MCP 管理。
 - WebSocket 必须支持流式对话与事件推送。
 - Server 模式必须支持 API Token 认证。
@@ -65,13 +64,12 @@
 - Server 模式必须在运行时强制使用 `full_trust`，不允许进入运行中审批状态。
 - Server 端不提供审批 API，不暴露远程审批事件，也不维护远程审批角色。
 - Server 远程角色收敛为 `controller` 与 `observer`：控制者可发消息和管理会话，观察者只读。
+- Desktop 设置页必须支持在应用运行时启动和停止后台 Server，并复用同一份 Server 监听地址、端口与认证 Token 配置。
+- Desktop 模式下必须提供菜单栏 / 系统托盘入口控制后台 Server 的启动和停止；关闭主窗口时应用应继续驻留在菜单栏，保证已启动的后台 Server 持续存活，只有用户显式停止 Server 时才停止 Server。
 
-#### Connector 机制
-- 必须定义标准化 Connector trait，支持消息收发、媒体传输、健康检查。
-- 必须实现统一消息模型（IncomingMessage / OutgoingMessage），支持文本、图片、文件、音频、视频。
-- 首批必须支持至少 3 种 IM 通道（Telegram + 飞书/Lark + Webhook）。
-- Connector 必须支持配置化管理（启停、凭据配置、白名单）。
-- 通过 Connector 接收的消息必须走与本地 CLI 相同的 Agent 执行链路。
+#### 三方 IM 适配
+- 与三方 IM 软件的交互通过 Server API + 外部适配程序（adapt）完成，不在天工内部实现 Connector 机制。
+- 外部适配程序通过 Server REST API / WebSocket 收发消息，天工只负责提供标准 Server 接口。
 
 #### 多媒体能力
 - 必须支持图片生成能力，至少实现一个后端适配（OpenAI DALL-E / GPT-Image）；models.json 中未配置 `image_generation` routing 时该功能自动关闭。
@@ -90,8 +88,8 @@
 - 用户在消息中直接输入本地图片路径或普通网页 URL 时，不得触发自动多模态路由；只有用户上传为会话附件的内容，才可由主模型通过附件解析工具交给多模态模型处理。
 - 系统必须能够区分“最终结果媒体”和“中间过程媒体”，不能将所有图片/视频工具结果一律视为最终回复。
 - 媒体生成必须采用异步任务模型，支持状态查询。
-- 生成的媒体文件必须可通过 Connector 发送到 IM 通道。
-- Connector 接收到语音消息时，必须支持自动调用 STT 转为文字后交给 Agent 处理。
+- 生成的媒体文件必须可通过外部适配程序发送到 IM 通道。
+- 外部适配程序接收到语音消息时，应负责调用 STT 转为文字后再提交给 Server API。
 - Agent 响应时应支持可选的 TTS 输出，将文本回复转为语音发送。
 
 #### 上下文管理
@@ -204,8 +202,6 @@
 
 - Server 模式应支持 CORS 配置，方便 Web 前端调用。
 - 应实现事件总线（EventBus）实现各层解耦通信。
-- 应支持 Discord Bot Connector。
-- 应支持钉钉/Slack Connector。
 - 应支持配置热重载，修改配置无需重启。
 - 多媒体生成应支持 Stable Diffusion / Flux 等开源模型后端。
 - Agent 层应集成 MediaAgent，支持在对话中自然触发图片/视频生成。

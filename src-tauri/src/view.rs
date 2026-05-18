@@ -289,24 +289,6 @@ pub struct ServerConfigView {
     pub running: bool,
 }
 
-/// Connector 信息（前端使用）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectorInfoView {
-    pub name: String,
-    pub connector_type: String,
-    pub enabled: bool,
-}
-
-impl ConnectorInfoView {
-    pub fn from_config(config: &tiangong_connector::config::ConnectorConfig) -> Self {
-        Self {
-            name: config.name.clone(),
-            connector_type: format!("{:?}", config.connector_type),
-            enabled: config.enabled,
-        }
-    }
-}
-
 /// 模型能力（前端使用）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelCapabilityInfo {

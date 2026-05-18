@@ -14,12 +14,6 @@ pub enum TiangongEvent {
         session_id: String,
         success: bool,
     },
-    ConnectorStarted(String),
-    ConnectorStopped(String),
-    ConnectorError {
-        name: String,
-        error: String,
-    },
     ConfigChanged,
     Shutdown,
 }

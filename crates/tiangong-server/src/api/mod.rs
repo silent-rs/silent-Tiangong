@@ -1,6 +1,7 @@
 mod chat;
 mod health;
 mod mcp;
+mod messages;
 mod server_ctrl;
 mod sessions;
 mod skills;
@@ -80,6 +81,7 @@ pub fn build_routes(
     let route = Route::new("api/v1")
         .append(Route::new("health").get(health::health_check))
         .append(Route::new("chat").post(chat::chat))
+        .append(Route::new("messages").post(messages::post_message))
         .append(
             Route::new("sessions")
                 .get(sessions::list_sessions)

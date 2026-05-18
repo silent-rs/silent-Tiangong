@@ -6,7 +6,6 @@ license = "Apache-2.0"
 
 [dependencies]
 tiangong-core = { path = "../tiangong-core" }
-tiangong-connector = { path = "../tiangong-connector" }
 tiangong-config = { path = "../tiangong-config" }
 tiangong-media = { path = "../tiangong-media" }
 tiangong-types = { path = "../tiangong-types" }
@@ -20,3 +19,4 @@ async-channel = "2"
 async-lock = "3"
 scru128 = "3"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+libc = "0.2"

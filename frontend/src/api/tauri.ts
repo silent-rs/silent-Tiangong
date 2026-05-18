@@ -179,12 +179,6 @@ export interface ServerConfig {
   running: boolean;
 }
 
-export interface ConnectorInfo {
-  name: string;
-  connector_type: string;
-  enabled: boolean;
-}
-
 // 模型配置（Provider + Model + Routing 三层架构）
 
 export interface ProviderConfigView {
@@ -463,14 +457,11 @@ export const api = {
   setServerConfig: (host: string, port: number, authToken?: string): Promise<string> =>
     invoke('set_server_config', { host, port, authToken }),
 
-  // ----------------------------------------------------------------
-  // Connector 管理
-  // ----------------------------------------------------------------
-  getConnectors: (): Promise<ConnectorInfo[]> =>
-    invoke('get_connectors'),
+  startServer: (): Promise<string> =>
+    invoke('start_server'),
 
-  setConnectorEnabled: (name: string, enabled: boolean): Promise<string> =>
-    invoke('set_connector_enabled', { name, enabled }),
+  stopServer: (): Promise<string> =>
+    invoke('stop_server'),
 
   // ----------------------------------------------------------------
   // 模型配置（Provider + Model + Routing）

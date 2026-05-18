@@ -3,7 +3,6 @@ use std::fs;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tiangong_connector::config::ConnectorConfig;
 
 /// Server 模式配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,70 +76,5 @@ impl ServerConfig {
             Some(token) if token.len() <= 4 => "****".to_string(),
             Some(token) => format!("{}****", &token[..4]),
         }
-    }
-}
-
-/// Connector 配置文件结构
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectorsFile {
-    pub connectors: Vec<ConnectorConfig>,
-}
-
-/// Connector 配置文件路径: ~/.tiangong/connectors.json
-fn connectors_file_path() -> PathBuf {
-    user_home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".tiangong")
-        .join("connectors.json")
-}
-
-/// 从 ~/.tiangong/connectors.json 加载 Connector 配置
-/// 文件不存在时返回空列表
-pub fn load_connectors_config() -> Vec<ConnectorConfig> {
-    let path = connectors_file_path();
-    if !path.exists() {
-        tracing::info!("Connector 配置文件不存在: {}", path.display());
-        return Vec::new();
-    }
-    match fs::read_to_string(&path) {
-        Ok(content) => match serde_json::from_str::<ConnectorsFile>(&content) {
-            Ok(file) => file.connectors,
-            Err(e) => {
-                tracing::warn!("解析 Connector 配置失败: {e}");
-                Vec::new()
-            }
-        },
-        Err(e) => {
-            tracing::warn!("读取 Connector 配置文件失败: {e}");
-            Vec::new()
-        }
-    }
-}
-
-/// 保存 Connector 配置到 ~/.tiangong/connectors.json
-pub fn save_connectors_config(connectors: &[ConnectorConfig]) -> anyhow::Result<()> {
-    let path = connectors_file_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let file = ConnectorsFile {
-        connectors: connectors.to_vec(),
-    };
-    let content = serde_json::to_string_pretty(&file)?;
-    fs::write(&path, content)?;
-    Ok(())
-}
-
-/// 设置指定 Connector 的启用状态并保存
-pub fn set_connector_enabled(name: &str, enabled: bool) -> anyhow::Result<()> {
-    let mut connectors = load_connectors_config();
-    let found = connectors.iter_mut().find(|c| c.name == name);
-    match found {
-        Some(c) => {
-            c.enabled = enabled;
-            save_connectors_config(&connectors)?;
-            Ok(())
-        }
-        None => Err(anyhow::anyhow!("未找到 Connector: {name}")),
     }
 }

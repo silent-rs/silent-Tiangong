@@ -20,6 +20,7 @@ pub struct ServerCoreManager {
     event_bus: Arc<EventBus>,
     cores: Arc<Mutex<HashMap<String, tiangong_core::core::TiangongCore>>>,
     trackers: Arc<Mutex<HashMap<String, Arc<ExecutionTracker>>>>,
+    remote_sessions: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl ServerCoreManager {
@@ -30,7 +31,20 @@ impl ServerCoreManager {
             event_bus,
             cores: Arc::new(Mutex::new(HashMap::new())),
             trackers: Arc::new(Mutex::new(HashMap::new())),
+            remote_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub async fn send_connector_message_and_wait(
+        &self,
+        connector: &str,
+        channel_id: &str,
+        content: String,
+    ) -> Result<(String, OutgoingMessage)> {
+        let session_id = self
+            .resolve_connector_session_id(connector, channel_id)
+            .await?;
+        self.send_message_and_wait(&session_id, content).await
     }
 
     pub async fn send_message_and_wait(
@@ -113,6 +127,56 @@ impl ServerCoreManager {
         Ok((actual_session_id, session, true))
     }
 
+    async fn resolve_connector_session_id(
+        &self,
+        connector: &str,
+        channel_id: &str,
+    ) -> Result<String> {
+        let channel_id = channel_id.trim();
+        if channel_id.is_empty() {
+            let state = self.state.lock().await;
+            return Ok(state.active_session_id().to_string());
+        }
+
+        let key = remote_session_key(connector, channel_id);
+        if let Some(session_id) = self.remote_sessions.lock().unwrap().get(&key).cloned() {
+            return Ok(session_id);
+        }
+
+        let title = remote_session_title(connector, channel_id);
+        let session_id = {
+            let mut state = self.state.lock().await;
+            if state
+                .sessions()
+                .iter()
+                .any(|session| session.id == channel_id)
+            {
+                channel_id.to_string()
+            } else if let Some(session) = state
+                .sessions()
+                .iter()
+                .find(|session| session.title == title)
+            {
+                session.id.clone()
+            } else {
+                let mut session = Session::new_isolated(title);
+                session.trust_mode = TrustMode::FullTrust;
+                let session_id = session.id.clone();
+                state.sessions_mut().push(session);
+                state.persist_session_and_app(&session_id)?;
+                self.event_bus
+                    .publish(TiangongEvent::SessionCreated(session_id.clone()));
+                session_id
+            }
+        };
+
+        self.remote_sessions
+            .lock()
+            .unwrap()
+            .insert(key, session_id.clone());
+        Ok(session_id)
+    }
+
     fn spawn_stream_forwarder(
         &self,
         session_id: String,
@@ -177,6 +241,21 @@ impl ServerCoreManager {
             text_outgoing(latest_text)
         }
     }
+}
+
+fn remote_session_key(connector: &str, channel_id: &str) -> String {
+    format!("{}:{}", connector.trim(), channel_id.trim())
+}
+
+fn remote_session_title(connector: &str, channel_id: &str) -> String {
+    let connector = connector.trim();
+    let channel_id = channel_id.trim();
+    let raw = if connector.is_empty() {
+        format!("外部通道 {channel_id}")
+    } else {
+        format!("{connector} {channel_id}")
+    };
+    raw.chars().take(80).collect()
 }
 
 fn text_outgoing(text: impl Into<String>) -> OutgoingMessage {

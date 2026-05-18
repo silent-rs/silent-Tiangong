@@ -10,11 +10,11 @@ import { Card, CardContent } from './ui/card';
 import { Switch } from './ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Link, Edit2, KeyRound, RefreshCw, Info, Wrench, FolderOpen, Save, ShieldCheck, Database, X } from 'lucide-react';
+import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Edit2, KeyRound, RefreshCw, Info, Wrench, FolderOpen, Save, ShieldCheck, Database, X } from 'lucide-react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater';
 import { api } from '@/api/tauri';
-import type { McpServer, Skill, SkillDetail, ServerConfig, ConnectorInfo, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo, MemoryConfigView } from '@/api/tauri';
+import type { McpServer, Skill, SkillDetail, ServerConfig, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo, MemoryConfigView } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
 import { useToast } from './Toast';
 import { MemoryManagementSettings } from './memory';
@@ -81,10 +81,6 @@ export function SettingsDialog() {
                   <Globe className="w-4 h-4 mr-2" />
                   Server
                 </TabsTrigger>
-                <TabsTrigger value="connector" className="w-full justify-start px-3 py-2">
-                  <Link className="w-4 h-4 mr-2" />
-                  Connectors
-                </TabsTrigger>
                 <TabsTrigger value="about" className="w-full justify-start px-3 py-2">
                   <Info className="w-4 h-4 mr-2" />
                   关于与更新
@@ -123,9 +119,6 @@ export function SettingsDialog() {
               </TabsContent>
               <TabsContent value="server" className="m-0 h-full overflow-y-auto">
                 <ServerSettings />
-              </TabsContent>
-              <TabsContent value="connector" className="m-0 h-full overflow-y-auto">
-                <ConnectorSettings />
               </TabsContent>
               <TabsContent value="about" className="m-0 h-full overflow-y-auto">
                 <AppUpdateSettings />
@@ -2110,26 +2103,35 @@ function ServerSettings() {
   const [editAuthToken, setEditAuthToken] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isToggling, setIsToggling] = useState(false);
   const { showSuccess, showError } = useToast();
 
-  const loadConfig = async () => {
-    setIsLoading(true);
+  const loadConfig = async (showLoading = true) => {
+    if (showLoading) setIsLoading(true);
     try {
       const cfg = await api.getServerConfig();
       setConfig(cfg);
-      setEditHost(cfg.host);
-      setEditPort(String(cfg.port));
-      setEditAuthToken('');
+      if (showLoading) {
+        setEditHost(cfg.host);
+        setEditPort(String(cfg.port));
+        setEditAuthToken('');
+      }
     } catch (error) {
       console.error('加载 Server 配置失败:', error);
-      showError('加载失败', '无法加载 Server 配置');
+      if (showLoading) {
+        showError('加载失败', '无法加载 Server 配置');
+      }
     } finally {
-      setIsLoading(false);
+      if (showLoading) setIsLoading(false);
     }
   };
 
   useEffect(() => {
     loadConfig();
+    const timer = window.setInterval(() => {
+      loadConfig(false);
+    }, 3000);
+    return () => window.clearInterval(timer);
   }, []);
 
   const handleSave = async () => {
@@ -2152,6 +2154,41 @@ function ServerSettings() {
     }
   };
 
+  const saveCurrentConfig = async () => {
+    const port = parseInt(editPort, 10);
+    if (isNaN(port) || port < 1 || port > 65535) {
+      showError('端口无效', '请输入 1-65535 之间的端口号');
+      return false;
+    }
+    const authToken = editAuthToken.trim() || undefined;
+    await api.setServerConfig(editHost, port, authToken);
+    return true;
+  };
+
+  const handleToggleServer = async (enabled: boolean) => {
+    setIsToggling(true);
+    try {
+      if (enabled) {
+        const saved = await saveCurrentConfig();
+        if (!saved) return;
+        const message = await api.startServer();
+        showSuccess('启动成功', message);
+      } else {
+        const message = await api.stopServer();
+        showSuccess('已停止', message);
+      }
+      await loadConfig();
+    } catch (error) {
+      console.error('切换 Server 状态失败:', error);
+      showError(
+        enabled ? '启动失败' : '停止失败',
+        error instanceof Error ? error.message : String(error || '无法切换 Server 运行状态')
+      );
+    } finally {
+      setIsToggling(false);
+    }
+  };
+
   return (
     <div className="space-y-4 p-4">
       {isLoading ? (
@@ -2162,11 +2199,21 @@ function ServerSettings() {
       ) : (
         <>
           {/* 运行状态 */}
-          <div className="flex items-center gap-2 mb-4">
-            <span className="text-sm text-muted-foreground">状态：</span>
-            <Badge variant={config.running ? 'default' : 'secondary'}>
-              {config.running ? '运行中' : '未运行'}
-            </Badge>
+          <div className="flex items-center justify-between gap-3 mb-4">
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-muted-foreground">状态：</span>
+              <Badge variant={config.running ? 'default' : 'secondary'}>
+                {config.running ? '运行中' : '未运行'}
+              </Badge>
+            </div>
+            <div className="flex items-center gap-2">
+              {isToggling && <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />}
+              <Switch
+                checked={config.running}
+                disabled={isSaving || isToggling}
+                onCheckedChange={handleToggleServer}
+              />
+            </div>
           </div>
 
           <div className="space-y-2">
@@ -2176,7 +2223,7 @@ function ServerSettings() {
               value={editHost}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditHost(e.target.value)}
               placeholder="127.0.0.1"
-              disabled={isSaving}
+              disabled={isSaving || isToggling || config.running}
             />
           </div>
 
@@ -2188,7 +2235,7 @@ function ServerSettings() {
               value={editPort}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditPort(e.target.value)}
               placeholder="8080"
-              disabled={isSaving}
+              disabled={isSaving || isToggling || config.running}
             />
           </div>
 
@@ -2200,7 +2247,7 @@ function ServerSettings() {
               value={editAuthToken}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditAuthToken(e.target.value)}
               placeholder={config.auth_token_masked || '留空表示不鉴权'}
-              disabled={isSaving}
+              disabled={isSaving || isToggling || config.running}
             />
             <p className="text-xs text-muted-foreground">
               当前: {config.auth_token_masked}（留空则保持不变）
@@ -2208,7 +2255,7 @@ function ServerSettings() {
           </div>
 
           <div className="flex justify-end gap-2 pt-4">
-            <Button onClick={handleSave} disabled={isSaving}>
+            <Button onClick={handleSave} disabled={isSaving || isToggling || config.running}>
               {isSaving ? (
                 <>
                   <Loader2 className="w-4 h-4 mr-2 animate-spin" />
@@ -2411,83 +2458,6 @@ function AppUpdateSettings() {
           </div>
         </CardContent>
       </Card>
-    </div>
-  );
-}
-
-// ============================================================================
-// Connector 设置组件
-// ============================================================================
-
-function ConnectorSettings() {
-  const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const { showSuccess, showError } = useToast();
-
-  const loadConnectors = async () => {
-    setIsLoading(true);
-    try {
-      const data = await api.getConnectors();
-      setConnectors(data);
-    } catch (error) {
-      console.error('加载 Connector 列表失败:', error);
-      showError('加载失败', '无法加载 Connector 列表');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadConnectors();
-  }, []);
-
-  const handleToggleEnabled = async (name: string, enabled: boolean) => {
-    try {
-      await api.setConnectorEnabled(name, enabled);
-      showSuccess('状态更新', `Connector "${name}" 已${enabled ? '启用' : '禁用'}`);
-      loadConnectors();
-    } catch (error) {
-      console.error('切换 Connector 状态失败:', error);
-      showError('操作失败', '无法更新 Connector 状态');
-    }
-  };
-
-  return (
-    <div className="p-4">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-lg font-medium">Connectors</h3>
-      </div>
-
-      {isLoading ? (
-        <div className="text-center text-muted-foreground py-8">加载中...</div>
-      ) : connectors.length === 0 ? (
-        <div className="text-center text-muted-foreground py-8">
-          <p>暂无已配置的 Connector</p>
-          <p className="text-xs mt-2">请在 ~/.tiangong/connectors.json 中添加配置</p>
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {connectors.map((connector) => (
-            <Card key={connector.name}>
-              <CardContent className="p-4 flex items-center justify-between">
-                <div className="flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium">{connector.name}</span>
-                    <Badge variant="outline">{connector.connector_type}</Badge>
-                    <Badge variant={connector.enabled ? 'default' : 'secondary'}>
-                      {connector.enabled ? '已启用' : '已禁用'}
-                    </Badge>
-                  </div>
-                </div>
-                <Switch
-                  checked={connector.enabled}
-                  onCheckedChange={(checked) => handleToggleEnabled(connector.name, checked)}
-                />
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
