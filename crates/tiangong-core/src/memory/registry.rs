@@ -509,7 +509,7 @@ mod tests {
     fn memory_config_summary_tracks_memory_relevant_fields() {
         let _lock = memory_registry_test_lock();
         let _env = MemoryRegistryEnvGuard::enter();
-        write_memory_test_config(768, tiangong_memory::MemoryVectorMode::Embedded);
+        write_memory_test_config(768, tiangong_memory::MemoryVectorMode::EmbeddedQdrantEdge);
         let config = CoreConfig::default();
         let summary = memory_config_summary(&config);
 
@@ -523,9 +523,9 @@ mod tests {
         let rerank = summary.rerank.as_ref().expect("应包含 rerank 摘要");
         assert_eq!(rerank.base_url, "http://rerank.example");
         assert_eq!(rerank.model, "rerank-model");
-        assert_eq!(summary.vector_mode, "Embedded");
+        assert_eq!(summary.vector_mode, "EmbeddedQdrantEdge");
 
-        write_memory_test_config(1024, tiangong_memory::MemoryVectorMode::Embedded);
+        write_memory_test_config(1024, tiangong_memory::MemoryVectorMode::EmbeddedQdrantEdge);
         let changed_dimension = memory_config_summary(&CoreConfig::default());
         assert!(memory_config_changed(&summary, &changed_dimension));
 
@@ -533,7 +533,7 @@ mod tests {
         let changed_vector_mode = memory_config_summary(&CoreConfig::default());
         assert!(memory_config_changed(&summary, &changed_vector_mode));
 
-        write_memory_test_config(768, tiangong_memory::MemoryVectorMode::Embedded);
+        write_memory_test_config(768, tiangong_memory::MemoryVectorMode::EmbeddedQdrantEdge);
         let same_memory_config = memory_config_summary(&CoreConfig::default());
         assert!(!memory_config_changed(&summary, &same_memory_config));
         assert!(memory_config_can_update_in_place(
@@ -636,7 +636,7 @@ mod tests {
         )
         .expect("初始 MemoryHandle 应启动成功");
 
-        write_memory_test_config(1024, tiangong_memory::MemoryVectorMode::Embedded);
+        write_memory_test_config(1024, tiangong_memory::MemoryVectorMode::EmbeddedQdrantEdge);
         let updated = CoreConfig::default();
         let expected_summary = memory_config_summary(&updated);
         let updated_handle = get_or_init_memory(
@@ -682,7 +682,7 @@ mod tests {
         )
         .expect("初始 MemoryHandle 应启动成功");
 
-        write_memory_test_config(2048, tiangong_memory::MemoryVectorMode::Embedded);
+        write_memory_test_config(2048, tiangong_memory::MemoryVectorMode::EmbeddedQdrantEdge);
         provider.update(|config| {
             config.context_limit += 1;
         });
