@@ -6,7 +6,6 @@ license = "Apache-2.0"
 
 [features]
 default = []
-embedded-qdrant-edge = ["dep:qdrant-edge"]
 
 [dependencies]
 tokio = { workspace = true, features = ["sync", "time", "fs", "rt", "net", "io-util", "macros"] }
@@ -23,8 +22,11 @@ tantivy = { workspace = true }
 libc = { workspace = true }
 tiangong-llm = { workspace = true }
 qdrant-client = { workspace = true }
-qdrant-edge = { workspace = true, optional = true }
+lancedb = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
 async-trait = { workspace = true }
+futures-util = { workspace = true }
 
 [dev-dependencies]
 serial_test = { workspace = true }

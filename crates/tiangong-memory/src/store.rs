@@ -15,12 +15,12 @@ use tiangong_llm::{
 
 use crate::command::InjectionLevel;
 use crate::db::MemoryDb;
+use crate::db::migration;
 use crate::injection;
 use crate::options::MemoryVectorMode;
 use crate::recall::RecallEngine;
 use crate::search::TantivyIndex;
-#[cfg(feature = "embedded-qdrant-edge")]
-use crate::search::edge_search::QdrantEdgeIndex;
+use crate::search::lancedb_search::LanceDbIndex;
 use crate::search::qdrant_search::QdrantIndex;
 use crate::search::vector::VectorIndex;
 use crate::types::{
@@ -77,47 +77,6 @@ impl MemoryStore {
 
     pub(crate) fn enable_rerank_only(&mut self, rerank: Arc<dyn RerankProvider>) {
         self.recall_engine = RecallEngine::rerank_only(rerank);
-    }
-
-    /// 将 SQLite memory_vectors 表中的向量迁移到 Qdrant Edge 索引。
-    #[cfg(feature = "embedded-qdrant-edge")]
-    async fn migrate_vectors_to_qdrant_edge(&self, index: &QdrantEdgeIndex, dimension: usize) {
-        let points = match self.db.list_vectors(dimension) {
-            Ok(p) => p,
-            Err(err) => {
-                tracing::warn!("Memory 向量迁移: 读取 SQLite 向量失败，跳过: {err}");
-                return;
-            }
-        };
-
-        if points.is_empty() {
-            return;
-        }
-
-        tracing::info!("Memory 开始迁移 {} 条向量到 Qdrant Edge...", points.len());
-
-        let mut migrated = 0usize;
-        let mut failed = 0usize;
-        for point in &points {
-            match index.upsert(point.clone()).await {
-                Ok(()) => migrated += 1,
-                Err(err) => {
-                    tracing::warn!(
-                        node_id = %point.node_id,
-                        "Memory 向量迁移失败（跳过）: {err}"
-                    );
-                    failed += 1;
-                }
-            }
-        }
-
-        if migrated > 0 {
-            if let Err(err) = self.db.clear_vectors() {
-                tracing::warn!("Memory 向量迁移: 清空 SQLite 向量表失败: {err}");
-            } else {
-                tracing::info!("Memory 向量迁移完成: {migrated} 条成功, {failed} 条失败");
-            }
-        }
     }
 
     /// 重新配置召回增强层。
@@ -210,18 +169,16 @@ impl MemoryStore {
         }
 
         let (vector_index, backend): (Box<dyn VectorIndex>, &str) = match vector_mode {
-            #[cfg(feature = "embedded-qdrant-edge")]
-            MemoryVectorMode::EmbeddedQdrantEdge => {
+            MemoryVectorMode::EmbeddedLanceDb => {
                 let base = memory_index_base_dir(self.workspace_id.as_deref());
-                let needs_migration = self.db.count_vectors().unwrap_or(0) > 0
-                    && !base.join("qdrant_edge").join("segments").exists();
-                match QdrantEdgeIndex::open(&base, embedding.dimension) {
+                let needs_migration = migration::needs_vector_migration(&self.db, &base);
+                migration::cleanup_legacy_qdrant_edge(&base);
+                match LanceDbIndex::open(&base, embedding.dimension).await {
                     Ok(index) => {
                         if needs_migration {
-                            self.migrate_vectors_to_qdrant_edge(&index, embedding.dimension)
-                                .await;
+                            migration::migrate_vectors(&self.db, &index, embedding.dimension).await;
                         }
-                        (Box::new(index), "embedded_qdrant_edge")
+                        (Box::new(index), "embedded_lancedb")
                     }
                     Err(err) => {
                         if let Some(rerank_provider) = rerank_provider {
@@ -229,30 +186,16 @@ impl MemoryStore {
                             self.enable_rerank_only(rerank_provider);
                             tracing::warn!(
                                 model = %model,
-                                "Memory Qdrant Edge 索引初始化失败，仅启用 rerank: {err}"
+                                "Memory LanceDB 索引初始化失败，仅启用 rerank: {err}"
                             );
                         } else {
                             tracing::warn!(
-                                "Memory Qdrant Edge 索引初始化失败，使用 BM25-only 召回: {err}"
+                                "Memory LanceDB 索引初始化失败，使用 BM25-only 召回: {err}"
                             );
                         }
                         return;
                     }
                 }
-            }
-            #[cfg(not(feature = "embedded-qdrant-edge"))]
-            MemoryVectorMode::EmbeddedQdrantEdge => {
-                if let Some(rerank_provider) = rerank_provider {
-                    let model = rerank_provider.model().to_string();
-                    self.enable_rerank_only(rerank_provider);
-                    tracing::warn!(
-                        model = %model,
-                        "Memory Qdrant Edge 功能未启用，仅启用 rerank"
-                    );
-                } else {
-                    tracing::warn!("Memory Qdrant Edge 功能未启用，使用 BM25-only 召回");
-                }
-                return;
             }
             MemoryVectorMode::ExternalQdrant => {
                 match QdrantIndex::connect(embedding.dimension).await {
@@ -943,11 +886,7 @@ fn memory_base_dir() -> PathBuf {
 }
 
 fn default_vector_mode() -> MemoryVectorMode {
-    if cfg!(feature = "embedded-qdrant-edge") {
-        MemoryVectorMode::EmbeddedQdrantEdge
-    } else {
-        MemoryVectorMode::Disabled
-    }
+    MemoryVectorMode::EmbeddedLanceDb
 }
 
 fn memory_index_base_dir(workspace_id: Option<&str>) -> PathBuf {

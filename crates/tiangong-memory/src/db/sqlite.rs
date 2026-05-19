@@ -6,8 +6,6 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-#[cfg(feature = "embedded-qdrant-edge")]
-use crate::types::VectorPoint;
 use crate::types::{
     Decision, Entity, EntityType, Episode, ExpandedMemory, MemoryCognitiveType, MemoryKind,
     MemoryNode, MemoryRelation, MemoryRelationDraft, MemoryRelationKind, MemoryScopeType,
@@ -844,33 +842,9 @@ impl MemoryDb {
         Ok(dedupe_strings(related))
     }
 
-    /// 加载指定维度的全部向量点（迁移用途）。
-    #[cfg(feature = "embedded-qdrant-edge")]
-    pub(crate) fn list_vectors(&self, dimension: usize) -> Result<Vec<VectorPoint>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT node_id, title, summary, kind, importance, vector
-             FROM memory_vectors
-             WHERE dimension = ?1",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![dimension as i64], |row| {
-            let kind: String = row.get(3)?;
-            let vector_json: String = row.get(5)?;
-            let vector: Vec<f32> = serde_json::from_str(&vector_json).unwrap_or_default();
-            Ok(VectorPoint {
-                node_id: row.get(0)?,
-                title: row.get(1)?,
-                summary: row.get(2)?,
-                kind: str_to_memory_kind(&kind),
-                importance: row.get(4)?,
-                vector,
-            })
-        })?;
-
-        let mut points = Vec::new();
-        for row in rows {
-            points.push(row.with_context(|| "读取 memory_vectors 行失败")?);
-        }
-        Ok(points)
+    /// 暴露底层连接，仅供 `db::migration` 模块访问。
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.conn
     }
 
     /// 按节点 ID 加载完整内容，供 LoadDepth2 定向展开使用。
@@ -1040,24 +1014,6 @@ impl MemoryDb {
             });
         }
         Ok(nodes)
-    }
-
-    /// 清空 memory_vectors 表（迁移完成后调用）。
-    #[cfg(feature = "embedded-qdrant-edge")]
-    pub(crate) fn clear_vectors(&self) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM memory_vectors", [])
-            .with_context(|| "清空 memory_vectors 表失败")?;
-        Ok(())
-    }
-
-    /// 统计 memory_vectors 表中的记录数。
-    #[cfg(feature = "embedded-qdrant-edge")]
-    pub(crate) fn count_vectors(&self) -> Result<usize> {
-        let count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM memory_vectors", [], |row| row.get(0))?;
-        Ok(count as usize)
     }
 
     fn load_expanded_memory(&self, node_id: &str) -> Result<Option<ExpandedMemory>> {
