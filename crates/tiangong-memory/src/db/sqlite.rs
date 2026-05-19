@@ -185,21 +185,6 @@ impl MemoryDb {
         Ok(())
     }
 
-    /// 根据 id 查询 Entity
-    #[allow(dead_code)]
-    pub(crate) fn get_entity(&self, entity_id: &str) -> Result<Option<Entity>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT full_content FROM entities WHERE id = ?1")?;
-        let mut rows = stmt.query(rusqlite::params![entity_id])?;
-        let Some(row) = rows.next()? else {
-            return Ok(None);
-        };
-        let full_content: String = row.get(0)?;
-        let entity = serde_json::from_str(&full_content).with_context(|| "解析 Entity 失败")?;
-        Ok(Some(entity))
-    }
-
     /// 列出工作区下的 Entity
     #[allow(dead_code)]
     pub(crate) fn list_entities(&self, workspace_id: Option<&str>) -> Result<Vec<Entity>> {
@@ -238,24 +223,6 @@ impl MemoryDb {
             }
         }
         Ok(entities)
-    }
-
-    /// 删除 Entity
-    #[allow(dead_code)]
-    pub(crate) fn delete_entity(&self, entity_id: &str) -> Result<()> {
-        self.conn
-            .execute(
-                "DELETE FROM entities WHERE id = ?1",
-                rusqlite::params![entity_id],
-            )
-            .with_context(|| "删除 entities 记录失败")?;
-        self.conn
-            .execute(
-                "DELETE FROM memory_nodes WHERE id = ?1",
-                rusqlite::params![entity_id],
-            )
-            .with_context(|| "删除 entity 对应 memory_nodes 记录失败")?;
-        Ok(())
     }
 
     /// 插入或更新 Decision 到 memory_nodes 和 decisions 表
@@ -306,21 +273,6 @@ impl MemoryDb {
         Ok(())
     }
 
-    /// 根据 id 查询 Decision
-    #[allow(dead_code)]
-    pub(crate) fn get_decision(&self, decision_id: &str) -> Result<Option<Decision>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT full_content FROM decisions WHERE id = ?1")?;
-        let mut rows = stmt.query(rusqlite::params![decision_id])?;
-        let Some(row) = rows.next()? else {
-            return Ok(None);
-        };
-        let full_content: String = row.get(0)?;
-        let decision = serde_json::from_str(&full_content).with_context(|| "解析 Decision 失败")?;
-        Ok(Some(decision))
-    }
-
     /// 列出工作区下的 Decision
     #[allow(dead_code)]
     pub(crate) fn list_decisions(&self, workspace_id: Option<&str>) -> Result<Vec<Decision>> {
@@ -359,24 +311,6 @@ impl MemoryDb {
             }
         }
         Ok(decisions)
-    }
-
-    /// 删除 Decision
-    #[allow(dead_code)]
-    pub(crate) fn delete_decision(&self, decision_id: &str) -> Result<()> {
-        self.conn
-            .execute(
-                "DELETE FROM decisions WHERE id = ?1",
-                rusqlite::params![decision_id],
-            )
-            .with_context(|| "删除 decisions 记录失败")?;
-        self.conn
-            .execute(
-                "DELETE FROM memory_nodes WHERE id = ?1",
-                rusqlite::params![decision_id],
-            )
-            .with_context(|| "删除 decision 对应 memory_nodes 记录失败")?;
-        Ok(())
     }
 
     /// 查询最近的 Episode 摘要（用于 MesoRumination）
@@ -1368,7 +1302,7 @@ pub(crate) mod test_helpers {
 #[cfg(test)]
 mod tests {
     use super::test_helpers::open_in_memory;
-    use crate::types::{Decision, Entity, EntityType, Episode, EpisodeOutcome};
+    use crate::types::{Episode, EpisodeOutcome};
 
     fn make_episode(session_id: &str) -> Episode {
         Episode::new(
@@ -1380,34 +1314,6 @@ mod tests {
             vec!["tool_call_1".to_string()],
             0.7,
         )
-    }
-
-    fn make_entity(id: &str) -> Entity {
-        let now = chrono::Local::now().naive_local().to_string();
-        Entity {
-            id: id.to_string(),
-            name: "memory-system".to_string(),
-            entity_type: EntityType::Project,
-            description: "memory system project".to_string(),
-            file_path: Some("/tmp/memory-system".to_string()),
-            related_episodes: vec!["ep-1".to_string(), "ep-2".to_string()],
-            importance: 0.8,
-            created_at: now.clone(),
-            updated_at: now,
-        }
-    }
-
-    fn make_decision(id: &str) -> Decision {
-        Decision {
-            id: id.to_string(),
-            title: "use tcp ipc".to_string(),
-            context: "windows does not support unix socket path".to_string(),
-            alternatives: vec!["uds".to_string(), "named pipe".to_string()],
-            chosen: "tcp loopback".to_string(),
-            reasons: vec!["cross platform".to_string(), "easy to test".to_string()],
-            episode_ids: vec!["ep-10".to_string()],
-            created_at: chrono::Local::now().naive_local().to_string(),
-        }
     }
 
     #[test]
@@ -1511,45 +1417,6 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(ids.contains(&id_a1.as_str()));
         assert!(ids.contains(&id_a2.as_str()));
-    }
-
-    #[test]
-    fn entity_crud_roundtrip_works() {
-        let db = open_in_memory().unwrap();
-        let entity = make_entity("entity-1");
-
-        db.upsert_entity(&entity, Some("ws-entity")).unwrap();
-
-        let loaded = db.get_entity("entity-1").unwrap().expect("entity 应存在");
-        assert_eq!(loaded.name, entity.name);
-
-        let listed = db.list_entities(Some("ws-entity")).unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].id, entity.id);
-
-        db.delete_entity("entity-1").unwrap();
-        assert!(db.get_entity("entity-1").unwrap().is_none());
-    }
-
-    #[test]
-    fn decision_crud_roundtrip_works() {
-        let db = open_in_memory().unwrap();
-        let decision = make_decision("decision-1");
-
-        db.upsert_decision(&decision, Some("ws-decision")).unwrap();
-
-        let loaded = db
-            .get_decision("decision-1")
-            .unwrap()
-            .expect("decision 应存在");
-        assert_eq!(loaded.title, decision.title);
-
-        let listed = db.list_decisions(Some("ws-decision")).unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].id, decision.id);
-
-        db.delete_decision("decision-1").unwrap();
-        assert!(db.get_decision("decision-1").unwrap().is_none());
     }
 
     #[test]
