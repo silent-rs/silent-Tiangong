@@ -6,21 +6,7 @@ use rusqlite::Connection;
 /// 初始化数据库 Schema（幂等，IF NOT EXISTS）
 pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA_SQL)?;
-    migrate_existing_schema(conn)?;
-    conn.execute_batch(POST_MIGRATION_SQL)?;
-    Ok(())
-}
-
-fn migrate_existing_schema(conn: &Connection) -> Result<()> {
-    if let Err(err) = conn.execute(
-        "ALTER TABLE memory_nodes ADD COLUMN memory_type TEXT NOT NULL DEFAULT 'factual'",
-        [],
-    ) {
-        let message = err.to_string();
-        if !message.contains("duplicate column name") {
-            return Err(err.into());
-        }
-    }
+    super::migration::migrate_schema_columns(conn)?;
     Ok(())
 }
 
@@ -97,6 +83,7 @@ CREATE TABLE IF NOT EXISTS evidence (
     byte_size     INTEGER NOT NULL DEFAULT 0
 );
 
+-- ⚠️ 迁移过渡表，所有用户完成迁移后可删除
 CREATE TABLE IF NOT EXISTS memory_vectors (
     node_id    TEXT PRIMARY KEY REFERENCES memory_nodes(id),
     title      TEXT NOT NULL,
@@ -109,8 +96,4 @@ CREATE TABLE IF NOT EXISTS memory_vectors (
 );
 
 CREATE INDEX IF NOT EXISTS idx_vectors_dimension ON memory_vectors(dimension);
-"#;
-
-const POST_MIGRATION_SQL: &str = r#"
-CREATE INDEX IF NOT EXISTS idx_nodes_memory_type ON memory_nodes(memory_type);
 "#;

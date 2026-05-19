@@ -3,9 +3,8 @@
 //! Phase B: Tantivy BM25 全文检索
 //! Phase C: Qdrant 语义向量检索 + 双引擎融合重排
 
-#[cfg(feature = "embedded-qdrant-edge")]
-pub(crate) mod edge_search;
 pub(crate) mod embedding;
+pub(crate) mod lancedb_search;
 pub(crate) mod qdrant_search;
 pub(crate) mod reranker;
 pub(crate) mod tantivy_search;

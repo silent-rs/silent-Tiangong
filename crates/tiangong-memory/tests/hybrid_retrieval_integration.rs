@@ -268,7 +268,7 @@ async fn embedded_hybrid_retrieval_uses_deterministic_embedding_without_external
     let handle = start_with_options(
         MemoryOptions::new(Some(workspace_id.clone()))
             .with_embedding(embedding_server.config())
-            .with_vector_mode(MemoryVectorMode::EmbeddedQdrantEdge),
+            .with_vector_mode(MemoryVectorMode::EmbeddedLanceDb),
     )
     .expect("启动 memory 失败");
 
@@ -338,7 +338,7 @@ async fn archived_node_is_removed_from_embedded_vector_index_and_can_be_restored
     let handle = start_with_options(
         MemoryOptions::new(Some(workspace_id.clone()))
             .with_embedding(embedding_server.config())
-            .with_vector_mode(MemoryVectorMode::EmbeddedQdrantEdge),
+            .with_vector_mode(MemoryVectorMode::EmbeddedLanceDb),
     )
     .expect("启动 memory 失败");
 
@@ -404,7 +404,7 @@ async fn benchmark_recall(hybrid: bool, embedding: Option<EmbeddingEndpointConfi
     if hybrid {
         options = options
             .with_embedding(embedding.expect("hybrid benchmark 需要 embedding"))
-            .with_vector_mode(MemoryVectorMode::EmbeddedQdrantEdge);
+            .with_vector_mode(MemoryVectorMode::EmbeddedLanceDb);
     }
     let handle = start_with_options(options).expect("启动 benchmark memory 失败");
     let cases = [
@@ -497,7 +497,7 @@ async fn embedded_hybrid_retrieval_loads_configured_embedding_and_recalls_semant
     let handle = start_with_options(
         MemoryOptions::new(Some(workspace_id.clone()))
             .with_embedding(embedding)
-            .with_vector_mode(MemoryVectorMode::EmbeddedQdrantEdge),
+            .with_vector_mode(MemoryVectorMode::EmbeddedLanceDb),
     )
     .expect("启动 memory 失败");
 

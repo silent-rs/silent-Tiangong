@@ -28,6 +28,8 @@ tiangong-types = { path = "crates/tiangong-types" }
 
 anyhow = "1"
 arc-swap = "1"
+arrow-array = "58"
+arrow-schema = "58"
 async-channel = "2"
 async-lock = "3"
 async-openai = { git = "https://github.com/silent-rs/async-openai", branch = "main", package = "async-openai" }
@@ -44,7 +46,7 @@ hex = "0.4"
 http = "1"
 libc = "0.2"
 qdrant-client = "1"
-qdrant-edge = "0.6"
+lancedb = "0.29"
 ratatui = "0.28"
 reqwest = { version = "0.12", default-features = false }
 rmcp = { version = "0.17.0", default-features = false }
