@@ -122,7 +122,6 @@ impl TantivyIndex {
         }
 
         self.writer.add_document(doc)?;
-        self.writer.commit()?;
 
         Ok(())
     }
@@ -193,6 +192,11 @@ impl TantivyIndex {
     pub(crate) fn delete_node(&mut self, node_id: &str) -> Result<()> {
         let term = Term::from_field_text(self.fields.id, node_id);
         self.writer.delete_term(term);
+        Ok(())
+    }
+
+    /// 将缓冲区的写入操作持久化到磁盘
+    pub(crate) fn commit(&mut self) -> Result<()> {
         self.writer.commit()?;
         Ok(())
     }

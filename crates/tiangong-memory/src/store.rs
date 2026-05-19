@@ -270,6 +270,11 @@ impl MemoryStore {
         if let Err(err) = self.recall_engine.upsert_node(&node).await {
             tracing::warn!("Memory 向量写入失败（非致命）: {err}");
         }
+        if let Some(ref mut tantivy) = self.tantivy
+            && let Err(e) = tantivy.commit()
+        {
+            tracing::warn!("Tantivy commit 失败（非致命）: {e}");
+        }
         Ok(())
     }
 
@@ -316,6 +321,11 @@ impl MemoryStore {
             && let Err(e) = tantivy.index_node(&node, summary)
         {
             tracing::warn!("Tantivy Episode 更新索引失败（非致命）: {}", e);
+        }
+        if let Some(ref mut tantivy) = self.tantivy
+            && let Err(e) = tantivy.commit()
+        {
+            tracing::warn!("Tantivy commit 失败（非致命）: {e}");
         }
         Ok(())
     }
@@ -453,6 +463,11 @@ impl MemoryStore {
         if let Err(err) = self.recall_engine.upsert_node(&node).await {
             tracing::warn!("Memory 手动记忆向量写入失败（非致命）: {err}");
         }
+        if let Some(ref mut tantivy) = self.tantivy
+            && let Err(e) = tantivy.commit()
+        {
+            tracing::warn!("Tantivy commit 失败（非致命）: {e}");
+        }
         Ok(node)
     }
 
@@ -485,6 +500,11 @@ impl MemoryStore {
         }
         if let Err(err) = self.recall_engine.upsert_node(&node).await {
             tracing::warn!("Memory 手动记忆向量更新失败（非致命）: {err}");
+        }
+        if let Some(ref mut tantivy) = self.tantivy
+            && let Err(e) = tantivy.commit()
+        {
+            tracing::warn!("Tantivy commit 失败（非致命）: {e}");
         }
         Ok(node)
     }
@@ -596,6 +616,11 @@ impl MemoryStore {
         {
             tracing::warn!("Tantivy Entity 索引写入失败（非致命）: {}", e);
         }
+        if let Some(ref mut tantivy) = self.tantivy
+            && let Err(e) = tantivy.commit()
+        {
+            tracing::warn!("Tantivy commit 失败（非致命）: {e}");
+        }
         Ok(())
     }
 
@@ -611,6 +636,11 @@ impl MemoryStore {
             && let Err(e) = tantivy.index_node(&node, &decision.chosen)
         {
             tracing::warn!("Tantivy Decision 索引写入失败（非致命）: {}", e);
+        }
+        if let Some(ref mut tantivy) = self.tantivy
+            && let Err(e) = tantivy.commit()
+        {
+            tracing::warn!("Tantivy commit 失败（非致命）: {e}");
         }
         Ok(())
     }
@@ -657,6 +687,11 @@ impl MemoryStore {
         if let Err(e) = self.recall_engine.delete_node(node_id).await {
             tracing::warn!("从语义向量索引删除节点 {} 失败（非致命）: {}", node_id, e);
         }
+        if let Some(ref mut tantivy) = self.tantivy
+            && let Err(e) = tantivy.commit()
+        {
+            tracing::warn!("Tantivy commit 失败（非致命）: {e}");
+        }
     }
 
     /// 设置节点状态，供 GUI 手动管理使用。
@@ -676,6 +711,11 @@ impl MemoryStore {
                     && let Err(e) = tantivy.index_node(&node, "")
                 {
                     tracing::warn!("恢复 Tantivy 节点 {} 失败（非致命）: {}", node_id, e);
+                }
+                if let Some(ref mut tantivy) = self.tantivy
+                    && let Err(e) = tantivy.commit()
+                {
+                    tracing::warn!("Tantivy commit 失败（非致命）: {e}");
                 }
                 if let Some(node) = self.db.get_memory_node(node_id)?
                     && let Err(e) = self.recall_engine.upsert_node(&node).await
