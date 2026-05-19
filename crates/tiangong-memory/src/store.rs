@@ -19,6 +19,7 @@ use crate::injection;
 use crate::options::MemoryVectorMode;
 use crate::recall::RecallEngine;
 use crate::search::TantivyIndex;
+use crate::search::edge_search::QdrantEdgeIndex;
 use crate::search::qdrant_search::QdrantIndex;
 use crate::search::vector::{EmbeddedFlatVectorIndex, VectorIndex};
 use crate::types::{
@@ -152,7 +153,7 @@ impl MemoryStore {
         };
 
         let vector_mode = match vector_mode {
-            MemoryVectorMode::Auto => MemoryVectorMode::Embedded,
+            MemoryVectorMode::Auto => MemoryVectorMode::EmbeddedQdrantEdge,
             mode => mode,
         };
         if vector_mode == MemoryVectorMode::Disabled {
@@ -181,6 +182,27 @@ impl MemoryStore {
                         } else {
                             tracing::warn!(
                                 "Memory 内置向量索引初始化失败，使用 BM25-only 召回: {err}"
+                            );
+                        }
+                        return;
+                    }
+                }
+            }
+            MemoryVectorMode::EmbeddedQdrantEdge => {
+                let base = memory_index_base_dir(self.workspace_id.as_deref());
+                match QdrantEdgeIndex::open(&base, embedding.dimension) {
+                    Ok(index) => Box::new(index),
+                    Err(err) => {
+                        if let Some(rerank_provider) = rerank_provider {
+                            let model = rerank_provider.model().to_string();
+                            self.enable_rerank_only(rerank_provider);
+                            tracing::warn!(
+                                model = %model,
+                                "Memory Qdrant Edge 索引初始化失败，仅启用 rerank: {err}"
+                            );
+                        } else {
+                            tracing::warn!(
+                                "Memory Qdrant Edge 索引初始化失败，使用 BM25-only 召回: {err}"
                             );
                         }
                         return;
@@ -221,6 +243,7 @@ impl MemoryStore {
 
         let backend = match vector_mode {
             MemoryVectorMode::Embedded => "embedded_flat",
+            MemoryVectorMode::EmbeddedQdrantEdge => "embedded_qdrant_edge",
             MemoryVectorMode::ExternalQdrant => "external_qdrant",
             MemoryVectorMode::Auto | MemoryVectorMode::Disabled => unreachable!(),
         };
@@ -649,13 +672,6 @@ impl MemoryStore {
             && let Err(e) = tantivy.delete_node(node_id)
         {
             tracing::warn!("从 Tantivy 删除节点 {} 失败（非致命）: {}", node_id, e);
-        }
-        if let Err(e) = self.db.delete_vector(node_id) {
-            tracing::warn!(
-                "从 SQLite 向量索引删除节点 {} 失败（非致命）: {}",
-                node_id,
-                e
-            );
         }
         if let Err(e) = self.recall_engine.delete_node(node_id).await {
             tracing::warn!("从语义向量索引删除节点 {} 失败（非致命）: {}", node_id, e);

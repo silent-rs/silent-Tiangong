@@ -19,6 +19,7 @@ tantivy = "0.22"
 libc = "0.2"
 tiangong-llm = { path = "../tiangong-llm" }
 qdrant-client = "1"
+qdrant-edge = "0.6"
 async-trait = "0.1"
 
 [dev-dependencies]
