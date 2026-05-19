@@ -47,16 +47,12 @@ export function SettingsDialog() {
             {saveStatus === 'error' && '保存失败'}
           </span>
 
-          <Tabs defaultValue="workspace" className="flex-1 overflow-hidden flex">
+          <Tabs defaultValue="agent" className="flex-1 overflow-hidden flex">
             <aside className="w-60 shrink-0 border-r bg-muted/30 flex flex-col">
               <DialogHeader className="px-5 pb-5 pt-14 pr-10 mb-0 border-b">
                 <DialogTitle>设置</DialogTitle>
               </DialogHeader>
               <TabsList className="h-auto w-full flex-1 flex-col items-stretch justify-start rounded-none bg-transparent p-2">
-                <TabsTrigger value="workspace" className="w-full justify-start px-3 py-2">
-                  <FolderOpen className="w-4 h-4 mr-2" />
-                  工作区
-                </TabsTrigger>
                 <TabsTrigger value="agent" className="w-full justify-start px-3 py-2">
                   <ShieldCheck className="w-4 h-4 mr-2" />
                   Agent
@@ -99,10 +95,7 @@ export function SettingsDialog() {
             </aside>
 
             <div className="min-w-0 flex-1 overflow-hidden">
-              <TabsContent value="workspace" className="m-0 h-full overflow-y-auto">
-                <WorkspaceSettings />
-              </TabsContent>
-              <TabsContent value="agent" className="m-0 h-full overflow-y-auto">
+              <TabsContent value="agent" className="m-0 h-full overflow-hidden flex flex-col">
                 <AgentSettings onSaveStatusChange={setSaveStatus} />
               </TabsContent>
               <TabsContent value="llm" className="m-0 h-full overflow-y-auto">
@@ -131,19 +124,69 @@ export function SettingsDialog() {
   );
 }
 
-// ============================================================================
-// 工作区设置组件
-// ============================================================================
-
-function WorkspaceSettings() {
+function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: SaveStatus) => void }) {
+  const [defaultTrustMode, setDefaultTrustMode] = useState('full_trust');
+  const [customPrompt, setCustomPrompt] = useState('');
+  const [lastSavedPrompt, setLastSavedPrompt] = useState('');
+  const { showError } = useToast();
   const { workspaceDir, setWorkspaceDir } = useStore();
   const [editWorkspaceDir, setEditWorkspaceDir] = useState(workspaceDir);
-  const [isSaving, setIsSaving] = useState(false);
-  const { showSuccess, showError } = useToast();
+  const [isSavingWorkspace, setIsSavingWorkspace] = useState(false);
+  const { showSuccess } = useToast();
 
   useEffect(() => {
     setEditWorkspaceDir(workspaceDir);
   }, [workspaceDir]);
+
+  useEffect(() => {
+    Promise.all([
+      api.getDefaultTrustMode(),
+      api.getCustomSystemPrompt(),
+    ])
+      .then(([mode, prompt]) => {
+        setDefaultTrustMode(mode);
+        setCustomPrompt(prompt);
+        setLastSavedPrompt(prompt);
+      })
+      .catch((error) => {
+        console.error('加载 Agent 配置失败:', error);
+        showError('加载失败', '无法加载 Agent 配置');
+      });
+  }, [showError]);
+
+  const saveCustomPrompt = useCallback(async (prompt: string) => {
+    onSaveStatusChange('saving');
+    try {
+      await api.setCustomSystemPrompt(prompt);
+      setLastSavedPrompt(prompt);
+      onSaveStatusChange('saved');
+      setTimeout(() => onSaveStatusChange('idle'), 2000);
+    } catch (error) {
+      console.error('保存自定义 Prompt 失败:', error);
+      onSaveStatusChange('error');
+      showError('保存失败', '无法保存自定义 Prompt');
+    }
+  }, [onSaveStatusChange, showError]);
+
+  const handlePromptBlur = () => {
+    if (customPrompt !== lastSavedPrompt) {
+      saveCustomPrompt(customPrompt);
+    }
+  };
+
+  const handleTrustModeChange = async (mode: string) => {
+    setDefaultTrustMode(mode);
+    onSaveStatusChange('saving');
+    try {
+      await api.setDefaultTrustMode(mode);
+      onSaveStatusChange('saved');
+      setTimeout(() => onSaveStatusChange('idle'), 2000);
+    } catch (error) {
+      console.error('保存默认审核模式失败:', error);
+      onSaveStatusChange('error');
+      showError('保存失败', '无法保存默认审核模式');
+    }
+  };
 
   const handleSelectDirectory = async () => {
     try {
@@ -162,14 +205,13 @@ function WorkspaceSettings() {
     }
   };
 
-  const handleSave = async () => {
+  const handleSaveWorkspace = async () => {
     const nextWorkspaceDir = editWorkspaceDir.trim();
     if (!nextWorkspaceDir) {
       showError('路径为空', '请选择或输入工作区目录');
       return;
     }
-
-    setIsSaving(true);
+    setIsSavingWorkspace(true);
     try {
       await setWorkspaceDir(nextWorkspaceDir);
       showSuccess('工作区已更新', '未指定对话目录时会默认使用该工作区');
@@ -177,137 +219,73 @@ function WorkspaceSettings() {
       console.error('保存工作区失败:', error);
       showError('保存失败', error instanceof Error ? error.message : '无法保存工作区目录');
     } finally {
-      setIsSaving(false);
+      setIsSavingWorkspace(false);
     }
   };
 
   return (
-    <div className="space-y-4 p-4">
-      <div className="space-y-2">
-        <Label htmlFor="workspacePath">工作区目录</Label>
-        <div className="flex gap-2">
-          <Input
-            id="workspacePath"
-            value={editWorkspaceDir}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditWorkspaceDir(e.target.value)}
-            placeholder="选择或输入工作区目录"
-            disabled={isSaving}
-          />
-          <Button variant="outline" onClick={handleSelectDirectory} disabled={isSaving}>
-            <FolderOpen className="w-4 h-4 mr-2" />
-            选择
-          </Button>
+    <div className="p-4 flex flex-col flex-1 min-h-0 overflow-hidden">
+      {/* 固定区域：审核模式 + 工作区 */}
+      <div className="shrink-0 space-y-5 pb-4">
+        <div className="space-y-2">
+          <Label>新对话默认审核权限</Label>
+          <Select value={defaultTrustMode} onValueChange={handleTrustModeChange}>
+            <SelectTrigger className="w-56">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="full_trust">完全信任</SelectItem>
+              <SelectItem value="supervised">监督审核</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="workspacePath">工作区目录</Label>
+          <div className="flex gap-2">
+            <Input
+              id="workspacePath"
+              value={editWorkspaceDir}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditWorkspaceDir(e.target.value)}
+              placeholder="选择或输入工作区目录"
+              disabled={isSavingWorkspace}
+            />
+            <Button variant="outline" onClick={handleSelectDirectory} disabled={isSavingWorkspace}>
+              <FolderOpen className="w-4 h-4 mr-2" />
+              选择
+            </Button>
+          </div>
+          <div className="rounded-md border p-3 text-sm">
+            <div className="text-muted-foreground mb-1">当前工作区</div>
+            <div className="break-all font-mono text-xs">{workspaceDir || '未设置'}</div>
+          </div>
+          <div className="flex justify-end">
+            <Button onClick={handleSaveWorkspace} disabled={isSavingWorkspace || editWorkspaceDir.trim() === workspaceDir}>
+              {isSavingWorkspace ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  保存中...
+                </>
+              ) : (
+                <>
+                  <Save className="w-4 h-4 mr-2" />
+                  保存工作区
+                </>
+              )}
+            </Button>
+          </div>
         </div>
       </div>
 
-      <div className="rounded-md border p-3 text-sm">
-        <div className="text-muted-foreground mb-1">当前工作区</div>
-        <div className="break-all font-mono text-xs">{workspaceDir || '未设置'}</div>
-      </div>
-
-      <div className="flex justify-end">
-        <Button onClick={handleSave} disabled={isSaving || editWorkspaceDir.trim() === workspaceDir}>
-          {isSaving ? (
-            <>
-              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-              保存中...
-            </>
-          ) : (
-            <>
-              <Save className="w-4 h-4 mr-2" />
-              保存工作区
-            </>
-          )}
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: SaveStatus) => void }) {
-  const [defaultTrustMode, setDefaultTrustMode] = useState('full_trust');
-  const [customPrompt, setCustomPrompt] = useState('');
-  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const { showError } = useToast();
-
-  useEffect(() => {
-    Promise.all([
-      api.getDefaultTrustMode(),
-      api.getCustomSystemPrompt(),
-    ])
-      .then(([mode, prompt]) => {
-        setDefaultTrustMode(mode);
-        setCustomPrompt(prompt);
-      })
-      .catch((error) => {
-        console.error('加载 Agent 配置失败:', error);
-        showError('加载失败', '无法加载 Agent 配置');
-      });
-  }, [showError]);
-
-  const saveCustomPrompt = useCallback(async (prompt: string) => {
-    onSaveStatusChange('saving');
-    try {
-      await api.setCustomSystemPrompt(prompt);
-      onSaveStatusChange('saved');
-      setTimeout(() => onSaveStatusChange('idle'), 2000);
-    } catch (error) {
-      console.error('保存自定义 Prompt 失败:', error);
-      onSaveStatusChange('error');
-      showError('保存失败', '无法保存自定义 Prompt');
-    }
-  }, [onSaveStatusChange, showError]);
-
-  const handlePromptChange = (value: string) => {
-    setCustomPrompt(value);
-    if (saveTimerRef.current) {
-      clearTimeout(saveTimerRef.current);
-    }
-    saveTimerRef.current = setTimeout(() => saveCustomPrompt(value), 500);
-  };
-
-  const handleTrustModeChange = async (mode: string) => {
-    setDefaultTrustMode(mode);
-    onSaveStatusChange('saving');
-    try {
-      await api.setDefaultTrustMode(mode);
-      onSaveStatusChange('saved');
-      setTimeout(() => onSaveStatusChange('idle'), 2000);
-    } catch (error) {
-      console.error('保存默认审核模式失败:', error);
-      onSaveStatusChange('error');
-      showError('保存失败', '无法保存默认审核模式');
-    }
-  };
-
-  useEffect(() => {
-    return () => {
-      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    };
-  }, []);
-
-  return (
-    <div className="p-4 space-y-5">
-      <div className="space-y-2">
-        <Label>新对话默认审核权限</Label>
-        <Select value={defaultTrustMode} onValueChange={handleTrustModeChange}>
-          <SelectTrigger className="w-56">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="full_trust">完全信任</SelectItem>
-            <SelectItem value="supervised">监督审核</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-
-      <div className="space-y-2">
-        <Label htmlFor="customSystemPrompt">用户自定义特色 Prompt</Label>
+      {/* 弹性区域：自定义 Prompt */}
+      <div className="flex flex-col flex-1 min-h-0">
+        <Label htmlFor="customSystemPrompt" className="shrink-0 mb-2">自定义 Prompt</Label>
         <Textarea
           id="customSystemPrompt"
           value={customPrompt}
-          onChange={(event) => handlePromptChange(event.target.value)}
-          className="min-h-40 resize-y"
+          onChange={(event) => setCustomPrompt(event.target.value)}
+          onBlur={handlePromptBlur}
+          className="flex-1 min-h-0 resize-none"
           placeholder="例如：回复时保持简洁，优先给出可执行步骤。"
         />
       </div>
@@ -411,7 +389,7 @@ function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Save
             }`}
             onClick={() => setSubTab(tab)}
           >
-            {tab === 'providers' ? 'Providers' : tab === 'models' ? 'Models' : tab === 'routing' ? 'Routing' : 'Memory'}
+            {tab === 'providers' ? '供应商' : tab === 'models' ? '模型' : tab === 'routing' ? '路由' : '记忆模型'}
           </button>
         ))}
       </div>
@@ -664,6 +642,33 @@ function MemoryModelSelectSection({
 
 
 // ---------------------------------------------------------------------------
+// 预设供应商
+// ---------------------------------------------------------------------------
+
+interface ProviderPreset {
+  name: string;
+  base_url: string;
+  protocol: string;
+}
+
+const PROVIDER_PRESETS: ProviderPreset[] = [
+  { name: 'DeepSeek', base_url: 'https://api.deepseek.com/v1', protocol: 'openai_compatible' },
+  { name: '智谱', base_url: 'https://open.bigmodel.cn/api/paas/v4', protocol: 'openai_compatible' },
+  { name: 'Z.ai', base_url: 'https://api.zai.com/v1', protocol: 'openai_compatible' },
+  { name: '硅基流动', base_url: 'https://api.siliconflow.cn/v1', protocol: 'openai_compatible' },
+  { name: '月之暗面', base_url: 'https://api.moonshot.cn/v1', protocol: 'openai_compatible' },
+  { name: '阿里云百炼', base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', protocol: 'openai_compatible' },
+  { name: 'OpenAI', base_url: 'https://api.openai.com/v1', protocol: 'openai_compatible' },
+  { name: 'Anthropic', base_url: 'https://api.anthropic.com', protocol: 'anthropic' },
+];
+
+// 协议对应的默认 URL
+const PROTOCOL_DEFAULTS: Record<string, string> = {
+  openai_compatible: 'https://api.openai.com/v1',
+  anthropic: 'https://api.anthropic.com',
+};
+
+// ---------------------------------------------------------------------------
 // Providers 子区域
 // ---------------------------------------------------------------------------
 
@@ -701,6 +706,21 @@ function ProvidersSection({
     setShowApiKey(false);
   };
 
+  const openAddPreset = (preset: ProviderPreset) => {
+    if (config.providers[preset.name]) return;
+    const next = { ...config };
+    next.providers = {
+      ...next.providers,
+      [preset.name]: {
+        base_url: preset.base_url,
+        api_key: '',
+        timeout_ms: 60000,
+        protocol: preset.protocol,
+      },
+    };
+    onChange(next);
+  };
+
   const openEdit = (key: string) => {
     setModalMode('edit');
     setEditingKey(key);
@@ -714,7 +734,6 @@ function ProvidersSection({
     const next = { ...config };
     const trimmedKey = newKey.trim();
     if (trimmedKey !== editingKey) {
-      // 名称变了：删除旧 key，用新 key 保存，更新 models 中的 provider 引用
       const { [editingKey]: _, ...restProviders } = next.providers;
       next.providers = { ...restProviders, [trimmedKey]: { ...draft } };
       const newModels = { ...next.models };
@@ -749,18 +768,42 @@ function ProvidersSection({
   return (
     <div>
       <div className="flex items-center justify-between mb-3">
-        <h4 className="text-sm font-medium text-muted-foreground">Providers (连接配置)</h4>
+        <h4 className="text-sm font-medium text-muted-foreground">供应商（连接配置）</h4>
         <Button size="sm" onClick={openAdd}>
           <Plus className="w-3 h-3 mr-1" />
-          添加
+          自定义添加
         </Button>
       </div>
 
+      {/* 快捷预设供应商 */}
+      <div className="mb-4">
+        <div className="text-xs text-muted-foreground mb-2">快捷添加常用供应商</div>
+        <div className="flex flex-wrap gap-1.5">
+          {PROVIDER_PRESETS.map((preset) => {
+            const exists = !!config.providers[preset.name];
+            return (
+              <button
+                key={preset.name}
+                className={`px-2.5 py-1 text-xs rounded-md border transition-colors ${
+                  exists
+                    ? 'bg-primary/10 text-primary border-primary/30 cursor-default'
+                    : 'bg-secondary text-muted-foreground border-border hover:text-foreground hover:border-primary/40'
+                }`}
+                onClick={() => !exists && openAddPreset(preset)}
+                disabled={exists}
+              >
+                {exists ? `${preset.name} ✓` : preset.name}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       {providerKeys.length === 0 && (
-        <div className="text-center text-muted-foreground py-6 text-sm">暂无 Provider 配置</div>
+        <div className="text-center text-muted-foreground py-6 text-sm">暂无供应商配置，点击上方快捷按钮或自定义添加</div>
       )}
 
-      <div className="space-y-2 max-h-[calc(80vh-280px)] overflow-y-auto">
+      <div className="space-y-2 max-h-[calc(80vh-380px)] overflow-y-auto">
         {providerKeys.map((key) => (
           <Card key={key}>
             <CardContent className="p-3">
@@ -797,16 +840,16 @@ function ProvidersSection({
       <Dialog open={modalMode !== null} onOpenChange={(v) => !v && setModalMode(null)}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>{modalMode === 'add' ? '添加 Provider' : `编辑 Provider: ${editingKey}`}</DialogTitle>
+            <DialogTitle>{modalMode === 'add' ? '添加供应商' : `编辑供应商: ${editingKey}`}</DialogTitle>
           </DialogHeader>
           <div className="space-y-3 pt-2">
             <div>
-              <Label className="text-xs">Provider 名称</Label>
+              <Label className="text-xs">供应商名称</Label>
               <Input
                 value={newKey}
                 onChange={(e) => setNewKey(e.target.value)}
                 className="text-sm h-8"
-                placeholder="例如: openai, anthropic"
+                placeholder="例如: DeepSeek, 智谱"
               />
             </div>
             <ProviderForm
@@ -842,6 +885,11 @@ function ProviderForm({
   onCancel: () => void;
   saveLabel?: string;
 }) {
+  const handleProtocolChange = (protocol: string) => {
+    const defaultUrl = PROTOCOL_DEFAULTS[protocol] || '';
+    setDraft({ ...draft, protocol, base_url: defaultUrl });
+  };
+
   return (
     <div className="space-y-2">
       <div>
@@ -884,10 +932,10 @@ function ProviderForm({
         />
       </div>
       <div>
-        <Label className="text-xs">协议类型</Label>
+        <Label className="text-xs">请求格式（协议类型）</Label>
         <Select
           value={draft.protocol || 'openai_compatible'}
-          onValueChange={(value) => setDraft({ ...draft, protocol: value })}
+          onValueChange={handleProtocolChange}
         >
           <SelectTrigger className="text-sm h-8">
             <SelectValue placeholder="选择协议" />
@@ -1272,7 +1320,7 @@ function ModelsSection({
   return (
     <div>
       <div className="flex items-center justify-between mb-3">
-        <h4 className="text-sm font-medium text-muted-foreground">Models (模型定义)</h4>
+        <h4 className="text-sm font-medium text-muted-foreground">模型定义</h4>
         <Button size="sm" onClick={openAdd}>
           <Plus className="w-3 h-3 mr-1" />
           添加
@@ -1379,7 +1427,7 @@ function RoutingSection({
   return (
     <div>
       <div className="mb-3">
-        <h4 className="text-sm font-medium text-muted-foreground">Routing (能力路由)</h4>
+        <h4 className="text-sm font-medium text-muted-foreground">能力路由</h4>
         <p className="text-xs text-muted-foreground mt-1">
           为对话和多媒体能力选择默认模型；Embedding 和 Rerank 在 Memory 子页中选择。
         </p>
