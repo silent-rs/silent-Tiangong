@@ -6,10 +6,12 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
+#[cfg(feature = "embedded-qdrant-edge")]
+use crate::types::VectorPoint;
 use crate::types::{
     Decision, Entity, EntityType, Episode, ExpandedMemory, MemoryCognitiveType, MemoryKind,
     MemoryNode, MemoryRelation, MemoryRelationDraft, MemoryRelationKind, MemoryScopeType,
-    MemoryStatus, RecallHit, VectorPoint,
+    MemoryStatus, RecallHit,
 };
 
 use super::schema;
@@ -843,6 +845,7 @@ impl MemoryDb {
     }
 
     /// 加载指定维度的全部向量点（迁移用途）。
+    #[cfg(feature = "embedded-qdrant-edge")]
     pub(crate) fn list_vectors(&self, dimension: usize) -> Result<Vec<VectorPoint>> {
         let mut stmt = self.conn.prepare(
             "SELECT node_id, title, summary, kind, importance, vector
@@ -1040,6 +1043,7 @@ impl MemoryDb {
     }
 
     /// 清空 memory_vectors 表（迁移完成后调用）。
+    #[cfg(feature = "embedded-qdrant-edge")]
     pub(crate) fn clear_vectors(&self) -> Result<()> {
         self.conn
             .execute("DELETE FROM memory_vectors", [])
@@ -1048,6 +1052,7 @@ impl MemoryDb {
     }
 
     /// 统计 memory_vectors 表中的记录数。
+    #[cfg(feature = "embedded-qdrant-edge")]
     pub(crate) fn count_vectors(&self) -> Result<usize> {
         let count: i64 = self
             .conn
