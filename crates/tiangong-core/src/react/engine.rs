@@ -363,6 +363,8 @@ impl ReactEngine {
         let mut memory_context: Option<String> = None;
         let mut memory_recall_attempted = false;
         let mut successful_tool_call_keys = HashSet::new();
+        let mut failed_tool_call_keys = HashSet::new();
+        let mut failed_tool_names = HashSet::new();
         let mut memory_candidate_count = 0usize;
 
         if self.agent_id == "main" {
@@ -409,6 +411,8 @@ impl ReactEngine {
                     memory_context = None;
                     memory_recall_attempted = false;
                     successful_tool_call_keys.clear();
+                    failed_tool_call_keys.clear();
+                    failed_tool_names.clear();
                     memory_candidate_count = 0;
                 }
                 PendingCommandEffect::None => {}
@@ -559,6 +563,27 @@ impl ReactEngine {
                     continue;
                 }
 
+                // 有 reasoning 但无 tool_calls 且回复为空或简短时，明确提醒模型补全决策。
+                // 若确实不需要工具，下一轮应直接给出最终回复；若需要操作，应返回 tool_calls。
+                if !response.reasoning_content.trim().is_empty()
+                    && response.text.trim().chars().count() <= 100
+                    && round < self.max_rounds
+                {
+                    let previous_text = response.text.trim();
+                    let previous_text_block = if previous_text.is_empty() {
+                        "上一轮 assistant 回复为空。".to_string()
+                    } else {
+                        format!("上一轮 assistant 短回复：\n{previous_text}")
+                    };
+                    loop_context.push(Message::new(
+                        MessageRole::Tool,
+                        format!(
+                            "<system-reminder>\n{previous_text_block}\n上一轮包含 thinking，但没有返回可执行 tool_calls。请重新判断：如果仍需要执行操作，直接返回正确的 tool_calls；如果不需要执行操作，直接给出最终回复。\n</system-reminder>"
+                        ),
+                    ));
+                    continue 'react_loop;
+                }
+
                 session.append_message_with_id_and_media(
                     pending_msg_id,
                     MessageRole::Assistant,
@@ -593,6 +618,8 @@ impl ReactEngine {
                     memory_context = None;
                     memory_recall_attempted = false;
                     successful_tool_call_keys.clear();
+                    failed_tool_call_keys.clear();
+                    failed_tool_names.clear();
                     memory_candidate_count = 0;
                     continue 'react_loop;
                 }
@@ -648,6 +675,7 @@ impl ReactEngine {
             );
 
             // 执行工具
+            let mut need_failure_recovery_prompt = false;
             for call in executable_calls {
                 match drain_pending_commands_async(
                     session,
@@ -661,6 +689,8 @@ impl ReactEngine {
                         memory_context = None;
                         memory_recall_attempted = false;
                         successful_tool_call_keys.clear();
+                        failed_tool_call_keys.clear();
+                        failed_tool_names.clear();
                         session.persist_to_disk();
                         continue 'react_loop;
                     }
@@ -727,6 +757,12 @@ impl ReactEngine {
                 let tool_call_key = tool_call_dedupe_key(&call.name, &call.arguments);
                 if successful_tool_call_keys.contains(&tool_call_key) {
                     append_duplicate_tool_result(session, stream_tx, &call.id, &call.name);
+                    continue;
+                }
+                if failed_tool_call_keys.contains(&tool_call_key) {
+                    append_repeated_failed_tool_result(session, stream_tx, &call.id, &call.name);
+                    failed_tool_names.insert(call.name.clone());
+                    need_failure_recovery_prompt = true;
                     continue;
                 }
 
@@ -1018,6 +1054,8 @@ impl ReactEngine {
                 }
 
                 if result.ok {
+                    failed_tool_call_keys.remove(&tool_call_key);
+                    failed_tool_names.remove(&call.name);
                     successful_tool_call_keys.insert(tool_call_key);
                     pending_media_assets.extend(
                         crate::memory::turn_result::parse_media_assets_from_tool_result(
@@ -1026,6 +1064,10 @@ impl ReactEngine {
                             &result.summary,
                         ),
                     );
+                } else {
+                    failed_tool_call_keys.insert(tool_call_key);
+                    failed_tool_names.insert(call.name.clone());
+                    need_failure_recovery_prompt = true;
                 }
 
                 // 记忆候选评估
@@ -1080,12 +1122,48 @@ impl ReactEngine {
                         memory_context = None;
                         memory_recall_attempted = false;
                         successful_tool_call_keys.clear();
+                        failed_tool_call_keys.clear();
+                        failed_tool_names.clear();
                         memory_candidate_count = 0;
                         session.persist_to_disk();
                         continue 'react_loop;
                     }
                     PendingCommandEffect::None => {}
                 }
+            }
+
+            if need_failure_recovery_prompt {
+                let mut failed_tools = failed_tool_names.iter().cloned().collect::<Vec<_>>();
+                failed_tools.sort();
+                let collaboration_hint = if self.agent_id == "main"
+                    && request_tools.iter().any(|tool| tool.name == "create_agent")
+                {
+                    "如果问题适合并行排查或需要第二视角，请创建 temporary Sub Agent 协作处理，并把失败工具、失败原因、已尝试方案和用户目标一并分配给它。"
+                } else {
+                    "如果当前 Agent 无法继续独立推进，请向用户说明需要的外部条件、凭据、授权、环境调整或人工确认。"
+                };
+                let recall_hint = if request_tools
+                    .iter()
+                    .any(|tool| tool.name == "recall_memory")
+                {
+                    memory_recall_attempted = false;
+                    "优先调用 recall_memory，充分使用 Memory 系统查询这个工具以前成功调用时使用的参数、环境前置条件、配置方式、替代步骤和相关经验；只有回忆不足以解决时，再切换工具、创建子 Agent 或请求用户协作。"
+                } else {
+                    ""
+                };
+                let mut reminder = Message::new(
+                    MessageRole::Tool,
+                    format!(
+                        "<system-reminder>\n以下工具调用在本轮出现失败，暂时不要重复调用相同工具和相同参数：\n{}\n请重新规划：{}{}\n</system-reminder>",
+                        failed_tools.join("\n"),
+                        recall_hint,
+                        collaboration_hint
+                    ),
+                );
+                reminder.tool_name = Some("react_failed_tool_recovery".to_string());
+                loop_context.push(reminder);
+                session.persist_to_disk();
+                continue 'react_loop;
             }
 
             // 执行有待处理任务的 Sub Agent

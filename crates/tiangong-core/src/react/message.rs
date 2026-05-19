@@ -214,6 +214,30 @@ pub(crate) fn append_duplicate_tool_result(
     );
 }
 
+pub(crate) fn append_repeated_failed_tool_result(
+    session: &mut Session,
+    stream_tx: &StdSender<StreamEvent>,
+    tool_call_id: &str,
+    tool_name: &str,
+) {
+    let message = format!(
+        "本轮已经执行过完全相同的 {tool_name} 工具调用且执行失败，系统已跳过重复执行。请不要继续重复相同工具和参数；请切换到其他可行方式，或在缺少外部条件时请求用户协作。"
+    );
+    let _ = stream_tx.send(StreamEvent::ToolResult {
+        name: tool_name.to_string(),
+        tool_call_id: Some(tool_call_id.to_string()),
+        ok: false,
+        output: message.clone(),
+        full_output: Some(message.clone()),
+    });
+    append_tool_result_message(session, tool_call_id, tool_name, message.clone(), true);
+    append_runtime_tool_message(
+        session,
+        tool_name,
+        format!("跳过重复失败工具调用 [{tool_name}]\n{message}"),
+    );
+}
+
 pub(crate) fn is_media_tool_name(tool_name: &str) -> bool {
     matches!(
         tool_name,
