@@ -560,6 +560,8 @@ impl MemoryDb {
         workspace_id: Option<&str>,
         query: Option<&str>,
         status: Option<&MemoryStatus>,
+        created_after: Option<&str>,
+        offset: usize,
         limit: usize,
     ) -> Result<Vec<MemoryNode>> {
         let status_str = status.map(memory_status_to_str);
@@ -592,8 +594,16 @@ impl MemoryDb {
             params.push(Box::new(query_like.clone()));
             params.push(Box::new(query_like));
         }
-        sql.push_str(" ORDER BY updated_at DESC LIMIT ?");
+        if let Some(created_after) = created_after
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            sql.push_str(" AND created_at >= ?");
+            params.push(Box::new(created_after.to_string()));
+        }
+        sql.push_str(" ORDER BY updated_at DESC LIMIT ? OFFSET ?");
         params.push(Box::new(limit as i64));
+        params.push(Box::new(offset as i64));
 
         let mut stmt = self.conn.prepare(&sql)?;
         let params = params.iter().map(|item| item.as_ref()).collect::<Vec<_>>();
@@ -604,6 +614,55 @@ impl MemoryDb {
             nodes.push(row.with_context(|| "读取 memory_nodes 行失败")?);
         }
         Ok(nodes)
+    }
+
+    /// 统计记忆节点数量，供 GUI 展示真实总数。
+    pub(crate) fn count_memory_nodes(
+        &self,
+        workspace_id: Option<&str>,
+        query: Option<&str>,
+        status: Option<&MemoryStatus>,
+        created_after: Option<&str>,
+    ) -> Result<usize> {
+        let status_str = status.map(memory_status_to_str);
+        let query_like = query
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("%{}%", value.replace('%', "\\%").replace('_', "\\_")));
+
+        let mut sql = String::from("SELECT COUNT(*) FROM memory_nodes WHERE 1 = 1");
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(workspace_id) = workspace_id {
+            sql.push_str(" AND scope_type = 'workspace' AND scope_id = ?");
+            params.push(Box::new(workspace_id.to_string()));
+        }
+        if let Some(status_str) = status_str {
+            sql.push_str(" AND status = ?");
+            params.push(Box::new(status_str.to_string()));
+        }
+        if let Some(query_like) = query_like {
+            sql.push_str(
+                " AND (title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' OR keywords LIKE ? ESCAPE '\\')",
+            );
+            params.push(Box::new(query_like.clone()));
+            params.push(Box::new(query_like.clone()));
+            params.push(Box::new(query_like));
+        }
+        if let Some(created_after) = created_after
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            sql.push_str(" AND created_at >= ?");
+            params.push(Box::new(created_after.to_string()));
+        }
+
+        let params = params.iter().map(|item| item.as_ref()).collect::<Vec<_>>();
+        let count: i64 = self
+            .conn
+            .query_row(&sql, rusqlite::params_from_iter(params), |row| row.get(0))
+            .with_context(|| "统计 memory_nodes 数量失败")?;
+        Ok(count.max(0) as usize)
     }
 
     /// 更新记忆节点元信息，供手动调整使用。

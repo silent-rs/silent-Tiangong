@@ -376,7 +376,24 @@ impl MemoryStore {
                 workspace_id,
                 query.query.as_deref(),
                 query.status.as_ref(),
+                query.created_after.as_deref(),
+                query.offset,
                 query.limit,
+            )
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn count_nodes(&self, query: &MemoryListQuery) -> usize {
+        let workspace_id = query
+            .workspace_id
+            .as_deref()
+            .or(self.workspace_id.as_deref());
+        self.db
+            .count_memory_nodes(
+                workspace_id,
+                query.query.as_deref(),
+                query.status.as_ref(),
+                query.created_after.as_deref(),
             )
             .unwrap_or_default()
     }

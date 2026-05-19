@@ -275,6 +275,7 @@ fn run_gui() {
             tiangong_app::commands::get_memory_config,
             tiangong_app::commands::set_memory_config,
             tiangong_app::commands::list_memory_nodes,
+            tiangong_app::commands::count_memory_nodes,
             tiangong_app::commands::upsert_manual_memory,
             tiangong_app::commands::set_memory_node_status,
             tiangong_app::commands::list_memory_relations,

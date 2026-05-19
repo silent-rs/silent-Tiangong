@@ -68,7 +68,7 @@ function computeMemoryGraphLayout(
       edge.source !== undefined && edge.target !== undefined && edge.source !== edge.target
     );
 
-  const iterations = Math.min(120, 40 + nodes.length);
+  const iterations = Math.min(80, 32 + Math.ceil(Math.sqrt(nodes.length) * 6));
   for (let step = 0; step < iterations; step += 1) {
     const cooling = 1 - step / iterations;
 

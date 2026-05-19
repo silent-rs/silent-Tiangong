@@ -302,6 +302,9 @@ async fn handle_memory_request(
         MemoryIpcRequestPayload::ListNodes { query } => Ok(MemoryIpcResponsePayload::Nodes {
             items: handle.list_nodes(query).await,
         }),
+        MemoryIpcRequestPayload::CountNodes { query } => Ok(MemoryIpcResponsePayload::NodeCount {
+            count: handle.count_nodes(query).await,
+        }),
         MemoryIpcRequestPayload::ListRelations { node_id } => {
             Ok(MemoryIpcResponsePayload::Relations {
                 items: handle.list_relations(node_id).await,

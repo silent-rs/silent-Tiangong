@@ -72,6 +72,7 @@ async fn manual_memory_can_be_recalled_and_archived() {
             query: Some("sentinel".to_string()),
             status: Some(MemoryStatus::Active),
             limit: 10,
+            ..Default::default()
         })
         .await;
     assert_eq!(nodes.len(), 1);

@@ -10,6 +10,7 @@ pub async fn list_memory_nodes_for_gui(
     query: Option<String>,
     status: Option<String>,
     limit: Option<usize>,
+    offset: Option<usize>,
 ) -> anyhow::Result<Vec<tiangong_memory::MemoryNode>> {
     let status = parse_memory_status(status.as_deref())?;
     let handle = get_or_init_memory_handle_async(config_provider, workspace_id.clone())
@@ -20,7 +21,33 @@ pub async fn list_memory_nodes_for_gui(
             workspace_id,
             query,
             status,
+            created_after: None,
+            offset: offset.unwrap_or_default(),
             limit: limit.unwrap_or(100),
+        })
+        .await)
+}
+
+/// GUI Memory 管理：统计当前 workspace 的记忆节点真实总数。
+pub async fn count_memory_nodes_for_gui(
+    config_provider: &CoreConfigProvider,
+    workspace_id: Option<String>,
+    query: Option<String>,
+    status: Option<String>,
+    created_after: Option<String>,
+) -> anyhow::Result<usize> {
+    let status = parse_memory_status(status.as_deref())?;
+    let handle = get_or_init_memory_handle_async(config_provider, workspace_id.clone())
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Memory 未启动或初始化失败"))?;
+    Ok(handle
+        .count_nodes(tiangong_memory::MemoryListQuery {
+            workspace_id,
+            query,
+            status,
+            created_after,
+            offset: 0,
+            limit: 0,
         })
         .await)
 }

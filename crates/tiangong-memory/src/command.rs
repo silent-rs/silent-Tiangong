@@ -52,6 +52,10 @@ pub enum MemoryCommand {
         query: MemoryListQuery,
         reply: oneshot::Sender<Vec<MemoryNode>>,
     },
+    CountNodes {
+        query: MemoryListQuery,
+        reply: oneshot::Sender<usize>,
+    },
     ListRelations {
         node_id: String,
         reply: oneshot::Sender<Vec<MemoryRelation>>,

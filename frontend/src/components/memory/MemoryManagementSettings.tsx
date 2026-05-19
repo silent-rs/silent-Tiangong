@@ -15,6 +15,20 @@ import { MemoryRelationPanel } from './MemoryRelationPanel';
 import { RecallTestPanel } from './RecallTestPanel';
 import { emptyMemoryDraft, relationKindLabel } from './constants';
 
+const MEMORY_LIST_PAGE_SIZE = 50;
+const MEMORY_GRAPH_INITIAL_LIMIT = 240;
+const MEMORY_GRAPH_LIMIT_STEP = 120;
+const MEMORY_GRAPH_MAX_LIMIT = 500;
+
+function formatLocalDateTime(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+  ].join('-') + ` ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
 // ============================================================================
 // 统计卡片组件
 // ============================================================================
@@ -22,16 +36,12 @@ import { emptyMemoryDraft, relationKindLabel } from './constants';
 interface MemoryStatsProps {
   nodes: MemoryNode[];
   relations: MemoryRelation[];
+  totalNodeCount: number;
+  activeNodeCount: number;
+  weekNewCount: number;
 }
 
-function MemoryStats({ nodes, relations }: MemoryStatsProps) {
-  const activeCount = nodes.filter(n => n.status === 'active').length;
-
-  // 最近 7 天新增
-  const weekAgo = new Date();
-  weekAgo.setDate(weekAgo.getDate() - 7);
-  const weekNew = nodes.filter(n => new Date(n.created_at) > weekAgo).length;
-
+function MemoryStats({ nodes, relations, totalNodeCount, activeNodeCount, weekNewCount }: MemoryStatsProps) {
   return (
     <div className="grid grid-cols-4 gap-2 shrink-0">
       <div className="rounded-md border p-3 text-center">
@@ -39,21 +49,24 @@ function MemoryStats({ nodes, relations }: MemoryStatsProps) {
           <Database className="w-3 h-3" />
           <span className="text-xs">总计</span>
         </div>
-        <div className="text-lg font-semibold">{nodes.length}</div>
+        <div className="text-lg font-semibold">{totalNodeCount}</div>
+        {totalNodeCount > nodes.length ? (
+          <div className="text-[10px] text-muted-foreground">已加载 {nodes.length}</div>
+        ) : null}
       </div>
       <div className="rounded-md border p-3 text-center">
         <div className="flex items-center justify-center gap-1 text-muted-foreground mb-1">
           <Activity className="w-3 h-3" />
           <span className="text-xs">活跃</span>
         </div>
-        <div className="text-lg font-semibold text-green-600">{activeCount}</div>
+        <div className="text-lg font-semibold text-green-600">{activeNodeCount}</div>
       </div>
       <div className="rounded-md border p-3 text-center">
         <div className="flex items-center justify-center gap-1 text-muted-foreground mb-1">
           <TrendingUp className="w-3 h-3" />
           <span className="text-xs">本周新增</span>
         </div>
-        <div className="text-lg font-semibold text-blue-600">{weekNew}</div>
+        <div className="text-lg font-semibold text-blue-600">{weekNewCount}</div>
       </div>
       <div className="rounded-md border p-3 text-center">
         <div className="flex items-center justify-center gap-1 text-muted-foreground mb-1">
@@ -77,6 +90,8 @@ export function MemoryManagementSettings() {
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState<MemoryStatus>('active');
   const [viewMode, setViewMode] = useState<MemoryViewMode>('graph');
+  const [listPage, setListPage] = useState(1);
+  const [graphLimit, setGraphLimit] = useState(MEMORY_GRAPH_INITIAL_LIMIT);
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isBulkBusy, setIsBulkBusy] = useState(false);
@@ -85,6 +100,9 @@ export function MemoryManagementSettings() {
   const [keywordsText, setKeywordsText] = useState('');
   const [relations, setRelations] = useState<MemoryRelation[]>([]);
   const [graphRelations, setGraphRelations] = useState<MemoryRelation[]>([]);
+  const [totalNodeCount, setTotalNodeCount] = useState(0);
+  const [activeNodeCount, setActiveNodeCount] = useState(0);
+  const [weekNewCount, setWeekNewCount] = useState(0);
   const [relationTargetId, setRelationTargetId] = useState('');
   const [relationKind, setRelationKind] = useState<MemoryRelationKind>('related_to');
   const [relationNote, setRelationNote] = useState('');
@@ -114,8 +132,23 @@ export function MemoryManagementSettings() {
   const loadNodes = useCallback(async () => {
     setIsLoading(true);
     try {
-      const data = await api.listMemoryNodes(query.trim() || undefined, status, 120);
+      const normalizedQuery = query.trim() || undefined;
+      const isListView = viewMode === 'list';
+      const pageSize = isListView ? MEMORY_LIST_PAGE_SIZE : graphLimit;
+      const offset = isListView ? (listPage - 1) * MEMORY_LIST_PAGE_SIZE : 0;
+      const weekAgo = new Date();
+      weekAgo.setDate(weekAgo.getDate() - 7);
+      const createdAfter = formatLocalDateTime(weekAgo);
+      const [data, total, activeTotal, weekTotal] = await Promise.all([
+        api.listMemoryNodes(normalizedQuery, status, pageSize, offset),
+        api.countMemoryNodes(normalizedQuery, status),
+        api.countMemoryNodes(normalizedQuery, 'active'),
+        api.countMemoryNodes(normalizedQuery, status, createdAfter),
+      ]);
       setNodes(data);
+      setTotalNodeCount(total);
+      setActiveNodeCount(activeTotal);
+      setWeekNewCount(weekTotal);
       setSelectedNodeIds((current) => current.filter((id) => data.some((node) => node.id === id)));
       await loadGraphRelations(data);
     } catch (error) {
@@ -124,11 +157,17 @@ export function MemoryManagementSettings() {
     } finally {
       setIsLoading(false);
     }
-  }, [loadGraphRelations, query, status, showError]);
+  }, [graphLimit, listPage, loadGraphRelations, query, status, showError, viewMode]);
 
   useEffect(() => {
     loadNodes();
   }, [loadNodes]);
+
+  useEffect(() => {
+    setListPage(1);
+    setGraphLimit(MEMORY_GRAPH_INITIAL_LIMIT);
+    setSelectedNodeIds([]);
+  }, [query, status]);
 
   const startNew = () => {
     setDraft(emptyMemoryDraft());
@@ -280,11 +319,19 @@ export function MemoryManagementSettings() {
     nodes.some((node) => node.id === relation.from_node_id) &&
     nodes.some((node) => node.id === relation.to_node_id),
   ).length;
+  const graphCanLoadMore = viewMode === 'graph' && nodes.length < totalNodeCount && graphLimit < MEMORY_GRAPH_MAX_LIMIT;
+  const nextGraphLimit = Math.min(MEMORY_GRAPH_MAX_LIMIT, graphLimit + MEMORY_GRAPH_LIMIT_STEP, totalNodeCount);
 
   return (
     <div className="h-full min-h-0 p-4 flex flex-col gap-4">
       {/* 统计概览 */}
-      <MemoryStats nodes={nodes} relations={graphRelations} />
+      <MemoryStats
+        nodes={nodes}
+        relations={graphRelations}
+        totalNodeCount={totalNodeCount}
+        activeNodeCount={activeNodeCount}
+        weekNewCount={weekNewCount}
+      />
 
       <div className="min-h-0 flex-1 grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_340px] gap-4">
         <div className="min-h-0 flex flex-col gap-3">
@@ -342,25 +389,40 @@ export function MemoryManagementSettings() {
                         {selectedNode?.title ?? 'Memory 图谱'}
                       </div>
                       <div className="text-xs text-muted-foreground">
-                        {nodes.length} 个节点 · {visibleRelationCount} 条连接
+                        {totalNodeCount > nodes.length
+                          ? `已加载 ${nodes.length} / 共 ${totalNodeCount} 个节点 · ${visibleRelationCount} 条连接`
+                          : `${nodes.length} 个节点 · ${visibleRelationCount} 条连接`}
                       </div>
                     </div>
-                    {selectedNode && (
-                      <div className="flex items-center gap-1 shrink-0">
-                        <Button variant="ghost" size="icon" className="size-8" onClick={() => editNode(selectedNode)} title="编辑">
-                          <Edit2 className="size-4" />
+                    <div className="flex items-center gap-1 shrink-0">
+                      {graphCanLoadMore && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-8"
+                          onClick={() => setGraphLimit(nextGraphLimit)}
+                          disabled={isLoading}
+                        >
+                          加载更多
                         </Button>
-                        {selectedNode.status === 'active' ? (
-                          <Button variant="ghost" size="icon" className="size-8" onClick={() => setNodeStatus(selectedNode, 'archived')} title="归档">
-                            <Archive className="size-4" />
+                      )}
+                      {selectedNode && (
+                        <>
+                          <Button variant="ghost" size="icon" className="size-8" onClick={() => editNode(selectedNode)} title="编辑">
+                            <Edit2 className="size-4" />
                           </Button>
-                        ) : (
-                          <Button variant="ghost" size="icon" className="size-8" onClick={() => setNodeStatus(selectedNode, 'active')} title="恢复">
-                            <RotateCcw className="size-4" />
-                          </Button>
-                        )}
-                      </div>
-                    )}
+                          {selectedNode.status === 'active' ? (
+                            <Button variant="ghost" size="icon" className="size-8" onClick={() => setNodeStatus(selectedNode, 'archived')} title="归档">
+                              <Archive className="size-4" />
+                            </Button>
+                          ) : (
+                            <Button variant="ghost" size="icon" className="size-8" onClick={() => setNodeStatus(selectedNode, 'active')} title="恢复">
+                              <RotateCcw className="size-4" />
+                            </Button>
+                          )}
+                        </>
+                      )}
+                    </div>
                   </div>
                 )}
                 <div className="min-h-0 flex-1">
@@ -376,10 +438,14 @@ export function MemoryManagementSettings() {
             ) : (
               <MemoryList
                 nodes={nodes}
+                page={listPage}
+                pageSize={MEMORY_LIST_PAGE_SIZE}
+                totalCount={totalNodeCount}
                 selectedId={draft.id}
                 selectedIds={selectedNodeIds}
                 status={status}
                 isBulkBusy={isBulkBusy}
+                onPageChange={setListPage}
                 onSelectNode={editNode}
                 onToggleSelection={toggleNodeSelection}
                 onToggleAll={toggleAllNodes}

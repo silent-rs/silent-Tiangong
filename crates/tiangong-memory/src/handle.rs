@@ -441,6 +441,43 @@ impl MemoryHandle {
         }
     }
 
+    /// 统计记忆节点数量（查询，等待响应）。
+    pub async fn count_nodes(&self, query: MemoryListQuery) -> usize {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                if tx
+                    .send(MemoryCommand::CountNodes {
+                        query,
+                        reply: reply_tx,
+                    })
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("Memory count_nodes 发送失败");
+                    return 0;
+                }
+                reply_rx.await.unwrap_or_default()
+            }
+            HandleInner::Remote { .. } => {
+                match self
+                    .send_remote_request(MemoryIpcRequestPayload::CountNodes { query })
+                    .await
+                {
+                    Ok(MemoryIpcResponsePayload::NodeCount { count }) => count,
+                    Ok(other) => {
+                        tracing::warn!("Memory IPC count_nodes 返回了非预期响应: {:?}", other);
+                        0
+                    }
+                    Err(e) => {
+                        tracing::warn!("Memory IPC count_nodes 失败: {}", e);
+                        0
+                    }
+                }
+            }
+        }
+    }
+
     /// 手动新增或调整记忆。
     pub async fn upsert_manual_memory(&self, draft: ManualMemoryDraft) -> Result<MemoryNode> {
         match self.inner.as_ref() {

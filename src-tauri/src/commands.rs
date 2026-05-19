@@ -2514,6 +2514,7 @@ pub async fn list_memory_nodes(
     query: Option<String>,
     status: Option<String>,
     limit: Option<usize>,
+    offset: Option<usize>,
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<tiangong_memory::MemoryNode>, String> {
     let workspace_id = current_memory_workspace_id(&state)?;
@@ -2523,6 +2524,27 @@ pub async fn list_memory_nodes(
         query,
         status,
         limit,
+        offset,
+    )
+    .await
+    .map_err(|err| err.to_string())
+}
+
+/// 统计当前 workspace 的记忆节点真实总数。
+#[tauri::command]
+pub async fn count_memory_nodes(
+    query: Option<String>,
+    status: Option<String>,
+    created_after: Option<String>,
+    state: State<'_, TiangongApp>,
+) -> Result<usize, String> {
+    let workspace_id = current_memory_workspace_id(&state)?;
+    tiangong_core::core::count_memory_nodes_for_gui(
+        &state.config,
+        workspace_id,
+        query,
+        status,
+        created_after,
     )
     .await
     .map_err(|err| err.to_string())

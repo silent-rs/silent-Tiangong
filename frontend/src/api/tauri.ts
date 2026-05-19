@@ -478,8 +478,11 @@ export const api = {
   setMemoryConfig: (config: MemoryConfigView): Promise<void> =>
     invoke('set_memory_config', { config }),
 
-  listMemoryNodes: (query?: string, status?: MemoryStatus, limit?: number): Promise<MemoryNode[]> =>
-    invoke('list_memory_nodes', { query, status, limit }),
+  listMemoryNodes: (query?: string, status?: MemoryStatus, limit?: number, offset?: number): Promise<MemoryNode[]> =>
+    invoke('list_memory_nodes', { query, status, limit, offset }),
+
+  countMemoryNodes: (query?: string, status?: MemoryStatus, createdAfter?: string): Promise<number> =>
+    invoke('count_memory_nodes', { query, status, createdAfter }),
 
   upsertManualMemory: (draft: ManualMemoryDraft): Promise<MemoryNode> =>
     invoke('upsert_manual_memory', { draft }),

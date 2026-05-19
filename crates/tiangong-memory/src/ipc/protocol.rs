@@ -79,6 +79,9 @@ pub enum MemoryIpcRequestPayload {
     ListNodes {
         query: MemoryListQuery,
     },
+    CountNodes {
+        query: MemoryListQuery,
+    },
     ListRelations {
         node_id: String,
     },
@@ -135,6 +138,7 @@ pub enum MemoryIpcResponsePayload {
     RecallSufficiency { result: RecallSufficiency },
     Depth2 { items: Vec<ExpandedMemory> },
     Nodes { items: Vec<MemoryNode> },
+    NodeCount { count: usize },
     Node { item: MemoryNode },
     Relations { items: Vec<MemoryRelation> },
     Relation { item: MemoryRelation },

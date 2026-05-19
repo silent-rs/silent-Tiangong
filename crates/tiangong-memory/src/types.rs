@@ -115,6 +115,10 @@ pub struct MemoryListQuery {
     #[serde(default)]
     pub status: Option<MemoryStatus>,
     #[serde(default)]
+    pub created_after: Option<String>,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default)]
     pub limit: usize,
 }
 

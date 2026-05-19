@@ -8,10 +8,14 @@ import { memoryTypeLabel } from './constants';
 
 interface MemoryListProps {
   nodes: MemoryNode[];
+  page: number;
+  pageSize: number;
+  totalCount: number;
   selectedId?: string;
   selectedIds: string[];
   status: MemoryStatus;
   isBulkBusy: boolean;
+  onPageChange: (page: number) => void;
   onSelectNode: (node: MemoryNode) => void;
   onToggleSelection: (nodeId: string) => void;
   onToggleAll: () => void;
@@ -21,10 +25,14 @@ interface MemoryListProps {
 
 export function MemoryList({
   nodes,
+  page,
+  pageSize,
+  totalCount,
   selectedId,
   selectedIds,
   status,
   isBulkBusy,
+  onPageChange,
   onSelectNode,
   onToggleSelection,
   onToggleAll,
@@ -34,6 +42,9 @@ export function MemoryList({
   const selectedSet = new Set(selectedIds);
   const allSelected = nodes.length > 0 && nodes.every((node) => selectedSet.has(node.id));
   const nextStatus: MemoryStatus = status === 'active' ? 'archived' : 'active';
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const start = totalCount === 0 ? 0 : (page - 1) * pageSize + 1;
+  const end = Math.min(totalCount, (page - 1) * pageSize + nodes.length);
 
   return (
     <div className="h-full min-h-0 rounded-md border bg-background flex flex-col">
@@ -50,7 +61,7 @@ export function MemoryList({
           <div className="min-w-0">
             <div className="text-sm font-medium">记忆列表</div>
             <div className="text-xs text-muted-foreground">
-              已选 {selectedIds.length} / {nodes.length}
+              {start}-{end} / {totalCount} · 已选 {selectedIds.length}
             </div>
           </div>
         </div>
@@ -145,6 +156,29 @@ export function MemoryList({
             暂无匹配记忆
           </div>
         )}
+      </div>
+      <div className="flex items-center justify-between gap-3 border-t px-3 py-2">
+        <div className="text-xs text-muted-foreground">
+          第 {page} / {totalPages} 页
+        </div>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => onPageChange(page - 1)}
+            disabled={page <= 1}
+          >
+            上一页
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => onPageChange(page + 1)}
+            disabled={page >= totalPages}
+          >
+            下一页
+          </Button>
+        </div>
       </div>
     </div>
   );
