@@ -2,7 +2,7 @@
 
 > 全功能可扩展的 GUI + CLI + Server 个人智能终端平台
 
-Silent-Tiangong 是一个实现"可对话、可规划、可执行、可扩展、可治理、可远程"的 Agent 能力闭环的个人 AI 中枢。支持多智能体团队协作、通过 Connector 接入各类 IM 通道远程调度，并具备图片/视频等多媒体生成能力。
+Silent-Tiangong 是一个实现"可对话、可规划、可执行、可扩展、可治理、可远程"的 Agent 能力闭环的个人 AI 中枢。支持多智能体团队协作、通过 Server API 对接各类 IM 通道远程调度，并具备图片/视频等多媒体生成能力。
 
 ## 核心能力
 
@@ -14,7 +14,7 @@ Silent-Tiangong 是一个实现"可对话、可规划、可执行、可扩展、
 - **Skill 管理** — Skill 安装、启停、卸载，按任务意图自动匹配
 - **长期记忆** — 基于 SQLite + Tantivy + 向量索引的持久化记忆系统，支持跨会话回忆
 - **多媒体生成** — 图片生成（DALL-E）、视频生成（火山方舟）、语音合成/识别（TTS/STT）
-- **多通道接入** — Telegram、Discord、飞书/Lark、Webhook Connector
+- **多通道接入** — 通过 Server API + 外部适配程序对接 Telegram、Discord、飞书/Lark 等 IM 通道
 - **权限管理** — 监督模式（高风险操作审批）/ 信任模式（全自动执行），实时切换
 
 ## 多智能体协作
@@ -61,7 +61,6 @@ crates/
   tiangong-cli/         CLI/TUI 前端（ratatui）
   tiangong-entry/       统一入口与命令路由
   tiangong-server/      HTTP REST + WebSocket Server
-  tiangong-connector/   IM 通道适配（Telegram/Discord/Lark/Webhook）
   tiangong-media/       多媒体生成（图片/视频/语音）
 frontend/               桌面 GUI（React + shadcn/ui）
 src-tauri/              Tauri 桌面壳
@@ -180,6 +179,7 @@ cargo run --release -- update --check
   skills.json           Skill 配置
   mcp.json              MCP 配置
   sessions/             会话持久化
+  logs/                 运行日志（含 Server 后台日志）
   media/                生成的媒体文件
   memory/               长期记忆数据（SQLite + Tantivy 索引）
 ```
@@ -198,8 +198,6 @@ cargo run --release -- update --check
 | LLM 协议 | async-openai（OpenAI 兼容）、tiangong-anthropic（Anthropic） |
 | MCP | rmcp |
 | 记忆存储 | rusqlite（SQLCipher）、tantivy（全文检索）、qdrant（向量索引） |
-| Telegram | teloxide |
-| Discord | serenity |
 | 序列化 | serde / serde_json |
 | ID 生成 | scru128 |
 
