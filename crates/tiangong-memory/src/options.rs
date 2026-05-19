@@ -55,8 +55,6 @@ pub enum MemoryVectorMode {
     Auto,
     /// 禁用向量层，仅使用 SQLite + Tantivy。
     Disabled,
-    /// 使用内置 SQLite flat 向量索引。
-    Embedded,
     /// 使用嵌入式 Qdrant Edge HNSW 索引。
     EmbeddedQdrantEdge,
     /// 使用外部 Qdrant 服务。

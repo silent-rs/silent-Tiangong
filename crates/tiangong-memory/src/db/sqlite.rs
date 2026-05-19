@@ -842,31 +842,7 @@ impl MemoryDb {
         Ok(dedupe_strings(related))
     }
 
-    /// 写入或更新内置向量索引点。
-    pub(crate) fn upsert_vector(&self, point: &VectorPoint) -> Result<()> {
-        let vector_json = serde_json::to_string(&point.vector)?;
-        let now = chrono::Local::now().naive_local().to_string();
-        self.conn
-            .execute(
-                "INSERT OR REPLACE INTO memory_vectors
-                 (node_id, title, summary, kind, importance, dimension, vector, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                rusqlite::params![
-                    point.node_id,
-                    point.title,
-                    point.summary,
-                    memory_kind_to_str(point.kind.clone()),
-                    point.importance,
-                    point.vector.len() as i64,
-                    vector_json,
-                    now,
-                ],
-            )
-            .with_context(|| "写入 memory_vectors 失败")?;
-        Ok(())
-    }
-
-    /// 加载指定维度的全部向量点，供内置 flat search 使用。
+    /// 加载指定维度的全部向量点（迁移用途）。
     pub(crate) fn list_vectors(&self, dimension: usize) -> Result<Vec<VectorPoint>> {
         let mut stmt = self.conn.prepare(
             "SELECT node_id, title, summary, kind, importance, vector
@@ -1063,16 +1039,20 @@ impl MemoryDb {
         Ok(nodes)
     }
 
-    /// 删除内置向量索引点。
-    #[allow(dead_code)]
-    pub(crate) fn delete_vector(&self, node_id: &str) -> Result<()> {
+    /// 清空 memory_vectors 表（迁移完成后调用）。
+    pub(crate) fn clear_vectors(&self) -> Result<()> {
         self.conn
-            .execute(
-                "DELETE FROM memory_vectors WHERE node_id = ?1",
-                rusqlite::params![node_id],
-            )
-            .with_context(|| "删除 memory_vectors 记录失败")?;
+            .execute("DELETE FROM memory_vectors", [])
+            .with_context(|| "清空 memory_vectors 表失败")?;
         Ok(())
+    }
+
+    /// 统计 memory_vectors 表中的记录数。
+    pub(crate) fn count_vectors(&self) -> Result<usize> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM memory_vectors", [], |row| row.get(0))?;
+        Ok(count as usize)
     }
 
     fn load_expanded_memory(&self, node_id: &str) -> Result<Option<ExpandedMemory>> {

@@ -275,13 +275,13 @@ mod tests {
                 model: "bge-reranker".into(),
                 ..Default::default()
             }),
-            vector_mode: MemoryVectorMode::Embedded,
+            vector_mode: MemoryVectorMode::EmbeddedQdrantEdge,
         };
 
         let options = config.to_options(Some("ws-1".into()));
 
         assert_eq!(options.workspace_id.as_deref(), Some("ws-1"));
-        assert_eq!(options.vector_mode, MemoryVectorMode::Embedded);
+        assert_eq!(options.vector_mode, MemoryVectorMode::EmbeddedQdrantEdge);
         assert_eq!(options.model.expect("model 应存在").model, "memory-small");
         assert_eq!(options.embedding.expect("embedding 应存在").dimension, 1024);
         assert_eq!(options.rerank.expect("rerank 应存在").model, "bge-reranker");
