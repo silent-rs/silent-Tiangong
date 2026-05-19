@@ -169,14 +169,14 @@ export function MemoryManagementSettings() {
     setSelectedNodeIds([]);
   }, [query, status]);
 
-  const startNew = () => {
+  const startNew = useCallback(() => {
     setDraft(emptyMemoryDraft());
     setKeywordsText('');
     setRelations([]);
     setRelationTargetId('');
     setRelationKind('related_to');
     setRelationNote('');
-  };
+  }, []);
 
   const editNode = useCallback((node: MemoryNode) => {
     setDraft({
@@ -432,6 +432,7 @@ export function MemoryManagementSettings() {
                     selectedId={draft.id}
                     isLoading={isLoading}
                     onSelect={editNode}
+                    onClearSelection={startNew}
                   />
                 </div>
               </div>

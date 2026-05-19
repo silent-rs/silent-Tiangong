@@ -13,6 +13,7 @@ interface MemoryGraphCanvasProps {
   selectedId?: string;
   isLoading: boolean;
   onSelect: (node: MemoryNode) => void;
+  onClearSelection: () => void;
 }
 
 interface GraphPosition {
@@ -20,9 +21,58 @@ interface GraphPosition {
   y: number;
 }
 
+function computeNodeRelationStats(
+  nodes: MemoryNode[],
+  relations: MemoryRelation[],
+): Map<string, { degree: number; weight: number }> {
+  const visibleNodeIds = new Set(nodes.map((node) => node.id));
+  const stats = new Map<string, { degree: number; weight: number }>();
+  nodes.forEach((node) => {
+    stats.set(node.id, { degree: 0, weight: 0 });
+  });
+
+  relations.forEach((relation) => {
+    if (!visibleNodeIds.has(relation.from_node_id) || !visibleNodeIds.has(relation.to_node_id)) {
+      return;
+    }
+    const weight = Math.max(0.2, Math.min(2, relation.weight || 1));
+    const from = stats.get(relation.from_node_id);
+    const to = stats.get(relation.to_node_id);
+    if (from) {
+      from.degree += 1;
+      from.weight += weight;
+    }
+    if (to) {
+      to.degree += 1;
+      to.weight += weight;
+    }
+  });
+
+  return stats;
+}
+
+function memoryGraphNodeSize(degree: number, selected: boolean, nodeCount: number): number {
+  const degreeBaseSize = [8, 13, 19, 25, 32][Math.min(degree, 4)];
+  const extraDegreeSize = Math.max(0, degree - 4) * 1.6;
+  const densityScale = Math.max(0.55, Math.min(1, Math.sqrt(140 / Math.max(140, nodeCount))));
+  const size = (degreeBaseSize + extraDegreeSize) * densityScale;
+  return selected ? Math.max(size + 4, 22) : Math.min(40, Math.max(6, size));
+}
+
+function memoryGraphNodeRadius(degree: number, nodeCount: number): number {
+  return memoryGraphNodeSize(degree, false, nodeCount) * 0.16;
+}
+
+function memoryGraphNodeColor(node: MemoryNode): string {
+  const color = memoryGraphColor(node.memory_type);
+  const alpha = Math.round((0.36 + Math.max(0, Math.min(1, node.importance || 0)) * 0.64) * 255);
+  return `${color}${alpha.toString(16).padStart(2, '0')}`;
+}
+
 function computeMemoryGraphLayout(
   nodes: MemoryNode[],
   relations: MemoryRelation[],
+  relationStats: Map<string, { degree: number; weight: number }>,
   selectedId?: string,
 ): Map<string, GraphPosition> {
   const positions = new Map<string, GraphPosition>();
@@ -39,18 +89,27 @@ function computeMemoryGraphLayout(
   const state = orderedNodes.map((node, index) => {
     nodeIndex.set(node.id, index);
     if (node.id === selectedId) {
-      return { id: node.id, x: 0, y: 0, vx: 0, vy: 0, fixed: true };
+      return {
+        id: node.id,
+        x: 0,
+        y: 0,
+        vx: 0,
+        vy: 0,
+        radius: memoryGraphNodeRadius(relationStats.get(node.id)?.degree ?? 0, nodes.length),
+        fixed: true,
+      };
     }
     const ringIndex = selectedNode ? index - 1 : index;
     const ringCount = selectedNode ? orderedNodes.length - 1 : orderedNodes.length;
     const angle = (Math.PI * 2 * ringIndex) / Math.max(1, ringCount) - Math.PI / 2;
-    const radius = Math.max(5, Math.min(20, Math.sqrt(Math.max(1, ringCount)) * 4.4));
+    const radius = Math.max(8, Math.min(36, Math.sqrt(Math.max(1, ringCount)) * 5.6));
     return {
       id: node.id,
       x: Math.cos(angle) * radius,
       y: Math.sin(angle) * radius,
       vx: 0,
       vy: 0,
+      radius: memoryGraphNodeRadius(relationStats.get(node.id)?.degree ?? 0, nodes.length),
       fixed: false,
     };
   });
@@ -90,6 +149,21 @@ function computeMemoryGraphLayout(
         if (!b.fixed) {
           b.vx += fx;
           b.vy += fy;
+        }
+
+        const minDistance = a.radius + b.radius + (nodes.length > 80 ? 0.8 : 1.2);
+        if (distance < minDistance) {
+          const overlapForce = (minDistance - distance) * 0.08 * cooling;
+          const ox = (dx / distance) * overlapForce;
+          const oy = (dy / distance) * overlapForce;
+          if (!a.fixed) {
+            a.vx -= ox;
+            a.vy -= oy;
+          }
+          if (!b.fixed) {
+            b.vx += ox;
+            b.vy += oy;
+          }
         }
       }
     }
@@ -131,6 +205,37 @@ function computeMemoryGraphLayout(
     });
   }
 
+  for (let step = 0; step < 18; step += 1) {
+    for (let i = 0; i < state.length; i += 1) {
+      for (let j = i + 1; j < state.length; j += 1) {
+        const a = state[i];
+        const b = state[j];
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const distance = Math.max(0.001, Math.sqrt(dx * dx + dy * dy));
+        const minDistance = a.radius + b.radius + (nodes.length > 80 ? 0.6 : 1);
+        if (distance >= minDistance) {
+          continue;
+        }
+        const shift = (minDistance - distance) * 0.52;
+        const sx = (dx / distance) * shift;
+        const sy = (dy / distance) * shift;
+        if (!a.fixed && !b.fixed) {
+          a.x -= sx * 0.5;
+          a.y -= sy * 0.5;
+          b.x += sx * 0.5;
+          b.y += sy * 0.5;
+        } else if (!a.fixed) {
+          a.x -= sx;
+          a.y -= sy;
+        } else if (!b.fixed) {
+          b.x += sx;
+          b.y += sy;
+        }
+      }
+    }
+  }
+
   state.forEach((item) => {
     positions.set(item.id, { x: item.x, y: item.y });
   });
@@ -143,6 +248,7 @@ export function MemoryGraphCanvas({
   selectedId,
   isLoading,
   onSelect,
+  onClearSelection,
 }: MemoryGraphCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const nodeMapRef = useRef<Map<string, MemoryNode>>(new Map());
@@ -159,21 +265,35 @@ export function MemoryGraphCanvas({
       : nodes;
     const graph = new Graph();
     const nodeMap = new Map<string, MemoryNode>();
-    const layout = computeMemoryGraphLayout(nodes, relations, selectedId);
+    const relationStats = computeNodeRelationStats(nodes, relations);
+    const layout = computeMemoryGraphLayout(nodes, relations, relationStats, selectedId);
+    const selectedLinkedNodeIds = new Set<string>();
+    if (selectedId) {
+      relations.forEach((relation) => {
+        if (relation.from_node_id === selectedId) {
+          selectedLinkedNodeIds.add(relation.to_node_id);
+        }
+        if (relation.to_node_id === selectedId) {
+          selectedLinkedNodeIds.add(relation.from_node_id);
+        }
+      });
+    }
 
     orderedNodes.forEach((node, index) => {
       const selected = node.id === selectedId;
       const position = layout.get(node.id) ?? { x: index * 1.5, y: 0 };
+      const degree = relationStats.get(node.id)?.degree ?? 0;
+      const size = memoryGraphNodeSize(degree, selected, nodes.length);
       nodeMap.set(node.id, node);
       graph.addNode(node.id, {
         label: `${node.title} · ${memoryTypeLabel(node.memory_type)}`,
         x: position.x,
         y: position.y,
-        size: selected ? 18 : 11 + Math.round(node.importance * 6),
-        color: selected ? '#ffffff' : memoryGraphColor(node.memory_type),
+        size,
+        color: selected ? '#ffffff' : memoryGraphNodeColor(node),
         borderColor: memoryGraphColor(node.memory_type),
         highlighted: selected,
-        forceLabel: selected || nodes.length <= 24,
+        forceLabel: false,
         zIndex: selected ? 2 : 1,
       });
     });
@@ -199,6 +319,7 @@ export function MemoryGraphCanvas({
     });
 
     nodeMapRef.current = nodeMap;
+    let hoveredNodeId: string | undefined;
     const renderer = new Sigma(graph, container, {
       allowInvalidContainer: true,
       autoCenter: true,
@@ -209,7 +330,7 @@ export function MemoryGraphCanvas({
       hideLabelsOnMove: true,
       labelColor: { color: '#cbd5e1' },
       labelDensity: 0.08,
-      labelRenderedSizeThreshold: 7,
+      labelRenderedSizeThreshold: Number.POSITIVE_INFINITY,
       labelSize: 12,
       minCameraRatio: 0.45,
       maxCameraRatio: 2.6,
@@ -218,28 +339,33 @@ export function MemoryGraphCanvas({
       stagePadding: 24,
       zIndex: true,
       nodeReducer: (nodeId, data) => {
+        const hovered = nodeId === hoveredNodeId;
+        const linked = Boolean(selectedId && selectedLinkedNodeIds.has(nodeId));
+        const labelVisible = hovered || nodeId === selectedId || linked;
         if (!selectedId) {
-          return data;
+          return {
+            ...data,
+            highlighted: hovered,
+            forceLabel: hovered,
+            zIndex: hovered ? 3 : data.zIndex,
+          };
         }
         if (nodeId === selectedId) {
           return {
             ...data,
             color: '#ffffff',
             highlighted: true,
-            forceLabel: true,
-            size: Math.max(data.size ?? 14, 18),
+            forceLabel: labelVisible,
+            size: Math.max(data.size ?? 14, 20),
             zIndex: 3,
           };
         }
-        const linked = relations.some((relation) =>
-          (relation.from_node_id === selectedId && relation.to_node_id === nodeId) ||
-          (relation.to_node_id === selectedId && relation.from_node_id === nodeId),
-        );
         return {
           ...data,
-          color: linked ? data.color : '#334155',
-          forceLabel: linked && nodes.length <= 40,
-          zIndex: linked ? 2 : 1,
+          color: linked || hovered ? data.color : '#33415566',
+          highlighted: hovered,
+          forceLabel: labelVisible,
+          zIndex: hovered ? 3 : linked ? 2 : 1,
         };
       },
       edgeReducer: (_edgeId, data) => {
@@ -264,12 +390,23 @@ export function MemoryGraphCanvas({
         onSelect(selected);
       }
     });
+    renderer.on('clickStage', onClearSelection);
+    renderer.on('enterNode', ({ node }) => {
+      hoveredNodeId = node;
+      renderer.refresh();
+    });
+    renderer.on('leaveNode', ({ node }) => {
+      if (hoveredNodeId === node) {
+        hoveredNodeId = undefined;
+        renderer.refresh();
+      }
+    });
 
     return () => {
       renderer.kill();
       graph.clear();
     };
-  }, [nodes, onSelect, relations, selectedId]);
+  }, [nodes, onClearSelection, onSelect, relations, selectedId]);
 
   return (
     <div className="relative h-full min-h-[360px]">

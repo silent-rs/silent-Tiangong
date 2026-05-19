@@ -1,5 +1,6 @@
 //! Memory 关联管理组件
 
+import { useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent } from '@/components/ui/card';
@@ -35,21 +36,59 @@ export function MemoryRelationPanel({
   onSave,
   onRemove,
 }: MemoryRelationPanelProps) {
+  const [targetQuery, setTargetQuery] = useState('');
+  const candidateNodes = useMemo(() => nodes.filter((node) => node.id !== draftId), [draftId, nodes]);
+  const normalizedTargetQuery = targetQuery.trim().toLowerCase();
+  const filteredCandidateNodes = useMemo(() => {
+    if (!normalizedTargetQuery) {
+      return candidateNodes;
+    }
+    return candidateNodes.filter((node) => {
+      const searchable = [
+        node.title,
+        node.summary,
+        node.memory_type,
+        ...node.keywords,
+      ].join(' ').toLowerCase();
+      return searchable.includes(normalizedTargetQuery);
+    });
+  }, [candidateNodes, normalizedTargetQuery]);
+
   return (
     <Card>
       <CardContent className="p-4 space-y-3">
         <h4 className="text-sm font-medium">记忆关联</h4>
-        <div className="grid grid-cols-[minmax(0,1fr)_104px] gap-2">
-          <Select value={relationTargetId} onValueChange={onTargetChange} disabled={!draftId}>
-            <SelectTrigger className="h-8 text-sm">
-              <SelectValue placeholder="选择关联目标" />
-            </SelectTrigger>
-            <SelectContent>
-              {nodes.filter((node) => node.id !== draftId).map((node) => (
-                <SelectItem key={node.id} value={node.id}>{node.title}</SelectItem>
+        <div className="grid grid-cols-[minmax(0,1fr)_104px] gap-2 items-start">
+          <div className="min-w-0 space-y-2">
+            <Input
+              value={targetQuery}
+              onChange={(event) => setTargetQuery(event.target.value)}
+              className="h-8 text-sm"
+              placeholder="搜索关联目标"
+              disabled={!draftId}
+            />
+            <div className="max-h-32 overflow-y-auto rounded-md border bg-background p-1">
+              {filteredCandidateNodes.map((node) => (
+                <button
+                  key={node.id}
+                  type="button"
+                  className={`flex h-8 w-full items-center rounded-sm px-2 text-left text-xs transition-colors hover:bg-accent ${
+                    relationTargetId === node.id ? 'bg-accent text-accent-foreground' : ''
+                  }`}
+                  disabled={!draftId}
+                  onClick={() => onTargetChange(node.id)}
+                  title={node.title}
+                >
+                  <span className="truncate">{node.title}</span>
+                </button>
               ))}
-            </SelectContent>
-          </Select>
+              {filteredCandidateNodes.length === 0 && (
+                <div className="px-2 py-2 text-xs text-muted-foreground">
+                  没有匹配目标
+                </div>
+              )}
+            </div>
+          </div>
           <Select value={relationKind} onValueChange={(value) => onKindChange(value as MemoryRelationKind)} disabled={!draftId}>
             <SelectTrigger className="h-8 text-sm">
               <SelectValue />
