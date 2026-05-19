@@ -153,9 +153,7 @@ async fn run_cli_update_async(
 
     let updater = if let Some(endpoint) = options.endpoint.as_deref() {
         let endpoint = reqwest::Url::parse(endpoint)?;
-        app.updater_builder()
-            .endpoints(vec![endpoint])?
-            .build()?
+        app.updater_builder().endpoints(vec![endpoint])?.build()?
     } else {
         app.updater()?
     };
@@ -179,7 +177,11 @@ async fn run_cli_update_async(
     if let Some(date) = update.date {
         println!("发布时间：{date}");
     }
-    if let Some(body) = update.body.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(body) = update
+        .body
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         println!("\n更新说明：\n{}", body.trim());
     }
 

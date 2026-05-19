@@ -530,10 +530,12 @@ fn resolved_model_by_key(
         .models
         .get(model_key)
         .ok_or_else(|| format!("模型不存在：{model_key}"))?;
-    let provider = models
-        .providers
-        .get(&model_entry.provider)
-        .ok_or_else(|| format!("模型 {model_key} 引用的 Provider 不存在：{}", model_entry.provider))?;
+    let provider = models.providers.get(&model_entry.provider).ok_or_else(|| {
+        format!(
+            "模型 {model_key} 引用的 Provider 不存在：{}",
+            model_entry.provider
+        )
+    })?;
 
     Ok(tiangong_core::models_config::ResolvedModel {
         provider: model_entry.provider.clone(),
@@ -603,21 +605,36 @@ fn find_model_key_for_endpoint(
     models: &tiangong_core::models_config::ModelsConfig,
     endpoint: &tiangong_memory::MemoryLlmConfig,
 ) -> Option<String> {
-    find_model_key(models, &endpoint.base_url, &endpoint.model, endpoint.protocol)
+    find_model_key(
+        models,
+        &endpoint.base_url,
+        &endpoint.model,
+        endpoint.protocol,
+    )
 }
 
 fn find_embedding_key_for_endpoint(
     models: &tiangong_core::models_config::ModelsConfig,
     endpoint: &tiangong_memory::MemoryEmbeddingConfig,
 ) -> Option<String> {
-    find_model_key(models, &endpoint.base_url, &endpoint.model, endpoint.protocol)
+    find_model_key(
+        models,
+        &endpoint.base_url,
+        &endpoint.model,
+        endpoint.protocol,
+    )
 }
 
 fn find_rerank_key_for_endpoint(
     models: &tiangong_core::models_config::ModelsConfig,
     endpoint: &tiangong_memory::MemoryRerankConfig,
 ) -> Option<String> {
-    find_model_key(models, &endpoint.base_url, &endpoint.model, endpoint.protocol)
+    find_model_key(
+        models,
+        &endpoint.base_url,
+        &endpoint.model,
+        endpoint.protocol,
+    )
 }
 
 fn find_model_key(
@@ -628,7 +645,10 @@ fn find_model_key(
 ) -> Option<String> {
     models.models.iter().find_map(|(model_key, model)| {
         let provider = models.providers.get(&model.provider)?;
-        if provider.base_url == base_url && provider.protocol == protocol && model.model == model_name {
+        if provider.base_url == base_url
+            && provider.protocol == protocol
+            && model.model == model_name
+        {
             Some(model_key.clone())
         } else {
             None
@@ -640,7 +660,7 @@ fn memory_vector_mode_to_string(mode: tiangong_memory::MemoryVectorMode) -> &'st
     match mode {
         tiangong_memory::MemoryVectorMode::Auto => "auto",
         tiangong_memory::MemoryVectorMode::Disabled => "disabled",
-        tiangong_memory::MemoryVectorMode::Embedded => "embedded",
+        tiangong_memory::MemoryVectorMode::EmbeddedQdrantEdge => "qdrant",
         tiangong_memory::MemoryVectorMode::ExternalQdrant => "external_qdrant",
     }
 }
@@ -648,7 +668,6 @@ fn memory_vector_mode_to_string(mode: tiangong_memory::MemoryVectorMode) -> &'st
 fn memory_vector_mode_from_string(value: &str) -> tiangong_memory::MemoryVectorMode {
     match value.trim().to_ascii_lowercase().as_str() {
         "disabled" => tiangong_memory::MemoryVectorMode::Disabled,
-        "embedded" => tiangong_memory::MemoryVectorMode::Embedded,
         "external_qdrant" | "qdrant" => tiangong_memory::MemoryVectorMode::ExternalQdrant,
         _ => tiangong_memory::MemoryVectorMode::Auto,
     }

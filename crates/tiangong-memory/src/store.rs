@@ -19,6 +19,7 @@ use crate::injection;
 use crate::options::MemoryVectorMode;
 use crate::recall::RecallEngine;
 use crate::search::TantivyIndex;
+#[cfg(feature = "embedded-qdrant-edge")]
 use crate::search::edge_search::QdrantEdgeIndex;
 use crate::search::qdrant_search::QdrantIndex;
 use crate::search::vector::VectorIndex;
@@ -79,6 +80,7 @@ impl MemoryStore {
     }
 
     /// 将 SQLite memory_vectors 表中的向量迁移到 Qdrant Edge 索引。
+    #[cfg(feature = "embedded-qdrant-edge")]
     async fn migrate_vectors_to_qdrant_edge(&self, index: &QdrantEdgeIndex, dimension: usize) {
         let points = match self.db.list_vectors(dimension) {
             Ok(p) => p,
@@ -193,7 +195,7 @@ impl MemoryStore {
         };
 
         let vector_mode = match vector_mode {
-            MemoryVectorMode::Auto => MemoryVectorMode::EmbeddedQdrantEdge,
+            MemoryVectorMode::Auto => default_vector_mode(),
             mode => mode,
         };
         if vector_mode == MemoryVectorMode::Disabled {
@@ -208,6 +210,7 @@ impl MemoryStore {
         }
 
         let (vector_index, backend): (Box<dyn VectorIndex>, &str) = match vector_mode {
+            #[cfg(feature = "embedded-qdrant-edge")]
             MemoryVectorMode::EmbeddedQdrantEdge => {
                 let base = memory_index_base_dir(self.workspace_id.as_deref());
                 let needs_migration = self.db.count_vectors().unwrap_or(0) > 0
@@ -236,6 +239,20 @@ impl MemoryStore {
                         return;
                     }
                 }
+            }
+            #[cfg(not(feature = "embedded-qdrant-edge"))]
+            MemoryVectorMode::EmbeddedQdrantEdge => {
+                if let Some(rerank_provider) = rerank_provider {
+                    let model = rerank_provider.model().to_string();
+                    self.enable_rerank_only(rerank_provider);
+                    tracing::warn!(
+                        model = %model,
+                        "Memory Qdrant Edge 功能未启用，仅启用 rerank"
+                    );
+                } else {
+                    tracing::warn!("Memory Qdrant Edge 功能未启用，使用 BM25-only 召回");
+                }
+                return;
             }
             MemoryVectorMode::ExternalQdrant => {
                 match QdrantIndex::connect(embedding.dimension).await {
@@ -923,6 +940,14 @@ fn memory_base_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".tiangong")
         .join("memory")
+}
+
+fn default_vector_mode() -> MemoryVectorMode {
+    if cfg!(feature = "embedded-qdrant-edge") {
+        MemoryVectorMode::EmbeddedQdrantEdge
+    } else {
+        MemoryVectorMode::Disabled
+    }
 }
 
 fn memory_index_base_dir(workspace_id: Option<&str>) -> PathBuf {
