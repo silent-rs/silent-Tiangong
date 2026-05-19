@@ -995,11 +995,13 @@ impl ReactEngine {
                             (result, usage, false, "analyze_attachment")
                         } else {
                             (
-                                self.engine.execute_tool_call(
-                                    call,
-                                    &self.mcp_targets,
-                                    &self.engine.agent_config().mcp,
-                                ),
+                                self.engine
+                                    .execute_tool_call(
+                                        call,
+                                        &self.mcp_targets,
+                                        &self.engine.agent_config().mcp,
+                                    )
+                                    .await,
                                 tiangong_types::TokenUsage::default(),
                                 false,
                                 "",

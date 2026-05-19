@@ -11,7 +11,7 @@ use crate::tool::{LocalToolExecutor, ToolResult};
 const MAX_DYNAMIC_STEPS_PER_PLAN: usize = 12;
 
 #[allow(clippy::too_many_arguments)]
-pub fn execute_plan_with_execution_agent<P, L, T, S, G>(
+pub async fn execute_plan_with_execution_agent<P, L, T, S, G>(
     client: &SingleProviderClient,
     tool_executor: &LocalToolExecutor,
     mcp_config: &McpConfig,
@@ -73,7 +73,8 @@ where
                 &mut |delta: &crate::model::ModelStreamChunk| {
                     on_stage_thinking(&stage_name, delta);
                 },
-            );
+            )
+            .await;
             for item in tool_results.iter().skip(tool_results_before) {
                 on_tool_result(item);
             }

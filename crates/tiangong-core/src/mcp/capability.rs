@@ -5,7 +5,7 @@ use std::sync::{OnceLock, RwLock};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use crate::agent_config::{McpConfig, McpServerConfig};
@@ -251,10 +251,25 @@ pub fn build_mcp_tools_system_prompt(max_tools_per_server: usize) -> Option<Stri
 
 fn probe_server_capability(server: &McpServerConfig, timeout_ms: u64) -> McpServerCapability {
     let client = LocalMcpClient;
-    match client.list_tools(server, timeout_ms) {
+    let server_name = server.name.clone();
+    let server_transport = server.resolved_transport();
+    let server = server.clone();
+    let result = std::thread::scope(|scope| {
+        scope
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .context("初始化 MCP 探测运行时失败")?;
+                runtime.block_on(client.list_tools(&server, timeout_ms))
+            })
+            .join()
+            .map_err(|_| anyhow!("MCP 探测线程 panic"))?
+    });
+    match result {
         Ok(tools) => {
             let tools = dedup_tools(&tools);
-            let server_version = super::client::get_cached_server_version(&server.name);
+            let server_version = super::client::get_cached_server_version(&server_name);
             McpServerCapability {
                 healthy: true,
                 tools,
@@ -266,8 +281,8 @@ fn probe_server_capability(server: &McpServerConfig, timeout_ms: u64) -> McpServ
             let err_msg = err.to_string();
             tracing::warn!(
                 "MCP 探测失败：server={} transport={:?} error={}",
-                server.name,
-                server.resolved_transport(),
+                server_name,
+                server_transport,
                 err_msg
             );
             McpServerCapability {

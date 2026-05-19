@@ -13,7 +13,6 @@ use rmcp::transport::{ConfigureCommandExt, StreamableHttpClientTransport, TokioC
 use rmcp::{Peer, RoleClient, ServiceExt};
 use serde_json::{Value, json};
 use tokio::process::Command;
-use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::time::timeout;
 
 use crate::agent_config::{McpServerConfig, ResolvedMcpTransport};
@@ -98,25 +97,29 @@ impl McpToolMeta {
 
 #[allow(dead_code)]
 pub trait McpClient {
-    fn list_tools(&self, server: &McpServerConfig, timeout_ms: u64) -> Result<Vec<McpToolMeta>>;
+    fn list_tools(
+        &self,
+        server: &McpServerConfig,
+        timeout_ms: u64,
+    ) -> impl std::future::Future<Output = Result<Vec<McpToolMeta>>> + Send;
     fn list_resources(
         &self,
         server: &McpServerConfig,
         timeout_ms: u64,
-    ) -> Result<Vec<McpResourceMeta>>;
+    ) -> impl std::future::Future<Output = Result<Vec<McpResourceMeta>>> + Send;
     fn read_resource(
         &self,
         server: &McpServerConfig,
         resource: &McpResourceMeta,
         timeout_ms: u64,
-    ) -> Result<String>;
+    ) -> impl std::future::Future<Output = Result<String>> + Send;
     fn call_tool(
         &self,
         server: &McpServerConfig,
         tool_name: &str,
         arguments: Value,
         timeout_ms: u64,
-    ) -> Result<String>;
+    ) -> impl std::future::Future<Output = Result<String>> + Send;
 }
 
 // MCP server 版本信息全局缓存
@@ -143,7 +146,11 @@ pub fn get_cached_server_version(name: &str) -> Option<String> {
 pub struct LocalMcpClient;
 
 impl McpClient for LocalMcpClient {
-    fn list_tools(&self, server: &McpServerConfig, timeout_ms: u64) -> Result<Vec<McpToolMeta>> {
+    async fn list_tools(
+        &self,
+        server: &McpServerConfig,
+        timeout_ms: u64,
+    ) -> Result<Vec<McpToolMeta>> {
         if !server.enabled {
             return Ok(Vec::new());
         }
@@ -168,10 +175,10 @@ impl McpClient for LocalMcpClient {
                 .collect());
         }
 
-        list_tools_via_rmcp(server, timeout_ms)
+        list_tools_via_rmcp(server, timeout_ms).await
     }
 
-    fn list_resources(
+    async fn list_resources(
         &self,
         server: &McpServerConfig,
         timeout_ms: u64,
@@ -197,10 +204,10 @@ impl McpClient for LocalMcpClient {
                 .collect());
         }
 
-        list_resources_via_rmcp(server, timeout_ms)
+        list_resources_via_rmcp(server, timeout_ms).await
     }
 
-    fn read_resource(
+    async fn read_resource(
         &self,
         server: &McpServerConfig,
         resource: &McpResourceMeta,
@@ -229,11 +236,12 @@ impl McpClient for LocalMcpClient {
             timeout_ms,
             "resources/read",
             Some(json!({ "uri": resource.uri })),
-        )?;
+        )
+        .await?;
         Ok(parse_read_resource_result(&result))
     }
 
-    fn call_tool(
+    async fn call_tool(
         &self,
         server: &McpServerConfig,
         tool_name: &str,
@@ -258,13 +266,14 @@ impl McpClient for LocalMcpClient {
                 "name": tool_name,
                 "arguments": arguments,
             })),
-        )?;
+        )
+        .await?;
         parse_call_tool_result(&result)
     }
 }
 
 #[allow(dead_code)]
-fn list_resources_via_rmcp(
+async fn list_resources_via_rmcp(
     server: &McpServerConfig,
     timeout_ms: u64,
 ) -> Result<Vec<McpResourceMeta>> {
@@ -274,7 +283,7 @@ fn list_resources_via_rmcp(
 
     for _ in 0..MAX_LIST_PAGES {
         let params = cursor.as_ref().map(|cursor| json!({ "cursor": cursor }));
-        let result = run_mcp_request(server, timeout_ms, "resources/list", params)?;
+        let result = run_mcp_request(server, timeout_ms, "resources/list", params).await?;
         let (page, next_cursor) = parse_resource_page(&server.name, &result);
         for resource in page {
             if seen.insert(resource.uri.clone()) {
@@ -301,14 +310,17 @@ fn list_resources_via_rmcp(
     Ok(resources)
 }
 
-fn list_tools_via_rmcp(server: &McpServerConfig, timeout_ms: u64) -> Result<Vec<McpToolMeta>> {
+async fn list_tools_via_rmcp(
+    server: &McpServerConfig,
+    timeout_ms: u64,
+) -> Result<Vec<McpToolMeta>> {
     let mut tools = Vec::new();
     let mut seen = HashSet::new();
     let mut cursor: Option<String> = None;
 
     for _ in 0..MAX_LIST_PAGES {
         let params = cursor.as_ref().map(|cursor| json!({ "cursor": cursor }));
-        let result = run_mcp_request(server, timeout_ms, "tools/list", params)?;
+        let result = run_mcp_request(server, timeout_ms, "tools/list", params).await?;
         let (page, next_cursor) = parse_tool_page(&server.name, &result);
         for tool in page {
             if seen.insert(tool.name.clone()) {
@@ -335,7 +347,7 @@ fn list_tools_via_rmcp(server: &McpServerConfig, timeout_ms: u64) -> Result<Vec<
     Ok(tools)
 }
 
-fn run_mcp_request(
+async fn run_mcp_request(
     server: &McpServerConfig,
     timeout_ms: u64,
     method: &str,
@@ -357,21 +369,14 @@ fn run_mcp_request(
         }
     }
 
-    let runtime = TokioRuntimeBuilder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("初始化 MCP 运行时失败")?;
+    let result = timeout(
+        Duration::from_millis(timeout_ms),
+        run_mcp_request_async(server, method, params),
+    )
+    .await;
 
-    let output = runtime.block_on(async {
-        timeout(
-            Duration::from_millis(timeout_ms),
-            run_mcp_request_async(server, method, params),
-        )
-        .await
-    });
-
-    match output {
-        Ok(Ok(result)) => Ok(result),
+    match result {
+        Ok(Ok(value)) => Ok(value),
         Ok(Err(err)) => Err(anyhow!(
             "MCP调用失败：server={} method={} error={}",
             server.name,
