@@ -206,8 +206,8 @@ fn create_script(content: &str) -> TempScript {
 }
 
 #[cfg(unix)]
-#[test]
-fn local_mcp_client_stdio_mode_supports_list_and_read() {
+#[tokio::test]
+async fn local_mcp_client_stdio_mode_supports_list_and_read() {
     let script = create_script(
         r#"#!/usr/bin/env bash
 set -euo pipefail
@@ -282,10 +282,11 @@ done
 
     let resources = client
         .list_resources(&server, 3000)
+        .await
         .expect("list resources");
     assert_eq!(resources.len(), 2);
     assert_eq!(resources[0].uri, "mcp://demo/first");
-    let tools = client.list_tools(&server, 3000).expect("list tools");
+    let tools = client.list_tools(&server, 3000).await.expect("list tools");
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].name, "read_demo");
     assert_eq!(tools[0].argument_summaries.len(), 2);
@@ -305,16 +306,17 @@ done
 
     let first_content = client
         .read_resource(&server, &resources[0], 3000)
+        .await
         .expect("read first resource");
     assert_eq!(first_content, "hello-from-first");
 
-    let read_err = client.read_resource(&server, &resources[1], 3000);
+    let read_err = client.read_resource(&server, &resources[1], 3000).await;
     assert!(read_err.is_err());
 }
 
 #[cfg(unix)]
-#[test]
-fn local_mcp_client_stdio_mode_respects_timeout() {
+#[tokio::test]
+async fn local_mcp_client_stdio_mode_respects_timeout() {
     let script = create_script(
         r#"#!/usr/bin/env bash
 set -euo pipefail
@@ -364,7 +366,7 @@ done
         tags: vec!["slow".to_string()],
     };
 
-    let result = client.list_resources(&server, 100);
+    let result = client.list_resources(&server, 100).await;
     assert!(result.is_err());
     let detail = result.err().map(|err| err.to_string()).unwrap_or_default();
     assert!(detail.contains("超时"));
@@ -447,9 +449,9 @@ done
     assert!(context.is_empty());
 }
 
-#[test]
+#[tokio::test]
 #[ignore] // 需要真实网络环境，验证后删除
-fn test_http_mcp_rmcp_connect() {
+async fn test_http_mcp_rmcp_connect() {
     let server = McpServerConfig {
         name: "model_share_platform".to_string(),
         transport: McpTransportMode::Http,
@@ -464,7 +466,7 @@ fn test_http_mcp_rmcp_connect() {
         tags: Vec::new(),
     };
     let client = LocalMcpClient;
-    match client.list_tools(&server, 15000) {
+    match client.list_tools(&server, 15000).await {
         Ok(tools) => {
             println!("list_tools 成功，工具数量: {}", tools.len());
             for tool in &tools {

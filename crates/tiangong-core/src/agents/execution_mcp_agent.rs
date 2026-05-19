@@ -140,15 +140,15 @@ fn function_tool_from_mcp_tool(
     }
 }
 
-pub(crate) fn execute_mcp_tool_call(
+pub(crate) async fn execute_mcp_tool_call(
     call: &ToolCall,
     target: &McpFunctionTarget,
     mcp_config: &McpConfig,
 ) -> Result<ToolResult> {
-    execute_mcp_tool_call_with_args(target, normalize_mcp_call_arguments(call), mcp_config)
+    execute_mcp_tool_call_with_args(target, normalize_mcp_call_arguments(call), mcp_config).await
 }
 
-pub(crate) fn execute_mcp_tool_call_with_args(
+pub(crate) async fn execute_mcp_tool_call_with_args(
     target: &McpFunctionTarget,
     args: Value,
     mcp_config: &McpConfig,
@@ -162,12 +162,15 @@ pub(crate) fn execute_mcp_tool_call_with_args(
         )
     })?;
     let client = LocalMcpClient;
-    match client.call_tool(
-        server,
-        &target.tool_name,
-        args.clone(),
-        mcp_config.timeout_ms,
-    ) {
+    match client
+        .call_tool(
+            server,
+            &target.tool_name,
+            args.clone(),
+            mcp_config.timeout_ms,
+        )
+        .await
+    {
         Ok(stdout) => Ok(ToolResult {
             ok: true,
             summary: format!(
