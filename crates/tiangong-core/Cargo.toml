@@ -5,34 +5,34 @@ edition = "2024"
 license = "Apache-2.0"
 
 [dependencies]
-tiangong-types = { path = "../tiangong-types" }
-tiangong-llm = { path = "../tiangong-llm" }
-tiangong-memory = { path = "../tiangong-memory" }
-anyhow = "1"
-arc-swap = "1"
-base64 = "0.22"
-chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
-scru128 = "3"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-async-openai = { git = "https://github.com/silent-rs/async-openai", branch = "main", package = "async-openai", features = ["byot", "chat-completion", "model"] }
-backoff = "0.4"
-tokio = { version = "1", features = ["rt", "time", "process", "io-util", "sync"] }
-rmcp = { version = "0.17.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
-futures-util = "0.3"
-http = "1"
-scraper = "0.19"
-sha2 = "0.10"
-toml = "0.8"
-tracing = "0.1"
-zip = { version = "2", default-features = false, features = ["deflate"] }
-diffy = { version = "0.4", optional = true }
-tiangong-media = { path = "../tiangong-media" }
+tiangong-types = { workspace = true }
+tiangong-llm = { workspace = true }
+tiangong-memory = { workspace = true }
+anyhow = { workspace = true }
+arc-swap = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true, default-features = false, features = ["std", "clock"] }
+scru128 = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+async-openai = { workspace = true, features = ["byot", "chat-completion", "model"] }
+backoff = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time", "process", "io-util", "sync"] }
+rmcp = { workspace = true, default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+reqwest = { workspace = true, default-features = false, features = ["blocking", "rustls-tls"] }
+futures-util = { workspace = true }
+http = { workspace = true }
+scraper = { workspace = true }
+sha2 = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+zip = { workspace = true, default-features = false, features = ["deflate"] }
+diffy = { workspace = true, optional = true }
+tiangong-media = { workspace = true }
 
 [features]
 default = ["diffy"]
 llm-debug-log = []
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }

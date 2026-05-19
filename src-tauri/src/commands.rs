@@ -1,6 +1,6 @@
 use crate::app::TiangongApp;
 use crate::view::*;
-use base64::{Engine as _, engine::general_purpose};
+use base64::{engine::general_purpose, Engine as _};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
@@ -23,9 +23,7 @@ fn configure_no_window(command: &mut tokio::process::Command) -> &mut tokio::pro
 }
 
 fn format_agent_reply_message(agent_label: &str, content: &str) -> String {
-    let safe_label = agent_label
-        .replace(['\n', '\r'], " ")
-        .replace("--", "- -");
+    let safe_label = agent_label.replace(['\n', '\r'], " ").replace("--", "- -");
     format!("<!-- tiangong-agent-reply -->\n<!-- label:{safe_label} -->\n\n{content}")
 }
 
@@ -462,7 +460,10 @@ fn record_session_token_usage(
             session.active_agent_id = Some(aid.to_string());
             session.active_agent_current_tokens =
                 current_tokens.max(session.active_agent_current_tokens);
-            let agent_current_tokens = session.agent_current_tokens.entry(aid.to_string()).or_default();
+            let agent_current_tokens = session
+                .agent_current_tokens
+                .entry(aid.to_string())
+                .or_default();
             *agent_current_tokens = current_tokens.max(*agent_current_tokens);
         } else {
             session.current_tokens = current_tokens.max(session.current_tokens);
@@ -595,7 +596,8 @@ pub fn switch_session(session_id: String, state: State<TiangongApp>) -> Result<(
         Ok(())
     })?;
     state.sync_core_config_from_state()?;
-    let trust_mode = state.with_state_read(|core_state| Ok(core_state.active_session_trust_mode()))?;
+    let trust_mode =
+        state.with_state_read(|core_state| Ok(core_state.active_session_trust_mode()))?;
     state.set_core_trust_mode(&session_id, trust_mode);
     Ok(())
 }
@@ -1846,7 +1848,10 @@ pub async fn play_audio_file(file_path: String) -> Result<(), String> {
         let mut command = tokio::process::Command::new("afplay");
         command.arg(&file_path);
         configure_no_window(&mut command);
-        command.output().await.map_err(|e| format!("播放失败：{e}"))?;
+        command
+            .output()
+            .await
+            .map_err(|e| format!("播放失败：{e}"))?;
     }
 
     #[cfg(target_os = "windows")]
@@ -1857,7 +1862,10 @@ pub async fn play_audio_file(file_path: String) -> Result<(), String> {
             &format!("(New-Object Media.SoundPlayer '{}').PlaySync()", file_path),
         ]);
         configure_no_window(&mut command);
-        command.output().await.map_err(|e| format!("播放失败：{e}"))?;
+        command
+            .output()
+            .await
+            .map_err(|e| format!("播放失败：{e}"))?;
     }
 
     #[cfg(target_os = "linux")]
@@ -1865,7 +1873,10 @@ pub async fn play_audio_file(file_path: String) -> Result<(), String> {
         let mut command = tokio::process::Command::new("aplay");
         command.arg(&file_path);
         configure_no_window(&mut command);
-        command.output().await.map_err(|e| format!("播放失败：{e}"))?;
+        command
+            .output()
+            .await
+            .map_err(|e| format!("播放失败：{e}"))?;
     }
 
     Ok(())
@@ -2582,8 +2593,8 @@ pub async fn set_memory_node_status(
         node_id,
         status,
     )
-        .await
-        .map_err(|err| err.to_string())
+    .await
+    .map_err(|err| err.to_string())
 }
 
 /// 列出指定记忆节点的图关系。
@@ -2605,13 +2616,9 @@ pub async fn list_memory_relations_batch(
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<tiangong_memory::MemoryRelation>, String> {
     let workspace_id = current_memory_workspace_id(&state)?;
-    tiangong_core::core::list_memory_relations_batch_for_gui(
-        &state.config,
-        workspace_id,
-        node_ids,
-    )
-    .await
-    .map_err(|err| err.to_string())
+    tiangong_core::core::list_memory_relations_batch_for_gui(&state.config, workspace_id, node_ids)
+        .await
+        .map_err(|err| err.to_string())
 }
 
 /// 新增或调整记忆图关系。
@@ -2633,11 +2640,7 @@ pub async fn delete_memory_relation(
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
     let workspace_id = current_memory_workspace_id(&state)?;
-    tiangong_core::core::delete_memory_relation_for_gui(
-        &state.config,
-        workspace_id,
-        relation_id,
-    )
+    tiangong_core::core::delete_memory_relation_for_gui(&state.config, workspace_id, relation_id)
         .await
         .map_err(|err| err.to_string())
 }

@@ -5,18 +5,18 @@ edition = "2024"
 license = "Apache-2.0"
 
 [dependencies]
-tiangong-core = { path = "../tiangong-core" }
-tiangong-config = { path = "../tiangong-config" }
-tiangong-media = { path = "../tiangong-media" }
-tiangong-types = { path = "../tiangong-types" }
-silent = { version = "2", features = ["upgrade"] }
-tokio = { version = "1", features = ["rt-multi-thread", "signal", "fs", "time"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-anyhow = "1"
-tracing = "0.1"
-async-channel = "2"
-async-lock = "3"
-scru128 = "3"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-libc = "0.2"
+tiangong-core = { workspace = true }
+tiangong-config = { workspace = true }
+tiangong-media = { workspace = true }
+tiangong-types = { workspace = true }
+silent = { workspace = true, features = ["upgrade"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "signal", "fs", "time"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+async-channel = { workspace = true }
+async-lock = { workspace = true }
+scru128 = { workspace = true }
+reqwest = { workspace = true, default-features = false, features = ["rustls-tls"] }
+libc = { workspace = true }

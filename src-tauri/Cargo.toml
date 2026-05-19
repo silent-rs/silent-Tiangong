@@ -4,48 +4,48 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
-[workspace]
-# Empty workspace to make src-tauri independent from parent workspace
-
 [dependencies]
 # 引用核心库 crate
-tiangong_core = { path = "../crates/tiangong-core", package = "tiangong-core" }
-tiangong_types = { path = "../crates/tiangong-types", package = "tiangong-types" }
-tiangong_cli = { path = "../crates/tiangong-cli", package = "tiangong-cli" }
-tiangong_entry = { path = "../crates/tiangong-entry", package = "tiangong-entry" }
-tiangong_server = { path = "../crates/tiangong-server", package = "tiangong-server" }
-tiangong_media = { path = "../crates/tiangong-media", package = "tiangong-media" }
-tiangong_config = { path = "../crates/tiangong-config", package = "tiangong-config" }
-tiangong_memory = { path = "../crates/tiangong-memory", package = "tiangong-memory" }
+tiangong-core = { workspace = true }
+tiangong-types = { workspace = true }
+tiangong-cli = { workspace = true }
+tiangong-entry = { workspace = true }
+tiangong-server = { workspace = true }
+tiangong-media = { workspace = true }
+tiangong-config = { workspace = true }
+tiangong-memory = { workspace = true }
 
-anyhow = "1"
-clap = { version = "4", features = ["derive"] }
-base64 = "0.22"
-chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
-scru128 = "3"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-async-openai = { git = "https://github.com/silent-rs/async-openai", branch = "main", package = "async-openai", features = ["byot", "chat-completion", "model"] }
-tokio = { version = "1", features = ["rt", "time", "process", "io-util", "sync"] }
-rmcp = { version = "0.17.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
-futures-util = "0.3"
-http = "1"
-toml = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+base64 = { workspace = true }
+chrono = { workspace = true, default-features = false, features = ["std", "clock"] }
+scru128 = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+async-openai = { workspace = true, features = ["byot", "chat-completion", "model"] }
+tokio = { workspace = true, features = ["rt", "time", "process", "io-util", "sync"] }
+rmcp = { workspace = true, default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+futures-util = { workspace = true }
+http = { workspace = true }
+toml = { workspace = true }
+reqwest = { workspace = true, default-features = false, features = ["json", "rustls-tls"] }
 
 # Tauri 相关依赖
-tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
-tauri-plugin-shell = "2"
-tauri-plugin-fs = "2"
-tauri-plugin-dialog = "2"
-tauri-plugin-notification = "2"
-tauri-plugin-process = "2"
-tauri-plugin-updater = "2"
+tauri = { workspace = true, features = ["protocol-asset", "tray-icon"] }
+tauri-plugin-shell = { workspace = true }
+tauri-plugin-fs = { workspace = true }
+tauri-plugin-dialog = { workspace = true }
+tauri-plugin-notification = { workspace = true }
+tauri-plugin-process = { workspace = true }
+tauri-plugin-updater = { workspace = true }
+tauri-runtime = { workspace = true }
+tauri-runtime-wry = { workspace = true }
+wry = { workspace = true }
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { workspace = true, features = [] }
 
 [features]
 default = []
 cli = []
-llm-debug-log = ["tiangong_core/llm-debug-log"]
+llm-debug-log = ["tiangong-core/llm-debug-log"]

@@ -5,12 +5,12 @@ edition = "2024"
 license = "Apache-2.0"
 
 [dependencies]
-tiangong-core = { path = "../tiangong-core" }
-tiangong-config = { path = "../tiangong-config" }
-tiangong-types = { path = "../tiangong-types" }
-tracing = "0.1"
-tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
-anyhow = "1"
-crossterm = "0.28"
-ratatui = "0.28"
-termimad = "0.30"
+tiangong-core = { workspace = true }
+tiangong-config = { workspace = true }
+tiangong-types = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+anyhow = { workspace = true }
+crossterm = { workspace = true }
+ratatui = { workspace = true }
+termimad = { workspace = true }

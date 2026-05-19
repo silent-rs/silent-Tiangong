@@ -1,12 +1,14 @@
 //! Memory Handle 全局注册表：初始化、热更新、关闭
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::core_config::{CoreConfig, CoreConfigProvider};
 use crate::session::now_text;
 
 static MEMORY_HANDLES: OnceLock<Mutex<HashMap<String, MemoryRegistryEntry>>> = OnceLock::new();
+static MEMORY_INIT_LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+    OnceLock::new();
 
 const GLOBAL_MEMORY_WORKSPACE_KEY: &str = "__global__";
 
@@ -243,6 +245,26 @@ pub(crate) async fn get_or_init_memory_async(
         return Some(handle);
     }
 
+    let init_lock = memory_init_lock(&key);
+    let _init_guard = init_lock.lock().await;
+
+    let existing_after_wait = {
+        let mut guard = match registry.lock() {
+            Ok(guard) => guard,
+            Err(err) => {
+                tracing::warn!("Memory Handle registry 已污染，尝试恢复: {}", err);
+                err.into_inner()
+            }
+        };
+        guard.get_mut(&key).map(|entry| {
+            entry.last_used_at = now_text();
+            entry.handle.clone()
+        })
+    };
+    if let Some(handle) = existing_after_wait {
+        return Some(handle);
+    }
+
     match tiangong_memory::start_or_connect_with_options(options, process_type).await {
         Ok(managed) => {
             let handle = managed.handle();
@@ -280,6 +302,21 @@ pub(crate) async fn get_or_init_memory_async(
             None
         }
     }
+}
+
+fn memory_init_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let locks = MEMORY_INIT_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = match locks.lock() {
+        Ok(guard) => guard,
+        Err(err) => {
+            tracing::warn!("Memory init lock registry 已污染，尝试恢复: {}", err);
+            err.into_inner()
+        }
+    };
+    guard
+        .entry(key.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
 }
 
 fn start_or_connect_memory(
