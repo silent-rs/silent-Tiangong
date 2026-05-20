@@ -1336,10 +1336,11 @@ function RoutingSection({
   onChange: (c: ModelsConfigView) => void;
   capabilities: ModelCapabilityInfo[];
 }) {
-  const modelKeys = Object.keys(config.models);
+  const modelKeys = Object.keys(config.models).sort();
   const routingCapabilities = capabilities.filter(
     (cap) => cap.key !== 'embedding' && cap.key !== 'rerank',
   );
+  const [routeSearch, setRouteSearch] = useState<Record<string, string>>({});
   const modelLabel = (modelKey: string) => {
     const model = config.models[modelKey];
     if (!model) return modelKey;
@@ -1356,6 +1357,7 @@ function RoutingSection({
     }
     next.routing = newRouting;
     onChange(next);
+    setRouteSearch((prev) => ({ ...prev, [capKey]: '' }));
   };
 
   return (
@@ -1368,41 +1370,59 @@ function RoutingSection({
       </div>
 
       <div className="space-y-2 flex-1 min-h-0 overflow-y-auto">
-        {routingCapabilities.map((cap) => (
-          <Card key={cap.key}>
-            <CardContent className="p-3">
-              <div className="flex items-center gap-4">
-                <div className="w-28 shrink-0">
-                  <div className="text-sm font-medium leading-tight">{cap.display_name}</div>
-                  <div className="text-xs text-muted-foreground">({cap.key})</div>
-                </div>
-                <Select
-                  value={config.routing[cap.key] || '__none__'}
-                  onValueChange={(v) => setRoute(cap.key, v)}
-                >
-                  <SelectTrigger className="h-8 text-sm flex-1">
-                    <SelectValue placeholder="-- 未配置 --" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="__none__">-- 未配置 --</SelectItem>
-                    {modelKeys
-                      .filter((mk) => {
-                        const m = config.models[mk];
-                        if (m.capabilities.length === 0) return true;
-                        if (m.capabilities.includes(cap.key)) return true;
-                        // lite 路由也可以选择 chat 文本模型
-                        if (cap.key === 'lite' && m.capabilities.includes('chat')) return true;
-                        return false;
-                      })
-                      .map((mk) => (
+        {routingCapabilities.map((cap) => {
+          const search = routeSearch[cap.key] || '';
+          const filtered = modelKeys
+            .filter((mk) => {
+              const m = config.models[mk];
+              if (m.capabilities.length === 0) return true;
+              if (m.capabilities.includes(cap.key)) return true;
+              if (cap.key === 'lite' && m.capabilities.includes('chat')) return true;
+              return false;
+            })
+            .filter((mk) => {
+              if (!search) return true;
+              const q = search.toLowerCase();
+              return mk.toLowerCase().includes(q) || modelLabel(mk).toLowerCase().includes(q);
+            });
+          return (
+            <Card key={cap.key}>
+              <CardContent className="p-3">
+                <div className="flex items-center gap-4">
+                  <div className="w-28 shrink-0">
+                    <div className="text-sm font-medium leading-tight">{cap.display_name}</div>
+                    <div className="text-xs text-muted-foreground">({cap.key})</div>
+                  </div>
+                  <Select
+                    value={config.routing[cap.key] || '__none__'}
+                    onValueChange={(v) => setRoute(cap.key, v)}
+                  >
+                    <SelectTrigger className="h-8 text-sm flex-1">
+                      <SelectValue placeholder="-- 未配置 --" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <div className="p-1.5 border-b" onPointerDown={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+                        <Input
+                          value={search}
+                          onChange={(e) => setRouteSearch((prev) => ({ ...prev, [cap.key]: e.target.value }))}
+                          className="h-7 text-xs"
+                          placeholder="搜索模型..."
+                        />
+                      </div>
+                      <SelectItem value="__none__">-- 未配置 --</SelectItem>
+                      {filtered.map((mk) => (
                         <SelectItem key={mk} value={mk}>{modelLabel(mk)}</SelectItem>
                       ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            </CardContent>
-          </Card>
-        ))}
+                      {filtered.length === 0 && (
+                        <div className="px-2 py-3 text-xs text-muted-foreground text-center">无匹配模型</div>
+                      )}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </CardContent>
+            </Card>
+          );
+        })}
       </div>
 
       {modelKeys.length === 0 && (
