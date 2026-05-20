@@ -13,11 +13,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Edit2, KeyRound, RefreshCw, Info, Wrench, FolderOpen, Save, ShieldCheck, Database, X } from 'lucide-react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { api } from '@/api/tauri';
 import type { McpServer, Skill, SkillDetail, ServerConfig, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo, MemoryConfigView } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
 import { useToast } from './Toast';
 import { MemoryManagementSettings } from './memory';
+
+const appWindow = getCurrentWindow();
 
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 
@@ -38,21 +41,30 @@ export function SettingsDialog() {
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent showCloseButton={false} className="w-screen max-w-none h-screen max-h-screen overflow-hidden flex flex-col rounded-none border-0 p-0">
-          {/* 保存状态 - absolute 定位到关闭按钮左侧 */}
-          <span className={`absolute right-12 top-[18px] z-10 text-xs flex items-center transition-opacity ${saveStatus === 'idle' ? 'opacity-0' : 'opacity-100'} ${saveStatus === 'error' ? 'text-destructive' : 'text-muted-foreground'}`}>
-            {saveStatus === 'saving' && (
-              <><Loader2 className="w-3 h-3 mr-1 animate-spin" />保存中...</>
-            )}
-            {(saveStatus === 'saved' || saveStatus === 'idle') && '已自动保存'}
-            {saveStatus === 'error' && '保存失败'}
-          </span>
+          {/* 顶部标题栏 — 可拖动窗口 */}
+          <header
+            className="flex h-12 shrink-0 items-center border-b pr-4 select-none"
+            style={{ paddingLeft: '80px' }}
+            onMouseDown={(e) => {
+              const tag = (e.target as HTMLElement).tagName;
+              if (tag === 'INPUT' || tag === 'BUTTON') return;
+              if ((e.target as HTMLElement).closest('[data-no-drag]')) return;
+              appWindow.startDragging();
+            }}
+          >
+            <span className="text-sm font-medium">设置</span>
+            <span className={`ml-auto text-xs flex items-center transition-opacity ${saveStatus === 'idle' ? 'opacity-0' : 'opacity-100'} ${saveStatus === 'error' ? 'text-destructive' : 'text-muted-foreground'}`}>
+              {saveStatus === 'saving' && (
+                <><Loader2 className="w-3 h-3 mr-1 animate-spin" />保存中...</>
+              )}
+              {(saveStatus === 'saved' || saveStatus === 'idle') && '已自动保存'}
+              {saveStatus === 'error' && '保存失败'}
+            </span>
+          </header>
 
           <Tabs defaultValue="agent" className="flex-1 overflow-hidden flex">
             <aside className="w-60 shrink-0 border-r bg-muted/30 flex flex-col">
-              <DialogHeader className="px-5 pb-5 pt-14 pr-10 mb-0 border-b">
-                <DialogTitle>设置</DialogTitle>
-              </DialogHeader>
-              <TabsList className="h-auto w-full flex-1 flex-col items-stretch justify-start rounded-none bg-transparent p-2">
+              <TabsList className="h-auto w-full flex-1 flex-col items-stretch justify-start rounded-none bg-transparent p-2 pt-4">
                 <TabsTrigger value="agent" className="w-full justify-start px-3 py-2">
                   <ShieldCheck className="w-4 h-4 mr-2" />
                   Agent
@@ -98,7 +110,7 @@ export function SettingsDialog() {
               <TabsContent value="agent" className="m-0 flex-1 min-h-0 overflow-hidden flex flex-col">
                 <AgentSettings onSaveStatusChange={setSaveStatus} />
               </TabsContent>
-              <TabsContent value="llm" className="m-0 flex-1 min-h-0 overflow-y-auto">
+              <TabsContent value="llm" className="m-0 flex-1 min-h-0 overflow-hidden">
                 <LLMSettings onSaveStatusChange={setSaveStatus} />
               </TabsContent>
               <TabsContent value="memory" className="m-0 flex-1 min-h-0 overflow-hidden">
@@ -376,9 +388,9 @@ function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Save
   }
 
   return (
-    <div className="p-4 space-y-4">
+    <div className="flex flex-col h-full">
       {/* 子标签栏 — 固定不动 */}
-      <div className="flex gap-1">
+      <div className="flex gap-1 shrink-0 p-4 pb-0">
         {(['providers', 'models', 'routing', 'memory'] as const).map((tab) => (
           <button
             key={tab}
@@ -395,7 +407,7 @@ function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Save
       </div>
 
       {/* 内容区域 */}
-      <div>
+      <div className="flex-1 min-h-0 overflow-y-auto p-4">
         {subTab === 'providers' && (
           <ProvidersSection config={modelsConfig} onChange={handleChange} />
         )}
@@ -766,8 +778,8 @@ function ProvidersSection({
   };
 
   return (
-    <div>
-      <div className="flex items-center justify-between mb-3">
+    <div className="flex flex-col h-full">
+      <div className="flex items-center justify-between mb-3 shrink-0">
         <h4 className="text-sm font-medium text-muted-foreground">供应商（连接配置）</h4>
         <Button size="sm" onClick={openAdd}>
           <Plus className="w-3 h-3 mr-1" />
@@ -776,7 +788,7 @@ function ProvidersSection({
       </div>
 
       {/* 快捷预设供应商 */}
-      <div className="mb-4">
+      <div className="mb-4 shrink-0">
         <div className="text-xs text-muted-foreground mb-2">快捷添加常用供应商</div>
         <div className="flex flex-wrap gap-1.5">
           {PROVIDER_PRESETS.map((preset) => {
@@ -803,7 +815,7 @@ function ProvidersSection({
         <div className="text-center text-muted-foreground py-6 text-sm">暂无供应商配置，点击上方快捷按钮或自定义添加</div>
       )}
 
-      <div className="space-y-2 max-h-[calc(80vh-380px)] overflow-y-auto">
+      <div className="space-y-2 flex-1 min-h-0 overflow-y-auto">
         {providerKeys.map((key) => (
           <Card key={key}>
             <CardContent className="p-3">
@@ -1318,8 +1330,8 @@ function ModelsSection({
   );
 
   return (
-    <div>
-      <div className="flex items-center justify-between mb-3">
+    <div className="flex flex-col h-full">
+      <div className="flex items-center justify-between mb-3 shrink-0">
         <h4 className="text-sm font-medium text-muted-foreground">模型定义</h4>
         <Button size="sm" onClick={openAdd}>
           <Plus className="w-3 h-3 mr-1" />
@@ -1331,7 +1343,7 @@ function ModelsSection({
         <div className="text-center text-muted-foreground py-6 text-sm">暂无模型定义</div>
       )}
 
-      <div className="space-y-2 max-h-[calc(80vh-280px)] overflow-y-auto">
+      <div className="space-y-2 flex-1 min-h-0 overflow-y-auto">
         {modelKeys.map((key) => {
           const m = config.models[key];
           return (
@@ -1425,15 +1437,15 @@ function RoutingSection({
   };
 
   return (
-    <div>
-      <div className="mb-3">
+    <div className="flex flex-col h-full">
+      <div className="mb-3 shrink-0">
         <h4 className="text-sm font-medium text-muted-foreground">能力路由</h4>
         <p className="text-xs text-muted-foreground mt-1">
           为对话和多媒体能力选择默认模型；Embedding 和 Rerank 在 Memory 子页中选择。
         </p>
       </div>
 
-      <div className="space-y-2 max-h-[calc(80vh-280px)] overflow-y-auto">
+      <div className="space-y-2 flex-1 min-h-0 overflow-y-auto">
         {routingCapabilities.map((cap) => (
           <Card key={cap.key}>
             <CardContent className="p-3">
