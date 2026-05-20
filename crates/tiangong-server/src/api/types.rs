@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tiangong_types::MessageContent;
+use tiangong_types::{MediaAsset, MessageContent};
 
 /// POST /api/v1/chat 请求体
 #[derive(Debug, Deserialize)]
@@ -37,6 +37,9 @@ pub struct ConnectorMessageRequest {
     /// 结构化消息内容
     #[serde(default)]
     pub content: Option<ApiMessageContent>,
+    /// 附加媒体资源（图片、视频等）
+    #[serde(default)]
+    pub media: Vec<MediaAsset>,
     #[serde(default)]
     pub reply_to: Option<String>,
 }

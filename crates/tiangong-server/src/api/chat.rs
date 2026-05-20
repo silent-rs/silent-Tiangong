@@ -38,6 +38,7 @@ pub async fn chat(mut req: Request) -> Result<Response> {
             sender_id: "http-client".to_string(),
             sender_role: access.role,
             content: MessageContent::Text(body.message),
+            media: Vec::new(),
             reply_to: None,
             timestamp: now_text(),
         })

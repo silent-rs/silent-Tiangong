@@ -40,17 +40,22 @@ impl ServerCoreManager {
         connector: &str,
         channel_id: &str,
         content: String,
+        message_id: Option<String>,
+        media: Vec<MediaAsset>,
     ) -> Result<(String, OutgoingMessage)> {
         let session_id = self
             .resolve_connector_session_id(connector, channel_id)
             .await?;
-        self.send_message_and_wait(&session_id, content).await
+        self.send_message_and_wait(&session_id, content, message_id, media)
+            .await
     }
 
     pub async fn send_message_and_wait(
         &self,
         requested_session_id: &str,
         content: String,
+        message_id: Option<String>,
+        media: Vec<MediaAsset>,
     ) -> Result<(String, OutgoingMessage)> {
         let (session_id, session, created) = self.ensure_core(requested_session_id).await?;
         if created {
@@ -65,7 +70,8 @@ impl ServerCoreManager {
             let Some(core) = cores.get(&session_id) else {
                 return Err(anyhow!("会话 core 不存在：{session_id}"));
             };
-            core.send_message(content);
+            let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
+            core.send_message_with_id(content, msg_id, media);
         }
 
         let tracker_for_wait = tracker.clone();

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::message::MediaAsset;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RemoteRole {
@@ -48,6 +50,8 @@ pub struct IncomingMessage {
     #[serde(default)]
     pub sender_role: RemoteRole,
     pub content: MessageContent,
+    #[serde(default)]
+    pub media: Vec<MediaAsset>,
     pub reply_to: Option<String>,
     pub timestamp: String,
 }

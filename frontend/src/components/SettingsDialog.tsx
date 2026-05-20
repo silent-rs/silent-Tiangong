@@ -912,7 +912,6 @@ function ProviderModelsView({
               onClick={() => setSelectedProvider(key)}
             >
               <span>{key}</span>
-              <span className="text-[10px] px-1 py-0.5 rounded bg-primary/10 text-primary">默认</span>
             </button>
           ))}
           {/* 自定义供应商 */}

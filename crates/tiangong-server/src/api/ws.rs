@@ -153,6 +153,7 @@ async fn on_receive(msg: Message, parts: Arc<RwLock<WebSocketParts>>) -> Result<
                 sender_id: "ws-client".to_string(),
                 sender_role: access.role,
                 content: MessageContent::Text(request.message),
+                media: Vec::new(),
                 reply_to: None,
                 timestamp: now_text(),
             };
