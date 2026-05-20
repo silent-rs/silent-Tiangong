@@ -29,13 +29,11 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Setup protoc
-        uses: arduino/setup-protoc@v3
-
       - name: Install Linux system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            protobuf-compiler \
             pkg-config \
             libglib2.0-dev \
             libwebkit2gtk-4.1-dev \
@@ -62,6 +60,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --tests --benches -- -D warnings
 
       - name: Run nextest
+        env:
+          CARGO_BUILD_JOBS: "1"
         run: cargo nextest run --workspace --no-tests pass
 
   frontend:
@@ -100,6 +100,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            protobuf-compiler \
             pkg-config \
             libglib2.0-dev \
             libwebkit2gtk-4.1-dev \
@@ -110,9 +111,6 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Setup protoc
-        uses: arduino/setup-protoc@v3
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
