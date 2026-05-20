@@ -10,7 +10,7 @@ import { Card, CardContent } from './ui/card';
 import { Switch } from './ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Edit2, KeyRound, RefreshCw, Info, Wrench, FolderOpen, Save, ShieldCheck, Database, X } from 'lucide-react';
+import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Edit2, KeyRound, RefreshCw, Info, FolderOpen, Save, ShieldCheck, Database, X } from 'lucide-react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -79,7 +79,7 @@ export function SettingsDialog() {
                 </TabsTrigger>
                 <TabsTrigger value="mcp" className="w-full justify-start px-3 py-2">
                   <Server className="w-4 h-4 mr-2" />
-                  MCP 服务器
+                  MCP
                 </TabsTrigger>
                 <TabsTrigger value="skill" className="w-full justify-start px-3 py-2">
                   <Puzzle className="w-4 h-4 mr-2" />
@@ -1513,10 +1513,16 @@ function McpSettings() {
     <div className="p-4">
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-lg font-medium">MCP 服务器</h3>
-        <Button size="sm" onClick={() => setShowAddDialog(true)}>
-          <Plus className="w-4 h-4 mr-2" />
-          添加服务器
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="outline" onClick={loadServers}>
+            <RefreshCw className="w-4 h-4 mr-2" />
+            刷新
+          </Button>
+          <Button size="sm" onClick={() => setShowAddDialog(true)}>
+            <Plus className="w-4 h-4 mr-2" />
+            添加服务器
+          </Button>
+        </div>
       </div>
 
       {isLoading ? (
@@ -1691,7 +1697,6 @@ function SkillSettings() {
   const [editSkillEnvId, setEditSkillEnvId] = useState<string | null>(null);
   const [editSkillEnvValues, setEditSkillEnvValues] = useState<Record<string, string>>({});
   const [skillDetail, setSkillDetail] = useState<SkillDetail | null>(null);
-  const [skillGcReport, setSkillGcReport] = useState<string>('');
   const { showSuccess, showError } = useToast();
 
   const loadSkills = async () => {
@@ -1806,18 +1811,6 @@ function SkillSettings() {
     }
   };
 
-  const handleGcSkills = async (apply: boolean) => {
-    try {
-      const msg = await api.gcSkills(apply);
-      setSkillGcReport(msg);
-      showSuccess(apply ? '清理完成' : '检测完成', msg);
-      loadSkills();
-    } catch (error) {
-      console.error('Skill GC 失败:', error);
-      showError('GC 失败', `${error}`);
-    }
-  };
-
   const handleShowSkillDetail = async (id: string) => {
     try {
       const detail = await api.getSkillDetail(id);
@@ -1837,27 +1830,12 @@ function SkillSettings() {
             <RefreshCw className="w-4 h-4 mr-2" />
             刷新
           </Button>
-          <Button size="sm" variant="outline" onClick={() => handleGcSkills(false)}>
-            <Wrench className="w-4 h-4 mr-2" />
-            GC 检测
-          </Button>
           <Button size="sm" onClick={() => setShowInstallDialog(true)}>
             <Plus className="w-4 h-4 mr-2" />
             安装 Skill
           </Button>
         </div>
       </div>
-
-      {skillGcReport && (
-        <div className="mb-4 rounded-md border bg-muted/40 p-3 text-xs font-mono whitespace-pre-wrap">
-          {skillGcReport}
-          <div className="mt-2">
-            <Button size="sm" variant="outline" onClick={() => handleGcSkills(true)}>
-              清理报告中的孤儿项
-            </Button>
-          </div>
-        </div>
-      )}
 
       {isLoading ? (
         <div className="text-center text-muted-foreground py-8">加载中...</div>
