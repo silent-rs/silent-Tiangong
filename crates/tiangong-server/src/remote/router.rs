@@ -7,7 +7,7 @@ use tiangong_core::session::MessageRole;
 use tiangong_core::task::TaskNotification;
 use tiangong_media::agent::MediaAgent;
 use tiangong_media::stt::TranscribeRequest;
-use tiangong_types::{IncomingMessage, MessageContent, OutgoingMessage};
+use tiangong_types::{IncomingMessage, MediaAsset, MediaKind, MessageContent, OutgoingMessage};
 use tokio::sync::Mutex;
 
 use super::core::ServerCoreManager;
@@ -66,6 +66,7 @@ impl MessageRouter {
             .publish(TiangongEvent::MessageReceived(msg.clone()));
 
         let text = self.extract_text(&msg).await;
+        let media = extract_media(&msg);
         let channel_id = if msg.channel_id.trim().is_empty() {
             let state = self.state.lock().await;
             state.active_session_id().to_string()
@@ -85,7 +86,12 @@ impl MessageRouter {
         );
 
         let Some(outgoing) = self
-            .handle_runtime_event_with_reply(event, Some(msg.id.clone()))
+            .handle_runtime_event_with_reply(
+                event,
+                Some(msg.id.clone()),
+                Some(msg.id.clone()),
+                media,
+            )
             .await?
         else {
             return Ok((
@@ -105,7 +111,7 @@ impl MessageRouter {
         event: RuntimeEvent,
     ) -> Result<Option<OutgoingMessage>> {
         Ok(self
-            .handle_runtime_event_with_reply(event, None)
+            .handle_runtime_event_with_reply(event, None, None, Vec::new())
             .await?
             .map(|(_, outgoing)| outgoing))
     }
@@ -209,6 +215,8 @@ impl MessageRouter {
         &self,
         event: RuntimeEvent,
         reply_to: Option<String>,
+        message_id: Option<String>,
+        media: Vec<MediaAsset>,
     ) -> Result<Option<(String, OutgoingMessage)>> {
         match event.event_type {
             RuntimeEventType::UserMessage => {
@@ -225,13 +233,19 @@ impl MessageRouter {
                     .map(str::trim)
                     .unwrap_or_default()
                     .to_string();
-                if text.is_empty() {
+                if text.is_empty() && media.is_empty() {
                     return Ok(None);
                 }
 
                 let (actual_session_id, mut outgoing) = self
                     .core_manager
-                    .send_connector_message_and_wait(connector, &requested_session_id, text)
+                    .send_connector_message_and_wait(
+                        connector,
+                        &requested_session_id,
+                        text,
+                        message_id,
+                        media,
+                    )
                     .await?;
                 outgoing.reply_to = reply_to;
                 self.event_bus.publish(TiangongEvent::MessageSent {
@@ -316,4 +330,46 @@ async fn download_url(url: &str) -> Result<Vec<u8>> {
     let response = reqwest::get(url).await?;
     let bytes = response.bytes().await?;
     Ok(bytes.to_vec())
+}
+
+fn extract_media(msg: &IncomingMessage) -> Vec<MediaAsset> {
+    let mut media = msg.media.clone();
+    if media.is_empty() {
+        media = content_to_media(&msg.content);
+    }
+    media
+}
+
+fn content_to_media(content: &MessageContent) -> Vec<MediaAsset> {
+    match content {
+        MessageContent::Image { url, caption } => vec![MediaAsset {
+            kind: MediaKind::Image,
+            url: url.clone(),
+            mime_type: None,
+            title: caption.clone(),
+            capability: None,
+        }],
+        MessageContent::Video { url, caption } => vec![MediaAsset {
+            kind: MediaKind::Video,
+            url: url.clone(),
+            mime_type: None,
+            title: caption.clone(),
+            capability: None,
+        }],
+        MessageContent::Audio { url, .. } => vec![MediaAsset {
+            kind: MediaKind::Audio,
+            url: url.clone(),
+            mime_type: None,
+            title: None,
+            capability: None,
+        }],
+        MessageContent::File { url, name } => vec![MediaAsset {
+            kind: MediaKind::File,
+            url: url.clone(),
+            mime_type: None,
+            title: Some(name.clone()),
+            capability: None,
+        }],
+        MessageContent::Text(_) => Vec::new(),
+    }
 }

@@ -32,6 +32,7 @@ pub async fn post_message(mut req: Request) -> Result<Response> {
     }
 
     let content = resolve_content(body.message, body.content)?;
+    let media = body.media;
     let (session_id, outgoing) = app
         .router
         .handle_incoming_with_session(IncomingMessage {
@@ -47,6 +48,7 @@ pub async fn post_message(mut req: Request) -> Result<Response> {
                 .unwrap_or_else(|| "external-user".to_string()),
             sender_role: access.role,
             content: content.into(),
+            media,
             reply_to: body.reply_to,
             timestamp: now_text(),
         })
