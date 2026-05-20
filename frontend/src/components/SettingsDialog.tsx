@@ -83,11 +83,11 @@ export function SettingsDialog() {
                 </TabsTrigger>
                 <TabsTrigger value="skill" className="w-full justify-start px-3 py-2">
                   <Puzzle className="w-4 h-4 mr-2" />
-                  技能管理
+                  Skills
                 </TabsTrigger>
                 <TabsTrigger value="server" className="w-full justify-start px-3 py-2">
                   <Globe className="w-4 h-4 mr-2" />
-                  远程服务
+                  Server
                 </TabsTrigger>
                 <TabsTrigger value="about" className="w-full justify-start px-3 py-2">
                   <Info className="w-4 h-4 mr-2" />
