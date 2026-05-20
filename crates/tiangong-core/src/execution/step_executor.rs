@@ -24,7 +24,7 @@ use crate::agents::execution_tool_agent::build_tool_call_from_function;
 
 const MAX_EXECUTION_AGENT_ROUNDS: usize = 6;
 #[allow(clippy::too_many_arguments)]
-pub fn execute_single_plan_step_with_execution_agent(
+pub async fn execute_single_plan_step_with_execution_agent(
     client: &SingleProviderClient,
     tool_executor: &LocalToolExecutor,
     mcp_config: &McpConfig,
@@ -110,17 +110,13 @@ pub fn execute_single_plan_step_with_execution_agent(
                 completion_signal = Some(parse_completion_signal(tool_call)?);
                 continue;
             }
-            let result = match (|| -> Result<ToolResult> {
-                if let Some(target) = mcp_function_targets.get(&tool_call.name) {
-                    return execute_mcp_tool_call(tool_call, target, mcp_config);
-                }
-                if let Some((target, args)) = resolve_mcp_tool_call_from_run_command(
-                    tool_call,
-                    &mcp_function_targets,
-                    mcp_config,
-                ) {
-                    return execute_mcp_tool_call_with_args(&target, args, mcp_config);
-                }
+            let result = if let Some(target) = mcp_function_targets.get(&tool_call.name) {
+                execute_mcp_tool_call(tool_call, target, mcp_config).await
+            } else if let Some((target, args)) =
+                resolve_mcp_tool_call_from_run_command(tool_call, &mcp_function_targets, mcp_config)
+            {
+                execute_mcp_tool_call_with_args(&target, args, mcp_config).await
+            } else {
                 match build_tool_call_from_function(tool_call) {
                     Ok(call) => tool_executor.execute(&call),
                     Err(err) => {
@@ -132,12 +128,14 @@ pub fn execute_single_plan_step_with_execution_agent(
                                 normalize_mcp_call_arguments(tool_call),
                                 mcp_config,
                             )
+                            .await
                         } else {
                             Err(err)
                         }
                     }
                 }
-            })() {
+            };
+            let result = match result {
                 Ok(result) => result,
                 Err(err) => build_internal_tool_error_result(&tool_call.name, &err.to_string()),
             };

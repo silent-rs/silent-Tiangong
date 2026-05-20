@@ -1,6 +1,6 @@
 # TODO - 天工当前开发任务
 
-> 最后更新：2026-05-15
+> 最后更新：2026-05-20
 > 当前主线：发布准备与自动化
 > 参考：`PLAN.md`、`docs/rfc/0011-multi-agent-collaboration.md`
 
@@ -66,6 +66,10 @@
 - [x] 调整上下文压缩完成后的前端痕迹展示
 - [x] 修复 Windows 桌面模式运行 shell 时弹出黑框的问题
 - [x] 修复 LLM 流式生成期间前端界面卡死、生成完成后恢复的问题
+- [x] 修复 GitHub Actions Rust/Tauri 构建缺少 protoc 和 GLib 系统依赖的问题
+- [x] 修复 GitHub Actions protoc 安装限流和 nextest 链接器崩溃的问题
+- [x] 修复 GitHub Actions Linux 测试绕开 rust-lld 崩溃的问题
+- [x] 增加 OrbStack Ubuntu 测试脚本并隔离 Linux 构建产物目录
 
 ## 发布准备任务
 

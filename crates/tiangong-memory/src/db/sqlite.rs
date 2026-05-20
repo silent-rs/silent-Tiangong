@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use crate::types::{
     Decision, Entity, EntityType, Episode, ExpandedMemory, MemoryCognitiveType, MemoryKind,
     MemoryNode, MemoryRelation, MemoryRelationDraft, MemoryRelationKind, MemoryScopeType,
-    MemoryStatus, RecallHit, VectorPoint,
+    MemoryStatus, RecallHit,
 };
 
 use super::schema;
@@ -185,21 +185,6 @@ impl MemoryDb {
         Ok(())
     }
 
-    /// 根据 id 查询 Entity
-    #[allow(dead_code)]
-    pub(crate) fn get_entity(&self, entity_id: &str) -> Result<Option<Entity>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT full_content FROM entities WHERE id = ?1")?;
-        let mut rows = stmt.query(rusqlite::params![entity_id])?;
-        let Some(row) = rows.next()? else {
-            return Ok(None);
-        };
-        let full_content: String = row.get(0)?;
-        let entity = serde_json::from_str(&full_content).with_context(|| "解析 Entity 失败")?;
-        Ok(Some(entity))
-    }
-
     /// 列出工作区下的 Entity
     #[allow(dead_code)]
     pub(crate) fn list_entities(&self, workspace_id: Option<&str>) -> Result<Vec<Entity>> {
@@ -238,24 +223,6 @@ impl MemoryDb {
             }
         }
         Ok(entities)
-    }
-
-    /// 删除 Entity
-    #[allow(dead_code)]
-    pub(crate) fn delete_entity(&self, entity_id: &str) -> Result<()> {
-        self.conn
-            .execute(
-                "DELETE FROM entities WHERE id = ?1",
-                rusqlite::params![entity_id],
-            )
-            .with_context(|| "删除 entities 记录失败")?;
-        self.conn
-            .execute(
-                "DELETE FROM memory_nodes WHERE id = ?1",
-                rusqlite::params![entity_id],
-            )
-            .with_context(|| "删除 entity 对应 memory_nodes 记录失败")?;
-        Ok(())
     }
 
     /// 插入或更新 Decision 到 memory_nodes 和 decisions 表
@@ -306,21 +273,6 @@ impl MemoryDb {
         Ok(())
     }
 
-    /// 根据 id 查询 Decision
-    #[allow(dead_code)]
-    pub(crate) fn get_decision(&self, decision_id: &str) -> Result<Option<Decision>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT full_content FROM decisions WHERE id = ?1")?;
-        let mut rows = stmt.query(rusqlite::params![decision_id])?;
-        let Some(row) = rows.next()? else {
-            return Ok(None);
-        };
-        let full_content: String = row.get(0)?;
-        let decision = serde_json::from_str(&full_content).with_context(|| "解析 Decision 失败")?;
-        Ok(Some(decision))
-    }
-
     /// 列出工作区下的 Decision
     #[allow(dead_code)]
     pub(crate) fn list_decisions(&self, workspace_id: Option<&str>) -> Result<Vec<Decision>> {
@@ -359,24 +311,6 @@ impl MemoryDb {
             }
         }
         Ok(decisions)
-    }
-
-    /// 删除 Decision
-    #[allow(dead_code)]
-    pub(crate) fn delete_decision(&self, decision_id: &str) -> Result<()> {
-        self.conn
-            .execute(
-                "DELETE FROM decisions WHERE id = ?1",
-                rusqlite::params![decision_id],
-            )
-            .with_context(|| "删除 decisions 记录失败")?;
-        self.conn
-            .execute(
-                "DELETE FROM memory_nodes WHERE id = ?1",
-                rusqlite::params![decision_id],
-            )
-            .with_context(|| "删除 decision 对应 memory_nodes 记录失败")?;
-        Ok(())
     }
 
     /// 查询最近的 Episode 摘要（用于 MesoRumination）
@@ -842,56 +776,9 @@ impl MemoryDb {
         Ok(dedupe_strings(related))
     }
 
-    /// 写入或更新内置向量索引点。
-    pub(crate) fn upsert_vector(&self, point: &VectorPoint) -> Result<()> {
-        let vector_json = serde_json::to_string(&point.vector)?;
-        let now = chrono::Local::now().naive_local().to_string();
-        self.conn
-            .execute(
-                "INSERT OR REPLACE INTO memory_vectors
-                 (node_id, title, summary, kind, importance, dimension, vector, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                rusqlite::params![
-                    point.node_id,
-                    point.title,
-                    point.summary,
-                    memory_kind_to_str(point.kind.clone()),
-                    point.importance,
-                    point.vector.len() as i64,
-                    vector_json,
-                    now,
-                ],
-            )
-            .with_context(|| "写入 memory_vectors 失败")?;
-        Ok(())
-    }
-
-    /// 加载指定维度的全部向量点，供内置 flat search 使用。
-    pub(crate) fn list_vectors(&self, dimension: usize) -> Result<Vec<VectorPoint>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT node_id, title, summary, kind, importance, vector
-             FROM memory_vectors
-             WHERE dimension = ?1",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![dimension as i64], |row| {
-            let kind: String = row.get(3)?;
-            let vector_json: String = row.get(5)?;
-            let vector: Vec<f32> = serde_json::from_str(&vector_json).unwrap_or_default();
-            Ok(VectorPoint {
-                node_id: row.get(0)?,
-                title: row.get(1)?,
-                summary: row.get(2)?,
-                kind: str_to_memory_kind(&kind),
-                importance: row.get(4)?,
-                vector,
-            })
-        })?;
-
-        let mut points = Vec::new();
-        for row in rows {
-            points.push(row.with_context(|| "读取 memory_vectors 行失败")?);
-        }
-        Ok(points)
+    /// 暴露底层连接，仅供 `db::migration` 模块访问。
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.conn
     }
 
     /// 按节点 ID 加载完整内容，供 LoadDepth2 定向展开使用。
@@ -1061,18 +948,6 @@ impl MemoryDb {
             });
         }
         Ok(nodes)
-    }
-
-    /// 删除内置向量索引点。
-    #[allow(dead_code)]
-    pub(crate) fn delete_vector(&self, node_id: &str) -> Result<()> {
-        self.conn
-            .execute(
-                "DELETE FROM memory_vectors WHERE node_id = ?1",
-                rusqlite::params![node_id],
-            )
-            .with_context(|| "删除 memory_vectors 记录失败")?;
-        Ok(())
     }
 
     fn load_expanded_memory(&self, node_id: &str) -> Result<Option<ExpandedMemory>> {
@@ -1427,7 +1302,7 @@ pub(crate) mod test_helpers {
 #[cfg(test)]
 mod tests {
     use super::test_helpers::open_in_memory;
-    use crate::types::{Decision, Entity, EntityType, Episode, EpisodeOutcome};
+    use crate::types::{Episode, EpisodeOutcome};
 
     fn make_episode(session_id: &str) -> Episode {
         Episode::new(
@@ -1439,34 +1314,6 @@ mod tests {
             vec!["tool_call_1".to_string()],
             0.7,
         )
-    }
-
-    fn make_entity(id: &str) -> Entity {
-        let now = chrono::Local::now().naive_local().to_string();
-        Entity {
-            id: id.to_string(),
-            name: "memory-system".to_string(),
-            entity_type: EntityType::Project,
-            description: "memory system project".to_string(),
-            file_path: Some("/tmp/memory-system".to_string()),
-            related_episodes: vec!["ep-1".to_string(), "ep-2".to_string()],
-            importance: 0.8,
-            created_at: now.clone(),
-            updated_at: now,
-        }
-    }
-
-    fn make_decision(id: &str) -> Decision {
-        Decision {
-            id: id.to_string(),
-            title: "use tcp ipc".to_string(),
-            context: "windows does not support unix socket path".to_string(),
-            alternatives: vec!["uds".to_string(), "named pipe".to_string()],
-            chosen: "tcp loopback".to_string(),
-            reasons: vec!["cross platform".to_string(), "easy to test".to_string()],
-            episode_ids: vec!["ep-10".to_string()],
-            created_at: chrono::Local::now().naive_local().to_string(),
-        }
     }
 
     #[test]
@@ -1570,45 +1417,6 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(ids.contains(&id_a1.as_str()));
         assert!(ids.contains(&id_a2.as_str()));
-    }
-
-    #[test]
-    fn entity_crud_roundtrip_works() {
-        let db = open_in_memory().unwrap();
-        let entity = make_entity("entity-1");
-
-        db.upsert_entity(&entity, Some("ws-entity")).unwrap();
-
-        let loaded = db.get_entity("entity-1").unwrap().expect("entity 应存在");
-        assert_eq!(loaded.name, entity.name);
-
-        let listed = db.list_entities(Some("ws-entity")).unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].id, entity.id);
-
-        db.delete_entity("entity-1").unwrap();
-        assert!(db.get_entity("entity-1").unwrap().is_none());
-    }
-
-    #[test]
-    fn decision_crud_roundtrip_works() {
-        let db = open_in_memory().unwrap();
-        let decision = make_decision("decision-1");
-
-        db.upsert_decision(&decision, Some("ws-decision")).unwrap();
-
-        let loaded = db
-            .get_decision("decision-1")
-            .unwrap()
-            .expect("decision 应存在");
-        assert_eq!(loaded.title, decision.title);
-
-        let listed = db.list_decisions(Some("ws-decision")).unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].id, decision.id);
-
-        db.delete_decision("decision-1").unwrap();
-        assert!(db.get_decision("decision-1").unwrap().is_none());
     }
 
     #[test]

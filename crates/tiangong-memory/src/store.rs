@@ -15,12 +15,14 @@ use tiangong_llm::{
 
 use crate::command::InjectionLevel;
 use crate::db::MemoryDb;
+use crate::db::migration;
 use crate::injection;
 use crate::options::MemoryVectorMode;
 use crate::recall::RecallEngine;
 use crate::search::TantivyIndex;
+use crate::search::lancedb_search::LanceDbIndex;
 use crate::search::qdrant_search::QdrantIndex;
-use crate::search::vector::{EmbeddedFlatVectorIndex, VectorIndex};
+use crate::search::vector::VectorIndex;
 use crate::types::{
     Decision, Entity, Episode, EpisodeOutcome, ExpandedMemory, ManualMemoryDraft,
     MemoryCognitiveType, MemoryKind, MemoryListQuery, MemoryNode, MemoryRelation,
@@ -152,7 +154,7 @@ impl MemoryStore {
         };
 
         let vector_mode = match vector_mode {
-            MemoryVectorMode::Auto => MemoryVectorMode::Embedded,
+            MemoryVectorMode::Auto => default_vector_mode(),
             mode => mode,
         };
         if vector_mode == MemoryVectorMode::Disabled {
@@ -166,21 +168,29 @@ impl MemoryStore {
             return;
         }
 
-        let vector_index: Box<dyn VectorIndex> = match vector_mode {
-            MemoryVectorMode::Embedded => {
-                match EmbeddedFlatVectorIndex::open(embedding.dimension) {
-                    Ok(index) => Box::new(index),
+        let (vector_index, backend): (Box<dyn VectorIndex>, &str) = match vector_mode {
+            MemoryVectorMode::EmbeddedLanceDb => {
+                let base = memory_index_base_dir(self.workspace_id.as_deref());
+                let needs_migration = migration::needs_vector_migration(&self.db, &base);
+                migration::cleanup_legacy_qdrant_edge(&base);
+                match LanceDbIndex::open(&base, embedding.dimension).await {
+                    Ok(index) => {
+                        if needs_migration {
+                            migration::migrate_vectors(&self.db, &index, embedding.dimension).await;
+                        }
+                        (Box::new(index), "embedded_lancedb")
+                    }
                     Err(err) => {
                         if let Some(rerank_provider) = rerank_provider {
                             let model = rerank_provider.model().to_string();
                             self.enable_rerank_only(rerank_provider);
                             tracing::warn!(
                                 model = %model,
-                                "Memory 内置向量索引初始化失败，仅启用 rerank: {err}"
+                                "Memory LanceDB 索引初始化失败，仅启用 rerank: {err}"
                             );
                         } else {
                             tracing::warn!(
-                                "Memory 内置向量索引初始化失败，使用 BM25-only 召回: {err}"
+                                "Memory LanceDB 索引初始化失败，使用 BM25-only 召回: {err}"
                             );
                         }
                         return;
@@ -189,7 +199,7 @@ impl MemoryStore {
             }
             MemoryVectorMode::ExternalQdrant => {
                 match QdrantIndex::connect(embedding.dimension).await {
-                    Ok(index) => Box::new(index),
+                    Ok(index) => (Box::new(index), "external_qdrant"),
                     Err(err) => {
                         if let Some(rerank_provider) = rerank_provider {
                             let model = rerank_provider.model().to_string();
@@ -218,12 +228,6 @@ impl MemoryStore {
             }
             return;
         }
-
-        let backend = match vector_mode {
-            MemoryVectorMode::Embedded => "embedded_flat",
-            MemoryVectorMode::ExternalQdrant => "external_qdrant",
-            MemoryVectorMode::Auto | MemoryVectorMode::Disabled => unreachable!(),
-        };
 
         let rerank_model = rerank_provider
             .as_ref()
@@ -265,6 +269,11 @@ impl MemoryStore {
         let node = self.write_episode_metadata(episode, workspace_id)?;
         if let Err(err) = self.recall_engine.upsert_node(&node).await {
             tracing::warn!("Memory 向量写入失败（非致命）: {err}");
+        }
+        if let Some(ref mut tantivy) = self.tantivy
+            && let Err(e) = tantivy.commit()
+        {
+            tracing::warn!("Tantivy commit 失败（非致命）: {e}");
         }
         Ok(())
     }
@@ -312,6 +321,11 @@ impl MemoryStore {
             && let Err(e) = tantivy.index_node(&node, summary)
         {
             tracing::warn!("Tantivy Episode 更新索引失败（非致命）: {}", e);
+        }
+        if let Some(ref mut tantivy) = self.tantivy
+            && let Err(e) = tantivy.commit()
+        {
+            tracing::warn!("Tantivy commit 失败（非致命）: {e}");
         }
         Ok(())
     }
@@ -449,6 +463,11 @@ impl MemoryStore {
         if let Err(err) = self.recall_engine.upsert_node(&node).await {
             tracing::warn!("Memory 手动记忆向量写入失败（非致命）: {err}");
         }
+        if let Some(ref mut tantivy) = self.tantivy
+            && let Err(e) = tantivy.commit()
+        {
+            tracing::warn!("Tantivy commit 失败（非致命）: {e}");
+        }
         Ok(node)
     }
 
@@ -481,6 +500,11 @@ impl MemoryStore {
         }
         if let Err(err) = self.recall_engine.upsert_node(&node).await {
             tracing::warn!("Memory 手动记忆向量更新失败（非致命）: {err}");
+        }
+        if let Some(ref mut tantivy) = self.tantivy
+            && let Err(e) = tantivy.commit()
+        {
+            tracing::warn!("Tantivy commit 失败（非致命）: {e}");
         }
         Ok(node)
     }
@@ -592,6 +616,11 @@ impl MemoryStore {
         {
             tracing::warn!("Tantivy Entity 索引写入失败（非致命）: {}", e);
         }
+        if let Some(ref mut tantivy) = self.tantivy
+            && let Err(e) = tantivy.commit()
+        {
+            tracing::warn!("Tantivy commit 失败（非致命）: {e}");
+        }
         Ok(())
     }
 
@@ -607,6 +636,11 @@ impl MemoryStore {
             && let Err(e) = tantivy.index_node(&node, &decision.chosen)
         {
             tracing::warn!("Tantivy Decision 索引写入失败（非致命）: {}", e);
+        }
+        if let Some(ref mut tantivy) = self.tantivy
+            && let Err(e) = tantivy.commit()
+        {
+            tracing::warn!("Tantivy commit 失败（非致命）: {e}");
         }
         Ok(())
     }
@@ -650,15 +684,13 @@ impl MemoryStore {
         {
             tracing::warn!("从 Tantivy 删除节点 {} 失败（非致命）: {}", node_id, e);
         }
-        if let Err(e) = self.db.delete_vector(node_id) {
-            tracing::warn!(
-                "从 SQLite 向量索引删除节点 {} 失败（非致命）: {}",
-                node_id,
-                e
-            );
-        }
         if let Err(e) = self.recall_engine.delete_node(node_id).await {
             tracing::warn!("从语义向量索引删除节点 {} 失败（非致命）: {}", node_id, e);
+        }
+        if let Some(ref mut tantivy) = self.tantivy
+            && let Err(e) = tantivy.commit()
+        {
+            tracing::warn!("Tantivy commit 失败（非致命）: {e}");
         }
     }
 
@@ -679,6 +711,11 @@ impl MemoryStore {
                     && let Err(e) = tantivy.index_node(&node, "")
                 {
                     tracing::warn!("恢复 Tantivy 节点 {} 失败（非致命）: {}", node_id, e);
+                }
+                if let Some(ref mut tantivy) = self.tantivy
+                    && let Err(e) = tantivy.commit()
+                {
+                    tracing::warn!("Tantivy commit 失败（非致命）: {e}");
                 }
                 if let Some(node) = self.db.get_memory_node(node_id)?
                     && let Err(e) = self.recall_engine.upsert_node(&node).await
@@ -886,6 +923,10 @@ fn memory_base_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".tiangong")
         .join("memory")
+}
+
+fn default_vector_mode() -> MemoryVectorMode {
+    MemoryVectorMode::EmbeddedLanceDb
 }
 
 fn memory_index_base_dir(workspace_id: Option<&str>) -> PathBuf {

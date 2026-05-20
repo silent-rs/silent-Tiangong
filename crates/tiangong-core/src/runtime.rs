@@ -201,7 +201,7 @@ impl RuntimeEngine {
     ///
     /// 注意：权限检查已由调用方（core/mod.rs）在执行前完成，
     /// 此方法内部的权限检查改为仅 Denied 拦截，NeedsApproval 由调用方处理。
-    pub(crate) fn execute_tool_call(
+    pub(crate) async fn execute_tool_call(
         &self,
         call: &ToolCall,
         mcp_targets: &HashMap<String, McpFunctionTarget>,
@@ -250,7 +250,7 @@ impl RuntimeEngine {
         }
         // 检查是否是 MCP 工具
         if let Some(target) = mcp_targets.get(&call.name) {
-            return match execute_mcp_tool_call(call, target, mcp_config) {
+            return match execute_mcp_tool_call(call, target, mcp_config).await {
                 Ok(result) => result,
                 Err(err) => ToolResult {
                     ok: false,
@@ -270,7 +270,9 @@ impl RuntimeEngine {
         {
             return match crate::agents::execution_mcp_agent::execute_mcp_tool_call_with_args(
                 &target, args, mcp_config,
-            ) {
+            )
+            .await
+            {
                 Ok(result) => result,
                 Err(err) => ToolResult {
                     ok: false,

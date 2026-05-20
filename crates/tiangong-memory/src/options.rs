@@ -50,13 +50,13 @@ impl MemoryOptions {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryVectorMode {
-    /// 有 embedding 配置时默认使用内置 flat 向量索引。
+    /// 有 embedding 配置时默认使用嵌入式 LanceDB 向量索引。
     #[default]
     Auto,
     /// 禁用向量层，仅使用 SQLite + Tantivy。
     Disabled,
-    /// 使用内置 SQLite flat 向量索引。
-    Embedded,
+    /// 使用嵌入式 LanceDB 向量索引。
+    EmbeddedLanceDb,
     /// 使用外部 Qdrant 服务。
     ExternalQdrant,
 }
