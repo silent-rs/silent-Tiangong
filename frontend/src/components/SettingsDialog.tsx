@@ -253,7 +253,7 @@ function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Sa
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor="workspacePath">工作区目录</Label>
+          <Label htmlFor="workspacePath">默认工作区目录</Label>
           <div className="flex gap-2">
             <Input
               id="workspacePath"
@@ -267,24 +267,21 @@ function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Sa
               选择
             </Button>
           </div>
-          <div className="rounded-md border p-3 text-sm">
-            <div className="text-muted-foreground mb-1">当前工作区</div>
-            <div className="break-all font-mono text-xs">{workspaceDir || '未设置'}</div>
-          </div>
-          <div className="flex justify-end">
-            <Button onClick={handleSaveWorkspace} disabled={isSavingWorkspace || editWorkspaceDir.trim() === workspaceDir}>
-              {isSavingWorkspace ? (
-                <>
-                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                  保存中...
-                </>
-              ) : (
-                <>
-                  <Save className="w-4 h-4 mr-2" />
-                  保存工作区
-                </>
-              )}
-            </Button>
+          <div className="flex items-center justify-between min-h-7">
+            <p className="text-xs text-muted-foreground">
+              {workspaceDir
+                ? <><span className="opacity-60">当前：</span><span className="font-mono">{workspaceDir}</span></>
+                : <span className="opacity-60">未设置</span>
+              }
+            </p>
+            {editWorkspaceDir.trim() !== workspaceDir && (
+              <Button size="sm" className="h-6 text-xs" onClick={handleSaveWorkspace} disabled={isSavingWorkspace}>
+                {isSavingWorkspace
+                  ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" />保存中...</>
+                  : <><Save className="w-3 h-3 mr-1" />保存</>
+                }
+              </Button>
+            )}
           </div>
         </div>
       </div>
@@ -408,7 +405,7 @@ function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Save
             }`}
             onClick={() => setSubTab(tab)}
           >
-            {tab === 'providers' ? '模型' : tab === 'routing' ? '路由' : '记忆模型'}
+            {tab === 'providers' ? '模型' : tab === 'routing' ? '路由' : '记忆设置'}
           </button>
         ))}
       </div>
@@ -611,23 +608,14 @@ function MemoryModelSelectSection({
   onChange: (modelKey: string | undefined) => void;
   footer?: ReactNode;
 }) {
-  const enabled = !!selectedKey;
-
   return (
     <Card>
       <CardContent className="p-4 space-y-3">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h4 className="text-sm font-medium">{title}</h4>
-            <p className="text-xs text-muted-foreground mt-1">{description}</p>
-          </div>
-          <Switch
-            checked={enabled}
-            onCheckedChange={(checked) => onChange(checked ? candidates[0] : undefined)}
-            disabled={candidates.length === 0}
-          />
+        <div>
+          <h4 className="text-sm font-medium">{title}</h4>
+          <p className="text-xs text-muted-foreground mt-1">{description}</p>
         </div>
-        {enabled && (
+        {candidates.length > 0 ? (
           <Select
             value={selectedKey || '__none__'}
             onValueChange={(value) => onChange(value === '__none__' ? undefined : value)}
@@ -644,8 +632,7 @@ function MemoryModelSelectSection({
               ))}
             </SelectContent>
           </Select>
-        )}
-        {candidates.length === 0 && (
+        ) : (
           <div className="text-xs text-muted-foreground">
             请先在模型页添加对应能力的模型。
           </div>
