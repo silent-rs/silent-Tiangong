@@ -22,8 +22,8 @@ use crate::permission::{
 };
 use crate::prompt::PromptAssembler;
 use crate::react::context::{
-    emit_token_usage, force_final_response, loop_context_with_memory, maybe_update_context_summary,
-    select_client_for_request,
+    check_completion_with_lite_model, emit_token_usage, force_final_response,
+    loop_context_with_memory, maybe_update_context_summary, select_client_for_request,
 };
 use crate::react::message::*;
 use crate::runtime::LlmOutputRecord;
@@ -351,7 +351,7 @@ impl ReactEngine {
     pub(crate) async fn execute_turn(
         &mut self,
         session: &mut Session,
-        _user_input: &str,
+        user_input: &str,
         stream_tx: &StdSender<StreamEvent>,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
         memory_handle: Option<&tiangong_memory::MemoryHandle>,
@@ -366,6 +366,7 @@ impl ReactEngine {
         let mut failed_tool_call_keys = HashSet::new();
         let mut failed_tool_names = HashSet::new();
         let mut memory_candidate_count = 0usize;
+        let mut completion_check_count: u32 = 0;
 
         if self.agent_id == "main" {
             let routed = self
@@ -374,9 +375,7 @@ impl ReactEngine {
                 .and_then(|team| {
                     team.lock().ok().map(|mut team| {
                         crate::agent_team::lifecycle::route_user_mentions(
-                            &mut team,
-                            _user_input,
-                            stream_tx,
+                            &mut team, user_input, stream_tx,
                         )
                     })
                 })
@@ -563,25 +562,39 @@ impl ReactEngine {
                     continue;
                 }
 
-                // 有 reasoning 但无 tool_calls 且回复为空或简短时，明确提醒模型补全决策。
-                // 若确实不需要工具，下一轮应直接给出最终回复；若需要操作，应返回 tool_calls。
-                if !response.reasoning_content.trim().is_empty()
-                    && response.text.trim().chars().count() <= 100
-                    && round < self.max_rounds
-                {
-                    let previous_text = response.text.trim();
-                    let previous_text_block = if previous_text.is_empty() {
-                        "上一轮 assistant 回复为空。".to_string()
-                    } else {
-                        format!("上一轮 assistant 短回复：\n{previous_text}")
-                    };
-                    loop_context.push(Message::new(
-                        MessageRole::Tool,
-                        format!(
-                            "<system-reminder>\n{previous_text_block}\n上一轮包含 thinking，但没有返回可执行 tool_calls。请重新判断：如果仍需要执行操作，直接返回正确的 tool_calls；如果不需要执行操作，直接给出最终回复。\n</system-reminder>"
-                        ),
-                    ));
-                    continue 'react_loop;
+                // lite 模型完成度检测：判断回复是否真正完成了任务
+                if round < self.max_rounds && completion_check_count < 2 {
+                    completion_check_count += 1;
+                    let is_complete =
+                        check_completion_with_lite_model(&self.engine, user_input, &response.text)
+                            .await;
+
+                    if !is_complete {
+                        // 将已流式输出的回复保存到 session，避免上下文丢失
+                        session.append_message_with_id_and_media(
+                            pending_msg_id.clone(),
+                            MessageRole::Assistant,
+                            response.text.clone(),
+                            response.reasoning_content.clone(),
+                            std::mem::take(&mut pending_media_assets),
+                        );
+                        if let Some(message) = session.messages.last_mut() {
+                            message.reasoning_signature = response.reasoning_signature.clone();
+                        }
+                        // 加入 loop_context 使下一轮模型看到已输出内容
+                        loop_context
+                            .push(Message::new(MessageRole::Assistant, response.text.clone()));
+                        loop_context.push(Message::new(
+                            MessageRole::Tool,
+                            format!(
+                                "<system-reminder>\n上方回复被判定为未完成任务。\
+                                不要重复上方已说过的内容。\
+                                如果需要执行操作，直接返回 tool_calls；\
+                                如果确实无需更多操作，简要补充未覆盖的要点即可。\n</system-reminder>"
+                            ),
+                        ));
+                        continue 'react_loop;
+                    }
                 }
 
                 session.append_message_with_id_and_media(

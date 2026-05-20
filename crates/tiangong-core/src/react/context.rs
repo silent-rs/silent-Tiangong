@@ -101,6 +101,62 @@ pub(crate) fn select_client_for_request<'a>(
     engine.client()
 }
 
+const COMPLETION_CHECK_SYSTEM_PROMPT: &str = "\
+你是一个任务完成度判断器。你需要判断 AI 助手是否已经充分完成了用户的请求。
+
+判断标准（偏向判定为已完成）：
+- 助手是否给出了实质性的回复内容（代码改动说明、执行结果、分析结论等）
+- 如果助手回复了具体的操作结果（如编译通过、文件已修改、命令已执行），应判定为已完成
+- 只有当回复明显空洞（如只有\"好的\"\"让我来\"等过渡语）或用户请求明显需要操作但助手未执行任何工具时，才判定为未完成
+
+回复规则：
+- 已完成：COMPLETE
+- 未完成：INCOMPLETE
+- 只回复一个词，不要添加任何其他文字";
+
+/// 使用 lite 模型判断当前回复是否真正完成了任务。
+/// 返回 `true` 表示任务已完成，`false` 表示需要继续 react 循环。
+/// 如果 lite 模型调用失败，降级返回 `true`（直接结束，不影响原有流程）。
+pub(crate) async fn check_completion_with_lite_model(
+    engine: &RuntimeEngine,
+    user_input: &str,
+    assistant_response: &str,
+) -> bool {
+    if assistant_response.trim().is_empty() {
+        return false;
+    }
+
+    let lite = engine.lite_client().clone();
+    let system_prompt = COMPLETION_CHECK_SYSTEM_PROMPT.to_string();
+    let user_prompt = format_completion_check_prompt(user_input, assistant_response);
+
+    let result = tokio::task::spawn_blocking(move || {
+        lite.complete_lite_with_system(&system_prompt, &user_prompt)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(response_text)) => parse_completion_response(&response_text),
+        _ => {
+            tracing::warn!("lite 模型完成度检测失败，降级为直接结束");
+            true
+        }
+    }
+}
+
+fn format_completion_check_prompt(user_input: &str, assistant_response: &str) -> String {
+    format!(
+        "用户原始请求：\n{user_input}\n\n\
+         AI 助手的最新回复：\n{assistant_response}\n\n\
+         请判断：AI 助手是否已经充分完成了用户的请求？"
+    )
+}
+
+fn parse_completion_response(response: &str) -> bool {
+    let trimmed = response.trim().to_uppercase();
+    trimmed.contains("COMPLETE") && !trimmed.contains("INCOMPLETE")
+}
+
 pub(crate) fn loop_context_with_memory(
     loop_context: &[Message],
     memory_context: Option<&str>,
