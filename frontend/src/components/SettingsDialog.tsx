@@ -309,7 +309,7 @@ function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Sa
 // LLM 设置组件（三层架构：Providers / Models / Routing）
 // ============================================================================
 
-type LLMSubTab = 'providers' | 'models' | 'routing' | 'memory';
+type LLMSubTab = 'providers' | 'routing' | 'memory';
 
 function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: SaveStatus) => void }) {
   const [subTab, setSubTab] = useState<LLMSubTab>('providers');
@@ -330,7 +330,14 @@ function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Save
         api.getModelsConfig(),
         api.getModelCapabilities(),
       ]);
-      setModelsConfig(cfg);
+      // Ensure default providers are always present
+      const mergedProviders = { ...cfg.providers };
+      for (const [name, providerConfig] of Object.entries(DEFAULT_PROVIDERS)) {
+        if (!mergedProviders[name]) {
+          mergedProviders[name] = { ...providerConfig };
+        }
+      }
+      setModelsConfig({ ...cfg, providers: mergedProviders });
       setCapabilities(caps);
     } catch (error) {
       console.error('加载配置失败:', error);
@@ -391,7 +398,7 @@ function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Save
     <div className="flex flex-col h-full">
       {/* 子标签栏 — 固定不动 */}
       <div className="flex gap-1 shrink-0 p-4 pb-0">
-        {(['providers', 'models', 'routing', 'memory'] as const).map((tab) => (
+        {(['providers', 'routing', 'memory'] as const).map((tab) => (
           <button
             key={tab}
             className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
@@ -401,18 +408,15 @@ function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Save
             }`}
             onClick={() => setSubTab(tab)}
           >
-            {tab === 'providers' ? '供应商' : tab === 'models' ? '模型' : tab === 'routing' ? '路由' : '记忆模型'}
+            {tab === 'providers' ? '模型' : tab === 'routing' ? '路由' : '记忆模型'}
           </button>
         ))}
       </div>
 
       {/* 内容区域 */}
-      <div className="flex-1 min-h-0 overflow-y-auto p-4">
+      <div className={`flex-1 min-h-0 ${subTab === 'providers' ? 'overflow-hidden' : 'overflow-y-auto p-4'}`}>
         {subTab === 'providers' && (
-          <ProvidersSection config={modelsConfig} onChange={handleChange} />
-        )}
-        {subTab === 'models' && (
-          <ModelsSection config={modelsConfig} onChange={handleChange} capabilities={capabilities} />
+          <ProviderModelsView config={modelsConfig} onChange={handleChange} capabilities={capabilities} />
         )}
         {subTab === 'routing' && (
           <RoutingSection config={modelsConfig} onChange={handleChange} capabilities={capabilities} />
@@ -663,9 +667,30 @@ interface ProviderPreset {
   protocol: string;
 }
 
+const DEFAULT_PROVIDERS: Record<string, ProviderConfigView> = {
+  'DeepSeek': { base_url: 'https://api.deepseek.com', api_key: '', timeout_ms: 300000, protocol: 'openai_compatible' },
+  '智谱': { base_url: 'https://open.bigmodel.cn/api/paas/v4', api_key: '', timeout_ms: 300000, protocol: 'openai_compatible' },
+};
+
+interface UrlPreset {
+  label: string;
+  url: string;
+  protocol: string;
+}
+
+const DEFAULT_PROVIDER_URL_PRESETS: Record<string, UrlPreset[]> = {
+  'DeepSeek': [
+    { label: 'OpenAI 兼容', url: 'https://api.deepseek.com', protocol: 'openai_compatible' },
+    { label: 'Anthropic 兼容', url: 'https://api.deepseek.com/anthropic', protocol: 'anthropic' },
+  ],
+  '智谱': [
+    { label: 'OpenAI 兼容（通用）', url: 'https://open.bigmodel.cn/api/paas/v4', protocol: 'openai_compatible' },
+    { label: 'OpenAI 兼容（Coding 套餐）', url: 'https://open.bigmodel.cn/api/coding/paas/v4', protocol: 'openai_compatible' },
+    { label: 'Anthropic 兼容（Coding 套餐）', url: 'https://open.bigmodel.cn/api/anthropic', protocol: 'anthropic' },
+  ],
+};
+
 const PROVIDER_PRESETS: ProviderPreset[] = [
-  { name: 'DeepSeek', base_url: 'https://api.deepseek.com/v1', protocol: 'openai_compatible' },
-  { name: '智谱', base_url: 'https://open.bigmodel.cn/api/paas/v4', protocol: 'openai_compatible' },
   { name: 'Z.ai', base_url: 'https://api.zai.com/v1', protocol: 'openai_compatible' },
   { name: '硅基流动', base_url: 'https://api.siliconflow.cn/v1', protocol: 'openai_compatible' },
   { name: '月之暗面', base_url: 'https://api.moonshot.cn/v1', protocol: 'openai_compatible' },
@@ -681,198 +706,525 @@ const PROTOCOL_DEFAULTS: Record<string, string> = {
 };
 
 // ---------------------------------------------------------------------------
-// Providers 子区域
+// 供应商与模型 — 分栏视图
 // ---------------------------------------------------------------------------
 
-function ProvidersSection({
+function ProviderModelsView({
   config,
   onChange,
+  capabilities,
 }: {
   config: ModelsConfigView;
   onChange: (c: ModelsConfigView) => void;
+  capabilities: ModelCapabilityInfo[];
 }) {
-  const [modalMode, setModalMode] = useState<'add' | 'edit' | null>(null);
-  const [editingKey, setEditingKey] = useState<string>('');
-  const [newKey, setNewKey] = useState('');
-  const [draft, setDraft] = useState<ProviderConfigView>({
-    base_url: '',
-    api_key: '',
-    timeout_ms: 60000,
-    protocol: 'openai_compatible',
-  });
+  const providerKeys = Object.keys(config.providers);
+  const defaultKeys = Object.keys(DEFAULT_PROVIDERS).filter((k) => providerKeys.includes(k));
+  const customKeys = providerKeys.filter((k) => !(k in DEFAULT_PROVIDERS)).sort();
+  const sortedProviderKeys = [...defaultKeys, ...customKeys];
+
+  const [selectedProvider, setSelectedProvider] = useState(sortedProviderKeys[0] || '');
   const [showApiKey, setShowApiKey] = useState(false);
 
-  const providerKeys = Object.keys(config.providers);
-  const protocolLabel = (protocol?: string) =>
-    protocol === 'anthropic' ? 'Anthropic' : 'OpenAI 兼容';
+  // Add provider modal
+  const [showAddProvider, setShowAddProvider] = useState(false);
+  const [newProviderKey, setNewProviderKey] = useState('');
+  const [newProviderDraft, setNewProviderDraft] = useState<ProviderConfigView>({
+    base_url: '', api_key: '', timeout_ms: 300000, protocol: 'openai_compatible',
+  });
+  const [showNewApiKey, setShowNewApiKey] = useState(false);
 
-  const openAdd = () => {
-    setModalMode('add');
-    setDraft({
-      base_url: '',
-      api_key: '',
-      timeout_ms: 60000,
-      protocol: 'openai_compatible',
-    });
-    setNewKey('');
-    setShowApiKey(false);
-  };
+  // Model modal
+  const [modelModalMode, setModelModalMode] = useState<'add' | 'edit' | null>(null);
+  const [editingModelKey, setEditingModelKey] = useState('');
+  const [modelDraft, setModelDraft] = useState<ModelEntryView>({
+    provider: '', model: '', capabilities: [], options: {},
+  });
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [isFetchingModels, setIsFetchingModels] = useState(false);
+  const [ttsVoices, setTtsVoices] = useState<{ id: string; name: string; gender?: string }[]>([]);
+  const [isFetchingVoices, setIsFetchingVoices] = useState(false);
+  const [isProbingEmbeddingDimension, setIsProbingEmbeddingDimension] = useState(false);
+  const { showSuccess, showError } = useToast();
 
-  const openAddPreset = (preset: ProviderPreset) => {
-    if (config.providers[preset.name]) return;
+  // Effective selected provider
+  const activeProvider = (selectedProvider && config.providers[selectedProvider])
+    ? selectedProvider
+    : (sortedProviderKeys[0] || '');
+  const selectedConfig = config.providers[activeProvider] || null;
+  const providerModels = activeProvider
+    ? Object.entries(config.models).filter(([, m]) => m.provider === activeProvider).sort(([a], [b]) => a.localeCompare(b))
+    : [];
+
+  // ---- Provider handlers ----
+  const updateProviderField = (field: keyof ProviderConfigView, value: unknown) => {
+    if (!activeProvider) return;
     const next = { ...config };
     next.providers = {
       ...next.providers,
-      [preset.name]: {
-        base_url: preset.base_url,
-        api_key: '',
-        timeout_ms: 60000,
-        protocol: preset.protocol,
-      },
+      [activeProvider]: { ...next.providers[activeProvider], [field]: value },
     };
     onChange(next);
-  };
-
-  const openEdit = (key: string) => {
-    setModalMode('edit');
-    setEditingKey(key);
-    setNewKey(key);
-    setDraft({ ...config.providers[key] });
-    setShowApiKey(false);
-  };
-
-  const saveEdit = () => {
-    if (!editingKey || !newKey.trim()) return;
-    const next = { ...config };
-    const trimmedKey = newKey.trim();
-    if (trimmedKey !== editingKey) {
-      const { [editingKey]: _, ...restProviders } = next.providers;
-      next.providers = { ...restProviders, [trimmedKey]: { ...draft } };
-      const newModels = { ...next.models };
-      for (const [mk, mv] of Object.entries(newModels)) {
-        if (mv.provider === editingKey) {
-          newModels[mk] = { ...mv, provider: trimmedKey };
-        }
-      }
-      next.models = newModels;
-    } else {
-      next.providers = { ...next.providers, [editingKey]: { ...draft } };
-    }
-    onChange(next);
-    setModalMode(null);
-  };
-
-  const addProvider = () => {
-    if (!newKey.trim()) return;
-    const next = { ...config };
-    next.providers = { ...next.providers, [newKey.trim()]: { ...draft } };
-    onChange(next);
-    setModalMode(null);
   };
 
   const removeProvider = (key: string) => {
     const next = { ...config };
     const { [key]: _, ...rest } = next.providers;
     next.providers = rest;
+    const newModels = { ...next.models };
+    for (const [mk, mv] of Object.entries(newModels)) {
+      if (mv.provider === key) delete newModels[mk];
+    }
+    next.models = newModels;
+    const newRouting = { ...next.routing };
+    const remainingModelKeys = new Set(Object.keys(newModels));
+    for (const [cap, modelKey] of Object.entries(newRouting)) {
+      if (!remainingModelKeys.has(modelKey)) delete newRouting[cap];
+    }
+    next.routing = newRouting;
+    onChange(next);
+    if (activeProvider === key) {
+      const remaining = sortedProviderKeys.filter((k) => k !== key);
+      setSelectedProvider(remaining[0] || '');
+    }
+  };
+
+  const addPresetProvider = (preset: ProviderPreset) => {
+    if (config.providers[preset.name]) return;
+    const next = { ...config };
+    next.providers = {
+      ...next.providers,
+      [preset.name]: { base_url: preset.base_url, api_key: '', timeout_ms: 300000, protocol: preset.protocol },
+    };
+    onChange(next);
+    setSelectedProvider(preset.name);
+  };
+
+  const addCustomProvider = () => {
+    if (!newProviderKey.trim()) return;
+    const key = newProviderKey.trim();
+    const next = { ...config };
+    next.providers = { ...next.providers, [key]: { ...newProviderDraft } };
+    onChange(next);
+    setSelectedProvider(key);
+    setShowAddProvider(false);
+    setNewProviderKey('');
+    setNewProviderDraft({ base_url: '', api_key: '', timeout_ms: 300000, protocol: 'openai_compatible' });
+  };
+
+  // ---- Model handlers ----
+  const openAddModel = () => {
+    setModelModalMode('add');
+    setModelDraft({ provider: activeProvider, model: '', capabilities: [], options: {} });
+    setAvailableModels([]);
+    setTtsVoices([]);
+  };
+
+  const openEditModel = (key: string) => {
+    setModelModalMode('edit');
+    setEditingModelKey(key);
+    setModelDraft({ ...config.models[key] });
+    setAvailableModels([]);
+  };
+
+  const saveModelEdit = () => {
+    if (!editingModelKey) return;
+    const next = { ...config };
+    next.models = { ...next.models, [editingModelKey]: { ...modelDraft } };
+    onChange(next);
+    setModelModalMode(null);
+  };
+
+  const addModel = () => {
+    if (!modelDraft.model.trim()) return;
+    let key = modelDraft.model.trim();
+    if (config.models[key]) key = `${modelDraft.provider}-${key}`;
+    const next = { ...config };
+    next.models = { ...next.models, [key]: { ...modelDraft } };
+    onChange(next);
+    setModelModalMode(null);
+  };
+
+  const removeModel = (key: string) => {
+    const next = { ...config };
+    const { [key]: _, ...rest } = next.models;
+    next.models = rest;
+    const newRouting = { ...next.routing };
+    for (const [cap, modelName] of Object.entries(newRouting)) {
+      if (modelName === key) delete newRouting[cap];
+    }
+    next.routing = newRouting;
     onChange(next);
   };
 
-  return (
-    <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between mb-3 shrink-0">
-        <h4 className="text-sm font-medium text-muted-foreground">供应商（连接配置）</h4>
-        <Button size="sm" onClick={openAdd}>
-          <Plus className="w-3 h-3 mr-1" />
-          自定义添加
-        </Button>
-      </div>
+  const toggleCapability = (cap: string) => {
+    if (modelDraft.capabilities.includes(cap)) {
+      setModelDraft({ ...modelDraft, capabilities: modelDraft.capabilities.filter((c) => c !== cap) });
+    } else {
+      setModelDraft({ ...modelDraft, capabilities: [...modelDraft.capabilities, cap] });
+    }
+  };
 
-      {/* 快捷预设供应商 */}
-      <div className="mb-4 shrink-0">
-        <div className="text-xs text-muted-foreground mb-2">快捷添加常用供应商</div>
-        <div className="flex flex-wrap gap-1.5">
-          {PROVIDER_PRESETS.map((preset) => {
-            const exists = !!config.providers[preset.name];
-            return (
-              <button
-                key={preset.name}
-                className={`px-2.5 py-1 text-xs rounded-md border transition-colors ${
-                  exists
-                    ? 'bg-primary/10 text-primary border-primary/30 cursor-default'
-                    : 'bg-secondary text-muted-foreground border-border hover:text-foreground hover:border-primary/40'
-                }`}
-                onClick={() => !exists && openAddPreset(preset)}
-                disabled={exists}
-              >
-                {exists ? `${preset.name} ✓` : preset.name}
-              </button>
-            );
-          })}
+  const fetchModelsForProvider = async (providerKey: string) => {
+    const provider = config.providers[providerKey];
+    if (!provider?.base_url || !provider?.api_key) {
+      showError('配置不完整', '请先配置 Base URL 和 API Key');
+      return;
+    }
+    setIsFetchingModels(true);
+    try {
+      const models = await api.fetchProviderModels(provider.base_url, provider.api_key, provider.timeout_ms, provider.protocol);
+      if (models.length === 0) showError('无可用模型', '该供应商未返回任何模型');
+      setAvailableModels(models);
+    } catch (error) {
+      showError('获取失败', `无法获取模型列表：${error}`);
+      setAvailableModels([]);
+    } finally {
+      setIsFetchingModels(false);
+    }
+  };
+
+  const fetchTtsVoices = async () => {
+    setIsFetchingVoices(true);
+    try { setTtsVoices(await api.listTtsVoices()); } catch { setTtsVoices([]); } finally { setIsFetchingVoices(false); }
+  };
+
+  const probeEmbeddingDimension = async () => {
+    const provider = config.providers[modelDraft.provider];
+    if (!provider?.base_url || !modelDraft.model.trim()) {
+      showError('配置不完整', '请先选择供应商并填写嵌入模型名称');
+      return;
+    }
+    setIsProbingEmbeddingDimension(true);
+    try {
+      const dimension = await api.probeEmbeddingDimension(provider.base_url, provider.api_key, modelDraft.model.trim(), provider.timeout_ms, provider.protocol);
+      setModelDraft((c) => ({ ...c, options: { ...c.options, dimension } }));
+      showSuccess('获取成功', `Embedding 维度：${dimension}`);
+    } catch (error) {
+      showError('获取失败', `无法获取 Embedding 维度：${error}`);
+    } finally {
+      setIsProbingEmbeddingDimension(false);
+    }
+  };
+
+  return (
+    <div className="flex h-full">
+      {/* 左侧：供应商列表 */}
+      <div className="w-56 shrink-0 border-r flex flex-col">
+        <div className="px-3 pt-4 pb-2 text-xs text-muted-foreground font-medium">供应商</div>
+        <div className="flex-1 overflow-y-auto px-2 pt-1">
+          {/* 默认供应商 — Card 风格 */}
+          {defaultKeys.map((key) => (
+            <button
+              key={key}
+              className={`w-full text-left px-3 py-2 rounded-md text-sm transition-colors flex items-center justify-between border mb-1.5 ${
+                activeProvider === key
+                  ? 'bg-primary/10 text-primary font-medium border-primary/30'
+                  : 'border-border hover:bg-muted text-muted-foreground hover:text-foreground'
+              }`}
+              onClick={() => setSelectedProvider(key)}
+            >
+              <span>{key}</span>
+              <span className="text-[10px] px-1 py-0.5 rounded bg-primary/10 text-primary">默认</span>
+            </button>
+          ))}
+          {/* 自定义供应商 */}
+          {customKeys.length > 0 && defaultKeys.length > 0 && <div className="border-t my-1.5 mx-1" />}
+          {customKeys.map((key) => (
+            <button
+              key={key}
+              className={`w-full text-left px-3 py-2 rounded-md text-sm transition-colors ${
+                activeProvider === key
+                  ? 'bg-primary/10 text-primary font-medium'
+                  : 'hover:bg-muted text-muted-foreground hover:text-foreground'
+              }`}
+              onClick={() => setSelectedProvider(key)}
+            >
+              {key}
+            </button>
+          ))}
+        </div>
+        {PROVIDER_PRESETS.filter((p) => !config.providers[p.name]).length > 0 && (
+          <div className="border-t px-2 pt-2 pb-1">
+            <div className="text-[10px] text-muted-foreground px-1 mb-1">快捷添加</div>
+            <div className="flex flex-wrap gap-1">
+              {PROVIDER_PRESETS.filter((p) => !config.providers[p.name]).map((preset) => (
+                <button
+                  key={preset.name}
+                  className="px-1.5 py-0.5 text-[10px] rounded border border-border text-muted-foreground hover:text-foreground hover:border-primary/40 transition-colors"
+                  onClick={() => addPresetProvider(preset)}
+                >
+                  + {preset.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        <div className="border-t p-2">
+          <Button size="sm" className="w-full" onClick={() => { setShowAddProvider(true); setNewProviderKey(''); setNewProviderDraft({ base_url: '', api_key: '', timeout_ms: 300000, protocol: 'openai_compatible' }); setShowNewApiKey(false); }}>
+            <Plus className="w-3 h-3 mr-1" />自定义供应商
+          </Button>
         </div>
       </div>
 
-      {providerKeys.length === 0 && (
-        <div className="text-center text-muted-foreground py-6 text-sm">暂无供应商配置，点击上方快捷按钮或自定义添加</div>
-      )}
-
-      <div className="space-y-2 flex-1 min-h-0 overflow-y-auto">
-        {providerKeys.map((key) => (
-          <Card key={key}>
-            <CardContent className="p-3">
-              <div className="flex items-center justify-between">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium text-sm">{key}</span>
-                    <Badge variant="secondary" className="text-[10px] px-1.5 py-0 h-5">
-                      {protocolLabel(config.providers[key].protocol)}
-                    </Badge>
+      {/* 右侧：供应商设置 + 模型列表 */}
+      <div className="flex-1 min-w-0 overflow-y-auto p-4">
+        {activeProvider && selectedConfig ? (
+          <>
+            {/* 供应商设置 */}
+            <div className="mb-6">
+              <div className="flex items-center justify-between mb-3">
+                <h4 className="text-sm font-medium">{activeProvider} 设置</h4>
+                {!(activeProvider in DEFAULT_PROVIDERS) && (
+                <Button variant="ghost" size="sm" className="h-7 text-destructive hover:text-destructive hover:bg-destructive/10" onClick={() => removeProvider(activeProvider)}>
+                  <Trash2 className="w-3 h-3 mr-1" />移除供应商
+                </Button>
+                )}
+              </div>
+              <div className="space-y-3">
+                <div>
+                  <Label className="text-xs">API Key</Label>
+                  <div className="relative">
+                    <Input
+                      type={showApiKey ? 'text' : 'password'}
+                      value={selectedConfig.api_key}
+                      onChange={(e) => updateProviderField('api_key', e.target.value)}
+                      className="text-sm h-8 pr-8"
+                      placeholder="sk-... 或 ${ENV_VAR}"
+                    />
+                    <button type="button" onClick={() => setShowApiKey(!showApiKey)} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
+                      {showApiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                    </button>
                   </div>
-                  <div className="text-xs text-muted-foreground mt-1">
-                    {config.providers[key].base_url || '(未设置 URL)'}
-                  </div>
-                  <div className="text-[11px] text-muted-foreground mt-1">
-                    超时 {config.providers[key].timeout_ms} ms
-                  </div>
+                  <p className="text-xs text-muted-foreground mt-1">支持 {'${ENV_VAR}'} 引用环境变量</p>
                 </div>
-                <div className="flex items-center gap-1">
-                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit(key)} title="编辑">
-                    <Edit2 className="w-3.5 h-3.5" />
-                  </Button>
-                  <Button variant="ghost" size="icon" className="h-7 w-7 hover:bg-destructive/20 hover:text-destructive" onClick={() => removeProvider(key)} title="删除">
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </Button>
+                <div>
+                  <Label className="text-xs">Base URL</Label>
+                  {(() => {
+                    const urlPresets = DEFAULT_PROVIDER_URL_PRESETS[activeProvider];
+                    if (urlPresets) {
+                      const matchIdx = urlPresets.findIndex((p) => p.url === selectedConfig.base_url);
+                      const isCustom = matchIdx === -1;
+                      return (
+                        <>
+                          <Select
+                            value={isCustom ? '__custom__' : String(matchIdx)}
+                            onValueChange={(v) => {
+                              if (v === '__custom__') {
+                                updateProviderField('base_url', '');
+                              } else {
+                                const preset = urlPresets[parseInt(v)];
+                                const next = { ...config };
+                                next.providers = { ...next.providers, [activeProvider]: { ...selectedConfig, base_url: preset.url, protocol: preset.protocol } };
+                                onChange(next);
+                              }
+                            }}
+                          >
+                            <SelectTrigger className="h-8 text-sm"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              {urlPresets.map((p, i) => (
+                                <SelectItem key={i} value={String(i)}>{p.label}</SelectItem>
+                              ))}
+                              <SelectItem value="__custom__">自定义 URL</SelectItem>
+                            </SelectContent>
+                          </Select>
+                          {!isCustom && (
+                            <div className="text-xs text-muted-foreground mt-1.5 font-mono break-all">{selectedConfig.base_url}</div>
+                          )}
+                          {isCustom && (
+                            <Input
+                              value={selectedConfig.base_url}
+                              onChange={(e) => updateProviderField('base_url', e.target.value)}
+                              className="text-sm h-8 mt-2"
+                              placeholder="https://..."
+                            />
+                          )}
+                        </>
+                      );
+                    }
+                    return (
+                      <Input
+                        value={selectedConfig.base_url}
+                        onChange={(e) => updateProviderField('base_url', e.target.value)}
+                        className="text-sm h-8"
+                        placeholder="https://api.openai.com/v1"
+                      />
+                    );
+                  })()}
+                </div>
+                <div className="flex gap-3">
+                  <div className="flex-1">
+                    <Label className="text-xs">协议</Label>
+                    <Select
+                      value={selectedConfig.protocol || 'openai_compatible'}
+                      onValueChange={(v) => {
+                        const next = { ...config };
+                        next.providers = { ...next.providers, [activeProvider]: { ...selectedConfig, protocol: v } };
+                        onChange(next);
+                      }}
+                    >
+                      <SelectTrigger className="h-8 text-sm"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="openai_compatible">OpenAI 兼容</SelectItem>
+                        <SelectItem value="anthropic">Anthropic</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="w-32">
+                    <Label className="text-xs">超时 (ms)</Label>
+                    <Input
+                      type="number"
+                      value={selectedConfig.timeout_ms}
+                      onChange={(e) => updateProviderField('timeout_ms', parseInt(e.target.value) || 300000)}
+                      className="text-sm h-8"
+                    />
+                  </div>
                 </div>
               </div>
-            </CardContent>
-          </Card>
-        ))}
+            </div>
+
+            <div className="border-t my-4" />
+
+            {/* 模型列表 */}
+            <div>
+              <div className="flex items-center justify-between mb-3">
+                <h4 className="text-sm font-medium">模型列表</h4>
+                <Button size="sm" onClick={openAddModel}>
+                  <Plus className="w-3 h-3 mr-1" />添加模型
+                </Button>
+              </div>
+              {providerModels.length === 0 ? (
+                <div className="text-center text-muted-foreground py-6 text-sm">暂无模型，点击上方按钮添加</div>
+              ) : (
+                <div className="space-y-2">
+                  {providerModels.map(([key, m]) => (
+                    <Card key={key}>
+                      <CardContent className="p-3">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <span className="font-medium text-sm">{key}</span>
+                            <div className="text-xs text-muted-foreground mt-1">{m.model}</div>
+                            <div className="flex gap-1 mt-1">
+                              {m.capabilities.map((cap) => {
+                                const capInfo = capabilities.find((c) => c.key === cap);
+                                return <Badge key={cap} variant="secondary" className="text-[10px] px-1.5 py-0 h-5">{capInfo?.display_name || cap}</Badge>;
+                              })}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEditModel(key)} title="编辑"><Edit2 className="w-3.5 h-3.5" /></Button>
+                            <Button variant="ghost" size="icon" className="h-7 w-7 hover:bg-destructive/20 hover:text-destructive" onClick={() => removeModel(key)} title="删除"><Trash2 className="w-3.5 h-3.5" /></Button>
+                          </div>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </div>
+              )}
+            </div>
+          </>
+        ) : (
+          <div className="flex items-center justify-center h-full text-muted-foreground text-sm">请从左侧选择或添加一个供应商</div>
+        )}
       </div>
 
-      {/* Provider 添加/编辑 Modal */}
-      <Dialog open={modalMode !== null} onOpenChange={(v) => !v && setModalMode(null)}>
+      {/* 添加供应商 Modal */}
+      <Dialog open={showAddProvider} onOpenChange={setShowAddProvider}>
         <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>{modalMode === 'add' ? '添加供应商' : `编辑供应商: ${editingKey}`}</DialogTitle>
-          </DialogHeader>
+          <DialogHeader><DialogTitle>添加自定义供应商</DialogTitle></DialogHeader>
           <div className="space-y-3 pt-2">
             <div>
               <Label className="text-xs">供应商名称</Label>
-              <Input
-                value={newKey}
-                onChange={(e) => setNewKey(e.target.value)}
-                className="text-sm h-8"
-                placeholder="例如: DeepSeek, 智谱"
-              />
+              <Input value={newProviderKey} onChange={(e) => setNewProviderKey(e.target.value)} className="text-sm h-8" placeholder="例如: MyProvider" />
             </div>
-            <ProviderForm
-              draft={draft}
-              setDraft={setDraft}
-              showApiKey={showApiKey}
-              setShowApiKey={setShowApiKey}
-              onSave={modalMode === 'add' ? addProvider : saveEdit}
-              onCancel={() => setModalMode(null)}
-              saveLabel={modalMode === 'add' ? '添加' : '保存'}
-            />
+            <ProviderForm draft={newProviderDraft} setDraft={setNewProviderDraft} showApiKey={showNewApiKey} setShowApiKey={setShowNewApiKey} onSave={addCustomProvider} onCancel={() => setShowAddProvider(false)} saveLabel="添加" />
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 添加/编辑模型 Modal */}
+      <Dialog open={modelModalMode !== null} onOpenChange={(v) => { if (!v) { setModelModalMode(null); setAvailableModels([]); } }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader><DialogTitle>{modelModalMode === 'add' ? '添加模型' : `编辑模型: ${editingModelKey}`}</DialogTitle></DialogHeader>
+          <div className="pt-2 space-y-3">
+            <div>
+              <Label className="text-xs">供应商</Label>
+              <div className="text-sm text-muted-foreground mt-0.5">{modelDraft.provider}</div>
+            </div>
+            <div>
+              <div className="flex items-center justify-between">
+                <Label className="text-xs">模型名称</Label>
+                <Button variant="ghost" size="sm" className="h-5 text-xs px-2" onClick={() => fetchModelsForProvider(modelDraft.provider)} disabled={isFetchingModels}>
+                  {isFetchingModels ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" />获取中...</> : '获取模型列表'}
+                </Button>
+              </div>
+              {availableModels.length > 0 ? (
+                <Select value={modelDraft.model} onValueChange={(v) => setModelDraft({ ...modelDraft, model: v })}>
+                  <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="-- 选择模型 --" /></SelectTrigger>
+                  <SelectContent>
+                    {availableModels.map((m) => <SelectItem key={m} value={m}>{m}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              ) : (
+                <Input value={modelDraft.model} onChange={(e) => setModelDraft({ ...modelDraft, model: e.target.value })} className="text-sm h-8" placeholder="gpt-4o, deepseek-chat, ..." />
+              )}
+            </div>
+            <div>
+              <Label className="text-xs">能力</Label>
+              <div className="flex flex-wrap gap-1.5 mt-1">
+                {capabilities.filter((cap) => cap.key !== 'lite').map((cap) => (
+                  <button
+                    key={cap.key}
+                    className={`px-2 py-0.5 text-xs rounded border transition-colors ${modelDraft.capabilities.includes(cap.key) ? 'bg-primary/20 text-primary border-primary/40' : 'bg-secondary text-muted-foreground border-border hover:text-foreground'}`}
+                    onClick={() => toggleCapability(cap.key)}
+                  >
+                    {cap.display_name}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {modelDraft.capabilities.includes('tts') && (
+              <div>
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs">TTS 音色 (voice)</Label>
+                  {ttsVoices.length === 0 && (
+                    <Button variant="ghost" size="sm" className="h-5 text-xs px-2" onClick={fetchTtsVoices} disabled={isFetchingVoices}>
+                      {isFetchingVoices ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" />获取中...</> : '获取可用音色'}
+                    </Button>
+                  )}
+                </div>
+                {ttsVoices.length > 0 ? (
+                  <Select value={(modelDraft.options?.voice as string) || '__default__'} onValueChange={(v) => setModelDraft({ ...modelDraft, options: { ...modelDraft.options, voice: v === '__default__' ? undefined : v } })}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="-- 使用默认音色 --" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__default__">-- 使用默认音色 --</SelectItem>
+                      {ttsVoices.map((v) => <SelectItem key={v.id} value={v.id}>{v.name}{v.gender ? ` (${v.gender})` : ''}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <Input value={(modelDraft.options?.voice as string) || ''} onChange={(e) => setModelDraft({ ...modelDraft, options: { ...modelDraft.options, voice: e.target.value || undefined } })} className="text-sm h-8" placeholder="输入音色名称" />
+                )}
+              </div>
+            )}
+            {modelDraft.capabilities.includes('embedding') && (
+              <div>
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs">Embedding 维度</Label>
+                  <Button variant="ghost" size="sm" className="h-5 text-xs px-2" onClick={probeEmbeddingDimension} disabled={isProbingEmbeddingDimension || !modelDraft.model.trim()}>
+                    {isProbingEmbeddingDimension ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" />获取中...</> : '获取维度'}
+                  </Button>
+                </div>
+                <Input type="number" min={1} value={(modelDraft.options?.dimension as number | undefined) || ''} onChange={(e) => setModelDraft({ ...modelDraft, options: { ...modelDraft.options, dimension: e.target.value ? Number(e.target.value) : undefined } })} className="text-sm h-8" placeholder="例如 1536、1024、768" />
+                <p className="text-xs text-muted-foreground mt-1">不同 embedding 模型需要填写对应维度。</p>
+              </div>
+            )}
+            {modelDraft.capabilities.includes('rerank') && (
+              <div className="rounded-md border border-dashed p-2 text-xs text-muted-foreground">Rerank 模型用于通用召回结果精排。</div>
+            )}
+            <div className="flex justify-end gap-2 pt-1">
+              <Button variant="ghost" size="sm" onClick={() => { setModelModalMode(null); setAvailableModels([]); }}>取消</Button>
+              <Button size="sm" onClick={modelModalMode === 'add' ? addModel : saveModelEdit} disabled={!modelDraft.model}>{modelModalMode === 'add' ? '添加' : '保存'}</Button>
+            </div>
           </div>
         </DialogContent>
       </Dialog>
@@ -938,9 +1290,9 @@ function ProviderForm({
         <Input
           type="number"
           value={draft.timeout_ms}
-          onChange={(e) => setDraft({ ...draft, timeout_ms: parseInt(e.target.value) || 60000 })}
+          onChange={(e) => setDraft({ ...draft, timeout_ms: parseInt(e.target.value) || 300000 })}
           className="text-sm h-8"
-          placeholder="60000"
+          placeholder="300000"
         />
       </div>
       <div>
@@ -970,436 +1322,6 @@ function ProviderForm({
   );
 }
 
-// ---------------------------------------------------------------------------
-// Models 子区域
-// ---------------------------------------------------------------------------
-
-function ModelsSection({
-  config,
-  onChange,
-  capabilities,
-}: {
-  config: ModelsConfigView;
-  onChange: (c: ModelsConfigView) => void;
-  capabilities: ModelCapabilityInfo[];
-}) {
-  const [modalMode, setModalMode] = useState<'add' | 'edit' | null>(null);
-  const [editingKey, setEditingKey] = useState<string>('');
-  const [draft, setDraft] = useState<ModelEntryView>({
-    provider: '',
-    model: '',
-    capabilities: [],
-    options: {},
-  });
-  const [availableModels, setAvailableModels] = useState<string[]>([]);
-  const [isFetchingModels, setIsFetchingModels] = useState(false);
-  const [ttsVoices, setTtsVoices] = useState<{ id: string; name: string; gender?: string }[]>([]);
-  const [isFetchingVoices, setIsFetchingVoices] = useState(false);
-  const [isProbingEmbeddingDimension, setIsProbingEmbeddingDimension] = useState(false);
-  const { showSuccess, showError } = useToast();
-
-  const modelKeys = Object.keys(config.models);
-  const providerKeys = Object.keys(config.providers);
-
-  const fetchModelsForProvider = async (providerKey: string) => {
-    const provider = config.providers[providerKey];
-    if (!provider?.base_url || !provider?.api_key) {
-      showError('配置不完整', '请先在 Providers 中配置 Base URL 和 API Key');
-      return;
-    }
-    setIsFetchingModels(true);
-    try {
-      const models = await api.fetchProviderModels(
-        provider.base_url,
-        provider.api_key,
-        provider.timeout_ms,
-        provider.protocol,
-      );
-      if (models.length === 0) {
-        showError('无可用模型', '该供应商未返回任何模型，请检查 API 配置');
-      }
-      setAvailableModels(models);
-    } catch (error) {
-      console.error('获取模型列表失败:', error);
-      showError('获取失败', `无法获取模型列表：${error}`);
-      setAvailableModels([]);
-    } finally {
-      setIsFetchingModels(false);
-    }
-  };
-
-  const fetchTtsVoices = async () => {
-    setIsFetchingVoices(true);
-    try {
-      const voices = await api.listTtsVoices();
-      setTtsVoices(voices);
-    } catch {
-      setTtsVoices([]);
-    } finally {
-      setIsFetchingVoices(false);
-    }
-  };
-
-  const probeEmbeddingDimension = async () => {
-    const provider = config.providers[draft.provider];
-    if (!provider?.base_url || !draft.model.trim()) {
-      showError('配置不完整', '请先选择供应商并填写嵌入模型名称');
-      return;
-    }
-    setIsProbingEmbeddingDimension(true);
-    try {
-      const dimension = await api.probeEmbeddingDimension(
-        provider.base_url,
-        provider.api_key,
-        draft.model.trim(),
-        provider.timeout_ms,
-        provider.protocol,
-      );
-      setDraft((current) => ({
-        ...current,
-        options: {
-          ...current.options,
-          dimension,
-        },
-      }));
-      showSuccess('获取成功', `Embedding 维度：${dimension}`);
-    } catch (error) {
-      console.error('获取 Embedding 维度失败:', error);
-      showError('获取失败', `无法获取 Embedding 维度：${error}`);
-    } finally {
-      setIsProbingEmbeddingDimension(false);
-    }
-  };
-
-  const openAdd = () => {
-    setModalMode('add');
-    setDraft({ provider: providerKeys[0] || '', model: '', capabilities: [], options: {} });
-    setAvailableModels([]);
-    setTtsVoices([]);
-  };
-
-  const openEdit = (key: string) => {
-    setModalMode('edit');
-    setEditingKey(key);
-    setDraft({ ...config.models[key] });
-    setAvailableModels([]);
-  };
-
-  const saveEdit = () => {
-    if (!editingKey) return;
-    const next = { ...config };
-    next.models = { ...next.models, [editingKey]: { ...draft } };
-    onChange(next);
-    setModalMode(null);
-  };
-
-  const addModel = () => {
-    if (!draft.model.trim()) return;
-    let key = draft.model.trim();
-    if (config.models[key]) {
-      key = `${draft.provider}-${key}`;
-    }
-    const next = { ...config };
-    next.models = { ...next.models, [key]: { ...draft } };
-    onChange(next);
-    setModalMode(null);
-  };
-
-  const removeModel = (key: string) => {
-    const next = { ...config };
-    const { [key]: _, ...rest } = next.models;
-    next.models = rest;
-    const newRouting = { ...next.routing };
-    for (const [cap, modelName] of Object.entries(newRouting)) {
-      if (modelName === key) {
-        delete newRouting[cap];
-      }
-    }
-    next.routing = newRouting;
-    onChange(next);
-  };
-
-  const toggleCapability = (cap: string) => {
-    if (draft.capabilities.includes(cap)) {
-      setDraft({ ...draft, capabilities: draft.capabilities.filter((c) => c !== cap) });
-    } else {
-      setDraft({ ...draft, capabilities: [...draft.capabilities, cap] });
-    }
-  };
-
-  const renderModelForm = (onSave: () => void, onCancel: () => void, label = '保存') => (
-    <div className="space-y-3">
-      <div>
-        <Label className="text-xs">供应商</Label>
-        <Select
-          value={draft.provider}
-          onValueChange={(v) => {
-            setDraft({ ...draft, provider: v, model: '' });
-            setAvailableModels([]);
-          }}
-        >
-          <SelectTrigger className="h-8 text-sm">
-            <SelectValue placeholder="-- 选择供应商 --" />
-          </SelectTrigger>
-          <SelectContent>
-            {providerKeys.map((pk) => (
-              <SelectItem key={pk} value={pk}>{pk}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-      <div>
-        <div className="flex items-center justify-between">
-          <Label className="text-xs">模型名称</Label>
-          {draft.provider && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-5 text-xs px-2"
-              onClick={() => fetchModelsForProvider(draft.provider)}
-              disabled={isFetchingModels}
-            >
-              {isFetchingModels ? (
-                <>
-                  <Loader2 className="w-3 h-3 mr-1 animate-spin" />
-                  获取中...
-                </>
-              ) : (
-                '获取模型列表'
-              )}
-            </Button>
-          )}
-        </div>
-        {availableModels.length > 0 ? (
-          <Select value={draft.model} onValueChange={(v) => setDraft({ ...draft, model: v })}>
-            <SelectTrigger className="h-8 text-sm">
-              <SelectValue placeholder="-- 选择模型 --" />
-            </SelectTrigger>
-            <SelectContent>
-              {availableModels.map((m) => (
-                <SelectItem key={m} value={m}>{m}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        ) : (
-          <Input
-            value={draft.model}
-            onChange={(e) => setDraft({ ...draft, model: e.target.value })}
-            className="text-sm h-8"
-            placeholder="gpt-4o, claude-3-opus, ..."
-          />
-        )}
-      </div>
-      <div>
-        <Label className="text-xs">能力</Label>
-        <div className="flex flex-wrap gap-1.5 mt-1">
-          {capabilities.filter((cap) => cap.key !== 'lite').map((cap) => (
-            <button
-              key={cap.key}
-              className={`px-2 py-0.5 text-xs rounded border transition-colors ${
-                draft.capabilities.includes(cap.key)
-                  ? 'bg-primary/20 text-primary border-primary/40'
-                  : 'bg-secondary text-muted-foreground border-border hover:text-foreground'
-              }`}
-              onClick={() => toggleCapability(cap.key)}
-            >
-              {cap.display_name}
-            </button>
-          ))}
-        </div>
-      </div>
-      {/* TTS 模型参数 */}
-      {draft.capabilities.includes('tts') && (
-        <div>
-          <div className="flex items-center justify-between">
-            <Label className="text-xs">TTS 音色 (voice)</Label>
-            {ttsVoices.length === 0 && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-5 text-xs px-2"
-                onClick={fetchTtsVoices}
-                disabled={isFetchingVoices}
-              >
-                {isFetchingVoices ? (
-                  <>
-                    <Loader2 className="w-3 h-3 mr-1 animate-spin" />
-                    获取中...
-                  </>
-                ) : (
-                  '获取可用音色'
-                )}
-              </Button>
-            )}
-          </div>
-          {ttsVoices.length > 0 ? (
-            <Select
-              value={(draft.options?.voice as string) || '__default__'}
-              onValueChange={(v) =>
-                setDraft({
-                  ...draft,
-                  options: { ...draft.options, voice: v === '__default__' ? undefined : v },
-                })
-              }
-            >
-              <SelectTrigger className="h-8 text-sm">
-                <SelectValue placeholder="-- 使用默认音色 --" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__default__">-- 使用默认音色 --</SelectItem>
-                {ttsVoices.map((v) => (
-                  <SelectItem key={v.id} value={v.id}>
-                    {v.name}{v.gender ? ` (${v.gender})` : ''}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          ) : (
-            <Input
-              value={(draft.options?.voice as string) || ''}
-              onChange={(e) =>
-                setDraft({
-                  ...draft,
-                  options: { ...draft.options, voice: e.target.value || undefined },
-                })
-              }
-              className="text-sm h-8"
-              placeholder="输入音色名称，如 Chinese Female"
-            />
-          )}
-        </div>
-      )}
-      {/* Embedding 模型参数 */}
-      {draft.capabilities.includes('embedding') && (
-        <div>
-          <div className="flex items-center justify-between">
-            <Label className="text-xs">Embedding 维度</Label>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-5 text-xs px-2"
-              onClick={probeEmbeddingDimension}
-              disabled={isProbingEmbeddingDimension || !draft.provider || !draft.model.trim()}
-            >
-              {isProbingEmbeddingDimension ? (
-                <>
-                  <Loader2 className="w-3 h-3 mr-1 animate-spin" />
-                  获取中...
-                </>
-              ) : (
-                '获取维度'
-              )}
-            </Button>
-          </div>
-          <Input
-            type="number"
-            min={1}
-            value={(draft.options?.dimension as number | undefined) || ''}
-            onChange={(e) =>
-              setDraft({
-                ...draft,
-                options: {
-                  ...draft.options,
-                  dimension: e.target.value ? Number(e.target.value) : undefined,
-                },
-              })
-            }
-            className="text-sm h-8"
-            placeholder="例如 1536、1024、768"
-          />
-          <p className="text-xs text-muted-foreground mt-1">
-            不同 embedding 模型需要填写对应维度。
-          </p>
-        </div>
-      )}
-      {/* Rerank 模型说明 */}
-      {draft.capabilities.includes('rerank') && (
-        <div className="rounded-md border border-dashed p-2 text-xs text-muted-foreground">
-          Rerank 模型用于通用召回结果精排。若服务需要额外参数，可在 models.json 的 options 中继续扩展。
-        </div>
-      )}
-      <div className="flex justify-end gap-2 pt-1">
-        <Button variant="ghost" size="sm" onClick={onCancel}>
-          取消
-        </Button>
-        <Button size="sm" onClick={onSave} disabled={!draft.provider || !draft.model}>
-          {label}
-        </Button>
-      </div>
-    </div>
-  );
-
-  return (
-    <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between mb-3 shrink-0">
-        <h4 className="text-sm font-medium text-muted-foreground">模型定义</h4>
-        <Button size="sm" onClick={openAdd}>
-          <Plus className="w-3 h-3 mr-1" />
-          添加
-        </Button>
-      </div>
-
-      {modelKeys.length === 0 && (
-        <div className="text-center text-muted-foreground py-6 text-sm">暂无模型定义</div>
-      )}
-
-      <div className="space-y-2 flex-1 min-h-0 overflow-y-auto">
-        {modelKeys.map((key) => {
-          const m = config.models[key];
-          return (
-            <Card key={key}>
-              <CardContent className="p-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium text-sm">{key}</span>
-                      <span className="text-xs text-muted-foreground">({m.provider})</span>
-                    </div>
-                    <div className="text-xs text-muted-foreground mt-1">{m.model}</div>
-                    <div className="flex gap-1 mt-1">
-                      {m.capabilities.map((cap) => {
-                        const capInfo = capabilities.find((c) => c.key === cap);
-                        return (
-                          <Badge key={cap} variant="secondary" className="text-xs">
-                            {capInfo?.display_name || cap}
-                          </Badge>
-                        );
-                      })}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit(key)} title="编辑">
-                      <Edit2 className="w-3.5 h-3.5" />
-                    </Button>
-                    <Button variant="ghost" size="icon" className="h-7 w-7 hover:bg-destructive/20 hover:text-destructive" onClick={() => removeModel(key)} title="删除">
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </Button>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          );
-        })}
-      </div>
-
-      {/* Model 添加/编辑 Modal */}
-      <Dialog open={modalMode !== null} onOpenChange={(v) => { if (!v) { setModalMode(null); setAvailableModels([]); } }}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>{modalMode === 'add' ? '添加模型' : `编辑模型: ${editingKey}`}</DialogTitle>
-          </DialogHeader>
-          <div className="pt-2">
-            {renderModelForm(
-              modalMode === 'add' ? addModel : saveEdit,
-              () => { setModalMode(null); setAvailableModels([]); },
-              modalMode === 'add' ? '添加' : '保存',
-            )}
-          </div>
-        </DialogContent>
-      </Dialog>
-    </div>
-  );
-}
 
 // ---------------------------------------------------------------------------
 // Routing 子区域
