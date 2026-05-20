@@ -7,5 +7,5 @@ license = "Apache-2.0"
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-chrono = { workspace = true, features = ["serde"] }
+chrono = { workspace = true, features = ["serde", "clock"] }
 scru128 = { workspace = true }

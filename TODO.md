@@ -68,6 +68,8 @@
 - [x] 修复 LLM 流式生成期间前端界面卡死、生成完成后恢复的问题
 - [x] 修复 GitHub Actions Rust/Tauri 构建缺少 protoc 和 GLib 系统依赖的问题
 - [x] 修复 GitHub Actions protoc 安装限流和 nextest 链接器崩溃的问题
+- [x] 修复 GitHub Actions Linux 测试绕开 rust-lld 崩溃的问题
+- [x] 增加 OrbStack Ubuntu 测试脚本并隔离 Linux 构建产物目录
 
 ## 发布准备任务
 
