@@ -515,8 +515,8 @@ function MemorySettings({
   return (
     <div className="space-y-4">
       <MemoryModelSelectSection
-        title="Memory LLM"
-        description="Episode 提取、Recall 规划和结果整理使用的文本模型"
+        title="记忆文本模型"
+        description="片段提取、回忆规划和结果整理使用的文本模型"
         selectedKey={config.model_key}
         candidates={modelKeysFor(['chat', 'lite'])}
         modelLabel={modelLabel}
@@ -524,8 +524,8 @@ function MemorySettings({
       />
 
       <MemoryModelSelectSection
-        title="Memory Embedding"
-        description="语义检索和向量索引使用的 Embedding 模型"
+        title="记忆嵌入模型"
+        description="语义检索和向量索引使用的嵌入模型"
         selectedKey={config.embedding_key}
         candidates={modelKeysFor(['embedding'])}
         modelLabel={modelLabel}
@@ -535,14 +535,14 @@ function MemorySettings({
             <div className={`text-xs ${embeddingDimension > 0 ? 'text-muted-foreground' : 'text-destructive'}`}>
               {embeddingDimension > 0
                 ? `当前维度：${embeddingDimension}`
-                : '选中的 Embedding 模型缺少 options.dimension，请先在 Models 页补齐。'}
+                : '选中的嵌入模型缺少 options.dimension，请先在模型页补齐。'}
             </div>
           ) : null
         }
       />
 
       <MemoryModelSelectSection
-        title="Memory Rerank"
+        title="记忆重排模型"
         description="召回结果精排模型，当前保存为独立配置供后续召回链路消费"
         selectedKey={config.rerank_key}
         candidates={modelKeysFor(['rerank'])}
@@ -555,7 +555,7 @@ function MemorySettings({
           <div>
             <h4 className="text-sm font-medium">向量模式</h4>
             <p className="text-xs text-muted-foreground mt-1">
-              控制 Memory 语义检索使用内置向量索引、外部 Qdrant 或完全关闭。
+              控制语义检索使用内置向量索引、外部 Qdrant 或完全关闭。
             </p>
           </div>
           <Select
@@ -631,7 +631,7 @@ function MemoryModelSelectSection({
         )}
         {candidates.length === 0 && (
           <div className="text-xs text-muted-foreground">
-            请先在 Models 页添加对应能力的模型。
+            请先在模型页添加对应能力的模型。
           </div>
         )}
         {footer}
@@ -1004,7 +1004,7 @@ function ModelsSection({
         provider.protocol,
       );
       if (models.length === 0) {
-        showError('无可用模型', '该 Provider 未返回任何模型，请检查 API 配置');
+        showError('无可用模型', '该供应商未返回任何模型，请检查 API 配置');
       }
       setAvailableModels(models);
     } catch (error) {
@@ -1031,7 +1031,7 @@ function ModelsSection({
   const probeEmbeddingDimension = async () => {
     const provider = config.providers[draft.provider];
     if (!provider?.base_url || !draft.model.trim()) {
-      showError('配置不完整', '请先选择 Provider 并填写 Embedding 模型名称');
+      showError('配置不完整', '请先选择供应商并填写嵌入模型名称');
       return;
     }
     setIsProbingEmbeddingDimension(true);
@@ -1118,7 +1118,7 @@ function ModelsSection({
   const renderModelForm = (onSave: () => void, onCancel: () => void, label = '保存') => (
     <div className="space-y-3">
       <div>
-        <Label className="text-xs">Provider</Label>
+        <Label className="text-xs">供应商</Label>
         <Select
           value={draft.provider}
           onValueChange={(v) => {
@@ -1127,7 +1127,7 @@ function ModelsSection({
           }}
         >
           <SelectTrigger className="h-8 text-sm">
-            <SelectValue placeholder="-- 选择 Provider --" />
+            <SelectValue placeholder="-- 选择供应商 --" />
           </SelectTrigger>
           <SelectContent>
             {providerKeys.map((pk) => (
@@ -1473,7 +1473,7 @@ function RoutingSection({
 
       {modelKeys.length === 0 && (
         <p className="text-xs text-muted-foreground mt-3">
-          请先在 Models 标签页中添加模型定义，然后回来配置路由
+          请先在模型页中添加模型定义，然后回来配置路由
         </p>
       )}
     </div>
