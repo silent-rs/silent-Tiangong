@@ -85,6 +85,14 @@ fn load_from_disk_prefers_most_recent_session_when_app_storage_missing() -> Resu
     with_isolated_state(
         "tiangong-repository-recover-latest-without-app",
         |paths, state| {
+            // 清除 load_or_default 创建的默认会话文件
+            let sessions_dir = paths.fake_home.join(".tiangong").join("sessions");
+            if sessions_dir.exists() {
+                for entry in fs::read_dir(&sessions_dir)? {
+                    fs::remove_file(entry?.path())?;
+                }
+            }
+
             state.store.session.sessions.clear();
 
             let mut older = Session::new("较早会话");
@@ -119,6 +127,14 @@ fn load_from_disk_prefers_most_recent_session_when_active_session_is_invalid() -
     with_isolated_state(
         "tiangong-repository-recover-latest-invalid-active",
         |paths, state| {
+            // 清除 load_or_default 创建的默认会话文件
+            let sessions_dir = paths.fake_home.join(".tiangong").join("sessions");
+            if sessions_dir.exists() {
+                for entry in fs::read_dir(&sessions_dir)? {
+                    fs::remove_file(entry?.path())?;
+                }
+            }
+
             state.store.session.sessions.clear();
 
             let mut older = Session::new("较早会话");
@@ -157,7 +173,15 @@ fn load_from_disk_prefers_most_recent_session_when_active_session_is_invalid() -
 fn load_from_disk_filters_child_sessions_from_session_list_state() -> Result<()> {
     with_isolated_state(
         "tiangong-repository-filter-child-sessions",
-        |_paths, state| {
+        |paths, state| {
+            // 清除 load_or_default 创建的默认会话文件
+            let sessions_dir = paths.fake_home.join(".tiangong").join("sessions");
+            if sessions_dir.exists() {
+                for entry in fs::read_dir(&sessions_dir)? {
+                    fs::remove_file(entry?.path())?;
+                }
+            }
+
             state.store.session.sessions.clear();
 
             let mut parent = Session::new("主会话");
