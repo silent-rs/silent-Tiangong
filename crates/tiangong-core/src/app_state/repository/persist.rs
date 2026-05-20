@@ -58,17 +58,9 @@ impl AppRepository {
             session_ids_set.insert(session.id.clone());
         }
 
-        for session_id in self.list_session_ids_from_dir()? {
-            if session_ids_set.contains(&session_id) {
-                continue;
-            }
-
-            let stale_path = session_storage_path(&self.paths.sessions_dir_path, &session_id);
-            if stale_path.exists() {
-                fs::remove_file(&stale_path)
-                    .with_context(|| format!("删除废弃会话文件失败：{}", stale_path.display()))?;
-            }
-        }
+        // 不再删除不在内存中的会话文件：多进程（桌面端 / server）共享同一数据目录，
+        // 每个进程只持有自己加载到内存的会话子集，删除"未知"文件会导致其他进程创建的会话丢失。
+        // 会话文件的清理由 delete_active_session 显式执行。
 
         let mut app_agent_config = store.agent.agent_config.clone();
         app_agent_config.skills.installed.clear();
