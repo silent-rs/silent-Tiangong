@@ -67,15 +67,15 @@ export function SettingsDialog() {
               <TabsList className="h-auto w-full flex-1 flex-col items-stretch justify-start rounded-none bg-transparent p-2 pt-4">
                 <TabsTrigger value="agent" className="w-full justify-start px-3 py-2">
                   <ShieldCheck className="w-4 h-4 mr-2" />
-                  Agent
+                  智能体
                 </TabsTrigger>
                 <TabsTrigger value="llm" className="w-full justify-start px-3 py-2">
                   <Settings className="w-4 h-4 mr-2" />
-                  LLM 配置
+                  模型配置
                 </TabsTrigger>
                 <TabsTrigger value="memory" className="w-full justify-start px-3 py-2">
                   <Database className="w-4 h-4 mr-2" />
-                  Memory
+                  记忆管理
                 </TabsTrigger>
                 <TabsTrigger value="mcp" className="w-full justify-start px-3 py-2">
                   <Server className="w-4 h-4 mr-2" />
@@ -83,11 +83,11 @@ export function SettingsDialog() {
                 </TabsTrigger>
                 <TabsTrigger value="skill" className="w-full justify-start px-3 py-2">
                   <Puzzle className="w-4 h-4 mr-2" />
-                  Skills
+                  技能管理
                 </TabsTrigger>
                 <TabsTrigger value="server" className="w-full justify-start px-3 py-2">
                   <Globe className="w-4 h-4 mr-2" />
-                  Server
+                  远程服务
                 </TabsTrigger>
                 <TabsTrigger value="about" className="w-full justify-start px-3 py-2">
                   <Info className="w-4 h-4 mr-2" />
