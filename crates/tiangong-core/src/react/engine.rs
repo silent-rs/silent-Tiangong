@@ -586,12 +586,11 @@ impl ReactEngine {
                             .push(Message::new(MessageRole::Assistant, response.text.clone()));
                         loop_context.push(Message::new(
                             MessageRole::Tool,
-                            format!(
-                                "<system-reminder>\n上方回复被判定为未完成任务。\
+                            "<system-reminder>\n上方回复被判定为未完成任务。\
                                 不要重复上方已说过的内容。\
                                 如果需要执行操作，直接返回 tool_calls；\
                                 如果确实无需更多操作，简要补充未覆盖的要点即可。\n</system-reminder>"
-                            ),
+                                .to_string(),
                         ));
                         continue 'react_loop;
                     }
