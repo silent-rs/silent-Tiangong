@@ -94,26 +94,26 @@ export function SettingsDialog() {
               </div>
             </aside>
 
-            <div className="min-w-0 flex-1 overflow-hidden">
-              <TabsContent value="agent" className="m-0 h-full overflow-hidden flex flex-col">
+            <div className="min-w-0 flex-1 flex flex-col overflow-hidden">
+              <TabsContent value="agent" className="m-0 flex-1 min-h-0 overflow-hidden flex flex-col">
                 <AgentSettings onSaveStatusChange={setSaveStatus} />
               </TabsContent>
-              <TabsContent value="llm" className="m-0 h-full overflow-y-auto">
+              <TabsContent value="llm" className="m-0 flex-1 min-h-0 overflow-y-auto">
                 <LLMSettings onSaveStatusChange={setSaveStatus} />
               </TabsContent>
-              <TabsContent value="memory" className="m-0 h-full overflow-hidden">
+              <TabsContent value="memory" className="m-0 flex-1 min-h-0 overflow-hidden">
                 <MemoryManagementSettings />
               </TabsContent>
-              <TabsContent value="mcp" className="m-0 h-full overflow-y-auto">
+              <TabsContent value="mcp" className="m-0 flex-1 min-h-0 overflow-y-auto">
                 <McpSettings />
               </TabsContent>
-              <TabsContent value="skill" className="m-0 h-full overflow-y-auto">
+              <TabsContent value="skill" className="m-0 flex-1 min-h-0 overflow-y-auto">
                 <SkillSettings />
               </TabsContent>
-              <TabsContent value="server" className="m-0 h-full overflow-y-auto">
+              <TabsContent value="server" className="m-0 flex-1 min-h-0 overflow-y-auto">
                 <ServerSettings />
               </TabsContent>
-              <TabsContent value="about" className="m-0 h-full overflow-y-auto">
+              <TabsContent value="about" className="m-0 flex-1 min-h-0 overflow-y-auto">
                 <AppUpdateSettings />
               </TabsContent>
             </div>
