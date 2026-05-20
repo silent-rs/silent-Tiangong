@@ -3,7 +3,7 @@
 use crate::core_config::CoreConfigProvider;
 use crate::memory::registry::get_or_init_memory_handle_async;
 
-/// GUI Memory 管理：列出当前 workspace 的记忆节点。
+/// GUI Memory 管理：列出全部记忆节点（全局可见，不按 workspace 过滤）。
 pub async fn list_memory_nodes_for_gui(
     config_provider: &CoreConfigProvider,
     workspace_id: Option<String>,
@@ -13,12 +13,12 @@ pub async fn list_memory_nodes_for_gui(
     offset: Option<usize>,
 ) -> anyhow::Result<Vec<tiangong_memory::MemoryNode>> {
     let status = parse_memory_status(status.as_deref())?;
-    let handle = get_or_init_memory_handle_async(config_provider, workspace_id.clone())
+    let handle = get_or_init_memory_handle_async(config_provider, workspace_id)
         .await
         .ok_or_else(|| anyhow::anyhow!("Memory 未启动或初始化失败"))?;
     Ok(handle
         .list_nodes(tiangong_memory::MemoryListQuery {
-            workspace_id,
+            workspace_id: None,
             query,
             status,
             created_after: None,
@@ -28,7 +28,7 @@ pub async fn list_memory_nodes_for_gui(
         .await)
 }
 
-/// GUI Memory 管理：统计当前 workspace 的记忆节点真实总数。
+/// GUI Memory 管理：统计全部记忆节点真实总数（全局可见，不按 workspace 过滤）。
 pub async fn count_memory_nodes_for_gui(
     config_provider: &CoreConfigProvider,
     workspace_id: Option<String>,
@@ -37,12 +37,12 @@ pub async fn count_memory_nodes_for_gui(
     created_after: Option<String>,
 ) -> anyhow::Result<usize> {
     let status = parse_memory_status(status.as_deref())?;
-    let handle = get_or_init_memory_handle_async(config_provider, workspace_id.clone())
+    let handle = get_or_init_memory_handle_async(config_provider, workspace_id)
         .await
         .ok_or_else(|| anyhow::anyhow!("Memory 未启动或初始化失败"))?;
     Ok(handle
         .count_nodes(tiangong_memory::MemoryListQuery {
-            workspace_id,
+            workspace_id: None,
             query,
             status,
             created_after,
