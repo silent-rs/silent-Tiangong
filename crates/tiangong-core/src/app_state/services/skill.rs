@@ -247,7 +247,7 @@ impl AppSkillService {
         validate_agent_config(&state.store.agent.agent_config)?;
         state.rebuild_runtime_for_agent_config();
         state.persist_app_only()?;
-        state.sync_mcp_dependency_lock()?;
+        state.persist_agent_configs_only()?;
 
         let mut message = format!(
             "skill 已安装：{}@{} enabled={}",
@@ -341,7 +341,7 @@ impl AppSkillService {
         validate_agent_config(&state.store.agent.agent_config)?;
         state.rebuild_runtime_for_agent_config();
         state.persist_app_only()?;
-        state.sync_mcp_dependency_lock()?;
+        state.persist_agent_configs_only()?;
         audit::append_audit_log(&audit::AuditEntry::new(
             "skill.remove",
             id,
@@ -372,7 +372,7 @@ impl AppSkillService {
         state.sync_installed_from_registry();
         validate_agent_config(&state.store.agent.agent_config)?;
         state.rebuild_runtime_for_agent_config();
-        state.sync_mcp_dependency_lock()?;
+        state.persist_agent_configs_only()?;
         audit::append_audit_log(&audit::AuditEntry::new(
             "skill.toggle",
             id,

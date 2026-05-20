@@ -115,6 +115,7 @@ impl AppMcpService {
         validate_agent_config(&state.store.agent.agent_config)?;
         state.rebuild_runtime_for_agent_config();
         state.persist_app_only()?;
+        state.persist_agent_configs_only()?;
         audit::append_audit_log(&audit::AuditEntry::new(
             "mcp.register",
             name,
@@ -149,6 +150,7 @@ impl AppMcpService {
         validate_agent_config(&state.store.agent.agent_config)?;
         state.rebuild_runtime_for_agent_config();
         state.persist_app_only()?;
+        state.persist_agent_configs_only()?;
         audit::append_audit_log(&audit::AuditEntry::new(
             "mcp.remove",
             name,
@@ -185,6 +187,7 @@ impl AppMcpService {
         validate_agent_config(&state.store.agent.agent_config)?;
         state.rebuild_runtime_for_agent_config();
         state.persist_app_only()?;
+        state.persist_agent_configs_only()?;
         audit::append_audit_log(&audit::AuditEntry::new(
             "mcp.toggle",
             name,
@@ -257,6 +260,7 @@ impl AppMcpService {
         validate_agent_config(&state.store.agent.agent_config)?;
         state.rebuild_runtime_for_agent_config();
         state.persist_app_only()?;
+        state.persist_agent_configs_only()?;
 
         Ok(format!("配置已更新：{key}={updated_value}"))
     }

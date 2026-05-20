@@ -103,7 +103,7 @@ impl TiangongState {
         self.sync_installed_from_registry();
         validate_agent_config(&self.store.agent.agent_config)?;
         self.rebuild_runtime_for_agent_config();
-        self.sync_mcp_dependency_lock()?;
+        self.persist_agent_configs_only()?;
 
         let total = self.store.agent.agent_config.skills.installed.len();
         let enabled = self
@@ -140,7 +140,7 @@ impl TiangongState {
             validate_agent_config(&self.store.agent.agent_config)?;
             self.rebuild_runtime_for_agent_config();
             self.persist_app_only()?;
-            self.sync_mcp_dependency_lock()?;
+            self.persist_agent_configs_only()?;
             for backup in &gc_report.legacy_backups {
                 if backup.is_dir() {
                     let _ = fs::remove_dir_all(backup);

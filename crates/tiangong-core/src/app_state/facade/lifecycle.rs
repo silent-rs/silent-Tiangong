@@ -78,6 +78,7 @@ impl TiangongState {
         } else if let Ok(Some(legacy_loaded)) = state.load_from_legacy_disk() {
             state.apply_loaded_state(legacy_loaded);
             let _ = state.persist_to_disk();
+            let _ = state.persist_agent_configs_only();
         }
 
         state.migrate_legacy_skill_layout_if_needed();

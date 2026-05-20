@@ -38,6 +38,7 @@ fn repository_persist_to_disk_round_trips_split_configs_and_sessions() -> Result
         state.store.session.sessions.push(session.clone());
 
         state.persist_to_disk()?;
+        state.persist_agent_configs_only()?;
 
         let loaded = state
             .services
