@@ -158,7 +158,7 @@ export function MessageInput() {
   const tokenStats = useStore((state) => state.tokenStats);
   const agents = useStore((state) => state.agents);
   const selectedAgentTab = useStore((state) => state.selectedAgentTab);
-  const [isComposing, setIsComposing] = useState(false);
+  const isComposingRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const inputAreaRef = useRef<HTMLDivElement>(null);
   const lastNativeDropAtRef = useRef(0);
@@ -633,7 +633,7 @@ export function MessageInput() {
       if (e.key === 'Escape') { e.preventDefault(); setMentionOpen(false); return; }
       if (e.key === 'Tab') { e.preventDefault(); selectCandidate(filteredCandidates[mentionIndex]); return; }
     }
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !isComposing) {
+    if (e.key === 'Enter' && !e.shiftKey && !isComposingRef.current && !e.nativeEvent.isComposing) {
       e.preventDefault();
       handleSend();
     }
@@ -1001,15 +1001,17 @@ export function MessageInput() {
                 onChange={(e) => handleInputChange(e.target.value)}
                 onKeyDown={handleKeyDown}
                 onPaste={handlePaste}
-                onCompositionStart={() => setIsComposing(true)}
-                onCompositionEnd={() => setIsComposing(false)}
+                onCompositionStart={() => { isComposingRef.current = true; }}
+                onCompositionEnd={() => {
+                  setTimeout(() => { isComposingRef.current = false; }, 0);
+                }}
                 onBlur={() => setTimeout(() => setMentionOpen(false), 150)}
                 placeholder={
                   isIdle
                     ? agents.length > 0
-                      ? '输入消息... (⌘+Enter 发送，@ 引用 Agent/Skill/MCP)'
-                      : '输入消息... (⌘+Enter 发送，@ 引用 Skill/MCP)'
-                    : '追加指示... (⌘+Enter 发送)'
+                      ? '输入消息... (Enter 发送，@ 引用 Agent/Skill/MCP)'
+                      : '输入消息... (Enter 发送，@ 引用 Skill/MCP)'
+                    : '追加指示... (Enter 发送)'
                 }
                 className="min-h-[60px] max-h-[200px] resize-none pr-32 bg-muted/50 focus-visible:ring-ring"
               />
@@ -1144,7 +1146,7 @@ export function MessageInput() {
                     <><ShieldOff className="w-3 h-3" /><span>信任</span></>
                   )}
                 </button>
-                <span>⌘+Enter 发送</span>
+                <span>Enter 发送 · Shift+Enter 换行</span>
               </div>
             </div>
           </div>
