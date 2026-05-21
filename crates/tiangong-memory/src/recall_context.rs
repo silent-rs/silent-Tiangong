@@ -10,8 +10,7 @@ use crate::recall_anchor::extract_recall_anchors;
 use crate::store::MemoryStore;
 use crate::types::{
     ExpandedMemory, MemoryKind, MemoryRecallRequest, MemoryRecallResponse, RecallDepth, RecallHit,
-    RecallSufficiency, RuntimeRecallContext, SearchStrategy, WorkspaceIndexHit,
-    WorkspaceIndexHitKind,
+    RecallSufficiency, RuntimeRecallContext, SearchStrategy,
 };
 use tiangong_llm::{LlmEndpointConfig, TokenUsageData, complete_text_with_usage};
 
@@ -111,11 +110,9 @@ pub(crate) async fn recall_context(
     }
 
     let initial_hits = dedupe_hits(store.recall_async(&plan.anchors, plan.limit).await);
-    let workspace_hints = store.workspace_index_hints(&request.query, 5);
     tracing::debug!(
         query = %request.query,
         hit_count = initial_hits.len(),
-        workspace_hint_count = workspace_hints.len(),
         "内存 recall 初始召回完成"
     );
     let initial_expanded = store.load_depth2(
@@ -155,27 +152,10 @@ pub(crate) async fn recall_context(
         }
     }
 
-    if hits.is_empty() && workspace_hints.is_empty() {
-        return MemoryRecallResponse {
-            content: apply_output_budget(
-                format!("未找到与「{}」相关的历史记忆。", request.query),
-                DEFAULT_RECALL_OUTPUT_BUDGET_CHARS,
-            ),
-            hits,
-            used_llm: plan.used_llm || model.is_some(),
-            recall_depth,
-            usage: total_usage,
-            deep_queries,
-        };
-    }
     if hits.is_empty() {
         return MemoryRecallResponse {
             content: apply_output_budget(
-                format!(
-                    "未找到与「{}」相关的历史记忆。\n\n{}",
-                    request.query,
-                    format_workspace_index_hints(&workspace_hints)
-                ),
+                format!("未找到与「{}」相关的历史记忆。", request.query),
                 DEFAULT_RECALL_OUTPUT_BUDGET_CHARS,
             ),
             hits,
@@ -203,7 +183,6 @@ pub(crate) async fn recall_context(
     if let Some(usage) = synthesis_usage {
         accumulate_usage(&mut total_usage, &usage);
     }
-    let raw_content = append_workspace_index_hints(raw_content, &workspace_hints);
     let content =
         finalize_recall_content(&raw_content, &request, DEFAULT_RECALL_OUTPUT_BUDGET_CHARS);
     tracing::debug!(
@@ -419,39 +398,6 @@ fn build_next_runtime_query(context: &RuntimeRecallContext) -> String {
     .filter(|item| !item.is_empty())
     .collect::<Vec<_>>()
     .join(" ")
-}
-
-fn append_workspace_index_hints(content: String, hints: &[WorkspaceIndexHit]) -> String {
-    if hints.is_empty() {
-        return content;
-    }
-    format!("{content}\n\n{}", format_workspace_index_hints(hints))
-}
-
-fn format_workspace_index_hints(hints: &[WorkspaceIndexHit]) -> String {
-    if hints.is_empty() {
-        return String::new();
-    }
-    let mut lines = vec!["[工作区线索]".to_string()];
-    for hint in hints.iter().take(5) {
-        match hint.hit_kind {
-            WorkspaceIndexHitKind::File => {
-                lines.push(format!("- 文件：{}", hint.path));
-            }
-            WorkspaceIndexHitKind::Directory => {
-                lines.push(format!("- 目录：{}", hint.path));
-            }
-            WorkspaceIndexHitKind::Symbol => {
-                let name = hint.name.as_deref().unwrap_or("未知符号");
-                let line = hint
-                    .line
-                    .map(|value| format!(":{}", value))
-                    .unwrap_or_default();
-                lines.push(format!("- 符号：{}（{}{}）", name, hint.path, line));
-            }
-        }
-    }
-    lines.join("\n")
 }
 
 fn normalize_request(mut request: MemoryRecallRequest) -> MemoryRecallRequest {

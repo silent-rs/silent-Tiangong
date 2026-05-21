@@ -27,10 +27,8 @@ use crate::types::{
     Decision, Entity, Episode, EpisodeOutcome, ExpandedMemory, ManualMemoryDraft,
     MemoryCognitiveType, MemoryKind, MemoryListQuery, MemoryNode, MemoryRelation,
     MemoryRelationDraft, MemoryRelationKind, MemoryScopeType, MemoryStatus, RecallAnchors,
-    RecallHit, WorkspaceIndexHit,
+    RecallHit,
 };
-use crate::workspace_index;
-
 /// Memory 存储协调器
 pub(crate) struct MemoryStore {
     db: MemoryDb,
@@ -368,15 +366,6 @@ impl MemoryStore {
                 Vec::new()
             }
         }
-    }
-
-    /// 查询当前工作区索引线索，供 recall_memory 补充文件和符号上下文。
-    pub(crate) fn workspace_index_hints(
-        &self,
-        query: &str,
-        limit: usize,
-    ) -> Vec<WorkspaceIndexHit> {
-        workspace_index::query_current_workspace(self.workspace_id.as_deref(), query, limit)
     }
 
     /// 列出记忆节点，供 GUI 手动管理使用。
