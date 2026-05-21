@@ -2509,17 +2509,7 @@ pub fn set_memory_config(
     Ok(())
 }
 
-fn current_memory_workspace_id(state: &State<TiangongApp>) -> Result<Option<String>, String> {
-    let cwd = state.with_state_read(|core_state| Ok(core_state.active_session_effective_cwd()))?;
-    let trimmed = cwd.trim();
-    if trimmed.is_empty() {
-        Ok(None)
-    } else {
-        Ok(tiangong_core::core::memory_workspace_id_from_cwd(trimmed))
-    }
-}
-
-/// 列出当前 workspace 的记忆节点。
+/// 列出全部记忆节点。
 #[tauri::command]
 pub async fn list_memory_nodes(
     query: Option<String>,
@@ -2528,20 +2518,12 @@ pub async fn list_memory_nodes(
     offset: Option<usize>,
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<tiangong_memory::MemoryNode>, String> {
-    let workspace_id = current_memory_workspace_id(&state)?;
-    tiangong_core::core::list_memory_nodes_for_gui(
-        &state.config,
-        workspace_id,
-        query,
-        status,
-        limit,
-        offset,
-    )
-    .await
-    .map_err(|err| err.to_string())
+    tiangong_core::core::list_memory_nodes_for_gui(&state.config, query, status, limit, offset)
+        .await
+        .map_err(|err| err.to_string())
 }
 
-/// 统计当前 workspace 的记忆节点真实总数。
+/// 统计全部记忆节点真实总数。
 #[tauri::command]
 pub async fn count_memory_nodes(
     query: Option<String>,
@@ -2549,16 +2531,9 @@ pub async fn count_memory_nodes(
     created_after: Option<String>,
     state: State<'_, TiangongApp>,
 ) -> Result<usize, String> {
-    let workspace_id = current_memory_workspace_id(&state)?;
-    tiangong_core::core::count_memory_nodes_for_gui(
-        &state.config,
-        workspace_id,
-        query,
-        status,
-        created_after,
-    )
-    .await
-    .map_err(|err| err.to_string())
+    tiangong_core::core::count_memory_nodes_for_gui(&state.config, query, status, created_after)
+        .await
+        .map_err(|err| err.to_string())
 }
 
 /// 手动新增或调整一条记忆。
@@ -2573,8 +2548,7 @@ pub async fn upsert_manual_memory(
     if draft.summary.trim().is_empty() {
         return Err("记忆内容不能为空".to_string());
     }
-    let workspace_id = current_memory_workspace_id(&state)?;
-    tiangong_core::core::upsert_manual_memory_for_gui(&state.config, workspace_id, draft)
+    tiangong_core::core::upsert_manual_memory_for_gui(&state.config, draft)
         .await
         .map_err(|err| err.to_string())
 }
@@ -2586,15 +2560,9 @@ pub async fn set_memory_node_status(
     status: String,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
-    let workspace_id = current_memory_workspace_id(&state)?;
-    tiangong_core::core::set_memory_node_status_for_gui(
-        &state.config,
-        workspace_id,
-        node_id,
-        status,
-    )
-    .await
-    .map_err(|err| err.to_string())
+    tiangong_core::core::set_memory_node_status_for_gui(&state.config, node_id, status)
+        .await
+        .map_err(|err| err.to_string())
 }
 
 /// 列出指定记忆节点的图关系。
@@ -2603,8 +2571,7 @@ pub async fn list_memory_relations(
     node_id: String,
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<tiangong_memory::MemoryRelation>, String> {
-    let workspace_id = current_memory_workspace_id(&state)?;
-    tiangong_core::core::list_memory_relations_for_gui(&state.config, workspace_id, node_id)
+    tiangong_core::core::list_memory_relations_for_gui(&state.config, node_id)
         .await
         .map_err(|err| err.to_string())
 }
@@ -2615,8 +2582,7 @@ pub async fn list_memory_relations_batch(
     node_ids: Vec<String>,
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<tiangong_memory::MemoryRelation>, String> {
-    let workspace_id = current_memory_workspace_id(&state)?;
-    tiangong_core::core::list_memory_relations_batch_for_gui(&state.config, workspace_id, node_ids)
+    tiangong_core::core::list_memory_relations_batch_for_gui(&state.config, node_ids)
         .await
         .map_err(|err| err.to_string())
 }
@@ -2627,8 +2593,7 @@ pub async fn upsert_memory_relation(
     draft: tiangong_memory::MemoryRelationDraft,
     state: State<'_, TiangongApp>,
 ) -> Result<tiangong_memory::MemoryRelation, String> {
-    let workspace_id = current_memory_workspace_id(&state)?;
-    tiangong_core::core::upsert_memory_relation_for_gui(&state.config, workspace_id, draft)
+    tiangong_core::core::upsert_memory_relation_for_gui(&state.config, draft)
         .await
         .map_err(|err| err.to_string())
 }
@@ -2639,8 +2604,7 @@ pub async fn delete_memory_relation(
     relation_id: String,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
-    let workspace_id = current_memory_workspace_id(&state)?;
-    tiangong_core::core::delete_memory_relation_for_gui(&state.config, workspace_id, relation_id)
+    tiangong_core::core::delete_memory_relation_for_gui(&state.config, relation_id)
         .await
         .map_err(|err| err.to_string())
 }
@@ -2652,8 +2616,7 @@ pub async fn test_memory_recall(
     limit: Option<usize>,
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<tiangong_memory::RecallHit>, String> {
-    let workspace_id = current_memory_workspace_id(&state)?;
-    tiangong_core::core::test_memory_recall_for_gui(&state.config, workspace_id, query, limit)
+    tiangong_core::core::test_memory_recall_for_gui(&state.config, query, limit)
         .await
         .map_err(|err| err.to_string())
 }

@@ -266,7 +266,7 @@ async fn embedded_hybrid_retrieval_uses_deterministic_embedding_without_external
     let _env = EnvGuard::enter(home.path(), &workspace_path);
 
     let handle = start_with_options(
-        MemoryOptions::new(Some(workspace_id.clone()))
+        MemoryOptions::new()
             .with_embedding(embedding_server.config())
             .with_vector_mode(MemoryVectorMode::EmbeddedLanceDb),
     )
@@ -336,7 +336,7 @@ async fn archived_node_is_removed_from_embedded_vector_index_and_can_be_restored
     let workspace_id = workspace_id_from_path(&workspace_path);
     let _env = EnvGuard::enter(home.path(), &workspace_path);
     let handle = start_with_options(
-        MemoryOptions::new(Some(workspace_id.clone()))
+        MemoryOptions::new()
             .with_embedding(embedding_server.config())
             .with_vector_mode(MemoryVectorMode::EmbeddedLanceDb),
     )
@@ -400,7 +400,7 @@ async fn benchmark_recall(hybrid: bool, embedding: Option<EmbeddingEndpointConfi
     let workspace_path = workspace.path().to_path_buf();
     let workspace_id = workspace_id_from_path(&workspace_path);
     let _env = EnvGuard::enter(home.path(), &workspace_path);
-    let mut options = MemoryOptions::new(Some(workspace_id.clone()));
+    let mut options = MemoryOptions::new();
     if hybrid {
         options = options
             .with_embedding(embedding.expect("hybrid benchmark 需要 embedding"))
@@ -495,7 +495,7 @@ async fn embedded_hybrid_retrieval_loads_configured_embedding_and_recalls_semant
     );
 
     let handle = start_with_options(
-        MemoryOptions::new(Some(workspace_id.clone()))
+        MemoryOptions::new()
             .with_embedding(embedding)
             .with_vector_mode(MemoryVectorMode::EmbeddedLanceDb),
     )

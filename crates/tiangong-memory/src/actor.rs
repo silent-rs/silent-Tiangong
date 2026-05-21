@@ -17,7 +17,6 @@ use crate::types::MemoryCandidate;
 pub(crate) struct MemoryActor {
     rx: mpsc::Receiver<MemoryCommand>,
     store: MemoryStore,
-    workspace_id: Option<String>,
     options: MemoryOptions,
     pending_candidates: Vec<MemoryCandidate>,
 }
@@ -28,11 +27,9 @@ impl MemoryActor {
         store: MemoryStore,
         options: MemoryOptions,
     ) -> Self {
-        let workspace_id = options.workspace_id.clone();
         Self {
             rx,
             store,
-            workspace_id,
             options,
             pending_candidates: Vec::new(),
         }
@@ -262,11 +259,8 @@ impl MemoryActor {
             }
 
             MemoryCommand::RunMicroRumination { turn_result } => {
-                // 优先使用 turn 携带的 workspace_id，避免跨工作区串写
-                let wid = turn_result
-                    .workspace_id
-                    .as_deref()
-                    .or(self.workspace_id.as_deref());
+                // 使用 turn 携带的 workspace_id 作为 scope 标记
+                let wid = turn_result.workspace_id.as_deref();
                 if let Err(e) = rumination::process_micro(
                     &mut self.store,
                     &turn_result,
@@ -286,10 +280,7 @@ impl MemoryActor {
                         .memory_candidates
                         .append(&mut self.pending_candidates);
                 }
-                let wid = enhanced
-                    .workspace_id
-                    .as_deref()
-                    .or(self.workspace_id.as_deref());
+                let wid = enhanced.workspace_id.as_deref();
                 if let Err(e) = rumination::process_enhanced_micro(
                     &mut self.store,
                     &enhanced,
@@ -340,16 +331,7 @@ impl MemoryActor {
         }
     }
 
-    async fn reconfigure(&mut self, mut options: MemoryOptions) -> anyhow::Result<()> {
-        if options.workspace_id != self.workspace_id {
-            tracing::warn!(
-                current_workspace = ?self.workspace_id,
-                requested_workspace = ?options.workspace_id,
-                "Memory 热更新不允许修改 actor workspace_id，继续使用当前 workspace"
-            );
-            options.workspace_id = self.workspace_id.clone();
-        }
-
+    async fn reconfigure(&mut self, options: MemoryOptions) -> anyhow::Result<()> {
         self.store
             .reconfigure_recall_engine(
                 options.embedding.as_ref(),
@@ -367,18 +349,16 @@ impl MemoryActor {
 ///
 /// 内部在独立线程 + current_thread runtime + LocalSet 中运行 Actor，
 /// 不要求 MemoryActor 或 MemoryStore 实现 Send/Sync。
-pub fn start_memory(workspace_id: Option<String>) -> anyhow::Result<MemoryHandle> {
-    start_memory_with_options(MemoryOptions::new(workspace_id))
+pub fn start_memory() -> anyhow::Result<MemoryHandle> {
+    start_memory_with_options(MemoryOptions::new())
 }
-
-/// 使用显式配置启动 Memory 系统。
 ///
 /// 上层可通过 `tiangong-config` 读取配置文件，再将解析后的 embedding
 /// 端点传入这里。Memory 自身不负责重复解析全局配置文件。
 pub fn start_memory_with_options(options: MemoryOptions) -> anyhow::Result<MemoryHandle> {
     let (tx, rx) = mpsc::channel(256);
 
-    let store = MemoryStore::open(options.workspace_id.clone()).map_err(|e| {
+    let store = MemoryStore::open().map_err(|e| {
         tracing::error!("Memory Store 初始化失败: {}", e);
         e
     })?;

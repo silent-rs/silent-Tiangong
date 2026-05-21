@@ -25,11 +25,11 @@ pub(crate) use crate::memory::recall::{
     duplicate_memory_recall_tool_result, execute_memory_recall_tool, inject_memory_recall_tool,
 };
 pub(crate) use crate::memory::registry::{
-    WorkerMemoryContext, get_or_init_memory, get_or_init_memory_async, resolve_memory_workspace_id,
+    WorkerMemoryContext, get_or_init_memory, get_or_init_memory_async,
 };
 pub use crate::memory::registry::{
     get_or_init_memory_handle, get_or_init_memory_handle_async, load_memory_config,
-    memory_workspace_id_from_cwd, save_memory_config, shutdown_memory_registry_blocking,
+    save_memory_config, shutdown_memory_registry_blocking,
 };
 
 pub(crate) mod command;
@@ -114,13 +114,8 @@ impl TiangongCore {
         process_type: tiangong_memory::ProcessType,
     ) -> Self {
         let config_snapshot = config.snapshot();
-        let memory_workspace_id = resolve_memory_workspace_id(&session.cwd);
-        let memory_handle = get_or_init_memory(
-            &config_snapshot,
-            config.generation(),
-            memory_workspace_id.clone(),
-            process_type.clone(),
-        );
+        let memory_handle =
+            get_or_init_memory(&config_snapshot, config.generation(), process_type.clone());
         let initial_trust_mode = session.trust_mode;
         let shared_trust_mode = Arc::new(RwLock::new(initial_trust_mode));
         let session_id = session.id.clone();
@@ -131,7 +126,6 @@ impl TiangongCore {
         let worker = thread::spawn(move || {
             let memory = WorkerMemoryContext {
                 handle: memory_handle,
-                workspace_id: memory_workspace_id,
                 process_type: worker_process_type,
             };
             worker_loop(
@@ -341,13 +335,8 @@ async fn worker_loop_async(
         let cfg_gen = config.generation();
         if engine.is_none() || cfg_gen != last_cfg_gen {
             let cfg = config.snapshot();
-            memory.handle = get_or_init_memory_async(
-                &cfg,
-                cfg_gen,
-                memory.workspace_id.clone(),
-                memory.process_type.clone(),
-            )
-            .await;
+            memory.handle =
+                get_or_init_memory_async(&cfg, cfg_gen, memory.process_type.clone()).await;
             engine = Some(build_engine_from_config(
                 &cfg,
                 &stream_tx,
@@ -384,12 +373,10 @@ async fn worker_loop_async(
             Command::UpdateCwd { cwd } => {
                 session.cwd = cwd;
                 apply_session_cwd(&session);
-                memory.workspace_id = resolve_memory_workspace_id(&session.cwd);
                 let cfg = config.snapshot();
                 memory.handle = get_or_init_memory_async(
                     &cfg,
                     config.generation(),
-                    memory.workspace_id.clone(),
                     memory.process_type.clone(),
                 )
                 .await;
@@ -435,13 +422,12 @@ async fn worker_loop_async(
 
                 // turn 完成后触发增强版 Micro 反刍
                 if let Some(handle) = memory.handle.as_ref() {
-                    let mut enhanced_result = build_enhanced_memory_turn_result(
+                    let enhanced_result = build_enhanced_memory_turn_result(
                         &session,
                         turn_start_idx,
                         &content,
                         vec![],
                     );
-                    enhanced_result.workspace_id = memory.workspace_id.clone();
                     tokio::task::block_in_place(|| {
                         handle.run_enhanced_micro_rumination_blocking(enhanced_result);
                     });
@@ -500,11 +486,9 @@ async fn worker_loop_async(
 
     // 会话结束 → 触发 Meso 反刍（提炼 Entity/Decision，更新 Workspace Injection）
     // fire-and-forget：handle 仍可使用（Memory Actor 在 registry 中持续运行）
-    if let Some(handle) = memory.handle.as_ref()
-        && let Some(wid) = &memory.workspace_id
-    {
-        handle.run_meso_rumination(session_id.clone(), wid.clone());
-        tracing::info!(session_id = %session_id, workspace_id = %wid, "Meso 反刍已触发（会话结束）");
+    if let Some(handle) = memory.handle.as_ref() {
+        handle.run_meso_rumination(session_id.clone(), "__global__".to_string());
+        tracing::info!(session_id = %session_id, "Meso 反刍已触发（会话结束）");
     }
 
     session

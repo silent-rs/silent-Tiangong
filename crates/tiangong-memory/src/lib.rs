@@ -40,7 +40,7 @@ pub use config::{
 pub use election::{
     LeaderInfo, LeaderState, ManagedMemory, ProcessType, leader_info_path, leader_lock_path,
     memory_service_name, read_leader_info, start_or_connect, start_or_connect_with_options,
-    start_or_connect_with_options_and_service, start_or_connect_with_service,
+    start_or_connect_with_options_and_service,
 };
 pub use handle::MemoryHandle;
 pub use options::{MemoryOptions, MemoryVectorMode};
