@@ -14,6 +14,9 @@ members = [
     "src-tauri",
 ]
 
+[workspace.package]
+version = "0.2.0"
+
 [workspace.dependencies]
 tiangong-anthropic = { path = "crates/tiangong-anthropic" }
 tiangong-cli = { path = "crates/tiangong-cli" }
@@ -83,7 +86,7 @@ zip = { version = "2", default-features = false }
 
 [package]
 name = "tiangong"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 license = "Apache-2.0"
 
