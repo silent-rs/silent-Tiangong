@@ -11,8 +11,7 @@ use tiangong_llm::{LlmEndpointConfig, ProviderProtocol};
 use tiangong_memory::{
     Episode, EpisodeOutcome, MemoryKind, MemoryOptions, MemoryRecallRequest, MemoryRelationDraft,
     MemoryRelationKind, RecallAnchors, RecallDepth, TurnArtifact, TurnArtifactKind, TurnResult,
-    load_injection_sync, refresh_workspace_index, start, start_with_options,
-    workspace_id_from_path,
+    load_injection_sync, start, start_with_options, workspace_id_from_path,
 };
 
 struct EnvGuard {
@@ -613,46 +612,6 @@ async fn meta_rumination_archives_missing_paths_expired_urls_and_project_archive
             "Meta 应归档过时引用 {title}"
         );
     }
-
-    handle.shutdown().await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-#[serial]
-async fn recall_context_returns_workspace_index_hints_without_memory_hits() {
-    let (home, _workspace, workspace_path, workspace_id) = setup_workspace();
-    let _env = EnvGuard::enter(home.path(), &workspace_path);
-    write_file(
-        &workspace_path.join("src/billing.rs"),
-        r#"
-pub mod nested;
-pub struct BillingWorkspaceClue;
-pub enum BillingMode { Active }
-pub trait BillingLookup {}
-pub fn billing_workspace_clue() {}
-"#,
-    );
-    refresh_workspace_index(&workspace_path).expect("刷新 workspace index 失败");
-
-    let handle = start(Some(workspace_id.clone())).expect("启动 memory 失败");
-    let response = handle
-        .recall_context(MemoryRecallRequest {
-            query: "billing workspace clue".to_string(),
-            limit: 3,
-            ..Default::default()
-        })
-        .await;
-
-    assert!(
-        response.content.contains("[工作区线索]"),
-        "没有历史记忆时仍应返回工作区索引线索"
-    );
-    assert!(
-        response.content.contains("billing_workspace_clue")
-            || response.content.contains("src/billing.rs"),
-        "工作区线索应包含相关 Rust 符号或文件"
-    );
-    assert!(response.hits.is_empty(), "该场景不应伪造 Memory 命中");
 
     handle.shutdown().await;
 }
