@@ -1091,12 +1091,11 @@ async fn meso_rumination_extracts_entity_and_decision_memories() {
     handle.write_episode(
         Episode::new(
             "session-meso".to_string(),
-            "qdrant vector backend evaluation".to_string(),
-            "Compared external qdrant server with embedded flat vector index for memory recall."
-                .to_string(),
+            "vector backend evaluation".to_string(),
+            "Compared different vector index backends for memory recall.".to_string(),
             EpisodeOutcome::Success,
             vec![
-                "qdrant".to_string(),
+                "vector".to_string(),
                 "vector".to_string(),
                 "memory".to_string(),
             ],
@@ -1109,11 +1108,11 @@ async fn meso_rumination_extracts_entity_and_decision_memories() {
         Episode::new(
             "session-meso".to_string(),
             "choose embedded vector index for memory".to_string(),
-            "We decided to choose embedded vector index instead of external qdrant server to reduce user startup complexity."
+            "We decided to choose embedded vector index to reduce user startup complexity."
                 .to_string(),
             EpisodeOutcome::Success,
             vec![
-                "qdrant".to_string(),
+                "vector".to_string(),
                 "vector".to_string(),
                 "memory".to_string(),
                 "embedded".to_string(),
@@ -1128,7 +1127,7 @@ async fn meso_rumination_extracts_entity_and_decision_memories() {
     handle.run_meso_rumination("session-meso".to_string(), workspace_id.clone());
 
     let entity_hits =
-        wait_for_recall_kind(&handle, "qdrant memory entity", MemoryKind::Entity).await;
+        wait_for_recall_kind(&handle, "vector memory entity", MemoryKind::Entity).await;
     for (idx, hit) in entity_hits.iter().enumerate() {
         eprintln!(
             "[meso] entity_hit[{idx}] kind={:?} title={} summary={}",
@@ -1180,7 +1179,7 @@ async fn meso_rumination_extracts_entity_and_decision_memories() {
     eprintln!("[meso] rerun submitted for idempotency verification");
 
     let rerun_entity_hits =
-        wait_for_unique_kind_hits(&handle, "qdrant memory entity", MemoryKind::Entity).await;
+        wait_for_unique_kind_hits(&handle, "vector memory entity", MemoryKind::Entity).await;
     let entity_ids = rerun_entity_hits
         .iter()
         .filter(|hit| hit.kind == MemoryKind::Entity)

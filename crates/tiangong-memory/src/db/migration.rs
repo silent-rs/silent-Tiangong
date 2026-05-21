@@ -5,7 +5,6 @@
 //! 当前处理的迁移路径：
 //! - Schema 列级迁移（memory_type 列补齐）
 //! - SQLite memory_vectors → LanceDB 向量迁移
-//! - 旧 Qdrant Edge 数据目录清理
 //!
 //! 删除时同步清理：
 //! - `schema.rs` 中的 `memory_vectors` 表定义和 `idx_vectors_dimension` 索引
@@ -90,43 +89,6 @@ pub(crate) async fn migrate_vectors(db: &MemoryDb, index: &LanceDbIndex, dimensi
             tracing::warn!("Memory 向量迁移: 清空 SQLite 向量表失败: {err}");
         } else {
             tracing::info!("Memory 向量迁移完成: {migrated} 条成功, {failed} 条失败");
-        }
-    }
-}
-
-// ── 旧 Qdrant Edge 目录清理 ─────────────────────────────────────
-
-/// 检测并清理旧的 Qdrant Edge 数据目录。
-///
-/// 从 Qdrant Edge 切换到 LanceDB 后，旧的 qdrant_edge/ 目录不再有用。
-/// 由于已移除 qdrant-edge 依赖，无法读取其中的向量数据，需要清理并
-/// 让系统从 episode 元数据重新嵌入到 LanceDB。
-///
-/// 返回 true 表示进行了清理。
-pub(crate) fn cleanup_legacy_qdrant_edge(base_dir: &Path) -> bool {
-    let qdrant_dir = base_dir.join("qdrant_edge");
-    if !qdrant_dir.exists() {
-        return false;
-    }
-
-    tracing::info!(
-        "Memory 检测到旧 Qdrant Edge 数据目录，开始清理: {}",
-        qdrant_dir.display()
-    );
-
-    match std::fs::remove_dir_all(&qdrant_dir) {
-        Ok(()) => {
-            tracing::info!(
-                "Memory 已清理旧 Qdrant Edge 目录。向量将在后续写入时自动重建到 LanceDB。"
-            );
-            true
-        }
-        Err(err) => {
-            tracing::warn!(
-                "Memory 清理旧 Qdrant Edge 目录失败（可手动删除）: {}: {err}",
-                qdrant_dir.display()
-            );
-            false
         }
     }
 }

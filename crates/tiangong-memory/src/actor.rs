@@ -139,7 +139,7 @@ impl MemoryActor {
                 let _ = reply.send(result);
             }
 
-            // Phase C：双引擎召回（Tantivy BM25 + Qdrant 语义）
+            // Phase C：双引擎召回（Tantivy BM25 + LanceDB 语义）
             MemoryCommand::Recall {
                 anchors,
                 limit,

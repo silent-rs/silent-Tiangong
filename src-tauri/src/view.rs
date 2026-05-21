@@ -661,14 +661,12 @@ fn memory_vector_mode_to_string(mode: tiangong_memory::MemoryVectorMode) -> &'st
         tiangong_memory::MemoryVectorMode::Auto => "auto",
         tiangong_memory::MemoryVectorMode::Disabled => "disabled",
         tiangong_memory::MemoryVectorMode::EmbeddedLanceDb => "lancedb",
-        tiangong_memory::MemoryVectorMode::ExternalQdrant => "external_qdrant",
     }
 }
 
 fn memory_vector_mode_from_string(value: &str) -> tiangong_memory::MemoryVectorMode {
     match value.trim().to_ascii_lowercase().as_str() {
         "disabled" => tiangong_memory::MemoryVectorMode::Disabled,
-        "external_qdrant" | "qdrant" => tiangong_memory::MemoryVectorMode::ExternalQdrant,
         "lancedb" | "embedded_lancedb" => tiangong_memory::MemoryVectorMode::EmbeddedLanceDb,
         _ => tiangong_memory::MemoryVectorMode::Auto,
     }

@@ -57,6 +57,4 @@ pub enum MemoryVectorMode {
     Disabled,
     /// 使用嵌入式 LanceDB 向量索引。
     EmbeddedLanceDb,
-    /// 使用外部 Qdrant 服务。
-    ExternalQdrant,
 }

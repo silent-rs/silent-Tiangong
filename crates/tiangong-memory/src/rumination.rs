@@ -764,7 +764,7 @@ fn classify_entity(keyword: &str) -> EntityType {
         EntityType::Module
     } else if lower.ends_with(".md") || lower.ends_with(".json") || lower.ends_with(".toml") {
         EntityType::Document
-    } else if lower.contains("server") || lower.contains("qdrant") || lower.contains("ipc") {
+    } else if lower.contains("server") || lower.contains("ipc") {
         EntityType::Server
     } else if lower.contains("skill") {
         EntityType::Skill
@@ -1235,7 +1235,7 @@ mod tests {
             decisions: vec![MesoDecisionExtraction {
                 title: Some("使用内置向量索引".to_string()),
                 context: Some("为了降低用户启动成本，优先采用内置向量索引".to_string()),
-                alternatives: vec!["外部 Qdrant".to_string(), "内置 flat index".to_string()],
+                alternatives: vec!["外部向量服务".to_string(), "内置 flat index".to_string()],
                 chosen: Some("内置 flat index".to_string()),
                 reasons: vec!["降低启动复杂度".to_string()],
                 episode_ids: vec![episode.id.clone()],

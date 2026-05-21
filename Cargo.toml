@@ -48,7 +48,6 @@ futures-util = "0.3"
 hex = "0.4"
 http = "1"
 libc = "0.2"
-qdrant-client = "1"
 lancedb = "0.29"
 ratatui = "0.28"
 reqwest = { version = "0.12", default-features = false }

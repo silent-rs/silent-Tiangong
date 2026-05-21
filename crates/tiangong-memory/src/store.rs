@@ -21,7 +21,6 @@ use crate::options::MemoryVectorMode;
 use crate::recall::RecallEngine;
 use crate::search::TantivyIndex;
 use crate::search::lancedb_search::LanceDbIndex;
-use crate::search::qdrant_search::QdrantIndex;
 use crate::search::vector::VectorIndex;
 use crate::types::{
     Decision, Entity, Episode, EpisodeOutcome, ExpandedMemory, ManualMemoryDraft,
@@ -170,7 +169,6 @@ impl MemoryStore {
             MemoryVectorMode::EmbeddedLanceDb => {
                 let base = memory_index_base_dir(self.workspace_id.as_deref());
                 let needs_migration = migration::needs_vector_migration(&self.db, &base);
-                migration::cleanup_legacy_qdrant_edge(&base);
                 match LanceDbIndex::open(&base, embedding.dimension).await {
                     Ok(index) => {
                         if needs_migration {
@@ -190,24 +188,6 @@ impl MemoryStore {
                             tracing::warn!(
                                 "Memory LanceDB 索引初始化失败，使用 BM25-only 召回: {err}"
                             );
-                        }
-                        return;
-                    }
-                }
-            }
-            MemoryVectorMode::ExternalQdrant => {
-                match QdrantIndex::connect(embedding.dimension).await {
-                    Ok(index) => (Box::new(index), "external_qdrant"),
-                    Err(err) => {
-                        if let Some(rerank_provider) = rerank_provider {
-                            let model = rerank_provider.model().to_string();
-                            self.enable_rerank_only(rerank_provider);
-                            tracing::warn!(
-                                model = %model,
-                                "Memory Qdrant 连接失败，仅启用 rerank: {err}"
-                            );
-                        } else {
-                            tracing::warn!("Memory Qdrant 连接失败，使用 BM25-only 召回: {err}");
                         }
                         return;
                     }
@@ -239,13 +219,6 @@ impl MemoryStore {
             embedding.timeout.as_millis(),
             rerank_model.as_deref().unwrap_or("none")
         );
-    }
-
-    /// 显式启用外部 Qdrant，供后续兼容接口使用。
-    #[allow(dead_code)]
-    pub(crate) async fn try_enable_qdrant(&mut self, embedding: Option<&EmbeddingEndpointConfig>) {
-        self.try_enable_recall_engine(embedding, None, MemoryVectorMode::ExternalQdrant)
-            .await;
     }
 
     /// 加载三级注入上下文
@@ -301,7 +274,7 @@ impl MemoryStore {
             tracing::warn!("Tantivy 索引写入失败（非致命）: {}", e);
         }
 
-        // Phase C：Qdrant upsert 在 actor 层触发（异步，通过 RunEmbedAndUpsert 命令）
+        // Phase C：向量 upsert 在 actor 层触发（异步，通过 RunEmbedAndUpsert 命令）
 
         Ok(node)
     }
