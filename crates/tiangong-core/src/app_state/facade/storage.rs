@@ -22,6 +22,17 @@ impl TiangongState {
         self.services.repository.persist_app_only(&self.store)
     }
 
+    /// 仅持久化 agent 配置（skills.json、mcp.json）+ MCP 依赖锁。
+    /// 只应由显式修改 agent_config 的操作调用，避免多进程覆盖。
+    pub(in crate::app_state) fn persist_agent_configs_only(&self) -> Result<()> {
+        self.services
+            .repository
+            .persist_agent_configs(&self.store.agent.agent_config)?;
+        self.services
+            .repository
+            .sync_mcp_dependency_lock(&self.store.agent.agent_config)
+    }
+
     pub(in crate::app_state) fn persist_to_disk(&mut self) -> Result<()> {
         self.normalize_sessions_for_storage();
         self.services.repository.persist_to_disk(&self.store)
