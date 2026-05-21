@@ -40,12 +40,8 @@ jobs:
         include:
           - label: macOS Apple Silicon
             platform: macos-latest
-            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            rust_targets: aarch64-apple-darwin
             args: --target aarch64-apple-darwin
-          - label: macOS Intel
-            platform: macos-latest
-            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
-            args: --target x86_64-apple-darwin
           - label: Linux
             platform: ubuntu-22.04
             rust_targets: ""
@@ -145,7 +141,7 @@ jobs:
           releaseBody: |
             自动构建的天工桌面安装包。
 
-            当前 Release 包含 macOS、Windows 和 Linux 安装产物，并上传应用内更新所需的 latest.json 与签名文件。macOS 构建暂未接入签名和公证，首次安装时可能需要手动允许打开。
+            当前 Release 包含 macOS Apple Silicon、Windows 和 Linux 安装产物，并上传应用内更新所需的 latest.json 与签名文件。macOS 构建暂未接入签名和公证，首次安装时可能需要手动允许打开。
           releaseDraft: ${{ steps.release.outputs.draft }}
           prerelease: false
           includeUpdaterJson: true
