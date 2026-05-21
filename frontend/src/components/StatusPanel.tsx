@@ -93,10 +93,12 @@ export function StatusPanel() {
   };
 
 
+  const titlePaddingLeft = navigator.platform.includes('Mac') ? '80px' : '16px';
+
   return (
     <header
       className="flex h-12 shrink-0 items-center gap-2 border-b pr-4 select-none"
-      style={{ paddingLeft: '80px' }}
+      style={{ paddingLeft: titlePaddingLeft }}
       onMouseDown={(e) => {
         const tag = (e.target as HTMLElement).tagName;
         if (tag === 'INPUT' || tag === 'BUTTON') return;
