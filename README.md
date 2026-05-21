@@ -1,159 +1,126 @@
 # Silent-Tiangong（天工）
 
-> 全功能可扩展的 GUI + CLI + Server 个人智能终端平台
+> 面向个人工作流的桌面级 AI 自动化中枢：对话、规划、执行、记忆、工具调用和多智能体协作。
 
-Silent-Tiangong 是一个实现"可对话、可规划、可执行、可扩展、可治理、可远程"的 Agent 能力闭环的个人 AI 中枢。支持多智能体团队协作、通过 Server API 对接各类 IM 通道远程调度，并具备图片/视频等多媒体生成能力。
+天工是一个基于 Rust、Tauri 和 silent 构建的个人智能终端。它既可以作为桌面 AI 助手使用，也可以通过 CLI 和 Server API 接入脚本、服务或外部消息通道。核心目标不是只回答问题，而是让 Agent 能围绕真实工作区读取资料、拆解任务、调用工具、执行命令、保存长期记忆，并在复杂任务中动态创建 Sub Agent 分工协作。模型推荐使用 [DeepSeek](https://www.deepseek.com/) 和 [智谱](https://www.bigmodel.cn/) 的GLM5.1，其他模型可以通过自定义供应商接入。
+
+> 安全提示：天工当前未使用沙箱技术隔离工具执行环境。如果你对本地文件访问、命令执行或自动化操作的隔离要求较高，建议暂时考虑其他软件。
+
+![多智能体协作示例](docs/readme/sub_agent.png)
+
+## 项目状态
+
+- 桌面 GUI、CLI、Server 三种入口已接入同一套核心能力。
+- 多智能体协作主链路已完成：创建 Sub Agent、Agent 间消息、前端 Tab 切换、用户 @ 提及、文件编辑锁、并发和 token 预算控制。
+- 长期记忆系统已独立为 `tiangong-memory`，支持跨会话回忆、反刍、去重和工作区隔离。
+- 发布链路已接入 GitHub Actions，可构建 macOS、Windows、Linux 桌面安装包，并支持 Tauri updater 在线更新。
+- 当前仍在补齐外部 Bot 通过 Server API 收发消息的验证场景。
 
 ## 核心能力
 
-- **智能对话** — 意图识别、多轮上下文管理、自动摘要压缩
-- **任务规划与执行** — 输入 → 规划 → 多轮执行 → 验证 → 反馈，动态 Step 推进
-- **多智能体协作** — 主 Agent 动态组建团队（PM / Developer / Tester 等），Sub Agent 间通过工具调用互相通讯，共享工作区但有文件编辑锁防止冲突
-- **工具调用** — 文件读写、命令执行、代码搜索、补丁应用、网页抓取等本地工具
-- **MCP 集成** — 标准化 MCP 协议接入外部工具（stdio / HTTP）
-- **Skill 管理** — Skill 安装、启停、卸载，按任务意图自动匹配
-- **长期记忆** — 基于 SQLite + Tantivy + 向量索引的持久化记忆系统，支持跨会话回忆
-- **多媒体生成** — 图片生成（DALL-E）、视频生成（火山方舟）、语音合成/识别（TTS/STT）
-- **多通道接入** — 通过 Server API + 外部适配程序对接 Telegram、Discord、飞书/Lark 等 IM 通道
-- **权限管理** — 监督模式（高风险操作审批）/ 信任模式（全自动执行），实时切换
+| 能力         | 说明                                                                                         |
+| ------------ | -------------------------------------------------------------------------------------------- |
+| 桌面 Agent   | Tauri + React + shadcn/ui 桌面界面，支持会话、工作区、工具过程、模型配置和运行状态展示       |
+| CLI / Server | 同一个 `tiangong` 入口支持命令行、后台 Server、更新检查和安装                                |
+| 多智能体协作 | 主 Agent 可按任务创建 PM、Developer、Tester、Researcher 等 Sub Agent，并通过消息和文件锁协作 |
+| 工具执行     | 支持文件读写、命令执行、代码搜索、补丁应用、网页抓取、时间查询等本地工具                     |
+| MCP 与 Skill | 支持 MCP 工具接入、本地 Skill 安装启停、按任务意图匹配和详情加载                             |
+| 长期记忆     | 基于 SQLite、Tantivy 和向量索引保存项目事实、偏好、决策、产物和历史问题                      |
+| 多媒体能力   | 支持图片、视频、语音识别、语音合成等能力路由，结果以结构化媒体资源进入会话                   |
+| 权限治理     | 桌面会话可在监督模式和信任模式之间切换，Server 模式使用受控的远程角色边界                    |
+| 发布更新     | GitHub Release 分发安装包，桌面设置页和 `tiangong update` 共用在线更新链路                   |
 
 ## 多智能体协作
 
-天工支持在对话中动态组建多 Agent 团队，每个 Sub Agent 拥有独立的角色、工具集和执行上下文。
+多智能体协作适合资料搜集、代码实现、测试验证、方案评审等需要分工的任务。主 Agent 会判断是否需要组建团队，创建的 Sub Agent 拥有独立角色、状态和上下文。
 
-### 工作模式
-
+```text
+用户提出复杂任务
+    ↓
+Main Agent 判断是否需要协作
+    ↓
+create_agent 创建 Sub Agent
+    ↓
+Sub Agent 独立执行、互相发消息、必要时获取文件锁
+    ↓
+Main Agent 汇总结果并回复用户
 ```
-用户: "帮我实现用户认证模块"
 
-Main Agent → 创建团队
-  ├── @pm    (Project Manager)  — 需求分析、任务拆分、进度跟踪
-  ├── @dev   (Developer)        — 代码实现
-  └── @test  (Tester)           — 测试用例编写与执行
+已支持的协作方式：
 
-PM 拆分任务 → @dev 实现 → @dev 提测 → @test 测试 → @test 报告 PM
-```
+- 动态创建和解散 Sub Agent。
+- `send_message` / `broadcast_message` 进行 Agent 间通讯。
+- `@dev`、`@test`、`@all` 等语法直接向指定 Agent 发送消息。
+- Sub Agent 可直接向前端推送进度、阻塞和问题。
+- 文件编辑前获取锁，避免多个 Agent 同时修改同一文件。
+- 前端按 Agent 分 Tab 展示执行细节、状态和通知。
 
-### 核心特性
-
-- **动态团队组建** — 主 Agent 根据任务复杂度自主决定是否创建团队，不额外消耗 API 调用
-- **Agent 间通讯** — Sub Agent 通过 `send_message` / `broadcast_message` 工具互相协作
-- **文件编辑锁** — 多 Agent 编辑同一文件时自动排队，防止冲突
-- **用户交互** — 支持 `@dev`、`@test`、`@all` 等 @提及语法向指定 Agent 发送指令
-- **直接推送** — Sub Agent 可直接向用户推送消息（进度、阻塞、提问），无需经主 Agent 转发
-- **视角切换** — 前端 Agent Tab 栏可切换查看每个 Agent 的执行细节
-- **混合生命周期** — 持久 Agent 跨任务保持上下文，临时 Agent 完成后自动销毁
-
-> 详细设计见 [RFC 0011: 多智能体协作系统](docs/rfc/0011-multi-agent-collaboration.md)
+详细设计见 [RFC 0011：多智能体协作系统](docs/rfc/0011-multi-agent-collaboration.md)。
 
 ## 架构
 
-Cargo workspace 多 crate 结构：
+天工采用 Cargo workspace 多 crate 结构，核心引擎和各入口解耦：
 
-```
+```text
 crates/
-  tiangong-types/       公共类型定义（消息、会话、任务状态、流事件等）
-  tiangong-config/      配置管理（磁盘加载、持久化、日志初始化）
-  tiangong-llm          LLM 协议抽象与 Provider 封装（OpenAI 兼容）
-  tiangong-anthropic/   Anthropic 协议适配（Messages API + SSE）
-  tiangong-core/        核心引擎（Agent 循环、工具调用、MCP、Skill、多 Agent 团队）
-  tiangong-memory/      长期记忆系统（Episode 存储、检索、反刍）
-  tiangong-cli/         CLI/TUI 前端（ratatui）
-  tiangong-entry/       统一入口与命令路由
+  tiangong-types/       公共类型、消息、会话、任务状态和流事件
+  tiangong-config/      配置加载、持久化和日志初始化
+  tiangong-llm/         LLM 协议抽象和 Provider 封装
+  tiangong-anthropic/   Anthropic Messages API 与 SSE 适配
+  tiangong-core/        Agent 循环、工具调用、MCP、Skill、多 Agent 团队
+  tiangong-memory/      长期记忆、检索、反刍和工作区隔离
+  tiangong-cli/         CLI / TUI 前端
+  tiangong-entry/       统一命令入口
   tiangong-server/      HTTP REST + WebSocket Server
-  tiangong-media/       多媒体生成（图片/视频/语音）
-frontend/               桌面 GUI（React + shadcn/ui）
+  tiangong-media/       图片、视频、语音等多媒体能力
+frontend/               桌面前端
 src-tauri/              Tauri 桌面壳
 ```
 
-### 执行流程
+核心执行流程：
 
-```
-用户输入 → ReAct 循环（推理 + 工具调用 + 观察）
-              │
-              ├── 单 Agent 直接执行
-              │
-              └── 多 Agent 协作
-                    │
-                    ├── create_agent → 组建团队
-                    ├── send_message → Agent 间通讯
-                    ├── lock_file / unlock_file → 文件编辑锁
-                    └── dismiss_agent → 解散团队
-```
-
-### 交互模型
-
-执行过程按事件模型实时展示：
-
-```
-[解释] 我需要读取 Cargo.toml 查看 workspace 成员
-  [工具] read_file → OK
-[解释] 看到成员列表，现在统计代码行数
-  [工具] run_command × 7 → OK
-[最终回复] Workspace 包含 11 个成员...
-```
-
-多 Agent 模式下，前端按 Agent 分 Tab 展示：
-
-```
-[Main] [PM] [Dev] [Test]
-
-当前 Tab: Dev
-🔒 locked: src/auth/middleware.rs
-📝 write_file: src/auth/middleware.rs
-   + JWT 中间件实现...
-✅ write_file 完成
-📨 send_message → @test "认证模块开发完成，已提测"
+```text
+用户输入
+  ↓
+会话与工作区上下文装配
+  ↓
+ReAct 循环：推理、工具调用、观察、继续执行
+  ↓
+单 Agent 直接完成，或创建 Sub Agent 分工协作
+  ↓
+结构化事件实时推送到 GUI / CLI / Server
 ```
 
 ## 安装
 
-### 安装发布包
+### 从发布包安装
 
-在 GitHub Releases 下载当前系统对应的安装包：
+在 [GitHub Releases](https://github.com/silent-rs/silent-Tiangong/releases) 下载当前系统对应的安装包：
 
-- macOS：下载 `.dmg` 安装包，打开后将「天工」拖入「应用程序」目录。
-- Windows：下载 `.msi` 或 `.exe` 安装包，按安装向导完成安装。
+- macOS：下载 `.dmg`，打开后将「天工」拖入「应用程序」目录。
+- Windows：下载 `.msi` 或 `.exe`，按安装向导完成安装。
 - Linux：下载 `.AppImage`、`.deb` 或 `.rpm`，按发行版习惯安装或直接运行。
 
-安装后可直接启动桌面应用。
+macOS 当前构建暂未接入 Apple 签名和公证，首次打开如提示应用已损坏，可执行：
 
-> **macOS 用户注意**：由于当前构建暂未接入 Apple 签名和公证，首次打开时系统可能会提示「"天工"已损坏，无法打开」。这是 macOS Gatekeeper 安全机制导致的，并非应用真的损坏。在终端执行以下命令清除隔离属性即可正常打开：
->
-> ```bash
-> xattr -cr /Applications/天工.app
-> ```
+```bash
+xattr -cr /Applications/天工.app
+```
 
 ### 命令行入口
 
-桌面安装包内包含同一个 `tiangong` 入口，可用于 CLI、Server 和更新命令。
-
-macOS 可创建软链接：
+桌面安装包内包含同一个 `tiangong` 入口，可用于 CLI、Server 和更新命令。macOS 可创建软链接：
 
 ```bash
 ln -s /Applications/天工.app/Contents/MacOS/天工 /usr/local/bin/tiangong
 ```
 
-Windows 安装后可将安装目录加入 `PATH`。Linux 安装包通常会直接提供可执行入口。
+Windows 可将安装目录加入 `PATH`。Linux 安装包通常会直接提供可执行入口。
 
-### 在线更新
-
-桌面应用设置页提供版本显示、检查更新和安装更新按钮。也可以通过命令行检查和安装：
+## 使用
 
 ```bash
-# 只检查是否有新版本
-tiangong update --check
-
-# 检查、下载并安装更新
-tiangong update
-```
-
-在线更新复用 GitHub Release 的更新元数据和签名校验。只有正式发布且上传了 updater 元数据后，才会检测到可用更新。
-
-## 运行
-
-```bash
-# 桌面 GUI 模式（默认）
+# 桌面 GUI 模式，源码运行时默认启动桌面应用
 cargo run --release
 
 # CLI 模式
@@ -161,60 +128,76 @@ cargo run --release -- cli
 
 # Server 模式
 cargo run --release -- server
-cargo run --release -- server -d    # 后台运行
-cargo run --release -- server stop  # 停止
+cargo run --release -- server -d
+cargo run --release -- server stop
 
-# 检查更新（源码运行时只做检查提示）
+# 检查更新
 cargo run --release -- update --check
+```
+
+安装后的命令行入口：
+
+```bash
+tiangong cli
+tiangong server
+tiangong server -d
+tiangong server stop
+tiangong update --check
+tiangong update
 ```
 
 ## 配置
 
-存储目录：`~/.tiangong/`
+默认数据目录：
 
-```
+```text
 ~/.tiangong/
   app.json              应用主配置
-  models.json           模型配置（Provider + Model + Routing）
+  models.json           模型配置：Provider + Model + Routing
   skills.json           Skill 配置
   mcp.json              MCP 配置
   sessions/             会话持久化
-  logs/                 运行日志（含 Server 后台日志）
-  media/                生成的媒体文件
-  memory/               长期记忆数据（SQLite + Tantivy 索引）
+  logs/                 运行日志
+  media/                生成或归档的媒体文件
+  memory/               长期记忆数据
 ```
 
-模型配置采用 Provider + Model + Routing 三层架构，`api_key` 支持 `${ENV_VAR}` 环境变量引用。
-
-## 技术栈
-
-| 领域 | 技术 |
-|------|------|
-| 语言 | Rust (edition 2024) |
-| 桌面 GUI | Tauri + React + shadcn/ui |
-| CLI/TUI | ratatui + crossterm |
-| Server | silent (HTTP/WS) |
-| 异步运行时 | tokio |
-| LLM 协议 | async-openai（OpenAI 兼容）、tiangong-anthropic（Anthropic） |
-| MCP | rmcp |
-| 记忆存储 | rusqlite（SQLCipher）、tantivy（全文检索）、qdrant（向量索引） |
-| 序列化 | serde / serde_json |
-| ID 生成 | scru128 |
+模型配置采用 Provider、Model、Routing 三层结构。`api_key` 支持 `${ENV_VAR}` 环境变量引用，便于避免明文保存密钥。
 
 ## 开发
 
 ```bash
-# 检查
+# Rust 检查
 cargo check --workspace
 
-# Lint
-cargo clippy --workspace --all-targets -- -D warnings
+# Rust lint
+cargo clippy --workspace --all-targets --tests --benches -- -D warnings
 
 # 格式化
 cargo fmt
 
 # 前端构建
-cd frontend && yarn build
+yarn --cwd frontend build
+
+# 完整检查链
+cargo fmt -- --check && cargo check --workspace && cargo clippy --workspace --all-targets --tests --benches -- -D warnings && cargo nextest run --workspace --no-tests pass
+```
+
+前端开发使用 yarn：
+
+```bash
+yarn --cwd frontend install
+yarn --cwd frontend dev
+```
+
+## 文档
+
+- [Server API](docs/server-api.md)
+
+## GitHub 仓库简介建议
+
+```text
+桌面级 AI 自动化中枢：支持 GUI、CLI、Server、多智能体协作、MCP/Skill、长期记忆和多媒体生成。
 ```
 
 ## 许可证
