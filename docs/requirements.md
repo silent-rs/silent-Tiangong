@@ -34,6 +34,7 @@
 - 设置界面必须展示当前应用版本，并提供检查更新与安装更新入口。
 - `tiangong update` 必须复用同一 GitHub Release 在线更新链路；桌面打包二进制应支持命令行触发检查、下载和安装更新。
 - 更新包必须使用 Tauri updater 签名校验，私钥只能通过 GitHub Secrets 注入发布流水线。
+- updater JSON 中的更新说明必须随版本内容生成，避免长期复用固定描述。
 
 #### 模型配置
 - 模型配置必须独立为 `models.json`，采用 Provider 与 Model 分离设计。

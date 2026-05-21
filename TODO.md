@@ -81,6 +81,7 @@
 - [x] 设置界面展示当前版本、检查更新和安装更新按钮
 - [x] 发布流水线注入 updater 签名私钥并生成更新元数据
 - [x] 新增 `tiangong update` 命令，复用 GitHub Release 在线更新链路
+- [x] 发布说明按版本提交内容生成，避免 updater 元数据长期复用固定描述
 
 ## Server 与飞书 Bot 互联
 
