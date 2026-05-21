@@ -35,7 +35,7 @@ arrow-array = "58"
 arrow-schema = "58"
 async-channel = "2"
 async-lock = "3"
-async-openai = { git = "https://github.com/silent-rs/async-openai", branch = "main", package = "async-openai" }
+async-openai = "0.40"
 async-trait = "0.1"
 backoff = "0.4"
 base64 = "0.22"

@@ -218,11 +218,7 @@ impl OpenAiClient {
                 normalize_api_base(&self.config.base_url)
                     .unwrap_or_else(|_| self.config.base_url.clone()),
             );
-        let no_retry = backoff::ExponentialBackoff {
-            max_elapsed_time: Some(Duration::from_nanos(1)),
-            ..Default::default()
-        };
-        async_openai::Client::build(reqwest::Client::new(), config, no_retry)
+        async_openai::Client::with_config(config)
     }
 
     async fn with_retry<F, Fut, T>(
