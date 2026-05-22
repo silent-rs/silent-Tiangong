@@ -620,9 +620,9 @@ pub(crate) fn compress_context_for_session(
             );
             let _ = stream_tx.send(StreamEvent::ContextCompressed {
                 action: if update.compressed {
-                    "压缩".to_string()
+                    tiangong_types::stream::ContextCompressAction::Compress
                 } else {
-                    "无需压缩".to_string()
+                    tiangong_types::stream::ContextCompressAction::Noop
                 },
                 summary_up_to: session.summary_up_to,
                 remaining_messages: remaining,
@@ -651,7 +651,7 @@ pub(crate) fn reset_context_for_session(
     // 清空后重建 system prompt
     crate::react::context::rebuild_system_prompt(session, engine);
     let _ = stream_tx.send(StreamEvent::ContextCompressed {
-        action: "清理".to_string(),
+        action: tiangong_types::stream::ContextCompressAction::Clear,
         summary_up_to: total,
         remaining_messages: 0,
     });

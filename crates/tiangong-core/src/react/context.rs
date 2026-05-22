@@ -89,7 +89,7 @@ pub(crate) fn maybe_update_context_summary(
                 None,
             );
             let _ = stream_tx.send(StreamEvent::ContextCompressed {
-                action: "自动压缩".to_string(),
+                action: tiangong_types::stream::ContextCompressAction::Auto,
                 summary_up_to: session.summary_up_to,
                 remaining_messages: remaining,
             });

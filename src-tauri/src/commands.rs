@@ -1118,12 +1118,10 @@ fn start_stream_consumer(
                             summary_up_to,
                             ..
                         } => {
-                            let message = match action.as_str() {
-                                "压缩" => "[上下文管理] 上下文已压缩".to_string(),
-                                "清理" => "[上下文管理] 上下文已清理".to_string(),
-                                "无需压缩" => "[上下文管理] 无需压缩上下文".to_string(),
-                                _ => format!("[上下文管理] 上下文{action}"),
-                            };
+                            let message = format!(
+                                "[上下文管理] 上下文已{}",
+                                action.display_text()
+                            );
                             session.append_message(
                                 tiangong_core::session::MessageRole::System,
                                 message,
@@ -1133,7 +1131,7 @@ fn start_stream_consumer(
                             session.current_tokens = 0;
                             session.active_agent_current_tokens = 0;
                             session.agent_current_tokens.clear();
-                            if action == "清理" {
+                            if *action == tiangong_types::stream::ContextCompressAction::Clear {
                                 session.context_summary = None;
                             }
                             let _ = core_state.persist_session_and_app(&sid);
@@ -1261,10 +1259,11 @@ fn start_stream_consumer(
                             tiangong_core::session::now_text();
                     }
                     StreamEvent::ContextCompressed { ref action, .. } => {
+                        let text = format!("上下文{}", action.display_text());
                         if core_state.has_pending_turn_for(&sid) {
-                            core_state.store.runtime.run.summary = format!("上下文{action}");
+                            core_state.store.runtime.run.summary = text;
                         } else {
-                            core_state.report_run_idle(format!("上下文{action}"));
+                            core_state.report_run_idle(text);
                         }
                     }
                     StreamEvent::IndexStatus { ref phase, count } => {

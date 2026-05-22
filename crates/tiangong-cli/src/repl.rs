@@ -374,7 +374,8 @@ impl ResponseState {
             } => {
                 self.end_active_stream();
                 output::status(&format!(
-                    "上下文{action}: 已处理 {summary_up_to} 条，剩余 {remaining_messages} 条"
+                    "上下文{}: 已处理 {summary_up_to} 条，剩余 {remaining_messages} 条",
+                    action.display_text()
                 ));
             }
 

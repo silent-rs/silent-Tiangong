@@ -188,7 +188,7 @@ pub enum StreamEvent {
     },
     /// 上下文已压缩/清理
     ContextCompressed {
-        action: String,
+        action: ContextCompressAction,
         summary_up_to: usize,
         remaining_messages: usize,
     },
@@ -198,6 +198,32 @@ pub enum StreamEvent {
         #[serde(default)]
         count: usize,
     },
+}
+
+/// 上下文压缩/清理操作类型
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextCompressAction {
+    /// 手动压缩
+    Compress,
+    /// 无需压缩
+    Noop,
+    /// 清理上下文
+    Clear,
+    /// 自动压缩
+    Auto,
+}
+
+impl ContextCompressAction {
+    /// 中文显示文案
+    pub fn display_text(&self) -> &'static str {
+        match self {
+            Self::Compress => "压缩",
+            Self::Noop => "无需压缩",
+            Self::Clear => "清理",
+            Self::Auto => "自动压缩",
+        }
+    }
 }
 
 /// 记忆检索命中项摘要（前端展示用）
