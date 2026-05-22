@@ -9,6 +9,7 @@ pub mod core;
 pub mod core_config;
 pub mod event;
 pub mod execution;
+pub mod index;
 pub mod mcp;
 pub mod media;
 pub mod media_archive;

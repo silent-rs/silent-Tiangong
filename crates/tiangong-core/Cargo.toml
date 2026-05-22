@@ -29,6 +29,9 @@ tracing = { workspace = true }
 zip = { workspace = true, default-features = false, features = ["deflate"] }
 diffy = { workspace = true, optional = true }
 tiangong-media = { workspace = true }
+tantivy = { workspace = true }
+notify = { workspace = true }
+dashmap = { workspace = true }
 
 [features]
 default = ["diffy"]
