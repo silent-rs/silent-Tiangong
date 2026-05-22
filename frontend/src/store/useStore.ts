@@ -154,6 +154,11 @@ interface AppState {
   // 草稿模式
   isDraft: boolean;
 
+  // 思考强度（按 session 存储）
+  reasoningEffort: string;
+  reasoningEffortPerSession: Record<string, string>;
+  setReasoningEffort: (effort: string) => void;
+
   // 工作目录
   workspaceDir: string;
   sessionCwd: string;
@@ -222,6 +227,15 @@ export const useStore = create<AppState>((set, get) => ({
   mcpServers: null,
   skills: null,
   isDraft: false,
+  reasoningEffort: 'medium',
+  reasoningEffortPerSession: {},
+  setReasoningEffort: (effort: string) => {
+    const { activeSessionId, reasoningEffortPerSession } = get();
+    const key = activeSessionId || '__draft__';
+    const updated = { ...reasoningEffortPerSession, [key]: effort };
+    set({ reasoningEffort: effort, reasoningEffortPerSession: updated });
+    api.setReasoningEffort(effort).catch(console.error);
+  },
   workspaceDir: '',
   sessionCwd: '',
   sessionRunStatuses: {},
@@ -272,6 +286,11 @@ export const useStore = create<AppState>((set, get) => ({
       if (!activeSessionId && !isDraft) {
         set({ isDraft: true, sessionCwd: get().workspaceDir });
       }
+
+      // 从后端恢复思考强度设置
+      api.getReasoningEffort().then((effort) => {
+        set({ reasoningEffort: effort });
+      }).catch(console.error);
     } catch (error) {
       console.error('加载会话失败:', error);
       set({ isLoadingSessions: false });
@@ -281,6 +300,8 @@ export const useStore = create<AppState>((set, get) => ({
   // 创建新会话 — 纯前端草稿模式，不立即调后端
   createSession: () => {
     const workspaceDir = get().workspaceDir;
+    const { reasoningEffortPerSession } = get();
+    const draftEffort = reasoningEffortPerSession['__draft__'] || 'medium';
     set({
       isDraft: true,
       activeSessionId: null,
@@ -297,7 +318,9 @@ export const useStore = create<AppState>((set, get) => ({
       sessionCwd: workspaceDir,
       agents: [],
       selectedAgentTab: null,
+      reasoningEffort: draftEffort,
     });
+    api.setReasoningEffort(draftEffort).catch(console.error);
   },
 
   // 切换会话
@@ -308,6 +331,8 @@ export const useStore = create<AppState>((set, get) => ({
         api.getRunSnapshot(),
         api.getSessionCwd(),
       ]);
+      const { reasoningEffortPerSession } = get();
+      const sessionEffort = reasoningEffortPerSession[id] || 'medium';
       set({
         isDraft: false,
         activeSessionId: id,
@@ -326,7 +351,9 @@ export const useStore = create<AppState>((set, get) => ({
         streamingReasoningContent: '',
         agents: parseAgentsFromMessages(snapshot.messages),
         selectedAgentTab: null,
+        reasoningEffort: sessionEffort,
       });
+      api.setReasoningEffort(sessionEffort).catch(console.error);
     } catch (error) {
       console.error('切换会话失败:', error);
     }

@@ -100,6 +100,8 @@ fn sample_request() -> ProviderRequest {
         thinking: Some(ThinkingConfig {
             budget_tokens: 4096,
         }),
+        reasoning_effort: None,
+        thinking_disabled: false,
     }
 }
 

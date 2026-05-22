@@ -701,6 +701,63 @@ const PROTOCOL_DEFAULTS: Record<string, string> = {
 };
 
 // ---------------------------------------------------------------------------
+// DeepSeek 余额查询
+// ---------------------------------------------------------------------------
+
+function ProviderBalanceSection({ providerName }: { providerName: string }) {
+  const [balance, setBalance] = useState<import('@/api/tauri').ProviderBalance | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchBalance = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await api.getProviderBalance(providerName);
+      setBalance(result);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '查询失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="mt-3 pt-3 border-t">
+      <div className="flex items-center gap-2 mb-2">
+        <Label className="text-xs">账户余额</Label>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-6 text-xs px-2"
+          onClick={fetchBalance}
+          disabled={loading}
+        >
+          {loading ? '查询中...' : '查询余额'}
+        </Button>
+      </div>
+      {error && <p className="text-xs text-destructive">{error}</p>}
+      {balance && (
+        <div className="space-y-1">
+          <div className="flex items-center gap-2 text-xs">
+            <span className={balance.is_available ? 'text-green-500' : 'text-destructive'}>
+              {balance.is_available ? '可用' : '不可用'}
+            </span>
+          </div>
+          {balance.balance_infos.map((info, i) => (
+            <div key={i} className="text-xs text-muted-foreground flex gap-3">
+              <span>{info.currency === 'CNY' ? '¥' : '$'}{info.total_balance}</span>
+              <span>充值 {info.topped_up_balance}</span>
+              <span>赠金 {info.granted_balance}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // 供应商与模型 — 分栏视图
 // ---------------------------------------------------------------------------
 
@@ -1074,6 +1131,10 @@ function ProviderModelsView({
                     />
                   </div>
                 </div>
+                {/* DeepSeek 余额查询 */}
+                {activeProvider === 'DeepSeek' && selectedConfig.api_key.trim() && (
+                  <ProviderBalanceSection providerName={activeProvider} />
+                )}
               </div>
             </div>
 

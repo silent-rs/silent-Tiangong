@@ -2,7 +2,7 @@ import { useState, KeyboardEvent, ClipboardEvent, DragEvent, useEffect, useRef, 
 import { useStore } from '@/store/useStore';
 import { Textarea } from './ui/textarea';
 import { Button } from './ui/button';
-import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Users } from 'lucide-react';
+import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Users, Brain } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
@@ -158,6 +158,8 @@ export function MessageInput() {
   const tokenStats = useStore((state) => state.tokenStats);
   const agents = useStore((state) => state.agents);
   const selectedAgentTab = useStore((state) => state.selectedAgentTab);
+  const reasoningEffort = useStore((state) => state.reasoningEffort);
+  const setReasoningEffort = useStore((state) => state.setReasoningEffort);
   const isComposingRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const inputAreaRef = useRef<HTMLDivElement>(null);
@@ -914,6 +916,40 @@ export function MessageInput() {
         ) : (
           // ===== 文字模式 =====
           <div>
+            {/* 输入框上方：运行状态 + 思考强度 */}
+            <div className="mb-1 flex items-center justify-between text-xs text-muted-foreground">
+              <div className="flex items-center gap-2 min-w-0">
+                {currentRunStatus !== 'idle' ? (
+                  <span className="flex items-center gap-1 text-yellow-500 truncate" title={runSummary || '执行中'}>
+                    <Circle className="w-1.5 h-1.5 animate-pulse shrink-0" />
+                    <span className="truncate">{runSummary && runSummary.length > 30 ? runSummary.slice(0, 30) + '...' : (runSummary || '执行中')}</span>
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1 text-green-500">
+                    <Circle className="w-1.5 h-1.5 fill-current shrink-0" />
+                    <span>就绪</span>
+                  </span>
+                )}
+                {activeAgentLabel && (
+                  <span className="text-muted-foreground/60">[{activeAgentLabel}]</span>
+                )}
+              </div>
+              <div className="flex items-center gap-1 shrink-0">
+                <Brain className="w-3 h-3" />
+                <select
+                  value={reasoningEffort}
+                  onChange={(e) => setReasoningEffort(e.target.value)}
+                  className="bg-transparent text-xs text-muted-foreground hover:text-foreground cursor-pointer outline-none border-none appearance-none pr-1"
+                  title="思考强度"
+                >
+                  <option value="none">不思考</option>
+                  <option value="low">低强度</option>
+                  <option value="medium">中强度</option>
+                  <option value="high">高强度</option>
+                  <option value="max">最大强度</option>
+                </select>
+              </div>
+            </div>
             <div
               ref={inputAreaRef}
               className="relative"
@@ -1087,17 +1123,6 @@ export function MessageInput() {
                   <FolderOpen className="w-3 h-3 shrink-0" />
                   <span className="truncate">{displayCwd || '设置对话目录'}</span>
                 </button>
-                {currentRunStatus !== 'idle' ? (
-                  <span className="flex items-center gap-1 text-yellow-500 truncate" title={runSummary || '执行中'}>
-                    <Circle className="w-1.5 h-1.5 animate-pulse shrink-0" />
-                    <span className="truncate">{runSummary && runSummary.length > 30 ? runSummary.slice(0, 30) + '...' : (runSummary || '执行中')}</span>
-                  </span>
-                ) : (
-                  <span className="flex items-center gap-1 text-green-500">
-                    <Circle className="w-1.5 h-1.5 fill-current shrink-0" />
-                    <span>就绪</span>
-                  </span>
-                )}
               </div>
               <div className="flex items-center gap-2 shrink-0">
                 {(displayTokens > 0 || totalTokens > 0) && (

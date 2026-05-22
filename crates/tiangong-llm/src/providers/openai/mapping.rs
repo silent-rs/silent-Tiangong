@@ -8,7 +8,7 @@ use async_openai::types::chat::{
 use serde_json::{Value, json};
 
 use crate::message::{ChatMessage, MessageContent, MessageRole};
-use crate::request::ProviderRequest;
+use crate::request::{ProviderRequest, ReasoningEffort};
 use crate::response::{ProviderResponse, StopReason};
 use crate::tool::{ToolChoice, ToolSpec};
 use crate::usage::TokenUsageData;
@@ -45,6 +45,12 @@ pub fn build_request_json(req: &ProviderRequest, stream: bool) -> Result<Value> 
     }
     if !req.tools.is_empty() {
         inject_function_tools(&mut payload, &req.tools, req.tool_choice.as_ref());
+    }
+    if let Some(effort) = &req.reasoning_effort {
+        inject_reasoning_effort(&mut payload, effort);
+    }
+    if req.thinking_disabled {
+        inject_thinking_disabled(&mut payload);
     }
     Ok(payload)
 }
@@ -368,6 +374,26 @@ fn inject_function_tools(
         Some(ToolChoice::Auto) => {}
         None => {}
     }
+}
+
+fn inject_reasoning_effort(payload: &mut Value, effort: &ReasoningEffort) {
+    let Some(obj) = payload.as_object_mut() else {
+        return;
+    };
+    let effort_str = match effort {
+        ReasoningEffort::Low => "low",
+        ReasoningEffort::Medium => "medium",
+        ReasoningEffort::High => "high",
+        ReasoningEffort::Max => "max",
+    };
+    obj.insert("reasoning_effort".to_string(), json!(effort_str));
+}
+
+fn inject_thinking_disabled(payload: &mut Value) {
+    let Some(obj) = payload.as_object_mut() else {
+        return;
+    };
+    obj.insert("thinking".to_string(), json!({"type": "disabled"}));
 }
 
 pub fn strip_think_tags(text: &str) -> String {

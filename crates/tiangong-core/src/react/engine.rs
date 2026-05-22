@@ -333,6 +333,59 @@ impl ReactEngine {
         }
     }
 
+    fn build_thinking_config(
+        &self,
+    ) -> (
+        Option<crate::model::ThinkingConfig>,
+        Option<crate::model::ReasoningEffort>,
+        bool,
+    ) {
+        let effort_str = self
+            .engine
+            .agent_config()
+            .reasoning_effort
+            .trim()
+            .to_lowercase();
+        match effort_str.as_str() {
+            "none" | "" => (None, None, true),
+            "low" => (
+                Some(crate::model::ThinkingConfig {
+                    budget_tokens: 4096,
+                }),
+                Some(crate::model::ReasoningEffort::Low),
+                false,
+            ),
+            "medium" => (
+                Some(crate::model::ThinkingConfig {
+                    budget_tokens: 4096,
+                }),
+                Some(crate::model::ReasoningEffort::Medium),
+                false,
+            ),
+            "high" => (
+                Some(crate::model::ThinkingConfig {
+                    budget_tokens: 8192,
+                }),
+                Some(crate::model::ReasoningEffort::High),
+                false,
+            ),
+            "max" => (
+                Some(crate::model::ThinkingConfig {
+                    budget_tokens: 16384,
+                }),
+                Some(crate::model::ReasoningEffort::Max),
+                false,
+            ),
+            _ => (
+                Some(crate::model::ThinkingConfig {
+                    budget_tokens: 4096,
+                }),
+                Some(crate::model::ReasoningEffort::Medium),
+                false,
+            ),
+        }
+    }
+
     /// 使用已有团队上下文执行指定 Agent。
     pub(crate) fn with_shared_team(
         mut self,
@@ -447,14 +500,15 @@ impl ReactEngine {
             );
 
             let system_prompt = assembled.final_system_prompt();
+            let (thinking, reasoning_effort, thinking_disabled) = self.build_thinking_config();
             let req = ModelRequest {
                 session_title: session.title.clone(),
                 user_input: assembled.user_input.clone(),
                 context: assembled.build_messages(),
                 assembled_system_prompt: Some(system_prompt),
-                thinking: Some(crate::model::ThinkingConfig {
-                    budget_tokens: 4096,
-                }),
+                thinking,
+                reasoning_effort,
+                thinking_disabled,
                 include_media: false,
             };
 

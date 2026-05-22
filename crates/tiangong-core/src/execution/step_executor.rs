@@ -68,6 +68,8 @@ pub async fn execute_single_plan_step_with_execution_agent(
             thinking: Some(crate::model::ThinkingConfig {
                 budget_tokens: 4096,
             }),
+            reasoning_effort: None,
+            thinking_disabled: false,
             include_media: false,
         };
         let response =
