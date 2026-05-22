@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use crate::model::{ModelClient, ModelRequest, SingleProviderClient, TokenUsage};
-use crate::session::{Message, MessageRole, Session};
+use crate::session::{Message, MessageRole, Session, now_text};
 
 /// 上下文压缩器
 ///
@@ -229,6 +229,8 @@ pub fn compress_loop_messages(
         user_input: prompt,
         context: Vec::new(),
         thinking: None,
+        reasoning_effort: None,
+        thinking_disabled: false,
         include_media: false,
     };
 

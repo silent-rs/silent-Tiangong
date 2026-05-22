@@ -440,6 +440,8 @@ fn new_path_end_to_end_system_prompt_sent_to_llm() {
         user_input: "继续".to_string(),
         context: session.context(),
         thinking: None,
+        reasoning_effort: None,
+        thinking_disabled: false,
         include_media: false,
     };
     let result = client.complete(&req).expect("请求应成功");
