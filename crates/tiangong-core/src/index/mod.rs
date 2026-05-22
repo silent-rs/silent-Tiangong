@@ -195,6 +195,21 @@ impl IndexManager {
         guard.commit()
     }
 
+    /// 批量写入 turn（不自动 commit），需在调用后手动 commit
+    pub fn index_turn_batch(&self, session_id: &str, turns: &[TurnData]) -> Result<()> {
+        if turns.is_empty() {
+            return Ok(());
+        }
+        let index = self.get_or_create_session_index(session_id)?;
+        let mut guard = index
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Session 索引锁获取失败: {}", e))?;
+        for turn in turns {
+            guard.index_turn(turn)?;
+        }
+        guard.commit()
+    }
+
     pub fn finalize_session_index(&self, session_id: &str) -> Result<()> {
         if let Some(entry) = self.sessions.get(session_id) {
             let mut guard = entry
@@ -511,7 +526,7 @@ pub fn session_index_exists(session_id: &str) -> bool {
     tantivy_dir.is_dir()
 }
 
-/// 为已有会话消息建立索引（回溯索引）
+/// 为已有会话消息建立索引（回溯索引，批量写入后统一 commit）
 pub fn backfill_session_index(
     session_id: &str,
     messages: &[crate::session::Message],
@@ -519,34 +534,36 @@ pub fn backfill_session_index(
     if messages.is_empty() {
         return Ok(0);
     }
-    let manager = IndexManager::new()?;
-    let mut indexed = 0;
-    for msg in messages {
-        let role = match msg.role {
-            crate::session::MessageRole::User => "user",
-            crate::session::MessageRole::Assistant => "assistant",
-            crate::session::MessageRole::Tool => "tool",
-            crate::session::MessageRole::System => continue,
-        };
-        if msg.content.trim().is_empty() {
-            continue;
-        }
-        let turn = TurnData {
-            turn_id: msg.id.clone(),
-            workspace_id: String::new(),
-            role: role.to_string(),
-            content: msg.content.clone(),
-            topics: Vec::new(),
-            entity_names: Vec::new(),
-        };
-        if let Err(e) = manager.index_turn(session_id, &turn) {
-            tracing::warn!("回溯索引写入失败: {e}");
-        } else {
-            indexed += 1;
-        }
+    let turns: Vec<TurnData> = messages
+        .iter()
+        .filter_map(|msg| {
+            let role = match msg.role {
+                crate::session::MessageRole::User => "user",
+                crate::session::MessageRole::Assistant => "assistant",
+                crate::session::MessageRole::Tool => "tool",
+                crate::session::MessageRole::System => return None,
+            };
+            if msg.content.trim().is_empty() {
+                return None;
+            }
+            Some(TurnData {
+                turn_id: msg.id.clone(),
+                workspace_id: String::new(),
+                role: role.to_string(),
+                content: msg.content.clone(),
+                topics: Vec::new(),
+                entity_names: Vec::new(),
+            })
+        })
+        .collect();
+    let count = turns.len();
+    if count == 0 {
+        return Ok(0);
     }
+    let manager = IndexManager::new()?;
+    manager.index_turn_batch(session_id, &turns)?;
     manager.finalize_session_index(session_id)?;
-    Ok(indexed)
+    Ok(count)
 }
 
 fn workspace_index_dir(root: &Path) -> PathBuf {

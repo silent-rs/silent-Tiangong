@@ -556,24 +556,27 @@ fn index_turn_messages(
     session: &Session,
     turn_start_idx: usize,
 ) {
-    for msg in &session.messages[turn_start_idx..] {
-        let role = match msg.role {
-            MessageRole::User => "user",
-            MessageRole::Assistant => "assistant",
-            MessageRole::Tool => "tool",
-            MessageRole::System => continue,
-        };
-        let turn = crate::index::TurnData {
-            turn_id: msg.id.clone(),
-            workspace_id: session.cwd.clone(),
-            role: role.to_string(),
-            content: msg.content.clone(),
-            topics: Vec::new(),
-            entity_names: Vec::new(),
-        };
-        if let Err(e) = index_manager.index_turn(&session.id, &turn) {
-            tracing::warn!("Session 索引写入失败: {e}");
-        }
+    let turns: Vec<crate::index::TurnData> = session.messages[turn_start_idx..]
+        .iter()
+        .filter_map(|msg| {
+            let role = match msg.role {
+                MessageRole::User => "user",
+                MessageRole::Assistant => "assistant",
+                MessageRole::Tool => "tool",
+                MessageRole::System => return None,
+            };
+            Some(crate::index::TurnData {
+                turn_id: msg.id.clone(),
+                workspace_id: session.cwd.clone(),
+                role: role.to_string(),
+                content: msg.content.clone(),
+                topics: Vec::new(),
+                entity_names: Vec::new(),
+            })
+        })
+        .collect();
+    if let Err(e) = index_manager.index_turn_batch(&session.id, &turns) {
+        tracing::warn!("Session 索引批量写入失败: {e}");
     }
 }
 
