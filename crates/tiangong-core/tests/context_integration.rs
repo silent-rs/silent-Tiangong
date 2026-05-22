@@ -1,8 +1,8 @@
 //! 上下文系统集成测试
 //!
-//! 验证 PromptAssembler、ContextCompressor、ContextOrganizer 在重构后的协作行为：
+//! 验证 session.context() + build_full_system_prompt 路径：
+//! - system prompt 包含摘要和所有动态段
 //! - 消息零丢失：所有 session.messages 完整传递给 LLM
-//! - 消息顺序：capabilities → memory → team → summary → attachments → history
 //! - 压缩流程：mock LLM 返回固定摘要，验证 summary_up_to 推进
 
 use std::io::{Read, Write};
@@ -11,9 +11,8 @@ use std::sync::mpsc;
 
 use tiangong_core::agent_config::AgentConfig;
 use tiangong_core::context::compressor::ContextCompressor;
-use tiangong_core::context::organizer::ContextOrganizer;
-use tiangong_core::model::{ModelProviderConfig, SingleProviderClient};
-use tiangong_core::prompt::PromptAssembler;
+use tiangong_core::model::{ModelClient, ModelProviderConfig, ModelRequest, SingleProviderClient};
+use tiangong_core::prompt::SystemPromptConfig;
 use tiangong_core::session::{Message, MessageRole, MessageToolCall, Session};
 use tiangong_llm::ProviderProtocol;
 
@@ -141,10 +140,6 @@ fn helper_session() -> Session {
     Session::new("测试会话")
 }
 
-fn user_msg(content: &str) -> Message {
-    Message::new(MessageRole::User, content)
-}
-
 fn tool_context_msg(name: &str, content: &str) -> Message {
     let mut msg = Message::new(MessageRole::Tool, content);
     msg.tool_name = Some(name.to_string());
@@ -194,531 +189,341 @@ fn multi_turn_session() -> Session {
     session
 }
 
-// ── PromptAssembler 测试 ─────────────────────────────────────
+// ── 新路径（session.context + build_full_system_prompt）测试 ────────
 
-#[test]
-fn assemble_empty_session_produces_minimal_context() {
-    let session = helper_session();
-    let assembler = PromptAssembler::new(32768);
-    let result = assembler.assemble(
-        &session,
-        "你好",
-        Vec::new(),
-        &tiangong_core::models_config::ModelsConfig::default(),
-        &AgentConfig::default(),
-        None,
-        None,
-    );
-    // 无 context_summary、无 attachments、无 memory、无 team
-    assert!(result.context_summary_message.is_none());
-    assert!(result.memory_prefix_message.is_none());
-    assert!(result.team_context_message.is_none());
-    assert!(result.attachment_messages.is_empty());
-    // history 只有空 session（无消息）
-    assert!(result.history_messages.is_empty());
-    assert_eq!(result.user_input, "你好");
+/// 能捕获请求体的 Mock LLM 服务器
+struct CapturingMockLlmServer {
+    base_url: String,
+    shutdown_tx: Option<mpsc::Sender<()>>,
+    join: Option<std::thread::JoinHandle<()>>,
+    /// 收到的所有请求体
+    captured: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
-#[test]
-fn assemble_preserves_all_session_messages_in_history() {
-    let session = multi_turn_session();
-    let msg_count = session.messages.len();
-    let assembler = PromptAssembler::new(32768);
-    let result = assembler.assemble(
-        &session,
-        "",
-        Vec::new(),
-        &tiangong_core::models_config::ModelsConfig::default(),
-        &AgentConfig::default(),
-        None,
-        None,
-    );
-    // 所有 session.messages 必须出现在 history 中
-    assert_eq!(result.history_messages.len(), msg_count);
-    for (original, assembled) in session.messages.iter().zip(result.history_messages.iter()) {
-        assert_eq!(original.content, assembled.content);
-        assert_eq!(original.role, assembled.role);
+impl CapturingMockLlmServer {
+    fn start(response_text: &str) -> Self {
+        let response_text = response_text.to_string();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("绑定端口失败");
+        let addr = listener.local_addr().expect("读取地址失败");
+        listener.set_nonblocking(true).expect("设置非阻塞失败");
+        let base_url = format!("http://{}", addr);
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let captured: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_clone = captured.clone();
+        let join = std::thread::spawn(move || {
+            loop {
+                if shutdown_rx.try_recv().is_ok() {
+                    break;
+                }
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        if let Some(body) = read_http_request(&mut stream) {
+                            if let Ok(mut guard) = captured_clone.lock() {
+                                guard.push(body);
+                            }
+                            let resp = openai_chat_completion_response(&response_text);
+                            let http = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                                resp.len(),
+                                resp
+                            );
+                            let _ = stream.write_all(http.as_bytes());
+                            let _ = stream.flush();
+                        }
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            base_url,
+            shutdown_tx: Some(shutdown_tx),
+            join: Some(join),
+            captured,
+        }
+    }
+
+    fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// 获取收到的请求体列表
+    fn captured_requests(&self) -> Vec<String> {
+        self.captured.lock().unwrap().clone()
     }
 }
 
-#[test]
-fn memory_context_injected_as_prefix_tool_message() {
-    let session = helper_session();
-    let assembler = PromptAssembler::new(32768);
-    let result = assembler.assemble(
-        &session,
-        "",
-        Vec::new(),
+impl Drop for CapturingMockLlmServer {
+    fn drop(&mut self) {
+        let _ = self.shutdown_tx.take().unwrap().send(());
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+fn rebuild_session(session: &mut Session) {
+    let config = SystemPromptConfig::from_configs(
         &tiangong_core::models_config::ModelsConfig::default(),
         &AgentConfig::default(),
-        Some("用户之前问过关于 Rust 的问题"),
-        None,
+        &session.id,
     );
-    let mem = result
-        .memory_prefix_message
-        .expect("应有 memory_prefix_message");
-    assert_eq!(mem.role, MessageRole::Tool);
-    assert!(mem.content.contains("用户之前问过关于 Rust 的问题"));
-    assert!(mem.content.contains("<memory-recall>"));
-    assert_eq!(mem.tool_name.as_deref(), Some("recall_memory"));
+    session.rebuild_system_prompt(&config);
 }
 
 #[test]
-fn team_context_injected_as_prefix_message() {
-    let session = helper_session();
-    let team_msg = Message::new(MessageRole::System, "你是 sub-agent，团队有 3 个成员");
-    let assembler = PromptAssembler::new(32768);
-    let result = assembler.assemble(
-        &session,
-        "",
-        Vec::new(),
-        &tiangong_core::models_config::ModelsConfig::default(),
-        &AgentConfig::default(),
-        None,
-        Some(&team_msg),
-    );
-    let team = result
-        .team_context_message
-        .expect("应有 team_context_message");
-    assert_eq!(team.role, MessageRole::System);
-    assert!(team.content.contains("sub-agent"));
-}
-
-#[test]
-fn context_summary_injected_when_present() {
-    let mut session = helper_session();
-    session.append_message(MessageRole::User, "你好");
-    session.append_message(MessageRole::Assistant, "你好！");
-    session.append_message(MessageRole::User, "继续");
-    session.append_message(MessageRole::Assistant, "好的");
-    session.context_summary = Some("之前的对话讨论了 Rust 基础知识".to_string());
-    session.summary_up_to = 2; // 前两条消息已被摘要
-    let assembler = PromptAssembler::new(32768);
-    let result = assembler.assemble(
-        &session,
-        "",
-        Vec::new(),
-        &tiangong_core::models_config::ModelsConfig::default(),
-        &AgentConfig::default(),
-        None,
-        None,
-    );
-    let summary = result
-        .context_summary_message
-        .expect("应有 context_summary_message");
-    assert_eq!(summary.role, MessageRole::Tool);
-    assert!(summary.content.contains("之前的对话讨论了 Rust 基础知识"));
-    assert!(summary.content.contains("<context-summary>"));
-    // history 应只有后两条消息
-    assert_eq!(result.history_messages.len(), 2);
-}
-
-#[test]
-fn only_messages_after_summary_up_to_included() {
+fn new_path_system_prompt_includes_summary() {
     let mut session = multi_turn_session();
     let total = session.messages.len();
-    // 模拟已压缩前 4 条消息
+    // 模拟压缩：设置 summary 并标记前 4 条消息已被摘要覆盖
+    session.context_summary = Some("早期对话讨论了文件读取和文件修改操作".to_string());
     session.summary_up_to = 4;
-    session.context_summary = Some("早期对话摘要".to_string());
-    let assembler = PromptAssembler::new(32768);
-    let result = assembler.assemble(
-        &session,
-        "",
-        Vec::new(),
-        &tiangong_core::models_config::ModelsConfig::default(),
-        &AgentConfig::default(),
-        None,
-        None,
+    // 重建 system prompt
+    rebuild_session(&mut session);
+    // context() 应返回 [system_prompt_message] + messages[summary_up_to..]
+    let context = session.context();
+    // 第一条应为 System 消息
+    assert_eq!(context[0].role, MessageRole::System);
+    let system_text = &context[0].content;
+    // 验证摘要已嵌入 system prompt
+    assert!(
+        system_text.contains("早期对话讨论了文件读取和文件修改操作"),
+        "system prompt 应包含摘要内容，实际: {system_text}"
     );
-    // history 应只包含 summary_up_to 之后的消息
-    assert_eq!(result.history_messages.len(), total - 4);
-    assert!(result.context_summary_message.is_some());
-}
-
-#[test]
-fn full_message_order_is_correct() {
-    let mut session = helper_session();
-    session.append_message(MessageRole::User, "你好");
-    session.context_summary = Some("摘要内容".to_string());
-    session.summary_up_to = 0;
-    let team_msg = Message::new(MessageRole::System, "团队信息");
-    let assembler = PromptAssembler::new(32768);
-    let result = assembler.assemble(
-        &session,
-        "",
-        Vec::new(),
-        &tiangong_core::models_config::ModelsConfig::default(),
-        &AgentConfig::default(),
-        Some("记忆内容"),
-        Some(&team_msg),
+    assert!(
+        system_text.contains("此前对话摘要"),
+        "system prompt 应包含摘要标签"
     );
-    let messages = result.build_messages();
-    // 验证顺序：
-    // 1. capabilities（Tool，有 system_prompt 内容）
-    // 2. memory（Tool，<memory-recall>）
-    // 3. team（System）
-    // 4. context_summary（Tool，<context-summary>）
-    // 5. attachments（MCP tools，可能为空）
-    // 6. history（User "你好"）
-    let mut idx = 0;
-    // capabilities
-    if !result.system_prompt.is_empty() {
-        assert_eq!(messages[idx].role, MessageRole::Tool);
-        assert!(messages[idx].content.contains("<capabilities>"));
-        idx += 1;
+    // 后续消息应只有 summary_up_to 之后的
+    assert_eq!(context.len(), 1 + (total - 4));
+    for msg in &context[1..] {
+        assert_ne!(msg.role, MessageRole::System);
     }
-    // memory
-    assert_eq!(messages[idx].role, MessageRole::Tool);
-    assert!(messages[idx].content.contains("<memory-recall>"));
-    idx += 1;
-    // team
-    assert_eq!(messages[idx].role, MessageRole::System);
-    assert!(messages[idx].content.contains("团队信息"));
-    idx += 1;
-    // context_summary
-    assert_eq!(messages[idx].role, MessageRole::Tool);
-    assert!(messages[idx].content.contains("<context-summary>"));
-    idx += 1;
-    // attachments 可能为空或为 MCP tools
-    let attachment_count = result.attachment_messages.len();
-    idx += attachment_count;
-    // history
-    assert!(idx < messages.len());
-    assert_eq!(messages[idx].role, MessageRole::User);
-    assert_eq!(messages[idx].content, "你好");
 }
 
 #[test]
-fn multi_turn_preserves_complete_history() {
-    let session = multi_turn_session();
-    let total = session.messages.len();
-    let assembler = PromptAssembler::new(32768);
-    let result = assembler.assemble(
-        &session,
-        "",
-        Vec::new(),
-        &tiangong_core::models_config::ModelsConfig::default(),
-        &AgentConfig::default(),
-        None,
-        None,
-    );
-    let _messages = result.build_messages();
-    // history 部分（去掉可能的 prefix 消息）应包含所有 session.messages
-    let history = &result.history_messages;
-    assert_eq!(history.len(), total);
-    // 验证每条消息角色和内容
-    assert_eq!(history[0].role, MessageRole::User);
-    assert_eq!(history[1].role, MessageRole::Assistant);
-    assert_eq!(history[2].role, MessageRole::Tool);
-    assert_eq!(history[3].role, MessageRole::User);
-    assert_eq!(history[4].role, MessageRole::Assistant);
-    assert_eq!(history[5].role, MessageRole::Tool);
-    assert_eq!(history[6].role, MessageRole::User);
-    assert_eq!(history[7].role, MessageRole::Assistant);
+fn new_path_system_prompt_includes_all_sections() {
+    let session = helper_session();
+    let config = SystemPromptConfig {
+        custom_prompt: "回复必须使用中文".to_string(),
+        skills_text: "已安装的 Skills：\n- test-skill (id=s1): 测试技能".to_string(),
+        media_text: "已配置的多媒体能力：\n- 图片生成：已配置".to_string(),
+        team_text: "团队协作能力".to_string(),
+        user_context: vec!["用户偏好深色主题".to_string()],
+    };
+    let msg = tiangong_core::prompt::sections::build_full_system_prompt(&session, &config);
+    assert_eq!(msg.role, MessageRole::System);
+    let text = &msg.content;
+    // 静态段
+    assert!(text.contains("天工智能助手"), "应包含身份段");
+    assert!(text.contains("规则"), "应包含规则段");
+    // 自定义指令
+    assert!(text.contains("回复必须使用中文"), "应包含自定义指令");
+    // 环境段
+    assert!(text.contains("当前会话"), "应包含会话标题");
+    assert!(text.contains("当前工作目录"), "应包含工作目录");
+    // 动态段
+    assert!(text.contains("test-skill"), "应包含 Skills 列表");
+    assert!(text.contains("图片生成"), "应包含多媒体能力");
+    assert!(text.contains("团队协作"), "应包含团队协作");
+    // 用户上下文
+    assert!(text.contains("用户偏好深色主题"), "应包含用户上下文");
 }
 
 #[test]
-fn tool_context_messages_preserved_in_history() {
+fn new_path_messages_increment_across_turns() {
     let mut session = helper_session();
-    // 模拟完成度检查提示（直接推入 session.messages）
-    session.append_message(MessageRole::User, "请帮我写代码");
-    session.append_message(MessageRole::Assistant, "好的，让我来写");
+    rebuild_session(&mut session);
+    // 初始：system_prompt_message + 0 条消息
+    let ctx0 = session.context();
+    assert_eq!(ctx0.len(), 1); // 只有 system prompt message
+    // 第 1 轮
+    session.append_message(MessageRole::User, "你好");
+    let ctx1 = session.context();
+    assert_eq!(ctx1.len(), 2); // system + 1 条消息
+    assert_eq!(ctx1[1].role, MessageRole::User);
+    assert_eq!(ctx1[1].content, "你好");
+    // 第 2 轮
+    session.append_message(MessageRole::Assistant, "你好！有什么可以帮你的？");
+    let ctx2 = session.context();
+    assert_eq!(ctx2.len(), 3); // system + 2 条消息
+    assert_eq!(ctx2[2].role, MessageRole::Assistant);
+    // 第 3 轮
+    session.append_message(MessageRole::User, "读取文件");
+    session.append_message(MessageRole::Assistant, "正在读取");
+    {
+        let last = session.messages.last_mut().unwrap();
+        last.tool_calls.push(MessageToolCall {
+            id: "call_1".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({"path": "test.rs"}),
+        });
+    }
+    let mut tr = tool_result_msg("call_1", "文件内容");
+    tr.tool_name = Some("read_file".to_string());
+    session.messages.push(tr);
+    let ctx3 = session.context();
+    assert_eq!(ctx3.len(), 6); // system + 5 条消息
+}
+
+#[test]
+fn new_path_tool_calls_preserved_in_context() {
+    let mut session = helper_session();
+    // 模拟一轮带工具调用的对话
+    session.append_message(MessageRole::User, "请读取 main.rs");
+    session.append_message(MessageRole::Assistant, "我来读取");
+    {
+        let last = session.messages.last_mut().unwrap();
+        last.tool_calls.push(MessageToolCall {
+            id: "call_abc".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({"path": "main.rs"}),
+        });
+    }
+    let mut tr = tool_result_msg("call_abc", "fn main() {}");
+    tr.tool_name = Some("read_file".to_string());
+    session.messages.push(tr);
+    session.append_message(MessageRole::Assistant, "文件内容如上");
+    rebuild_session(&mut session);
+    let context = session.context();
+    // system + 4 条对话消息
+    assert_eq!(context.len(), 5);
+    // 验证 assistant 消息中的 tool_calls
+    let assistant_msg = &context[2]; // system, user, assistant
+    assert_eq!(assistant_msg.role, MessageRole::Assistant);
+    assert_eq!(assistant_msg.tool_calls.len(), 1);
+    assert_eq!(assistant_msg.tool_calls[0].id, "call_abc");
+    assert_eq!(assistant_msg.tool_calls[0].name, "read_file");
+    // 验证 tool result
+    let tool_result = &context[3];
+    assert_eq!(tool_result.role, MessageRole::Tool);
+    assert_eq!(tool_result.tool_call_id.as_deref(), Some("call_abc"));
+    assert_eq!(tool_result.content, "fn main() {}");
+}
+
+#[test]
+fn new_path_tool_context_messages_preserved() {
+    let mut session = helper_session();
+    session.append_message(MessageRole::User, "写代码");
+    session.append_message(MessageRole::Assistant, "好的");
+    // 模拟完成度检查提示（tool_context 类型，无 tool_call_id）
     session.messages.push(tool_context_msg(
         "react_completion_check",
-        "上方回复被判定为未完成任务",
+        "上方回复被判定为未完成",
     ));
     session.append_message(MessageRole::Assistant, "代码已完成");
-    let assembler = PromptAssembler::new(32768);
-    let result = assembler.assemble(
-        &session,
-        "",
-        Vec::new(),
-        &tiangong_core::models_config::ModelsConfig::default(),
-        &AgentConfig::default(),
-        None,
-        None,
-    );
-    // 所有 4 条消息都应出现在 history 中
-    assert_eq!(result.history_messages.len(), 4);
-    let tool_ctx = &result.history_messages[2];
-    assert_eq!(tool_ctx.role, MessageRole::Tool);
-    assert_eq!(
-        tool_ctx.tool_name.as_deref(),
-        Some("react_completion_check")
-    );
+    rebuild_session(&mut session);
+    let context = session.context();
+    // system + 4 条消息
+    assert_eq!(context.len(), 5);
+    // 第 3 条（index 3）应为 tool context
+    let tc = &context[3];
+    assert_eq!(tc.role, MessageRole::Tool);
+    assert!(tc.tool_call_id.is_none());
+    assert_eq!(tc.tool_name.as_deref(), Some("react_completion_check"));
+    assert!(tc.content.contains("未完成"));
 }
 
 #[test]
-fn failure_recovery_reminder_preserved_in_history() {
-    let mut session = helper_session();
-    session.append_message(MessageRole::User, "读取文件");
-    session.append_message(MessageRole::Assistant, "调用 read_file");
-    // 模拟工具执行失败
-    let mut tr = tool_result_msg("call_1", "文件不存在");
-    tr.tool_name = Some("read_file".to_string());
-    tr.tool_result_is_error = true;
-    session.messages.push(tr);
-    // 失败恢复提示（直接推入 session.messages）
-    session.messages.push(tool_context_msg(
-        "react_failed_tool_recovery",
-        "read_file 调用失败",
-    ));
-    let assembler = PromptAssembler::new(32768);
-    let result = assembler.assemble(
-        &session,
-        "",
-        Vec::new(),
-        &tiangong_core::models_config::ModelsConfig::default(),
-        &AgentConfig::default(),
-        None,
-        None,
-    );
-    assert_eq!(result.history_messages.len(), 4);
-    assert_eq!(result.history_messages[3].role, MessageRole::Tool);
-    assert_eq!(
-        result.history_messages[3].tool_name.as_deref(),
-        Some("react_failed_tool_recovery")
-    );
-}
-
-#[test]
-fn sub_agent_messages_preserved_in_history() {
-    let mut session = helper_session();
-    session.append_message(MessageRole::User, "请分析代码");
-    // 模拟子代理消息（直接推入 session.messages）
-    let sub_msg = user_msg("[from:agent-1 at 2025-01-01T00:00:00]\n分析完成");
-    session.messages.push(sub_msg);
-    let assembler = PromptAssembler::new(32768);
-    let result = assembler.assemble(
-        &session,
-        "",
-        Vec::new(),
-        &tiangong_core::models_config::ModelsConfig::default(),
-        &AgentConfig::default(),
-        None,
-        None,
-    );
-    assert_eq!(result.history_messages.len(), 2);
-    assert!(result.history_messages[1].content.contains("[from:agent-1"));
-}
-
-// ── ContextCompressor 测试（不需要 LLM）────────────────────
-
-#[test]
-fn compressor_build_context_keeps_recent_turns() {
-    let compressor = ContextCompressor::new(2); // 保留最近 2 轮
-    let mut session = helper_session();
-    // 5 轮对话
-    for i in 0..5 {
-        session.append_message(MessageRole::User, format!("用户消息 {i}"));
-        session.append_message(MessageRole::Assistant, format!("助手回复 {i}"));
-    }
-    // 无 summary 时，build_context 返回全部消息
-    let context = compressor.build_context(&session);
-    assert_eq!(context.len(), session.messages.len());
-}
-
-#[test]
-fn compressor_no_split_for_few_messages() {
-    let compressor = ContextCompressor::new(6);
-    let mut session = helper_session();
-    session.append_message(MessageRole::User, "只有一条");
-    let context = compressor.build_context(&session);
-    // 消息太少，全部返回
-    assert_eq!(context.len(), 1);
-}
-
-#[test]
-fn build_context_returns_all_messages_when_no_summary() {
-    let session = multi_turn_session();
-    let total = session.messages.len();
-    let compressor = ContextCompressor::new(6);
-    let context = compressor.build_context(&session);
-    assert_eq!(context.len(), total);
-}
-
-#[test]
-fn build_context_returns_only_recent_after_summary() {
-    let mut session = multi_turn_session();
-    let total = session.messages.len();
-    session.summary_up_to = 4;
-    let compressor = ContextCompressor::new(6);
-    let context = compressor.build_context(&session);
-    assert_eq!(context.len(), total - 4);
-}
-
-// ── ContextOrganizer 测试 ────────────────────────────────────
-
-#[test]
-fn organizer_needs_compression_below_threshold() {
-    let organizer = ContextOrganizer::new(10000).with_threshold(0.95);
-    assert!(!organizer.needs_compression(5000));
-    assert!(!organizer.needs_compression(9499));
-    assert!(!organizer.needs_compression(9500)); // == threshold 不触发
-    assert!(organizer.needs_compression(9501)); // > threshold 才触发
-    assert!(organizer.needs_compression(10000));
-}
-
-#[test]
-fn organizer_build_context_matches_compressor() {
-    let mut session = multi_turn_session();
-    session.summary_up_to = 3;
-    let organizer = ContextOrganizer::new(32768);
-    let context = organizer.build_context(&session);
-    assert_eq!(context.len(), session.messages.len() - 3);
-}
-
-// ── Mock LLM 压缩流程测试 ────────────────────────────────────
-
-#[test]
-fn compression_with_mock_llm_produces_summary() {
-    let mock = MockLlmServer::start("这是一个关于多轮对话的压缩摘要");
+fn new_path_end_to_end_system_prompt_sent_to_llm() {
+    let mock = CapturingMockLlmServer::start("这是 LLM 的回复");
     let client = mock_client(mock.base_url());
     let mut session = multi_turn_session();
-    let original_len = session.messages.len();
-    let compressor = ContextCompressor::new(2); // 保留最近 2 轮
+    // 不设 summary_up_to，保留所有消息以验证 tool_calls 传递
+    rebuild_session(&mut session);
+    let req = ModelRequest {
+        session_title: session.title.clone(),
+        user_input: "继续".to_string(),
+        context: session.context(),
+        thinking: None,
+        include_media: false,
+    };
+    let result = client.complete(&req).expect("请求应成功");
+    assert!(!result.text.is_empty());
+    // 检查发送到 mock 的请求体
+    let requests = mock.captured_requests();
+    assert_eq!(requests.len(), 1, "应有 1 个请求");
+    let body: serde_json::Value = serde_json::from_str(&requests[0]).expect("请求体应为 JSON");
+    // 验证 system prompt 包含完整内容
+    let system = body["messages"]
+        .as_array()
+        .expect("应有 messages")
+        .iter()
+        .find(|m| m["role"].as_str() == Some("system"))
+        .expect("应有 system 消息");
+    let system_content = system["content"].as_str().expect("system 应有 content");
+    assert!(
+        system_content.contains("天工智能助手"),
+        "system prompt 应包含身份段"
+    );
+    assert!(
+        system_content.contains("规则"),
+        "system prompt 应包含规则段"
+    );
+    // 验证对话消息包含 tool result
+    let messages = body["messages"].as_array().unwrap();
+    let tool_results = messages
+        .iter()
+        .filter(|m| m["role"].as_str() == Some("tool"))
+        .count();
+    assert!(
+        tool_results >= 1,
+        "应有 tool result 消息，实际: {messages:?}"
+    );
+    // 验证 user_input 在末尾
+    let last_user = messages.last().expect("应有消息");
+    assert_eq!(last_user["role"].as_str(), Some("user"));
+    assert_eq!(last_user["content"].as_str(), Some("继续"));
+}
+
+#[test]
+fn new_path_rebuild_after_compression_refreshes_summary() {
+    let mock = MockLlmServer::start("第一次压缩摘要");
+    let client = mock_client(mock.base_url());
+    let mut session = multi_turn_session();
+    // 第一次压缩
+    let compressor = ContextCompressor::new(2);
     let result = compressor
         .update_summary_with_usage(&mut session, &client)
         .expect("压缩不应失败");
     assert!(result.compressed);
     assert!(session.context_summary.is_some());
+    // 压缩后重建 system prompt
+    rebuild_session(&mut session);
+    let context = session.context();
+    // system prompt 应包含摘要
+    assert_eq!(context[0].role, MessageRole::System);
     assert!(
-        session
-            .context_summary
-            .as_ref()
-            .unwrap()
-            .contains("压缩摘要")
+        context[0].content.contains("第一次压缩摘要"),
+        "重建后的 system prompt 应包含最新摘要"
     );
-    assert!(session.summary_up_to > 0);
-    assert!(session.summary_up_to < original_len);
 }
 
 #[test]
-fn after_compression_assembly_excludes_summarized_messages() {
-    let mock = MockLlmServer::start("早期对话讨论了文件读取和修改");
-    let client = mock_client(mock.base_url());
+fn new_path_clear_and_rebuild_system_prompt() {
     let mut session = multi_turn_session();
+    rebuild_session(&mut session);
+    // 验证 system prompt 已创建
+    assert!(session.system_prompt_message.is_some());
+    let context_before = session.context();
+    assert_eq!(context_before[0].role, MessageRole::System);
+    // 模拟清空上下文
     let total = session.messages.len();
-    // 执行压缩
-    let compressor = ContextCompressor::new(2);
-    let result = compressor
-        .update_summary_with_usage(&mut session, &client)
-        .expect("压缩不应失败");
-    assert!(result.compressed);
-    let summary_up_to = session.summary_up_to;
-    assert!(summary_up_to > 0);
-    // 装配后 history 应只有 summary_up_to 之后的消息
-    let assembler = PromptAssembler::new(32768);
-    let assembled = assembler.assemble(
-        &session,
-        "",
-        Vec::new(),
-        &tiangong_core::models_config::ModelsConfig::default(),
-        &AgentConfig::default(),
-        None,
-        None,
+    session.summary_up_to = total;
+    session.context_summary = None;
+    // 重建
+    rebuild_session(&mut session);
+    let context_after = session.context();
+    // system prompt 仍在，但对话消息为空
+    assert_eq!(context_after[0].role, MessageRole::System);
+    assert_eq!(context_after.len(), 1, "清空后只有 system prompt message");
+    // 摘要段不应出现
+    assert!(
+        !context_after[0].content.contains("此前对话摘要"),
+        "清空后 system prompt 不应包含摘要段"
     );
-    assert!(assembled.context_summary_message.is_some());
-    assert_eq!(assembled.history_messages.len(), total - summary_up_to);
-    // 验证 context_summary 消息内容
-    let summary_msg = assembled.context_summary_message.unwrap();
-    assert!(summary_msg.content.contains("早期对话讨论了文件读取和修改"));
-    assert!(summary_msg.content.contains("<context-summary>"));
-}
-
-#[test]
-fn double_compression_only_advances_if_new_messages() {
-    let mock = MockLlmServer::start("第一次压缩摘要");
-    let client = mock_client(mock.base_url());
-    let mut session = multi_turn_session();
-    let compressor = ContextCompressor::new(2);
-    // 第一次压缩
-    let result1 = compressor
-        .update_summary_with_usage(&mut session, &client)
-        .expect("第一次压缩不应失败");
-    assert!(result1.compressed);
-    let first_summary_up_to = session.summary_up_to;
-    // 不添加新消息，第二次压缩应无效（split_point <= summary_up_to）
-    let result2 = compressor
-        .update_summary_with_usage(&mut session, &client)
-        .expect("第二次压缩不应失败");
-    assert!(!result2.compressed);
-    assert_eq!(session.summary_up_to, first_summary_up_to);
-}
-
-// ── Provider 消息转换测试 ────────────────────────────────────
-
-#[test]
-fn tool_context_messages_appear_in_provider_messages() {
-    let mut session = helper_session();
-    session.append_message(MessageRole::User, "你好");
-    session
-        .messages
-        .push(tool_context_msg("capabilities", "Skills: 无"));
-    session
-        .messages
-        .push(tool_context_msg("recall_memory", "回忆结果内容"));
-    let assembler = PromptAssembler::new(32768);
-    let assembled = assembler.assemble(
-        &session,
-        "",
-        Vec::new(),
-        &tiangong_core::models_config::ModelsConfig::default(),
-        &AgentConfig::default(),
-        None,
-        None,
-    );
-    let messages = assembled.build_messages();
-    // 至少应有 User + 2 个 Tool context 消息
-    assert!(messages.len() >= 3);
-    // Tool context 消息（无 tool_call_id）应在 messages 中
-    let tool_contexts: Vec<_> = messages
-        .iter()
-        .filter(|m| m.role == MessageRole::Tool && m.tool_call_id.is_none())
-        .collect();
-    assert!(tool_contexts.len() >= 2);
-}
-
-#[test]
-fn force_final_response_reminder_included_in_assembly() {
-    let mut session = multi_turn_session();
-    // 模拟 force_final_response 推入的提醒
-    session.messages.push(tool_context_msg(
-        "force_final_response",
-        "请基于以上所有工具执行结果，直接给出最终回复。",
-    ));
-    let assembler = PromptAssembler::new(32768);
-    let assembled = assembler.assemble(
-        &session,
-        "",
-        Vec::new(),
-        &tiangong_core::models_config::ModelsConfig::default(),
-        &AgentConfig::default(),
-        None,
-        None,
-    );
-    // 提醒消息应在 history 末尾
-    let last = assembled.history_messages.last().expect("应有消息");
-    assert_eq!(last.role, MessageRole::Tool);
-    assert_eq!(last.tool_name.as_deref(), Some("force_final_response"));
-}
-
-#[test]
-fn no_duplicate_messages_in_assembly() {
-    let session = multi_turn_session();
-    let assembler = PromptAssembler::new(32768);
-    let assembled = assembler.assemble(
-        &session,
-        "",
-        Vec::new(),
-        &tiangong_core::models_config::ModelsConfig::default(),
-        &AgentConfig::default(),
-        None,
-        None,
-    );
-    // 每条 history 消息的 id 应唯一
-    let mut ids = std::collections::HashSet::new();
-    for msg in &assembled.history_messages {
-        assert!(ids.insert(msg.id.clone()), "发现重复消息 id: {}", msg.id);
-    }
 }

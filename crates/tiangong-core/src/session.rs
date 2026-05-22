@@ -76,6 +76,12 @@ pub struct Session {
     /// 摘要覆盖到的消息索引（messages[0..summary_up_to] 已被摘要覆盖）
     #[serde(default)]
     pub summary_up_to: usize,
+    /// 缓存的 system prompt 消息（role=System）。
+    ///
+    /// 在新对话、压缩对话、清空上下文时由外部调用 `rebuild_system_prompt()` 重建。
+    /// `context()` 返回时会将其置于消息列表头部，由 `build_provider_messages()` 提取。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt_message: Option<Message>,
     pub created_at: String,
     pub updated_at: String,
     /// 父会话 ID（Worker 子会话标注所属的父会话）
@@ -229,6 +235,7 @@ impl Session {
             trust_mode: TrustMode::default(),
             context_summary: None,
             summary_up_to: 0,
+            system_prompt_message: None,
             created_at: now.clone(),
             updated_at: now,
             parent_session_id: None,
@@ -264,6 +271,7 @@ impl Session {
             trust_mode: TrustMode::default(),
             context_summary: None,
             summary_up_to: 0,
+            system_prompt_message: None,
             created_at: now.clone(),
             updated_at: now,
             parent_session_id: None,
@@ -736,21 +744,29 @@ impl Session {
         total
     }
 
+    /// 重建 system prompt 消息
+    ///
+    /// 从 session 数据（title, cwd, context_summary）和外部配置构建完整的 system prompt，
+    /// 存为 `Message { role: System }`，供 `context()` 返回。
+    ///
+    /// 应在以下时机调用：
+    /// - 新对话首轮（system_prompt_message 为 None）
+    /// - 压缩对话后
+    /// - 清空上下文后
+    pub fn rebuild_system_prompt(&mut self, config: &crate::prompt::SystemPromptConfig) {
+        let msg = crate::prompt::sections::build_full_system_prompt(self, config);
+        self.system_prompt_message = Some(msg);
+        self.updated_at = now_text();
+    }
+
     /// 构建 LLM 请求上下文
     ///
-    /// 返回 `summary_up_to` 之后的完整消息，如有压缩摘要则前置注入。
-    /// 摘要以 `tool_name="context_summary"` 标记，由 `build_provider_messages` 提取到 system prompt。
+    /// 返回 system_prompt_message（如有）+ `summary_up_to` 之后的对话消息。
+    /// System 消息由 `build_provider_messages` 提取到 system prompt。
     pub fn context(&self) -> Vec<Message> {
         let mut context = Vec::new();
-        if let Some(summary) = self
-            .context_summary
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            let mut msg = Message::new(MessageRole::Tool, summary.to_string());
-            msg.tool_name = Some("context_summary".to_string());
-            context.push(msg);
+        if let Some(ref msg) = self.system_prompt_message {
+            context.push(msg.clone());
         }
         context.extend(self.messages[self.summary_up_to..].iter().cloned());
         context

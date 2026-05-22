@@ -523,7 +523,7 @@ async fn worker_loop_async(
                 continue;
             }
             Command::ResetContext => {
-                reset_context_for_session(&mut session, &stream_tx);
+                reset_context_for_session(&mut session, &stream_tx, engine.as_ref().unwrap());
                 continue;
             }
         }
@@ -637,13 +637,19 @@ pub(crate) fn compress_context_for_session(
     }
 }
 
-pub(crate) fn reset_context_for_session(session: &mut Session, stream_tx: &StdSender<StreamEvent>) {
+pub(crate) fn reset_context_for_session(
+    session: &mut Session,
+    stream_tx: &StdSender<StreamEvent>,
+    engine: &RuntimeEngine,
+) {
     let total = session.messages.len();
     session.summary_up_to = total;
     session.context_summary = None;
     session.current_tokens = 0;
     session.active_agent_current_tokens = 0;
     session.agent_current_tokens.clear();
+    // 清空后重建 system prompt
+    crate::react::context::rebuild_system_prompt(session, engine);
     let _ = stream_tx.send(StreamEvent::ContextCompressed {
         action: "清理".to_string(),
         summary_up_to: total,
@@ -698,7 +704,7 @@ fn build_engine_from_config(
     use crate::model::OnRetryCallback;
     use crate::models_config::ModelsConfig;
 
-    // 从 LlmConfig 构建兼容的 ModelsConfig（供 PromptAssembler 等旧代码使用）
+    // 从 LlmConfig 构建兼容的 ModelsConfig（供 system prompt 构建使用）
     let models_config = ModelsConfig::from_llm_config(&config.llm);
     let model_config = models_config.to_chat_provider_config();
 

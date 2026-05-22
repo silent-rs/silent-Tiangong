@@ -175,6 +175,7 @@ mod tests {
             trust_mode: Default::default(),
             context_summary: None,
             summary_up_to: 0,
+            system_prompt_message: None,
             created_at: String::new(),
             updated_at: String::new(),
         }

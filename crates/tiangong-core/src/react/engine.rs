@@ -449,6 +449,10 @@ impl ReactEngine {
         }
 
         'react_loop: loop {
+            // 首轮：确保 system prompt 已构建
+            if round == 0 && session.system_prompt_message.is_none() {
+                crate::react::context::rebuild_system_prompt(session, &self.engine);
+            }
             match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
                 PendingCommandEffect::Terminate => return accumulated_usage,
                 PendingCommandEffect::MessageInjected => {
@@ -553,7 +557,11 @@ impl ReactEngine {
                                 );
                             }
                             Some(Command::ResetContext) => {
-                                crate::core::reset_context_for_session(session, stream_tx);
+                                crate::core::reset_context_for_session(
+                                    session,
+                                    stream_tx,
+                                    &self.engine,
+                                );
                             }
                         }
                     }
@@ -946,7 +954,11 @@ impl ReactEngine {
                                     );
                                 }
                                 Some(Command::ResetContext) => {
-                                    crate::core::reset_context_for_session(session, stream_tx);
+                                    crate::core::reset_context_for_session(
+                                        session,
+                                        stream_tx,
+                                        &self.engine,
+                                    );
                                 }
                             }
                         };
@@ -1684,7 +1696,7 @@ impl ReactEngine {
                             );
                         }
                         Some(Command::ResetContext) => {
-                            crate::core::reset_context_for_session(parent_session, stream_tx);
+                            crate::core::reset_context_for_session(parent_session, stream_tx, &self.engine);
                         }
                         Some(Command::ReloadConfig) | Some(Command::Approval { .. }) => {}
                         None => break,
@@ -1858,7 +1870,7 @@ fn drain_pending_commands_async(
                 crate::core::compress_context_for_session(session, engine, stream_tx);
             }
             Command::ResetContext => {
-                crate::core::reset_context_for_session(session, stream_tx);
+                crate::core::reset_context_for_session(session, stream_tx, engine);
             }
         }
     }
@@ -1890,7 +1902,7 @@ fn check_cancel(
                 crate::core::compress_context_for_session(session, engine, stream_tx);
             }
             Command::ResetContext => {
-                crate::core::reset_context_for_session(session, stream_tx);
+                crate::core::reset_context_for_session(session, stream_tx, engine);
             }
             _ => {}
         }

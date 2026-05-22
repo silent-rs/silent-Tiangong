@@ -913,13 +913,12 @@ fn build_provider_messages(req: &ModelRequest) -> (String, Vec<ChatMessage>) {
         format!("允许文件操作目录：{}", allowed_file_roots_text()),
     ];
     for msg in &req.context {
-        if msg.role == MessageRole::Tool
-            && msg.tool_call_id.is_none()
-            && msg.tool_name.as_deref() == Some("context_summary")
-        {
-            let summary = msg.content.trim();
-            if !summary.is_empty() {
-                system_texts.push(format!("此前对话摘要：\n{summary}"));
+        // 提取 System 消息作为完整 system prompt
+        if msg.role == MessageRole::System {
+            let text = msg.content.trim();
+            if !text.is_empty() {
+                system_texts.clear();
+                system_texts.push(text.to_string());
             }
             continue;
         }

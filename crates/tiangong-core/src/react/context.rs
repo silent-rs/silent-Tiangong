@@ -4,10 +4,21 @@ use std::sync::mpsc::Sender as StdSender;
 
 use crate::context::organizer::ContextOrganizer;
 use crate::model::{ModelClient, ModelRequest, SingleProviderClient, TokenUsage};
+use crate::prompt::SystemPromptConfig;
 use crate::runtime::{RuntimeEngine, use_stream_mode};
 use crate::session::{Message, MessageRole, Session, now_text};
 use crate::stream_throttle::ThrottledStreamSink;
 use tiangong_types::StreamEvent;
+
+/// 从 RuntimeEngine 配置构建 SystemPromptConfig 并重建 session 的 system prompt
+pub(crate) fn rebuild_system_prompt(session: &mut Session, engine: &RuntimeEngine) {
+    let config = SystemPromptConfig::from_configs(
+        engine.models_config(),
+        engine.agent_config(),
+        &session.id,
+    );
+    session.rebuild_system_prompt(&config);
+}
 
 pub(crate) fn compression_threshold_tokens(context_limit: usize) -> usize {
     ContextOrganizer::new(context_limit)
@@ -67,6 +78,8 @@ pub(crate) fn maybe_update_context_summary(
                 * (remaining as f64 / total_messages.max(1) as f64))
                 as usize;
             session.current_tokens = estimated_tokens;
+            // 压缩后重建 system prompt（摘要已更新）
+            rebuild_system_prompt(session, engine);
             emit_token_usage(
                 stream_tx,
                 &update.usage,
@@ -169,6 +182,10 @@ pub(crate) fn force_final_response(
     engine: &RuntimeEngine,
     stream_tx: &StdSender<StreamEvent>,
 ) {
+    // 确保 system prompt 已构建
+    if session.system_prompt_message.is_none() {
+        rebuild_system_prompt(session, engine);
+    }
     // 注入提示消息到 session
     session.messages.push(Message {
         id: scru128::new().to_string(),
