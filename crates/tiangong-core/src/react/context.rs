@@ -60,15 +60,22 @@ pub(crate) fn maybe_update_context_summary(
         observed_prompt_tokens,
     ) {
         Ok(update) if update.compressed => {
+            // 重置 current_tokens，压缩后上下文已大幅缩减
+            session.current_tokens = 0;
+            let remaining = session.messages.len().saturating_sub(session.summary_up_to);
+            // 估算压缩后的 token 数（基于剩余消息比例）
+            let estimated_tokens = (observed_prompt_tokens as f64
+                * (remaining as f64 / total_messages.max(1) as f64))
+                as usize;
+            session.current_tokens = estimated_tokens;
             emit_token_usage(
                 stream_tx,
                 &update.usage,
-                None,
+                Some(estimated_tokens),
                 engine.context_limit,
                 "context_summary",
                 None,
             );
-            let remaining = session.messages.len().saturating_sub(session.summary_up_to);
             let _ = stream_tx.send(StreamEvent::ContextCompressed {
                 action: "自动压缩".to_string(),
                 summary_up_to: session.summary_up_to,
