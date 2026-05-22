@@ -849,7 +849,16 @@ pub(crate) fn execute_attachment_analysis_tool(
         );
     }
 
-    let mut attachment_message = Message::new(
+    let mut attachment_context = vec![Message::new(
+        MessageRole::User,
+        "你是附件解析助手。只根据随消息提供的附件内容和解析要求回答，输出可供主模型直接使用的简洁中文结果。".to_string(),
+    )];
+    let attachment_message = Message::new(
+        MessageRole::Assistant,
+        "好的，我将作为附件解析助手，根据附件内容和解析要求进行分析。".to_string(),
+    );
+    attachment_context.push(attachment_message);
+    let mut user_message = Message::new(
         MessageRole::User,
         format!(
             "用户原始消息：{}\n\n解析要求：{}",
@@ -857,16 +866,13 @@ pub(crate) fn execute_attachment_analysis_tool(
             instruction
         ),
     );
-    attachment_message.media = media;
+    user_message.media = media;
+    attachment_context.push(user_message);
 
     let req = ModelRequest {
         session_title: format!("{} · attachment-analysis", session.title),
         user_input: String::new(),
-        context: vec![attachment_message],
-        assembled_system_prompt: Some(
-            "你是附件解析助手。只根据随消息提供的附件内容和解析要求回答，输出可供主模型直接使用的简洁中文结果。"
-                .to_string(),
-        ),
+        context: attachment_context,
         thinking: None,
         reasoning_effort: None,
         thinking_disabled: false,

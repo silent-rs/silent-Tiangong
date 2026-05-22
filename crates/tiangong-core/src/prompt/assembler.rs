@@ -34,22 +34,16 @@ impl PromptAssembler {
         agent_config: &AgentConfig,
         loop_context: &[Message],
     ) -> AssembledPrompt {
-        // 1. 构建 System Prompt（静态 + 动态块）
+        // 1. 构建 System Prompt 动态段（媒体能力、Skills、团队协作等）
         let system_block = sections::build_system_prompt_block(models_config, agent_config);
-        let system_prompt = system_block.to_text();
+        let dynamic_sections: Vec<String> = system_block
+            .dynamic_blocks
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect();
 
         // 2. System Context（环境事实）
-        let mut system_context = sections::build_system_context(session);
-        if let Some(summary) = session
-            .context_summary
-            .as_deref()
-            .map(str::trim)
-            .filter(|summary| !summary.is_empty())
-        {
-            system_context.push(format!(
-                "## 早期对话摘要（上下文压缩）\n{summary}\n\n请将以上摘要视为此前多轮对话的压缩上下文。"
-            ));
-        }
+        let system_context = sections::build_system_context(session);
 
         // 3. 历史消息（经过裁剪/压缩）
         let organizer = ContextOrganizer::new(self.context_limit).with_keep_recent_turns(6);
@@ -58,15 +52,41 @@ impl PromptAssembler {
         // 追加 loop_context（当前事件循环的中间消息）
         history_messages.extend(loop_context.iter().cloned());
 
-        // 4. System Attachments（MCP 工具摘要等系统级工具上下文）
+        // 4. context_summary 作为 Tool 消息注入对话流（不进系统提示词）
+        let context_summary_message = session
+            .context_summary
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|summary| Message {
+                id: scru128::new().to_string(),
+                role: crate::session::MessageRole::Tool,
+                content: format!(
+                    "<context-summary>\n{summary}\n</context-summary>\n\
+                    请将以上摘要视为此前多轮对话的压缩上下文。"
+                ),
+                reasoning_content: String::new(),
+                reasoning_signature: None,
+                worker_id: None,
+                media: Vec::new(),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                tool_name: Some("context_summary".to_string()),
+                tool_result_is_error: false,
+                compact: false,
+                created_at: crate::session::now_text(),
+            });
+
+        // 5. System Attachments（MCP 工具摘要等系统级工具上下文）
         let attachment_messages = build_attachments(agent_config);
 
         AssembledPrompt {
-            system_prompt,
+            system_prompt: dynamic_sections.join("\n\n"),
             system_context,
             user_context: Vec::new(),
             history_messages,
             attachment_messages,
+            context_summary_message,
             user_input: user_input.to_string(),
             tools,
         }
@@ -120,8 +140,6 @@ mod tests {
             &[],
         );
 
-        assert!(result.system_prompt.contains("天工"));
-        assert!(result.system_prompt.contains("规则"));
         assert_eq!(result.user_input, "你好");
         assert!(result.system_context.iter().any(|c| c.contains("工作目录")));
     }

@@ -114,7 +114,6 @@ impl QueryOrchestrator {
             session_title: String::new(),
             user_input: prompt.clone(),
             context: Vec::new(),
-            assembled_system_prompt: None,
             thinking: None,
             reasoning_effort: None,
             thinking_disabled: false,

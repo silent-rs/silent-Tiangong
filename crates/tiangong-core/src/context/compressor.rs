@@ -146,7 +146,6 @@ impl ContextCompressor {
             session_title: String::new(),
             user_input: String::new(),
             context,
-            assembled_system_prompt: None,
             thinking: None,
             reasoning_effort: None,
             thinking_disabled: false,

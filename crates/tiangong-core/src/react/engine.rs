@@ -499,13 +499,11 @@ impl ReactEngine {
                 &loop_context_with_memory,
             );
 
-            let system_prompt = assembled.final_system_prompt();
             let (thinking, reasoning_effort, thinking_disabled) = self.build_thinking_config();
             let req = ModelRequest {
                 session_title: session.title.clone(),
                 user_input: assembled.user_input.clone(),
                 context: assembled.build_messages(),
-                assembled_system_prompt: Some(system_prompt),
                 thinking,
                 reasoning_effort,
                 thinking_disabled,

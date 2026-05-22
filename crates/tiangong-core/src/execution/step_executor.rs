@@ -64,7 +64,6 @@ pub async fn execute_single_plan_step_with_execution_agent(
             session_title: format!("{} · execution-agent", session.title),
             user_input: round_prompt,
             context: loop_context.clone(),
-            assembled_system_prompt: None,
             thinking: Some(crate::model::ThinkingConfig {
                 budget_tokens: 4096,
             }),

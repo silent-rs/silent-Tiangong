@@ -2,7 +2,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::mcp::build_mcp_tools_system_prompt;
 use crate::session::{Message, MessageRole};
 use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose};
@@ -46,8 +45,6 @@ pub struct ModelRequest {
     pub session_title: String,
     pub user_input: String,
     pub context: Vec<Message>,
-    /// 已由 PromptAssembler 装配的 system prompt。
-    pub assembled_system_prompt: Option<String>,
     pub thinking: Option<ThinkingConfig>,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub thinking_disabled: bool,
@@ -56,25 +53,6 @@ pub struct ModelRequest {
 }
 
 impl ModelRequest {
-    /// 带 assembled_system_prompt 的构造
-    pub fn with_assembled_prompt(
-        session_title: String,
-        user_input: String,
-        context: Vec<Message>,
-        system_prompt: String,
-    ) -> Self {
-        Self {
-            session_title,
-            user_input,
-            context,
-            assembled_system_prompt: Some(system_prompt),
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: false,
-            include_media: false,
-        }
-    }
-
     pub fn with_thinking_budget(mut self, budget_tokens: u32) -> Self {
         self.thinking = Some(ThinkingConfig { budget_tokens });
         self
@@ -911,35 +889,37 @@ fn build_provider_request(
     }
 }
 
+const SYSTEM_IDENTITY: &str = "你是天工智能助手，一个功能丰富的个人 AI 中枢。你可以回答问题、处理文件、执行命令、生成多媒体内容，也可以通过工具和技能完成各种复杂任务。";
+
+const SYSTEM_RULES: &str = "规则：\
+1. 对话时自然友好，回复内容完整有用。闲聊和问候时正常交流，简单介绍自己的能力。\
+2. 需要文件操作、代码搜索、命令执行等实际操作时，调用对应的工具。\
+3. 每次工具调用后会收到执行结果，根据结果决定下一步：继续调用工具或给出最终回复。\
+4. 执行工具任务时语言简洁高效，不要说\"让我查看\"之类的过渡语，直接给出结果。\
+5. 不要在回复中包含工具调用的原始痕迹（如 ok=、exit_code= 等元数据）。\
+6. 回复使用 Markdown 格式：代码和命令用代码块包裹，使用标题、列表等结构化排版。\
+7. 工具调用失败时必须如实告知用户失败原因，绝对不能虚构成功结果。\
+8. 如果已安装的 Skill 能处理用户请求，优先通过 run_command 调用 Skill 脚本。\
+9. 耗时较长的命令使用 spawn_task 在后台执行。\
+10. 多个可并行的耗时任务使用 spawn+join 模式。";
+
 fn build_provider_messages(req: &ModelRequest) -> (String, Vec<ChatMessage>) {
     let mut messages = Vec::new();
 
-    let system_texts = if let Some(ref assembled) = req.assembled_system_prompt {
-        let texts = vec![assembled.clone()];
-        for msg in &req.context {
-            if let Some(message) = provider_message_from_session(msg, req.include_media) {
-                messages.push(message);
-            }
+    let system_texts = [
+        SYSTEM_IDENTITY.to_string(),
+        SYSTEM_RULES.to_string(),
+        format!("当前会话：{}", req.session_title),
+        format!("当前工作目录：{}", current_working_directory_text()),
+        format!("允许文件操作目录：{}", allowed_file_roots_text()),
+    ];
+    for msg in &req.context {
+        if let Some(message) = provider_message_from_session(msg, req.include_media) {
+            messages.push(message);
         }
-        texts
-    } else {
-        let mut texts = vec![
-            format!("当前会话：{}", req.session_title),
-            format!("当前工作目录：{}", current_working_directory_text()),
-            format!("允许文件操作目录：{}", allowed_file_roots_text()),
-        ];
-        if let Some(mcp_tools_prompt) = build_mcp_tools_system_prompt(24) {
-            texts.push(mcp_tools_prompt);
-        }
-        for msg in &req.context {
-            if let Some(message) = provider_message_from_session(msg, req.include_media) {
-                messages.push(message);
-            }
-        }
-        texts
-    };
+    }
 
-    if req.assembled_system_prompt.is_none() && !req.user_input.is_empty() {
+    if !req.user_input.is_empty() {
         messages.push(ChatMessage::text(
             LlmMessageRole::User,
             req.user_input.clone(),

@@ -53,16 +53,18 @@ pub struct PromptSection {
 /// 包含发送给 API 所需的全部数据。
 #[derive(Debug, Clone)]
 pub struct AssembledPrompt {
-    /// System Prompt（合并后的文本）
+    /// System Prompt 动态段（媒体能力、Skills、团队协作等）
     pub system_prompt: String,
-    /// System Context 追加到 system prompt 尾部的环境信息
+    /// System Context（环境事实，注入对话流）
     pub system_context: Vec<String>,
     /// User Context（包装为 system-reminder，放在消息最前面）
     pub user_context: Vec<String>,
     /// 历史消息（经过裁剪/压缩）
     pub history_messages: Vec<Message>,
-    /// Attachment Messages（技能列表、文件引用、诊断等）
+    /// Attachment Messages（MCP 工具摘要等）
     pub attachment_messages: Vec<Message>,
+    /// 上下文压缩摘要（作为 Tool 消息注入对话流）
+    pub context_summary_message: Option<Message>,
     /// 当前用户输入
     pub user_input: String,
     /// 工具定义
@@ -118,12 +120,17 @@ impl AssembledPrompt {
 
     /// 构建完整的消息列表（按文档顺序）
     ///
-    /// 顺序：history。
-    /// 用户输入统一通过 session history 传递，不在此处追加；系统级上下文已归并到
-    /// final_system_prompt()。
+    /// 顺序：context_summary → attachments → history。
+    /// 所有动态内容通过对话消息流传递，系统提示词保持稳定。
     pub fn build_messages(&self) -> Vec<Message> {
         let mut messages = Vec::new();
-        // 历史消息（包含用户输入）
+        // 1. 上下文压缩摘要（如存在）
+        if let Some(ref msg) = self.context_summary_message {
+            messages.push(msg.clone());
+        }
+        // 2. 系统级工具上下文（MCP 工具摘要等）
+        messages.extend(self.attachment_messages.iter().cloned());
+        // 3. 历史消息（包含用户输入）
         messages.extend(self.history_messages.iter().cloned());
         messages
     }
@@ -151,6 +158,7 @@ mod tests {
             user_context: vec!["偏好中文".into()],
             history_messages: Vec::new(),
             attachment_messages: Vec::new(),
+            context_summary_message: None,
             user_input: "你好".into(),
             tools: Vec::new(),
         };
@@ -180,6 +188,7 @@ mod tests {
                 compact: false,
                 created_at: String::new(),
             }],
+            context_summary_message: None,
             user_input: String::new(),
             tools: Vec::new(),
         };
@@ -200,6 +209,7 @@ mod tests {
             user_context: Vec::new(),
             history_messages: Vec::new(),
             attachment_messages: Vec::new(),
+            context_summary_message: None,
             user_input: "你好".into(),
             tools: Vec::new(),
         };
@@ -228,11 +238,12 @@ mod tests {
                 created_at: String::new(),
             }],
             attachment_messages: Vec::new(),
+            context_summary_message: None,
             user_input: "当前输入".into(),
             tools: Vec::new(),
         };
         let msgs = prompt.build_messages();
-        // 系统级上下文进入 system prompt，消息链只保留历史（用户输入已在 history 中）
+        // 无 context_summary、无 attachment，只保留历史（用户输入已在 history 中）
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].content, "历史");
     }
