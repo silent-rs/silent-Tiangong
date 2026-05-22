@@ -123,23 +123,26 @@ pub(crate) fn append_tool_result_message(
     session.updated_at = now_text();
 }
 
-pub(crate) fn append_runtime_tool_message(session: &mut Session, tool_name: &str, content: String) {
-    let mut message = Message::new(MessageRole::Tool, content);
-    message.tool_name = Some(tool_name.to_string());
-    session.messages.push(message);
-    session.updated_at = now_text();
+pub(crate) fn append_runtime_tool_message(
+    _session: &mut Session,
+    tool_name: &str,
+    content: String,
+) {
+    tracing::info!(tool_name, content, "runtime trace");
 }
 
 pub(crate) fn append_runtime_tool_message_with_reasoning(
-    session: &mut Session,
+    _session: &mut Session,
     tool_name: &str,
     content: String,
     reasoning_content: String,
 ) {
-    let mut message = Message::with_reasoning(MessageRole::Tool, content, reasoning_content);
-    message.tool_name = Some(tool_name.to_string());
-    session.messages.push(message);
-    session.updated_at = now_text();
+    tracing::info!(
+        tool_name,
+        content,
+        reasoning_content,
+        "runtime trace with reasoning"
+    );
 }
 
 pub(crate) fn tool_result_provider_text(
