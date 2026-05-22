@@ -701,6 +701,7 @@ fn build_engine_from_config(
         trust_mode: config.trust_mode,
         default_trust_mode: config.default_trust_mode,
         custom_system_prompt: config.custom_system_prompt.clone(),
+        reasoning_effort: config.reasoning_effort.clone(),
     };
 
     // 构造重试回调：发送 StreamEvent::Retry 通知前端
@@ -860,6 +861,8 @@ pub(crate) fn execute_attachment_analysis_tool(
                 .to_string(),
         ),
         thinking: None,
+        reasoning_effort: None,
+        thinking_disabled: false,
         include_media: true,
     };
 

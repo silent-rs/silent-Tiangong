@@ -1716,6 +1716,85 @@ pub fn set_custom_system_prompt(prompt: String, state: State<TiangongApp>) -> Re
     Ok(())
 }
 
+#[tauri::command]
+pub fn get_reasoning_effort(state: State<TiangongApp>) -> Result<String, String> {
+    state.with_state_read(|core_state| Ok(core_state.agent_config().reasoning_effort.clone()))
+}
+
+#[tauri::command]
+pub fn set_reasoning_effort(effort: String, state: State<TiangongApp>) -> Result<(), String> {
+    let valid = ["none", "low", "medium", "high", "max"];
+    if !valid.contains(&effort.as_str()) {
+        return Err(format!(
+            "无效的思考强度: {effort}，可选值: {}",
+            valid.join("/")
+        ));
+    }
+    state.with_state(|core_state| core_state.set_reasoning_effort(effort))?;
+    state.sync_core_config_from_state()?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_provider_balance(
+    provider_name: String,
+    state: State<'_, TiangongApp>,
+) -> Result<serde_json::Value, String> {
+    let (base_url, api_key) = state.with_state_read(|core_state| {
+        let models = core_state.models_config();
+        let provider = models
+            .providers
+            .get(&provider_name)
+            .ok_or_else(|| anyhow::anyhow!("Provider '{provider_name}' 不存在"))?;
+        let resolved_key =
+            tiangong_core::models_config::ModelsConfig::resolve_api_key(&provider.api_key);
+        if resolved_key.trim().is_empty() {
+            return Err(anyhow::anyhow!(
+                "Provider '{provider_name}' 的 API Key 未设置"
+            ));
+        }
+        Ok((provider.base_url.clone(), resolved_key))
+    })?;
+
+    // 余额 API 挂在域名根路径下，需去掉 base_url 中的路径部分
+    // e.g. https://api.deepseek.com/anthropic → https://api.deepseek.com/user/balance
+    let trimmed = base_url.trim_end_matches('/');
+    let origin = if let Some(scheme_end) = trimmed.find("://") {
+        let rest = &trimmed[scheme_end + 3..];
+        if let Some(slash_pos) = rest.find('/') {
+            trimmed[..scheme_end + 3 + slash_pos].to_string()
+        } else {
+            trimmed.to_string()
+        }
+    } else if let Some(slash_pos) = trimmed.find('/') {
+        trimmed[..slash_pos].to_string()
+    } else {
+        trimmed.to_string()
+    };
+    let url = format!("{origin}/user/balance");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?;
+    let response = client
+        .get(&url)
+        .bearer_auth(&api_key)
+        .send()
+        .await
+        .map_err(|e| format!("请求余额失败 ({url}): {e}"))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("查询余额失败: HTTP {status}, {body}"));
+    }
+
+    response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("解析余额响应失败: {e}"))
+}
+
 /// 获取会话成本统计
 #[tauri::command]
 pub fn get_session_cost(

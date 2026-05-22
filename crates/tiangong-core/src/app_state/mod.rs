@@ -149,4 +149,9 @@ impl TiangongState {
         self.rebuild_runtime_from_current_config();
         self.persist_app_only()
     }
+
+    pub fn set_reasoning_effort(&mut self, effort: String) -> Result<()> {
+        self.store.agent.agent_config.reasoning_effort = effort;
+        self.persist_app_only()
+    }
 }

@@ -142,6 +142,8 @@ pub struct CoreConfig {
     pub default_trust_mode: TrustMode,
     /// 用户自定义 system prompt
     pub custom_system_prompt: String,
+    /// 思考强度设置
+    pub reasoning_effort: String,
     /// 上下文窗口大小（token 数）
     pub context_limit: usize,
 }
@@ -156,6 +158,7 @@ impl Default for CoreConfig {
             trust_mode: TrustMode::default(),
             default_trust_mode: TrustMode::default(),
             custom_system_prompt: String::new(),
+            reasoning_effort: "medium".to_string(),
             context_limit: DEFAULT_CONTEXT_LIMIT,
         }
     }

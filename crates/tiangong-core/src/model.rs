@@ -27,7 +27,7 @@ use tiangong_llm::usage::TokenUsageData;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 
 pub use tiangong_llm::ProviderProtocol;
-pub use tiangong_llm::request::ThinkingConfig;
+pub use tiangong_llm::request::{ReasoningEffort, ThinkingConfig};
 pub use tiangong_llm::tool::{ToolCall, ToolChoice, ToolSpec};
 pub use tiangong_types::TokenUsage;
 
@@ -49,6 +49,8 @@ pub struct ModelRequest {
     /// 已由 PromptAssembler 装配的 system prompt。
     pub assembled_system_prompt: Option<String>,
     pub thinking: Option<ThinkingConfig>,
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub thinking_disabled: bool,
     /// 普通主模型请求不携带附件原始内容；只有显式的多模态解析工具会开启。
     pub include_media: bool,
 }
@@ -67,6 +69,8 @@ impl ModelRequest {
             context,
             assembled_system_prompt: Some(system_prompt),
             thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
             include_media: false,
         }
     }
@@ -381,6 +385,8 @@ impl SingleProviderClient {
             stop_sequences: Vec::new(),
             metadata: None,
             thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
         };
         let response = self.block_on_llm(provider.complete(request))?;
         let text = strip_think_tags(&collect_provider_text(&response))
@@ -466,6 +472,8 @@ impl SingleProviderClient {
             stop_sequences: Vec::new(),
             metadata: None,
             thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
         };
         let response = self.block_on_llm(provider.complete(request))?;
         Ok(collect_provider_text(&response).trim().to_string())
@@ -492,6 +500,8 @@ impl SingleProviderClient {
             stop_sequences: Vec::new(),
             metadata: None,
             thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
         };
         if self.protocol() == ProviderProtocol::Anthropic {
             let provider = self.build_anthropic_provider(timeout_ms)?;
@@ -896,6 +906,8 @@ fn build_provider_request(
         stop_sequences: Vec::new(),
         metadata: None,
         thinking,
+        reasoning_effort: req.reasoning_effort,
+        thinking_disabled: req.thinking_disabled,
     }
 }
 

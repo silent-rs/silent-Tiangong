@@ -95,6 +95,7 @@ impl TiangongConfig {
             trust_mode: self.trust_mode,
             default_trust_mode: self.trust_mode,
             custom_system_prompt: String::new(),
+            reasoning_effort: "medium".to_string(),
             context_limit: 0, // 0 表示自动根据模型名称解析
         }
     }

@@ -14,6 +14,15 @@ fn default_thinking_budget_tokens() -> u32 {
     2048
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    Low,
+    Medium,
+    High,
+    Max,
+}
+
 /// 统一 provider 请求。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderRequest {
@@ -35,4 +44,9 @@ pub struct ProviderRequest {
     pub metadata: Option<Map<String, Value>>,
     #[serde(default)]
     pub thinking: Option<ThinkingConfig>,
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
+    /// 显式禁用思考模式（如 DeepSeek 的 thinking: {"type": "disabled"}）
+    #[serde(default)]
+    pub thinking_disabled: bool,
 }

@@ -179,6 +179,13 @@ pub struct AgentConfig {
     /// 用户自定义特色 Prompt，会注入到 system prompt。
     #[serde(default)]
     pub custom_system_prompt: String,
+    /// 思考强度设置：none/low/medium/high/max，默认 medium
+    #[serde(default = "default_reasoning_effort")]
+    pub reasoning_effort: String,
+}
+
+fn default_reasoning_effort() -> String {
+    "medium".to_string()
 }
 
 impl Default for SkillsConfig {

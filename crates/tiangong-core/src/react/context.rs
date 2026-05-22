@@ -242,6 +242,8 @@ pub(crate) fn force_final_response(
         thinking: Some(crate::model::ThinkingConfig {
             budget_tokens: 4096,
         }),
+        reasoning_effort: None,
+        thinking_disabled: false,
         include_media: false,
     };
 

@@ -19,6 +19,7 @@ pub use embedding::{
     embedding_provider_from_config,
 };
 pub use model::{ProviderModelInfo, ProviderProtocol};
+pub use request::ReasoningEffort;
 pub use rerank::{
     RerankEndpointConfig, RerankProvider, RerankRequest, RerankResponse, RerankResult,
 };

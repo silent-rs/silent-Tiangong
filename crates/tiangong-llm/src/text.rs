@@ -80,6 +80,8 @@ pub async fn complete_text_with_usage(
         stop_sequences: Vec::new(),
         metadata: None,
         thinking: None,
+        reasoning_effort: None,
+        thinking_disabled: false,
     };
     let response = provider.complete(request).await?;
     Ok((message_text(&response.assistant_message), response.usage))

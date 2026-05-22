@@ -154,6 +154,8 @@ fn build_plan_with_agent_inner(
         thinking: Some(crate::model::ThinkingConfig {
             budget_tokens: 4096,
         }),
+        reasoning_effort: None,
+        thinking_disabled: false,
         include_media: false,
     };
     let response = client

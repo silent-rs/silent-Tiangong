@@ -49,6 +49,18 @@ export interface CostSummary {
   tool_call_count: number;
 }
 
+export interface BalanceInfo {
+  currency: string;
+  total_balance: string;
+  granted_balance: string;
+  topped_up_balance: string;
+}
+
+export interface ProviderBalance {
+  is_available: boolean;
+  balance_infos: BalanceInfo[];
+}
+
 export interface RequestCost {
   request_id: string;
   usage: TokenUsage;
@@ -382,6 +394,15 @@ export const api = {
 
   setCustomSystemPrompt: (prompt: string): Promise<void> =>
     invoke('set_custom_system_prompt', { prompt }),
+
+  getReasoningEffort: (): Promise<string> =>
+    invoke('get_reasoning_effort'),
+
+  setReasoningEffort: (effort: string): Promise<void> =>
+    invoke('set_reasoning_effort', { effort }),
+
+  getProviderBalance: (providerName: string): Promise<ProviderBalance> =>
+    invoke('get_provider_balance', { providerName }),
 
   getRunSnapshot: (): Promise<RunSnapshot> =>
     invoke('get_run_snapshot'),

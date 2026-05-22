@@ -116,6 +116,8 @@ impl QueryOrchestrator {
             context: Vec::new(),
             assembled_system_prompt: None,
             thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
             include_media: false,
         };
 
