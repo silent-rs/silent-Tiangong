@@ -20,6 +20,11 @@ use tiangong_types::{SessionStreamEvent, StreamEvent};
 const MAX_ROUNDS: usize = 20;
 
 // ── Memory re-exports ──
+pub use crate::index::{
+    WorkspaceIndexInfo, backfill_session_index, delete_workspace_index_for_gui,
+    list_workspace_indexes_for_gui, rebuild_workspace_index_for_gui, session_index_exists,
+    workspace_index_exists,
+};
 pub use crate::memory::gui_api::*;
 pub(crate) use crate::memory::recall::{
     duplicate_memory_recall_tool_result, execute_memory_recall_tool, inject_memory_recall_tool,
@@ -296,6 +301,14 @@ async fn worker_loop_async(
     // turn 计数器：每 10 个 turn 触发一次 Meta 反刍（归档低活跃节点）
     let mut turn_count: u32 = 0;
 
+    // IndexManager：Workspace 文件索引 + Session 对话索引
+    let index_manager = crate::index::IndexManager::new()
+        .map_err(|e| {
+            tracing::warn!("IndexManager 初始化失败: {e}");
+            e
+        })
+        .ok();
+
     // 内部 StreamEvent 通道 —— 转发线程负责包装 session_id
     // stream_tx 保持 std::sync::mpsc（工具执行等同步代码可直接使用）
     let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
@@ -316,6 +329,17 @@ async fn worker_loop_async(
     });
 
     apply_session_cwd(&session);
+
+    // 初始索引：仅在索引不存在时扫描
+    if let Some(ref im) = index_manager {
+        let root = std::path::PathBuf::from(&session.cwd);
+        if root.is_dir() && !crate::index::workspace_index_exists(&root) {
+            match im.full_scan(&root) {
+                Ok(count) => tracing::info!(count, "Workspace 初始索引扫描完成"),
+                Err(e) => tracing::warn!("Workspace 初始索引扫描失败: {e}"),
+            }
+        }
+    }
 
     // 恢复未完成的审批请求（崩溃恢复场景）
     let pending = crate::approval_store::get_pending(&session_id);
@@ -349,6 +373,9 @@ async fn worker_loop_async(
                 .filter(|t| t.name != "mark_step_completed")
                 .collect();
             inject_enhanced_tools(&mut new_tools, e);
+            if index_manager.is_some() {
+                crate::index::inject_index_search_tool(&mut new_tools);
+            }
             if memory.handle.is_some() {
                 inject_memory_recall_tool(&mut new_tools);
             }
@@ -371,6 +398,7 @@ async fn worker_loop_async(
 
         match cmd {
             Command::UpdateCwd { cwd } => {
+                let cwd_changed = cwd != session.cwd;
                 session.cwd = cwd;
                 apply_session_cwd(&session);
                 let cfg = config.snapshot();
@@ -380,6 +408,22 @@ async fn worker_loop_async(
                     memory.process_type.clone(),
                 )
                 .await;
+
+                // 索引：仅当 CWD 实际变化时扫描
+                if cwd_changed && let Some(ref im) = index_manager {
+                    let root = std::path::PathBuf::from(&session.cwd);
+                    if root.is_dir() {
+                        match im.full_scan(&root) {
+                            Ok(count) => {
+                                tracing::info!(count, "Workspace 索引扫描完成");
+                            }
+                            Err(e) => {
+                                tracing::warn!("Workspace 索引扫描失败: {e}");
+                            }
+                        }
+                    }
+                }
+
                 continue;
             }
             Command::ReloadConfig => {
@@ -416,9 +460,15 @@ async fn worker_loop_async(
                     &stream_tx,
                     &mut cmd_rx,
                     memory.handle.as_ref(),
+                    index_manager.as_ref(),
                     team_context.clone(),
                 )
                 .await;
+
+                // Turn 完成后 → Session 索引
+                if let Some(ref im) = index_manager {
+                    index_turn_messages(im, &session, turn_start_idx);
+                }
 
                 // turn 完成后触发增强版 Micro 反刍
                 if let Some(handle) = memory.handle.as_ref() {
@@ -491,7 +541,40 @@ async fn worker_loop_async(
         tracing::info!(session_id = %session_id, "Meso 反刍已触发（会话结束）");
     }
 
+    // 会话结束 → finalize Session 索引
+    if let Some(ref im) = index_manager
+        && let Err(e) = im.finalize_session_index(&session_id)
+    {
+        tracing::warn!("Session 索引 finalize 失败: {e}");
+    }
+
     session
+}
+
+fn index_turn_messages(
+    index_manager: &crate::index::IndexManager,
+    session: &Session,
+    turn_start_idx: usize,
+) {
+    for msg in &session.messages[turn_start_idx..] {
+        let role = match msg.role {
+            MessageRole::User => "user",
+            MessageRole::Assistant => "assistant",
+            MessageRole::Tool => "tool",
+            MessageRole::System => continue,
+        };
+        let turn = crate::index::TurnData {
+            turn_id: msg.id.clone(),
+            workspace_id: session.cwd.clone(),
+            role: role.to_string(),
+            content: msg.content.clone(),
+            topics: Vec::new(),
+            entity_names: Vec::new(),
+        };
+        if let Err(e) = index_manager.index_turn(&session.id, &turn) {
+            tracing::warn!("Session 索引写入失败: {e}");
+        }
+    }
 }
 
 pub(crate) fn apply_session_cwd(session: &Session) {
@@ -570,6 +653,7 @@ async fn execute_turn_async(
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     memory_handle: Option<&tiangong_memory::MemoryHandle>,
+    index_manager: Option<&crate::index::IndexManager>,
     team_context: Arc<Mutex<crate::agent_team::lifecycle::TeamContext>>,
 ) {
     let mut react = crate::react::engine::ReactEngine::new(
@@ -580,7 +664,14 @@ async fn execute_turn_async(
     )
     .with_shared_team(team_context, "main".to_string());
     react
-        .execute_turn(session, user_input, stream_tx, cmd_rx, memory_handle)
+        .execute_turn(
+            session,
+            user_input,
+            stream_tx,
+            cmd_rx,
+            memory_handle,
+            index_manager,
+        )
         .await;
 }
 

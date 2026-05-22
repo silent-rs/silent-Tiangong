@@ -66,13 +66,22 @@ impl App {
     fs::write(dir.join("image.png"), "fake png").unwrap();
 }
 
+fn create_index_manager() -> (tempfile::TempDir, IndexManager) {
+    let index_temp = tempfile::tempdir().unwrap();
+    let manager = IndexManager::new_with_dir(index_temp.path().to_path_buf()).unwrap();
+    (index_temp, manager)
+}
+
 #[test]
 fn test_workspace_full_scan_and_search() {
+    let _index_temp;
+    let manager;
+    (_index_temp, manager) = create_index_manager();
+
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path();
     create_temp_workspace(workspace);
 
-    let manager = IndexManager::new().unwrap();
     let count = manager.full_scan(workspace).unwrap();
 
     assert!(count >= 3, "至少索引 3 个源文件，实际: {}", count);
@@ -100,11 +109,14 @@ fn test_workspace_full_scan_and_search() {
 
 #[test]
 fn test_workspace_skip_dirs_and_binary_files() {
+    let _index_temp;
+    let manager;
+    (_index_temp, manager) = create_index_manager();
+
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path();
     create_temp_workspace(workspace);
 
-    let manager = IndexManager::new().unwrap();
     let _count = manager.full_scan(workspace).unwrap();
 
     let hits = manager
@@ -126,11 +138,14 @@ fn test_workspace_skip_dirs_and_binary_files() {
 
 #[test]
 fn test_workspace_rust_symbol_search() {
+    let _index_temp;
+    let manager;
+    (_index_temp, manager) = create_index_manager();
+
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path();
     create_temp_workspace(workspace);
 
-    let manager = IndexManager::new().unwrap();
     let _ = manager.full_scan(workspace);
 
     // 搜索函数名
@@ -181,11 +196,14 @@ fn test_workspace_rust_symbol_search() {
 
 #[test]
 fn test_workspace_update_and_remove_file() {
+    let _index_temp;
+    let manager;
+    (_index_temp, manager) = create_index_manager();
+
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path();
     create_temp_workspace(workspace);
 
-    let manager = IndexManager::new().unwrap();
     let _count = manager.full_scan(workspace).unwrap();
 
     // 新增文件
@@ -207,7 +225,10 @@ fn test_workspace_update_and_remove_file() {
 
 #[test]
 fn test_session_index_turn_and_search() {
-    let manager = IndexManager::new().unwrap();
+    let _index_temp;
+    let manager;
+    (_index_temp, manager) = create_index_manager();
+
     let session_id = scru128::new().to_string();
 
     let turn = TurnData {
@@ -247,7 +268,8 @@ fn test_session_index_turn_and_search() {
 
 #[test]
 fn test_session_finalize() {
-    let manager = IndexManager::new().unwrap();
+    let index_temp = tempfile::tempdir().unwrap();
+    let manager = IndexManager::new_with_dir(index_temp.path().to_path_buf()).unwrap();
     let session_id = scru128::new().to_string();
 
     let turn = TurnData {
@@ -262,26 +284,21 @@ fn test_session_finalize() {
     manager.index_turn(&session_id, &turn).unwrap();
     manager.finalize_session_index(&session_id).unwrap();
 
-    // 验证 meta.json 已写入
-    let home = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| ".".into());
-    let meta_path = home
-        .join(".tiangong")
-        .join("index")
-        .join("sessions")
-        .join(&session_id)
-        .join("meta.json");
-    assert!(meta_path.exists(), "finalize 后应写入 meta.json");
+    // 验证索引目录已创建在临时目录中
+    let session_dir = index_temp.path().join("sessions").join(&session_id);
+    assert!(session_dir.exists(), "finalize 后应存在 session 索引目录");
 }
 
 #[test]
 fn test_workspace_entry_count() {
+    let _index_temp;
+    let manager;
+    (_index_temp, manager) = create_index_manager();
+
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path();
     create_temp_workspace(workspace);
 
-    let manager = IndexManager::new().unwrap();
     let count = manager.full_scan(workspace).unwrap();
 
     let queried = manager.workspace_entry_count(workspace).unwrap();

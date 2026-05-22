@@ -269,12 +269,13 @@ pub struct WorkspaceIndex {
     #[allow(dead_code)]
     schema: Schema,
     root: PathBuf,
+    base_dir: PathBuf,
     entry_count: usize,
 }
 
 impl WorkspaceIndex {
-    pub fn open_or_create(root: &Path) -> Result<Self> {
-        let index_dir = Self::index_dir(root);
+    pub fn open_or_create(root: &Path, base_dir: &Path) -> Result<Self> {
+        let index_dir = Self::index_dir(root, base_dir);
         let (schema, fields) = workspace_schema();
 
         let index = if index_dir.exists() {
@@ -295,6 +296,7 @@ impl WorkspaceIndex {
             writer,
             fields,
             root: root.to_path_buf(),
+            base_dir: base_dir.to_path_buf(),
             entry_count: 0,
         })
     }
@@ -306,6 +308,7 @@ impl WorkspaceIndex {
         self.entry_count = 0;
         self.scan_dir(&self.root.clone(), 0)?;
         self.writer.commit().context("提交 Workspace 索引失败")?;
+        self.write_meta()?;
         Ok(self.entry_count)
     }
 
@@ -447,13 +450,26 @@ impl WorkspaceIndex {
         &self.root
     }
 
-    fn index_dir(root: &Path) -> PathBuf {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
+    fn write_meta(&self) -> Result<()> {
+        let meta = super::IndexMeta {
+            root: self.root.to_string_lossy().to_string(),
+            entry_count: self.entry_count,
+            updated_at: chrono::Local::now().naive_local().to_string(),
+        };
+        let meta_dir = Self::index_dir(&self.root, &self.base_dir)
+            .parent()
+            .context("索引目录无效")?
+            .to_path_buf();
+        std::fs::create_dir_all(&meta_dir).context("创建 Workspace meta 目录失败")?;
+        let meta_path = meta_dir.join("meta.json");
+        let json = serde_json::to_string_pretty(&meta).context("序列化 Workspace meta 失败")?;
+        std::fs::write(&meta_path, json).context("写入 Workspace meta 失败")?;
+        Ok(())
+    }
+
+    fn index_dir(root: &Path, base_dir: &Path) -> PathBuf {
         let workspace_id = md5_hex(root.to_string_lossy().as_bytes());
-        home.join(".tiangong")
-            .join("index")
+        base_dir
             .join("workspaces")
             .join(workspace_id)
             .join("tantivy")
@@ -463,6 +479,10 @@ impl WorkspaceIndex {
 pub struct SearchHit {
     pub path: String,
     pub language: String,
+}
+
+pub fn hash_path(root: &Path) -> String {
+    md5_hex(root.to_string_lossy().as_bytes())
 }
 
 fn md5_hex(data: &[u8]) -> String {
