@@ -1,10 +1,9 @@
-//! ReAct 循环上下文管理：memory 注入、强制回复、上下文压缩
+//! ReAct 循环上下文管理：强制回复、上下文压缩
 
 use std::sync::mpsc::Sender as StdSender;
 
 use crate::context::organizer::ContextOrganizer;
 use crate::model::{ModelClient, ModelRequest, SingleProviderClient, TokenUsage};
-use crate::prompt::PromptAssembler;
 use crate::runtime::{RuntimeEngine, use_stream_mode};
 use crate::session::{Message, MessageRole, Session, now_text};
 use crate::stream_throttle::ThrottledStreamSink;
@@ -164,48 +163,14 @@ fn parse_completion_response(response: &str) -> bool {
     trimmed.contains("COMPLETE") && !trimmed.contains("INCOMPLETE")
 }
 
-pub(crate) fn loop_context_with_memory(
-    loop_context: &[Message],
-    memory_context: Option<&str>,
-) -> Vec<Message> {
-    let mut messages = loop_context.to_vec();
-    let Some(ctx) = memory_context.map(str::trim).filter(|ctx| !ctx.is_empty()) else {
-        return messages;
-    };
-
-    messages.insert(
-        0,
-        Message {
-            id: scru128::new().to_string(),
-            role: MessageRole::Tool,
-            content: format!(
-                "<memory-recall>\n{ctx}\n</memory-recall>\n\
-                请基于以上 recall_memory 检索结果继续完成用户原始目标；不要再次调用 recall_memory，除非用户提出新的历史查询。"
-            ),
-            reasoning_content: String::new(),
-            reasoning_signature: None,
-            worker_id: None,
-            media: Vec::new(),
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            tool_name: Some("recall_memory".to_string()),
-            tool_result_is_error: false,
-            compact: false,
-            created_at: now_text(),
-        },
-    );
-    messages
-}
-
 /// 超限时强制最终回复
 pub(crate) fn force_final_response(
     session: &mut Session,
-    loop_context: &[Message],
     engine: &RuntimeEngine,
     stream_tx: &StdSender<StreamEvent>,
 ) {
-    let mut final_context = loop_context.to_vec();
-    final_context.push(Message {
+    // 注入提示消息到 session
+    session.messages.push(Message {
         id: scru128::new().to_string(),
         role: MessageRole::Tool,
         content:
@@ -223,20 +188,10 @@ pub(crate) fn force_final_response(
         created_at: now_text(),
     });
 
-    let assembler = PromptAssembler::new(engine.context_limit);
-    let assembled = assembler.assemble(
-        session,
-        "",
-        Vec::new(),
-        engine.models_config(),
-        engine.agent_config(),
-        &final_context,
-    );
-
     let req = ModelRequest {
         session_title: session.title.clone(),
-        user_input: assembled.user_input.clone(),
-        context: assembled.build_messages(),
+        user_input: String::new(),
+        context: session.context(),
         thinking: Some(crate::model::ThinkingConfig {
             budget_tokens: 4096,
         }),

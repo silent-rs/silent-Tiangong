@@ -59,6 +59,10 @@ pub struct AssembledPrompt {
     pub system_context: Vec<String>,
     /// User Context（包装为 system-reminder，放在消息最前面）
     pub user_context: Vec<String>,
+    /// 记忆上下文（recall_memory 检索结果，作为 Tool 消息注入）
+    pub memory_prefix_message: Option<Message>,
+    /// 团队上下文（子 Agent 的团队信息，作为 System 消息注入）
+    pub team_context_message: Option<Message>,
     /// 历史消息（经过裁剪/压缩）
     pub history_messages: Vec<Message>,
     /// Attachment Messages（MCP 工具摘要等）
@@ -120,17 +124,46 @@ impl AssembledPrompt {
 
     /// 构建完整的消息列表（按文档顺序）
     ///
-    /// 顺序：context_summary → attachments → history。
+    /// 顺序：capabilities → memory → team_context → context_summary → attachments → history。
     /// 所有动态内容通过对话消息流传递，系统提示词保持稳定。
     pub fn build_messages(&self) -> Vec<Message> {
         let mut messages = Vec::new();
-        // 1. 上下文压缩摘要（如存在）
+        // 1. 动态能力段（Skills、多媒体、团队协作、自定义指令等）
+        if !self.system_prompt.is_empty() {
+            messages.push(Message {
+                id: scru128::new().to_string(),
+                role: crate::session::MessageRole::Tool,
+                content: format!(
+                    "<system-reminder>\n<capabilities>\n{}\n</capabilities>\n</system-reminder>",
+                    self.system_prompt
+                ),
+                reasoning_content: String::new(),
+                reasoning_signature: None,
+                worker_id: None,
+                media: Vec::new(),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                tool_name: Some("capabilities".to_string()),
+                tool_result_is_error: false,
+                compact: false,
+                created_at: crate::session::now_text(),
+            });
+        }
+        // 2. 记忆上下文（recall_memory 检索结果）
+        if let Some(ref msg) = self.memory_prefix_message {
+            messages.push(msg.clone());
+        }
+        // 3. 团队上下文（子 Agent 的团队信息）
+        if let Some(ref msg) = self.team_context_message {
+            messages.push(msg.clone());
+        }
+        // 4. 上下文压缩摘要（如存在）
         if let Some(ref msg) = self.context_summary_message {
             messages.push(msg.clone());
         }
-        // 2. 系统级工具上下文（MCP 工具摘要等）
+        // 5. 系统级工具上下文（MCP 工具摘要等）
         messages.extend(self.attachment_messages.iter().cloned());
-        // 3. 历史消息（包含用户输入）
+        // 6. 历史消息（包含用户输入）
         messages.extend(self.history_messages.iter().cloned());
         messages
     }
@@ -156,6 +189,8 @@ mod tests {
             system_prompt: String::new(),
             system_context: Vec::new(),
             user_context: vec!["偏好中文".into()],
+            memory_prefix_message: None,
+            team_context_message: None,
             history_messages: Vec::new(),
             attachment_messages: Vec::new(),
             context_summary_message: None,
@@ -172,6 +207,8 @@ mod tests {
             system_prompt: "基础提示".into(),
             system_context: vec!["当前工作目录：/tmp".into()],
             user_context: vec!["偏好中文".into()],
+            memory_prefix_message: None,
+            team_context_message: None,
             history_messages: Vec::new(),
             attachment_messages: vec![Message {
                 id: "a1".into(),
@@ -207,6 +244,8 @@ mod tests {
             system_prompt: String::new(),
             system_context: Vec::new(),
             user_context: Vec::new(),
+            memory_prefix_message: None,
+            team_context_message: None,
             history_messages: Vec::new(),
             attachment_messages: Vec::new(),
             context_summary_message: None,
@@ -222,6 +261,8 @@ mod tests {
             system_prompt: String::new(),
             system_context: Vec::new(),
             user_context: vec!["ctx".into()],
+            memory_prefix_message: None,
+            team_context_message: None,
             history_messages: vec![Message {
                 id: "h1".into(),
                 role: crate::session::MessageRole::User,

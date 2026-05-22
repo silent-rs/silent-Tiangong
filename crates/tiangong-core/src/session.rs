@@ -736,6 +736,26 @@ impl Session {
         total
     }
 
+    /// 构建 LLM 请求上下文
+    ///
+    /// 返回 `summary_up_to` 之后的完整消息，如有压缩摘要则前置注入。
+    /// 摘要以 `tool_name="context_summary"` 标记，由 `build_provider_messages` 提取到 system prompt。
+    pub fn context(&self) -> Vec<Message> {
+        let mut context = Vec::new();
+        if let Some(summary) = self
+            .context_summary
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let mut msg = Message::new(MessageRole::Tool, summary.to_string());
+            msg.tool_name = Some("context_summary".to_string());
+            context.push(msg);
+        }
+        context.extend(self.messages[self.summary_up_to..].iter().cloned());
+        context
+    }
+
     pub fn recent_messages(&self, limit: usize) -> Vec<Message> {
         if self.messages.len() <= limit {
             return self.messages.clone();

@@ -905,8 +905,7 @@ const SYSTEM_RULES: &str = "规则：\
 
 fn build_provider_messages(req: &ModelRequest) -> (String, Vec<ChatMessage>) {
     let mut messages = Vec::new();
-
-    let system_texts = [
+    let mut system_texts = vec![
         SYSTEM_IDENTITY.to_string(),
         SYSTEM_RULES.to_string(),
         format!("当前会话：{}", req.session_title),
@@ -914,6 +913,16 @@ fn build_provider_messages(req: &ModelRequest) -> (String, Vec<ChatMessage>) {
         format!("允许文件操作目录：{}", allowed_file_roots_text()),
     ];
     for msg in &req.context {
+        if msg.role == MessageRole::Tool
+            && msg.tool_call_id.is_none()
+            && msg.tool_name.as_deref() == Some("context_summary")
+        {
+            let summary = msg.content.trim();
+            if !summary.is_empty() {
+                system_texts.push(format!("此前对话摘要：\n{summary}"));
+            }
+            continue;
+        }
         if let Some(message) = provider_message_from_session(msg, req.include_media) {
             messages.push(message);
         }

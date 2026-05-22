@@ -8,34 +8,6 @@ use tiangong_types::{MediaAsset, StreamEvent};
 const MEMORY_LOOP_FEEDBACK_MAX_CHARS: usize = 12_000;
 const TOOL_RESULT_STREAM_MAX_CHARS: usize = 8_000;
 
-pub(crate) fn append_user_message_to_loop_context(
-    session: &mut Session,
-    loop_context: &mut Vec<Message>,
-    stream_tx: &StdSender<StreamEvent>,
-    content: String,
-    message_id: Option<String>,
-    media: Vec<MediaAsset>,
-) {
-    let loop_message_id = append_or_reuse_user_message(session, &content, message_id, media);
-    let _ = stream_tx.send(StreamEvent::UserMessage {
-        message_id: loop_message_id.clone(),
-        content: content.clone(),
-        media: session
-            .messages
-            .iter()
-            .find(|message| message.id == loop_message_id)
-            .map(|message| message.media.clone())
-            .unwrap_or_default(),
-    });
-    if let Some(message) = session
-        .messages
-        .iter()
-        .find(|message| message.id == loop_message_id)
-    {
-        loop_context.push(message.clone());
-    }
-}
-
 pub(crate) fn append_or_reuse_user_message(
     session: &mut Session,
     content: &str,
