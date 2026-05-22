@@ -112,7 +112,7 @@ async fn remote_memory_handle_can_write_and_recall_via_tcp_bridge() {
     let home = TempDir::new().expect("创建 fake home 失败");
     let _env = EnvGuard::enter(home.path());
 
-    let local_handle = start(None).expect("启动本地 memory 失败");
+    let local_handle = start().expect("启动本地 memory 失败");
     let _bridge = spawn_memory_bridge("memory-remote-handle", local_handle.clone())
         .expect("启动 memory bridge 失败");
     let remote_handle = MemoryHandle::connect_tcp("memory-remote-handle")

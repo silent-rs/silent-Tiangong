@@ -20,16 +20,21 @@ use tiangong_types::{SessionStreamEvent, StreamEvent};
 const MAX_ROUNDS: usize = 20;
 
 // ── Memory re-exports ──
+pub use crate::index::{
+    WorkspaceIndexInfo, backfill_session_index, delete_workspace_index_for_gui,
+    list_workspace_indexes_for_gui, rebuild_workspace_index_for_gui, session_index_exists,
+    workspace_index_exists,
+};
 pub use crate::memory::gui_api::*;
 pub(crate) use crate::memory::recall::{
     duplicate_memory_recall_tool_result, execute_memory_recall_tool, inject_memory_recall_tool,
 };
 pub(crate) use crate::memory::registry::{
-    WorkerMemoryContext, get_or_init_memory, get_or_init_memory_async, resolve_memory_workspace_id,
+    WorkerMemoryContext, get_or_init_memory, get_or_init_memory_async,
 };
 pub use crate::memory::registry::{
     get_or_init_memory_handle, get_or_init_memory_handle_async, load_memory_config,
-    memory_workspace_id_from_cwd, save_memory_config, shutdown_memory_registry_blocking,
+    save_memory_config, shutdown_memory_registry_blocking,
 };
 
 pub(crate) mod command;
@@ -114,13 +119,8 @@ impl TiangongCore {
         process_type: tiangong_memory::ProcessType,
     ) -> Self {
         let config_snapshot = config.snapshot();
-        let memory_workspace_id = resolve_memory_workspace_id(&session.cwd);
-        let memory_handle = get_or_init_memory(
-            &config_snapshot,
-            config.generation(),
-            memory_workspace_id.clone(),
-            process_type.clone(),
-        );
+        let memory_handle =
+            get_or_init_memory(&config_snapshot, config.generation(), process_type.clone());
         let initial_trust_mode = session.trust_mode;
         let shared_trust_mode = Arc::new(RwLock::new(initial_trust_mode));
         let session_id = session.id.clone();
@@ -131,7 +131,6 @@ impl TiangongCore {
         let worker = thread::spawn(move || {
             let memory = WorkerMemoryContext {
                 handle: memory_handle,
-                workspace_id: memory_workspace_id,
                 process_type: worker_process_type,
             };
             worker_loop(
@@ -302,6 +301,14 @@ async fn worker_loop_async(
     // turn 计数器：每 10 个 turn 触发一次 Meta 反刍（归档低活跃节点）
     let mut turn_count: u32 = 0;
 
+    // IndexManager：Workspace 文件索引 + Session 对话索引
+    let index_manager = crate::index::IndexManager::new()
+        .map_err(|e| {
+            tracing::warn!("IndexManager 初始化失败: {e}");
+            e
+        })
+        .ok();
+
     // 内部 StreamEvent 通道 —— 转发线程负责包装 session_id
     // stream_tx 保持 std::sync::mpsc（工具执行等同步代码可直接使用）
     let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
@@ -323,6 +330,17 @@ async fn worker_loop_async(
 
     apply_session_cwd(&session);
 
+    // 初始索引：仅在索引不存在时扫描
+    if let Some(ref im) = index_manager {
+        let root = std::path::PathBuf::from(&session.cwd);
+        if root.is_dir() && !crate::index::workspace_index_exists(&root) {
+            match im.full_scan(&root) {
+                Ok(count) => tracing::info!(count, "Workspace 初始索引扫描完成"),
+                Err(e) => tracing::warn!("Workspace 初始索引扫描失败: {e}"),
+            }
+        }
+    }
+
     // 恢复未完成的审批请求（崩溃恢复场景）
     let pending = crate::approval_store::get_pending(&session_id);
     if !pending.is_empty() {
@@ -341,13 +359,8 @@ async fn worker_loop_async(
         let cfg_gen = config.generation();
         if engine.is_none() || cfg_gen != last_cfg_gen {
             let cfg = config.snapshot();
-            memory.handle = get_or_init_memory_async(
-                &cfg,
-                cfg_gen,
-                memory.workspace_id.clone(),
-                memory.process_type.clone(),
-            )
-            .await;
+            memory.handle =
+                get_or_init_memory_async(&cfg, cfg_gen, memory.process_type.clone()).await;
             engine = Some(build_engine_from_config(
                 &cfg,
                 &stream_tx,
@@ -360,6 +373,9 @@ async fn worker_loop_async(
                 .filter(|t| t.name != "mark_step_completed")
                 .collect();
             inject_enhanced_tools(&mut new_tools, e);
+            if index_manager.is_some() {
+                crate::index::inject_index_search_tool(&mut new_tools);
+            }
             if memory.handle.is_some() {
                 inject_memory_recall_tool(&mut new_tools);
             }
@@ -382,17 +398,32 @@ async fn worker_loop_async(
 
         match cmd {
             Command::UpdateCwd { cwd } => {
+                let cwd_changed = cwd != session.cwd;
                 session.cwd = cwd;
                 apply_session_cwd(&session);
-                memory.workspace_id = resolve_memory_workspace_id(&session.cwd);
                 let cfg = config.snapshot();
                 memory.handle = get_or_init_memory_async(
                     &cfg,
                     config.generation(),
-                    memory.workspace_id.clone(),
                     memory.process_type.clone(),
                 )
                 .await;
+
+                // 索引：仅当 CWD 实际变化时扫描
+                if cwd_changed && let Some(ref im) = index_manager {
+                    let root = std::path::PathBuf::from(&session.cwd);
+                    if root.is_dir() {
+                        match im.full_scan(&root) {
+                            Ok(count) => {
+                                tracing::info!(count, "Workspace 索引扫描完成");
+                            }
+                            Err(e) => {
+                                tracing::warn!("Workspace 索引扫描失败: {e}");
+                            }
+                        }
+                    }
+                }
+
                 continue;
             }
             Command::ReloadConfig => {
@@ -429,19 +460,24 @@ async fn worker_loop_async(
                     &stream_tx,
                     &mut cmd_rx,
                     memory.handle.as_ref(),
+                    index_manager.as_ref(),
                     team_context.clone(),
                 )
                 .await;
 
+                // Turn 完成后 → Session 索引
+                if let Some(ref im) = index_manager {
+                    index_turn_messages(im, &session, turn_start_idx);
+                }
+
                 // turn 完成后触发增强版 Micro 反刍
                 if let Some(handle) = memory.handle.as_ref() {
-                    let mut enhanced_result = build_enhanced_memory_turn_result(
+                    let enhanced_result = build_enhanced_memory_turn_result(
                         &session,
                         turn_start_idx,
                         &content,
                         vec![],
                     );
-                    enhanced_result.workspace_id = memory.workspace_id.clone();
                     tokio::task::block_in_place(|| {
                         handle.run_enhanced_micro_rumination_blocking(enhanced_result);
                     });
@@ -500,14 +536,48 @@ async fn worker_loop_async(
 
     // 会话结束 → 触发 Meso 反刍（提炼 Entity/Decision，更新 Workspace Injection）
     // fire-and-forget：handle 仍可使用（Memory Actor 在 registry 中持续运行）
-    if let Some(handle) = memory.handle.as_ref()
-        && let Some(wid) = &memory.workspace_id
+    if let Some(handle) = memory.handle.as_ref() {
+        handle.run_meso_rumination(session_id.clone(), "__global__".to_string());
+        tracing::info!(session_id = %session_id, "Meso 反刍已触发（会话结束）");
+    }
+
+    // 会话结束 → finalize Session 索引
+    if let Some(ref im) = index_manager
+        && let Err(e) = im.finalize_session_index(&session_id)
     {
-        handle.run_meso_rumination(session_id.clone(), wid.clone());
-        tracing::info!(session_id = %session_id, workspace_id = %wid, "Meso 反刍已触发（会话结束）");
+        tracing::warn!("Session 索引 finalize 失败: {e}");
     }
 
     session
+}
+
+fn index_turn_messages(
+    index_manager: &crate::index::IndexManager,
+    session: &Session,
+    turn_start_idx: usize,
+) {
+    let turns: Vec<crate::index::TurnData> = session.messages[turn_start_idx..]
+        .iter()
+        .filter_map(|msg| {
+            let role = match msg.role {
+                MessageRole::User => "user",
+                MessageRole::Assistant => "assistant",
+                MessageRole::Tool => "tool",
+                MessageRole::System => return None,
+            };
+            Some(crate::index::TurnData {
+                turn_id: msg.id.clone(),
+                workspace_id: session.cwd.clone(),
+                role: role.to_string(),
+                content: msg.content.clone(),
+                topics: Vec::new(),
+                entity_names: Vec::new(),
+            })
+        })
+        .collect();
+    if let Err(e) = index_manager.index_turn_batch(&session.id, &turns) {
+        tracing::warn!("Session 索引批量写入失败: {e}");
+    }
 }
 
 pub(crate) fn apply_session_cwd(session: &Session) {
@@ -586,6 +656,7 @@ async fn execute_turn_async(
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     memory_handle: Option<&tiangong_memory::MemoryHandle>,
+    index_manager: Option<&crate::index::IndexManager>,
     team_context: Arc<Mutex<crate::agent_team::lifecycle::TeamContext>>,
 ) {
     let mut react = crate::react::engine::ReactEngine::new(
@@ -596,7 +667,14 @@ async fn execute_turn_async(
     )
     .with_shared_team(team_context, "main".to_string());
     react
-        .execute_turn(session, user_input, stream_tx, cmd_rx, memory_handle)
+        .execute_turn(
+            session,
+            user_input,
+            stream_tx,
+            cmd_rx,
+            memory_handle,
+            index_manager,
+        )
         .await;
 }
 

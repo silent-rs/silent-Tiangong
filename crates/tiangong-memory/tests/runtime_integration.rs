@@ -465,7 +465,7 @@ async fn runtime_loads_profile_workspace_and_session_injections() {
         "session-memory",
     );
 
-    let handle = start(Some(workspace_id.clone())).expect("启动 memory 失败");
+    let handle = start().expect("启动 memory 失败");
     let loaded = handle
         .load_injection("session-a", Some(&workspace_id))
         .await;
@@ -491,7 +491,7 @@ async fn runtime_can_write_episode_and_recall_without_core() {
     let (home, _workspace, workspace_path, workspace_id) = setup_workspace();
     let _env = EnvGuard::enter(home.path(), &workspace_path);
 
-    let handle = start(Some(workspace_id.clone())).expect("启动 memory 失败");
+    let handle = start().expect("启动 memory 失败");
     handle.write_episode(
         Episode::new(
             "session-b".to_string(),
@@ -534,7 +534,7 @@ async fn meta_rumination_archives_missing_paths_expired_urls_and_project_archive
     write_file(&alive_path, "alive reference");
     let missing_path = workspace_path.join("artifacts/missing-meta-reference.png");
 
-    let handle = start(Some(workspace_id.clone())).expect("启动 memory 失败");
+    let handle = start().expect("启动 memory 失败");
     let cases = [
         (
             "meta alive file alpha",
@@ -622,7 +622,7 @@ async fn runtime_can_expand_recalled_episode_with_depth2() {
     let (home, _workspace, workspace_path, workspace_id) = setup_workspace();
     let _env = EnvGuard::enter(home.path(), &workspace_path);
 
-    let handle = start(Some(workspace_id.clone())).expect("启动 memory 失败");
+    let handle = start().expect("启动 memory 失败");
     handle.write_episode(
         Episode::new(
             "session-depth2".to_string(),
@@ -668,7 +668,7 @@ async fn micro_rumination_writes_episode_with_explicit_workspace_context() {
     let (home, _workspace, workspace_path, workspace_id) = setup_workspace();
     let _env = EnvGuard::enter(home.path(), &workspace_path);
 
-    let handle = start(None).expect("启动 memory 失败");
+    let handle = start().expect("启动 memory 失败");
     handle.run_micro_rumination(TurnResult {
         session_id: "session-c".to_string(),
         turn_id: "turn-c".to_string(),
@@ -695,7 +695,7 @@ async fn artifact_only_turn_is_added_to_memory_and_recalled_by_context_tool() {
 
     let image_url = "https://example.invalid/artifacts/architecture-sunrise.png";
     let file_path = "/tmp/tiangong/architecture-sunrise.png";
-    let handle = start(Some(workspace_id.clone())).expect("启动 memory 失败");
+    let handle = start().expect("启动 memory 失败");
 
     handle.run_micro_rumination(TurnResult {
         session_id: "session-artifact-add".to_string(),
@@ -790,7 +790,7 @@ async fn contextual_recall_returns_incremental_memory_without_repeating_prompt_c
     let (home, _workspace, workspace_path, workspace_id) = setup_workspace();
     let _env = EnvGuard::enter(home.path(), &workspace_path);
 
-    let handle = start(Some(workspace_id.clone())).expect("启动 memory 失败");
+    let handle = start().expect("启动 memory 失败");
     let redundant_summary = "We chose coral teal palette for flamingo dashboard";
     let export_url = "https://example.invalid/artifacts/flamingo-dashboard.svg";
     let export_path = "/tmp/tiangong/flamingo-dashboard.svg";
@@ -887,7 +887,7 @@ async fn contextual_recall_fixed_reference_cases_return_only_incremental_memory(
     for case in &cases {
         let (home, _workspace, workspace_path, workspace_id) = setup_workspace();
         let _env = EnvGuard::enter(home.path(), &workspace_path);
-        let handle = start(Some(workspace_id.clone())).expect("启动 memory 失败");
+        let handle = start().expect("启动 memory 失败");
 
         handle.write_episode(
             Episode::new(
@@ -1087,16 +1087,15 @@ async fn meso_rumination_extracts_entity_and_decision_memories() {
     let (home, _workspace, workspace_path, workspace_id) = setup_workspace();
     let _env = EnvGuard::enter(home.path(), &workspace_path);
 
-    let handle = start(Some(workspace_id.clone())).expect("启动 memory 失败");
+    let handle = start().expect("启动 memory 失败");
     handle.write_episode(
         Episode::new(
             "session-meso".to_string(),
-            "qdrant vector backend evaluation".to_string(),
-            "Compared external qdrant server with embedded flat vector index for memory recall."
-                .to_string(),
+            "vector backend evaluation".to_string(),
+            "Compared different vector index backends for memory recall.".to_string(),
             EpisodeOutcome::Success,
             vec![
-                "qdrant".to_string(),
+                "vector".to_string(),
                 "vector".to_string(),
                 "memory".to_string(),
             ],
@@ -1109,11 +1108,11 @@ async fn meso_rumination_extracts_entity_and_decision_memories() {
         Episode::new(
             "session-meso".to_string(),
             "choose embedded vector index for memory".to_string(),
-            "We decided to choose embedded vector index instead of external qdrant server to reduce user startup complexity."
+            "We decided to choose embedded vector index to reduce user startup complexity."
                 .to_string(),
             EpisodeOutcome::Success,
             vec![
-                "qdrant".to_string(),
+                "vector".to_string(),
                 "vector".to_string(),
                 "memory".to_string(),
                 "embedded".to_string(),
@@ -1128,7 +1127,7 @@ async fn meso_rumination_extracts_entity_and_decision_memories() {
     handle.run_meso_rumination("session-meso".to_string(), workspace_id.clone());
 
     let entity_hits =
-        wait_for_recall_kind(&handle, "qdrant memory entity", MemoryKind::Entity).await;
+        wait_for_recall_kind(&handle, "vector memory entity", MemoryKind::Entity).await;
     for (idx, hit) in entity_hits.iter().enumerate() {
         eprintln!(
             "[meso] entity_hit[{idx}] kind={:?} title={} summary={}",
@@ -1180,7 +1179,7 @@ async fn meso_rumination_extracts_entity_and_decision_memories() {
     eprintln!("[meso] rerun submitted for idempotency verification");
 
     let rerun_entity_hits =
-        wait_for_unique_kind_hits(&handle, "qdrant memory entity", MemoryKind::Entity).await;
+        wait_for_unique_kind_hits(&handle, "vector memory entity", MemoryKind::Entity).await;
     let entity_ids = rerun_entity_hits
         .iter()
         .filter(|hit| hit.kind == MemoryKind::Entity)
@@ -1250,9 +1249,8 @@ async fn deep_recall_fixed_scenario_traces_cross_session_artifact_entity_and_dec
         timeout: Duration::from_secs(5),
         max_retries: 0,
     };
-    let handle =
-        start_with_options(MemoryOptions::new(Some(workspace_id.clone())).with_model(model))
-            .expect("启动带 mock Memory LLM 的 memory 失败");
+    let handle = start_with_options(MemoryOptions::new().with_model(model))
+        .expect("启动带 mock Memory LLM 的 memory 失败");
 
     let current_context =
         "Nebula release overview mentions billing provider and event ledger decision";
@@ -1470,7 +1468,7 @@ async fn memory_recall_levels_cover_injection_depth1_depth2_and_context_summary(
         "session recall level",
     );
 
-    let handle = start(Some(workspace_id.clone())).expect("启动 memory 失败");
+    let handle = start().expect("启动 memory 失败");
 
     let injection = handle
         .load_injection("session-levels", Some(&workspace_id))

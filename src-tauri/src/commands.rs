@@ -590,7 +590,11 @@ pub fn create_session(state: State<TiangongApp>) -> Result<SessionListItem, Stri
 
 /// 切换到指定会话
 #[tauri::command]
-pub fn switch_session(session_id: String, state: State<TiangongApp>) -> Result<(), String> {
+pub fn switch_session(
+    session_id: String,
+    app: AppHandle,
+    state: State<TiangongApp>,
+) -> Result<(), String> {
     state.with_state(|core_state| {
         core_state.switch_session(&session_id);
         Ok(())
@@ -599,6 +603,70 @@ pub fn switch_session(session_id: String, state: State<TiangongApp>) -> Result<(
     let trust_mode =
         state.with_state_read(|core_state| Ok(core_state.active_session_trust_mode()))?;
     state.set_core_trust_mode(&session_id, trust_mode);
+
+    // 为新会话补充索引（后台执行，不阻塞 UI）
+    let cwd = state.with_state_read(|core_state| Ok(core_state.active_session_effective_cwd()))?;
+    let sid = session_id.clone();
+    let has_session_index = tiangong_core::index::session_index_exists(&sid);
+    let messages = if !has_session_index {
+        state.with_state_read(|core_state| {
+            Ok(core_state
+                .sessions()
+                .iter()
+                .find(|s| s.id == sid)
+                .map(|s| s.messages.clone())
+                .unwrap_or_default())
+        })?
+    } else {
+        Vec::new()
+    };
+
+    if !cwd.is_empty() || !messages.is_empty() {
+        let app_clone = app.clone();
+        thread::spawn(move || {
+            let mut need_snapshot = false;
+
+            // Workspace 索引：仅在尚不存在时创建
+            if !cwd.is_empty()
+                && !tiangong_core::index::workspace_index_exists(std::path::Path::new(&cwd))
+            {
+                match tiangong_core::index::rebuild_workspace_index_for_gui(std::path::Path::new(
+                    &cwd,
+                )) {
+                    Ok(count) => {
+                        eprintln!("切换会话后 Workspace 索引扫描完成: {count} 个文件");
+                        need_snapshot = true;
+                    }
+                    Err(e) => {
+                        eprintln!("切换会话后 Workspace 索引扫描失败: {e}");
+                    }
+                }
+            }
+
+            // Session 索引：回溯已有消息
+            if !messages.is_empty() {
+                match tiangong_core::index::backfill_session_index(&sid, &messages) {
+                    Ok(count) => {
+                        eprintln!("切换会话后 Session 回溯索引完成: {count} 条消息");
+                        need_snapshot = true;
+                    }
+                    Err(e) => {
+                        eprintln!("切换会话后 Session 回溯索引失败: {e}");
+                    }
+                }
+            }
+
+            if need_snapshot {
+                if let Ok(snapshot) = app_clone
+                    .state::<TiangongApp>()
+                    .with_state_read(|s| Ok(build_full_snapshot_with_status(s, false)))
+                {
+                    let _ = app_clone.emit("run_snapshot", &snapshot);
+                }
+            }
+        });
+    }
+
     Ok(())
 }
 
@@ -1188,6 +1256,23 @@ fn start_stream_consumer(
                             core_state.store.runtime.run.summary = format!("上下文{action}");
                         } else {
                             core_state.report_run_idle(format!("上下文{action}"));
+                        }
+                    }
+                    StreamEvent::IndexStatus { ref phase, count } => {
+                        match phase.as_str() {
+                            "scanning" => {
+                                core_state.store.runtime.run.summary =
+                                    "正在建立工作区索引...".to_string();
+                            }
+                            "done" => {
+                                core_state.store.runtime.run.summary =
+                                    format!("索引扫描完成: {count} 个文件");
+                            }
+                            "error" => {
+                                core_state.store.runtime.run.summary =
+                                    "索引扫描失败".to_string();
+                            }
+                            _ => {}
                         }
                     }
                     _ => {}
@@ -2509,17 +2594,7 @@ pub fn set_memory_config(
     Ok(())
 }
 
-fn current_memory_workspace_id(state: &State<TiangongApp>) -> Result<Option<String>, String> {
-    let cwd = state.with_state_read(|core_state| Ok(core_state.active_session_effective_cwd()))?;
-    let trimmed = cwd.trim();
-    if trimmed.is_empty() {
-        Ok(None)
-    } else {
-        Ok(tiangong_core::core::memory_workspace_id_from_cwd(trimmed))
-    }
-}
-
-/// 列出当前 workspace 的记忆节点。
+/// 列出全部记忆节点。
 #[tauri::command]
 pub async fn list_memory_nodes(
     query: Option<String>,
@@ -2528,20 +2603,12 @@ pub async fn list_memory_nodes(
     offset: Option<usize>,
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<tiangong_memory::MemoryNode>, String> {
-    let workspace_id = current_memory_workspace_id(&state)?;
-    tiangong_core::core::list_memory_nodes_for_gui(
-        &state.config,
-        workspace_id,
-        query,
-        status,
-        limit,
-        offset,
-    )
-    .await
-    .map_err(|err| err.to_string())
+    tiangong_core::core::list_memory_nodes_for_gui(&state.config, query, status, limit, offset)
+        .await
+        .map_err(|err| err.to_string())
 }
 
-/// 统计当前 workspace 的记忆节点真实总数。
+/// 统计全部记忆节点真实总数。
 #[tauri::command]
 pub async fn count_memory_nodes(
     query: Option<String>,
@@ -2549,16 +2616,9 @@ pub async fn count_memory_nodes(
     created_after: Option<String>,
     state: State<'_, TiangongApp>,
 ) -> Result<usize, String> {
-    let workspace_id = current_memory_workspace_id(&state)?;
-    tiangong_core::core::count_memory_nodes_for_gui(
-        &state.config,
-        workspace_id,
-        query,
-        status,
-        created_after,
-    )
-    .await
-    .map_err(|err| err.to_string())
+    tiangong_core::core::count_memory_nodes_for_gui(&state.config, query, status, created_after)
+        .await
+        .map_err(|err| err.to_string())
 }
 
 /// 手动新增或调整一条记忆。
@@ -2573,8 +2633,7 @@ pub async fn upsert_manual_memory(
     if draft.summary.trim().is_empty() {
         return Err("记忆内容不能为空".to_string());
     }
-    let workspace_id = current_memory_workspace_id(&state)?;
-    tiangong_core::core::upsert_manual_memory_for_gui(&state.config, workspace_id, draft)
+    tiangong_core::core::upsert_manual_memory_for_gui(&state.config, draft)
         .await
         .map_err(|err| err.to_string())
 }
@@ -2586,15 +2645,9 @@ pub async fn set_memory_node_status(
     status: String,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
-    let workspace_id = current_memory_workspace_id(&state)?;
-    tiangong_core::core::set_memory_node_status_for_gui(
-        &state.config,
-        workspace_id,
-        node_id,
-        status,
-    )
-    .await
-    .map_err(|err| err.to_string())
+    tiangong_core::core::set_memory_node_status_for_gui(&state.config, node_id, status)
+        .await
+        .map_err(|err| err.to_string())
 }
 
 /// 列出指定记忆节点的图关系。
@@ -2603,8 +2656,7 @@ pub async fn list_memory_relations(
     node_id: String,
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<tiangong_memory::MemoryRelation>, String> {
-    let workspace_id = current_memory_workspace_id(&state)?;
-    tiangong_core::core::list_memory_relations_for_gui(&state.config, workspace_id, node_id)
+    tiangong_core::core::list_memory_relations_for_gui(&state.config, node_id)
         .await
         .map_err(|err| err.to_string())
 }
@@ -2615,8 +2667,7 @@ pub async fn list_memory_relations_batch(
     node_ids: Vec<String>,
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<tiangong_memory::MemoryRelation>, String> {
-    let workspace_id = current_memory_workspace_id(&state)?;
-    tiangong_core::core::list_memory_relations_batch_for_gui(&state.config, workspace_id, node_ids)
+    tiangong_core::core::list_memory_relations_batch_for_gui(&state.config, node_ids)
         .await
         .map_err(|err| err.to_string())
 }
@@ -2627,8 +2678,7 @@ pub async fn upsert_memory_relation(
     draft: tiangong_memory::MemoryRelationDraft,
     state: State<'_, TiangongApp>,
 ) -> Result<tiangong_memory::MemoryRelation, String> {
-    let workspace_id = current_memory_workspace_id(&state)?;
-    tiangong_core::core::upsert_memory_relation_for_gui(&state.config, workspace_id, draft)
+    tiangong_core::core::upsert_memory_relation_for_gui(&state.config, draft)
         .await
         .map_err(|err| err.to_string())
 }
@@ -2639,8 +2689,7 @@ pub async fn delete_memory_relation(
     relation_id: String,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
-    let workspace_id = current_memory_workspace_id(&state)?;
-    tiangong_core::core::delete_memory_relation_for_gui(&state.config, workspace_id, relation_id)
+    tiangong_core::core::delete_memory_relation_for_gui(&state.config, relation_id)
         .await
         .map_err(|err| err.to_string())
 }
@@ -2652,10 +2701,31 @@ pub async fn test_memory_recall(
     limit: Option<usize>,
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<tiangong_memory::RecallHit>, String> {
-    let workspace_id = current_memory_workspace_id(&state)?;
-    tiangong_core::core::test_memory_recall_for_gui(&state.config, workspace_id, query, limit)
+    tiangong_core::core::test_memory_recall_for_gui(&state.config, query, limit)
         .await
         .map_err(|err| err.to_string())
+}
+
+// ── 索引管理 ──
+
+/// 列出所有 Workspace 索引
+#[tauri::command]
+pub fn list_workspace_indexes() -> Result<Vec<tiangong_core::core::WorkspaceIndexInfo>, String> {
+    tiangong_core::core::list_workspace_indexes_for_gui().map_err(|err| err.to_string())
+}
+
+/// 删除指定 Workspace 索引
+#[tauri::command]
+pub fn delete_workspace_index(workspace_id: String) -> Result<(), String> {
+    tiangong_core::core::delete_workspace_index_for_gui(&workspace_id)
+        .map_err(|err| err.to_string())
+}
+
+/// 重建指定路径的 Workspace 索引
+#[tauri::command]
+pub fn rebuild_workspace_index(root: String) -> Result<usize, String> {
+    let root = std::path::PathBuf::from(&root);
+    tiangong_core::core::rebuild_workspace_index_for_gui(&root).map_err(|err| err.to_string())
 }
 
 /// 获取所有可用的模型能力列表

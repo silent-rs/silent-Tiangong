@@ -192,6 +192,12 @@ pub enum StreamEvent {
         summary_up_to: usize,
         remaining_messages: usize,
     },
+    /// 索引扫描状态
+    IndexStatus {
+        phase: String,
+        #[serde(default)]
+        count: usize,
+    },
 }
 
 /// 记忆检索命中项摘要（前端展示用）

@@ -367,7 +367,7 @@ mod tests {
         let engine = RecallEngine::bm25_only();
         let hits = make_hits(5); // score 从高到低
         let result = engine.recall(hits, "测试查询", 5, None).await;
-        // 保持输入顺序（无 Qdrant 时不重排）
+        // 保持输入顺序（无向量引擎时不重排）
         for (i, hit) in result.iter().enumerate() {
             assert_eq!(hit.node_id, format!("node-{i}"));
         }

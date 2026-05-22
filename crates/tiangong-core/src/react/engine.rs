@@ -355,6 +355,7 @@ impl ReactEngine {
         stream_tx: &StdSender<StreamEvent>,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
         memory_handle: Option<&tiangong_memory::MemoryHandle>,
+        index_manager: Option<&crate::index::IndexManager>,
     ) -> TokenUsage {
         let mut loop_context: Vec<Message> = Vec::new();
         let mut round = 0;
@@ -539,9 +540,23 @@ impl ReactEngine {
             let response = match response_result {
                 Ok(r) => r,
                 Err(err) => {
-                    let _ = stream_tx.send(StreamEvent::Error {
-                        message: err.to_string(),
-                    });
+                    let err_msg = err.to_string();
+                    // 上下文超限时强制压缩后重试一次
+                    if err_msg.contains("context_window_exceeded")
+                        || err_msg.contains("context_length_exceeded")
+                    {
+                        tracing::warn!("检测到上下文超限，尝试强制压缩");
+                        crate::react::context::maybe_update_context_summary(
+                            session,
+                            &self.engine,
+                            self.engine.context_limit,
+                            stream_tx,
+                        );
+                        if session.summary_up_to > 0 {
+                            continue 'react_loop;
+                        }
+                    }
+                    let _ = stream_tx.send(StreamEvent::Error { message: err_msg });
                     return accumulated_usage;
                 }
             };
@@ -982,7 +997,27 @@ impl ReactEngine {
 
                 let (result, tool_llm_usage, allow_memory_context, usage_source) = {
                     let (mut result, tool_llm_usage, allow_memory_context, usage_source) =
-                        if call.name == "recall_memory" {
+                        if call.name == "index_search" {
+                            if let Some(im) = index_manager {
+                                let (result, usage, allow_context) =
+                                    crate::index::execute_index_search_tool(call, im, session);
+                                (result, usage, allow_context, "index_search")
+                            } else {
+                                (
+                                    crate::tool::ToolResult {
+                                        ok: false,
+                                        summary: "索引系统未初始化".to_string(),
+                                        stdout: String::new(),
+                                        stderr: "index manager not available".to_string(),
+                                        exit_code: 1,
+                                        execution: None,
+                                    },
+                                    tiangong_types::TokenUsage::default(),
+                                    false,
+                                    "index_search",
+                                )
+                            }
+                        } else if call.name == "recall_memory" {
                             if memory_recall_attempted {
                                 let (result, usage, allow_context) =
                                     crate::core::duplicate_memory_recall_tool_result();
@@ -1432,6 +1467,7 @@ impl ReactEngine {
                         &prompt,
                         &child_stream_tx,
                         &mut sub_cmd_rx,
+                        None,
                         None,
                     )
                     .await;

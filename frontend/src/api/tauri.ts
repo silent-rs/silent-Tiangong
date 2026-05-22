@@ -302,6 +302,13 @@ export interface RecallHit {
   depth1_loaded: boolean;
 }
 
+export interface WorkspaceIndexInfo {
+  id: string;
+  root: string;
+  entry_count: number;
+  updated_at: string;
+}
+
 // ============================================================================
 // API 方法
 // ============================================================================
@@ -504,6 +511,16 @@ export const api = {
 
   testMemoryRecall: (query: string, limit?: number): Promise<RecallHit[]> =>
     invoke('test_memory_recall', { query, limit }),
+
+  // ── 索引管理 ──
+  listWorkspaceIndexes: (): Promise<WorkspaceIndexInfo[]> =>
+    invoke('list_workspace_indexes'),
+
+  deleteWorkspaceIndex: (workspaceId: string): Promise<void> =>
+    invoke('delete_workspace_index', { workspaceId }),
+
+  rebuildWorkspaceIndex: (root: string): Promise<number> =>
+    invoke('rebuild_workspace_index', { root }),
 
   getModelCapabilities: (): Promise<ModelCapabilityInfo[]> =>
     invoke('get_model_capabilities'),

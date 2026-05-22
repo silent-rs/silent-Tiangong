@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
 
     let config = MemoryConfig::load_from_path(&args.config_path)
         .with_context(|| format!("读取 Memory 配置失败：{}", args.config_path.display()))?;
-    let options = config.to_options(None);
+    let options = config.to_options();
     let Some(model) = options.model else {
         if args.allow_missing_config {
             eprintln!(

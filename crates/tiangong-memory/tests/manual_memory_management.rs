@@ -48,8 +48,7 @@ impl Drop for EnvGuard {
 async fn manual_memory_can_be_recalled_and_archived() {
     let _env = EnvGuard::enter();
     let workspace_id = format!("manual-memory-{}", scru128::new());
-    let handle = start_with_options(MemoryOptions::new(Some(workspace_id.clone())))
-        .expect("Memory 应可启动");
+    let handle = start_with_options(MemoryOptions::new()).expect("Memory 应可启动");
 
     let saved = handle
         .upsert_manual_memory(ManualMemoryDraft {

@@ -377,6 +377,12 @@ impl ResponseState {
                     "上下文{action}: 已处理 {summary_up_to} 条，剩余 {remaining_messages} 条"
                 ));
             }
+
+            StreamEvent::IndexStatus { phase, count } => {
+                if phase == "done" {
+                    output::status(&format!("索引扫描完成: {count} 个文件"));
+                }
+            }
         }
         false
     }

@@ -1,6 +1,6 @@
 //! 召回结果融合与重排（Phase C）
 //!
-//! 将 Tantivy BM25 召回和 Qdrant 语义召回的结果融合、归一化、重排。
+//! 将 Tantivy BM25 召回和 LanceDB 语义召回的结果融合、归一化、重排。
 
 use crate::types::{MemoryKind, RecallHit, SearchStrategy};
 

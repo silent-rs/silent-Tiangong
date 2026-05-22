@@ -168,11 +168,8 @@ impl CoreConfig {
     }
 
     /// 根据 CoreConfig 生成 Memory 启动参数。
-    pub fn to_memory_options(
-        &self,
-        workspace_id: Option<String>,
-    ) -> tiangong_memory::MemoryOptions {
-        tiangong_memory::MemoryConfig::load_or_default().to_options(workspace_id)
+    pub fn to_memory_options(&self) -> tiangong_memory::MemoryOptions {
+        tiangong_memory::MemoryConfig::load_or_default().to_options()
     }
 }
 

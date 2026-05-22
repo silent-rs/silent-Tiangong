@@ -1,21 +1,16 @@
-//! Memory Handle 全局注册表：初始化、热更新、关闭
+//! Memory Handle 全局单例：初始化、热更新、关闭
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 
 use crate::core_config::{CoreConfig, CoreConfigProvider};
 use crate::session::now_text;
 
-static MEMORY_HANDLES: OnceLock<Mutex<HashMap<String, MemoryRegistryEntry>>> = OnceLock::new();
-static MEMORY_INIT_LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
-    OnceLock::new();
+static MEMORY_HANDLE: OnceLock<Mutex<Option<MemoryEntry>>> = OnceLock::new();
+static MEMORY_INIT_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
-const GLOBAL_MEMORY_WORKSPACE_KEY: &str = "__global__";
-
-struct MemoryRegistryEntry {
+struct MemoryEntry {
     managed: tiangong_memory::ManagedMemory,
     handle: tiangong_memory::MemoryHandle,
-    workspace_id: Option<String>,
     config_summary: MemoryConfigSummary,
     config_generation: u64,
     created_at: String,
@@ -55,29 +50,26 @@ struct MemoryRerankSummary {
 
 pub(crate) struct WorkerMemoryContext {
     pub handle: Option<tiangong_memory::MemoryHandle>,
-    pub workspace_id: Option<String>,
     pub process_type: tiangong_memory::ProcessType,
 }
 
-/// 获取或初始化 workspace 级 Memory Handle。
+/// 获取或初始化全局 Memory Handle（同步）。
 pub(crate) fn get_or_init_memory(
     config: &CoreConfig,
     config_generation: u64,
-    workspace_id: Option<String>,
     process_type: tiangong_memory::ProcessType,
 ) -> Option<tiangong_memory::MemoryHandle> {
-    let key = memory_registry_key(workspace_id.as_deref());
-    let options = config.to_memory_options(workspace_id.clone());
+    let options = config.to_memory_options();
     let config_summary = memory_config_summary_from_options(&options);
-    let registry = MEMORY_HANDLES.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = match registry.lock() {
+    let slot = MEMORY_HANDLE.get_or_init(|| Mutex::new(None));
+    let mut guard = match slot.lock() {
         Ok(guard) => guard,
         Err(err) => {
             tracing::warn!("Memory Handle registry 已污染，尝试恢复: {}", err);
             err.into_inner()
         }
     };
-    if let Some(entry) = guard.get_mut(&key) {
+    if let Some(entry) = guard.as_mut() {
         entry.last_used_at = now_text();
         let summary_changed = memory_config_changed(&entry.config_summary, &config_summary);
         let generation_changed = entry.config_generation != config_generation;
@@ -89,7 +81,6 @@ pub(crate) fn get_or_init_memory(
                 match entry.handle.reconfigure_blocking(options) {
                     Ok(()) => {
                         tracing::info!(
-                            workspace_id = ?entry.workspace_id,
                             created_at = %entry.created_at,
                             last_used_at = %entry.last_used_at,
                             "Memory 配置已原地热更新"
@@ -100,7 +91,6 @@ pub(crate) fn get_or_init_memory(
                     Err(err) => {
                         entry.restart_required = true;
                         tracing::warn!(
-                            workspace_id = ?entry.workspace_id,
                             created_at = %entry.created_at,
                             last_used_at = %entry.last_used_at,
                             "Memory 配置热更新失败，继续复用旧 handle 并标记待重启: {}", err
@@ -110,7 +100,6 @@ pub(crate) fn get_or_init_memory(
             } else {
                 entry.restart_required = true;
                 tracing::warn!(
-                    workspace_id = ?entry.workspace_id,
                     created_at = %entry.created_at,
                     last_used_at = %entry.last_used_at,
                     "Memory 配置变化需要重启 actor，当前继续复用旧 handle 并标记待重启"
@@ -124,50 +113,45 @@ pub(crate) fn get_or_init_memory(
         Ok(managed) => {
             let handle = managed.handle();
             let is_leader = managed.is_leader();
-            tracing::info!(workspace_id = ?workspace_id, is_leader, "Memory 已启动或连接");
+            tracing::info!(is_leader, "Memory 已启动或连接");
             let now = now_text();
-            guard.insert(
-                key,
-                MemoryRegistryEntry {
-                    managed,
-                    handle: handle.clone(),
-                    workspace_id,
-                    config_summary,
-                    config_generation,
-                    created_at: now.clone(),
-                    last_used_at: now,
-                    restart_required: false,
-                },
-            );
+            *guard = Some(MemoryEntry {
+                managed,
+                handle: handle.clone(),
+                config_summary,
+                config_generation,
+                created_at: now.clone(),
+                last_used_at: now,
+                restart_required: false,
+            });
             Some(handle)
         }
         Err(err) => {
-            tracing::warn!(workspace_id = ?workspace_id, "Memory 启动或连接失败（非致命）: {}", err);
+            tracing::warn!("Memory 启动或连接失败（非致命）: {}", err);
             None
         }
     }
 }
 
+/// 获取或初始化全局 Memory Handle（异步）。
 pub(crate) async fn get_or_init_memory_async(
     config: &CoreConfig,
     config_generation: u64,
-    workspace_id: Option<String>,
     process_type: tiangong_memory::ProcessType,
 ) -> Option<tiangong_memory::MemoryHandle> {
-    let key = memory_registry_key(workspace_id.as_deref());
-    let options = config.to_memory_options(workspace_id.clone());
+    let options = config.to_memory_options();
     let config_summary = memory_config_summary_from_options(&options);
-    let registry = MEMORY_HANDLES.get_or_init(|| Mutex::new(HashMap::new()));
+    let slot = MEMORY_HANDLE.get_or_init(|| Mutex::new(None));
 
     let existing = {
-        let mut guard = match registry.lock() {
+        let mut guard = match slot.lock() {
             Ok(guard) => guard,
             Err(err) => {
                 tracing::warn!("Memory Handle registry 已污染，尝试恢复: {}", err);
                 err.into_inner()
             }
         };
-        if let Some(entry) = guard.get_mut(&key) {
+        if let Some(entry) = guard.as_mut() {
             entry.last_used_at = now_text();
             let summary_changed = memory_config_changed(&entry.config_summary, &config_summary);
             let generation_changed = entry.config_generation != config_generation;
@@ -183,7 +167,6 @@ pub(crate) async fn get_or_init_memory_async(
                 if summary_changed {
                     entry.restart_required = true;
                     tracing::warn!(
-                        workspace_id = ?entry.workspace_id,
                         created_at = %entry.created_at,
                         last_used_at = %entry.last_used_at,
                         "Memory 配置变化需要重启 actor，当前继续复用旧 handle 并标记待重启"
@@ -200,20 +183,19 @@ pub(crate) async fn get_or_init_memory_async(
         if should_reconfigure {
             match handle.reconfigure(options).await {
                 Ok(()) => {
-                    let mut guard = match registry.lock() {
+                    let mut guard = match slot.lock() {
                         Ok(guard) => guard,
                         Err(err) => {
                             tracing::warn!("Memory Handle registry 已污染，尝试恢复: {}", err);
                             err.into_inner()
                         }
                     };
-                    if let Some(entry) = guard.get_mut(&key)
+                    if let Some(entry) = guard.as_mut()
                         && entry.handle.is_same_handle(&handle)
                     {
                         entry.config_summary = config_summary;
                         entry.restart_required = false;
                         tracing::info!(
-                            workspace_id = ?entry.workspace_id,
                             created_at = %entry.created_at,
                             last_used_at = %entry.last_used_at,
                             "Memory 配置已原地热更新"
@@ -221,19 +203,18 @@ pub(crate) async fn get_or_init_memory_async(
                     }
                 }
                 Err(err) => {
-                    let mut guard = match registry.lock() {
+                    let mut guard = match slot.lock() {
                         Ok(guard) => guard,
                         Err(err) => {
                             tracing::warn!("Memory Handle registry 已污染，尝试恢复: {}", err);
                             err.into_inner()
                         }
                     };
-                    if let Some(entry) = guard.get_mut(&key)
+                    if let Some(entry) = guard.as_mut()
                         && entry.handle.is_same_handle(&handle)
                     {
                         entry.restart_required = true;
                         tracing::warn!(
-                            workspace_id = ?entry.workspace_id,
                             created_at = %entry.created_at,
                             last_used_at = %entry.last_used_at,
                             "Memory 配置热更新失败，继续复用旧 handle 并标记待重启: {}", err
@@ -245,18 +226,18 @@ pub(crate) async fn get_or_init_memory_async(
         return Some(handle);
     }
 
-    let init_lock = memory_init_lock(&key);
+    let init_lock = MEMORY_INIT_LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
     let _init_guard = init_lock.lock().await;
 
     let existing_after_wait = {
-        let mut guard = match registry.lock() {
+        let mut guard = match slot.lock() {
             Ok(guard) => guard,
             Err(err) => {
                 tracing::warn!("Memory Handle registry 已污染，尝试恢复: {}", err);
                 err.into_inner()
             }
         };
-        guard.get_mut(&key).map(|entry| {
+        guard.as_mut().map(|entry| {
             entry.last_used_at = now_text();
             entry.handle.clone()
         })
@@ -269,54 +250,35 @@ pub(crate) async fn get_or_init_memory_async(
         Ok(managed) => {
             let handle = managed.handle();
             let is_leader = managed.is_leader();
-            tracing::info!(workspace_id = ?workspace_id, is_leader, "Memory 已启动或连接");
-            let mut guard = match registry.lock() {
+            tracing::info!(is_leader, "Memory 已启动或连接");
+            let mut guard = match slot.lock() {
                 Ok(guard) => guard,
                 Err(err) => {
                     tracing::warn!("Memory Handle registry 已污染，尝试恢复: {}", err);
                     err.into_inner()
                 }
             };
-            if let Some(entry) = guard.get_mut(&key) {
+            if let Some(entry) = guard.as_mut() {
                 entry.last_used_at = now_text();
                 return Some(entry.handle.clone());
             }
             let now = now_text();
-            guard.insert(
-                key,
-                MemoryRegistryEntry {
-                    managed,
-                    handle: handle.clone(),
-                    workspace_id,
-                    config_summary,
-                    config_generation,
-                    created_at: now.clone(),
-                    last_used_at: now,
-                    restart_required: false,
-                },
-            );
+            *guard = Some(MemoryEntry {
+                managed,
+                handle: handle.clone(),
+                config_summary,
+                config_generation,
+                created_at: now.clone(),
+                last_used_at: now,
+                restart_required: false,
+            });
             Some(handle)
         }
         Err(err) => {
-            tracing::warn!(workspace_id = ?workspace_id, "Memory 启动或连接失败（非致命）: {}", err);
+            tracing::warn!("Memory 启动或连接失败（非致命）: {}", err);
             None
         }
     }
-}
-
-fn memory_init_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
-    let locks = MEMORY_INIT_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = match locks.lock() {
-        Ok(guard) => guard,
-        Err(err) => {
-            tracing::warn!("Memory init lock registry 已污染，尝试恢复: {}", err);
-            err.into_inner()
-        }
-    };
-    guard
-        .entry(key.to_string())
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone()
 }
 
 fn start_or_connect_memory(
@@ -346,30 +308,26 @@ fn start_or_connect_memory_blocking(
     ))
 }
 
-/// 获取或初始化 workspace 级 Memory Handle，供 GUI/Server 侧管理入口复用。
+/// 获取或初始化全局 Memory Handle，供 GUI/Server 侧管理入口复用。
 pub fn get_or_init_memory_handle(
     config_provider: &CoreConfigProvider,
-    workspace_id: Option<String>,
 ) -> Option<tiangong_memory::MemoryHandle> {
     let config = config_provider.snapshot();
     get_or_init_memory(
         &config,
         config_provider.generation(),
-        workspace_id,
         tiangong_memory::ProcessType::Gui,
     )
 }
 
-/// 异步获取或初始化 workspace 级 Memory Handle，供 Tauri async command 复用。
+/// 异步获取或初始化全局 Memory Handle，供 Tauri async command 复用。
 pub async fn get_or_init_memory_handle_async(
     config_provider: &CoreConfigProvider,
-    workspace_id: Option<String>,
 ) -> Option<tiangong_memory::MemoryHandle> {
     let config = config_provider.snapshot();
     get_or_init_memory_async(
         &config,
         config_provider.generation(),
-        workspace_id,
         tiangong_memory::ProcessType::Gui,
     )
     .await
@@ -385,33 +343,25 @@ pub fn save_memory_config(config: tiangong_memory::MemoryConfig) -> anyhow::Resu
     config.save()
 }
 
-/// 根据当前会话工作目录解析 Memory workspace id。
-pub fn memory_workspace_id_from_cwd(cwd: &str) -> Option<String> {
-    resolve_memory_workspace_id(cwd)
-}
-
-/// 统一关闭当前进程内所有 MemoryHandle。
+/// 统一关闭当前进程内 MemoryHandle。
 pub fn shutdown_memory_registry_blocking() {
-    let Some(registry) = MEMORY_HANDLES.get() else {
+    let Some(slot) = MEMORY_HANDLE.get() else {
         return;
     };
-    let entries = match registry.lock() {
-        Ok(mut guard) => guard.drain().map(|(_, entry)| entry).collect::<Vec<_>>(),
+    let entry = match slot.lock() {
+        Ok(mut guard) => guard.take(),
         Err(err) => {
             tracing::warn!("Memory Handle registry 已污染，尝试恢复后统一关闭: {}", err);
-            err.into_inner()
-                .drain()
-                .map(|(_, entry)| entry)
-                .collect::<Vec<_>>()
+            err.into_inner().take()
         }
     };
-    if entries.is_empty() {
+    let Some(entry) = entry else {
         return;
-    }
+    };
     if tokio::runtime::Handle::try_current().is_ok() {
         match std::thread::Builder::new()
             .name("memory-shutdown".to_string())
-            .spawn(move || shutdown_memory_entries_blocking(entries))
+            .spawn(move || shutdown_memory_entry_blocking(entry))
         {
             Ok(join) => {
                 if join.join().is_err() {
@@ -422,10 +372,10 @@ pub fn shutdown_memory_registry_blocking() {
         }
         return;
     }
-    shutdown_memory_entries_blocking(entries);
+    shutdown_memory_entry_blocking(entry);
 }
 
-fn shutdown_memory_entries_blocking(entries: Vec<MemoryRegistryEntry>) {
+fn shutdown_memory_entry_blocking(entry: MemoryEntry) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -437,24 +387,10 @@ fn shutdown_memory_entries_blocking(entries: Vec<MemoryRegistryEntry>) {
         }
     };
     runtime.block_on(async move {
-        for entry in entries {
-            if entry.managed.is_leader() {
-                entry.handle.shutdown().await;
-            }
+        if entry.managed.is_leader() {
+            entry.handle.shutdown().await;
         }
     });
-}
-
-pub(crate) fn resolve_memory_workspace_id(session_cwd: &str) -> Option<String> {
-    let trimmed = session_cwd.trim();
-    if !trimmed.is_empty() {
-        return Some(tiangong_memory::workspace_id_from_path(
-            &std::path::PathBuf::from(trimmed),
-        ));
-    }
-    std::env::current_dir()
-        .ok()
-        .map(|p| tiangong_memory::workspace_id_from_path(&p))
 }
 
 fn memory_config_changed(running: &MemoryConfigSummary, latest: &MemoryConfigSummary) -> bool {
@@ -463,7 +399,7 @@ fn memory_config_changed(running: &MemoryConfigSummary, latest: &MemoryConfigSum
 
 #[cfg(test)]
 fn memory_config_summary(_config: &CoreConfig) -> MemoryConfigSummary {
-    let options = tiangong_memory::MemoryConfig::load_or_default().to_options(None);
+    let options = tiangong_memory::MemoryConfig::load_or_default().to_options();
     memory_config_summary_from_options(&options)
 }
 
@@ -501,13 +437,6 @@ fn memory_config_can_update_in_place(
     true
 }
 
-fn memory_registry_key(workspace_id: Option<&str>) -> String {
-    workspace_id
-        .filter(|workspace_id| !workspace_id.trim().is_empty())
-        .unwrap_or(GLOBAL_MEMORY_WORKSPACE_KEY)
-        .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,26 +449,6 @@ mod tests {
             .get_or_init(|| Mutex::new(()))
             .lock()
             .expect("memory registry 测试锁已污染")
-    }
-
-    #[test]
-    fn memory_registry_key_separates_workspace_and_global_handles() {
-        assert_eq!(memory_registry_key(None), GLOBAL_MEMORY_WORKSPACE_KEY);
-        assert_eq!(memory_registry_key(Some("")), GLOBAL_MEMORY_WORKSPACE_KEY);
-        assert_eq!(memory_registry_key(Some("ws-a")), "ws-a");
-        assert_ne!(
-            memory_registry_key(Some("ws-a")),
-            memory_registry_key(Some("ws-b"))
-        );
-    }
-
-    #[test]
-    fn resolve_memory_workspace_id_prefers_session_cwd() {
-        let from_session = resolve_memory_workspace_id("/tmp/tiangong-memory-workspace-a")
-            .expect("session cwd 应生成 workspace_id");
-        let from_other_session = resolve_memory_workspace_id("/tmp/tiangong-memory-workspace-b")
-            .expect("session cwd 应生成 workspace_id");
-        assert_ne!(from_session, from_other_session);
     }
 
     #[test]
@@ -580,44 +489,27 @@ mod tests {
     }
 
     #[test]
-    fn memory_registry_reuses_workspace_handle_and_separates_workspaces() {
+    fn memory_registry_reuses_global_handle_regardless_of_workspace() {
         let _lock = memory_registry_test_lock();
         let _env = MemoryRegistryEnvGuard::enter();
         shutdown_memory_registry_blocking();
 
         let config = CoreConfig::default();
-        let workspace_a = format!("ws-registry-a-{}", scru128::new());
-        let workspace_b = format!("ws-registry-b-{}", scru128::new());
 
-        let handle_a = get_or_init_memory(
-            &config,
-            1,
-            Some(workspace_a.clone()),
-            tiangong_memory::ProcessType::Cli,
-        )
-        .expect("workspace A memory handle 应启动成功");
-        let handle_a_again = get_or_init_memory(
-            &config,
-            1,
-            Some(workspace_a),
-            tiangong_memory::ProcessType::Cli,
-        )
-        .expect("workspace A memory handle 应可复用");
-        let handle_b = get_or_init_memory(
-            &config,
-            1,
-            Some(workspace_b),
-            tiangong_memory::ProcessType::Cli,
-        )
-        .expect("workspace B memory handle 应启动成功");
+        let handle_a = get_or_init_memory(&config, 1, tiangong_memory::ProcessType::Cli)
+            .expect("memory handle 应启动成功");
+        let handle_a_again = get_or_init_memory(&config, 1, tiangong_memory::ProcessType::Cli)
+            .expect("memory handle 应可复用");
+        let handle_b = get_or_init_memory(&config, 1, tiangong_memory::ProcessType::Cli)
+            .expect("memory handle 应启动成功");
 
         assert!(
             handle_a.is_same_handle(&handle_a_again),
-            "同一 workspace 应复用同一个 MemoryHandle"
+            "相同参数应复用同一个 MemoryHandle"
         );
         assert!(
-            !handle_a.is_same_handle(&handle_b),
-            "不同 workspace 应使用不同 MemoryHandle"
+            handle_a.is_same_handle(&handle_b),
+            "全局模式下应复用同一个 MemoryHandle"
         );
 
         shutdown_memory_registry_blocking();
@@ -631,27 +523,16 @@ mod tests {
         shutdown_memory_registry_blocking();
 
         let config = CoreConfig::default();
-        let workspace = format!("ws-async-registry-{}", scru128::new());
-        let handle = get_or_init_memory_async(
-            &config,
-            1,
-            Some(workspace.clone()),
-            tiangong_memory::ProcessType::Gui,
-        )
-        .await
-        .expect("tokio runtime 内应能初始化 MemoryHandle");
-        let same_handle = get_or_init_memory_async(
-            &config,
-            1,
-            Some(workspace),
-            tiangong_memory::ProcessType::Gui,
-        )
-        .await
-        .expect("tokio runtime 内应能复用 MemoryHandle");
+        let handle = get_or_init_memory_async(&config, 1, tiangong_memory::ProcessType::Gui)
+            .await
+            .expect("tokio runtime 内应能初始化 MemoryHandle");
+        let same_handle = get_or_init_memory_async(&config, 1, tiangong_memory::ProcessType::Gui)
+            .await
+            .expect("tokio runtime 内应能复用 MemoryHandle");
 
         assert!(
             handle.is_same_handle(&same_handle),
-            "异步路径应复用同一个 workspace MemoryHandle"
+            "异步路径应复用同一个 MemoryHandle"
         );
 
         shutdown_memory_registry_blocking();
@@ -663,37 +544,24 @@ mod tests {
         let _env = MemoryRegistryEnvGuard::enter();
         shutdown_memory_registry_blocking();
 
-        let workspace = format!("ws-hot-update-{}", scru128::new());
         let initial = CoreConfig::default();
-        let initial_handle = get_or_init_memory(
-            &initial,
-            1,
-            Some(workspace.clone()),
-            tiangong_memory::ProcessType::Cli,
-        )
-        .expect("初始 MemoryHandle 应启动成功");
+        let initial_handle = get_or_init_memory(&initial, 1, tiangong_memory::ProcessType::Cli)
+            .expect("初始 MemoryHandle 应启动成功");
 
         write_memory_test_config(1024, tiangong_memory::MemoryVectorMode::EmbeddedLanceDb);
         let updated = CoreConfig::default();
         let expected_summary = memory_config_summary(&updated);
-        let updated_handle = get_or_init_memory(
-            &updated,
-            2,
-            Some(workspace.clone()),
-            tiangong_memory::ProcessType::Cli,
-        )
-        .expect("MemoryHandle 应支持热更新后继续可用");
+        let updated_handle = get_or_init_memory(&updated, 2, tiangong_memory::ProcessType::Cli)
+            .expect("MemoryHandle 应支持热更新后继续可用");
 
         assert!(
             initial_handle.is_same_handle(&updated_handle),
             "Memory 配置热更新应原地复用同一 handle"
         );
 
-        let registry = MEMORY_HANDLES.get().expect("registry 应已初始化");
-        let guard = registry.lock().expect("registry 锁应可用");
-        let entry = guard
-            .get(&memory_registry_key(Some(&workspace)))
-            .expect("workspace entry 应存在");
+        let slot = MEMORY_HANDLE.get().expect("registry 应已初始化");
+        let guard = slot.lock().expect("registry 锁应可用");
+        let entry = guard.as_ref().expect("entry 应存在");
         assert_eq!(entry.config_generation, 2);
         assert!(!entry.restart_required);
         assert_eq!(entry.config_summary, expected_summary);
@@ -708,13 +576,11 @@ mod tests {
         let _env = MemoryRegistryEnvGuard::enter();
         shutdown_memory_registry_blocking();
 
-        let workspace = format!("ws-provider-reload-{}", scru128::new());
         let provider = CoreConfigProvider::new(CoreConfig::default());
         let initial_snapshot = provider.snapshot();
         let initial_handle = get_or_init_memory(
             &initial_snapshot,
             provider.generation(),
-            Some(workspace.clone()),
             tiangong_memory::ProcessType::Cli,
         )
         .expect("初始 MemoryHandle 应启动成功");
@@ -728,7 +594,6 @@ mod tests {
         let updated_handle = get_or_init_memory(
             &updated_snapshot,
             provider.generation(),
-            Some(workspace.clone()),
             tiangong_memory::ProcessType::Cli,
         )
         .expect("配置热重载后 MemoryHandle 应继续可用");
@@ -738,11 +603,9 @@ mod tests {
             "CoreConfigProvider 热重载后应原地复用同一 MemoryHandle"
         );
 
-        let registry = MEMORY_HANDLES.get().expect("registry 应已初始化");
-        let guard = registry.lock().expect("registry 锁应可用");
-        let entry = guard
-            .get(&memory_registry_key(Some(&workspace)))
-            .expect("workspace entry 应存在");
+        let slot = MEMORY_HANDLE.get().expect("registry 应已初始化");
+        let guard = slot.lock().expect("registry 锁应可用");
+        let entry = guard.as_ref().expect("entry 应存在");
         assert_eq!(
             entry.config_generation,
             provider.generation(),

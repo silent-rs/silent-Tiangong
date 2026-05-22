@@ -62,14 +62,14 @@ async fn follower_continues_memory_after_leader_disappears() {
         home.path().display()
     ));
 
-    let leader = start_or_connect(Some(workspace_id.clone()), ProcessType::Cli)
+    let leader = start_or_connect(ProcessType::Cli)
         .await
         .expect("启动 leader 失败");
     log_state("leader 启动后", &leader);
     log_leader_info("leader 启动后");
     assert!(leader.is_leader(), "首个 memory 实例应成为 leader");
 
-    let follower = start_or_connect(Some(workspace_id.clone()), ProcessType::Server)
+    let follower = start_or_connect(ProcessType::Server)
         .await
         .expect("启动 follower 失败");
     log_state("follower 启动后", &follower);
@@ -151,7 +151,7 @@ async fn gui_cli_server_processes_share_one_workspace_leader() {
         "至少一个入口应作为 follower 连接已有 leader"
     );
 
-    let service = memory_service_name(Some(&workspace_id));
+    let service = memory_service_name();
     let remote_handle = MemoryHandle::connect_tcp(&service)
         .await
         .expect("父进程应能连接多进程 leader");
@@ -177,7 +177,7 @@ async fn multiprocess_memory_actor_child_entry() {
     let workspace_id =
         std::env::var(MULTIPROCESS_CHILD_WORKSPACE_ENV).expect("子进程缺少 workspace 环境变量");
     let process_type = process_type_for_role(&role);
-    let memory = start_or_connect(Some(workspace_id.clone()), process_type)
+    let memory = start_or_connect(process_type)
         .await
         .expect("子进程启动或连接 Memory 失败");
 
@@ -419,8 +419,8 @@ fn log_state(label: &str, memory: &ManagedMemory) {
 fn log_leader_info(label: &str) {
     match read_leader_info() {
         Ok(Some(info)) => log_step(format!(
-            "{label}: leader pid={} process={:?} workspace={:?} service={} heartbeat={}",
-            info.pid, info.process_type, info.workspace_id, info.service, info.heartbeat_at
+            "{label}: leader pid={} process={:?} service={} heartbeat={}",
+            info.pid, info.process_type, info.service, info.heartbeat_at
         )),
         Ok(None) => log_step(format!("{label}: leader 信息不存在")),
         Err(err) => log_step(format!("{label}: 读取 leader 信息失败: {err}")),

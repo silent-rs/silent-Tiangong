@@ -198,8 +198,8 @@ impl MemoryConfig {
             .with_context(|| format!("写入 Memory 配置失败：{}", path.display()))
     }
 
-    pub fn to_options(&self, workspace_id: Option<String>) -> MemoryOptions {
-        let mut options = MemoryOptions::new(workspace_id);
+    pub fn to_options(&self) -> MemoryOptions {
+        let mut options = MemoryOptions::new();
 
         if let Some(model) = self
             .model
@@ -278,9 +278,8 @@ mod tests {
             vector_mode: MemoryVectorMode::EmbeddedLanceDb,
         };
 
-        let options = config.to_options(Some("ws-1".into()));
+        let options = config.to_options();
 
-        assert_eq!(options.workspace_id.as_deref(), Some("ws-1"));
         assert_eq!(options.vector_mode, MemoryVectorMode::EmbeddedLanceDb);
         assert_eq!(options.model.expect("model 应存在").model, "memory-small");
         assert_eq!(options.embedding.expect("embedding 应存在").dimension, 1024);
@@ -312,7 +311,7 @@ mod tests {
             ..Default::default()
         };
 
-        let options = config.to_options(None);
+        let options = config.to_options();
 
         assert!(options.model.is_none());
         assert!(options.embedding.is_none());

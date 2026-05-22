@@ -8,7 +8,6 @@ use tiangong_llm::{EmbeddingEndpointConfig, LlmEndpointConfig, RerankEndpointCon
 
 #[derive(Debug, Clone, Default)]
 pub struct MemoryOptions {
-    pub workspace_id: Option<String>,
     pub model: Option<LlmEndpointConfig>,
     pub embedding: Option<EmbeddingEndpointConfig>,
     pub rerank: Option<RerankEndpointConfig>,
@@ -16,9 +15,8 @@ pub struct MemoryOptions {
 }
 
 impl MemoryOptions {
-    pub fn new(workspace_id: Option<String>) -> Self {
+    pub fn new() -> Self {
         Self {
-            workspace_id,
             model: None,
             embedding: None,
             rerank: None,
@@ -57,6 +55,4 @@ pub enum MemoryVectorMode {
     Disabled,
     /// 使用嵌入式 LanceDB 向量索引。
     EmbeddedLanceDb,
-    /// 使用外部 Qdrant 服务。
-    ExternalQdrant,
 }

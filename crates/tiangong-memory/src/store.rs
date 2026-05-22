@@ -21,7 +21,6 @@ use crate::options::MemoryVectorMode;
 use crate::recall::RecallEngine;
 use crate::search::TantivyIndex;
 use crate::search::lancedb_search::LanceDbIndex;
-use crate::search::qdrant_search::QdrantIndex;
 use crate::search::vector::VectorIndex;
 use crate::types::{
     Decision, Entity, Episode, EpisodeOutcome, ExpandedMemory, ManualMemoryDraft,
@@ -35,13 +34,12 @@ pub(crate) struct MemoryStore {
     /// Tantivy 全文索引，多实例锁冲突时降级为 None（纯 SQLite 模式）
     tantivy: Option<TantivyIndex>,
     recall_engine: RecallEngine,
-    workspace_id: Option<String>,
 }
 
 impl MemoryStore {
     /// 打开存储（初始化 SQLite + Tantivy，Tantivy 锁冲突时降级为纯 SQLite 模式）
-    pub(crate) fn open(workspace_id: Option<String>) -> Result<Self> {
-        let base = memory_index_base_dir(workspace_id.as_deref());
+    pub(crate) fn open() -> Result<Self> {
+        let base = memory_base_dir();
         let db = MemoryDb::open()?;
 
         // Tantivy 初始化失败时优雅降级（多实例锁冲突等场景）
@@ -59,7 +57,6 @@ impl MemoryStore {
             db,
             tantivy,
             recall_engine,
-            workspace_id,
         })
     }
 
@@ -168,9 +165,8 @@ impl MemoryStore {
 
         let (vector_index, backend): (Box<dyn VectorIndex>, &str) = match vector_mode {
             MemoryVectorMode::EmbeddedLanceDb => {
-                let base = memory_index_base_dir(self.workspace_id.as_deref());
+                let base = memory_base_dir();
                 let needs_migration = migration::needs_vector_migration(&self.db, &base);
-                migration::cleanup_legacy_qdrant_edge(&base);
                 match LanceDbIndex::open(&base, embedding.dimension).await {
                     Ok(index) => {
                         if needs_migration {
@@ -190,24 +186,6 @@ impl MemoryStore {
                             tracing::warn!(
                                 "Memory LanceDB 索引初始化失败，使用 BM25-only 召回: {err}"
                             );
-                        }
-                        return;
-                    }
-                }
-            }
-            MemoryVectorMode::ExternalQdrant => {
-                match QdrantIndex::connect(embedding.dimension).await {
-                    Ok(index) => (Box::new(index), "external_qdrant"),
-                    Err(err) => {
-                        if let Some(rerank_provider) = rerank_provider {
-                            let model = rerank_provider.model().to_string();
-                            self.enable_rerank_only(rerank_provider);
-                            tracing::warn!(
-                                model = %model,
-                                "Memory Qdrant 连接失败，仅启用 rerank: {err}"
-                            );
-                        } else {
-                            tracing::warn!("Memory Qdrant 连接失败，使用 BM25-only 召回: {err}");
                         }
                         return;
                     }
@@ -241,20 +219,13 @@ impl MemoryStore {
         );
     }
 
-    /// 显式启用外部 Qdrant，供后续兼容接口使用。
-    #[allow(dead_code)]
-    pub(crate) async fn try_enable_qdrant(&mut self, embedding: Option<&EmbeddingEndpointConfig>) {
-        self.try_enable_recall_engine(embedding, None, MemoryVectorMode::ExternalQdrant)
-            .await;
-    }
-
     /// 加载三级注入上下文
     pub(crate) fn load_injection(
         &self,
         session_id: &str,
         workspace_id: Option<&str>,
     ) -> Vec<String> {
-        let wid = workspace_id.or(self.workspace_id.as_deref());
+        let wid = workspace_id;
         injection::load_injection_context(session_id, wid)
     }
 
@@ -281,8 +252,8 @@ impl MemoryStore {
         episode: Episode,
         workspace_id: Option<&str>,
     ) -> Result<MemoryNode> {
-        // 优先使用调用方传入的 workspace_id，回退到 store 启动时的值
-        let wid = workspace_id.or(self.workspace_id.as_deref());
+        // 优先使用调用方传入的 workspace_id
+        let wid = workspace_id;
         // 1. 写入 SQLite（携带 workspace_id，保证 scope_id 正确落库）
         let node = episode_to_node(&episode, wid);
         self.db.insert_episode(&episode, wid)?;
@@ -301,7 +272,7 @@ impl MemoryStore {
             tracing::warn!("Tantivy 索引写入失败（非致命）: {}", e);
         }
 
-        // Phase C：Qdrant upsert 在 actor 层触发（异步，通过 RunEmbedAndUpsert 命令）
+        // Phase C：向量 upsert 在 actor 层触发（异步，通过 RunEmbedAndUpsert 命令）
 
         Ok(node)
     }
@@ -370,10 +341,7 @@ impl MemoryStore {
 
     /// 列出记忆节点，供 GUI 手动管理使用。
     pub(crate) fn list_nodes(&self, query: &MemoryListQuery) -> Vec<MemoryNode> {
-        let workspace_id = query
-            .workspace_id
-            .as_deref()
-            .or(self.workspace_id.as_deref());
+        let workspace_id = query.workspace_id.as_deref();
         self.db
             .list_memory_nodes(
                 workspace_id,
@@ -387,10 +355,7 @@ impl MemoryStore {
     }
 
     pub(crate) fn count_nodes(&self, query: &MemoryListQuery) -> usize {
-        let workspace_id = query
-            .workspace_id
-            .as_deref()
-            .or(self.workspace_id.as_deref());
+        let workspace_id = query.workspace_id.as_deref();
         self.db
             .count_memory_nodes(
                 workspace_id,
@@ -406,11 +371,7 @@ impl MemoryStore {
         &mut self,
         draft: ManualMemoryDraft,
     ) -> Result<MemoryNode> {
-        let workspace_id = draft
-            .workspace_id
-            .as_deref()
-            .or(self.workspace_id.as_deref())
-            .map(str::to_string);
+        let workspace_id = draft.workspace_id.as_deref().map(str::to_string);
         let keywords = normalize_keywords(draft.keywords);
         let importance = if draft.importance > 0.0 {
             draft.importance.clamp(0.0, 1.0)
@@ -916,14 +877,6 @@ fn memory_base_dir() -> PathBuf {
 
 fn default_vector_mode() -> MemoryVectorMode {
     MemoryVectorMode::EmbeddedLanceDb
-}
-
-fn memory_index_base_dir(workspace_id: Option<&str>) -> PathBuf {
-    let base = memory_base_dir();
-    workspace_id
-        .filter(|workspace_id| !workspace_id.trim().is_empty())
-        .map(|workspace_id| base.join("workspaces").join(workspace_id))
-        .unwrap_or(base)
 }
 
 fn home_dir() -> Option<PathBuf> {
