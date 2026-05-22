@@ -380,6 +380,11 @@ impl WorkspaceIndex {
         Ok(())
     }
 
+    pub fn commit(&mut self) -> Result<()> {
+        self.writer.commit().context("提交 Workspace 索引失败")?;
+        Ok(())
+    }
+
     pub fn remove_file(&mut self, rel_path: &str) -> Result<()> {
         let term = tantivy::Term::from_field_text(self.fields.path, rel_path);
         self.writer.delete_term(term);

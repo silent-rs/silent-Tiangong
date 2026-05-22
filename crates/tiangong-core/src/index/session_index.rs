@@ -32,7 +32,7 @@ impl SessionIndex {
         };
 
         let writer = index
-            .writer(10_000_000)
+            .writer(15_000_000)
             .context("创建 Session 索引写入器失败")?;
 
         Ok(Self {
