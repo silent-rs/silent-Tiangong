@@ -606,15 +606,18 @@ pub(crate) fn compress_context_for_session(
         .with_keep_recent_turns(6);
     match organizer.force_update_summary_with_usage(session, engine.client()) {
         Ok(update) => {
+            let remaining = session.messages.len().saturating_sub(session.summary_up_to);
+            session.current_tokens = 0;
+            session.active_agent_current_tokens = 0;
+            session.agent_current_tokens.clear();
             crate::react::context::emit_token_usage(
                 stream_tx,
                 &update.usage,
-                None,
+                Some(0),
                 engine.context_limit,
                 "manual_context_compress",
                 None,
             );
-            let remaining = session.messages.len().saturating_sub(session.summary_up_to);
             let _ = stream_tx.send(StreamEvent::ContextCompressed {
                 action: if update.compressed {
                     "压缩".to_string()
@@ -637,6 +640,10 @@ pub(crate) fn compress_context_for_session(
 pub(crate) fn reset_context_for_session(session: &mut Session, stream_tx: &StdSender<StreamEvent>) {
     let total = session.messages.len();
     session.summary_up_to = total;
+    session.context_summary = None;
+    session.current_tokens = 0;
+    session.active_agent_current_tokens = 0;
+    session.agent_current_tokens.clear();
     let _ = stream_tx.send(StreamEvent::ContextCompressed {
         action: "清理".to_string(),
         summary_up_to: total,
