@@ -540,9 +540,23 @@ impl ReactEngine {
             let response = match response_result {
                 Ok(r) => r,
                 Err(err) => {
-                    let _ = stream_tx.send(StreamEvent::Error {
-                        message: err.to_string(),
-                    });
+                    let err_msg = err.to_string();
+                    // 上下文超限时强制压缩后重试一次
+                    if err_msg.contains("context_window_exceeded")
+                        || err_msg.contains("context_length_exceeded")
+                    {
+                        tracing::warn!("检测到上下文超限，尝试强制压缩");
+                        crate::react::context::maybe_update_context_summary(
+                            session,
+                            &self.engine,
+                            self.engine.context_limit,
+                            stream_tx,
+                        );
+                        if session.summary_up_to > 0 {
+                            continue 'react_loop;
+                        }
+                    }
+                    let _ = stream_tx.send(StreamEvent::Error { message: err_msg });
                     return accumulated_usage;
                 }
             };
