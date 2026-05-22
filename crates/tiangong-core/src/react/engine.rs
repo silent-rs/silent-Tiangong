@@ -595,18 +595,19 @@ impl ReactEngine {
                 Ok(r) => r,
                 Err(err) => {
                     let err_msg = err.to_string();
-                    // 上下文超限时强制压缩后重试一次
+                    // 上下文超限时强制压缩后重试
                     if err_msg.contains("context_window_exceeded")
                         || err_msg.contains("context_length_exceeded")
                     {
                         tracing::warn!("检测到上下文超限，尝试强制压缩");
+                        let before_summary_up_to = session.summary_up_to;
                         crate::react::context::maybe_update_context_summary(
                             session,
                             &self.engine,
                             self.engine.context_limit,
                             stream_tx,
                         );
-                        if session.summary_up_to > 0 {
+                        if session.summary_up_to > before_summary_up_to {
                             continue 'react_loop;
                         }
                     }
