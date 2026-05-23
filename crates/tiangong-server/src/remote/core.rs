@@ -557,9 +557,12 @@ fn append_assistant_delta(session: &mut Session, message_id: &str, content: &str
         if message.text_content().trim().is_empty() && content.trim().is_empty() {
             return;
         }
-        message
-            .content
-            .push(tiangong_types::ContentBlock::text(content.to_string()));
+        match message.content.last_mut() {
+            Some(tiangong_types::ContentBlock::Text { text }) => text.push_str(content),
+            _ => message
+                .content
+                .push(tiangong_types::ContentBlock::text(content.to_string())),
+        }
     }
 }
 

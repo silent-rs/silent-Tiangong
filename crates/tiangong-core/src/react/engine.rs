@@ -82,16 +82,6 @@ fn send_sub_agent_output(
     });
 }
 
-fn agent_status_label(status: &crate::agent_team::descriptor::AgentStatus) -> &'static str {
-    match status {
-        crate::agent_team::descriptor::AgentStatus::Idle => "idle",
-        crate::agent_team::descriptor::AgentStatus::Running => "running",
-        crate::agent_team::descriptor::AgentStatus::WaitingForUser => "waiting_for_user",
-        crate::agent_team::descriptor::AgentStatus::WaitingForLock => "waiting_for_lock",
-        crate::agent_team::descriptor::AgentStatus::Terminated => "terminated",
-    }
-}
-
 fn spawn_sub_agent_stream_forwarder(
     agent_id: String,
     agent_role: String,
@@ -472,17 +462,6 @@ impl ReactEngine {
             }
 
             let request_tools = self.tools.to_vec();
-
-            // 子 Agent 的团队上下文注入 session.messages
-            if let Some(team_msg) = self.sub_agent_team_context_message() {
-                // 仅在首轮注入，避免重复
-                let has_team = session.messages.iter().any(|m| {
-                    m.role == MessageRole::System && m.text_content().contains("[团队上下文]")
-                });
-                if !has_team {
-                    session.messages.push(team_msg);
-                }
-            }
 
             let (thinking, reasoning_effort, thinking_disabled) = self.build_thinking_config();
             let req = ModelRequest {
@@ -1311,56 +1290,6 @@ impl ReactEngine {
             .as_ref()
             .and_then(|team| team.lock().ok().map(|mut team| team.drain_main_inbox()))
             .unwrap_or_default()
-    }
-
-    fn sub_agent_team_context_message(&self) -> Option<Message> {
-        if self.agent_id == "main" {
-            return None;
-        }
-
-        let team = self.team.as_ref()?.lock().ok()?;
-        let current = team.registry.get(&self.agent_id)?;
-        let mut agents = team.registry.alive_agents();
-        agents.sort_by(|a, b| a.role.cmp(&b.role));
-        if agents.is_empty() {
-            return None;
-        }
-
-        let roster = agents
-            .iter()
-            .map(|agent| {
-                let own = if agent.agent_id == self.agent_id {
-                    "（你）"
-                } else {
-                    ""
-                };
-                format!(
-                    "- {} (@{}) status={}{}",
-                    agent.label,
-                    agent.role,
-                    agent_status_label(&agent.status),
-                    own
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let mut msg = Message::new(
-            MessageRole::Tool,
-            format!(
-                "[团队上下文]\n\
-你的身份：{} (@{})。\n\
-当前可用团队成员：\n{}\n\
-协作规则：\n\
-- 需要其他角色补充信息、实现或验证时，使用 send_message(to=\"role\", content=\"...\") 主动沟通，role 必须来自上面的 @角色。\n\
-- 需要同步给所有成员时，使用 broadcast_message(content=\"...\", exclude=[\"{}\"]）。\n\
-- 子 Agent 不负责创建或解散成员；已有团队成员都列在上方。\n\
-- 需要向用户汇报时，使用 notify_user；内容直接用你的角色口吻输出结论和进展，不要带系统日志前缀。",
-                current.label, current.role, roster, current.role
-            ),
-        );
-        msg.tool_name = Some("team_context".to_string());
-        Some(msg)
     }
 
     #[allow(clippy::too_many_arguments)]

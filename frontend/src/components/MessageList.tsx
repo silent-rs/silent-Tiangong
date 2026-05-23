@@ -730,7 +730,8 @@ function resolveAssetUrl(url: string): string {
 }
 
 function renderContentMedia(message: MessageItem) {
-  const mediaBlocks = message.content.filter((b) => b.type === 'media');
+  const content = Array.isArray(message.content) ? message.content : [];
+  const mediaBlocks = content.filter((b) => b.type === 'media');
   // 兼容旧格式：也检查 message.media
   const legacyMedia = message.media || [];
   const allMedia = [

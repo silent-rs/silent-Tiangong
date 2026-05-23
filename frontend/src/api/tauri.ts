@@ -122,9 +122,12 @@ export interface Message {
   created_at: string;
 }
 
-/** 提取消息的纯文本内容 */
+/** 提取消息的纯文本内容，兼容旧格式 content 为字符串的情况 */
 export function textContent(msg: Message): string {
-  return msg.content
+  const content = msg.content;
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
     .filter((b) => b.type === 'text' && b.text)
     .map((b) => b.text!)
     .join('');
@@ -132,7 +135,9 @@ export function textContent(msg: Message): string {
 
 /** 消息是否包含媒体内容块 */
 export function hasMediaBlocks(msg: Message): boolean {
-  return msg.content.some((b) => b.type === 'media');
+  const content = msg.content;
+  if (!Array.isArray(content)) return false;
+  return content.some((b) => b.type === 'media');
 }
 
 export interface RunSnapshot {

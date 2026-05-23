@@ -227,8 +227,12 @@ fn append_assistant_delta(
         if msg.text_content().trim().is_empty() && content.trim().is_empty() {
             return;
         }
-        msg.content
-            .push(tiangong_types::ContentBlock::text(content.to_string()));
+        match msg.content.last_mut() {
+            Some(tiangong_types::ContentBlock::Text { text }) => text.push_str(content),
+            _ => msg
+                .content
+                .push(tiangong_types::ContentBlock::text(content.to_string())),
+        }
     }
 }
 
