@@ -10,7 +10,9 @@ pub mod status;
 pub mod stream;
 pub mod token;
 
-pub use message::{MediaAsset, MediaKind, Message, MessageRole, MessageToolCall, now_text};
+pub use message::{
+    ContentBlock, MediaAsset, MediaKind, Message, MessageRole, MessageToolCall, now_text,
+};
 pub use remote::{IncomingMessage, MessageContent, OutgoingMessage, RemoteRole};
 pub use session::Session;
 pub use status::RunStatus;

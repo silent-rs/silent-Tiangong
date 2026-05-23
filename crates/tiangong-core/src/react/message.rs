@@ -20,8 +20,12 @@ pub(crate) fn append_or_reuse_user_message(
             .iter_mut()
             .find(|message| message.id == message_id)
         {
-            if message.media.is_empty() && !media.is_empty() {
-                message.media = media;
+            let has_media = message.content.iter().any(|b| !b.is_text());
+            if !has_media && !media.is_empty() {
+                for asset in &media {
+                    message.content.push(asset.to_content_block());
+                }
+                message.media_migrated = true;
             }
         } else {
             session.append_message_with_id_and_media(
@@ -293,12 +297,12 @@ pub(crate) fn truncate_chars_with_notice(text: &str, max_chars: usize, notice: &
     }
 }
 
-pub(crate) fn latest_user_message(session: &Session) -> &str {
+pub(crate) fn latest_user_message(session: &Session) -> String {
     session
         .messages
         .iter()
         .rev()
         .find(|message| message.role == MessageRole::User)
-        .map(|message| message.content.as_str())
+        .map(|message| message.text_content())
         .unwrap_or_default()
 }

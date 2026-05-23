@@ -26,7 +26,7 @@ import rehypeRaw from "rehype-raw";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { AgentPanel } from "./AgentPanel";
-import { api } from "@/api/tauri";
+import { api, textContent, ContentBlock } from "@/api/tauri";
 import { CopyableCodeBlock } from "./CopyableCodeBlock";
 
 import { memo, useEffect, useMemo, useRef, useState } from "react";
@@ -218,7 +218,7 @@ function VoiceBubble({ messageId, audioPath, duration, showText, content }: {
 }
 
 function workerContentMessages(messages: MessageItem[]): MessageItem[] {
-  return messages.filter(m => !(m.role === "system" && m.content.startsWith("🔧 Worker:")));
+  return messages.filter(m => !(m.role === "system" && textContent(m).startsWith("🔧 Worker:")));
 }
 
 export function MessageList() {
@@ -517,7 +517,7 @@ export function MessageList() {
                 if (selectedAgentTab) {
                   const hasRelatedAgentEvent = group.messages.some((message) =>
                     message.role === "system"
-                    && extractAgentRoles(message.content, useStore.getState().agents).includes(selectedAgentTab)
+                    && extractAgentRoles(textContent(message), useStore.getState().agents).includes(selectedAgentTab)
                   );
                   if (!hasRelatedAgentEvent) return null;
                 }
@@ -584,24 +584,24 @@ export function MessageList() {
                           audioPath={voiceInfo.audioPath}
                           duration={voiceInfo.duration}
                           showText={voiceInfo.showText}
-                          content={message.content}
+                          content={textContent(message)}
                         />
                       ) : (
                         <div>
-                          {renderMessageMedia(message)}
-                          {message.content && (
+                          {renderContentMedia(message)}
+                          {textContent(message) && (
                             <p className="whitespace-pre-wrap break-words text-sm">
-                              {message.content}
+                              {textContent(message)}
                             </p>
                           )}
                         </div>
                       )}
                     </div>
                   </div>
-                  {message.content && !isEditing && (
+                  {textContent(message) && !isEditing && (
                     <div className="flex justify-end">
                       <UserMessageActions
-                        text={message.content}
+                        text={textContent(message)}
                         messageId={message.id}
                         runStatus={runStatus}
                         onStartEdit={handleStartEdit}
@@ -689,7 +689,7 @@ export function MessageList() {
 interface MessageItem {
   id: string;
   role: "system" | "user" | "assistant" | "tool";
-  content: string;
+  content: ContentBlock[];
   reasoning_content: string;
   worker_id?: string;
   media?: {
@@ -729,14 +729,21 @@ function resolveAssetUrl(url: string): string {
   return url;
 }
 
-function renderMessageMedia(message: MessageItem) {
-  if (!message.media || message.media.length === 0) {
+function renderContentMedia(message: MessageItem) {
+  const mediaBlocks = message.content.filter((b) => b.type === 'media');
+  // 兼容旧格式：也检查 message.media
+  const legacyMedia = message.media || [];
+  const allMedia = [
+    ...mediaBlocks.map((b) => ({ kind: b.kind!, url: b.url!, title: b.title, mime_type: b.mime_type })),
+    ...legacyMedia,
+  ];
+  if (allMedia.length === 0) {
     return null;
   }
 
   return (
     <div className="space-y-2 my-2">
-      {message.media.map((asset, index) => {
+      {allMedia.map((asset, index) => {
         const src = resolveAssetUrl(asset.url);
         if (asset.kind === "image") {
           return (
@@ -869,7 +876,7 @@ function llmOutputHasToolCalls(content: string): boolean {
 }
 
 function toolItemSucceeded(tool: MessageItem): boolean {
-  return !tool.content.includes("ok=false") && !tool.tool_result_is_error;
+  return !textContent(tool).includes("ok=false") && !tool.tool_result_is_error;
 }
 
 function summarizeToolGroup(tools: MessageItem[]): string {
@@ -880,7 +887,7 @@ function summarizeToolGroup(tools: MessageItem[]): string {
     new Set(
       tools
         .map((tool) => {
-          const meta = getSystemMessageMeta(tool.content);
+          const meta = getSystemMessageMeta(textContent(tool));
           return meta.toolName || meta.summary.split(" · ")[0] || "";
         })
         .filter(Boolean)
@@ -999,14 +1006,14 @@ function AgentTurnView({
 
     if (!resultMsg) {
       brief = `记忆检索 (${strategy})`;
-    } else if (resultMsg.content.includes("无相关记忆")) {
+    } else if (textContent(resultMsg).includes("无相关记忆")) {
       brief = `记忆检索 (${strategy}) · 无命中`;
     } else {
-      const countMatch = resultMsg.content.match(/命中 (\d+) 条/);
+      const countMatch = textContent(resultMsg).match(/命中 (\d+) 条/);
       const count = countMatch ? countMatch[1] : "?";
       brief = `记忆检索 (${strategy}) · ${count} 条命中`;
       // 解析命中条目
-      const lines = resultMsg.content.split("\n").slice(1);
+      const lines = textContent(resultMsg).split("\n").slice(1);
       hits = lines.filter(l => l.startsWith("- "));
     }
     fragments.push({ type: "memory_recall", key, strategy, brief, hits });
@@ -1018,21 +1025,21 @@ function AgentTurnView({
       flushTools();
       flushRecall();
       fragments.push({ type: "user", msg });
-    } else if (msg.role === "system" && msg.content.startsWith("[记忆检索] 策略:")) {
+    } else if (msg.role === "system" && textContent(msg).startsWith("[记忆检索] 策略:")) {
       flushTools();
       flushRecall();
-      const strategyMatch = msg.content.match(/策略:\s*(.+)/);
+      const strategyMatch = textContent(msg).match(/策略:\s*(.+)/);
       pendingRecall = {
         strategy: strategyMatch ? strategyMatch[1].trim() : "auto",
         key: msg.id,
       };
-    } else if (msg.role === "system" && msg.content.startsWith("[记忆检索]") && pendingRecall) {
+    } else if (msg.role === "system" && textContent(msg).startsWith("[记忆检索]") && pendingRecall) {
       flushRecall(msg);
-    } else if (msg.role === "system" && msg.content.startsWith("LLM 输出")) {
+    } else if (msg.role === "system" && textContent(msg).startsWith("LLM 输出")) {
       // 提取 reasoning
       const reasoning = msgReasoning(msg);
-      const explanation = extractLlmExplanation(msg.content);
-      if (!reasoning && !explanation && llmOutputHasToolCalls(msg.content)) {
+      const explanation = extractLlmExplanation(textContent(msg));
+      if (!reasoning && !explanation && llmOutputHasToolCalls(textContent(msg))) {
         continue;
       }
       flushTools();
@@ -1044,16 +1051,16 @@ function AgentTurnView({
       if (explanation) {
         fragments.push({ type: "explanation", text: explanation, time: msg.created_at });
       }
-    } else if (msg.role === "system" && (msg.content.includes("tool_name:") || msg.content.includes("exit_code") || msg.content.startsWith("工具执行 ["))) {
+    } else if (msg.role === "system" && (textContent(msg).includes("tool_name:") || textContent(msg).includes("exit_code") || textContent(msg).startsWith("工具执行 ["))) {
       pendingTools.push(msg);
     } else if (msg.role === "tool") {
       const toolName = msg.tool_name || "";
       if (toolName === "recall_memory") {
         flushTools();
-        const isStart = msg.content.startsWith("[记忆检索] 策略:");
+        const isStart = textContent(msg).startsWith("[记忆检索] 策略:");
         if (isStart && !pendingRecall) {
           flushRecall();
-          const strategyMatch = msg.content.match(/策略:\s*(\S+)/);
+          const strategyMatch = textContent(msg).match(/策略:\s*(\S+)/);
           pendingRecall = {
             strategy: strategyMatch ? strategyMatch[1] : "recall",
             key: msg.id,
@@ -1074,9 +1081,10 @@ function AgentTurnView({
       const assistantReasoning = msgReasoning(msg);
       const hasVisibleAssistantContent =
         isStreaming ||
-        msg.content.trim().length > 0 ||
+        textContent(msg).trim().length > 0 ||
         assistantReasoning.length > 0 ||
-        !!msg.media?.length;
+        !!msg.media?.length ||
+        msg.content.some(b => b.type === "media");
       if (!hasVisibleAssistantContent) {
         continue;
       }
@@ -1084,7 +1092,7 @@ function AgentTurnView({
       flushTools();
       // 跳过与前一个 explanation 完全重复的 assistant 内容
       const prevFrag = fragments[fragments.length - 1];
-      if (prevFrag?.type === "explanation" && prevFrag.text === msg.content.trim() && !isStreaming) {
+      if (prevFrag?.type === "explanation" && prevFrag.text === textContent(msg).trim() && !isStreaming) {
         // 内容重复，移除前面的 explanation，只保留 assistant
         fragments.pop();
       }
@@ -1094,26 +1102,26 @@ function AgentTurnView({
         fragments.push({ type: "thinking", content: assistantReasoning, time: msg.created_at });
       }
       fragments.push({ type: "assistant", msg, isStreaming });
-    } else if (msg.role === "system" && msg.content.startsWith("[错误]")) {
+    } else if (msg.role === "system" && textContent(msg).startsWith("[错误]")) {
       flushTools();
       fragments.push({ type: "error_system", msg });
-    } else if (msg.role === "system" && msg.content.startsWith("[重试]")) {
+    } else if (msg.role === "system" && textContent(msg).startsWith("[重试]")) {
       flushTools();
       fragments.push({ type: "retry_system", msg });
-    } else if (msg.role === "system" && msg.content.startsWith("[上下文管理]")) {
-      if (msg.content.includes("正在压缩")) {
+    } else if (msg.role === "system" && textContent(msg).startsWith("[上下文管理]")) {
+      if (textContent(msg).includes("正在压缩")) {
         continue;
       }
       flushTools();
       fragments.push({ type: "context_management", msg });
     } else if (msg.role === "system" && (
-      msg.content.startsWith("[Agent]")
-      || msg.content.startsWith("[文件锁]")
+      textContent(msg).startsWith("[Agent]")
+      || textContent(msg).startsWith("[文件锁]")
     )) {
       flushTools();
       let category = "info";
-      if (msg.content.startsWith("[文件锁]")) category = "lock";
-      fragments.push({ type: "agent_event", category, content: msg.content, agentRoles: extractAgentRoles(msg.content, agents) });
+      if (textContent(msg).startsWith("[文件锁]")) category = "lock";
+      fragments.push({ type: "agent_event", category, content: textContent(msg), agentRoles: extractAgentRoles(textContent(msg), agents) });
     } else if (msg.role === "system") {
       flushTools();
       fragments.push({ type: "other_system", msg });
@@ -1135,7 +1143,7 @@ function AgentTurnView({
 
   /** 渲染工具条目 */
   const renderToolItem = (tool: MessageItem) => {
-    const meta = getSystemMessageMeta(tool.content);
+    const meta = getSystemMessageMeta(textContent(tool));
     const expanded = expandedItems.has(tool.id);
     return (
       <div key={tool.id} title={formatMessageTime(tool.created_at)}>
@@ -1150,7 +1158,7 @@ function AgentTurnView({
         </button>
         {expanded && (
           <div className="ml-5 mt-0.5 px-3 py-2 rounded-md bg-muted/30 border border-border/50">
-            <pre className="text-xs text-muted-foreground whitespace-pre-wrap break-words font-mono leading-relaxed">{tool.content}</pre>
+            <pre className="text-xs text-muted-foreground whitespace-pre-wrap break-words font-mono leading-relaxed">{textContent(tool)}</pre>
           </div>
         )}
       </div>
@@ -1241,14 +1249,14 @@ function AgentTurnView({
           return (
             <div key={frag.msg.id} className="flex justify-end" title={formatMessageTime(frag.msg.created_at)}>
               <div className="max-w-[92%] rounded-md border border-border/70 bg-muted/40 px-3 py-1.5 text-sm text-muted-foreground whitespace-pre-wrap break-words">
-                {frag.msg.content}
+                {textContent(frag.msg)}
               </div>
             </div>
           );
         }
         if (frag.type === "assistant") {
           const { msg, isStreaming } = frag;
-          const agentReply = !isStreaming ? parseAgentReply(msg.content) : null;
+          const agentReply = !isStreaming ? parseAgentReply(textContent(msg)) : null;
           if (agentReply) {
             return (
               <div key={msg.id} className="text-foreground" title={formatMessageTime(msg.created_at)}>
@@ -1277,36 +1285,36 @@ function AgentTurnView({
                   reasoningContent={streamingReasoningContent}
                   MarkdownComponents={MarkdownComponents}
                 />
-              ) : msg.content || (msg.media && msg.media.length > 0) ? (
+              ) : textContent(msg) || (msg.media && msg.media.length > 0) || msg.content.some(b => b.type === "media") ? (
                 <div>
-                  {renderMessageMedia(msg)}
+                  {renderContentMedia(msg)}
                   <div className="prose prose-sm max-w-none break-words text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
                     <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={MarkdownComponents as any}>
-                      {msg.content}
+                      {textContent(msg)}
                     </ReactMarkdown>
                   </div>
                 </div>
               ) : null}
-              {!isStreaming && msg.content && <MessageActions text={msg.content} showTts={hasTts} />}
+              {!isStreaming && msg.content && <MessageActions text={textContent(msg)} showTts={hasTts} />}
             </div>
           );
         }
         if (frag.type === "error_system") {
           return (
             <div key={frag.msg.id} className="text-sm text-destructive bg-destructive/10 rounded-md px-3 py-2 my-1">
-              {frag.msg.content.replace("[错误] ", "")}
+              {textContent(frag.msg).replace("[错误] ", "")}
             </div>
           );
         }
         if (frag.type === "retry_system") {
           return (
             <div key={frag.msg.id} className="text-xs text-yellow-600 dark:text-yellow-400 bg-yellow-500/10 rounded-md px-3 py-1.5 my-0.5">
-              {frag.msg.content.replace("[重试] ", "")}
+              {textContent(frag.msg).replace("[重试] ", "")}
             </div>
           );
         }
         if (frag.type === "context_management") {
-          const text = frag.msg.content.replace("[上下文管理] ", "");
+          const text = textContent(frag.msg).replace("[上下文管理] ", "");
           return (
             <div
               key={frag.msg.id}
@@ -1332,7 +1340,7 @@ function AgentTurnView({
         if (frag.type === "other_system") {
           return (
             <p key={frag.msg.id} className="text-xs text-muted-foreground">
-              {frag.msg.content.split("\n")[0]}
+              {textContent(frag.msg).split("\n")[0]}
             </p>
           );
         }

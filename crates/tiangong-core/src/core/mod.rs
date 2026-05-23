@@ -569,7 +569,7 @@ fn index_turn_messages(
                 turn_id: msg.id.clone(),
                 workspace_id: session.cwd.clone(),
                 role: role.to_string(),
-                content: msg.content.clone(),
+                content: msg.text_content(),
                 topics: Vec::new(),
                 entity_names: Vec::new(),
             })
@@ -868,11 +868,20 @@ pub(crate) fn execute_attachment_analysis_tool(
         MessageRole::User,
         format!(
             "用户原始消息：{}\n\n解析要求：{}",
-            source_message.content.trim(),
+            source_message.text_content().trim(),
             instruction
         ),
     );
-    user_message.media = media;
+    for asset in media {
+        user_message
+            .content
+            .push(crate::session::ContentBlock::Media {
+                kind: asset.kind,
+                url: asset.url.clone(),
+                mime_type: asset.mime_type.clone(),
+                title: asset.title.clone(),
+            });
+    }
     attachment_context.push(user_message);
 
     let req = ModelRequest {

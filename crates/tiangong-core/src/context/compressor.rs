@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use crate::model::{ModelClient, ModelRequest, SingleProviderClient, TokenUsage};
-use crate::session::{Message, MessageRole, Session, now_text};
+use crate::session::{ContentBlock, Message, MessageRole, Session, now_text};
 
 /// 上下文压缩器
 ///
@@ -127,11 +127,12 @@ impl ContextCompressor {
         context.push(Message {
             id: scru128::new().to_string(),
             role: MessageRole::User,
-            content: instruction,
+            content: vec![ContentBlock::text(instruction)],
             reasoning_content: String::new(),
             reasoning_signature: None,
             worker_id: None,
             media: Vec::new(),
+            media_migrated: true,
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
@@ -205,11 +206,12 @@ pub fn compress_loop_messages(
             MessageRole::User => "用户",
             MessageRole::Tool => "工具结果",
         };
-        let content = if msg.content.chars().count() > 1000 {
-            let truncated: String = msg.content.chars().take(1000).collect();
+        let content_text = msg.text_content();
+        let content = if content_text.chars().count() > 1000 {
+            let truncated: String = content_text.chars().take(1000).collect();
             format!("{truncated}...(已截断)")
         } else {
-            msg.content.clone()
+            content_text.clone()
         };
         text.push_str(&format!("[{label}]: {content}\n"));
     }
@@ -245,11 +247,14 @@ pub fn compress_loop_messages(
     let mut result = vec![Message {
         id: scru128::new().to_string(),
         role: MessageRole::Tool,
-        content: format!("[前 {compress_rounds} 轮执行摘要]\n{summary}"),
+        content: vec![ContentBlock::text(format!(
+            "[前 {compress_rounds} 轮执行摘要]\n{summary}"
+        ))],
         reasoning_content: String::new(),
         reasoning_signature: None,
         worker_id: None,
         media: Vec::new(),
+        media_migrated: true,
         tool_calls: Vec::new(),
         tool_call_id: None,
         tool_name: Some("loop_summary".to_string()),

@@ -190,13 +190,15 @@ pub(crate) fn force_final_response(
     session.messages.push(Message {
         id: scru128::new().to_string(),
         role: MessageRole::Tool,
-        content:
+        content: vec![crate::session::ContentBlock::text(
             "<system-reminder>\n请基于以上所有工具执行结果，直接给出最终回复。\n</system-reminder>"
                 .to_string(),
+        )],
         reasoning_content: String::new(),
         reasoning_signature: None,
         worker_id: None,
         media: Vec::new(),
+        media_migrated: true,
         tool_calls: Vec::new(),
         tool_call_id: None,
         tool_name: Some("force_final_response".to_string()),

@@ -69,6 +69,17 @@ export interface RequestCost {
 
 export type MediaKind = 'image' | 'video' | 'audio' | 'file';
 
+export interface ContentBlock {
+  type: 'text' | 'media';
+  // text 类型
+  text?: string;
+  // media 类型
+  kind?: MediaKind;
+  url?: string;
+  mime_type?: string;
+  title?: string;
+}
+
 export interface MediaAsset {
   kind: MediaKind;
   url: string;
@@ -99,7 +110,7 @@ export interface SessionCost {
 export interface Message {
   id: string;
   role: MessageRole;
-  content: string;
+  content: ContentBlock[];
   reasoning_content: string;
   worker_id?: string;
   media?: MediaAsset[];
@@ -109,6 +120,19 @@ export interface Message {
   tool_result_is_error?: boolean;
   compact?: boolean;
   created_at: string;
+}
+
+/** 提取消息的纯文本内容 */
+export function textContent(msg: Message): string {
+  return msg.content
+    .filter((b) => b.type === 'text' && b.text)
+    .map((b) => b.text!)
+    .join('');
+}
+
+/** 消息是否包含媒体内容块 */
+export function hasMediaBlocks(msg: Message): boolean {
+  return msg.content.some((b) => b.type === 'media');
 }
 
 export interface RunSnapshot {

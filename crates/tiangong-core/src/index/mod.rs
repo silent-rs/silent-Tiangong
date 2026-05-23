@@ -543,14 +543,15 @@ pub fn backfill_session_index(
                 crate::session::MessageRole::Tool => "tool",
                 crate::session::MessageRole::System => return None,
             };
-            if msg.content.trim().is_empty() {
+            let text = msg.text_content();
+            if text.trim().is_empty() {
                 return None;
             }
             Some(TurnData {
                 turn_id: msg.id.clone(),
                 workspace_id: String::new(),
                 role: role.to_string(),
-                content: msg.content.clone(),
+                content: text,
                 topics: Vec::new(),
                 entity_names: Vec::new(),
             })

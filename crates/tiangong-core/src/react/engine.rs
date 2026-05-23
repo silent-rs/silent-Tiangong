@@ -52,11 +52,12 @@ fn sub_agent_stream_message(
     Message {
         id: id.into(),
         role,
-        content: content.into(),
+        content: vec![crate::session::ContentBlock::text(content.into())],
         reasoning_content: reasoning_content.into(),
         reasoning_signature: None,
         worker_id: None,
         media: Vec::new(),
+        media_migrated: true,
         tool_calls: Vec::new(),
         tool_call_id: None,
         tool_name: None,
@@ -475,10 +476,9 @@ impl ReactEngine {
             // 子 Agent 的团队上下文注入 session.messages
             if let Some(team_msg) = self.sub_agent_team_context_message() {
                 // 仅在首轮注入，避免重复
-                let has_team = session
-                    .messages
-                    .iter()
-                    .any(|m| m.role == MessageRole::System && m.content.contains("[团队上下文]"));
+                let has_team = session.messages.iter().any(|m| {
+                    m.role == MessageRole::System && m.text_content().contains("[团队上下文]")
+                });
                 if !has_team {
                     session.messages.push(team_msg);
                 }
@@ -487,7 +487,10 @@ impl ReactEngine {
             let (thinking, reasoning_effort, thinking_disabled) = self.build_thinking_config();
             let req = ModelRequest {
                 session_title: session.title.clone(),
-                user_input: user_input.to_string(),
+                // 当前用户消息已在 Command::Message 入口写入 session.messages。
+                // ReAct 多轮继续请求时不能再次追加 user_input，否则模型会把同一请求
+                // 误认为新的用户消息，反复从第一步重新开始。
+                user_input: String::new(),
                 context: session.context(),
                 thinking,
                 reasoning_effort,
@@ -1729,14 +1732,16 @@ impl ReactEngine {
             let has_error = child_session
                 .messages
                 .iter()
-                .any(|m| m.role == MessageRole::System && m.content.starts_with("[错误]"));
+                .any(|m| m.role == MessageRole::System && m.text_content().starts_with("[错误]"));
 
             let completion_content = if has_error {
                 let error_content = child_session
                     .messages
                     .iter()
-                    .filter(|m| m.role == MessageRole::System && m.content.starts_with("[错误]"))
-                    .map(|m| m.content.replace("[错误] ", ""))
+                    .filter(|m| {
+                        m.role == MessageRole::System && m.text_content().starts_with("[错误]")
+                    })
+                    .map(|m| m.text_content().replace("[错误] ", ""))
                     .collect::<Vec<_>>()
                     .join("; ");
                 format!("[{agent_label}] 执行出错：{error_content}")
@@ -1746,7 +1751,7 @@ impl ReactEngine {
                     .iter()
                     .filter(|m| m.role == MessageRole::Assistant)
                     .filter_map(|m| {
-                        let c = m.content.trim().to_string();
+                        let c = m.text_content().trim().to_string();
                         if c.is_empty() { None } else { Some(c) }
                     })
                     .collect::<Vec<_>>()

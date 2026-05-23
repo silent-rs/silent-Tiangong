@@ -7,7 +7,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { DragDropEvent } from '@tauri-apps/api/webview';
-import { api, type MediaAsset } from '@/api/tauri';
+import { api, type MediaAsset, textContent } from '@/api/tauri';
 import { useAudioRecording } from '@/hooks/useAudioRecording';
 
 const MAX_ATTACHMENT_BASE64_BYTES = 50 * 1024 * 1024;
@@ -769,7 +769,7 @@ export function MessageInput() {
           const msgs = useStore.getState().messages;
           // 从后往前找内容匹配的 user 消息
           const matched = [...msgs].reverse().find(
-            m => m.role === 'user' && m.content === text
+            m => m.role === 'user' && textContent(m) === text
           );
           if (matched && !useStore.getState().voiceMessages[matched.id]) {
             console.log("关联语音消息:", matched.id, "->", audioPath);

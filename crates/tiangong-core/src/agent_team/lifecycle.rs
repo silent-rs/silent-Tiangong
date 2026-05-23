@@ -132,13 +132,14 @@ pub fn restore_agents_from_session_history(
             continue;
         }
 
-        if let Some(agent) = parse_agent_created_message(&message.content) {
+        if let Some(agent) = parse_agent_created_message(&message.text_content()) {
             restored.retain(|existing| existing.role != agent.role);
             restored.push(agent);
             continue;
         }
 
-        if let Some((label, status, agent_id)) = parse_agent_status_message(&message.content) {
+        if let Some((label, status, agent_id)) = parse_agent_status_message(&message.text_content())
+        {
             for agent in &mut restored {
                 let id_matches = agent_id.as_deref() == Some(agent.agent_id.as_str());
                 if id_matches || agent.label == label {
