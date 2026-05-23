@@ -487,7 +487,10 @@ impl ReactEngine {
             let (thinking, reasoning_effort, thinking_disabled) = self.build_thinking_config();
             let req = ModelRequest {
                 session_title: session.title.clone(),
-                user_input: user_input.to_string(),
+                // 当前用户消息已在 Command::Message 入口写入 session.messages。
+                // ReAct 多轮继续请求时不能再次追加 user_input，否则模型会把同一请求
+                // 误认为新的用户消息，反复从第一步重新开始。
+                user_input: String::new(),
                 context: session.context(),
                 thinking,
                 reasoning_effort,
