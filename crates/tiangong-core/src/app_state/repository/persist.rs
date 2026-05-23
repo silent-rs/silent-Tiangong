@@ -33,7 +33,7 @@ impl AppRepository {
             model_list: store.provider.model_list.clone(),
             agent_config: Some(app_agent_config),
         };
-        let content = serde_json::to_string_pretty(&payload).context("序列化应用存储失败")?;
+        let content = self.serialize_app_payload_without_mcp(&payload)?;
         fs::write(&self.paths.app_storage_path, content).with_context(|| {
             format!(
                 "写入应用存储失败：{}",
@@ -70,7 +70,7 @@ impl AppRepository {
             model_list: store.provider.model_list.clone(),
             agent_config: Some(app_agent_config),
         };
-        let content = serde_json::to_string_pretty(&payload).context("序列化应用存储失败")?;
+        let content = self.serialize_app_payload_without_mcp(&payload)?;
         fs::write(&self.paths.app_storage_path, content).with_context(|| {
             format!(
                 "写入应用存储失败：{}",
@@ -79,6 +79,17 @@ impl AppRepository {
         })?;
         // 注意：不再调用 persist_agent_configs / sync_mcp_dependency_lock，理由同 persist_app_only。
         Ok(())
+    }
+
+    fn serialize_app_payload_without_mcp(&self, payload: &PersistedAppState) -> Result<String> {
+        let mut value = serde_json::to_value(payload).context("序列化应用存储失败")?;
+        if let Some(agent_config) = value
+            .get_mut("agent_config")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            agent_config.remove("mcp");
+        }
+        serde_json::to_string_pretty(&value).context("序列化应用存储失败")
     }
 
     pub(in crate::app_state) fn remove_session_file(&self, session_id: &str) -> Result<()> {

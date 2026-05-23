@@ -1600,7 +1600,7 @@ pub fn set_custom_system_prompt(prompt: String, state: State<TiangongApp>) -> Re
 
 #[tauri::command]
 pub fn get_reasoning_effort(state: State<TiangongApp>) -> Result<String, String> {
-    state.with_state_read(|core_state| Ok(core_state.agent_config().reasoning_effort.clone()))
+    state.with_state_read(|core_state| Ok(core_state.active_session_reasoning_effort()))
 }
 
 #[tauri::command]

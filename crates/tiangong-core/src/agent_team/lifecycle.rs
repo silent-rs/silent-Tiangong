@@ -1045,6 +1045,7 @@ pub(crate) fn error_tool_result(name: &str, message: &str) -> ToolResult {
 fn create_child_session(parent: &Session, title: &str) -> Session {
     let mut child = Session::new(title);
     child.cwd = parent.cwd.clone();
+    child.reasoning_effort = parent.reasoning_effort.clone();
     child.parent_session_id = Some(parent.id.clone());
     child
 }

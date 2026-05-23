@@ -27,6 +27,15 @@ impl TiangongState {
             .unwrap_or(self.store.agent.agent_config.default_trust_mode)
     }
 
+    pub fn active_session_reasoning_effort(&self) -> String {
+        self.active_session()
+            .and_then(|session| session.reasoning_effort.as_deref())
+            .map(str::trim)
+            .filter(|effort| !effort.is_empty())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| self.store.agent.agent_config.reasoning_effort.clone())
+    }
+
     pub fn active_task_plans(&self) -> Vec<SessionTaskPlan> {
         let Some(session) = self.active_session() else {
             return Vec::new();
@@ -83,7 +92,7 @@ impl TiangongState {
             trust_mode: self.active_session_trust_mode(),
             default_trust_mode: self.agent_config().default_trust_mode,
             custom_system_prompt: self.agent_config().custom_system_prompt.clone(),
-            reasoning_effort: self.agent_config().reasoning_effort.clone(),
+            reasoning_effort: self.active_session_reasoning_effort(),
             context_limit: 0,
         }
     }

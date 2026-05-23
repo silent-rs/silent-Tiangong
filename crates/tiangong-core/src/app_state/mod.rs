@@ -151,7 +151,20 @@ impl TiangongState {
     }
 
     pub fn set_reasoning_effort(&mut self, effort: String) -> Result<()> {
-        self.store.agent.agent_config.reasoning_effort = effort;
-        self.persist_app_only()
+        self.store.agent.agent_config.reasoning_effort = effort.clone();
+        let active_id = self.store.session.active_session_id.clone();
+        if let Some(session) = self
+            .store
+            .session
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == active_id)
+        {
+            session.reasoning_effort = Some(effort);
+            session.updated_at = now_text();
+            self.persist_session_and_app(&active_id)
+        } else {
+            self.persist_app_only()
+        }
     }
 }

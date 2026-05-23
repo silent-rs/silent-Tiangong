@@ -68,6 +68,9 @@ pub struct Session {
     /// 会话级信任模式；应用级默认值只在新建会话时复制到这里。
     #[serde(default)]
     pub trust_mode: TrustMode,
+    /// 会话级思考强度；为空时使用应用级默认值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     /// 早期对话的滚动摘要（用于无限上下文压缩）
     ///
     /// 当对话历史超过模型上下文阈值时，早期消息被 LLM 压缩为摘要存储在此。
@@ -242,6 +245,7 @@ impl Session {
             cwd: String::new(),
             cwd_mode: SessionCwdMode::Inherit,
             trust_mode: TrustMode::default(),
+            reasoning_effort: None,
             context_summary: None,
             summary_up_to: 0,
             system_prompt_message: None,
@@ -278,6 +282,7 @@ impl Session {
             cwd: workspace_dir.to_string_lossy().to_string(),
             cwd_mode: SessionCwdMode::Isolated,
             trust_mode: TrustMode::default(),
+            reasoning_effort: None,
             context_summary: None,
             summary_up_to: 0,
             system_prompt_message: None,

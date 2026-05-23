@@ -182,6 +182,7 @@ mod tests {
             cwd: String::new(),
             cwd_mode: Default::default(),
             trust_mode: Default::default(),
+            reasoning_effort: None,
             summary_up_to: 0,
             system_prompt_message: None,
             created_at: String::new(),
