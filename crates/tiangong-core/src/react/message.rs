@@ -125,9 +125,14 @@ pub(crate) fn tool_result_provider_text(
     if tool_name == "recall_memory" {
         build_memory_recall_feedback(&result.stdout, allow_memory_context)
     } else if is_media_tool_name(tool_name) && result.ok {
+        let media_desc = if result.stdout.trim().is_empty() {
+            result.summary.clone()
+        } else {
+            format!("{}\n{}", result.summary, result.stdout)
+        };
         format!(
-            "工具 {tool_name} 执行成功：{}。媒体内容已生成并交付给用户，不要再次调用该工具。",
-            result.summary
+            "工具 {tool_name} 执行成功：{}。不要再次调用该工具。",
+            media_desc
         )
     } else {
         tool_result_full_output(result)
@@ -172,7 +177,8 @@ pub(crate) fn append_duplicate_tool_result(
     tool_name: &str,
 ) {
     let message = format!(
-        "本轮已经成功执行过完全相同的 {tool_name} 工具调用，系统已跳过重复执行。请直接基于前一次工具结果继续完成用户目标，不要再次调用相同工具和参数。"
+        "本轮已经成功执行过完全相同的 {tool_name} 工具调用，系统已跳过重复执行。\
+        请查看上方历史消息中的工具执行结果，直接基于已有结果继续后续任务，不要再次发起相同调用。"
     );
     let _ = stream_tx.send(StreamEvent::ToolResult {
         name: tool_name.to_string(),
@@ -180,6 +186,7 @@ pub(crate) fn append_duplicate_tool_result(
         ok: true,
         output: message.clone(),
         full_output: Some(message.clone()),
+        media: vec![],
     });
     append_tool_result_message(session, tool_call_id, tool_name, message.clone(), false);
     append_runtime_tool_message(
@@ -204,6 +211,7 @@ pub(crate) fn append_repeated_failed_tool_result(
         ok: false,
         output: message.clone(),
         full_output: Some(message.clone()),
+        media: vec![],
     });
     append_tool_result_message(session, tool_call_id, tool_name, message.clone(), true);
     append_runtime_tool_message(

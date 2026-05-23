@@ -913,7 +913,6 @@ fn build_provider_messages(req: &ModelRequest) -> (String, Vec<ChatMessage>) {
         format!("允许文件操作目录：{}", allowed_file_roots_text()),
     ];
     for msg in &req.context {
-        // 提取 System 消息作为完整 system prompt
         if msg.role == MessageRole::System {
             let text = msg.content.trim();
             if !text.is_empty() {
@@ -925,6 +924,17 @@ fn build_provider_messages(req: &ModelRequest) -> (String, Vec<ChatMessage>) {
         if let Some(message) = provider_message_from_session(msg, req.include_media) {
             messages.push(message);
         }
+    }
+
+    // 跳过消息列表开头的非 User 消息（summary_up_to 截断可能导致以 Assistant/Tool 开头）
+    if let Some(idx) = messages.iter().position(|m| m.role == LlmMessageRole::User)
+        && idx > 0
+    {
+        tracing::debug!(
+            skipped = idx,
+            "跳过消息列表开头的非 User 消息（可能是 summary 截断导致）"
+        );
+        messages = messages.split_off(idx);
     }
 
     if !req.user_input.is_empty() {

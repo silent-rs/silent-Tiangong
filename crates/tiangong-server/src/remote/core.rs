@@ -427,13 +427,24 @@ fn sync_stream_event_to_state(
             ok,
             output,
             full_output,
+            media,
         } => {
             let persisted_output = full_output.as_deref().unwrap_or(output);
             let status = if *ok { "成功" } else { "失败" };
-            if *ok {
-                let media = parse_tool_media_assets(name, persisted_output);
-                if !media.is_empty() {
-                    session.append_message_with_media(MessageRole::Assistant, String::new(), media);
+            if *ok && !media.is_empty() {
+                session.append_message_with_media(
+                    MessageRole::Assistant,
+                    String::new(),
+                    media.clone(),
+                );
+            } else if *ok {
+                let parsed_media = parse_tool_media_assets(name, persisted_output);
+                if !parsed_media.is_empty() {
+                    session.append_message_with_media(
+                        MessageRole::Assistant,
+                        String::new(),
+                        parsed_media,
+                    );
                 }
             }
             session.append_message(

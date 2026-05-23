@@ -309,118 +309,6 @@ fn append_tool_result_message(
     session.updated_at = tiangong_core::session::now_text();
 }
 
-fn parse_image_markdown_assets(output: &str) -> Vec<tiangong_types::MediaAsset> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if !line.starts_with("![") || !line.ends_with(')') {
-                return None;
-            }
-
-            let close_alt = line.find("](")?;
-            let alt = line[2..close_alt].trim();
-            let url = line[close_alt + 2..line.len() - 1].trim();
-            if url.is_empty() {
-                return None;
-            }
-
-            let mime_type = if url.starts_with("data:image/") {
-                url.strip_prefix("data:")
-                    .and_then(|raw| raw.split(';').next())
-                    .map(str::to_string)
-            } else {
-                None
-            };
-
-            Some(tiangong_types::MediaAsset {
-                kind: tiangong_types::MediaKind::Image,
-                url: url.to_string(),
-                mime_type,
-                title: (!alt.is_empty()).then(|| alt.to_string()),
-                capability: Some("image_generation".to_string()),
-            })
-        })
-        .collect()
-}
-
-fn output_may_contain_generated_images(tool_name: &str, output: &str) -> bool {
-    tool_name == "generate_image"
-        || looks_like_pure_image_markdown(output)
-        || (tool_name.to_ascii_lowercase().contains("image") && output.contains("]("))
-}
-
-fn looks_like_pure_image_markdown(output: &str) -> bool {
-    let trimmed = output.trim();
-    !trimmed.is_empty()
-        && trimmed.lines().all(|line| {
-            let line = line.trim();
-            line.is_empty()
-                || (line.starts_with("![") && line.contains("](") && line.ends_with(')'))
-        })
-}
-
-fn is_video_tool(name: &str) -> bool {
-    matches!(name, "generate_video" | "query_video_generation")
-}
-
-/// 从视频工具输出中提取视频 URL 作为 MediaAsset。
-/// 支持 MCP 工具返回的 JSON（含 "Video URL: ..."）和纯 URL。
-fn parse_video_url_assets(output: &str) -> Vec<tiangong_types::MediaAsset> {
-    let text = output.trim();
-    let mut urls = Vec::new();
-
-    // 尝试从 "Video URL: <url>" 模式提取
-    for line in text.lines() {
-        if let Some(pos) = line.find("Video URL:") {
-            let url = line[pos + "Video URL:".len()..].trim();
-            if !url.is_empty() && (url.starts_with("http://") || url.starts_with("https://")) {
-                let url = url.split_whitespace().next().unwrap_or(url);
-                urls.push(url.to_string());
-            }
-        }
-    }
-
-    // 如果没找到，尝试从 JSON 的字段中提取视频 URL
-    if urls.is_empty() {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
-            extract_video_urls_from_json(&value, &mut urls);
-        }
-    }
-
-    urls.into_iter()
-        .map(|url| tiangong_types::MediaAsset {
-            kind: tiangong_types::MediaKind::Video,
-            url,
-            mime_type: Some("video/mp4".to_string()),
-            title: Some("生成的视频".to_string()),
-            capability: Some("video_generation".to_string()),
-        })
-        .collect()
-}
-
-fn extract_video_urls_from_json(value: &serde_json::Value, urls: &mut Vec<String>) {
-    match value {
-        serde_json::Value::String(s)
-            if (s.starts_with("http://") || s.starts_with("https://"))
-                && (s.contains(".mp4") || s.contains("video")) =>
-        {
-            urls.push(s.clone());
-        }
-        serde_json::Value::Object(map) => {
-            for v in map.values() {
-                extract_video_urls_from_json(v, urls);
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            for v in arr {
-                extract_video_urls_from_json(v, urls);
-            }
-        }
-        _ => {}
-    }
-}
-
 fn append_assistant_media(
     session: &mut tiangong_core::session::Session,
     media: Vec<tiangong_types::MediaAsset>,
@@ -774,7 +662,6 @@ fn start_stream_consumer(
     thread::spawn(move || {
         let mut assistant_msg_id: Option<String> = None;
         let mut last_tool_args_summary = String::new();
-        let mut pending_final_media: Option<Vec<tiangong_types::MediaAsset>> = None;
         for session_event in stream_rx.iter() {
             // 先 emit 完整事件给前端，再解构
             let _ = app.emit("stream_event", &session_event);
@@ -880,18 +767,10 @@ fn start_stream_consumer(
                             ok,
                             ref output,
                             ref full_output,
+                            ref media,
                         } => {
                             let persisted_output = full_output.as_deref().unwrap_or(output);
                             let status = if *ok { "ok=true" } else { "ok=false" };
-                            let media_assets = if *ok
-                                && output_may_contain_generated_images(name, persisted_output)
-                            {
-                                parse_image_markdown_assets(persisted_output)
-                            } else if *ok && is_video_tool(name) {
-                                parse_video_url_assets(persisted_output)
-                            } else {
-                                Vec::new()
-                            };
 
                             let mut lines = vec![format!("工具执行 [{name}]")];
                             if !last_tool_args_summary.is_empty() {
@@ -899,8 +778,8 @@ fn start_stream_consumer(
                             }
                             lines.push(format!("{status} exit_code=0"));
                             lines.push(format!("summary: {name}"));
-                            if !media_assets.is_empty() {
-                                let media_desc = media_assets
+                            if !media.is_empty() {
+                                let media_desc = media
                                     .iter()
                                     .map(|a| match a.kind {
                                         tiangong_types::MediaKind::Image => "图片",
@@ -910,11 +789,10 @@ fn start_stream_consumer(
                                     })
                                     .next()
                                     .unwrap_or("媒体");
-                                let count = media_assets.len();
+                                let count = media.len();
                                 lines.push(format!("stdout: 已生成 {count} 个{media_desc}"));
-                                pending_final_media
-                                    .get_or_insert_with(Vec::new)
-                                    .extend(media_assets);
+                                // 媒体资源立即绑定到 assistant 消息，前端可实时渲染
+                                append_assistant_media(session, media.clone());
                             } else if !persisted_output.trim().is_empty() {
                                 lines.push(format!("stdout:\n{persisted_output}"));
                             }
@@ -937,10 +815,6 @@ fn start_stream_consumer(
                             // 审批请求不写入 session（前端通过 RunStatus 展示审批 UI）
                         }
                         StreamEvent::Error { ref message } => {
-                            // 错误前先保存已生成的媒体资源
-                            if let Some(media) = pending_final_media.take() {
-                                append_assistant_media(session, media);
-                            }
                             session.append_message(
                                 tiangong_core::session::MessageRole::System,
                                 format!("[错误] {message}"),
@@ -955,9 +829,6 @@ fn start_stream_consumer(
                             let _ = (message, attempt, max_attempts);
                         }
                         StreamEvent::Done { .. } => {
-                            if let Some(media) = pending_final_media.take() {
-                                append_assistant_media(session, media);
-                            }
                             assistant_msg_id = None;
                         }
                         StreamEvent::MemoryRecallStart { ref strategy } => {

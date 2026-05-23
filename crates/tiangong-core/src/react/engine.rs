@@ -198,6 +198,7 @@ fn spawn_sub_agent_stream_forwarder(
                     ok,
                     output,
                     full_output,
+                    ..
                 } => {
                     let persisted_output = full_output.unwrap_or(output);
                     let mut content = format!(
@@ -411,7 +412,6 @@ impl ReactEngine {
     ) -> TokenUsage {
         let mut round = 0;
         let mut accumulated_usage = TokenUsage::default();
-        let mut pending_media_assets: Vec<tiangong_types::MediaAsset> = Vec::new();
         let mut memory_recall_attempted = false;
         let mut successful_tool_call_keys = HashSet::new();
         let mut failed_tool_call_keys = HashSet::new();
@@ -638,12 +638,11 @@ impl ReactEngine {
 
                     if !is_complete {
                         // 将已流式输出的回复保存到 session，避免上下文丢失
-                        session.append_message_with_id_and_media(
+                        session.append_message_with_id(
                             pending_msg_id.clone(),
                             MessageRole::Assistant,
                             response.text.clone(),
                             response.reasoning_content.clone(),
-                            std::mem::take(&mut pending_media_assets),
                         );
                         if let Some(message) = session.messages.last_mut() {
                             message.reasoning_signature = response.reasoning_signature.clone();
@@ -660,12 +659,11 @@ impl ReactEngine {
                     }
                 }
 
-                session.append_message_with_id_and_media(
+                session.append_message_with_id(
                     pending_msg_id,
                     MessageRole::Assistant,
                     response.text.clone(),
                     response.reasoning_content.clone(),
-                    std::mem::take(&mut pending_media_assets),
                 );
                 if let Some(message) = session.messages.last_mut() {
                     message.reasoning_signature = response.reasoning_signature.clone();
@@ -800,6 +798,7 @@ impl ReactEngine {
                         ok: result.ok,
                         output: tool_result_stream_output(&result),
                         full_output: Some(tool_result_full_output(&result)),
+                        media: vec![],
                     });
                     append_tool_result_message(
                         session,
@@ -869,6 +868,7 @@ impl ReactEngine {
                             ok: false,
                             output: format!("权限拒绝：{reason}"),
                             full_output: None,
+                            media: vec![],
                         });
                         append_tool_result_message(
                             session,
@@ -994,6 +994,7 @@ impl ReactEngine {
                                 ok: false,
                                 output: "用户拒绝执行".to_string(),
                                 full_output: None,
+                                media: vec![],
                             });
                             let _ = stream_tx.send(StreamEvent::Done {
                                 usage: Some(accumulated_usage.clone()),
@@ -1032,6 +1033,7 @@ impl ReactEngine {
                                 ok: false,
                                 output: message.clone(),
                                 full_output: None,
+                                media: vec![],
                             });
                             append_tool_result_message(
                                 session, &call.id, &call.name, message, true,
@@ -1130,13 +1132,31 @@ impl ReactEngine {
                     normalized_target.as_deref().or(target_summary.as_deref()),
                     &result.summary,
                 );
+                let tool_media = if result.ok {
+                    crate::memory::turn_result::parse_media_assets_from_tool_result(
+                        &call.name,
+                        &result.stdout,
+                        &result.summary,
+                    )
+                } else {
+                    Vec::new()
+                };
                 let _ = stream_tx.send(StreamEvent::ToolResult {
                     name: call.name.clone(),
                     tool_call_id: Some(call.id.clone()),
                     ok: result.ok,
                     output: tool_result_stream_output(&result),
                     full_output: Some(tool_result_full_output(&result)),
+                    media: tool_media.clone(),
                 });
+                // 媒体工具成功时，立即创建一条携带媒体的 assistant 消息，前端可实时渲染
+                if !tool_media.is_empty() {
+                    session.append_message_with_media(
+                        MessageRole::Assistant,
+                        String::new(),
+                        tool_media.clone(),
+                    );
+                }
                 append_tool_result_message(
                     session,
                     &call.id,
@@ -1157,13 +1177,6 @@ impl ReactEngine {
                     failed_tool_call_keys.remove(&tool_call_key);
                     failed_tool_names.remove(&call.name);
                     successful_tool_call_keys.insert(tool_call_key);
-                    pending_media_assets.extend(
-                        crate::memory::turn_result::parse_media_assets_from_tool_result(
-                            &call.name,
-                            &result.stdout,
-                            &result.summary,
-                        ),
-                    );
                 } else {
                     failed_tool_call_keys.insert(tool_call_key);
                     failed_tool_names.insert(call.name.clone());
