@@ -224,10 +224,11 @@ fn append_assistant_delta(
     }
     ensure_assistant_message(session, assistant_msg_id, message_id);
     if let Some(msg) = session.messages.iter_mut().find(|msg| msg.id == message_id) {
-        if msg.content.trim().is_empty() && content.trim().is_empty() {
+        if msg.text_content().trim().is_empty() && content.trim().is_empty() {
             return;
         }
-        msg.content.push_str(content);
+        msg.content
+            .push(tiangong_types::ContentBlock::Text(content.to_string()));
     }
 }
 
@@ -257,11 +258,11 @@ fn cleanup_assistant_before_tool_calls(
     };
 
     let message = &mut session.messages[index];
-    if !message.content.trim().is_empty() {
+    if !message.text_content().trim().is_empty() {
         return;
     }
     message.content.clear();
-    if message.reasoning_content.trim().is_empty() && message.media.is_empty() {
+    if message.reasoning_content.trim().is_empty() && !message.has_media() {
         session.messages.remove(index);
     }
 }
@@ -930,7 +931,7 @@ fn start_stream_consumer(
                             let header = format!("🔧 Worker: {agent_label} (@{agent_role})");
                             if !session.messages.iter().any(|message| {
                                 message.worker_id.as_deref() == Some(worker_id.as_str())
-                                    && message.content == header
+                                    && message.text_content() == header
                             }) {
                                 session.append_worker_message(
                                     tiangong_core::session::MessageRole::System,
@@ -957,7 +958,9 @@ fn start_stream_consumer(
                                         && item.worker_id.as_deref() == Some(worker_id.as_str())
                                 }) {
                                     if role == tiangong_core::session::MessageRole::Assistant {
-                                        existing.content.push_str(&message.content);
+                                        for block in &message.content {
+                                            existing.content.push(block.clone());
+                                        }
                                         existing
                                             .reasoning_content
                                             .push_str(&message.reasoning_content);
@@ -1220,7 +1223,7 @@ fn start_stream_consumer(
                                 .messages
                                 .iter()
                                 .find(|m| m.role == tiangong_core::session::MessageRole::User)
-                                .map(|m| m.content.clone())
+                                .map(|m| m.text_content())
                             {
                                 let provider_config = core_state
                                     .store

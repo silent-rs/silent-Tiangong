@@ -288,7 +288,7 @@ fn new_path_system_prompt_includes_summary() {
     let context = session.context();
     // 第一条应为 System 消息
     assert_eq!(context[0].role, MessageRole::System);
-    let system_text = &context[0].content;
+    let system_text = context[0].text_content();
     // 验证摘要已嵌入 system prompt
     assert!(
         system_text.contains("早期对话讨论了文件读取和文件修改操作"),
@@ -317,7 +317,7 @@ fn new_path_system_prompt_includes_all_sections() {
     };
     let msg = tiangong_core::prompt::sections::build_full_system_prompt(&session, &config);
     assert_eq!(msg.role, MessageRole::System);
-    let text = &msg.content;
+    let text = msg.text_content();
     // 静态段
     assert!(text.contains("天工智能助手"), "应包含身份段");
     assert!(text.contains("规则"), "应包含规则段");
@@ -346,7 +346,7 @@ fn new_path_messages_increment_across_turns() {
     let ctx1 = session.context();
     assert_eq!(ctx1.len(), 2); // system + 1 条消息
     assert_eq!(ctx1[1].role, MessageRole::User);
-    assert_eq!(ctx1[1].content, "你好");
+    assert_eq!(ctx1[1].text_content(), "你好");
     // 第 2 轮
     session.append_message(MessageRole::Assistant, "你好！有什么可以帮你的？");
     let ctx2 = session.context();
@@ -402,7 +402,7 @@ fn new_path_tool_calls_preserved_in_context() {
     let tool_result = &context[3];
     assert_eq!(tool_result.role, MessageRole::Tool);
     assert_eq!(tool_result.tool_call_id.as_deref(), Some("call_abc"));
-    assert_eq!(tool_result.content, "fn main() {}");
+    assert_eq!(tool_result.text_content(), "fn main() {}");
 }
 
 #[test]
@@ -425,7 +425,7 @@ fn new_path_tool_context_messages_preserved() {
     assert_eq!(tc.role, MessageRole::Tool);
     assert!(tc.tool_call_id.is_none());
     assert_eq!(tc.tool_name.as_deref(), Some("react_completion_check"));
-    assert!(tc.content.contains("未完成"));
+    assert!(tc.text_content().contains("未完成"));
 }
 
 #[test]
@@ -500,7 +500,7 @@ fn new_path_rebuild_after_compression_refreshes_summary() {
     // system prompt 应包含摘要
     assert_eq!(context[0].role, MessageRole::System);
     assert!(
-        context[0].content.contains("第一次压缩摘要"),
+        context[0].text_content().contains("第一次压缩摘要"),
         "重建后的 system prompt 应包含最新摘要"
     );
 }
@@ -525,7 +525,7 @@ fn new_path_clear_and_rebuild_system_prompt() {
     assert_eq!(context_after.len(), 1, "清空后只有 system prompt message");
     // 摘要段不应出现
     assert!(
-        !context_after[0].content.contains("此前对话摘要"),
+        !context_after[0].text_content().contains("此前对话摘要"),
         "清空后 system prompt 不应包含摘要段"
     );
 }

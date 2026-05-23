@@ -229,11 +229,20 @@ impl ServerCoreManager {
             if message.role != MessageRole::Assistant {
                 continue;
             }
-            if !message.content.trim().is_empty() {
-                latest_text = message.content.clone();
+            let text = message.text_content();
+            if !text.trim().is_empty() {
+                latest_text = text;
             }
-            if let Some(media) = message.media.last() {
-                latest_media = Some(media.clone());
+            for block in &message.content {
+                if let tiangong_types::ContentBlock::Media { kind, url, .. } = block {
+                    latest_media = Some(MediaAsset {
+                        kind: *kind,
+                        url: url.clone(),
+                        mime_type: None,
+                        title: None,
+                        capability: None,
+                    });
+                }
             }
         }
 
@@ -545,10 +554,12 @@ fn append_assistant_delta(session: &mut Session, message_id: &str, content: &str
         .iter_mut()
         .find(|message| message.id == message_id)
     {
-        if message.content.trim().is_empty() && content.trim().is_empty() {
+        if message.text_content().trim().is_empty() && content.trim().is_empty() {
             return;
         }
-        message.content.push_str(content);
+        message
+            .content
+            .push(tiangong_types::ContentBlock::Text(content.to_string()));
     }
 }
 
@@ -573,11 +584,11 @@ fn cleanup_latest_assistant_before_tool_calls(session: &mut Session) {
     };
 
     let message = &mut session.messages[index];
-    if !message.content.trim().is_empty() {
+    if !message.text_content().trim().is_empty() {
         return;
     }
     message.content.clear();
-    if message.reasoning_content.trim().is_empty() && message.media.is_empty() {
+    if message.reasoning_content.trim().is_empty() && !message.has_media() {
         session.messages.remove(index);
     }
 }

@@ -232,11 +232,12 @@ pub fn build_full_system_prompt(session: &Session, config: &SystemPromptConfig) 
     Message {
         id: scru128::new().to_string(),
         role: MessageRole::System,
-        content: parts.join("\n\n"),
+        content: vec![crate::session::ContentBlock::Text(parts.join("\n\n"))],
         reasoning_content: String::new(),
         reasoning_signature: None,
         worker_id: None,
         media: Vec::new(),
+        media_migrated: true,
         tool_calls: Vec::new(),
         tool_call_id: None,
         tool_name: None,

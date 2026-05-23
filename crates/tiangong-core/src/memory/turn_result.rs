@@ -23,9 +23,10 @@ fn extract_turn_tool_calls(messages: &[Message]) -> Vec<String> {
         if message.role != MessageRole::Tool {
             continue;
         }
-        for name in parse_tool_calls_line(&message.content)
+        let text = message.text_content();
+        for name in parse_tool_calls_line(&text)
             .into_iter()
-            .chain(parse_tool_trace_name(&message.content))
+            .chain(parse_tool_trace_name(&text))
         {
             if name == "recall_memory" {
                 continue;
@@ -48,17 +49,25 @@ fn extract_turn_artifacts(messages: &[Message]) -> Vec<tiangong_memory::TurnArti
     let mut seen = HashSet::new();
     for message in messages {
         if message.role == MessageRole::Assistant {
-            for media in &message.media {
-                let key = format!("media:{}", media.url);
-                if seen.insert(key) {
-                    artifacts.push(tiangong_memory::TurnArtifact {
-                        kind: tiangong_memory::TurnArtifactKind::Media,
-                        tool_name: None,
-                        title: media.title.clone(),
-                        url: Some(media.url.clone()),
-                        path: None,
-                        summary: media.capability.clone(),
-                    });
+            for block in &message.content {
+                if let crate::session::ContentBlock::Media {
+                    kind: _,
+                    url,
+                    title,
+                    ..
+                } = block
+                {
+                    let key = format!("media:{url}");
+                    if seen.insert(key) {
+                        artifacts.push(tiangong_memory::TurnArtifact {
+                            kind: tiangong_memory::TurnArtifactKind::Media,
+                            tool_name: None,
+                            title: title.clone(),
+                            url: Some(url.clone()),
+                            path: None,
+                            summary: None,
+                        });
+                    }
                 }
             }
             continue;
@@ -67,10 +76,9 @@ fn extract_turn_artifacts(messages: &[Message]) -> Vec<tiangong_memory::TurnArti
         if message.role != MessageRole::Tool {
             continue;
         }
-        let tool_name = parse_tool_trace_name(&message.content);
-        for artifact in
-            parse_media_artifacts_from_tool_trace(&message.content, tool_name.as_deref())
-        {
+        let text = message.text_content();
+        let tool_name = parse_tool_trace_name(&text);
+        for artifact in parse_media_artifacts_from_tool_trace(&text, tool_name.as_deref()) {
             let key = artifact
                 .url
                 .as_deref()
@@ -84,7 +92,7 @@ fn extract_turn_artifacts(messages: &[Message]) -> Vec<tiangong_memory::TurnArti
         if let Some(path) = tool_name
             .as_deref()
             .filter(|name| *name == "write_file" || *name == "replace_in_file")
-            .and_then(|_| parse_written_path(&message.content))
+            .and_then(|_| parse_written_path(&text))
         {
             let key = format!("file:{path}");
             if seen.insert(key) {
@@ -94,15 +102,15 @@ fn extract_turn_artifacts(messages: &[Message]) -> Vec<tiangong_memory::TurnArti
                     title: Some("文件产物".to_string()),
                     url: None,
                     path: Some(path),
-                    summary: parse_summary_line(&message.content),
+                    summary: parse_summary_line(&text),
                 });
             }
         }
         if let Some(tool_name) = tool_name
             && should_record_tool_result(&tool_name)
         {
-            let summary = parse_summary_line(&message.content)
-                .unwrap_or_else(|| compact_single_memory_text(&message.content, 240));
+            let summary =
+                parse_summary_line(&text).unwrap_or_else(|| compact_single_memory_text(&text, 240));
             let key = format!("tool:{tool_name}:{summary}");
             if !summary.is_empty() && seen.insert(key) {
                 artifacts.push(tiangong_memory::TurnArtifact {
@@ -131,9 +139,9 @@ fn build_turn_memory_summary(
         .iter()
         .rev()
         .find(|message| {
-            message.role == MessageRole::Assistant && !message.content.trim().is_empty()
+            message.role == MessageRole::Assistant && !message.text_content().trim().is_empty()
         })
-        .map(|message| compact_single_memory_text(&message.content, 600))
+        .map(|message| compact_single_memory_text(&message.text_content(), 600))
         .unwrap_or_default();
     if !assistant_summary.is_empty() {
         return assistant_summary;
@@ -506,7 +514,7 @@ pub(crate) fn build_enhanced_memory_turn_result(
                 MessageRole::System => return None,
                 MessageRole::Tool => "tool",
             };
-            let content = compact_single_memory_text(&message.content, 400);
+            let content = compact_single_memory_text(&message.text_content(), 400);
             (!content.is_empty()).then(|| tiangong_memory::TurnMessage {
                 role: role.to_string(),
                 content,

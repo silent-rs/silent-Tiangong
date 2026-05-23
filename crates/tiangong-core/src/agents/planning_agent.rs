@@ -418,7 +418,7 @@ fn collect_user_input_list(
         .recent_messages(context_limit)
         .into_iter()
         .filter(|message| matches!(message.role, MessageRole::User))
-        .map(|message| normalize_text(message.content))
+        .map(|message| normalize_text(message.text_content()))
         .filter(|content| !content.is_empty())
         .collect::<Vec<_>>();
 

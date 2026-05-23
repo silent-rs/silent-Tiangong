@@ -37,7 +37,7 @@ fn prepare_active_user_message_ingress_persists_message_immediately() -> Result<
         assert_eq!(state.active_session_id(), session_id);
         assert_eq!(session.messages.len(), 1);
         assert_eq!(session.messages[0].id, message_id);
-        assert_eq!(session.messages[0].content, "立即固定这条消息");
+        assert_eq!(session.messages[0].text_content(), "立即固定这条消息");
 
         let session_path = paths
             .fake_home
@@ -49,7 +49,7 @@ fn prepare_active_user_message_ingress_persists_message_immediately() -> Result<
         let persisted: Session = serde_json::from_str(&fs::read_to_string(session_path)?)?;
         assert_eq!(persisted.messages.len(), 1);
         assert_eq!(persisted.messages[0].id, message_id);
-        assert_eq!(persisted.messages[0].content, "立即固定这条消息");
+        assert_eq!(persisted.messages[0].text_content(), "立即固定这条消息");
         Ok(())
     })
 }

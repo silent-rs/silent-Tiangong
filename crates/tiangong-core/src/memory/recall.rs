@@ -70,13 +70,20 @@ pub(crate) async fn execute_memory_recall_tool(
         );
     };
 
+    let query_owned;
     let query = call
         .arguments
         .get("query")
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .unwrap_or_else(|| latest_user_message(session));
+        .filter(|text| !text.is_empty());
+    let query = match query {
+        Some(q) => q,
+        None => {
+            query_owned = latest_user_message(session);
+            &query_owned
+        }
+    };
     if query.is_empty() {
         return (
             memory_recall_tool_result(
@@ -239,7 +246,7 @@ fn build_memory_recall_context(session: &Session) -> Vec<String> {
                 MessageRole::System => return None,
                 MessageRole::Tool => message.tool_name.as_deref().unwrap_or("tool"),
             };
-            let content = compact_single_memory_text(&message.content, 900);
+            let content = compact_single_memory_text(&message.text_content(), 900);
             (!content.is_empty()).then(|| format!("{role}: {content}"))
         })
         .take(30)

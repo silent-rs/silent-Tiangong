@@ -88,7 +88,7 @@ pub async fn get_session(req: Request) -> Result<Response> {
         .map(|m| MessageSummary {
             id: m.id.clone(),
             role: format!("{:?}", m.role).to_lowercase(),
-            content: m.content.clone(),
+            content: m.text_content(),
             created_at: m.created_at.clone(),
         })
         .collect();

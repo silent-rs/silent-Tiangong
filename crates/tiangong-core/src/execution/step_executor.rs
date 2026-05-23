@@ -178,14 +178,15 @@ pub async fn execute_single_plan_step_with_execution_agent(
             loop_context.push(Message {
                 id: scru128::new().to_string(),
                 role: MessageRole::Tool,
-                content: format!(
+                content: vec![crate::session::ContentBlock::Text(format!(
                     "执行反馈：上一轮工具调用失败，请修正后继续。\n错误列表：\n{}\n要求：必须优先直接调用函数工具（尤其 MCP 工具），不要将工具名当 shell 命令。",
                     blocking_errors.join("\n")
-                ),
+                ))],
                 reasoning_content: String::new(),
                 reasoning_signature: None,
                 worker_id: None,
                 media: Vec::new(),
+                media_migrated: true,
                 tool_calls: Vec::new(),
                 tool_call_id: None,
                 tool_name: Some("execution_feedback".to_string()),

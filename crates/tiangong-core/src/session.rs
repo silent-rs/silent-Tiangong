@@ -6,7 +6,9 @@ use crate::model::TokenUsage;
 use crate::permission::TrustMode;
 use crate::planner::{PlanItem, PlanStepSource, PlanStepStatus};
 
-pub use tiangong_types::{Message, MessageRole, MessageToolCall, now_text};
+pub use tiangong_types::{
+    ContentBlock, MediaAsset, MediaKind, Message, MessageRole, MessageToolCall, now_text,
+};
 
 /// 会话工作目录模式
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -214,6 +216,13 @@ pub struct SessionTaskPlan {
 }
 
 impl Session {
+    /// 迁移旧格式数据：将 message.media 合并到 message.content 中。
+    pub fn migrate_legacy_content(&mut self) {
+        for message in &mut self.messages {
+            message.migrate_legacy_media();
+        }
+    }
+
     pub fn new(title: impl Into<String>) -> Self {
         let now = now_text();
         Self {
@@ -313,14 +322,19 @@ impl Session {
         content: impl Into<String>,
         media: Vec<tiangong_types::MediaAsset>,
     ) {
+        let mut blocks = vec![ContentBlock::Text(content.into())];
+        for asset in &media {
+            blocks.push(asset.to_content_block());
+        }
         self.messages.push(Message {
             id: new_id(),
             role,
-            content: content.into(),
+            content: blocks,
             reasoning_content: String::new(),
             reasoning_signature: None,
             worker_id: None,
-            media,
+            media: Vec::new(),
+            media_migrated: true,
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
@@ -340,11 +354,12 @@ impl Session {
         self.messages.push(Message {
             id: new_id(),
             role,
-            content: content.into(),
+            content: vec![ContentBlock::Text(content.into())],
             reasoning_content: reasoning_content.into(),
             reasoning_signature: None,
             worker_id: None,
             media: Vec::new(),
+            media_migrated: true,
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
@@ -375,14 +390,19 @@ impl Session {
         reasoning_content: impl Into<String>,
         media: Vec<tiangong_types::MediaAsset>,
     ) {
+        let mut blocks = vec![ContentBlock::Text(content.into())];
+        for asset in &media {
+            blocks.push(asset.to_content_block());
+        }
         self.messages.push(Message {
             id,
             role,
-            content: content.into(),
+            content: blocks,
             reasoning_content: reasoning_content.into(),
             reasoning_signature: None,
             worker_id: None,
-            media,
+            media: Vec::new(),
+            media_migrated: true,
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
@@ -412,11 +432,12 @@ impl Session {
         self.messages.push(Message {
             id: new_id(),
             role,
-            content: content.into(),
+            content: vec![ContentBlock::Text(content.into())],
             reasoning_content: reasoning_content.into(),
             reasoning_signature: None,
             worker_id: Some(worker_id.to_string()),
             media: Vec::new(),
+            media_migrated: true,
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
@@ -782,7 +803,7 @@ impl Session {
     /// 更新指定消息的内容
     pub fn update_message_content(&mut self, message_id: &str, new_content: String) -> bool {
         if let Some(msg) = self.messages.iter_mut().find(|m| m.id == message_id) {
-            msg.content = new_content;
+            msg.content = vec![ContentBlock::Text(new_content)];
             self.updated_at = now_text();
             true
         } else {
