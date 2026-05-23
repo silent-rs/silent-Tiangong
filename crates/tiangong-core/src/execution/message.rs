@@ -4,7 +4,7 @@ pub(crate) fn runtime_message(role: MessageRole, content: impl Into<String>) -> 
     Message {
         id: scru128::new().to_string(),
         role,
-        content: vec![ContentBlock::Text(content.into())],
+        content: vec![ContentBlock::text(content.into())],
         reasoning_content: String::new(),
         reasoning_signature: None,
         worker_id: None,

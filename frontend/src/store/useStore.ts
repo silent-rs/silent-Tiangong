@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { api, Session, Message, RunSnapshot, McpServer, Skill, TaskPlan, MediaAsset, TokenStats } from '../api/tauri';
+import { api, Session, Message, RunSnapshot, McpServer, Skill, TaskPlan, MediaAsset, TokenStats, textContent } from '../api/tauri';
 import { notifyBackgroundSessionCompleted } from '../utils/desktopNotification';
 
 // ---------------------------------------------------------------------------
@@ -18,15 +18,16 @@ export function parseAgentsFromMessages(messages: Message[]): AgentInfo[] {
   const agents = new Map<string, AgentInfo>();
   for (const msg of messages) {
     if (msg.role !== 'system') continue;
+    const text = textContent(msg);
     // [Agent] {label} ({role}) 已加入团队
-    const createMatch = msg.content.match(/^\[Agent\] (.+?) \((.+?)\) 已加入团队.*?id=([^\s]+)/);
+    const createMatch = text.match(/^\[Agent\] (.+?) \((.+?)\) 已加入团队.*?id=([^\s]+)/);
     if (createMatch) {
       const [, label, role, agentId] = createMatch;
       agents.set(role, { agentId, role, label, status: 'idle' });
       continue;
     }
     // [Agent] {label} 状态变更: {status}
-    const statusMatch = msg.content.match(/^\[Agent\] (.+?) 状态变更: (\w+).*?id=([^\s]+)/);
+    const statusMatch = text.match(/^\[Agent\] (.+?) 状态变更: (\w+).*?id=([^\s]+)/);
     if (statusMatch) {
       const [, label, status, agentId] = statusMatch;
       if (status === 'terminated') {
@@ -57,7 +58,8 @@ export function parseAgentsFromMessages(messages: Message[]): AgentInfo[] {
 
 function isAgentSystemMessage(message: Message): boolean {
   if (message.role !== 'system') return false;
-  return message.content.startsWith('[Agent]') || message.content.startsWith('[文件锁]');
+  const text = textContent(message);
+  return text.startsWith('[Agent]') || text.startsWith('[文件锁]');
 }
 
 function shouldRefreshAgentsFromSnapshot(
@@ -89,7 +91,7 @@ function sameJsonValue(left: unknown, right: unknown): boolean {
 function sameMessage(left: Message, right: Message): boolean {
   return left.id === right.id
     && left.role === right.role
-    && left.content === right.content
+    && sameJsonValue(left.content, right.content)
     && left.reasoning_content === right.reasoning_content
     && left.worker_id === right.worker_id
     && left.tool_call_id === right.tool_call_id
@@ -683,16 +685,18 @@ export const useStore = create<AppState>((set, get) => ({
 
         // 新出现的 assistant 消息、正文增长或 thinking 增长都属于流式更新。
         const isNew = !oldAssistant;
+        const oldText = oldAssistant ? textContent(oldAssistant) : '';
+        const newText = textContent(lastAssistant);
         const isContentGrowing = oldAssistant &&
-          oldAssistant.content !== lastAssistant.content &&
-          lastAssistant.content.length > oldAssistant.content.length;
+          oldText !== newText &&
+          newText.length > oldText.length;
         const isReasoningGrowing = oldAssistant &&
           oldAssistant.reasoning_content !== lastAssistant.reasoning_content &&
           lastAssistant.reasoning_content.length > oldAssistant.reasoning_content.length;
 
         if ((isNew || isContentGrowing || isReasoningGrowing) && !hasRenderableMedia) {
           streamingId = lastAssistant.id;
-          streamingContent = lastAssistant.content;
+          streamingContent = textContent(lastAssistant);
           streamingReasoningContent = lastAssistant.reasoning_content;
         }
       }

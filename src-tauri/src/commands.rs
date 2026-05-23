@@ -228,7 +228,7 @@ fn append_assistant_delta(
             return;
         }
         msg.content
-            .push(tiangong_types::ContentBlock::Text(content.to_string()));
+            .push(tiangong_types::ContentBlock::text(content.to_string()));
     }
 }
 

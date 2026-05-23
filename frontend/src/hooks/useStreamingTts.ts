@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from "react";
-import { api } from "@/api/tauri";
+import { api, textContent } from "@/api/tauri";
 import { useStore } from "@/store/useStore";
 
 // 中英文句子边界正则：句号、感叹号、问号、分号、换行
@@ -150,7 +150,7 @@ export function useStreamingTts() {
       const finalMessages = useStore.getState().messages;
       const lastMsg = finalMessages[finalMessages.length - 1];
       if (lastMsg && lastMsg.role === "assistant") {
-        extractSentences(lastMsg.content, true);
+        extractSentences(textContent(lastMsg), true);
       }
       lastStreamingIdRef.current = null;
     }

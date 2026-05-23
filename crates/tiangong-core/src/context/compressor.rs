@@ -127,7 +127,7 @@ impl ContextCompressor {
         context.push(Message {
             id: scru128::new().to_string(),
             role: MessageRole::User,
-            content: vec![ContentBlock::Text(instruction)],
+            content: vec![ContentBlock::text(instruction)],
             reasoning_content: String::new(),
             reasoning_signature: None,
             worker_id: None,
@@ -247,7 +247,7 @@ pub fn compress_loop_messages(
     let mut result = vec![Message {
         id: scru128::new().to_string(),
         role: MessageRole::Tool,
-        content: vec![ContentBlock::Text(format!(
+        content: vec![ContentBlock::text(format!(
             "[前 {compress_rounds} 轮执行摘要]\n{summary}"
         ))],
         reasoning_content: String::new(),

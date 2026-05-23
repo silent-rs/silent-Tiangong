@@ -52,7 +52,7 @@ fn sub_agent_stream_message(
     Message {
         id: id.into(),
         role,
-        content: vec![crate::session::ContentBlock::Text(content.into())],
+        content: vec![crate::session::ContentBlock::text(content.into())],
         reasoning_content: reasoning_content.into(),
         reasoning_signature: None,
         worker_id: None,

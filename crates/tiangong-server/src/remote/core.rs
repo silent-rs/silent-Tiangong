@@ -559,7 +559,7 @@ fn append_assistant_delta(session: &mut Session, message_id: &str, content: &str
         }
         message
             .content
-            .push(tiangong_types::ContentBlock::Text(content.to_string()));
+            .push(tiangong_types::ContentBlock::text(content.to_string()));
     }
 }
 

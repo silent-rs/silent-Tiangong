@@ -28,7 +28,9 @@ pub struct MessageToolCall {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
-    Text(String),
+    Text {
+        text: String,
+    },
     Media {
         kind: MediaKind,
         url: String,
@@ -41,16 +43,18 @@ pub enum ContentBlock {
 
 impl ContentBlock {
     pub fn text(content: impl Into<String>) -> Self {
-        Self::Text(content.into())
+        Self::Text {
+            text: content.into(),
+        }
     }
 
     pub fn is_text(&self) -> bool {
-        matches!(self, Self::Text(_))
+        matches!(self, Self::Text { .. })
     }
 
     pub fn as_text(&self) -> Option<&str> {
         match self {
-            Self::Text(s) => Some(s),
+            Self::Text { text } => Some(text),
             _ => None,
         }
     }
@@ -58,14 +62,14 @@ impl ContentBlock {
     pub fn url(&self) -> Option<&str> {
         match self {
             Self::Media { url, .. } => Some(url),
-            Self::Text(_) => None,
+            Self::Text { .. } => None,
         }
     }
 
     pub fn kind(&self) -> Option<MediaKind> {
         match self {
             Self::Media { kind, .. } => Some(*kind),
-            Self::Text(_) => None,
+            Self::Text { .. } => None,
         }
     }
 }
@@ -162,11 +166,11 @@ where
         }
 
         fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
-            Ok(vec![ContentBlock::Text(v.to_string())])
+            Ok(vec![ContentBlock::text(v.to_string())])
         }
 
         fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
-            Ok(vec![ContentBlock::Text(v)])
+            Ok(vec![ContentBlock::text(v)])
         }
 
         fn visit_seq<A: de::SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
@@ -191,7 +195,7 @@ impl Message {
         Self {
             id: scru128::new().to_string(),
             role,
-            content: vec![ContentBlock::Text(content.into())],
+            content: vec![ContentBlock::text(content.into())],
             reasoning_content: String::new(),
             reasoning_signature: None,
             worker_id: None,
@@ -214,7 +218,7 @@ impl Message {
         Self {
             id: scru128::new().to_string(),
             role,
-            content: vec![ContentBlock::Text(content.into())],
+            content: vec![ContentBlock::text(content.into())],
             reasoning_content: reasoning.into(),
             reasoning_signature: None,
             worker_id: None,

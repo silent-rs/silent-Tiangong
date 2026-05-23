@@ -322,7 +322,7 @@ impl Session {
         content: impl Into<String>,
         media: Vec<tiangong_types::MediaAsset>,
     ) {
-        let mut blocks = vec![ContentBlock::Text(content.into())];
+        let mut blocks = vec![ContentBlock::text(content.into())];
         for asset in &media {
             blocks.push(asset.to_content_block());
         }
@@ -354,7 +354,7 @@ impl Session {
         self.messages.push(Message {
             id: new_id(),
             role,
-            content: vec![ContentBlock::Text(content.into())],
+            content: vec![ContentBlock::text(content.into())],
             reasoning_content: reasoning_content.into(),
             reasoning_signature: None,
             worker_id: None,
@@ -390,7 +390,7 @@ impl Session {
         reasoning_content: impl Into<String>,
         media: Vec<tiangong_types::MediaAsset>,
     ) {
-        let mut blocks = vec![ContentBlock::Text(content.into())];
+        let mut blocks = vec![ContentBlock::text(content.into())];
         for asset in &media {
             blocks.push(asset.to_content_block());
         }
@@ -432,7 +432,7 @@ impl Session {
         self.messages.push(Message {
             id: new_id(),
             role,
-            content: vec![ContentBlock::Text(content.into())],
+            content: vec![ContentBlock::text(content.into())],
             reasoning_content: reasoning_content.into(),
             reasoning_signature: None,
             worker_id: Some(worker_id.to_string()),
@@ -803,7 +803,7 @@ impl Session {
     /// 更新指定消息的内容
     pub fn update_message_content(&mut self, message_id: &str, new_content: String) -> bool {
         if let Some(msg) = self.messages.iter_mut().find(|m| m.id == message_id) {
-            msg.content = vec![ContentBlock::Text(new_content)];
+            msg.content = vec![ContentBlock::text(new_content)];
             self.updated_at = now_text();
             true
         } else {

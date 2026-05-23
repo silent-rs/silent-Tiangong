@@ -1001,7 +1001,7 @@ fn provider_message_from_session(msg: &Message, include_media: bool) -> Option<C
     // 遍历 content blocks
     for block in &msg.content {
         match block {
-            ContentBlock::Text(s) => {
+            ContentBlock::Text { text: s } => {
                 if !s.trim().is_empty() {
                     content.push(LlmMessageContent::Text(s.trim().to_string()));
                 }
