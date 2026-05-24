@@ -9071,7 +9071,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "tiangong-config",
@@ -9080,7 +9080,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-anthropic"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "eventsource-stream",
  "futures-util",
@@ -9092,7 +9092,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-app"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -9131,7 +9131,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "crossterm 0.28.1",
@@ -9146,7 +9146,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-config"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -9159,7 +9159,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -9193,7 +9193,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-entry"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -9208,7 +9208,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-llm"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -9227,7 +9227,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-media"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9240,7 +9240,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-memory"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -9267,7 +9267,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -9288,7 +9288,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-types"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "scru128 3.6.1",
