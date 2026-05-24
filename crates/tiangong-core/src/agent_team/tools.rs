@@ -31,7 +31,7 @@ pub fn inject_agent_team_tools(tools: &mut Vec<ToolSpec>) {
 fn create_agent_tool() -> ToolSpec {
     ToolSpec {
         name: "create_agent".to_string(),
-        description: "创建一个新的 Sub Agent 加入团队。Agent 将拥有独立的执行上下文和指定的角色。"
+        description: "创建一个 Sub Agent 加入团队。Agent 拥有独立的执行上下文和指定角色，持续存在直到被解散。"
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -48,15 +48,10 @@ fn create_agent_tool() -> ToolSpec {
                     "type": "string",
                     "description": "Agent 的角色系统提示，定义其职责和行为规范"
                 },
-                "lifecycle": {
-                    "type": "string",
-                    "enum": ["persistent", "temporary"],
-                    "description": "生命周期：persistent=持久存在，temporary=任务完成后自动销毁。默认 persistent"
-                },
                 "tools": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Agent 可用的工具列表。默认包含所有工具"
+                    "description": "Agent 可用的工具列表。不指定时继承你的全部工具（不含 create_agent/dismiss_agent）。建议根据任务需要精确授权。"
                 }
             },
             "required": ["role", "label", "system_prompt"]

@@ -399,7 +399,7 @@ impl ReactEngine {
         stream_tx: &StdSender<StreamEvent>,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
         memory_handle: Option<&tiangong_memory::MemoryHandle>,
-        index_manager: Option<&crate::index::IndexManager>,
+        index_manager: Option<std::sync::Arc<crate::index::IndexManager>>,
     ) -> TokenUsage {
         let mut round = 0;
         let mut accumulated_usage = TokenUsage::default();
@@ -424,7 +424,13 @@ impl ReactEngine {
                 .unwrap_or(false);
             if routed {
                 let sub_result = self
-                    .drain_sub_agent_inboxes(session, stream_tx, cmd_rx)
+                    .drain_sub_agent_inboxes(
+                        session,
+                        stream_tx,
+                        cmd_rx,
+                        memory_handle,
+                        &index_manager,
+                    )
                     .await;
                 accumulated_usage.accumulate(&sub_result.usage);
                 if sub_result.cancelled {
@@ -1033,7 +1039,7 @@ impl ReactEngine {
                 let (result, tool_llm_usage, allow_memory_context, usage_source) = {
                     let (mut result, tool_llm_usage, allow_memory_context, usage_source) =
                         if call.name == "index_search" {
-                            if let Some(im) = index_manager {
+                            if let Some(ref im) = index_manager {
                                 let (result, usage, allow_context) =
                                     crate::index::execute_index_search_tool(call, im, session);
                                 (result, usage, allow_context, "index_search")
@@ -1249,7 +1255,7 @@ impl ReactEngine {
 
             // 执行有待处理任务的 Sub Agent
             let sub_result = self
-                .drain_sub_agent_inboxes(session, stream_tx, cmd_rx)
+                .drain_sub_agent_inboxes(session, stream_tx, cmd_rx, memory_handle, &index_manager)
                 .await;
             accumulated_usage.accumulate(&sub_result.usage);
             if sub_result.cancelled {
@@ -1291,7 +1297,22 @@ impl ReactEngine {
             .and_then(|team| team.lock().ok().map(|mut team| team.drain_main_inbox()))
             .unwrap_or_default()
     }
+}
 
+fn format_team_roster(team_arc: &Arc<Mutex<TeamContext>>) -> String {
+    let Ok(team) = team_arc.lock() else {
+        return String::new();
+    };
+    let mut agents = team.registry.alive_agents();
+    agents.sort_by(|a, b| a.role.cmp(&b.role));
+    agents
+        .iter()
+        .map(|a| format!("- {} (@{})", a.label, a.role))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+impl ReactEngine {
     #[allow(clippy::too_many_arguments)]
     fn spawn_ready_sub_agents(
         &self,
@@ -1303,6 +1324,8 @@ impl ReactEngine {
         max_concurrent: usize,
         token_budget: usize,
         sub_max_rounds: usize,
+        memory_handle: Option<&tiangong_memory::MemoryHandle>,
+        index_manager: &Option<std::sync::Arc<crate::index::IndexManager>>,
     ) -> bool {
         let remaining_slots = max_concurrent.saturating_sub(active_sub_agents.len());
         if remaining_slots == 0 {
@@ -1412,6 +1435,34 @@ impl ReactEngine {
             )
             .with_shared_team(team_arc.clone(), agent_id.clone());
 
+            // 通过 SubAgentPromptContext 构建 system prompt
+            let base_config = crate::prompt::SystemPromptConfig::from_configs(
+                self.engine.models_config(),
+                self.engine.agent_config(),
+                &child_session.id,
+            );
+            let team_roster = format_team_roster(team_arc);
+            let ctx = crate::prompt::SubAgentPromptContext::new(
+                &base_config,
+                &system_prompt,
+                &team_roster,
+            );
+            child_session.system_prompt_message = Some(ctx.build(&child_session));
+
+            // 条件性赋予能力：根据 tools 列表决定是否共享 index_manager 和 memory_handle
+            let has_index = tool_names.iter().any(|n| n == "index_search");
+            let has_memory = tool_names.iter().any(|n| n == "recall_memory");
+            let sub_index = if has_index {
+                index_manager.clone()
+            } else {
+                None
+            };
+            let sub_memory = if has_memory {
+                memory_handle.cloned()
+            } else {
+                None
+            };
+
             let (sub_cmd_tx, mut sub_cmd_rx) = tokio_mpsc::unbounded_channel();
             let _ = sub_cmd_tx.send(Command::Message {
                 content: combined_content,
@@ -1432,7 +1483,6 @@ impl ReactEngine {
             let id = agent_id;
             let label = agent_label;
             let role = agent_role;
-            let prompt = system_prompt;
             let start_message_len = child_session.messages.len();
 
             let fut = Box::pin(async move {
@@ -1448,11 +1498,11 @@ impl ReactEngine {
                 let usage = sub_engine
                     .execute_turn(
                         &mut child_session,
-                        &prompt,
+                        "",
                         &child_stream_tx,
                         &mut sub_cmd_rx,
-                        None,
-                        None,
+                        sub_memory.as_ref(),
+                        sub_index,
                     )
                     .await;
                 drop(child_stream_tx);
@@ -1478,6 +1528,8 @@ impl ReactEngine {
         parent_session: &mut Session,
         stream_tx: &StdSender<StreamEvent>,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+        memory_handle: Option<&tiangong_memory::MemoryHandle>,
+        index_manager: &Option<std::sync::Arc<crate::index::IndexManager>>,
     ) -> SubAgentDrainResult {
         let mut result = SubAgentDrainResult::default();
 
@@ -1512,6 +1564,8 @@ impl ReactEngine {
             max_concurrent,
             token_budget,
             sub_max_rounds,
+            memory_handle,
+            index_manager,
         ) {
             result.ran = true;
         }
@@ -1542,6 +1596,8 @@ impl ReactEngine {
                             max_concurrent,
                             token_budget,
                             sub_max_rounds,
+                            memory_handle,
+                            index_manager,
                         ) {
                             result.ran = true;
                         }
@@ -1558,6 +1614,8 @@ impl ReactEngine {
                             max_concurrent,
                             token_budget,
                             sub_max_rounds,
+                            memory_handle,
+                            index_manager,
                         )
                     {
                         result.ran = true;
@@ -1734,35 +1792,17 @@ impl ReactEngine {
                 label: agent_label.clone(),
                 status: status.to_string(),
             });
-            let should_dismiss = team
-                .registry
-                .get(&agent_id)
-                .map(|d| d.lifecycle == crate::agent_team::descriptor::AgentLifecycle::Temporary)
-                .unwrap_or(false);
-            if should_dismiss {
-                for path in team.file_locks.release_all(&agent_id) {
-                    let _ = stream_tx.send(StreamEvent::FileLockChanged {
-                        path,
-                        holder_agent_id: Some(agent_id.clone()),
-                        holder_agent_label: Some(agent_label.clone()),
-                        action: "unlocked".to_string(),
-                    });
-                }
-                team.registry.unregister(&agent_id);
-                let _ = stream_tx.send(StreamEvent::AgentStatusChanged {
-                    agent_id,
-                    label: agent_label.clone(),
-                    status: "terminated".to_string(),
-                });
-                append_runtime_tool_message(
+            team.registry.set_session(&agent_id, child_session);
+            team.registry
+                .update_status(&agent_id, crate::agent_team::descriptor::AgentStatus::Idle);
+
+            // 持久化 child_session 到磁盘
+            if let Some(child) = team.registry.get_session(&agent_id) {
+                crate::agent_team::lifecycle::persist_child_session(
                     parent_session,
-                    &format!("sub_agent_{agent_label}"),
-                    format!("[{agent_label}] 临时 Agent 已自动销毁"),
+                    &agent_id,
+                    child,
                 );
-            } else {
-                team.registry.set_session(&agent_id, child_session);
-                team.registry
-                    .update_status(&agent_id, crate::agent_team::descriptor::AgentStatus::Idle);
             }
         }
 

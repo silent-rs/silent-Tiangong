@@ -147,7 +147,6 @@ pub enum StreamEvent {
         agent_id: String,
         role: String,
         label: String,
-        lifecycle: String,
     },
     /// Agent 状态变更
     AgentStatusChanged {

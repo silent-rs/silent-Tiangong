@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender as StdSender;
 
-use crate::agent_team::descriptor::{AgentDescriptor, AgentLifecycle, AgentStatus};
+use crate::agent_team::descriptor::{AgentDescriptor, AgentStatus};
 use crate::agent_team::file_lock::FileLockManager;
 use crate::agent_team::message_bus::AgentMessage;
 use crate::agent_team::registry::AgentRegistry;
@@ -75,13 +75,18 @@ impl TeamContext {
         message: AgentMessage,
         media: Vec<tiangong_types::MediaAsset>,
     ) {
-        if let Some(tx) = self.active_agent_senders.get(agent_id) {
-            let _ = tx.send(Command::Message {
+        let dispatched = if let Some(tx) = self.active_agent_senders.get(agent_id) {
+            tx.send(Command::Message {
                 content: format_agent_message_for_prompt(&message),
                 message_id: Some(message.id.clone()),
                 media,
-            });
+            })
+            .is_ok()
         } else {
+            false
+        };
+
+        if !dispatched {
             self.registry.deliver_message(agent_id, message);
             if let Some(waker) = &self.dispatch_waker {
                 let _ = waker.send(());
@@ -112,7 +117,6 @@ struct RestoredAgent {
     agent_id: String,
     role: String,
     label: String,
-    lifecycle: AgentLifecycle,
     status: AgentStatus,
 }
 
@@ -171,11 +175,11 @@ pub fn restore_agents_from_session_history(
                 "你是从会话历史恢复的子 Agent，角色为 {}（{}）。请延续当前会话上下文，按该角色职责处理用户和主 Agent 分配的任务。",
                 agent.label, agent.role
             ),
-            lifecycle: agent.lifecycle,
             tools: tool_names.clone(),
             status: AgentStatus::Idle,
         };
-        let child_session = create_child_session(parent_session, &agent.label);
+        let child_session = load_child_session(parent_session, &agent.agent_id)
+            .unwrap_or_else(|| create_child_session(parent_session, &agent.label));
         team.registry
             .register_with_session(descriptor, child_session);
         count += 1;
@@ -196,17 +200,10 @@ fn parse_agent_created_message(content: &str) -> Option<RestoredAgent> {
         return None;
     }
 
-    let lifecycle = if after_role.contains("[temporary]") || after_role.contains("[临时]") {
-        AgentLifecycle::Temporary
-    } else {
-        AgentLifecycle::Persistent
-    };
-
     Some(RestoredAgent {
         agent_id,
         role: role.trim().to_string(),
         label: label.trim().to_string(),
-        lifecycle,
         status: AgentStatus::Idle,
     })
 }
@@ -265,12 +262,6 @@ pub fn execute_create_agent(
         .unwrap_or_default()
         .trim()
         .to_string();
-    let lifecycle_str = call
-        .arguments
-        .get("lifecycle")
-        .and_then(|v| v.as_str())
-        .unwrap_or("persistent")
-        .trim();
     let requested_tools: Vec<String> = call
         .arguments
         .get("tools")
@@ -302,12 +293,6 @@ pub fn execute_create_agent(
         );
     }
 
-    let lifecycle = if lifecycle_str == "temporary" {
-        AgentLifecycle::Temporary
-    } else {
-        AgentLifecycle::Persistent
-    };
-
     // 确定工具集：如果指定了 tools 则过滤，否则继承全部（排除团队管理工具）
     let tool_names = if requested_tools.is_empty() {
         let excluded = ["create_agent", "dismiss_agent"];
@@ -326,18 +311,11 @@ pub fn execute_create_agent(
 
     let agent_id = scru128::new().to_string();
 
-    let lifecycle_label = if lifecycle == AgentLifecycle::Temporary {
-        "临时"
-    } else {
-        "持久"
-    };
-
     let descriptor = AgentDescriptor {
         agent_id: agent_id.clone(),
         role: role.clone(),
         label: label.clone(),
         system_prompt,
-        lifecycle,
         tools: tool_names,
         status: AgentStatus::Idle,
     };
@@ -353,8 +331,31 @@ pub fn execute_create_agent(
         agent_id: agent_id.clone(),
         role: role.clone(),
         label: label.clone(),
-        lifecycle: lifecycle_str.to_string(),
     });
+
+    // 向所有已存在的 Agent 广播新成员通知
+    let notification = format!("[团队通知] 新成员 {label} (@{role}) 已加入团队");
+    let targets: Vec<String> = team
+        .registry
+        .alive_agents()
+        .iter()
+        .filter(|a| a.agent_id != agent_id)
+        .map(|a| a.agent_id.clone())
+        .collect();
+    for target_id in targets {
+        team.dispatch_agent_message(
+            &target_id,
+            AgentMessage {
+                id: scru128::new().to_string(),
+                from: "system".to_string(),
+                to: target_id.clone(),
+                content: notification.clone(),
+                priority: crate::agent_team::message_bus::MessagePriority::Normal,
+                created_at: now_text(),
+            },
+            Vec::new(),
+        );
+    }
 
     let tools_list = team
         .registry
@@ -364,7 +365,7 @@ pub fn execute_create_agent(
 
     ToolResult {
         ok: true,
-        summary: format!("{label} ({role}) 已加入团队 [{lifecycle_label}]"),
+        summary: format!("{label} ({role}) 已加入团队"),
         stdout: format!(
             "Agent '{label}' (role={role}, id={agent_id}) 已创建。\n可用工具: {tools_list}\n状态: 等待任务分配"
         ),
@@ -376,7 +377,7 @@ pub fn execute_create_agent(
             duration_ms: 0,
             ok: true,
             exit_code: 0,
-            summary: format!("Agent 已加入团队 [{lifecycle_label}]"),
+            summary: "Agent 已加入团队".to_string(),
         }),
     }
 }
@@ -1050,6 +1051,48 @@ fn create_child_session(parent: &Session, title: &str) -> Session {
     child
 }
 
+/// 持久化 child_session 到磁盘
+pub fn persist_child_session(parent_session: &Session, agent_id: &str, session: &Session) {
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let agents_dir = home
+        .join(".tiangong")
+        .join("sessions")
+        .join(&parent_session.id)
+        .join("agents");
+    if std::fs::create_dir_all(&agents_dir).is_err() {
+        tracing::warn!("创建 agents 目录失败");
+        return;
+    }
+    let path = agents_dir.join(format!("{agent_id}.json"));
+    match serde_json::to_string_pretty(session) {
+        Ok(content) => {
+            if let Err(err) = std::fs::write(&path, content) {
+                tracing::warn!(error = %err, "child session 持久化写入失败");
+            }
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "child session 序列化失败");
+        }
+    }
+}
+
+/// 从磁盘加载 child_session
+pub fn load_child_session(parent_session: &Session, agent_id: &str) -> Option<Session> {
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let path = home
+        .join(".tiangong")
+        .join("sessions")
+        .join(&parent_session.id)
+        .join("agents")
+        .join(format!("{agent_id}.json"));
+    let content = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
@@ -1088,8 +1131,7 @@ mod tests {
                 json!({
                     "role": "dev",
                     "label": "Developer",
-                    "system_prompt": "You are a developer",
-                    "lifecycle": "persistent"
+                    "system_prompt": "You are a developer"
                 }),
             ),
             &parent,
@@ -1239,6 +1281,12 @@ mod tests {
         let dev_id = team.registry.find_by_role("dev").unwrap().agent_id.clone();
         let test_id = team.registry.find_by_role("test").unwrap().agent_id.clone();
         let pm_id = team.registry.find_by_role("pm").unwrap().agent_id.clone();
+
+        // 先清空团队通知（创建 Agent 时自动广播的）
+        let _ = team.registry.drain_inbox(&dev_id);
+        let _ = team.registry.drain_inbox(&test_id);
+        let _ = team.registry.drain_inbox(&pm_id);
+
         let result = execute_broadcast_message(
             &mut team,
             &dev_id,
@@ -1396,11 +1444,11 @@ mod tests {
         let mut parent = Session::new("parent");
         parent.append_message(
             crate::session::MessageRole::System,
-            "[Agent] 开发者 (dev) 已加入团队 [persistent] id=agent-dev".to_string(),
+            "[Agent] 开发者 (dev) 已加入团队 id=agent-dev".to_string(),
         );
         parent.append_message(
             crate::session::MessageRole::System,
-            "[Agent] 项目经理 (pm) 已加入团队 [persistent] id=agent-pm".to_string(),
+            "[Agent] 项目经理 (pm) 已加入团队 id=agent-pm".to_string(),
         );
 
         let restored = restore_agents_from_session_history(
@@ -1432,7 +1480,7 @@ mod tests {
         let mut parent = Session::new("parent");
         parent.append_message(
             crate::session::MessageRole::System,
-            "[Agent] 开发者 (dev) 已加入团队 [persistent] id=agent-dev".to_string(),
+            "[Agent] 开发者 (dev) 已加入团队 id=agent-dev".to_string(),
         );
         parent.append_message(
             crate::session::MessageRole::System,

@@ -303,6 +303,7 @@ async fn worker_loop_async(
 
     // IndexManager：Workspace 文件索引 + Session 对话索引
     let index_manager = crate::index::IndexManager::new()
+        .map(std::sync::Arc::new)
         .map_err(|e| {
             tracing::warn!("IndexManager 初始化失败: {e}");
             e
@@ -460,7 +461,7 @@ async fn worker_loop_async(
                     &stream_tx,
                     &mut cmd_rx,
                     memory.handle.as_ref(),
-                    index_manager.as_ref(),
+                    index_manager.clone(),
                     team_context.clone(),
                 )
                 .await;
@@ -669,7 +670,7 @@ async fn execute_turn_async(
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     memory_handle: Option<&tiangong_memory::MemoryHandle>,
-    index_manager: Option<&crate::index::IndexManager>,
+    index_manager: Option<std::sync::Arc<crate::index::IndexManager>>,
     team_context: Arc<Mutex<crate::agent_team::lifecycle::TeamContext>>,
 ) {
     let mut react = crate::react::engine::ReactEngine::new(
