@@ -150,7 +150,6 @@ fn build_plan_with_agent_inner(
         session_title: format!("{} · planing-agent", session.title),
         user_input: build_planing_prompt(user_input, &input_list, &skill_hints, &mcp_hints),
         context: session.recent_messages(context_limit),
-        assembled_system_prompt: None,
         thinking: Some(crate::model::ThinkingConfig {
             budget_tokens: 4096,
         }),
@@ -419,7 +418,7 @@ fn collect_user_input_list(
         .recent_messages(context_limit)
         .into_iter()
         .filter(|message| matches!(message.role, MessageRole::User))
-        .map(|message| normalize_text(message.content))
+        .map(|message| normalize_text(message.text_content()))
         .filter(|content| !content.is_empty())
         .collect::<Vec<_>>();
 

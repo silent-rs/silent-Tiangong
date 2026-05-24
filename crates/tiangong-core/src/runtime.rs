@@ -1,4 +1,3 @@
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -237,16 +236,20 @@ impl RuntimeEngine {
 
         // 多媒体工具
         if call.name == "generate_image" {
-            return self.handle_media_generation(call, ModelCapability::ImageGeneration);
+            return self
+                .handle_media_generation(call, ModelCapability::ImageGeneration)
+                .await;
         }
         if call.name == "generate_video" {
-            return self.handle_media_generation(call, ModelCapability::VideoGeneration);
+            return self
+                .handle_media_generation(call, ModelCapability::VideoGeneration)
+                .await;
         }
         if call.name == "text_to_speech" {
-            return self.handle_tts(call);
+            return self.handle_tts(call).await;
         }
         if call.name == "speech_to_text" {
-            return self.handle_stt(call);
+            return self.handle_stt(call).await;
         }
         // 检查是否是 MCP 工具
         if let Some(target) = mcp_targets.get(&call.name) {
@@ -769,13 +772,6 @@ impl RuntimeEngine {
         }
     }
 
-    fn build_media_runtime() -> Result<tokio::runtime::Runtime, String> {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| e.to_string())
-    }
-
     fn media_error_summary(prefix: &str, err: &crate::media::MediaServiceError) -> String {
         if err.is_timeout() || err.is_config() {
             err.to_string()
@@ -785,7 +781,11 @@ impl RuntimeEngine {
     }
 
     /// 处理多媒体生成工具调用（图片/视频）
-    fn handle_media_generation(&self, call: &ToolCall, capability: ModelCapability) -> ToolResult {
+    async fn handle_media_generation(
+        &self,
+        call: &ToolCall,
+        capability: ModelCapability,
+    ) -> ToolResult {
         let prompt = call
             .arguments
             .get("prompt")
@@ -825,26 +825,9 @@ impl RuntimeEngine {
                     .get("style")
                     .and_then(|v| v.as_str())
                     .map(String::from);
-                let runtime = match Self::build_media_runtime() {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        return ToolResult {
-                            ok: false,
-                            summary: format!("运行时初始化失败：{e}"),
-                            stdout: String::new(),
-                            stderr: e.to_string(),
-                            exit_code: 1,
-                            execution: None,
-                        };
-                    }
-                };
-                let result = runtime.block_on(crate::media::generate_image(
-                    &self.models_config,
-                    prompt,
-                    width,
-                    height,
-                    style,
-                ));
+                let result =
+                    crate::media::generate_image(&self.models_config, prompt, width, height, style)
+                        .await;
                 let duration_ms = started.elapsed().as_millis() as u64;
                 match result {
                     Ok(output) => {
@@ -905,25 +888,9 @@ impl RuntimeEngine {
                     .get("resolution")
                     .and_then(|v| v.as_str())
                     .map(String::from);
-                let runtime = match Self::build_media_runtime() {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        return ToolResult {
-                            ok: false,
-                            summary: format!("运行时初始化失败：{e}"),
-                            stdout: String::new(),
-                            stderr: e.to_string(),
-                            exit_code: 1,
-                            execution: None,
-                        };
-                    }
-                };
-                let result = runtime.block_on(crate::media::generate_video(
-                    &self.models_config,
-                    prompt,
-                    duration,
-                    resolution,
-                ));
+                let result =
+                    crate::media::generate_video(&self.models_config, prompt, duration, resolution)
+                        .await;
                 let duration_ms = started.elapsed().as_millis() as u64;
                 match result {
                     Ok(output) => {
@@ -1024,7 +991,7 @@ impl RuntimeEngine {
     }
 
     /// 处理语音合成（TTS）工具调用
-    fn handle_tts(&self, call: &ToolCall) -> ToolResult {
+    async fn handle_tts(&self, call: &ToolCall) -> ToolResult {
         let text = call
             .arguments
             .get("text")
@@ -1067,27 +1034,14 @@ impl RuntimeEngine {
         let started = std::time::Instant::now();
         let tool_name = call.name.clone();
 
-        let runtime = match Self::build_media_runtime() {
-            Ok(rt) => rt,
-            Err(e) => {
-                return ToolResult {
-                    ok: false,
-                    summary: format!("运行时初始化失败：{e}"),
-                    stdout: String::new(),
-                    stderr: e.to_string(),
-                    exit_code: 1,
-                    execution: None,
-                };
-            }
-        };
-
-        let result = runtime.block_on(crate::media::synthesize_speech(
+        let result = crate::media::synthesize_speech(
             &self.models_config,
             text.clone(),
             voice,
             speed,
             Some("mp3".to_string()),
-        ));
+        )
+        .await;
 
         let duration_ms = started.elapsed().as_millis() as u64;
         match result {
@@ -1148,7 +1102,7 @@ impl RuntimeEngine {
     }
 
     /// 处理语音识别（STT）工具调用
-    fn handle_stt(&self, call: &ToolCall) -> ToolResult {
+    async fn handle_stt(&self, call: &ToolCall) -> ToolResult {
         let file_path = call
             .arguments
             .get("file_path")
@@ -1205,26 +1159,9 @@ impl RuntimeEngine {
         let started = std::time::Instant::now();
         let tool_name = call.name.clone();
 
-        let runtime = match Self::build_media_runtime() {
-            Ok(rt) => rt,
-            Err(e) => {
-                return ToolResult {
-                    ok: false,
-                    summary: format!("运行时初始化失败：{e}"),
-                    stdout: String::new(),
-                    stderr: e.to_string(),
-                    exit_code: 1,
-                    execution: None,
-                };
-            }
-        };
-
-        let result = runtime.block_on(crate::media::transcribe_audio(
-            &self.models_config,
-            audio_data,
-            mime_type,
-            language,
-        ));
+        let result =
+            crate::media::transcribe_audio(&self.models_config, audio_data, mime_type, language)
+                .await;
 
         let duration_ms = started.elapsed().as_millis() as u64;
         match result {
@@ -1353,11 +1290,13 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<ToolSpec>, engine: &RuntimeE
     if has_image_gen {
         tools.push(ToolSpec {
             name: "generate_image".to_string(),
-            description: "根据文字描述生成图片".to_string(),
+            description: "根据文字描述生成图片。每次调用会等待生成完成后返回图片路径。\
+            注意：同一轮次中不要重复调用相同 prompt 的 generate_image，\
+            拿到图片结果后应直接继续后续任务（如编写 HTML、组合排版等）。".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "prompt": { "type": "string", "description": "图片描述" },
+                    "prompt": { "type": "string", "description": "图片描述，建议使用英文以获得更好效果" },
                     "width": { "type": "integer", "description": "宽度（可选）" },
                     "height": { "type": "integer", "description": "高度（可选）" },
                     "style": { "type": "string", "description": "风格（可选）" }
@@ -1526,80 +1465,6 @@ fn missing_managed_mcp_servers(
             (!configured.contains(server_name.as_str())).then_some(server_name)
         })
         .collect()
-}
-
-/// 构建 ReAct agent 的系统 prompt
-#[allow(dead_code)]
-pub(crate) fn build_react_system_prompt(
-    user_input: &str,
-    models_config: &ModelsConfig,
-    agent_config: &AgentConfig,
-) -> String {
-    use crate::models_config::ModelCapability;
-
-    // 构建多媒体能力提示
-    let mut media_hints = Vec::new();
-    for cap in ModelCapability::media_capabilities() {
-        if let Some(resolved) = models_config.resolve_for_capability(*cap) {
-            media_hints.push(format!(
-                "- {}：已配置（模型：{}）",
-                cap.display_name(),
-                resolved.model
-            ));
-        }
-    }
-    let media_section = if media_hints.is_empty() {
-        String::new()
-    } else {
-        format!("\n\n已配置的多媒体能力：\n{}", media_hints.join("\n"))
-    };
-
-    // 构建已安装 skill 摘要（仅名称+描述，不注入完整 SKILL.md）
-    let mut skill_summaries = Vec::new();
-    for skill in &agent_config.skills.installed {
-        if !skill.enabled {
-            continue;
-        }
-        skill_summaries.push(format!(
-            "- {} (id={}): {}",
-            skill.name,
-            skill.id,
-            if skill.description.is_empty() {
-                "无描述"
-            } else {
-                &skill.description
-            }
-        ));
-    }
-    let skills_section = if skill_summaries.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "\n\n已安装的 Skills（使用前先调用 get_skill_detail 获取完整说明）：\n{}",
-            skill_summaries.join("\n")
-        )
-    };
-
-    format!(
-"你是天工智能助手。你可以直接回答用户问题，也可以使用工具来完成任务。
-
-规则：
-1. 如果能直接回答（闲聊、知识问答等），直接回复，不要调用工具。
-2. 如果需要文件操作、代码搜索、命令执行等，调用对应的工具。
-3. 每次工具调用后会收到执行结果，根据结果决定下一步：继续调用工具或给出最终回复。
-4. 回复时语言简洁，直接回答问题，不要说\"让我查看\"之类的过渡语。
-5. 不要在回复中包含工具调用的原始痕迹（如 ok=、exit_code= 等元数据）。
-6. 回复使用 Markdown 格式：代码和命令用代码块（```语言 ... ```）包裹，使用标题、列表等结构化排版。
-7. 工具调用失败时必须如实告知用户失败原因，绝对不能虚构成功结果。
-8. 如果已安装的 Skill 能处理用户请求，优先通过 run_command 调用 Skill 脚本。
-9. 如果工具列表包含 recall_memory，且用户提到“刚刚、刚才、上次、之前、那个、继续、这张图、生成的图片”等历史指代，必须先调用 recall_memory，除非当前上下文已经包含明确答案。
-10. 耗时较长的命令（编译、下载、视频生成等）使用 spawn_task 在后台执行。
-11. 多个可并行的耗时任务使用 spawn+join 模式：先多次调用 spawn_task 启动所有任务，再调用 wait_tasks 一次性等待全部完成。
-12. 独立的后台任务（不需要等待结果的）用 spawn_task 启动后直接继续，无需 wait_tasks。{media_section}{skills_section}
-
-用户输入：
-{user_input}"
-    )
 }
 
 pub(crate) fn use_stream_mode() -> bool {

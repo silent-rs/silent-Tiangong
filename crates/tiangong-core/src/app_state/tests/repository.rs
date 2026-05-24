@@ -60,7 +60,11 @@ fn repository_persist_to_disk_round_trips_split_configs_and_sessions() -> Result
         assert_eq!(loaded_agent.mcp.timeout_ms, 23_000);
         assert_eq!(loaded_agent.mcp.servers.len(), 1);
 
-        assert!(paths.fake_home.join(".tiangong").join("app.json").exists());
+        let app_path = paths.fake_home.join(".tiangong").join("app.json");
+        assert!(app_path.exists());
+        let app_json: serde_json::Value = serde_json::from_str(&fs::read_to_string(&app_path)?)?;
+        assert!(app_json.get("agent_config").is_some());
+        assert!(app_json["agent_config"].get("mcp").is_none());
         assert!(
             paths
                 .fake_home

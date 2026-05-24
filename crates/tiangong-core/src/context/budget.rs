@@ -59,7 +59,7 @@ fn estimate_message_tokens(messages: &[crate::session::Message]) -> usize {
     messages
         .iter()
         .map(|msg| {
-            let content_chars = msg.content.chars().count();
+            let content_chars = msg.text_content().chars().count();
             let reasoning_chars = msg.reasoning_content.chars().count();
             ((content_chars + reasoning_chars) as f64 * 0.6) as usize + 4
         })

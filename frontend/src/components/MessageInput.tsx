@@ -7,7 +7,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { DragDropEvent } from '@tauri-apps/api/webview';
-import { api, type MediaAsset } from '@/api/tauri';
+import { api, type MediaAsset, textContent } from '@/api/tauri';
 import { useAudioRecording } from '@/hooks/useAudioRecording';
 
 const MAX_ATTACHMENT_BASE64_BYTES = 50 * 1024 * 1024;
@@ -635,7 +635,7 @@ export function MessageInput() {
       if (e.key === 'Escape') { e.preventDefault(); setMentionOpen(false); return; }
       if (e.key === 'Tab') { e.preventDefault(); selectCandidate(filteredCandidates[mentionIndex]); return; }
     }
-    if (e.key === 'Enter' && !e.shiftKey && !isComposingRef.current && !e.nativeEvent.isComposing) {
+    if (e.key === 'Enter' && !e.shiftKey && !isComposingRef.current && !e.nativeEvent.isComposing && e.keyCode !== 229) {
       e.preventDefault();
       handleSend();
     }
@@ -769,7 +769,7 @@ export function MessageInput() {
           const msgs = useStore.getState().messages;
           // 从后往前找内容匹配的 user 消息
           const matched = [...msgs].reverse().find(
-            m => m.role === 'user' && m.content === text
+            m => m.role === 'user' && textContent(m) === text
           );
           if (matched && !useStore.getState().voiceMessages[matched.id]) {
             console.log("关联语音消息:", matched.id, "->", audioPath);

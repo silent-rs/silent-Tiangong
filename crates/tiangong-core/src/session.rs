@@ -6,7 +6,9 @@ use crate::model::TokenUsage;
 use crate::permission::TrustMode;
 use crate::planner::{PlanItem, PlanStepSource, PlanStepStatus};
 
-pub use tiangong_types::{Message, MessageRole, MessageToolCall, now_text};
+pub use tiangong_types::{
+    ContentBlock, MediaAsset, MediaKind, Message, MessageRole, MessageToolCall, now_text,
+};
 
 /// 会话工作目录模式
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -66,6 +68,9 @@ pub struct Session {
     /// 会话级信任模式；应用级默认值只在新建会话时复制到这里。
     #[serde(default)]
     pub trust_mode: TrustMode,
+    /// 会话级思考强度；为空时使用应用级默认值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     /// 早期对话的滚动摘要（用于无限上下文压缩）
     ///
     /// 当对话历史超过模型上下文阈值时，早期消息被 LLM 压缩为摘要存储在此。
@@ -76,6 +81,12 @@ pub struct Session {
     /// 摘要覆盖到的消息索引（messages[0..summary_up_to] 已被摘要覆盖）
     #[serde(default)]
     pub summary_up_to: usize,
+    /// 缓存的 system prompt 消息（role=System）。
+    ///
+    /// 在新对话、压缩对话、清空上下文时由外部调用 `rebuild_system_prompt()` 重建。
+    /// `context()` 返回时会将其置于消息列表头部，由 `build_provider_messages()` 提取。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt_message: Option<Message>,
     pub created_at: String,
     pub updated_at: String,
     /// 父会话 ID（Worker 子会话标注所属的父会话）
@@ -208,6 +219,13 @@ pub struct SessionTaskPlan {
 }
 
 impl Session {
+    /// 迁移旧格式数据：将 message.media 合并到 message.content 中。
+    pub fn migrate_legacy_content(&mut self) {
+        for message in &mut self.messages {
+            message.migrate_legacy_media();
+        }
+    }
+
     pub fn new(title: impl Into<String>) -> Self {
         let now = now_text();
         Self {
@@ -227,8 +245,10 @@ impl Session {
             cwd: String::new(),
             cwd_mode: SessionCwdMode::Inherit,
             trust_mode: TrustMode::default(),
+            reasoning_effort: None,
             context_summary: None,
             summary_up_to: 0,
+            system_prompt_message: None,
             created_at: now.clone(),
             updated_at: now,
             parent_session_id: None,
@@ -262,8 +282,10 @@ impl Session {
             cwd: workspace_dir.to_string_lossy().to_string(),
             cwd_mode: SessionCwdMode::Isolated,
             trust_mode: TrustMode::default(),
+            reasoning_effort: None,
             context_summary: None,
             summary_up_to: 0,
+            system_prompt_message: None,
             created_at: now.clone(),
             updated_at: now,
             parent_session_id: None,
@@ -305,14 +327,19 @@ impl Session {
         content: impl Into<String>,
         media: Vec<tiangong_types::MediaAsset>,
     ) {
+        let mut blocks = vec![ContentBlock::text(content.into())];
+        for asset in &media {
+            blocks.push(asset.to_content_block());
+        }
         self.messages.push(Message {
             id: new_id(),
             role,
-            content: content.into(),
+            content: blocks,
             reasoning_content: String::new(),
             reasoning_signature: None,
             worker_id: None,
-            media,
+            media: Vec::new(),
+            media_migrated: true,
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
@@ -332,11 +359,12 @@ impl Session {
         self.messages.push(Message {
             id: new_id(),
             role,
-            content: content.into(),
+            content: vec![ContentBlock::text(content.into())],
             reasoning_content: reasoning_content.into(),
             reasoning_signature: None,
             worker_id: None,
             media: Vec::new(),
+            media_migrated: true,
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
@@ -367,14 +395,19 @@ impl Session {
         reasoning_content: impl Into<String>,
         media: Vec<tiangong_types::MediaAsset>,
     ) {
+        let mut blocks = vec![ContentBlock::text(content.into())];
+        for asset in &media {
+            blocks.push(asset.to_content_block());
+        }
         self.messages.push(Message {
             id,
             role,
-            content: content.into(),
+            content: blocks,
             reasoning_content: reasoning_content.into(),
             reasoning_signature: None,
             worker_id: None,
-            media,
+            media: Vec::new(),
+            media_migrated: true,
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
@@ -404,11 +437,12 @@ impl Session {
         self.messages.push(Message {
             id: new_id(),
             role,
-            content: content.into(),
+            content: vec![ContentBlock::text(content.into())],
             reasoning_content: reasoning_content.into(),
             reasoning_signature: None,
             worker_id: Some(worker_id.to_string()),
             media: Vec::new(),
+            media_migrated: true,
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
@@ -736,6 +770,34 @@ impl Session {
         total
     }
 
+    /// 重建 system prompt 消息
+    ///
+    /// 从 session 数据（title, cwd, context_summary）和外部配置构建完整的 system prompt，
+    /// 存为 `Message { role: System }`，供 `context()` 返回。
+    ///
+    /// 应在以下时机调用：
+    /// - 新对话首轮（system_prompt_message 为 None）
+    /// - 压缩对话后
+    /// - 清空上下文后
+    pub fn rebuild_system_prompt(&mut self, config: &crate::prompt::SystemPromptConfig) {
+        let msg = crate::prompt::sections::build_full_system_prompt(self, config);
+        self.system_prompt_message = Some(msg);
+        self.updated_at = now_text();
+    }
+
+    /// 构建 LLM 请求上下文
+    ///
+    /// 返回 system_prompt_message（如有）+ `summary_up_to` 之后的对话消息。
+    /// System 消息由 `build_provider_messages` 提取到 system prompt。
+    pub fn context(&self) -> Vec<Message> {
+        let mut context = Vec::new();
+        if let Some(ref msg) = self.system_prompt_message {
+            context.push(msg.clone());
+        }
+        context.extend(self.messages[self.summary_up_to..].iter().cloned());
+        context
+    }
+
     pub fn recent_messages(&self, limit: usize) -> Vec<Message> {
         if self.messages.len() <= limit {
             return self.messages.clone();
@@ -746,7 +808,7 @@ impl Session {
     /// 更新指定消息的内容
     pub fn update_message_content(&mut self, message_id: &str, new_content: String) -> bool {
         if let Some(msg) = self.messages.iter_mut().find(|m| m.id == message_id) {
-            msg.content = new_content;
+            msg.content = vec![ContentBlock::text(new_content)];
             self.updated_at = now_text();
             true
         } else {

@@ -523,7 +523,7 @@ async fn worker_loop_async(
                 continue;
             }
             Command::ResetContext => {
-                reset_context_for_session(&mut session, &stream_tx);
+                reset_context_for_session(&mut session, &stream_tx, engine.as_ref().unwrap());
                 continue;
             }
         }
@@ -569,7 +569,7 @@ fn index_turn_messages(
                 turn_id: msg.id.clone(),
                 workspace_id: session.cwd.clone(),
                 role: role.to_string(),
-                content: msg.content.clone(),
+                content: msg.text_content(),
                 topics: Vec::new(),
                 entity_names: Vec::new(),
             })
@@ -606,20 +606,23 @@ pub(crate) fn compress_context_for_session(
         .with_keep_recent_turns(6);
     match organizer.force_update_summary_with_usage(session, engine.client()) {
         Ok(update) => {
+            let remaining = session.messages.len().saturating_sub(session.summary_up_to);
+            session.current_tokens = 0;
+            session.active_agent_current_tokens = 0;
+            session.agent_current_tokens.clear();
             crate::react::context::emit_token_usage(
                 stream_tx,
                 &update.usage,
-                None,
+                Some(0),
                 engine.context_limit,
                 "manual_context_compress",
                 None,
             );
-            let remaining = session.messages.len().saturating_sub(session.summary_up_to);
             let _ = stream_tx.send(StreamEvent::ContextCompressed {
                 action: if update.compressed {
-                    "压缩".to_string()
+                    tiangong_types::stream::ContextCompressAction::Compress
                 } else {
-                    "无需压缩".to_string()
+                    tiangong_types::stream::ContextCompressAction::Noop
                 },
                 summary_up_to: session.summary_up_to,
                 remaining_messages: remaining,
@@ -634,11 +637,21 @@ pub(crate) fn compress_context_for_session(
     }
 }
 
-pub(crate) fn reset_context_for_session(session: &mut Session, stream_tx: &StdSender<StreamEvent>) {
+pub(crate) fn reset_context_for_session(
+    session: &mut Session,
+    stream_tx: &StdSender<StreamEvent>,
+    engine: &RuntimeEngine,
+) {
     let total = session.messages.len();
     session.summary_up_to = total;
+    session.context_summary = None;
+    session.current_tokens = 0;
+    session.active_agent_current_tokens = 0;
+    session.agent_current_tokens.clear();
+    // 清空后重建 system prompt
+    crate::react::context::rebuild_system_prompt(session, engine);
     let _ = stream_tx.send(StreamEvent::ContextCompressed {
-        action: "清理".to_string(),
+        action: tiangong_types::stream::ContextCompressAction::Clear,
         summary_up_to: total,
         remaining_messages: 0,
     });
@@ -691,7 +704,7 @@ fn build_engine_from_config(
     use crate::model::OnRetryCallback;
     use crate::models_config::ModelsConfig;
 
-    // 从 LlmConfig 构建兼容的 ModelsConfig（供 PromptAssembler 等旧代码使用）
+    // 从 LlmConfig 构建兼容的 ModelsConfig（供 system prompt 构建使用）
     let models_config = ModelsConfig::from_llm_config(&config.llm);
     let model_config = models_config.to_chat_provider_config();
 
@@ -842,24 +855,39 @@ pub(crate) fn execute_attachment_analysis_tool(
         );
     }
 
-    let mut attachment_message = Message::new(
+    let mut attachment_context = vec![Message::new(
+        MessageRole::User,
+        "你是附件解析助手。只根据随消息提供的附件内容和解析要求回答，输出可供主模型直接使用的简洁中文结果。".to_string(),
+    )];
+    let attachment_message = Message::new(
+        MessageRole::Assistant,
+        "好的，我将作为附件解析助手，根据附件内容和解析要求进行分析。".to_string(),
+    );
+    attachment_context.push(attachment_message);
+    let mut user_message = Message::new(
         MessageRole::User,
         format!(
             "用户原始消息：{}\n\n解析要求：{}",
-            source_message.content.trim(),
+            source_message.text_content().trim(),
             instruction
         ),
     );
-    attachment_message.media = media;
+    for asset in media {
+        user_message
+            .content
+            .push(crate::session::ContentBlock::Media {
+                kind: asset.kind,
+                url: asset.url.clone(),
+                mime_type: asset.mime_type.clone(),
+                title: asset.title.clone(),
+            });
+    }
+    attachment_context.push(user_message);
 
     let req = ModelRequest {
         session_title: format!("{} · attachment-analysis", session.title),
         user_input: String::new(),
-        context: vec![attachment_message],
-        assembled_system_prompt: Some(
-            "你是附件解析助手。只根据随消息提供的附件内容和解析要求回答，输出可供主模型直接使用的简洁中文结果。"
-                .to_string(),
-        ),
+        context: attachment_context,
         thinking: None,
         reasoning_effort: None,
         thinking_disabled: false,

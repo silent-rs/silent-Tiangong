@@ -73,11 +73,12 @@ fn main() {
     let session = core.into_session();
     println!("消息数: {}", session.messages.len());
     for (i, m) in session.messages.iter().enumerate() {
-        let preview: String = m.content.chars().take(80).collect();
+        let text = m.text_content();
+        let preview: String = text.chars().take(80).collect();
         println!(
             "[{i}] {:?} clen={} | {}",
             m.role,
-            m.content.len(),
+            text.len(),
             preview.replace('\n', "\\n")
         );
     }

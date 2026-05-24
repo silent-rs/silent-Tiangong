@@ -1,14 +1,24 @@
-//! ReAct 循环上下文管理：memory 注入、强制回复、上下文压缩
+//! ReAct 循环上下文管理：强制回复、上下文压缩
 
 use std::sync::mpsc::Sender as StdSender;
 
 use crate::context::organizer::ContextOrganizer;
 use crate::model::{ModelClient, ModelRequest, SingleProviderClient, TokenUsage};
-use crate::prompt::PromptAssembler;
+use crate::prompt::SystemPromptConfig;
 use crate::runtime::{RuntimeEngine, use_stream_mode};
 use crate::session::{Message, MessageRole, Session, now_text};
 use crate::stream_throttle::ThrottledStreamSink;
 use tiangong_types::StreamEvent;
+
+/// 从 RuntimeEngine 配置构建 SystemPromptConfig 并重建 session 的 system prompt
+pub(crate) fn rebuild_system_prompt(session: &mut Session, engine: &RuntimeEngine) {
+    let config = SystemPromptConfig::from_configs(
+        engine.models_config(),
+        engine.agent_config(),
+        &session.id,
+    );
+    session.rebuild_system_prompt(&config);
+}
 
 pub(crate) fn compression_threshold_tokens(context_limit: usize) -> usize {
     ContextOrganizer::new(context_limit)
@@ -68,6 +78,8 @@ pub(crate) fn maybe_update_context_summary(
                 * (remaining as f64 / total_messages.max(1) as f64))
                 as usize;
             session.current_tokens = estimated_tokens;
+            // 压缩后重建 system prompt（摘要已更新）
+            rebuild_system_prompt(session, engine);
             emit_token_usage(
                 stream_tx,
                 &update.usage,
@@ -77,7 +89,7 @@ pub(crate) fn maybe_update_context_summary(
                 None,
             );
             let _ = stream_tx.send(StreamEvent::ContextCompressed {
-                action: "自动压缩".to_string(),
+                action: tiangong_types::stream::ContextCompressAction::Auto,
                 summary_up_to: session.summary_up_to,
                 remaining_messages: remaining,
             });
@@ -164,57 +176,29 @@ fn parse_completion_response(response: &str) -> bool {
     trimmed.contains("COMPLETE") && !trimmed.contains("INCOMPLETE")
 }
 
-pub(crate) fn loop_context_with_memory(
-    loop_context: &[Message],
-    memory_context: Option<&str>,
-) -> Vec<Message> {
-    let mut messages = loop_context.to_vec();
-    let Some(ctx) = memory_context.map(str::trim).filter(|ctx| !ctx.is_empty()) else {
-        return messages;
-    };
-
-    messages.insert(
-        0,
-        Message {
-            id: scru128::new().to_string(),
-            role: MessageRole::Tool,
-            content: format!(
-                "<memory-recall>\n{ctx}\n</memory-recall>\n\
-                请基于以上 recall_memory 检索结果继续完成用户原始目标；不要再次调用 recall_memory，除非用户提出新的历史查询。"
-            ),
-            reasoning_content: String::new(),
-            reasoning_signature: None,
-            worker_id: None,
-            media: Vec::new(),
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            tool_name: Some("recall_memory".to_string()),
-            tool_result_is_error: false,
-            compact: false,
-            created_at: now_text(),
-        },
-    );
-    messages
-}
-
 /// 超限时强制最终回复
 pub(crate) fn force_final_response(
     session: &mut Session,
-    loop_context: &[Message],
     engine: &RuntimeEngine,
     stream_tx: &StdSender<StreamEvent>,
 ) {
-    let mut final_context = loop_context.to_vec();
-    final_context.push(Message {
+    // 确保 system prompt 已构建
+    if session.system_prompt_message.is_none() {
+        rebuild_system_prompt(session, engine);
+    }
+    // 注入提示消息到 session
+    session.messages.push(Message {
         id: scru128::new().to_string(),
         role: MessageRole::Tool,
-        content:
+        content: vec![crate::session::ContentBlock::text(
             "<system-reminder>\n请基于以上所有工具执行结果，直接给出最终回复。\n</system-reminder>"
                 .to_string(),
+        )],
         reasoning_content: String::new(),
         reasoning_signature: None,
         worker_id: None,
         media: Vec::new(),
+        media_migrated: true,
         tool_calls: Vec::new(),
         tool_call_id: None,
         tool_name: Some("force_final_response".to_string()),
@@ -223,22 +207,10 @@ pub(crate) fn force_final_response(
         created_at: now_text(),
     });
 
-    let assembler = PromptAssembler::new(engine.context_limit);
-    let assembled = assembler.assemble(
-        session,
-        "",
-        Vec::new(),
-        engine.models_config(),
-        engine.agent_config(),
-        &final_context,
-    );
-
-    let system_prompt = assembled.final_system_prompt();
     let req = ModelRequest {
         session_title: session.title.clone(),
-        user_input: assembled.user_input.clone(),
-        context: assembled.build_messages(),
-        assembled_system_prompt: Some(system_prompt),
+        user_input: String::new(),
+        context: session.context(),
         thinking: Some(crate::model::ThinkingConfig {
             budget_tokens: 4096,
         }),

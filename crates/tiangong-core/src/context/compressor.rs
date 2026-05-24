@@ -1,14 +1,13 @@
 use anyhow::Result;
 
 use crate::model::{ModelClient, ModelRequest, SingleProviderClient, TokenUsage};
-use crate::session::{Message, MessageRole, Session, now_text};
+use crate::session::{ContentBlock, Message, MessageRole, Session, now_text};
 
 /// 上下文压缩器
 ///
 /// 采用滚动摘要策略：保留最近 N 轮完整对话，对更早的消息（含旧摘要）
 /// 折叠为新摘要。摘要持久化到 Session，支持无限对话延伸。
 pub struct ContextCompressor {
-    /// 保留最近的完整对话轮数
     keep_recent_turns: usize,
 }
 
@@ -31,20 +30,6 @@ impl ContextCompressor {
         Self { keep_recent_turns }
     }
 
-    /// 更新 session 的滚动摘要
-    ///
-    /// 如果消息数量足够多（超过 keep_recent_turns），将早期消息（含旧摘要）
-    /// 折叠为新摘要，更新 session.context_summary 和 summary_up_to。
-    ///
-    /// 返回 true 表示执行了压缩，false 表示无需压缩。
-    pub fn update_summary(
-        &self,
-        session: &mut Session,
-        client: &SingleProviderClient,
-    ) -> Result<bool> {
-        Ok(self.update_summary_with_usage(session, client)?.compressed)
-    }
-
     pub fn update_summary_with_usage(
         &self,
         session: &mut Session,
@@ -55,27 +40,22 @@ impl ContextCompressor {
             return Ok(CompressionUpdate::default());
         }
 
-        // 已被摘要覆盖的部分不需要重新处理
         if split_point <= session.summary_up_to {
             return Ok(CompressionUpdate::default());
         }
 
-        // 需要新增摘要的消息范围：从上次摘要覆盖点到新分割点
-        let new_messages_start = session.summary_up_to;
-        let new_messages = &session.messages[new_messages_start..split_point];
+        let new_messages = &session.messages[session.summary_up_to..split_point];
 
         if new_messages.is_empty() {
             return Ok(CompressionUpdate::default());
         }
 
-        // 折叠：旧摘要 + 新溢出消息 → 新摘要
-        let (summary, usage) =
-            self.fold_summary(session.context_summary.as_deref(), new_messages, client)?;
+        let (summary, usage) = self.fold_summary(session, new_messages, client)?;
 
         tracing::info!(
             old_summary_up_to = session.summary_up_to,
             new_summary_up_to = split_point,
-            new_messages_count = new_messages.len(),
+            messages_count = new_messages.len(),
             summary_len = summary.len(),
             "滚动摘要已更新"
         );
@@ -90,19 +70,12 @@ impl ContextCompressor {
     }
 
     /// 构建发送给 LLM 的上下文消息列表
-    ///
-    /// 结构：[最近 N 轮完整消息]
-    ///
-    /// 滚动摘要由 PromptAssembler 注入 system prompt，不作为普通消息进入对话链。
     pub fn build_context(&self, session: &Session) -> Vec<Message> {
         let split_point = if session.summary_up_to > 0 {
-            // 使用已有摘要覆盖点
             session.summary_up_to
         } else {
-            // 没有摘要时返回全部消息
             0
         };
-
         session.messages[split_point..].to_vec()
     }
 
@@ -127,53 +100,53 @@ impl ContextCompressor {
         split_point
     }
 
-    /// 将旧摘要 + 新消息折叠为新摘要
+    /// 折叠摘要：将待压缩消息作为对话流发送给 LLM
+    ///
+    /// context_summary 和压缩指令作为 user 消息附加在对话流中，
+    /// system prompt 保持默认以复用 KV cache。
     fn fold_summary(
         &self,
-        old_summary: Option<&str>,
+        session: &Session,
         new_messages: &[Message],
         client: &SingleProviderClient,
     ) -> Result<(String, TokenUsage)> {
-        let mut input_text = String::new();
+        let mut context = Vec::new();
 
-        // 旧摘要作为上文
-        if let Some(summary) = old_summary {
-            input_text.push_str(&format!("[已有摘要]\n{summary}\n\n[新增对话]\n"));
-        }
-
-        // 新消息
-        for msg in new_messages {
-            let role_label = match msg.role {
-                MessageRole::User => "用户",
-                MessageRole::Assistant => "助手",
-                MessageRole::System => "系统",
-                MessageRole::Tool => "工具结果",
-            };
-            let content = if msg.content.chars().count() > 2000 {
-                let truncated: String = msg.content.chars().take(2000).collect();
-                format!("{truncated}...(已截断)")
-            } else {
-                msg.content.clone()
-            };
-            input_text.push_str(&format!("[{role_label}]: {content}\n"));
-        }
-
-        let prompt = format!(
-            "请将以下内容压缩为简洁的对话摘要。要求：\n\
-             1. 保留所有关键信息、决策结论和重要数据\n\
-             2. 保留用户的核心需求和偏好\n\
-             3. 保留已执行的操作及其结果\n\
-             4. 如果有已有摘要，将其与新增内容合并为统一摘要\n\
-             5. 去除冗余的中间过程和重复内容\n\
-             6. 直接输出摘要内容，不要加前缀说明\n\n\
-             {input_text}"
+        let mut instruction = String::from(
+            "请将以下对话历史压缩为简洁摘要。保留关键信息、决策结论和重要数据，去除冗余的中间过程和重复内容。直接输出摘要内容。",
         );
+        if let Some(summary) = session
+            .context_summary
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            instruction.push_str(&format!("\n\n[已有摘要]\n{summary}"));
+        }
+
+        context.push(Message {
+            id: scru128::new().to_string(),
+            role: MessageRole::User,
+            content: vec![ContentBlock::text(instruction)],
+            reasoning_content: String::new(),
+            reasoning_signature: None,
+            worker_id: None,
+            media: Vec::new(),
+            media_migrated: true,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_result_is_error: false,
+            compact: false,
+            created_at: crate::session::now_text(),
+        });
+
+        context.extend(new_messages.iter().cloned());
 
         let req = ModelRequest {
             session_title: String::new(),
-            user_input: prompt,
-            context: Vec::new(),
-            assembled_system_prompt: None,
+            user_input: String::new(),
+            context,
             thinking: None,
             reasoning_effort: None,
             thinking_disabled: false,
@@ -233,11 +206,12 @@ pub fn compress_loop_messages(
             MessageRole::User => "用户",
             MessageRole::Tool => "工具结果",
         };
-        let content = if msg.content.chars().count() > 1000 {
-            let truncated: String = msg.content.chars().take(1000).collect();
+        let content_text = msg.text_content();
+        let content = if content_text.chars().count() > 1000 {
+            let truncated: String = content_text.chars().take(1000).collect();
             format!("{truncated}...(已截断)")
         } else {
-            msg.content.clone()
+            content_text.clone()
         };
         text.push_str(&format!("[{label}]: {content}\n"));
     }
@@ -256,7 +230,6 @@ pub fn compress_loop_messages(
         session_title: String::new(),
         user_input: prompt,
         context: Vec::new(),
-        assembled_system_prompt: None,
         thinking: None,
         reasoning_effort: None,
         thinking_disabled: false,
@@ -274,11 +247,14 @@ pub fn compress_loop_messages(
     let mut result = vec![Message {
         id: scru128::new().to_string(),
         role: MessageRole::Tool,
-        content: format!("[前 {compress_rounds} 轮执行摘要]\n{summary}"),
+        content: vec![ContentBlock::text(format!(
+            "[前 {compress_rounds} 轮执行摘要]\n{summary}"
+        ))],
         reasoning_content: String::new(),
         reasoning_signature: None,
         worker_id: None,
         media: Vec::new(),
+        media_migrated: true,
         tool_calls: Vec::new(),
         tool_call_id: None,
         tool_name: Some("loop_summary".to_string()),

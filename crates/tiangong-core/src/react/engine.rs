@@ -20,10 +20,9 @@ use crate::permission::{
     PermissionDecision, evaluate_tool_permission, format_call_args_summary, infer_audit_target,
     normalize_permission_target,
 };
-use crate::prompt::PromptAssembler;
 use crate::react::context::{
     check_completion_with_lite_model, emit_token_usage, force_final_response,
-    loop_context_with_memory, maybe_update_context_summary, select_client_for_request,
+    maybe_update_context_summary, select_client_for_request,
 };
 use crate::react::message::*;
 use crate::runtime::LlmOutputRecord;
@@ -53,11 +52,12 @@ fn sub_agent_stream_message(
     Message {
         id: id.into(),
         role,
-        content: content.into(),
+        content: vec![crate::session::ContentBlock::text(content.into())],
         reasoning_content: reasoning_content.into(),
         reasoning_signature: None,
         worker_id: None,
         media: Vec::new(),
+        media_migrated: true,
         tool_calls: Vec::new(),
         tool_call_id: None,
         tool_name: None,
@@ -80,16 +80,6 @@ fn send_sub_agent_output(
         agent_label: agent_label.to_string(),
         messages: vec![message],
     });
-}
-
-fn agent_status_label(status: &crate::agent_team::descriptor::AgentStatus) -> &'static str {
-    match status {
-        crate::agent_team::descriptor::AgentStatus::Idle => "idle",
-        crate::agent_team::descriptor::AgentStatus::Running => "running",
-        crate::agent_team::descriptor::AgentStatus::WaitingForUser => "waiting_for_user",
-        crate::agent_team::descriptor::AgentStatus::WaitingForLock => "waiting_for_lock",
-        crate::agent_team::descriptor::AgentStatus::Terminated => "terminated",
-    }
 }
 
 fn spawn_sub_agent_stream_forwarder(
@@ -199,6 +189,7 @@ fn spawn_sub_agent_stream_forwarder(
                     ok,
                     output,
                     full_output,
+                    ..
                 } => {
                     let persisted_output = full_output.unwrap_or(output);
                     let mut content = format!(
@@ -410,11 +401,8 @@ impl ReactEngine {
         memory_handle: Option<&tiangong_memory::MemoryHandle>,
         index_manager: Option<&crate::index::IndexManager>,
     ) -> TokenUsage {
-        let mut loop_context: Vec<Message> = Vec::new();
         let mut round = 0;
         let mut accumulated_usage = TokenUsage::default();
-        let mut pending_media_assets: Vec<tiangong_types::MediaAsset> = Vec::new();
-        let mut memory_context: Option<String> = None;
         let mut memory_recall_attempted = false;
         let mut successful_tool_call_keys = HashSet::new();
         let mut failed_tool_call_keys = HashSet::new();
@@ -452,16 +440,13 @@ impl ReactEngine {
         }
 
         'react_loop: loop {
-            match drain_pending_commands_async(
-                session,
-                &self.engine,
-                &mut loop_context,
-                stream_tx,
-                cmd_rx,
-            ) {
+            // 首轮：确保 system prompt 已构建
+            if round == 0 && session.system_prompt_message.is_none() {
+                crate::react::context::rebuild_system_prompt(session, &self.engine);
+            }
+            match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
                 PendingCommandEffect::Terminate => return accumulated_usage,
                 PendingCommandEffect::MessageInjected => {
-                    memory_context = None;
                     memory_recall_attempted = false;
                     successful_tool_call_keys.clear();
                     failed_tool_call_keys.clear();
@@ -472,40 +457,20 @@ impl ReactEngine {
             }
 
             if round >= self.max_rounds {
-                force_final_response(session, &loop_context, &self.engine, stream_tx);
+                force_final_response(session, &self.engine, stream_tx);
                 break;
             }
 
             let request_tools = self.tools.to_vec();
-            let loop_context_with_team;
-            let context_for_request =
-                if let Some(team_context) = self.sub_agent_team_context_message() {
-                    loop_context_with_team = std::iter::once(team_context)
-                        .chain(loop_context.iter().cloned())
-                        .collect::<Vec<_>>();
-                    &loop_context_with_team
-                } else {
-                    &loop_context
-                };
-            let loop_context_with_memory =
-                loop_context_with_memory(context_for_request, memory_context.as_deref());
-            let assembler = PromptAssembler::new(self.engine.context_limit);
-            let assembled = assembler.assemble(
-                session,
-                "",
-                request_tools.clone(),
-                self.engine.models_config(),
-                self.engine.agent_config(),
-                &loop_context_with_memory,
-            );
 
-            let system_prompt = assembled.final_system_prompt();
             let (thinking, reasoning_effort, thinking_disabled) = self.build_thinking_config();
             let req = ModelRequest {
                 session_title: session.title.clone(),
-                user_input: assembled.user_input.clone(),
-                context: assembled.build_messages(),
-                assembled_system_prompt: Some(system_prompt),
+                // 当前用户消息已在 Command::Message 入口写入 session.messages。
+                // ReAct 多轮继续请求时不能再次追加 user_input，否则模型会把同一请求
+                // 误认为新的用户消息，反复从第一步重新开始。
+                user_input: String::new(),
+                context: session.context(),
                 thinking,
                 reasoning_effort,
                 thinking_disabled,
@@ -542,10 +507,20 @@ impl ReactEngine {
                                 return accumulated_usage;
                             }
                             Some(Command::Message { content, message_id, media }) => {
-                                append_user_message_to_loop_context(
-                                    session, &mut loop_context, stream_tx,
-                                    content, message_id, media,
+                                let mid = append_or_reuse_user_message(
+                                    session, &content, message_id, media,
                                 );
+                                let media = session
+                                    .messages
+                                    .iter()
+                                    .find(|message| message.id == mid)
+                                    .map(|message| message.media.clone())
+                                    .unwrap_or_default();
+                                let _ = stream_tx.send(StreamEvent::UserMessage {
+                                    message_id: mid,
+                                    content: content.clone(),
+                                    media,
+                                });
                                 user_message_injected_during_stream = true;
                     memory_candidate_count = 0;
                             }
@@ -564,7 +539,11 @@ impl ReactEngine {
                                 );
                             }
                             Some(Command::ResetContext) => {
-                                crate::core::reset_context_for_session(session, stream_tx);
+                                crate::core::reset_context_for_session(
+                                    session,
+                                    stream_tx,
+                                    &self.engine,
+                                );
                             }
                         }
                     }
@@ -595,18 +574,19 @@ impl ReactEngine {
                 Ok(r) => r,
                 Err(err) => {
                     let err_msg = err.to_string();
-                    // 上下文超限时强制压缩后重试一次
+                    // 上下文超限时强制压缩后重试
                     if err_msg.contains("context_window_exceeded")
                         || err_msg.contains("context_length_exceeded")
                     {
                         tracing::warn!("检测到上下文超限，尝试强制压缩");
+                        let before_summary_up_to = session.summary_up_to;
                         crate::react::context::maybe_update_context_summary(
                             session,
                             &self.engine,
                             self.engine.context_limit,
                             stream_tx,
                         );
-                        if session.summary_up_to > 0 {
+                        if session.summary_up_to > before_summary_up_to {
                             continue 'react_loop;
                         }
                     }
@@ -640,20 +620,16 @@ impl ReactEngine {
 
                     if !is_complete {
                         // 将已流式输出的回复保存到 session，避免上下文丢失
-                        session.append_message_with_id_and_media(
+                        session.append_message_with_id(
                             pending_msg_id.clone(),
                             MessageRole::Assistant,
                             response.text.clone(),
                             response.reasoning_content.clone(),
-                            std::mem::take(&mut pending_media_assets),
                         );
                         if let Some(message) = session.messages.last_mut() {
                             message.reasoning_signature = response.reasoning_signature.clone();
                         }
-                        // 加入 loop_context 使下一轮模型看到已输出内容
-                        loop_context
-                            .push(Message::new(MessageRole::Assistant, response.text.clone()));
-                        loop_context.push(Message::new(
+                        session.messages.push(Message::new(
                             MessageRole::Tool,
                             "<system-reminder>\n上方回复被判定为未完成任务。\
                                 不要重复上方已说过的内容。\
@@ -665,12 +641,11 @@ impl ReactEngine {
                     }
                 }
 
-                session.append_message_with_id_and_media(
+                session.append_message_with_id(
                     pending_msg_id,
                     MessageRole::Assistant,
                     response.text.clone(),
                     response.reasoning_content.clone(),
-                    std::mem::take(&mut pending_media_assets),
                 );
                 if let Some(message) = session.messages.last_mut() {
                     message.reasoning_signature = response.reasoning_signature.clone();
@@ -696,7 +671,6 @@ impl ReactEngine {
                 );
 
                 if user_message_injected_during_stream {
-                    memory_context = None;
                     memory_recall_attempted = false;
                     successful_tool_call_keys.clear();
                     failed_tool_call_keys.clear();
@@ -758,16 +732,9 @@ impl ReactEngine {
             // 执行工具
             let mut need_failure_recovery_prompt = false;
             for call in executable_calls {
-                match drain_pending_commands_async(
-                    session,
-                    &self.engine,
-                    &mut loop_context,
-                    stream_tx,
-                    cmd_rx,
-                ) {
+                match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
                     PendingCommandEffect::Terminate => return accumulated_usage,
                     PendingCommandEffect::MessageInjected => {
-                        memory_context = None;
                         memory_recall_attempted = false;
                         successful_tool_call_keys.clear();
                         failed_tool_call_keys.clear();
@@ -813,6 +780,7 @@ impl ReactEngine {
                         ok: result.ok,
                         output: tool_result_stream_output(&result),
                         full_output: Some(tool_result_full_output(&result)),
+                        media: vec![],
                     });
                     append_tool_result_message(
                         session,
@@ -882,6 +850,7 @@ impl ReactEngine {
                             ok: false,
                             output: format!("权限拒绝：{reason}"),
                             full_output: None,
+                            media: vec![],
                         });
                         append_tool_result_message(
                             session,
@@ -936,14 +905,20 @@ impl ReactEngine {
                                     message_id,
                                     media,
                                 }) => {
-                                    append_user_message_to_loop_context(
-                                        session,
-                                        &mut loop_context,
-                                        stream_tx,
-                                        content,
-                                        message_id,
-                                        media,
+                                    let mid = append_or_reuse_user_message(
+                                        session, &content, message_id, media,
                                     );
+                                    let msg_media = session
+                                        .messages
+                                        .iter()
+                                        .find(|message| message.id == mid)
+                                        .map(|message| message.media.clone())
+                                        .unwrap_or_default();
+                                    let _ = stream_tx.send(StreamEvent::UserMessage {
+                                        message_id: mid,
+                                        content: content.clone(),
+                                        media: msg_media,
+                                    });
                                     memory_candidate_count = 0;
                                 }
                                 Some(Command::UpdateCwd { cwd }) => {
@@ -961,7 +936,11 @@ impl ReactEngine {
                                     );
                                 }
                                 Some(Command::ResetContext) => {
-                                    crate::core::reset_context_for_session(session, stream_tx);
+                                    crate::core::reset_context_for_session(
+                                        session,
+                                        stream_tx,
+                                        &self.engine,
+                                    );
                                 }
                             }
                         };
@@ -997,6 +976,7 @@ impl ReactEngine {
                                 ok: false,
                                 output: "用户拒绝执行".to_string(),
                                 full_output: None,
+                                media: vec![],
                             });
                             let _ = stream_tx.send(StreamEvent::Done {
                                 usage: Some(accumulated_usage.clone()),
@@ -1035,6 +1015,7 @@ impl ReactEngine {
                                 ok: false,
                                 output: message.clone(),
                                 full_output: None,
+                                media: vec![],
                             });
                             append_tool_result_message(
                                 session, &call.id, &call.name, message, true,
@@ -1133,13 +1114,31 @@ impl ReactEngine {
                     normalized_target.as_deref().or(target_summary.as_deref()),
                     &result.summary,
                 );
+                let tool_media = if result.ok {
+                    crate::memory::turn_result::parse_media_assets_from_tool_result(
+                        &call.name,
+                        &result.stdout,
+                        &result.summary,
+                    )
+                } else {
+                    Vec::new()
+                };
                 let _ = stream_tx.send(StreamEvent::ToolResult {
                     name: call.name.clone(),
                     tool_call_id: Some(call.id.clone()),
                     ok: result.ok,
                     output: tool_result_stream_output(&result),
                     full_output: Some(tool_result_full_output(&result)),
+                    media: tool_media.clone(),
                 });
+                // 媒体工具成功时，立即创建一条携带媒体的 assistant 消息，前端可实时渲染
+                if !tool_media.is_empty() {
+                    session.append_message_with_media(
+                        MessageRole::Assistant,
+                        String::new(),
+                        tool_media.clone(),
+                    );
+                }
                 append_tool_result_message(
                     session,
                     &call.id,
@@ -1160,13 +1159,6 @@ impl ReactEngine {
                     failed_tool_call_keys.remove(&tool_call_key);
                     failed_tool_names.remove(&call.name);
                     successful_tool_call_keys.insert(tool_call_key);
-                    pending_media_assets.extend(
-                        crate::memory::turn_result::parse_media_assets_from_tool_result(
-                            &call.name,
-                            &result.stdout,
-                            &result.summary,
-                        ),
-                    );
                 } else {
                     failed_tool_call_keys.insert(tool_call_key);
                     failed_tool_names.insert(call.name.clone());
@@ -1199,13 +1191,6 @@ impl ReactEngine {
                         memory_candidate_count += 1;
                     }
                 }
-                if call.name == "recall_memory"
-                    && result.ok
-                    && allow_memory_context
-                    && !result.stdout.trim().is_empty()
-                {
-                    memory_context = Some(result.stdout.clone());
-                }
                 maybe_update_context_summary(
                     session,
                     &self.engine,
@@ -1213,16 +1198,9 @@ impl ReactEngine {
                     stream_tx,
                 );
 
-                match drain_pending_commands_async(
-                    session,
-                    &self.engine,
-                    &mut loop_context,
-                    stream_tx,
-                    cmd_rx,
-                ) {
+                match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
                     PendingCommandEffect::Terminate => return accumulated_usage,
                     PendingCommandEffect::MessageInjected => {
-                        memory_context = None;
                         memory_recall_attempted = false;
                         successful_tool_call_keys.clear();
                         failed_tool_call_keys.clear();
@@ -1264,7 +1242,7 @@ impl ReactEngine {
                     ),
                 );
                 reminder.tool_name = Some("react_failed_tool_recovery".to_string());
-                loop_context.push(reminder);
+                session.messages.push(reminder);
                 session.persist_to_disk();
                 continue 'react_loop;
             }
@@ -1282,7 +1260,7 @@ impl ReactEngine {
             let main_messages = self.drain_main_agent_messages();
             if !main_messages.is_empty() {
                 for message in main_messages {
-                    loop_context.push(Message::new(
+                    session.messages.push(Message::new(
                         MessageRole::User,
                         format!(
                             "[from:{} at {}]\n{}",
@@ -1312,54 +1290,6 @@ impl ReactEngine {
             .as_ref()
             .and_then(|team| team.lock().ok().map(|mut team| team.drain_main_inbox()))
             .unwrap_or_default()
-    }
-
-    fn sub_agent_team_context_message(&self) -> Option<Message> {
-        if self.agent_id == "main" {
-            return None;
-        }
-
-        let team = self.team.as_ref()?.lock().ok()?;
-        let current = team.registry.get(&self.agent_id)?;
-        let mut agents = team.registry.alive_agents();
-        agents.sort_by(|a, b| a.role.cmp(&b.role));
-        if agents.is_empty() {
-            return None;
-        }
-
-        let roster = agents
-            .iter()
-            .map(|agent| {
-                let own = if agent.agent_id == self.agent_id {
-                    "（你）"
-                } else {
-                    ""
-                };
-                format!(
-                    "- {} (@{}) status={}{}",
-                    agent.label,
-                    agent.role,
-                    agent_status_label(&agent.status),
-                    own
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        Some(Message::new(
-            MessageRole::System,
-            format!(
-                "[团队上下文]\n\
-你的身份：{} (@{})。\n\
-当前可用团队成员：\n{}\n\
-协作规则：\n\
-- 需要其他角色补充信息、实现或验证时，使用 send_message(to=\"role\", content=\"...\") 主动沟通，role 必须来自上面的 @角色。\n\
-- 需要同步给所有成员时，使用 broadcast_message(content=\"...\", exclude=[\"{}\"]）。\n\
-- 子 Agent 不负责创建或解散成员；已有团队成员都列在上方。\n\
-- 需要向用户汇报时，使用 notify_user；内容直接用你的角色口吻输出结论和进展，不要带系统日志前缀。",
-                current.label, current.role, roster, current.role
-            ),
-        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1711,7 +1641,7 @@ impl ReactEngine {
                             );
                         }
                         Some(Command::ResetContext) => {
-                            crate::core::reset_context_for_session(parent_session, stream_tx);
+                            crate::core::reset_context_for_session(parent_session, stream_tx, &self.engine);
                         }
                         Some(Command::ReloadConfig) | Some(Command::Approval { .. }) => {}
                         None => break,
@@ -1731,14 +1661,16 @@ impl ReactEngine {
             let has_error = child_session
                 .messages
                 .iter()
-                .any(|m| m.role == MessageRole::System && m.content.starts_with("[错误]"));
+                .any(|m| m.role == MessageRole::System && m.text_content().starts_with("[错误]"));
 
             let completion_content = if has_error {
                 let error_content = child_session
                     .messages
                     .iter()
-                    .filter(|m| m.role == MessageRole::System && m.content.starts_with("[错误]"))
-                    .map(|m| m.content.replace("[错误] ", ""))
+                    .filter(|m| {
+                        m.role == MessageRole::System && m.text_content().starts_with("[错误]")
+                    })
+                    .map(|m| m.text_content().replace("[错误] ", ""))
                     .collect::<Vec<_>>()
                     .join("; ");
                 format!("[{agent_label}] 执行出错：{error_content}")
@@ -1748,7 +1680,7 @@ impl ReactEngine {
                     .iter()
                     .filter(|m| m.role == MessageRole::Assistant)
                     .filter_map(|m| {
-                        let c = m.content.trim().to_string();
+                        let c = m.text_content().trim().to_string();
                         if c.is_empty() { None } else { Some(c) }
                     })
                     .collect::<Vec<_>>()
@@ -1841,7 +1773,6 @@ impl ReactEngine {
 fn drain_pending_commands_async(
     session: &mut Session,
     engine: &crate::runtime::RuntimeEngine,
-    loop_context: &mut Vec<Message>,
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> PendingCommandEffect {
@@ -1862,14 +1793,18 @@ fn drain_pending_commands_async(
                 message_id,
                 media,
             } => {
-                append_user_message_to_loop_context(
-                    session,
-                    loop_context,
-                    stream_tx,
-                    content,
-                    message_id,
-                    media,
-                );
+                let mid = append_or_reuse_user_message(session, &content, message_id, media);
+                let msg_media = session
+                    .messages
+                    .iter()
+                    .find(|message| message.id == mid)
+                    .map(|message| message.media.clone())
+                    .unwrap_or_default();
+                let _ = stream_tx.send(StreamEvent::UserMessage {
+                    message_id: mid,
+                    content: content.clone(),
+                    media: msg_media,
+                });
                 injected_message = true;
             }
             Command::UpdateCwd { cwd } => {
@@ -1882,7 +1817,7 @@ fn drain_pending_commands_async(
                 crate::core::compress_context_for_session(session, engine, stream_tx);
             }
             Command::ResetContext => {
-                crate::core::reset_context_for_session(session, stream_tx);
+                crate::core::reset_context_for_session(session, stream_tx, engine);
             }
         }
     }
@@ -1914,7 +1849,7 @@ fn check_cancel(
                 crate::core::compress_context_for_session(session, engine, stream_tx);
             }
             Command::ResetContext => {
-                crate::core::reset_context_for_session(session, stream_tx);
+                crate::core::reset_context_for_session(session, stream_tx, engine);
             }
             _ => {}
         }

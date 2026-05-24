@@ -8,34 +8,6 @@ use tiangong_types::{MediaAsset, StreamEvent};
 const MEMORY_LOOP_FEEDBACK_MAX_CHARS: usize = 12_000;
 const TOOL_RESULT_STREAM_MAX_CHARS: usize = 8_000;
 
-pub(crate) fn append_user_message_to_loop_context(
-    session: &mut Session,
-    loop_context: &mut Vec<Message>,
-    stream_tx: &StdSender<StreamEvent>,
-    content: String,
-    message_id: Option<String>,
-    media: Vec<MediaAsset>,
-) {
-    let loop_message_id = append_or_reuse_user_message(session, &content, message_id, media);
-    let _ = stream_tx.send(StreamEvent::UserMessage {
-        message_id: loop_message_id.clone(),
-        content: content.clone(),
-        media: session
-            .messages
-            .iter()
-            .find(|message| message.id == loop_message_id)
-            .map(|message| message.media.clone())
-            .unwrap_or_default(),
-    });
-    if let Some(message) = session
-        .messages
-        .iter()
-        .find(|message| message.id == loop_message_id)
-    {
-        loop_context.push(message.clone());
-    }
-}
-
 pub(crate) fn append_or_reuse_user_message(
     session: &mut Session,
     content: &str,
@@ -48,8 +20,12 @@ pub(crate) fn append_or_reuse_user_message(
             .iter_mut()
             .find(|message| message.id == message_id)
         {
-            if message.media.is_empty() && !media.is_empty() {
-                message.media = media;
+            let has_media = message.content.iter().any(|b| !b.is_text());
+            if !has_media && !media.is_empty() {
+                for asset in &media {
+                    message.content.push(asset.to_content_block());
+                }
+                message.media_migrated = true;
             }
         } else {
             session.append_message_with_id_and_media(
@@ -123,23 +99,26 @@ pub(crate) fn append_tool_result_message(
     session.updated_at = now_text();
 }
 
-pub(crate) fn append_runtime_tool_message(session: &mut Session, tool_name: &str, content: String) {
-    let mut message = Message::new(MessageRole::Tool, content);
-    message.tool_name = Some(tool_name.to_string());
-    session.messages.push(message);
-    session.updated_at = now_text();
+pub(crate) fn append_runtime_tool_message(
+    _session: &mut Session,
+    tool_name: &str,
+    content: String,
+) {
+    tracing::info!(tool_name, content, "runtime trace");
 }
 
 pub(crate) fn append_runtime_tool_message_with_reasoning(
-    session: &mut Session,
+    _session: &mut Session,
     tool_name: &str,
     content: String,
     reasoning_content: String,
 ) {
-    let mut message = Message::with_reasoning(MessageRole::Tool, content, reasoning_content);
-    message.tool_name = Some(tool_name.to_string());
-    session.messages.push(message);
-    session.updated_at = now_text();
+    tracing::info!(
+        tool_name,
+        content,
+        reasoning_content,
+        "runtime trace with reasoning"
+    );
 }
 
 pub(crate) fn tool_result_provider_text(
@@ -150,9 +129,14 @@ pub(crate) fn tool_result_provider_text(
     if tool_name == "recall_memory" {
         build_memory_recall_feedback(&result.stdout, allow_memory_context)
     } else if is_media_tool_name(tool_name) && result.ok {
+        let media_desc = if result.stdout.trim().is_empty() {
+            result.summary.clone()
+        } else {
+            format!("{}\n{}", result.summary, result.stdout)
+        };
         format!(
-            "工具 {tool_name} 执行成功：{}。媒体内容已生成并交付给用户，不要再次调用该工具。",
-            result.summary
+            "工具 {tool_name} 执行成功：{}。不要再次调用该工具。",
+            media_desc
         )
     } else {
         tool_result_full_output(result)
@@ -197,7 +181,8 @@ pub(crate) fn append_duplicate_tool_result(
     tool_name: &str,
 ) {
     let message = format!(
-        "本轮已经成功执行过完全相同的 {tool_name} 工具调用，系统已跳过重复执行。请直接基于前一次工具结果继续完成用户目标，不要再次调用相同工具和参数。"
+        "本轮已经成功执行过完全相同的 {tool_name} 工具调用，系统已跳过重复执行。\
+        请查看上方历史消息中的工具执行结果，直接基于已有结果继续后续任务，不要再次发起相同调用。"
     );
     let _ = stream_tx.send(StreamEvent::ToolResult {
         name: tool_name.to_string(),
@@ -205,6 +190,7 @@ pub(crate) fn append_duplicate_tool_result(
         ok: true,
         output: message.clone(),
         full_output: Some(message.clone()),
+        media: vec![],
     });
     append_tool_result_message(session, tool_call_id, tool_name, message.clone(), false);
     append_runtime_tool_message(
@@ -229,6 +215,7 @@ pub(crate) fn append_repeated_failed_tool_result(
         ok: false,
         output: message.clone(),
         full_output: Some(message.clone()),
+        media: vec![],
     });
     append_tool_result_message(session, tool_call_id, tool_name, message.clone(), true);
     append_runtime_tool_message(
@@ -310,12 +297,12 @@ pub(crate) fn truncate_chars_with_notice(text: &str, max_chars: usize, notice: &
     }
 }
 
-pub(crate) fn latest_user_message(session: &Session) -> &str {
+pub(crate) fn latest_user_message(session: &Session) -> String {
     session
         .messages
         .iter()
         .rev()
         .find(|message| message.role == MessageRole::User)
-        .map(|message| message.content.as_str())
+        .map(|message| message.text_content())
         .unwrap_or_default()
 }

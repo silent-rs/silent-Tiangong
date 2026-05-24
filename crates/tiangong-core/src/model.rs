@@ -2,8 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::mcp::build_mcp_tools_system_prompt;
-use crate::session::{Message, MessageRole};
+use crate::session::{ContentBlock, MediaKind, Message, MessageRole};
 use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose};
 use futures_util::StreamExt;
@@ -46,8 +45,6 @@ pub struct ModelRequest {
     pub session_title: String,
     pub user_input: String,
     pub context: Vec<Message>,
-    /// 已由 PromptAssembler 装配的 system prompt。
-    pub assembled_system_prompt: Option<String>,
     pub thinking: Option<ThinkingConfig>,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub thinking_disabled: bool,
@@ -56,25 +53,6 @@ pub struct ModelRequest {
 }
 
 impl ModelRequest {
-    /// 带 assembled_system_prompt 的构造
-    pub fn with_assembled_prompt(
-        session_title: String,
-        user_input: String,
-        context: Vec<Message>,
-        system_prompt: String,
-    ) -> Self {
-        Self {
-            session_title,
-            user_input,
-            context,
-            assembled_system_prompt: Some(system_prompt),
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: false,
-            include_media: false,
-        }
-    }
-
     pub fn with_thinking_budget(mut self, budget_tokens: u32) -> Self {
         self.thinking = Some(ThinkingConfig { budget_tokens });
         self
@@ -911,35 +889,55 @@ fn build_provider_request(
     }
 }
 
+const SYSTEM_IDENTITY: &str = "你是天工智能助手，一个功能丰富的个人 AI 中枢。你可以回答问题、处理文件、执行命令、生成多媒体内容，也可以通过工具和技能完成各种复杂任务。";
+
+const SYSTEM_RULES: &str = "规则：\
+1. 对话时自然友好，回复内容完整有用。闲聊和问候时正常交流，简单介绍自己的能力。\
+2. 需要文件操作、代码搜索、命令执行等实际操作时，调用对应的工具。\
+3. 每次工具调用后会收到执行结果，根据结果决定下一步：继续调用工具或给出最终回复。\
+4. 执行工具任务时语言简洁高效，不要说\"让我查看\"之类的过渡语，直接给出结果。\
+5. 不要在回复中包含工具调用的原始痕迹（如 ok=、exit_code= 等元数据）。\
+6. 回复使用 Markdown 格式：代码和命令用代码块包裹，使用标题、列表等结构化排版。\
+7. 工具调用失败时必须如实告知用户失败原因，绝对不能虚构成功结果。\
+8. 如果已安装的 Skill 能处理用户请求，优先通过 run_command 调用 Skill 脚本。\
+9. 耗时较长的命令使用 spawn_task 在后台执行。\
+10. 多个可并行的耗时任务使用 spawn+join 模式。";
+
 fn build_provider_messages(req: &ModelRequest) -> (String, Vec<ChatMessage>) {
     let mut messages = Vec::new();
-
-    let system_texts = if let Some(ref assembled) = req.assembled_system_prompt {
-        let texts = vec![assembled.clone()];
-        for msg in &req.context {
-            if let Some(message) = provider_message_from_session(msg, req.include_media) {
-                messages.push(message);
+    let mut system_texts = vec![
+        SYSTEM_IDENTITY.to_string(),
+        SYSTEM_RULES.to_string(),
+        format!("当前会话：{}", req.session_title),
+        format!("当前工作目录：{}", current_working_directory_text()),
+        format!("允许文件操作目录：{}", allowed_file_roots_text()),
+    ];
+    for msg in &req.context {
+        if msg.role == MessageRole::System {
+            let text = msg.text_content().trim().to_string();
+            if !text.is_empty() {
+                system_texts.clear();
+                system_texts.push(text);
             }
+            continue;
         }
-        texts
-    } else {
-        let mut texts = vec![
-            format!("当前会话：{}", req.session_title),
-            format!("当前工作目录：{}", current_working_directory_text()),
-            format!("允许文件操作目录：{}", allowed_file_roots_text()),
-        ];
-        if let Some(mcp_tools_prompt) = build_mcp_tools_system_prompt(24) {
-            texts.push(mcp_tools_prompt);
+        if let Some(message) = provider_message_from_session(msg, req.include_media) {
+            messages.push(message);
         }
-        for msg in &req.context {
-            if let Some(message) = provider_message_from_session(msg, req.include_media) {
-                messages.push(message);
-            }
-        }
-        texts
-    };
+    }
 
-    if req.assembled_system_prompt.is_none() && !req.user_input.is_empty() {
+    // 跳过消息列表开头的非 User 消息（summary_up_to 截断可能导致以 Assistant/Tool 开头）
+    if let Some(idx) = messages.iter().position(|m| m.role == LlmMessageRole::User)
+        && idx > 0
+    {
+        tracing::debug!(
+            skipped = idx,
+            "跳过消息列表开头的非 User 消息（可能是 summary 截断导致）"
+        );
+        messages = messages.split_off(idx);
+    }
+
+    if !req.user_input.is_empty() {
         messages.push(ChatMessage::text(
             LlmMessageRole::User,
             req.user_input.clone(),
@@ -968,22 +966,25 @@ fn provider_message_from_session(msg: &Message, include_media: bool) -> Option<C
     };
 
     if msg.role == MessageRole::Tool {
+        let text = msg.text_content();
         let Some(tool_call_id) = msg.tool_call_id.as_ref() else {
-            let text = msg.content.trim();
-            if text.is_empty() {
+            if text.trim().is_empty() {
                 return None;
             }
             let tool_name = msg.tool_name.as_deref().unwrap_or("runtime_context");
             return Some(ChatMessage::text(
                 LlmMessageRole::User,
-                format!("<tool-context name=\"{tool_name}\">\n{text}\n</tool-context>"),
+                format!(
+                    "<tool-context name=\"{tool_name}\">\n{}\n</tool-context>",
+                    text.trim()
+                ),
             ));
         };
         return Some(ChatMessage::new(
             role,
             vec![LlmMessageContent::ToolResult(LlmToolResult {
                 tool_call_id: tool_call_id.clone(),
-                content: LlmToolResultContent::Text(msg.content.clone()),
+                content: LlmToolResultContent::Text(text),
                 is_error: msg.tool_result_is_error,
             })],
         ));
@@ -996,29 +997,87 @@ fn provider_message_from_session(msg: &Message, include_media: bool) -> Option<C
             signature: msg.reasoning_signature.clone(),
         }));
     }
-    if !msg.content.trim().is_empty() {
-        content.push(LlmMessageContent::Text(msg.content.trim().to_string()));
+
+    // 遍历 content blocks
+    for block in &msg.content {
+        match block {
+            ContentBlock::Text { text: s } => {
+                if !s.trim().is_empty() {
+                    content.push(LlmMessageContent::Text(s.trim().to_string()));
+                }
+            }
+            ContentBlock::Media {
+                kind: MediaKind::Image,
+                url,
+                ..
+            } if include_media && msg.role == MessageRole::User => {
+                if let Some(img_content) = image_content_from_reference(url) {
+                    content.push(LlmMessageContent::Image(img_content));
+                }
+            }
+            ContentBlock::Media {
+                kind: MediaKind::File,
+                url,
+                mime_type,
+                title,
+                ..
+            } => {
+                if include_media
+                    && msg.role == MessageRole::User
+                    && url.trim_start().starts_with("data:")
+                    && !looks_like_image_reference(url)
+                {
+                    content.push(LlmMessageContent::File(
+                        tiangong_llm::message::FileContent {
+                            mime_type: mime_type
+                                .clone()
+                                .or_else(|| mime_from_data_url(url))
+                                .unwrap_or_else(|| "application/octet-stream".to_string()),
+                            data: url.clone(),
+                            title: title.clone(),
+                        },
+                    ));
+                }
+            }
+            ContentBlock::Media { .. } => {}
+        }
     }
-    if msg.role == MessageRole::User && include_media {
-        let image_contents = message_image_contents(msg);
-        if !image_contents.is_empty() {
-            content.push(LlmMessageContent::Text(format!(
-                "本条用户消息包含 {} 张图片附件，图片内容已随消息提供，请直接基于附件分析。",
-                image_contents.len()
-            )));
+
+    if include_media && msg.role == MessageRole::User {
+        let image_count = content
+            .iter()
+            .filter(|c| matches!(c, LlmMessageContent::Image(_)))
+            .count();
+        if image_count > 0 {
+            // 插入图片数量提示（在图片之前）
+            let notice = LlmMessageContent::Text(format!(
+                "本条用户消息包含 {image_count} 张图片附件，图片内容已随消息提供，请直接基于附件分析。"
+            ));
+            // 找到第一个 Image 的位置，在其前面插入
+            let pos = content
+                .iter()
+                .position(|c| matches!(c, LlmMessageContent::Image(_)))
+                .unwrap_or(content.len());
+            content.insert(pos, notice);
         }
-        content.extend(image_contents);
-        let file_contents = message_file_contents(msg);
-        if !file_contents.is_empty() {
-            content.push(LlmMessageContent::Text(format!(
-                "本条用户消息包含 {} 个文件附件，文件内容已以 base64 data URL 随消息提供，请直接基于附件分析。",
-                file_contents.len()
-            )));
+        let file_count = content
+            .iter()
+            .filter(|c| matches!(c, LlmMessageContent::File(_)))
+            .count();
+        if file_count > 0 {
+            let notice = LlmMessageContent::Text(format!(
+                "本条用户消息包含 {file_count} 个文件附件，文件内容已以 base64 data URL 随消息提供，请直接基于附件分析。"
+            ));
+            let pos = content
+                .iter()
+                .position(|c| matches!(c, LlmMessageContent::File(_)))
+                .unwrap_or(content.len());
+            content.insert(pos, notice);
         }
-        content.extend(file_contents);
-    } else if msg.role == MessageRole::User && !msg.media.is_empty() {
+    } else if msg.role == MessageRole::User && msg.has_media() {
         content.push(LlmMessageContent::Text(attachment_notice_text(msg)));
     }
+
     content.extend(msg.tool_calls.iter().map(|call| {
         LlmMessageContent::ToolCall(LlmToolCall {
             id: call.id.clone(),
@@ -1033,61 +1092,30 @@ fn provider_message_from_session(msg: &Message, include_media: bool) -> Option<C
     Some(ChatMessage::new(role, content))
 }
 
-fn message_image_contents(msg: &Message) -> Vec<LlmMessageContent> {
-    let mut refs = Vec::new();
-    for asset in &msg.media {
-        if matches!(
-            asset.kind,
-            tiangong_types::MediaKind::Image | tiangong_types::MediaKind::File
-        ) && looks_like_image_reference(&asset.url)
-        {
-            refs.push(asset.url.clone());
-        }
-    }
-    refs.sort();
-    refs.dedup();
-
-    refs.into_iter()
-        .filter_map(|value| image_content_from_reference(&value))
-        .map(LlmMessageContent::Image)
-        .collect()
-}
-
-fn message_file_contents(msg: &Message) -> Vec<LlmMessageContent> {
-    msg.media
-        .iter()
-        .filter(|asset| matches!(asset.kind, tiangong_types::MediaKind::File))
-        .filter(|asset| asset.url.trim_start().starts_with("data:"))
-        .filter(|asset| !looks_like_image_reference(&asset.url))
-        .map(|asset| {
-            LlmMessageContent::File(tiangong_llm::message::FileContent {
-                mime_type: asset
-                    .mime_type
-                    .clone()
-                    .or_else(|| mime_from_data_url(&asset.url))
-                    .unwrap_or_else(|| "application/octet-stream".to_string()),
-                data: asset.url.clone(),
-                title: asset.title.clone(),
-            })
-        })
-        .collect()
-}
-
 fn attachment_notice_text(msg: &Message) -> String {
-    let items = msg
-        .media
+    let items: Vec<String> = msg
+        .content
         .iter()
         .enumerate()
-        .map(|(index, asset)| {
-            let title = asset.title.as_deref().unwrap_or("未命名附件");
-            let mime = asset.mime_type.as_deref().unwrap_or("unknown");
-            format!(
-                "- index={index} kind={:?} title={title} mime_type={mime}",
-                asset.kind
-            )
+        .filter_map(|(index, block)| {
+            if let ContentBlock::Media {
+                kind,
+                url: _,
+                mime_type,
+                title,
+            } = block
+            {
+                let title = title.as_deref().unwrap_or("未命名附件");
+                let mime = mime_type.as_deref().unwrap_or("unknown");
+                Some(format!(
+                    "- index={index} kind={kind:?} title={title} mime_type={mime}",
+                ))
+            } else {
+                None
+            }
         })
-        .collect::<Vec<_>>()
-        .join("\n");
+        .collect();
+    let items = items.join("\n");
     format!(
         "本条用户消息包含附件，但主模型请求不会直接携带附件内容。需要查看附件内容时，请调用 analyze_attachment 工具，并指定 message_id={} 和附件 index。\n{}",
         msg.id, items

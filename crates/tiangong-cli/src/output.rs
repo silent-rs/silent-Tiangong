@@ -254,7 +254,8 @@ pub fn print_user_message(content: &str) {
 #[allow(dead_code)]
 pub fn print_assistant_message(msg: &tiangong_core::session::Message) {
     println!("{GREEN_BOLD}助手{RESET}");
-    let content = msg.content.trim();
+    let content = msg.text_content();
+    let content = content.trim();
     if !content.is_empty() {
         for line in content.lines() {
             println!("  {line}");
@@ -264,7 +265,8 @@ pub fn print_assistant_message(msg: &tiangong_core::session::Message) {
 }
 #[allow(dead_code)]
 pub fn print_system_message(msg: &tiangong_core::session::Message) {
-    let content = msg.content.trim();
+    let content = msg.text_content();
+    let content = content.trim();
     if !content.is_empty() {
         for line in content.lines() {
             println!("{DIM}{line}{RESET}");
@@ -275,7 +277,7 @@ pub fn print_system_message(msg: &tiangong_core::session::Message) {
 pub fn print_session_messages(messages: &[tiangong_core::session::Message]) {
     for msg in messages {
         match msg.role {
-            tiangong_core::session::MessageRole::User => print_user_message(&msg.content),
+            tiangong_core::session::MessageRole::User => print_user_message(&msg.text_content()),
             tiangong_core::session::MessageRole::Assistant => print_assistant_message(msg),
             tiangong_core::session::MessageRole::System => print_system_message(msg),
             tiangong_core::session::MessageRole::Tool => print_system_message(msg),

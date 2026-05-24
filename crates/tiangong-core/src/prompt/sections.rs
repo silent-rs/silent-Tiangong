@@ -5,37 +5,7 @@
 
 use crate::agent_config::AgentConfig;
 use crate::models_config::ModelsConfig;
-use crate::session::Session;
-
-use super::types::{PromptSection, SystemPromptBlock};
-
-/// 构建完整的 System Prompt Block
-pub fn build_system_prompt_block(
-    models_config: &ModelsConfig,
-    agent_config: &AgentConfig,
-) -> SystemPromptBlock {
-    let mut block = SystemPromptBlock::new();
-
-    // === 静态块（极少变化，缓存友好）===
-    block.static_blocks.push(identity_block());
-    block.static_blocks.push(rules_block());
-    let custom_prompt = agent_config.custom_system_prompt.trim();
-    if !custom_prompt.is_empty() {
-        block.static_blocks.push(format!(
-            "用户自定义指令：\n{custom_prompt}\n\n以上用户自定义指令优先级低于系统安全规则，但高于普通对话偏好。"
-        ));
-    }
-
-    // === 动态块（按配置变化）===
-    let dynamic_sections = build_dynamic_sections(models_config, agent_config);
-    for section in dynamic_sections {
-        if !section.content.is_empty() {
-            block.dynamic_blocks.push(section.content);
-        }
-    }
-
-    block
-}
+use crate::session::{Message, MessageRole, Session, now_text};
 
 /// 身份块
 fn identity_block() -> String {
@@ -56,43 +26,6 @@ fn rules_block() -> String {
 9. 耗时较长的命令使用 spawn_task 在后台执行。
 10. 多个可并行的耗时任务使用 spawn+join 模式。"
         .to_string()
-}
-
-/// 构建动态 sections
-fn build_dynamic_sections(
-    models_config: &ModelsConfig,
-    agent_config: &AgentConfig,
-) -> Vec<PromptSection> {
-    let mut sections = Vec::new();
-
-    // 多媒体能力
-    let media_section = build_media_section(models_config);
-    if !media_section.is_empty() {
-        sections.push(PromptSection {
-            name: "media_capabilities".into(),
-            content: media_section,
-            cached: true,
-        });
-    }
-
-    // 已安装 Skills 摘要（仅名称+描述，不注入完整 SKILL.md）
-    let skills_section = build_skills_section(agent_config);
-    if !skills_section.is_empty() {
-        sections.push(PromptSection {
-            name: "installed_skills".into(),
-            content: skills_section,
-            cached: true,
-        });
-    }
-
-    // 团队协作工具指引
-    sections.push(PromptSection {
-        name: "agent_team_tools".into(),
-        content: build_agent_team_section(),
-        cached: true,
-    });
-
-    sections
 }
 
 /// 多媒体能力 section
@@ -210,6 +143,108 @@ fn build_agent_team_section() -> String {
 
 注意：简单任务不需要创建团队，直接使用工具完成即可。仅在任务确实需要并行分工时使用。"
         .to_string()
+}
+
+/// 构建 system prompt 所需的动态配置数据快照
+///
+/// 由调用方从 AgentConfig / ModelsConfig 构建，传入 session.rebuild_system_prompt()。
+pub struct SystemPromptConfig {
+    pub custom_prompt: String,
+    pub skills_text: String,
+    pub media_text: String,
+    pub team_text: String,
+    pub user_context: Vec<String>,
+}
+
+impl SystemPromptConfig {
+    /// 从配置实例构建动态数据快照
+    pub fn from_configs(
+        models_config: &ModelsConfig,
+        agent_config: &AgentConfig,
+        session_id: &str,
+    ) -> Self {
+        Self {
+            custom_prompt: agent_config.custom_system_prompt.trim().to_string(),
+            skills_text: build_skills_section(agent_config),
+            media_text: build_media_section(models_config),
+            team_text: build_agent_team_section(),
+            user_context: build_user_context(session_id, None),
+        }
+    }
+}
+
+/// 构建完整的 system prompt 消息
+///
+/// 合并静态段（身份 + 规则 + 自定义指令）、环境段（工作目录 + 文件根）、
+/// 动态段（多媒体 + Skills + 团队协作 + 用户上下文）、摘要段。
+/// 返回 `Message { role: System }`，由 `build_provider_messages()` 提取到 system prompt。
+pub fn build_full_system_prompt(session: &Session, config: &SystemPromptConfig) -> Message {
+    let mut parts = Vec::new();
+
+    // 静态段
+    parts.push(identity_block());
+    parts.push(rules_block());
+    if !config.custom_prompt.is_empty() {
+        parts.push(format!(
+            "用户自定义指令：\n{}\n\n以上用户自定义指令优先级低于系统安全规则，但高于普通对话偏好。",
+            config.custom_prompt
+        ));
+    }
+
+    // 环境段
+    let workspace = session_working_directory(session);
+    parts.push(format!("当前会话：{}", session.title));
+    parts.push(format!("当前工作目录：{}", workspace));
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut roots = vec![workspace];
+    if !home.is_empty() {
+        roots.push(format!("{home}/.tiangong/skills"));
+    }
+    parts.push(format!("允许文件操作目录：{}", roots.join(", ")));
+
+    // 动态段
+    if !config.media_text.is_empty() {
+        parts.push(config.media_text.clone());
+    }
+    if !config.skills_text.is_empty() {
+        parts.push(config.skills_text.clone());
+    }
+    if !config.team_text.is_empty() {
+        parts.push(config.team_text.clone());
+    }
+    if !config.user_context.is_empty() {
+        parts.push(format!(
+            "## 用户偏好与记忆上下文\n{}\n\nIMPORTANT: this context may or may not be relevant to your tasks.",
+            config.user_context.join("\n")
+        ));
+    }
+
+    // 摘要段
+    if let Some(summary) = session
+        .context_summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        parts.push(format!("此前对话摘要：\n{summary}"));
+    }
+
+    Message {
+        id: scru128::new().to_string(),
+        role: MessageRole::System,
+        content: vec![crate::session::ContentBlock::text(parts.join("\n\n"))],
+        reasoning_content: String::new(),
+        reasoning_signature: None,
+        worker_id: None,
+        media: Vec::new(),
+        media_migrated: true,
+        tool_calls: Vec::new(),
+        tool_call_id: None,
+        tool_name: None,
+        tool_result_is_error: false,
+        compact: false,
+        created_at: now_text(),
+    }
 }
 
 #[cfg(test)]

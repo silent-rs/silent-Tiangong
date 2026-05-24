@@ -45,8 +45,10 @@ impl QueryOrchestrator {
         // 会话有工具历史 → 继续多步执行
         let has_tool_history = session.task_records.iter().any(|r| r.tool_result.is_some())
             || session.messages.iter().any(|m| {
-                m.role == crate::session::MessageRole::Tool
-                    && (m.content.contains("tool_name:") || m.content.contains("exit_code"))
+                m.role == crate::session::MessageRole::Tool && {
+                    let t = m.text_content();
+                    t.contains("tool_name:") || t.contains("exit_code")
+                }
             });
         if has_tool_history {
             return OrchestratorDecision {
@@ -114,7 +116,6 @@ impl QueryOrchestrator {
             session_title: String::new(),
             user_input: prompt.clone(),
             context: Vec::new(),
-            assembled_system_prompt: None,
             thinking: None,
             reasoning_effort: None,
             thinking_disabled: false,
@@ -177,11 +178,13 @@ mod tests {
             task_records: Vec::new(),
             task_plans: Vec::new(),
             parent_session_id: None,
+            context_summary: None,
             cwd: String::new(),
             cwd_mode: Default::default(),
             trust_mode: Default::default(),
-            context_summary: None,
+            reasoning_effort: None,
             summary_up_to: 0,
+            system_prompt_message: None,
             created_at: String::new(),
             updated_at: String::new(),
         }

@@ -317,7 +317,7 @@ impl ModelsConfig {
     /// 从 LlmConfig 构建兼容的 ModelsConfig
     ///
     /// 将扁平的 LlmConfig 端点映射为 Provider + Model + Routing 三层结构，
-    /// 使旧代码（PromptAssembler、系统 prompt 构建等）无需修改。
+    /// 使 system prompt 构建等代码无需修改。
     pub fn from_llm_config(llm: &crate::core_config::LlmConfig) -> Self {
         let mut providers = HashMap::new();
         let mut models = HashMap::new();

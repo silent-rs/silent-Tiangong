@@ -37,7 +37,7 @@ fn prepare_active_user_message_ingress_persists_message_immediately() -> Result<
         assert_eq!(state.active_session_id(), session_id);
         assert_eq!(session.messages.len(), 1);
         assert_eq!(session.messages[0].id, message_id);
-        assert_eq!(session.messages[0].content, "立即固定这条消息");
+        assert_eq!(session.messages[0].text_content(), "立即固定这条消息");
 
         let session_path = paths
             .fake_home
@@ -49,7 +49,7 @@ fn prepare_active_user_message_ingress_persists_message_immediately() -> Result<
         let persisted: Session = serde_json::from_str(&fs::read_to_string(session_path)?)?;
         assert_eq!(persisted.messages.len(), 1);
         assert_eq!(persisted.messages[0].id, message_id);
-        assert_eq!(persisted.messages[0].content, "立即固定这条消息");
+        assert_eq!(persisted.messages[0].text_content(), "立即固定这条消息");
         Ok(())
     })
 }
@@ -94,6 +94,44 @@ fn trust_mode_is_session_scoped_and_default_only_initializes_new_sessions() -> R
             state.active_session_trust_mode(),
             crate::permission::TrustMode::FullTrust
         );
+        Ok(())
+    })
+}
+
+#[test]
+fn reasoning_effort_is_session_scoped_when_present() -> Result<()> {
+    with_isolated_state("tiangong-state-session-reasoning-effort", |paths, state| {
+        state.store.agent.agent_config.reasoning_effort = "medium".to_string();
+        state.create_session();
+        let first_id = state.active_session_id().to_string();
+
+        state.set_reasoning_effort("high".to_string())?;
+        assert_eq!(state.active_session_reasoning_effort(), "high");
+        assert_eq!(
+            state
+                .sessions()
+                .iter()
+                .find(|session| session.id == first_id)
+                .and_then(|session| session.reasoning_effort.as_deref()),
+            Some("high")
+        );
+
+        let session_path = paths
+            .fake_home
+            .join(".tiangong")
+            .join("sessions")
+            .join(format!("{first_id}.json"));
+        let persisted: Session = serde_json::from_str(&fs::read_to_string(session_path)?)?;
+        assert_eq!(persisted.reasoning_effort.as_deref(), Some("high"));
+
+        state.store.agent.agent_config.reasoning_effort = "low".to_string();
+        state.create_session();
+        let second_id = state.active_session_id().to_string();
+        assert_ne!(first_id, second_id);
+        assert_eq!(state.active_session_reasoning_effort(), "low");
+
+        state.switch_session(&first_id);
+        assert_eq!(state.active_session_reasoning_effort(), "high");
         Ok(())
     })
 }
