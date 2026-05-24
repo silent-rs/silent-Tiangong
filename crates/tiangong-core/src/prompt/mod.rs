@@ -5,4 +5,4 @@
 
 pub mod sections;
 
-pub use sections::SystemPromptConfig;
+pub use sections::{SubAgentPromptContext, SystemPromptConfig};

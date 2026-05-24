@@ -695,8 +695,10 @@ fn start_stream_consumer(
                                     media.clone(),
                                 );
                             } else if !media.is_empty() {
-                                if let Some(message) =
-                                    session.messages.iter_mut().find(|msg| msg.id == *message_id)
+                                if let Some(message) = session
+                                    .messages
+                                    .iter_mut()
+                                    .find(|msg| msg.id == *message_id)
                                 {
                                     if message.media.is_empty() {
                                         message.media = media.clone();
@@ -872,11 +874,10 @@ fn start_stream_consumer(
                             ref agent_id,
                             ref role,
                             ref label,
-                            ref lifecycle,
                         } => {
                             session.append_message(
                                 tiangong_core::session::MessageRole::System,
-                                format!("[Agent] {label} ({role}) 已加入团队 [{lifecycle}] id={agent_id}"),
+                                format!("[Agent] {label} ({role}) 已加入团队 id={agent_id}"),
                             );
                         }
                         StreamEvent::AgentStatusChanged {
@@ -987,7 +988,10 @@ fn start_stream_consumer(
                         } => {
                             session.append_message(
                                 tiangong_core::session::MessageRole::System,
-                                format!("[文件锁] {path} {action} by {}", holder_agent_label.as_deref().unwrap_or("未知")),
+                                format!(
+                                    "[文件锁] {path} {action} by {}",
+                                    holder_agent_label.as_deref().unwrap_or("未知")
+                                ),
                             );
                         }
                         StreamEvent::ContextCompressing { .. } => {}
@@ -996,10 +1000,7 @@ fn start_stream_consumer(
                             summary_up_to,
                             ..
                         } => {
-                            let message = format!(
-                                "[上下文管理] 上下文已{}",
-                                action.display_text()
-                            );
+                            let message = format!("[上下文管理] 上下文已{}", action.display_text());
                             session.append_message(
                                 tiangong_core::session::MessageRole::System,
                                 message,
@@ -1091,8 +1092,7 @@ fn start_stream_consumer(
                         core_state.store.runtime.run.summary = "正在检索记忆...".to_string();
                     }
                     StreamEvent::MemoryRecallProgress { ref phase } => {
-                        core_state.store.runtime.run.summary =
-                            format!("正在检索记忆: {phase}");
+                        core_state.store.runtime.run.summary = format!("正在检索记忆: {phase}");
                     }
                     StreamEvent::MemoryRecallDone { hit_count, .. } => {
                         if *hit_count > 0 {
@@ -1104,34 +1104,50 @@ fn start_stream_consumer(
                         }
                     }
                     StreamEvent::AgentCreated { ref label, .. } => {
-                        core_state.store.runtime.run.summary =
-                            format!("Agent {label} 已加入团队");
+                        core_state.store.runtime.run.summary = format!("Agent {label} 已加入团队");
                     }
-                    StreamEvent::AgentStatusChanged { ref label, ref status, .. } => {
-                        core_state.store.runtime.run.summary =
-                            format!("Agent {label}: {status}");
+                    StreamEvent::AgentStatusChanged {
+                        ref label,
+                        ref status,
+                        ..
+                    } => {
+                        core_state.store.runtime.run.summary = format!("Agent {label}: {status}");
                     }
-                    StreamEvent::AgentNotification { ref agent_label, .. } => {
+                    StreamEvent::AgentNotification {
+                        ref agent_label, ..
+                    } => {
                         core_state.store.runtime.run.summary =
                             format!("Agent {agent_label} 发送了通知");
                     }
-                    StreamEvent::AgentMessage { ref from_agent_label, ref to_agent_label, .. } => {
+                    StreamEvent::AgentMessage {
+                        ref from_agent_label,
+                        ref to_agent_label,
+                        ..
+                    } => {
                         core_state.store.runtime.run.summary =
                             format!("{from_agent_label} → {to_agent_label}");
                     }
-                    StreamEvent::AgentOutput { ref agent_label, .. } => {
+                    StreamEvent::AgentOutput {
+                        ref agent_label, ..
+                    } => {
                         core_state.store.runtime.run.summary =
                             format!("Agent {agent_label} 输出已更新");
                     }
-                    StreamEvent::FileLockChanged { ref path, ref action, ref holder_agent_label, .. } => {
-                        core_state.store.runtime.run.summary =
-                            format!("文件锁 {action}: {path} ({})", holder_agent_label.as_deref().unwrap_or("未知"));
+                    StreamEvent::FileLockChanged {
+                        ref path,
+                        ref action,
+                        ref holder_agent_label,
+                        ..
+                    } => {
+                        core_state.store.runtime.run.summary = format!(
+                            "文件锁 {action}: {path} ({})",
+                            holder_agent_label.as_deref().unwrap_or("未知")
+                        );
                     }
                     StreamEvent::ContextCompressing { .. } => {
                         core_state.store.runtime.run.status =
                             tiangong_core::runtime::RunStatus::Executing;
-                        core_state.store.runtime.run.summary =
-                            "正在压缩早期上下文...".to_string();
+                        core_state.store.runtime.run.summary = "正在压缩早期上下文...".to_string();
                         core_state.store.runtime.run.last_session_id = Some(sid.clone());
                         core_state.store.runtime.run.updated_at =
                             tiangong_core::session::now_text();
@@ -1144,23 +1160,20 @@ fn start_stream_consumer(
                             core_state.report_run_idle(text);
                         }
                     }
-                    StreamEvent::IndexStatus { ref phase, count } => {
-                        match phase.as_str() {
-                            "scanning" => {
-                                core_state.store.runtime.run.summary =
-                                    "正在建立工作区索引...".to_string();
-                            }
-                            "done" => {
-                                core_state.store.runtime.run.summary =
-                                    format!("索引扫描完成: {count} 个文件");
-                            }
-                            "error" => {
-                                core_state.store.runtime.run.summary =
-                                    "索引扫描失败".to_string();
-                            }
-                            _ => {}
+                    StreamEvent::IndexStatus { ref phase, count } => match phase.as_str() {
+                        "scanning" => {
+                            core_state.store.runtime.run.summary =
+                                "正在建立工作区索引...".to_string();
                         }
-                    }
+                        "done" => {
+                            core_state.store.runtime.run.summary =
+                                format!("索引扫描完成: {count} 个文件");
+                        }
+                        "error" => {
+                            core_state.store.runtime.run.summary = "索引扫描失败".to_string();
+                        }
+                        _ => {}
+                    },
                     _ => {}
                 }
                 Ok(())

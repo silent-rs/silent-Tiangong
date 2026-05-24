@@ -1,15 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-/// Agent 生命周期类型
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentLifecycle {
-    /// 持久存在，随会话生命周期
-    Persistent,
-    /// 单次任务完成后自动销毁
-    Temporary,
-}
-
 /// Agent 状态
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -37,8 +27,6 @@ pub struct AgentDescriptor {
     pub label: String,
     /// Agent 专属系统 prompt
     pub system_prompt: String,
-    /// 生命周期类型
-    pub lifecycle: AgentLifecycle,
     /// 可用工具列表（从主 Agent 工具集中选取）
     pub tools: Vec<String>,
     /// 当前状态

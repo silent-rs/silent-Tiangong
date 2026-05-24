@@ -119,12 +119,12 @@ fn build_agent_team_section() -> String {
     "团队协作能力（可选使用）：
 当任务复杂需要分工时，你可以创建团队来协作完成。以下是可用的团队工具：
 
-- create_agent(role, label, system_prompt, lifecycle, tools)：创建一个 Sub Agent
+- create_agent(role, label, system_prompt, tools)：创建一个 Sub Agent
   - role：角色标识（如 pm、dev、test），用于消息路由
   - label：显示名称（如「项目经理」「开发者」）
   - system_prompt：Agent 的专属指令
-  - lifecycle：persistent（持久，跨任务存在）或 temporary（单次任务后销毁）
-  - tools：可选，指定可用工具列表（默认继承你的工具集）
+  - tools：可选，指定可用工具列表（默认继承你的工具集，不含 create_agent/dismiss_agent）
+  - Agent 持续存在直到被解散
   - 最多同时 8 个 Agent
 
 - send_message(to, content)：向指定角色的 Agent 发送消息，Agent 会自动执行任务
@@ -192,6 +192,20 @@ pub fn build_full_system_prompt(session: &Session, config: &SystemPromptConfig) 
     }
 
     // 环境段
+    parts.extend(collect_environment_parts(session));
+
+    // 动态段
+    parts.extend(collect_dynamic_parts(config));
+
+    // 摘要段
+    parts.extend(collect_summary_part(session));
+
+    assemble_system_message(parts)
+}
+
+/// 收集环境段（工作目录、文件根）
+fn collect_environment_parts(session: &Session) -> Vec<String> {
+    let mut parts = Vec::new();
     let workspace = session_working_directory(session);
     parts.push(format!("当前会话：{}", session.title));
     parts.push(format!("当前工作目录：{}", workspace));
@@ -201,8 +215,12 @@ pub fn build_full_system_prompt(session: &Session, config: &SystemPromptConfig) 
         roots.push(format!("{home}/.tiangong/skills"));
     }
     parts.push(format!("允许文件操作目录：{}", roots.join(", ")));
+    parts
+}
 
-    // 动态段
+/// 收集动态段（多媒体、Skills、团队协作、用户上下文）
+fn collect_dynamic_parts(config: &SystemPromptConfig) -> Vec<String> {
+    let mut parts = Vec::new();
     if !config.media_text.is_empty() {
         parts.push(config.media_text.clone());
     }
@@ -218,17 +236,25 @@ pub fn build_full_system_prompt(session: &Session, config: &SystemPromptConfig) 
             config.user_context.join("\n")
         ));
     }
+    parts
+}
 
-    // 摘要段
+/// 收集摘要段
+fn collect_summary_part(session: &Session) -> Vec<String> {
     if let Some(summary) = session
         .context_summary
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        parts.push(format!("此前对话摘要：\n{summary}"));
+        vec![format!("此前对话摘要：\n{summary}")]
+    } else {
+        Vec::new()
     }
+}
 
+/// 组装最终的 System Message
+fn assemble_system_message(parts: Vec<String>) -> Message {
     Message {
         id: scru128::new().to_string(),
         role: MessageRole::System,
@@ -244,6 +270,58 @@ pub fn build_full_system_prompt(session: &Session, config: &SystemPromptConfig) 
         tool_result_is_error: false,
         compact: false,
         created_at: now_text(),
+    }
+}
+
+/// Sub Agent 的 system prompt 构建上下文
+///
+/// 将基础 SystemPromptConfig（纯配置快照）与运行时上下文
+/// （角色指令、团队成员列表）组合，构建 Sub Agent 专属的 system prompt。
+///
+/// 不修改 SystemPromptConfig，避免配置加载逻辑被运行时状态污染。
+pub struct SubAgentPromptContext<'a> {
+    /// 基础配置快照（引用，不持有）
+    base: &'a SystemPromptConfig,
+    /// Main Agent 生成的角色特化指令
+    role_prompt: &'a str,
+    /// 当前团队成员列表文本
+    team_roster: &'a str,
+}
+
+impl<'a> SubAgentPromptContext<'a> {
+    pub fn new(base: &'a SystemPromptConfig, role_prompt: &'a str, team_roster: &'a str) -> Self {
+        Self {
+            base,
+            role_prompt,
+            team_roster,
+        }
+    }
+
+    /// 构建 Sub Agent 的 system prompt
+    ///
+    /// 与 Main Agent 的区别：用角色特化指令替代通用身份块，附加团队成员列表。
+    pub fn build(&self, session: &Session) -> Message {
+        let mut parts = Vec::new();
+
+        // 角色特化指令替代通用身份块
+        parts.push(self.role_prompt.to_string());
+        parts.push(rules_block());
+
+        // 环境段
+        parts.extend(collect_environment_parts(session));
+
+        // 动态段
+        parts.extend(collect_dynamic_parts(self.base));
+
+        // 团队成员列表（Sub Agent 独有）
+        if !self.team_roster.is_empty() {
+            parts.push(format!("当前团队成员：\n{}", self.team_roster));
+        }
+
+        // 摘要段
+        parts.extend(collect_summary_part(session));
+
+        assemble_system_message(parts)
     }
 }
 
