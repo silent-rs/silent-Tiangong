@@ -2092,23 +2092,120 @@ pub fn get_workspace_dir(state: State<TiangongApp>) -> Result<String, String> {
 
 /// 设置 Desktop 工作空间目录
 #[tauri::command]
-pub fn set_workspace_dir(workspace_dir: String, state: State<TiangongApp>) -> Result<(), String> {
+pub fn set_workspace_dir(
+    workspace_dir: String,
+    app: AppHandle,
+    state: State<TiangongApp>,
+) -> Result<(), String> {
     let path = std::path::Path::new(&workspace_dir);
     if !path.is_dir() {
         return Err(format!("路径不存在或不是目录：{workspace_dir}"));
     }
-    state.with_state(|core_state| core_state.update_workspace_dir(workspace_dir))
+
+    let old_workspace_dir =
+        state.with_state_read(|core_state| Ok(core_state.workspace_dir().to_string()))?;
+    let cwd_changed = old_workspace_dir != workspace_dir;
+
+    state.with_state(|core_state| core_state.update_workspace_dir(workspace_dir.clone()))?;
+
+    // 同步活跃 core 的 cwd（仅限无对话的 Inherit 会话）
+    let active_session_id = state.with_state_read(|core_state| {
+        Ok(core_state
+            .sessions()
+            .iter()
+            .find(|s| s.id == core_state.active_session_id())
+            .filter(|s| s.cwd_mode == tiangong_core::session::SessionCwdMode::Inherit)
+            .filter(|s| !s.has_user_messages())
+            .map(|s| s.id.clone()))
+    })?;
+    if let Some(sid) = &active_session_id {
+        let cores = state.cores.lock().map_err(|e| e.to_string())?;
+        if let Some(core) = cores.get(sid) {
+            let _ = core.update_cwd(workspace_dir.clone());
+        }
+    }
+
+    // 索引：仅在目录实际变化且索引不存在时创建
+    if cwd_changed
+        && !workspace_dir.is_empty()
+        && !tiangong_core::index::workspace_index_exists(std::path::Path::new(&workspace_dir))
+    {
+        let app_clone = app.clone();
+        let cwd = workspace_dir.clone();
+        thread::spawn(move || {
+            match tiangong_core::index::rebuild_workspace_index_for_gui(std::path::Path::new(&cwd))
+            {
+                Ok(count) => eprintln!("Workspace 索引扫描完成: {count} 个文件"),
+                Err(e) => eprintln!("Workspace 索引扫描失败: {e}"),
+            }
+            if let Ok(snapshot) = app_clone
+                .state::<TiangongApp>()
+                .with_state_read(|s| Ok(build_full_snapshot_with_status(s, false)))
+            {
+                let _ = app_clone.emit("run_snapshot", &snapshot);
+            }
+        });
+    }
+
+    Ok(())
 }
 
 /// 设置活动会话的工作目录
 #[tauri::command]
-pub fn set_session_cwd(cwd: String, state: State<TiangongApp>) -> Result<(), String> {
-    // 验证路径存在且是目录
+pub fn set_session_cwd(
+    cwd: String,
+    app: AppHandle,
+    state: State<TiangongApp>,
+) -> Result<(), String> {
     let path = std::path::Path::new(&cwd);
     if !path.is_dir() {
         return Err(format!("路径不存在或不是目录：{cwd}"));
     }
-    state.with_state(|core_state| core_state.update_active_session_cwd(cwd))
+
+    let old_cwd = state.with_state_read(|core_state| {
+        Ok(core_state
+            .active_session()
+            .map(|s| s.cwd.clone())
+            .unwrap_or_default())
+    })?;
+    let cwd_changed = old_cwd != cwd;
+
+    state.with_state(|core_state| core_state.update_active_session_cwd(cwd.clone()))?;
+
+    // 同步活跃 core 的 cwd
+    let active_session_id =
+        state.with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))?;
+    {
+        let cores = state.cores.lock().map_err(|e| e.to_string())?;
+        if let Some(core) = cores.get(&active_session_id) {
+            let _ = core.update_cwd(cwd.clone());
+        }
+    }
+
+    // 索引：仅在目录实际变化且索引不存在时创建
+    if cwd_changed
+        && !cwd.is_empty()
+        && !tiangong_core::index::workspace_index_exists(std::path::Path::new(&cwd))
+    {
+        let app_clone = app.clone();
+        let cwd_path = cwd.clone();
+        thread::spawn(move || {
+            match tiangong_core::index::rebuild_workspace_index_for_gui(std::path::Path::new(
+                &cwd_path,
+            )) {
+                Ok(count) => eprintln!("Session cwd 索引扫描完成: {count} 个文件"),
+                Err(e) => eprintln!("Session cwd 索引扫描失败: {e}"),
+            }
+            if let Ok(snapshot) = app_clone
+                .state::<TiangongApp>()
+                .with_state_read(|s| Ok(build_full_snapshot_with_status(s, false)))
+            {
+                let _ = app_clone.emit("run_snapshot", &snapshot);
+            }
+        });
+    }
+
+    Ok(())
 }
 
 // ============================================================================
