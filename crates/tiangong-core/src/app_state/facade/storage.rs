@@ -56,35 +56,6 @@ impl TiangongState {
         self.services.repository.load_from_legacy_disk()
     }
 
-    /// 扫描磁盘会话目录，将新出现的会话加载到内存（不覆盖已有会话）。
-    /// 用于 Tauri app 感知 server 等外部进程创建的会话。
-    pub fn sync_sessions_from_disk(&mut self) {
-        let Ok(disk_ids) = self.services.repository.list_session_ids_from_dir() else {
-            return;
-        };
-        let existing_ids: HashSet<String> = self
-            .store
-            .session
-            .sessions
-            .iter()
-            .map(|s| s.id.clone())
-            .collect();
-        let trust_mode = self.store.agent.agent_config.default_trust_mode;
-        for id in disk_ids {
-            if existing_ids.contains(&id) {
-                continue;
-            }
-            if let Ok(Some(session)) = self
-                .services
-                .repository
-                .load_session_from_disk(&id, trust_mode)
-                && session.parent_session_id.is_none()
-            {
-                self.store.session.sessions.push(session);
-            }
-        }
-    }
-
     pub fn ensure_active_session_index(&mut self) -> usize {
         if let Some(idx) = self
             .store

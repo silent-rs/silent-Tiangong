@@ -453,11 +453,10 @@ fn build_session_snapshot(
 // 会话管理
 // ============================================================================
 
-/// 获取所有会话列表（同步磁盘上由 server 等进程新建的会话）
+/// 获取所有会话列表
 #[tauri::command]
 pub fn get_sessions(state: State<TiangongApp>) -> Result<Vec<SessionListItem>, String> {
-    state.with_state(|core_state| {
-        core_state.sync_sessions_from_disk();
+    state.with_state_read(|core_state| {
         Ok(core_state
             .sessions()
             .iter()
