@@ -3547,6 +3547,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest",
+]
+
+[[package]]
 name = "html5ever"
 version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9302,11 +9311,14 @@ dependencies = [
  "async-channel",
  "async-lock",
  "chrono",
+ "hex",
+ "hmac",
  "libc",
  "reqwest 0.12.28",
  "scru128 3.6.1",
  "serde",
  "serde_json",
+ "sha2",
  "silent",
  "tiangong-config",
  "tiangong-core",

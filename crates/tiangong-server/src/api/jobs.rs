@@ -1,10 +1,10 @@
 use silent::prelude::*;
 
 use super::AuthToken;
+use super::SharedAppContext;
 use crate::auth::check_auth;
-use tiangong_core::scheduler::model::{
-    CreateJobRequest, Job, JobRunStatus, TriggerType, UpdateJobRequest,
-};
+use crate::scheduler::executor;
+use tiangong_core::scheduler::model::{CreateJobRequest, Job, TriggerType, UpdateJobRequest};
 use tiangong_core::scheduler::store::JobStore;
 
 /// GET /api/v1/jobs — Job 列表
@@ -209,36 +209,16 @@ pub async fn trigger_job(req: Request) -> Result<Response> {
         SilentError::business_error(StatusCode::NOT_FOUND, format!("任务 '{id}' 不存在"))
     })?;
 
-    let now = chrono::Local::now().naive_local().to_string();
-    let run_id = scru128::new().to_string();
-    let session_id = job
-        .session_id
-        .clone()
-        .unwrap_or_else(|| scru128::new().to_string());
-
-    let run = tiangong_core::scheduler::model::JobRun {
-        id: run_id.clone(),
-        job_id: id.clone(),
-        session_id: session_id.clone(),
-        status: JobRunStatus::Running,
-        started_at: now,
-        finished_at: None,
-        result_summary: None,
-    };
-
-    store.insert_job_run(&run).map_err(|e| {
-        SilentError::business_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("记录执行失败：{e}"),
-        )
-    })?;
-
-    // TODO: 实际触发执行（接入 RuntimeEngine）
+    let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    let job_clone = job.clone();
+    tokio::spawn(async move {
+        executor::execute_job(app_ctx, job_clone).await;
+    });
 
     Ok(Response::json(&serde_json::json!({
-        "run_id": run_id,
-        "session_id": session_id,
-        "status": "running",
+        "job_id": job.id,
+        "session_id": job.session_id,
+        "status": "triggered",
     })))
 }
 

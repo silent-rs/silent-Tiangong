@@ -19,5 +19,8 @@ async-channel = { workspace = true }
 async-lock = { workspace = true }
 scru128 = { workspace = true }
 chrono = { workspace = true }
+hmac = "0.12"
+hex = { workspace = true }
+sha2 = { workspace = true }
 reqwest = { workspace = true, default-features = false, features = ["rustls-tls"] }
 libc = { workspace = true }

@@ -7,6 +7,7 @@ mod server_ctrl;
 mod sessions;
 mod skills;
 mod types;
+mod webhook;
 pub mod ws;
 
 use std::sync::Arc;
@@ -109,6 +110,7 @@ pub fn build_routes(
                         .append(Route::new("trigger").post(jobs::trigger_job)),
                 ),
         )
+        .append(Route::new("webhooks/<token>").post(webhook::handle_webhook))
         .append(Route::new("server/shutdown").post(server_ctrl::shutdown))
         .append(ws::ws_route());
 

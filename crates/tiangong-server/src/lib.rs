@@ -3,6 +3,7 @@ pub mod auth;
 pub mod config;
 pub mod daemon;
 pub mod remote;
+pub mod scheduler;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -46,13 +47,13 @@ pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
     let app = Arc::new(ServerAppContext::new(state, config, event_bus.clone()));
 
     tracing::info!("构建路由...");
-    let (api_routes, configs) = build_routes(app, token, event_bus);
+    let (api_routes, configs) = build_routes(app.clone(), token, event_bus);
 
     let mut route = Route::new_root().append(api_routes);
     route.set_configs(Some(configs));
 
     // 初始化调度器，恢复已启用的 cron job
-    restore_cron_jobs();
+    restore_cron_jobs(app);
     tokio::spawn(async {
         Scheduler::schedule(silent::SCHEDULER.clone()).await;
     });
@@ -74,7 +75,7 @@ pub fn stop_daemon() -> Result<()> {
 }
 
 /// 从 job store 加载已启用的 cron job 并注册到 silent scheduler
-fn restore_cron_jobs() {
+fn restore_cron_jobs(app_ctx: Arc<ServerAppContext>) {
     let store = match JobStore::open() {
         Ok(s) => s,
         Err(e) => {
@@ -91,7 +92,6 @@ fn restore_cron_jobs() {
         }
     };
 
-    // blocking_lock 因为还在同步上下文中
     let rt = tokio::runtime::Handle::current();
     rt.block_on(async {
         let mut scheduler = silent::SCHEDULER.lock().await;
@@ -100,7 +100,7 @@ fn restore_cron_jobs() {
                 Some(s) => s.clone(),
                 None => continue,
             };
-            let job_id = job.id.clone();
+            let job_clone = job.clone();
             let process_time = match schedule.try_into() {
                 Ok(pt) => pt,
                 Err(e) => {
@@ -108,15 +108,17 @@ fn restore_cron_jobs() {
                     continue;
                 }
             };
+            let app_ctx_clone = app_ctx.clone();
             let task = silent::Task::create_with_action_async(
                 job.id.clone(),
                 process_time,
                 job.name.clone(),
                 Arc::new(move || {
-                    let job_id = job_id.clone();
+                    let job = job_clone.clone();
+                    let app_ctx = app_ctx_clone.clone();
                     Box::pin(async move {
-                        tracing::info!("定时任务触发：{job_id}");
-                        // TODO: 查找或创建 session → RuntimeEngine 执行 → 记录 JobRun
+                        tracing::info!("定时任务触发：{} [{}]", job.name, job.id);
+                        scheduler::executor::execute_job(app_ctx, job).await;
                         Ok(())
                     })
                 }),
