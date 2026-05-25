@@ -221,7 +221,7 @@ pub async fn list_webhook_runs(mut req: Request) -> Result<Response> {
 ///
 /// 通过 webhook id 触发执行。如果配置了 secret，需在请求头 `X-Webhook-Signature` 中传入签名。
 #[allow(deprecated)]
-pub async fn invoke_webhook(req: Request) -> Result<Response> {
+pub async fn invoke_webhook(mut req: Request) -> Result<Response> {
     let id: String = req.get_path_params("id")?;
     let store = open_store()?;
     let webhook = store.get(&id).map_err(|e| {
@@ -242,14 +242,26 @@ pub async fn invoke_webhook(req: Request) -> Result<Response> {
         ));
     }
 
-    // 验证签名（如果配置了 secret）
+    // 验证签名（如果配置了 secret，使用 HMAC-SHA256）
     if let Some(ref secret) = webhook.secret {
         let signature = req
             .headers()
             .get("X-Webhook-Signature")
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if signature != secret {
+            .unwrap_or("")
+            .to_string();
+
+        let body_bytes = http_body_util::BodyExt::collect(req.take_body())
+            .await
+            .map_err(|e| {
+                SilentError::business_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("读取请求体失败：{e}"),
+                )
+            })?
+            .to_bytes();
+        let expected = compute_hmac_sha256(secret, &body_bytes);
+        if !constant_time_eq(signature.as_bytes(), expected.as_bytes()) {
             return Err(SilentError::business_error(
                 StatusCode::UNAUTHORIZED,
                 "签名验证失败".to_string(),
@@ -267,4 +279,19 @@ pub async fn invoke_webhook(req: Request) -> Result<Response> {
         "webhook_id": webhook.id,
         "status": "triggered",
     })))
+}
+
+fn compute_hmac_sha256(secret: &str, data: &[u8]) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC key length valid");
+    mac.update(data);
+    hex::encode(mac.finalize().into_bytes())
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    a.ct_eq(b).into()
 }

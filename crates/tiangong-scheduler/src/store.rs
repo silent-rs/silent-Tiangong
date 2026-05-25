@@ -138,7 +138,7 @@ impl JobStore {
 
     fn ensure_jobs_file(&self) -> Result<()> {
         if !self.jobs_path.exists() {
-            std::fs::write(&self.jobs_path, "[]").with_context(|| "初始化 jobs.json 失败")?;
+            atomic_write(&self.jobs_path, "[]").with_context(|| "初始化 jobs.json 失败")?;
         }
         Ok(())
     }
@@ -153,7 +153,7 @@ impl JobStore {
 
     fn save_jobs(&self, jobs: &[Job]) -> Result<()> {
         let content = serde_json::to_string_pretty(jobs).with_context(|| "序列化 jobs 失败")?;
-        std::fs::write(&self.jobs_path, content)
+        atomic_write(&self.jobs_path, &content)
             .with_context(|| format!("写入 {} 失败", self.jobs_path.display()))?;
         Ok(())
     }
@@ -173,7 +173,7 @@ impl JobStore {
     fn save_runs(&self, job_id: &str, runs: &[JobRun]) -> Result<()> {
         let path = self.runs_dir.join(format!("{job_id}.json"));
         let content = serde_json::to_string_pretty(runs).with_context(|| "序列化 runs 失败")?;
-        std::fs::write(&path, content).with_context(|| format!("写入 {} 失败", path.display()))?;
+        atomic_write(&path, &content).with_context(|| format!("写入 {} 失败", path.display()))?;
         Ok(())
     }
 }
@@ -181,4 +181,14 @@ impl JobStore {
 fn scheduler_dir() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".tiangong").join("scheduler")
+}
+
+/// 原子写入：先写临时文件再 rename，防止写入中断导致文件损坏
+fn atomic_write(path: &std::path::Path, content: &str) -> Result<()> {
+    let tmp_path = path.with_extension("tmp");
+    std::fs::write(&tmp_path, content)
+        .with_context(|| format!("写入临时文件 {} 失败", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, path)
+        .with_context(|| format!("重命名 {} → {} 失败", tmp_path.display(), path.display()))?;
+    Ok(())
 }

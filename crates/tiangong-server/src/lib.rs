@@ -53,8 +53,9 @@ pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
     route.set_configs(Some(configs));
 
     // 初始化调度器，恢复已启用的 cron job
-    restore_cron_jobs(app.clone());
-    tokio::spawn(async {
+    let app_restore = app.clone();
+    tokio::spawn(async move {
+        restore_cron_jobs(app_restore).await;
         Scheduler::schedule(silent::SCHEDULER.clone()).await;
     });
 
@@ -75,7 +76,7 @@ pub fn stop_daemon() -> Result<()> {
 }
 
 /// 从 job store 加载已启用的 cron job 并注册到 silent scheduler
-fn restore_cron_jobs(app_ctx: Arc<ServerAppContext>) {
+async fn restore_cron_jobs(app_ctx: Arc<ServerAppContext>) {
     let store = match JobStore::open() {
         Ok(s) => s,
         Err(e) => {
@@ -92,42 +93,39 @@ fn restore_cron_jobs(app_ctx: Arc<ServerAppContext>) {
         }
     };
 
-    let rt = tokio::runtime::Handle::current();
-    rt.block_on(async {
-        let mut scheduler = silent::SCHEDULER.lock().await;
-        for job in jobs {
-            let schedule = match &job.schedule {
-                Some(s) => s.clone(),
-                None => continue,
-            };
-            let job_clone = job.clone();
-            let process_time = match schedule.try_into() {
-                Ok(pt) => pt,
-                Err(e) => {
-                    tracing::warn!("解析 cron 表达式失败 [{}]: {e}", job.schedule.unwrap());
-                    continue;
-                }
-            };
-            let app_ctx_clone = app_ctx.clone();
-            let task = silent::Task::create_with_action_async(
-                job.id.clone(),
-                process_time,
-                job.name.clone(),
-                Arc::new(move || {
-                    let job = job_clone.clone();
-                    let app_ctx = app_ctx_clone.clone();
-                    Box::pin(async move {
-                        tracing::info!("定时任务触发：{} [{}]", job.name, job.id);
-                        scheduler::executor::execute_job(app_ctx, job).await;
-                        Ok(())
-                    })
-                }),
-            );
-            if let Err(e) = scheduler.add_task(task) {
-                tracing::warn!("注册定时任务失败 [{}]：{e}", job.id);
-            } else {
-                tracing::info!("已恢复定时任务：{} [{}]", job.name, job.id);
+    let mut scheduler = silent::SCHEDULER.lock().await;
+    for job in jobs {
+        let schedule = match &job.schedule {
+            Some(s) => s.clone(),
+            None => continue,
+        };
+        let job_clone = job.clone();
+        let process_time = match schedule.try_into() {
+            Ok(pt) => pt,
+            Err(e) => {
+                tracing::warn!("解析 cron 表达式失败 [{}]: {e}", job.schedule.unwrap());
+                continue;
             }
+        };
+        let app_ctx_clone = app_ctx.clone();
+        let task = silent::Task::create_with_action_async(
+            job.id.clone(),
+            process_time,
+            job.name.clone(),
+            Arc::new(move || {
+                let job = job_clone.clone();
+                let app_ctx = app_ctx_clone.clone();
+                Box::pin(async move {
+                    tracing::info!("定时任务触发：{} [{}]", job.name, job.id);
+                    scheduler::executor::execute_job(app_ctx, job).await;
+                    Ok(())
+                })
+            }),
+        );
+        if let Err(e) = scheduler.add_task(task) {
+            tracing::warn!("注册定时任务失败 [{}]：{e}", job.id);
+        } else {
+            tracing::info!("已恢复定时任务：{} [{}]", job.name, job.id);
         }
-    });
+    }
 }
