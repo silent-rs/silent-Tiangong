@@ -1007,6 +1007,10 @@ fn start_stream_consumer(
                             );
                             // 同步 core worker 中对 session 字段的修改
                             session.summary_up_to = *summary_up_to;
+                            tiangong_core::context::compressor::mark_compact_boundary(
+                                &mut session.messages,
+                                *summary_up_to,
+                            );
                             session.current_tokens = 0;
                             session.active_agent_current_tokens = 0;
                             session.agent_current_tokens.clear();

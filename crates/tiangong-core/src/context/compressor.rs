@@ -266,7 +266,7 @@ pub fn compress_loop_messages(
     Ok(result)
 }
 
-pub(crate) fn mark_compact_boundary(messages: &mut [Message], split_point: usize) {
+pub fn mark_compact_boundary(messages: &mut [Message], split_point: usize) {
     for message in messages.iter_mut() {
         message.compact = false;
     }

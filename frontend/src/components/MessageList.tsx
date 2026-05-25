@@ -154,7 +154,7 @@ function UserMessageActions({ text, messageId, runStatus, canEdit, onStartEdit }
       </button>
       <button
         onClick={() => onStartEdit(messageId, text)}
-        className={btnClass}
+        className={`${btnClass} ${(!idle || !canEdit) ? 'opacity-30 cursor-not-allowed' : ''}`}
         title={!canEdit ? "已压缩消息无法编辑" : !idle ? "执行中无法编辑" : "编辑并重发"}
         disabled={!idle || !canEdit}
       >
@@ -381,6 +381,16 @@ export function MessageList() {
   };
 
   const messageGroups = useMemo(() => groupMessages(messages), [messages]);
+
+  // 计算 compact 边界：compact=true 的消息及其之前的消息都不可编辑
+  const nonEditableIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const msg of messages) {
+      ids.add(msg.id);
+      if (msg.compact) break;
+    }
+    return ids;
+  }, [messages]);
   const streamScrollKey = streamingMessageId
     ? `${streamingMessageId}:${streamingContent.length}:${streamingReasoningContent.length}`
     : "";
@@ -768,7 +778,7 @@ export function MessageList() {
                         text={textContent(message)}
                         messageId={message.id}
                         runStatus={runStatus}
-                        canEdit={!message.compact}
+                        canEdit={!nonEditableIds.has(message.id)}
                         onStartEdit={handleStartEdit}
                       />
                     </div>
