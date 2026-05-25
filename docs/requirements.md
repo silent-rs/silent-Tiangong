@@ -199,6 +199,18 @@
 - 非可重试错误（如 401 认证失败、400 参数错误）不进行重试，直接返回错误。
 - 重试逻辑必须覆盖所有 LLM 调用方法（complete / complete_stream / complete_with_functions / complete_with_functions_stream / complete_lite）。
 
+#### 自动化触发层
+- 必须支持定时任务（Cron），通过 `tiangong-scheduler` 独立 crate 管理，使用 JSON 文件存储（`~/.tiangong/scheduler/`）。
+- 定时任务必须复用 silent 框架内置的 Scheduler 模块，Server 启动时自动恢复已启用的 Cron Job。
+- 每个 Job 必须支持关联已有 session 复用上下文；未指定时自动创建新 session。
+- 触发时必须构造结构化消息（任务名称 + 描述 + payload），通过 RuntimeEngine 执行链路处理，结果由 LLM 通过 MCP/Skill 决定如何处理，不强投递到 IM 通道。
+- 必须记录每次执行的 JobRun（状态、开始时间、结束时间、结果摘要），支持通过 API 查询执行历史。
+- Webhook 是 Server 内置的 HTTP 触发能力，独立于定时任务，拥有独立的 model 和 JSON 存储（`~/.tiangong/webhooks/`）。
+- Webhook 必须提供无需认证的外部触发端点（`/api/v1/webhooks/:id/invoke`），支持可选的签名验证（X-Webhook-Signature）。
+- Webhook 必须同时提供需认证的管理端点（CRUD + 手动触发 + 执行历史查询）。
+- Job 和 Webhook 的执行逻辑必须共享同一个通用 executor，避免重复实现。
+- Polling 触发器暂不实现，后续根据实际需求评估。
+
 ### Should
 
 - Server 模式应支持 CORS 配置，方便 Web 前端调用。

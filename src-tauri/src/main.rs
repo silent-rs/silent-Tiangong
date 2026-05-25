@@ -318,6 +318,18 @@ fn run_gui() {
             tiangong_app::commands::get_mention_candidates,
             tiangong_app::commands::compress_context,
             tiangong_app::commands::reset_context,
+            tiangong_app::commands::job_list,
+            tiangong_app::commands::job_create,
+            tiangong_app::commands::job_update,
+            tiangong_app::commands::job_delete,
+            tiangong_app::commands::job_trigger,
+            tiangong_app::commands::job_list_runs,
+            tiangong_app::commands::webhook_list,
+            tiangong_app::commands::webhook_create,
+            tiangong_app::commands::webhook_update,
+            tiangong_app::commands::webhook_delete,
+            tiangong_app::commands::webhook_trigger,
+            tiangong_app::commands::webhook_list_runs,
         ])
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())

@@ -2848,3 +2848,209 @@ pub async fn probe_embedding_dimension(
 
     Err(last_error.unwrap_or_else(|| "无法请求 Embedding 接口".to_string()))
 }
+
+// ── 定时任务管理 ──────────────────────────────────────────────
+
+#[tauri::command]
+pub fn job_list() -> Result<Vec<serde_json::Value>, String> {
+    let store = tiangong_core::scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
+    let jobs = store.list_jobs().map_err(|e| e.to_string())?;
+    Ok(jobs
+        .into_iter()
+        .map(|j| serde_json::to_value(j).unwrap())
+        .collect())
+}
+
+#[tauri::command]
+pub fn job_create(
+    name: String,
+    description: String,
+    schedule: String,
+    session_id: Option<String>,
+    payload: String,
+    enabled: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let store = tiangong_core::scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
+    let now = chrono::Local::now().naive_local().to_string();
+    let job = tiangong_core::scheduler::model::Job {
+        id: scru128::new().to_string(),
+        name,
+        description,
+        trigger_type: tiangong_core::scheduler::model::TriggerType::Cron,
+        schedule: Some(schedule),
+        session_id,
+        payload,
+        enabled: enabled.unwrap_or(true),
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    store.insert_job(&job).map_err(|e| e.to_string())?;
+    Ok(serde_json::to_value(job).unwrap())
+}
+
+#[tauri::command]
+pub fn job_update(
+    id: String,
+    name: Option<String>,
+    description: Option<String>,
+    schedule: Option<String>,
+    session_id: Option<String>,
+    payload: Option<String>,
+    enabled: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let store = tiangong_core::scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
+    let req = tiangong_core::scheduler::model::UpdateJobRequest {
+        name,
+        description,
+        schedule,
+        session_id,
+        payload,
+        enabled,
+    };
+    let updated = store.update_job(&id, &req).map_err(|e| e.to_string())?;
+    if !updated {
+        return Err(format!("定时任务 '{id}' 不存在"));
+    }
+    let job = store.get_job(&id).map_err(|e| e.to_string())?;
+    Ok(serde_json::to_value(job).unwrap())
+}
+
+#[tauri::command]
+pub fn job_delete(id: String) -> Result<(), String> {
+    let store = tiangong_core::scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
+    let deleted = store.delete_job(&id).map_err(|e| e.to_string())?;
+    if !deleted {
+        return Err(format!("定时任务 '{id}' 不存在"));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn job_trigger(id: String) -> Result<serde_json::Value, String> {
+    let store = tiangong_core::scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
+    let job = store.get_job(&id).map_err(|e| e.to_string())?;
+    match job {
+        Some(j) => Ok(serde_json::json!({
+            "job_id": j.id,
+            "session_id": j.session_id,
+            "status": "triggered"
+        })),
+        None => Err(format!("定时任务 '{id}' 不存在")),
+    }
+}
+
+#[tauri::command]
+pub fn job_list_runs(id: String, limit: Option<usize>) -> Result<Vec<serde_json::Value>, String> {
+    let store = tiangong_core::scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
+    let runs = store
+        .list_job_runs(&id, limit.unwrap_or(20))
+        .map_err(|e| e.to_string())?;
+    Ok(runs
+        .into_iter()
+        .map(|r| serde_json::to_value(r).unwrap())
+        .collect())
+}
+
+// ── Webhook 管理 ─────────────────────────────────────────────
+
+#[tauri::command]
+pub fn webhook_list() -> Result<Vec<serde_json::Value>, String> {
+    let store = tiangong_server::webhook::store::WebhookStore::open().map_err(|e| e.to_string())?;
+    let webhooks = store.list().map_err(|e| e.to_string())?;
+    Ok(webhooks
+        .into_iter()
+        .map(|w| serde_json::to_value(w).unwrap())
+        .collect())
+}
+
+#[tauri::command]
+pub fn webhook_create(
+    name: String,
+    description: String,
+    session_id: Option<String>,
+    payload: String,
+    secret: Option<String>,
+    enabled: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let store = tiangong_server::webhook::store::WebhookStore::open().map_err(|e| e.to_string())?;
+    let now = chrono::Local::now().naive_local().to_string();
+    let webhook = tiangong_server::webhook::model::Webhook {
+        id: scru128::new().to_string(),
+        name,
+        description,
+        session_id,
+        payload,
+        secret,
+        enabled: enabled.unwrap_or(true),
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    store.insert(&webhook).map_err(|e| e.to_string())?;
+    Ok(serde_json::to_value(webhook).unwrap())
+}
+
+#[tauri::command]
+pub fn webhook_update(
+    id: String,
+    name: Option<String>,
+    description: Option<String>,
+    session_id: Option<String>,
+    payload: Option<String>,
+    secret: Option<String>,
+    enabled: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let store = tiangong_server::webhook::store::WebhookStore::open().map_err(|e| e.to_string())?;
+    let req = tiangong_server::webhook::model::UpdateWebhookRequest {
+        name,
+        description,
+        session_id,
+        payload,
+        secret,
+        enabled,
+    };
+    let updated = store.update(&id, &req).map_err(|e| e.to_string())?;
+    if !updated {
+        return Err(format!("Webhook '{id}' 不存在"));
+    }
+    let webhook = store.get(&id).map_err(|e| e.to_string())?;
+    Ok(serde_json::to_value(webhook).unwrap())
+}
+
+#[tauri::command]
+pub fn webhook_delete(id: String) -> Result<(), String> {
+    let store = tiangong_server::webhook::store::WebhookStore::open().map_err(|e| e.to_string())?;
+    let deleted = store.delete(&id).map_err(|e| e.to_string())?;
+    if !deleted {
+        return Err(format!("Webhook '{id}' 不存在"));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn webhook_trigger(id: String) -> Result<serde_json::Value, String> {
+    let store = tiangong_server::webhook::store::WebhookStore::open().map_err(|e| e.to_string())?;
+    let webhook = store.get(&id).map_err(|e| e.to_string())?;
+    match webhook {
+        Some(w) => Ok(serde_json::json!({
+            "webhook_id": w.id,
+            "session_id": w.session_id,
+            "status": "triggered"
+        })),
+        None => Err(format!("Webhook '{id}' 不存在")),
+    }
+}
+
+#[tauri::command]
+pub fn webhook_list_runs(
+    id: String,
+    limit: Option<usize>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let store = tiangong_server::webhook::store::WebhookStore::open().map_err(|e| e.to_string())?;
+    let runs = store
+        .list_runs(&id, limit.unwrap_or(20))
+        .map_err(|e| e.to_string())?;
+    Ok(runs
+        .into_iter()
+        .map(|r| serde_json::to_value(r).unwrap())
+        .collect())
+}

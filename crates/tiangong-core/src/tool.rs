@@ -14,6 +14,7 @@ mod list_dir;
 mod read_file;
 mod replace_in_file;
 mod run_command;
+mod scheduler;
 mod search_code;
 mod tree_dir;
 mod web_fetch;
@@ -30,6 +31,7 @@ pub enum ToolName {
     RunCommand,
     SearchCode,
     CurrentTime,
+    Scheduler,
     WebFetch,
     WriteFile,
     ReplaceInFile,
@@ -46,6 +48,7 @@ impl ToolName {
             Self::RunCommand => "run_command",
             Self::SearchCode => "search_code",
             Self::CurrentTime => "current_time",
+            Self::Scheduler => "scheduler",
             Self::WebFetch => "web_fetch",
             Self::WriteFile => "write_file",
             Self::ReplaceInFile => "replace_in_file",
@@ -103,6 +106,7 @@ impl ToolExecutor for LocalToolExecutor {
             ToolName::RunCommand => self.run_command(call),
             ToolName::SearchCode => self.search_code(call),
             ToolName::CurrentTime => self.current_time(call),
+            ToolName::Scheduler => self.scheduler(call),
             ToolName::WebFetch => self.web_fetch(call),
             ToolName::WriteFile => self.write_file(call),
             ToolName::ReplaceInFile => self.replace_in_file(call),

@@ -10,7 +10,7 @@ import { Card, CardContent } from './ui/card';
 import { Switch } from './ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Edit2, KeyRound, RefreshCw, Info, FolderOpen, Save, ShieldCheck, Database, X, HardDrive } from 'lucide-react';
+import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Edit2, KeyRound, RefreshCw, Info, FolderOpen, Save, ShieldCheck, Database, X, HardDrive, Clock } from 'lucide-react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -20,6 +20,7 @@ import { useStore } from '@/store/useStore';
 import { useToast } from './Toast';
 import { MemoryManagementSettings } from './memory';
 import { IndexManagementSettings } from './index/IndexManagementSettings';
+import { AutomationSettings } from './automation/AutomationSettings';
 
 const appWindow = getCurrentWindow();
 
@@ -94,6 +95,10 @@ export function SettingsDialog() {
                   <Globe className="w-4 h-4 mr-2" />
                   Server
                 </TabsTrigger>
+                <TabsTrigger value="automation" className="w-full justify-start px-3 py-2">
+                  <Clock className="w-4 h-4 mr-2" />
+                  自动化
+                </TabsTrigger>
                 <TabsTrigger value="about" className="w-full justify-start px-3 py-2">
                   <Info className="w-4 h-4 mr-2" />
                   关于与更新
@@ -132,6 +137,9 @@ export function SettingsDialog() {
               </TabsContent>
               <TabsContent value="server" className="m-0 flex-1 min-h-0 overflow-y-auto">
                 <ServerSettings />
+              </TabsContent>
+              <TabsContent value="automation" className="m-0 flex-1 min-h-0 overflow-y-auto">
+                <AutomationSettings />
               </TabsContent>
               <TabsContent value="about" className="m-0 flex-1 min-h-0 overflow-y-auto">
                 <AppUpdateSettings />

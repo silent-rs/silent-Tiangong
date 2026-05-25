@@ -50,29 +50,31 @@
 
 **设计原则**：
 - 调度器常驻 Server 进程，不做成 tool call
-- Job 持久化（SQLite），启动时恢复
+- 定时任务持久化（JSON 文件），启动时恢复
 - 触发 → 构造任务上下文 → RuntimeEngine 执行链路 → LLM 自行决定结果处理方式（通过 MCP/Skill）
 - Job 可选关联 session_id，复用对话上下文处理连续性任务
 - Cron 调度复用 silent 框架的 scheduler 模块
+- Webhook 作为 Server 内置 HTTP 触发能力，独立于定时任务调度
+- Polling 触发器暂缓实现
 
 **核心流程**：
 ```
-触发器（cron/webhook/polling）
+触发器（cron/webhook）
   → 查找或创建 session
   → 构造用户消息（任务描述 + 触发上下文）
   → RuntimeEngine::execute_turn_with_streaming
   → LLM 执行并自行决定是否通过 MCP/Skill 处理结果
-  → 记录 JobRun 执行历史
+  → 记录执行历史（JobRun / WebhookRun）
 ```
 
 | 子阶段 | 内容 |
 |--------|------|
-| 20-A | 任务模型与存储 — Job/JobRun 模型、SQLite store、CRUD API |
+| 20-A | 任务模型与存储 — Job/JobRun 模型、JSON store、CRUD API |
 | 20-B | Cron 调度器 — 复用 silent scheduler、Job 与 Task 对接、启动恢复、手动触发 |
-| 20-C | Webhook 触发器 — 端点注册、签名验证、触发接入 |
-| 20-D | Polling 触发器 — HTTP 轮询、条件去重、触发接入 |
-| 20-E | 执行记录与历史查询 — JobRun 记录、执行历史 API |
-| 20-F | 前端管理界面 — Job 列表/创建/启停、执行历史、手动触发 |
+| 20-C | Webhook 触发器 — Server 内置能力、独立 model/store、端点注册、签名验证、触发接入 |
+| 20-D | Polling 触发器 — 暂缓，后续根据实际需求评估 |
+| 20-E | Executor 通用化 — ExecuteParams 抽象、RunTracker 多类型追踪、Job/Webhook 共享执行核心 |
+| 20-F | 前端管理界面 — Job/Webhook 列表/创建/启停、执行历史、手动触发 |
 
 ## 参考文档
 
