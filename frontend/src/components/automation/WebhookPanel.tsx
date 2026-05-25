@@ -51,8 +51,9 @@ export function WebhookPanel({ serverRunning }: WebhookPanelProps) {
   const handleTrigger = async (id: string) => {
     try {
       await api.webhookTrigger(id);
+      setTimeout(load, 2000);
     } catch (e) {
-      console.error('触发失败', e);
+      alert(e instanceof Error ? e.message : String(e));
     }
   };
 

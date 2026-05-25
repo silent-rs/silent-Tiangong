@@ -63,9 +63,10 @@ export function MainApp() {
 
     setupListener();
 
-    api.getRunSnapshot().then((snapshot) => {
-      updateFromSnapshot(snapshot);
-    }).catch(console.error);
+    // 定期刷新会话列表，确保自动化任务创建的新会话能及时显示
+    const refreshTimer = window.setInterval(() => {
+      loadSessions();
+    }, 30_000);
 
     // 加载初始工作空间和当前对话目录
     Promise.all([api.getWorkspaceDir(), api.getSessionCwd()])
@@ -79,6 +80,7 @@ export function MainApp() {
         window.clearTimeout(snapshotTimerRef.current);
         snapshotTimerRef.current = null;
       }
+      window.clearInterval(refreshTimer);
       unlistenRef.current?.();
     };
   }, []);

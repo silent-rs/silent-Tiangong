@@ -51,8 +51,9 @@ export function JobPanel({ serverRunning }: JobPanelProps) {
   const handleTrigger = async (id: string) => {
     try {
       await api.jobTrigger(id);
+      setTimeout(load, 2000);
     } catch (e) {
-      console.error('触发失败', e);
+      alert(e instanceof Error ? e.message : String(e));
     }
   };
 
