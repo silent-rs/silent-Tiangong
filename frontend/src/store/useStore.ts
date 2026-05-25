@@ -442,10 +442,10 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   // 编辑用户消息并从该节点重新发送
-  editAndResend: async (messageId: string, newContent: string) => {
+  editAndResend: async (messageId: string, newContent: string, media: MediaAsset[] = []) => {
     set({ isSending: true });
     try {
-      await api.editAndResend(messageId, newContent);
+      await api.editAndResend(messageId, newContent, media.length > 0 ? media : undefined);
       const runningSessionId = get().activeSessionId;
       set(state => ({
         runStatus: 'executing',

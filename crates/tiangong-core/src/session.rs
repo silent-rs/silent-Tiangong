@@ -816,6 +816,28 @@ impl Session {
         }
     }
 
+    /// 更新指定消息的文本和媒体内容
+    pub fn update_message_content_with_media(
+        &mut self,
+        message_id: &str,
+        new_text: String,
+        new_media: Vec<tiangong_types::MediaAsset>,
+    ) -> bool {
+        if let Some(msg) = self.messages.iter_mut().find(|m| m.id == message_id) {
+            let mut blocks = vec![ContentBlock::text(new_text)];
+            for asset in &new_media {
+                blocks.push(asset.to_content_block());
+            }
+            msg.content = blocks;
+            msg.media.clear();
+            msg.media_migrated = true;
+            self.updated_at = now_text();
+            true
+        } else {
+            false
+        }
+    }
+
     /// 截断指定消息之后的所有消息（保留该消息本身），返回移除数量
     pub fn truncate_after_message(&mut self, message_id: &str) -> usize {
         let Some(idx) = self.messages.iter().position(|m| m.id == message_id) else {
