@@ -1,99 +1,70 @@
 # TODO - 天工当前开发任务
 
-> 最后更新：2026-05-20
-> 当前主线：发布准备与自动化
-> 参考：`PLAN.md`、`docs/rfc/0011-multi-agent-collaboration.md`
+> 最后更新：2026-05-25
+> 当前主线：Phase 20 — 自动化触发层（0.4.0）
+> 参考：`PLAN.md`、Issue #38
 
 ---
 
-## Phase A：基础框架
+## Phase 20-A：任务模型与存储
 
-- [x] 定义 AgentDescriptor / AgentLifecycle / AgentStatus 类型（`agent_team/descriptor.rs`）
-- [x] 实现 AgentRegistry — 会话级 Agent 注册表（`agent_team/registry.rs`）
-- [x] 定义团队工具 Spec 并注册（`agent_team/tools.rs`）
-- [x] 在 `inject_enhanced_tools` 中注册团队工具
-- [x] 实现 Sub Agent ReactEngine 独立执行循环（`react/engine.rs::drain_sub_agent_inboxes`）
-- [x] 实现 Sub Agent 生命周期管理：创建、解散（`agent_team/lifecycle.rs`）
-- [x] 新增 StreamEvent：AgentCreated / AgentStatusChanged / AgentNotification / AgentMessage / FileLockChanged
-- [x] ReactEngine 拦截团队工具调用（create_agent / dismiss_agent / send_message 等）
-- [x] 前端：Agent Tab 栏基础展示（Agent 列表 + 状态指示器）
+- [ ] 定义 Job 数据模型（id / name / trigger_type / schedule / payload / enabled / created_at / updated_at）
+- [ ] 定义 JobRun 数据模型（id / job_id / status / started_at / finished_at / result）
+- [ ] 定义 JobDelivery 数据模型（id / job_run_id / channel / status / retry_count）
+- [ ] 实现 SQLite job store（建表、CRUD）
+- [ ] 实现 run history 存储（写入、查询、状态更新）
+- [ ] 新增 Job CRUD API（`POST/GET/PUT/DELETE /api/v1/jobs`）
 
-## Phase B：消息通讯
+## Phase 20-B：Cron 调度器
 
-- [x] 定义 AgentMessage 类型（from / to / content / priority）
-- [x] 实现 MessageBus 消息路由（`agent_team/message_bus.rs`）
-- [x] 定义 `send_message` / `broadcast_message` 工具 Spec
-- [x] 实现 Agent 收件箱：消息注入 ReactEngine 上下文
-- [x] 新增 StreamEvent：AgentMessage
-- [x] 前端：Agent 间消息流展示（系统消息形式）
+- [ ] 引入 cron 表达式解析库（如 `cron` 或 `saffron`）
+- [ ] 实现 Scheduler 常驻执行器（tokio spawn，内嵌于 Server 启动流程）
+- [ ] Cron job 触发 → 构造 RuntimeEvent → 进入现有执行链路
+- [ ] Server 启动时从 job store 加载已启用的 cron job 并恢复调度
+- [ ] 支持执行目标指定（main session / isolated session / skill）
+- [ ] 手动触发 API（`POST /api/v1/jobs/:id/trigger`）
 
-## Phase C：文件编辑锁
+## Phase 20-C：Webhook 触发器
 
-- [x] 实现 FileLockManager（`agent_team/file_lock.rs`）
-- [x] 定义 `lock_file` / `unlock_file` 工具 Spec
-- [x] 集成到 `write_file` / `replace_in_file`：执行前检查锁状态
-- [x] 锁超时机制（默认 300 秒自动释放）
-- [x] Agent 销毁时自动释放所有持有锁
-- [x] 主 Agent 拥有锁最高权限（可强制释放）
-- [x] 新增 StreamEvent：FileLockChanged
-- [x] 锁冲突状态报告（active_locks_summary）
+- [ ] Webhook 端点注册（每个 webhook job 分配唯一路径）
+- [ ] 实现 `POST /api/v1/webhooks/:token` 端点
+- [ ] 请求签名验证（HMAC-SHA256）
+- [ ] Webhook 触发 → 构造 RuntimeEvent → 进入现有执行链路
 
-## Phase D：前端交互
+## Phase 20-D：Polling 触发器
 
-- [x] 定义 `notify_user` 工具 Spec，Sub Agent 可直接推送消息到前端
-- [x] 新增 StreamEvent：AgentNotification（携带 agent_id + agent_label）
-- [x] 前端：Agent Tab 切换 — 用户可查看不同 Agent 的执行细节
-- [x] 前端：@提及输入 — 支持 @dev / @test / @all 语法
-- [x] 前端：Agent 面板 — 显示团队成员列表、状态、手动关闭按钮
-- [x] Tauri commands 层处理 Agent 相关事件转发
+- [ ] 实现 HTTP polling 轮询执行器（定时请求指定 URL）
+- [ ] 条件判断与去重（响应内容变化时才触发）
+- [ ] Polling 触发 → 构造 RuntimeEvent → 进入现有执行链路
 
-## Phase E：完善与优化
+## Phase 20-E：结果投递与通知
 
-- [x] 临时 Agent 任务完成后自动销毁
-- [x] Agent 错误恢复：Sub Agent 失败不影响团队其他 Agent
-- [x] 并发限制：最大 8 个 Agent，同时运行 4 个 Sub Agent
-- [x] Token 预算分配：Sub Agent 共享 200K token 预算，超出后暂停后续 Agent
-- [x] system prompt 中补充团队工具使用指引
-- [x] Sub Agent 并行执行（使用 futures::join_all 协作并发）
-- [x] 修复 token 消耗统计口径，展示当前 tokens、压缩进度和总 tokens
+- [ ] 执行结果投递到 IM 通道（复用 `POST /api/v1/messages` 或直接调用 MessageRouter）
+- [ ] 失败重试机制（可配置重试次数与间隔）
+- [ ] Run history 查询 API（`GET /api/v1/jobs/:id/runs`）
+- [ ] 投递状态追踪与查询
 
-## 临时修复任务
+## Phase 20-F：前端管理界面
 
-- [x] 修复 LLM 调用失败日志缺少供应商与模型信息、provider 字段混用协议名导致误判的问题
-- [x] 修复 Markdown 代码块内部误显示行内代码背景色的问题
-- [x] 在前端展示上下文压缩开始和完成状态
-- [x] 修复手动上下文压缩未真实触发 LLM 摘要的问题
-- [x] 调整上下文压缩完成后的前端痕迹展示
-- [x] 修复 Windows 桌面模式运行 shell 时弹出黑框的问题
-- [x] 修复 LLM 流式生成期间前端界面卡死、生成完成后恢复的问题
-- [x] 修复 GitHub Actions Rust/Tauri 构建缺少 protoc 和 GLib 系统依赖的问题
-- [x] 修复 GitHub Actions protoc 安装限流和 nextest 链接器崩溃的问题
-- [x] 修复 GitHub Actions Linux 测试绕开 rust-lld 崩溃的问题
-- [x] 增加 OrbStack Ubuntu 测试脚本并隔离 Linux 构建产物目录
+- [ ] Job 列表页（展示所有 job、状态、下次执行时间）
+- [ ] Job 创建/编辑表单（cron 表达式、webhook URL、polling 配置）
+- [ ] Job 启停开关
+- [ ] 执行历史查看（run 列表、状态、耗时、结果摘要）
+- [ ] 手动触发按钮
 
-## 发布准备任务
+## 发布准备（0.4.0）
 
-- [x] 新增 GitHub Actions 发布流水线，支持手动触发和 `v*` 标签触发
-- [x] 自动构建 macOS、Windows、Linux Tauri 安装包
-- [x] 将安装包上传到 GitHub Release，手动触发默认保持草稿状态
-- [x] 验证发布 workflow 语法、前端构建和 Tauri shell 检查
-- [x] 接入 Tauri updater，通过 GitHub Release 检测和安装新版本
-- [x] 设置界面展示当前版本、检查更新和安装更新按钮
-- [x] 发布流水线注入 updater 签名私钥并生成更新元数据
-- [x] 新增 `tiangong update` 命令，复用 GitHub Release 在线更新链路
-- [x] 发布说明按版本提交内容生成，避免 updater 元数据长期复用固定描述
-
-## Server 与飞书 Bot 互联
-
-- [x] 新增外部 Bot 统一消息入口
-- [x] 外部通道自动映射到独立 Server 会话
-- [x] Desktop 设置页支持运行时启动和停止后台 Server
-- [x] Desktop 菜单栏支持控制后台 Server，关闭主窗口后保持应用驻留
-- [ ] 验证飞书 Bot 可通过 Server API 发送消息并接收回复
+- [ ] 更新 `Cargo.toml` 版本号为 `0.4.0`
+- [ ] 更新 `tauri.conf.json` 版本号
+- [ ] 更新 `CHANGELOG.md`
+- [ ] 验证 cron / webhook / polling 端到端流程
+- [ ] 验证 Server 启动恢复 cron job
+- [ ] 验证前端 Job 管理界面
 
 ---
 
 ## 文档同步要求
 
-- `docs/requirements.md`：补充多智能体协作和发布分发相关需求
-- `docs/rfc/0011-multi-agent-collaboration.md`：实现过程中如有设计变更需同步更新
+- `docs/requirements.md`：补充自动化触发层相关需求
+- `docs/server-api.md`：补充 Job / Webhook API 文档
+- Issue #38：开发完成后关闭
