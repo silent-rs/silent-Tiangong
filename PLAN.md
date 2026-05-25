@@ -51,16 +51,27 @@
 **设计原则**：
 - 调度器常驻 Server 进程，不做成 tool call
 - Job 持久化（SQLite），启动时恢复
-- 触发 → RuntimeEvent → 现有执行链路
-- 结果可投递到 IM 通道
+- 触发 → 构造任务上下文 → RuntimeEngine 执行链路 → LLM 自行决定结果处理方式（通过 MCP/Skill）
+- Job 可选关联 session_id，复用对话上下文处理连续性任务
+- Cron 调度复用 silent 框架的 scheduler 模块
+
+**核心流程**：
+```
+触发器（cron/webhook/polling）
+  → 查找或创建 session
+  → 构造用户消息（任务描述 + 触发上下文）
+  → RuntimeEngine::execute_turn_with_streaming
+  → LLM 执行并自行决定是否通过 MCP/Skill 处理结果
+  → 记录 JobRun 执行历史
+```
 
 | 子阶段 | 内容 |
 |--------|------|
-| 20-A | 任务模型与存储 — Job/JobRun/JobDelivery 模型、SQLite store、CRUD API |
-| 20-B | Cron 调度器 — 表达式解析、常驻执行器、启动恢复、手动触发 |
+| 20-A | 任务模型与存储 — Job/JobRun 模型、SQLite store、CRUD API |
+| 20-B | Cron 调度器 — 复用 silent scheduler、Job 与 Task 对接、启动恢复、手动触发 |
 | 20-C | Webhook 触发器 — 端点注册、签名验证、触发接入 |
 | 20-D | Polling 触发器 — HTTP 轮询、条件去重、触发接入 |
-| 20-E | 结果投递与通知 — IM 通道投递、失败重试、Run history API |
+| 20-E | 执行记录与历史查询 — JobRun 记录、执行历史 API |
 | 20-F | 前端管理界面 — Job 列表/创建/启停、执行历史、手动触发 |
 
 ## 参考文档

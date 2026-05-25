@@ -8,46 +8,50 @@
 
 ## Phase 20-A：任务模型与存储
 
-- [ ] 定义 Job 数据模型（id / name / trigger_type / schedule / payload / enabled / created_at / updated_at）
-- [ ] 定义 JobRun 数据模型（id / job_id / status / started_at / finished_at / result）
-- [ ] 定义 JobDelivery 数据模型（id / job_run_id / channel / status / retry_count）
-- [ ] 实现 SQLite job store（建表、CRUD）
-- [ ] 实现 run history 存储（写入、查询、状态更新）
+- [ ] 定义 Job 数据模型（id / name / description / trigger_type / schedule / session_id / payload / enabled / created_at / updated_at）
+  - `trigger_type`：Cron / Webhook / Polling
+  - `session_id`：可选，指定则在关联 session 中执行，否则自动创建新 session
+  - `payload`：触发时构造给 LLM 的任务描述模板
+- [ ] 定义 JobRun 数据模型（id / job_id / session_id / status / started_at / finished_at / result_summary）
+- [ ] 在 tiangong-server 中引入 SQLite 依赖（rusqlite 或 sqlx）
+- [ ] 实现 Job store（建表、CRUD、按 trigger_type 查询）
+- [ ] 实现 JobRun store（写入、按 job_id 查询、状态更新）
 - [ ] 新增 Job CRUD API（`POST/GET/PUT/DELETE /api/v1/jobs`）
+- [ ] 新增 JobRun 查询 API（`GET /api/v1/jobs/:id/runs`）
 
 ## Phase 20-B：Cron 调度器
 
-- [ ] 引入 cron 表达式解析库（如 `cron` 或 `saffron`）
-- [ ] 实现 Scheduler 常驻执行器（tokio spawn，内嵌于 Server 启动流程）
-- [ ] Cron job 触发 → 构造 RuntimeEvent → 进入现有执行链路
-- [ ] Server 启动时从 job store 加载已启用的 cron job 并恢复调度
-- [ ] 支持执行目标指定（main session / isolated session / skill）
+- [ ] 为 tiangong-server 启用 silent 的 `scheduler` feature
+- [ ] 实现 Job → silent Task 转换（将 Job 的 schedule 映射为 ProcessTime，payload 映射为 action）
+- [ ] action 内部：查找或创建 session → 构造用户消息 → 调用 RuntimeEngine::execute_turn_with_streaming
+- [ ] action 内部：记录 JobRun（状态、耗时、结果摘要）
+- [ ] Server 启动时从 job store 加载已启用的 cron job 并注册到 silent scheduler
+- [ ] Job 启停时同步增删 silent Task
 - [ ] 手动触发 API（`POST /api/v1/jobs/:id/trigger`）
 
 ## Phase 20-C：Webhook 触发器
 
-- [ ] Webhook 端点注册（每个 webhook job 分配唯一路径）
+- [ ] Webhook 端点注册（每个 webhook job 分配唯一 token）
 - [ ] 实现 `POST /api/v1/webhooks/:token` 端点
 - [ ] 请求签名验证（HMAC-SHA256）
-- [ ] Webhook 触发 → 构造 RuntimeEvent → 进入现有执行链路
+- [ ] Webhook 触发 → 查找或创建 session → 构造用户消息（含 webhook payload）→ RuntimeEngine 执行
 
 ## Phase 20-D：Polling 触发器
 
-- [ ] 实现 HTTP polling 轮询执行器（定时请求指定 URL）
+- [ ] 实现 HTTP polling 轮询执行器（基于 silent scheduler 或独立 tokio spawn）
 - [ ] 条件判断与去重（响应内容变化时才触发）
-- [ ] Polling 触发 → 构造 RuntimeEvent → 进入现有执行链路
+- [ ] Polling 触发 → 查找或创建 session → 构造用户消息（含 polling 响应）→ RuntimeEngine 执行
 
-## Phase 20-E：结果投递与通知
+## Phase 20-E：执行记录与历史查询
 
-- [ ] 执行结果投递到 IM 通道（复用 `POST /api/v1/messages` 或直接调用 MessageRouter）
-- [ ] 失败重试机制（可配置重试次数与间隔）
-- [ ] Run history 查询 API（`GET /api/v1/jobs/:id/runs`）
-- [ ] 投递状态追踪与查询
+- [ ] JobRun 执行记录完善（成功/失败状态、错误信息、结果摘要）
+- [ ] Run history 查询 API 完善（分页、按状态过滤、按时间排序）
+- [ ] 手动触发时同步记录 JobRun
 
 ## Phase 20-F：前端管理界面
 
 - [ ] Job 列表页（展示所有 job、状态、下次执行时间）
-- [ ] Job 创建/编辑表单（cron 表达式、webhook URL、polling 配置）
+- [ ] Job 创建/编辑表单（trigger_type 切换、cron 表达式、webhook 配置、polling 配置、session 选择）
 - [ ] Job 启停开关
 - [ ] 执行历史查看（run 列表、状态、耗时、结果摘要）
 - [ ] 手动触发按钮
