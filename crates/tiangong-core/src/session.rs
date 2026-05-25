@@ -219,6 +219,10 @@ pub struct SessionTaskPlan {
 }
 
 impl Session {
+    pub fn has_user_messages(&self) -> bool {
+        self.messages.iter().any(|m| m.role == MessageRole::User)
+    }
+
     /// 迁移旧格式数据：将 message.media 合并到 message.content 中。
     pub fn migrate_legacy_content(&mut self) {
         for message in &mut self.messages {

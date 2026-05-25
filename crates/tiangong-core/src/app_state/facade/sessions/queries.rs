@@ -115,6 +115,13 @@ impl TiangongState {
 
     pub fn update_workspace_dir(&mut self, workspace_dir: String) -> Result<()> {
         self.store.session.workspace_dir = workspace_dir;
+        for session in &mut self.store.session.sessions {
+            if session.cwd_mode == crate::session::SessionCwdMode::Inherit
+                && !session.has_user_messages()
+            {
+                session.cwd = self.store.session.workspace_dir.clone();
+            }
+        }
         self.persist_app_only()
     }
 
@@ -139,9 +146,12 @@ impl TiangongState {
             if session.cwd_mode == crate::session::SessionCwdMode::Isolated {
                 return Err(anyhow::anyhow!("隔离模式会话不允许修改工作目录"));
             }
+            // 已有对话的会话不允许切换工作目录
+            if session.has_user_messages() {
+                return Err(anyhow::anyhow!("已有对话的会话不允许切换工作目录"));
+            }
             session.cwd = cwd;
             session.cwd_mode = crate::session::SessionCwdMode::Custom;
-            session.updated_at = now_text();
         }
         self.persist_session_and_app(&active_id)
     }
