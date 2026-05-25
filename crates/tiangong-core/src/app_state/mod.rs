@@ -131,7 +131,6 @@ impl TiangongState {
             return Err(anyhow::anyhow!("当前会话不存在，无法设置信任模式"));
         };
         session.trust_mode = mode;
-        session.updated_at = now_text();
         // 兼容旧的状态读取；真实来源是当前会话。
         self.store.agent.agent_config.trust_mode = mode;
         self.services.runtime.permission_gate().set_trust_mode(mode);
@@ -161,7 +160,6 @@ impl TiangongState {
             .find(|session| session.id == active_id)
         {
             session.reasoning_effort = Some(effort);
-            session.updated_at = now_text();
             self.persist_session_and_app(&active_id)
         } else {
             self.persist_app_only()

@@ -347,7 +347,6 @@ impl Session {
             compact: false,
             created_at: now_text(),
         });
-        self.updated_at = now_text();
     }
 
     pub fn append_message_with_reasoning(
@@ -372,7 +371,6 @@ impl Session {
             compact: false,
             created_at: now_text(),
         });
-        self.updated_at = now_text();
     }
 
     /// 使用预生成的 ID 追加消息（流式场景：Delta/Reasoning 事件先于消息创建）
@@ -415,7 +413,6 @@ impl Session {
             compact: false,
             created_at: now_text(),
         });
-        self.updated_at = now_text();
     }
 
     pub fn append_worker_message(
@@ -450,7 +447,6 @@ impl Session {
             compact: false,
             created_at: now_text(),
         });
-        self.updated_at = now_text();
     }
 
     pub fn start_task(
@@ -479,7 +475,6 @@ impl Session {
             llm_calls: Vec::new(),
             worker_results: Vec::new(),
         });
-        self.updated_at = now_text();
     }
 
     pub fn mark_task_executing(&mut self, task_id: &str, plan_snapshot: Option<String>) {
@@ -496,7 +491,6 @@ impl Session {
             record.plan_snapshot = Some(plan_snapshot);
         }
         record.updated_at = now_text();
-        self.updated_at = now_text();
     }
 
     pub fn bind_task_assistant_message_id(&mut self, task_id: &str, assistant_message_id: String) {
@@ -509,7 +503,6 @@ impl Session {
         };
         record.assistant_message_id = assistant_message_id;
         record.updated_at = now_text();
-        self.updated_at = now_text();
     }
 
     pub fn sync_task_plans(&mut self, task_id: &str, plans: &[PlanItem]) {
@@ -579,7 +572,6 @@ impl Session {
                 self.task_plans.push(target);
             }
         }
-        self.updated_at = now_text();
     }
 
     pub fn delete_pending_task_plan(&mut self, pending_index: usize) -> bool {
@@ -591,7 +583,6 @@ impl Session {
             return false;
         };
         self.task_plans.remove(pos);
-        self.updated_at = now_text();
         true
     }
 
@@ -615,7 +606,6 @@ impl Session {
         for (slot, item) in pending_positions.iter().zip(pending) {
             self.task_plans[*slot] = item;
         }
-        self.updated_at = now_text();
         true
     }
 
@@ -665,7 +655,6 @@ impl Session {
         let now = now_text();
         record.updated_at = now.clone();
         record.finished_at = Some(now);
-        self.updated_at = now_text();
     }
 
     pub fn fail_task(
@@ -730,7 +719,6 @@ impl Session {
         let now = now_text();
         record.updated_at = now.clone();
         record.finished_at = Some(now);
-        self.updated_at = now_text();
     }
 
     pub fn recover_interrupted_tasks(&mut self) -> usize {
@@ -748,9 +736,6 @@ impl Session {
                 record.updated_at = now.clone();
                 record.finished_at = Some(now);
             }
-        }
-        if recovered > 0 {
-            self.updated_at = now_text();
         }
         recovered
     }
@@ -782,7 +767,6 @@ impl Session {
     pub fn rebuild_system_prompt(&mut self, config: &crate::prompt::SystemPromptConfig) {
         let msg = crate::prompt::sections::build_full_system_prompt(self, config);
         self.system_prompt_message = Some(msg);
-        self.updated_at = now_text();
     }
 
     /// 构建 LLM 请求上下文
@@ -809,7 +793,6 @@ impl Session {
     pub fn update_message_content(&mut self, message_id: &str, new_content: String) -> bool {
         if let Some(msg) = self.messages.iter_mut().find(|m| m.id == message_id) {
             msg.content = vec![ContentBlock::text(new_content)];
-            self.updated_at = now_text();
             true
         } else {
             false
@@ -823,7 +806,6 @@ impl Session {
         };
         let remove_count = self.messages.len() - idx - 1;
         self.messages.truncate(idx + 1);
-        self.updated_at = now_text();
         remove_count
     }
 }

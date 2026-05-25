@@ -33,6 +33,7 @@ impl TiangongState {
             String::new(),
             media,
         );
+        self.store.session.sessions[idx].updated_at = now_text();
         self.persist_session_and_app(&session_id)?;
         let session = self.store.session.sessions[idx].clone();
         self.store.session.input_draft.clear();
@@ -69,6 +70,7 @@ impl TiangongState {
         };
 
         session.append_message(role, content);
+        session.updated_at = now_text();
         self.persist_session_and_app(session_id)
     }
 }
