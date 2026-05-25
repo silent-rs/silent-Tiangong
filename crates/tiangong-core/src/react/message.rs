@@ -2,7 +2,7 @@
 
 use std::sync::mpsc::Sender as StdSender;
 
-use crate::session::{Message, MessageRole, MessageToolCall, Session, now_text};
+use crate::session::{Message, MessageRole, MessageToolCall, Session};
 use tiangong_types::{MediaAsset, StreamEvent};
 
 const MEMORY_LOOP_FEEDBACK_MAX_CHARS: usize = 12_000;
@@ -81,7 +81,6 @@ pub(crate) fn append_assistant_tool_call_message(
     message.reasoning_signature = reasoning_signature;
     message.tool_calls = tool_calls;
     session.messages.push(message);
-    session.updated_at = now_text();
 }
 
 pub(crate) fn append_tool_result_message(
@@ -96,7 +95,6 @@ pub(crate) fn append_tool_result_message(
     message.tool_name = Some(tool_name.to_string());
     message.tool_result_is_error = is_error;
     session.messages.push(message);
-    session.updated_at = now_text();
 }
 
 pub(crate) fn append_runtime_tool_message(
