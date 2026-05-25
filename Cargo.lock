@@ -9311,6 +9311,7 @@ dependencies = [
  "async-channel",
  "async-lock",
  "chrono",
+ "dirs",
  "hex",
  "hmac",
  "libc",

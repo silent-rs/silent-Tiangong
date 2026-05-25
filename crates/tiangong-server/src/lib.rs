@@ -4,6 +4,7 @@ pub mod config;
 pub mod daemon;
 pub mod remote;
 pub mod scheduler;
+pub mod webhook;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -14,7 +15,6 @@ use silent::prelude::*;
 use tiangong_config::load_tiangong_config;
 use tiangong_core::app_state::TiangongState;
 use tiangong_core::permission::TrustMode;
-use tiangong_core::scheduler::model::TriggerType;
 use tiangong_core::scheduler::store::JobStore;
 use tokio::sync::Mutex;
 
@@ -53,7 +53,7 @@ pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
     route.set_configs(Some(configs));
 
     // 初始化调度器，恢复已启用的 cron job
-    restore_cron_jobs(app);
+    restore_cron_jobs(app.clone());
     tokio::spawn(async {
         Scheduler::schedule(silent::SCHEDULER.clone()).await;
     });
@@ -84,7 +84,7 @@ fn restore_cron_jobs(app_ctx: Arc<ServerAppContext>) {
         }
     };
 
-    let jobs = match store.list_enabled_jobs_by_type(&TriggerType::Cron) {
+    let jobs = match store.list_enabled_cron_jobs() {
         Ok(jobs) => jobs,
         Err(e) => {
             tracing::warn!("查询定时任务失败，跳过：{e}");

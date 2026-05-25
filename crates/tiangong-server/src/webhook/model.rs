@@ -1,53 +1,38 @@
 use serde::{Deserialize, Serialize};
+use silent::prelude::*;
 
-/// 触发类型
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TriggerType {
-    Cron,
-}
+use super::store::WebhookStore;
 
-/// Job 运行状态
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum JobRunStatus {
-    Running,
-    Succeeded,
-    Failed,
-}
-
-/// 自动化任务定义（仅定时任务）
+/// Webhook 配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Job {
+pub struct Webhook {
     pub id: String,
     pub name: String,
     pub description: String,
-    pub trigger_type: TriggerType,
-    /// Cron 表达式
-    #[serde(default)]
-    pub schedule: Option<String>,
     /// 可选，关联已有 session 复用上下文；为空时触发自动创建新 session
     #[serde(default)]
     pub session_id: Option<String>,
     /// 触发时构造给 LLM 的任务描述
     pub payload: String,
+    /// 签名密钥（可选，配置后需在请求头 X-Webhook-Signature 中传入）
+    #[serde(default)]
+    pub secret: Option<String>,
     /// 是否启用
     pub enabled: bool,
     pub created_at: String,
     pub updated_at: String,
 }
 
-/// 创建 Job 请求
+/// 创建 Webhook 请求
 #[derive(Debug, Deserialize)]
-pub struct CreateJobRequest {
+pub struct CreateWebhookRequest {
     pub name: String,
     pub description: String,
-    pub trigger_type: TriggerType,
-    #[serde(default)]
-    pub schedule: Option<String>,
     #[serde(default)]
     pub session_id: Option<String>,
     pub payload: String,
+    #[serde(default)]
+    pub secret: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -56,32 +41,50 @@ const fn default_true() -> bool {
     true
 }
 
-/// 更新 Job 请求（所有字段可选）
+/// 更新 Webhook 请求（所有字段可选）
 #[derive(Debug, Default, Deserialize)]
-pub struct UpdateJobRequest {
+pub struct UpdateWebhookRequest {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
-    pub schedule: Option<String>,
-    #[serde(default)]
     pub session_id: Option<String>,
     #[serde(default)]
     pub payload: Option<String>,
     #[serde(default)]
+    pub secret: Option<String>,
+    #[serde(default)]
     pub enabled: Option<bool>,
 }
 
-/// Job 单次执行记录
+/// Webhook 执行记录
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JobRun {
+pub struct WebhookRun {
     pub id: String,
-    pub job_id: String,
+    pub webhook_id: String,
     /// 本次执行使用的 session_id
     pub session_id: String,
-    pub status: JobRunStatus,
+    pub status: WebhookRunStatus,
     pub started_at: String,
     pub finished_at: Option<String>,
     pub result_summary: Option<String>,
+}
+
+/// Webhook 执行状态
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WebhookRunStatus {
+    Running,
+    Succeeded,
+    Failed,
+}
+
+pub fn open_store() -> Result<WebhookStore> {
+    WebhookStore::open().map_err(|e| {
+        SilentError::business_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("打开 webhook 存储失败：{e}"),
+        )
+    })
 }

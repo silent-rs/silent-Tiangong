@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use super::model::{Job, JobRun, JobRunStatus, TriggerType, UpdateJobRequest};
+use super::model::{Job, JobRun, JobRunStatus, UpdateJobRequest};
 
 /// Job 存储（JSON 文件）
 pub struct JobStore {
@@ -47,9 +47,9 @@ impl JobStore {
         Ok(jobs)
     }
 
-    pub fn list_enabled_jobs_by_type(&self, trigger_type: &TriggerType) -> Result<Vec<Job>> {
+    pub fn list_enabled_cron_jobs(&self) -> Result<Vec<Job>> {
         let mut jobs = self.load_jobs()?;
-        jobs.retain(|j| j.enabled && j.trigger_type == *trigger_type);
+        jobs.retain(|j| j.enabled);
         jobs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         Ok(jobs)
     }
@@ -75,12 +75,6 @@ impl JobStore {
         }
         if let Some(ref v) = req.payload {
             job.payload = v.clone();
-        }
-        if let Some(ref v) = req.webhook_secret {
-            job.webhook_secret = Some(v.clone());
-        }
-        if let Some(ref v) = req.polling_url {
-            job.polling_url = Some(v.clone());
         }
         if let Some(v) = req.enabled {
             job.enabled = v;

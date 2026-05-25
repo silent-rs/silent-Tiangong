@@ -45,8 +45,6 @@ pub async fn create_job(mut req: Request) -> Result<Response> {
         schedule: body.schedule,
         session_id: body.session_id,
         payload: body.payload,
-        webhook_secret: body.webhook_secret,
-        polling_url: body.polling_url,
         enabled: body.enabled,
         created_at: now.clone(),
         updated_at: now,
@@ -236,14 +234,6 @@ fn validate_create_request(req: &CreateJobRequest) -> Result<()> {
         TriggerType::Cron if req.schedule.is_none() => Err(SilentError::business_error(
             StatusCode::BAD_REQUEST,
             "Cron 类型任务必须提供 schedule 字段".to_string(),
-        )),
-        TriggerType::Webhook if req.webhook_secret.is_none() => Err(SilentError::business_error(
-            StatusCode::BAD_REQUEST,
-            "Webhook 类型任务必须提供 webhook_secret 字段".to_string(),
-        )),
-        TriggerType::Polling if req.polling_url.is_none() => Err(SilentError::business_error(
-            StatusCode::BAD_REQUEST,
-            "Polling 类型任务必须提供 polling_url 字段".to_string(),
         )),
         _ => Ok(()),
     }

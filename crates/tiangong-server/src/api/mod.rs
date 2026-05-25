@@ -110,7 +110,20 @@ pub fn build_routes(
                         .append(Route::new("trigger").post(jobs::trigger_job)),
                 ),
         )
-        .append(Route::new("webhooks/<token>").post(webhook::handle_webhook))
+        .append(
+            Route::new("webhooks")
+                .get(webhook::list_webhooks)
+                .post(webhook::create_webhook)
+                .append(
+                    Route::new("<id>")
+                        .get(webhook::get_webhook)
+                        .put(webhook::update_webhook)
+                        .delete(webhook::delete_webhook)
+                        .append(Route::new("runs").get(webhook::list_webhook_runs))
+                        .append(Route::new("trigger").post(webhook::trigger_webhook))
+                        .append(Route::new("invoke").post(webhook::invoke_webhook)),
+                ),
+        )
         .append(Route::new("server/shutdown").post(server_ctrl::shutdown))
         .append(ws::ws_route());
 
