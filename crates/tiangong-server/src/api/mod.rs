@@ -1,5 +1,6 @@
 mod chat;
 mod health;
+mod jobs;
 mod mcp;
 mod messages;
 mod server_ctrl;
@@ -95,6 +96,19 @@ pub fn build_routes(
         )
         .append(Route::new("mcp").get(mcp::list_mcp))
         .append(Route::new("skills").get(skills::list_skills))
+        .append(
+            Route::new("jobs")
+                .get(jobs::list_jobs)
+                .post(jobs::create_job)
+                .append(
+                    Route::new("<id>")
+                        .get(jobs::get_job)
+                        .put(jobs::update_job)
+                        .delete(jobs::delete_job)
+                        .append(Route::new("runs").get(jobs::list_job_runs))
+                        .append(Route::new("trigger").post(jobs::trigger_job)),
+                ),
+        )
         .append(Route::new("server/shutdown").post(server_ctrl::shutdown))
         .append(ws::ws_route());
 
