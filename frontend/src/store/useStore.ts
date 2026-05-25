@@ -193,7 +193,7 @@ interface AppState {
   deleteSession: () => Promise<void>;
 
   sendMessage: (content: string, media?: MediaAsset[]) => Promise<void>;
-  editAndResend: (messageId: string, newContent: string) => Promise<void>;
+  editAndResend: (messageId: string, newContent: string, media?: MediaAsset[]) => Promise<void>;
   cancelTurn: () => Promise<boolean>;
   cancelAgent: (role: string) => Promise<boolean>;
 

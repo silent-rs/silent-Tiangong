@@ -32,7 +32,6 @@ import { api, textContent, type ContentBlock } from "@/api/tauri";
 import { CopyableCodeBlock } from "./CopyableCodeBlock";
 import {
   type Attachment,
-  imageMimeType,
   imageExtFromMime,
   fileToDataUrl,
   attachmentFromPath,
