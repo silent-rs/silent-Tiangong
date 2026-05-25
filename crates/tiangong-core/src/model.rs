@@ -1093,11 +1093,11 @@ fn provider_message_from_session(msg: &Message, include_media: bool) -> Option<C
 }
 
 fn attachment_notice_text(msg: &Message) -> String {
+    let mut media_index = 0usize;
     let items: Vec<String> = msg
         .content
         .iter()
-        .enumerate()
-        .filter_map(|(index, block)| {
+        .filter_map(|block| {
             if let ContentBlock::Media {
                 kind,
                 url: _,
@@ -1107,8 +1107,10 @@ fn attachment_notice_text(msg: &Message) -> String {
             {
                 let title = title.as_deref().unwrap_or("未命名附件");
                 let mime = mime_type.as_deref().unwrap_or("unknown");
+                let idx = media_index;
+                media_index += 1;
                 Some(format!(
-                    "- index={index} kind={kind:?} title={title} mime_type={mime}",
+                    "- index={idx} kind={kind:?} title={title} mime_type={mime}",
                 ))
             } else {
                 None

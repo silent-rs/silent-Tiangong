@@ -1007,6 +1007,10 @@ fn start_stream_consumer(
                             );
                             // 同步 core worker 中对 session 字段的修改
                             session.summary_up_to = *summary_up_to;
+                            tiangong_core::context::compressor::mark_compact_boundary(
+                                &mut session.messages,
+                                *summary_up_to,
+                            );
                             session.current_tokens = 0;
                             session.active_agent_current_tokens = 0;
                             session.agent_current_tokens.clear();
@@ -1301,10 +1305,17 @@ fn start_stream_consumer(
 pub fn edit_and_resend(
     message_id: String,
     new_content: String,
+    media: Option<Vec<tiangong_types::MediaAsset>>,
     app: AppHandle,
     state: State<TiangongApp>,
 ) -> Result<(), String> {
     use std::sync::mpsc;
+
+    if let Some(ref media_vec) = media {
+        if parse_context_slash_command(&new_content).is_none() && !media_vec.is_empty() {
+            ensure_multimodal_enabled(&state)?;
+        }
+    }
 
     // 1. 查找消息所在会话并验证
     let session_id = state.with_state(|core_state| {
@@ -1314,13 +1325,20 @@ pub fn edit_and_resend(
             .find(|s| s.messages.iter().any(|m| m.id == message_id))
             .ok_or_else(|| anyhow::anyhow!("消息不存在：{message_id}"))?;
 
-        let msg = session
+        let msg_idx = session
             .messages
             .iter()
-            .find(|m| m.id == message_id)
+            .position(|m| m.id == message_id)
             .ok_or_else(|| anyhow::anyhow!("消息不存在"))?;
+        let msg = &session.messages[msg_idx];
         if msg.role != tiangong_core::session::MessageRole::User {
             return Err(anyhow::anyhow!("只能编辑用户消息"));
+        }
+        if msg.compact {
+            return Err(anyhow::anyhow!("该消息已被压缩或清空，无法编辑"));
+        }
+        if msg_idx < session.summary_up_to {
+            return Err(anyhow::anyhow!("该消息已被压缩或清空，无法编辑"));
         }
         Ok(session.id.clone())
     })?;
@@ -1337,13 +1355,43 @@ pub fn edit_and_resend(
             .find(|s| s.id == session_id)
             .ok_or_else(|| anyhow::anyhow!("会话不存在"))?;
 
-        session.update_message_content(&message_id, new_content.clone());
+        if let Some(ref new_media) = media {
+            session.update_message_content_with_media(
+                &message_id,
+                new_content.clone(),
+                new_media.clone(),
+            );
+        } else {
+            session.update_message_content(&message_id, new_content.clone());
+        }
         session.truncate_after_message(&message_id);
-        let message_media = session
+
+        let message_media: Vec<tiangong_types::MediaAsset> = session
             .messages
             .iter()
             .find(|message| message.id == message_id)
-            .map(|message| message.media.clone())
+            .map(|message| {
+                let mut assets = Vec::new();
+                for block in &message.content {
+                    if let tiangong_types::message::ContentBlock::Media {
+                        kind,
+                        url,
+                        mime_type,
+                        title,
+                    } = block
+                    {
+                        assets.push(tiangong_types::MediaAsset {
+                            kind: *kind,
+                            url: url.clone(),
+                            mime_type: mime_type.clone(),
+                            title: title.clone(),
+                            capability: None,
+                        });
+                    }
+                }
+                assets.extend(message.media.clone());
+                assets
+            })
             .unwrap_or_default();
 
         let mut runtime_session = session.clone();

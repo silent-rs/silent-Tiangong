@@ -1,187 +1,71 @@
 # 天工项目规划（PLAN）
 
 ## 愿景
-构建一个全功能可扩展的 GUI + CLI + Server 个人智能终端平台，实现"可对话、可规划、可执行、可扩展、可治理、可远程"的 Agent 能力闭环。通过 Connector 机制接入各类 IM 通道，支持图片/视频等多媒体生成，打造个人 AI 中枢。
 
-## 总体目标
-- 产品目标：从桌面对话工具演进为全栈个人智能终端（本地 + 远程 + 多通道）。
-- 架构目标：Workspace 多 crate 分离，核心引擎、前端、Server、Connector、媒体生成各自独立。
-- 安全目标：Server 模式默认安全（本地绑定、Token 认证），Connector 鉴权白名单制。
-- 工程目标：按 Phase 增量交付，每个 Phase 保证功能不回退。
+构建全功能可扩展的 GUI + CLI + Server 个人智能终端平台，实现"可对话、可规划、可执行、可扩展、可治理、可远程"的 Agent 能力闭环。通过 IM Adapter 接入消息通道，通过自动化触发层实现系统级主动调度，打造个人 AI 中枢。
 
-## 当前执行策略（2026-05-12）
-- 架构 RFC：`docs/rfc/0004-full-stack-agent-platform.md`
-- 架构基准：`docs/desktop-agent-technical-architecture.md`
-- Phase 1~17 已完成。
-- Phase 18（Memory 系统）主链路已完成，待验证场景验证。
-- 当前主目标：基于 RFC-0011 实现多智能体协作系统。
-- 当前进展：RFC 已创建，Agent 生命周期、通讯机制、文件编辑锁、前端交互设计已明确。
-- 当前风险：多 Agent 并发执行需处理好消息路由正确性和文件锁死锁问题。
+## 版本规划
 
-## 里程碑
+| 版本 | 里程碑 | 状态 |
+|------|--------|------|
+| 0.1.0 | CLI Agent 基线 + Skill 管理 | ✅ |
+| 0.2.0 | Server + Gateway + 多媒体 + Memory | ✅ |
+| 0.3.0 | 多智能体协作 + 发布分发 + 飞书互联 | ✅ |
+| **0.4.0** | **自动化触发层（cron/webhook/polling）** | **🔲 进行中** |
 
-### Phase 1（CLI Agent 基线，已达成）
-- 单 Agent 对话能力可用。
-- 最小任务执行链路可跑通（输入 -> 规划 -> 执行 -> 反馈）。
-- MCP 本地/远程接入可用。
+## 当前执行策略（2026-05-25）
 
-### Phase 2（Skill 管理 MVP，部分完成）
-- Skill 支持安装、启停、卸载、列表、详情。
-- `/skill` 管理交互对齐 `/mcp`。
-- 动态 Step 执行闭环。
-- 当前重构：根据 RFC-0007 将 Skill 注册事实源改为文件系统目录，保留 MCP 锁机制。
-- 待完成：文件系统注册表、按需实时加载、旧布局迁移、GC 与诊断工具。
+- Phase 1~19 已完成。
+- 当前主目标：实现自动化触发层（Issue #38），完成后发布 0.4.0。
+- 自动化触发层与 IM Adapter 模式正交，互不冲突。
 
-### Phase 3（Workspace 拆分与核心抽离，已完成）
-- 单 crate → Cargo workspace 多 crate。
-- `tiangong-core`：核心引擎独立（无 UI 依赖）。
-- `tiangong-cli`：CLI/TUI 前端独立。
-- `tiangong-gui`：桌面 GUI 前端独立（Tauri + React）。
-- 主二进制统一入口分发。
-- 确保现有功能不回退。
+## 已完成里程碑
 
-### Phase 4（Server 模式）
-- `tiangong-server`：HTTP REST + WebSocket API。
-- 对话、会话管理、Skill/MCP 管理 API。
-- API Token 认证与访问控制。
-- `tiangong server` 命令启动，支持 `-d` / `--daemon` 后台运行。
-- `tiangong server stop` 停止后台运行的 Server。
-- Server 启动时自动加载并启动已启用的 Connector。
+| Phase | 名称 | 关键交付 |
+|-------|------|----------|
+| 1 | CLI Agent 基线 | 单 Agent 对话、MCP 接入 |
+| 2 | Skill 管理 MVP | 安装/启停/卸载、动态 Step 执行 |
+| 3 | Workspace 拆分 | 多 crate 分离（core / cli / gui） |
+| 4 | Server 模式 | HTTP + WebSocket API、Token 认证、守护进程 |
+| 5 | Gateway 与事件总线 | EventBus、统一消息路由 |
+| 6 | IM Adapter 框架 | 外部 Bot 统一入口、飞书 Bot Adapter |
+| 7 | 多媒体能力 | 图片/视频生成、语音识别/合成 |
+| 8 | 生产化与完善 | 日志监控、配置热重载、TLS |
+| 9 | 模型配置重构 | Provider + Model + Routing 三层架构、shadcn/ui |
+| 10 | 友好交互改造 | GUI 简化、流式展示 |
+| 11 | 运行时基础设施 | 统一任务模型、后台任务回流、远程角色模型 |
+| 12 | 事件驱动运行时 | Event-loop 模型替代 Turn-based |
+| 13 | CoreConfig 注入 | 配置外部注入，支持 CLI/GUI/Server |
+| 15 | LLM 协议抽象 | tiangong-llm + tiangong-anthropic、Anthropic 适配 |
+| 16 | 架构收口 | 统一入口、成本可见性、安全审计 |
+| 17 | 多媒体语义收敛 | 结构化图片/视频结果、Connector 视频发送 |
+| 18 | Memory 系统 | tiangong-memory crate、Micro/Meso 记忆链路 |
+| 19 | 多智能体协作 | 动态组队、消息通讯、文件编辑锁、前端交互 |
 
-### Phase 5（Gateway 与事件总线）
-- 事件总线（EventBus）实现层间解耦。
-- Gateway 统一消息路由。
-- 统一消息模型（IncomingMessage / OutgoingMessage）。
+## Phase 20：自动化触发层（进行中）
 
-### Phase 6（Connector 框架与 IM 接入）
-- `tiangong-connector`：Connector trait 定义。
-- 首批适配器：Telegram、Discord、飞书/Lark、Webhook。
-- Connector 配置管理与热插拔。
-- 后续扩展：钉钉、Slack 等。
+> Issue：#38
 
-### Phase 7（多媒体能力）
-- `tiangong-media`：图片/视频生成 + 语音识别/合成框架。
-- 图片生成后端：OpenAI DALL-E / GPT-Image、Flux。
-- 视频生成后端：Sora、Kling。
-- 语音识别后端：OpenAI Whisper、讯飞。
-- 语音合成后端：OpenAI TTS、ElevenLabs。
-- Agent 层集成 MediaAgent。
-- Connector 支持语音消息自动转文字。
+内嵌于 Server 的系统级主动触发能力，与 IM Adapter 模式正交。
 
-### Phase 8（生产化与完善）
-- 日志与监控完善。
-- 配置热重载。
-- TLS、安全加固、Docker 部署支持。
+**设计原则**：
+- 调度器常驻 Server 进程，不做成 tool call
+- Job 持久化（SQLite），启动时恢复
+- 触发 → RuntimeEvent → 现有执行链路
+- 结果可投递到 IM 通道
 
-### Phase 9（模型配置重构与多媒体集成，已完成）
-- `ModelsConfig` 替换 `ModelProviderConfig` 为唯一模型配置源。
-- Provider + Model + Routing 三层架构。
-- GUI 全面升级为 shadcn/ui dashboard 风格，支持暗/亮主题。
-- 意图分类快速路径：简单对话跳过 planning，减少 token 消耗。
-- 多媒体能力通过 Routing 集成到执行引擎。
-
-### Phase 10（友好交互改造，已完成）
-- GUI 样式简化（去头像、去气泡边框）。
-- GUI 解释文本独立流式展示。
-- CLI 实时流式展示。
-
-### Phase 11（架构补全 — 运行时基础设施，已完成）
-> 对照 `docs/desktop-agent-technical-architecture.md` 补全缺失能力
-> 差距分析：`docs/architecture-gap-analysis.md`
-
-**Phase 11-A：基础设施（高优先级）**
-- 统一任务模型：合并 RunStatus / TaskStatus 为 UnifiedTaskStatus，覆盖完整状态机。
-- 查询编排层独立抽象：新建 `orchestrator/` 模块，扩展 QueryMode 为多路由。
-
-**Phase 11-B：执行闭环（高优先级）**
-- 后台任务回流：后台任务完成 → RuntimeEvent → EventBus → 会话注入。
-- 恢复与持久化：任务状态实时持久化，启动时恢复未完成任务现场。
-
-**Phase 11-C：能力增强（中优先级）**
-- 上下文装配层增强：用户偏好/长期记忆注入，预留检索接口。
-- 多代理 Worker 隔离：独立工具集、上下文边界、预算上限。
-- 权限细粒度控制：路径级规则、网络目标限制。
-- 观测与成本治理：请求级/任务级/会话级三层成本聚合。
-
-**Phase 11-D：远程能力（低优先级）**
-- 远程接入角色模型：控制者/观察者角色区分，并通过部署边界与鉴权控制风险。
-
-### Phase 12（事件驱动循环运行时，已完成）
-> RFC：`docs/rfc/0005-event-loop-runtime.md`
-
-将运行时从 Turn-based 改为 Event-loop 模型：
-- Phase A：EventLoopRunner 核心 + 挂起/恢复
-- Phase B：ActiveLoops 管理器 + LoopHost trait
-- Phase C：生命周期管理、优雅关闭与持久化恢复
-- Phase D：清理旧代码（TurnRunner / QueryClassifier / ControlSignal）
-
-### Phase 13（CoreConfig 配置注入，已完成）
-> RFC：`docs/rfc/0006-core-config-provider.md`
-
-将 TiangongCore 的配置从内部磁盘加载改为外部注入：
-- Phase A：定义 CoreConfig + CoreConfigProvider，修改 TiangongCore 构造函数
-- Phase B：CLI/GUI/Server 适配，使用 CoreConfigProvider 注入配置
-- Phase C：tiangong-config 独立 crate（可选），提供磁盘加载、持久化、文件监听
-
-### Phase 15（LLM 协议抽象与 Anthropic 支持，已完成）
-- Provider 配置增加协议类型，区分 OpenAI 兼容与 Anthropic。
-- 新增独立 crate `tiangong-llm`，统一承载 Provider 抽象、领域模型、错误类型与各协议适配。
-- 在 `tiangong-core` 内部维护统一 Provider 抽象和领域模型，Anthropic transport 下沉到独立 crate `tiangong-anthropic`，使用原生 `reqwest + serde` 实现 Messages 与 SSE 解析，`tiangong-llm` 仅负责协议抽象与 provider 封装。
-- `async-openai` 也迁入 `tiangong-llm` 作为 OpenAI 兼容 provider，避免协议实现继续散落在 `tiangong-core`。
-- 对话、流式输出、工具调用、轻量模型调用补齐 Anthropic Messages 适配。
-- GUI / CLI / Server 共享同一套协议能力判断与错误处理。
-
-### Phase 16（架构收口与远程能力补齐，已完成）
-> 对照 `docs/desktop-agent-technical-architecture.md` 的剩余缺口继续推进
-
-- 统一会话入口与运行时事件模型，减少 GUI / Server / Gateway 的入口分叉。
-- 收敛远程角色模型（控制者 / 观察者）与相应权限边界。
-- 收敛 `tiangong-core/src/model.rs` 剩余兼容桥接，继续降低核心层协议细节。
-- 完善安全与审计闭环，补齐路径、网络目标与远程会话绑定的治理能力。
-- 继续补齐观测与成本治理，让请求级 / 任务级 / 会话级统计对齐架构基准。
-- 已完成 Server 信任语义收敛：运行时强制 `full_trust`，远程角色收敛为 `controller / observer`，并移除 Server 端审批 API 与审批事件。
-- 已完成 Server 成本可见性主链路：支持会话级成本查询并继承远程会话可见范围控制。
-- 已完成入口尾项收口：GUI 本地消息入口准备逻辑下沉到 `app_state` ingress 门面，减少本地/远程入口分叉。
-- 已完成文档尾项收口：清理历史文档中的远程审批语义，保证路线与实现一致。
-
-### Phase 17（多媒体结果语义收敛，已完成）
-> 设计说明：`docs/media-capability-architecture-adjustment.md`
-
-- 已为会话消息补齐结构化图片/视频结果语义，避免依赖工具日志文本渲染图片/视频。
-- 已保留 `tiangong-media` 作为多媒体主链路，MCP 仅作为后端适配来源之一。
-- 已在 Core/Tauri/Server 链路中保留结构化媒体资源，避免多媒体结果退化为工具文本。
-- 已补齐 Connector 对结构化视频结果的发送分支。
-
-### Phase 18（Memory 系统，已完成）
-> 设计说明：`docs/memory-system/`
-
-- 将长期记忆从 Core 中拆出为独立 `tiangong-memory` crate，保证可单独集成测试、可复用、可关闭。
-- 已完成 Micro 写入主链路：TurnResult -> EpisodeWriter -> SQLite/Tantivy/向量索引。
-- 已完成 Tool 化按需回忆：主模型通过 `recall_memory` 主动触发 Memory。
-- 已完成结构化产物记忆：媒体 URL、文件路径、工具结果摘要进入 Episode。
-- 已完成 Meso 反刍：从近期 Episode 提炼 Entity/Decision。
-- 已完成多类型记忆提取与智能去重。
-- 已完成运行时粗回忆与重新回忆机制。
-
-### Phase 19（多智能体协作系统，进行中）
-> RFC：`docs/rfc/0011-multi-agent-collaboration.md`
-
-主 Agent 在对话中动态组建团队，Sub Agent 之间通过工具调用互相通讯，共享工作区但通过文件编辑锁防止冲突。用户可直接与任意存活 Agent 交互。
-
-- Phase A：基础框架 — AgentDescriptor / AgentRegistry 数据结构，create_agent / dismiss_agent 工具，Sub Agent ReactEngine 启动与停止
-- Phase B：消息通讯 — send_message / broadcast_message 工具，MessageBus 消息路由，收件箱消息注入 ReactEngine 循环
-- Phase C：文件编辑锁 — FileLockManager 实现，lock_file / unlock_file 工具，write_file / replace_in_file 锁检查集成
-- Phase D：前端交互 — Agent Tab 切换，Sub Agent 直接推送，@提及输入，Agent 状态面板
-- Phase E：完善与优化 — 临时 Agent 自动销毁，锁超时与死锁检测，Agent 错误恢复
+| 子阶段 | 内容 |
+|--------|------|
+| 20-A | 任务模型与存储 — Job/JobRun/JobDelivery 模型、SQLite store、CRUD API |
+| 20-B | Cron 调度器 — 表达式解析、常驻执行器、启动恢复、手动触发 |
+| 20-C | Webhook 触发器 — 端点注册、签名验证、触发接入 |
+| 20-D | Polling 触发器 — HTTP 轮询、条件去重、触发接入 |
+| 20-E | 结果投递与通知 — IM 通道投递、失败重试、Run history API |
+| 20-F | 前端管理界面 — Job 列表/创建/启停、执行历史、手动触发 |
 
 ## 参考文档
-- 项目说明：`README.md`
-- RFC 0001：`docs/rfc/0001-tiangong-desktop-agent-roadmap.md`
-- RFC 0002：`docs/rfc/0002-cli-agent-roadmap.md`
-- RFC 0003：`docs/rfc/0003-skill-market.md`
-- RFC 0004：`docs/rfc/0004-full-stack-agent-platform.md`（全栈平台架构）
-- RFC 0006：`docs/rfc/0006-core-config-provider.md`（CoreConfig 配置注入）
-- RFC 0011：`docs/rfc/0011-multi-agent-collaboration.md`（多智能体协作系统）
+
 - 架构基准：`docs/desktop-agent-technical-architecture.md`
-- 架构差距分析：`docs/architecture-gap-analysis.md`
 - 需求基线：`docs/requirements.md`
+- Server API：`docs/server-api.md`
+- RFC 0011：`docs/rfc/0011-multi-agent-collaboration.md`

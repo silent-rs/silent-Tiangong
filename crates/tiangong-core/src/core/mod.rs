@@ -645,6 +645,7 @@ pub(crate) fn reset_context_for_session(
 ) {
     let total = session.messages.len();
     session.summary_up_to = total;
+    crate::context::compressor::mark_compact_boundary(&mut session.messages, total);
     session.context_summary = None;
     session.current_tokens = 0;
     session.active_agent_current_tokens = 0;
@@ -824,7 +825,8 @@ pub(crate) fn execute_attachment_analysis_tool(
     };
 
     let media = if let Some(index) = attachment_index {
-        let Some(asset) = source_message.media.get(index) else {
+        let all_media = collect_message_media(source_message);
+        let Some(asset) = all_media.get(index) else {
             return (
                 attachment_tool_result(
                     false,
@@ -839,7 +841,7 @@ pub(crate) fn execute_attachment_analysis_tool(
         };
         vec![asset.clone()]
     } else {
-        source_message.media.clone()
+        collect_message_media(source_message)
     };
 
     if media.is_empty() {
@@ -925,17 +927,47 @@ fn find_attachment_source_message<'a>(
     session: &'a Session,
     message_id: Option<&str>,
 ) -> Option<&'a Message> {
+    let has_media = |msg: &Message| -> bool {
+        !msg.media.is_empty()
+            || msg
+                .content
+                .iter()
+                .any(|b| matches!(b, tiangong_types::message::ContentBlock::Media { .. }))
+    };
     if let Some(message_id) = message_id {
         return session
             .messages
             .iter()
-            .find(|message| message.id == message_id && !message.media.is_empty());
+            .find(|message| message.id == message_id && has_media(message));
     }
     session
         .messages
         .iter()
         .rev()
-        .find(|message| message.role == MessageRole::User && !message.media.is_empty())
+        .find(|message| message.role == MessageRole::User && has_media(message))
+}
+
+fn collect_message_media(message: &Message) -> Vec<tiangong_types::MediaAsset> {
+    let mut assets = Vec::new();
+    for block in &message.content {
+        if let tiangong_types::message::ContentBlock::Media {
+            kind,
+            url,
+            mime_type,
+            title,
+        } = block
+        {
+            assets.push(tiangong_types::MediaAsset {
+                kind: *kind,
+                url: url.clone(),
+                mime_type: mime_type.clone(),
+                title: title.clone(),
+                capability: None,
+            });
+        }
+    }
+    assets.extend(message.media.clone());
+    assets
 }
 
 fn attachment_tool_result(
