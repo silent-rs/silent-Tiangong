@@ -11,6 +11,7 @@ members = [
     "crates/tiangong-server",
     "crates/tiangong-media",
     "crates/tiangong-config",
+    "crates/tiangong-scheduler",
     "src-tauri",
 ]
 
@@ -27,6 +28,7 @@ tiangong-llm = { path = "crates/tiangong-llm" }
 tiangong-media = { path = "crates/tiangong-media" }
 tiangong-memory = { path = "crates/tiangong-memory" }
 tiangong-server = { path = "crates/tiangong-server" }
+tiangong-scheduler = { path = "crates/tiangong-scheduler" }
 tiangong-types = { path = "crates/tiangong-types" }
 
 anyhow = "1"
