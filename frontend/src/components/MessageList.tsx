@@ -242,6 +242,7 @@ export function MessageList() {
   const [hasTts, setHasTts] = useState(false);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState("");
+  const editingTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   // 检查 TTS 能力
   useEffect(() => {
@@ -255,6 +256,13 @@ export function MessageList() {
     if (runStatus !== "idle") return;
     setEditingMessageId(messageId);
     setEditingContent(text);
+    setTimeout(() => {
+      const textarea = editingTextareaRef.current;
+      if (textarea) {
+        textarea.style.height = '60px';
+        textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
+      }
+    }, 0);
   };
 
   const handleConfirmEdit = () => {
@@ -543,42 +551,54 @@ export function MessageList() {
               const isEditing = editingMessageId === message.id;
               return (
                 <div key={group.key} className="mt-3 first:mt-0">
+                  {isEditing ? (
+                    <div className="w-full">
+                      <Textarea
+                        ref={editingTextareaRef}
+                        value={editingContent}
+                        onChange={(e) => {
+                          setEditingContent(e.target.value);
+                          const textarea = editingTextareaRef.current;
+                          if (textarea) {
+                            textarea.style.height = '60px';
+                            textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
+                          }
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
+                            e.preventDefault();
+                            handleConfirmEdit();
+                          }
+                          if (e.key === "Escape") {
+                            handleCancelEdit();
+                          }
+                        }}
+                        className="min-h-[60px] max-h-[200px] resize-none text-sm w-full"
+                        autoFocus
+                      />
+                      <div className="flex justify-between items-center mt-1">
+                        <span className="text-[10px] text-muted-foreground">Enter 发送 · Shift+Enter 换行 · Esc 取消</span>
+                        <div className="flex gap-1.5">
+                          <button
+                            onClick={handleCancelEdit}
+                            className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                          >
+                            <X className="w-3 h-3" />
+                            取消
+                          </button>
+                          <button
+                            onClick={handleConfirmEdit}
+                            className="px-2.5 py-1 text-xs bg-green-600 hover:bg-green-700 text-white rounded transition-colors"
+                          >
+                            发送
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
                   <div className="flex justify-end" title={formatMessageTime(message.created_at)}>
                     <div className="max-w-[100%] text-muted-foreground">
-                      {isEditing ? (
-                        <div className="w-full">
-                          <Textarea
-                            value={editingContent}
-                            onChange={(e) => setEditingContent(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                                e.preventDefault();
-                                handleConfirmEdit();
-                              }
-                              if (e.key === "Escape") {
-                                handleCancelEdit();
-                              }
-                            }}
-                            className="min-h-[60px] max-h-[200px] resize-none text-sm"
-                            autoFocus
-                          />
-                          <div className="flex justify-end gap-1.5 mt-1">
-                            <button
-                              onClick={handleCancelEdit}
-                              className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-                            >
-                              <X className="w-3 h-3" />
-                              取消
-                            </button>
-                            <button
-                              onClick={handleConfirmEdit}
-                              className="px-2.5 py-1 text-xs bg-green-600 hover:bg-green-700 text-white rounded transition-colors"
-                            >
-                              发送 (⌘+Enter)
-                            </button>
-                          </div>
-                        </div>
-                      ) : voiceInfo ? (
+                      {voiceInfo ? (
                         <VoiceBubble
                           messageId={message.id}
                           audioPath={voiceInfo.audioPath}
@@ -598,6 +618,7 @@ export function MessageList() {
                       )}
                     </div>
                   </div>
+                  )}
                   {textContent(message) && !isEditing && (
                     <div className="flex justify-end">
                       <UserMessageActions
