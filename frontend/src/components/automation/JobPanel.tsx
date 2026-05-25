@@ -3,12 +3,6 @@ import { api, type Job } from '../../api/tauri';
 import { Button } from '../ui/button';
 import { Switch } from '../ui/switch';
 import { Badge } from '../ui/badge';
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '../ui/tooltip';
 import { JobFormDialog } from './JobFormDialog';
 import { RunHistoryDialog } from './RunHistoryDialog';
 
@@ -78,8 +72,7 @@ export function JobPanel({ serverRunning }: JobPanelProps) {
   }
 
   return (
-    <TooltipProvider delayDuration={300}>
-      <div className="p-6 space-y-4">
+    <div className="p-6 space-y-4">
         <div className="flex items-center justify-between">
           <p className="text-sm text-muted-foreground">
             共 {jobs.length} 个定时任务
@@ -123,7 +116,6 @@ export function JobPanel({ serverRunning }: JobPanelProps) {
           />
         )}
       </div>
-    </TooltipProvider>
   );
 }
 
@@ -138,7 +130,7 @@ interface JobRowProps {
 }
 
 function JobRow({ job, active, onToggle, onTrigger, onHistory, onEdit, onDelete }: JobRowProps) {
-  const row = (
+  return (
     <div
       className={`flex items-center gap-3 p-3 rounded-lg border transition-colors ${
         active
@@ -156,11 +148,6 @@ function JobRow({ job, active, onToggle, onTrigger, onHistory, onEdit, onDelete 
           <Badge variant="outline" className="text-xs font-mono">
             {job.schedule}
           </Badge>
-          {!active && (
-            <Badge variant="secondary" className="text-xs text-amber-600 dark:text-amber-400">
-              未激活
-            </Badge>
-          )}
         </div>
         <p className="text-sm text-muted-foreground truncate">{job.description}</p>
       </div>
@@ -179,20 +166,5 @@ function JobRow({ job, active, onToggle, onTrigger, onHistory, onEdit, onDelete 
         </Button>
       </div>
     </div>
-  );
-
-  if (active) {
-    return row;
-  }
-
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        {row}
-      </TooltipTrigger>
-      <TooltipContent side="top">
-        Server 未运行，定时任务处于未激活状态。请在「Server」选项卡中启动 Server。
-      </TooltipContent>
-    </Tooltip>
   );
 }

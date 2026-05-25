@@ -3,12 +3,6 @@ import { api, type Webhook } from '../../api/tauri';
 import { Button } from '../ui/button';
 import { Switch } from '../ui/switch';
 import { Badge } from '../ui/badge';
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '../ui/tooltip';
 import { WebhookFormDialog } from './WebhookFormDialog';
 import { RunHistoryDialog } from './RunHistoryDialog';
 
@@ -80,8 +74,7 @@ export function WebhookPanel({ serverRunning }: WebhookPanelProps) {
   }
 
   return (
-    <TooltipProvider delayDuration={300}>
-      <div className="p-6 space-y-4">
+    <div className="p-6 space-y-4">
         <div className="flex items-center justify-between">
           <p className="text-sm text-muted-foreground">
             共 {webhooks.length} 个 Webhook
@@ -126,7 +119,6 @@ export function WebhookPanel({ serverRunning }: WebhookPanelProps) {
           />
         )}
       </div>
-    </TooltipProvider>
   );
 }
 
@@ -142,7 +134,7 @@ interface WebhookRowProps {
 }
 
 function WebhookRow({ webhook, active, invokeUrl, onToggle, onTrigger, onHistory, onEdit, onDelete }: WebhookRowProps) {
-  const row = (
+  return (
     <div
       className={`flex items-center gap-3 p-3 rounded-lg border transition-colors ${
         active
@@ -158,11 +150,6 @@ function WebhookRow({ webhook, active, invokeUrl, onToggle, onTrigger, onHistory
             <Badge variant="default" className="text-xs">已设密钥</Badge>
           ) : (
             <Badge variant="secondary" className="text-xs">无密钥</Badge>
-          )}
-          {!active && (
-            <Badge variant="secondary" className="text-xs text-amber-600 dark:text-amber-400">
-              未激活
-            </Badge>
           )}
         </div>
         <p className="text-xs text-muted-foreground font-mono truncate mt-0.5">
@@ -184,20 +171,5 @@ function WebhookRow({ webhook, active, invokeUrl, onToggle, onTrigger, onHistory
         </Button>
       </div>
     </div>
-  );
-
-  if (active) {
-    return row;
-  }
-
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        {row}
-      </TooltipTrigger>
-      <TooltipContent side="top">
-        Server 未运行，Webhook 处于未激活状态。请在「Server」选项卡中启动 Server。
-      </TooltipContent>
-    </Tooltip>
   );
 }
