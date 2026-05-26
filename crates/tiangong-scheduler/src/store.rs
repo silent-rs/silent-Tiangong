@@ -13,7 +13,11 @@ pub struct JobStore {
 impl JobStore {
     /// 打开或创建存储目录
     pub fn open() -> Result<Self> {
-        let base = scheduler_dir();
+        Self::open_at(scheduler_dir())
+    }
+
+    /// 在指定目录打开或创建存储
+    pub fn open_at(base: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&base)
             .with_context(|| format!("创建调度器目录失败: {}", base.display()))?;
         let runs_dir = base.join("runs");

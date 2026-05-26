@@ -27,3 +27,6 @@ subtle = { workspace = true }
 reqwest = { workspace = true, default-features = false, features = ["rustls-tls"] }
 dirs = "6"
 libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

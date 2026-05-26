@@ -9299,6 +9299,7 @@ dependencies = [
  "serde",
  "serde_json",
  "silent",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -9323,6 +9324,7 @@ dependencies = [
  "sha2",
  "silent",
  "subtle",
+ "tempfile",
  "tiangong-config",
  "tiangong-core",
  "tiangong-media",

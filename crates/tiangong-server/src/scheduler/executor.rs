@@ -1,9 +1,10 @@
 use std::collections::HashSet;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::api::ServerAppContext;
 use tiangong_core::scheduler::store::JobStore;
-use tiangong_types::MessageContent;
 
 /// 通用执行参数
 pub struct ExecuteParams {
@@ -24,92 +25,26 @@ pub enum RunTracker {
     },
 }
 
+/// 消息发送器类型：接受 (session_id, message)，仅发送不等结果
+type MessageSender = Box<
+    dyn Fn(String, String) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// 正在执行的 trigger_id 集合，防止同一任务重叠执行
 static RUNNING: std::sync::LazyLock<std::sync::Mutex<HashSet<String>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
 
-/// 触发执行：查找/创建 session → 发送消息 → 等待结果 → 记录执行历史
+/// 触发执行（生产入口：使用 ServerCoreManager.send_message）
 pub async fn execute(app_ctx: Arc<ServerAppContext>, params: ExecuteParams, tracker: RunTracker) {
-    // 防止同一任务重叠执行
-    {
-        let mut running = RUNNING.lock().unwrap();
-        if running.contains(&params.trigger_id) {
-            tracing::warn!("触发 {} 跳过：上一轮执行尚未完成", params.trigger_id);
-            return;
-        }
-        running.insert(params.trigger_id.clone());
-    }
-    struct RunGuard(String);
-    impl Drop for RunGuard {
-        fn drop(&mut self) {
-            RUNNING.lock().unwrap().remove(&self.0);
-        }
-    }
-    let _guard = RunGuard(params.trigger_id.clone());
+    let cores = app_ctx.cores.clone();
+    let sender: MessageSender = Box::new(move |session_id, message| {
+        let cores = cores.clone();
+        Box::pin(async move { cores.send_message(&session_id, message, None, vec![]).await })
+    });
 
-    let run_id = scru128::new().to_string();
-    let now = chrono::Local::now().naive_local().to_string();
-
-    // 确定使用哪个 session
-    let (session_id, created_new) = match resolve_session(&app_ctx, &params).await {
-        Ok(result) => result,
-        Err(e) => {
-            tracing::error!("触发 {} 解析 session 失败：{e}", params.trigger_id);
-            return;
-        }
-    };
-
-    // 首次执行时将 session_id 写回 job/webhook，后续复用同一会话
-    if created_new {
-        pin_session_to_tracker(&tracker, &params.trigger_id, &session_id);
-    }
-
-    // 记录开始执行
-    insert_run(&tracker, &run_id, &params.trigger_id, &session_id, &now);
-
-    // 构造消息
-    let message = format!(
-        "[自动化任务触发]\n任务名称：{}\n任务描述：{}\n\n{}",
-        params.trigger_name, params.trigger_description, params.payload
-    );
-
-    // 通过 ServerCoreManager 发送消息并等待结果
-    let result = app_ctx
-        .cores
-        .send_message_and_wait(&session_id, message, None, vec![])
-        .await;
-
-    let finished_at = chrono::Local::now().naive_local().to_string();
-    match result {
-        Ok((_sid, outgoing)) => {
-            let text = match &outgoing.content {
-                MessageContent::Text(t) => t.clone(),
-                MessageContent::Image { url, .. } => url.clone(),
-                MessageContent::Video { url, .. } => url.clone(),
-                _ => String::new(),
-            };
-            let summary = truncate_summary(&text, 500);
-            update_run_success(
-                &tracker,
-                &run_id,
-                &params.trigger_id,
-                &finished_at,
-                &summary,
-            );
-            tracing::info!("触发 {} 执行成功", params.trigger_id);
-        }
-        Err(e) => {
-            let err_msg = format!("执行失败：{e}");
-            update_run_failed(
-                &tracker,
-                &run_id,
-                &params.trigger_id,
-                &finished_at,
-                &err_msg,
-            );
-            tracing::error!("触发 {} 执行失败：{e}", params.trigger_id);
-        }
-    }
+    execute_core(&app_ctx, params, &tracker, &sender).await;
 }
 
 /// 执行定时任务（兼容旧接口）
@@ -162,6 +97,79 @@ pub async fn execute_webhook(
     };
 
     execute(app_ctx, params, RunTracker::Webhook { store }).await;
+}
+
+/// 核心执行逻辑（可测试入口）
+pub(crate) async fn execute_core(
+    app_ctx: &Arc<ServerAppContext>,
+    params: ExecuteParams,
+    tracker: &RunTracker,
+    sender: &MessageSender,
+) {
+    // 防止同一任务重叠执行
+    {
+        let mut running = RUNNING.lock().unwrap();
+        if running.contains(&params.trigger_id) {
+            tracing::warn!("触发 {} 跳过：上一轮执行尚未完成", params.trigger_id);
+            return;
+        }
+        running.insert(params.trigger_id.clone());
+    }
+    struct RunGuard(String);
+    impl Drop for RunGuard {
+        fn drop(&mut self) {
+            RUNNING.lock().unwrap().remove(&self.0);
+        }
+    }
+    let _guard = RunGuard(params.trigger_id.clone());
+
+    let run_id = scru128::new().to_string();
+    let now = chrono::Local::now().naive_local().to_string();
+
+    // 确定使用哪个 session
+    let (session_id, created_new) = match resolve_session(app_ctx, &params).await {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::error!("触发 {} 解析 session 失败：{e}", params.trigger_id);
+            return;
+        }
+    };
+
+    // 首次执行时将 session_id 写回 job/webhook，后续复用同一会话
+    if created_new {
+        pin_session_to_tracker(tracker, &params.trigger_id, &session_id);
+    }
+
+    // 记录开始执行
+    insert_run(tracker, &run_id, &params.trigger_id, &session_id, &now);
+
+    // 构造消息
+    let message = format!(
+        "[自动化任务触发]\n任务名称：{}\n任务描述：{}\n\n{}",
+        params.trigger_name, params.trigger_description, params.payload
+    );
+
+    // 发送消息到 core（不等结果）
+    let result = sender(session_id, message).await;
+
+    let finished_at = chrono::Local::now().naive_local().to_string();
+    match result {
+        Ok(()) => {
+            update_run_success(
+                tracker,
+                &run_id,
+                &params.trigger_id,
+                &finished_at,
+                "消息已发送至会话",
+            );
+            tracing::info!("触发 {} 消息已发送", params.trigger_id);
+        }
+        Err(e) => {
+            let err_msg = format!("发送失败：{e}");
+            update_run_failed(tracker, &run_id, &params.trigger_id, &finished_at, &err_msg);
+            tracing::error!("触发 {} 发送失败：{e}", params.trigger_id);
+        }
+    }
 }
 
 // ── 内部方法 ──────────────────────────────────────────────────
@@ -313,10 +321,253 @@ async fn resolve_session(
     Ok((session_id, true))
 }
 
-fn truncate_summary(text: &str, max_len: usize) -> String {
-    if text.len() <= max_len {
-        return text.to_string();
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::ServerAppContext;
+    use crate::remote::event::EventBus;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use tiangong_config::CoreConfigProvider;
+    use tiangong_core::app_state::TiangongState;
+    use tiangong_core::scheduler::model::{Job, JobRunStatus, TriggerType};
+    use tiangong_core::session::Session;
+    use tokio::sync::Mutex;
+
+    fn mock_sender_ok() -> MessageSender {
+        Box::new(|_sid, _msg| Box::pin(async { Ok(()) }))
     }
-    let truncated: String = text.chars().take(max_len).collect();
-    format!("{truncated}...")
+
+    fn mock_sender_err(msg: &str) -> MessageSender {
+        let msg = msg.to_string();
+        Box::new(move |_sid, _msg| {
+            let msg = msg.clone();
+            Box::pin(async move { Err(anyhow::anyhow!("{msg}")) })
+        })
+    }
+
+    fn setup_app_ctx() -> (TempDir, Arc<ServerAppContext>) {
+        let dir = TempDir::new().unwrap();
+        let state = Arc::new(Mutex::new(TiangongState::load_or_default()));
+        let config = CoreConfigProvider::new(tiangong_config::CoreConfig::default());
+        let event_bus = Arc::new(EventBus::default());
+        let app_ctx = Arc::new(ServerAppContext::new(state, config, event_bus));
+        (dir, app_ctx)
+    }
+
+    fn setup_job_store(dir: &TempDir) -> (JobStore, Job) {
+        let store = JobStore::open_at(dir.path().to_path_buf()).unwrap();
+        let job = Job {
+            id: "test-job-1".to_string(),
+            name: "测试任务".to_string(),
+            description: "测试".to_string(),
+            trigger_type: TriggerType::Cron,
+            schedule: Some("0 */1 * * * *".to_string()),
+            session_id: None,
+            payload: "hello".to_string(),
+            enabled: true,
+            created_at: chrono::Local::now().naive_local().to_string(),
+            updated_at: chrono::Local::now().naive_local().to_string(),
+        };
+        store.insert_job(&job).unwrap();
+        (store, job)
+    }
+
+    #[tokio::test]
+    async fn execute_succeeds_and_records_run() {
+        let (dir, app_ctx) = setup_app_ctx();
+        let (store, _job) = setup_job_store(&dir);
+        let store_path = dir.path().to_path_buf();
+
+        let params = ExecuteParams {
+            trigger_id: "test-job-1".to_string(),
+            trigger_name: "测试任务".to_string(),
+            trigger_description: "测试".to_string(),
+            session_id: None,
+            payload: "hello".to_string(),
+        };
+
+        execute_core(
+            &app_ctx,
+            params,
+            &RunTracker::Job { store },
+            &mock_sender_ok(),
+        )
+        .await;
+
+        let reader = JobStore::open_at(store_path).unwrap();
+        let runs = reader.list_job_runs("test-job-1", 10).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert!(matches!(runs[0].status, JobRunStatus::Succeeded));
+        assert!(runs[0].finished_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn execute_failure_records_run_as_failed() {
+        let (dir, app_ctx) = setup_app_ctx();
+        let (store, _) = setup_job_store(&dir);
+        let store_path = dir.path().to_path_buf();
+
+        let params = ExecuteParams {
+            trigger_id: "test-job-1".to_string(),
+            trigger_name: "测试任务".to_string(),
+            trigger_description: "测试".to_string(),
+            session_id: None,
+            payload: "hello".to_string(),
+        };
+
+        execute_core(
+            &app_ctx,
+            params,
+            &RunTracker::Job { store },
+            &mock_sender_err("core 不存在"),
+        )
+        .await;
+
+        let reader = JobStore::open_at(store_path).unwrap();
+        let runs = reader.list_job_runs("test-job-1", 10).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert!(matches!(runs[0].status, JobRunStatus::Failed));
+        assert!(
+            runs[0]
+                .result_summary
+                .as_deref()
+                .unwrap()
+                .contains("core 不存在")
+        );
+    }
+
+    #[tokio::test]
+    async fn session_is_reused_when_pinned() {
+        let (dir, app_ctx) = setup_app_ctx();
+        let (store, _) = setup_job_store(&dir);
+        let store_path = dir.path().to_path_buf();
+
+        // 第一次执行：创建 session 并 pin
+        let params1 = ExecuteParams {
+            trigger_id: "test-job-1".to_string(),
+            trigger_name: "测试任务".to_string(),
+            trigger_description: "测试".to_string(),
+            session_id: None,
+            payload: "hello".to_string(),
+        };
+        execute_core(
+            &app_ctx,
+            params1,
+            &RunTracker::Job { store },
+            &mock_sender_ok(),
+        )
+        .await;
+
+        // 验证 session_id 被写回 job
+        let reader = JobStore::open_at(store_path.clone()).unwrap();
+        let job = reader.get_job("test-job-1").unwrap().unwrap();
+        let pinned_session = job.session_id.clone().unwrap();
+        assert!(!pinned_session.is_empty());
+
+        // 在 state 中手动添加 pinned session（模拟 server 重启后的加载）
+        {
+            let mut state = app_ctx.state.lock().await;
+            let session = Session::new_isolated("自动化任务：测试任务".to_string());
+            let mut session = session;
+            session.id = pinned_session.clone();
+            state.sessions_mut().push(session);
+        }
+
+        // 第二次执行：应该复用同一个 session
+        let store2 = JobStore::open_at(store_path.clone()).unwrap();
+        let params2 = ExecuteParams {
+            trigger_id: "test-job-1".to_string(),
+            trigger_name: "测试任务".to_string(),
+            trigger_description: "测试".to_string(),
+            session_id: Some(pinned_session.clone()),
+            payload: "hello again".to_string(),
+        };
+        execute_core(
+            &app_ctx,
+            params2,
+            &RunTracker::Job { store: store2 },
+            &mock_sender_ok(),
+        )
+        .await;
+
+        let reader = JobStore::open_at(store_path).unwrap();
+        let runs = reader.list_job_runs("test-job-1", 10).unwrap();
+        assert_eq!(runs.len(), 2);
+        assert!(
+            runs.iter()
+                .all(|r| matches!(r.status, JobRunStatus::Succeeded))
+        );
+        // 两次运行使用相同的 session
+        assert_eq!(runs[0].session_id, runs[1].session_id);
+    }
+
+    #[tokio::test]
+    async fn concurrent_execution_is_skipped() {
+        let (dir, app_ctx) = setup_app_ctx();
+        let (_store, _) = setup_job_store(&dir);
+        let store_path = dir.path().to_path_buf();
+
+        // 用 sleep 模拟长时间执行
+        let slow_sender: MessageSender = Box::new(|_sid, _msg| {
+            Box::pin(async {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                Ok(())
+            })
+        });
+
+        let params1 = ExecuteParams {
+            trigger_id: "test-job-1".to_string(),
+            trigger_name: "测试任务".to_string(),
+            trigger_description: "测试".to_string(),
+            session_id: None,
+            payload: "hello".to_string(),
+        };
+        let params2 = ExecuteParams {
+            trigger_id: "test-job-1".to_string(),
+            trigger_name: "测试任务".to_string(),
+            trigger_description: "测试".to_string(),
+            session_id: None,
+            payload: "hello".to_string(),
+        };
+
+        let app_ctx_clone = app_ctx.clone();
+        let store1 = JobStore::open_at(store_path.clone()).unwrap();
+
+        // 启动第一个执行（慢执行）
+        let h1 = tokio::spawn(async move {
+            execute_core(
+                &app_ctx_clone,
+                params1,
+                &RunTracker::Job { store: store1 },
+                &slow_sender,
+            )
+            .await;
+        });
+
+        // 给一点时间让第一个执行获取锁
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let app_ctx_clone2 = app_ctx.clone();
+        let store2 = JobStore::open_at(store_path.clone()).unwrap();
+
+        // 第二个执行应被跳过
+        let h2 = tokio::spawn(async move {
+            execute_core(
+                &app_ctx_clone2,
+                params2,
+                &RunTracker::Job { store: store2 },
+                &mock_sender_ok(),
+            )
+            .await;
+        });
+
+        h1.await.unwrap();
+        h2.await.unwrap();
+
+        // 第二个执行被跳过，只有一条 run 记录
+        let reader = JobStore::open_at(store_path).unwrap();
+        let runs = reader.list_job_runs("test-job-1", 10).unwrap();
+        assert_eq!(runs.len(), 1, "并发执行应被跳过，只有一条记录");
+    }
 }

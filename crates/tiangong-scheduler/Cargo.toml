@@ -14,3 +14,6 @@ tracing = { workspace = true }
 silent = { workspace = true, features = ["scheduler"] }
 tokio = { workspace = true, features = ["sync", "time"] }
 dirs = "6"
+
+[dev-dependencies]
+tempfile = { workspace = true }

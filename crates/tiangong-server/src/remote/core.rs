@@ -51,6 +51,24 @@ impl ServerCoreManager {
             .await
     }
 
+    /// 发送消息到 core（不等结果），适用于定时任务等触发场景
+    pub async fn send_message(
+        &self,
+        requested_session_id: &str,
+        content: String,
+        message_id: Option<String>,
+        media: Vec<MediaAsset>,
+    ) -> Result<()> {
+        let (session_id, _session, _created) = self.ensure_core(requested_session_id).await?;
+        let cores = self.cores.lock().unwrap();
+        let Some(core) = cores.get(&session_id) else {
+            return Err(anyhow!("会话 core 不存在：{session_id}"));
+        };
+        let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
+        core.send_message_with_id(content, msg_id, media);
+        Ok(())
+    }
+
     pub async fn send_message_and_wait(
         &self,
         requested_session_id: &str,
@@ -76,9 +94,14 @@ impl ServerCoreManager {
         }
 
         let tracker_for_wait = tracker.clone();
-        let outcome = tokio::task::spawn_blocking(move || tracker_for_wait.wait_for_turn(turn_id))
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let outcome = tracker_for_wait.wait_for_turn(turn_id);
+            let _ = tx.send(outcome);
+        });
+        let outcome = rx
             .await
-            .map_err(|err| anyhow!("等待执行结果失败：{err}"))?;
+            .map_err(|_| anyhow!("等待执行结果的线程意外退出"))?;
         let response = match outcome {
             TurnOutcome::Completed => self.last_assistant_outgoing(&session_id).await,
             TurnOutcome::Failed(message) => return Err(anyhow!(message)),
