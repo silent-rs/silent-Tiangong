@@ -1342,7 +1342,7 @@ pub async fn edit_and_resend(
 
     if let Some(ref media_vec) = media {
         if parse_context_slash_command(&new_content).is_none() && !media_vec.is_empty() {
-            ensure_multimodal_enabled(&state)?;
+            ensure_multimodal_enabled(&state).await?;
         }
     }
 
@@ -2205,11 +2205,6 @@ pub async fn set_workspace_dir(
     if !path.is_dir() {
         return Err(format!("路径不存在或不是目录：{workspace_dir}"));
     }
-    let old_workspace_dir = state
-        .with_state_read(|core_state| Ok(core_state.workspace_dir().to_string()))
-        .await?;
-    let cwd_changed = old_workspace_dir != workspace_dir;
-
     state
         .with_state(|core_state| core_state.update_workspace_dir(workspace_dir.clone()))
         .await?;
@@ -2243,16 +2238,6 @@ pub async fn set_session_cwd(cwd: String, state: State<'_, TiangongApp>) -> Resu
     if !path.is_dir() {
         return Err(format!("路径不存在或不是目录：{cwd}"));
     }
-    let old_cwd = state
-        .with_state_read(|core_state| {
-            Ok(core_state
-                .active_session()
-                .map(|s| s.cwd.clone())
-                .unwrap_or_default())
-        })
-        .await?;
-    let cwd_changed = old_cwd != cwd;
-
     state
         .with_state(|core_state| core_state.update_active_session_cwd(cwd.clone()))
         .await?;
@@ -3039,7 +3024,9 @@ pub async fn fetch_provider_models(
         api_model: String::new(),
         api_lite_model: String::new(),
     };
-    SingleProviderClient::list_models(&config).map_err(|e| e.to_string())
+    SingleProviderClient::list_models_async(&config)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 fn embedding_probe_urls(base_url: &str) -> Result<Vec<String>, String> {

@@ -225,6 +225,33 @@ impl SingleProviderClient {
         self
     }
 
+    pub async fn list_models_async(cfg: &ModelProviderConfig) -> Result<Vec<String>> {
+        let token = cfg.api_auth_token.trim();
+        if token.is_empty() {
+            return Err(anyhow!("API_AUTH_TOKEN 不能为空，无法更新模型列表"));
+        }
+
+        let timeout_ms = parse_timeout_ms(&cfg.api_timeout_ms)?;
+        let mut models = if cfg.api_protocol == ProviderProtocol::Anthropic {
+            let provider = build_anthropic_provider_from_config(cfg, timeout_ms, None)?;
+            provider
+                .list_models()
+                .await
+                .map(|items| items.into_iter().map(|item| item.id).collect::<Vec<_>>())
+                .map_err(map_llm_error)?
+        } else {
+            let provider = build_openai_provider_from_config(cfg, timeout_ms, None)?;
+            provider
+                .list_models()
+                .await
+                .map(|items| items.into_iter().map(|item| item.id).collect::<Vec<_>>())
+                .map_err(map_llm_error)?
+        };
+        models.sort();
+        models.dedup();
+        Ok(models)
+    }
+
     pub fn list_models(cfg: &ModelProviderConfig) -> Result<Vec<String>> {
         let token = cfg.api_auth_token.trim();
         if token.is_empty() {

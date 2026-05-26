@@ -385,8 +385,20 @@ export function MessageList() {
   const nonEditableIds = useMemo(() => {
     const ids = new Set<string>();
     for (const msg of messages) {
-      ids.add(msg.id);
-      if (msg.compact) break;
+      if (msg.compact) {
+        // compact 消息及其之前的所有消息都不可编辑
+        ids.add(msg.id);
+        break;
+      }
+    }
+    // 如果没有 compact 消息，ids 为空，所有消息都可编辑
+    // 如果有 compact 消息，把它之前的消息也加入
+    if (ids.size > 0) {
+      const compactId = [...ids][0];
+      for (const msg of messages) {
+        ids.add(msg.id);
+        if (msg.id === compactId) break;
+      }
     }
     return ids;
   }, [messages]);
