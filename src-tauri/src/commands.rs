@@ -2500,6 +2500,7 @@ pub async fn set_server_config(
             .map(|token| token.trim().to_string())
             .filter(|token| !token.is_empty())
             .or(current.auth_token),
+        enabled: current.enabled,
     };
     tiangong_server::config::save_server_config(&config).map_err(|e| e.to_string())?;
     Ok("Server 配置已保存".to_string())
@@ -2527,6 +2528,12 @@ pub async fn start_server(state: State<'_, TiangongApp>) -> Result<String, Strin
         let _ = state.stop_embedded_server();
         return Err(err);
     }
+
+    // 持久化 enabled 标记，重启后自动拉起
+    let mut config = config;
+    config.enabled = true;
+    let _ = tiangong_server::config::save_server_config(&config);
+
     Ok(format!("Server 已启动：{}:{}", config.host, config.port))
 }
 
@@ -2536,6 +2543,12 @@ pub async fn stop_server(state: State<'_, TiangongApp>) -> Result<String, String
     // 优先停止嵌入式 server
     if state.is_embedded_server_running() {
         state.stop_embedded_server()?;
+
+        // 持久化 enabled 标记
+        let mut config = tiangong_server::config::load_server_config();
+        config.enabled = false;
+        let _ = tiangong_server::config::save_server_config(&config);
+
         return Ok("Server 已停止".to_string());
     }
 
@@ -2553,6 +2566,12 @@ pub async fn stop_server(state: State<'_, TiangongApp>) -> Result<String, String
     }
     tiangong_server::stop_daemon().map_err(|e| e.to_string())?;
     wait_for_server_stop(&config)?;
+
+    // 持久化 enabled 标记
+    let mut config = config;
+    config.enabled = false;
+    let _ = tiangong_server::config::save_server_config(&config);
+
     Ok("Server 已停止".to_string())
 }
 

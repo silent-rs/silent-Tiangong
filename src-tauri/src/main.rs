@@ -389,9 +389,33 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     }
     tray.build(app)?;
     refresh_tray_server_status(&app_handle, &status_item, &start_item, &stop_item);
-    start_tray_status_refresh(app_handle, status_item, start_item, stop_item);
+    start_tray_status_refresh(app_handle.clone(), status_item, start_item, stop_item);
+
+    // 自动拉起：如果上次退出时 Server 是开启的，自动启动嵌入式 Server
+    auto_start_embedded_server(&app_handle);
 
     Ok(())
+}
+
+/// 检查配置中 enabled 标记，自动启动嵌入式 Server
+fn auto_start_embedded_server(app: &tauri::AppHandle) {
+    let config = tiangong_server::config::load_server_config();
+    if !config.enabled {
+        return;
+    }
+    let state = app.state::<tiangong_app::TiangongApp>();
+    match state.start_embedded_server(&config.host, config.port, config.auth_token.clone()) {
+        Ok(()) => {
+            eprintln!("自动启动嵌入式 Server：{}:{}", config.host, config.port);
+        }
+        Err(err) => {
+            eprintln!("自动启动嵌入式 Server 失败：{err}");
+            // 启动失败时重置标记，避免下次启动继续失败
+            let mut config = config;
+            config.enabled = false;
+            let _ = tiangong_server::config::save_server_config(&config);
+        }
+    }
 }
 
 fn start_tray_status_refresh(
@@ -431,6 +455,9 @@ fn handle_tray_menu_event(
                 ) {
                     Ok(()) => {
                         eprintln!("Server 已启动：{}:{}", config.host, config.port);
+                        let mut config = config;
+                        config.enabled = true;
+                        let _ = tiangong_server::config::save_server_config(&config);
                     }
                     Err(err) => {
                         eprintln!("菜单栏启动 Server 失败：{err}");
@@ -451,6 +478,9 @@ fn handle_tray_menu_event(
                     eprintln!("菜单栏停止 Server 失败：{err}");
                 } else {
                     eprintln!("Server 已停止");
+                    let mut config = tiangong_server::config::load_server_config();
+                    config.enabled = false;
+                    let _ = tiangong_server::config::save_server_config(&config);
                 }
                 refresh_tray_server_status(&app_clone, &status_item, &start_item, &stop_item);
             });
