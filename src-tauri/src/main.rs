@@ -8,6 +8,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use tauri::Manager;
+
 const TRAY_SHOW_WINDOW_ID: &str = "show_window";
 const TRAY_START_SERVER_ID: &str = "start_server";
 const TRAY_STOP_SERVER_ID: &str = "stop_server";
@@ -347,7 +349,8 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     use tauri::menu::{MenuBuilder, MenuItemBuilder};
     use tauri::tray::TrayIconBuilder;
 
-    let status_item = MenuItemBuilder::with_id(TRAY_STATUS_ID, tray_server_status().0)
+    let app_handle = app.handle().clone();
+    let status_item = MenuItemBuilder::with_id(TRAY_STATUS_ID, tray_server_status(&app_handle).0)
         .enabled(false)
         .build(app)?;
     let show_item = MenuItemBuilder::with_id(TRAY_SHOW_WINDOW_ID, "显示天工").build(app)?;
@@ -385,20 +388,21 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         tray = tray.icon(icon);
     }
     tray.build(app)?;
-    refresh_tray_server_status(&status_item, &start_item, &stop_item);
-    start_tray_status_refresh(status_item, start_item, stop_item);
+    refresh_tray_server_status(&app_handle, &status_item, &start_item, &stop_item);
+    start_tray_status_refresh(app_handle, status_item, start_item, stop_item);
 
     Ok(())
 }
 
 fn start_tray_status_refresh(
+    app: tauri::AppHandle,
     status_item: tauri::menu::MenuItem<tauri::Wry>,
     start_item: tauri::menu::MenuItem<tauri::Wry>,
     stop_item: tauri::menu::MenuItem<tauri::Wry>,
 ) {
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(3));
-        refresh_tray_server_status(&status_item, &start_item, &stop_item);
+        refresh_tray_server_status(&app, &status_item, &start_item, &stop_item);
     });
 }
 
@@ -412,37 +416,43 @@ fn handle_tray_menu_event(
     match menu_id {
         TRAY_SHOW_WINDOW_ID => show_main_window(&app),
         TRAY_START_SERVER_ID => {
+            let app_clone = app.clone();
             let status_item = status_item.clone();
             let start_item = start_item.clone();
             let stop_item = stop_item.clone();
             std::thread::spawn(move || {
                 let _ = status_item.set_text("Server 状态：启动中");
-                match tiangong_app::commands::start_server() {
-                    Ok(message) => {
-                        eprintln!("{message}");
+                let config = tiangong_server::config::load_server_config();
+                let state = app_clone.state::<tiangong_app::TiangongApp>();
+                match state.start_embedded_server(
+                    &config.host,
+                    config.port,
+                    config.auth_token.clone(),
+                ) {
+                    Ok(()) => {
+                        eprintln!("Server 已启动：{}:{}", config.host, config.port);
                     }
                     Err(err) => {
                         eprintln!("菜单栏启动 Server 失败：{err}");
                     }
                 }
-                refresh_tray_server_status(&status_item, &start_item, &stop_item);
+                refresh_tray_server_status(&app_clone, &status_item, &start_item, &stop_item);
             });
         }
         TRAY_STOP_SERVER_ID => {
+            let app_clone = app.clone();
             let status_item = status_item.clone();
             let start_item = start_item.clone();
             let stop_item = stop_item.clone();
             std::thread::spawn(move || {
                 let _ = status_item.set_text("Server 状态：停止中");
-                match tiangong_app::commands::stop_server() {
-                    Ok(message) => {
-                        eprintln!("{message}");
-                    }
-                    Err(err) => {
-                        eprintln!("菜单栏停止 Server 失败：{err}");
-                    }
+                let state = app_clone.state::<tiangong_app::TiangongApp>();
+                if let Err(err) = state.stop_embedded_server() {
+                    eprintln!("菜单栏停止 Server 失败：{err}");
+                } else {
+                    eprintln!("Server 已停止");
                 }
-                refresh_tray_server_status(&status_item, &start_item, &stop_item);
+                refresh_tray_server_status(&app_clone, &status_item, &start_item, &stop_item);
             });
         }
         TRAY_QUIT_ID => app.exit(0),
@@ -461,21 +471,27 @@ fn show_main_window(app: &tauri::AppHandle) {
 }
 
 fn refresh_tray_server_status(
+    app: &tauri::AppHandle,
     status_item: &tauri::menu::MenuItem<tauri::Wry>,
     start_item: &tauri::menu::MenuItem<tauri::Wry>,
     stop_item: &tauri::menu::MenuItem<tauri::Wry>,
 ) {
-    let (text, running) = tray_server_status();
+    let (text, running) = tray_server_status(app);
     let _ = status_item.set_text(text);
     let _ = start_item.set_enabled(!running);
     let _ = stop_item.set_enabled(running);
 }
 
-fn tray_server_status() -> (String, bool) {
-    match tiangong_app::commands::get_server_config() {
-        Ok(config) if config.running => ("Server 状态：运行中".to_string(), true),
-        Ok(_) => ("Server 状态：未运行".to_string(), false),
-        Err(_) => ("Server 状态：未知".to_string(), false),
+fn tray_server_status(app: &tauri::AppHandle) -> (String, bool) {
+    use tauri::Manager;
+    let app_state = app.state::<tiangong_app::TiangongApp>();
+    let config = tiangong_server::config::load_server_config();
+    let running = app_state.is_embedded_server_running()
+        || tiangong_app::commands::is_server_running(&config);
+    if running {
+        ("Server 状态：运行中".to_string(), true)
+    } else {
+        ("Server 状态：未运行".to_string(), false)
     }
 }
 

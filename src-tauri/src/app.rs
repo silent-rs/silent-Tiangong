@@ -4,16 +4,19 @@ use std::sync::Mutex;
 use tiangong_config::load_tiangong_config;
 use tiangong_core::core::TiangongCore;
 use tiangong_core::core_config::CoreConfigProvider;
+use tokio::sync::Mutex as AsyncMutex;
 
 /// 天工应用状态
 ///
-/// state: 应用管理（会话列表、配置、持久化）
+/// state: 应用管理（会话列表、配置、持久化）— Arc<tokio Mutex> 以支持嵌入式 server 共享
 /// cores: 活跃的对话核心（session_id → TiangongCore）
 /// config: 共享配置提供者
+/// embedded_server: 嵌入式 Server 句柄（Desktop 模式下 Server 运行在 app 进程内）
 pub struct TiangongApp {
-    pub state: Mutex<tiangong_core::app_state::TiangongState>,
+    pub state: std::sync::Arc<AsyncMutex<tiangong_core::app_state::TiangongState>>,
     pub cores: Mutex<HashMap<String, TiangongCore>>,
     pub config: CoreConfigProvider,
+    embedded_server: Mutex<Option<tiangong_server::EmbeddedServerHandle>>,
 }
 
 impl Default for TiangongApp {
@@ -23,9 +26,12 @@ impl Default for TiangongApp {
         let config = CoreConfigProvider::new(core_config);
 
         Self {
-            state: Mutex::new(tiangong_core::app_state::TiangongState::load_or_default()),
+            state: std::sync::Arc::new(AsyncMutex::new(
+                tiangong_core::app_state::TiangongState::load_or_default(),
+            )),
             cores: Mutex::new(HashMap::new()),
             config,
+            embedded_server: Mutex::new(None),
         }
     }
 }
@@ -35,10 +41,11 @@ impl TiangongApp {
         Self::default()
     }
 
-    pub fn sync_core_config_from_state(&self) -> Result<(), String> {
+    pub async fn sync_core_config_from_state(&self) -> Result<(), String> {
         let base = self.config.snapshot();
-        let next =
-            self.with_state_read(|core_state| Ok(core_state.build_core_config_from_base(&base)))?;
+        let next = self
+            .with_state_read(|core_state| Ok(core_state.build_core_config_from_base(&base)))
+            .await?;
         self.config.replace(next);
         if let Ok(cores) = self.cores.lock() {
             for core in cores.values() {
@@ -48,24 +55,20 @@ impl TiangongApp {
         Ok(())
     }
 
-    pub fn with_state<F, R>(&self, f: F) -> Result<R, String>
+    pub async fn with_state<F, R>(&self, f: F) -> Result<R, String>
     where
         F: FnOnce(&mut tiangong_core::app_state::TiangongState) -> Result<R, anyhow::Error>,
     {
-        self.state
-            .lock()
-            .map_err(|e| e.to_string())
-            .and_then(|mut guard| f(&mut guard).map_err(|e| e.to_string()))
+        let mut guard = self.state.lock().await;
+        f(&mut guard).map_err(|e| e.to_string())
     }
 
-    pub fn with_state_read<F, R>(&self, f: F) -> Result<R, String>
+    pub async fn with_state_read<F, R>(&self, f: F) -> Result<R, String>
     where
         F: FnOnce(&tiangong_core::app_state::TiangongState) -> Result<R, anyhow::Error>,
     {
-        self.state
-            .lock()
-            .map_err(|e| e.to_string())
-            .and_then(|guard| f(&guard).map_err(|e| e.to_string()))
+        let guard = self.state.lock().await;
+        f(&guard).map_err(|e| e.to_string())
     }
 
     /// 获取或创建会话对应的 TiangongCore
@@ -122,13 +125,6 @@ impl TiangongApp {
         } else {
             false
         }
-    }
-
-    /// 获取 core 的 session 快照（不消费 core）
-    pub fn get_core_session(&self, _session_id: &str) -> Option<tiangong_core::session::Session> {
-        // core session 在消费线程中独占，无法直接读取
-        // 只能在 into_session 时获取
-        None
     }
 
     /// 取回 core 的 session（消费 core，用于持久化或切换会话）
@@ -204,5 +200,45 @@ impl TiangongApp {
             .get(session_id)
             .map(|core| core.reset_context())
             .unwrap_or(false)
+    }
+
+    /// 启动嵌入式 Server（共享 app 的 state 和 config）
+    pub fn start_embedded_server(
+        &self,
+        host: &str,
+        port: u16,
+        token: Option<String>,
+    ) -> Result<(), String> {
+        let mut guard = self.embedded_server.lock().unwrap();
+        if guard.is_some() {
+            return Err("Server 已在运行".to_string());
+        }
+        let handle = tiangong_server::run_embedded(
+            host,
+            port,
+            token,
+            self.state.clone(),
+            self.config.clone(),
+        )
+        .map_err(|e| e.to_string())?;
+        *guard = Some(handle);
+        Ok(())
+    }
+
+    /// 停止嵌入式 Server
+    pub fn stop_embedded_server(&self) -> Result<(), String> {
+        let mut guard = self.embedded_server.lock().unwrap();
+        if let Some(mut handle) = guard.take() {
+            handle.stop();
+            Ok(())
+        } else {
+            Err("Server 未在运行".to_string())
+        }
+    }
+
+    /// 检查嵌入式 Server 是否在运行
+    pub fn is_embedded_server_running(&self) -> bool {
+        let guard = self.embedded_server.lock().unwrap();
+        guard.is_some()
     }
 }
