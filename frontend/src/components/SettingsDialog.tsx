@@ -21,6 +21,7 @@ import { useToast } from './Toast';
 import { MemoryManagementSettings } from './memory';
 import { IndexManagementSettings } from './index/IndexManagementSettings';
 import { AutomationSettings } from './automation/AutomationSettings';
+import { WebhookPanel } from './automation/WebhookPanel';
 
 const appWindow = getCurrentWindow();
 
@@ -97,7 +98,7 @@ export function SettingsDialog() {
                 </TabsTrigger>
                 <TabsTrigger value="automation" className="w-full justify-start px-3 py-2">
                   <Clock className="w-4 h-4 mr-2" />
-                  自动化
+                  定时任务
                 </TabsTrigger>
                 <TabsTrigger value="about" className="w-full justify-start px-3 py-2">
                   <Info className="w-4 h-4 mr-2" />
@@ -2135,6 +2136,52 @@ function SkillSettings() {
 // ============================================================================
 
 function ServerSettings() {
+  const [subTab, setSubTab] = useState<'config' | 'webhooks'>('config');
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="flex gap-1 shrink-0 p-4 pb-0">
+        {(['config', 'webhooks'] as const).map((tab) => (
+          <button
+            key={tab}
+            className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+              subTab === tab
+                ? 'bg-primary text-primary-foreground'
+                : 'bg-muted text-muted-foreground hover:text-foreground'
+            }`}
+            onClick={() => setSubTab(tab)}
+          >
+            {tab === 'config' ? 'Server 配置' : 'Webhook'}
+          </button>
+        ))}
+      </div>
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        {subTab === 'config' && <ServerConfigPanel />}
+        {subTab === 'webhooks' && <ServerWebhookPanel />}
+      </div>
+    </div>
+  );
+}
+
+function ServerWebhookPanel() {
+  const [serverRunning, setServerRunning] = useState(false);
+
+  useEffect(() => {
+    const check = async () => {
+      try {
+        const cfg = await api.getServerConfig();
+        setServerRunning(cfg.running);
+      } catch { /* ignore */ }
+    };
+    check();
+    const timer = window.setInterval(check, 5000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  return <WebhookPanel serverRunning={serverRunning} />;
+}
+
+function ServerConfigPanel() {
   const [config, setConfig] = useState<ServerConfig>({
     host: '127.0.0.1',
     port: 8080,

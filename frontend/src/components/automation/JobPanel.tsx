@@ -6,11 +6,7 @@ import { Badge } from '../ui/badge';
 import { JobFormDialog } from './JobFormDialog';
 import { RunHistoryDialog } from './RunHistoryDialog';
 
-interface JobPanelProps {
-  serverRunning: boolean;
-}
-
-export function JobPanel({ serverRunning }: JobPanelProps) {
+export function JobPanel() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
@@ -94,7 +90,6 @@ export function JobPanel({ serverRunning }: JobPanelProps) {
               <JobRow
                 key={job.id}
                 job={job}
-                active={serverRunning}
                 onToggle={() => handleToggle(job)}
                 onTrigger={() => handleTrigger(job.id)}
                 onHistory={() => setRunHistoryJobId(job.id)}
@@ -122,7 +117,6 @@ export function JobPanel({ serverRunning }: JobPanelProps) {
 
 interface JobRowProps {
   job: Job;
-  active: boolean;
   onToggle: () => void;
   onTrigger: () => void;
   onHistory: () => void;
@@ -130,15 +124,9 @@ interface JobRowProps {
   onDelete: () => void;
 }
 
-function JobRow({ job, active, onToggle, onTrigger, onHistory, onEdit, onDelete }: JobRowProps) {
+function JobRow({ job, onToggle, onTrigger, onHistory, onEdit, onDelete }: JobRowProps) {
   return (
-    <div
-      className={`flex items-center gap-3 p-3 rounded-lg border transition-colors ${
-        active
-          ? 'bg-card hover:bg-accent/50'
-          : 'bg-card/50 opacity-60'
-      }`}
-    >
+    <div className="flex items-center gap-3 p-3 rounded-lg border transition-colors bg-card hover:bg-accent/50">
       <Switch
         checked={job.enabled}
         onCheckedChange={onToggle}
@@ -153,7 +141,7 @@ function JobRow({ job, active, onToggle, onTrigger, onHistory, onEdit, onDelete 
         <p className="text-sm text-muted-foreground truncate">{job.description}</p>
       </div>
       <div className="flex items-center gap-1 shrink-0">
-        <Button variant="ghost" size="sm" disabled={!active} onClick={onTrigger}>
+        <Button variant="ghost" size="sm" onClick={onTrigger}>
           触发
         </Button>
         <Button variant="ghost" size="sm" onClick={onHistory}>

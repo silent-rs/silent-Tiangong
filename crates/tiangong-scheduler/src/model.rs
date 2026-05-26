@@ -16,7 +16,7 @@ pub enum JobRunStatus {
     Failed,
 }
 
-/// 自动化任务定义（仅定时任务）
+/// 定时任务定义
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
     pub id: String,

@@ -161,7 +161,7 @@ async fn execute_core(
 
     // 构造消息
     let message = format!(
-        "[自动化任务触发]\n任务名称：{}\n任务描述：{}\n\n{}",
+        "[定时任务触发]\n任务名称：{}\n任务描述：{}\n\n{}",
         params.trigger_name, params.trigger_description, params.payload
     );
 

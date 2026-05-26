@@ -10,12 +10,12 @@ use tokio::sync::Mutex as AsyncMutex;
 
 /// Desktop 端调度器执行上下文
 ///
-/// 使用 TiangongApp 共享的 state 和 config，维护独立的自动化 core map。
-/// 自动化 core 运行在 FullTrust 模式下，与 UI 核心隔离。
+/// 使用 TiangongApp 共享的 state 和 config，维护独立的定时任务 core map。
+/// 定时任务 core 运行在 FullTrust 模式下，与 UI 核心隔离。
 pub struct DesktopSchedulerContext {
     state: Arc<AsyncMutex<tiangong_core::app_state::TiangongState>>,
     config: CoreConfigProvider,
-    automation_cores: std::sync::Mutex<HashMap<String, TiangongCore>>,
+    scheduler_cores: std::sync::Mutex<HashMap<String, TiangongCore>>,
 }
 
 impl DesktopSchedulerContext {
@@ -26,7 +26,7 @@ impl DesktopSchedulerContext {
         Self {
             state,
             config,
-            automation_cores: std::sync::Mutex::new(HashMap::new()),
+            scheduler_cores: std::sync::Mutex::new(HashMap::new()),
         }
     }
 }
@@ -36,19 +36,19 @@ impl SchedulerContext for DesktopSchedulerContext {
     async fn send_message(&self, session_id: &str, content: String) -> anyhow::Result<()> {
         // 确保 core 存在
         let needs_create = {
-            let cores = self.automation_cores.lock().unwrap();
+            let cores = self.scheduler_cores.lock().unwrap();
             !cores.contains_key(session_id)
         };
         if needs_create {
-            self.ensure_automation_core(session_id).await?;
+            self.ensure_scheduler_core(session_id).await?;
         }
 
-        let cores = self.automation_cores.lock().unwrap();
+        let cores = self.scheduler_cores.lock().unwrap();
         let core = cores
             .get(session_id)
-            .ok_or_else(|| anyhow::anyhow!("自动化 core 不存在：{session_id}"))?;
+            .ok_or_else(|| anyhow::anyhow!("定时任务 core 不存在：{session_id}"))?;
         if !core.send_message(content) {
-            return Err(anyhow::anyhow!("自动化 core 命令通道已关闭"));
+            return Err(anyhow::anyhow!("定时任务 core 命令通道已关闭"));
         }
         Ok(())
     }
@@ -66,7 +66,7 @@ impl SchedulerContext for DesktopSchedulerContext {
         }
 
         let mut state = self.state.lock().await;
-        let title = format!("自动化任务：{}", trigger_name);
+        let title = format!("定时任务：{}", trigger_name);
         let session = tiangong_core::session::Session::new_isolated(title);
         let session_id = session.id.clone();
         state.sessions_mut().push(session);
@@ -76,8 +76,8 @@ impl SchedulerContext for DesktopSchedulerContext {
 }
 
 impl DesktopSchedulerContext {
-    /// 为自动化任务创建 core 并启动流消费线程
-    async fn ensure_automation_core(&self, session_id: &str) -> anyhow::Result<()> {
+    /// 为定时任务创建 core 并启动流消费线程
+    async fn ensure_scheduler_core(&self, session_id: &str) -> anyhow::Result<()> {
         let session = {
             let state = self.state.lock().await;
             state
@@ -85,7 +85,7 @@ impl DesktopSchedulerContext {
                 .iter()
                 .find(|s| s.id == session_id)
                 .cloned()
-                .ok_or_else(|| anyhow::anyhow!("会话不存在：{session_id}"))?
+                .ok_or_else(|| anyhow::anyhow!("定时任务会话不存在：{session_id}"))?
         };
 
         let (stream_tx, stream_rx) =
@@ -94,7 +94,7 @@ impl DesktopSchedulerContext {
         core.set_trust_mode(TrustMode::FullTrust);
 
         {
-            let mut cores = self.automation_cores.lock().unwrap();
+            let mut cores = self.scheduler_cores.lock().unwrap();
             cores.insert(session_id.to_string(), core);
         }
 
@@ -102,7 +102,7 @@ impl DesktopSchedulerContext {
         let state = self.state.clone();
         let sid = session_id.to_string();
         std::thread::Builder::new()
-            .name(format!("automation-stream-{sid}"))
+            .name(format!("scheduler-stream-{sid}"))
             .spawn(move || {
                 for session_event in stream_rx {
                     if let tiangong_types::StreamEvent::Done { .. }
@@ -117,7 +117,7 @@ impl DesktopSchedulerContext {
                         });
                     }
                 }
-                eprintln!("自动化流消费线程退出：{sid}");
+                eprintln!("定时任务流消费线程退出：{sid}");
             })?;
 
         Ok(())
