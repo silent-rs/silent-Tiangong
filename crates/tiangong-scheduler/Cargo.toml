@@ -6,6 +6,7 @@ license = "Apache-2.0"
 
 [dependencies]
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 chrono = { workspace = true }
 scru128 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

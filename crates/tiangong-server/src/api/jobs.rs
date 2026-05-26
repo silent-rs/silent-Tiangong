@@ -1,11 +1,13 @@
 use silent::prelude::*;
+use std::sync::Arc;
 
 use super::AuthToken;
 use super::SharedAppContext;
 use crate::auth::check_auth;
-use crate::scheduler::executor;
+use crate::scheduler::context::ServerSchedulerContext;
 use tiangong_core::scheduler::model::{CreateJobRequest, Job, TriggerType, UpdateJobRequest};
 use tiangong_core::scheduler::store::JobStore;
+use tiangong_scheduler::executor::SchedulerContext;
 
 /// GET /api/v1/jobs — Job 列表
 #[allow(deprecated)]
@@ -208,9 +210,13 @@ pub async fn trigger_job(req: Request) -> Result<Response> {
     })?;
 
     let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    let scheduler_ctx: Arc<dyn SchedulerContext> = Arc::new(ServerSchedulerContext {
+        state: app_ctx.state.clone(),
+        cores: app_ctx.cores.clone(),
+    });
     let job_clone = job.clone();
     tokio::spawn(async move {
-        executor::execute_job(app_ctx, job_clone).await;
+        tiangong_scheduler::executor::execute_job(scheduler_ctx, job_clone).await;
     });
 
     Ok(Response::json(&serde_json::json!({

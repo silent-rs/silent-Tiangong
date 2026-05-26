@@ -15,11 +15,12 @@ use silent::prelude::*;
 use tiangong_config::load_tiangong_config;
 use tiangong_core::app_state::TiangongState;
 use tiangong_core::permission::TrustMode;
-use tiangong_core::scheduler::store::JobStore;
+use tiangong_scheduler::executor::SchedulerContext;
 use tokio::sync::Mutex;
 
 use self::api::{ServerAppContext, SharedState, build_routes};
 use self::remote::event::EventBus;
+use self::scheduler::context::ServerSchedulerContext;
 
 /// 启动 Server 模式（前台运行，阻塞）
 #[allow(deprecated)]
@@ -53,9 +54,12 @@ pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
     route.set_configs(Some(configs));
 
     // 初始化调度器，恢复已启用的 cron job
-    let app_restore = app.clone();
+    let scheduler_ctx: Arc<dyn SchedulerContext> = Arc::new(ServerSchedulerContext {
+        state: app.state.clone(),
+        cores: app.cores.clone(),
+    });
     tokio::spawn(async move {
-        restore_cron_jobs(app_restore).await;
+        tiangong_scheduler::executor::restore_cron_jobs(scheduler_ctx).await;
         Scheduler::schedule(silent::SCHEDULER.clone()).await;
     });
 
@@ -131,9 +135,12 @@ pub fn run_embedded(
                 .expect("failed to build embedded server runtime");
             rt.block_on(async move {
                 // 初始化调度器
-                let app_restore = app.clone();
+                let scheduler_ctx: Arc<dyn SchedulerContext> = Arc::new(ServerSchedulerContext {
+                    state: app.state.clone(),
+                    cores: app.cores.clone(),
+                });
                 tokio::spawn(async move {
-                    restore_cron_jobs(app_restore).await;
+                    tiangong_scheduler::executor::restore_cron_jobs(scheduler_ctx).await;
                     Scheduler::schedule(silent::SCHEDULER.clone()).await;
                 });
 
@@ -153,59 +160,4 @@ pub fn run_embedded(
         shutdown_tx: Some(shutdown_tx),
         thread: Some(thread),
     })
-}
-
-/// 从 job store 加载已启用的 cron job 并注册到 silent scheduler
-async fn restore_cron_jobs(app_ctx: Arc<ServerAppContext>) {
-    let store = match JobStore::open() {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("恢复定时任务失败，跳过：{e}");
-            return;
-        }
-    };
-
-    let jobs = match store.list_enabled_cron_jobs() {
-        Ok(jobs) => jobs,
-        Err(e) => {
-            tracing::warn!("查询定时任务失败，跳过：{e}");
-            return;
-        }
-    };
-
-    let mut scheduler = silent::SCHEDULER.lock().await;
-    for job in jobs {
-        let schedule = match &job.schedule {
-            Some(s) => s.clone(),
-            None => continue,
-        };
-        let job_clone = job.clone();
-        let process_time = match schedule.try_into() {
-            Ok(pt) => pt,
-            Err(e) => {
-                tracing::warn!("解析 cron 表达式失败 [{}]: {e}", job.schedule.unwrap());
-                continue;
-            }
-        };
-        let app_ctx_clone = app_ctx.clone();
-        let task = silent::Task::create_with_action_async(
-            job.id.clone(),
-            process_time,
-            job.name.clone(),
-            Arc::new(move || {
-                let job = job_clone.clone();
-                let app_ctx = app_ctx_clone.clone();
-                Box::pin(async move {
-                    tracing::info!("定时任务触发：{} [{}]", job.name, job.id);
-                    scheduler::executor::execute_job(app_ctx, job).await;
-                    Ok(())
-                })
-            }),
-        );
-        if let Err(e) = scheduler.add_task(task) {
-            tracing::warn!("注册定时任务失败 [{}]：{e}", job.id);
-        } else {
-            tracing::info!("已恢复定时任务：{} [{}]", job.name, job.id);
-        }
-    }
 }

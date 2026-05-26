@@ -3116,8 +3116,27 @@ pub async fn job_delete(id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn job_trigger(id: String) -> Result<serde_json::Value, String> {
-    trigger_server_api("jobs", &id, "trigger").await
+pub async fn job_trigger(
+    id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<serde_json::Value, String> {
+    let store = tiangong_core::scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
+    let job = store
+        .get_job(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("定时任务 '{id}' 不存在"))?;
+
+    let ctx = state.create_scheduler_context();
+    let job_clone = job.clone();
+    tokio::spawn(async move {
+        tiangong_scheduler::executor::execute_job(ctx, job_clone).await;
+    });
+
+    Ok(serde_json::json!({
+        "job_id": job.id,
+        "session_id": job.session_id,
+        "status": "triggered",
+    }))
 }
 
 #[tauri::command]
@@ -3215,8 +3234,28 @@ pub async fn webhook_delete(id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn webhook_trigger(id: String) -> Result<serde_json::Value, String> {
-    trigger_server_api("webhooks", &id, "trigger").await
+pub async fn webhook_trigger(
+    id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<serde_json::Value, String> {
+    let store = tiangong_core::scheduler::webhook::store::WebhookStore::open()
+        .map_err(|e| e.to_string())?;
+    let webhook = store
+        .get(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Webhook '{id}' 不存在"))?;
+
+    let ctx = state.create_scheduler_context();
+    let webhook_clone = webhook.clone();
+    tokio::spawn(async move {
+        tiangong_scheduler::executor::execute_webhook(ctx, webhook_clone).await;
+    });
+
+    Ok(serde_json::json!({
+        "webhook_id": webhook.id,
+        "session_id": webhook.session_id,
+        "status": "triggered",
+    }))
 }
 
 #[tauri::command]
@@ -3233,50 +3272,4 @@ pub async fn webhook_list_runs(
         .into_iter()
         .map(|r| serde_json::to_value(r).unwrap())
         .collect())
-}
-
-/// 通过 Server HTTP API 触发 Job 或 Webhook 执行
-async fn trigger_server_api(
-    resource: &str,
-    id: &str,
-    action: &str,
-) -> Result<serde_json::Value, String> {
-    let config = tiangong_server::config::load_server_config();
-    if !server_health_check(&config) {
-        return Err("Server 未运行，无法触发执行。请先启动 Server。".to_string());
-    }
-
-    let host = connect_host(&config.host);
-    let url = format!(
-        "http://{host}:{}/api/v1/{resource}/{id}/{action}",
-        config.port
-    );
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("创建 HTTP 客户端失败：{e}"))?;
-
-    let mut request = client.post(&url);
-    if let Some(ref token) = config.auth_token {
-        if !token.is_empty() {
-            request = request.bearer_auth(token);
-        }
-    }
-
-    let response = request
-        .send()
-        .await
-        .map_err(|e| format!("触发请求失败：{e}"))?;
-
-    if response.status().is_success() {
-        response
-            .json::<serde_json::Value>()
-            .await
-            .map_err(|e| format!("解析响应失败：{e}"))
-    } else {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        Err(format!("Server 返回错误：HTTP {status}, {body}"))
-    }
 }

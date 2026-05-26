@@ -9118,6 +9118,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-openai",
+ "async-trait",
  "base64 0.22.1",
  "chrono",
  "clap",
@@ -9128,6 +9129,7 @@ dependencies = [
  "scru128 3.6.1",
  "serde",
  "serde_json",
+ "silent",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -9144,6 +9146,7 @@ dependencies = [
  "tiangong-entry",
  "tiangong-media",
  "tiangong-memory",
+ "tiangong-scheduler",
  "tiangong-server",
  "tiangong-types",
  "tokio",
@@ -9293,6 +9296,7 @@ name = "tiangong-scheduler"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "dirs",
  "scru128 3.6.1",
@@ -9311,6 +9315,7 @@ dependencies = [
  "anyhow",
  "async-channel",
  "async-lock",
+ "async-trait",
  "chrono",
  "dirs",
  "hex",
@@ -9328,6 +9333,7 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-media",
+ "tiangong-scheduler",
  "tiangong-types",
  "tokio",
  "tracing",

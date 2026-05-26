@@ -1,0 +1,45 @@
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use tiangong_scheduler::executor::SchedulerContext;
+
+use crate::api::SharedState;
+use crate::remote::core::ServerCoreManager;
+
+/// Server 端调度器执行上下文
+///
+/// 通过 ServerCoreManager 发送消息，通过 SharedState 管理会话。
+pub struct ServerSchedulerContext {
+    pub state: SharedState,
+    pub cores: Arc<ServerCoreManager>,
+}
+
+#[async_trait]
+impl SchedulerContext for ServerSchedulerContext {
+    async fn send_message(&self, session_id: &str, content: String) -> anyhow::Result<()> {
+        self.cores
+            .send_message(session_id, content, None, vec![])
+            .await
+    }
+
+    async fn resolve_or_create_session(
+        &self,
+        requested_session_id: Option<&str>,
+        trigger_name: &str,
+    ) -> anyhow::Result<(String, bool)> {
+        if let Some(sid) = requested_session_id {
+            let state = self.state.lock().await;
+            if state.sessions().iter().any(|s| s.id == *sid) {
+                return Ok((sid.to_string(), false));
+            }
+        }
+
+        let mut state = self.state.lock().await;
+        let title = format!("自动化任务：{}", trigger_name);
+        let session = tiangong_core::session::Session::new_isolated(title);
+        let session_id = session.id.clone();
+        state.sessions_mut().push(session);
+        state.persist_session(&session_id)?;
+        Ok((session_id, true))
+    }
+}

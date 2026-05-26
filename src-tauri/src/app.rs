@@ -241,4 +241,14 @@ impl TiangongApp {
         let guard = self.embedded_server.lock().unwrap();
         guard.is_some()
     }
+
+    /// 创建调度器执行上下文（用于 Desktop 端独立执行定时任务）
+    pub fn create_scheduler_context(
+        &self,
+    ) -> std::sync::Arc<dyn tiangong_scheduler::executor::SchedulerContext> {
+        std::sync::Arc::new(crate::scheduler::DesktopSchedulerContext::new(
+            self.state.clone(),
+            self.config.clone(),
+        ))
+    }
 }

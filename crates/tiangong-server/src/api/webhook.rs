@@ -1,10 +1,12 @@
 use silent::prelude::*;
+use std::sync::Arc;
 
 use super::AuthToken;
 use super::SharedAppContext;
 use crate::auth::check_auth;
-use crate::scheduler::executor;
+use crate::scheduler::context::ServerSchedulerContext;
 use crate::webhook::model::{CreateWebhookRequest, UpdateWebhookRequest, Webhook, open_store};
+use tiangong_scheduler::executor::SchedulerContext;
 
 /// GET /api/v1/webhooks — Webhook 列表
 #[allow(deprecated)]
@@ -164,9 +166,13 @@ pub async fn trigger_webhook(req: Request) -> Result<Response> {
     })?;
 
     let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    let scheduler_ctx: Arc<dyn SchedulerContext> = Arc::new(ServerSchedulerContext {
+        state: app_ctx.state.clone(),
+        cores: app_ctx.cores.clone(),
+    });
     let webhook_clone = webhook.clone();
     tokio::spawn(async move {
-        executor::execute_webhook(app_ctx, webhook_clone).await;
+        tiangong_scheduler::executor::execute_webhook(scheduler_ctx, webhook_clone).await;
     });
 
     Ok(Response::json(&serde_json::json!({
@@ -270,9 +276,13 @@ pub async fn invoke_webhook(mut req: Request) -> Result<Response> {
     }
 
     let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    let scheduler_ctx: Arc<dyn SchedulerContext> = Arc::new(ServerSchedulerContext {
+        state: app_ctx.state.clone(),
+        cores: app_ctx.cores.clone(),
+    });
     let webhook_clone = webhook.clone();
     tokio::spawn(async move {
-        executor::execute_webhook(app_ctx, webhook_clone).await;
+        tiangong_scheduler::executor::execute_webhook(scheduler_ctx, webhook_clone).await;
     });
 
     Ok(Response::json(&serde_json::json!({

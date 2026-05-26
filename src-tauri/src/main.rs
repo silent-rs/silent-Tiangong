@@ -225,6 +225,15 @@ fn run_gui() {
         .manage(tiangong_app::TiangongApp::new())
         .setup(|app| {
             setup_tray(app)?;
+
+            // Desktop 端独立初始化调度器（不依赖 server）
+            let state = app.state::<tiangong_app::TiangongApp>();
+            let scheduler_ctx = state.create_scheduler_context();
+            tauri::async_runtime::spawn(async move {
+                tiangong_scheduler::executor::restore_cron_jobs(scheduler_ctx).await;
+                silent::Scheduler::schedule(silent::SCHEDULER.clone()).await;
+            });
+
             Ok(())
         })
         .on_window_event(|window, event| {
