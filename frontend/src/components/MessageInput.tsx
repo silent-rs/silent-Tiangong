@@ -4,13 +4,22 @@ import { Textarea } from './ui/textarea';
 import { Button } from './ui/button';
 import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Users, Brain } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
-import { convertFileSrc } from '@tauri-apps/api/core';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { DragDropEvent } from '@tauri-apps/api/webview';
 import { api, type MediaAsset, textContent } from '@/api/tauri';
 import { useAudioRecording } from '@/hooks/useAudioRecording';
-
-const MAX_ATTACHMENT_BASE64_BYTES = 50 * 1024 * 1024;
+import {
+  type Attachment,
+  MAX_ATTACHMENT_BASE64_BYTES,
+  imageMimeType,
+  imageExtFromMime,
+  clipboardImagePaths,
+  fileToDataUrl,
+  attachmentFromPath,
+  estimatedBase64Size,
+  resolveAttachmentUrl,
+  attachmentsToBase64Media,
+} from '@/utils/attachments';
 
 interface MentionCandidate {
   value: string;
@@ -33,108 +42,6 @@ const SLASH_COMMANDS: MentionCandidate[] = [
     hint: '清理当前上下文',
   },
 ];
-
-type Attachment = {
-  kind: 'image' | 'file';
-  url: string;
-  title: string;
-  mime_type?: string;
-};
-
-function imageMimeType(path: string): string | undefined {
-  const lower = path.toLowerCase();
-  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
-  if (lower.endsWith('.webp')) return 'image/webp';
-  if (lower.endsWith('.gif')) return 'image/gif';
-  if (lower.endsWith('.png')) return 'image/png';
-  return undefined;
-}
-
-function fileMimeType(path: string): string | undefined {
-  const lower = path.toLowerCase();
-  const imageMime = imageMimeType(lower);
-  if (imageMime) return imageMime;
-  if (lower.endsWith('.pdf')) return 'application/pdf';
-  if (lower.endsWith('.txt')) return 'text/plain';
-  if (lower.endsWith('.md') || lower.endsWith('.markdown')) return 'text/markdown';
-  if (lower.endsWith('.json')) return 'application/json';
-  if (lower.endsWith('.csv')) return 'text/csv';
-  return undefined;
-}
-
-function imageExtFromMime(mimeType: string): string {
-  if (mimeType === 'image/jpeg' || mimeType === 'image/jpg') return 'jpg';
-  if (mimeType === 'image/webp') return 'webp';
-  if (mimeType === 'image/gif') return 'gif';
-  return 'png';
-}
-
-function resolveAttachmentUrl(url: string): string {
-  if (!url) return '';
-  if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('asset://')) {
-    return url;
-  }
-  if (url.startsWith('/')) {
-    return convertFileSrc(url);
-  }
-  return url;
-}
-
-function clipboardImagePaths(text: string): string[] {
-  return text
-    .split(/\r?\n/)
-    .map(part => part.trim())
-    .map(part => part.replace(/^["']|["']$/g, ''))
-    .map(part => {
-      if (!part.startsWith('file://')) return part;
-      try {
-        return decodeURIComponent(part.replace(/^file:\/\//, ''));
-      } catch {
-        return part.replace(/^file:\/\//, '');
-      }
-    })
-    .filter(part => !!part && !!imageMimeType(part));
-}
-
-function fileToDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(reader.error || new Error('读取附件失败'));
-    reader.readAsDataURL(file);
-  });
-}
-
-function attachmentFromPath(path: string): Attachment {
-  const lower = path.toLowerCase();
-  const isImage = /\.(png|jpe?g|webp|gif)$/.test(lower);
-  return {
-    kind: isImage ? 'image' : 'file',
-    url: path,
-    title: path.split('/').pop() || path,
-    mime_type: fileMimeType(path),
-  };
-}
-
-function base64SizeFromDataUrl(dataUrl: string): number {
-  return dataUrl.split(',', 2)[1]?.length ?? 0;
-}
-
-function mimeTypeFromDataUrl(dataUrl: string): string | undefined {
-  const header = dataUrl.split(',', 1)[0] || '';
-  const mime = header.match(/^data:([^;]+);/)?.[1];
-  return mime || undefined;
-}
-
-function assertBase64Size(dataUrl: string, title: string) {
-  if (base64SizeFromDataUrl(dataUrl) > MAX_ATTACHMENT_BASE64_BYTES) {
-    throw new Error(`附件“${title}”超过 50MB，已停止发送。`);
-  }
-}
-
-function estimatedBase64Size(rawBytes: number): number {
-  return Math.ceil(rawBytes / 3) * 4;
-}
 
 export function MessageInput() {
   const inputContent = useStore((state) => state.inputContent);
@@ -418,36 +325,6 @@ export function MessageInput() {
     addAttachments(paths.map(attachmentFromPath));
   }, [addAttachments]);
 
-  const attachmentToBase64Media = async (item: Attachment): Promise<MediaAsset> => {
-    if (item.url.startsWith('data:')) {
-      assertBase64Size(item.url, item.title);
-      return {
-        kind: item.kind,
-        url: item.url,
-        title: item.title,
-        mime_type: item.mime_type || mimeTypeFromDataUrl(item.url),
-        capability: 'multimodal',
-      };
-    }
-
-    const encoded = await api.readAttachmentAsDataUrl(item.url, MAX_ATTACHMENT_BASE64_BYTES);
-    return {
-      kind: item.kind,
-      url: encoded.data_url,
-      title: item.title || encoded.title,
-      mime_type: item.mime_type || encoded.mime_type,
-      capability: 'multimodal',
-    };
-  };
-
-  const attachmentsToBase64Media = async (): Promise<MediaAsset[]> => {
-    const media: MediaAsset[] = [];
-    for (const item of attachments) {
-      media.push(await attachmentToBase64Media(item));
-    }
-    return media;
-  };
-
   useEffect(() => {
     if (!isTextDropTargetActive) {
       setIsDraggingFiles(false);
@@ -657,7 +534,7 @@ export function MessageInput() {
     }
     let media: MediaAsset[];
     try {
-      media = await attachmentsToBase64Media();
+      media = await attachmentsToBase64Media(attachments);
     } catch (err) {
       console.error('附件转换失败:', err);
       alert(err instanceof Error ? err.message : '附件转换失败');
@@ -1004,9 +881,9 @@ export function MessageInput() {
                 <div className="mb-2 flex flex-wrap gap-1.5">
                   {attachments.map(item => (
                     <span
-                      key={item.url}
+                      key={item.title + item.url.slice(0, 40)}
                       className="inline-flex h-9 max-w-[260px] items-center gap-1.5 rounded-md border bg-muted/40 px-2 text-xs"
-                      title={item.url}
+                      title={item.title}
                     >
                       {item.kind === 'image' ? (
                         <img

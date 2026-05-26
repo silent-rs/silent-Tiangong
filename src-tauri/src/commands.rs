@@ -1033,6 +1033,10 @@ fn start_stream_consumer(
                             );
                             // 同步 core worker 中对 session 字段的修改
                             session.summary_up_to = *summary_up_to;
+                            tiangong_core::context::compressor::mark_compact_boundary(
+                                &mut session.messages,
+                                *summary_up_to,
+                            );
                             session.current_tokens = 0;
                             session.active_agent_current_tokens = 0;
                             session.agent_current_tokens.clear();
@@ -1330,10 +1334,17 @@ fn start_stream_consumer(
 pub async fn edit_and_resend(
     message_id: String,
     new_content: String,
+    media: Option<Vec<tiangong_types::MediaAsset>>,
     app: AppHandle,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
     use std::sync::mpsc;
+
+    if let Some(ref media_vec) = media {
+        if parse_context_slash_command(&new_content).is_none() && !media_vec.is_empty() {
+            ensure_multimodal_enabled(&state)?;
+        }
+    }
 
     // 1. 查找消息所在会话并验证
     let session_id = state
@@ -1344,13 +1355,20 @@ pub async fn edit_and_resend(
                 .find(|s| s.messages.iter().any(|m| m.id == message_id))
                 .ok_or_else(|| anyhow::anyhow!("消息不存在：{message_id}"))?;
 
-            let msg = session
+            let msg_idx = session
                 .messages
                 .iter()
-                .find(|m| m.id == message_id)
+                .position(|m| m.id == message_id)
                 .ok_or_else(|| anyhow::anyhow!("消息不存在"))?;
+            let msg = &session.messages[msg_idx];
             if msg.role != tiangong_core::session::MessageRole::User {
                 return Err(anyhow::anyhow!("只能编辑用户消息"));
+            }
+            if msg.compact {
+                return Err(anyhow::anyhow!("该消息已被压缩或清空，无法编辑"));
+            }
+            if msg_idx < session.summary_up_to {
+                return Err(anyhow::anyhow!("该消息已被压缩或清空，无法编辑"));
             }
             Ok(session.id.clone())
         })
@@ -1369,13 +1387,43 @@ pub async fn edit_and_resend(
                 .find(|s| s.id == session_id)
                 .ok_or_else(|| anyhow::anyhow!("会话不存在"))?;
 
-            session.update_message_content(&message_id, new_content.clone());
+            if let Some(ref new_media) = media {
+                session.update_message_content_with_media(
+                    &message_id,
+                    new_content.clone(),
+                    new_media.clone(),
+                );
+            } else {
+                session.update_message_content(&message_id, new_content.clone());
+            }
             session.truncate_after_message(&message_id);
-            let message_media = session
+
+            let message_media: Vec<tiangong_types::MediaAsset> = session
                 .messages
                 .iter()
                 .find(|message| message.id == message_id)
-                .map(|message| message.media.clone())
+                .map(|message| {
+                    let mut assets = Vec::new();
+                    for block in &message.content {
+                        if let tiangong_types::message::ContentBlock::Media {
+                            kind,
+                            url,
+                            mime_type,
+                            title,
+                        } = block
+                        {
+                            assets.push(tiangong_types::MediaAsset {
+                                kind: *kind,
+                                url: url.clone(),
+                                mime_type: mime_type.clone(),
+                                title: title.clone(),
+                                capability: None,
+                            });
+                        }
+                    }
+                    assets.extend(message.media.clone());
+                    assets
+                })
                 .unwrap_or_default();
 
             let mut runtime_session = session.clone();
@@ -2157,22 +2205,70 @@ pub async fn set_workspace_dir(
     if !path.is_dir() {
         return Err(format!("路径不存在或不是目录：{workspace_dir}"));
     }
+    let old_workspace_dir = state
+        .with_state_read(|core_state| Ok(core_state.workspace_dir().to_string()))
+        .await?;
+    let cwd_changed = old_workspace_dir != workspace_dir;
+
     state
-        .with_state(|core_state| core_state.update_workspace_dir(workspace_dir))
-        .await
+        .with_state(|core_state| core_state.update_workspace_dir(workspace_dir.clone()))
+        .await?;
+
+    // 同步活跃 core 的 cwd（仅限无对话的 Inherit 会话）
+    let active_session_id = state
+        .with_state_read(|core_state| {
+            Ok(core_state
+                .sessions()
+                .iter()
+                .find(|s| s.id == core_state.active_session_id())
+                .filter(|s| s.cwd_mode == tiangong_core::session::SessionCwdMode::Inherit)
+                .filter(|s| !s.has_user_messages())
+                .map(|s| s.id.clone()))
+        })
+        .await?;
+    if let Some(sid) = &active_session_id {
+        let cores = state.cores.lock().map_err(|e| e.to_string())?;
+        if let Some(core) = cores.get(sid) {
+            let _ = core.update_cwd(workspace_dir.clone());
+        }
+    }
+
+    Ok(())
 }
 
 /// 设置活动会话的工作目录
 #[tauri::command]
 pub async fn set_session_cwd(cwd: String, state: State<'_, TiangongApp>) -> Result<(), String> {
-    // 验证路径存在且是目录
     let path = std::path::Path::new(&cwd);
     if !path.is_dir() {
         return Err(format!("路径不存在或不是目录：{cwd}"));
     }
+    let old_cwd = state
+        .with_state_read(|core_state| {
+            Ok(core_state
+                .active_session()
+                .map(|s| s.cwd.clone())
+                .unwrap_or_default())
+        })
+        .await?;
+    let cwd_changed = old_cwd != cwd;
+
     state
-        .with_state(|core_state| core_state.update_active_session_cwd(cwd))
-        .await
+        .with_state(|core_state| core_state.update_active_session_cwd(cwd.clone()))
+        .await?;
+
+    // 同步活跃 core 的 cwd
+    let active_session_id = state
+        .with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))
+        .await?;
+    {
+        let cores = state.cores.lock().map_err(|e| e.to_string())?;
+        if let Some(core) = cores.get(&active_session_id) {
+            let _ = core.update_cwd(cwd.clone());
+        }
+    }
+
+    Ok(())
 }
 
 // ============================================================================

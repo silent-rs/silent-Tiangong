@@ -665,12 +665,6 @@ function MemoryModelSelectSection({
 // 预设供应商
 // ---------------------------------------------------------------------------
 
-interface ProviderPreset {
-  name: string;
-  base_url: string;
-  protocol: string;
-}
-
 const DEFAULT_PROVIDERS: Record<string, ProviderConfigView> = {
   'DeepSeek': { base_url: 'https://api.deepseek.com', api_key: '', timeout_ms: 300000, protocol: 'openai_compatible' },
   '智谱': { base_url: 'https://open.bigmodel.cn/api/paas/v4', api_key: '', timeout_ms: 300000, protocol: 'openai_compatible' },
@@ -693,15 +687,6 @@ const DEFAULT_PROVIDER_URL_PRESETS: Record<string, UrlPreset[]> = {
     { label: 'Anthropic 兼容（Coding 套餐）', url: 'https://open.bigmodel.cn/api/anthropic', protocol: 'anthropic' },
   ],
 };
-
-const PROVIDER_PRESETS: ProviderPreset[] = [
-  { name: 'Z.ai', base_url: 'https://api.zai.com/v1', protocol: 'openai_compatible' },
-  { name: '硅基流动', base_url: 'https://api.siliconflow.cn/v1', protocol: 'openai_compatible' },
-  { name: '月之暗面', base_url: 'https://api.moonshot.cn/v1', protocol: 'openai_compatible' },
-  { name: '阿里云百炼', base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', protocol: 'openai_compatible' },
-  { name: 'OpenAI', base_url: 'https://api.openai.com/v1', protocol: 'openai_compatible' },
-  { name: 'Anthropic', base_url: 'https://api.anthropic.com', protocol: 'anthropic' },
-];
 
 // 协议对应的默认 URL
 const PROTOCOL_DEFAULTS: Record<string, string> = {
@@ -850,17 +835,6 @@ function ProviderModelsView({
     }
   };
 
-  const addPresetProvider = (preset: ProviderPreset) => {
-    if (config.providers[preset.name]) return;
-    const next = { ...config };
-    next.providers = {
-      ...next.providers,
-      [preset.name]: { base_url: preset.base_url, api_key: '', timeout_ms: 300000, protocol: preset.protocol },
-    };
-    onChange(next);
-    setSelectedProvider(preset.name);
-  };
-
   const addCustomProvider = () => {
     if (!newProviderKey.trim()) return;
     const key = newProviderKey.trim();
@@ -1004,22 +978,6 @@ function ProviderModelsView({
             </button>
           ))}
         </div>
-        {PROVIDER_PRESETS.filter((p) => !config.providers[p.name]).length > 0 && (
-          <div className="border-t px-2 pt-2 pb-1">
-            <div className="text-[10px] text-muted-foreground px-1 mb-1">快捷添加</div>
-            <div className="flex flex-wrap gap-1">
-              {PROVIDER_PRESETS.filter((p) => !config.providers[p.name]).map((preset) => (
-                <button
-                  key={preset.name}
-                  className="px-1.5 py-0.5 text-[10px] rounded border border-border text-muted-foreground hover:text-foreground hover:border-primary/40 transition-colors"
-                  onClick={() => addPresetProvider(preset)}
-                >
-                  + {preset.name}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
         <div className="border-t p-2">
           <Button size="sm" className="w-full" onClick={() => { setShowAddProvider(true); setNewProviderKey(''); setNewProviderDraft({ base_url: '', api_key: '', timeout_ms: 300000, protocol: 'openai_compatible' }); setShowNewApiKey(false); }}>
             <Plus className="w-3 h-3 mr-1" />自定义供应商

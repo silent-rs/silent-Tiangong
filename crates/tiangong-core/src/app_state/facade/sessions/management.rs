@@ -85,7 +85,6 @@ impl TiangongState {
         };
 
         session.title = new_title.to_string();
-        session.updated_at = now_text();
         self.store.session.session_title_draft = session.title.clone();
         self.persist_session_and_app(&active_id)
     }

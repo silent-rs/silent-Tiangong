@@ -19,15 +19,26 @@ import {
   Brain,
   Pencil,
   X,
+  Paperclip,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { open } from '@tauri-apps/plugin-dialog';
 import { ThinkingBlock } from "./ThinkingBlock";
 import { AgentPanel } from "./AgentPanel";
-import { api, textContent, ContentBlock } from "@/api/tauri";
+import { api, textContent, type ContentBlock } from "@/api/tauri";
 import { CopyableCodeBlock } from "./CopyableCodeBlock";
+import {
+  type Attachment,
+  imageExtFromMime,
+  fileToDataUrl,
+  attachmentFromPath,
+  estimatedBase64Size,
+  resolveAttachmentUrl,
+  attachmentsToBase64Media,
+} from '@/utils/attachments';
 
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -113,10 +124,11 @@ function MessageActions({ text, showTts }: { text: string; showTts: boolean }) {
   );
 }
 
-function UserMessageActions({ text, messageId, runStatus, onStartEdit }: {
+function UserMessageActions({ text, messageId, runStatus, canEdit, onStartEdit }: {
   text: string;
   messageId: string;
   runStatus: string;
+  canEdit: boolean;
   onStartEdit: (messageId: string, text: string) => void;
 }) {
   const [copied, setCopied] = useState(false);
@@ -141,9 +153,9 @@ function UserMessageActions({ text, messageId, runStatus, onStartEdit }: {
       </button>
       <button
         onClick={() => onStartEdit(messageId, text)}
-        className={btnClass}
-        title={idle ? "编辑并重发" : "执行中无法编辑"}
-        disabled={!idle}
+        className={`${btnClass} ${(!idle || !canEdit) ? 'opacity-30 cursor-not-allowed' : ''}`}
+        title={!canEdit ? "已压缩消息无法编辑" : !idle ? "执行中无法编辑" : "编辑并重发"}
+        disabled={!idle || !canEdit}
       >
         <Pencil className="w-3.5 h-3.5" />
       </button>
@@ -242,10 +254,18 @@ export function MessageList() {
   const [hasTts, setHasTts] = useState(false);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState("");
+  const [editingAttachments, setEditingAttachments] = useState<Attachment[]>([]);
+  const editingTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const [hasMultimodal, setHasMultimodal] = useState(false);
 
   // 检查 TTS 能力
   useEffect(() => {
     api.hasTtsCapability().then(setHasTts).catch(() => setHasTts(false));
+  }, []);
+
+  // 检查多模态能力
+  useEffect(() => {
+    api.hasModelCapability('multimodal').then(setHasMultimodal).catch(() => setHasMultimodal(false));
   }, []);
 
   const isThinking = runStatus !== "idle";
@@ -255,21 +275,121 @@ export function MessageList() {
     if (runStatus !== "idle") return;
     setEditingMessageId(messageId);
     setEditingContent(text);
+    // 从原始消息中提取已有 media 作为初始附件
+    const msg = messages.find(m => m.id === messageId);
+    if (msg && hasMultimodal) {
+      const mediaAttachments: Attachment[] = (Array.isArray(msg.content) ? msg.content : [])
+        .filter((b: ContentBlock) => b.type === 'media' && b.url)
+        .map((b: ContentBlock) => ({
+          kind: b.kind === 'image' ? 'image' : 'file',
+          url: b.url!,
+          title: b.title || '',
+          mime_type: b.mime_type,
+        }));
+      setEditingAttachments(mediaAttachments);
+    } else {
+      setEditingAttachments([]);
+    }
+    setTimeout(() => {
+      const textarea = editingTextareaRef.current;
+      if (textarea) {
+        textarea.style.height = '60px';
+        textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
+      }
+    }, 0);
   };
 
-  const handleConfirmEdit = () => {
+  const handleConfirmEdit = async () => {
     if (!editingMessageId || !editingContent.trim()) return;
-    editAndResend(editingMessageId, editingContent.trim());
+    let media: Awaited<ReturnType<typeof attachmentsToBase64Media>> = [];
+    if (editingAttachments.length > 0 && hasMultimodal) {
+      try {
+        media = await attachmentsToBase64Media(editingAttachments);
+      } catch (err) {
+        console.error('附件转换失败:', err);
+        alert(err instanceof Error ? err.message : '附件转换失败');
+        return;
+      }
+    }
+    editAndResend(editingMessageId, editingContent.trim(), media);
     setEditingMessageId(null);
     setEditingContent("");
+    setEditingAttachments([]);
   };
 
   const handleCancelEdit = () => {
     setEditingMessageId(null);
     setEditingContent("");
+    setEditingAttachments([]);
+  };
+
+  const handleAttachFilesForEdit = async () => {
+    try {
+      const selected = await open({
+        multiple: true,
+        directory: false,
+        title: '选择图片或文件',
+        filters: [
+          { name: '图片和文件', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'pdf', 'txt', 'md', 'json', 'csv'] },
+        ],
+      });
+      const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
+      if (paths.length === 0) return;
+      const newAttachments = paths.map(attachmentFromPath);
+      setEditingAttachments(prev => {
+        const next = [...prev];
+        for (const item of newAttachments) {
+          if (!next.some(existing => existing.url === item.url)) {
+            next.push(item);
+          }
+        }
+        return next;
+      });
+    } catch (e) {
+      console.error('选择附件失败:', e);
+    }
+  };
+
+  const handleEditPaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    if (!hasMultimodal) return;
+    const files = Array.from(e.clipboardData.files).filter(file =>
+      file.type.startsWith('image/')
+    );
+    if (files.length > 0) {
+      e.preventDefault();
+      try {
+        const pasted = await Promise.all(files.map(async (file, index) => {
+          const mimeType = file.type || 'image/png';
+          const title = file.name || `pasted-image-${Date.now()}-${index + 1}.${imageExtFromMime(mimeType)}`;
+          if (estimatedBase64Size(file.size) > 50 * 1024 * 1024) {
+            throw new Error(`附件"${title}"超过 50MB，已停止添加。`);
+          }
+          return {
+            kind: 'image' as const,
+            url: await fileToDataUrl(file),
+            title,
+            mime_type: mimeType,
+          };
+        }));
+        setEditingAttachments(prev => [...prev, ...pasted]);
+      } catch (err) {
+        console.error('读取粘贴图片失败:', err);
+        alert(err instanceof Error ? err.message : '读取粘贴图片失败');
+      }
+    }
   };
 
   const messageGroups = useMemo(() => groupMessages(messages), [messages]);
+
+  // 计算 compact 边界：compact=true 的消息及其之前的消息都不可编辑
+  const nonEditableIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const msg of messages) {
+      ids.add(msg.id);
+      if (msg.compact) break;
+    }
+    return ids;
+  }, [messages]);
   const streamScrollKey = streamingMessageId
     ? `${streamingMessageId}:${streamingContent.length}:${streamingReasoningContent.length}`
     : "";
@@ -543,42 +663,94 @@ export function MessageList() {
               const isEditing = editingMessageId === message.id;
               return (
                 <div key={group.key} className="mt-3 first:mt-0">
+                  {isEditing ? (
+                    <div className="w-full">
+                      {editingAttachments.length > 0 && (
+                        <div className="mb-2 flex flex-wrap gap-1.5">
+                          {editingAttachments.map(item => (
+                            <span
+                              key={item.title + item.url.slice(0, 40)}
+                              className="inline-flex h-9 max-w-[260px] items-center gap-1.5 rounded-md border bg-muted/40 px-2 text-xs"
+                              title={item.title}
+                            >
+                              {item.kind === 'image' ? (
+                                <img
+                                  src={resolveAttachmentUrl(item.url)}
+                                  alt={item.title}
+                                  className="h-6 w-6 shrink-0 rounded object-cover"
+                                />
+                              ) : (
+                                <Paperclip className="h-3 w-3 shrink-0" />
+                              )}
+                              <span className="truncate">{item.title}</span>
+                              <button
+                                type="button"
+                                onClick={() => setEditingAttachments(prev => prev.filter(a => a.url !== item.url))}
+                                className="ml-1 text-muted-foreground hover:text-foreground"
+                                title="移除附件"
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      <Textarea
+                        ref={editingTextareaRef}
+                        value={editingContent}
+                        onChange={(e) => {
+                          setEditingContent(e.target.value);
+                          const textarea = editingTextareaRef.current;
+                          if (textarea) {
+                            textarea.style.height = '60px';
+                            textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
+                          }
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
+                            e.preventDefault();
+                            handleConfirmEdit();
+                          }
+                          if (e.key === "Escape") {
+                            handleCancelEdit();
+                          }
+                        }}
+                        onPaste={handleEditPaste}
+                        className="min-h-[60px] max-h-[200px] resize-none text-sm w-full"
+                        autoFocus
+                      />
+                      <div className="flex justify-between items-center mt-1">
+                        <span className="text-[10px] text-muted-foreground">Enter 发送 · Shift+Enter 换行 · Esc 取消</span>
+                        <div className="flex gap-1.5">
+                          {hasMultimodal && (
+                            <button
+                              onClick={handleAttachFilesForEdit}
+                              className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                              title="添加附件"
+                            >
+                              <Paperclip className="w-3 h-3" />
+                            </button>
+                          )}
+                          <button
+                            onClick={handleCancelEdit}
+                            className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                          >
+                            <X className="w-3 h-3" />
+                            取消
+                          </button>
+                          <button
+                            onClick={handleConfirmEdit}
+                            className="px-2.5 py-1 text-xs bg-green-600 hover:bg-green-700 text-white rounded transition-colors"
+                          >
+                            发送
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
                   <div className="flex justify-end" title={formatMessageTime(message.created_at)}>
                     <div className="max-w-[100%] text-muted-foreground">
-                      {isEditing ? (
-                        <div className="w-full">
-                          <Textarea
-                            value={editingContent}
-                            onChange={(e) => setEditingContent(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                                e.preventDefault();
-                                handleConfirmEdit();
-                              }
-                              if (e.key === "Escape") {
-                                handleCancelEdit();
-                              }
-                            }}
-                            className="min-h-[60px] max-h-[200px] resize-none text-sm"
-                            autoFocus
-                          />
-                          <div className="flex justify-end gap-1.5 mt-1">
-                            <button
-                              onClick={handleCancelEdit}
-                              className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-                            >
-                              <X className="w-3 h-3" />
-                              取消
-                            </button>
-                            <button
-                              onClick={handleConfirmEdit}
-                              className="px-2.5 py-1 text-xs bg-green-600 hover:bg-green-700 text-white rounded transition-colors"
-                            >
-                              发送 (⌘+Enter)
-                            </button>
-                          </div>
-                        </div>
-                      ) : voiceInfo ? (
+                      {voiceInfo ? (
                         <VoiceBubble
                           messageId={message.id}
                           audioPath={voiceInfo.audioPath}
@@ -598,12 +770,14 @@ export function MessageList() {
                       )}
                     </div>
                   </div>
+                  )}
                   {textContent(message) && !isEditing && (
                     <div className="flex justify-end">
                       <UserMessageActions
                         text={textContent(message)}
                         messageId={message.id}
                         runStatus={runStatus}
+                        canEdit={!nonEditableIds.has(message.id)}
                         onStartEdit={handleStartEdit}
                       />
                     </div>
