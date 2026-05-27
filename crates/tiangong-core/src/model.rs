@@ -613,6 +613,7 @@ impl SingleProviderClient {
         let mut usage = TokenUsageData::default();
         let mut tool_calls: std::collections::BTreeMap<String, (String, String)> =
             std::collections::BTreeMap::new();
+        let mut tool_call_order: Vec<String> = Vec::new();
 
         let mut stream = provider.stream(request).await.map_err(map_llm_error)?;
         while let Some(event) = stream.next().await {
@@ -646,14 +647,22 @@ impl SingleProviderClient {
                     } else {
                         call.arguments.to_string()
                     };
+                    tool_call_order.push(call.id.clone());
                     tool_calls.insert(call.id.clone(), (call.name, args));
                 }
                 ProviderStreamEvent::ToolCallDelta {
                     call_id,
                     partial_json,
                 } => {
+                    let actual_id = if tool_calls.contains_key(&call_id) {
+                        call_id
+                    } else if let Ok(idx) = call_id.parse::<usize>() {
+                        tool_call_order.get(idx).cloned().unwrap_or_default()
+                    } else {
+                        call_id
+                    };
                     let entry = tool_calls
-                        .entry(call_id)
+                        .entry(actual_id)
                         .or_insert_with(|| (String::new(), String::new()));
                     // 某些 provider 会在 ToolCallStart 里直接给出完整 arguments，
                     // 也可能在 delta 中再发送一遍；这里尽量避免重复拼接导致 JSON 无法解析。
@@ -676,6 +685,13 @@ impl SingleProviderClient {
             if name.trim().is_empty() {
                 continue;
             }
+            tracing::info!(
+                tool_call_id = %id,
+                tool_name = %name,
+                raw_args_len = raw_args.len(),
+                raw_args_preview = &raw_args[..raw_args.len().min(256)],
+                "解析 tool call arguments"
+            );
             let arguments = parse_tool_arguments_or_error(&name, &id, &raw_args);
             tool_calls_vec.push(ToolCall {
                 id,
@@ -1487,6 +1503,7 @@ async fn consume_provider_stream_events_async(
     let mut usage = TokenUsageData::default();
     let mut tool_calls: std::collections::BTreeMap<String, (String, String)> =
         std::collections::BTreeMap::new();
+    let mut tool_call_order: Vec<String> = Vec::new();
 
     while let Some(event) = stream.next().await {
         match event.map_err(map_llm_error)? {
@@ -1519,14 +1536,22 @@ async fn consume_provider_stream_events_async(
                 } else {
                     call.arguments.to_string()
                 };
+                tool_call_order.push(call.id.clone());
                 tool_calls.insert(call.id.clone(), (call.name, args));
             }
             ProviderStreamEvent::ToolCallDelta {
                 call_id,
                 partial_json,
             } => {
+                let actual_id = if tool_calls.contains_key(&call_id) {
+                    call_id
+                } else if let Ok(idx) = call_id.parse::<usize>() {
+                    tool_call_order.get(idx).cloned().unwrap_or_default()
+                } else {
+                    call_id
+                };
                 let entry = tool_calls
-                    .entry(call_id)
+                    .entry(actual_id)
                     .or_insert_with(|| (String::new(), String::new()));
                 entry.1.push_str(&partial_json);
             }

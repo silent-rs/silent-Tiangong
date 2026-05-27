@@ -31,8 +31,14 @@ pub fn parse_stream_payload(
                     let id = tool_call
                         .get("id")
                         .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
                         .unwrap_or_default()
                         .to_string();
+                    let index = tool_call
+                        .get("index")
+                        .and_then(Value::as_u64)
+                        .map(|i| i.to_string())
+                        .unwrap_or_default();
                     if let Some(function) = tool_call.get("function") {
                         if let Some(name) = function.get("name").and_then(Value::as_str) {
                             events.push(Ok(ProviderStreamEvent::ToolCallStart(
@@ -46,8 +52,9 @@ pub fn parse_stream_payload(
                         if let Some(arguments) = function.get("arguments").and_then(Value::as_str)
                             && !arguments.is_empty()
                         {
+                            let call_id = if !id.is_empty() { id } else { index };
                             events.push(Ok(ProviderStreamEvent::ToolCallDelta {
-                                call_id: id.clone(),
+                                call_id,
                                 partial_json: arguments.to_string(),
                             }));
                         }
