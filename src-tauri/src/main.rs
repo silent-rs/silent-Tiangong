@@ -379,7 +379,10 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let status_item_for_menu = status_item.clone();
     let start_item_for_menu = start_item.clone();
     let stop_item_for_menu = stop_item.clone();
-    let icon = app.default_window_icon().cloned();
+    let icon_normal = load_icon_rgba(include_bytes!("../icons/32x32.rgba"));
+    let icon_running = load_icon_rgba(include_bytes!("../icons/32x32-running.rgba"));
+    let icon_running_for_menu = icon_running.clone();
+    let icon_normal_for_menu = icon_normal.clone();
     let mut tray = TrayIconBuilder::with_id("tiangong")
         .menu(&menu)
         .tooltip("天工")
@@ -391,14 +394,32 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
                 status_item_for_menu.clone(),
                 start_item_for_menu.clone(),
                 stop_item_for_menu.clone(),
+                icon_normal_for_menu.clone(),
+                icon_running_for_menu.clone(),
             );
         });
-    if let Some(icon) = icon {
+    if let Some(icon) = icon_normal.clone() {
         tray = tray.icon(icon);
     }
-    tray.build(app)?;
-    refresh_tray_server_status(&app_handle, &status_item, &start_item, &stop_item);
-    start_tray_status_refresh(app_handle.clone(), status_item, start_item, stop_item);
+    let tray = tray.build(app)?;
+    refresh_tray_server_status(
+        &app_handle,
+        &tray,
+        &status_item,
+        &start_item,
+        &stop_item,
+        &icon_normal,
+        &icon_running,
+    );
+    start_tray_status_refresh(
+        app_handle.clone(),
+        tray,
+        status_item,
+        start_item,
+        stop_item,
+        icon_normal,
+        icon_running,
+    );
 
     // 自动拉起：如果上次退出时 Server 是开启的，自动启动嵌入式 Server
     auto_start_embedded_server(&app_handle);
@@ -429,13 +450,24 @@ fn auto_start_embedded_server(app: &tauri::AppHandle) {
 
 fn start_tray_status_refresh(
     app: tauri::AppHandle,
+    tray: tauri::tray::TrayIcon,
     status_item: tauri::menu::MenuItem<tauri::Wry>,
     start_item: tauri::menu::MenuItem<tauri::Wry>,
     stop_item: tauri::menu::MenuItem<tauri::Wry>,
+    icon_normal: Option<tauri::image::Image<'static>>,
+    icon_running: Option<tauri::image::Image<'static>>,
 ) {
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(3));
-        refresh_tray_server_status(&app, &status_item, &start_item, &stop_item);
+        refresh_tray_server_status(
+            &app,
+            &tray,
+            &status_item,
+            &start_item,
+            &stop_item,
+            &icon_normal,
+            &icon_running,
+        );
     });
 }
 
@@ -445,6 +477,8 @@ fn handle_tray_menu_event(
     status_item: tauri::menu::MenuItem<tauri::Wry>,
     start_item: tauri::menu::MenuItem<tauri::Wry>,
     stop_item: tauri::menu::MenuItem<tauri::Wry>,
+    icon_normal: Option<tauri::image::Image<'static>>,
+    icon_running: Option<tauri::image::Image<'static>>,
 ) {
     match menu_id {
         TRAY_SHOW_WINDOW_ID => show_main_window(&app),
@@ -453,6 +487,9 @@ fn handle_tray_menu_event(
             let status_item = status_item.clone();
             let start_item = start_item.clone();
             let stop_item = stop_item.clone();
+            let icon_normal = icon_normal.clone();
+            let icon_running = icon_running.clone();
+            let tray = app.tray_by_id("tiangong");
             std::thread::spawn(move || {
                 let _ = status_item.set_text("Server 状态：启动中");
                 let config = tiangong_server::config::load_server_config();
@@ -472,7 +509,17 @@ fn handle_tray_menu_event(
                         eprintln!("菜单栏启动 Server 失败：{err}");
                     }
                 }
-                refresh_tray_server_status(&app_clone, &status_item, &start_item, &stop_item);
+                if let Some(tray) = tray.as_ref() {
+                    refresh_tray_server_status(
+                        &app_clone,
+                        tray,
+                        &status_item,
+                        &start_item,
+                        &stop_item,
+                        &icon_normal,
+                        &icon_running,
+                    );
+                }
             });
         }
         TRAY_STOP_SERVER_ID => {
@@ -480,6 +527,9 @@ fn handle_tray_menu_event(
             let status_item = status_item.clone();
             let start_item = start_item.clone();
             let stop_item = stop_item.clone();
+            let icon_normal = icon_normal.clone();
+            let icon_running = icon_running.clone();
+            let tray = app.tray_by_id("tiangong");
             std::thread::spawn(move || {
                 let _ = status_item.set_text("Server 状态：停止中");
                 let state = app_clone.state::<tiangong_app::TiangongApp>();
@@ -491,7 +541,17 @@ fn handle_tray_menu_event(
                     config.enabled = false;
                     let _ = tiangong_server::config::save_server_config(&config);
                 }
-                refresh_tray_server_status(&app_clone, &status_item, &start_item, &stop_item);
+                if let Some(tray) = tray.as_ref() {
+                    refresh_tray_server_status(
+                        &app_clone,
+                        tray,
+                        &status_item,
+                        &start_item,
+                        &stop_item,
+                        &icon_normal,
+                        &icon_running,
+                    );
+                }
             });
         }
         TRAY_QUIT_ID => app.exit(0),
@@ -511,14 +571,25 @@ fn show_main_window(app: &tauri::AppHandle) {
 
 fn refresh_tray_server_status(
     app: &tauri::AppHandle,
+    tray: &tauri::tray::TrayIcon,
     status_item: &tauri::menu::MenuItem<tauri::Wry>,
     start_item: &tauri::menu::MenuItem<tauri::Wry>,
     stop_item: &tauri::menu::MenuItem<tauri::Wry>,
+    icon_normal: &Option<tauri::image::Image<'static>>,
+    icon_running: &Option<tauri::image::Image<'static>>,
 ) {
     let (text, running) = tray_server_status(app);
     let _ = status_item.set_text(text);
     let _ = start_item.set_enabled(!running);
     let _ = stop_item.set_enabled(running);
+    let icon = if running {
+        icon_running.as_ref().or(icon_normal.as_ref())
+    } else {
+        icon_normal.as_ref()
+    };
+    if let Some(icon) = icon {
+        let _ = tray.set_icon(Some(icon.clone()));
+    }
 }
 
 fn tray_server_status(app: &tauri::AppHandle) -> (String, bool) {
@@ -536,4 +607,14 @@ fn tray_server_status(app: &tauri::AppHandle) -> (String, bool) {
 
 fn generate_tauri_context() -> tauri::Context<tauri::Wry> {
     tauri::generate_context!()
+}
+
+fn load_icon_rgba(data: &'static [u8]) -> Option<tauri::image::Image<'static>> {
+    if data.len() < 8 {
+        return None;
+    }
+    let width = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+    let height = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+    let rgba = data[8..].to_vec();
+    Some(tauri::image::Image::new_owned(rgba, width, height))
 }
