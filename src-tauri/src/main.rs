@@ -224,6 +224,8 @@ fn run_gui() {
     tauri::Builder::default()
         .manage(tiangong_app::TiangongApp::new())
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Regular);
             setup_tray(app)?;
 
             // Desktop 端独立初始化调度器（不依赖 server）
@@ -348,8 +350,16 @@ fn run_gui() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .run(generate_tauri_context())
-        .expect("error while running tauri application");
+        .build(generate_tauri_context())
+        .expect("error while building tauri application")
+        .run(|handle, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                show_main_window(handle);
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (handle, event);
+        });
 
     drop(_guard);
 }
