@@ -31,7 +31,7 @@ rmcp = { workspace = true, default-features = false, features = ["client", "tran
 futures-util = { workspace = true }
 http = { workspace = true }
 toml = { workspace = true }
-reqwest = { workspace = true, default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { workspace = true, default-features = false, features = ["json", "rustls"] }
 
 # Tauri 相关依赖
 tauri = { workspace = true, features = ["protocol-asset", "tray-icon"] }

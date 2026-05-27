@@ -20,7 +20,7 @@ async-openai = { workspace = true, features = ["byot", "chat-completion", "model
 backoff = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time", "process", "io-util", "sync"] }
 rmcp = { workspace = true, default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
-reqwest = { workspace = true, default-features = false, features = ["blocking", "rustls-tls"] }
+reqwest = { workspace = true, default-features = false, features = ["blocking", "rustls"] }
 futures-util = { workspace = true }
 http = { workspace = true }
 scraper = { workspace = true }

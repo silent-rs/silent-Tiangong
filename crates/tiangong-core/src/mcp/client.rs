@@ -530,10 +530,7 @@ async fn request_tools_list(peer: &Peer<RoleClient>, params: Option<Value>) -> R
         .map(str::trim)
         .filter(|cursor| !cursor.is_empty())
         .map(ToString::to_string);
-    let request = cursor.map(|cursor| PaginatedRequestParams {
-        meta: None,
-        cursor: Some(cursor),
-    });
+    let request = cursor.map(|cursor| PaginatedRequestParams::default().with_cursor(Some(cursor)));
 
     let response = peer
         .list_tools(request)
@@ -550,10 +547,7 @@ async fn request_resources_list(peer: &Peer<RoleClient>, params: Option<Value>) 
         .map(str::trim)
         .filter(|cursor| !cursor.is_empty())
         .map(ToString::to_string);
-    let request = cursor.map(|cursor| PaginatedRequestParams {
-        meta: None,
-        cursor: Some(cursor),
-    });
+    let request = cursor.map(|cursor| PaginatedRequestParams::default().with_cursor(Some(cursor)));
 
     let response = peer
         .list_resources(request)
@@ -573,7 +567,7 @@ async fn request_resources_read(peer: &Peer<RoleClient>, params: Option<Value>) 
         .to_string();
 
     let response = peer
-        .read_resource(ReadResourceRequestParams { meta: None, uri })
+        .read_resource(ReadResourceRequestParams::new(uri))
         .await
         .context("调用 MCP resources/read 失败")?;
     serde_json::to_value(response).context("序列化 MCP resources/read 响应失败")
@@ -604,12 +598,7 @@ async fn request_tools_call(peer: &Peer<RoleClient>, params: Option<Value>) -> R
         }
     };
     let response = peer
-        .call_tool(CallToolRequestParams {
-            meta: None,
-            name: name.into(),
-            arguments,
-            task: None,
-        })
+        .call_tool(CallToolRequestParams::new(name).with_arguments(arguments.unwrap_or_default()))
         .await
         .context("调用 MCP tools/call 失败")?;
     serde_json::to_value(response).context("序列化 MCP tools/call 响应失败")

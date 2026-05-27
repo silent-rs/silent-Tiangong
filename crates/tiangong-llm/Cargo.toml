@@ -15,6 +15,6 @@ async-trait = { workspace = true }
 async-openai = { workspace = true, features = ["byot", "chat-completion", "model"] }
 backoff = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time"] }
-reqwest = { workspace = true, default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { workspace = true, default-features = false, features = ["json", "rustls"] }
 futures-util = { workspace = true }
 tracing = { workspace = true }

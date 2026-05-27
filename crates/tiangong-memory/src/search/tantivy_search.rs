@@ -221,13 +221,8 @@ fn parse_kind(s: &str) -> MemoryKind {
 }
 
 fn get_text(doc: &TantivyDocument, field: Field, _schema: &Schema) -> Option<String> {
-    doc.get_first(field).and_then(|v| {
-        if let tantivy::schema::OwnedValue::Str(s) = v {
-            Some(s.clone())
-        } else {
-            None
-        }
-    })
+    doc.get_first(field)
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
 }
 
 /// 简单转义 Tantivy 查询中的特殊字符
