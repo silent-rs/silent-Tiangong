@@ -59,15 +59,36 @@ impl MemoryHandle {
     ///
     /// 该方法用于 Core 工作线程响应配置 generation 变化；远程 handle 暂不支持
     /// 跨进程重配置，调用方应在本进程 registry 内使用。
+    ///
+    /// 当在 tokio 异步运行时内调用时，自动将阻塞操作转移到独立线程以避免 panic。
     pub fn reconfigure_blocking(&self, options: MemoryOptions) -> Result<()> {
         match self.inner.as_ref() {
             HandleInner::Local { tx } => {
                 let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-                tx.blocking_send(MemoryCommand::Reconfigure {
-                    options: Box::new(options),
-                    reply: reply_tx,
-                })
-                .with_context(|| "发送 Memory 热更新命令失败")?;
+                if tokio::runtime::Handle::try_current().is_ok() {
+                    let tx = tx.clone();
+                    let send_ok = std::thread::Builder::new()
+                        .name("memory-reconfigure".to_string())
+                        .spawn(move || {
+                            tx.blocking_send(MemoryCommand::Reconfigure {
+                                options: Box::new(options),
+                                reply: reply_tx,
+                            })
+                            .is_ok()
+                        })
+                        .with_context(|| "创建 Memory 热更新线程失败")?
+                        .join()
+                        .map_err(|_| anyhow::anyhow!("Memory 热更新线程 panic"))?;
+                    if !send_ok {
+                        return Err(anyhow!("发送 Memory 热更新命令失败"));
+                    }
+                } else {
+                    tx.blocking_send(MemoryCommand::Reconfigure {
+                        options: Box::new(options),
+                        reply: reply_tx,
+                    })
+                    .with_context(|| "发送 Memory 热更新命令失败")?;
+                }
                 reply_rx
                     .recv_timeout(Duration::from_secs(30))
                     .with_context(|| "等待 Memory 热更新结果超时或失败")?

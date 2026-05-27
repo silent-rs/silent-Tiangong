@@ -41,6 +41,28 @@ impl TiangongApp {
         Self::default()
     }
 
+    fn lock_cores(&self) -> std::sync::MutexGuard<'_, HashMap<String, TiangongCore>> {
+        match self.cores.lock() {
+            Ok(guard) => guard,
+            Err(err) => {
+                eprintln!("cores 锁已污染，尝试恢复: {}", err);
+                err.into_inner()
+            }
+        }
+    }
+
+    fn lock_embedded_server(
+        &self,
+    ) -> std::sync::MutexGuard<'_, Option<tiangong_server::EmbeddedServerHandle>> {
+        match self.embedded_server.lock() {
+            Ok(guard) => guard,
+            Err(err) => {
+                eprintln!("embedded_server 锁已污染，尝试恢复: {}", err);
+                err.into_inner()
+            }
+        }
+    }
+
     pub async fn sync_core_config_from_state(&self) -> Result<(), String> {
         let base = self.config.snapshot();
         let next = self
@@ -81,7 +103,7 @@ impl TiangongApp {
         session: tiangong_core::session::Session,
         stream_tx: std::sync::mpsc::Sender<tiangong_types::SessionStreamEvent>,
     ) -> (String, bool) {
-        let mut cores = self.cores.lock().unwrap();
+        let mut cores = self.lock_cores();
         if let Some(core) = cores.get(session_id) {
             if core.is_running() {
                 let _ = core.reload_config();
@@ -110,7 +132,7 @@ impl TiangongApp {
         content: String,
         message_id: Option<String>,
     ) -> bool {
-        let mut cores = self.cores.lock().unwrap();
+        let mut cores = self.lock_cores();
         if let Some(core) = cores.get(session_id) {
             let sent = if let Some(message_id) = message_id {
                 core.send_message_with_id(content, message_id, Vec::new())
@@ -129,13 +151,13 @@ impl TiangongApp {
 
     /// 取回 core 的 session（消费 core，用于持久化或切换会话）
     pub fn take_core(&self, session_id: &str) -> Option<TiangongCore> {
-        let mut cores = self.cores.lock().unwrap();
+        let mut cores = self.lock_cores();
         cores.remove(session_id)
     }
 
     /// 取消指定会话的执行
     pub fn cancel_core(&self, session_id: &str) {
-        let cores = self.cores.lock().unwrap();
+        let cores = self.lock_cores();
         if let Some(core) = cores.get(session_id) {
             core.cancel();
         }
@@ -143,7 +165,7 @@ impl TiangongApp {
 
     /// 取消指定会话中某个 Agent 的当前执行
     pub fn cancel_agent_core(&self, session_id: &str, role: String) -> bool {
-        let cores = self.cores.lock().unwrap();
+        let cores = self.lock_cores();
         cores
             .get(session_id)
             .map(|core| core.cancel_agent(role))
@@ -152,7 +174,7 @@ impl TiangongApp {
 
     /// 向指定会话的 core 发送审批响应
     pub fn respond_approval_to_core(&self, session_id: &str, request_id: String, approved: bool) {
-        let cores = self.cores.lock().unwrap();
+        let cores = self.lock_cores();
         if let Some(core) = cores.get(session_id) {
             core.respond_approval(request_id, approved);
         }
@@ -160,7 +182,7 @@ impl TiangongApp {
 
     /// 设置所有活跃 core 的信任模式（全局生效）
     pub fn set_all_cores_trust_mode(&self, mode: tiangong_core::permission::TrustMode) {
-        let cores = self.cores.lock().unwrap();
+        let cores = self.lock_cores();
         for core in cores.values() {
             core.set_trust_mode(mode);
         }
@@ -172,7 +194,7 @@ impl TiangongApp {
         session_id: &str,
         mode: tiangong_core::permission::TrustMode,
     ) {
-        let cores = self.cores.lock().unwrap();
+        let cores = self.lock_cores();
         if let Some(core) = cores.get(session_id) {
             core.set_trust_mode(mode);
         }
@@ -180,13 +202,13 @@ impl TiangongApp {
 
     /// 检查 session 是否有活跃 core
     pub fn is_session_executing(&self, session_id: &str) -> bool {
-        let cores = self.cores.lock().unwrap();
+        let cores = self.lock_cores();
         cores.contains_key(session_id)
     }
 
     /// 手动触发上下文压缩
     pub fn compress_context_core(&self, session_id: &str) -> bool {
-        let cores = self.cores.lock().unwrap();
+        let cores = self.lock_cores();
         cores
             .get(session_id)
             .map(|core| core.compress_context())
@@ -195,7 +217,7 @@ impl TiangongApp {
 
     /// 清理上下文（重置 LLM 上下文到初始 system prompt）
     pub fn reset_context_core(&self, session_id: &str) -> bool {
-        let cores = self.cores.lock().unwrap();
+        let cores = self.lock_cores();
         cores
             .get(session_id)
             .map(|core| core.reset_context())
@@ -209,7 +231,7 @@ impl TiangongApp {
         port: u16,
         token: Option<String>,
     ) -> Result<(), String> {
-        let mut guard = self.embedded_server.lock().unwrap();
+        let mut guard = self.lock_embedded_server();
         if guard.is_some() {
             return Err("Server 已在运行".to_string());
         }
@@ -227,7 +249,7 @@ impl TiangongApp {
 
     /// 停止嵌入式 Server
     pub fn stop_embedded_server(&self) -> Result<(), String> {
-        let mut guard = self.embedded_server.lock().unwrap();
+        let mut guard = self.lock_embedded_server();
         if let Some(mut handle) = guard.take() {
             handle.stop();
             Ok(())
@@ -238,7 +260,7 @@ impl TiangongApp {
 
     /// 检查嵌入式 Server 是否在运行
     pub fn is_embedded_server_running(&self) -> bool {
-        let guard = self.embedded_server.lock().unwrap();
+        let guard = self.lock_embedded_server();
         guard.is_some()
     }
 
