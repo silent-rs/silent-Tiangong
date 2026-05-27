@@ -11,7 +11,7 @@
 | 0.1.0 | CLI Agent 基线 + Skill 管理 | ✅ |
 | 0.2.0 | Server + Gateway + 多媒体 + Memory | ✅ |
 | 0.3.0 | 多智能体协作 + 发布分发 + 飞书互联 | ✅ |
-| **0.4.0** | **自动化触发层（cron/webhook/polling）** | **🔲 进行中** |
+| **0.4.0** | **自动化触发层（cron/webhook/polling）** | **✅** |
 
 ## 当前执行策略（2026-05-25）
 
@@ -42,7 +42,7 @@
 | 18 | Memory 系统 | tiangong-memory crate、Micro/Meso 记忆链路 |
 | 19 | 多智能体协作 | 动态组队、消息通讯、文件编辑锁、前端交互 |
 
-## Phase 20：自动化触发层（进行中）
+## Phase 20：自动化触发层（已完成）
 
 > Issue：#38
 
