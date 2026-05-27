@@ -132,7 +132,7 @@ pub(in crate::app_state) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result
 
 pub(in crate::app_state) fn canonical_scru128_id(raw: &str) -> Option<String> {
     raw.trim()
-        .parse::<scru128::Scru128Id>()
+        .parse::<scru128::Id>()
         .ok()
         .map(|id| id.to_string())
 }
