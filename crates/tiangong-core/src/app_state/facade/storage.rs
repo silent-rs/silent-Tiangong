@@ -10,7 +10,7 @@ impl TiangongState {
         self.services.repository.persist_app_only(&self.store)
     }
 
-    pub(in crate::app_state) fn persist_session(&mut self, session_id: &str) -> Result<()> {
+    pub fn persist_session(&mut self, session_id: &str) -> Result<()> {
         self.normalize_sessions_for_storage();
         self.services
             .repository

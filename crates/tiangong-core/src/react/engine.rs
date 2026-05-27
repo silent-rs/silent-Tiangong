@@ -405,7 +405,7 @@ impl ReactEngine {
         let mut accumulated_usage = TokenUsage::default();
         let mut memory_recall_attempted = false;
         let mut successful_tool_call_keys = HashSet::new();
-        let mut failed_tool_call_keys = HashSet::new();
+        let mut failed_tool_call_keys: HashMap<String, String> = HashMap::new();
         let mut failed_tool_names = HashSet::new();
         let mut memory_candidate_count = 0usize;
         let mut completion_check_count: u32 = 0;
@@ -814,8 +814,14 @@ impl ReactEngine {
                     append_duplicate_tool_result(session, stream_tx, &call.id, &call.name);
                     continue;
                 }
-                if failed_tool_call_keys.contains(&tool_call_key) {
-                    append_repeated_failed_tool_result(session, stream_tx, &call.id, &call.name);
+                if let Some(original_error) = failed_tool_call_keys.get(&tool_call_key).cloned() {
+                    append_repeated_failed_tool_result(
+                        session,
+                        stream_tx,
+                        &call.id,
+                        &call.name,
+                        &original_error,
+                    );
                     failed_tool_names.insert(call.name.clone());
                     need_failure_recovery_prompt = true;
                     continue;
@@ -1166,7 +1172,16 @@ impl ReactEngine {
                     failed_tool_names.remove(&call.name);
                     successful_tool_call_keys.insert(tool_call_key);
                 } else {
-                    failed_tool_call_keys.insert(tool_call_key);
+                    let error_summary = format!(
+                        "{}{}",
+                        result.summary.trim(),
+                        if result.stderr.trim().is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {}", result.stderr.trim())
+                        }
+                    );
+                    failed_tool_call_keys.insert(tool_call_key, error_summary);
                     failed_tool_names.insert(call.name.clone());
                     need_failure_recovery_prompt = true;
                 }

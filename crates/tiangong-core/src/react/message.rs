@@ -203,9 +203,15 @@ pub(crate) fn append_repeated_failed_tool_result(
     stream_tx: &StdSender<StreamEvent>,
     tool_call_id: &str,
     tool_name: &str,
+    original_error: &str,
 ) {
+    let error_hint = if original_error.trim().is_empty() {
+        String::new()
+    } else {
+        format!("失败原因：{original_error}\n")
+    };
     let message = format!(
-        "本轮已经执行过完全相同的 {tool_name} 工具调用且执行失败，系统已跳过重复执行。请不要继续重复相同工具和参数；请切换到其他可行方式，或在缺少外部条件时请求用户协作。"
+        "{error_hint}本轮已经执行过完全相同的 {tool_name} 工具调用且执行失败，系统已跳过重复执行。请不要继续重复相同工具和参数；请修正参数后重试，或切换到其他可行方式。"
     );
     let _ = stream_tx.send(StreamEvent::ToolResult {
         name: tool_name.to_string(),

@@ -14,6 +14,9 @@ tiangong-server = { workspace = true }
 tiangong-media = { workspace = true }
 tiangong-config = { workspace = true }
 tiangong-memory = { workspace = true }
+tiangong-scheduler = { workspace = true }
+silent = { workspace = true, features = ["scheduler"] }
+async-trait = { workspace = true }
 
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive"] }

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use crate::api::SharedState;
 use crate::remote::event::{EventBus, TiangongEvent};
@@ -50,6 +51,24 @@ impl ServerCoreManager {
             .await
     }
 
+    /// 发送消息到 core（不等结果），适用于定时任务等触发场景
+    pub async fn send_message(
+        &self,
+        requested_session_id: &str,
+        content: String,
+        message_id: Option<String>,
+        media: Vec<MediaAsset>,
+    ) -> Result<()> {
+        let (session_id, _session, _created) = self.ensure_core(requested_session_id).await?;
+        let cores = self.cores.lock().unwrap();
+        let Some(core) = cores.get(&session_id) else {
+            return Err(anyhow!("会话 core 不存在：{session_id}"));
+        };
+        let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
+        core.send_message_with_id(content, msg_id, media);
+        Ok(())
+    }
+
     pub async fn send_message_and_wait(
         &self,
         requested_session_id: &str,
@@ -75,9 +94,14 @@ impl ServerCoreManager {
         }
 
         let tracker_for_wait = tracker.clone();
-        let outcome = tokio::task::spawn_blocking(move || tracker_for_wait.wait_for_turn(turn_id))
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let outcome = tracker_for_wait.wait_for_turn(turn_id);
+            let _ = tx.send(outcome);
+        });
+        let outcome = rx
             .await
-            .map_err(|err| anyhow!("等待执行结果失败：{err}"))?;
+            .map_err(|_| anyhow!("等待执行结果的线程意外退出"))?;
         let response = match outcome {
             TurnOutcome::Completed => self.last_assistant_outgoing(&session_id).await,
             TurnOutcome::Failed(message) => return Err(anyhow!(message)),
@@ -94,9 +118,6 @@ impl ServerCoreManager {
                 .iter()
                 .any(|s| s.id == requested_session_id)
             {
-                if state.active_session_id() != requested_session_id {
-                    state.switch_session(requested_session_id);
-                }
                 requested_session_id.to_string()
             } else {
                 let idx = state.ensure_active_session_index();
@@ -169,7 +190,7 @@ impl ServerCoreManager {
                 session.trust_mode = TrustMode::FullTrust;
                 let session_id = session.id.clone();
                 state.sessions_mut().push(session);
-                state.persist_session_and_app(&session_id)?;
+                state.persist_session(&session_id)?;
                 self.event_bus
                     .publish(TiangongEvent::SessionCreated(session_id.clone()));
                 session_id
@@ -359,12 +380,30 @@ impl ExecutionTracker {
     }
 
     fn wait_for_turn(&self, turn_id: u64) -> TurnOutcome {
+        let timeout = Duration::from_secs(300);
         let mut state = self.state.lock().unwrap();
+        let deadline = std::time::Instant::now() + timeout;
         loop {
             if let Some(outcome) = state.outcomes.remove(&turn_id) {
                 return outcome;
             }
-            state = self.notify.wait(state).unwrap();
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                state.current_turn_id = None;
+                return TurnOutcome::Failed("执行超时（300 秒）".to_string());
+            }
+            match self.notify.wait_timeout(state, remaining) {
+                Ok((guard, timed_out)) => {
+                    state = guard;
+                    if timed_out.timed_out() {
+                        state.current_turn_id = None;
+                        return TurnOutcome::Failed("执行超时（300 秒）".to_string());
+                    }
+                }
+                Err(poisoned) => {
+                    state = poisoned.into_inner().0;
+                }
+            }
         }
     }
 }
@@ -527,7 +566,7 @@ fn sync_stream_event_to_state(
     }
 
     if should_persist {
-        let _ = state.persist_session_and_app(session_id);
+        let _ = state.persist_session(session_id);
     }
     drop(state);
 

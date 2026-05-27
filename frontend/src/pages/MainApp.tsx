@@ -63,10 +63,6 @@ export function MainApp() {
 
     setupListener();
 
-    api.getRunSnapshot().then((snapshot) => {
-      updateFromSnapshot(snapshot);
-    }).catch(console.error);
-
     // 加载初始工作空间和当前对话目录
     Promise.all([api.getWorkspaceDir(), api.getSessionCwd()])
       .then(([workspaceDir, sessionCwd]) => {

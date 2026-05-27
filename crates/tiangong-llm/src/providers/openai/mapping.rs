@@ -51,6 +51,8 @@ pub fn build_request_json(req: &ProviderRequest, stream: bool) -> Result<Value> 
     }
     if req.thinking_disabled {
         inject_thinking_disabled(&mut payload);
+    } else if let Some(thinking) = &req.thinking {
+        inject_thinking_enabled(&mut payload, thinking.budget_tokens);
     }
     Ok(payload)
 }
@@ -394,6 +396,16 @@ fn inject_thinking_disabled(payload: &mut Value) {
         return;
     };
     obj.insert("thinking".to_string(), json!({"type": "disabled"}));
+}
+
+fn inject_thinking_enabled(payload: &mut Value, budget_tokens: u32) {
+    let Some(obj) = payload.as_object_mut() else {
+        return;
+    };
+    obj.insert(
+        "thinking".to_string(),
+        json!({"type": "enabled", "budget_tokens": budget_tokens}),
+    );
 }
 
 pub fn strip_think_tags(text: &str) -> String {

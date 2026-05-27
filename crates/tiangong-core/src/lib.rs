@@ -25,6 +25,7 @@ mod process;
 pub mod prompt;
 pub mod react;
 pub mod runtime;
+pub mod scheduler;
 pub mod session;
 pub mod skill;
 mod stream_throttle;

@@ -36,12 +36,12 @@ pub struct AttachmentDataUrl {
 }
 
 #[tauri::command]
-pub fn read_attachment_as_data_url(
+pub async fn read_attachment_as_data_url(
     path: String,
     max_base64_bytes: Option<u64>,
-    state: State<TiangongApp>,
+    state: State<'_, TiangongApp>,
 ) -> Result<AttachmentDataUrl, String> {
-    ensure_multimodal_enabled(&state)?;
+    ensure_multimodal_enabled(&state).await?;
 
     let path_buf = PathBuf::from(&path);
     if !path_buf.is_file() {
@@ -100,22 +100,24 @@ fn mime_type_from_path(path: &std::path::Path) -> String {
     .to_string()
 }
 
-fn ensure_multimodal_enabled(state: &State<TiangongApp>) -> Result<(), String> {
-    state.with_state_read(|core_state| {
-        let enabled = has_capability_in_state(
-            core_state,
-            tiangong_core::models_config::ModelCapability::Multimodal,
-        );
-        if enabled {
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("未配置多模态模型，文件上传能力已关闭。"))
-        }
-    })
+async fn ensure_multimodal_enabled(state: &State<'_, TiangongApp>) -> Result<(), String> {
+    state
+        .with_state_read(|core_state| {
+            let enabled = has_capability_in_state(
+                core_state,
+                tiangong_core::models_config::ModelCapability::Multimodal,
+            );
+            if enabled {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("未配置多模态模型，文件上传能力已关闭。"))
+            }
+        })
+        .await
 }
 
 #[tauri::command]
-pub fn request_desktop_notification_permission(app: AppHandle) -> Result<bool, String> {
+pub async fn request_desktop_notification_permission(app: AppHandle) -> Result<bool, String> {
     let permission = app
         .notification()
         .request_permission()
@@ -124,7 +126,7 @@ pub fn request_desktop_notification_permission(app: AppHandle) -> Result<bool, S
 }
 
 #[tauri::command]
-pub fn send_desktop_notification(
+pub async fn send_desktop_notification(
     title: String,
     body: String,
     session_id: Option<String>,
@@ -165,7 +167,7 @@ fn main_window_is_focused(app: &AppHandle) -> bool {
         .unwrap_or(false)
 }
 
-fn send_approval_notification_if_background(
+async fn send_approval_notification_if_background(
     app: AppHandle,
     session_id: String,
     request_id: String,
@@ -175,6 +177,7 @@ fn send_approval_notification_if_background(
     let is_current_session = app
         .state::<TiangongApp>()
         .with_state_read(|state| Ok(state.active_session_id() == session_id))
+        .await
         .unwrap_or(false);
     if is_current_session && main_window_is_focused(&app) {
         return;
@@ -455,67 +458,79 @@ fn build_session_snapshot(
 
 /// 获取所有会话列表
 #[tauri::command]
-pub fn get_sessions(state: State<TiangongApp>) -> Result<Vec<SessionListItem>, String> {
-    state.with_state_read(|core_state| {
-        Ok(core_state
-            .sessions()
-            .iter()
-            .filter(|session| session.parent_session_id.is_none())
-            .map(SessionListItem::from_core)
-            .collect())
-    })
+pub async fn get_sessions(state: State<'_, TiangongApp>) -> Result<Vec<SessionListItem>, String> {
+    state
+        .with_state_read(|core_state| {
+            Ok(core_state
+                .sessions()
+                .iter()
+                .filter(|session| session.parent_session_id.is_none())
+                .map(SessionListItem::from_core)
+                .collect())
+        })
+        .await
 }
 
 /// 创建新会话
 #[tauri::command]
-pub fn create_session(state: State<TiangongApp>) -> Result<SessionListItem, String> {
-    let result = state.with_state(|core_state| {
-        core_state.create_session();
-        // 返回新创建的活动会话
-        core_state
-            .active_session()
-            .map(SessionListItem::from_core)
-            .ok_or_else(|| anyhow::anyhow!("Failed to create session"))
-    })?;
-    state.sync_core_config_from_state()?;
+pub async fn create_session(state: State<'_, TiangongApp>) -> Result<SessionListItem, String> {
+    let result = state
+        .with_state(|core_state| {
+            core_state.create_session();
+            // 返回新创建的活动会话
+            core_state
+                .active_session()
+                .map(SessionListItem::from_core)
+                .ok_or_else(|| anyhow::anyhow!("Failed to create session"))
+        })
+        .await?;
+    state.sync_core_config_from_state().await?;
     Ok(result)
 }
 
 /// 切换到指定会话
 #[tauri::command]
-pub fn switch_session(
+pub async fn switch_session(
     session_id: String,
     app: AppHandle,
-    state: State<TiangongApp>,
+    state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
-    state.with_state(|core_state| {
-        core_state.switch_session(&session_id);
-        Ok(())
-    })?;
-    state.sync_core_config_from_state()?;
-    let trust_mode =
-        state.with_state_read(|core_state| Ok(core_state.active_session_trust_mode()))?;
+    state
+        .with_state(|core_state| {
+            core_state.switch_session(&session_id);
+            Ok(())
+        })
+        .await?;
+    state.sync_core_config_from_state().await?;
+    let trust_mode = state
+        .with_state_read(|core_state| Ok(core_state.active_session_trust_mode()))
+        .await?;
     state.set_core_trust_mode(&session_id, trust_mode);
 
     // 为新会话补充索引（后台执行，不阻塞 UI）
-    let cwd = state.with_state_read(|core_state| Ok(core_state.active_session_effective_cwd()))?;
+    let cwd = state
+        .with_state_read(|core_state| Ok(core_state.active_session_effective_cwd()))
+        .await?;
     let sid = session_id.clone();
     let has_session_index = tiangong_core::index::session_index_exists(&sid);
     let messages = if !has_session_index {
-        state.with_state_read(|core_state| {
-            Ok(core_state
-                .sessions()
-                .iter()
-                .find(|s| s.id == sid)
-                .map(|s| s.messages.clone())
-                .unwrap_or_default())
-        })?
+        state
+            .with_state_read(|core_state| {
+                Ok(core_state
+                    .sessions()
+                    .iter()
+                    .find(|s| s.id == sid)
+                    .map(|s| s.messages.clone())
+                    .unwrap_or_default())
+            })
+            .await?
     } else {
         Vec::new()
     };
 
     if !cwd.is_empty() || !messages.is_empty() {
         let app_clone = app.clone();
+        let rt = tokio::runtime::Handle::current();
         thread::spawn(move || {
             let mut need_snapshot = false;
 
@@ -550,10 +565,11 @@ pub fn switch_session(
             }
 
             if need_snapshot {
-                if let Ok(snapshot) = app_clone
-                    .state::<TiangongApp>()
-                    .with_state_read(|s| Ok(build_full_snapshot_with_status(s, false)))
-                {
+                if let Ok(snapshot) = rt.block_on(
+                    app_clone
+                        .state::<TiangongApp>()
+                        .with_state_read(|s| Ok(build_full_snapshot_with_status(s, false))),
+                ) {
                     let _ = app_clone.emit("run_snapshot", &snapshot);
                 }
             }
@@ -565,17 +581,24 @@ pub fn switch_session(
 
 /// 删除当前会话
 #[tauri::command]
-pub fn delete_session(state: State<TiangongApp>) -> Result<(), String> {
-    state.with_state(|core_state| core_state.delete_active_session())
+pub async fn delete_session(state: State<'_, TiangongApp>) -> Result<(), String> {
+    state
+        .with_state(|core_state| core_state.delete_active_session())
+        .await
 }
 
 /// 更新会话标题
 #[tauri::command]
-pub fn update_session_title(title: String, state: State<TiangongApp>) -> Result<(), String> {
-    state.with_state(|core_state| {
-        core_state.update_session_title_draft(title);
-        core_state.save_active_session_title()
-    })
+pub async fn update_session_title(
+    title: String,
+    state: State<'_, TiangongApp>,
+) -> Result<(), String> {
+    state
+        .with_state(|core_state| {
+            core_state.update_session_title_draft(title);
+            core_state.save_active_session_title()
+        })
+        .await
 }
 
 // ============================================================================
@@ -584,49 +607,51 @@ pub fn update_session_title(title: String, state: State<TiangongApp>) -> Result<
 
 /// 发送消息并执行
 #[tauri::command]
-pub fn send_message(
+pub async fn send_message(
     content: String,
     app: AppHandle,
     _window: Window,
-    state: State<TiangongApp>,
+    state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
-    send_message_inner(content, Vec::new(), app, state)
+    send_message_inner(content, Vec::new(), app, state).await
 }
 
 #[tauri::command]
-pub fn send_message_with_media(
+pub async fn send_message_with_media(
     content: String,
     media: Vec<tiangong_types::MediaAsset>,
     app: AppHandle,
     _window: Window,
-    state: State<TiangongApp>,
+    state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
     if parse_context_slash_command(&content).is_none() && !media.is_empty() {
-        ensure_multimodal_enabled(&state)?;
+        ensure_multimodal_enabled(&state).await?;
     }
-    send_message_inner(content, media, app, state)
+    send_message_inner(content, media, app, state).await
 }
 
-fn send_message_inner(
+async fn send_message_inner(
     content: String,
     media: Vec<tiangong_types::MediaAsset>,
     app: AppHandle,
-    state: State<TiangongApp>,
+    state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
     use std::sync::mpsc;
     use tiangong_types::SessionStreamEvent;
 
     if let Some(command) = parse_context_slash_command(&content) {
-        run_context_slash_command(command, app, &state)?;
+        run_context_slash_command(command, app, &state).await?;
         return Ok(());
     }
 
-    state.sync_core_config_from_state()?;
+    state.sync_core_config_from_state().await?;
 
     // 准备 session
-    let (session_id, user_message_id, session_snapshot) = state.with_state(|core_state| {
-        core_state.prepare_active_user_message_ingress_with_media(content.clone(), media)
-    })?;
+    let (session_id, user_message_id, session_snapshot) = state
+        .with_state(|core_state| {
+            core_state.prepare_active_user_message_ingress_with_media(content.clone(), media)
+        })
+        .await?;
     let command_media = session_snapshot
         .messages
         .iter()
@@ -664,6 +689,7 @@ fn start_stream_consumer(
 ) {
     use tiangong_types::StreamEvent;
 
+    let rt = tokio::runtime::Handle::current();
     thread::spawn(move || {
         let mut assistant_msg_id: Option<String> = None;
         let mut last_tool_args_summary = String::new();
@@ -677,7 +703,7 @@ fn start_stream_consumer(
             let is_error = matches!(event, StreamEvent::Error { .. });
 
             // 更新 session + RunStatus/usage
-            let _ = app.state::<TiangongApp>().with_state(|core_state| {
+            let _ = rt.block_on(app.state::<TiangongApp>().with_state(|core_state| {
                 if let Some(session) = core_state.sessions_mut().iter_mut().find(|s| s.id == sid) {
                     match &event {
                         StreamEvent::UserMessage {
@@ -1181,7 +1207,7 @@ fn start_stream_consumer(
                     _ => {}
                 }
                 Ok(())
-            });
+            }));
 
             // emit run_snapshot
             {
@@ -1194,16 +1220,18 @@ fn start_stream_consumer(
                 } else if matches!(&event, StreamEvent::ContextCompressing { .. }) {
                     true
                 } else if is_context_event {
-                    app.state::<TiangongApp>()
-                        .with_state_read(|s| Ok(s.has_pending_turn_for(&sid)))
-                        .unwrap_or(false)
+                    rt.block_on(
+                        app.state::<TiangongApp>()
+                            .with_state_read(|s| Ok(s.has_pending_turn_for(&sid))),
+                    )
+                    .unwrap_or(false)
                 } else {
                     true
                 };
-                if let Ok(snapshot) = app
-                    .state::<TiangongApp>()
-                    .with_state_read(|s| Ok(build_full_snapshot_with_status(s, is_exec)))
-                {
+                if let Ok(snapshot) = rt.block_on(
+                    app.state::<TiangongApp>()
+                        .with_state_read(|s| Ok(build_full_snapshot_with_status(s, is_exec))),
+                ) {
                     let _ = app.emit("run_snapshot", &snapshot);
                 }
             }
@@ -1214,13 +1242,13 @@ fn start_stream_consumer(
                 args_summary,
             } = &event
             {
-                send_approval_notification_if_background(
+                rt.block_on(send_approval_notification_if_background(
                     app.clone(),
                     sid.clone(),
                     request_id.clone(),
                     tool_name.clone(),
                     args_summary.clone(),
-                );
+                ));
             }
 
             if is_done || is_error {
@@ -1228,7 +1256,7 @@ fn start_stream_consumer(
                 let final_sid = sid.clone();
 
                 // 提取标题生成所需数据（在锁内完成，避免长时间持锁）
-                let title_task = app.state::<TiangongApp>().with_state(|core_state| {
+                let title_task = rt.block_on(app.state::<TiangongApp>().with_state(|core_state| {
                     let _ = core_state.persist_session_and_app(&final_sid);
                     let snapshot = build_full_snapshot_with_status(core_state, false);
                     let _ = app.emit("run_snapshot", &snapshot);
@@ -1256,12 +1284,13 @@ fn start_stream_consumer(
                         }
                     }
                     Ok(None)
-                });
+                }));
 
                 // 异步生成标题（不阻塞消费线程）
                 if let Ok(Some((input, provider_config))) = title_task {
                     let app_for_title = app.clone();
                     let sid_for_title = final_sid.clone();
+                    let rt2 = rt.clone();
                     thread::spawn(move || {
                         let client =
                             tiangong_core::model::SingleProviderClient::new(provider_config);
@@ -1269,9 +1298,8 @@ fn start_stream_consumer(
                             let clean = t.trim().trim_matches('"').to_string();
                             if !clean.is_empty() {
                                 let _ =
-                                    app_for_title
-                                        .state::<TiangongApp>()
-                                        .with_state(|core_state| {
+                                    rt2.block_on(app_for_title.state::<TiangongApp>().with_state(
+                                        |core_state| {
                                             if let Some(s) = core_state
                                                 .sessions_mut()
                                                 .iter_mut()
@@ -1287,7 +1315,8 @@ fn start_stream_consumer(
                                             let _ = app_for_title.emit("run_snapshot", &snapshot);
                                             let _ = app_for_title.emit("sessions_updated", &());
                                             Ok(())
-                                        });
+                                        },
+                                    ));
                             }
                         }
                     });
@@ -1302,109 +1331,113 @@ fn start_stream_consumer(
 ///
 /// 截断该消息之后的所有内容，更新消息内容，然后创建新的 core 重新执行 turn。
 #[tauri::command]
-pub fn edit_and_resend(
+pub async fn edit_and_resend(
     message_id: String,
     new_content: String,
     media: Option<Vec<tiangong_types::MediaAsset>>,
     app: AppHandle,
-    state: State<TiangongApp>,
+    state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
     use std::sync::mpsc;
 
     if let Some(ref media_vec) = media {
         if parse_context_slash_command(&new_content).is_none() && !media_vec.is_empty() {
-            ensure_multimodal_enabled(&state)?;
+            ensure_multimodal_enabled(&state).await?;
         }
     }
 
     // 1. 查找消息所在会话并验证
-    let session_id = state.with_state(|core_state| {
-        let session = core_state
-            .sessions()
-            .iter()
-            .find(|s| s.messages.iter().any(|m| m.id == message_id))
-            .ok_or_else(|| anyhow::anyhow!("消息不存在：{message_id}"))?;
+    let session_id = state
+        .with_state(|core_state| {
+            let session = core_state
+                .sessions()
+                .iter()
+                .find(|s| s.messages.iter().any(|m| m.id == message_id))
+                .ok_or_else(|| anyhow::anyhow!("消息不存在：{message_id}"))?;
 
-        let msg_idx = session
-            .messages
-            .iter()
-            .position(|m| m.id == message_id)
-            .ok_or_else(|| anyhow::anyhow!("消息不存在"))?;
-        let msg = &session.messages[msg_idx];
-        if msg.role != tiangong_core::session::MessageRole::User {
-            return Err(anyhow::anyhow!("只能编辑用户消息"));
-        }
-        if msg.compact {
-            return Err(anyhow::anyhow!("该消息已被压缩或清空，无法编辑"));
-        }
-        if msg_idx < session.summary_up_to {
-            return Err(anyhow::anyhow!("该消息已被压缩或清空，无法编辑"));
-        }
-        Ok(session.id.clone())
-    })?;
+            let msg_idx = session
+                .messages
+                .iter()
+                .position(|m| m.id == message_id)
+                .ok_or_else(|| anyhow::anyhow!("消息不存在"))?;
+            let msg = &session.messages[msg_idx];
+            if msg.role != tiangong_core::session::MessageRole::User {
+                return Err(anyhow::anyhow!("只能编辑用户消息"));
+            }
+            if msg.compact {
+                return Err(anyhow::anyhow!("该消息已被压缩或清空，无法编辑"));
+            }
+            if msg_idx < session.summary_up_to {
+                return Err(anyhow::anyhow!("该消息已被压缩或清空，无法编辑"));
+            }
+            Ok(session.id.clone())
+        })
+        .await?;
 
     // 2. 取消并丢弃旧 core
     state.cancel_core(&session_id);
     state.take_core(&session_id);
 
     // 3. 更新消息内容、截断后续消息、持久化
-    let (session_snapshot, message_media) = state.with_state(|core_state| {
-        let session = core_state
-            .sessions_mut()
-            .iter_mut()
-            .find(|s| s.id == session_id)
-            .ok_or_else(|| anyhow::anyhow!("会话不存在"))?;
+    let (session_snapshot, message_media) = state
+        .with_state(|core_state| {
+            let session = core_state
+                .sessions_mut()
+                .iter_mut()
+                .find(|s| s.id == session_id)
+                .ok_or_else(|| anyhow::anyhow!("会话不存在"))?;
 
-        if let Some(ref new_media) = media {
-            session.update_message_content_with_media(
-                &message_id,
-                new_content.clone(),
-                new_media.clone(),
-            );
-        } else {
-            session.update_message_content(&message_id, new_content.clone());
-        }
-        session.truncate_after_message(&message_id);
+            if let Some(ref new_media) = media {
+                session.update_message_content_with_media(
+                    &message_id,
+                    new_content.clone(),
+                    new_media.clone(),
+                );
+            } else {
+                session.update_message_content(&message_id, new_content.clone());
+            }
+            session.truncate_after_message(&message_id);
 
-        let message_media: Vec<tiangong_types::MediaAsset> = session
-            .messages
-            .iter()
-            .find(|message| message.id == message_id)
-            .map(|message| {
-                let mut assets = Vec::new();
-                for block in &message.content {
-                    if let tiangong_types::message::ContentBlock::Media {
-                        kind,
-                        url,
-                        mime_type,
-                        title,
-                    } = block
-                    {
-                        assets.push(tiangong_types::MediaAsset {
-                            kind: *kind,
-                            url: url.clone(),
-                            mime_type: mime_type.clone(),
-                            title: title.clone(),
-                            capability: None,
-                        });
+            let message_media: Vec<tiangong_types::MediaAsset> = session
+                .messages
+                .iter()
+                .find(|message| message.id == message_id)
+                .map(|message| {
+                    let mut assets = Vec::new();
+                    for block in &message.content {
+                        if let tiangong_types::message::ContentBlock::Media {
+                            kind,
+                            url,
+                            mime_type,
+                            title,
+                        } = block
+                        {
+                            assets.push(tiangong_types::MediaAsset {
+                                kind: *kind,
+                                url: url.clone(),
+                                mime_type: mime_type.clone(),
+                                title: title.clone(),
+                                capability: None,
+                            });
+                        }
                     }
-                }
-                assets.extend(message.media.clone());
-                assets
-            })
-            .unwrap_or_default();
+                    assets.extend(message.media.clone());
+                    assets
+                })
+                .unwrap_or_default();
 
-        let mut runtime_session = session.clone();
-        if runtime_session.cwd.trim().is_empty() {
-            runtime_session.cwd = core_state.workspace_dir().to_string();
-        }
+            let mut runtime_session = session.clone();
+            if runtime_session.cwd.trim().is_empty() {
+                runtime_session.cwd = core_state.workspace_dir().to_string();
+            }
 
-        core_state.clear_pending_turn_for(&session_id);
-        core_state.report_run_idle("正在重新发送编辑后的消息");
-        core_state.persist_session_and_app(&session_id)?;
+            core_state.clear_pending_turn_for(&session_id);
+            core_state.report_run_idle("正在重新发送编辑后的消息");
+            core_state.persist_session_and_app(&session_id)?;
 
-        Ok((runtime_session, message_media))
-    })?;
+            Ok((runtime_session, message_media))
+        })
+        .await?;
 
     // 4. 创建新 core 并发送消息
     let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::SessionStreamEvent>();
@@ -1432,31 +1465,34 @@ pub fn edit_and_resend(
 
 /// 取消当前执行
 #[tauri::command]
-pub fn cancel_turn(state: State<TiangongApp>) -> Result<bool, String> {
-    let session_id =
-        state.with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))?;
+pub async fn cancel_turn(state: State<'_, TiangongApp>) -> Result<bool, String> {
+    let session_id = state
+        .with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))
+        .await?;
     state.cancel_core(&session_id);
     Ok(true)
 }
 
-fn ensure_active_context_core(
+async fn ensure_active_context_core(
     app: AppHandle,
     state: &State<'_, TiangongApp>,
 ) -> Result<String, String> {
     use std::sync::mpsc;
 
-    state.sync_core_config_from_state()?;
+    state.sync_core_config_from_state().await?;
 
-    let (session_id, session_snapshot) = state.with_state(|core_state| {
-        let idx = core_state.ensure_active_session_index();
-        let session_id = core_state.sessions()[idx].id.clone();
-        let mut session_snapshot = core_state.sessions()[idx].clone();
-        if session_snapshot.cwd.trim().is_empty() {
-            session_snapshot.cwd = core_state.workspace_dir().to_string();
-        }
-        core_state.persist_session_and_app(&session_id)?;
-        Ok((session_id, session_snapshot))
-    })?;
+    let (session_id, session_snapshot) = state
+        .with_state(|core_state| {
+            let idx = core_state.ensure_active_session_index();
+            let session_id = core_state.sessions()[idx].id.clone();
+            let mut session_snapshot = core_state.sessions()[idx].clone();
+            if session_snapshot.cwd.trim().is_empty() {
+                session_snapshot.cwd = core_state.workspace_dir().to_string();
+            }
+            core_state.persist_session_and_app(&session_id)?;
+            Ok((session_id, session_snapshot))
+        })
+        .await?;
 
     let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::SessionStreamEvent>();
     let (sid, is_new_core) = state.ensure_core(&session_id, session_snapshot, stream_tx);
@@ -1480,12 +1516,12 @@ fn parse_context_slash_command(content: &str) -> Option<ContextSlashCommand> {
     }
 }
 
-fn run_context_slash_command(
+async fn run_context_slash_command(
     command: ContextSlashCommand,
     app: AppHandle,
     state: &State<'_, TiangongApp>,
 ) -> Result<bool, String> {
-    let session_id = ensure_active_context_core(app, state)?;
+    let session_id = ensure_active_context_core(app, state).await?;
     let ok = match command {
         ContextSlashCommand::Compress => state.compress_context_core(&session_id),
         ContextSlashCommand::Reset => state.reset_context_core(&session_id),
@@ -1495,31 +1531,35 @@ fn run_context_slash_command(
 
 /// 手动触发上下文压缩
 #[tauri::command]
-pub fn compress_context(app: AppHandle, state: State<TiangongApp>) -> Result<bool, String> {
-    run_context_slash_command(ContextSlashCommand::Compress, app, &state)
+pub async fn compress_context(
+    app: AppHandle,
+    state: State<'_, TiangongApp>,
+) -> Result<bool, String> {
+    run_context_slash_command(ContextSlashCommand::Compress, app, &state).await
 }
 
 /// 清理上下文（重置 LLM 上下文到初始 system prompt）
 #[tauri::command]
-pub fn reset_context(app: AppHandle, state: State<TiangongApp>) -> Result<bool, String> {
-    run_context_slash_command(ContextSlashCommand::Reset, app, &state)
+pub async fn reset_context(app: AppHandle, state: State<'_, TiangongApp>) -> Result<bool, String> {
+    run_context_slash_command(ContextSlashCommand::Reset, app, &state).await
 }
 
 /// 取消当前会话中指定 Agent 的执行
 #[tauri::command]
-pub fn cancel_agent(role: String, state: State<TiangongApp>) -> Result<bool, String> {
-    let session_id =
-        state.with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))?;
+pub async fn cancel_agent(role: String, state: State<'_, TiangongApp>) -> Result<bool, String> {
+    let session_id = state
+        .with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))
+        .await?;
     Ok(state.cancel_agent_core(&session_id, role))
 }
 
 /// 向正在执行的 turn 追加用户消息
 #[tauri::command]
-pub fn append_message(
+pub async fn append_message(
     session_id: String,
     content: String,
     app: AppHandle,
-    state: State<TiangongApp>,
+    state: State<'_, TiangongApp>,
 ) -> Result<bool, String> {
     if session_id.trim().is_empty() {
         return Err("当前会话 ID 不能为空".to_string());
@@ -1535,50 +1575,54 @@ pub fn append_message(
 
     let message_id = scru128::new().to_string();
     if !state.send_to_core_with_id(&session_id, content.clone(), Some(message_id.clone())) {
-        let snapshot = state.with_state(|core_state| {
-            core_state.report_run_idle("当前会话任务已结束，请重新发送");
-            Ok(build_session_snapshot(core_state, &session_id, false))
-        })?;
+        let snapshot = state
+            .with_state(|core_state| {
+                core_state.report_run_idle("当前会话任务已结束，请重新发送");
+                Ok(build_session_snapshot(core_state, &session_id, false))
+            })
+            .await?;
         let _ = app.emit("run_snapshot", &snapshot);
         return Ok(false);
     }
 
-    let snapshot = state.with_state(|core_state| {
-        {
-            let Some(session) = core_state
-                .sessions_mut()
-                .iter_mut()
-                .find(|session| session.id == session_id)
-            else {
-                return Err(anyhow::anyhow!("当前会话不存在"));
-            };
-            if !session.messages.iter().any(|msg| msg.id == message_id) {
-                session.append_message_with_id_and_media(
-                    message_id,
-                    tiangong_core::session::MessageRole::User,
-                    content,
-                    String::new(),
-                    Vec::new(),
-                );
+    let snapshot = state
+        .with_state(|core_state| {
+            {
+                let Some(session) = core_state
+                    .sessions_mut()
+                    .iter_mut()
+                    .find(|session| session.id == session_id)
+                else {
+                    return Err(anyhow::anyhow!("当前会话不存在"));
+                };
+                if !session.messages.iter().any(|msg| msg.id == message_id) {
+                    session.append_message_with_id_and_media(
+                        message_id,
+                        tiangong_core::session::MessageRole::User,
+                        content,
+                        String::new(),
+                        Vec::new(),
+                    );
+                }
             }
-        }
 
-        let usage = core_state
-            .sessions()
-            .iter()
-            .find(|session| session.id == session_id)
-            .map(|session| session.total_usage())
-            .unwrap_or_default();
-        core_state.store.session.input_draft.clear();
-        core_state.store.runtime.run.status = tiangong_core::runtime::RunStatus::Executing;
-        core_state.store.runtime.run.summary = "正在处理".to_string();
-        core_state.store.runtime.run.last_session_id = Some(session_id.clone());
-        core_state.store.runtime.run.last_usage = (usage.total_tokens > 0).then_some(usage);
-        core_state.store.runtime.run.updated_at = tiangong_core::session::now_text();
-        core_state.mark_pending_turn_for(session_id.clone());
-        core_state.persist_session_and_app(&session_id)?;
-        Ok(build_session_snapshot(core_state, &session_id, true))
-    })?;
+            let usage = core_state
+                .sessions()
+                .iter()
+                .find(|session| session.id == session_id)
+                .map(|session| session.total_usage())
+                .unwrap_or_default();
+            core_state.store.session.input_draft.clear();
+            core_state.store.runtime.run.status = tiangong_core::runtime::RunStatus::Executing;
+            core_state.store.runtime.run.summary = "正在处理".to_string();
+            core_state.store.runtime.run.last_session_id = Some(session_id.clone());
+            core_state.store.runtime.run.last_usage = (usage.total_tokens > 0).then_some(usage);
+            core_state.store.runtime.run.updated_at = tiangong_core::session::now_text();
+            core_state.mark_pending_turn_for(session_id.clone());
+            core_state.persist_session_and_app(&session_id)?;
+            Ok(build_session_snapshot(core_state, &session_id, true))
+        })
+        .await?;
     let _ = app.emit("run_snapshot", &snapshot);
 
     Ok(true)
@@ -1586,90 +1630,115 @@ pub fn append_message(
 
 /// 响应工具审批请求
 #[tauri::command]
-pub fn respond_approval(
+pub async fn respond_approval(
     request_id: String,
     approved: bool,
-    state: State<TiangongApp>,
+    state: State<'_, TiangongApp>,
 ) -> Result<bool, String> {
-    let session_id =
-        state.with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))?;
+    let session_id = state
+        .with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))
+        .await?;
     state.respond_approval_to_core(&session_id, request_id, approved);
     Ok(true)
 }
 
 /// 获取当前信任模式
 #[tauri::command]
-pub fn get_trust_mode(state: State<TiangongApp>) -> Result<String, String> {
-    state.with_state_read(|core_state| {
-        let mode = core_state.active_session_trust_mode();
-        Ok(serde_json::to_value(mode)
-            .unwrap_or_default()
-            .as_str()
-            .unwrap_or("full_trust")
-            .to_string())
-    })
+pub async fn get_trust_mode(state: State<'_, TiangongApp>) -> Result<String, String> {
+    state
+        .with_state_read(|core_state| {
+            let mode = core_state.active_session_trust_mode();
+            Ok(serde_json::to_value(mode)
+                .unwrap_or_default()
+                .as_str()
+                .unwrap_or("full_trust")
+                .to_string())
+        })
+        .await
 }
 
 /// 设置信任模式
 #[tauri::command]
-pub fn set_trust_mode(mode: String, state: State<TiangongApp>) -> Result<(), String> {
+pub async fn set_trust_mode(mode: String, state: State<'_, TiangongApp>) -> Result<(), String> {
     let trust_mode: tiangong_core::permission::TrustMode =
         serde_json::from_value(serde_json::Value::String(mode))
             .map_err(|e| format!("无效的信任模式: {e}"))?;
 
-    state.with_state(|core_state| core_state.set_trust_mode(trust_mode))?;
-    state.sync_core_config_from_state()?;
+    state
+        .with_state(|core_state| core_state.set_trust_mode(trust_mode))
+        .await?;
+    state.sync_core_config_from_state().await?;
 
     // 会话级设置只影响当前会话；其他后台会话保留自己的信任模式。
-    let session_id =
-        state.with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))?;
+    let session_id = state
+        .with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))
+        .await?;
     state.set_core_trust_mode(&session_id, trust_mode);
 
     Ok(())
 }
 
 #[tauri::command]
-pub fn get_default_trust_mode(state: State<TiangongApp>) -> Result<String, String> {
-    state.with_state_read(|core_state| {
-        let mode = core_state.agent_config().default_trust_mode;
-        Ok(serde_json::to_value(mode)
-            .unwrap_or_default()
-            .as_str()
-            .unwrap_or("full_trust")
-            .to_string())
-    })
+pub async fn get_default_trust_mode(state: State<'_, TiangongApp>) -> Result<String, String> {
+    state
+        .with_state_read(|core_state| {
+            let mode = core_state.agent_config().default_trust_mode;
+            Ok(serde_json::to_value(mode)
+                .unwrap_or_default()
+                .as_str()
+                .unwrap_or("full_trust")
+                .to_string())
+        })
+        .await
 }
 
 #[tauri::command]
-pub fn set_default_trust_mode(mode: String, state: State<TiangongApp>) -> Result<(), String> {
+pub async fn set_default_trust_mode(
+    mode: String,
+    state: State<'_, TiangongApp>,
+) -> Result<(), String> {
     let trust_mode: tiangong_core::permission::TrustMode =
         serde_json::from_value(serde_json::Value::String(mode))
             .map_err(|e| format!("无效的默认信任模式: {e}"))?;
 
-    state.with_state(|core_state| core_state.set_default_trust_mode(trust_mode))?;
-    state.sync_core_config_from_state()?;
+    state
+        .with_state(|core_state| core_state.set_default_trust_mode(trust_mode))
+        .await?;
+    state.sync_core_config_from_state().await?;
     Ok(())
 }
 
 #[tauri::command]
-pub fn get_custom_system_prompt(state: State<TiangongApp>) -> Result<String, String> {
-    state.with_state_read(|core_state| Ok(core_state.agent_config().custom_system_prompt.clone()))
+pub async fn get_custom_system_prompt(state: State<'_, TiangongApp>) -> Result<String, String> {
+    state
+        .with_state_read(|core_state| Ok(core_state.agent_config().custom_system_prompt.clone()))
+        .await
 }
 
 #[tauri::command]
-pub fn set_custom_system_prompt(prompt: String, state: State<TiangongApp>) -> Result<(), String> {
-    state.with_state(|core_state| core_state.set_custom_system_prompt(prompt))?;
-    state.sync_core_config_from_state()?;
+pub async fn set_custom_system_prompt(
+    prompt: String,
+    state: State<'_, TiangongApp>,
+) -> Result<(), String> {
+    state
+        .with_state(|core_state| core_state.set_custom_system_prompt(prompt))
+        .await?;
+    state.sync_core_config_from_state().await?;
     Ok(())
 }
 
 #[tauri::command]
-pub fn get_reasoning_effort(state: State<TiangongApp>) -> Result<String, String> {
-    state.with_state_read(|core_state| Ok(core_state.active_session_reasoning_effort()))
+pub async fn get_reasoning_effort(state: State<'_, TiangongApp>) -> Result<String, String> {
+    state
+        .with_state_read(|core_state| Ok(core_state.active_session_reasoning_effort()))
+        .await
 }
 
 #[tauri::command]
-pub fn set_reasoning_effort(effort: String, state: State<TiangongApp>) -> Result<(), String> {
+pub async fn set_reasoning_effort(
+    effort: String,
+    state: State<'_, TiangongApp>,
+) -> Result<(), String> {
     let valid = ["none", "low", "medium", "high", "max"];
     if !valid.contains(&effort.as_str()) {
         return Err(format!(
@@ -1677,8 +1746,10 @@ pub fn set_reasoning_effort(effort: String, state: State<TiangongApp>) -> Result
             valid.join("/")
         ));
     }
-    state.with_state(|core_state| core_state.set_reasoning_effort(effort))?;
-    state.sync_core_config_from_state()?;
+    state
+        .with_state(|core_state| core_state.set_reasoning_effort(effort))
+        .await?;
+    state.sync_core_config_from_state().await?;
     Ok(())
 }
 
@@ -1687,21 +1758,23 @@ pub async fn get_provider_balance(
     provider_name: String,
     state: State<'_, TiangongApp>,
 ) -> Result<serde_json::Value, String> {
-    let (base_url, api_key) = state.with_state_read(|core_state| {
-        let models = core_state.models_config();
-        let provider = models
-            .providers
-            .get(&provider_name)
-            .ok_or_else(|| anyhow::anyhow!("Provider '{provider_name}' 不存在"))?;
-        let resolved_key =
-            tiangong_core::models_config::ModelsConfig::resolve_api_key(&provider.api_key);
-        if resolved_key.trim().is_empty() {
-            return Err(anyhow::anyhow!(
-                "Provider '{provider_name}' 的 API Key 未设置"
-            ));
-        }
-        Ok((provider.base_url.clone(), resolved_key))
-    })?;
+    let (base_url, api_key) = state
+        .with_state_read(|core_state| {
+            let models = core_state.models_config();
+            let provider = models
+                .providers
+                .get(&provider_name)
+                .ok_or_else(|| anyhow::anyhow!("Provider '{provider_name}' 不存在"))?;
+            let resolved_key =
+                tiangong_core::models_config::ModelsConfig::resolve_api_key(&provider.api_key);
+            if resolved_key.trim().is_empty() {
+                return Err(anyhow::anyhow!(
+                    "Provider '{provider_name}' 的 API Key 未设置"
+                ));
+            }
+            Ok((provider.base_url.clone(), resolved_key))
+        })
+        .await?;
 
     // 余额 API 挂在域名根路径下，需去掉 base_url 中的路径部分
     // e.g. https://api.deepseek.com/anthropic → https://api.deepseek.com/user/balance
@@ -1744,35 +1817,39 @@ pub async fn get_provider_balance(
 
 /// 获取会话成本统计
 #[tauri::command]
-pub fn get_session_cost(
+pub async fn get_session_cost(
     session_id: Option<String>,
-    state: State<TiangongApp>,
+    state: State<'_, TiangongApp>,
 ) -> Result<serde_json::Value, String> {
-    state.with_state_read(|core_state| {
-        let sid = session_id
-            .as_deref()
-            .unwrap_or_else(|| core_state.active_session_id());
-        let session = core_state.sessions().iter().find(|s| s.id == sid);
-        match session {
-            Some(s) => {
-                let cost =
-                    tiangong_core::observe::build_session_cost(s.id.clone(), &s.task_records);
-                Ok(serde_json::to_value(cost).unwrap_or_default())
+    state
+        .with_state_read(|core_state| {
+            let sid = session_id
+                .as_deref()
+                .unwrap_or_else(|| core_state.active_session_id());
+            let session = core_state.sessions().iter().find(|s| s.id == sid);
+            match session {
+                Some(s) => {
+                    let cost =
+                        tiangong_core::observe::build_session_cost(s.id.clone(), &s.task_records);
+                    Ok(serde_json::to_value(cost).unwrap_or_default())
+                }
+                None => Ok(serde_json::json!({})),
             }
-            None => Ok(serde_json::json!({})),
-        }
-    })
+        })
+        .await
 }
 
 /// 获取当前活跃的 Worker 列表
 #[tauri::command]
-pub fn list_workers(state: State<TiangongApp>) -> Result<Vec<serde_json::Value>, String> {
-    state.with_state_read(|core_state| Ok(core_state.list_active_workers()))
+pub async fn list_workers(state: State<'_, TiangongApp>) -> Result<Vec<serde_json::Value>, String> {
+    state
+        .with_state_read(|core_state| Ok(core_state.list_active_workers()))
+        .await
 }
 
 /// 获取后台任务列表
 #[tauri::command]
-pub fn get_background_tasks() -> Result<Vec<serde_json::Value>, String> {
+pub async fn get_background_tasks() -> Result<Vec<serde_json::Value>, String> {
     let reg = tiangong_core::tool::background_task::task_registry();
     let mut guard = reg.lock().map_err(|e| e.to_string())?;
     let tasks = guard.list();
@@ -1784,7 +1861,7 @@ pub fn get_background_tasks() -> Result<Vec<serde_json::Value>, String> {
 
 /// 取消后台任务
 #[tauri::command]
-pub fn cancel_background_task(task_id: String) -> Result<(), String> {
+pub async fn cancel_background_task(task_id: String) -> Result<(), String> {
     let reg = tiangong_core::tool::background_task::task_registry();
     let mut guard = reg.lock().map_err(|e| e.to_string())?;
     guard.cancel(&task_id);
@@ -1797,8 +1874,9 @@ pub async fn synthesize_speech(
     text: String,
     state: State<'_, TiangongApp>,
 ) -> Result<SpeechResult, String> {
-    let models_config =
-        state.with_state_read(|core_state| Ok(core_state.models_config().clone()))?;
+    let models_config = state
+        .with_state_read(|core_state| Ok(core_state.models_config().clone()))
+        .await?;
     let output = tiangong_core::media::synthesize_speech(
         &models_config,
         text,
@@ -1837,44 +1915,51 @@ pub async fn synthesize_speech(
 
 /// 检查 TTS 能力是否已配置
 #[tauri::command]
-pub fn has_tts_capability(state: State<TiangongApp>) -> Result<bool, String> {
-    has_model_capability("tts".to_string(), state)
+pub async fn has_tts_capability(state: State<'_, TiangongApp>) -> Result<bool, String> {
+    has_model_capability("tts".to_string(), state).await
 }
 
 /// 检查 STT 能力是否已配置
 #[tauri::command]
-pub fn has_stt_capability(state: State<TiangongApp>) -> Result<bool, String> {
-    has_model_capability("stt".to_string(), state)
+pub async fn has_stt_capability(state: State<'_, TiangongApp>) -> Result<bool, String> {
+    has_model_capability("stt".to_string(), state).await
 }
 
 /// 统一的能力可用性查询（基于配置快速检测）
 #[tauri::command]
-pub fn has_model_capability(capability: String, state: State<TiangongApp>) -> Result<bool, String> {
+pub async fn has_model_capability(
+    capability: String,
+    state: State<'_, TiangongApp>,
+) -> Result<bool, String> {
     let capability = parse_model_capability(&capability)?;
-    state.with_state_read(|core_state| Ok(has_capability_in_state(core_state, capability)))
+    state
+        .with_state_read(|core_state| Ok(has_capability_in_state(core_state, capability)))
+        .await
 }
 
 /// 获取所有能力的当前配置状态
 #[tauri::command]
-pub fn get_available_capabilities(
-    state: State<TiangongApp>,
+pub async fn get_available_capabilities(
+    state: State<'_, TiangongApp>,
 ) -> Result<Vec<CapabilityAvailabilityInfo>, String> {
     use tiangong_core::models_config::ModelCapability;
 
-    state.with_state_read(|core_state| {
-        Ok(ModelCapability::all()
-            .iter()
-            .map(|capability| CapabilityAvailabilityInfo {
-                key: capability.key().to_string(),
-                display_name: capability.display_name().to_string(),
-                enabled: has_capability_in_state(core_state, *capability),
-                routed_model: core_state
-                    .models_config()
-                    .routed_model(*capability)
-                    .map(str::to_string),
-            })
-            .collect())
-    })
+    state
+        .with_state_read(|core_state| {
+            Ok(ModelCapability::all()
+                .iter()
+                .map(|capability| CapabilityAvailabilityInfo {
+                    key: capability.key().to_string(),
+                    display_name: capability.display_name().to_string(),
+                    enabled: has_capability_in_state(core_state, *capability),
+                    routed_model: core_state
+                        .models_config()
+                        .routed_model(*capability)
+                        .map(str::to_string),
+                })
+                .collect())
+        })
+        .await
 }
 
 /// 语音识别：将音频数据转录为文本，同时保存音频文件
@@ -1884,8 +1969,9 @@ pub async fn transcribe_speech(
     mime_type: String,
     state: State<'_, TiangongApp>,
 ) -> Result<TranscribeResult, String> {
-    let models_config =
-        state.with_state_read(|core_state| Ok(core_state.models_config().clone()))?;
+    let models_config = state
+        .with_state_read(|core_state| Ok(core_state.models_config().clone()))
+        .await?;
 
     // 解码 base64 音频数据
     use base64::Engine;
@@ -1928,8 +2014,9 @@ pub async fn transcribe_speech(
 pub async fn list_tts_voices(
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let models_config =
-        state.with_state_read(|core_state| Ok(core_state.models_config().clone()))?;
+    let models_config = state
+        .with_state_read(|core_state| Ok(core_state.models_config().clone()))
+        .await?;
     let voices = tiangong_core::media::list_tts_voices(&models_config)
         .await
         .map_err(|e| e.to_string())?;
@@ -2008,116 +2095,132 @@ pub async fn stop_audio() -> Result<(), String> {
 
 /// 获取 @提及补全候选列表（已启用的 Skill 和 MCP 服务器）
 #[tauri::command]
-pub fn get_mention_candidates(state: State<TiangongApp>) -> Result<Vec<MentionCandidate>, String> {
-    state.with_state_read(|core_state| {
-        let mut candidates = Vec::new();
+pub async fn get_mention_candidates(
+    state: State<'_, TiangongApp>,
+) -> Result<Vec<MentionCandidate>, String> {
+    state
+        .with_state_read(|core_state| {
+            let mut candidates = Vec::new();
 
-        // 已启用的 Skill
-        for skill in core_state.installed_skills() {
-            if skill.enabled {
-                candidates.push(MentionCandidate {
-                    value: format!("@skill:{}", skill.id),
-                    label: skill.name.clone(),
-                    kind: "skill".to_string(),
-                    hint: if skill.description.is_empty() {
-                        format!("v{}", skill.version)
-                    } else {
-                        skill.description.clone()
-                    },
-                });
+            // 已启用的 Skill
+            for skill in core_state.installed_skills() {
+                if skill.enabled {
+                    candidates.push(MentionCandidate {
+                        value: format!("@skill:{}", skill.id),
+                        label: skill.name.clone(),
+                        kind: "skill".to_string(),
+                        hint: if skill.description.is_empty() {
+                            format!("v{}", skill.version)
+                        } else {
+                            skill.description.clone()
+                        },
+                    });
+                }
             }
-        }
 
-        // 已启用的 MCP 服务器
-        let active_tools = tiangong_core::mcp::cached_active_tools();
-        for server in core_state.mcp_servers() {
-            if server.enabled {
-                let tool_count = active_tools
-                    .iter()
-                    .find(|(name, _)| name == &server.name)
-                    .map(|(_, tools)| tools.len())
-                    .unwrap_or(0);
-                candidates.push(MentionCandidate {
-                    value: format!("@mcp:{}", server.name),
-                    label: server.name.clone(),
-                    kind: "mcp".to_string(),
-                    hint: format!("{} 工具", tool_count),
-                });
+            // 已启用的 MCP 服务器
+            let active_tools = tiangong_core::mcp::cached_active_tools();
+            for server in core_state.mcp_servers() {
+                if server.enabled {
+                    let tool_count = active_tools
+                        .iter()
+                        .find(|(name, _)| name == &server.name)
+                        .map(|(_, tools)| tools.len())
+                        .unwrap_or(0);
+                    candidates.push(MentionCandidate {
+                        value: format!("@mcp:{}", server.name),
+                        label: server.name.clone(),
+                        kind: "mcp".to_string(),
+                        hint: format!("{} 工具", tool_count),
+                    });
+                }
             }
-        }
 
-        Ok(candidates)
-    })
+            Ok(candidates)
+        })
+        .await
 }
 
 /// 获取运行状态快照
 #[tauri::command]
-pub fn get_run_snapshot(state: State<TiangongApp>) -> Result<RunSnapshotView, String> {
-    let active_id = state.with_state_read(|s| Ok(s.active_session_id().to_string()))?;
-    let is_exec = state.with_state_read(|s| {
-        let snapshot = s.run_snapshot();
-        Ok(s.has_pending_turn_for(&active_id)
-            || (snapshot.last_session_id.as_deref() == Some(active_id.as_str())
-                && snapshot.status != tiangong_types::RunStatus::Idle))
-    })?;
-    state.with_state_read(|core_state| Ok(build_full_snapshot_with_status(core_state, is_exec)))
+pub async fn get_run_snapshot(state: State<'_, TiangongApp>) -> Result<RunSnapshotView, String> {
+    let active_id = state
+        .with_state_read(|s| Ok(s.active_session_id().to_string()))
+        .await?;
+    let is_exec = state
+        .with_state_read(|s| {
+            let snapshot = s.run_snapshot();
+            Ok(s.has_pending_turn_for(&active_id)
+                || (snapshot.last_session_id.as_deref() == Some(active_id.as_str())
+                    && snapshot.status != tiangong_types::RunStatus::Idle))
+        })
+        .await?;
+    state
+        .with_state_read(|core_state| Ok(build_full_snapshot_with_status(core_state, is_exec)))
+        .await
 }
 
 /// 获取输入草稿
 #[tauri::command]
-pub fn get_input_draft(state: State<TiangongApp>) -> Result<String, String> {
-    state.with_state_read(|core_state| Ok(core_state.input_draft().to_string()))
+pub async fn get_input_draft(state: State<'_, TiangongApp>) -> Result<String, String> {
+    state
+        .with_state_read(|core_state| Ok(core_state.input_draft().to_string()))
+        .await
 }
 
 /// 设置输入草稿
 #[tauri::command]
-pub fn set_input_draft(content: String, state: State<TiangongApp>) -> Result<(), String> {
-    state.with_state(|core_state| {
-        core_state.update_draft(content);
-        Ok(())
-    })
+pub async fn set_input_draft(content: String, state: State<'_, TiangongApp>) -> Result<(), String> {
+    state
+        .with_state(|core_state| {
+            core_state.update_draft(content);
+            Ok(())
+        })
+        .await
 }
 
 /// 获取活动会话的工作目录
 #[tauri::command]
-pub fn get_session_cwd(state: State<TiangongApp>) -> Result<String, String> {
-    state.with_state_read(|core_state| Ok(core_state.active_session_cwd().to_string()))
+pub async fn get_session_cwd(state: State<'_, TiangongApp>) -> Result<String, String> {
+    state
+        .with_state_read(|core_state| Ok(core_state.active_session_cwd().to_string()))
+        .await
 }
 
 /// 获取 Desktop 工作空间目录
 #[tauri::command]
-pub fn get_workspace_dir(state: State<TiangongApp>) -> Result<String, String> {
-    state.with_state_read(|core_state| Ok(core_state.workspace_dir().to_string()))
+pub async fn get_workspace_dir(state: State<'_, TiangongApp>) -> Result<String, String> {
+    state
+        .with_state_read(|core_state| Ok(core_state.workspace_dir().to_string()))
+        .await
 }
 
 /// 设置 Desktop 工作空间目录
 #[tauri::command]
-pub fn set_workspace_dir(
+pub async fn set_workspace_dir(
     workspace_dir: String,
-    app: AppHandle,
-    state: State<TiangongApp>,
+    state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
     let path = std::path::Path::new(&workspace_dir);
     if !path.is_dir() {
         return Err(format!("路径不存在或不是目录：{workspace_dir}"));
     }
-
-    let old_workspace_dir =
-        state.with_state_read(|core_state| Ok(core_state.workspace_dir().to_string()))?;
-    let cwd_changed = old_workspace_dir != workspace_dir;
-
-    state.with_state(|core_state| core_state.update_workspace_dir(workspace_dir.clone()))?;
+    state
+        .with_state(|core_state| core_state.update_workspace_dir(workspace_dir.clone()))
+        .await?;
 
     // 同步活跃 core 的 cwd（仅限无对话的 Inherit 会话）
-    let active_session_id = state.with_state_read(|core_state| {
-        Ok(core_state
-            .sessions()
-            .iter()
-            .find(|s| s.id == core_state.active_session_id())
-            .filter(|s| s.cwd_mode == tiangong_core::session::SessionCwdMode::Inherit)
-            .filter(|s| !s.has_user_messages())
-            .map(|s| s.id.clone()))
-    })?;
+    let active_session_id = state
+        .with_state_read(|core_state| {
+            Ok(core_state
+                .sessions()
+                .iter()
+                .find(|s| s.id == core_state.active_session_id())
+                .filter(|s| s.cwd_mode == tiangong_core::session::SessionCwdMode::Inherit)
+                .filter(|s| !s.has_user_messages())
+                .map(|s| s.id.clone()))
+        })
+        .await?;
     if let Some(sid) = &active_session_id {
         let cores = state.cores.lock().map_err(|e| e.to_string())?;
         if let Some(core) = cores.get(sid) {
@@ -2125,84 +2228,29 @@ pub fn set_workspace_dir(
         }
     }
 
-    // 索引：仅在目录实际变化且索引不存在时创建
-    if cwd_changed
-        && !workspace_dir.is_empty()
-        && !tiangong_core::index::workspace_index_exists(std::path::Path::new(&workspace_dir))
-    {
-        let app_clone = app.clone();
-        let cwd = workspace_dir.clone();
-        thread::spawn(move || {
-            match tiangong_core::index::rebuild_workspace_index_for_gui(std::path::Path::new(&cwd))
-            {
-                Ok(count) => eprintln!("Workspace 索引扫描完成: {count} 个文件"),
-                Err(e) => eprintln!("Workspace 索引扫描失败: {e}"),
-            }
-            if let Ok(snapshot) = app_clone
-                .state::<TiangongApp>()
-                .with_state_read(|s| Ok(build_full_snapshot_with_status(s, false)))
-            {
-                let _ = app_clone.emit("run_snapshot", &snapshot);
-            }
-        });
-    }
-
     Ok(())
 }
 
 /// 设置活动会话的工作目录
 #[tauri::command]
-pub fn set_session_cwd(
-    cwd: String,
-    app: AppHandle,
-    state: State<TiangongApp>,
-) -> Result<(), String> {
+pub async fn set_session_cwd(cwd: String, state: State<'_, TiangongApp>) -> Result<(), String> {
     let path = std::path::Path::new(&cwd);
     if !path.is_dir() {
         return Err(format!("路径不存在或不是目录：{cwd}"));
     }
-
-    let old_cwd = state.with_state_read(|core_state| {
-        Ok(core_state
-            .active_session()
-            .map(|s| s.cwd.clone())
-            .unwrap_or_default())
-    })?;
-    let cwd_changed = old_cwd != cwd;
-
-    state.with_state(|core_state| core_state.update_active_session_cwd(cwd.clone()))?;
+    state
+        .with_state(|core_state| core_state.update_active_session_cwd(cwd.clone()))
+        .await?;
 
     // 同步活跃 core 的 cwd
-    let active_session_id =
-        state.with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))?;
+    let active_session_id = state
+        .with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))
+        .await?;
     {
         let cores = state.cores.lock().map_err(|e| e.to_string())?;
         if let Some(core) = cores.get(&active_session_id) {
             let _ = core.update_cwd(cwd.clone());
         }
-    }
-
-    // 索引：仅在目录实际变化且索引不存在时创建
-    if cwd_changed
-        && !cwd.is_empty()
-        && !tiangong_core::index::workspace_index_exists(std::path::Path::new(&cwd))
-    {
-        let app_clone = app.clone();
-        let cwd_path = cwd.clone();
-        thread::spawn(move || {
-            match tiangong_core::index::rebuild_workspace_index_for_gui(std::path::Path::new(
-                &cwd_path,
-            )) {
-                Ok(count) => eprintln!("Session cwd 索引扫描完成: {count} 个文件"),
-                Err(e) => eprintln!("Session cwd 索引扫描失败: {e}"),
-            }
-            if let Ok(snapshot) = app_clone
-                .state::<TiangongApp>()
-                .with_state_read(|s| Ok(build_full_snapshot_with_status(s, false)))
-            {
-                let _ = app_clone.emit("run_snapshot", &snapshot);
-            }
-        });
     }
 
     Ok(())
@@ -2214,19 +2262,21 @@ pub fn set_session_cwd(
 
 /// 获取 MCP 服务器列表
 #[tauri::command]
-pub fn get_mcp_servers(state: State<TiangongApp>) -> Result<Vec<McpServerView>, String> {
-    state.with_state_read(|core_state| {
-        Ok(core_state
-            .mcp_servers()
-            .iter()
-            .map(McpServerView::from_core)
-            .collect())
-    })
+pub async fn get_mcp_servers(state: State<'_, TiangongApp>) -> Result<Vec<McpServerView>, String> {
+    state
+        .with_state_read(|core_state| {
+            Ok(core_state
+                .mcp_servers()
+                .iter()
+                .map(McpServerView::from_core)
+                .collect())
+        })
+        .await
 }
 
 /// 获取 MCP 服务器健康状态
 #[tauri::command]
-pub fn get_mcp_health() -> Result<Vec<serde_json::Value>, String> {
+pub async fn get_mcp_health() -> Result<Vec<serde_json::Value>, String> {
     let statuses = tiangong_core::mcp::mcp_server_health_statuses();
     statuses
         .into_iter()
@@ -2236,55 +2286,63 @@ pub fn get_mcp_health() -> Result<Vec<serde_json::Value>, String> {
 
 /// 注册 MCP 服务器
 #[tauri::command]
-pub fn register_mcp_server(
+pub async fn register_mcp_server(
     name: String,
     command: String,
     args: Vec<String>,
     env: Option<std::collections::HashMap<String, String>>,
-    state: State<TiangongApp>,
+    state: State<'_, TiangongApp>,
 ) -> Result<String, String> {
     use tiangong_core::app_state::RegisterMcpServerOptions;
     use tiangong_core::app_state::RegisterMcpServerRequest;
 
-    let message = state.with_state(|core_state| {
-        // 转换 env HashMap 为 Vec<(String, String)>
-        let env_vec = env.unwrap_or_default().into_iter().collect();
+    let message = state
+        .with_state(|core_state| {
+            // 转换 env HashMap 为 Vec<(String, String)>
+            let env_vec = env.unwrap_or_default().into_iter().collect();
 
-        let request = RegisterMcpServerRequest {
-            name: name.clone(),
-            command,
-            args,
-            tags: vec![],
-            enabled: true,
-            options: RegisterMcpServerOptions {
-                env: env_vec,
-                ..Default::default()
-            },
-        };
-        core_state.register_mcp_server(request)
-    })?;
-    state.sync_core_config_from_state()?;
+            let request = RegisterMcpServerRequest {
+                name: name.clone(),
+                command,
+                args,
+                tags: vec![],
+                enabled: true,
+                options: RegisterMcpServerOptions {
+                    env: env_vec,
+                    ..Default::default()
+                },
+            };
+            core_state.register_mcp_server(request)
+        })
+        .await?;
+    state.sync_core_config_from_state().await?;
     Ok(message)
 }
 
 /// 移除 MCP 服务器
 #[tauri::command]
-pub fn remove_mcp_server(name: String, state: State<TiangongApp>) -> Result<String, String> {
-    let message = state.with_state(|core_state| core_state.remove_mcp_server(&name))?;
-    state.sync_core_config_from_state()?;
+pub async fn remove_mcp_server(
+    name: String,
+    state: State<'_, TiangongApp>,
+) -> Result<String, String> {
+    let message = state
+        .with_state(|core_state| core_state.remove_mcp_server(&name))
+        .await?;
+    state.sync_core_config_from_state().await?;
     Ok(message)
 }
 
 /// 设置 MCP 服务器启用状态
 #[tauri::command]
-pub fn set_mcp_server_enabled(
+pub async fn set_mcp_server_enabled(
     name: String,
     enabled: bool,
-    state: State<TiangongApp>,
+    state: State<'_, TiangongApp>,
 ) -> Result<String, String> {
-    let message =
-        state.with_state(|core_state| core_state.set_mcp_server_enabled(&name, enabled))?;
-    state.sync_core_config_from_state()?;
+    let message = state
+        .with_state(|core_state| core_state.set_mcp_server_enabled(&name, enabled))
+        .await?;
+    state.sync_core_config_from_state().await?;
     Ok(message)
 }
 
@@ -2294,173 +2352,199 @@ pub fn set_mcp_server_enabled(
 
 /// 获取已安装的 Skill 列表
 #[tauri::command]
-pub fn get_skills(state: State<TiangongApp>) -> Result<Vec<SkillView>, String> {
-    state.with_state_read(|core_state| {
-        Ok(core_state
-            .installed_skills()
-            .iter()
-            .map(SkillView::from_core)
-            .collect())
-    })
+pub async fn get_skills(state: State<'_, TiangongApp>) -> Result<Vec<SkillView>, String> {
+    state
+        .with_state_read(|core_state| {
+            Ok(core_state
+                .installed_skills()
+                .iter()
+                .map(SkillView::from_core)
+                .collect())
+        })
+        .await
 }
 
 /// 刷新 Skill 注册表（重扫 skills/<id>/）
 #[tauri::command]
-pub fn refresh_skills(state: State<TiangongApp>) -> Result<String, String> {
-    let message = state.with_state(|core_state| core_state.refresh_skills())?;
-    state.sync_core_config_from_state()?;
+pub async fn refresh_skills(state: State<'_, TiangongApp>) -> Result<String, String> {
+    let message = state
+        .with_state(|core_state| core_state.refresh_skills())
+        .await?;
+    state.sync_core_config_from_state().await?;
     Ok(message)
 }
 
 /// 检测或清理孤儿 Skill 托管 MCP 配置
 #[tauri::command]
-pub fn gc_skills(apply: bool, state: State<TiangongApp>) -> Result<String, String> {
-    let message = state.with_state(|core_state| core_state.gc_skills(apply))?;
-    state.sync_core_config_from_state()?;
+pub async fn gc_skills(apply: bool, state: State<'_, TiangongApp>) -> Result<String, String> {
+    let message = state
+        .with_state(|core_state| core_state.gc_skills(apply))
+        .await?;
+    state.sync_core_config_from_state().await?;
     Ok(message)
 }
 
 /// 获取 Skill 完整详情（按需读取 SKILL.md）
 #[tauri::command]
-pub fn get_skill_detail(id: String, state: State<TiangongApp>) -> Result<SkillDetailView, String> {
-    state.with_state_read(|core_state| {
-        let detail = core_state.get_skill_detail(&id)?;
-        Ok(SkillDetailView::from_core(&detail))
-    })
+pub async fn get_skill_detail(
+    id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<SkillDetailView, String> {
+    state
+        .with_state_read(|core_state| {
+            let detail = core_state.get_skill_detail(&id)?;
+            Ok(SkillDetailView::from_core(&detail))
+        })
+        .await
 }
 
 /// 检查 Skill 安装需求（返回需要配置的环境变量列表）
 #[tauri::command]
-pub fn inspect_skill(path: String, state: State<TiangongApp>) -> Result<SkillInspection, String> {
-    state.with_state_read(|core_state| {
-        let inspection = core_state.inspect_skill_install_requirements(&path, true)?;
-        Ok(SkillInspection {
-            env_vars: inspection.env_vars,
-            missing_env_vars: inspection.missing_env_vars,
-            dependencies: inspection.dependencies,
+pub async fn inspect_skill(
+    path: String,
+    state: State<'_, TiangongApp>,
+) -> Result<SkillInspection, String> {
+    state
+        .with_state_read(|core_state| {
+            let inspection = core_state.inspect_skill_install_requirements(&path, true)?;
+            Ok(SkillInspection {
+                env_vars: inspection.env_vars,
+                missing_env_vars: inspection.missing_env_vars,
+                dependencies: inspection.dependencies,
+            })
         })
-    })
+        .await
 }
 
 /// 安装 Skill（支持传入环境变量配置）
 #[tauri::command]
-pub fn install_skill(
+pub async fn install_skill(
     path: String,
     env_values: Option<std::collections::HashMap<String, String>>,
-    state: State<TiangongApp>,
+    state: State<'_, TiangongApp>,
 ) -> Result<String, String> {
-    let message = state.with_state(|core_state| {
-        let env: Vec<(String, String)> = env_values
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|(_, v)| !v.trim().is_empty())
-            .collect();
-        core_state.install_local_skill_with_options_and_inputs(&path, true, true, &env)
-    })?;
-    state.sync_core_config_from_state()?;
+    let message = state
+        .with_state(|core_state| {
+            let env: Vec<(String, String)> = env_values
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(_, v)| !v.trim().is_empty())
+                .collect();
+            core_state.install_local_skill_with_options_and_inputs(&path, true, true, &env)
+        })
+        .await?;
+    state.sync_core_config_from_state().await?;
     Ok(message)
 }
 
 /// 移除 Skill
 #[tauri::command]
-pub fn remove_skill(id: String, state: State<TiangongApp>) -> Result<String, String> {
-    let message = state.with_state(|core_state| core_state.remove_skill(&id))?;
-    state.sync_core_config_from_state()?;
+pub async fn remove_skill(id: String, state: State<'_, TiangongApp>) -> Result<String, String> {
+    let message = state
+        .with_state(|core_state| core_state.remove_skill(&id))
+        .await?;
+    state.sync_core_config_from_state().await?;
     Ok(message)
 }
 
 /// 获取 Skill 的环境变量（合并 skill.toml 声明的 requires.env + .env.local 已有值）
 #[tauri::command]
-pub fn get_skill_env(
+pub async fn get_skill_env(
     id: String,
-    state: State<TiangongApp>,
+    state: State<'_, TiangongApp>,
 ) -> Result<std::collections::HashMap<String, String>, String> {
-    state.with_state_read(|core_state| {
-        let skill = core_state
-            .installed_skills()
-            .iter()
-            .find(|s| s.id == id)
-            .ok_or_else(|| anyhow::anyhow!("未找到 skill：{id}"))?;
+    state
+        .with_state_read(|core_state| {
+            let skill = core_state
+                .installed_skills()
+                .iter()
+                .find(|s| s.id == id)
+                .ok_or_else(|| anyhow::anyhow!("未找到 skill：{id}"))?;
 
-        let skill_dir = std::path::Path::new(&skill.source.value);
-        let mut env = std::collections::HashMap::new();
+            let skill_dir = std::path::Path::new(&skill.source.value);
+            let mut env = std::collections::HashMap::new();
 
-        // 1. 从 skill.toml 的 requires.env 读取声明的 key（值为空）
-        let toml_path = skill_dir.join("skill.toml");
-        if let Ok(raw) = std::fs::read_to_string(&toml_path) {
-            #[derive(serde::Deserialize, Default)]
-            struct T {
-                #[serde(default)]
-                requires: R,
-            }
-            #[derive(serde::Deserialize, Default)]
-            struct R {
-                #[serde(default)]
-                env: Vec<String>,
-            }
-            if let Ok(parsed) = toml::from_str::<T>(&raw) {
-                for key in parsed.requires.env {
-                    env.insert(key, String::new());
+            // 1. 从 skill.toml 的 requires.env 读取声明的 key（值为空）
+            let toml_path = skill_dir.join("skill.toml");
+            if let Ok(raw) = std::fs::read_to_string(&toml_path) {
+                #[derive(serde::Deserialize, Default)]
+                struct T {
+                    #[serde(default)]
+                    requires: R,
+                }
+                #[derive(serde::Deserialize, Default)]
+                struct R {
+                    #[serde(default)]
+                    env: Vec<String>,
+                }
+                if let Ok(parsed) = toml::from_str::<T>(&raw) {
+                    for key in parsed.requires.env {
+                        env.insert(key, String::new());
+                    }
                 }
             }
-        }
 
-        // 2. 从 .env.local 读取已有值（覆盖空值）
-        let env_path = skill_dir.join(".env.local");
-        if let Ok(content) = std::fs::read_to_string(&env_path) {
-            for line in content.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                if let Some((k, v)) = line.split_once('=') {
-                    env.insert(k.trim().to_string(), v.trim().to_string());
+            // 2. 从 .env.local 读取已有值（覆盖空值）
+            let env_path = skill_dir.join(".env.local");
+            if let Ok(content) = std::fs::read_to_string(&env_path) {
+                for line in content.lines() {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    if let Some((k, v)) = line.split_once('=') {
+                        env.insert(k.trim().to_string(), v.trim().to_string());
+                    }
                 }
             }
-        }
 
-        Ok(env)
-    })
+            Ok(env)
+        })
+        .await
 }
 
 /// 设置 Skill 的环境变量
 #[tauri::command]
-pub fn set_skill_env(
+pub async fn set_skill_env(
     id: String,
     env: std::collections::HashMap<String, String>,
-    state: State<TiangongApp>,
+    state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
-    state.with_state_read(|core_state| {
-        let skill = core_state
-            .installed_skills()
-            .iter()
-            .find(|s| s.id == id)
-            .ok_or_else(|| anyhow::anyhow!("未找到 skill：{id}"))?;
-        let env_path = std::path::Path::new(&skill.source.value).join(".env.local");
-        let lines: Vec<String> = env
-            .iter()
-            .filter(|(k, v)| !k.trim().is_empty() && !v.trim().is_empty())
-            .map(|(k, v)| format!("{}={}", k.trim(), v.trim()))
-            .collect();
-        if lines.is_empty() {
-            let _ = std::fs::remove_file(&env_path);
-        } else {
-            std::fs::write(&env_path, format!("{}\n", lines.join("\n")))
-                .map_err(|e| anyhow::anyhow!("写入 .env.local 失败：{e}"))?;
-        }
-        Ok(())
-    })
+    state
+        .with_state_read(|core_state| {
+            let skill = core_state
+                .installed_skills()
+                .iter()
+                .find(|s| s.id == id)
+                .ok_or_else(|| anyhow::anyhow!("未找到 skill：{id}"))?;
+            let env_path = std::path::Path::new(&skill.source.value).join(".env.local");
+            let lines: Vec<String> = env
+                .iter()
+                .filter(|(k, v)| !k.trim().is_empty() && !v.trim().is_empty())
+                .map(|(k, v)| format!("{}={}", k.trim(), v.trim()))
+                .collect();
+            if lines.is_empty() {
+                let _ = std::fs::remove_file(&env_path);
+            } else {
+                std::fs::write(&env_path, format!("{}\n", lines.join("\n")))
+                    .map_err(|e| anyhow::anyhow!("写入 .env.local 失败：{e}"))?;
+            }
+            Ok(())
+        })
+        .await
 }
 
 /// 设置 Skill 启用状态
 #[tauri::command]
-pub fn set_skill_enabled(
+pub async fn set_skill_enabled(
     id: String,
     enabled: bool,
-    state: State<TiangongApp>,
+    state: State<'_, TiangongApp>,
 ) -> Result<String, String> {
-    let message = state.with_state(|core_state| core_state.set_skill_enabled(&id, enabled))?;
-    state.sync_core_config_from_state()?;
+    let message = state
+        .with_state(|core_state| core_state.set_skill_enabled(&id, enabled))
+        .await?;
+    state.sync_core_config_from_state().await?;
     Ok(message)
 }
 
@@ -2470,9 +2554,9 @@ pub fn set_skill_enabled(
 
 /// 获取 Server 配置
 #[tauri::command]
-pub fn get_server_config() -> Result<ServerConfigView, String> {
+pub fn get_server_config(state: State<'_, TiangongApp>) -> Result<ServerConfigView, String> {
     let config = tiangong_server::config::load_server_config();
-    let running = is_server_running(&config);
+    let running = state.is_embedded_server_running() || is_server_running(&config);
     let auth_token_masked = config.masked_auth_token();
     Ok(ServerConfigView {
         host: config.host,
@@ -2484,7 +2568,7 @@ pub fn get_server_config() -> Result<ServerConfigView, String> {
 
 /// 设置 Server 配置
 #[tauri::command]
-pub fn set_server_config(
+pub async fn set_server_config(
     host: String,
     port: u16,
     auth_token: Option<String>,
@@ -2497,34 +2581,59 @@ pub fn set_server_config(
             .map(|token| token.trim().to_string())
             .filter(|token| !token.is_empty())
             .or(current.auth_token),
+        enabled: current.enabled,
     };
     tiangong_server::config::save_server_config(&config).map_err(|e| e.to_string())?;
     Ok("Server 配置已保存".to_string())
 }
 
-/// 启动后台 Server
+/// 启动嵌入式 Server（Desktop 模式下 Server 运行在 app 进程内）
 #[tauri::command]
-pub fn start_server() -> Result<String, String> {
+pub async fn start_server(state: State<'_, TiangongApp>) -> Result<String, String> {
     let config = tiangong_server::config::load_server_config();
+
+    // 优先检查嵌入式 server 是否已运行
+    if state.is_embedded_server_running() {
+        return Ok("Server 已在运行（嵌入式）".to_string());
+    }
+
+    // 检查是否有外部 server 进程占用端口
     if server_health_check(&config) {
-        return Ok("Server 已在运行".to_string());
+        return Ok("Server 已在运行（外部进程）".to_string());
     }
-    cleanup_dead_server_pid();
-    if server_pid_alive() {
-        return Err("Server 进程存在但健康检查未通过，请先停止后再启动".to_string());
-    }
-    tiangong_server::run_daemon(&config.host, config.port, config.auth_token.clone())
-        .map_err(|e| e.to_string())?;
+
+    state.start_embedded_server(&config.host, config.port, config.auth_token.clone())?;
+
+    // 等待健康检查通过
     if let Err(err) = wait_for_server_health(&config) {
-        cleanup_dead_server_pid();
+        let _ = state.stop_embedded_server();
         return Err(err);
     }
+
+    // 持久化 enabled 标记，重启后自动拉起
+    let mut config = config;
+    config.enabled = true;
+    let _ = tiangong_server::config::save_server_config(&config);
+
     Ok(format!("Server 已启动：{}:{}", config.host, config.port))
 }
 
-/// 停止后台 Server
+/// 停止 Server
 #[tauri::command]
-pub fn stop_server() -> Result<String, String> {
+pub async fn stop_server(state: State<'_, TiangongApp>) -> Result<String, String> {
+    // 优先停止嵌入式 server
+    if state.is_embedded_server_running() {
+        state.stop_embedded_server()?;
+
+        // 持久化 enabled 标记
+        let mut config = tiangong_server::config::load_server_config();
+        config.enabled = false;
+        let _ = tiangong_server::config::save_server_config(&config);
+
+        return Ok("Server 已停止".to_string());
+    }
+
+    // 兜底：检查是否有外部 server 进程
     let config = tiangong_server::config::load_server_config();
     let running_by_health = server_health_check(&config);
     let running_by_pid = server_pid_alive();
@@ -2538,11 +2647,17 @@ pub fn stop_server() -> Result<String, String> {
     }
     tiangong_server::stop_daemon().map_err(|e| e.to_string())?;
     wait_for_server_stop(&config)?;
+
+    // 持久化 enabled 标记
+    let mut config = config;
+    config.enabled = false;
+    let _ = tiangong_server::config::save_server_config(&config);
+
     Ok("Server 已停止".to_string())
 }
 
 /// 检查 Server 是否在运行：优先访问健康检查，PID 仅作为兜底。
-fn is_server_running(config: &tiangong_server::config::ServerConfig) -> bool {
+pub fn is_server_running(config: &tiangong_server::config::ServerConfig) -> bool {
     if server_health_check(config) {
         return true;
     }
@@ -2671,49 +2786,57 @@ fn user_home_dir() -> Option<PathBuf> {
 
 /// 获取模型配置
 #[tauri::command]
-pub fn get_models_config(state: State<TiangongApp>) -> Result<ModelsConfigView, String> {
-    state.with_state_read(|core_state| Ok(ModelsConfigView::from_core(core_state.models_config())))
+pub async fn get_models_config(state: State<'_, TiangongApp>) -> Result<ModelsConfigView, String> {
+    state
+        .with_state_read(|core_state| Ok(ModelsConfigView::from_core(core_state.models_config())))
+        .await
 }
 
 /// 设置模型配置
 #[tauri::command]
-pub fn set_models_config(
+pub async fn set_models_config(
     config: ModelsConfigView,
-    state: State<TiangongApp>,
+    state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
-    state.with_state(|core_state| {
-        let core_config = config.to_core();
-        core_state.save_models_config(core_config)
-    })?;
-    state.sync_core_config_from_state()?;
+    state
+        .with_state(|core_state| {
+            let core_config = config.to_core();
+            core_state.save_models_config(core_config)
+        })
+        .await?;
+    state.sync_core_config_from_state().await?;
     Ok(())
 }
 
 /// 获取 Memory 独立模型配置
 #[tauri::command]
-pub fn get_memory_config(state: State<TiangongApp>) -> Result<MemoryConfigView, String> {
+pub async fn get_memory_config(state: State<'_, TiangongApp>) -> Result<MemoryConfigView, String> {
     let config = tiangong_core::core::load_memory_config();
-    state.with_state_read(|core_state| {
-        Ok(MemoryConfigView::from_memory(
-            &config,
-            core_state.models_config(),
-        ))
-    })
+    state
+        .with_state_read(|core_state| {
+            Ok(MemoryConfigView::from_memory(
+                &config,
+                core_state.models_config(),
+            ))
+        })
+        .await
 }
 
 /// 设置 Memory 独立模型配置
 #[tauri::command]
-pub fn set_memory_config(
+pub async fn set_memory_config(
     config: MemoryConfigView,
-    state: State<TiangongApp>,
+    state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
-    let memory_config = state.with_state_read(|core_state| {
-        config
-            .to_memory(core_state.models_config())
-            .map_err(anyhow::Error::msg)
-    })?;
+    let memory_config = state
+        .with_state_read(|core_state| {
+            config
+                .to_memory(core_state.models_config())
+                .map_err(anyhow::Error::msg)
+        })
+        .await?;
     tiangong_core::core::save_memory_config(memory_config).map_err(|err| err.to_string())?;
-    state.sync_core_config_from_state()?;
+    state.sync_core_config_from_state().await?;
     Ok(())
 }
 
@@ -2833,27 +2956,28 @@ pub async fn test_memory_recall(
 
 /// 列出所有 Workspace 索引
 #[tauri::command]
-pub fn list_workspace_indexes() -> Result<Vec<tiangong_core::core::WorkspaceIndexInfo>, String> {
+pub async fn list_workspace_indexes() -> Result<Vec<tiangong_core::core::WorkspaceIndexInfo>, String>
+{
     tiangong_core::core::list_workspace_indexes_for_gui().map_err(|err| err.to_string())
 }
 
 /// 删除指定 Workspace 索引
 #[tauri::command]
-pub fn delete_workspace_index(workspace_id: String) -> Result<(), String> {
+pub async fn delete_workspace_index(workspace_id: String) -> Result<(), String> {
     tiangong_core::core::delete_workspace_index_for_gui(&workspace_id)
         .map_err(|err| err.to_string())
 }
 
 /// 重建指定路径的 Workspace 索引
 #[tauri::command]
-pub fn rebuild_workspace_index(root: String) -> Result<usize, String> {
+pub async fn rebuild_workspace_index(root: String) -> Result<usize, String> {
     let root = std::path::PathBuf::from(&root);
     tiangong_core::core::rebuild_workspace_index_for_gui(&root).map_err(|err| err.to_string())
 }
 
 /// 获取所有可用的模型能力列表
 #[tauri::command]
-pub fn get_model_capabilities() -> Result<Vec<ModelCapabilityInfo>, String> {
+pub async fn get_model_capabilities() -> Result<Vec<ModelCapabilityInfo>, String> {
     use tiangong_core::models_config::ModelCapability;
 
     let caps = ModelCapability::all()
@@ -2871,13 +2995,15 @@ pub fn get_model_capabilities() -> Result<Vec<ModelCapabilityInfo>, String> {
 
 /// 获取模型列表
 #[tauri::command]
-pub fn get_model_list(state: State<TiangongApp>) -> Result<Vec<String>, String> {
-    state.with_state_read(|core_state| Ok(core_state.model_list().to_vec()))
+pub async fn get_model_list(state: State<'_, TiangongApp>) -> Result<Vec<String>, String> {
+    state
+        .with_state_read(|core_state| Ok(core_state.model_list().to_vec()))
+        .await
 }
 
 /// 根据 provider 配置获取该 provider 的可用模型列表
 #[tauri::command]
-pub fn fetch_provider_models(
+pub async fn fetch_provider_models(
     base_url: String,
     api_key: String,
     timeout_ms: Option<u64>,
@@ -2898,7 +3024,9 @@ pub fn fetch_provider_models(
         api_model: String::new(),
         api_lite_model: String::new(),
     };
-    SingleProviderClient::list_models(&config).map_err(|e| e.to_string())
+    SingleProviderClient::list_models_async(&config)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 fn embedding_probe_urls(base_url: &str) -> Result<Vec<String>, String> {
@@ -2992,4 +3120,239 @@ pub async fn probe_embedding_dimension(
     }
 
     Err(last_error.unwrap_or_else(|| "无法请求 Embedding 接口".to_string()))
+}
+
+// ── 定时任务管理 ──────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn job_list() -> Result<Vec<serde_json::Value>, String> {
+    let store = tiangong_core::scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
+    let jobs = store.list_jobs().map_err(|e| e.to_string())?;
+    Ok(jobs
+        .into_iter()
+        .map(|j| serde_json::to_value(j).unwrap())
+        .collect())
+}
+
+#[tauri::command]
+pub async fn job_create(
+    name: String,
+    description: String,
+    schedule: String,
+    session_id: Option<String>,
+    payload: String,
+    enabled: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let store = tiangong_core::scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
+    let now = chrono::Local::now().naive_local().to_string();
+    let job = tiangong_core::scheduler::model::Job {
+        id: scru128::new().to_string(),
+        name,
+        description,
+        trigger_type: tiangong_core::scheduler::model::TriggerType::Cron,
+        schedule: Some(schedule),
+        session_id,
+        payload,
+        enabled: enabled.unwrap_or(true),
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    store.insert_job(&job).map_err(|e| e.to_string())?;
+    Ok(serde_json::to_value(job).unwrap())
+}
+
+#[tauri::command]
+pub async fn job_update(
+    id: String,
+    name: Option<String>,
+    description: Option<String>,
+    schedule: Option<String>,
+    session_id: Option<String>,
+    payload: Option<String>,
+    enabled: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let store = tiangong_core::scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
+    let req = tiangong_core::scheduler::model::UpdateJobRequest {
+        name,
+        description,
+        schedule,
+        session_id,
+        payload,
+        enabled,
+    };
+    let updated = store.update_job(&id, &req).map_err(|e| e.to_string())?;
+    if !updated {
+        return Err(format!("定时任务 '{id}' 不存在"));
+    }
+    let job = store.get_job(&id).map_err(|e| e.to_string())?;
+    Ok(serde_json::to_value(job).unwrap())
+}
+
+#[tauri::command]
+pub async fn job_delete(id: String) -> Result<(), String> {
+    let store = tiangong_core::scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
+    let deleted = store.delete_job(&id).map_err(|e| e.to_string())?;
+    if !deleted {
+        return Err(format!("定时任务 '{id}' 不存在"));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn job_trigger(
+    id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<serde_json::Value, String> {
+    let store = tiangong_core::scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
+    let job = store
+        .get_job(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("定时任务 '{id}' 不存在"))?;
+
+    let ctx = state.create_scheduler_context();
+    let job_clone = job.clone();
+    tokio::spawn(async move {
+        tiangong_scheduler::executor::execute_job(ctx, job_clone).await;
+    });
+
+    Ok(serde_json::json!({
+        "job_id": job.id,
+        "session_id": job.session_id,
+        "status": "triggered",
+    }))
+}
+
+#[tauri::command]
+pub async fn job_list_runs(
+    id: String,
+    limit: Option<usize>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let store = tiangong_core::scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
+    let runs = store
+        .list_job_runs(&id, limit.unwrap_or(20))
+        .map_err(|e| e.to_string())?;
+    Ok(runs
+        .into_iter()
+        .map(|r| serde_json::to_value(r).unwrap())
+        .collect())
+}
+
+// ── Webhook 管理 ─────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn webhook_list() -> Result<Vec<serde_json::Value>, String> {
+    let store = tiangong_core::scheduler::webhook::store::WebhookStore::open()
+        .map_err(|e| e.to_string())?;
+    let webhooks = store.list().map_err(|e| e.to_string())?;
+    Ok(webhooks
+        .into_iter()
+        .map(|w| serde_json::to_value(w).unwrap())
+        .collect())
+}
+
+#[tauri::command]
+pub async fn webhook_create(
+    name: String,
+    description: String,
+    session_id: Option<String>,
+    payload: String,
+    secret: Option<String>,
+    enabled: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let store = tiangong_core::scheduler::webhook::store::WebhookStore::open()
+        .map_err(|e| e.to_string())?;
+    let now = chrono::Local::now().naive_local().to_string();
+    let webhook = tiangong_core::scheduler::webhook::model::Webhook {
+        id: scru128::new().to_string(),
+        name,
+        description,
+        session_id,
+        payload,
+        secret,
+        enabled: enabled.unwrap_or(true),
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    store.insert(&webhook).map_err(|e| e.to_string())?;
+    Ok(serde_json::to_value(webhook).unwrap())
+}
+
+#[tauri::command]
+pub async fn webhook_update(
+    id: String,
+    name: Option<String>,
+    description: Option<String>,
+    session_id: Option<String>,
+    payload: Option<String>,
+    secret: Option<String>,
+    enabled: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let store = tiangong_core::scheduler::webhook::store::WebhookStore::open()
+        .map_err(|e| e.to_string())?;
+    let req = tiangong_core::scheduler::webhook::model::UpdateWebhookRequest {
+        name,
+        description,
+        session_id,
+        payload,
+        secret,
+        enabled,
+    };
+    let updated = store.update(&id, &req).map_err(|e| e.to_string())?;
+    if !updated {
+        return Err(format!("Webhook '{id}' 不存在"));
+    }
+    let webhook = store.get(&id).map_err(|e| e.to_string())?;
+    Ok(serde_json::to_value(webhook).unwrap())
+}
+
+#[tauri::command]
+pub async fn webhook_delete(id: String) -> Result<(), String> {
+    let store = tiangong_core::scheduler::webhook::store::WebhookStore::open()
+        .map_err(|e| e.to_string())?;
+    let deleted = store.delete(&id).map_err(|e| e.to_string())?;
+    if !deleted {
+        return Err(format!("Webhook '{id}' 不存在"));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn webhook_trigger(
+    id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<serde_json::Value, String> {
+    let store = tiangong_core::scheduler::webhook::store::WebhookStore::open()
+        .map_err(|e| e.to_string())?;
+    let webhook = store
+        .get(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Webhook '{id}' 不存在"))?;
+
+    let ctx = state.create_scheduler_context();
+    let webhook_clone = webhook.clone();
+    tokio::spawn(async move {
+        tiangong_scheduler::executor::execute_webhook(ctx, webhook_clone).await;
+    });
+
+    Ok(serde_json::json!({
+        "webhook_id": webhook.id,
+        "session_id": webhook.session_id,
+        "status": "triggered",
+    }))
+}
+
+#[tauri::command]
+pub async fn webhook_list_runs(
+    id: String,
+    limit: Option<usize>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let store = tiangong_core::scheduler::webhook::store::WebhookStore::open()
+        .map_err(|e| e.to_string())?;
+    let runs = store
+        .list_runs(&id, limit.unwrap_or(20))
+        .map_err(|e| e.to_string())?;
+    Ok(runs
+        .into_iter()
+        .map(|r| serde_json::to_value(r).unwrap())
+        .collect())
 }

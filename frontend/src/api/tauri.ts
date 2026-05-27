@@ -351,6 +351,59 @@ export interface WorkspaceIndexInfo {
 }
 
 // ============================================================================
+// 定时任务 & Webhook
+// ============================================================================
+
+export interface Job {
+  id: string;
+  name: string;
+  description: string;
+  trigger_type: 'cron';
+  schedule: string | null;
+  session_id: string | null;
+  payload: string;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export type JobRunStatus = 'running' | 'succeeded' | 'failed';
+
+export interface JobRun {
+  id: string;
+  job_id: string;
+  session_id: string;
+  status: JobRunStatus;
+  started_at: string;
+  finished_at: string | null;
+  result_summary: string | null;
+}
+
+export interface Webhook {
+  id: string;
+  name: string;
+  description: string;
+  session_id: string | null;
+  payload: string;
+  secret: string | null;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export type WebhookRunStatus = 'running' | 'succeeded' | 'failed';
+
+export interface WebhookRun {
+  id: string;
+  webhook_id: string;
+  session_id: string;
+  status: WebhookRunStatus;
+  started_at: string;
+  finished_at: string | null;
+  result_summary: string | null;
+}
+
+// ============================================================================
 // API 方法
 // ============================================================================
 
@@ -651,4 +704,76 @@ export const api = {
   // ----------------------------------------------------------------
   onRunSnapshot: (callback: (snapshot: RunSnapshot) => void) =>
     listen<RunSnapshot>('run_snapshot', (event) => callback(event.payload)),
+
+  // ----------------------------------------------------------------
+  // 定时任务管理
+  // ----------------------------------------------------------------
+  jobList: (): Promise<Job[]> =>
+    invoke('job_list'),
+
+  jobCreate: (params: {
+    name: string;
+    description: string;
+    schedule: string;
+    session_id?: string;
+    payload: string;
+    enabled?: boolean;
+  }): Promise<Job> =>
+    invoke('job_create', params),
+
+  jobUpdate: (params: {
+    id: string;
+    name?: string;
+    description?: string;
+    schedule?: string;
+    session_id?: string;
+    payload?: string;
+    enabled?: boolean;
+  }): Promise<Job> =>
+    invoke('job_update', params),
+
+  jobDelete: (id: string): Promise<void> =>
+    invoke('job_delete', { id }),
+
+  jobTrigger: (id: string): Promise<{ job_id: string; session_id: string; status: string }> =>
+    invoke('job_trigger', { id }),
+
+  jobListRuns: (id: string, limit?: number): Promise<JobRun[]> =>
+    invoke('job_list_runs', { id, limit }),
+
+  // ----------------------------------------------------------------
+  // Webhook 管理
+  // ----------------------------------------------------------------
+  webhookList: (): Promise<Webhook[]> =>
+    invoke('webhook_list'),
+
+  webhookCreate: (params: {
+    name: string;
+    description: string;
+    session_id?: string;
+    payload: string;
+    secret?: string;
+    enabled?: boolean;
+  }): Promise<Webhook> =>
+    invoke('webhook_create', params),
+
+  webhookUpdate: (params: {
+    id: string;
+    name?: string;
+    description?: string;
+    session_id?: string;
+    payload?: string;
+    secret?: string;
+    enabled?: boolean;
+  }): Promise<Webhook> =>
+    invoke('webhook_update', params),
+
+  webhookDelete: (id: string): Promise<void> =>
+    invoke('webhook_delete', { id }),
+
+  webhookTrigger: (id: string): Promise<{ webhook_id: string; session_id: string; status: string }> =>
+    invoke('webhook_trigger', { id }),
+
+  webhookListRuns: (id: string, limit?: number): Promise<WebhookRun[]> =>
+    invoke('webhook_list_runs', { id, limit }),
 };

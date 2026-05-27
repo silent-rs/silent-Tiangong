@@ -1,11 +1,13 @@
 mod chat;
 mod health;
+mod jobs;
 mod mcp;
 mod messages;
 mod server_ctrl;
 mod sessions;
 mod skills;
 mod types;
+mod webhook;
 pub mod ws;
 
 use std::sync::Arc;
@@ -95,6 +97,33 @@ pub fn build_routes(
         )
         .append(Route::new("mcp").get(mcp::list_mcp))
         .append(Route::new("skills").get(skills::list_skills))
+        .append(
+            Route::new("jobs")
+                .get(jobs::list_jobs)
+                .post(jobs::create_job)
+                .append(
+                    Route::new("<id>")
+                        .get(jobs::get_job)
+                        .put(jobs::update_job)
+                        .delete(jobs::delete_job)
+                        .append(Route::new("runs").get(jobs::list_job_runs))
+                        .append(Route::new("trigger").post(jobs::trigger_job)),
+                ),
+        )
+        .append(
+            Route::new("webhooks")
+                .get(webhook::list_webhooks)
+                .post(webhook::create_webhook)
+                .append(
+                    Route::new("<id>")
+                        .get(webhook::get_webhook)
+                        .put(webhook::update_webhook)
+                        .delete(webhook::delete_webhook)
+                        .append(Route::new("runs").get(webhook::list_webhook_runs))
+                        .append(Route::new("trigger").post(webhook::trigger_webhook))
+                        .append(Route::new("invoke").post(webhook::invoke_webhook)),
+                ),
+        )
         .append(Route::new("server/shutdown").post(server_ctrl::shutdown))
         .append(ws::ws_route());
 

@@ -13,6 +13,9 @@ pub struct ServerConfig {
     pub port: u16,
     /// API 认证 Token（为空则不鉴权）
     pub auth_token: Option<String>,
+    /// 上次退出时 Server 是否在运行，用于重启后自动拉起
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 impl Default for ServerConfig {
@@ -21,6 +24,7 @@ impl Default for ServerConfig {
             host: "127.0.0.1".to_string(),
             port: 8080,
             auth_token: None,
+            enabled: false,
         }
     }
 }

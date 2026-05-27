@@ -1329,6 +1329,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cron"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "089df96cf6a25253b4b6b6744d86f91150a3d4df546f31a95def47976b8cba97"
+dependencies = [
+ "chrono",
+ "once_cell",
+ "phf 0.11.3",
+ "winnow 0.7.15",
+]
+
+[[package]]
 name = "crossbeam"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3533,6 +3545,15 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest",
+]
 
 [[package]]
 name = "html5ever"
@@ -7962,6 +7983,7 @@ dependencies = [
  "async-tungstenite",
  "bytes",
  "chrono",
+ "cron",
  "futures",
  "futures-util",
  "headers",
@@ -9096,6 +9118,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-openai",
+ "async-trait",
  "base64 0.22.1",
  "chrono",
  "clap",
@@ -9106,6 +9129,7 @@ dependencies = [
  "scru128 3.6.1",
  "serde",
  "serde_json",
+ "silent",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -9122,6 +9146,7 @@ dependencies = [
  "tiangong-entry",
  "tiangong-media",
  "tiangong-memory",
+ "tiangong-scheduler",
  "tiangong-server",
  "tiangong-types",
  "tokio",
@@ -9184,6 +9209,7 @@ dependencies = [
  "tiangong-llm",
  "tiangong-media",
  "tiangong-memory",
+ "tiangong-scheduler",
  "tiangong-types",
  "tokio",
  "toml 0.8.2",
@@ -9266,21 +9292,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-scheduler"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "dirs",
+ "scru128 3.6.1",
+ "serde",
+ "serde_json",
+ "silent",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tiangong-server"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-channel",
  "async-lock",
+ "async-trait",
+ "chrono",
+ "dirs",
+ "hex",
+ "hmac",
+ "http-body-util",
  "libc",
  "reqwest 0.12.28",
  "scru128 3.6.1",
  "serde",
  "serde_json",
+ "sha2",
  "silent",
+ "subtle",
+ "tempfile",
  "tiangong-config",
  "tiangong-core",
  "tiangong-media",
+ "tiangong-scheduler",
  "tiangong-types",
  "tokio",
  "tracing",
@@ -10773,6 +10826,9 @@ name = "winnow"
 version = "0.7.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "winnow"

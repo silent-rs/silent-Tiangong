@@ -228,7 +228,7 @@ export const useStore = create<AppState>((set, get) => ({
   inputContent: '',
   mcpServers: null,
   skills: null,
-  isDraft: false,
+  isDraft: true,
   reasoningEffort: 'medium',
   reasoningEffortPerSession: {},
   setReasoningEffort: (effort: string) => {
@@ -283,7 +283,7 @@ export const useStore = create<AppState>((set, get) => ({
       const sessions = await api.getSessions();
       set({ sessions, isLoadingSessions: false });
 
-      // 首次加载时默认进入新对话（草稿模式）
+      // 未选中任何会话时确保处于草稿模式
       const { activeSessionId, isDraft } = get();
       if (!activeSessionId && !isDraft) {
         set({ isDraft: true, sessionCwd: get().workspaceDir });
