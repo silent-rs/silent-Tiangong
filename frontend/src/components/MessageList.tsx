@@ -39,8 +39,9 @@ import {
   resolveAttachmentUrl,
   attachmentsToBase64Media,
 } from '@/utils/attachments';
+import { useVirtualizer } from "@tanstack/react-virtual";
 
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import type { ReactNode } from "react";
 
 /** 格式化消息时间（hover 显示） */
@@ -72,7 +73,6 @@ function MessageActions({ text, showTts }: { text: string; showTts: boolean }) {
   };
 
   const handleTts = async () => {
-    console.log("handleTts called, playing:", playing, "text length:", text.length);
     if (playing) {
       api.stopAudio().catch(() => {});
       setPlaying(false);
@@ -81,18 +81,11 @@ function MessageActions({ text, showTts }: { text: string; showTts: boolean }) {
 
     setTtsLoading(true);
     try {
-      // 先停止可能正在播放的音频（不等待）
       api.stopAudio().catch(() => {});
-
-      console.log("开始 TTS 合成...");
       const result = await api.synthesizeSpeech(text);
-      console.log("TTS 合成完成，文件路径:", result.file_path);
-
       setPlaying(true);
       setTtsLoading(false);
-      // 通过系统原生命令播放音频文件（afplay on macOS）
       await api.playAudioFile(result.file_path);
-      // playAudioFile 阻塞到播放完成
       setPlaying(false);
     } catch (e: any) {
       console.error("TTS 播放失败:", e);
@@ -233,213 +226,46 @@ function workerContentMessages(messages: MessageItem[]): MessageItem[] {
   return messages.filter(m => !(m.role === "system" && textContent(m).startsWith("🔧 Worker:")));
 }
 
-export function MessageList() {
-  const {
-    messages,
-    runStatus,
-    runSummary,
-    streamingMessageId,
-    streamingContent,
-    streamingReasoningContent,
-    selectedAgentTab,
-    agents,
-    voiceMessages,
-    approvalRequestId,
-    editAndResend,
-  } = useStore();
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const prevMessagesLengthRef = useRef(0);
-  const prevStreamingIdRef = useRef<string | null>(null);
-  const prevSelectedAgentTabRef = useRef<string | null>(null);
-  const [hasTts, setHasTts] = useState(false);
-  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
-  const [editingContent, setEditingContent] = useState("");
-  const [editingAttachments, setEditingAttachments] = useState<Attachment[]>([]);
-  const editingTextareaRef = useRef<HTMLTextAreaElement>(null);
-  const [hasMultimodal, setHasMultimodal] = useState(false);
+// ---------------------------------------------------------------------------
+// Markdown 渲染组件
+// ---------------------------------------------------------------------------
 
-  // 检查 TTS 能力
-  useEffect(() => {
-    api.hasTtsCapability().then(setHasTts).catch(() => setHasTts(false));
-  }, []);
+/** 独立的 Markdown 图片组件，避免在 useMemo 内部使用 useState */
+function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
+  const [fullscreen, setFullscreen] = useState(false);
+  const resolvedSrc = resolveAssetUrl(src || "");
+  return (
+    <>
+      <img
+        src={resolvedSrc}
+        alt={alt || "生成的图片"}
+        className="max-w-full max-h-96 rounded-md my-2 cursor-pointer hover:opacity-90 transition-opacity"
+        loading="lazy"
+        onClick={() => setFullscreen(true)}
+      />
+      {fullscreen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 cursor-pointer"
+          onClick={() => setFullscreen(false)}
+        >
+          <img
+            src={resolvedSrc}
+            alt={alt || "生成的图片"}
+            className="max-w-[90vw] max-h-[90vh] object-contain rounded-md"
+          />
+        </div>
+      )}
+    </>
+  );
+}
 
-  // 检查多模态能力
-  useEffect(() => {
-    api.hasModelCapability('multimodal').then(setHasMultimodal).catch(() => setHasMultimodal(false));
-  }, []);
-
-  const isThinking = runStatus !== "idle";
-  const isContextCompressing = runSummary.includes("正在压缩");
-
-  const handleStartEdit = (messageId: string, text: string) => {
-    if (runStatus !== "idle") return;
-    setEditingMessageId(messageId);
-    setEditingContent(text);
-    // 从原始消息中提取已有 media 作为初始附件
-    const msg = messages.find(m => m.id === messageId);
-    if (msg && hasMultimodal) {
-      const mediaAttachments: Attachment[] = (Array.isArray(msg.content) ? msg.content : [])
-        .filter((b: ContentBlock) => b.type === 'media' && b.url)
-        .map((b: ContentBlock) => ({
-          kind: b.kind === 'image' ? 'image' : 'file',
-          url: b.url!,
-          title: b.title || '',
-          mime_type: b.mime_type,
-        }));
-      setEditingAttachments(mediaAttachments);
-    } else {
-      setEditingAttachments([]);
-    }
-    setTimeout(() => {
-      const textarea = editingTextareaRef.current;
-      if (textarea) {
-        textarea.style.height = '60px';
-        textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
-      }
-    }, 0);
-  };
-
-  const handleConfirmEdit = async () => {
-    if (!editingMessageId || !editingContent.trim()) return;
-    let media: Awaited<ReturnType<typeof attachmentsToBase64Media>> = [];
-    if (editingAttachments.length > 0 && hasMultimodal) {
-      try {
-        media = await attachmentsToBase64Media(editingAttachments);
-      } catch (err) {
-        console.error('附件转换失败:', err);
-        alert(err instanceof Error ? err.message : '附件转换失败');
-        return;
-      }
-    }
-    editAndResend(editingMessageId, editingContent.trim(), media);
-    setEditingMessageId(null);
-    setEditingContent("");
-    setEditingAttachments([]);
-  };
-
-  const handleCancelEdit = () => {
-    setEditingMessageId(null);
-    setEditingContent("");
-    setEditingAttachments([]);
-  };
-
-  const handleAttachFilesForEdit = async () => {
-    try {
-      const selected = await open({
-        multiple: true,
-        directory: false,
-        title: '选择图片或文件',
-        filters: [
-          { name: '图片和文件', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'pdf', 'txt', 'md', 'json', 'csv'] },
-        ],
-      });
-      const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
-      if (paths.length === 0) return;
-      const newAttachments = paths.map(attachmentFromPath);
-      setEditingAttachments(prev => {
-        const next = [...prev];
-        for (const item of newAttachments) {
-          if (!next.some(existing => existing.url === item.url)) {
-            next.push(item);
-          }
-        }
-        return next;
-      });
-    } catch (e) {
-      console.error('选择附件失败:', e);
-    }
-  };
-
-  const handleEditPaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    if (!hasMultimodal) return;
-    const files = Array.from(e.clipboardData.files).filter(file =>
-      file.type.startsWith('image/')
-    );
-    if (files.length > 0) {
-      e.preventDefault();
-      try {
-        const pasted = await Promise.all(files.map(async (file, index) => {
-          const mimeType = file.type || 'image/png';
-          const title = file.name || `pasted-image-${Date.now()}-${index + 1}.${imageExtFromMime(mimeType)}`;
-          if (estimatedBase64Size(file.size) > 50 * 1024 * 1024) {
-            throw new Error(`附件"${title}"超过 50MB，已停止添加。`);
-          }
-          return {
-            kind: 'image' as const,
-            url: await fileToDataUrl(file),
-            title,
-            mime_type: mimeType,
-          };
-        }));
-        setEditingAttachments(prev => [...prev, ...pasted]);
-      } catch (err) {
-        console.error('读取粘贴图片失败:', err);
-        alert(err instanceof Error ? err.message : '读取粘贴图片失败');
-      }
-    }
-  };
-
-  const messageGroups = useMemo(() => groupMessages(messages), [messages]);
-
-  // 计算 compact 边界：compact=true 的消息及其之前的消息都不可编辑
-  const nonEditableIds = useMemo(() => {
-    const ids = new Set<string>();
-    for (const msg of messages) {
-      if (msg.compact) {
-        // compact 消息及其之前的所有消息都不可编辑
-        ids.add(msg.id);
-        break;
-      }
-    }
-    // 如果没有 compact 消息，ids 为空，所有消息都可编辑
-    // 如果有 compact 消息，把它之前的消息也加入
-    if (ids.size > 0) {
-      const compactId = [...ids][0];
-      for (const msg of messages) {
-        ids.add(msg.id);
-        if (msg.id === compactId) break;
-      }
-    }
-    return ids;
-  }, [messages]);
-  const streamScrollKey = streamingMessageId
-    ? `${streamingMessageId}:${streamingContent.length}:${streamingReasoningContent.length}`
-    : "";
-
-  // 自动滚动到底部
-  useEffect(() => {
-    // 消息数量增加、流式状态变化、或消息内容增长（流式输出中）时自动滚动
-    const tabChanged = selectedAgentTab !== prevSelectedAgentTabRef.current;
-    const shouldScroll =
-      messages.length > prevMessagesLengthRef.current ||
-      streamingMessageId !== prevStreamingIdRef.current ||
-      isThinking ||
-      tabChanged;
-
-    if (shouldScroll) {
-      // 使用 setTimeout 确保在 DOM 更新后滚动
-      setTimeout(() => {
-        scrollRef.current?.scrollIntoView({
-          behavior: tabChanged ? "auto" : "smooth",
-          block: "end",
-        });
-      }, 100);
-    }
-
-    prevMessagesLengthRef.current = messages.length;
-    prevStreamingIdRef.current = streamingMessageId;
-    prevSelectedAgentTabRef.current = selectedAgentTab;
-  }, [messages.length, streamingMessageId, streamScrollKey, isThinking, selectedAgentTab]);
-
-  // 将本地文件路径转换为 Tauri asset URL
-  // Markdown 渲染器（用于非流式消息）
-  const MarkdownComponents = useMemo(() => ({
+function useMarkdownComponents() {
+  return useMemo(() => ({
     pre({ children }: any) {
       return <>{children}</>;
     },
     code({ className, children, node, ...rest }: any) {
       const match = /language-(\w+)/.exec(className || "");
-      // 判断是否是代码块：有语言标记，或者父节点是 pre
       const isBlock = match || node?.parentNode?.tagName === "pre";
       return isBlock ? (
         <CopyableCodeBlock
@@ -512,33 +338,7 @@ export function MessageList() {
         </a>
       );
     },
-    img({ src, alt }: { src?: string; alt?: string }) {
-      const [fullscreen, setFullscreen] = useState(false);
-      const resolvedSrc = resolveAssetUrl(src || "");
-      return (
-        <>
-          <img
-            src={resolvedSrc}
-            alt={alt || "生成的图片"}
-            className="max-w-full max-h-96 rounded-md my-2 cursor-pointer hover:opacity-90 transition-opacity"
-            loading="lazy"
-            onClick={() => setFullscreen(true)}
-          />
-          {fullscreen && (
-            <div
-              className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 cursor-pointer"
-              onClick={() => setFullscreen(false)}
-            >
-              <img
-                src={resolvedSrc}
-                alt={alt || "生成的图片"}
-                className="max-w-[90vw] max-h-[90vh] object-contain rounded-md"
-              />
-            </div>
-          )}
-        </>
-      );
-    },
+    img: MarkdownImage,
     table({ children }: { children: ReactNode }) {
       return (
         <div className="my-3 overflow-x-auto">
@@ -591,9 +391,443 @@ export function MessageList() {
       );
     },
   }), []);
+}
+
+// ---------------------------------------------------------------------------
+// 用户消息组渲染
+// ---------------------------------------------------------------------------
+
+function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessages, editingMessageId, editingContent, editingAttachments, editingTextareaRef, hasMultimodal, onStartEdit, onConfirmEdit, onCancelEdit, onSetEditingContent, onSetEditingAttachments, onAttachFiles, onEditPaste }: {
+  group: MessageGroup;
+  runStatus: string;
+  nonEditableIds: Set<string>;
+  voiceMessages: Record<string, { audioPath: string; duration?: number; showText: boolean }>;
+  editingMessageId: string | null;
+  editingContent: string;
+  editingAttachments: Attachment[];
+  editingTextareaRef: React.RefObject<HTMLTextAreaElement>;
+  hasMultimodal: boolean;
+  onStartEdit: (messageId: string, text: string) => void;
+  onConfirmEdit: () => void;
+  onCancelEdit: () => void;
+  onSetEditingContent: (v: string) => void;
+  onSetEditingAttachments: React.Dispatch<React.SetStateAction<Attachment[]>>;
+  onAttachFiles: () => void;
+  onEditPaste: (e: React.ClipboardEvent<HTMLTextAreaElement>) => void;
+}) {
+  const message = group.messages[0];
+  const voiceInfo = voiceMessages[message.id];
+  const isEditing = editingMessageId === message.id;
 
   return (
-    <ScrollArea className="h-full">
+    <div className="mt-3 first:mt-0">
+      {isEditing ? (
+        <div className="w-full">
+          {editingAttachments.length > 0 && (
+            <div className="mb-2 flex flex-wrap gap-1.5">
+              {editingAttachments.map(item => (
+                <span
+                  key={item.title + item.url.slice(0, 40)}
+                  className="inline-flex h-9 max-w-[260px] items-center gap-1.5 rounded-md border bg-muted/40 px-2 text-xs"
+                  title={item.title}
+                >
+                  {item.kind === 'image' ? (
+                    <img
+                      src={resolveAttachmentUrl(item.url)}
+                      alt={item.title}
+                      className="h-6 w-6 shrink-0 rounded object-cover"
+                    />
+                  ) : (
+                    <Paperclip className="h-3 w-3 shrink-0" />
+                  )}
+                  <span className="truncate">{item.title}</span>
+                  <button
+                    type="button"
+                    onClick={() => onSetEditingAttachments(prev => prev.filter(a => a.url !== item.url))}
+                    className="ml-1 text-muted-foreground hover:text-foreground"
+                    title="移除附件"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          <Textarea
+            ref={editingTextareaRef}
+            value={editingContent}
+            onChange={(e) => {
+              onSetEditingContent(e.target.value);
+              const textarea = editingTextareaRef.current;
+              if (textarea) {
+                textarea.style.height = '60px';
+                textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
+              }
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
+                e.preventDefault();
+                onConfirmEdit();
+              }
+              if (e.key === "Escape") {
+                onCancelEdit();
+              }
+            }}
+            onPaste={onEditPaste}
+            className="min-h-[60px] max-h-[200px] resize-none text-sm w-full"
+            autoFocus
+          />
+          <div className="flex justify-between items-center mt-1">
+            <span className="text-[10px] text-muted-foreground">Enter 发送 · Shift+Enter 换行 · Esc 取消</span>
+            <div className="flex gap-1.5">
+              {hasMultimodal && (
+                <button
+                  onClick={onAttachFiles}
+                  className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                  title="添加附件"
+                >
+                  <Paperclip className="w-3 h-3" />
+                </button>
+              )}
+              <button
+                onClick={onCancelEdit}
+                className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                <X className="w-3 h-3" />
+                取消
+              </button>
+              <button
+                onClick={onConfirmEdit}
+                className="px-2.5 py-1 text-xs bg-green-600 hover:bg-green-700 text-white rounded transition-colors"
+              >
+                发送
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : (
+      <div className="flex justify-end" title={formatMessageTime(message.created_at)}>
+        <div className="max-w-[100%] text-muted-foreground">
+          {voiceInfo ? (
+            <VoiceBubble
+              messageId={message.id}
+              audioPath={voiceInfo.audioPath}
+              duration={voiceInfo.duration}
+              showText={voiceInfo.showText}
+              content={textContent(message)}
+            />
+          ) : (
+            <div>
+              {renderContentMedia(message)}
+              {textContent(message) && (
+                <p className="whitespace-pre-wrap break-words text-sm">
+                  {textContent(message)}
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+      )}
+      {textContent(message) && !isEditing && (
+        <div className="flex justify-end">
+          <UserMessageActions
+            text={textContent(message)}
+            messageId={message.id}
+            runStatus={runStatus}
+            canEdit={!nonEditableIds.has(message.id)}
+            onStartEdit={onStartEdit}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 主组件
+// ---------------------------------------------------------------------------
+
+export function MessageList() {
+  const messages = useStore(s => s.messages);
+  const runStatus = useStore(s => s.runStatus);
+  const runSummary = useStore(s => s.runSummary);
+  const streamingMessageId = useStore(s => s.streamingMessageId);
+  const streamingContent = useStore(s => s.streamingContent);
+  const streamingReasoningContent = useStore(s => s.streamingReasoningContent);
+  const selectedAgentTab = useStore(s => s.selectedAgentTab);
+  const agents = useStore(s => s.agents);
+  const voiceMessages = useStore(s => s.voiceMessages);
+  const approvalRequestId = useStore(s => s.approvalRequestId);
+  const editAndResend = useStore(s => s.editAndResend);
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const prevMessagesLengthRef = useRef(0);
+  const prevStreamingIdRef = useRef<string | null>(null);
+  const prevSelectedAgentTabRef = useRef<string | null>(null);
+  const [hasTts, setHasTts] = useState(false);
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editingContent, setEditingContent] = useState("");
+  const [editingAttachments, setEditingAttachments] = useState<Attachment[]>([]);
+  const editingTextareaRef = useRef<HTMLTextAreaElement>(null!);
+  const [hasMultimodal, setHasMultimodal] = useState(false);
+
+  // 检查 TTS 能力
+  useEffect(() => {
+    api.hasTtsCapability().then(setHasTts).catch(() => setHasTts(false));
+  }, []);
+
+  // 检查多模态能力
+  useEffect(() => {
+    api.hasModelCapability('multimodal').then(setHasMultimodal).catch(() => setHasMultimodal(false));
+  }, []);
+
+  const isThinking = runStatus !== "idle";
+  const isContextCompressing = runSummary.includes("正在压缩");
+  const MarkdownComponents = useMarkdownComponents();
+
+  // 消息分组
+  const messageGroups = useMemo(() => groupMessages(messages), [messages]);
+
+  // agent_tab 过滤前置：将渲染时的 return null 改为数据层过滤
+  const filteredGroups = useMemo(() => {
+    if (!selectedAgentTab) return messageGroups;
+    return messageGroups.filter(group => {
+      if (group.type === "user") return false;
+      if (group.type === "worker") {
+        return group.worker_id?.startsWith(`agent:${selectedAgentTab}:`);
+      }
+      if (group.type === "agent_turn") {
+        return group.messages.some(m =>
+          m.role === "system"
+          && extractAgentRoles(textContent(m), agents).includes(selectedAgentTab)
+        );
+      }
+      return true;
+    });
+  }, [messageGroups, selectedAgentTab, agents]);
+
+  // 分离流式消息：正在流式输出的 agent_turn 不参与虚拟化
+  const { completedGroups, streamingGroup } = useMemo(() => {
+    if (!streamingMessageId || filteredGroups.length === 0) {
+      return { completedGroups: filteredGroups, streamingGroup: null };
+    }
+    // 检查最后一个 group 是否包含流式消息
+    const lastGroup = filteredGroups[filteredGroups.length - 1];
+    if (lastGroup.type === "agent_turn" && lastGroup.messages.some(m => m.id === streamingMessageId)) {
+      return {
+        completedGroups: filteredGroups.slice(0, -1),
+        streamingGroup: lastGroup,
+      };
+    }
+    return { completedGroups: filteredGroups, streamingGroup: null };
+  }, [filteredGroups, streamingMessageId]);
+
+  // 计算 compact 边界
+  const nonEditableIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const msg of messages) {
+      if (msg.compact) {
+        ids.add(msg.id);
+        break;
+      }
+    }
+    if (ids.size > 0) {
+      const compactId = [...ids][0];
+      for (const msg of messages) {
+        ids.add(msg.id);
+        if (msg.id === compactId) break;
+      }
+    }
+    return ids;
+  }, [messages]);
+
+  // 虚拟化
+  const virtualizer = useVirtualizer({
+    count: completedGroups.length,
+    getScrollElement: () => viewportRef.current,
+    estimateSize: (index) => {
+      const group = completedGroups[index];
+      if (group.type === "user") {
+        const msg = group.messages[0];
+        const hasMedia = msg.media?.length || msg.content.some(b => b.type === "media");
+        return hasMedia ? 300 : 80;
+      }
+      if (group.type === "worker") return 120;
+      // agent_turn: 根据消息数量、工具调用和内容长度启发式估算
+      const msgCount = group.messages.length;
+      const hasTools = group.messages.some(m =>
+        m.role === "system" && (textContent(m).includes("tool_name:") || textContent(m).includes("exit_code"))
+      );
+      const totalTextLen = group.messages.reduce((sum, m) => sum + textContent(m).length, 0);
+      const textBonus = Math.min(Math.floor(totalTextLen / 200) * 30, 400);
+      return (hasTools ? 200 + msgCount * 30 : 100 + msgCount * 40) + textBonus;
+    },
+    overscan: 5,
+  });
+
+  // 新消息到达时滚动到底部
+  useEffect(() => {
+    const tabChanged = selectedAgentTab !== prevSelectedAgentTabRef.current;
+    const shouldScroll =
+      messages.length > prevMessagesLengthRef.current ||
+      streamingMessageId !== prevStreamingIdRef.current ||
+      tabChanged;
+
+    if (shouldScroll) {
+      if (completedGroups.length > 0 && !streamingGroup) {
+        // 滚动到虚拟列表最后一项
+        requestAnimationFrame(() => {
+          virtualizer.scrollToIndex(completedGroups.length - 1, {
+            behavior: tabChanged ? "auto" : "smooth",
+            align: "end",
+          });
+        });
+      } else if (streamingGroup) {
+        requestAnimationFrame(() => {
+          scrollRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+        });
+      }
+    }
+
+    prevMessagesLengthRef.current = messages.length;
+    prevStreamingIdRef.current = streamingMessageId;
+    prevSelectedAgentTabRef.current = selectedAgentTab;
+  }, [messages.length, streamingMessageId, completedGroups.length, streamingGroup, selectedAgentTab]);
+
+  // 流式输出时自动滚动
+  useEffect(() => {
+    if (!streamingMessageId) return;
+    const el = scrollRef.current;
+    if (!el) return;
+
+    let ticking = false;
+    const observer = new MutationObserver(() => {
+      if (ticking) return;
+      ticking = true;
+      requestAnimationFrame(() => {
+        el.scrollIntoView({ behavior: "smooth", block: "end" });
+        ticking = false;
+      });
+    });
+    observer.observe(el.parentElement!, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+    return () => observer.disconnect();
+  }, [streamingMessageId]);
+
+  // 编辑相关回调
+  const handleStartEdit = useCallback((messageId: string, text: string) => {
+    if (runStatus !== "idle") return;
+    setEditingMessageId(messageId);
+    setEditingContent(text);
+    const msg = messages.find(m => m.id === messageId);
+    if (msg && hasMultimodal) {
+      const mediaAttachments: Attachment[] = (Array.isArray(msg.content) ? msg.content : [])
+        .filter((b: ContentBlock) => b.type === 'media' && b.url)
+        .map((b: ContentBlock) => ({
+          kind: b.kind === 'image' ? 'image' : 'file',
+          url: b.url!,
+          title: b.title || '',
+          mime_type: b.mime_type,
+        }));
+      setEditingAttachments(mediaAttachments);
+    } else {
+      setEditingAttachments([]);
+    }
+    setTimeout(() => {
+      const textarea = editingTextareaRef.current;
+      if (textarea) {
+        textarea.style.height = '60px';
+        textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
+      }
+    }, 0);
+  }, [runStatus, messages, hasMultimodal]);
+
+  const handleConfirmEdit = useCallback(async () => {
+    if (!editingMessageId || !editingContent.trim()) return;
+    let media: Awaited<ReturnType<typeof attachmentsToBase64Media>> = [];
+    if (editingAttachments.length > 0 && hasMultimodal) {
+      try {
+        media = await attachmentsToBase64Media(editingAttachments);
+      } catch (err) {
+        console.error('附件转换失败:', err);
+        alert(err instanceof Error ? err.message : '附件转换失败');
+        return;
+      }
+    }
+    editAndResend(editingMessageId, editingContent.trim(), media);
+    setEditingMessageId(null);
+    setEditingContent("");
+    setEditingAttachments([]);
+  }, [editingMessageId, editingContent, editingAttachments, hasMultimodal, editAndResend]);
+
+  const handleCancelEdit = useCallback(() => {
+    setEditingMessageId(null);
+    setEditingContent("");
+    setEditingAttachments([]);
+  }, []);
+
+  const handleAttachFilesForEdit = useCallback(async () => {
+    try {
+      const selected = await open({
+        multiple: true,
+        directory: false,
+        title: '选择图片或文件',
+        filters: [
+          { name: '图片和文件', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'pdf', 'txt', 'md', 'json', 'csv'] },
+        ],
+      });
+      const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
+      if (paths.length === 0) return;
+      const newAttachments = paths.map(attachmentFromPath);
+      setEditingAttachments(prev => {
+        const next = [...prev];
+        for (const item of newAttachments) {
+          if (!next.some(existing => existing.url === item.url)) {
+            next.push(item);
+          }
+        }
+        return next;
+      });
+    } catch (e) {
+      console.error('选择附件失败:', e);
+    }
+  }, []);
+
+  const handleEditPaste = useCallback(async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    if (!hasMultimodal) return;
+    const files = Array.from(e.clipboardData.files).filter(file =>
+      file.type.startsWith('image/')
+    );
+    if (files.length === 0) return;
+    e.preventDefault();
+    try {
+      const pasted = await Promise.all(files.map(async (file, index) => {
+        const mimeType = file.type || 'image/png';
+        const title = file.name || `pasted-image-${Date.now()}-${index + 1}.${imageExtFromMime(mimeType)}`;
+        if (estimatedBase64Size(file.size) > 50 * 1024 * 1024) {
+          throw new Error(`附件"${title}"超过 50MB，已停止添加。`);
+        }
+        return {
+          kind: 'image' as const,
+          url: await fileToDataUrl(file),
+          title,
+          mime_type: mimeType,
+        };
+      }));
+      setEditingAttachments(prev => [...prev, ...pasted]);
+    } catch (err) {
+      console.error('读取粘贴图片失败:', err);
+      alert(err instanceof Error ? err.message : '读取粘贴图片失败');
+    }
+  }, [hasMultimodal]);
+
+  return (
+    <ScrollArea className="h-full" viewportRef={viewportRef}>
       <div className="p-4">
         <div className="max-w-3xl mx-auto space-y-2">
           {messages.length === 0 && !isThinking ? (
@@ -615,188 +849,153 @@ export function MessageList() {
                   <AgentPanel />
                 </div>
               )}
-              {messageGroups.map((group, groupIdx, allGroups) => {
-              // Worker 组
-              if (group.type === "worker") {
-                if (!selectedAgentTab) {
-                  return null;
-                }
-                if (!group.worker_id?.startsWith(`agent:${selectedAgentTab}:`)) {
-                  return null;
-                }
-                const contentMessages = workerContentMessages(group.messages);
-                const isLastGroup = groupIdx === allGroups.length - 1;
-                return (
-                  <div key={group.key} className="mt-3 first:mt-0">
-                    <AgentTurn
-                      messages={contentMessages}
-                      streamingMessageId={null}
-                      streamingContent=""
-                      streamingReasoningContent=""
-                      MarkdownComponents={MarkdownComponents}
-                      hasTts={hasTts}
-                      selectedAgentTab={null}
-                    />
-                    {isLastGroup && isThinking && contentMessages.length === 0 && (
-                      <div className="text-xs text-muted-foreground">正在等待输出...</div>
-                    )}
-                  </div>
-                );
-              }
 
-              // 智能体回合：系统消息 + assistant 消息统一展示
-              if (group.type === "agent_turn") {
-                if (selectedAgentTab) {
-                  const hasRelatedAgentEvent = group.messages.some((message) =>
-                    message.role === "system"
-                    && extractAgentRoles(textContent(message), useStore.getState().agents).includes(selectedAgentTab)
-                  );
-                  if (!hasRelatedAgentEvent) return null;
-                }
-                return (
-                  <div key={group.key} className="mt-3 first:mt-0">
-                    <AgentTurn
-                      messages={group.messages}
-                      streamingMessageId={streamingMessageId}
-                      streamingContent={streamingContent}
-                      streamingReasoningContent={streamingReasoningContent}
-                      MarkdownComponents={MarkdownComponents}
-                      hasTts={hasTts}
-                      selectedAgentTab={selectedAgentTab}
-                    />
-                  </div>
-                );
-              }
-
-              // 用户消息
-              if (selectedAgentTab) return null;
-              const message = group.messages[0];
-              const voiceInfo = voiceMessages[message.id];
-              const isEditing = editingMessageId === message.id;
-              return (
-                <div key={group.key} className="mt-3 first:mt-0">
-                  {isEditing ? (
-                    <div className="w-full">
-                      {editingAttachments.length > 0 && (
-                        <div className="mb-2 flex flex-wrap gap-1.5">
-                          {editingAttachments.map(item => (
-                            <span
-                              key={item.title + item.url.slice(0, 40)}
-                              className="inline-flex h-9 max-w-[260px] items-center gap-1.5 rounded-md border bg-muted/40 px-2 text-xs"
-                              title={item.title}
-                            >
-                              {item.kind === 'image' ? (
-                                <img
-                                  src={resolveAttachmentUrl(item.url)}
-                                  alt={item.title}
-                                  className="h-6 w-6 shrink-0 rounded object-cover"
-                                />
-                              ) : (
-                                <Paperclip className="h-3 w-3 shrink-0" />
-                              )}
-                              <span className="truncate">{item.title}</span>
-                              <button
-                                type="button"
-                                onClick={() => setEditingAttachments(prev => prev.filter(a => a.url !== item.url))}
-                                className="ml-1 text-muted-foreground hover:text-foreground"
-                                title="移除附件"
-                              >
-                                <X className="h-3 w-3" />
-                              </button>
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                      <Textarea
-                        ref={editingTextareaRef}
-                        value={editingContent}
-                        onChange={(e) => {
-                          setEditingContent(e.target.value);
-                          const textarea = editingTextareaRef.current;
-                          if (textarea) {
-                            textarea.style.height = '60px';
-                            textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
-                          }
+              {/* 虚拟化渲染已完成消息 */}
+              <div
+                style={{
+                  height: virtualizer.getTotalSize(),
+                  width: "100%",
+                  position: "relative",
+                }}
+              >
+                {virtualizer.getVirtualItems().map((virtualItem) => {
+                  const group = completedGroups[virtualItem.index];
+                  if (group.type === "user") {
+                    return (
+                      <div
+                        key={virtualItem.key}
+                        data-index={virtualItem.index}
+                        ref={(el) => {
+                          if (el) virtualizer.measureElement(el);
                         }}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
-                            e.preventDefault();
-                            handleConfirmEdit();
-                          }
-                          if (e.key === "Escape") {
-                            handleCancelEdit();
-                          }
+                        style={{
+                          position: "absolute",
+                          top: 0,
+                          left: 0,
+                          width: "100%",
+                          transform: `translateY(${virtualItem.start}px)`,
                         }}
-                        onPaste={handleEditPaste}
-                        className="min-h-[60px] max-h-[200px] resize-none text-sm w-full"
-                        autoFocus
-                      />
-                      <div className="flex justify-between items-center mt-1">
-                        <span className="text-[10px] text-muted-foreground">Enter 发送 · Shift+Enter 换行 · Esc 取消</span>
-                        <div className="flex gap-1.5">
-                          {hasMultimodal && (
-                            <button
-                              onClick={handleAttachFilesForEdit}
-                              className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-                              title="添加附件"
-                            >
-                              <Paperclip className="w-3 h-3" />
-                            </button>
-                          )}
-                          <button
-                            onClick={handleCancelEdit}
-                            className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-                          >
-                            <X className="w-3 h-3" />
-                            取消
-                          </button>
-                          <button
-                            onClick={handleConfirmEdit}
-                            className="px-2.5 py-1 text-xs bg-green-600 hover:bg-green-700 text-white rounded transition-colors"
-                          >
-                            发送
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                  <div className="flex justify-end" title={formatMessageTime(message.created_at)}>
-                    <div className="max-w-[100%] text-muted-foreground">
-                      {voiceInfo ? (
-                        <VoiceBubble
-                          messageId={message.id}
-                          audioPath={voiceInfo.audioPath}
-                          duration={voiceInfo.duration}
-                          showText={voiceInfo.showText}
-                          content={textContent(message)}
+                      >
+                        <UserMessageGroup
+                          group={group}
+                          runStatus={runStatus}
+                          nonEditableIds={nonEditableIds}
+                          voiceMessages={voiceMessages}
+                          editingMessageId={editingMessageId}
+                          editingContent={editingContent}
+                          editingAttachments={editingAttachments}
+                          editingTextareaRef={editingTextareaRef}
+                          hasMultimodal={hasMultimodal}
+                          onStartEdit={handleStartEdit}
+                          onConfirmEdit={handleConfirmEdit}
+                          onCancelEdit={handleCancelEdit}
+                          onSetEditingContent={setEditingContent}
+                          onSetEditingAttachments={setEditingAttachments}
+                          onAttachFiles={handleAttachFilesForEdit}
+                          onEditPaste={handleEditPaste}
                         />
-                      ) : (
-                        <div>
-                          {renderContentMedia(message)}
-                          {textContent(message) && (
-                            <p className="whitespace-pre-wrap break-words text-sm">
-                              {textContent(message)}
-                            </p>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                  )}
-                  {textContent(message) && !isEditing && (
-                    <div className="flex justify-end">
-                      <UserMessageActions
-                        text={textContent(message)}
-                        messageId={message.id}
-                        runStatus={runStatus}
-                        canEdit={!nonEditableIds.has(message.id)}
-                        onStartEdit={handleStartEdit}
+                      </div>
+                    );
+                  }
+
+                  if (group.type === "worker") {
+                    const contentMessages = workerContentMessages(group.messages);
+                    return (
+                      <div
+                        key={virtualItem.key}
+                        data-index={virtualItem.index}
+                        ref={(el) => {
+                          if (el) virtualizer.measureElement(el);
+                        }}
+                        style={{
+                          position: "absolute",
+                          top: 0,
+                          left: 0,
+                          width: "100%",
+                          transform: `translateY(${virtualItem.start}px)`,
+                        }}
+                      >
+                        <AgentTurn
+                          messages={contentMessages}
+                          streamingMessageId={null}
+                          streamingContent=""
+                          streamingReasoningContent=""
+                          MarkdownComponents={MarkdownComponents}
+                          hasTts={hasTts}
+                          selectedAgentTab={null}
+                        />
+                      </div>
+                    );
+                  }
+
+                  // agent_turn
+                  return (
+                    <div
+                      key={virtualItem.key}
+                      data-index={virtualItem.index}
+                      ref={(el) => {
+                        if (el) virtualizer.measureElement(el);
+                      }}
+                      style={{
+                        position: "absolute",
+                        top: 0,
+                        left: 0,
+                        width: "100%",
+                        transform: `translateY(${virtualItem.start}px)`,
+                      }}
+                    >
+                      <AgentTurn
+                        messages={group.messages}
+                        streamingMessageId={null}
+                        streamingContent=""
+                        streamingReasoningContent=""
+                        MarkdownComponents={MarkdownComponents}
+                        hasTts={hasTts}
+                        selectedAgentTab={selectedAgentTab}
                       />
                     </div>
-                  )}
+                  );
+                })}
+              </div>
+
+              {/* 流式消息区域（始终渲染，不参与虚拟化） */}
+              {streamingGroup && (
+                <div className="mt-3">
+                  <AgentTurn
+                    messages={streamingGroup.messages}
+                    streamingMessageId={streamingMessageId}
+                    streamingContent={streamingContent}
+                    streamingReasoningContent={streamingReasoningContent}
+                    MarkdownComponents={MarkdownComponents}
+                    hasTts={hasTts}
+                    selectedAgentTab={selectedAgentTab}
+                  />
                 </div>
-              );
-              })}
+              )}
+
+              {/* 无流式但有思考中 */}
+              {!streamingGroup && isThinking && runStatus !== "waiting_approval" && (
+                isContextCompressing ||
+                (!streamingMessageId && !streamingContent &&
+                  !(messages.length > 0 && messages[messages.length - 1].role === "assistant"))
+              ) && (
+                <div className="flex justify-start mt-3">
+                  <div className="text-foreground">
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span className="text-sm text-muted-foreground">
+                        {runSummary || (
+                          <>
+                            {runStatus === "planning" && "正在制定计划..."}
+                            {runStatus === "executing" && "正在执行任务..."}
+                            {runStatus === "responding" && "正在生成回复..."}
+                          </>
+                        )}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
             </>
           )}
 
@@ -831,30 +1030,6 @@ export function MessageList() {
                     <ShieldX className="w-3.5 h-3.5" />
                     拒绝
                   </button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* 思考中/执行中指示器；上下文压缩需要在对话流中即时可见 */}
-          {isThinking && runStatus !== "waiting_approval" && (
-            isContextCompressing ||
-            (!streamingMessageId && !streamingContent &&
-              !(messages.length > 0 && messages[messages.length - 1].role === "assistant"))
-          ) && (
-            <div className="flex justify-start">
-              <div className="text-foreground">
-                <div className="flex items-center gap-2">
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  <span className="text-sm text-muted-foreground">
-                    {runSummary || (
-                      <>
-                        {runStatus === "planning" && "正在制定计划..."}
-                        {runStatus === "executing" && "正在执行任务..."}
-                        {runStatus === "responding" && "正在生成回复..."}
-                      </>
-                    )}
-                  </span>
                 </div>
               </div>
             </div>
@@ -918,7 +1093,6 @@ function resolveAssetUrl(url: string): string {
 function renderContentMedia(message: MessageItem) {
   const content = Array.isArray(message.content) ? message.content : [];
   const mediaBlocks = content.filter((b) => b.type === 'media');
-  // 兼容旧格式：也检查 message.media
   const legacyMedia = message.media || [];
   const allMedia = [
     ...mediaBlocks.map((b) => ({ kind: b.kind!, url: b.url!, title: b.title, mime_type: b.mime_type })),
@@ -1031,7 +1205,6 @@ function groupMessages(messages: MessageItem[]): MessageGroup[] {
       if (currentAgentTurn) { groups.push(currentAgentTurn); currentAgentTurn = null; }
       groups.push({ key: msg.id, type: "user", messages: [msg] });
     } else {
-      // System + Assistant → 合并到同一个 agent_turn
       if (!currentAgentTurn) {
         currentAgentTurn = { key: `turn-${msg.id}`, type: "agent_turn", messages: [] };
       }
@@ -1047,7 +1220,6 @@ function groupMessages(messages: MessageItem[]): MessageGroup[] {
 // ---------------------------------------------------------------------------
 
 function extractLlmExplanation(content: string): string {
-  // 格式: "LLM 输出 [...]\ntokens: ...\ntool_calls: ...\ncontent:\n实际内容"
   const lines = content.split("\n");
   const contentIdx = lines.findIndex((l) => l.startsWith("content:"));
   if (contentIdx >= 0 && contentIdx + 1 < lines.length) {
@@ -1106,7 +1278,6 @@ function extractAgentRoles(content: string, agents: { role: string; label: strin
     const agent = agents.find((item) => item.label === label);
     if (agent) roles.add(agent.role);
   };
-  // [Agent] {label} ({role}) 已加入团队
   const createMatch = content.match(/^\[Agent\] .+? \((.+?)\)/);
   if (createMatch) roles.add(createMatch[1]);
   const statusMatch = content.match(/^\[Agent\] (.+?) 状态变更:/);
@@ -1199,7 +1370,6 @@ function AgentTurnView({
       const countMatch = textContent(resultMsg).match(/命中 (\d+) 条/);
       const count = countMatch ? countMatch[1] : "?";
       brief = `记忆检索 (${strategy}) · ${count} 条命中`;
-      // 解析命中条目
       const lines = textContent(resultMsg).split("\n").slice(1);
       hits = lines.filter(l => l.startsWith("- "));
     }
@@ -1223,7 +1393,6 @@ function AgentTurnView({
     } else if (msg.role === "system" && textContent(msg).startsWith("[记忆检索]") && pendingRecall) {
       flushRecall(msg);
     } else if (msg.role === "system" && textContent(msg).startsWith("LLM 输出")) {
-      // 提取 reasoning
       const reasoning = msgReasoning(msg);
       const explanation = extractLlmExplanation(textContent(msg));
       if (!reasoning && !explanation && llmOutputHasToolCalls(textContent(msg))) {
@@ -1234,7 +1403,6 @@ function AgentTurnView({
         shownReasonings.add(reasoning);
         fragments.push({ type: "thinking", content: reasoning, time: msg.created_at });
       }
-      // 提取解释文本
       if (explanation) {
         fragments.push({ type: "explanation", text: explanation, time: msg.created_at });
       }
@@ -1260,8 +1428,6 @@ function AgentTurnView({
           flushRecall(msg);
         }
       }
-      // runtime_memory_recall 的 tool 消息仅用于 LLM 上下文，展示由系统消息驱动
-      // 其他 tool 消息仍然跳过
       continue;
     } else if (msg.role === "assistant") {
       const isStreaming = msg.id === streamingMessageId;
@@ -1277,13 +1443,10 @@ function AgentTurnView({
       }
 
       flushTools();
-      // 跳过与前一个 explanation 完全重复的 assistant 内容
       const prevFrag = fragments[fragments.length - 1];
       if (prevFrag?.type === "explanation" && prevFrag.text === textContent(msg).trim() && !isStreaming) {
-        // 内容重复，移除前面的 explanation，只保留 assistant
         fragments.pop();
       }
-      // assistant 自身携带的 reasoning（DirectAnswer 模式等无系统消息场景）
       if (!isStreaming && assistantReasoning && !shownReasonings.has(assistantReasoning)) {
         shownReasonings.add(assistantReasoning);
         fragments.push({ type: "thinking", content: assistantReasoning, time: msg.created_at });
@@ -1358,7 +1521,6 @@ function AgentTurnView({
         if (selectedAgentTab && frag.type !== "agent_event") {
           return null;
         }
-        // Agent Tab 过滤：选中特定 Agent 时，隐藏不相关的 agent_event
         if (selectedAgentTab && frag.type === "agent_event" && frag.agentRoles.length > 0 && !frag.agentRoles.includes(selectedAgentTab)) {
           return null;
         }
@@ -1408,7 +1570,6 @@ function AgentTurnView({
               {expanded && frag.hits.length > 0 && (
                 <div className="ml-6 mt-0.5 space-y-0.5">
                   {frag.hits.map((hit, idx) => {
-                    // hit 格式: "- [0.85] 标题: 摘要..."
                     const trimmed = hit.replace(/^-\s*/, "");
                     const scoreMatch = trimmed.match(/^\[([0-9.]+)\]\s*/);
                     const score = scoreMatch ? scoreMatch[1] : null;
@@ -1546,7 +1707,7 @@ function sameMessageRefs(left: MessageItem[], right: MessageItem[]): boolean {
 }
 
 function hasMessage(messages: MessageItem[], id: string | null): boolean {
-  return !!id && messages.some((message) => message.id === id);
+  return !!id && messages.some((message) => message.id === message.id);
 }
 
 const AgentTurn = memo(AgentTurnView, (prev, next) => {
