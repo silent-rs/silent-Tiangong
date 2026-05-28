@@ -4,6 +4,7 @@
 //! CLI / GUI / Server / Connector 统一通过 TiangongCore 运行。
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender, Sender as StdSender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
@@ -50,6 +51,8 @@ pub struct TiangongCore {
     session_id: String,
     /// 独立的信任模式（共享引用，实时生效）
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
+    /// 取消标志（stream consumer 检查此标志跳过 Delta/Reasoning 事件）
+    cancel_flag: Arc<AtomicBool>,
 }
 
 impl TiangongCore {
@@ -148,6 +151,7 @@ impl TiangongCore {
             worker: Some(worker),
             session_id,
             shared_trust_mode,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -188,7 +192,12 @@ impl TiangongCore {
     }
 
     pub fn cancel(&self) -> bool {
+        self.cancel_flag.store(true, Ordering::Release);
         self.send_cmd(Command::Cancel)
+    }
+
+    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
+        self.cancel_flag.clone()
     }
 
     pub fn cancel_agent(&self, role: String) -> bool {

@@ -4,6 +4,8 @@ use base64::{engine::general_purpose, Engine as _};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State, Window};
@@ -677,7 +679,14 @@ async fn send_message_inner(
         return Ok(());
     }
 
-    start_stream_consumer(app, stream_rx);
+    let cancel_flag = {
+        let cores = state.cores.lock().map_err(|e| e.to_string())?;
+        cores
+            .get(&sid)
+            .map(|c| c.cancel_flag())
+            .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
+    };
+    start_stream_consumer(app, stream_rx, cancel_flag);
 
     Ok(())
 }
@@ -686,6 +695,7 @@ async fn send_message_inner(
 fn start_stream_consumer(
     app: AppHandle,
     stream_rx: std::sync::mpsc::Receiver<tiangong_types::SessionStreamEvent>,
+    cancel_flag: Arc<std::sync::atomic::AtomicBool>,
 ) {
     use tiangong_types::StreamEvent;
 
@@ -694,6 +704,18 @@ fn start_stream_consumer(
         let mut assistant_msg_id: Option<String> = None;
         let mut last_tool_args_summary = String::new();
         for session_event in stream_rx.iter() {
+            let event = &session_event.event;
+
+            // 取消时跳过文本增量事件，只处理终止事件
+            if cancel_flag.load(Ordering::Acquire)
+                && matches!(
+                    event,
+                    StreamEvent::Delta { .. } | StreamEvent::Reasoning { .. }
+                )
+            {
+                continue;
+            }
+
             // 先 emit 完整事件给前端，再解构
             let _ = app.emit("stream_event", &session_event);
 
@@ -1252,6 +1274,8 @@ fn start_stream_consumer(
             }
 
             if is_done || is_error {
+                cancel_flag.store(false, Ordering::Release);
+
                 // Done：先持久化，再异步生成标题（不阻塞消费线程）
                 let final_sid = sid.clone();
 
@@ -1457,13 +1481,18 @@ pub async fn edit_and_resend(
     }
 
     if is_new_core {
-        start_stream_consumer(app, stream_rx);
+        let cancel_flag = {
+            let cores = state.cores.lock().map_err(|e| e.to_string())?;
+            cores
+                .get(&sid)
+                .map(|c| c.cancel_flag())
+                .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
+        };
+        start_stream_consumer(app, stream_rx, cancel_flag);
     }
 
     Ok(())
 }
-
-/// 取消当前执行
 #[tauri::command]
 pub async fn cancel_turn(state: State<'_, TiangongApp>) -> Result<bool, String> {
     let session_id = state
@@ -1497,7 +1526,14 @@ async fn ensure_active_context_core(
     let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::SessionStreamEvent>();
     let (sid, is_new_core) = state.ensure_core(&session_id, session_snapshot, stream_tx);
     if is_new_core {
-        start_stream_consumer(app, stream_rx);
+        let cancel_flag = {
+            let cores = state.cores.lock().map_err(|e| e.to_string())?;
+            cores
+                .get(&sid)
+                .map(|c| c.cancel_flag())
+                .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
+        };
+        start_stream_consumer(app, stream_rx, cancel_flag);
     }
     Ok(sid)
 }

@@ -499,6 +499,7 @@ impl ReactEngine {
             });
 
             let mut user_message_injected_during_stream = false;
+            let mut generated_chars: usize = 0;
             let response_result: anyhow::Result<crate::model::ModelFunctionResponse> = loop {
                 tokio::select! {
                     biased;
@@ -507,6 +508,22 @@ impl ReactEngine {
                             Some(Command::Cancel) | Some(Command::Shutdown) | None => {
                                 llm_fut.abort();
                                 sink.finish();
+                                let estimated_tokens = generated_chars.div_ceil(3);
+                                if estimated_tokens > 0 {
+                                    let partial_usage = tiangong_types::TokenUsage {
+                                        completion_tokens: estimated_tokens,
+                                        ..Default::default()
+                                    };
+                                    accumulated_usage.accumulate(&partial_usage);
+                                    crate::react::context::emit_token_usage(
+                                        stream_tx,
+                                        &partial_usage,
+                                        None,
+                                        self.engine.context_limit,
+                                        "cancelled",
+                                        None,
+                                    );
+                                }
                                 let _ = stream_tx.send(StreamEvent::Error {
                                     message: "已取消".into(),
                                 });
@@ -555,7 +572,11 @@ impl ReactEngine {
                     }
                     chunk_opt = chunk_rx.recv() => {
                         match chunk_opt {
-                            Some(chunk) => sink.push_chunk(&chunk),
+                            Some(chunk) => {
+                                generated_chars +=
+                                    chunk.content.len() + chunk.reasoning_content.len();
+                                sink.push_chunk(&chunk)
+                            }
                             None => {
                                 let response_result = match llm_fut.await {
                                     Ok(r) => r,
