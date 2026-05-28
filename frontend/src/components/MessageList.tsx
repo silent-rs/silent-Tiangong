@@ -649,14 +649,20 @@ export function MessageList() {
     getScrollElement: () => viewportRef.current,
     estimateSize: (index) => {
       const group = completedGroups[index];
-      if (group.type === "user") return 80;
+      if (group.type === "user") {
+        const msg = group.messages[0];
+        const hasMedia = msg.media?.length || msg.content.some(b => b.type === "media");
+        return hasMedia ? 300 : 80;
+      }
       if (group.type === "worker") return 120;
-      // agent_turn: 根据消息数量和工具调用启发式估算
+      // agent_turn: 根据消息数量、工具调用和内容长度启发式估算
       const msgCount = group.messages.length;
       const hasTools = group.messages.some(m =>
         m.role === "system" && (textContent(m).includes("tool_name:") || textContent(m).includes("exit_code"))
       );
-      return hasTools ? 200 + msgCount * 30 : 100 + msgCount * 40;
+      const totalTextLen = group.messages.reduce((sum, m) => sum + textContent(m).length, 0);
+      const textBonus = Math.min(Math.floor(totalTextLen / 200) * 30, 400);
+      return (hasTools ? 200 + msgCount * 30 : 100 + msgCount * 40) + textBonus;
     },
     overscan: 5,
   });
@@ -672,16 +678,16 @@ export function MessageList() {
     if (shouldScroll) {
       if (completedGroups.length > 0 && !streamingGroup) {
         // 滚动到虚拟列表最后一项
-        setTimeout(() => {
+        requestAnimationFrame(() => {
           virtualizer.scrollToIndex(completedGroups.length - 1, {
             behavior: tabChanged ? "auto" : "smooth",
             align: "end",
           });
-        }, 100);
+        });
       } else if (streamingGroup) {
-        setTimeout(() => {
+        requestAnimationFrame(() => {
           scrollRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-        }, 100);
+        });
       }
     }
 
@@ -696,8 +702,14 @@ export function MessageList() {
     const el = scrollRef.current;
     if (!el) return;
 
+    let ticking = false;
     const observer = new MutationObserver(() => {
-      el.scrollIntoView({ behavior: "smooth", block: "end" });
+      if (ticking) return;
+      ticking = true;
+      requestAnimationFrame(() => {
+        el.scrollIntoView({ behavior: "smooth", block: "end" });
+        ticking = false;
+      });
     });
     observer.observe(el.parentElement!, {
       childList: true,
