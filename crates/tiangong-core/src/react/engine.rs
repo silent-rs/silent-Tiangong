@@ -499,7 +499,7 @@ impl ReactEngine {
             });
 
             let mut user_message_injected_during_stream = false;
-            let mut generated_chars: usize = 0;
+            let mut streaming_usage = tiangong_types::TokenUsage::default();
             let response_result: anyhow::Result<crate::model::ModelFunctionResponse> = loop {
                 tokio::select! {
                     biased;
@@ -508,16 +508,11 @@ impl ReactEngine {
                             Some(Command::Cancel) | Some(Command::Shutdown) | None => {
                                 llm_fut.abort();
                                 sink.finish();
-                                let estimated_tokens = generated_chars.div_ceil(3);
-                                if estimated_tokens > 0 {
-                                    let partial_usage = tiangong_types::TokenUsage {
-                                        completion_tokens: estimated_tokens,
-                                        ..Default::default()
-                                    };
-                                    accumulated_usage.accumulate(&partial_usage);
+                                if streaming_usage.total_tokens > 0 {
+                                    accumulated_usage.accumulate(&streaming_usage);
                                     crate::react::context::emit_token_usage(
                                         stream_tx,
-                                        &partial_usage,
+                                        &streaming_usage,
                                         None,
                                         self.engine.context_limit,
                                         "cancelled",
@@ -573,8 +568,11 @@ impl ReactEngine {
                     chunk_opt = chunk_rx.recv() => {
                         match chunk_opt {
                             Some(chunk) => {
-                                generated_chars +=
-                                    chunk.content.len() + chunk.reasoning_content.len();
+                                if let Some(ref chunk_usage) = chunk.usage {
+                                    let tu: tiangong_types::TokenUsage =
+                                        chunk_usage.clone().into();
+                                    streaming_usage.accumulate(&tu);
+                                }
                                 sink.push_chunk(&chunk)
                             }
                             None => {
