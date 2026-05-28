@@ -47,7 +47,7 @@ export function SettingsDialog() {
           {/* 顶部标题栏 — 可拖动窗口 */}
           <header
             className="flex h-12 shrink-0 items-center border-b pr-4 select-none"
-            style={{ paddingLeft: '80px' }}
+            style={{ paddingLeft: navigator.platform.includes('Mac') ? '80px' : '16px' }}
             onMouseDown={(e) => {
               const tag = (e.target as HTMLElement).tagName;
               if (tag === 'INPUT' || tag === 'BUTTON') return;
