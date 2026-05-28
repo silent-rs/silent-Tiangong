@@ -29,12 +29,10 @@ pub use crate::memory::gui_api::*;
 pub(crate) use crate::memory::recall::{
     duplicate_memory_recall_tool_result, execute_memory_recall_tool, inject_memory_recall_tool,
 };
-pub(crate) use crate::memory::registry::{
-    WorkerMemoryContext, get_or_init_memory, get_or_init_memory_async,
-};
+pub(crate) use crate::memory::registry::{WorkerMemoryContext, get_or_init_memory_async};
 pub use crate::memory::registry::{
-    get_or_init_memory_handle, get_or_init_memory_handle_async, load_memory_config,
-    save_memory_config, shutdown_memory_registry_blocking,
+    get_or_init_memory_handle_async, load_memory_config, save_memory_config,
+    shutdown_memory_registry_blocking,
 };
 
 pub(crate) mod command;
@@ -119,19 +117,19 @@ impl TiangongCore {
         process_type: tiangong_memory::ProcessType,
     ) -> Self {
         let config_snapshot = config.snapshot();
-        let memory_handle =
-            get_or_init_memory(&config_snapshot, config.generation(), process_type.clone());
+        let config_generation = config.generation();
         let initial_trust_mode = session.trust_mode;
         let shared_trust_mode = Arc::new(RwLock::new(initial_trust_mode));
         let session_id = session.id.clone();
         let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel::<Command>();
 
         let worker_trust_mode = shared_trust_mode.clone();
-        let worker_process_type = process_type.clone();
         let worker = thread::spawn(move || {
             let memory = WorkerMemoryContext {
-                handle: memory_handle,
-                process_type: worker_process_type,
+                handle: None,
+                process_type,
+                initial_config_snapshot: Some(config_snapshot),
+                initial_config_generation: config_generation,
             };
             worker_loop(
                 config,
@@ -293,6 +291,16 @@ async fn worker_loop_async(
 ) -> Session {
     let session_id = session.id.clone();
     let mut last_cfg_gen = 0u64;
+
+    // 在 Worker 的 tokio runtime 中异步初始化 Memory Handle
+    if let Some(ref cfg) = memory.initial_config_snapshot {
+        memory.handle = get_or_init_memory_async(
+            cfg,
+            memory.initial_config_generation,
+            memory.process_type.clone(),
+        )
+        .await;
+    }
     let mut engine: Option<RuntimeEngine> = None;
     let mut tools: Vec<ToolSpec> = Vec::new();
     let mut mcp_targets: HashMap<String, McpFunctionTarget> = HashMap::new();

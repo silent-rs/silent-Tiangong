@@ -685,11 +685,18 @@ impl SingleProviderClient {
             if name.trim().is_empty() {
                 continue;
             }
+            let raw_args_preview = raw_args
+                .char_indices()
+                .take_while(|(i, _)| *i < 256)
+                .last()
+                .map(|(i, c)| i + c.len_utf8())
+                .map(|end| &raw_args[..end])
+                .unwrap_or("");
             tracing::info!(
                 tool_call_id = %id,
                 tool_name = %name,
                 raw_args_len = raw_args.len(),
-                raw_args_preview = &raw_args[..raw_args.len().min(256)],
+                %raw_args_preview,
                 "解析 tool call arguments"
             );
             let arguments = parse_tool_arguments_or_error(&name, &id, &raw_args);
