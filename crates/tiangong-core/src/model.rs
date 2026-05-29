@@ -292,7 +292,7 @@ impl SingleProviderClient {
         Ok(models)
     }
 
-    fn protocol(&self) -> ProviderProtocol {
+    pub fn protocol(&self) -> ProviderProtocol {
         self.cfg.api_protocol
     }
 

@@ -32,6 +32,25 @@ use tiangong_types::{StreamEvent, StreamToolCall};
 
 use crate::agent_team::lifecycle::TeamContext;
 
+/// 取消时 LLM 请求的处理策略，按 Provider 协议区分。
+enum CancelStrategy {
+    /// Anthropic: usage 在 message_start 就返回 prompt_tokens，可直接 abort
+    AbortWithStreamingUsage,
+    /// OpenAI 兼容: usage 仅在流式最后一个 chunk 返回，需等请求完成
+    WaitForUsage,
+}
+
+impl CancelStrategy {
+    fn from_protocol(protocol: tiangong_llm::model::ProviderProtocol) -> Self {
+        match protocol {
+            tiangong_llm::model::ProviderProtocol::Anthropic => {
+                CancelStrategy::AbortWithStreamingUsage
+            }
+            tiangong_llm::model::ProviderProtocol::OpenAiCompatible => CancelStrategy::WaitForUsage,
+        }
+    }
+}
+
 #[derive(Default)]
 struct SubAgentDrainResult {
     usage: TokenUsage,
@@ -492,37 +511,28 @@ impl ReactEngine {
             let client = select_client_for_request(&self.engine, &req).clone();
             let req_clone = req.clone();
             let tools_clone = request_tools.clone();
-            let llm_fut = tokio::task::spawn(async move {
+            let mut llm_fut = Some(tokio::task::spawn(async move {
                 client
                     .stream_function_calls_with_tool_choice(req_clone, tools_clone, None, chunk_tx)
                     .await
-            });
-
+            }));
             let mut user_message_injected_during_stream = false;
             let mut streaming_usage = tiangong_types::TokenUsage::default();
+            let cancel_strategy = CancelStrategy::from_protocol(self.engine.client().protocol());
             let response_result: anyhow::Result<crate::model::ModelFunctionResponse> = loop {
                 tokio::select! {
                     biased;
                     cmd_opt = cmd_rx.recv() => {
                         match cmd_opt {
                             Some(Command::Cancel) | Some(Command::Shutdown) | None => {
-                                llm_fut.abort();
-                                sink.finish();
-                                if streaming_usage.total_tokens > 0 {
-                                    accumulated_usage.accumulate(&streaming_usage);
-                                    crate::react::context::emit_token_usage(
-                                        stream_tx,
-                                        &streaming_usage,
-                                        None,
-                                        self.engine.context_limit,
-                                        "cancelled",
-                                        None,
-                                    );
+                                match cancel_strategy {
+                                    CancelStrategy::AbortWithStreamingUsage => {
+                                        break Err(anyhow::anyhow!("__cancelled_abort__"));
+                                    }
+                                    CancelStrategy::WaitForUsage => {
+                                        break Err(anyhow::anyhow!("__cancelled_wait_usage__"));
+                                    }
                                 }
-                                let _ = stream_tx.send(StreamEvent::Error {
-                                    message: "已取消".into(),
-                                });
-                                return accumulated_usage;
                             }
                             Some(Command::Message { content, message_id, media }) => {
                                 let mid = append_or_reuse_user_message(
@@ -576,7 +586,7 @@ impl ReactEngine {
                                 sink.push_chunk(&chunk)
                             }
                             None => {
-                                let response_result = match llm_fut.await {
+                                let response_result = match llm_fut.take().unwrap().await {
                                     Ok(r) => r,
                                     Err(e) if e.is_cancelled() => {
                                         sink.finish();
@@ -599,6 +609,67 @@ impl ReactEngine {
                 Ok(r) => r,
                 Err(err) => {
                     let err_msg = err.to_string();
+                    // Anthropic 取消：abort + 上报已收集的 streaming_usage
+                    if err_msg == "__cancelled_abort__" {
+                        if let Some(handle) = llm_fut.take() {
+                            handle.abort();
+                        }
+                        if streaming_usage.total_tokens > 0 {
+                            accumulated_usage.accumulate(&streaming_usage);
+                            emit_token_usage(
+                                stream_tx,
+                                &streaming_usage,
+                                None,
+                                self.engine.context_limit,
+                                "cancelled",
+                                None,
+                            );
+                        }
+                        let _ = stream_tx.send(StreamEvent::Error {
+                            message: "已取消".into(),
+                        });
+                        return accumulated_usage;
+                    }
+                    // OpenAI 取消：等 LLM 自然完成以获取准确 usage
+                    if err_msg == "__cancelled_wait_usage__" {
+                        if let Some(handle) = llm_fut.take() {
+                            if let Ok(Ok(resp)) = handle.await {
+                                accumulated_usage.accumulate(&resp.usage);
+                                emit_token_usage(
+                                    stream_tx,
+                                    &resp.usage,
+                                    None,
+                                    self.engine.context_limit,
+                                    "cancelled",
+                                    None,
+                                );
+                            } else if streaming_usage.total_tokens > 0 {
+                                accumulated_usage.accumulate(&streaming_usage);
+                                emit_token_usage(
+                                    stream_tx,
+                                    &streaming_usage,
+                                    None,
+                                    self.engine.context_limit,
+                                    "cancelled",
+                                    None,
+                                );
+                            }
+                        } else if streaming_usage.total_tokens > 0 {
+                            accumulated_usage.accumulate(&streaming_usage);
+                            emit_token_usage(
+                                stream_tx,
+                                &streaming_usage,
+                                None,
+                                self.engine.context_limit,
+                                "cancelled",
+                                None,
+                            );
+                        }
+                        let _ = stream_tx.send(StreamEvent::Error {
+                            message: "已取消".into(),
+                        });
+                        return accumulated_usage;
+                    }
                     // 上下文超限时强制压缩后重试
                     if err_msg.contains("context_window_exceeded")
                         || err_msg.contains("context_length_exceeded")
