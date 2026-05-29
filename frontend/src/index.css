@@ -134,6 +134,11 @@
   }
 }
 
+/* md-editor-rt 代码块导航栏在 ScrollArea/虚拟滚动内 sticky 定位异常 */
+.md-editor-code-head {
+  position: static !important;
+}
+
 /* 代码块样式 */
 @layer components {
   .prose pre {
