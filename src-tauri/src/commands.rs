@@ -679,16 +679,21 @@ async fn send_message_inner(
         return Ok(());
     }
 
-    let cancel_flag = {
-        let cores = state.cores.lock().map_err(|e| e.to_string())?;
-        cores
-            .get(&sid)
-            .map(|c| c.cancel_flag())
-            .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
-    };
+    let cancel_flag = get_cancel_flag(&state, &sid)?;
     start_stream_consumer(app, stream_rx, cancel_flag);
 
     Ok(())
+}
+
+fn get_cancel_flag(
+    state: &TiangongApp,
+    sid: &str,
+) -> Result<Arc<std::sync::atomic::AtomicBool>, String> {
+    let cores = state.cores.lock().map_err(|e| e.to_string())?;
+    Ok(cores
+        .get(sid)
+        .map(|c| c.cancel_flag())
+        .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false))))
 }
 
 /// 消费 SessionStreamEvent：emit 给前端 + 更新 RunStatus + Done 时同步 session
@@ -1481,13 +1486,7 @@ pub async fn edit_and_resend(
     }
 
     if is_new_core {
-        let cancel_flag = {
-            let cores = state.cores.lock().map_err(|e| e.to_string())?;
-            cores
-                .get(&sid)
-                .map(|c| c.cancel_flag())
-                .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
-        };
+        let cancel_flag = get_cancel_flag(&state, &sid)?;
         start_stream_consumer(app, stream_rx, cancel_flag);
     }
 
@@ -1526,13 +1525,7 @@ async fn ensure_active_context_core(
     let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::SessionStreamEvent>();
     let (sid, is_new_core) = state.ensure_core(&session_id, session_snapshot, stream_tx);
     if is_new_core {
-        let cancel_flag = {
-            let cores = state.cores.lock().map_err(|e| e.to_string())?;
-            cores
-                .get(&sid)
-                .map(|c| c.cancel_flag())
-                .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
-        };
+        let cancel_flag = get_cancel_flag(state, &sid)?;
         start_stream_consumer(app, stream_rx, cancel_flag);
     }
     Ok(sid)
