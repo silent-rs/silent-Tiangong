@@ -21,15 +21,14 @@ import {
   X,
   Paperclip,
 } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeRaw from "rehype-raw";
+import { MdPreview } from 'md-editor-rt';
+import 'md-editor-rt/lib/preview.css';
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from '@tauri-apps/plugin-dialog';
+import { open as openUrl } from '@tauri-apps/plugin-shell';
 import { ThinkingBlock } from "./ThinkingBlock";
 import { AgentPanel } from "./AgentPanel";
 import { api, textContent, type ContentBlock } from "@/api/tauri";
-import { CopyableCodeBlock } from "./CopyableCodeBlock";
 import {
   type Attachment,
   imageExtFromMime,
@@ -42,7 +41,7 @@ import {
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { memo, useEffect, useMemo, useRef, useState, useCallback } from "react";
-import type { ReactNode } from "react";
+import { useResolvedTheme } from "@/hooks/useTheme";
 
 /** 格式化消息时间（hover 显示） */
 function formatMessageTime(createdAt?: string): string {
@@ -228,171 +227,6 @@ function workerContentMessages(messages: MessageItem[]): MessageItem[] {
 
 // ---------------------------------------------------------------------------
 // Markdown 渲染组件
-// ---------------------------------------------------------------------------
-
-/** 独立的 Markdown 图片组件，避免在 useMemo 内部使用 useState */
-function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
-  const [fullscreen, setFullscreen] = useState(false);
-  const resolvedSrc = resolveAssetUrl(src || "");
-  return (
-    <>
-      <img
-        src={resolvedSrc}
-        alt={alt || "生成的图片"}
-        className="max-w-full max-h-96 rounded-md my-2 cursor-pointer hover:opacity-90 transition-opacity"
-        loading="lazy"
-        onClick={() => setFullscreen(true)}
-      />
-      {fullscreen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 cursor-pointer"
-          onClick={() => setFullscreen(false)}
-        >
-          <img
-            src={resolvedSrc}
-            alt={alt || "生成的图片"}
-            className="max-w-[90vw] max-h-[90vh] object-contain rounded-md"
-          />
-        </div>
-      )}
-    </>
-  );
-}
-
-function useMarkdownComponents() {
-  return useMemo(() => ({
-    pre({ children }: any) {
-      return <>{children}</>;
-    },
-    code({ className, children, node, ...rest }: any) {
-      const match = /language-(\w+)/.exec(className || "");
-      const isBlock = match || node?.parentNode?.tagName === "pre";
-      return isBlock ? (
-        <CopyableCodeBlock
-          code={String(children).replace(/\n$/, "")}
-          language={match?.[1] || "text"}
-        />
-      ) : (
-        <code
-          className="bg-muted text-foreground px-1 py-0.5 rounded text-xs font-mono"
-          {...rest}
-        >
-          {children}
-        </code>
-      );
-    },
-    p({ children }: { children: ReactNode }) {
-      return <p className="mb-2 last:mb-0 leading-6">{children}</p>;
-    },
-    ul({ children }: { children: ReactNode }) {
-      return (
-        <ul className="list-disc pl-5 mb-2 space-y-1 [&_p]:mb-0 [&_p]:inline">
-          {children}
-        </ul>
-      );
-    },
-    ol({ children }: { children: ReactNode }) {
-      return (
-        <ol className="list-decimal pl-5 mb-2 space-y-1 [&_p]:mb-0 [&_p]:inline">
-          {children}
-        </ol>
-      );
-    },
-    li({ children }: { children: ReactNode }) {
-      return <li className="leading-6">{children}</li>;
-    },
-    h1({ children }: { children: ReactNode }) {
-      return (
-        <h1 className="text-lg font-bold mb-3 mt-5 first:mt-0">{children}</h1>
-      );
-    },
-    h2({ children }: { children: ReactNode }) {
-      return (
-        <h2 className="text-base font-bold mb-2 mt-4 first:mt-0">{children}</h2>
-      );
-    },
-    h3({ children }: { children: ReactNode }) {
-      return (
-        <h3 className="text-sm font-bold mb-2 mt-3 first:mt-0">{children}</h3>
-      );
-    },
-    blockquote({ children }: { children: ReactNode }) {
-      return (
-        <blockquote className="border-l-4 border-accent-foreground/30 pl-4 py-2 my-3 text-foreground/80 italic">
-          {children}
-        </blockquote>
-      );
-    },
-    strong({ children }: { children: ReactNode }) {
-      return <strong className="font-bold text-foreground">{children}</strong>;
-    },
-    a({ href, children }: { href: string; children: ReactNode }) {
-      return (
-        <a
-          href={href}
-          className="text-blue-400 hover:text-blue-300 underline"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          {children}
-        </a>
-      );
-    },
-    img: MarkdownImage,
-    table({ children }: { children: ReactNode }) {
-      return (
-        <div className="my-3 overflow-x-auto">
-          <table className="min-w-full border-collapse border border-border text-sm">
-            {children}
-          </table>
-        </div>
-      );
-    },
-    thead({ children }: { children: ReactNode }) {
-      return <thead className="bg-muted/50">{children}</thead>;
-    },
-    th({ children }: { children: ReactNode }) {
-      return (
-        <th className="border border-border px-3 py-1.5 text-left font-semibold">
-          {children}
-        </th>
-      );
-    },
-    td({ children }: { children: ReactNode }) {
-      return <td className="border border-border px-3 py-1.5">{children}</td>;
-    },
-    video({ src, children, ...rest }: any) {
-      return (
-        <video
-          src={src ? resolveAssetUrl(src) : undefined}
-          controls
-          className="max-w-full max-h-96 rounded-md my-2"
-          preload="metadata"
-          {...rest}
-        >
-          {children}
-        </video>
-      );
-    },
-    source({ src, type, ...rest }: any) {
-      return <source src={resolveAssetUrl(src)} type={type} {...rest} />;
-    },
-    audio({ src, children, ...rest }: any) {
-      return (
-        <audio
-          src={src ? resolveAssetUrl(src) : undefined}
-          controls
-          className="w-full my-2"
-          preload="metadata"
-          {...rest}
-        >
-          {children}
-        </audio>
-      );
-    },
-  }), []);
-}
-
 // ---------------------------------------------------------------------------
 // 用户消息组渲染
 // ---------------------------------------------------------------------------
@@ -585,7 +419,6 @@ export function MessageList() {
 
   const isThinking = runStatus !== "idle";
   const isContextCompressing = runSummary.includes("正在压缩");
-  const MarkdownComponents = useMarkdownComponents();
 
   // 消息分组
   const messageGroups = useMemo(() => groupMessages(messages), [messages]);
@@ -826,6 +659,20 @@ export function MessageList() {
     }
   }, [hasMultimodal]);
 
+  // 拦截 MdPreview 内的链接点击，用系统浏览器打开
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      const anchor = (e.target as HTMLElement).closest('a[href]');
+      if (!anchor) return;
+      const href = anchor.getAttribute('href');
+      if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
+      e.preventDefault();
+      openUrl(href).catch(console.error);
+    };
+    document.addEventListener('click', handler);
+    return () => document.removeEventListener('click', handler);
+  }, []);
+
   return (
     <ScrollArea className="h-full" viewportRef={viewportRef}>
       <div className="p-4">
@@ -920,7 +767,6 @@ export function MessageList() {
                           streamingMessageId={null}
                           streamingContent=""
                           streamingReasoningContent=""
-                          MarkdownComponents={MarkdownComponents}
                           hasTts={hasTts}
                           selectedAgentTab={null}
                         />
@@ -949,7 +795,6 @@ export function MessageList() {
                         streamingMessageId={null}
                         streamingContent=""
                         streamingReasoningContent=""
-                        MarkdownComponents={MarkdownComponents}
                         hasTts={hasTts}
                         selectedAgentTab={selectedAgentTab}
                       />
@@ -966,7 +811,6 @@ export function MessageList() {
                     streamingMessageId={streamingMessageId}
                     streamingContent={streamingContent}
                     streamingReasoningContent={streamingReasoningContent}
-                    MarkdownComponents={MarkdownComponents}
                     hasTts={hasTts}
                     selectedAgentTab={selectedAgentTab}
                   />
@@ -1165,25 +1009,20 @@ function renderContentMedia(message: MessageItem) {
 function StreamingMessage({
   content,
   reasoningContent,
-  MarkdownComponents,
 }: {
   content: string;
   reasoningContent: string;
-  MarkdownComponents: any;
 }) {
+  const resolvedTheme = useResolvedTheme();
   return (
     <div>
       {reasoningContent && (
         <ThinkingBlock content={reasoningContent} defaultExpanded={false} />
       )}
-      <div className="prose prose-sm max-w-none break-words text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
-        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={MarkdownComponents as any}>
-          {content}
-        </ReactMarkdown>
-        {content.length > 0 && (
-          <span className="inline-block w-1.5 h-4 bg-primary ml-0.5 animate-pulse align-text-bottom" />
-        )}
-      </div>
+      <MdPreview modelValue={content} theme={resolvedTheme} previewTheme="github" />
+      {content.length > 0 && (
+        <span className="inline-block w-1.5 h-4 bg-primary ml-0.5 animate-pulse" />
+      )}
     </div>
   );
 }
@@ -1265,7 +1104,6 @@ interface AgentTurnProps {
   streamingMessageId: string | null;
   streamingContent: string;
   streamingReasoningContent: string;
-  MarkdownComponents: any;
   hasTts: boolean;
   selectedAgentTab: string | null;
 }
@@ -1301,13 +1139,13 @@ function AgentTurnView({
   streamingMessageId,
   streamingContent,
   streamingReasoningContent,
-  MarkdownComponents,
   hasTts,
   selectedAgentTab,
 }: AgentTurnProps) {
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
   const [expandedToolGroups, setExpandedToolGroups] = useState<Set<string>>(new Set());
   const agents = useStore((state) => state.agents);
+  const resolvedTheme = useResolvedTheme();
 
   const toggleItem = (id: string) => {
     setExpandedItems((prev) => {
@@ -1614,11 +1452,7 @@ function AgentTurnView({
                 </div>
                 <div className="border-l-2 border-green-500/50 pl-3">
                   {agentReply.body ? (
-                    <div className="prose prose-sm max-w-none break-words text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={MarkdownComponents as any}>
-                        {agentReply.body}
-                      </ReactMarkdown>
-                    </div>
+                    <MdPreview modelValue={agentReply.body} theme={resolvedTheme} previewTheme="github" />
                   ) : null}
                 </div>
                 {agentReply.body && <MessageActions text={agentReply.body} showTts={hasTts} />}
@@ -1631,16 +1465,11 @@ function AgentTurnView({
                 <StreamingMessage
                   content={streamingContent}
                   reasoningContent={streamingReasoningContent}
-                  MarkdownComponents={MarkdownComponents}
                 />
               ) : textContent(msg) || (msg.media && msg.media.length > 0) || msg.content.some(b => b.type === "media") ? (
                 <div>
                   {renderContentMedia(msg)}
-                  <div className="prose prose-sm max-w-none break-words text-[13px] text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-headings:text-foreground prose-a:text-blue-400 prose-blockquote:text-foreground/80 prose-code:text-foreground">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={MarkdownComponents as any}>
-                      {textContent(msg)}
-                    </ReactMarkdown>
-                  </div>
+                  <MdPreview modelValue={textContent(msg)} theme={resolvedTheme} previewTheme="github" />
                 </div>
               ) : null}
               {!isStreaming && msg.content && <MessageActions text={textContent(msg)} showTts={hasTts} />}
@@ -1713,7 +1542,6 @@ function hasMessage(messages: MessageItem[], id: string | null): boolean {
 const AgentTurn = memo(AgentTurnView, (prev, next) => {
   if (
     prev.hasTts !== next.hasTts
-    || prev.MarkdownComponents !== next.MarkdownComponents
     || !sameMessageRefs(prev.messages, next.messages)
     || prev.selectedAgentTab !== next.selectedAgentTab
   ) {
