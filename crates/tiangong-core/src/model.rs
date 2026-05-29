@@ -75,6 +75,7 @@ pub type ModelFunctionResponse = ModelResponse;
 pub struct ModelStreamChunk {
     pub content: String,
     pub reasoning_content: String,
+    pub usage: Option<tiangong_llm::usage::TokenUsageData>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,12 +152,14 @@ pub trait ModelClient {
             on_delta(&ModelStreamChunk {
                 content: String::new(),
                 reasoning_content: resp.reasoning_content.clone(),
+                usage: None,
             });
         }
         if !resp.text.is_empty() {
             on_delta(&ModelStreamChunk {
                 content: resp.text.clone(),
                 reasoning_content: String::new(),
+                usage: None,
             });
         }
         Ok(resp)
@@ -180,12 +183,14 @@ pub trait ModelClient {
             on_delta(&ModelStreamChunk {
                 content: String::new(),
                 reasoning_content: resp.reasoning_content.clone(),
+                usage: None,
             });
         }
         if !resp.text.is_empty() {
             on_delta(&ModelStreamChunk {
                 content: resp.text.clone(),
                 reasoning_content: String::new(),
+                usage: None,
             });
         }
         Ok(resp)
@@ -287,7 +292,7 @@ impl SingleProviderClient {
         Ok(models)
     }
 
-    fn protocol(&self) -> ProviderProtocol {
+    pub fn protocol(&self) -> ProviderProtocol {
         self.cfg.api_protocol
     }
 
@@ -570,12 +575,14 @@ impl SingleProviderClient {
                     let _ = fallback_tx.send(ModelStreamChunk {
                         content: String::new(),
                         reasoning_content: response.reasoning_content.clone(),
+                        usage: None,
                     });
                 }
                 if !response.text.is_empty() {
                     let _ = fallback_tx.send(ModelStreamChunk {
                         content: response.text.clone(),
                         reasoning_content: String::new(),
+                        usage: None,
                     });
                 }
                 Ok(response)
@@ -624,6 +631,7 @@ impl SingleProviderClient {
                         let _ = chunk_tx.send(ModelStreamChunk {
                             content: String::new(),
                             reasoning_content: delta,
+                            usage: None,
                         });
                     }
                 }
@@ -638,6 +646,7 @@ impl SingleProviderClient {
                         let _ = chunk_tx.send(ModelStreamChunk {
                             content: delta,
                             reasoning_content: String::new(),
+                            usage: None,
                         });
                     }
                 }
@@ -671,7 +680,12 @@ impl SingleProviderClient {
                     }
                 }
                 ProviderStreamEvent::Usage(stream_usage) => {
-                    merge_stream_usage(&mut usage, stream_usage)
+                    merge_stream_usage(&mut usage, stream_usage);
+                    let _ = chunk_tx.send(ModelStreamChunk {
+                        content: String::new(),
+                        reasoning_content: String::new(),
+                        usage: Some(usage.clone()),
+                    });
                 }
                 ProviderStreamEvent::Error(message) => return Err(anyhow!(message)),
                 ProviderStreamEvent::MessageStart
@@ -772,12 +786,14 @@ impl SingleProviderClient {
                         on_delta(&ModelStreamChunk {
                             content: String::new(),
                             reasoning_content: resp.reasoning_content.clone(),
+                            usage: None,
                         });
                     }
                     if !resp.text.is_empty() {
                         on_delta(&ModelStreamChunk {
                             content: resp.text.clone(),
                             reasoning_content: String::new(),
+                            usage: None,
                         });
                     }
                     Ok(resp)
@@ -790,12 +806,14 @@ impl SingleProviderClient {
                 on_delta(&ModelStreamChunk {
                     content: String::new(),
                     reasoning_content: resp.reasoning_content.clone(),
+                    usage: None,
                 });
             }
             if !resp.text.is_empty() {
                 on_delta(&ModelStreamChunk {
                     content: resp.text.clone(),
                     reasoning_content: String::new(),
+                    usage: None,
                 });
             }
             Ok(resp)
@@ -1520,6 +1538,7 @@ async fn consume_provider_stream_events_async(
                     on_delta(&ModelStreamChunk {
                         content: String::new(),
                         reasoning_content: delta.clone(),
+                        usage: None,
                     });
                 }
             }
@@ -1534,6 +1553,7 @@ async fn consume_provider_stream_events_async(
                     on_delta(&ModelStreamChunk {
                         content: delta,
                         reasoning_content: String::new(),
+                        usage: None,
                     });
                 }
             }
