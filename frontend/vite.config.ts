@@ -27,8 +27,8 @@ export default defineConfig({
           'react-core': ['react', 'react-dom', 'react-dom/client'],
           // UI 组件库
           'ui-components': ['lucide-react'],
-          // Markdown 和代码高亮
-          'markdown': ['react-markdown', 'react-syntax-highlighter'],
+          // Markdown 渲染
+          'markdown': ['md-editor-rt'],
           // Tauri API
           'tauri': ['@tauri-apps/api/core', '@tauri-apps/api/event'],
           // 工具库
