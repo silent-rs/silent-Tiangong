@@ -664,17 +664,29 @@ impl ReactEngine {
                                 accumulated_usage.accumulate(&streaming_usage);
                                 emit_cancel_usage(
                                     stream_tx,
-                                    &streaming_usage,
+                                    &accumulated_usage,
                                     self.engine.context_limit,
                                 );
                                 return accumulated_usage;
                             }
                             CancelSignal::WaitForUsage => {
+                                accumulated_usage.accumulate(&streaming_usage);
+                                // 先上报已知的 streaming_usage 作为保底
+                                if streaming_usage.total_tokens > 0 {
+                                    emit_token_usage(
+                                        stream_tx,
+                                        &streaming_usage,
+                                        None,
+                                        self.engine.context_limit,
+                                        "cancelled",
+                                        None,
+                                    );
+                                }
                                 // 立即通知前端取消已完成
                                 let _ = stream_tx.send(StreamEvent::Error {
                                     message: "已取消".into(),
                                 });
-                                // 后台等待 LLM 自然完成以获取 usage（带超时保护）
+                                // 后台等待 LLM 自然完成以补充完整 usage
                                 if let Some(handle) = llm_fut.take() {
                                     let ctx_limit = self.engine.context_limit;
                                     let tx = stream_tx.clone();
@@ -687,7 +699,7 @@ impl ReactEngine {
                                                 &resp.usage,
                                                 None,
                                                 ctx_limit,
-                                                "cancelled",
+                                                "cancelled_background",
                                                 None,
                                             );
                                         }
