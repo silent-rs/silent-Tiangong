@@ -40,7 +40,7 @@ import {
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { memo, useEffect, useMemo, useRef, useState, useCallback } from "react";
-import { useTheme } from "@/hooks/useTheme";
+import { useResolvedTheme } from "@/hooks/useTheme";
 
 /** 格式化消息时间（hover 显示） */
 function formatMessageTime(createdAt?: string): string {
@@ -998,13 +998,13 @@ function StreamingMessage({
   content: string;
   reasoningContent: string;
 }) {
-  const { resolvedTheme } = useTheme();
+  const resolvedTheme = useResolvedTheme();
   return (
     <div>
       {reasoningContent && (
         <ThinkingBlock content={reasoningContent} defaultExpanded={false} />
       )}
-      <MdPreview modelValue={content} theme={resolvedTheme} />
+      <MdPreview modelValue={content} theme={resolvedTheme} previewTheme="github" />
       {content.length > 0 && (
         <span className="inline-block w-1.5 h-4 bg-primary ml-0.5 animate-pulse" />
       )}
@@ -1130,7 +1130,7 @@ function AgentTurnView({
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
   const [expandedToolGroups, setExpandedToolGroups] = useState<Set<string>>(new Set());
   const agents = useStore((state) => state.agents);
-  const { resolvedTheme } = useTheme();
+  const resolvedTheme = useResolvedTheme();
 
   const toggleItem = (id: string) => {
     setExpandedItems((prev) => {
@@ -1437,7 +1437,7 @@ function AgentTurnView({
                 </div>
                 <div className="border-l-2 border-green-500/50 pl-3">
                   {agentReply.body ? (
-                    <MdPreview modelValue={agentReply.body} theme={resolvedTheme} />
+                    <MdPreview modelValue={agentReply.body} theme={resolvedTheme} previewTheme="github" />
                   ) : null}
                 </div>
                 {agentReply.body && <MessageActions text={agentReply.body} showTts={hasTts} />}
@@ -1454,7 +1454,7 @@ function AgentTurnView({
               ) : textContent(msg) || (msg.media && msg.media.length > 0) || msg.content.some(b => b.type === "media") ? (
                 <div>
                   {renderContentMedia(msg)}
-                  <MdPreview modelValue={textContent(msg)} theme={resolvedTheme} />
+                  <MdPreview modelValue={textContent(msg)} theme={resolvedTheme} previewTheme="github" />
                 </div>
               ) : null}
               {!isStreaming && msg.content && <MessageActions text={textContent(msg)} showTts={hasTts} />}

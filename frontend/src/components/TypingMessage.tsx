@@ -3,7 +3,7 @@ import { MdPreview } from 'md-editor-rt';
 import 'md-editor-rt/lib/preview.css';
 
 import { ThinkingBlock } from './ThinkingBlock';
-import { useTheme } from '@/hooks/useTheme';
+import { useResolvedTheme } from '@/hooks/useTheme';
 
 interface TypingMessageProps {
   content: string;
@@ -15,7 +15,7 @@ interface TypingMessageProps {
 export function TypingMessage({ content, reasoningContent, speed: _speed = 300, onComplete }: TypingMessageProps) {
   const [isComplete, setIsComplete] = useState(false);
   const prevContentRef = useRef('');
-  const { resolvedTheme } = useTheme();
+  const resolvedTheme = useResolvedTheme();
 
   useEffect(() => {
     if (!content) {
@@ -36,7 +36,7 @@ export function TypingMessage({ content, reasoningContent, speed: _speed = 300, 
         <ThinkingBlock content={reasoningContent} defaultExpanded={false} />
       )}
 
-      <MdPreview modelValue={content} theme={resolvedTheme} />
+      <MdPreview modelValue={content} theme={resolvedTheme} previewTheme="github" />
 
       {!isComplete && content.length > 0 && (
         <span className="inline-block w-1.5 h-4 bg-primary ml-0.5 animate-pulse" />
