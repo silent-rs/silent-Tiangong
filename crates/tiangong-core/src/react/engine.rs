@@ -51,6 +51,53 @@ impl CancelStrategy {
     }
 }
 
+/// select! 循环 break 时携带的取消信号，替代魔术字符串。
+#[derive(Clone, Copy)]
+enum CancelSignal {
+    /// 直接 abort LLM future，上报已累积的 streaming_usage
+    Abort,
+    /// 在后台等待 LLM 自然完成以获取 usage，前端立即响应取消
+    WaitForUsage,
+}
+
+impl CancelSignal {
+    /// 从 anyhow::Error 中提取 CancelSignal，如果不是取消信号返回 None。
+    fn from_error(err: &anyhow::Error) -> Option<Self> {
+        err.downcast_ref::<Self>().copied()
+    }
+}
+
+impl std::fmt::Display for CancelSignal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CancelSignal::Abort => write!(f, "cancelled (abort)"),
+            CancelSignal::WaitForUsage => write!(f, "cancelled (wait for usage)"),
+        }
+    }
+}
+
+impl std::fmt::Debug for CancelSignal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+impl std::error::Error for CancelSignal {}
+
+/// 取消时统一上报 token usage 并发送 Error 事件。
+fn emit_cancel_usage(
+    stream_tx: &StdSender<StreamEvent>,
+    usage: &tiangong_types::TokenUsage,
+    context_limit: usize,
+) {
+    if usage.total_tokens > 0 {
+        emit_token_usage(stream_tx, usage, None, context_limit, "cancelled", None);
+    }
+    let _ = stream_tx.send(StreamEvent::Error {
+        message: "已取消".into(),
+    });
+}
+
 #[derive(Default)]
 struct SubAgentDrainResult {
     usage: TokenUsage,
@@ -527,10 +574,10 @@ impl ReactEngine {
                             Some(Command::Cancel) | Some(Command::Shutdown) | None => {
                                 match cancel_strategy {
                                     CancelStrategy::AbortWithStreamingUsage => {
-                                        break Err(anyhow::anyhow!("__cancelled_abort__"));
+                                        break Err(anyhow::Error::new(CancelSignal::Abort));
                                     }
                                     CancelStrategy::WaitForUsage => {
-                                        break Err(anyhow::anyhow!("__cancelled_wait_usage__"));
+                                        break Err(anyhow::Error::new(CancelSignal::WaitForUsage));
                                     }
                                 }
                             }
@@ -608,68 +655,49 @@ impl ReactEngine {
             let response = match response_result {
                 Ok(r) => r,
                 Err(err) => {
-                    let err_msg = err.to_string();
-                    // Anthropic 取消：abort + 上报已收集的 streaming_usage
-                    if err_msg == "__cancelled_abort__" {
-                        if let Some(handle) = llm_fut.take() {
-                            handle.abort();
-                        }
-                        if streaming_usage.total_tokens > 0 {
-                            accumulated_usage.accumulate(&streaming_usage);
-                            emit_token_usage(
-                                stream_tx,
-                                &streaming_usage,
-                                None,
-                                self.engine.context_limit,
-                                "cancelled",
-                                None,
-                            );
-                        }
-                        let _ = stream_tx.send(StreamEvent::Error {
-                            message: "已取消".into(),
-                        });
-                        return accumulated_usage;
-                    }
-                    // OpenAI 取消：等 LLM 自然完成以获取准确 usage
-                    if err_msg == "__cancelled_wait_usage__" {
-                        if let Some(handle) = llm_fut.take() {
-                            if let Ok(Ok(resp)) = handle.await {
-                                accumulated_usage.accumulate(&resp.usage);
-                                emit_token_usage(
-                                    stream_tx,
-                                    &resp.usage,
-                                    None,
-                                    self.engine.context_limit,
-                                    "cancelled",
-                                    None,
-                                );
-                            } else if streaming_usage.total_tokens > 0 {
+                    if let Some(signal) = CancelSignal::from_error(&err) {
+                        match signal {
+                            CancelSignal::Abort => {
+                                if let Some(handle) = llm_fut.take() {
+                                    handle.abort();
+                                }
                                 accumulated_usage.accumulate(&streaming_usage);
-                                emit_token_usage(
+                                emit_cancel_usage(
                                     stream_tx,
                                     &streaming_usage,
-                                    None,
                                     self.engine.context_limit,
-                                    "cancelled",
-                                    None,
                                 );
+                                return accumulated_usage;
                             }
-                        } else if streaming_usage.total_tokens > 0 {
-                            accumulated_usage.accumulate(&streaming_usage);
-                            emit_token_usage(
-                                stream_tx,
-                                &streaming_usage,
-                                None,
-                                self.engine.context_limit,
-                                "cancelled",
-                                None,
-                            );
+                            CancelSignal::WaitForUsage => {
+                                // 立即通知前端取消已完成
+                                let _ = stream_tx.send(StreamEvent::Error {
+                                    message: "已取消".into(),
+                                });
+                                // 后台等待 LLM 自然完成以获取 usage（带超时保护）
+                                if let Some(handle) = llm_fut.take() {
+                                    let ctx_limit = self.engine.context_limit;
+                                    let tx = stream_tx.clone();
+                                    tokio::task::spawn(async move {
+                                        if let Ok(Ok(resp)) = handle.await
+                                            && resp.usage.total_tokens > 0
+                                        {
+                                            emit_token_usage(
+                                                &tx,
+                                                &resp.usage,
+                                                None,
+                                                ctx_limit,
+                                                "cancelled",
+                                                None,
+                                            );
+                                        }
+                                    });
+                                }
+                                return accumulated_usage;
+                            }
                         }
-                        let _ = stream_tx.send(StreamEvent::Error {
-                            message: "已取消".into(),
-                        });
-                        return accumulated_usage;
                     }
+                    let err_msg = err.to_string();
                     // 上下文超限时强制压缩后重试
                     if err_msg.contains("context_window_exceeded")
                         || err_msg.contains("context_length_exceeded")
