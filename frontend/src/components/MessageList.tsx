@@ -25,6 +25,7 @@ import { MdPreview } from 'md-editor-rt';
 import 'md-editor-rt/lib/preview.css';
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from '@tauri-apps/plugin-dialog';
+import { open as openUrl } from '@tauri-apps/plugin-shell';
 import { ThinkingBlock } from "./ThinkingBlock";
 import { AgentPanel } from "./AgentPanel";
 import { api, textContent, type ContentBlock } from "@/api/tauri";
@@ -657,6 +658,20 @@ export function MessageList() {
       alert(err instanceof Error ? err.message : '读取粘贴图片失败');
     }
   }, [hasMultimodal]);
+
+  // 拦截 MdPreview 内的链接点击，用系统浏览器打开
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      const anchor = (e.target as HTMLElement).closest('a[href]');
+      if (!anchor) return;
+      const href = anchor.getAttribute('href');
+      if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
+      e.preventDefault();
+      openUrl(href).catch(console.error);
+    };
+    document.addEventListener('click', handler);
+    return () => document.removeEventListener('click', handler);
+  }, []);
 
   return (
     <ScrollArea className="h-full" viewportRef={viewportRef}>
