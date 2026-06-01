@@ -279,15 +279,49 @@ fn default_options() -> Value {
 /// routing 直接存储 ModelEntry，不再需要中间的 models 映射层。
 /// 支持向后兼容：旧格式 routing 值为字符串（引用 models 中的 key），
 /// 新格式 routing 值为 ModelEntry 对象。
-#[derive(Debug, Clone, Serialize, Default)]
+///
+/// 序列化时优先将 routing 值写为字符串引用（确保旧版本也能读取），
+/// 仅当 models 中找不到匹配条目时才内联写入 ModelEntry。
+#[derive(Debug, Clone, Default)]
 pub struct ModelsConfig {
-    #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
     /// 模型注册表 — 存储所有已定义的模型，routing 从中选择
-    #[serde(default)]
     pub models: HashMap<String, ModelEntry>,
-    #[serde(default)]
     pub routing: HashMap<RoutingSlot, ModelEntry>,
+}
+
+/// 自定义序列化：routing 值优先写为字符串引用，确保旧版本可读取
+impl serde::Serialize for ModelsConfig {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let mut state = serializer.serialize_struct("ModelsConfig", 3)?;
+        state.serialize_field("providers", &self.providers)?;
+        state.serialize_field("models", &self.models)?;
+
+        // routing: 优先写为字符串引用，找不到匹配时内联 ModelEntry
+        let routing_compat: HashMap<RoutingSlot, serde_json::Value> = self
+            .routing
+            .iter()
+            .map(|(slot, entry)| {
+                let key = self
+                    .models
+                    .iter()
+                    .find(|(_, m)| m.provider == entry.provider && m.model == entry.model)
+                    .map(|(k, _)| serde_json::Value::String(k.clone()))
+                    .unwrap_or_else(|| {
+                        serde_json::to_value(entry).unwrap_or(serde_json::Value::Null)
+                    });
+                (*slot, key)
+            })
+            .collect();
+        state.serialize_field("routing", &routing_compat)?;
+
+        state.end()
+    }
 }
 
 /// 向后兼容的反序列化：支持旧格式（routing 值为字符串引用 models）和新格式（routing 值为 ModelEntry）
@@ -431,17 +465,41 @@ impl ModelsConfig {
     }
 
     /// 保存到 ~/.tiangong/models.json
+    ///
+    /// 保存前自动将 routing 中未在 models 注册表里的条目补入 models，
+    /// 确保序列化时 routing 值能写为字符串引用（旧版本兼容）。
     pub fn save(&self) -> Result<()> {
+        let mut cfg = self.clone();
+        cfg.ensure_routing_models_registered();
+
         let path = models_config_path();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("创建目录失败：{}", parent.display()))?;
         }
         let content =
-            serde_json::to_string_pretty(self).with_context(|| "序列化 ModelsConfig 失败")?;
+            serde_json::to_string_pretty(&cfg).with_context(|| "序列化 ModelsConfig 失败")?;
         fs::write(&path, content)
             .with_context(|| format!("写入 models.json 失败：{}", path.display()))?;
         Ok(())
+    }
+
+    /// 将 routing 中未在 models 注册表中的条目自动补入 models
+    fn ensure_routing_models_registered(&mut self) {
+        for entry in self.routing.values() {
+            let exists = self
+                .models
+                .iter()
+                .any(|(_, m)| m.provider == entry.provider && m.model == entry.model);
+            if !exists {
+                let key = format!("{}-{}", entry.provider, entry.model);
+                if self.models.contains_key(&key) {
+                    // 名称冲突时追加 slot 后缀
+                    continue;
+                }
+                self.models.insert(key, entry.clone());
+            }
+        }
     }
 
     /// 从旧版 ModelProviderConfig 迁移
@@ -704,5 +762,213 @@ impl ModelsConfig {
             // 回退到 chat 配置
             self.to_chat_provider_config()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serialize_routing_as_string_reference_when_model_exists() {
+        let mut config = ModelsConfig::default();
+        config.providers.insert(
+            "test".to_string(),
+            ProviderConfig {
+                base_url: "https://api.test.com".to_string(),
+                api_key: "key".to_string(),
+                timeout_ms: 60_000,
+                protocol: ProviderProtocol::OpenAiCompatible,
+            },
+        );
+        config.models.insert(
+            "my-chat".to_string(),
+            ModelEntry {
+                provider: "test".to_string(),
+                model: "gpt-4".to_string(),
+                capabilities: vec![ModelCapability::Chat],
+                options: serde_json::json!({}),
+            },
+        );
+        config.routing.insert(
+            RoutingSlot::Chat,
+            ModelEntry {
+                provider: "test".to_string(),
+                model: "gpt-4".to_string(),
+                capabilities: vec![ModelCapability::Chat],
+                options: serde_json::json!({}),
+            },
+        );
+
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(
+            json.contains(r#""chat":"my-chat""#),
+            "routing 值应为字符串引用，实际输出：{json}"
+        );
+    }
+
+    #[test]
+    fn serialize_routing_as_inline_object_when_no_matching_model() {
+        let mut config = ModelsConfig::default();
+        config.providers.insert(
+            "test".to_string(),
+            ProviderConfig {
+                base_url: "https://api.test.com".to_string(),
+                api_key: "key".to_string(),
+                timeout_ms: 60_000,
+                protocol: ProviderProtocol::OpenAiCompatible,
+            },
+        );
+        config.routing.insert(
+            RoutingSlot::Chat,
+            ModelEntry {
+                provider: "test".to_string(),
+                model: "gpt-4".to_string(),
+                capabilities: vec![ModelCapability::Chat],
+                options: serde_json::json!({}),
+            },
+        );
+
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(
+            json.contains(r#""provider":"test""#) && json.contains(r#""model":"gpt-4""#),
+            "无匹配模型时 routing 应内联对象，实际输出：{json}"
+        );
+    }
+
+    #[test]
+    fn deserialize_string_routing_compat() {
+        let json = r#"{
+            "providers": {
+                "test": {
+                    "base_url": "https://api.test.com",
+                    "api_key": "key",
+                    "timeout_ms": 60000,
+                    "protocol": "open_ai_compatible"
+                }
+            },
+            "models": {
+                "my-chat": {
+                    "provider": "test",
+                    "model": "gpt-4",
+                    "capabilities": ["chat"],
+                    "options": {}
+                }
+            },
+            "routing": {
+                "chat": "my-chat"
+            }
+        }"#;
+
+        let config: ModelsConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.routing.get(&RoutingSlot::Chat).unwrap().model,
+            "gpt-4"
+        );
+    }
+
+    #[test]
+    fn deserialize_object_routing_compat() {
+        let json = r#"{
+            "providers": {
+                "test": {
+                    "base_url": "https://api.test.com",
+                    "api_key": "key",
+                    "timeout_ms": 60000,
+                    "protocol": "open_ai_compatible"
+                }
+            },
+            "models": {},
+            "routing": {
+                "chat": {
+                    "provider": "test",
+                    "model": "gpt-4",
+                    "capabilities": ["chat"],
+                    "options": {}
+                }
+            }
+        }"#;
+
+        let config: ModelsConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.routing.get(&RoutingSlot::Chat).unwrap().model,
+            "gpt-4"
+        );
+    }
+
+    #[test]
+    fn roundtrip_serialize_deserialize_preserves_data() {
+        let mut config = ModelsConfig::default();
+        config.providers.insert(
+            "test".to_string(),
+            ProviderConfig {
+                base_url: "https://api.test.com".to_string(),
+                api_key: "key".to_string(),
+                timeout_ms: 60_000,
+                protocol: ProviderProtocol::OpenAiCompatible,
+            },
+        );
+        config.models.insert(
+            "my-chat".to_string(),
+            ModelEntry {
+                provider: "test".to_string(),
+                model: "gpt-4".to_string(),
+                capabilities: vec![ModelCapability::Chat],
+                options: serde_json::json!({"temperature": 0.7}),
+            },
+        );
+        config.routing.insert(
+            RoutingSlot::Chat,
+            ModelEntry {
+                provider: "test".to_string(),
+                model: "gpt-4".to_string(),
+                capabilities: vec![ModelCapability::Chat],
+                options: serde_json::json!({"temperature": 0.7}),
+            },
+        );
+
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        let restored: ModelsConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            restored.routing.get(&RoutingSlot::Chat).unwrap().model,
+            "gpt-4"
+        );
+        assert_eq!(
+            restored
+                .routing
+                .get(&RoutingSlot::Chat)
+                .unwrap()
+                .options
+                .get("temperature")
+                .unwrap(),
+            &serde_json::json!(0.7)
+        );
+    }
+
+    #[test]
+    fn save_auto_registers_routing_entries_to_models() {
+        let mut config = ModelsConfig::default();
+        config.providers.insert(
+            "p".to_string(),
+            ProviderConfig {
+                base_url: "https://api.test.com".to_string(),
+                api_key: "k".to_string(),
+                timeout_ms: 60_000,
+                protocol: ProviderProtocol::OpenAiCompatible,
+            },
+        );
+        config.routing.insert(
+            RoutingSlot::Chat,
+            ModelEntry {
+                provider: "p".to_string(),
+                model: "gpt-4".to_string(),
+                capabilities: vec![ModelCapability::Chat],
+                options: serde_json::json!({}),
+            },
+        );
+
+        let mut cfg = config.clone();
+        cfg.ensure_routing_models_registered();
+        assert!(cfg.models.values().any(|m| m.model == "gpt-4"));
     }
 }
