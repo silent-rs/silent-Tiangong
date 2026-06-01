@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { useStore } from '@/store/useStore';
 import { api, type RunSnapshot } from '@/api/tauri';
 import { AppSidebar } from '@/components/AppSidebar';
@@ -8,9 +8,17 @@ import { BrowserPanel } from '@/components/BrowserPanel';
 import { ensureDesktopNotificationPermission } from '@/utils/desktopNotification';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 
+const BROWSER_MIN_WIDTH = 320;
+const BROWSER_DEFAULT_WIDTH = 500;
+const BROWSER_MAX_WIDTH_RATIO = 0.65;
+
 export function MainApp() {
   const { loadSessions, updateFromSnapshot } = useStore();
   const [showBrowser, setShowBrowser] = useState(false);
+  const [browserWidth, setBrowserWidth] = useState(BROWSER_DEFAULT_WIDTH);
+  const draggingRef = useRef(false);
+  const startXRef = useRef(0);
+  const startWidthRef = useRef(0);
   const unlistenRef = useRef<UnlistenFn | null>(null);
   const latestSnapshotRef = useRef<RunSnapshot | null>(null);
   const snapshotTimerRef = useRef<number | null>(null);
@@ -81,6 +89,35 @@ export function MainApp() {
     };
   }, []);
 
+  const handleDragStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    draggingRef.current = true;
+    startXRef.current = e.clientX;
+    startWidthRef.current = browserWidth;
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!draggingRef.current) return;
+      const delta = startXRef.current - ev.clientX;
+      const windowWidth = window.innerWidth;
+      const maxWidth = windowWidth * BROWSER_MAX_WIDTH_RATIO;
+      const next = Math.min(maxWidth, Math.max(BROWSER_MIN_WIDTH, startWidthRef.current + delta));
+      setBrowserWidth(next);
+    };
+
+    const onMouseUp = () => {
+      draggingRef.current = false;
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  }, [browserWidth]);
+
   return (
     <SidebarProvider>
       <div className="flex flex-col h-screen w-full overflow-hidden">
@@ -97,7 +134,10 @@ export function MainApp() {
           {/* 主内容区 */}
           <main className="flex flex-1 flex-col min-w-0 bg-background">
             <div className="flex flex-1 min-h-0">
-              <div className="flex flex-1 flex-col min-w-0">
+              <div
+                className="flex flex-1 flex-col min-w-0"
+                style={showBrowser ? { maxWidth: `calc(100% - ${browserWidth}px - 4px)` } : undefined}
+              >
                 {/* 消息列表 */}
                 <div className="flex-1 overflow-hidden">
                   <LazyMessageList />
@@ -109,9 +149,16 @@ export function MainApp() {
 
               {/* 浏览器面板 */}
               {showBrowser && (
-                <div className="w-[500px] shrink-0">
-                  <BrowserPanel onClose={() => setShowBrowser(false)} />
-                </div>
+                <>
+                  {/* 拖拽手柄 */}
+                  <div
+                    onMouseDown={handleDragStart}
+                    className="w-1 shrink-0 cursor-col-resize hover:bg-primary/30 active:bg-primary/50 transition-colors"
+                  />
+                  <div style={{ width: browserWidth }} className="shrink-0">
+                    <BrowserPanel onClose={() => setShowBrowser(false)} />
+                  </div>
+                </>
               )}
             </div>
           </main>
