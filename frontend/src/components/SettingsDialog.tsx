@@ -329,6 +329,7 @@ function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Save
   const [subTab, setSubTab] = useState<LLMSubTab>('providers');
   const [modelsConfig, setModelsConfig] = useState<ModelsConfigView>({
     providers: {},
+    models: {},
     routing: {},
   });
   const [capabilities, setCapabilities] = useState<ModelCapabilityInfo[]>([]);
@@ -508,7 +509,7 @@ function MemorySettings({
   }, []);
 
   const modelKeysFor = (acceptedCapabilities: string[]) =>
-    Object.entries(modelsConfig.routing)
+    Object.entries(modelsConfig.models)
       .filter(([, model]) => {
         if (model.capabilities.length === 0) return true;
         return acceptedCapabilities.some((capability) => model.capabilities.includes(capability));
@@ -516,7 +517,7 @@ function MemorySettings({
       .map(([key]) => key);
 
   const modelLabel = (modelKey: string) => {
-    const model = modelsConfig.routing[modelKey];
+    const model = modelsConfig.models[modelKey];
     if (!model) return modelKey;
     return `${model.provider} / ${model.model}`;
   };
@@ -529,7 +530,7 @@ function MemorySettings({
   };
 
   const embeddingDimension = config.embedding_key
-    ? Number(modelsConfig.routing[config.embedding_key]?.options?.dimension || 0)
+    ? Number(modelsConfig.models[config.embedding_key]?.options?.dimension || 0)
     : 0;
 
   if (isLoading) {
@@ -798,7 +799,7 @@ function ProviderModelsView({
     : (sortedProviderKeys[0] || '');
   const selectedConfig = config.providers[activeProvider] || null;
   const providerModels = activeProvider
-    ? Object.entries(config.routing).filter(([, m]) => m.provider === activeProvider).sort(([a], [b]) => a.localeCompare(b))
+    ? Object.entries(config.models).filter(([, m]) => m.provider === activeProvider).sort(([a], [b]) => a.localeCompare(b))
     : [];
 
   // ---- Provider handlers ----
@@ -816,6 +817,13 @@ function ProviderModelsView({
     const next = { ...config };
     const { [key]: _, ...rest } = next.providers;
     next.providers = rest;
+    // 清理引用该 provider 的模型
+    const newModels = { ...next.models };
+    for (const [mk, mv] of Object.entries(newModels)) {
+      if (mv.provider === key) delete newModels[mk];
+    }
+    next.models = newModels;
+    // 清理引用该 provider 的路由
     const newRouting = { ...next.routing };
     for (const [slot, entry] of Object.entries(newRouting)) {
       if (entry.provider === key) delete newRouting[slot];
@@ -851,14 +859,14 @@ function ProviderModelsView({
   const openEditModel = (key: string) => {
     setModelModalMode('edit');
     setEditingModelKey(key);
-    setModelDraft({ ...config.routing[key] });
+    setModelDraft({ ...config.models[key] });
     setAvailableModels([]);
   };
 
   const saveModelEdit = () => {
     if (!editingModelKey) return;
     const next = { ...config };
-    next.routing = { ...next.routing, [editingModelKey]: { ...modelDraft } };
+    next.models = { ...next.models, [editingModelKey]: { ...modelDraft } };
     onChange(next);
     setModelModalMode(null);
   };
@@ -866,17 +874,25 @@ function ProviderModelsView({
   const addModel = () => {
     if (!modelDraft.model.trim()) return;
     let key = modelDraft.model.trim();
-    if (config.routing[key]) key = `${modelDraft.provider}-${key}`;
+    if (config.models[key]) key = `${modelDraft.provider}-${key}`;
     const next = { ...config };
-    next.routing = { ...next.routing, [key]: { ...modelDraft } };
+    next.models = { ...next.models, [key]: { ...modelDraft } };
     onChange(next);
     setModelModalMode(null);
   };
 
   const removeModel = (key: string) => {
     const next = { ...config };
-    const { [key]: _, ...rest } = next.routing;
-    next.routing = rest;
+    const { [key]: _, ...rest } = next.models;
+    next.models = rest;
+    // 同时清理路由中引用该模型的条目
+    const newRouting = { ...next.routing };
+    for (const [slot, entry] of Object.entries(newRouting)) {
+      if (entry.provider === config.models[key]?.provider && entry.model === config.models[key]?.model) {
+        delete newRouting[slot];
+      }
+    }
+    next.routing = newRouting;
     onChange(next);
   };
 
@@ -1346,28 +1362,31 @@ function RoutingSection({
   onChange: (c: ModelsConfigView) => void;
   capabilities: ModelCapabilityInfo[];
 }) {
-  const routingEntries = Object.entries(config.routing).sort(([a], [b]) => a.localeCompare(b));
+  const modelKeys = Object.keys(config.models).sort();
   const routingCapabilities = capabilities.filter(
     (cap) => cap.key !== 'embedding' && cap.key !== 'rerank',
   );
-
-  const modelLabel = (slotKey: string) => {
-    const entry = config.routing[slotKey];
-    if (!entry) return slotKey;
-    return `${entry.provider} / ${entry.model}`;
+  const [routeSearch, setRouteSearch] = useState<Record<string, string>>({});
+  const modelLabel = (modelKey: string) => {
+    const model = config.models[modelKey];
+    if (!model) return modelKey;
+    return `${model.provider} / ${model.model}`;
   };
 
-  const setRoute = (capKey: string, sourceSlot: string) => {
+  const setRoute = (capKey: string, modelKey: string) => {
     const next = { ...config };
     const newRouting = { ...next.routing };
-    if (sourceSlot === '__none__') {
+    if (modelKey === '__none__') {
       delete newRouting[capKey];
-    } else if (newRouting[sourceSlot]) {
-      // 复制源路由条目到目标槽位
-      newRouting[capKey] = { ...newRouting[sourceSlot] };
+    } else {
+      const entry = next.models[modelKey];
+      if (entry) {
+        newRouting[capKey] = { ...entry };
+      }
     }
     next.routing = newRouting;
     onChange(next);
+    setRouteSearch((prev) => ({ ...prev, [capKey]: '' }));
   };
 
   return (
@@ -1382,7 +1401,20 @@ function RoutingSection({
       <div className="space-y-2 flex-1 min-h-0 overflow-y-auto">
         {routingCapabilities.map((cap) => {
           const currentEntry = config.routing[cap.key];
-          const hasRoute = !!currentEntry;
+          const search = routeSearch[cap.key] || '';
+          const filtered = modelKeys
+            .filter((mk) => {
+              const m = config.models[mk];
+              if (m.capabilities.length === 0) return true;
+              if (m.capabilities.includes(cap.key)) return true;
+              if (cap.key === 'chat' && m.capabilities.includes('multimodal')) return true;
+              return false;
+            })
+            .filter((mk) => {
+              if (!search) return true;
+              const q = search.toLowerCase();
+              return mk.toLowerCase().includes(q) || modelLabel(mk).toLowerCase().includes(q);
+            });
           return (
             <Card key={cap.key}>
               <CardContent className="p-3">
@@ -1391,7 +1423,7 @@ function RoutingSection({
                     <div className="text-sm font-medium leading-tight">{cap.display_name}</div>
                     <div className="text-xs text-muted-foreground">({cap.key})</div>
                   </div>
-                  {hasRoute ? (
+                  {currentEntry ? (
                     <div className="flex-1 flex items-center gap-2">
                       <span className="text-sm flex-1">{currentEntry.provider} / {currentEntry.model}</span>
                       <span className="text-xs text-muted-foreground">
@@ -1415,14 +1447,21 @@ function RoutingSection({
                         <SelectValue placeholder="-- 未配置 --" />
                       </SelectTrigger>
                       <SelectContent>
+                        <div className="p-1.5 border-b" onPointerDown={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+                          <Input
+                            value={search}
+                            onChange={(e) => setRouteSearch((prev) => ({ ...prev, [cap.key]: e.target.value }))}
+                            className="h-7 text-xs"
+                            placeholder="搜索模型..."
+                          />
+                        </div>
                         <SelectItem value="__none__">-- 未配置 --</SelectItem>
-                        {routingEntries
-                          .filter(([slotKey]) => slotKey !== cap.key)
-                          .map(([slotKey]) => (
-                            <SelectItem key={slotKey} value={slotKey}>
-                              {modelLabel(slotKey)}
-                            </SelectItem>
-                          ))}
+                        {filtered.map((mk) => (
+                          <SelectItem key={mk} value={mk}>{modelLabel(mk)}</SelectItem>
+                        ))}
+                        {filtered.length === 0 && (
+                          <div className="px-2 py-3 text-xs text-muted-foreground text-center">无匹配模型</div>
+                        )}
                       </SelectContent>
                     </Select>
                   )}
@@ -1433,7 +1472,7 @@ function RoutingSection({
         })}
       </div>
 
-      {routingEntries.length === 0 && (
+      {modelKeys.length === 0 && (
         <p className="text-xs text-muted-foreground mt-3">
           请先在模型页中添加模型定义，然后回来配置路由
         </p>

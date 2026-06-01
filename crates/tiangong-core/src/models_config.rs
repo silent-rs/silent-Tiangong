@@ -283,6 +283,9 @@ fn default_options() -> Value {
 pub struct ModelsConfig {
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
+    /// 模型注册表 — 存储所有已定义的模型，routing 从中选择
+    #[serde(default)]
+    pub models: HashMap<String, ModelEntry>,
     #[serde(default)]
     pub routing: HashMap<RoutingSlot, ModelEntry>,
 }
@@ -336,6 +339,7 @@ impl<'de> serde::Deserialize<'de> for ModelsConfig {
 
         Ok(ModelsConfig {
             providers: raw.providers,
+            models: raw.models,
             routing,
         })
     }
@@ -482,12 +486,16 @@ impl ModelsConfig {
             );
         }
 
-        Self { providers, routing }
+        Self {
+            providers,
+            models: HashMap::new(),
+            routing,
+        }
     }
 
     /// 从 LlmConfig 构建兼容的 ModelsConfig
     ///
-    /// 将扁平的 LlmConfig 端点映射为 Provider + Routing 两层结构。
+    /// 将扁平的 LlmConfig 端点映射为 Provider + Routing 结构。
     /// 当多个能力使用相同端点时，合并 capabilities 到已有的路由条目。
     pub fn from_llm_config(llm: &crate::core_config::LlmConfig) -> Self {
         let mut providers: HashMap<String, ProviderConfig> = HashMap::new();
@@ -594,7 +602,11 @@ impl ModelsConfig {
             register("rerank", ep, RoutingSlot::Rerank, ModelCapability::Rerank);
         }
 
-        Self { providers, routing }
+        Self {
+            providers,
+            models: HashMap::new(),
+            routing,
+        }
     }
 
     /// 解析 api_key 中的 ${ENV_VAR} 引用

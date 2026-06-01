@@ -324,10 +324,11 @@ pub struct ModelEntryView {
     pub options: serde_json::Value,
 }
 
-/// 两层模型配置（前端使用）
+/// 模型配置（前端使用）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelsConfigView {
     pub providers: HashMap<String, ProviderConfigView>,
+    pub models: HashMap<String, ModelEntryView>,
     pub routing: HashMap<String, ModelEntryView>,
 }
 
@@ -346,6 +347,27 @@ impl ModelsConfigView {
                         api_key: v.api_key.clone(),
                         timeout_ms: v.timeout_ms,
                         protocol: v.protocol.as_str().to_string(),
+                    },
+                )
+            })
+            .collect();
+
+        let models = config
+            .models
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    ModelEntryView {
+                        provider: v.provider.clone(),
+                        model: v.model.clone(),
+                        capabilities: v
+                            .capabilities
+                            .iter()
+                            .map(|c| serde_json::to_value(c).unwrap_or_default())
+                            .map(|v| v.as_str().unwrap_or_default().to_string())
+                            .collect(),
+                        options: v.options.clone(),
                     },
                 )
             })
@@ -374,7 +396,11 @@ impl ModelsConfigView {
             })
             .collect();
 
-        Self { providers, routing }
+        Self {
+            providers,
+            models,
+            routing,
+        }
     }
 
     pub fn to_core(&self) -> tiangong_core::models_config::ModelsConfig {
@@ -393,6 +419,30 @@ impl ModelsConfigView {
                         api_key: v.api_key.clone(),
                         timeout_ms: v.timeout_ms,
                         protocol: v.protocol.parse().unwrap_or_default(),
+                    },
+                )
+            })
+            .collect();
+
+        let models = self
+            .models
+            .iter()
+            .map(|(k, v)| {
+                let capabilities: Vec<ModelCapability> = v
+                    .capabilities
+                    .iter()
+                    .filter_map(|c| {
+                        let json_str = format!("\"{}\"", c);
+                        serde_json::from_str(&json_str).ok()
+                    })
+                    .collect();
+                (
+                    k.clone(),
+                    ModelEntry {
+                        provider: v.provider.clone(),
+                        model: v.model.clone(),
+                        capabilities,
+                        options: v.options.clone(),
                     },
                 )
             })
@@ -427,7 +477,11 @@ impl ModelsConfigView {
             })
             .collect();
 
-        ModelsConfig { providers, routing }
+        ModelsConfig {
+            providers,
+            models,
+            routing,
+        }
     }
 }
 
@@ -503,24 +557,30 @@ fn resolved_model_by_key(
             return Ok(resolved);
         }
     }
+    // 从模型注册表查找
+    let resolve_entry = |entry: &tiangong_core::models_config::ModelEntry| {
+        let provider = models.providers.get(&entry.provider)?;
+        Some(tiangong_core::models_config::ResolvedModel {
+            provider: entry.provider.clone(),
+            base_url: provider.base_url.clone(),
+            api_key: tiangong_core::models_config::ModelsConfig::resolve_api_key(&provider.api_key),
+            timeout_ms: provider.timeout_ms,
+            protocol: provider.protocol,
+            model: entry.model.clone(),
+            options: entry.options.clone(),
+        })
+    };
+    if let Some(entry) = models.models.get(model_key) {
+        return resolve_entry(entry)
+            .ok_or_else(|| format!("模型 {model_key} 引用的 Provider 不存在"));
+    }
     // 回退：按模型名称在路由条目中搜索
     models
         .routing
         .iter()
         .find_map(|(_, entry)| {
             if entry.model == model_key {
-                let provider = models.providers.get(&entry.provider)?;
-                Some(tiangong_core::models_config::ResolvedModel {
-                    provider: entry.provider.clone(),
-                    base_url: provider.base_url.clone(),
-                    api_key: tiangong_core::models_config::ModelsConfig::resolve_api_key(
-                        &provider.api_key,
-                    ),
-                    timeout_ms: provider.timeout_ms,
-                    protocol: provider.protocol,
-                    model: entry.model.clone(),
-                    options: entry.options.clone(),
-                })
+                resolve_entry(entry)
             } else {
                 None
             }
@@ -623,6 +683,22 @@ fn find_model_key(
     model_name: &str,
     protocol: tiangong_core::model::ProviderProtocol,
 ) -> Option<String> {
+    // 优先从模型注册表查找
+    let from_models = models.models.iter().find_map(|(key, entry)| {
+        let provider = models.providers.get(&entry.provider)?;
+        if provider.base_url == base_url
+            && provider.protocol == protocol
+            && entry.model == model_name
+        {
+            Some(key.clone())
+        } else {
+            None
+        }
+    });
+    if from_models.is_some() {
+        return from_models;
+    }
+    // 回退：从路由条目查找
     models.routing.iter().find_map(|(slot, entry)| {
         let provider = models.providers.get(&entry.provider)?;
         if provider.base_url == base_url

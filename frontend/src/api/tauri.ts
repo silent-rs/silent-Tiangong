@@ -238,6 +238,7 @@ export interface ModelEntryView {
 
 export interface ModelsConfigView {
   providers: Record<string, ProviderConfigView>;
+  models: Record<string, ModelEntryView>;
   routing: Record<string, ModelEntryView>;
 }
 
