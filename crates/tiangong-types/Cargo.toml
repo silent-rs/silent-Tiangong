@@ -9,3 +9,4 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 chrono = { workspace = true, features = ["serde", "clock"] }
 scru128 = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }

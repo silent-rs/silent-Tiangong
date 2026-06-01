@@ -230,6 +230,7 @@ fn run_gui() {
 
             // Desktop 端独立初始化调度器（不依赖 server）
             let state = app.state::<tiangong_app::TiangongApp>();
+            state.start_browser_handler(app.handle().clone());
             let scheduler_ctx = state.create_scheduler_context();
             tauri::async_runtime::spawn(async move {
                 tiangong_scheduler::executor::restore_cron_jobs(scheduler_ctx).await;

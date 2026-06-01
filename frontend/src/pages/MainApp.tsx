@@ -14,6 +14,7 @@ const CHAT_MAX_WIDTH = 800;
 export function MainApp() {
   const { loadSessions, updateFromSnapshot } = useStore();
   const [showBrowser, setShowBrowser] = useState(false);
+  const [browserUrl, setBrowserUrl] = useState<string | undefined>(undefined);
   const [chatWidth, setChatWidth] = useState(CHAT_MAX_WIDTH);
   const draggingRef = useRef(false);
   const startXRef = useRef(0);
@@ -62,11 +63,19 @@ export function MainApp() {
         }
       });
 
+      // 监听浏览器自动打开事件
+      const unlistenBrowserOpen = await listen<string>('browser:open', (event) => {
+        const url = event.payload;
+        setBrowserUrl(url);
+        setShowBrowser(true);
+      });
+
       const prevUnlisten = unlistenRef.current;
       unlistenRef.current = () => {
         prevUnlisten?.();
         unlistenSessions();
         unlistenOpenSession();
+        unlistenBrowserOpen();
       };
     };
 
@@ -79,11 +88,22 @@ export function MainApp() {
       })
       .catch(console.error);
 
+    // 监听来自消息列表的链接点击，在嵌入浏览器中打开
+    const onOpenBrowser = (e: Event) => {
+      const url = (e as CustomEvent).detail;
+      if (typeof url === 'string') {
+        setBrowserUrl(url);
+        setShowBrowser(true);
+      }
+    };
+    window.addEventListener('tiangong:open-browser', onOpenBrowser);
+
     return () => {
       if (snapshotTimerRef.current !== null) {
         window.clearTimeout(snapshotTimerRef.current);
         snapshotTimerRef.current = null;
       }
+      window.removeEventListener('tiangong:open-browser', onOpenBrowser);
       unlistenRef.current?.();
     };
   }, []);
@@ -153,7 +173,7 @@ export function MainApp() {
                     className="w-1 shrink-0 cursor-col-resize hover:bg-primary/30 active:bg-primary/50 transition-colors"
                   />
                   <div className="flex-1 min-w-0">
-                    <BrowserPanel onClose={() => setShowBrowser(false)} />
+                    <BrowserPanel onClose={() => { setShowBrowser(false); setBrowserUrl(undefined); }} initialUrl={browserUrl} />
                   </div>
                 </>
               )}

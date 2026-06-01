@@ -235,6 +235,14 @@ impl TiangongCore {
         }
     }
 
+    /// 设置浏览器命令通道（GUI 模式下由 Tauri 层注入）
+    pub fn set_browser_channel(
+        &self,
+        tx: tokio::sync::mpsc::Sender<tiangong_types::BrowserCommand>,
+    ) {
+        let _ = self.send_cmd(Command::SetBrowserChannel { tx });
+    }
+
     /// 关闭并获取最终 session
     pub fn into_session(mut self) -> Session {
         let _ = self.send_cmd(Command::Shutdown);
@@ -536,6 +544,12 @@ async fn worker_loop_async(
                 }
             }
             Command::Shutdown => break,
+            Command::SetBrowserChannel { tx } => {
+                if let Some(eng) = engine.as_ref() {
+                    eng.set_browser_channel(tx);
+                }
+                continue;
+            }
             Command::CompressContext => {
                 compress_context_for_session(&mut session, engine.as_ref().unwrap(), &stream_tx);
                 continue;

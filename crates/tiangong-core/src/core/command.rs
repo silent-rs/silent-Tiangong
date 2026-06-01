@@ -25,6 +25,10 @@ pub(crate) enum Command {
     /// 清理上下文（重置摘要，LLM 下次只看到 system prompt）
     #[allow(dead_code)]
     ResetContext,
+    /// 设置浏览器命令通道
+    SetBrowserChannel {
+        tx: tokio::sync::mpsc::Sender<tiangong_types::BrowserCommand>,
+    },
     /// 关闭
     Shutdown,
 }

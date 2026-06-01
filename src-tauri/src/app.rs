@@ -4,6 +4,7 @@ use std::sync::Mutex;
 use tiangong_config::load_tiangong_config;
 use tiangong_core::core::TiangongCore;
 use tiangong_core::core_config::CoreConfigProvider;
+use tokio::sync::mpsc;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::browser::BrowserManager;
@@ -15,12 +16,15 @@ use crate::browser::BrowserManager;
 /// config: 共享配置提供者
 /// embedded_server: 嵌入式 Server 句柄（Desktop 模式下 Server 运行在 app 进程内）
 /// browser: 浏览器面板管理器
+/// browser_cmd_tx: 浏览器命令通道发送端（core → browser handler）
 pub struct TiangongApp {
     pub state: std::sync::Arc<AsyncMutex<tiangong_core::app_state::TiangongState>>,
     pub cores: Mutex<HashMap<String, TiangongCore>>,
     pub config: CoreConfigProvider,
     embedded_server: Mutex<Option<tiangong_server::EmbeddedServerHandle>>,
     pub browser: BrowserManager,
+    browser_cmd_tx: mpsc::Sender<tiangong_types::BrowserCommand>,
+    browser_cmd_rx: Mutex<Option<mpsc::Receiver<tiangong_types::BrowserCommand>>>,
 }
 
 impl Default for TiangongApp {
@@ -29,6 +33,10 @@ impl Default for TiangongApp {
         let core_config = app_config.to_core_config();
         let config = CoreConfigProvider::new(core_config);
 
+        let (browser_cmd_tx, browser_cmd_rx) = mpsc::channel::<tiangong_types::BrowserCommand>(16);
+
+        let browser = BrowserManager::new();
+
         Self {
             state: std::sync::Arc::new(AsyncMutex::new(
                 tiangong_core::app_state::TiangongState::load_or_default(),
@@ -36,7 +44,9 @@ impl Default for TiangongApp {
             cores: Mutex::new(HashMap::new()),
             config,
             embedded_server: Mutex::new(None),
-            browser: BrowserManager::new(),
+            browser,
+            browser_cmd_tx,
+            browser_cmd_rx: Mutex::new(Some(browser_cmd_rx)),
         }
     }
 }
@@ -44,6 +54,20 @@ impl Default for TiangongApp {
 impl TiangongApp {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 在 Tauri setup 阶段启动浏览器命令处理循环（需要 AppHandle）
+    pub fn start_browser_handler(&self, app: tauri::AppHandle<tauri::Wry>) {
+        let rx = match self.browser_cmd_rx.lock().ok().and_then(|mut g| g.take()) {
+            Some(rx) => rx,
+            None => return,
+        };
+        let browser_clone = self.browser.clone_state();
+        tauri::async_runtime::spawn(crate::browser::browser_command_handler(
+            rx,
+            browser_clone,
+            app,
+        ));
     }
 
     fn lock_cores(&self) -> std::sync::MutexGuard<'_, HashMap<String, TiangongCore>> {
@@ -120,6 +144,7 @@ impl TiangongApp {
             cores.remove(session_id);
         }
         let core = TiangongCore::with_session_for_gui(self.config.clone(), session, stream_tx);
+        core.set_browser_channel(self.browser_cmd_tx.clone());
         let id = core.session_id().to_string();
         cores.insert(id.clone(), core);
         (id, true) // 新创建

@@ -6,12 +6,14 @@ import { Input } from './ui/input';
 
 interface BrowserPanelProps {
   onClose: () => void;
+  initialUrl?: string;
 }
 
-export function BrowserPanel({ onClose }: BrowserPanelProps) {
-  const [url, setUrl] = useState('https://www.bing.com');
+export function BrowserPanel({ onClose, initialUrl }: BrowserPanelProps) {
+  const [url, setUrl] = useState(initialUrl || 'https://www.bing.com');
   const [isLoading, setIsLoading] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const initializedRef = useRef(false);
 
   const syncPosition = useCallback(async () => {
     if (!containerRef.current) return;
@@ -56,6 +58,15 @@ export function BrowserPanel({ onClose }: BrowserPanelProps) {
     window.addEventListener('resize', syncPosition);
     return () => window.removeEventListener('resize', syncPosition);
   }, [syncPosition]);
+
+  // 挂载时自动导航到 initialUrl
+  useEffect(() => {
+    if (initialUrl && !initializedRef.current && containerRef.current) {
+      initializedRef.current = true;
+      const rect = containerRef.current.getBoundingClientRect();
+      api.browserOpen(initialUrl, rect.x, rect.y, rect.width, rect.height).catch(console.error);
+    }
+  }, [initialUrl]);
 
   return (
     <div className="flex flex-col h-full border-l bg-background">

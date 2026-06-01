@@ -72,6 +72,10 @@ pub struct RuntimeEngine {
     models_config: ModelsConfig,
     core_config: Option<crate::core_config::CoreConfig>,
     permission_gate: crate::permission::PermissionGate,
+    /// 浏览器命令通道（GUI 模式下注入，用于替代 web_fetch 走浏览器获取）
+    browser_tx: std::sync::Arc<
+        std::sync::Mutex<Option<tokio::sync::mpsc::Sender<tiangong_types::BrowserCommand>>>,
+    >,
 }
 
 impl RuntimeEngine {
@@ -95,6 +99,7 @@ impl RuntimeEngine {
             models_config: ModelsConfig::default(),
             core_config: None,
             permission_gate,
+            browser_tx: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -123,6 +128,7 @@ impl RuntimeEngine {
             models_config: ModelsConfig::default(),
             core_config: None,
             permission_gate,
+            browser_tx: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -181,6 +187,16 @@ impl RuntimeEngine {
     /// 获取权限网关引用
     pub fn permission_gate(&self) -> &crate::permission::PermissionGate {
         &self.permission_gate
+    }
+
+    /// 设置浏览器命令通道（GUI 模式下由 Tauri 层注入）
+    pub fn set_browser_channel(
+        &self,
+        tx: tokio::sync::mpsc::Sender<tiangong_types::BrowserCommand>,
+    ) {
+        if let Ok(mut guard) = self.browser_tx.lock() {
+            *guard = Some(tx);
+        }
     }
 
     pub fn provider_label(&self) -> String {
@@ -292,6 +308,20 @@ impl RuntimeEngine {
             };
         }
 
+        // 浏览器获取（优先于 HTTP web_fetch）
+        if call.name == "web_fetch" {
+            let mode = call
+                .arguments
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("text");
+            if mode == "text"
+                && let Some(result) = self.try_browser_fetch(call).await
+            {
+                return result;
+            }
+        }
+
         // 本地工具
         match build_tool_call_from_function(call) {
             Ok(tool_call) => match self.tool_executor.execute(&tool_call) {
@@ -313,6 +343,53 @@ impl RuntimeEngine {
                 exit_code: 1,
                 execution: None,
             },
+        }
+    }
+
+    /// 尝试通过内嵌浏览器获取网页内容，失败时返回 None 回退到 HTTP web_fetch
+    async fn try_browser_fetch(&self, call: &ToolCall) -> Option<ToolResult> {
+        let url = call.arguments.get("url")?.as_str()?.to_string();
+        let max_chars = call
+            .arguments
+            .get("max_chars")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(12000) as usize;
+
+        let tx = {
+            let guard = self.browser_tx.lock().ok()?;
+            guard.clone()?
+        };
+
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let cmd = tiangong_types::BrowserCommand::FetchPage {
+            url,
+            max_chars,
+            response_tx,
+        };
+
+        if tx.send(cmd).await.is_err() {
+            return None;
+        }
+
+        match tokio::time::timeout(std::time::Duration::from_secs(30), response_rx).await {
+            Ok(Ok(resp)) => {
+                let ok = resp.ok;
+                let error = resp.error.unwrap_or_default();
+                let summary = if ok {
+                    format!("浏览器获取成功：{}", resp.title)
+                } else {
+                    format!("浏览器获取失败：{}", error)
+                };
+                Some(ToolResult {
+                    ok,
+                    summary,
+                    stdout: if ok { resp.content } else { String::new() },
+                    stderr: if ok { String::new() } else { error },
+                    exit_code: if ok { 0 } else { 1 },
+                    execution: None,
+                })
+            }
+            _ => None,
         }
     }
 
