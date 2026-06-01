@@ -50,7 +50,7 @@ impl<'c> Chat<'c> {
     }
 }
 
-fn parse_stream_chunk(data: &str) -> Result<StreamEvent, DeepSeekError> {
+pub(crate) fn parse_stream_chunk(data: &str) -> Result<StreamEvent, DeepSeekError> {
     let chunk: StreamChunk = serde_json::from_str(data)
         .map_err(|err| DeepSeekError::Serialization(format!("{err}: {data}")))?;
 

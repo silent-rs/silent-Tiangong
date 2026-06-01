@@ -9,3 +9,6 @@ pub mod types;
 pub use client::DeepSeekClient;
 pub use config::DeepSeekConfig;
 pub use error::DeepSeekError;
+
+#[cfg(test)]
+mod tests;
