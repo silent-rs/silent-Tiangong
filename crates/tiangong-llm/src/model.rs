@@ -10,6 +10,7 @@ pub enum ProviderProtocol {
     #[default]
     OpenAiCompatible,
     Anthropic,
+    DeepSeek,
 }
 
 impl ProviderProtocol {
@@ -17,6 +18,7 @@ impl ProviderProtocol {
         match self {
             ProviderProtocol::OpenAiCompatible => "openai_compatible",
             ProviderProtocol::Anthropic => "anthropic",
+            ProviderProtocol::DeepSeek => "deepseek",
         }
     }
 }
@@ -28,6 +30,7 @@ impl FromStr for ProviderProtocol {
         match s.trim() {
             "" | "openai_compatible" => Ok(ProviderProtocol::OpenAiCompatible),
             "anthropic" => Ok(ProviderProtocol::Anthropic),
+            "deepseek" => Ok(ProviderProtocol::DeepSeek),
             other => Err(anyhow!("不支持的 provider 协议：{other}")),
         }
     }

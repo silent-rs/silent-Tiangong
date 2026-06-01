@@ -303,6 +303,8 @@ pub fn parse_usage(usage: &Value) -> TokenUsageData {
         prompt_tokens: prompt,
         completion_tokens: completion,
         total_tokens: total,
+        prompt_cache_hit_tokens: None,
+        prompt_cache_miss_tokens: None,
     }
 }
 
