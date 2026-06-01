@@ -324,16 +324,18 @@ pub struct ModelEntryView {
     pub options: serde_json::Value,
 }
 
-/// 完整的三层模型配置（前端使用）
+/// 模型配置（前端使用）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelsConfigView {
     pub providers: HashMap<String, ProviderConfigView>,
     pub models: HashMap<String, ModelEntryView>,
-    pub routing: HashMap<String, String>,
+    pub routing: HashMap<String, ModelEntryView>,
 }
 
 impl ModelsConfigView {
     pub fn from_core(config: &tiangong_core::models_config::ModelsConfig) -> Self {
+        use tiangong_core::models_config::RoutingSlot;
+
         let providers = config
             .providers
             .iter()
@@ -374,16 +376,23 @@ impl ModelsConfigView {
         let routing = config
             .routing
             .iter()
-            .filter(|(k, _)| {
-                !matches!(
-                    k,
-                    tiangong_core::models_config::ModelCapability::Embedding
-                        | tiangong_core::models_config::ModelCapability::Rerank
-                )
-            })
+            .filter(|(k, _)| !matches!(k, RoutingSlot::Embedding | RoutingSlot::Rerank))
             .map(|(k, v)| {
                 let key = serde_json::to_value(k).unwrap_or_default();
-                (key.as_str().unwrap_or_default().to_string(), v.clone())
+                (
+                    key.as_str().unwrap_or_default().to_string(),
+                    ModelEntryView {
+                        provider: v.provider.clone(),
+                        model: v.model.clone(),
+                        capabilities: v
+                            .capabilities
+                            .iter()
+                            .map(|c| serde_json::to_value(c).unwrap_or_default())
+                            .map(|v| v.as_str().unwrap_or_default().to_string())
+                            .collect(),
+                        options: v.options.clone(),
+                    },
+                )
             })
             .collect();
 
@@ -396,7 +405,7 @@ impl ModelsConfigView {
 
     pub fn to_core(&self) -> tiangong_core::models_config::ModelsConfig {
         use tiangong_core::models_config::{
-            ModelCapability, ModelEntry, ModelsConfig, ProviderConfig,
+            ModelCapability, ModelEntry, ModelsConfig, ProviderConfig, RoutingSlot,
         };
 
         let providers = self
@@ -444,11 +453,27 @@ impl ModelsConfigView {
             .iter()
             .filter_map(|(k, v)| {
                 let json_str = format!("\"{}\"", k);
-                let cap: ModelCapability = serde_json::from_str(&json_str).ok()?;
-                if matches!(cap, ModelCapability::Embedding | ModelCapability::Rerank) {
+                let slot: RoutingSlot = serde_json::from_str(&json_str).ok()?;
+                if matches!(slot, RoutingSlot::Embedding | RoutingSlot::Rerank) {
                     return None;
                 }
-                Some((cap, v.clone()))
+                let capabilities: Vec<ModelCapability> = v
+                    .capabilities
+                    .iter()
+                    .filter_map(|c| {
+                        let json_str = format!("\"{}\"", c);
+                        serde_json::from_str(&json_str).ok()
+                    })
+                    .collect();
+                Some((
+                    slot,
+                    ModelEntry {
+                        provider: v.provider.clone(),
+                        model: v.model.clone(),
+                        capabilities,
+                        options: v.options.clone(),
+                    },
+                ))
             })
             .collect();
 
@@ -526,26 +551,41 @@ fn resolved_model_by_key(
     models: &tiangong_core::models_config::ModelsConfig,
     model_key: &str,
 ) -> Result<tiangong_core::models_config::ResolvedModel, String> {
-    let model_entry = models
-        .models
-        .get(model_key)
-        .ok_or_else(|| format!("模型不存在：{model_key}"))?;
-    let provider = models.providers.get(&model_entry.provider).ok_or_else(|| {
-        format!(
-            "模型 {model_key} 引用的 Provider 不存在：{}",
-            model_entry.provider
-        )
-    })?;
-
-    Ok(tiangong_core::models_config::ResolvedModel {
-        provider: model_entry.provider.clone(),
-        base_url: provider.base_url.clone(),
-        api_key: tiangong_core::models_config::ModelsConfig::resolve_api_key(&provider.api_key),
-        timeout_ms: provider.timeout_ms,
-        protocol: provider.protocol,
-        model: model_entry.model.clone(),
-        options: model_entry.options.clone(),
-    })
+    // 优先按路由槽位 key 查找
+    if let Some(slot) = tiangong_core::models_config::RoutingSlot::from_key(model_key) {
+        if let Some(resolved) = models.resolve_slot(slot) {
+            return Ok(resolved);
+        }
+    }
+    // 从模型注册表查找
+    let resolve_entry = |entry: &tiangong_core::models_config::ModelEntry| {
+        let provider = models.providers.get(&entry.provider)?;
+        Some(tiangong_core::models_config::ResolvedModel {
+            provider: entry.provider.clone(),
+            base_url: provider.base_url.clone(),
+            api_key: tiangong_core::models_config::ModelsConfig::resolve_api_key(&provider.api_key),
+            timeout_ms: provider.timeout_ms,
+            protocol: provider.protocol,
+            model: entry.model.clone(),
+            options: entry.options.clone(),
+        })
+    };
+    if let Some(entry) = models.models.get(model_key) {
+        return resolve_entry(entry)
+            .ok_or_else(|| format!("模型 {model_key} 引用的 Provider 不存在"));
+    }
+    // 回退：按模型名称在路由条目中搜索
+    models
+        .routing
+        .iter()
+        .find_map(|(_, entry)| {
+            if entry.model == model_key {
+                resolve_entry(entry)
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| format!("模型不存在：{model_key}"))
 }
 
 fn resolve_memory_llm(
@@ -643,13 +683,29 @@ fn find_model_key(
     model_name: &str,
     protocol: tiangong_core::model::ProviderProtocol,
 ) -> Option<String> {
-    models.models.iter().find_map(|(model_key, model)| {
-        let provider = models.providers.get(&model.provider)?;
+    // 优先从模型注册表查找
+    let from_models = models.models.iter().find_map(|(key, entry)| {
+        let provider = models.providers.get(&entry.provider)?;
         if provider.base_url == base_url
             && provider.protocol == protocol
-            && model.model == model_name
+            && entry.model == model_name
         {
-            Some(model_key.clone())
+            Some(key.clone())
+        } else {
+            None
+        }
+    });
+    if from_models.is_some() {
+        return from_models;
+    }
+    // 回退：从路由条目查找
+    models.routing.iter().find_map(|(slot, entry)| {
+        let provider = models.providers.get(&entry.provider)?;
+        if provider.base_url == base_url
+            && provider.protocol == protocol
+            && entry.model == model_name
+        {
+            Some(slot.key().to_string())
         } else {
             None
         }

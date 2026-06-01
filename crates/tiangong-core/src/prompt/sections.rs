@@ -30,11 +30,12 @@ fn rules_block() -> String {
 
 /// 多媒体能力 section
 fn build_media_section(models_config: &ModelsConfig) -> String {
-    use crate::models_config::ModelCapability;
+    use crate::models_config::{ModelCapability, RoutingSlot};
 
     let mut hints = Vec::new();
     for cap in ModelCapability::media_capabilities() {
-        if let Some(resolved) = models_config.resolve_for_capability(*cap) {
+        let slot = RoutingSlot::from_capability(*cap);
+        if let Some(resolved) = models_config.resolve_slot(slot) {
             hints.push(format!(
                 "- {}：已配置（模型：{}）",
                 cap.display_name(),

@@ -16,10 +16,10 @@ impl TiangongState {
         }
 
         // 更新 routing 中的 chat 模型
-        self.store.provider.models_config.routing.insert(
-            crate::models_config::ModelCapability::Chat,
-            api_model.to_string(),
-        );
+        self.store
+            .provider
+            .models_config
+            .update_chat_model(api_model.to_string());
         let _ = self.store.provider.models_config.save();
 
         // 重新生成内部 model_config
@@ -57,8 +57,7 @@ impl TiangongState {
             self.store
                 .provider
                 .models_config
-                .routing
-                .insert(crate::models_config::ModelCapability::Chat, first.clone());
+                .update_chat_model(first.clone());
             let _ = self.store.provider.models_config.save();
             self.store.provider.model_config =
                 self.store.provider.models_config.to_chat_provider_config();

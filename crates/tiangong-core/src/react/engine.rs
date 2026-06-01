@@ -546,7 +546,7 @@ impl ReactEngine {
                 thinking,
                 reasoning_effort,
                 thinking_disabled,
-                include_media: false,
+                include_media: self.engine.chat_is_multimodal(),
             };
 
             let pending_msg_id = scru128::new().to_string();

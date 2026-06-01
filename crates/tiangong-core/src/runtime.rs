@@ -166,6 +166,10 @@ impl RuntimeEngine {
     pub fn has_multimodal_client(&self) -> bool {
         self.multimodal_client.is_some()
     }
+    /// 对话模型本身是否具备 multimodal 能力（multimodal 路由与 chat 路由指向同一模型）
+    pub fn chat_is_multimodal(&self) -> bool {
+        self.models_config.chat_is_multimodal()
+    }
     /// 获取 AgentConfig 引用
     pub fn agent_config(&self) -> &AgentConfig {
         &self.agent_config
@@ -1230,7 +1234,7 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<ToolSpec>, engine: &RuntimeE
         .unwrap_or_else(|| {
             engine
                 .models_config()
-                .resolve_for_capability(crate::models_config::ModelCapability::ImageGeneration)
+                .resolve_slot(crate::models_config::RoutingSlot::ImageGeneration)
                 .is_some()
         });
     let has_video_gen = engine
@@ -1239,7 +1243,7 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<ToolSpec>, engine: &RuntimeE
         .unwrap_or_else(|| {
             engine
                 .models_config()
-                .resolve_for_capability(crate::models_config::ModelCapability::VideoGeneration)
+                .resolve_slot(crate::models_config::RoutingSlot::VideoGeneration)
                 .is_some()
         });
     let has_tts = engine
@@ -1248,7 +1252,7 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<ToolSpec>, engine: &RuntimeE
         .unwrap_or_else(|| {
             engine
                 .models_config()
-                .resolve_for_capability(crate::models_config::ModelCapability::Tts)
+                .resolve_slot(crate::models_config::RoutingSlot::Tts)
                 .is_some()
         });
     let has_stt = engine
@@ -1257,12 +1261,14 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<ToolSpec>, engine: &RuntimeE
         .unwrap_or_else(|| {
             engine
                 .models_config()
-                .resolve_for_capability(crate::models_config::ModelCapability::Stt)
+                .resolve_slot(crate::models_config::RoutingSlot::Stt)
                 .is_some()
         });
     let has_multimodal = engine.has_multimodal_client();
+    // 当对话模型本身就是 multimodal 时，图片直接随消息发送，不需要工具
+    let chat_is_multimodal = engine.chat_is_multimodal();
 
-    if has_multimodal {
+    if has_multimodal && !chat_is_multimodal {
         tools.push(ToolSpec {
             name: "analyze_attachment".to_string(),
             description: "按需调用多模态模型解析用户上传的图片或文件附件。只有当用户问题确实需要查看附件内容时才调用；普通文本对话不要调用。".to_string(),
