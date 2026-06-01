@@ -8,14 +8,13 @@ import { BrowserPanel } from '@/components/BrowserPanel';
 import { ensureDesktopNotificationPermission } from '@/utils/desktopNotification';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 
-const BROWSER_MIN_WIDTH = 320;
-const BROWSER_DEFAULT_WIDTH = 500;
-const BROWSER_MAX_WIDTH_RATIO = 0.65;
+const CHAT_MIN_WIDTH = 400;
+const CHAT_MAX_WIDTH = 800;
 
 export function MainApp() {
   const { loadSessions, updateFromSnapshot } = useStore();
   const [showBrowser, setShowBrowser] = useState(false);
-  const [browserWidth, setBrowserWidth] = useState(BROWSER_DEFAULT_WIDTH);
+  const [chatWidth, setChatWidth] = useState(CHAT_MAX_WIDTH);
   const draggingRef = useRef(false);
   const startXRef = useRef(0);
   const startWidthRef = useRef(0);
@@ -93,15 +92,13 @@ export function MainApp() {
     e.preventDefault();
     draggingRef.current = true;
     startXRef.current = e.clientX;
-    startWidthRef.current = browserWidth;
+    startWidthRef.current = chatWidth;
 
     const onMouseMove = (ev: MouseEvent) => {
       if (!draggingRef.current) return;
-      const delta = startXRef.current - ev.clientX;
-      const windowWidth = window.innerWidth;
-      const maxWidth = windowWidth * BROWSER_MAX_WIDTH_RATIO;
-      const next = Math.min(maxWidth, Math.max(BROWSER_MIN_WIDTH, startWidthRef.current + delta));
-      setBrowserWidth(next);
+      const delta = ev.clientX - startXRef.current;
+      const next = Math.min(CHAT_MAX_WIDTH, Math.max(CHAT_MIN_WIDTH, startWidthRef.current + delta));
+      setChatWidth(next);
     };
 
     const onMouseUp = () => {
@@ -116,7 +113,7 @@ export function MainApp() {
     document.body.style.userSelect = 'none';
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
-  }, [browserWidth]);
+  }, [chatWidth]);
 
   return (
     <SidebarProvider>
@@ -135,8 +132,8 @@ export function MainApp() {
           <main className="flex flex-1 flex-col min-w-0 bg-background">
             <div className="flex flex-1 min-h-0">
               <div
-                className="flex flex-1 flex-col min-w-0"
-                style={showBrowser ? { maxWidth: `calc(100% - ${browserWidth}px - 4px)` } : undefined}
+                className={`flex flex-col min-w-0 ${showBrowser ? 'shrink-0' : 'flex-1'}`}
+                style={showBrowser ? { width: chatWidth } : undefined}
               >
                 {/* 消息列表 */}
                 <div className="flex-1 overflow-hidden">
@@ -155,7 +152,7 @@ export function MainApp() {
                     onMouseDown={handleDragStart}
                     className="w-1 shrink-0 cursor-col-resize hover:bg-primary/30 active:bg-primary/50 transition-colors"
                   />
-                  <div style={{ width: browserWidth }} className="shrink-0">
+                  <div className="flex-1 min-w-0">
                     <BrowserPanel onClose={() => setShowBrowser(false)} />
                   </div>
                 </>
