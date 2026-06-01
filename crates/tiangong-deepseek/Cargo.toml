@@ -1,0 +1,13 @@
+[package]
+name = "tiangong-deepseek"
+version.workspace = true
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+reqwest = { workspace = true, default-features = false, features = ["json", "rustls", "stream"] }
+eventsource-stream = { workspace = true }
+futures-util = { workspace = true }

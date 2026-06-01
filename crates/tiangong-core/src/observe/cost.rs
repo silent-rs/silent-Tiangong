@@ -191,11 +191,13 @@ mod tests {
             prompt_tokens: 100,
             completion_tokens: 50,
             total_tokens: 150,
+            ..Default::default()
         });
         summary.add_llm_usage(&TokenUsage {
             prompt_tokens: 200,
             completion_tokens: 100,
             total_tokens: 300,
+            ..Default::default()
         });
         summary.add_tool_call();
 

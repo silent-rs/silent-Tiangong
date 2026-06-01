@@ -9521,6 +9521,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-deepseek"
+version = "0.4.0"
+dependencies = [
+ "eventsource-stream",
+ "futures-util",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "tiangong-entry"
 version = "0.5.0"
 dependencies = [
@@ -9549,6 +9561,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tiangong-anthropic",
+ "tiangong-deepseek",
  "tiangong-types",
  "tokio",
  "tracing",
