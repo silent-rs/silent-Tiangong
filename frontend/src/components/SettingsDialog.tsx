@@ -666,7 +666,7 @@ function MemoryModelSelectSection({
 // ---------------------------------------------------------------------------
 
 const DEFAULT_PROVIDERS: Record<string, ProviderConfigView> = {
-  'DeepSeek': { base_url: 'https://api.deepseek.com', api_key: '', timeout_ms: 300000, protocol: 'openai_compatible' },
+  'DeepSeek': { base_url: 'https://api.deepseek.com', api_key: '', timeout_ms: 300000, protocol: 'deepseek' },
   '智谱': { base_url: 'https://open.bigmodel.cn/api/paas/v4', api_key: '', timeout_ms: 300000, protocol: 'openai_compatible' },
 };
 
@@ -677,10 +677,6 @@ interface UrlPreset {
 }
 
 const DEFAULT_PROVIDER_URL_PRESETS: Record<string, UrlPreset[]> = {
-  'DeepSeek': [
-    { label: 'OpenAI 兼容', url: 'https://api.deepseek.com', protocol: 'openai_compatible' },
-    { label: 'Anthropic 兼容', url: 'https://api.deepseek.com/anthropic', protocol: 'anthropic' },
-  ],
   '智谱': [
     { label: 'OpenAI 兼容（通用）', url: 'https://open.bigmodel.cn/api/paas/v4', protocol: 'openai_compatible' },
     { label: 'OpenAI 兼容（Coding 套餐）', url: 'https://open.bigmodel.cn/api/coding/paas/v4', protocol: 'openai_compatible' },
@@ -924,6 +920,37 @@ function ProviderModelsView({
     try { setTtsVoices(await api.listTtsVoices()); } catch { setTtsVoices([]); } finally { setIsFetchingVoices(false); }
   };
 
+  // DeepSeek 自动获取模型：选中 DeepSeek 且有 api-key 时自动拉取并填充
+  useEffect(() => {
+    if (activeProvider !== 'DeepSeek' || !selectedConfig?.api_key?.trim()) return;
+    if (isFetchingModels) return;
+
+    let cancelled = false;
+    const autoFetch = async () => {
+      const provider = config.providers[activeProvider];
+      if (!provider?.base_url || !provider?.api_key) return;
+      setIsFetchingModels(true);
+      try {
+        const models = await api.fetchProviderModels(provider.base_url, provider.api_key, provider.timeout_ms, provider.protocol);
+        if (cancelled || models.length === 0) return;
+        const next = { ...config };
+        for (const modelId of models) {
+          if (!next.models[modelId]) {
+            next.models = { ...next.models, [modelId]: { provider: activeProvider, model: modelId, capabilities: ['chat'], options: {} } };
+          }
+        }
+        onChange(next);
+      } catch {
+        // 静默失败，不影响 UI
+      } finally {
+        if (!cancelled) setIsFetchingModels(false);
+      }
+    };
+    autoFetch();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeProvider, selectedConfig?.api_key]);
+
   const probeEmbeddingDimension = async () => {
     const provider = config.providers[modelDraft.provider];
     if (!provider?.base_url || !modelDraft.model.trim()) {
@@ -1016,6 +1043,7 @@ function ProviderModelsView({
                   </div>
                   <p className="text-xs text-muted-foreground mt-1">支持 {'${ENV_VAR}'} 引用环境变量</p>
                 </div>
+                {activeProvider !== 'DeepSeek' && (
                 <div>
                   <Label className="text-xs">Base URL</Label>
                   {(() => {
@@ -1070,7 +1098,9 @@ function ProviderModelsView({
                     );
                   })()}
                 </div>
+                )}
                 <div className="flex gap-3">
+                  {activeProvider !== 'DeepSeek' && (
                   <div className="flex-1">
                     <Label className="text-xs">协议</Label>
                     <Select
@@ -1088,6 +1118,7 @@ function ProviderModelsView({
                       </SelectContent>
                     </Select>
                   </div>
+                  )}
                   <div className="w-32">
                     <Label className="text-xs">超时 (ms)</Label>
                     <Input
