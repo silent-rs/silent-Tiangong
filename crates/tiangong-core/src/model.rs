@@ -14,6 +14,7 @@ use tiangong_llm::message::{
 };
 use tiangong_llm::provider::LlmProvider;
 use tiangong_llm::providers::anthropic::{AnthropicConfig, AnthropicProvider};
+use tiangong_llm::providers::deepseek::{DeepSeekConfig, DeepSeekProvider};
 use tiangong_llm::providers::openai::{OpenAiCompatibleConfig, OpenAiCompatibleProvider};
 use tiangong_llm::request::ProviderRequest;
 use tiangong_llm::response::{ProviderResponse, StopReason};
@@ -244,6 +245,13 @@ impl SingleProviderClient {
                 .await
                 .map(|items| items.into_iter().map(|item| item.id).collect::<Vec<_>>())
                 .map_err(map_llm_error)?
+        } else if cfg.api_protocol == ProviderProtocol::DeepSeek {
+            let provider = build_deepseek_provider_from_config(cfg, timeout_ms, None)?;
+            provider
+                .list_models()
+                .await
+                .map(|items| items.into_iter().map(|item| item.id).collect::<Vec<_>>())
+                .map_err(map_llm_error)?
         } else {
             let provider = build_openai_provider_from_config(cfg, timeout_ms, None)?;
             provider
@@ -266,6 +274,20 @@ impl SingleProviderClient {
         let timeout_ms = parse_timeout_ms(&cfg.api_timeout_ms)?;
         if cfg.api_protocol == ProviderProtocol::Anthropic {
             let provider = build_anthropic_provider_from_config(cfg, timeout_ms, None)?;
+            let runtime = TokioRuntimeBuilder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("初始化异步运行时失败")?;
+            let mut models = runtime
+                .block_on(provider.list_models())
+                .map(|items| items.into_iter().map(|item| item.id).collect::<Vec<_>>())
+                .map_err(map_llm_error)?;
+            models.sort();
+            models.dedup();
+            return Ok(models);
+        }
+        if cfg.api_protocol == ProviderProtocol::DeepSeek {
+            let provider = build_deepseek_provider_from_config(cfg, timeout_ms, None)?;
             let runtime = TokioRuntimeBuilder::new_current_thread()
                 .enable_all()
                 .build()
@@ -308,6 +330,20 @@ impl SingleProviderClient {
             ProviderProtocol::OpenAiCompatible => Ok(ProviderDispatch::OpenAi(Box::new(
                 build_openai_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())?,
             ))),
+            ProviderProtocol::DeepSeek => {
+                let mut config = DeepSeekConfig::new(self.cfg.api_auth_token.trim().to_string());
+                config.base_url = if self.cfg.api_base_url.trim().is_empty() {
+                    None
+                } else {
+                    Some(self.cfg.api_base_url.clone())
+                };
+                config.timeout = Duration::from_millis(timeout_ms);
+                config.max_retries = MAX_RETRIES;
+                config.retry_notifier = self.on_retry.clone();
+                Ok(ProviderDispatch::DeepSeek(Box::new(
+                    DeepSeekProvider::from_config(config)?,
+                )))
+            }
         }
     }
 
@@ -929,6 +965,27 @@ fn build_openai_provider_from_config(
     config.max_retries = MAX_RETRIES;
     config.retry_notifier = on_retry;
     Ok(OpenAiCompatibleProvider::new(config))
+}
+
+fn build_deepseek_provider_from_config(
+    cfg: &ModelProviderConfig,
+    timeout_ms: u64,
+    on_retry: Option<OnRetryCallback>,
+) -> Result<DeepSeekProvider> {
+    let token = cfg.api_auth_token.trim();
+    if token.is_empty() {
+        return Err(anyhow!("API_AUTH_TOKEN 不能为空，无法发起 DeepSeek 请求"));
+    }
+    let mut config = DeepSeekConfig::new(token.to_string());
+    config.base_url = if cfg.api_base_url.trim().is_empty() {
+        None
+    } else {
+        Some(cfg.api_base_url.clone())
+    };
+    config.timeout = Duration::from_millis(timeout_ms);
+    config.max_retries = MAX_RETRIES;
+    config.retry_notifier = on_retry;
+    DeepSeekProvider::from_config(config).map_err(|err| anyhow!("{err}"))
 }
 
 fn build_provider_request(
@@ -1618,6 +1675,7 @@ async fn consume_provider_stream_events_async(
 enum ProviderDispatch {
     Anthropic(Box<AnthropicProvider>),
     OpenAi(Box<OpenAiCompatibleProvider>),
+    DeepSeek(Box<DeepSeekProvider>),
 }
 
 impl ProviderDispatch {
@@ -1628,6 +1686,7 @@ impl ProviderDispatch {
         match self {
             ProviderDispatch::Anthropic(provider) => provider.stream(request).await,
             ProviderDispatch::OpenAi(provider) => provider.stream(request).await,
+            ProviderDispatch::DeepSeek(provider) => provider.stream(request).await,
         }
     }
 }

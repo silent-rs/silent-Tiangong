@@ -37,11 +37,15 @@ fn token_usage_accumulate() {
         prompt_tokens: 100,
         completion_tokens: 50,
         total_tokens: 150,
+        prompt_cache_hit_tokens: None,
+        prompt_cache_miss_tokens: None,
     };
     let b = TokenUsage {
         prompt_tokens: 200,
         completion_tokens: 100,
         total_tokens: 300,
+        prompt_cache_hit_tokens: None,
+        prompt_cache_miss_tokens: None,
     };
     a.accumulate(&b);
     assert_eq!(a.total_tokens, 450);

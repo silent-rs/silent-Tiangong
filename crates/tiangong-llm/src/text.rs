@@ -10,6 +10,7 @@ use crate::message::{ChatMessage, MessageContent, MessageRole};
 use crate::model::ProviderProtocol;
 use crate::provider::LlmProvider;
 use crate::providers::anthropic::{AnthropicConfig, AnthropicProvider};
+use crate::providers::deepseek::{DeepSeekConfig, DeepSeekProvider};
 use crate::providers::openai::{OpenAiCompatibleConfig, OpenAiCompatibleProvider};
 use crate::request::ProviderRequest;
 
@@ -104,6 +105,15 @@ fn build_provider(config: &LlmEndpointConfig) -> Result<Box<dyn LlmProvider>, Ll
             provider_config.timeout = config.timeout;
             provider_config.max_retries = config.max_retries;
             Ok(Box::new(AnthropicProvider::from_config(provider_config)?))
+        }
+        ProviderProtocol::DeepSeek => {
+            let mut provider_config = DeepSeekConfig::new(config.api_key.clone());
+            if !config.base_url.trim().is_empty() {
+                provider_config.base_url = Some(config.base_url.clone());
+            }
+            provider_config.timeout = config.timeout;
+            provider_config.max_retries = config.max_retries;
+            Ok(Box::new(DeepSeekProvider::from_config(provider_config)?))
         }
     }
 }

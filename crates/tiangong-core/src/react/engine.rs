@@ -46,7 +46,8 @@ impl CancelStrategy {
             tiangong_llm::model::ProviderProtocol::Anthropic => {
                 CancelStrategy::AbortWithStreamingUsage
             }
-            tiangong_llm::model::ProviderProtocol::OpenAiCompatible => CancelStrategy::WaitForUsage,
+            tiangong_llm::model::ProviderProtocol::OpenAiCompatible
+            | tiangong_llm::model::ProviderProtocol::DeepSeek => CancelStrategy::WaitForUsage,
         }
     }
 }
