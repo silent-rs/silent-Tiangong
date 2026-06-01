@@ -723,9 +723,9 @@ fn build_engine_from_config(
     use crate::model::OnRetryCallback;
     use crate::models_config::ModelsConfig;
 
-    // 从 LlmConfig 构建兼容的 ModelsConfig（供 system prompt 构建使用）
     let models_config = ModelsConfig::from_llm_config(&config.llm);
     let model_config = models_config.to_chat_provider_config();
+    let chat_is_multimodal = models_config.chat_is_multimodal();
 
     let agent_config = AgentConfig {
         mcp: config.mcp.clone(),
@@ -783,6 +783,14 @@ fn build_engine_from_config(
         engine = engine.with_multimodal_client(
             SingleProviderClient::new(multimodal_config).with_on_retry(on_retry),
         );
+    }
+
+    // 当 chat 模型自带 multimodal 能力但没有独立 multimodal 端点时，
+    // 用 chat client 充当 multimodal_client（用于 ensure_multimodal_enabled 等检查）
+    let needs_fallback_multimodal = !engine.has_multimodal_client() && chat_is_multimodal;
+    if needs_fallback_multimodal {
+        let chat_client = engine.client().clone();
+        engine = engine.with_multimodal_client(chat_client);
     }
 
     engine

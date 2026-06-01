@@ -13,7 +13,6 @@ export function SettingsButton() {
   const [showApiKey, setShowApiKey] = useState(false);
   const [config, setConfig] = useState<ModelsConfigView>({
     providers: {},
-    models: {},
     routing: {},
   });
   const [originalConfig, setOriginalConfig] = useState<ModelsConfigView>({ ...config });

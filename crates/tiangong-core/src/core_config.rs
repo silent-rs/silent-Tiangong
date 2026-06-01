@@ -16,7 +16,7 @@ use serde_json::Value;
 use crate::agent_config::{McpConfig, McpServerConfig, SkillsConfig};
 use crate::mcp::McpToolMeta;
 use crate::model::ProviderProtocol;
-use crate::models_config::{ModelCapability, ModelsConfig};
+use crate::models_config::ModelsConfig;
 use crate::permission::TrustMode;
 
 const DEFAULT_CONTEXT_LIMIT: usize = 200_000;
@@ -94,8 +94,10 @@ pub struct LlmConfig {
 impl LlmConfig {
     /// 从 ModelsConfig 解析出 Core 运行所需的扁平端点配置
     pub fn from_models_config(models: &ModelsConfig) -> Self {
-        let resolve = |cap: ModelCapability| -> Option<ModelEndpoint> {
-            let resolved = models.resolve_for_capability(cap)?;
+        use crate::models_config::RoutingSlot;
+
+        let resolve = |slot: RoutingSlot| -> Option<ModelEndpoint> {
+            let resolved = models.resolve_slot(slot)?;
             Some(ModelEndpoint {
                 base_url: resolved.base_url,
                 api_key: resolved.api_key,
@@ -107,15 +109,15 @@ impl LlmConfig {
         };
 
         Self {
-            chat: resolve(ModelCapability::Chat).unwrap_or_default(),
-            lite: resolve(ModelCapability::Lite),
-            image_generation: resolve(ModelCapability::ImageGeneration),
-            tts: resolve(ModelCapability::Tts),
-            stt: resolve(ModelCapability::Stt),
-            video_generation: resolve(ModelCapability::VideoGeneration),
-            multimodal: resolve(ModelCapability::Multimodal),
-            embedding: resolve(ModelCapability::Embedding),
-            rerank: resolve(ModelCapability::Rerank),
+            chat: resolve(RoutingSlot::Chat).unwrap_or_default(),
+            lite: resolve(RoutingSlot::Lite),
+            image_generation: resolve(RoutingSlot::ImageGeneration),
+            tts: resolve(RoutingSlot::Tts),
+            stt: resolve(RoutingSlot::Stt),
+            video_generation: resolve(RoutingSlot::VideoGeneration),
+            multimodal: resolve(RoutingSlot::Multimodal),
+            embedding: resolve(RoutingSlot::Embedding),
+            rerank: resolve(RoutingSlot::Rerank),
         }
     }
 
@@ -359,6 +361,7 @@ pub fn resolve_context_limit(model_name: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models_config::ModelCapability;
 
     #[test]
     fn provider_snapshot_and_generation() {
@@ -424,6 +427,8 @@ mod tests {
 
     #[test]
     fn llm_config_from_models_config_preserves_protocol() {
+        use crate::models_config::RoutingSlot;
+
         let mut models = ModelsConfig::default();
         models.providers.insert(
             "anthropic".to_string(),
@@ -434,8 +439,8 @@ mod tests {
                 protocol: ProviderProtocol::Anthropic,
             },
         );
-        models.models.insert(
-            "chat-model".to_string(),
+        models.routing.insert(
+            RoutingSlot::Chat,
             crate::models_config::ModelEntry {
                 provider: "anthropic".into(),
                 model: "claude-sonnet-4".into(),
@@ -443,9 +448,6 @@ mod tests {
                 options: serde_json::json!({}),
             },
         );
-        models
-            .routing
-            .insert(ModelCapability::Chat, "chat-model".into());
 
         let llm = LlmConfig::from_models_config(&models);
         assert_eq!(llm.chat.protocol, ProviderProtocol::Anthropic);

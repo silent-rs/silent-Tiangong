@@ -12,13 +12,11 @@ use crate::model::{ModelProviderConfig, ProviderProtocol};
 // 核心类型
 // ---------------------------------------------------------------------------
 
-/// 模型能力枚举
+/// 模型能力枚举 — 描述模型具备什么能力
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelCapability {
     Chat,
-    /// 轻量级文本模型（标题生成、意图分类等简单任务）
-    Lite,
     Multimodal,
     ImageGeneration,
     VideoGeneration,
@@ -30,12 +28,114 @@ pub enum ModelCapability {
     Rerank,
 }
 
+/// 路由槽位枚举 — 描述哪个模型负责什么任务
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingSlot {
+    Chat,
+    Lite,
+    Multimodal,
+    ImageGeneration,
+    VideoGeneration,
+    Stt,
+    Tts,
+    Embedding,
+    Rerank,
+}
+
+impl RoutingSlot {
+    pub fn key(&self) -> &'static str {
+        match self {
+            RoutingSlot::Chat => "chat",
+            RoutingSlot::Lite => "lite",
+            RoutingSlot::Multimodal => "multimodal",
+            RoutingSlot::ImageGeneration => "image_generation",
+            RoutingSlot::VideoGeneration => "video_generation",
+            RoutingSlot::Stt => "stt",
+            RoutingSlot::Tts => "tts",
+            RoutingSlot::Embedding => "embedding",
+            RoutingSlot::Rerank => "rerank",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "chat" => Some(RoutingSlot::Chat),
+            "lite" => Some(RoutingSlot::Lite),
+            "multimodal" => Some(RoutingSlot::Multimodal),
+            "image_generation" => Some(RoutingSlot::ImageGeneration),
+            "video_generation" => Some(RoutingSlot::VideoGeneration),
+            "stt" => Some(RoutingSlot::Stt),
+            "tts" => Some(RoutingSlot::Tts),
+            "embedding" => Some(RoutingSlot::Embedding),
+            "rerank" => Some(RoutingSlot::Rerank),
+            _ => None,
+        }
+    }
+
+    pub fn all() -> &'static [RoutingSlot] {
+        &[
+            RoutingSlot::Chat,
+            RoutingSlot::Lite,
+            RoutingSlot::Multimodal,
+            RoutingSlot::ImageGeneration,
+            RoutingSlot::VideoGeneration,
+            RoutingSlot::Stt,
+            RoutingSlot::Tts,
+            RoutingSlot::Embedding,
+            RoutingSlot::Rerank,
+        ]
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            RoutingSlot::Chat => "对话",
+            RoutingSlot::Lite => "轻量文本",
+            RoutingSlot::Multimodal => "多模态",
+            RoutingSlot::ImageGeneration => "图片生成",
+            RoutingSlot::VideoGeneration => "视频生成",
+            RoutingSlot::Stt => "语音识别",
+            RoutingSlot::Tts => "语音合成",
+            RoutingSlot::Embedding => "向量嵌入",
+            RoutingSlot::Rerank => "结果重排",
+        }
+    }
+
+    /// 路由槽位对应的模型能力
+    pub fn capability(&self) -> Option<ModelCapability> {
+        match self {
+            RoutingSlot::Chat => Some(ModelCapability::Chat),
+            RoutingSlot::Lite => None, // Lite 是路由槽位，不对应模型能力
+            RoutingSlot::Multimodal => Some(ModelCapability::Multimodal),
+            RoutingSlot::ImageGeneration => Some(ModelCapability::ImageGeneration),
+            RoutingSlot::VideoGeneration => Some(ModelCapability::VideoGeneration),
+            RoutingSlot::Stt => Some(ModelCapability::Stt),
+            RoutingSlot::Tts => Some(ModelCapability::Tts),
+            RoutingSlot::Embedding => Some(ModelCapability::Embedding),
+            RoutingSlot::Rerank => Some(ModelCapability::Rerank),
+        }
+    }
+
+    /// 从模型能力获取对应的路由槽位
+    pub fn from_capability(cap: ModelCapability) -> Self {
+        match cap {
+            ModelCapability::Chat => RoutingSlot::Chat,
+            ModelCapability::Multimodal => RoutingSlot::Multimodal,
+            ModelCapability::ImageGeneration => RoutingSlot::ImageGeneration,
+            ModelCapability::VideoGeneration => RoutingSlot::VideoGeneration,
+            ModelCapability::Stt => RoutingSlot::Stt,
+            ModelCapability::Tts => RoutingSlot::Tts,
+            ModelCapability::Embedding => RoutingSlot::Embedding,
+            ModelCapability::Rerank => RoutingSlot::Rerank,
+        }
+    }
+}
+
 impl ModelCapability {
     /// 配置键（snake_case）
     pub fn key(&self) -> &'static str {
         match self {
             ModelCapability::Chat => "chat",
-            ModelCapability::Lite => "lite",
             ModelCapability::Multimodal => "multimodal",
             ModelCapability::ImageGeneration => "image_generation",
             ModelCapability::VideoGeneration => "video_generation",
@@ -50,7 +150,6 @@ impl ModelCapability {
     pub fn from_key(key: &str) -> Option<Self> {
         match key {
             "chat" => Some(ModelCapability::Chat),
-            "lite" => Some(ModelCapability::Lite),
             "multimodal" => Some(ModelCapability::Multimodal),
             "image_generation" => Some(ModelCapability::ImageGeneration),
             "video_generation" => Some(ModelCapability::VideoGeneration),
@@ -66,7 +165,6 @@ impl ModelCapability {
     pub fn all() -> &'static [ModelCapability] {
         &[
             ModelCapability::Chat,
-            ModelCapability::Lite,
             ModelCapability::Multimodal,
             ModelCapability::ImageGeneration,
             ModelCapability::VideoGeneration,
@@ -81,7 +179,6 @@ impl ModelCapability {
     pub fn display_name(&self) -> &'static str {
         match self {
             ModelCapability::Chat => "对话",
-            ModelCapability::Lite => "轻量文本",
             ModelCapability::Multimodal => "多模态",
             ModelCapability::ImageGeneration => "图片生成",
             ModelCapability::VideoGeneration => "视频生成",
@@ -96,7 +193,6 @@ impl ModelCapability {
     pub fn intent_label(&self) -> &'static str {
         match self {
             ModelCapability::Chat => "SIMPLE",
-            ModelCapability::Lite => "LITE",
             ModelCapability::Multimodal => "MULTIMODAL",
             ModelCapability::ImageGeneration => "IMAGE",
             ModelCapability::VideoGeneration => "VIDEO",
@@ -113,7 +209,6 @@ impl ModelCapability {
             ModelCapability::Chat => {
                 "简单对话（问候、闲聊、知识问答、翻译、解释概念等不需要执行工具或命令的请求）"
             }
-            ModelCapability::Lite => "轻量文本任务（标题生成、意图分类等内部任务，不参与意图路由）",
             ModelCapability::Multimodal => "多模态请求（需要理解图片、音频等多种输入形式）",
             ModelCapability::ImageGeneration => "图片生成请求（用户要求生成、绘制、创作图片）",
             ModelCapability::VideoGeneration => "视频生成请求（用户要求生成、制作视频）",
@@ -164,19 +259,86 @@ pub struct ModelEntry {
     pub options: Value,
 }
 
+impl Default for ModelEntry {
+    fn default() -> Self {
+        Self {
+            provider: String::new(),
+            model: String::new(),
+            capabilities: vec![],
+            options: default_options(),
+        }
+    }
+}
+
 fn default_options() -> Value {
     Value::Object(serde_json::Map::new())
 }
 
-/// 三层模型配置：Provider + Model + Routing
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// 两层模型配置：Provider + Routing
+///
+/// routing 直接存储 ModelEntry，不再需要中间的 models 映射层。
+/// 支持向后兼容：旧格式 routing 值为字符串（引用 models 中的 key），
+/// 新格式 routing 值为 ModelEntry 对象。
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct ModelsConfig {
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
     #[serde(default)]
-    pub models: HashMap<String, ModelEntry>,
-    #[serde(default)]
-    pub routing: HashMap<ModelCapability, String>,
+    pub routing: HashMap<RoutingSlot, ModelEntry>,
+}
+
+/// 向后兼容的反序列化：支持旧格式（routing 值为字符串引用 models）和新格式（routing 值为 ModelEntry）
+impl<'de> serde::Deserialize<'de> for ModelsConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default)]
+            providers: HashMap<String, ProviderConfig>,
+            #[serde(default)]
+            models: HashMap<String, ModelEntry>,
+            #[serde(default)]
+            routing: HashMap<RoutingSlot, RawRoutingValue>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum RawRoutingValue {
+            Key(String),
+            Entry(ModelEntry),
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+
+        let routing: HashMap<RoutingSlot, ModelEntry> = raw
+            .routing
+            .into_iter()
+            .map(|(slot, val)| {
+                let entry = match val {
+                    RawRoutingValue::Key(key) => {
+                        raw.models.get(&key).cloned().unwrap_or_else(|| {
+                            tracing::warn!("路由引用了不存在的模型：{key}");
+                            ModelEntry {
+                                provider: String::new(),
+                                model: key.clone(),
+                                capabilities: vec![],
+                                options: default_options(),
+                            }
+                        })
+                    }
+                    RawRoutingValue::Entry(entry) => entry,
+                };
+                (slot, entry)
+            })
+            .collect();
+
+        Ok(ModelsConfig {
+            providers: raw.providers,
+            routing,
+        })
+    }
 }
 
 /// 解析后的完整模型配置（Provider + Model 合并）
@@ -221,8 +383,26 @@ fn models_config_path() -> PathBuf {
 
 impl ModelsConfig {
     /// 检查指定能力是否已配置可用
+    /// 对于 Multimodal，除了检查独立路由外，也检查 chat 模型是否自带此能力
     pub fn has_capability(&self, capability: ModelCapability) -> bool {
-        self.resolve_for_capability(capability).is_some()
+        let slot = RoutingSlot::from_capability(capability);
+        if self.routing.contains_key(&slot) {
+            return true;
+        }
+        // chat 模型自带 multimodal 能力时，视为多模态可用
+        if capability == ModelCapability::Multimodal && self.chat_is_multimodal() {
+            return true;
+        }
+        false
+    }
+
+    /// 判断 chat 路由指向的模型是否应直接处理图片（跳过 analyze_attachment 工具）
+    /// 以模型定义中声明的 capabilities 为准
+    pub fn chat_is_multimodal(&self) -> bool {
+        let Some(entry) = self.routing.get(&RoutingSlot::Chat) else {
+            return false;
+        };
+        entry.capabilities.contains(&ModelCapability::Multimodal)
     }
 
     /// 返回当前已配置可用的能力列表
@@ -261,14 +441,10 @@ impl ModelsConfig {
     }
 
     /// 从旧版 ModelProviderConfig 迁移
-    ///
-    /// 将旧的单 provider 配置转为一个 "default" provider + 一个 chat model + routing
     pub fn from_legacy(legacy: &ModelProviderConfig) -> Self {
         let mut providers = HashMap::new();
-        let mut models = HashMap::new();
         let mut routing = HashMap::new();
 
-        // 构建 default provider
         let provider = ProviderConfig {
             base_url: legacy.api_base_url.clone(),
             api_key: legacy.api_auth_token.clone(),
@@ -277,68 +453,90 @@ impl ModelsConfig {
         };
         providers.insert("default".to_string(), provider);
 
-        // 构建 chat model
         let model_name = if legacy.api_model.is_empty() {
             "default-chat".to_string()
         } else {
             legacy.api_model.clone()
         };
 
-        let model_entry = ModelEntry {
-            provider: "default".to_string(),
-            model: legacy.api_model.clone(),
-            capabilities: vec![ModelCapability::Chat],
-            options: default_options(),
-        };
-        models.insert(model_name.clone(), model_entry);
-
-        // 如果有 lite model，也添加
-        let lite = legacy.lite_model();
-        if !lite.is_empty() && lite != legacy.api_model {
-            let lite_entry = ModelEntry {
+        routing.insert(
+            RoutingSlot::Chat,
+            ModelEntry {
                 provider: "default".to_string(),
-                model: lite.to_string(),
+                model: model_name,
                 capabilities: vec![ModelCapability::Chat],
                 options: default_options(),
-            };
-            models.insert(lite.to_string(), lite_entry);
+            },
+        );
+
+        let lite = legacy.lite_model();
+        if !lite.is_empty() && lite != legacy.api_model {
+            routing.insert(
+                RoutingSlot::Lite,
+                ModelEntry {
+                    provider: "default".to_string(),
+                    model: lite.to_string(),
+                    capabilities: vec![ModelCapability::Chat],
+                    options: default_options(),
+                },
+            );
         }
 
-        // 设置 routing
-        routing.insert(ModelCapability::Chat, model_name);
-
-        Self {
-            providers,
-            models,
-            routing,
-        }
+        Self { providers, routing }
     }
 
     /// 从 LlmConfig 构建兼容的 ModelsConfig
     ///
-    /// 将扁平的 LlmConfig 端点映射为 Provider + Model + Routing 三层结构，
-    /// 使 system prompt 构建等代码无需修改。
+    /// 将扁平的 LlmConfig 端点映射为 Provider + Routing 两层结构。
+    /// 当多个能力使用相同端点时，合并 capabilities 到已有的路由条目。
     pub fn from_llm_config(llm: &crate::core_config::LlmConfig) -> Self {
-        let mut providers = HashMap::new();
-        let mut models = HashMap::new();
-        let mut routing = HashMap::new();
+        let mut providers: HashMap<String, ProviderConfig> = HashMap::new();
+        let mut routing: HashMap<RoutingSlot, ModelEntry> = HashMap::new();
 
-        // 辅助：注册一个端点为 provider + model + routing
-        let mut register =
-            |name: &str, endpoint: &crate::core_config::ModelEndpoint, cap: ModelCapability| {
-                let provider_key = format!("{name}-provider");
-                providers.insert(
-                    provider_key.clone(),
-                    ProviderConfig {
-                        base_url: endpoint.base_url.clone(),
-                        api_key: endpoint.api_key.clone(),
-                        timeout_ms: endpoint.timeout_ms,
-                        protocol: endpoint.protocol,
+        // 跟踪已注册的端点签名，用于合并相同端点的能力
+        let mut seen: HashMap<(String, String), RoutingSlot> = HashMap::new();
+
+        let mut register = |name: &str,
+                            endpoint: &crate::core_config::ModelEndpoint,
+                            slot: RoutingSlot,
+                            cap: ModelCapability| {
+            let provider_key = format!("{name}-provider");
+            providers.insert(
+                provider_key.clone(),
+                ProviderConfig {
+                    base_url: endpoint.base_url.clone(),
+                    api_key: endpoint.api_key.clone(),
+                    timeout_ms: endpoint.timeout_ms,
+                    protocol: endpoint.protocol,
+                },
+            );
+
+            let sig = (endpoint.base_url.clone(), endpoint.model.clone());
+
+            if let Some(&first_slot) = seen.get(&sig) {
+                // 相同端点已注册 — 合并能力到已有条目
+                if let Some(entry) = routing.get_mut(&first_slot)
+                    && !entry.capabilities.contains(&cap)
+                {
+                    entry.capabilities.push(cap);
+                }
+                // 为当前槽位创建带完整能力的条目
+                let merged_caps = routing
+                    .get(&first_slot)
+                    .map(|e| e.capabilities.clone())
+                    .unwrap_or_default();
+                routing.insert(
+                    slot,
+                    ModelEntry {
+                        provider: provider_key,
+                        model: endpoint.model.clone(),
+                        capabilities: merged_caps,
+                        options: endpoint.options.clone(),
                     },
                 );
-                let model_key = format!("{name}-model");
-                models.insert(
-                    model_key.clone(),
+            } else {
+                routing.insert(
+                    slot,
                     ModelEntry {
                         provider: provider_key,
                         model: endpoint.model.clone(),
@@ -346,40 +544,57 @@ impl ModelsConfig {
                         options: endpoint.options.clone(),
                     },
                 );
-                routing.insert(cap, model_key);
-            };
+                seen.insert(sig, slot);
+            }
+        };
 
         // Chat（必须）
-        register("chat", &llm.chat, ModelCapability::Chat);
+        register("chat", &llm.chat, RoutingSlot::Chat, ModelCapability::Chat);
 
         // 可选能力
         if let Some(ref ep) = llm.image_generation {
-            register("image", ep, ModelCapability::ImageGeneration);
+            register(
+                "image",
+                ep,
+                RoutingSlot::ImageGeneration,
+                ModelCapability::ImageGeneration,
+            );
         }
         if let Some(ref ep) = llm.tts {
-            register("tts", ep, ModelCapability::Tts);
+            register("tts", ep, RoutingSlot::Tts, ModelCapability::Tts);
         }
         if let Some(ref ep) = llm.stt {
-            register("stt", ep, ModelCapability::Stt);
+            register("stt", ep, RoutingSlot::Stt, ModelCapability::Stt);
         }
         if let Some(ref ep) = llm.video_generation {
-            register("video", ep, ModelCapability::VideoGeneration);
+            register(
+                "video",
+                ep,
+                RoutingSlot::VideoGeneration,
+                ModelCapability::VideoGeneration,
+            );
         }
         if let Some(ref ep) = llm.multimodal {
-            register("multimodal", ep, ModelCapability::Multimodal);
+            register(
+                "multimodal",
+                ep,
+                RoutingSlot::Multimodal,
+                ModelCapability::Multimodal,
+            );
         }
         if let Some(ref ep) = llm.embedding {
-            register("embedding", ep, ModelCapability::Embedding);
+            register(
+                "embedding",
+                ep,
+                RoutingSlot::Embedding,
+                ModelCapability::Embedding,
+            );
         }
         if let Some(ref ep) = llm.rerank {
-            register("rerank", ep, ModelCapability::Rerank);
+            register("rerank", ep, RoutingSlot::Rerank, ModelCapability::Rerank);
         }
 
-        Self {
-            providers,
-            models,
-            routing,
-        }
+        Self { providers, routing }
     }
 
     /// 解析 api_key 中的 ${ENV_VAR} 引用
@@ -391,25 +606,31 @@ impl ModelsConfig {
         }
     }
 
-    /// 获取指定能力的路由模型名称
+    /// 获取指定路由槽位的模型名称
     pub fn routed_model(&self, capability: ModelCapability) -> Option<&str> {
-        self.routing.get(&capability).map(|s| s.as_str())
+        let slot = RoutingSlot::from_capability(capability);
+        self.routing.get(&slot).map(|e| e.model.as_str())
     }
 
-    /// 获取指定能力的完整配置（Provider + Model 合并）
+    /// 获取指定路由槽位的完整配置（Provider + Model 合并）
     pub fn resolve_for_capability(&self, capability: ModelCapability) -> Option<ResolvedModel> {
-        let model_name = self.routing.get(&capability)?;
-        let model_entry = self.models.get(model_name)?;
-        let provider = self.providers.get(&model_entry.provider)?;
+        let slot = RoutingSlot::from_capability(capability);
+        self.resolve_slot(slot)
+    }
+
+    /// 按路由槽位获取完整配置
+    pub fn resolve_slot(&self, slot: RoutingSlot) -> Option<ResolvedModel> {
+        let entry = self.routing.get(&slot)?;
+        let provider = self.providers.get(&entry.provider)?;
 
         Some(ResolvedModel {
-            provider: model_entry.provider.clone(),
+            provider: entry.provider.clone(),
             base_url: provider.base_url.clone(),
             api_key: Self::resolve_api_key(&provider.api_key),
             timeout_ms: provider.timeout_ms,
             protocol: provider.protocol,
-            model: model_entry.model.clone(),
-            options: model_entry.options.clone(),
+            model: entry.model.clone(),
+            options: entry.options.clone(),
         })
     }
 
@@ -418,9 +639,26 @@ impl ModelsConfig {
         self.has_capability(ModelCapability::Chat)
     }
 
-    /// 检查配置是否为空（无 provider 也无 model）
+    /// 检查配置是否为空（无 provider 也无 routing）
     pub fn is_empty(&self) -> bool {
-        self.providers.is_empty() && self.models.is_empty()
+        self.providers.is_empty() && self.routing.is_empty()
+    }
+
+    /// 更新 chat 路由的模型名称，保留其他字段不变
+    pub fn update_chat_model(&mut self, model: String) {
+        if let Some(entry) = self.routing.get_mut(&RoutingSlot::Chat) {
+            entry.model = model;
+        } else {
+            self.routing.insert(
+                RoutingSlot::Chat,
+                ModelEntry {
+                    provider: "default".to_string(),
+                    model,
+                    capabilities: vec![ModelCapability::Chat],
+                    options: default_options(),
+                },
+            );
+        }
     }
 
     /// 从 chat routing 生成 ModelProviderConfig（内部用于构建 SingleProviderClient）
@@ -441,7 +679,7 @@ impl ModelsConfig {
 
     /// 从 lite routing 生成 ModelProviderConfig（未配置时回退到 chat）
     pub fn to_lite_provider_config(&self) -> ModelProviderConfig {
-        if let Some(resolved) = self.resolve_for_capability(ModelCapability::Lite) {
+        if let Some(resolved) = self.resolve_slot(RoutingSlot::Lite) {
             ModelProviderConfig {
                 api_auth_token: resolved.api_key,
                 api_base_url: resolved.base_url,
