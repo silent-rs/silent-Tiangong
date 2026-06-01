@@ -714,7 +714,7 @@ function ProviderBalanceSection({ providerName }: { providerName: string }) {
 
   return (
     <div className="mt-3 pt-3 border-t">
-      <div className="flex items-center gap-2 mb-2">
+      <div className="flex items-center gap-3 flex-wrap">
         <Label className="text-xs">账户余额</Label>
         <Button
           size="sm"
@@ -725,24 +725,22 @@ function ProviderBalanceSection({ providerName }: { providerName: string }) {
         >
           {loading ? '查询中...' : '查询余额'}
         </Button>
-      </div>
-      {error && <p className="text-xs text-destructive">{error}</p>}
-      {balance && (
-        <div className="space-y-1">
-          <div className="flex items-center gap-2 text-xs">
-            <span className={balance.is_available ? 'text-green-500' : 'text-destructive'}>
+        {error && <span className="text-xs text-destructive">{error}</span>}
+        {balance && (
+          <div className="flex items-center gap-3 flex-wrap">
+            <span className={`text-xs font-medium ${balance.is_available ? 'text-green-500' : 'text-destructive'}`}>
               {balance.is_available ? '可用' : '不可用'}
             </span>
+            {balance.balance_infos.map((info, i) => (
+              <span key={i} className="text-xs text-muted-foreground">
+                {info.currency === 'CNY' ? '¥' : '$'}{info.total_balance}
+                <span className="ml-1.5 opacity-70">充值 {info.topped_up_balance}</span>
+                <span className="ml-1.5 opacity-70">赠金 {info.granted_balance}</span>
+              </span>
+            ))}
           </div>
-          {balance.balance_infos.map((info, i) => (
-            <div key={i} className="text-xs text-muted-foreground flex gap-3">
-              <span>{info.currency === 'CNY' ? '¥' : '$'}{info.total_balance}</span>
-              <span>充值 {info.topped_up_balance}</span>
-              <span>赠金 {info.granted_balance}</span>
-            </div>
-          ))}
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }
