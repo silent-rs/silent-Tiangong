@@ -3385,3 +3385,47 @@ pub async fn webhook_list_runs(
         .map(|r| serde_json::to_value(r).unwrap())
         .collect())
 }
+
+// ---------------------------------------------------------------------------
+// 浏览器面板
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn browser_open(
+    url: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    app: AppHandle,
+    state: State<'_, TiangongApp>,
+) -> Result<(), String> {
+    state.browser.open(&app, &url, x, y, width, height)
+}
+
+#[tauri::command]
+pub async fn browser_close(state: State<'_, TiangongApp>) -> Result<(), String> {
+    state.browser.close()
+}
+
+#[tauri::command]
+pub async fn browser_set_position(
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    state: State<'_, TiangongApp>,
+) -> Result<(), String> {
+    state.browser.set_position(x, y)?;
+    state.browser.set_size(width, height)
+}
+
+#[tauri::command]
+pub async fn browser_navigate(url: String, state: State<'_, TiangongApp>) -> Result<(), String> {
+    state.browser.navigate(&url)
+}
+
+#[tauri::command]
+pub async fn browser_eval(js: String, state: State<'_, TiangongApp>) -> Result<(), String> {
+    state.browser.eval(&js)
+}

@@ -1,14 +1,16 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useStore } from '@/store/useStore';
 import { api, type RunSnapshot } from '@/api/tauri';
 import { AppSidebar } from '@/components/AppSidebar';
 import { SidebarProvider } from '@/components/ui/sidebar';
 import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components/LazyComponents';
+import { BrowserPanel } from '@/components/BrowserPanel';
 import { ensureDesktopNotificationPermission } from '@/utils/desktopNotification';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 
 export function MainApp() {
   const { loadSessions, updateFromSnapshot } = useStore();
+  const [showBrowser, setShowBrowser] = useState(false);
   const unlistenRef = useRef<UnlistenFn | null>(null);
   const latestSnapshotRef = useRef<RunSnapshot | null>(null);
   const snapshotTimerRef = useRef<number | null>(null);
@@ -83,7 +85,10 @@ export function MainApp() {
     <SidebarProvider>
       <div className="flex flex-col h-screen w-full overflow-hidden">
         {/* 顶部 Header — 横跨全宽，固定在最顶部 */}
-        <LazyStatusPanel />
+        <LazyStatusPanel
+          showBrowser={showBrowser}
+          onToggleBrowser={() => setShowBrowser((prev) => !prev)}
+        />
 
         {/* 下方区域：Sidebar + 主内容 */}
         <div className="flex flex-1 min-h-0">
@@ -91,13 +96,24 @@ export function MainApp() {
 
           {/* 主内容区 */}
           <main className="flex flex-1 flex-col min-w-0 bg-background">
-            {/* 消息列表 */}
-            <div className="flex-1 overflow-hidden">
-              <LazyMessageList />
-            </div>
+            <div className="flex flex-1 min-h-0">
+              <div className="flex flex-1 flex-col min-w-0">
+                {/* 消息列表 */}
+                <div className="flex-1 overflow-hidden">
+                  <LazyMessageList />
+                </div>
 
-            {/* 输入框 */}
-            <LazyMessageInput />
+                {/* 输入框 */}
+                <LazyMessageInput />
+              </div>
+
+              {/* 浏览器面板 */}
+              {showBrowser && (
+                <div className="w-[500px] shrink-0">
+                  <BrowserPanel onClose={() => setShowBrowser(false)} />
+                </div>
+              )}
+            </div>
           </main>
         </div>
       </div>

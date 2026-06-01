@@ -34,7 +34,7 @@ toml = { workspace = true }
 reqwest = { workspace = true, default-features = false, features = ["json", "rustls"] }
 
 # Tauri 相关依赖
-tauri = { workspace = true, features = ["protocol-asset", "tray-icon"] }
+tauri = { workspace = true, features = ["protocol-asset", "tray-icon", "unstable"] }
 tauri-plugin-shell = { workspace = true }
 tauri-plugin-fs = { workspace = true }
 tauri-plugin-dialog = { workspace = true }

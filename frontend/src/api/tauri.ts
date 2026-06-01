@@ -776,4 +776,22 @@ export const api = {
 
   webhookListRuns: (id: string, limit?: number): Promise<WebhookRun[]> =>
     invoke('webhook_list_runs', { id, limit }),
+
+  // ----------------------------------------------------------------
+  // 浏览器面板
+  // ----------------------------------------------------------------
+  browserOpen: (url: string, x: number, y: number, width: number, height: number): Promise<void> =>
+    invoke('browser_open', { url, x, y, width, height }),
+
+  browserClose: (): Promise<void> =>
+    invoke('browser_close'),
+
+  browserSetPosition: (x: number, y: number, width: number, height: number): Promise<void> =>
+    invoke('browser_set_position', { x, y, width, height }),
+
+  browserNavigate: (url: string): Promise<void> =>
+    invoke('browser_navigate', { url }),
+
+  browserEval: (js: string): Promise<void> =>
+    invoke('browser_eval', { js }),
 };

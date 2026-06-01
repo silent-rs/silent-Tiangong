@@ -6,17 +6,21 @@ use tiangong_core::core::TiangongCore;
 use tiangong_core::core_config::CoreConfigProvider;
 use tokio::sync::Mutex as AsyncMutex;
 
+use crate::browser::BrowserManager;
+
 /// 天工应用状态
 ///
 /// state: 应用管理（会话列表、配置、持久化）— Arc<tokio Mutex> 以支持嵌入式 server 共享
 /// cores: 活跃的对话核心（session_id → TiangongCore）
 /// config: 共享配置提供者
 /// embedded_server: 嵌入式 Server 句柄（Desktop 模式下 Server 运行在 app 进程内）
+/// browser: 浏览器面板管理器
 pub struct TiangongApp {
     pub state: std::sync::Arc<AsyncMutex<tiangong_core::app_state::TiangongState>>,
     pub cores: Mutex<HashMap<String, TiangongCore>>,
     pub config: CoreConfigProvider,
     embedded_server: Mutex<Option<tiangong_server::EmbeddedServerHandle>>,
+    pub browser: BrowserManager,
 }
 
 impl Default for TiangongApp {
@@ -32,6 +36,7 @@ impl Default for TiangongApp {
             cores: Mutex::new(HashMap::new()),
             config,
             embedded_server: Mutex::new(None),
+            browser: BrowserManager::new(),
         }
     }
 }

@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, KeyboardEvent } from 'react';
 import { useStore } from '@/store/useStore';
 import { api } from '@/api/tauri';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { Sun, Moon, Monitor, PanelLeft, SquarePen, Volume2, VolumeX, AudioLines } from 'lucide-react';
+import { Sun, Moon, Monitor, PanelLeft, SquarePen, Volume2, VolumeX, AudioLines, Globe } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme';
 import { useStreamingTts } from '@/hooks/useStreamingTts';
 import { Separator } from './ui/separator';
@@ -17,7 +17,12 @@ import {
 
 const appWindow = getCurrentWindow();
 
-export function StatusPanel() {
+interface StatusPanelProps {
+  showBrowser?: boolean;
+  onToggleBrowser?: () => void;
+}
+
+export function StatusPanel({ showBrowser, onToggleBrowser }: StatusPanelProps) {
   const { activeSessionId, isDraft, sessions, loadSessions, createSession } = useStore();
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState('');
@@ -182,6 +187,18 @@ export function StatusPanel() {
             )}
           </button>
         )}
+        <button
+          data-no-drag
+          onClick={onToggleBrowser}
+          className={`transition-colors ${
+            showBrowser
+              ? 'text-primary'
+              : 'text-muted-foreground hover:text-foreground'
+          }`}
+          title={showBrowser ? '关闭浏览器' : '打开浏览器'}
+        >
+          <Globe className="w-4 h-4" />
+        </button>
         <button
           data-no-drag
           onClick={cycleTheme}

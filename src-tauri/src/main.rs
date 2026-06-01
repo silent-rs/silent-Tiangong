@@ -343,6 +343,11 @@ fn run_gui() {
             tiangong_app::commands::webhook_delete,
             tiangong_app::commands::webhook_trigger,
             tiangong_app::commands::webhook_list_runs,
+            tiangong_app::commands::browser_open,
+            tiangong_app::commands::browser_close,
+            tiangong_app::commands::browser_set_position,
+            tiangong_app::commands::browser_navigate,
+            tiangong_app::commands::browser_eval,
         ])
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
