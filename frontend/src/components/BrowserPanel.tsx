@@ -4,8 +4,6 @@ import { Globe, ArrowRight, ArrowLeft, RotateCw } from 'lucide-react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 
-const TOOLBAR_HEIGHT = 44;
-
 interface BrowserPanelProps {
   initialUrl?: string;
   currentUrl?: string;
@@ -14,9 +12,7 @@ interface BrowserPanelProps {
 export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
   const [url, setUrl] = useState(initialUrl || 'https://www.bing.com');
   const containerRef = useRef<HTMLDivElement>(null);
-  const wrapperRef = useRef<HTMLDivElement>(null);
   const initializedRef = useRef(false);
-  const [browserSize, setBrowserSize] = useState({ width: 0, height: 0 });
 
   // 同步后端推送的 URL 到地址栏
   useEffect(() => {
@@ -24,18 +20,6 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
       setUrl(currentUrl);
     }
   }, [currentUrl]);
-
-  // 根据 wrapper 可用高度计算 4:3 比例的浏览器尺寸
-  const recalcSize = useCallback(() => {
-    if (!wrapperRef.current) return;
-    const wrapperHeight = wrapperRef.current.clientHeight;
-    const availableHeight = wrapperHeight - TOOLBAR_HEIGHT;
-    if (availableHeight <= 0) return;
-    // 4:3 比例：宽度 = 高度 * 4/3
-    const width = Math.floor(availableHeight * 4 / 3);
-    const height = availableHeight;
-    setBrowserSize({ width, height });
-  }, []);
 
   const syncPosition = useCallback(async () => {
     if (!containerRef.current) return;
@@ -67,40 +51,32 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
     await api.browserEval('location.reload()').catch(console.error);
   }, []);
 
-  // 监听 wrapper 尺寸变化，重算 4:3 比例
   useEffect(() => {
-    if (!wrapperRef.current) return;
+    if (!containerRef.current) return;
     const observer = new ResizeObserver(() => {
-      recalcSize();
-    });
-    observer.observe(wrapperRef.current);
-    return () => observer.disconnect();
-  }, [recalcSize]);
-
-  // 尺寸变化时同步 WebView 位置
-  useEffect(() => {
-    if (browserSize.width > 0 && browserSize.height > 0) {
       syncPosition();
-    }
-  }, [browserSize, syncPosition]);
+    });
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
+  }, [syncPosition]);
 
   useEffect(() => {
-    window.addEventListener('resize', recalcSize);
-    return () => window.removeEventListener('resize', recalcSize);
-  }, [recalcSize]);
+    window.addEventListener('resize', syncPosition);
+    return () => window.removeEventListener('resize', syncPosition);
+  }, [syncPosition]);
 
-  // 挂载时自动导航到 initialUrl
+  // 挂载时自动导航到 initialUrl（首次打开创建 webview，恢复时只重新定位）
   useEffect(() => {
-    if (!initializedRef.current && containerRef.current && browserSize.width > 0) {
+    if (!initializedRef.current && containerRef.current) {
       initializedRef.current = true;
       const rect = containerRef.current.getBoundingClientRect();
       api.browserOpen(initialUrl || 'https://www.bing.com', rect.x, rect.y, rect.width, rect.height).catch(console.error);
     }
-  }, [initialUrl, browserSize]);
+  }, [initialUrl]);
 
   return (
-    <div ref={wrapperRef} className="flex flex-col h-full border-l bg-background">
-      <div className="flex items-center gap-1 px-2 py-2 border-b" style={{ height: TOOLBAR_HEIGHT }}>
+    <div className="flex flex-1 flex-col h-full border-l bg-background">
+      <div className="flex items-center gap-1 px-2 py-2 border-b shrink-0">
         <Button
           size="sm"
           variant="ghost"
@@ -134,15 +110,10 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
           className="flex-1 h-7 text-sm"
         />
       </div>
-      <div className="flex-1 flex justify-center overflow-hidden">
-        {browserSize.width > 0 && (
-          <div
-            ref={containerRef}
-            className="bg-muted/30"
-            style={{ width: browserSize.width, height: browserSize.height }}
-          />
-        )}
-      </div>
+      <div
+        ref={containerRef}
+        className="flex-1 bg-muted/30"
+      />
     </div>
   );
 }

@@ -14,20 +14,6 @@ const BRIDGE_SCRIPT: &str = r#"
     if (window.__tiangong_bridge_loaded) return;
     window.__tiangong_bridge_loaded = true;
 
-    // 拦截 __TAURI__ 使外部页面无法访问 Tauri API（如 shell.open）
-    // eval_with_callback 使用 __TAURI_INTERNALS__，不受影响
-    // 使用属性拦截器而非简单判断，确保无论 Tauri 何时注入都能生效
-    (function() {
-        var _tauri;
-        try {
-            Object.defineProperty(window, '__TAURI__', {
-                get: function() { return undefined; },
-                set: function(val) { _tauri = val; },
-                configurable: true
-            });
-        } catch(e) {}
-    })();
-
     window.__tiangong_bridge = {
         version: '0.5.0',
 

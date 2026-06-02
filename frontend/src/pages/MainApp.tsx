@@ -15,6 +15,9 @@ function calcBrowserWidth(logicalHeight: number): number {
   return Math.max(200, Math.floor(available * 4 / 3));
 }
 
+/** 浏览器面板最小宽度，低于此值自动关闭 */
+const MIN_BROWSER_WIDTH = 200;
+
 /** 扩展窗口以容纳浏览器面板，精确计算：窗口宽度 = sidebar + 400(对话) + browserW */
 async function expandWindowForBrowser() {
   const appWindow = getCurrentWindow();
@@ -129,6 +132,24 @@ export function MainApp() {
         setBrowserUrl(event.payload.url);
       });
 
+      // 监听窗口大小变化：浏览器打开时宽度不足则自动隐藏浏览器面板
+      const unlistenResize = await getCurrentWindow().onResized(async () => {
+        if (!showBrowserRef.current) return;
+        const appWindow = getCurrentWindow();
+        const innerSize = await appWindow.innerSize();
+        const scaleFactor = await appWindow.scaleFactor();
+        const logicalW = innerSize.width / scaleFactor;
+        const mainEl = document.querySelector('main');
+        const sidebarW = mainEl ? mainEl.offsetLeft : 0;
+        const browserSpace = logicalW - sidebarW - 400;
+        if (browserSpace < MIN_BROWSER_WIDTH) {
+          await api.browserHide().catch(console.error);
+          savedWindowWidthRef.current = null;
+          showBrowserRef.current = false;
+          setShowBrowser(false);
+        }
+      });
+
       const prevUnlisten = unlistenRef.current;
       unlistenRef.current = () => {
         prevUnlisten?.();
@@ -136,6 +157,7 @@ export function MainApp() {
         unlistenOpenSession();
         unlistenBrowserOpen();
         unlistenBrowserPageLoaded();
+        unlistenResize();
       };
     };
 
@@ -207,9 +229,7 @@ export function MainApp() {
 
               {/* 浏览器面板 */}
               {showBrowser && (
-                <div className="flex-1 flex justify-center overflow-hidden">
-                  <BrowserPanel initialUrl={browserUrl} currentUrl={browserUrl} />
-                </div>
+                <BrowserPanel initialUrl={browserUrl} currentUrl={browserUrl} />
               )}
             </div>
           </main>
