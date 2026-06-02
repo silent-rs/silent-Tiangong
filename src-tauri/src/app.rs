@@ -144,7 +144,16 @@ impl TiangongApp {
             cores.remove(session_id);
         }
         let core = TiangongCore::with_session_for_gui(self.config.clone(), session, stream_tx);
-        core.set_browser_channel(self.browser_cmd_tx.clone());
+        // 注入浏览器页面获取能力和工具覆盖
+        {
+            let fetcher = std::sync::Arc::new(crate::browser::ChannelPageFetcher::new(
+                self.browser_cmd_tx.clone(),
+            ));
+            core.set_page_fetcher(fetcher.clone());
+            let handler = std::sync::Arc::new(crate::browser::BrowserToolOverride::new(fetcher));
+            core.register_tool_override("web_fetch", handler.clone());
+            core.register_tool_override("web_browse", handler);
+        }
         let id = core.session_id().to_string();
         cores.insert(id.clone(), core);
         (id, true) // 新创建

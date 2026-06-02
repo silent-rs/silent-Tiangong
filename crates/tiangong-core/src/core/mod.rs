@@ -235,12 +235,21 @@ impl TiangongCore {
         }
     }
 
-    /// 设置浏览器命令通道（GUI 模式下由 Tauri 层注入）
-    pub fn set_browser_channel(
+    /// 注入页面获取能力（GUI 模式下由 Tauri Plugin 提供）
+    pub fn set_page_fetcher(&self, fetcher: std::sync::Arc<dyn crate::browser_trait::PageFetcher>) {
+        let _ = self.send_cmd(Command::SetPageFetcher { fetcher });
+    }
+
+    /// 注册工具覆盖处理器
+    pub fn register_tool_override(
         &self,
-        tx: tokio::sync::mpsc::Sender<tiangong_types::BrowserCommand>,
+        name: &str,
+        handler: std::sync::Arc<dyn crate::tool_override::ToolOverrideHandler>,
     ) {
-        let _ = self.send_cmd(Command::SetBrowserChannel { tx });
+        let _ = self.send_cmd(Command::RegisterToolOverride {
+            name: name.to_string(),
+            handler,
+        });
     }
 
     /// 关闭并获取最终 session
@@ -308,8 +317,12 @@ async fn worker_loop_async(
 ) -> Session {
     let session_id = session.id.clone();
     let mut last_cfg_gen = 0u64;
-    let mut saved_browser_tx: Option<tokio::sync::mpsc::Sender<tiangong_types::BrowserCommand>> =
+    let mut saved_page_fetcher: Option<std::sync::Arc<dyn crate::browser_trait::PageFetcher>> =
         None;
+    let mut saved_tool_overrides: std::collections::HashMap<
+        String,
+        std::sync::Arc<dyn crate::tool_override::ToolOverrideHandler>,
+    > = std::collections::HashMap::new();
 
     // 在 Worker 的 tokio runtime 中异步初始化 Memory Handle
     if let Some(ref cfg) = memory.initial_config_snapshot {
@@ -394,9 +407,15 @@ async fn worker_loop_async(
                 &stream_tx,
                 shared_trust_mode.clone(),
             ));
-            // 恢复浏览器通道到新建的引擎
-            if let Some(ref tx) = saved_browser_tx {
-                engine.as_ref().unwrap().set_browser_channel(tx.clone());
+            // 恢复 page_fetcher 和 tool_overrides 到新建的引擎
+            if let Some(ref fetcher) = saved_page_fetcher {
+                engine.as_ref().unwrap().set_page_fetcher(fetcher.clone());
+            }
+            for (name, handler) in &saved_tool_overrides {
+                engine
+                    .as_ref()
+                    .unwrap()
+                    .register_tool_override(name, handler.clone());
             }
             let e = engine.as_ref().unwrap();
             let (all_tools, new_mcp_targets) = execution_function_tools(&e.agent_config().mcp);
@@ -550,10 +569,17 @@ async fn worker_loop_async(
                 }
             }
             Command::Shutdown => break,
-            Command::SetBrowserChannel { tx } => {
-                saved_browser_tx = Some(tx.clone());
+            Command::SetPageFetcher { fetcher } => {
+                saved_page_fetcher = Some(fetcher.clone());
                 if let Some(eng) = engine.as_ref() {
-                    eng.set_browser_channel(tx);
+                    eng.set_page_fetcher(fetcher);
+                }
+                continue;
+            }
+            Command::RegisterToolOverride { name, handler } => {
+                saved_tool_overrides.insert(name.clone(), handler.clone());
+                if let Some(eng) = engine.as_ref() {
+                    eng.register_tool_override(&name, handler);
                 }
                 continue;
             }

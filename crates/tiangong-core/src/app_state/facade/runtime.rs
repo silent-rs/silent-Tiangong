@@ -4,13 +4,14 @@ impl TiangongState {
     pub(in crate::app_state) fn rebuild_runtime_from_current_config(&mut self) {
         let config = self.store.provider.models_config.to_chat_provider_config();
         self.store.provider.model_config = config.clone();
-        // 保留旧 RuntimeEngine 的共享信任模式引用和浏览器通道
+        // 保留旧 RuntimeEngine 的共享信任模式引用、page_fetcher 和 tool_overrides
         let shared_trust_mode = self
             .services
             .runtime
             .permission_gate()
             .shared_trust_mode_ref();
-        let browser_tx = self.services.runtime.browser_tx();
+        let page_fetcher = self.services.runtime.page_fetcher();
+        let tool_overrides = self.services.runtime.tool_overrides();
         let context_limit =
             crate::core_config::resolve_context_limit(&self.store.provider.model_config.api_model);
         let new_runtime = RuntimeEngine::with_shared_trust_mode(
@@ -20,8 +21,11 @@ impl TiangongState {
             shared_trust_mode,
         )
         .with_models_config(self.store.provider.models_config.clone());
-        if let Some(tx) = browser_tx {
-            new_runtime.set_browser_channel(tx);
+        if let Some(fetcher) = page_fetcher {
+            new_runtime.set_page_fetcher(fetcher);
+        }
+        for (name, handler) in tool_overrides {
+            new_runtime.register_tool_override(&name, handler);
         }
         self.services.runtime = new_runtime;
     }

@@ -607,8 +607,11 @@ impl ReactEngine {
                             Some(Command::ReloadConfig) => {}
                             Some(Command::Approval { .. }) => {}
                             Some(Command::CancelAgent { .. }) => {}
-                            Some(Command::SetBrowserChannel { tx }) => {
-                                self.engine.set_browser_channel(tx);
+                            Some(Command::SetPageFetcher { fetcher }) => {
+                                self.engine.set_page_fetcher(fetcher);
+                            }
+                            Some(Command::RegisterToolOverride { name, handler }) => {
+                                self.engine.register_tool_override(&name, handler);
                             }
                             Some(Command::CompressContext) => {
                                 crate::core::compress_context_for_session(
@@ -1074,8 +1077,11 @@ impl ReactEngine {
                                 Some(Command::ReloadConfig) => {}
                                 Some(Command::Approval { .. }) => {}
                                 Some(Command::CancelAgent { .. }) => {}
-                                Some(Command::SetBrowserChannel { tx }) => {
-                                    self.engine.set_browser_channel(tx);
+                                Some(Command::SetPageFetcher { fetcher }) => {
+                                    self.engine.set_page_fetcher(fetcher);
+                                }
+                                Some(Command::RegisterToolOverride { name, handler }) => {
+                                    self.engine.register_tool_override(&name, handler);
                                 }
                                 Some(Command::CompressContext) => {
                                     crate::core::compress_context_for_session(
@@ -1854,8 +1860,11 @@ impl ReactEngine {
                             crate::core::reset_context_for_session(parent_session, stream_tx, &self.engine);
                         }
                         Some(Command::ReloadConfig) | Some(Command::Approval { .. }) => {}
-                        Some(Command::SetBrowserChannel { tx }) => {
-                            self.engine.set_browser_channel(tx);
+                        Some(Command::SetPageFetcher { fetcher }) => {
+                            self.engine.set_page_fetcher(fetcher);
+                        }
+                        Some(Command::RegisterToolOverride { name, handler }) => {
+                            self.engine.register_tool_override(&name, handler);
                         }
                         None => break,
                     }
@@ -2008,8 +2017,11 @@ fn drain_pending_commands_async(
             }
             Command::ReloadConfig => {}
             Command::Approval { .. } => {}
-            Command::SetBrowserChannel { tx } => {
-                engine.set_browser_channel(tx);
+            Command::SetPageFetcher { fetcher } => {
+                engine.set_page_fetcher(fetcher);
+            }
+            Command::RegisterToolOverride { name, handler } => {
+                engine.register_tool_override(&name, handler);
             }
             Command::CompressContext => {
                 crate::core::compress_context_for_session(session, engine, stream_tx);

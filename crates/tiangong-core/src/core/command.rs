@@ -1,5 +1,10 @@
 //! Agent 命令与执行效果类型
 
+use std::sync::Arc;
+
+use crate::browser_trait::PageFetcher;
+use crate::tool_override::ToolOverrideHandler;
+
 /// 用户命令
 pub(crate) enum Command {
     /// 发送消息
@@ -25,9 +30,12 @@ pub(crate) enum Command {
     /// 清理上下文（重置摘要，LLM 下次只看到 system prompt）
     #[allow(dead_code)]
     ResetContext,
-    /// 设置浏览器命令通道
-    SetBrowserChannel {
-        tx: tokio::sync::mpsc::Sender<tiangong_types::BrowserCommand>,
+    /// 注入页面获取能力（GUI 模式下由 Tauri Plugin 提供）
+    SetPageFetcher { fetcher: Arc<dyn PageFetcher> },
+    /// 注册工具覆盖处理器
+    RegisterToolOverride {
+        name: String,
+        handler: Arc<dyn ToolOverrideHandler>,
     },
     /// 关闭
     Shutdown,

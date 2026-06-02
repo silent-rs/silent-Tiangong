@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use crate::agent_config::{AgentConfig, McpConfig};
 use crate::agents::execution_mcp_agent::{
@@ -7,11 +8,13 @@ use crate::agents::execution_mcp_agent::{
 };
 use crate::agents::execution_tool_agent::build_tool_call_from_function;
 use crate::app_state::ManagementCommand;
+use crate::browser_trait::PageFetcher;
 use crate::model::ToolSpec;
 use crate::model::{ModelClient, SingleProviderClient, TokenUsage, ToolCall};
 use crate::models_config::{ModelCapability, ModelsConfig};
 use crate::planner::TaskPlan;
 use crate::tool::{LocalToolExecutor, ToolExecutionRecord, ToolExecutor, ToolResult};
+use crate::tool_override::ToolOverrideHandler;
 
 pub use tiangong_types::RunStatus;
 
@@ -59,7 +62,7 @@ pub struct TurnExecution {
     pub llm_calls: Vec<crate::session::LlmCallRecord>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RuntimeEngine {
     client: SingleProviderClient,
     /// 轻量级文本模型客户端（标题生成等简单任务，未配置时为 None，回退到 client）
@@ -72,10 +75,31 @@ pub struct RuntimeEngine {
     models_config: ModelsConfig,
     core_config: Option<crate::core_config::CoreConfig>,
     permission_gate: crate::permission::PermissionGate,
-    /// 浏览器命令通道（GUI 模式下注入，用于替代 web_fetch 走浏览器获取）
-    browser_tx: std::sync::Arc<
-        std::sync::Mutex<Option<tokio::sync::mpsc::Sender<tiangong_types::BrowserCommand>>>,
-    >,
+    /// 浏览器页面获取能力（GUI 模式下注入）
+    page_fetcher: Arc<Mutex<Option<Arc<dyn PageFetcher>>>>,
+    /// 工具覆盖处理器（替代硬编码的工具名拦截）
+    tool_overrides: Arc<Mutex<HashMap<String, Arc<dyn ToolOverrideHandler>>>>,
+}
+
+impl std::fmt::Debug for RuntimeEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeEngine")
+            .field("client", &self.client)
+            .field("context_limit", &self.context_limit)
+            .field(
+                "page_fetcher",
+                &self
+                    .page_fetcher
+                    .lock()
+                    .map(|g| g.is_some())
+                    .unwrap_or(false),
+            )
+            .field(
+                "tool_overrides",
+                &self.tool_overrides.lock().map(|g| g.len()).unwrap_or(0),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl RuntimeEngine {
@@ -99,7 +123,8 @@ impl RuntimeEngine {
             models_config: ModelsConfig::default(),
             core_config: None,
             permission_gate,
-            browser_tx: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            page_fetcher: Arc::new(Mutex::new(None)),
+            tool_overrides: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -128,7 +153,8 @@ impl RuntimeEngine {
             models_config: ModelsConfig::default(),
             core_config: None,
             permission_gate,
-            browser_tx: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            page_fetcher: Arc::new(Mutex::new(None)),
+            tool_overrides: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -189,19 +215,31 @@ impl RuntimeEngine {
         &self.permission_gate
     }
 
-    /// 设置浏览器命令通道（GUI 模式下由 Tauri 层注入）
-    pub fn set_browser_channel(
-        &self,
-        tx: tokio::sync::mpsc::Sender<tiangong_types::BrowserCommand>,
-    ) {
-        if let Ok(mut guard) = self.browser_tx.lock() {
-            *guard = Some(tx);
+    /// 注入页面获取能力（GUI 模式下由 Tauri Plugin 提供）
+    pub fn set_page_fetcher(&self, fetcher: Arc<dyn PageFetcher>) {
+        if let Ok(mut guard) = self.page_fetcher.lock() {
+            *guard = Some(fetcher);
         }
     }
 
-    /// 获取浏览器命令通道的克隆（用于 runtime 重建时保留）
-    pub fn browser_tx(&self) -> Option<tokio::sync::mpsc::Sender<tiangong_types::BrowserCommand>> {
-        self.browser_tx.lock().ok()?.clone()
+    /// 获取 page_fetcher 的克隆（用于 runtime 重建时保留）
+    pub fn page_fetcher(&self) -> Option<Arc<dyn PageFetcher>> {
+        self.page_fetcher.lock().ok()?.clone()
+    }
+
+    /// 注册工具覆盖处理器
+    pub fn register_tool_override(&self, name: &str, handler: Arc<dyn ToolOverrideHandler>) {
+        if let Ok(mut guard) = self.tool_overrides.lock() {
+            guard.insert(name.to_string(), handler);
+        }
+    }
+
+    /// 获取所有已注册的工具覆盖（用于 runtime 重建时保留）
+    pub fn tool_overrides(&self) -> HashMap<String, Arc<dyn ToolOverrideHandler>> {
+        self.tool_overrides
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     pub fn provider_label(&self) -> String {
@@ -313,25 +351,15 @@ impl RuntimeEngine {
             };
         }
 
-        // 浏览器获取（优先于 HTTP web_fetch）
-        if call.name == "web_fetch" {
-            let mode = call
-                .arguments
-                .get("mode")
-                .and_then(|v| v.as_str())
-                .unwrap_or("text");
-            if mode == "text"
-                && let Some(result) = self.try_browser_fetch(call).await
-            {
-                return result;
-            }
-        }
-
-        // 浏览器观察：获取当前页面快照
-        if call.name == "web_browse" {
-            if let Some(result) = self.try_browser_observe().await {
-                return result;
-            }
+        // 工具覆盖（Plugin 注入的浏览器获取等能力优先于默认行为）
+        if let Some(handler) = self
+            .tool_overrides
+            .lock()
+            .ok()
+            .and_then(|g| g.get(&call.name).cloned())
+            && let Some(result) = handler.handle(call).await
+        {
+            return result;
         }
 
         // 本地工具
@@ -356,94 +384,6 @@ impl RuntimeEngine {
                 execution: None,
             },
         }
-    }
-
-    /// 尝试通过内嵌浏览器获取网页内容，失败时返回 None 回退到 HTTP web_fetch
-    async fn try_browser_fetch(&self, call: &ToolCall) -> Option<ToolResult> {
-        let url = call.arguments.get("url")?.as_str()?.to_string();
-        let max_chars = call
-            .arguments
-            .get("max_chars")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(12000) as usize;
-
-        let tx = {
-            let guard = self.browser_tx.lock().ok()?;
-            guard.clone()?
-        };
-
-        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-        let cmd = tiangong_types::BrowserCommand::FetchPage {
-            url,
-            max_chars,
-            response_tx,
-        };
-
-        if tx.send(cmd).await.is_err() {
-            return None;
-        }
-
-        match tokio::time::timeout(std::time::Duration::from_secs(30), response_rx).await {
-            Ok(Ok(resp)) => {
-                let ok = resp.ok;
-                let error = resp.error.unwrap_or_default();
-                let summary = if ok {
-                    format!("浏览器获取成功：{}", resp.title)
-                } else {
-                    format!("浏览器获取失败：{}", error)
-                };
-                Some(ToolResult {
-                    ok,
-                    summary,
-                    stdout: if ok { resp.content } else { String::new() },
-                    stderr: if ok { String::new() } else { error },
-                    exit_code: if ok { 0 } else { 1 },
-                    execution: None,
-                })
-            }
-            _ => None,
-        }
-    }
-
-    /// 通过内嵌浏览器获取当前页面快照
-    async fn try_browser_observe(&self) -> Option<ToolResult> {
-        let tx = {
-            let guard = self.browser_tx.lock().ok()?;
-            guard.clone()?
-        };
-
-        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-        let cmd = tiangong_types::BrowserCommand::ObservePage { response_tx };
-
-        if tx.send(cmd).await.is_err() {
-            return None;
-        }
-
-        let snapshot = tokio::time::timeout(std::time::Duration::from_secs(10), response_rx)
-            .await
-            .ok()?
-            .ok()?;
-
-        let content = if snapshot.text.is_empty() {
-            format!(
-                "浏览器页面：{}\nURL：{}\n状态：页面内容为空",
-                snapshot.title, snapshot.url
-            )
-        } else {
-            format!(
-                "浏览器页面：{}\nURL：{}\n\n{}",
-                snapshot.title, snapshot.url, snapshot.text
-            )
-        };
-
-        Some(ToolResult {
-            ok: true,
-            summary: format!("浏览器当前页面：{}", snapshot.title),
-            stdout: content,
-            stderr: String::new(),
-            exit_code: 0,
-            execution: None,
-        })
     }
 
     /// 处理后台任务工具调用
