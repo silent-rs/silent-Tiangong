@@ -138,6 +138,22 @@ pub(crate) fn basic_file_function_tools() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "web_browse".to_string(),
+            description: "读取天工内嵌浏览器面板当前显示的页面内容（标题、URL、正文）。当用户询问浏览器当前页面、让你查看内嵌浏览器内容时使用此工具，不要使用 Playwright。注意：这是用户可见的嵌入式浏览器，与 Playwright headless 浏览器完全独立。".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "最多返回字符数，默认 12000",
+                        "minimum": 1,
+                        "maximum": 50000
+                    }
+                },
+                "required": []
+            }),
+        },
+        ToolSpec {
             name: "write_file".to_string(),
             description: "写入文件内容（支持覆盖或追加）".to_string(),
             input_schema: serde_json::json!({

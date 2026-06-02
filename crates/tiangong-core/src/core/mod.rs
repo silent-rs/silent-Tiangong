@@ -308,6 +308,8 @@ async fn worker_loop_async(
 ) -> Session {
     let session_id = session.id.clone();
     let mut last_cfg_gen = 0u64;
+    let mut saved_browser_tx: Option<tokio::sync::mpsc::Sender<tiangong_types::BrowserCommand>> =
+        None;
 
     // 在 Worker 的 tokio runtime 中异步初始化 Memory Handle
     if let Some(ref cfg) = memory.initial_config_snapshot {
@@ -392,6 +394,10 @@ async fn worker_loop_async(
                 &stream_tx,
                 shared_trust_mode.clone(),
             ));
+            // 恢复浏览器通道到新建的引擎
+            if let Some(ref tx) = saved_browser_tx {
+                engine.as_ref().unwrap().set_browser_channel(tx.clone());
+            }
             let e = engine.as_ref().unwrap();
             let (all_tools, new_mcp_targets) = execution_function_tools(&e.agent_config().mcp);
             let mut new_tools: Vec<ToolSpec> = all_tools
@@ -545,6 +551,7 @@ async fn worker_loop_async(
             }
             Command::Shutdown => break,
             Command::SetBrowserChannel { tx } => {
+                saved_browser_tx = Some(tx.clone());
                 if let Some(eng) = engine.as_ref() {
                     eng.set_browser_channel(tx);
                 }

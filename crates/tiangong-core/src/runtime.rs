@@ -199,6 +199,11 @@ impl RuntimeEngine {
         }
     }
 
+    /// 获取浏览器命令通道的克隆（用于 runtime 重建时保留）
+    pub fn browser_tx(&self) -> Option<tokio::sync::mpsc::Sender<tiangong_types::BrowserCommand>> {
+        self.browser_tx.lock().ok()?.clone()
+    }
+
     pub fn provider_label(&self) -> String {
         format!(
             "{} @ {} · {}ms",
@@ -322,6 +327,13 @@ impl RuntimeEngine {
             }
         }
 
+        // 浏览器观察：获取当前页面快照
+        if call.name == "web_browse" {
+            if let Some(result) = self.try_browser_observe().await {
+                return result;
+            }
+        }
+
         // 本地工具
         match build_tool_call_from_function(call) {
             Ok(tool_call) => match self.tool_executor.execute(&tool_call) {
@@ -391,6 +403,47 @@ impl RuntimeEngine {
             }
             _ => None,
         }
+    }
+
+    /// 通过内嵌浏览器获取当前页面快照
+    async fn try_browser_observe(&self) -> Option<ToolResult> {
+        let tx = {
+            let guard = self.browser_tx.lock().ok()?;
+            guard.clone()?
+        };
+
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let cmd = tiangong_types::BrowserCommand::ObservePage { response_tx };
+
+        if tx.send(cmd).await.is_err() {
+            return None;
+        }
+
+        let snapshot = tokio::time::timeout(std::time::Duration::from_secs(10), response_rx)
+            .await
+            .ok()?
+            .ok()?;
+
+        let content = if snapshot.text.is_empty() {
+            format!(
+                "浏览器页面：{}\nURL：{}\n状态：页面内容为空",
+                snapshot.title, snapshot.url
+            )
+        } else {
+            format!(
+                "浏览器页面：{}\nURL：{}\n\n{}",
+                snapshot.title, snapshot.url, snapshot.text
+            )
+        };
+
+        Some(ToolResult {
+            ok: true,
+            summary: format!("浏览器当前页面：{}", snapshot.title),
+            stdout: content,
+            stderr: String::new(),
+            exit_code: 0,
+            execution: None,
+        })
     }
 
     /// 处理后台任务工具调用

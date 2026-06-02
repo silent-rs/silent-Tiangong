@@ -480,7 +480,7 @@ pub async fn browser_command_handler(
                 let manager = BrowserManager {
                     state: browser_state.clone(),
                 };
-                let snapshot = manager.get_snapshot().unwrap_or_else(|| {
+                let snapshot = tokio::task::spawn_blocking(move || {
                     manager
                         .eval_with_result("window.__tiangong_bridge.getFullText(12000)")
                         .and_then(|raw| {
@@ -500,6 +500,13 @@ pub async fn browser_command_handler(
                                 "浏览器未打开或页面未加载".to_string(),
                             ),
                         })
+                })
+                .await
+                .unwrap_or(tiangong_types::BrowserPageSnapshot {
+                    title: String::new(),
+                    url: String::new(),
+                    text: String::new(),
+                    status: tiangong_types::PageStatus::Error("浏览器快照任务失败".to_string()),
                 });
                 let _ = response_tx.send(snapshot);
             }
