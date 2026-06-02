@@ -349,6 +349,9 @@ fn run_gui() {
             tiangong_app::commands::browser_set_position,
             tiangong_app::commands::browser_navigate,
             tiangong_app::commands::browser_eval,
+            tiangong_app::commands::browser_hide,
+            tiangong_app::commands::browser_go_back,
+            tiangong_app::commands::browser_go_forward,
         ])
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())

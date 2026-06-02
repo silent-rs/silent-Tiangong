@@ -794,4 +794,13 @@ export const api = {
 
   browserEval: (js: string): Promise<void> =>
     invoke('browser_eval', { js }),
+
+  browserHide: (): Promise<void> =>
+    invoke('browser_hide'),
+
+  browserGoBack: (): Promise<void> =>
+    invoke('browser_go_back'),
+
+  browserGoForward: (): Promise<void> =>
+    invoke('browser_go_forward'),
 };

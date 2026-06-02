@@ -133,7 +133,19 @@ impl BrowserManager {
         w: f64,
         h: f64,
     ) -> Result<(), String> {
-        self.close()?;
+        // 如果 webview 已存在，只需重新定位（恢复场景）
+        {
+            let state = self.state.lock().map_err(|e| e.to_string())?;
+            if let Some(webview) = &state.webview {
+                webview
+                    .set_position(LogicalPosition::new(x, y))
+                    .map_err(|e| format!("恢复浏览器位置失败：{e}"))?;
+                webview
+                    .set_size(LogicalSize::new(w, h))
+                    .map_err(|e| format!("恢复浏览器尺寸失败：{e}"))?;
+                return Ok(());
+            }
+        }
 
         let window = app
             .get_window("main")
@@ -228,6 +240,27 @@ impl BrowserManager {
             state.latest_snapshot = None;
         }
         Ok(())
+    }
+
+    /// 隐藏浏览器（移到屏幕外，不销毁 WebView）
+    pub fn hide(&self) -> Result<(), String> {
+        let state = self.state.lock().map_err(|e| e.to_string())?;
+        if let Some(webview) = &state.webview {
+            webview
+                .set_position(LogicalPosition::new(-10000, -10000))
+                .map_err(|e| format!("隐藏浏览器失败：{e}"))?;
+        }
+        Ok(())
+    }
+
+    /// 浏览器后退
+    pub fn go_back(&self) -> Result<(), String> {
+        self.eval("history.back()")
+    }
+
+    /// 浏览器前进
+    pub fn go_forward(&self) -> Result<(), String> {
+        self.eval("history.forward()")
     }
 
     pub fn set_position(&self, x: f64, y: f64) -> Result<(), String> {

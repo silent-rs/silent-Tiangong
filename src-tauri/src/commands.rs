@@ -3429,3 +3429,18 @@ pub async fn browser_navigate(url: String, state: State<'_, TiangongApp>) -> Res
 pub async fn browser_eval(js: String, state: State<'_, TiangongApp>) -> Result<(), String> {
     state.browser.eval(&js)
 }
+
+#[tauri::command]
+pub async fn browser_hide(state: State<'_, TiangongApp>) -> Result<(), String> {
+    state.browser.hide()
+}
+
+#[tauri::command]
+pub async fn browser_go_back(state: State<'_, TiangongApp>) -> Result<(), String> {
+    state.browser.go_back()
+}
+
+#[tauri::command]
+pub async fn browser_go_forward(state: State<'_, TiangongApp>) -> Result<(), String> {
+    state.browser.go_forward()
+}

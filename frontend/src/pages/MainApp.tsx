@@ -7,21 +7,67 @@ import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components
 import { BrowserPanel } from '@/components/BrowserPanel';
 import { ensureDesktopNotificationPermission } from '@/utils/desktopNotification';
 import type { UnlistenFn } from '@tauri-apps/api/event';
+import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 
-const CHAT_MIN_WIDTH = 400;
-const CHAT_MAX_WIDTH = 800;
+/** 根据窗口逻辑高度计算 4:3 浏览器宽度 */
+function calcBrowserWidth(logicalHeight: number): number {
+  const available = logicalHeight - 40 - 44;
+  return Math.max(200, Math.floor(available * 4 / 3));
+}
+
+/** 扩展窗口以容纳浏览器面板，精确计算：窗口宽度 = sidebar + 400(对话) + browserW */
+async function expandWindowForBrowser() {
+  const appWindow = getCurrentWindow();
+  const innerSize = await appWindow.innerSize();
+  const scaleFactor = await appWindow.scaleFactor();
+  const logicalW = innerSize.width / scaleFactor;
+  const logicalH = innerSize.height / scaleFactor;
+  const browserW = calcBrowserWidth(logicalH);
+  // 当前对话宽度（flex-1 占满 main 区域）
+  const mainEl = document.querySelector('main');
+  const chatW = mainEl?.clientWidth ?? 400;
+  // 扩展量 = 浏览器宽度 - 对话从 flex-1 收缩到 400 的差值
+  const expand = browserW - (chatW - 400);
+  const newW = logicalW + expand;
+  await appWindow.setSize(new LogicalSize(newW, logicalH));
+  return { browserW, logicalW: logicalW, logicalH };
+}
 
 export function MainApp() {
   const { loadSessions, updateFromSnapshot } = useStore();
   const [showBrowser, setShowBrowser] = useState(false);
   const [browserUrl, setBrowserUrl] = useState<string | undefined>(undefined);
-  const [chatWidth, setChatWidth] = useState(CHAT_MAX_WIDTH);
-  const draggingRef = useRef(false);
-  const startXRef = useRef(0);
-  const startWidthRef = useRef(0);
+  const showBrowserRef = useRef(false);
   const unlistenRef = useRef<UnlistenFn | null>(null);
   const latestSnapshotRef = useRef<RunSnapshot | null>(null);
   const snapshotTimerRef = useRef<number | null>(null);
+  const savedWindowWidthRef = useRef<number | null>(null);
+
+  const handleToggleBrowser = useCallback(async () => {
+    if (!showBrowserRef.current) {
+      // 保存原始窗口宽度
+      const appWindow = getCurrentWindow();
+      const innerSize = await appWindow.innerSize();
+      const scaleFactor = await appWindow.scaleFactor();
+      savedWindowWidthRef.current = innerSize.width / scaleFactor;
+      // 扩展窗口
+      await expandWindowForBrowser();
+      showBrowserRef.current = true;
+      setShowBrowser(true);
+    } else {
+      await api.browserHide().catch(console.error);
+      // 恢复原始窗口宽度
+      const appWindow = getCurrentWindow();
+      const innerSize = await appWindow.innerSize();
+      const scaleFactor = await appWindow.scaleFactor();
+      const logicalH = innerSize.height / scaleFactor;
+      const restoreW = savedWindowWidthRef.current ?? (innerSize.width / scaleFactor - calcBrowserWidth(logicalH));
+      savedWindowWidthRef.current = null;
+      await appWindow.setSize(new LogicalSize(restoreW, logicalH));
+      showBrowserRef.current = false;
+      setShowBrowser(false);
+    }
+  }, []);
 
   useEffect(() => {
     ensureDesktopNotificationPermission().catch(console.warn);
@@ -64,10 +110,18 @@ export function MainApp() {
       });
 
       // 监听浏览器自动打开事件
-      const unlistenBrowserOpen = await listen<string>('browser:open', (event) => {
+      const unlistenBrowserOpen = await listen<string>('browser:open', async (event) => {
         const url = event.payload;
         setBrowserUrl(url);
-        setShowBrowser(true);
+        if (!showBrowserRef.current) {
+          const appWindow = getCurrentWindow();
+          const innerSize = await appWindow.innerSize();
+          const scaleFactor = await appWindow.scaleFactor();
+          savedWindowWidthRef.current = innerSize.width / scaleFactor;
+          await expandWindowForBrowser();
+          showBrowserRef.current = true;
+          setShowBrowser(true);
+        }
       });
 
       // 监听浏览器页面加载完成事件
@@ -95,11 +149,19 @@ export function MainApp() {
       .catch(console.error);
 
     // 监听来自消息列表的链接点击，在嵌入浏览器中打开
-    const onOpenBrowser = (e: Event) => {
+    const onOpenBrowser = async (e: Event) => {
       const url = (e as CustomEvent).detail;
       if (typeof url === 'string') {
         setBrowserUrl(url);
-        setShowBrowser(true);
+        if (!showBrowserRef.current) {
+          const appWindow = getCurrentWindow();
+          const innerSize = await appWindow.innerSize();
+          const scaleFactor = await appWindow.scaleFactor();
+          savedWindowWidthRef.current = innerSize.width / scaleFactor;
+          await expandWindowForBrowser();
+          showBrowserRef.current = true;
+          setShowBrowser(true);
+        }
       }
     };
     window.addEventListener('tiangong:open-browser', onOpenBrowser);
@@ -114,40 +176,13 @@ export function MainApp() {
     };
   }, []);
 
-  const handleDragStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    draggingRef.current = true;
-    startXRef.current = e.clientX;
-    startWidthRef.current = chatWidth;
-
-    const onMouseMove = (ev: MouseEvent) => {
-      if (!draggingRef.current) return;
-      const delta = ev.clientX - startXRef.current;
-      const next = Math.min(CHAT_MAX_WIDTH, Math.max(CHAT_MIN_WIDTH, startWidthRef.current + delta));
-      setChatWidth(next);
-    };
-
-    const onMouseUp = () => {
-      draggingRef.current = false;
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-  }, [chatWidth]);
-
   return (
     <SidebarProvider>
       <div className="flex flex-col h-screen w-full overflow-hidden">
         {/* 顶部 Header — 横跨全宽，固定在最顶部 */}
         <LazyStatusPanel
           showBrowser={showBrowser}
-          onToggleBrowser={() => setShowBrowser((prev) => !prev)}
+          onToggleBrowser={handleToggleBrowser}
         />
 
         {/* 下方区域：Sidebar + 主内容 */}
@@ -159,7 +194,7 @@ export function MainApp() {
             <div className="flex flex-1 min-h-0">
               <div
                 className={`flex flex-col min-w-0 ${showBrowser ? 'shrink-0' : 'flex-1'}`}
-                style={showBrowser ? { width: chatWidth } : undefined}
+                style={showBrowser ? { width: 400 } : undefined}
               >
                 {/* 消息列表 */}
                 <div className="flex-1 overflow-hidden">
@@ -172,16 +207,9 @@ export function MainApp() {
 
               {/* 浏览器面板 */}
               {showBrowser && (
-                <>
-                  {/* 拖拽手柄 */}
-                  <div
-                    onMouseDown={handleDragStart}
-                    className="w-1 shrink-0 cursor-col-resize hover:bg-primary/30 active:bg-primary/50 transition-colors"
-                  />
-                  <div className="flex-1 min-w-0">
-                    <BrowserPanel onClose={() => { setShowBrowser(false); setBrowserUrl(undefined); }} initialUrl={browserUrl} currentUrl={browserUrl} />
-                  </div>
-                </>
+                <div className="flex-1 flex justify-center overflow-hidden">
+                  <BrowserPanel initialUrl={browserUrl} currentUrl={browserUrl} />
+                </div>
               )}
             </div>
           </main>
