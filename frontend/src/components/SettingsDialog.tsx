@@ -31,6 +31,15 @@ export function SettingsDialog() {
   const [open, setOpen] = useState(false);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
 
+  useEffect(() => {
+    if (!open) {
+      window.dispatchEvent(new Event('tiangong:restore-browser-panel'));
+      return;
+    }
+
+    api.browserHide().catch(console.error);
+  }, [open]);
+
   return (
     <>
       <Button
@@ -63,6 +72,16 @@ export function SettingsDialog() {
               {(saveStatus === 'saved' || saveStatus === 'idle') && '已自动保存'}
               {saveStatus === 'error' && '保存失败'}
             </span>
+            <Button
+              data-no-drag
+              variant="ghost"
+              size="icon"
+              className="ml-1 h-7 w-7 shrink-0"
+              onClick={() => setOpen(false)}
+            >
+              <X className="h-4 w-4" />
+              <span className="sr-only">退出设置</span>
+            </Button>
           </header>
 
           <Tabs defaultValue="agent" className="flex-1 overflow-hidden flex">

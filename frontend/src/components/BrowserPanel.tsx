@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { api } from '@/api/tauri';
-import { Globe, ArrowRight, ArrowLeft, RotateCw } from 'lucide-react';
+import { Globe, ArrowRight, ArrowLeft, RotateCw, CornerDownRight } from 'lucide-react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 
@@ -9,10 +9,18 @@ interface BrowserPanelProps {
   currentUrl?: string;
 }
 
+function normalizeBrowserUrl(rawUrl: string): string {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return '';
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  return `https://${trimmed}`;
+}
+
 export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
   const [url, setUrl] = useState(initialUrl || 'https://www.bing.com');
   const containerRef = useRef<HTMLDivElement>(null);
   const initializedRef = useRef(false);
+  const browserOpenedRef = useRef(false);
 
   // 同步后端推送的 URL 到地址栏
   useEffect(() => {
@@ -28,12 +36,19 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
   }, []);
 
   const handleNavigate = useCallback(async () => {
-    if (!url.trim()) return;
+    const nextUrl = normalizeBrowserUrl(url);
+    if (!nextUrl) return;
 
     try {
       if (!containerRef.current) return;
       const rect = containerRef.current.getBoundingClientRect();
-      await api.browserOpen(url, rect.x, rect.y, rect.width, rect.height);
+      if (browserOpenedRef.current) {
+        await api.browserSetPosition(rect.x, rect.y, rect.width, rect.height);
+        await api.browserNavigate(nextUrl);
+      } else {
+        await api.browserOpen(nextUrl, rect.x, rect.y, rect.width, rect.height);
+        browserOpenedRef.current = true;
+      }
     } catch (err) {
       console.error('打开浏览器失败：', err);
     }
@@ -62,7 +77,11 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
 
   useEffect(() => {
     window.addEventListener('resize', syncPosition);
-    return () => window.removeEventListener('resize', syncPosition);
+    window.addEventListener('tiangong:restore-browser-panel', syncPosition);
+    return () => {
+      window.removeEventListener('resize', syncPosition);
+      window.removeEventListener('tiangong:restore-browser-panel', syncPosition);
+    };
   }, [syncPosition]);
 
   // 挂载时自动导航到 initialUrl（首次打开创建 webview，恢复时只重新定位）
@@ -70,7 +89,11 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
     if (!initializedRef.current && containerRef.current) {
       initializedRef.current = true;
       const rect = containerRef.current.getBoundingClientRect();
-      api.browserOpen(initialUrl || 'https://www.bing.com', rect.x, rect.y, rect.width, rect.height).catch(console.error);
+      api.browserOpen(initialUrl || 'https://www.bing.com', rect.x, rect.y, rect.width, rect.height)
+        .then(() => {
+          browserOpenedRef.current = true;
+        })
+        .catch(console.error);
     }
   }, [initialUrl]);
 
@@ -105,10 +128,25 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
         <Input
           value={url}
           onChange={(e) => setUrl(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && handleNavigate()}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              handleNavigate();
+            }
+          }}
           placeholder="输入 URL..."
           className="flex-1 h-7 text-sm"
         />
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={handleNavigate}
+          className="h-7 px-2 shrink-0"
+          title="进入"
+        >
+          <CornerDownRight className="w-3.5 h-3.5 mr-1" />
+          <span className="text-xs">进入</span>
+        </Button>
       </div>
       <div
         ref={containerRef}

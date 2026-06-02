@@ -18,21 +18,30 @@ function calcBrowserWidth(logicalHeight: number): number {
 /** 浏览器面板最小宽度，低于此值自动关闭 */
 const MIN_BROWSER_WIDTH = 200;
 
+/** 侧边栏自动隐藏/恢复阈值 */
+const SIDEBAR_RESTORE_THRESHOLD = 656;
+
+/** 侧边栏宽度：与 CSS 变量 --sidebar-width 的 16rem 对齐 */
+const SIDEBAR_WIDTH = 256;
+
+/** 主内容在打开侧边栏后保留的最小可用宽度 */
+const MIN_CONTENT_WIDTH_WITH_SIDEBAR = 400;
+
 /** 扩展窗口以容纳浏览器面板，精确计算：窗口宽度 = sidebar + 400(对话) + browserW */
-async function expandWindowForBrowser() {
+async function expandWindowForBrowser(lock?: () => void, unlock?: () => void) {
   const appWindow = getCurrentWindow();
   const innerSize = await appWindow.innerSize();
   const scaleFactor = await appWindow.scaleFactor();
   const logicalW = innerSize.width / scaleFactor;
   const logicalH = innerSize.height / scaleFactor;
   const browserW = calcBrowserWidth(logicalH);
-  // 当前对话宽度（flex-1 占满 main 区域）
   const mainEl = document.querySelector('main');
   const chatW = mainEl?.clientWidth ?? 400;
-  // 扩展量 = 浏览器宽度 - 对话从 flex-1 收缩到 400 的差值
   const expand = browserW - (chatW - 400);
   const newW = logicalW + expand;
+  lock?.();
   await appWindow.setSize(new LogicalSize(newW, logicalH));
+  unlock?.();
   return { browserW, logicalW: logicalW, logicalH };
 }
 
@@ -40,37 +49,80 @@ export function MainApp() {
   const { loadSessions, updateFromSnapshot } = useStore();
   const [showBrowser, setShowBrowser] = useState(false);
   const [browserUrl, setBrowserUrl] = useState<string | undefined>(undefined);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const showBrowserRef = useRef(false);
   const unlistenRef = useRef<UnlistenFn | null>(null);
   const latestSnapshotRef = useRef<RunSnapshot | null>(null);
   const snapshotTimerRef = useRef<number | null>(null);
   const savedWindowWidthRef = useRef<number | null>(null);
+  const preferredSidebarOpenRef = useRef(true);
+  const programmaticResizeRef = useRef(false);
+  const resizeLockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const lockResize = useCallback(() => {
+    programmaticResizeRef.current = true;
+    if (resizeLockTimerRef.current) clearTimeout(resizeLockTimerRef.current);
+  }, []);
+
+  const unlockResize = useCallback(() => {
+    resizeLockTimerRef.current = setTimeout(() => {
+      programmaticResizeRef.current = false;
+    }, 200);
+  }, []);
+
+  const setSidebarOpenByLayout = useCallback((open: boolean) => {
+    setSidebarOpen((current) => current === open ? current : open);
+  }, []);
+
+  const handleSidebarChange = useCallback(async (open: boolean) => {
+    preferredSidebarOpenRef.current = open;
+    if (open) {
+      const appWindow = getCurrentWindow();
+      const innerSize = await appWindow.innerSize();
+      const scaleFactor = await appWindow.scaleFactor();
+      const logicalW = innerSize.width / scaleFactor;
+      if (logicalW <= SIDEBAR_RESTORE_THRESHOLD) {
+        const logicalH = innerSize.height / scaleFactor;
+        const newW = Math.max(
+          logicalW + SIDEBAR_WIDTH,
+          SIDEBAR_RESTORE_THRESHOLD + SIDEBAR_WIDTH,
+          SIDEBAR_WIDTH + MIN_CONTENT_WIDTH_WITH_SIDEBAR,
+        );
+        lockResize();
+        await appWindow.setSize(new LogicalSize(newW, logicalH));
+        unlockResize();
+      }
+    }
+    setSidebarOpen(open);
+  }, [lockResize, unlockResize]);
 
   const handleToggleBrowser = useCallback(async () => {
     if (!showBrowserRef.current) {
-      // 保存原始窗口宽度
       const appWindow = getCurrentWindow();
       const innerSize = await appWindow.innerSize();
       const scaleFactor = await appWindow.scaleFactor();
       savedWindowWidthRef.current = innerSize.width / scaleFactor;
-      // 扩展窗口
-      await expandWindowForBrowser();
+      await expandWindowForBrowser(lockResize, unlockResize);
       showBrowserRef.current = true;
       setShowBrowser(true);
     } else {
       await api.browserHide().catch(console.error);
-      // 恢复原始窗口宽度
       const appWindow = getCurrentWindow();
       const innerSize = await appWindow.innerSize();
       const scaleFactor = await appWindow.scaleFactor();
       const logicalH = innerSize.height / scaleFactor;
       const restoreW = savedWindowWidthRef.current ?? (innerSize.width / scaleFactor - calcBrowserWidth(logicalH));
       savedWindowWidthRef.current = null;
+      lockResize();
       await appWindow.setSize(new LogicalSize(restoreW, logicalH));
+      unlockResize();
       showBrowserRef.current = false;
       setShowBrowser(false);
+      if (restoreW > SIDEBAR_RESTORE_THRESHOLD && preferredSidebarOpenRef.current) {
+        setSidebarOpenByLayout(true);
+      }
     }
-  }, []);
+  }, [lockResize, setSidebarOpenByLayout, unlockResize]);
 
   useEffect(() => {
     ensureDesktopNotificationPermission().catch(console.warn);
@@ -100,7 +152,6 @@ export function MainApp() {
       });
       unlistenRef.current = unlisten;
 
-      // 监听 sessions 列表更新（标题变化等）
       const { listen } = await import('@tauri-apps/api/event');
       const unlistenSessions = await listen('sessions_updated', () => {
         loadSessions();
@@ -112,7 +163,6 @@ export function MainApp() {
         }
       });
 
-      // 监听浏览器自动打开事件
       const unlistenBrowserOpen = await listen<string>('browser:open', async (event) => {
         const url = event.payload;
         setBrowserUrl(url);
@@ -121,32 +171,46 @@ export function MainApp() {
           const innerSize = await appWindow.innerSize();
           const scaleFactor = await appWindow.scaleFactor();
           savedWindowWidthRef.current = innerSize.width / scaleFactor;
-          await expandWindowForBrowser();
+          await expandWindowForBrowser(lockResize, unlockResize);
           showBrowserRef.current = true;
           setShowBrowser(true);
         }
       });
 
-      // 监听浏览器页面加载完成事件
       const unlistenBrowserPageLoaded = await listen<{ title: string; url: string; text: string }>('browser:page_loaded', (event) => {
         setBrowserUrl(event.payload.url);
       });
 
-      // 监听窗口大小变化：浏览器打开时宽度不足则自动隐藏浏览器面板
+      // 窗口大小变化：浏览器/侧边栏自适应（仅用户手动拖拽时触发）
       const unlistenResize = await getCurrentWindow().onResized(async () => {
-        if (!showBrowserRef.current) return;
+        if (programmaticResizeRef.current) return;
+
         const appWindow = getCurrentWindow();
         const innerSize = await appWindow.innerSize();
         const scaleFactor = await appWindow.scaleFactor();
         const logicalW = innerSize.width / scaleFactor;
-        const mainEl = document.querySelector('main');
-        const sidebarW = mainEl ? mainEl.offsetLeft : 0;
-        const browserSpace = logicalW - sidebarW - 400;
-        if (browserSpace < MIN_BROWSER_WIDTH) {
-          await api.browserHide().catch(console.error);
-          savedWindowWidthRef.current = null;
-          showBrowserRef.current = false;
-          setShowBrowser(false);
+
+        // 浏览器打开时宽度不足则隐藏
+        if (showBrowserRef.current) {
+          const mainEl = document.querySelector('main');
+          const sidebarW = mainEl ? mainEl.offsetLeft : 0;
+          const browserSpace = logicalW - sidebarW - 400;
+          if (browserSpace < MIN_BROWSER_WIDTH) {
+            await api.browserHide().catch(console.error);
+            savedWindowWidthRef.current = null;
+            showBrowserRef.current = false;
+            setShowBrowser(false);
+          }
+        }
+
+        // 窗口宽度不足时临时隐藏侧边栏，宽度恢复后再按用户原状态恢复
+        if (logicalW <= SIDEBAR_RESTORE_THRESHOLD) {
+          setSidebarOpenByLayout(false);
+        } else if (
+          !showBrowserRef.current
+          && preferredSidebarOpenRef.current
+        ) {
+          setSidebarOpenByLayout(true);
         }
       });
 
@@ -163,14 +227,12 @@ export function MainApp() {
 
     setupListener();
 
-    // 加载初始工作空间和当前对话目录
     Promise.all([api.getWorkspaceDir(), api.getSessionCwd()])
       .then(([workspaceDir, sessionCwd]) => {
         useStore.setState({ workspaceDir, sessionCwd });
       })
       .catch(console.error);
 
-    // 监听来自消息列表的链接点击，在嵌入浏览器中打开
     const onOpenBrowser = async (e: Event) => {
       const url = (e as CustomEvent).detail;
       if (typeof url === 'string') {
@@ -180,7 +242,7 @@ export function MainApp() {
           const innerSize = await appWindow.innerSize();
           const scaleFactor = await appWindow.scaleFactor();
           savedWindowWidthRef.current = innerSize.width / scaleFactor;
-          await expandWindowForBrowser();
+          await expandWindowForBrowser(lockResize, unlockResize);
           showBrowserRef.current = true;
           setShowBrowser(true);
         }
@@ -196,38 +258,32 @@ export function MainApp() {
       window.removeEventListener('tiangong:open-browser', onOpenBrowser);
       unlistenRef.current?.();
     };
-  }, []);
+  }, [setSidebarOpenByLayout]);
 
   return (
-    <SidebarProvider>
+    <SidebarProvider open={sidebarOpen} onOpenChange={handleSidebarChange}>
       <div className="flex flex-col h-screen w-full overflow-hidden">
-        {/* 顶部 Header — 横跨全宽，固定在最顶部 */}
         <LazyStatusPanel
           showBrowser={showBrowser}
           onToggleBrowser={handleToggleBrowser}
         />
 
-        {/* 下方区域：Sidebar + 主内容 */}
         <div className="flex flex-1 min-h-0">
           <AppSidebar />
 
-          {/* 主内容区 */}
           <main className="flex flex-1 flex-col min-w-0 bg-background">
             <div className="flex flex-1 min-h-0">
               <div
                 className={`flex flex-col min-w-0 ${showBrowser ? 'shrink-0' : 'flex-1'}`}
                 style={showBrowser ? { width: 400 } : undefined}
               >
-                {/* 消息列表 */}
                 <div className="flex-1 overflow-hidden">
                   <LazyMessageList />
                 </div>
 
-                {/* 输入框 */}
                 <LazyMessageInput />
               </div>
 
-              {/* 浏览器面板 */}
               {showBrowser && (
                 <BrowserPanel initialUrl={browserUrl} currentUrl={browserUrl} />
               )}

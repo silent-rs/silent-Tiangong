@@ -242,6 +242,8 @@ fn run_gui() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
+                let state = window.state::<tiangong_app::TiangongApp>();
+                let _ = state.browser.close();
                 let _ = window.hide();
             }
         })
