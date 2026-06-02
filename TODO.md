@@ -33,10 +33,10 @@
 - [x] 拖拽手柄调整面板宽度
 - [x] StatusPanel 添加浏览器开关按钮
 
-## Phase 21-D：Agent 交互增强（待开发）
+## Phase 21-D：Agent 交互增强
 
-- [ ] 注册 `web_browse` 工具 — Agent 主动获取当前浏览器页面快照
-- [ ] `ObservePage` 命令接入 RuntimeEngine
+- [x] 注册 `web_browse` 工具 — Agent 主动获取当前浏览器页面快照
+- [x] `ObservePage` 命令接入 RuntimeEngine
 - [ ] 页面内容变化注入对话链（tool 消息格式）
 - [ ] 页面导航事件通知前端（`browser:page_loaded`）
 
