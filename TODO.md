@@ -38,7 +38,7 @@
 - [x] 注册 `web_browse` 工具 — Agent 主动获取当前浏览器页面快照
 - [x] `ObservePage` 命令接入 RuntimeEngine
 - [ ] 页面内容变化注入对话链（tool 消息格式）
-- [ ] 页面导航事件通知前端（`browser:page_loaded`）
+- [x] 页面导航事件通知前端（`browser:page_loaded`）
 
 ## Phase 21-E：表单填写增强（待开发）
 

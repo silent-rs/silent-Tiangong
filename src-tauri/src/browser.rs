@@ -14,6 +14,20 @@ const BRIDGE_SCRIPT: &str = r#"
     if (window.__tiangong_bridge_loaded) return;
     window.__tiangong_bridge_loaded = true;
 
+    // 拦截 __TAURI__ 使外部页面无法访问 Tauri API（如 shell.open）
+    // eval_with_callback 使用 __TAURI_INTERNALS__，不受影响
+    // 使用属性拦截器而非简单判断，确保无论 Tauri 何时注入都能生效
+    (function() {
+        var _tauri;
+        try {
+            Object.defineProperty(window, '__TAURI__', {
+                get: function() { return undefined; },
+                set: function(val) { _tauri = val; },
+                configurable: true
+            });
+        } catch(e) {}
+    })();
+
     window.__tiangong_bridge = {
         version: '0.5.0',
 
@@ -129,6 +143,7 @@ impl BrowserManager {
 
         let data_dir = browser_data_directory();
         let state_clone = self.state.clone();
+        let app_clone = app.clone();
 
         let builder = WebviewBuilder::new(BROWSER_WEBVIEW_LABEL, WebviewUrl::External(parsed_url))
             .initialization_script(BRIDGE_SCRIPT)
@@ -152,23 +167,37 @@ impl BrowserManager {
                         cvar.notify_all();
                     }
 
-                    // 自动捕获页面快照
+                    // 自动捕获页面快照并通知前端
                     let state_clone2 = state_clone.clone();
+                    let app_for_event = app_clone.clone();
                     let _ = webview.eval_with_callback(
                         "window.__tiangong_bridge.getFullText(12000)",
                         move |result| {
                             if let Ok(data) =
                                 serde_json::from_str::<serde_json::Value>(&result)
                             {
+                                let title = data["title"].as_str().unwrap_or("").to_string();
+                                let page_url = data["url"].as_str().unwrap_or("").to_string();
+                                let text = data["text"].as_str().unwrap_or("").to_string();
                                 let snapshot = tiangong_types::BrowserPageSnapshot {
-                                    title: data["title"].as_str().unwrap_or("").to_string(),
-                                    url: data["url"].as_str().unwrap_or("").to_string(),
-                                    text: data["text"].as_str().unwrap_or("").to_string(),
+                                    title: title.clone(),
+                                    url: page_url.clone(),
+                                    text: text.clone(),
                                     status: tiangong_types::PageStatus::Loaded,
                                 };
                                 if let Ok(mut state) = state_clone2.lock() {
                                     state.latest_snapshot = Some(snapshot);
                                 }
+                                // 通知前端页面加载完成
+                                let summary: String = text.chars().take(2000).collect();
+                                let _ = app_for_event.emit(
+                                    "browser:page_loaded",
+                                    serde_json::json!({
+                                        "title": title,
+                                        "url": page_url,
+                                        "text": summary,
+                                    }),
+                                );
                             }
                         },
                     );

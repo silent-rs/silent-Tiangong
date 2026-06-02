@@ -70,12 +70,18 @@ export function MainApp() {
         setShowBrowser(true);
       });
 
+      // 监听浏览器页面加载完成事件
+      const unlistenBrowserPageLoaded = await listen<{ title: string; url: string; text: string }>('browser:page_loaded', (event) => {
+        setBrowserUrl(event.payload.url);
+      });
+
       const prevUnlisten = unlistenRef.current;
       unlistenRef.current = () => {
         prevUnlisten?.();
         unlistenSessions();
         unlistenOpenSession();
         unlistenBrowserOpen();
+        unlistenBrowserPageLoaded();
       };
     };
 
@@ -173,7 +179,7 @@ export function MainApp() {
                     className="w-1 shrink-0 cursor-col-resize hover:bg-primary/30 active:bg-primary/50 transition-colors"
                   />
                   <div className="flex-1 min-w-0">
-                    <BrowserPanel onClose={() => { setShowBrowser(false); setBrowserUrl(undefined); }} initialUrl={browserUrl} />
+                    <BrowserPanel onClose={() => { setShowBrowser(false); setBrowserUrl(undefined); }} initialUrl={browserUrl} currentUrl={browserUrl} />
                   </div>
                 </>
               )}

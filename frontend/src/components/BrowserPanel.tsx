@@ -7,13 +7,22 @@ import { Input } from './ui/input';
 interface BrowserPanelProps {
   onClose: () => void;
   initialUrl?: string;
+  currentUrl?: string;
 }
 
-export function BrowserPanel({ onClose, initialUrl }: BrowserPanelProps) {
+export function BrowserPanel({ onClose, initialUrl, currentUrl }: BrowserPanelProps) {
   const [url, setUrl] = useState(initialUrl || 'https://www.bing.com');
   const [isLoading, setIsLoading] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const initializedRef = useRef(false);
+
+  // 同步后端推送的 URL 到地址栏，并取消加载状态
+  useEffect(() => {
+    if (currentUrl) {
+      setUrl(currentUrl);
+      setIsLoading(false);
+    }
+  }, [currentUrl]);
 
   const syncPosition = useCallback(async () => {
     if (!containerRef.current) return;
@@ -31,7 +40,6 @@ export function BrowserPanel({ onClose, initialUrl }: BrowserPanelProps) {
       await api.browserOpen(url, rect.x, rect.y, rect.width, rect.height);
     } catch (err) {
       console.error('打开浏览器失败：', err);
-    } finally {
       setIsLoading(false);
     }
   }, [url, syncPosition]);
