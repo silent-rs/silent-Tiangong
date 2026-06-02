@@ -667,7 +667,7 @@ function MemoryModelSelectSection({
 
 const DEFAULT_PROVIDERS: Record<string, ProviderConfigView> = {
   'DeepSeek': { base_url: 'https://api.deepseek.com', api_key: '', timeout_ms: 300000, protocol: 'deepseek' },
-  '智谱': { base_url: 'https://open.bigmodel.cn/api/paas/v4', api_key: '', timeout_ms: 300000, protocol: 'openai_compatible' },
+  '智谱': { base_url: 'https://open.bigmodel.cn/api/paas/v4', api_key: '', timeout_ms: 300000, protocol: 'openai' },
 };
 
 interface UrlPreset {
@@ -678,15 +678,15 @@ interface UrlPreset {
 
 const DEFAULT_PROVIDER_URL_PRESETS: Record<string, UrlPreset[]> = {
   '智谱': [
-    { label: 'OpenAI 兼容（通用）', url: 'https://open.bigmodel.cn/api/paas/v4', protocol: 'openai_compatible' },
-    { label: 'OpenAI 兼容（Coding 套餐）', url: 'https://open.bigmodel.cn/api/coding/paas/v4', protocol: 'openai_compatible' },
+    { label: 'OpenAI 兼容（通用）', url: 'https://open.bigmodel.cn/api/paas/v4', protocol: 'openai' },
+    { label: 'OpenAI 兼容（Coding 套餐）', url: 'https://open.bigmodel.cn/api/coding/paas/v4', protocol: 'openai' },
     { label: 'Anthropic 兼容（Coding 套餐）', url: 'https://open.bigmodel.cn/api/anthropic', protocol: 'anthropic' },
   ],
 };
 
 // 协议对应的默认 URL
 const PROTOCOL_DEFAULTS: Record<string, string> = {
-  openai_compatible: 'https://api.openai.com/v1',
+  openai: 'https://api.openai.com/v1',
   anthropic: 'https://api.anthropic.com',
 };
 
@@ -770,7 +770,7 @@ function ProviderModelsView({
   const [showAddProvider, setShowAddProvider] = useState(false);
   const [newProviderKey, setNewProviderKey] = useState('');
   const [newProviderDraft, setNewProviderDraft] = useState<ProviderConfigView>({
-    base_url: '', api_key: '', timeout_ms: 300000, protocol: 'openai_compatible',
+    base_url: '', api_key: '', timeout_ms: 300000, protocol: 'openai',
   });
   const [showNewApiKey, setShowNewApiKey] = useState(false);
 
@@ -839,7 +839,7 @@ function ProviderModelsView({
     setSelectedProvider(key);
     setShowAddProvider(false);
     setNewProviderKey('');
-    setNewProviderDraft({ base_url: '', api_key: '', timeout_ms: 300000, protocol: 'openai_compatible' });
+    setNewProviderDraft({ base_url: '', api_key: '', timeout_ms: 300000, protocol: 'openai' });
   };
 
   // ---- Model handlers ----
@@ -1008,7 +1008,7 @@ function ProviderModelsView({
           ))}
         </div>
         <div className="border-t p-2">
-          <Button size="sm" className="w-full" onClick={() => { setShowAddProvider(true); setNewProviderKey(''); setNewProviderDraft({ base_url: '', api_key: '', timeout_ms: 300000, protocol: 'openai_compatible' }); setShowNewApiKey(false); }}>
+          <Button size="sm" className="w-full" onClick={() => { setShowAddProvider(true); setNewProviderKey(''); setNewProviderDraft({ base_url: '', api_key: '', timeout_ms: 300000, protocol: 'openai' }); setShowNewApiKey(false); }}>
             <Plus className="w-3 h-3 mr-1" />自定义供应商
           </Button>
         </div>
@@ -1106,7 +1106,7 @@ function ProviderModelsView({
                   <div className="flex-1">
                     <Label className="text-xs">协议</Label>
                     <Select
-                      value={selectedConfig.protocol || 'openai_compatible'}
+                      value={selectedConfig.protocol || 'openai'}
                       onValueChange={(v) => {
                         const next = { ...config };
                         next.providers = { ...next.providers, [activeProvider]: { ...selectedConfig, protocol: v } };
@@ -1115,7 +1115,7 @@ function ProviderModelsView({
                     >
                       <SelectTrigger className="h-8 text-sm"><SelectValue /></SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="openai_compatible">OpenAI 兼容</SelectItem>
+                        <SelectItem value="openai">OpenAI 兼容</SelectItem>
                         <SelectItem value="anthropic">Anthropic</SelectItem>
                       </SelectContent>
                     </Select>
@@ -1353,14 +1353,14 @@ function ProviderForm({
       <div>
         <Label className="text-xs">请求格式（协议类型）</Label>
         <Select
-          value={draft.protocol || 'openai_compatible'}
+          value={draft.protocol || 'openai'}
           onValueChange={handleProtocolChange}
         >
           <SelectTrigger className="text-sm h-8">
             <SelectValue placeholder="选择协议" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="openai_compatible">OpenAI 兼容</SelectItem>
+            <SelectItem value="openai">OpenAI 兼容</SelectItem>
             <SelectItem value="anthropic">Anthropic</SelectItem>
           </SelectContent>
         </Select>
