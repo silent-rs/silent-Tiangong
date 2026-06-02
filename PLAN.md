@@ -79,6 +79,7 @@
 | 21-D | Agent 交互增强 — ObservePage 快照、web_browse 工具、页面内容注入对话链 | 待开发 |
 | 21-E | 表单填写增强 — 三层策略（native setter / keyboard / paste）、UI 库适配 | 待开发 |
 | 21-F | 完善与优化 — Cookie 持久化、权限审批、导航控制、多标签页 | 待开发 |
+| 21-G | 浏览器能力插件化 — Core trait 抽象、Tauri Plugin 封装、应用层切换 | 待开发 |
 
 ## 参考文档
 
