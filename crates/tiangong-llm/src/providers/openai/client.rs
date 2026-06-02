@@ -78,7 +78,7 @@ impl OpenAiClient {
         let start = std::time::Instant::now();
         tracing::info!(
             operation = "openai_rerank",
-            provider = "openai_compatible",
+            provider = "openai",
             model,
             stream = false,
             attempt = 0,
@@ -94,7 +94,7 @@ impl OpenAiClient {
             let body = response.text().await.unwrap_or_default();
             tracing::warn!(
                 operation = "openai_rerank",
-                provider = "openai_compatible",
+                provider = "openai",
                 model,
                 stream = false,
                 attempt = 0,
@@ -103,7 +103,7 @@ impl OpenAiClient {
                 "OpenAI 兼容请求失败"
             );
             return Err(LlmError::Provider {
-                provider: "openai_compatible",
+                provider: "openai",
                 message: format!("Rerank API 返回错误 {status}: {body}"),
             });
         }
@@ -114,7 +114,7 @@ impl OpenAiClient {
             .map_err(|err| LlmError::Serialization(err.to_string()))?;
         tracing::info!(
             operation = "openai_rerank",
-            provider = "openai_compatible",
+            provider = "openai",
             model,
             stream = false,
             attempt = 0,
@@ -128,7 +128,7 @@ impl OpenAiClient {
         let start = std::time::Instant::now();
         tracing::info!(
             operation = "openai_list_models",
-            provider = "openai_compatible",
+            provider = "openai",
             model = "<list_models>",
             stream = false,
             attempt = 0,
@@ -153,7 +153,7 @@ impl OpenAiClient {
             let body = response.text().await.unwrap_or_default();
             tracing::warn!(
                 operation = "openai_list_models",
-                provider = "openai_compatible",
+                provider = "openai",
                 model = "<list_models>",
                 stream = false,
                 attempt = 0,
@@ -171,7 +171,7 @@ impl OpenAiClient {
                 return Err(LlmError::RateLimited(message));
             }
             return Err(LlmError::Provider {
-                provider: "openai_compatible",
+                provider: "openai",
                 message,
             });
         }
@@ -189,12 +189,12 @@ impl OpenAiClient {
             .map_err(|err| LlmError::Transport(err.to_string()))?;
         let parsed: ModelsResponse =
             serde_json::from_str(&body).map_err(|err| LlmError::Provider {
-                provider: "openai_compatible",
+                provider: "openai",
                 message: format!("failed to deserialize api response: {err}: {body}"),
             })?;
         tracing::info!(
             operation = "openai_list_models",
-            provider = "openai_compatible",
+            provider = "openai",
             model = "<list_models>",
             stream = false,
             attempt = 0,
@@ -239,7 +239,7 @@ impl OpenAiClient {
             let start = std::time::Instant::now();
             tracing::info!(
                 operation,
-                provider = "openai_compatible",
+                provider = "openai",
                 model,
                 stream,
                 attempt,
@@ -249,7 +249,7 @@ impl OpenAiClient {
                 Ok(value) => {
                     tracing::info!(
                         operation,
-                        provider = "openai_compatible",
+                        provider = "openai",
                         model,
                         stream,
                         attempt,
@@ -265,7 +265,7 @@ impl OpenAiClient {
                     }
                     tracing::warn!(
                         operation,
-                        provider = "openai_compatible",
+                        provider = "openai",
                         model,
                         stream,
                         attempt,
@@ -279,7 +279,7 @@ impl OpenAiClient {
                 Err(err) => {
                     tracing::warn!(
                         operation,
-                        provider = "openai_compatible",
+                        provider = "openai",
                         model,
                         stream,
                         attempt,
