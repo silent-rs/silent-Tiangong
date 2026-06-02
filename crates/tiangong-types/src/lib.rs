@@ -11,7 +11,7 @@ pub mod status;
 pub mod stream;
 pub mod token;
 
-pub use browser::{BrowserCommand, BrowserResponse};
+pub use browser::{BrowserCommand, BrowserPageSnapshot, BrowserResponse, PageStatus};
 pub use message::{
     ContentBlock, MediaAsset, MediaKind, Message, MessageRole, MessageToolCall, now_text,
 };

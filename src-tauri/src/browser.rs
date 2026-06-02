@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Url, Webview, WebviewBuilder,
@@ -8,7 +8,6 @@ use tauri::{
 use tokio::sync::oneshot;
 
 const BROWSER_WEBVIEW_LABEL: &str = "browser-webview";
-const RESULT_PREFIX: &str = "__TG_RESULT__";
 
 const BRIDGE_SCRIPT: &str = r#"
 (function() {
@@ -16,30 +15,30 @@ const BRIDGE_SCRIPT: &str = r#"
     window.__tiangong_bridge_loaded = true;
 
     window.__tiangong_bridge = {
-        version: '0.2.0',
-
-        getPageInfo: function() {
-            return JSON.stringify({
-                title: document.title,
-                url: window.location.href,
-                ready: document.readyState === 'complete' || document.readyState === 'interactive',
-            });
-        },
+        version: '0.5.0',
 
         getFullText: function(maxChars) {
             maxChars = maxChars || 12000;
             var text = '';
             if (document.body) {
-                text = document.body.innerText || '';
+                var clone = document.body.cloneNode(true);
+                var removes = clone.querySelectorAll('script,style,noscript');
+                for (var i = 0; i < removes.length; i++) {
+                    removes[i].parentNode.removeChild(removes[i]);
+                }
+                text = (clone.textContent || '').replace(/\s+/g, ' ').trim();
+                if (text.length < 50) {
+                    text = (document.body.innerText || '').trim();
+                }
             }
             if (text.length > maxChars) {
                 text = text.substring(0, maxChars) + '\n...[内容已截断]';
             }
-            return JSON.stringify({
+            return {
                 title: document.title,
                 url: window.location.href,
                 text: text,
-            });
+            };
         },
 
         click: function(selector) {
@@ -64,24 +63,19 @@ const BRIDGE_SCRIPT: &str = r#"
             el.dispatchEvent(new Event('change', { bubbles: true }));
             return true;
         },
-
-        // 通过 title 变更将结果传递给 Rust
-        returnResult: function(data) {
-            document.title = '__TG_RESULT__' + data;
-        },
     };
 
-    console.log('[Tiangong Bridge] loaded v0.2.0');
+    console.log('[Tiangong Bridge] loaded v0.5.0');
 })();
 "#;
 
 /// 浏览器 WebView 的共享状态
 pub struct BrowserState {
     webview: Option<Webview<Wry>>,
-    /// 等待中的 title 变更结果接收器
-    pending_result: Option<oneshot::Sender<String>>,
-    /// 原始页面标题（用于恢复）
-    original_title: String,
+    /// 页面加载完成信号
+    page_loaded: Arc<(Mutex<bool>, Condvar)>,
+    /// 最近一次页面快照
+    latest_snapshot: Option<tiangong_types::BrowserPageSnapshot>,
 }
 
 pub struct BrowserManager {
@@ -99,13 +93,12 @@ impl BrowserManager {
         Self {
             state: Arc::new(Mutex::new(BrowserState {
                 webview: None,
-                pending_result: None,
-                original_title: String::new(),
+                page_loaded: Arc::new((Mutex::new(false), Condvar::new())),
+                latest_snapshot: None,
             })),
         }
     }
 
-    /// 克隆内部状态引用（用于异步任务）
     pub fn clone_state(&self) -> Arc<Mutex<BrowserState>> {
         self.state.clone()
     }
@@ -140,19 +133,45 @@ impl BrowserManager {
         let builder = WebviewBuilder::new(BROWSER_WEBVIEW_LABEL, WebviewUrl::External(parsed_url))
             .initialization_script(BRIDGE_SCRIPT)
             .data_directory(data_dir)
+            .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/605.1.15")
             .enable_clipboard_access()
             .devtools(true)
-            .on_document_title_changed(move |_webview, title| {
-                if let Some(data) = title.strip_prefix(RESULT_PREFIX) {
-                    let mut state = match state_clone.lock() {
-                        Ok(s) => s,
-                        Err(_) => return,
-                    };
-                    if let Some(tx) = state.pending_result.take() {
-                        let _ = tx.send(data.to_string());
+            .on_page_load(move |webview, payload| {
+                use tauri::webview::PageLoadEvent;
+                if payload.event() == PageLoadEvent::Finished {
+                    // 通知页面加载完成
+                    {
+                        let state = match state_clone.lock() {
+                            Ok(s) => s,
+                            Err(_) => return,
+                        };
+                        let (lock, cvar) = &*state.page_loaded;
+                        if let Ok(mut loaded) = lock.lock() {
+                            *loaded = true;
+                        }
+                        cvar.notify_all();
                     }
-                } else if let Ok(mut state) = state_clone.lock() {
-                    state.original_title = title.to_string();
+
+                    // 自动捕获页面快照
+                    let state_clone2 = state_clone.clone();
+                    let _ = webview.eval_with_callback(
+                        "window.__tiangong_bridge.getFullText(12000)",
+                        move |result| {
+                            if let Ok(data) =
+                                serde_json::from_str::<serde_json::Value>(&result)
+                            {
+                                let snapshot = tiangong_types::BrowserPageSnapshot {
+                                    title: data["title"].as_str().unwrap_or("").to_string(),
+                                    url: data["url"].as_str().unwrap_or("").to_string(),
+                                    text: data["text"].as_str().unwrap_or("").to_string(),
+                                    status: tiangong_types::PageStatus::Loaded,
+                                };
+                                if let Ok(mut state) = state_clone2.lock() {
+                                    state.latest_snapshot = Some(snapshot);
+                                }
+                            }
+                        },
+                    );
                 }
             });
 
@@ -172,8 +191,12 @@ impl BrowserManager {
             if let Some(webview) = state.webview.take() {
                 let _ = webview.close();
             }
-            state.pending_result = None;
-            state.original_title = String::new();
+            let (lock, cvar) = &*state.page_loaded;
+            if let Ok(mut loaded) = lock.lock() {
+                *loaded = false;
+            }
+            cvar.notify_all();
+            state.latest_snapshot = None;
         }
         Ok(())
     }
@@ -200,6 +223,10 @@ impl BrowserManager {
 
     pub fn navigate(&self, url: &str) -> Result<(), String> {
         let state = self.state.lock().map_err(|e| e.to_string())?;
+        let (lock, _cvar) = &*state.page_loaded;
+        if let Ok(mut loaded) = lock.lock() {
+            *loaded = false;
+        }
         if let Some(webview) = &state.webview {
             let parsed_url: Url = url.parse().map_err(|e| format!("URL 解析失败：{e}"))?;
             webview
@@ -217,77 +244,174 @@ impl BrowserManager {
         Ok(())
     }
 
-    /// 通过浏览器获取网页内容
+    /// 通过 eval_with_callback 获取 JS 返回值
+    fn eval_with_result(&self, js: &str) -> Option<String> {
+        let (sender, rx) = oneshot::channel();
+        let tx = Arc::new(std::sync::Mutex::new(Some(sender)));
+        {
+            let state = self.state.lock().ok()?;
+            let webview = state.webview.as_ref()?;
+            webview
+                .eval_with_callback(js, move |result| {
+                    if let Ok(mut guard) = tx.lock() {
+                        if let Some(tx) = guard.take() {
+                            let _ = tx.send(result);
+                        }
+                    }
+                })
+                .ok()?;
+        }
+        rx.blocking_recv().ok()
+    }
+
+    /// 等待页面加载完成
     ///
-    /// 流程：导航到 URL → 等待加载 → 通过 title IPC 提取页面文本
+    /// 使用循环处理 close() 的过期 notify 和虚假唤醒，
+    /// 直到 loaded=true 或超时。
+    fn wait_for_page_load(&self, timeout_ms: u64) -> bool {
+        let page_loaded = {
+            let state = match self.state.lock() {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+            state.page_loaded.clone()
+        };
+        let (lock, cvar) = &*page_loaded;
+        let start = std::time::Instant::now();
+        let mut guard = match lock.lock() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        if *guard {
+            return true;
+        }
+        loop {
+            let remaining = timeout_ms.saturating_sub(start.elapsed().as_millis() as u64);
+            if remaining == 0 {
+                return *guard;
+            }
+            let result = cvar.wait_timeout(guard, std::time::Duration::from_millis(remaining));
+            match result {
+                Ok((g, _)) => {
+                    guard = g;
+                    if *guard {
+                        return true;
+                    }
+                    // 过期通知或虚假唤醒，继续等待
+                }
+                Err(_) => return false,
+            }
+        }
+    }
+
+    /// 轮询等待页面内容渲染就绪（处理 JS 异步渲染）
+    ///
+    /// 策略：等待内容增长后稳定，而非仅检查阈值。
+    /// - 内容 > 1000 字符且连续 2 次不变 → 快速路径（静态页面已加载）
+    /// - 内容曾增长且连续 3 次不变 → 慢速路径（JS 渲染完成）
+    /// - 否则持续轮询直到超时
+    fn wait_for_content_ready(&self, timeout_ms: u64) {
+        let start = std::time::Instant::now();
+        let check_interval = std::time::Duration::from_millis(500);
+        let timeout = std::time::Duration::from_millis(timeout_ms);
+        let mut last_len: usize = 0;
+        let mut stable_count: usize = 0;
+        let mut content_grew = false;
+
+        loop {
+            let text_len = self
+                .eval_with_result("(function(){if(!document.body)return 0;var c=document.body.cloneNode(true);var r=c.querySelectorAll('script,style,noscript');for(var i=0;i<r.length;i++)r[i].parentNode.removeChild(r[i]);return(c.textContent||'').length})()")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(0);
+
+            if text_len > last_len {
+                content_grew = true;
+                stable_count = 0;
+            } else {
+                stable_count += 1;
+            }
+            last_len = text_len;
+
+            if text_len > 1000 && stable_count >= 2 {
+                break;
+            }
+            if content_grew && stable_count >= 3 {
+                break;
+            }
+            if start.elapsed() >= timeout {
+                break;
+            }
+
+            std::thread::sleep(check_interval);
+        }
+    }
+
+    /// 通过浏览器获取网页内容
     pub fn fetch_page_content(
         &self,
         url: &str,
         max_chars: usize,
+        should_navigate: bool,
     ) -> tiangong_types::BrowserResponse {
-        // 导航到目标 URL
-        if let Err(err) = self.navigate(url) {
-            return tiangong_types::BrowserResponse {
-                ok: false,
-                title: String::new(),
-                content: String::new(),
-                final_url: url.to_string(),
-                error: Some(err),
-            };
+        let error_response = |err: String| tiangong_types::BrowserResponse {
+            ok: false,
+            title: String::new(),
+            content: String::new(),
+            final_url: url.to_string(),
+            error: Some(err),
+        };
+
+        if should_navigate {
+            if let Err(err) = self.navigate(url) {
+                return error_response(err);
+            }
         }
 
-        // 等待页面加载
-        for _ in 0..40 {
-            std::thread::sleep(std::time::Duration::from_millis(250));
-        }
+        let t0 = std::time::Instant::now();
+        let loaded = self.wait_for_page_load(15_000);
+        eprintln!(
+            "[browser] wait_for_page_load={loaded}, elapsed={}ms",
+            t0.elapsed().as_millis()
+        );
 
-        // 提取页面内容（通过 title IPC）
+        let t1 = std::time::Instant::now();
+        self.wait_for_content_ready(15_000);
+        eprintln!(
+            "[browser] wait_for_content_ready elapsed={}ms",
+            t1.elapsed().as_millis()
+        );
+
         let result = self.eval_with_result(&format!(
-            "window.__tiangong_bridge.returnResult(window.__tiangong_bridge.getFullText({max_chars}))",
+            "window.__tiangong_bridge.getFullText({max_chars})"
         ));
 
         match result {
             Some(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
-                Ok(data) => tiangong_types::BrowserResponse {
-                    ok: true,
-                    title: data["title"].as_str().unwrap_or("").to_string(),
-                    content: data["text"].as_str().unwrap_or("").to_string(),
-                    final_url: data["url"].as_str().unwrap_or(url).to_string(),
-                    error: None,
-                },
-                Err(_) => tiangong_types::BrowserResponse {
-                    ok: false,
-                    title: String::new(),
-                    content: String::new(),
-                    final_url: url.to_string(),
-                    error: Some("解析页面内容失败".to_string()),
-                },
+                Ok(data) => {
+                    let title = data["title"].as_str().unwrap_or("").to_string();
+                    let content = data["text"].as_str().unwrap_or("").to_string();
+                    let final_url = data["url"].as_str().unwrap_or(url).to_string();
+                    tiangong_types::BrowserResponse {
+                        ok: true,
+                        title,
+                        content,
+                        final_url,
+                        error: None,
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[browser] JSON parse error: {e}");
+                    error_response("解析页面内容失败".to_string())
+                }
             },
-            None => tiangong_types::BrowserResponse {
-                ok: false,
-                title: String::new(),
-                content: String::new(),
-                final_url: url.to_string(),
-                error: Some("获取页面内容超时".to_string()),
-            },
+            None => error_response("获取页面内容超时".to_string()),
         }
     }
 
-    /// 执行 JS 并通过 title 变更获取返回值
-    fn eval_with_result(&self, js: &str) -> Option<String> {
-        let (tx, rx) = oneshot::channel();
-
-        // 注册等待器
-        {
-            let mut state = self.state.lock().ok()?;
-            state.pending_result = Some(tx);
-        }
-
-        // 执行 JS
-        self.eval(js).ok()?;
-
-        // 等待结果（最多 10 秒）
-        rx.blocking_recv().ok()
+    /// 获取当前浏览器页面的快照
+    pub fn get_snapshot(&self) -> Option<tiangong_types::BrowserPageSnapshot> {
+        let state = self.state.lock().ok()?;
+        state.latest_snapshot.clone()
     }
 }
 
@@ -316,18 +440,18 @@ pub async fn browser_command_handler(
                     state: browser_state.clone(),
                 };
 
-                // 浏览器未打开时自动创建并通知前端
-                if !manager.is_open() {
+                let should_navigate = if !manager.is_open() {
                     if let Some((x, y, w, h)) = default_browser_rect(&app) {
                         let _ = manager.open(&app, &url, x, y, w, h);
                     }
                     let _ = app.emit("browser:open", &url);
-                    // 等待浏览器创建完成
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                }
+                    false
+                } else {
+                    true
+                };
 
                 let result = tokio::task::spawn_blocking(move || {
-                    manager.fetch_page_content(&url, max_chars)
+                    manager.fetch_page_content(&url, max_chars, should_navigate)
                 })
                 .await;
                 let response = result.unwrap_or(tiangong_types::BrowserResponse {
@@ -352,11 +476,37 @@ pub async fn browser_command_handler(
                     let _ = manager.navigate(&url);
                 }
             }
+            tiangong_types::BrowserCommand::ObservePage { response_tx } => {
+                let manager = BrowserManager {
+                    state: browser_state.clone(),
+                };
+                let snapshot = manager.get_snapshot().unwrap_or_else(|| {
+                    manager
+                        .eval_with_result("window.__tiangong_bridge.getFullText(12000)")
+                        .and_then(|raw| {
+                            let data = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+                            Some(tiangong_types::BrowserPageSnapshot {
+                                title: data["title"].as_str().unwrap_or("").to_string(),
+                                url: data["url"].as_str().unwrap_or("").to_string(),
+                                text: data["text"].as_str().unwrap_or("").to_string(),
+                                status: tiangong_types::PageStatus::Loaded,
+                            })
+                        })
+                        .unwrap_or(tiangong_types::BrowserPageSnapshot {
+                            title: String::new(),
+                            url: String::new(),
+                            text: String::new(),
+                            status: tiangong_types::PageStatus::Error(
+                                "浏览器未打开或页面未加载".to_string(),
+                            ),
+                        })
+                });
+                let _ = response_tx.send(snapshot);
+            }
         }
     }
 }
 
-/// 根据主窗口尺寸计算浏览器面板默认位置（右侧 50%）
 fn default_browser_rect(app: &AppHandle<Wry>) -> Option<(f64, f64, f64, f64)> {
     let window = app.get_window("main")?;
     let size = window.inner_size().ok()?;
