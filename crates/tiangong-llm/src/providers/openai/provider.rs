@@ -73,7 +73,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             .map_err(|err| LlmError::InvalidRequest(err.to_string()))?;
         let response = self.client.complete(&model, payload).await?;
         parse_complete_response(&response).map_err(|err| LlmError::Provider {
-            provider: "openai_compatible",
+            provider: "openai",
             message: err.to_string(),
         })
     }
