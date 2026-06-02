@@ -1,69 +1,58 @@
 # TODO - 天工当前开发任务
 
-> 最后更新：2026-05-27
-> 当前主线：Phase 20 — 自动化触发层（0.4.0）✅ 已完成
-> 参考：`PLAN.md`、Issue #38
+> 最后更新：2026-06-02
+> 当前主线：Phase 21 — 内嵌浏览器面板（0.5.0）
+> 参考：`PLAN.md`、Issue #95
 
 ---
 
-## Phase 20-A：任务模型与存储
+## Phase 21-A：技术验证
 
-- [x] 定义 Job 数据模型（id / name / trigger_type / schedule / payload / enabled / created_at / updated_at）
-- [x] 定义 JobRun 数据模型（id / job_id / status / started_at / finished_at / result）
-- [x] 定义 JobDelivery 数据模型（id / job_run_id / channel / status / retry_count）
-- [x] 实现 SQLite job store（建表、CRUD）
-- [x] 实现 run history 存储（写入、查询、状态更新）
-- [x] 新增 Job CRUD API（`POST/GET/PUT/DELETE /api/v1/jobs`）
+- [x] 验证 Tauri 2 多 WebView：在主窗口内创建第二个 WebView 加载外部 URL
+- [x] 验证 `initialization_script` 正确注入到外部 URL 页面
+- [x] 验证 IPC 双向通信（eval_with_callback 替代 title IPC）
+- [x] 验证 WebView 位置跟随前端容器动态调整
+- [x] 验证 data_directory 配置实现 Cookie 持久化
 
-## Phase 20-B：Cron 调度器
+## Phase 21-B：BrowserManager 核心
 
-- [x] 引入 cron 表达式解析库（如 `cron` 或 `saffron`）
-- [x] 实现 Scheduler 常驻执行器（tokio spawn，内嵌于 Server 启动流程）
-- [x] Cron job 触发 → 构造 RuntimeEvent → 进入现有执行链路
-- [x] Server 启动时从 job store 加载已启用的 cron job 并恢复调度
-- [x] 支持执行目标指定（main session / isolated session / skill）
-- [x] 手动触发 API（`POST /api/v1/jobs/:id/trigger`）
+- [x] 新增 `src-tauri/src/browser.rs` — BrowserManager 模块
+- [x] Bridge Script v0.5.0 — getFullText（textContent 提取）、click、type
+- [x] Tauri Commands：`browser_open`、`browser_close`、`browser_set_position`、`browser_navigate`、`browser_eval`
+- [x] Agent `web_fetch` 拦截 → 浏览器获取页面内容（eval_with_callback + on_page_load + Condvar）
+- [x] 内容就绪检测（wait_for_content_ready：内容增长稳定策略）
+- [x] 新增 `BrowserPageSnapshot`、`PageStatus`、`ObservePage` 命令类型
+- [x] `on_page_load` 自动捕获页面快照到 `latest_snapshot`
 
-## Phase 20-C：Webhook 触发器
+## Phase 21-C：前端浏览器面板
 
-- [x] Webhook 端点注册（每个 webhook job 分配唯一路径）
-- [x] 实现 `POST /api/v1/webhooks/:token` 端点
-- [x] 请求签名验证（HMAC-SHA256）
-- [x] Webhook 触发 → 构造 RuntimeEvent → 进入现有执行链路
+- [x] `BrowserPanel` 组件（地址栏 + WebView 容器 + 关闭按钮）
+- [x] 集成到主布局（右侧可折叠面板）
+- [x] 监听 `browser:open` 事件自动显示面板
+- [x] 容器位置同步（resize 时更新 WebView 位置）
+- [x] 拖拽手柄调整面板宽度
+- [x] StatusPanel 添加浏览器开关按钮
 
-## Phase 20-D：Polling 触发器
+## Phase 21-D：Agent 交互增强（待开发）
 
-- [x] 实现 HTTP polling 轮询执行器（定时请求指定 URL）
-- [x] 条件判断与去重（响应内容变化时才触发）
-- [x] Polling 触发 → 构造 RuntimeEvent → 进入现有执行链路
+- [ ] 注册 `web_browse` 工具 — Agent 主动获取当前浏览器页面快照
+- [ ] `ObservePage` 命令接入 RuntimeEngine
+- [ ] 页面内容变化注入对话链（tool 消息格式）
+- [ ] 页面导航事件通知前端（`browser:page_loaded`）
 
-## Phase 20-E：结果投递与通知
+## Phase 21-E：表单填写增强（待开发）
 
-- [x] 执行结果投递到 IM 通道（复用 `POST /api/v1/messages` 或直接调用 MessageRouter）
-- [x] 失败重试机制（可配置重试次数与间隔）
-- [x] Run history 查询 API（`GET /api/v1/jobs/:id/runs`）
-- [x] 投递状态追踪与查询
+- [ ] Bridge Script 实现三层表单填写策略（native setter / keyboard / paste）
+- [ ] 适配 Ant Design、Element Plus 等 UI 库的 Select/DatePicker 组件
+- [ ] 自动检测页面框架类型（React/Vue/vanilla）
+- [ ] MCP Tool 层实现策略自动选择和 fallback
 
-## Phase 20-F：前端管理界面
+## Phase 21-F：完善与优化（待开发）
 
-- [x] Job 列表页（展示所有 job、状态、下次执行时间）
-- [x] Job 创建/编辑表单（cron 表达式、webhook URL、polling 配置）
-- [x] Job 启停开关
-- [x] 执行历史查看（run 列表、状态、耗时、结果摘要）
-- [x] 手动触发按钮
-
-## 发布准备（0.4.0）
-
-- [x] 更新 `Cargo.toml` 版本号为 `0.4.0`
-- [x] 更新 `tauri.conf.json` 版本号
-- [x] 验证 cron / webhook / polling 端到端流程
-- [x] 验证 Server 启动恢复 cron job
-- [x] 验证前端 Job 管理界面
+- [ ] Cookie 持久化配置确认（data_directory 已设置，验证跨会话保持）
+- [ ] 浏览器操作的权限审批机制（复用现有审批流程）
+- [ ] 前进/后退/刷新导航控制
+- [ ] 多标签页支持（可选）
+- [ ] 用户批注模式（在页面上标注，Agent 理解标注内容）
 
 ---
-
-## 文档同步要求
-
-- `docs/requirements.md`：补充自动化触发层相关需求
-- `docs/server-api.md`：补充 Job / Webhook API 文档
-- Issue #38：开发完成后关闭

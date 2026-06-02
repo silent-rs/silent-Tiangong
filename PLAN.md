@@ -11,13 +11,13 @@
 | 0.1.0 | CLI Agent 基线 + Skill 管理 | ✅ |
 | 0.2.0 | Server + Gateway + 多媒体 + Memory | ✅ |
 | 0.3.0 | 多智能体协作 + 发布分发 + 飞书互联 | ✅ |
-| **0.4.0** | **自动化触发层（cron/webhook/polling）** | **✅** |
+| 0.4.0 | 自动化触发层（cron/webhook/polling） | ✅ |
+| **0.5.0** | **内嵌浏览器面板** | **进行中** |
 
-## 当前执行策略（2026-05-25）
+## 当前执行策略（2026-06-02）
 
-- Phase 1~19 已完成。
-- 当前主目标：实现自动化触发层（Issue #38），完成后发布 0.4.0。
-- 自动化触发层与 IM Adapter 模式正交，互不冲突。
+- Phase 1~20 已完成。
+- 当前主目标：内嵌浏览器面板（Issue #95），Phase 21-A ~ 21-C 已完成，21-D 进行中。
 
 ## 已完成里程碑
 
@@ -62,6 +62,23 @@
 | 20-D | Polling 触发器 — HTTP 轮询、条件去重、触发接入 |
 | 20-E | 结果投递与通知 — IM 通道投递、失败重试、Run history API |
 | 20-F | 前端管理界面 — Job 列表/创建/启停、执行历史、手动触发 |
+
+## Phase 21：内嵌浏览器面板（进行中）
+
+> Issue：#95
+
+基于 Tauri 2 多 WebView 能力，在主窗口内嵌入浏览器面板，用户和 Agent 共享浏览器会话。用户可正常浏览和登录，Agent 通过 Bridge Script 操控页面。
+
+**核心能力**：真实浏览器渲染、用户直接操作、Agent 自动操控、人机协作、Cookie 持久化。
+
+| 子阶段 | 内容 | 状态 |
+|--------|------|------|
+| 21-A | 技术验证 — Tauri 多 WebView、initialization_script、IPC 通信、位置跟随 | ✅ |
+| 21-B | BrowserManager 核心 — browser.rs、Bridge Script、Tauri Commands、Agent web_fetch 拦截 | ✅ |
+| 21-C | 前端浏览器面板 — BrowserPanel 组件、地址栏、容器同步、拖拽调整宽度 | ✅ |
+| 21-D | Agent 交互增强 — ObservePage 快照、web_browse 工具、页面内容注入对话链 | 待开发 |
+| 21-E | 表单填写增强 — 三层策略（native setter / keyboard / paste）、UI 库适配 | 待开发 |
+| 21-F | 完善与优化 — Cookie 持久化、权限审批、导航控制、多标签页 | 待开发 |
 
 ## 参考文档
 
