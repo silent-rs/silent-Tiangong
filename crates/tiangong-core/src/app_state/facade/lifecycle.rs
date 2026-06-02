@@ -73,8 +73,10 @@ impl TiangongState {
             },
         };
 
+        let mut loaded_from_disk = false;
         if let Ok(Some(loaded)) = state.load_from_disk() {
             state.apply_loaded_state(loaded);
+            loaded_from_disk = true;
         } else if let Ok(Some(legacy_loaded)) = state.load_from_legacy_disk() {
             state.apply_loaded_state(legacy_loaded);
             let _ = state.persist_to_disk();
@@ -83,13 +85,14 @@ impl TiangongState {
 
         state.migrate_legacy_skill_layout_if_needed();
 
-        if !state
-            .services
-            .repository
-            .paths()
-            .skills_config_path
-            .exists()
-            || !state.services.repository.paths().mcp_config_path.exists()
+        if loaded_from_disk
+            && (!state
+                .services
+                .repository
+                .paths()
+                .skills_config_path
+                .exists()
+                || !state.services.repository.paths().mcp_config_path.exists())
         {
             let _ = state.persist_app_only();
         }
