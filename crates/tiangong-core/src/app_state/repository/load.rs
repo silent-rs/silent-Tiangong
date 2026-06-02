@@ -15,10 +15,15 @@ impl AppRepository {
                 .unwrap_or_default();
             let mut sessions = Vec::new();
             for session_id in &session_ids {
-                if let Some(session) = self.load_session_from_disk(session_id, legacy_trust_mode)?
-                    && session.parent_session_id.is_none()
-                {
-                    sessions.push(session);
+                match self.load_session_from_disk(session_id, legacy_trust_mode) {
+                    Ok(Some(session)) if session.parent_session_id.is_none() => {
+                        sessions.push(session);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        self.backup_corrupted_session(session_id);
+                        tracing::warn!("跳过损坏的会话文件 {session_id}: {e:#}");
+                    }
                 }
             }
 
@@ -49,10 +54,15 @@ impl AppRepository {
 
         let mut sessions = Vec::new();
         for session_id in &session_ids {
-            if let Some(session) = self.load_session_from_disk(session_id, legacy_trust_mode)?
-                && session.parent_session_id.is_none()
-            {
-                sessions.push(session);
+            match self.load_session_from_disk(session_id, legacy_trust_mode) {
+                Ok(Some(session)) if session.parent_session_id.is_none() => {
+                    sessions.push(session);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    self.backup_corrupted_session(session_id);
+                    tracing::warn!("跳过损坏的会话文件 {session_id}: {e:#}");
+                }
             }
         }
         let active_session_id =
@@ -178,6 +188,23 @@ impl AppRepository {
             session.trust_mode = missing_trust_mode;
         }
         Ok(Some(session))
+    }
+
+    fn backup_corrupted_session(&self, session_id: &str) {
+        let path = session_storage_path(&self.paths.sessions_dir_path, session_id);
+        if !path.exists() {
+            return;
+        }
+        let backup_path = path.with_extension("corrupted");
+        let final_path = if backup_path.exists() {
+            let timestamp = chrono::Local::now().format("%Y%m%d%H%M%S");
+            path.with_extension(format!("corrupted.{timestamp}"))
+        } else {
+            backup_path
+        };
+        if let Err(e) = fs::rename(&path, &final_path) {
+            tracing::warn!("备份损坏会话文件失败 {}: {e}", final_path.display());
+        }
     }
 
     pub(in crate::app_state) fn list_session_ids_from_dir(&self) -> Result<Vec<String>> {
