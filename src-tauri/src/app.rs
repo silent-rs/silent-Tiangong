@@ -4,10 +4,7 @@ use std::sync::Mutex;
 use tiangong_config::load_tiangong_config;
 use tiangong_core::core::TiangongCore;
 use tiangong_core::core_config::CoreConfigProvider;
-use tokio::sync::mpsc;
 use tokio::sync::Mutex as AsyncMutex;
-
-use crate::browser::BrowserManager;
 
 /// 天工应用状态
 ///
@@ -15,16 +12,17 @@ use crate::browser::BrowserManager;
 /// cores: 活跃的对话核心（session_id → TiangongCore）
 /// config: 共享配置提供者
 /// embedded_server: 嵌入式 Server 句柄（Desktop 模式下 Server 运行在 app 进程内）
-/// browser: 浏览器面板管理器
-/// browser_cmd_tx: 浏览器命令通道发送端（core → browser handler）
 pub struct TiangongApp {
     pub state: std::sync::Arc<AsyncMutex<tiangong_core::app_state::TiangongState>>,
     pub cores: Mutex<HashMap<String, TiangongCore>>,
     pub config: CoreConfigProvider,
     embedded_server: Mutex<Option<tiangong_server::EmbeddedServerHandle>>,
-    pub browser: BrowserManager,
-    browser_cmd_tx: mpsc::Sender<tiangong_types::BrowserCommand>,
-    browser_cmd_rx: Mutex<Option<mpsc::Receiver<tiangong_types::BrowserCommand>>>,
+    /// 浏览器页面获取能力（由 plugin 在 setup 阶段注入）
+    page_fetcher: Mutex<Option<std::sync::Arc<dyn tiangong_core::browser_trait::PageFetcher>>>,
+    /// 工具覆盖处理器（由 plugin 在 setup 阶段注入）
+    tool_overrides: Mutex<
+        HashMap<String, std::sync::Arc<dyn tiangong_core::tool_override::ToolOverrideHandler>>,
+    >,
 }
 
 impl Default for TiangongApp {
@@ -33,10 +31,6 @@ impl Default for TiangongApp {
         let core_config = app_config.to_core_config();
         let config = CoreConfigProvider::new(core_config);
 
-        let (browser_cmd_tx, browser_cmd_rx) = mpsc::channel::<tiangong_types::BrowserCommand>(16);
-
-        let browser = BrowserManager::new();
-
         Self {
             state: std::sync::Arc::new(AsyncMutex::new(
                 tiangong_core::app_state::TiangongState::load_or_default(),
@@ -44,9 +38,8 @@ impl Default for TiangongApp {
             cores: Mutex::new(HashMap::new()),
             config,
             embedded_server: Mutex::new(None),
-            browser,
-            browser_cmd_tx,
-            browser_cmd_rx: Mutex::new(Some(browser_cmd_rx)),
+            page_fetcher: Mutex::new(None),
+            tool_overrides: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -56,18 +49,25 @@ impl TiangongApp {
         Self::default()
     }
 
-    /// 在 Tauri setup 阶段启动浏览器命令处理循环（需要 AppHandle）
-    pub fn start_browser_handler(&self, app: tauri::AppHandle<tauri::Wry>) {
-        let rx = match self.browser_cmd_rx.lock().ok().and_then(|mut g| g.take()) {
-            Some(rx) => rx,
-            None => return,
-        };
-        let browser_clone = self.browser.clone_state();
-        tauri::async_runtime::spawn(crate::browser::browser_command_handler(
-            rx,
-            browser_clone,
-            app,
-        ));
+    /// 注入浏览器页面获取能力（由 plugin 在 setup 阶段调用）
+    pub fn set_page_fetcher(
+        &self,
+        fetcher: std::sync::Arc<dyn tiangong_core::browser_trait::PageFetcher>,
+    ) {
+        if let Ok(mut guard) = self.page_fetcher.lock() {
+            *guard = Some(fetcher);
+        }
+    }
+
+    /// 注册工具覆盖处理器（由 plugin 在 setup 阶段调用）
+    pub fn register_tool_override(
+        &self,
+        name: &str,
+        handler: std::sync::Arc<dyn tiangong_core::tool_override::ToolOverrideHandler>,
+    ) {
+        if let Ok(mut guard) = self.tool_overrides.lock() {
+            guard.insert(name.to_string(), handler);
+        }
     }
 
     fn lock_cores(&self) -> std::sync::MutexGuard<'_, HashMap<String, TiangongCore>> {
@@ -144,15 +144,16 @@ impl TiangongApp {
             cores.remove(session_id);
         }
         let core = TiangongCore::with_session_for_gui(self.config.clone(), session, stream_tx);
-        // 注入浏览器页面获取能力和工具覆盖
-        {
-            let fetcher = std::sync::Arc::new(crate::browser::ChannelPageFetcher::new(
-                self.browser_cmd_tx.clone(),
-            ));
-            core.set_page_fetcher(fetcher.clone());
-            let handler = std::sync::Arc::new(crate::browser::BrowserToolOverride::new(fetcher));
-            core.register_tool_override("web_fetch", handler.clone());
-            core.register_tool_override("web_browse", handler);
+        // 注入浏览器页面获取能力和工具覆盖（由 plugin setup 阶段注册）
+        if let Ok(guard) = self.page_fetcher.lock() {
+            if let Some(ref fetcher) = *guard {
+                core.set_page_fetcher(fetcher.clone());
+            }
+        }
+        if let Ok(guard) = self.tool_overrides.lock() {
+            for (name, handler) in guard.iter() {
+                core.register_tool_override(name, handler.clone());
+            }
         }
         let id = core.session_id().to_string();
         cores.insert(id.clone(), core);

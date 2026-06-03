@@ -9315,6 +9315,7 @@ dependencies = [
  "tiangong-entry",
  "tiangong-media",
  "tiangong-memory",
+ "tiangong-plugin-browser",
  "tiangong-scheduler",
  "tiangong-server",
  "tiangong-types",
@@ -9541,7 +9542,6 @@ dependencies = [
  "scru128",
  "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]

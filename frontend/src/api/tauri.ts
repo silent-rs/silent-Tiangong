@@ -778,29 +778,29 @@ export const api = {
     invoke('webhook_list_runs', { id, limit }),
 
   // ----------------------------------------------------------------
-  // 浏览器面板
+  // 浏览器面板（通过 plugin:browser）
   // ----------------------------------------------------------------
   browserOpen: (url: string, x: number, y: number, width: number, height: number): Promise<void> =>
-    invoke('browser_open', { url, x, y, width, height }),
+    invoke('plugin:browser|browser_open', { url, x, y, width, height }),
 
   browserClose: (): Promise<void> =>
-    invoke('browser_close'),
+    invoke('plugin:browser|browser_close'),
 
   browserSetPosition: (x: number, y: number, width: number, height: number): Promise<void> =>
-    invoke('browser_set_position', { x, y, width, height }),
+    invoke('plugin:browser|browser_set_position', { x, y, width, height }),
 
   browserNavigate: (url: string): Promise<void> =>
-    invoke('browser_navigate', { url }),
+    invoke('plugin:browser|browser_navigate', { url }),
 
   browserEval: (js: string): Promise<void> =>
-    invoke('browser_eval', { js }),
+    invoke('plugin:browser|browser_eval', { js }),
 
   browserHide: (): Promise<void> =>
-    invoke('browser_hide'),
+    invoke('plugin:browser|browser_hide'),
 
   browserGoBack: (): Promise<void> =>
-    invoke('browser_go_back'),
+    invoke('plugin:browser|browser_go_back'),
 
   browserGoForward: (): Promise<void> =>
-    invoke('browser_go_forward'),
+    invoke('plugin:browser|browser_go_forward'),
 };

@@ -1,7 +1,7 @@
 # TODO - 天工当前开发任务
 
 > 最后更新：2026-06-03
-> 当前主线：Phase 21 — 内嵌浏览器面板（0.5.0）
+> 当前主线：Phase 21 — 内嵌浏览器面板（0.5.0）— 插件化已完成
 > 参考：`PLAN.md`、Issue #95
 
 ---
@@ -43,57 +43,14 @@
 
 ---
 
-## 当前优先：Phase 21-G — 浏览器能力插件化
+## 已完成
 
-> POC 已验证通过，现在将浏览器能力从应用代码中抽离为独立 Tauri Plugin。
-> 详细方案：`docs/rfc/0014-browser-plugin-extraction.md`
+### Phase 21-G：浏览器能力插件化
 
-### G-1：Core 层 Trait 抽象
-
-> 前置步骤，无功能变化。为 plugin 化提供解耦接口。
-
-- [ ] 新增 `tiangong-core/src/browser_trait.rs` — `PageFetcher` trait、`FetchResult`、`PageSnapshot`
-- [ ] `RuntimeEngine` 新增 `page_fetcher: Option<Arc<dyn PageFetcher>>` 字段
-- [ ] 新增 `set_page_fetcher()` 方法（通过 Command 传递，引擎重建时保留）
-- [ ] `try_browser_fetch()` / `try_browser_observe()` 改为调用 trait object
-- [ ] 新增 `register_tool_override(name, handler)` 机制，替代硬编码 `if call.name == "web_fetch"` 拦截
-- [ ] 验证：`page_fetcher` 为 None 时回退到 HTTP `web_fetch`，CLI/Server 模式不受影响
-
-### G-2：Plugin Crate 搭建
-
-> 将 `src-tauri/src/browser.rs` 迁移为独立 crate。
-
-- [ ] 创建 `tiangong-plugin-browser` crate
-- [ ] 迁移 `BrowserManager` → `src/manager.rs`
-- [ ] 迁移 JS Bridge Script → `src/bridge.rs`
-- [ ] 迁移命令处理循环 → `src/handler.rs`
-- [ ] 迁移 Tauri commands → `src/commands.rs`
-- [ ] 实现 `PageFetcher` trait → `src/page_fetcher.rs`
-- [ ] Plugin 入口 `src/lib.rs` — `plugin::Builder` 注册 commands 和 state
-- [ ] 创建 `guest-js/` 前端 API 包（invoke 封装）
-- [ ] 验证：Plugin 可独立编译，单元测试通过
-
-### G-3：应用层切换
-
-> 主应用切换到使用 plugin，移除内联 browser 代码。
-
-- [ ] `src-tauri/Cargo.toml` 添加 `tiangong-plugin-browser` 依赖
-- [ ] `main.rs` 使用 `.plugin(tiangong_plugin_browser::init())` 注册
-- [ ] `setup` 中创建 `BrowserPageFetcher` 并注入到 core（`set_page_fetcher`）
-- [ ] `app.rs` 移除 `browser`、`browser_cmd_tx`、`browser_cmd_rx` 字段和 `start_browser_handler()`
-- [ ] `commands.rs` 移除 `browser_open/close/hide/set_position/navigate/eval/go_back/go_forward`
-- [ ] 前端 `api/tauri.ts` 中 browser API 改为调用 plugin 前端包
-- [ ] 验证：全功能回归测试（打开/关闭/导航/Agent web_fetch/Agent web_browse/窗口 resize）
-
-### G-4：清理
-
-> 删除旧代码，恢复 crate 职责边界。
-
-- [ ] 删除 `src-tauri/src/browser.rs`
-- [ ] 删除 `tiangong-types/src/browser.rs`，移除 `tokio` 依赖
-- [ ] 删除 `tiangong-core` 中旧的 `browser_tx` channel 相关代码和 `SetBrowserChannel` Command
-- [ ] 删除 `tiangong-core` 中 `Command::SetBrowserChannel` 变体
-- [ ] 更新 `PLAN.md`、`TODO.md` 标记完成
+- [x] G-1：Core 层 Trait 抽象（`PageFetcher`、`ToolOverrideHandler`、`SetPageFetcher`/`RegisterToolOverride` Command）
+- [x] G-2：创建 `tiangong-plugin-browser` crate（`manager`、`bridge`、`handler`、`commands`、`page_fetcher`、`types`）
+- [x] G-3：应用层切换（`.plugin()` 注册、前端 invoke 前缀改为 `plugin:browser|`、移除内联 browser 代码）
+- [x] G-4：清理（删除 `src-tauri/src/browser.rs`、`tiangong-types/src/browser.rs`、移除 tokio 依赖）
 
 ---
 

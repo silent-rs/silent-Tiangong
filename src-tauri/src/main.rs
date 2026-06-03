@@ -230,7 +230,16 @@ fn run_gui() {
 
             // Desktop 端独立初始化调度器（不依赖 server）
             let state = app.state::<tiangong_app::TiangongApp>();
-            state.start_browser_handler(app.handle().clone());
+
+            // 注入浏览器 Plugin 的 PageFetcher 和工具覆盖到 TiangongApp
+            if let Some(fetcher) = tiangong_plugin_browser::get_page_fetcher(app.handle()) {
+                state.set_page_fetcher(fetcher);
+            }
+            if let Some(handler) = tiangong_plugin_browser::get_tool_override(app.handle()) {
+                state.register_tool_override("web_fetch", handler.clone());
+                state.register_tool_override("web_browse", handler);
+            }
+
             let scheduler_ctx = state.create_scheduler_context();
             tauri::async_runtime::spawn(async move {
                 tiangong_scheduler::executor::restore_cron_jobs(scheduler_ctx).await;
@@ -242,8 +251,9 @@ fn run_gui() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let state = window.state::<tiangong_app::TiangongApp>();
-                let _ = state.browser.close();
+                // 通过 plugin state 关闭浏览器
+                let plugin_state = window.state::<tiangong_plugin_browser::BrowserPluginState>();
+                let _ = plugin_state.manager.close();
                 let _ = window.hide();
             }
         })
@@ -346,15 +356,8 @@ fn run_gui() {
             tiangong_app::commands::webhook_delete,
             tiangong_app::commands::webhook_trigger,
             tiangong_app::commands::webhook_list_runs,
-            tiangong_app::commands::browser_open,
-            tiangong_app::commands::browser_close,
-            tiangong_app::commands::browser_set_position,
-            tiangong_app::commands::browser_navigate,
-            tiangong_app::commands::browser_eval,
-            tiangong_app::commands::browser_hide,
-            tiangong_app::commands::browser_go_back,
-            tiangong_app::commands::browser_go_forward,
         ])
+        .plugin(tiangong_plugin_browser::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
