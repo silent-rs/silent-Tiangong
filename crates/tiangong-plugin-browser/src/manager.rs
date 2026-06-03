@@ -20,6 +20,10 @@ pub struct BrowserState {
     pub page_loaded: Arc<(Mutex<bool>, Condvar)>,
     /// 最近一次页面快照
     pub latest_snapshot: Option<BrowserPageSnapshot>,
+    /// 轮询检测的最后一次已知 URL
+    pub last_known_url: String,
+    /// 轮询线程停止信号
+    pub poll_stop: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub struct BrowserManager {
@@ -39,6 +43,8 @@ impl BrowserManager {
                 webview: None,
                 page_loaded: Arc::new((Mutex::new(false), Condvar::new())),
                 latest_snapshot: None,
+                last_known_url: String::new(),
+                poll_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             })),
         }
     }
@@ -150,11 +156,17 @@ impl BrowserManager {
             state.webview = Some(webview);
         }
 
+        // 启动 URL 变化轮询线程（on_page_load 在子 WebView 后续导航中不触发）
+        self.start_url_poll(app, url);
+
         Ok(())
     }
 
     pub fn close(&self) -> Result<(), String> {
         if let Ok(mut state) = self.state.lock() {
+            state
+                .poll_stop
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             if let Some(webview) = state.webview.take() {
                 let _ = webview.close();
             }
@@ -164,8 +176,71 @@ impl BrowserManager {
             }
             cvar.notify_all();
             state.latest_snapshot = None;
+            state.last_known_url.clear();
         }
         Ok(())
+    }
+
+    /// 启动后台轮询线程，检测 webview URL 变化并发射 browser:page_loaded 事件
+    fn start_url_poll(&self, app: &AppHandle<Wry>, initial_url: &str) {
+        let state = self.state.clone();
+        let app = app.clone();
+        let stop = {
+            let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            s.poll_stop
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            s.last_known_url = initial_url.to_string();
+            s.poll_stop.clone()
+        };
+
+        std::thread::Builder::new()
+            .name("browser-url-poll".into())
+            .spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(500));
+                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    let current_url = {
+                        let s = match state.lock() {
+                            Ok(s) => s,
+                            Err(e) => e.into_inner(),
+                        };
+                        match s.webview {
+                            Some(ref wv) => match wv.url() {
+                                Ok(u) => u.to_string(),
+                                Err(_) => continue,
+                            },
+                            None => break,
+                        }
+                    };
+                    let changed = {
+                        let mut s = match state.lock() {
+                            Ok(s) => s,
+                            Err(e) => e.into_inner(),
+                        };
+                        if current_url != s.last_known_url {
+                            s.last_known_url = current_url.clone();
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if changed {
+                        eprintln!("[browser] url_poll detected change: {current_url}");
+                        let _ = app.emit(
+                            "browser:page_loaded",
+                            serde_json::json!({
+                                "title": "",
+                                "url": current_url,
+                                "text": "",
+                            }),
+                        );
+                    }
+                }
+                eprintln!("[browser] url_poll thread exiting");
+            })
+            .expect("failed to spawn browser URL poll thread");
     }
 
     pub fn hide(&self) -> Result<(), String> {
