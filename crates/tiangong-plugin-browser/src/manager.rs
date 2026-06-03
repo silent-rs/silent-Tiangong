@@ -295,6 +295,25 @@ impl BrowserManager {
         Ok(())
     }
 
+    pub fn load_html(&self, html: &str) -> Result<(), String> {
+        let state = self.state.lock().map_err(|e| e.to_string())?;
+        let (lock, _cvar) = &*state.page_loaded;
+        if let Ok(mut loaded) = lock.lock() {
+            *loaded = false;
+        }
+        if let Some(webview) = &state.webview {
+            let encoded = base64_url::encode(html.as_bytes());
+            let data_url = format!("data:text/html;base64,{encoded}");
+            let parsed_url: Url = data_url
+                .parse()
+                .map_err(|e| format!("data URL 构造失败：{e}"))?;
+            webview
+                .navigate(parsed_url)
+                .map_err(|e| format!("加载 HTML 失败：{e}"))?;
+        }
+        Ok(())
+    }
+
     pub fn eval(&self, js: &str) -> Result<(), String> {
         let state = self.state.lock().map_err(|e| e.to_string())?;
         if let Some(webview) = &state.webview {

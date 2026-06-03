@@ -187,6 +187,17 @@ pub(crate) fn basic_file_function_tools() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "web_load_html".to_string(),
+            description: "在天工内嵌浏览器中加载 HTML 内容。适用于预览本地 HTML 文件、展示生成的网页内容等场景。加载后可继续使用 web_browse 等工具交互。".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "html": { "type": "string", "description": "要加载的 HTML 内容（完整的 HTML 字符串）" }
+                },
+                "required": ["html"]
+            }),
+        },
+        ToolSpec {
             name: "write_file".to_string(),
             description: "写入文件内容（支持覆盖或追加）".to_string(),
             input_schema: serde_json::json!({

@@ -171,6 +171,15 @@ pub async fn browser_command_handler(
                 });
                 let _ = response_tx.send(result);
             }
+            BrowserCommand::LoadHtml { html, response_tx } => {
+                let manager = BrowserManager {
+                    state: browser_state.clone(),
+                };
+                let result = tokio::task::spawn_blocking(move || manager.load_html(&html))
+                    .await
+                    .unwrap_or(Err("加载 HTML 任务失败".to_string()));
+                let _ = response_tx.send(result);
+            }
         }
     }
 }

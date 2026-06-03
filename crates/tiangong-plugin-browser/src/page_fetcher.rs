@@ -212,6 +212,29 @@ impl PageFetcher for BrowserPageFetcher {
             })
         })
     }
+
+    fn load_html(
+        &self,
+        html: &str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Option<std::result::Result<(), String>>> + Send>,
+    > {
+        let tx = self.cmd_tx.clone();
+        let html = html.to_string();
+        Box::pin(async move {
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            let cmd = BrowserCommand::LoadHtml { html, response_tx };
+
+            if tx.send(cmd).await.is_err() {
+                return None;
+            }
+
+            tokio::time::timeout(Duration::from_secs(10), response_rx)
+                .await
+                .ok()?
+                .ok()
+        })
+    }
 }
 
 /// 浏览器工具覆盖处理器（web_fetch / web_browse / web_form_extract / web_form_fill / web_click）
@@ -380,6 +403,32 @@ impl tiangong_core::tool_override::ToolOverrideHandler for BrowserToolOverride {
                             exit_code: 1,
                             execution: None,
                         })
+                    }
+                }
+                "web_load_html" => {
+                    let html = call
+                        .arguments
+                        .get("html")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let result = fetcher.load_html(html).await?;
+                    match result {
+                        Ok(()) => Some(tiangong_core::tool::ToolResult {
+                            ok: true,
+                            summary: "HTML 内容已加载到浏览器".to_string(),
+                            stdout: String::new(),
+                            stderr: String::new(),
+                            exit_code: 0,
+                            execution: None,
+                        }),
+                        Err(err) => Some(tiangong_core::tool::ToolResult {
+                            ok: false,
+                            summary: "加载 HTML 失败".to_string(),
+                            stdout: String::new(),
+                            stderr: err,
+                            exit_code: 1,
+                            execution: None,
+                        }),
                     }
                 }
                 _ => None,

@@ -41,6 +41,15 @@ pub trait PageFetcher: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Option<ClickElementResult>> + Send>> {
         Box::pin(async move { None })
     }
+
+    /// 加载 HTML 内容到浏览器。
+    #[allow(clippy::type_complexity)]
+    fn load_html(
+        &self,
+        _html: &str,
+    ) -> Pin<Box<dyn Future<Output = Option<Result<(), String>>> + Send>> {
+        Box::pin(async move { None })
+    }
 }
 
 /// 页面获取结果（纯数据，无 tokio 依赖）

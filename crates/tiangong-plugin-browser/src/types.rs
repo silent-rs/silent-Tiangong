@@ -31,6 +31,11 @@ pub enum BrowserCommand {
         selector: String,
         response_tx: oneshot::Sender<ClickElementResult>,
     },
+    /// 加载本地 HTML 内容
+    LoadHtml {
+        html: String,
+        response_tx: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 /// 浏览器响应

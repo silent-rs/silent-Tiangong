@@ -202,8 +202,19 @@ pub const BRIDGE_SCRIPT: &str = r#"
             var el = document.querySelector(selector);
             if (!el) return { ok: false, error: '元素未找到: ' + selector };
             el.scrollIntoView({ block: 'center', behavior: 'instant' });
-            el.click();
-            return { ok: true };
+            var rect = el.getBoundingClientRect();
+            var x = rect.left + rect.width / 2;
+            var y = rect.top + rect.height / 2;
+            var opts = { bubbles: true, cancelable: true, view: window,
+                         clientX: x, clientY: y, screenX: x, screenY: y,
+                         button: 0, buttons: 1 };
+            el.dispatchEvent(new MouseEvent('mouseover', opts));
+            el.dispatchEvent(new MouseEvent('mouseenter', opts));
+            el.dispatchEvent(new MouseEvent('mousemove', opts));
+            el.dispatchEvent(new MouseEvent('mousedown', opts));
+            el.dispatchEvent(new MouseEvent('mouseup', opts));
+            el.dispatchEvent(new MouseEvent('click', opts));
+            return { ok: true, x: Math.round(x), y: Math.round(y) };
         },
     };
 
