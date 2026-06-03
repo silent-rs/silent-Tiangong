@@ -90,5 +90,7 @@ pub(crate) fn parse_stream_chunk(data: &str) -> Result<StreamEvent, DeepSeekErro
         }
     }
 
-    Err(DeepSeekError::Stream(format!("无法解析流式块：{data}")))
+    Err(DeepSeekError::Stream(format!(
+        "failed to parse stream chunk: {data}"
+    )))
 }

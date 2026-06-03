@@ -6,16 +6,17 @@ use crate::error::DeepSeekError;
 
 // ── 请求类型 ──────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum MessageRole {
     System,
+    #[default]
     User,
     Assistant,
     Tool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ChatMessage {
     pub role: MessageRole,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -81,7 +82,7 @@ pub struct ThinkingConfig {
     pub budget_tokens: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,

@@ -1,13 +1,17 @@
 [package]
 name = "tiangong-deepseek"
-version.workspace = true
+version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
+description = "An asynchronous Rust client for the DeepSeek API, supporting chat completions (with SSE streaming), model listing, and balance queries."
+repository = "https://github.com/silent-rs/silent-Tiangong"
+keywords = ["deepseek", "llm", "ai", "openai", "chat"]
+categories = ["api-bindings", "asynchronous", "web-programming::http-client"]
 
 [dependencies]
-thiserror = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
-reqwest = { workspace = true, default-features = false, features = ["json", "rustls", "stream"] }
-eventsource-stream = { workspace = true }
-futures-util = { workspace = true }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
+eventsource-stream = "0.2"
+futures-util = "0.3"
