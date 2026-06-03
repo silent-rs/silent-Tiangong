@@ -4,7 +4,10 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::types::BrowserCommand;
-use tiangong_core::browser_trait::{FetchResult, PageFetcher, PageSnapshot};
+use tiangong_core::browser_trait::{
+    ClickElementResult as CoreClickResult, FillFieldResult as CoreFillResult,
+    FormExtractResult as CoreFormExtractResult, PageFetcher,
+};
 
 /// 通过 BrowserCommand channel 实现 PageFetcher trait
 pub struct BrowserPageFetcher {
@@ -26,7 +29,12 @@ impl PageFetcher for BrowserPageFetcher {
         &self,
         url: &str,
         max_chars: usize,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<FetchResult>> + Send>> {
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Option<tiangong_core::browser_trait::FetchResult>>
+                + Send,
+        >,
+    > {
         let tx = self.cmd_tx.clone();
         let url = url.to_string();
         Box::pin(async move {
@@ -42,7 +50,7 @@ impl PageFetcher for BrowserPageFetcher {
             }
 
             match tokio::time::timeout(Duration::from_secs(30), response_rx).await {
-                Ok(Ok(resp)) => Some(FetchResult {
+                Ok(Ok(resp)) => Some(tiangong_core::browser_trait::FetchResult {
                     ok: resp.ok,
                     title: resp.title,
                     content: resp.content,
@@ -56,7 +64,12 @@ impl PageFetcher for BrowserPageFetcher {
 
     fn observe_page(
         &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<PageSnapshot>> + Send>> {
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Option<tiangong_core::browser_trait::PageSnapshot>>
+                + Send,
+        >,
+    > {
         let tx = self.cmd_tx.clone();
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
@@ -71,16 +84,137 @@ impl PageFetcher for BrowserPageFetcher {
                 .ok()?
                 .ok()?;
 
-            Some(PageSnapshot {
+            Some(tiangong_core::browser_trait::PageSnapshot {
                 title: snapshot.title,
                 url: snapshot.url,
                 text: snapshot.text,
             })
         })
     }
+
+    fn form_extract(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<CoreFormExtractResult>> + Send>>
+    {
+        let tx = self.cmd_tx.clone();
+        Box::pin(async move {
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            let cmd = BrowserCommand::FormExtract { response_tx };
+
+            if tx.send(cmd).await.is_err() {
+                return None;
+            }
+
+            let result = tokio::time::timeout(Duration::from_secs(10), response_rx)
+                .await
+                .ok()?
+                .ok()?;
+
+            Some(CoreFormExtractResult {
+                forms: result
+                    .forms
+                    .into_iter()
+                    .map(|f| tiangong_core::browser_trait::FormInfo {
+                        fields: f
+                            .fields
+                            .into_iter()
+                            .map(|field| tiangong_core::browser_trait::FormField {
+                                index: field.index,
+                                tag: field.tag,
+                                field_type: field.field_type,
+                                name: field.name,
+                                id: field.id,
+                                label: field.label,
+                                placeholder: field.placeholder,
+                                value: field.value,
+                                required: field.required,
+                                readonly: field.readonly,
+                                disabled: field.disabled,
+                                selector: field.selector,
+                                options: field
+                                    .options
+                                    .into_iter()
+                                    .map(|o| tiangong_core::browser_trait::SelectOption {
+                                        value: o.value,
+                                        text: o.text,
+                                    })
+                                    .collect(),
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            })
+        })
+    }
+
+    fn form_fill(
+        &self,
+        selector: &str,
+        value: &str,
+        strategy: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<CoreFillResult>> + Send>> {
+        let tx = self.cmd_tx.clone();
+        let selector = selector.to_string();
+        let value = value.to_string();
+        let strategy = strategy.to_string();
+        Box::pin(async move {
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            let cmd = BrowserCommand::FormFill {
+                selector,
+                value,
+                strategy,
+                response_tx,
+            };
+
+            if tx.send(cmd).await.is_err() {
+                return None;
+            }
+
+            let result = tokio::time::timeout(Duration::from_secs(10), response_rx)
+                .await
+                .ok()?
+                .ok()?;
+
+            Some(CoreFillResult {
+                ok: result.ok,
+                strategy: result.strategy,
+                error: result.error,
+                current_value: result.current_value,
+            })
+        })
+    }
+
+    fn click_element(
+        &self,
+        selector: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<CoreClickResult>> + Send>> {
+        let tx = self.cmd_tx.clone();
+        let selector = selector.to_string();
+        Box::pin(async move {
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            let cmd = BrowserCommand::ClickElement {
+                selector,
+                response_tx,
+            };
+
+            if tx.send(cmd).await.is_err() {
+                return None;
+            }
+
+            let result = tokio::time::timeout(Duration::from_secs(10), response_rx)
+                .await
+                .ok()?
+                .ok()?;
+
+            Some(CoreClickResult {
+                ok: result.ok,
+                error: result.error,
+            })
+        })
+    }
 }
 
-/// 浏览器工具覆盖处理器（web_fetch 和 web_browse）
+/// 浏览器工具覆盖处理器（web_fetch / web_browse / web_form_extract / web_form_fill / web_click）
 pub struct BrowserToolOverride {
     fetcher: Arc<dyn PageFetcher>,
 }
@@ -164,6 +298,89 @@ impl tiangong_core::tool_override::ToolOverrideHandler for BrowserToolOverride {
                         exit_code: 0,
                         execution: None,
                     })
+                }
+                "web_form_extract" => {
+                    let result = fetcher.form_extract().await?;
+                    let total_fields: usize = result.forms.iter().map(|f| f.fields.len()).sum();
+                    let output = serde_json::to_string_pretty(&result)
+                        .unwrap_or_else(|_| "序列化表单数据失败".to_string());
+                    Some(tiangong_core::tool::ToolResult {
+                        ok: true,
+                        summary: format!(
+                            "提取到 {} 个表单，共 {} 个字段",
+                            result.forms.len(),
+                            total_fields
+                        ),
+                        stdout: output,
+                        stderr: String::new(),
+                        exit_code: 0,
+                        execution: None,
+                    })
+                }
+                "web_form_fill" => {
+                    let selector = call
+                        .arguments
+                        .get("selector")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let value = call
+                        .arguments
+                        .get("value")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let strategy = call
+                        .arguments
+                        .get("strategy")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("auto");
+                    let result = fetcher.form_fill(selector, value, strategy).await?;
+                    let strategy_used = result.strategy.clone().unwrap_or_default();
+                    if result.ok {
+                        Some(tiangong_core::tool::ToolResult {
+                            ok: true,
+                            summary: format!("字段填写成功（策略：{strategy_used}）",),
+                            stdout: format!("已填写字段 {selector}，使用策略：{strategy_used}",),
+                            stderr: String::new(),
+                            exit_code: 0,
+                            execution: None,
+                        })
+                    } else {
+                        Some(tiangong_core::tool::ToolResult {
+                            ok: false,
+                            summary: "字段填写失败".to_string(),
+                            stdout: String::new(),
+                            stderr: result.error.unwrap_or_default(),
+                            exit_code: 1,
+                            execution: None,
+                        })
+                    }
+                }
+                "web_click" => {
+                    let selector = call
+                        .arguments
+                        .get("selector")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let result = fetcher.click_element(selector).await?;
+                    if result.ok {
+                        Some(tiangong_core::tool::ToolResult {
+                            ok: true,
+                            summary: format!("已点击元素 {}", selector),
+                            stdout: String::new(),
+                            stderr: String::new(),
+                            exit_code: 0,
+                            execution: None,
+                        })
+                    } else {
+                        Some(tiangong_core::tool::ToolResult {
+                            ok: false,
+                            summary: "点击元素失败".to_string(),
+                            stdout: String::new(),
+                            stderr: result.error.unwrap_or_default(),
+                            exit_code: 1,
+                            execution: None,
+                        })
+                    }
                 }
                 _ => None,
             }

@@ -154,6 +154,39 @@ pub(crate) fn basic_file_function_tools() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "web_form_extract".to_string(),
+            description: "提取天工内嵌浏览器当前页面中所有表单的字段信息（标签、类型、当前值、选项等）。返回结构化的表单字段列表，供 web_form_fill 填写。当需要帮用户填写网页表单时，先调用此工具了解页面有哪些可填写字段。".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
+        },
+        ToolSpec {
+            name: "web_form_fill".to_string(),
+            description: "在天工内嵌浏览器当前页面中填写指定表单字段。使用 selector 定位字段（从 web_form_extract 结果中获取 selector），自动采用三层填写策略（native setter → keyboard → paste）。填写前建议先调用 web_form_extract 了解页面表单结构。".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "selector": { "type": "string", "description": "表单字段的 CSS 选择器（从 web_form_extract 结果中获取）" },
+                    "value": { "type": "string", "description": "要填写的值" },
+                    "strategy": { "type": "string", "enum": ["auto", "native", "keyboard", "paste"], "description": "填写策略，默认 auto（自动选择最佳策略）" }
+                },
+                "required": ["selector", "value"]
+            }),
+        },
+        ToolSpec {
+            name: "web_click".to_string(),
+            description: "点击天工内嵌浏览器当前页面中的指定元素（按钮、链接等）。使用 CSS 选择器定位元素，元素会先滚动到可视区域再点击。常用于提交按钮、导航链接等交互。".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "selector": { "type": "string", "description": "要点击的元素的 CSS 选择器" }
+                },
+                "required": ["selector"]
+            }),
+        },
+        ToolSpec {
             name: "write_file".to_string(),
             description: "写入文件内容（支持覆盖或追加）".to_string(),
             input_schema: serde_json::json!({
