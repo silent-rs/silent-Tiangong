@@ -7,6 +7,7 @@ import { Input } from './ui/input';
 interface BrowserPanelProps {
   initialUrl?: string;
   currentUrl?: string;
+  navigateUrl?: string;
 }
 
 function normalizeBrowserUrl(rawUrl: string): string {
@@ -16,27 +17,33 @@ function normalizeBrowserUrl(rawUrl: string): string {
   return `https://${trimmed}`;
 }
 
-export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
+export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPanelProps) {
   const [url, setUrl] = useState(initialUrl || 'https://www.bing.com');
   const containerRef = useRef<HTMLDivElement>(null);
   const initializedRef = useRef(false);
   const browserOpenedRef = useRef(false);
 
-  // 同步外部 URL 变化：更新地址栏并自动导航
+  // 仅同步地址栏显示（来自 page_loaded 等浏览器内部导航）
   useEffect(() => {
-    if (!currentUrl) return;
-    setUrl(currentUrl);
+    if (currentUrl) {
+      setUrl(currentUrl);
+    }
+  }, [currentUrl]);
+
+  // 外部主动导航请求（来自对话链接点击、后端事件等）
+  useEffect(() => {
+    if (!navigateUrl) return;
     if (browserOpenedRef.current) {
-      api.browserNavigate(currentUrl).catch(console.error);
+      api.browserNavigate(navigateUrl).catch(console.error);
     } else if (containerRef.current) {
       const rect = containerRef.current.getBoundingClientRect();
       if (rect.width > 0 && rect.height > 0) {
-        api.browserOpen(currentUrl, rect.x, rect.y, rect.width, rect.height)
+        api.browserOpen(navigateUrl, rect.x, rect.y, rect.width, rect.height)
           .then(() => { browserOpenedRef.current = true; })
           .catch(console.error);
       }
     }
-  }, [currentUrl]);
+  }, [navigateUrl]);
 
   const syncPosition = useCallback(async () => {
     if (!containerRef.current) return;

@@ -49,6 +49,7 @@ export function MainApp() {
   const { loadSessions, updateFromSnapshot } = useStore();
   const [showBrowser, setShowBrowser] = useState(false);
   const [browserUrl, setBrowserUrl] = useState<string | undefined>(undefined);
+  const [navigateUrl, setNavigateUrl] = useState<string | undefined>(undefined);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const showBrowserRef = useRef(false);
   const unlistenRef = useRef<UnlistenFn | null>(null);
@@ -168,6 +169,7 @@ export function MainApp() {
       const unlistenBrowserOpen = await listen<string>('browser:open', async (event) => {
         const url = event.payload;
         setBrowserUrl(url);
+        setNavigateUrl(url);
         if (!showBrowserRef.current) {
           const appWindow = getCurrentWindow();
           const innerSize = await appWindow.innerSize();
@@ -239,6 +241,7 @@ export function MainApp() {
       const url = (e as CustomEvent).detail;
       if (typeof url === 'string') {
         setBrowserUrl(url);
+        setNavigateUrl(url);
         if (!showBrowserRef.current) {
           const appWindow = getCurrentWindow();
           const innerSize = await appWindow.innerSize();
@@ -287,7 +290,7 @@ export function MainApp() {
               </div>
 
               {showBrowser && (
-                <BrowserPanel initialUrl={browserUrl} currentUrl={browserUrl} />
+                <BrowserPanel initialUrl={browserUrl} currentUrl={browserUrl} navigateUrl={navigateUrl} />
               )}
             </div>
           </main>
