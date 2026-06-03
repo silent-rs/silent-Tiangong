@@ -19,12 +19,13 @@
 ### Phase 21-B：BrowserManager 核心
 
 - [x] 新增 `src-tauri/src/browser.rs` — BrowserManager 模块
-- [x] Bridge Script v0.5.0 — getFullText（textContent 提取）、click、type
+- [x] Bridge Script v0.6.0 — getFullText、click、type、extractForms、fillField、clickElement
 - [x] Tauri Commands：`browser_open`、`browser_close`、`browser_set_position`、`browser_navigate`、`browser_eval`
 - [x] Agent `web_fetch` 拦截 → 浏览器获取页面内容（eval_with_callback + on_page_load + Condvar）
 - [x] 内容就绪检测（wait_for_content_ready：内容增长稳定策略）
 - [x] 新增 `BrowserPageSnapshot`、`PageStatus`、`ObservePage` 命令类型
 - [x] `on_page_load` 自动捕获页面快照到 `latest_snapshot`
+- [x] URL 轮询线程检测子 WebView 后续导航变化
 
 ### Phase 21-C：前端浏览器面板
 
@@ -40,10 +41,20 @@
 - [x] 注册 `web_browse` 工具 — Agent 主动获取当前浏览器页面快照
 - [x] `ObservePage` 命令接入 RuntimeEngine
 - [x] 页面导航事件通知前端（`browser:page_loaded`）
+- [x] 页面内容变化注入对话链（tool 消息格式）
 
----
+### Phase 21-E：表单填写增强
 
-## 已完成
+- [x] Bridge Script 实现三层表单填写策略（keyboard / native setter / paste）
+- [x] `web_form_extract` 工具 — 提取页面表单字段结构
+- [x] `web_form_fill` 工具 — 三层策略自动填写 + fallback
+- [x] `web_click` 工具 — 模拟鼠标事件点击（mouseover/mousedown/mouseup/click + 坐标）
+- [x] `web_load_html` 工具 — 加载 HTML 内容到浏览器（data URL）
+
+### Phase 21-F：完善与优化（已完成部分）
+
+- [x] 前进/后退/刷新导航控制（BrowserPanel 工具栏按钮）
+- [x] 窗口缩小时浏览器面板自动隐藏
 
 ### Phase 21-G：浏览器能力插件化
 
@@ -54,26 +65,17 @@
 
 ---
 
-## 后续：Phase 21-D/E/F — 功能增强
+## 待开发
 
-> 插件化完成后，在 plugin 架构上继续开发功能增强。
+### Phase 21-E（剩余）：UI 库适配
 
-### Phase 21-D（剩余）：Agent 交互增强
-
-- [ ] 页面内容变化注入对话链（tool 消息格式）
-
-### Phase 21-E：表单填写增强
-
-- [ ] Bridge Script 实现三层表单填写策略（native setter / keyboard / paste）
 - [ ] 适配 Ant Design、Element Plus 等 UI 库的 Select/DatePicker 组件
 - [ ] 自动检测页面框架类型（React/Vue/vanilla）
-- [ ] MCP Tool 层实现策略自动选择和 fallback
 
-### Phase 21-F：完善与优化
+### Phase 21-F（剩余）：完善与优化
 
 - [ ] Cookie 持久化配置确认（data_directory 已设置，验证跨会话保持）
 - [ ] 浏览器操作的权限审批机制（复用现有审批流程）
-- [ ] 前进/后退/刷新导航控制
 - [ ] 多标签页支持（可选）
 - [ ] 用户批注模式（在页面上标注，Agent 理解标注内容）
 
