@@ -2,28 +2,28 @@ use thiserror::Error;
 
 #[derive(Debug, Error, Clone)]
 pub enum DeepSeekError {
-    #[error("配置错误：{0}")]
+    #[error("configuration error: {0}")]
     Config(String),
 
-    #[error("传输错误：{0}")]
+    #[error("transport error: {0}")]
     Transport(String),
 
-    #[error("认证失败：{0}")]
+    #[error("authentication failed: {0}")]
     Authentication(String),
 
-    #[error("请求无效：{0}")]
+    #[error("invalid request: {0}")]
     InvalidRequest(String),
 
-    #[error("请求被限流：{0}")]
+    #[error("rate limited: {0}")]
     RateLimited(String),
 
-    #[error("序列化失败：{0}")]
+    #[error("serialization error: {0}")]
     Serialization(String),
 
-    #[error("流式处理失败：{0}")]
+    #[error("stream error: {0}")]
     Stream(String),
 
-    #[error("DeepSeek API 错误：{0}")]
+    #[error("API error: {0}")]
     Api(String),
 }
 
