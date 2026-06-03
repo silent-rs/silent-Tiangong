@@ -70,6 +70,16 @@ impl TiangongApp {
         }
     }
 
+    /// 向所有活跃会话注入浏览器页面内容
+    pub fn inject_browser_content(&self, title: String, url: String, text: String) {
+        let cores = self.lock_cores();
+        for core in cores.values() {
+            if core.is_running() {
+                core.inject_browser_content(title.clone(), url.clone(), text.clone());
+            }
+        }
+    }
+
     fn lock_cores(&self) -> std::sync::MutexGuard<'_, HashMap<String, TiangongCore>> {
         match self.cores.lock() {
             Ok(guard) => guard,

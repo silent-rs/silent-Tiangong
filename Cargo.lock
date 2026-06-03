@@ -9481,6 +9481,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tauri",
+ "tauri-plugin",
  "tiangong-core",
  "tiangong-types",
  "tokio",

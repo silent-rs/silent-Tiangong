@@ -3,6 +3,7 @@ name = "tiangong-plugin-browser"
 version.workspace = true
 edition = "2021"
 license = "Apache-2.0"
+links = "browser"
 
 [dependencies]
 tiangong-core = { workspace = true }
@@ -13,3 +14,4 @@ tokio = { workspace = true, features = ["rt", "time", "sync"] }
 tauri = { workspace = true, features = ["unstable"] }
 
 [build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }

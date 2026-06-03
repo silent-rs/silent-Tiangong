@@ -310,3 +310,49 @@ pub(crate) fn latest_user_message(session: &Session) -> String {
         .map(|message| message.text_content())
         .unwrap_or_default()
 }
+
+/// 注入浏览器页面内容变化到会话（合成 assistant + tool 消息对）
+pub(crate) fn inject_browser_content_to_session(
+    session: &mut Session,
+    stream_tx: &StdSender<StreamEvent>,
+    title: &str,
+    url: &str,
+    text: &str,
+) {
+    if session.messages.iter().rev().take(6).any(|msg| {
+        msg.role == MessageRole::Tool
+            && msg.tool_name.as_deref() == Some("web_browse")
+            && msg.text_content().contains(url)
+    }) {
+        return;
+    }
+
+    let tool_call_id = format!("browser_auto_{}", scru128::new());
+    let tool_name = "web_browse";
+
+    let assistant_text = format!("[自动感知] 用户在浏览器中导航到新页面：{url}");
+    let mut assistant_msg = Message::new(MessageRole::Assistant, assistant_text);
+    assistant_msg.tool_calls = vec![MessageToolCall {
+        id: tool_call_id.clone(),
+        name: tool_name.to_string(),
+        arguments: serde_json::json!({"url": url}),
+    }];
+    session.messages.push(assistant_msg);
+
+    let content = if text.is_empty() {
+        format!("[浏览器页面更新]\n标题：{title}\nURL：{url}\n状态：页面内容为空")
+    } else {
+        format!("[浏览器页面更新]\n标题：{title}\nURL：{url}\n\n{text}")
+    };
+
+    let _ = stream_tx.send(StreamEvent::ToolResult {
+        name: tool_name.to_string(),
+        tool_call_id: Some(tool_call_id.clone()),
+        ok: true,
+        output: content.clone(),
+        full_output: Some(content.clone()),
+        media: vec![],
+    });
+
+    append_tool_result_message(session, &tool_call_id, tool_name, content, false);
+}

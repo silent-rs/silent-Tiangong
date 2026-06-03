@@ -252,6 +252,11 @@ impl TiangongCore {
         });
     }
 
+    /// 注入浏览器页面内容到当前会话（不触发 LLM 调用）
+    pub fn inject_browser_content(&self, title: String, url: String, text: String) -> bool {
+        self.send_cmd(Command::InjectBrowserContent { title, url, text })
+    }
+
     /// 关闭并获取最终 session
     pub fn into_session(mut self) -> Session {
         let _ = self.send_cmd(Command::Shutdown);
@@ -581,6 +586,16 @@ async fn worker_loop_async(
                 if let Some(eng) = engine.as_ref() {
                     eng.register_tool_override(&name, handler);
                 }
+                continue;
+            }
+            Command::InjectBrowserContent { title, url, text } => {
+                crate::react::message::inject_browser_content_to_session(
+                    &mut session,
+                    &stream_tx,
+                    &title,
+                    &url,
+                    &text,
+                );
                 continue;
             }
             Command::CompressContext => {

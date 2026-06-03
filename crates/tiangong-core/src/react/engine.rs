@@ -613,6 +613,11 @@ impl ReactEngine {
                             Some(Command::RegisterToolOverride { name, handler }) => {
                                 self.engine.register_tool_override(&name, handler);
                             }
+                            Some(Command::InjectBrowserContent { title, url, text }) => {
+                                crate::react::message::inject_browser_content_to_session(
+                                    session, stream_tx, &title, &url, &text,
+                                );
+                            }
                             Some(Command::CompressContext) => {
                                 crate::core::compress_context_for_session(
                                     session,
@@ -1082,6 +1087,11 @@ impl ReactEngine {
                                 }
                                 Some(Command::RegisterToolOverride { name, handler }) => {
                                     self.engine.register_tool_override(&name, handler);
+                                }
+                                Some(Command::InjectBrowserContent { title, url, text }) => {
+                                    crate::react::message::inject_browser_content_to_session(
+                                        session, stream_tx, &title, &url, &text,
+                                    );
                                 }
                                 Some(Command::CompressContext) => {
                                     crate::core::compress_context_for_session(
@@ -1866,6 +1876,11 @@ impl ReactEngine {
                         Some(Command::RegisterToolOverride { name, handler }) => {
                             self.engine.register_tool_override(&name, handler);
                         }
+                        Some(Command::InjectBrowserContent { title, url, text }) => {
+                            crate::react::message::inject_browser_content_to_session(
+                                parent_session, stream_tx, &title, &url, &text,
+                            );
+                        }
                         None => break,
                     }
                 }
@@ -2022,6 +2037,11 @@ fn drain_pending_commands_async(
             }
             Command::RegisterToolOverride { name, handler } => {
                 engine.register_tool_override(&name, handler);
+            }
+            Command::InjectBrowserContent { title, url, text } => {
+                crate::react::message::inject_browser_content_to_session(
+                    session, stream_tx, &title, &url, &text,
+                );
             }
             Command::CompressContext => {
                 crate::core::compress_context_for_session(session, engine, stream_tx);

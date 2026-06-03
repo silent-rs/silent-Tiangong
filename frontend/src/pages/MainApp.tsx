@@ -106,18 +106,20 @@ export function MainApp() {
       showBrowserRef.current = true;
       setShowBrowser(true);
     } else {
-      await api.browserHide().catch(console.error);
       const appWindow = getCurrentWindow();
       const innerSize = await appWindow.innerSize();
       const scaleFactor = await appWindow.scaleFactor();
       const logicalH = innerSize.height / scaleFactor;
       const restoreW = savedWindowWidthRef.current ?? (innerSize.width / scaleFactor - calcBrowserWidth(logicalH));
       savedWindowWidthRef.current = null;
+      // 先卸载 BrowserPanel（断开 ResizeObserver），再隐藏 WebView 和收缩窗口
+      // 避免窗口收缩时 ResizeObserver 的 syncPosition 把 WebView 拉回可见区域
+      showBrowserRef.current = false;
+      setShowBrowser(false);
+      await api.browserHide().catch(console.error);
       lockResize();
       await appWindow.setSize(new LogicalSize(restoreW, logicalH));
       unlockResize();
-      showBrowserRef.current = false;
-      setShowBrowser(false);
       if (restoreW > SIDEBAR_RESTORE_THRESHOLD && preferredSidebarOpenRef.current) {
         setSidebarOpenByLayout(true);
       }

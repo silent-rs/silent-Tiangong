@@ -171,9 +171,8 @@ impl BrowserManager {
     pub fn hide(&self) -> Result<(), String> {
         let state = self.state.lock().map_err(|e| e.to_string())?;
         if let Some(webview) = &state.webview {
-            webview
-                .set_position(LogicalPosition::new(-10000, -10000))
-                .map_err(|e| format!("隐藏浏览器失败：{e}"))?;
+            let _ = webview.set_size(LogicalSize::new(0.0, 0.0));
+            let _ = webview.set_position(LogicalPosition::new(-10000, -10000));
         }
         Ok(())
     }

@@ -88,12 +88,17 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
   useEffect(() => {
     if (!initializedRef.current && containerRef.current) {
       initializedRef.current = true;
-      const rect = containerRef.current.getBoundingClientRect();
-      api.browserOpen(initialUrl || 'https://www.bing.com', rect.x, rect.y, rect.width, rect.height)
-        .then(() => {
-          browserOpenedRef.current = true;
-        })
-        .catch(console.error);
+      const frame = requestAnimationFrame(() => {
+        if (!containerRef.current) return;
+        const rect = containerRef.current.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return;
+        api.browserOpen(initialUrl || 'https://www.bing.com', rect.x, rect.y, rect.width, rect.height)
+          .then(() => {
+            browserOpenedRef.current = true;
+          })
+          .catch(console.error);
+      });
+      return () => cancelAnimationFrame(frame);
     }
   }, [initialUrl]);
 

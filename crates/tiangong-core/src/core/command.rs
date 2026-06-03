@@ -37,6 +37,12 @@ pub(crate) enum Command {
         name: String,
         handler: Arc<dyn ToolOverrideHandler>,
     },
+    /// 浏览器页面内容自动注入（页面加载完成时触发）
+    InjectBrowserContent {
+        title: String,
+        url: String,
+        text: String,
+    },
     /// 关闭
     Shutdown,
 }
