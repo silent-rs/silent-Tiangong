@@ -22,10 +22,19 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
   const initializedRef = useRef(false);
   const browserOpenedRef = useRef(false);
 
-  // 同步后端推送的 URL 到地址栏
+  // 同步外部 URL 变化：更新地址栏并自动导航
   useEffect(() => {
-    if (currentUrl) {
-      setUrl(currentUrl);
+    if (!currentUrl) return;
+    setUrl(currentUrl);
+    if (browserOpenedRef.current) {
+      api.browserNavigate(currentUrl).catch(console.error);
+    } else if (containerRef.current) {
+      const rect = containerRef.current.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        api.browserOpen(currentUrl, rect.x, rect.y, rect.width, rect.height)
+          .then(() => { browserOpenedRef.current = true; })
+          .catch(console.error);
+      }
     }
   }, [currentUrl]);
 
@@ -84,21 +93,26 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
     };
   }, [syncPosition]);
 
-  // 挂载时自动导航到 initialUrl（首次打开创建 webview，恢复时只重新定位）
+  // 挂载时自动导航到 initialUrl（首次打开创建 webview）
   useEffect(() => {
     if (!initializedRef.current && containerRef.current) {
       initializedRef.current = true;
-      const frame = requestAnimationFrame(() => {
-        if (!containerRef.current) return;
+      let cancelled = false;
+      let retries = 0;
+      const tryOpen = () => {
+        if (cancelled || !containerRef.current || retries > 10) return;
         const rect = containerRef.current.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) return;
+        if (rect.width === 0 || rect.height === 0) {
+          retries++;
+          requestAnimationFrame(tryOpen);
+          return;
+        }
         api.browserOpen(initialUrl || 'https://www.bing.com', rect.x, rect.y, rect.width, rect.height)
-          .then(() => {
-            browserOpenedRef.current = true;
-          })
+          .then(() => { browserOpenedRef.current = true; })
           .catch(console.error);
-      });
-      return () => cancelAnimationFrame(frame);
+      };
+      requestAnimationFrame(tryOpen);
+      return () => { cancelled = true; };
     }
   }, [initialUrl]);
 
