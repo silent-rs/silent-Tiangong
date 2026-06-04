@@ -7,8 +7,10 @@ use serde::Deserialize;
 
 use crate::args::UpdateArgs;
 
-const DEFAULT_UPDATE_ENDPOINT: &str =
-    "https://github.com/silent-rs/silent-Tiangong/releases/latest/download/latest.json";
+const UPDATE_ENDPOINTS: &[&str] = &[
+    "https://github.com/silent-rs/silent-Tiangong/releases/latest/download/latest.json",
+    "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/latest.json",
+];
 
 #[derive(Debug, Deserialize)]
 struct ReleaseManifest {
@@ -28,14 +30,40 @@ struct ReleasePlatform {
 }
 
 pub(crate) fn run_update_command(args: UpdateArgs) -> anyhow::Result<()> {
-    let endpoint = args
+    let endpoints: Vec<&str> = if let Some(custom) = args
         .endpoint
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(DEFAULT_UPDATE_ENDPOINT);
+    {
+        vec![custom]
+    } else {
+        UPDATE_ENDPOINTS.to_vec()
+    };
 
-    let Some(manifest) = fetch_release_manifest(endpoint)? else {
+    let mut manifest = None;
+    let mut last_error = None;
+    for endpoint in &endpoints {
+        match fetch_release_manifest(endpoint) {
+            Ok(Some(m)) => {
+                manifest = Some(m);
+                break;
+            }
+            Ok(None) => {
+                // 404 — 没有发布，继续尝试下一个
+                last_error = None;
+            }
+            Err(e) => {
+                last_error = Some(e);
+            }
+        }
+    }
+
+    if last_error.is_some() && manifest.is_none() {
+        return Err(last_error.unwrap());
+    }
+
+    let Some(manifest) = manifest else {
         println!("当前没有可用的在线更新发布。");
         return Ok(());
     };
