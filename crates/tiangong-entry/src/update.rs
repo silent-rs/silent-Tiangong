@@ -59,8 +59,10 @@ pub(crate) fn run_update_command(args: UpdateArgs) -> anyhow::Result<()> {
         }
     }
 
-    if last_error.is_some() && manifest.is_none() {
-        return Err(last_error.unwrap());
+    if let Some(err) = last_error {
+        if manifest.is_none() {
+            return Err(err);
+        }
     }
 
     let Some(manifest) = manifest else {
