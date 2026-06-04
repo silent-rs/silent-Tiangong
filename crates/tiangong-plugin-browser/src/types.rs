@@ -140,3 +140,92 @@ pub struct ClickElementResult {
     pub ok: bool,
     pub error: Option<String>,
 }
+
+// ── 类型转换：plugin → core ──────────────────────────────────────────
+
+impl From<BrowserTab> for tiangong_core::browser_trait::TabInfo {
+    fn from(t: BrowserTab) -> Self {
+        Self {
+            id: t.id,
+            url: t.url,
+            title: t.title,
+        }
+    }
+}
+
+impl From<BrowserResponse> for tiangong_core::browser_trait::FetchResult {
+    fn from(r: BrowserResponse) -> Self {
+        Self {
+            ok: r.ok,
+            title: r.title,
+            content: r.content,
+            final_url: r.final_url,
+            error: r.error,
+        }
+    }
+}
+
+impl From<SelectOption> for tiangong_core::browser_trait::SelectOption {
+    fn from(o: SelectOption) -> Self {
+        Self {
+            value: o.value,
+            text: o.text,
+        }
+    }
+}
+
+impl From<FormField> for tiangong_core::browser_trait::FormField {
+    fn from(f: FormField) -> Self {
+        Self {
+            index: f.index,
+            tag: f.tag,
+            field_type: f.field_type,
+            name: f.name,
+            id: f.id,
+            label: f.label,
+            placeholder: f.placeholder,
+            value: f.value,
+            required: f.required,
+            readonly: f.readonly,
+            disabled: f.disabled,
+            selector: f.selector,
+            options: f.options.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<FormInfo> for tiangong_core::browser_trait::FormInfo {
+    fn from(f: FormInfo) -> Self {
+        Self {
+            fields: f.fields.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<FormExtractResult> for tiangong_core::browser_trait::FormExtractResult {
+    fn from(r: FormExtractResult) -> Self {
+        Self {
+            forms: r.forms.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<FillFieldResult> for tiangong_core::browser_trait::FillFieldResult {
+    fn from(r: FillFieldResult) -> Self {
+        Self {
+            ok: r.ok,
+            strategy: r.strategy,
+            error: r.error,
+            current_value: r.current_value,
+        }
+    }
+}
+
+impl From<ClickElementResult> for tiangong_core::browser_trait::ClickElementResult {
+    fn from(r: ClickElementResult) -> Self {
+        Self {
+            ok: r.ok,
+            error: r.error,
+        }
+    }
+}

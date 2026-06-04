@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, Emitter, Wry};
 use tokio::sync::mpsc;
+use tracing::warn;
 
 use crate::manager::{default_browser_rect, BrowserManager, BrowserState};
 use crate::types::{
@@ -248,7 +249,7 @@ pub async fn browser_command_handler(
                             serde_json::json!({ "action": "new", "tab_id": tab_id, "url": url }),
                         );
                     }
-                    Err(e) => eprintln!("[browser] tab_new error: {e}"),
+                    Err(e) => warn!(error = %e, "tab_new error"),
                 })
                 .await;
             }
@@ -259,7 +260,7 @@ pub async fn browser_command_handler(
                 let app_clone = app.clone();
                 let _ = tokio::task::spawn_blocking(move || {
                     if let Err(e) = manager.tab_switch(&tab_id) {
-                        eprintln!("[browser] tab_switch error: {e}");
+                        warn!(error = %e, "tab_switch error");
                     } else {
                         let _ = app_clone.emit(
                             "browser:tab_updated",
@@ -276,7 +277,7 @@ pub async fn browser_command_handler(
                 let app_clone = app.clone();
                 let _ = tokio::task::spawn_blocking(move || {
                     if let Err(e) = manager.tab_close(&tab_id) {
-                        eprintln!("[browser] tab_close error: {e}");
+                        warn!(error = %e, "tab_close error");
                     } else {
                         let _ = app_clone.emit(
                             "browser:tab_updated",

@@ -32,6 +32,42 @@ use tiangong_types::{StreamEvent, StreamToolCall};
 
 use crate::agent_team::lifecycle::TeamContext;
 
+/// 处理插件相关的 Command 变体（SetPageFetcher / RegisterToolOverride / InjectBrowserContent）。
+/// 消除 4 处 match 分支的重复代码。
+macro_rules! handle_plugin_commands {
+    ($cmd:expr, $engine:expr, $session:expr, $stream_tx:expr) => {
+        match $cmd {
+            Command::SetPageFetcher { fetcher } => {
+                $engine.set_page_fetcher(fetcher);
+            }
+            Command::RegisterToolOverride { name, handler } => {
+                $engine.register_tool_override(&name, handler);
+            }
+            Command::InjectBrowserContent {
+                title,
+                url,
+                text,
+                tabs,
+                active_tab_id,
+            } => {
+                crate::react::message::inject_browser_content_to_session(
+                    $session,
+                    $stream_tx,
+                    &crate::react::message::BrowserContent {
+                        title: &title,
+                        url: &url,
+                        text: &text,
+                        tabs: &tabs,
+                        active_tab_id: active_tab_id.as_deref(),
+                    },
+                    false,
+                );
+            }
+            _ => unreachable!("handle_plugin_commands: unexpected command variant"),
+        }
+    };
+}
+
 /// 取消时 LLM 请求的处理策略，按 Provider 协议区分。
 enum CancelStrategy {
     /// Anthropic: usage 在 message_start 就返回 prompt_tokens，可直接 abort
@@ -477,6 +513,7 @@ impl ReactEngine {
         let mut memory_candidate_count = 0usize;
         let mut completion_check_count: u32 = 0;
         let mut last_browser_snapshot: Option<crate::browser_trait::PageSnapshot> = None;
+        let mut last_browser_check: Option<std::time::Instant> = None;
 
         if self.agent_id == "main" {
             let routed = self
@@ -537,6 +574,7 @@ impl ReactEngine {
                     session,
                     stream_tx,
                     &mut last_browser_snapshot,
+                    &mut last_browser_check,
                 )
                 .await;
             }
@@ -619,31 +657,10 @@ impl ReactEngine {
                             Some(Command::ReloadConfig) => {}
                             Some(Command::Approval { .. }) => {}
                             Some(Command::CancelAgent { .. }) => {}
-                            Some(Command::SetPageFetcher { fetcher }) => {
-                                self.engine.set_page_fetcher(fetcher);
-                            }
-                            Some(Command::RegisterToolOverride { name, handler }) => {
-                                self.engine.register_tool_override(&name, handler);
-                            }
-                            Some(Command::InjectBrowserContent {
-                                title,
-                                url,
-                                text,
-                                tabs,
-                                active_tab_id,
-                            }) => {
-                                crate::react::message::inject_browser_content_to_session(
-                                    session,
-                                    stream_tx,
-                                    &crate::react::message::BrowserContent {
-                                        title: &title,
-                                        url: &url,
-                                        text: &text,
-                                        tabs: &tabs,
-                                        active_tab_id: active_tab_id.as_deref(),
-                                    },
-                                    false,
-                                );
+                            cmd @ (Some(Command::SetPageFetcher { .. })
+                            | Some(Command::RegisterToolOverride { .. })
+                            | Some(Command::InjectBrowserContent { .. })) => {
+                                handle_plugin_commands!(cmd.unwrap(), &self.engine, session, stream_tx);
                             }
                             Some(Command::CompressContext) => {
                                 crate::core::compress_context_for_session(
@@ -926,6 +943,7 @@ impl ReactEngine {
                     session,
                     stream_tx,
                     &mut last_browser_snapshot,
+                    &mut last_browser_check,
                 )
                 .await;
 
@@ -1118,30 +1136,14 @@ impl ReactEngine {
                                 Some(Command::ReloadConfig) => {}
                                 Some(Command::Approval { .. }) => {}
                                 Some(Command::CancelAgent { .. }) => {}
-                                Some(Command::SetPageFetcher { fetcher }) => {
-                                    self.engine.set_page_fetcher(fetcher);
-                                }
-                                Some(Command::RegisterToolOverride { name, handler }) => {
-                                    self.engine.register_tool_override(&name, handler);
-                                }
-                                Some(Command::InjectBrowserContent {
-                                    title,
-                                    url,
-                                    text,
-                                    tabs,
-                                    active_tab_id,
-                                }) => {
-                                    crate::react::message::inject_browser_content_to_session(
+                                cmd @ (Some(Command::SetPageFetcher { .. })
+                                | Some(Command::RegisterToolOverride { .. })
+                                | Some(Command::InjectBrowserContent { .. })) => {
+                                    handle_plugin_commands!(
+                                        cmd.unwrap(),
+                                        &self.engine,
                                         session,
-                                        stream_tx,
-                                        &crate::react::message::BrowserContent {
-                                            title: &title,
-                                            url: &url,
-                                            text: &text,
-                                            tabs: &tabs,
-                                            active_tab_id: active_tab_id.as_deref(),
-                                        },
-                                        false,
+                                        stream_tx
                                     );
                                 }
                                 Some(Command::CompressContext) => {
@@ -1443,6 +1445,7 @@ impl ReactEngine {
                     session,
                     stream_tx,
                     &mut last_browser_snapshot,
+                    &mut last_browser_check,
                 )
                 .await;
             }
@@ -1930,31 +1933,10 @@ impl ReactEngine {
                             crate::core::reset_context_for_session(parent_session, stream_tx, &self.engine);
                         }
                         Some(Command::ReloadConfig) | Some(Command::Approval { .. }) => {}
-                        Some(Command::SetPageFetcher { fetcher }) => {
-                            self.engine.set_page_fetcher(fetcher);
-                        }
-                        Some(Command::RegisterToolOverride { name, handler }) => {
-                            self.engine.register_tool_override(&name, handler);
-                        }
-                        Some(Command::InjectBrowserContent {
-                            title,
-                            url,
-                            text,
-                            tabs,
-                            active_tab_id,
-                        }) => {
-                            crate::react::message::inject_browser_content_to_session(
-                                parent_session,
-                                stream_tx,
-                                &crate::react::message::BrowserContent {
-                                    title: &title,
-                                    url: &url,
-                                    text: &text,
-                                    tabs: &tabs,
-                                    active_tab_id: active_tab_id.as_deref(),
-                                },
-                                false,
-                            );
+                        cmd @ (Some(Command::SetPageFetcher { .. })
+                        | Some(Command::RegisterToolOverride { .. })
+                        | Some(Command::InjectBrowserContent { .. })) => {
+                            handle_plugin_commands!(cmd.unwrap(), &self.engine, parent_session, stream_tx);
                         }
                         None => break,
                     }
@@ -2107,31 +2089,10 @@ fn drain_pending_commands_async(
             }
             Command::ReloadConfig => {}
             Command::Approval { .. } => {}
-            Command::SetPageFetcher { fetcher } => {
-                engine.set_page_fetcher(fetcher);
-            }
-            Command::RegisterToolOverride { name, handler } => {
-                engine.register_tool_override(&name, handler);
-            }
-            Command::InjectBrowserContent {
-                title,
-                url,
-                text,
-                tabs,
-                active_tab_id,
-            } => {
-                crate::react::message::inject_browser_content_to_session(
-                    session,
-                    stream_tx,
-                    &crate::react::message::BrowserContent {
-                        title: &title,
-                        url: &url,
-                        text: &text,
-                        tabs: &tabs,
-                        active_tab_id: active_tab_id.as_deref(),
-                    },
-                    false,
-                );
+            cmd @ (Command::SetPageFetcher { .. }
+            | Command::RegisterToolOverride { .. }
+            | Command::InjectBrowserContent { .. }) => {
+                handle_plugin_commands!(cmd, engine, session, stream_tx);
             }
             Command::CompressContext => {
                 crate::core::compress_context_for_session(session, engine, stream_tx);
@@ -2154,11 +2115,23 @@ async fn maybe_inject_browser_update(
     session: &mut Session,
     stream_tx: &StdSender<StreamEvent>,
     last_snapshot: &mut Option<crate::browser_trait::PageSnapshot>,
+    last_check: &mut Option<std::time::Instant>,
 ) {
     let fetcher = match engine.page_fetcher() {
         Some(f) => f,
         None => return,
     };
+    // 首次检测无间隔限制；后续检测至少间隔 5 秒，避免频繁 observe_page 拖慢执行
+    if last_snapshot.is_some() {
+        let min_interval = std::time::Duration::from_secs(5);
+        let now = std::time::Instant::now();
+        if let Some(prev) = last_check
+            && now.duration_since(*prev) < min_interval
+        {
+            return;
+        }
+        *last_check = Some(now);
+    }
     let snapshot =
         match tokio::time::timeout(std::time::Duration::from_secs(3), fetcher.observe_page()).await
         {

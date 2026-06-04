@@ -1,3 +1,5 @@
+use tracing::{debug, warn};
+
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -266,7 +268,7 @@ impl BrowserManager {
                         }
                     };
                     if changed {
-                        eprintln!("[browser] url_poll detected change: {current_url}");
+                        debug!(url = %current_url, "browser url_poll detected change");
                         // 更新活跃标签 URL（标题通过 on_page_load 回调更新）
                         {
                             let mut s = match state.lock() {
@@ -288,7 +290,7 @@ impl BrowserManager {
                         );
                     }
                 }
-                eprintln!("[browser] url_poll thread exiting");
+                debug!("browser url_poll thread exiting");
             })
             .expect("failed to spawn browser URL poll thread");
     }
@@ -484,16 +486,17 @@ impl BrowserManager {
 
         let t0 = std::time::Instant::now();
         let loaded = self.wait_for_page_load(15_000);
-        eprintln!(
-            "[browser] wait_for_page_load={loaded}, elapsed={}ms",
-            t0.elapsed().as_millis()
+        debug!(
+            loaded,
+            elapsed_ms = t0.elapsed().as_millis() as u64,
+            "browser wait_for_page_load"
         );
 
         let t1 = std::time::Instant::now();
         self.wait_for_content_ready(15_000);
-        eprintln!(
-            "[browser] wait_for_content_ready elapsed={}ms",
-            t1.elapsed().as_millis()
+        debug!(
+            elapsed_ms = t1.elapsed().as_millis() as u64,
+            "browser wait_for_content_ready"
         );
 
         let result = self.eval_with_result(&format!(
@@ -515,7 +518,7 @@ impl BrowserManager {
                     }
                 }
                 Err(e) => {
-                    eprintln!("[browser] JSON parse error: {e}");
+                    warn!(error = %e, "browser JSON parse error");
                     error_response("解析页面内容失败".to_string())
                 }
             },
