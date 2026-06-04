@@ -110,6 +110,25 @@ impl AppRepository {
         &self,
         agent_config: &AgentConfig,
     ) -> Result<()> {
+        self.persist_agent_configs_inner(agent_config, true)
+    }
+
+    /// 持久化 agent 配置但跳过 MCP 磁盘合并。
+    ///
+    /// 删除操作必须使用此方法，否则 `merge_mcp_with_disk` 会将磁盘上刚被删除的
+    /// server 视为"其他进程新增"而重新加回，导致删除无法持久化。
+    pub(in crate::app_state) fn persist_agent_configs_no_merge_mcp(
+        &self,
+        agent_config: &AgentConfig,
+    ) -> Result<()> {
+        self.persist_agent_configs_inner(agent_config, false)
+    }
+
+    fn persist_agent_configs_inner(
+        &self,
+        agent_config: &AgentConfig,
+        merge_mcp: bool,
+    ) -> Result<()> {
         ensure_parent_dir(&self.paths.skills_config_path)?;
         ensure_parent_dir(&self.paths.mcp_config_path)?;
 
@@ -127,10 +146,14 @@ impl AppRepository {
             )
         })?;
 
-        // --- mcp.json：合并磁盘上其他进程新增的 server ---
-        let merged_mcp = self.merge_mcp_with_disk(&agent_config.mcp)?;
+        // --- mcp.json ---
+        let final_mcp = if merge_mcp {
+            self.merge_mcp_with_disk(&agent_config.mcp)?
+        } else {
+            agent_config.mcp.clone()
+        };
         let mcp_content =
-            serde_json::to_string_pretty(&merged_mcp).context("序列化 mcp 配置失败")?;
+            serde_json::to_string_pretty(&final_mcp).context("序列化 mcp 配置失败")?;
         fs::write(&self.paths.mcp_config_path, mcp_content).with_context(|| {
             format!(
                 "写入 mcp 配置失败：{}",
