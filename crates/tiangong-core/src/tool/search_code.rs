@@ -65,6 +65,12 @@ impl LocalToolExecutor {
         };
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        // 超时时 stdout 可能非常大（日志文件等），截断避免撑爆上下文
+        let stdout = if timed_out {
+            super::common::truncate_output(&stdout)
+        } else {
+            stdout
+        };
         let ok = !timed_out && (output.status.success() || exit_code == 1);
         let summary = if timed_out {
             format!("代码检索超时：pattern={pattern} (timeout_ms={timeout_ms})")
