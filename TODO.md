@@ -1,8 +1,8 @@
 # TODO - 天工当前开发任务
 
-> 最后更新：2026-05-27
-> 当前主线：Phase 20 — 自动化触发层（0.4.0）✅ 已完成
-> 参考：`PLAN.md`、Issue #38
+> 最后更新：2026-06-04
+> 当前主线：0.6.0 发布准备
+> 参考：`PLAN.md`
 
 ---
 
@@ -59,6 +59,19 @@
 - [x] 验证 cron / webhook / polling 端到端流程
 - [x] 验证 Server 启动恢复 cron job
 - [x] 验证前端 Job 管理界面
+
+## 发布准备（0.6.0）
+
+- [x] 从最新主分支创建 `release/0.6.0` worktree
+- [x] 更新 `Cargo.toml` 版本号为 `0.6.0`
+- [x] 更新 `frontend/package.json` 版本号为 `0.6.0`
+- [x] 更新 `tauri.conf.json` 版本号为 `0.6.0`
+- [x] 更新发布流水线默认标签、Release 标题和 OSS 上传默认标签为 `v0.6.0`
+- [x] 运行 Rust 检查
+- [x] 运行 Rust lint
+- [x] 运行 Rust 测试
+- [x] 运行前端构建
+- [x] 创建发布提交与 `v0.6.0` 标签
 
 ---
 
