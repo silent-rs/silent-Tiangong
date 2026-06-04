@@ -64,6 +64,16 @@ pub async fn browser_command_handler(
                 }
             }
             BrowserCommand::ObservePage { response_tx } => {
+                // 浏览器未打开时不返回响应，让 observe_page() 返回 None
+                {
+                    let s = match browser_state.lock() {
+                        Ok(s) => s,
+                        Err(e) => e.into_inner(),
+                    };
+                    if s.webview.is_none() {
+                        continue;
+                    }
+                }
                 let manager = BrowserManager {
                     state: browser_state.clone(),
                 };
