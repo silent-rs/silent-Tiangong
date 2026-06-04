@@ -28,6 +28,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 async-openai = { workspace = true, features = ["byot", "chat-completion", "model"] }
 tokio = { workspace = true, features = ["rt", "time", "process", "io-util", "sync"] }
+tracing = { workspace = true }
 rmcp = { workspace = true, default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 futures-util = { workspace = true }
 http = { workspace = true }

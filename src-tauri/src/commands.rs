@@ -10,6 +10,7 @@ use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 use tauri_plugin_notification::{NotificationExt, PermissionState};
+use tracing::{debug, warn};
 
 const MAX_ATTACHMENT_BASE64_BYTES: u64 = 50 * 1024 * 1024;
 
@@ -544,11 +545,11 @@ pub async fn switch_session(
                     &cwd,
                 )) {
                     Ok(count) => {
-                        eprintln!("切换会话后 Workspace 索引扫描完成: {count} 个文件");
+                        debug!(count, "切换会话后 Workspace 索引扫描完成");
                         need_snapshot = true;
                     }
                     Err(e) => {
-                        eprintln!("切换会话后 Workspace 索引扫描失败: {e}");
+                        warn!(error = %e, "切换会话后 Workspace 索引扫描失败");
                     }
                 }
             }
@@ -557,11 +558,11 @@ pub async fn switch_session(
             if !messages.is_empty() {
                 match tiangong_core::index::backfill_session_index(&sid, &messages) {
                     Ok(count) => {
-                        eprintln!("切换会话后 Session 回溯索引完成: {count} 条消息");
+                        debug!(count, "切换会话后 Session 回溯索引完成");
                         need_snapshot = true;
                     }
                     Err(e) => {
-                        eprintln!("切换会话后 Session 回溯索引失败: {e}");
+                        warn!(error = %e, "切换会话后 Session 回溯索引失败");
                     }
                 }
             }

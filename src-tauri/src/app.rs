@@ -5,6 +5,7 @@ use tiangong_config::load_tiangong_config;
 use tiangong_core::core::TiangongCore;
 use tiangong_core::core_config::CoreConfigProvider;
 use tokio::sync::Mutex as AsyncMutex;
+use tracing::warn;
 
 /// 天工应用状态
 ///
@@ -98,7 +99,7 @@ impl TiangongApp {
         match self.cores.lock() {
             Ok(guard) => guard,
             Err(err) => {
-                eprintln!("cores 锁已污染，尝试恢复: {}", err);
+                warn!(error = %err, "cores 锁已污染，尝试恢复");
                 err.into_inner()
             }
         }
@@ -110,7 +111,7 @@ impl TiangongApp {
         match self.embedded_server.lock() {
             Ok(guard) => guard,
             Err(err) => {
-                eprintln!("embedded_server 锁已污染，尝试恢复: {}", err);
+                warn!(error = %err, "embedded_server 锁已污染，尝试恢复");
                 err.into_inner()
             }
         }
@@ -164,7 +165,7 @@ impl TiangongApp {
                 core.set_trust_mode(session.trust_mode);
                 return (session_id.to_string(), false); // 已存在，复用
             }
-            eprintln!("移除已停止的 TiangongCore：{session_id}");
+            warn!(session_id, "移除已停止的 TiangongCore");
             cores.remove(session_id);
         }
         let core = TiangongCore::with_session_for_gui(self.config.clone(), session, stream_tx);
@@ -204,7 +205,7 @@ impl TiangongApp {
                 core.send_message(content)
             };
             if !sent {
-                eprintln!("TiangongCore 命令通道已关闭，移除僵尸 core：{session_id}");
+                warn!(session_id, "TiangongCore 命令通道已关闭，移除僵尸 core");
                 cores.remove(session_id);
             }
             sent

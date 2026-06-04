@@ -9,6 +9,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use tauri::Manager;
+use tracing::{info, warn};
 
 const TRAY_SHOW_WINDOW_ID: &str = "show_window";
 const TRAY_START_SERVER_ID: &str = "start_server";
@@ -482,10 +483,10 @@ fn auto_start_embedded_server(app: &tauri::AppHandle) {
     let state = app.state::<tiangong_app::TiangongApp>();
     match state.start_embedded_server(&config.host, config.port, config.auth_token.clone()) {
         Ok(()) => {
-            eprintln!("自动启动嵌入式 Server：{}:{}", config.host, config.port);
+            info!(host = %config.host, port = config.port, "自动启动嵌入式 Server");
         }
         Err(err) => {
-            eprintln!("自动启动嵌入式 Server 失败：{err}");
+            warn!(error = %err, "自动启动嵌入式 Server 失败");
             // 启动失败时重置标记，避免下次启动继续失败
             let mut config = config;
             config.enabled = false;
@@ -546,13 +547,13 @@ fn handle_tray_menu_event(
                     config.auth_token.clone(),
                 ) {
                     Ok(()) => {
-                        eprintln!("Server 已启动：{}:{}", config.host, config.port);
+                        info!(host = %config.host, port = config.port, "Server 已启动");
                         let mut config = config;
                         config.enabled = true;
                         let _ = tiangong_server::config::save_server_config(&config);
                     }
                     Err(err) => {
-                        eprintln!("菜单栏启动 Server 失败：{err}");
+                        warn!(error = %err, "菜单栏启动 Server 失败");
                     }
                 }
                 if let Some(tray) = tray.as_ref() {
@@ -580,9 +581,9 @@ fn handle_tray_menu_event(
                 let _ = status_item.set_text("Server 状态：停止中");
                 let state = app_clone.state::<tiangong_app::TiangongApp>();
                 if let Err(err) = state.stop_embedded_server() {
-                    eprintln!("菜单栏停止 Server 失败：{err}");
+                    warn!(error = %err, "菜单栏停止 Server 失败");
                 } else {
-                    eprintln!("Server 已停止");
+                    info!("Server 已停止");
                     let mut config = tiangong_server::config::load_server_config();
                     config.enabled = false;
                     let _ = tiangong_server::config::save_server_config(&config);
