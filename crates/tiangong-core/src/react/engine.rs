@@ -711,9 +711,11 @@ impl ReactEngine {
                         }
                     }
                     let err_msg = err.to_string();
-                    // 上下文超限时强制压缩后重试
+                    // 上下文超限或空响应时强制压缩后重试
                     if err_msg.contains("context_window_exceeded")
                         || err_msg.contains("context_length_exceeded")
+                        || (err_msg.contains("content_blocks=0")
+                            && err_msg.contains("stop_reason=end_turn"))
                     {
                         tracing::warn!("检测到上下文超限，尝试强制压缩");
                         let before_summary_up_to = session.summary_up_to;
