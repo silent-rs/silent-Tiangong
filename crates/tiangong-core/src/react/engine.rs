@@ -34,6 +34,11 @@ use crate::agent_team::lifecycle::TeamContext;
 
 /// 处理插件相关的 Command 变体（SetPageFetcher / RegisterToolOverride / InjectBrowserContent）。
 /// 消除 4 处 match 分支的重复代码。
+///
+/// 调用点通过 or-pattern (`cmd @ (Some(Command::SetPageFetcher { .. }) | ...)`) 限定
+/// 只会将这三种 Command 传入，因此 `_ => unreachable!` 不会触发。新增变体时必须同步更新：
+/// 1. 此宏的 match 分支
+/// 2. 所有调用点的 or-pattern
 macro_rules! handle_plugin_commands {
     ($cmd:expr, $engine:expr, $session:expr, $stream_tx:expr) => {
         match $cmd {
@@ -63,7 +68,7 @@ macro_rules! handle_plugin_commands {
                     false,
                 );
             }
-            _ => unreachable!("handle_plugin_commands: unexpected command variant"),
+            _ => unreachable!("handle_plugin_commands: unexpected command — 调用点 or-pattern 与宏分支不同步"),
         }
     };
 }
