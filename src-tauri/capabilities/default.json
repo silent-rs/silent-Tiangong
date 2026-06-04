@@ -1,8 +1,9 @@
 {
   "$schema": "../gen/schemas/capabilities.json",
   "identifier": "default",
-  "description": "默认窗口能力",
+  "description": "默认窗口能力（仅主 WebView，不含浏览器子 WebView）",
   "windows": ["main"],
+  "webviews": ["main"],
   "permissions": [
     "core:default",
     "core:window:default",

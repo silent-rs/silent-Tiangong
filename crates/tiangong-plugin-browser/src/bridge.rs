@@ -3,8 +3,32 @@ pub const BRIDGE_SCRIPT: &str = r#"
     if (window.__tiangong_bridge_loaded) return;
     window.__tiangong_bridge_loaded = true;
 
+    // 屏蔽 Tauri IPC — 浏览器 WebView 加载外部 URL，不应暴露 Tauri API
+    try {
+        var _noop = function() { return Promise.resolve(''); };
+        if (window.__TAURI_INTERNALS__) {
+            window.__TAURI_INTERNALS__.ipc = _noop;
+            window.__TAURI_INTERNALS__.postMessage = function() {};
+        }
+        var _origFetch = window.fetch;
+        window.fetch = function(input, init) {
+            var url = (typeof input === 'string') ? input : (input && input.url ? input.url : '');
+            if (url.indexOf('ipc://') === 0) {
+                return Promise.resolve(new Response('{}', { status: 200 }));
+            }
+            return _origFetch.apply(this, arguments);
+        };
+        var _origXHR = window.XMLHttpRequest.prototype.open;
+        window.XMLHttpRequest.prototype.open = function(method, url) {
+            if (typeof url === 'string' && url.indexOf('ipc://') === 0) {
+                return;
+            }
+            return _origXHR.apply(this, arguments);
+        };
+    } catch(e) {}
+
     window.__tiangong_bridge = {
-        version: '0.6.0',
+        version: '0.7.0',
 
         getFullText: function(maxChars) {
             maxChars = maxChars || 12000;
@@ -218,6 +242,6 @@ pub const BRIDGE_SCRIPT: &str = r#"
         },
     };
 
-    console.log('[Tiangong Bridge] loaded v0.6.0');
+    console.log('[Tiangong Bridge] loaded v0.7.0');
 })();
 "#;

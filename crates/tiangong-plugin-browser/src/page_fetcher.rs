@@ -237,7 +237,7 @@ impl PageFetcher for BrowserPageFetcher {
     }
 }
 
-/// 浏览器工具覆盖处理器（web_fetch / web_browse / web_form_extract / web_form_fill / web_click）
+/// 浏览器工具覆盖处理器（web_fetch / web_browse / web_form_extract / web_form_fill / web_click / web_load_html）
 pub struct BrowserToolOverride {
     fetcher: Arc<dyn PageFetcher>,
 }

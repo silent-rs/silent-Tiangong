@@ -1,7 +1,7 @@
 # TODO - 天工当前开发任务
 
-> 最后更新：2026-06-03
-> 当前主线：Phase 21 — 内嵌浏览器面板（0.5.0）— 插件化已完成
+> 最后更新：2026-06-04
+> 当前主线：Phase 21 — 内嵌浏览器面板（0.5.0）— 全部子阶段已完成
 > 参考：`PLAN.md`、Issue #95
 
 ---
@@ -19,7 +19,7 @@
 ### Phase 21-B：BrowserManager 核心
 
 - [x] 新增 `src-tauri/src/browser.rs` — BrowserManager 模块
-- [x] Bridge Script v0.6.0 — getFullText、click、type、extractForms、fillField、clickElement
+- [x] Bridge Script v0.7.0 — getFullText、click、type、extractForms、fillField、clickElement
 - [x] Tauri Commands：`browser_open`、`browser_close`、`browser_set_position`、`browser_navigate`、`browser_eval`
 - [x] Agent `web_fetch` 拦截 → 浏览器获取页面内容（eval_with_callback + on_page_load + Condvar）
 - [x] 内容就绪检测（wait_for_content_ready：内容增长稳定策略）
@@ -51,10 +51,12 @@
 - [x] `web_click` 工具 — 模拟鼠标事件点击（mouseover/mousedown/mouseup/click + 坐标）
 - [x] `web_load_html` 工具 — 加载 HTML 内容到浏览器（data URL）
 
-### Phase 21-F：完善与优化（已完成部分）
+### Phase 21-F：完善与优化
 
 - [x] 前进/后退/刷新导航控制（BrowserPanel 工具栏按钮）
 - [x] 窗口缩小时浏览器面板自动隐藏
+- [x] Cookie 持久化验证（data_directory 已设置，依赖 WKWebView 内置行为）
+- [x] 浏览器工具权限分类（web_browse/web_form_extract → Safe，web_form_fill/web_click/web_load_html → Elevated）
 
 ### Phase 21-G：浏览器能力插件化
 
@@ -74,8 +76,6 @@
 
 ### Phase 21-F（剩余）：完善与优化
 
-- [ ] Cookie 持久化配置确认（data_directory 已设置，验证跨会话保持）
-- [ ] 浏览器操作的权限审批机制（复用现有审批流程）
 - [ ] 多标签页支持（可选）
 - [ ] 用户批注模式（在页面上标注，Agent 理解标注内容）
 

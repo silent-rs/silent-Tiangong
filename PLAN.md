@@ -78,7 +78,7 @@
 | 21-C | 前端浏览器面板 — BrowserPanel 组件、地址栏、容器同步、拖拽调整宽度 | ✅ |
 | 21-D | Agent 交互增强 — ObservePage 快照、web_browse 工具、页面内容注入对话链 | ✅ |
 | 21-E | 表单填写增强 — 三层策略（keyboard / native setter / paste）、表单提取、模拟点击、加载HTML | ✅ |
-| 21-F | 完善与优化 — Cookie 持久化、权限审批、导航控制、多标签页 | 部分完成 |
+| 21-F | 完善与优化 — Cookie 持久化、权限审批、导航控制 | ✅ |
 | 21-G | 浏览器能力插件化 — Core trait 抽象、Tauri Plugin 封装、应用层切换 | ✅ |
 
 ## 参考文档
