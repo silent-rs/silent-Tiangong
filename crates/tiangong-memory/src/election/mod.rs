@@ -165,11 +165,17 @@ fn read_leader_info_from_path(path: &PathBuf) -> Result<Option<LeaderInfo>> {
     if !path.exists() {
         return Ok(None);
     }
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("读取 leader 信息失败: {}", path.display()))?;
-    let info = serde_json::from_str(&content)
-        .with_context(|| format!("解析 leader 信息失败: {}", path.display()))?;
-    Ok(Some(info))
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return Ok(None),
+    };
+    match serde_json::from_str(&content) {
+        Ok(info) => Ok(Some(info)),
+        Err(_) => {
+            tracing::debug!("leader.json 内容损坏，已忽略：{}", path.display());
+            Ok(None)
+        }
+    }
 }
 
 /// 判断给定 leader 是否仍然健康。
