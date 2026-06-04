@@ -18,6 +18,9 @@ function calcBrowserWidth(logicalHeight: number): number {
 /** 浏览器面板最小宽度，低于此值自动关闭 */
 const MIN_BROWSER_WIDTH = 200;
 
+/** 对话面板最小宽度 */
+const MIN_CHAT_WIDTH = 400;
+
 /** 侧边栏自动隐藏/恢复阈值 */
 const SIDEBAR_RESTORE_THRESHOLD = 656;
 
@@ -27,31 +30,30 @@ const SIDEBAR_WIDTH = 256;
 /** 主内容在打开侧边栏后保留的最小可用宽度 */
 const MIN_CONTENT_WIDTH_WITH_SIDEBAR = 400;
 
-/** 扩展窗口以容纳浏览器面板，精确计算：窗口宽度 = sidebar + 400(对话) + browserW */
+/** 扩展窗口以容纳浏览器面板：对话区缩至最小宽度 + 浏览器面板宽度 */
 async function expandWindowForBrowser(lock?: () => void, unlock?: () => void) {
   const appWindow = getCurrentWindow();
   const innerSize = await appWindow.innerSize();
   const scaleFactor = await appWindow.scaleFactor();
-  const logicalW = innerSize.width / scaleFactor;
   const logicalH = innerSize.height / scaleFactor;
   const browserW = calcBrowserWidth(logicalH);
-  const mainEl = document.querySelector('main');
-  const chatW = mainEl?.clientWidth ?? 400;
-  const expand = browserW - (chatW - 400);
-  const newW = logicalW + expand;
+  const targetW = MIN_CHAT_WIDTH + browserW;
   lock?.();
-  await appWindow.setSize(new LogicalSize(newW, logicalH));
+  await appWindow.setSize(new LogicalSize(targetW, logicalH));
   unlock?.();
-  return { browserW, logicalW: logicalW, logicalH };
+  return { browserW, logicalH };
 }
 
 export function MainApp() {
   const { loadSessions, updateFromSnapshot } = useStore();
   const [showBrowser, setShowBrowser] = useState(false);
+  const [chatPanelWidth, setChatPanelWidth] = useState(MIN_CHAT_WIDTH);
   const [browserUrl, setBrowserUrl] = useState<string | undefined>(undefined);
   const [navigateUrl, setNavigateUrl] = useState<string | undefined>(undefined);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const showBrowserRef = useRef(false);
+  const chatPanelWidthRef = useRef(MIN_CHAT_WIDTH);
+  const isDraggingRef = useRef(false);
   const unlistenRef = useRef<UnlistenFn | null>(null);
   const latestSnapshotRef = useRef<RunSnapshot | null>(null);
   const snapshotTimerRef = useRef<number | null>(null);
@@ -97,15 +99,22 @@ export function MainApp() {
     setSidebarOpen(open);
   }, [lockResize, unlockResize]);
 
+  const openBrowserPanel = useCallback(async () => {
+    const appWindow = getCurrentWindow();
+    const innerSize = await appWindow.innerSize();
+    const scaleFactor = await appWindow.scaleFactor();
+    savedWindowWidthRef.current = innerSize.width / scaleFactor;
+    setSidebarOpenByLayout(false);
+    await expandWindowForBrowser(lockResize, unlockResize);
+    chatPanelWidthRef.current = MIN_CHAT_WIDTH;
+    setChatPanelWidth(MIN_CHAT_WIDTH);
+    showBrowserRef.current = true;
+    setShowBrowser(true);
+  }, [lockResize, setSidebarOpenByLayout, unlockResize]);
+
   const handleToggleBrowser = useCallback(async () => {
     if (!showBrowserRef.current) {
-      const appWindow = getCurrentWindow();
-      const innerSize = await appWindow.innerSize();
-      const scaleFactor = await appWindow.scaleFactor();
-      savedWindowWidthRef.current = innerSize.width / scaleFactor;
-      await expandWindowForBrowser(lockResize, unlockResize);
-      showBrowserRef.current = true;
-      setShowBrowser(true);
+      await openBrowserPanel();
     } else {
       const appWindow = getCurrentWindow();
       const innerSize = await appWindow.innerSize();
@@ -113,8 +122,6 @@ export function MainApp() {
       const logicalH = innerSize.height / scaleFactor;
       const restoreW = savedWindowWidthRef.current ?? (innerSize.width / scaleFactor - calcBrowserWidth(logicalH));
       savedWindowWidthRef.current = null;
-      // 先卸载 BrowserPanel（断开 ResizeObserver），再隐藏 WebView 和收缩窗口
-      // 避免窗口收缩时 ResizeObserver 的 syncPosition 把 WebView 拉回可见区域
       showBrowserRef.current = false;
       setShowBrowser(false);
       await api.browserHide().catch(console.error);
@@ -125,7 +132,46 @@ export function MainApp() {
         setSidebarOpenByLayout(true);
       }
     }
-  }, [lockResize, setSidebarOpenByLayout, unlockResize]);
+  }, [openBrowserPanel, lockResize, setSidebarOpenByLayout, unlockResize]);
+
+  const handleDividerDrag = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isDraggingRef.current = true;
+    const mainEl = document.querySelector('main');
+    if (!mainEl) return;
+
+    const cleanup = () => {
+      isDraggingRef.current = false;
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    const onUp = () => { cleanup(); };
+
+    const onMove = (ev: MouseEvent) => {
+      if (!isDraggingRef.current) return;
+      const rect = mainEl.getBoundingClientRect();
+      const next = ev.clientX - rect.left;
+      if (rect.width - next < MIN_BROWSER_WIDTH) {
+        cleanup();
+        api.browserHide().catch(console.error);
+        savedWindowWidthRef.current = null;
+        showBrowserRef.current = false;
+        setShowBrowser(false);
+        return;
+      }
+      const clamped = Math.max(MIN_CHAT_WIDTH, next);
+      setChatPanelWidth(clamped);
+      chatPanelWidthRef.current = clamped;
+    };
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, []);
 
   useEffect(() => {
     ensureDesktopNotificationPermission().catch(console.warn);
@@ -171,13 +217,7 @@ export function MainApp() {
         setBrowserUrl(url);
         setNavigateUrl(url);
         if (!showBrowserRef.current) {
-          const appWindow = getCurrentWindow();
-          const innerSize = await appWindow.innerSize();
-          const scaleFactor = await appWindow.scaleFactor();
-          savedWindowWidthRef.current = innerSize.width / scaleFactor;
-          await expandWindowForBrowser(lockResize, unlockResize);
-          showBrowserRef.current = true;
-          setShowBrowser(true);
+          await openBrowserPanel();
         }
       });
 
@@ -185,7 +225,6 @@ export function MainApp() {
         setBrowserUrl(event.payload.url);
       });
 
-      // 窗口大小变化：浏览器/侧边栏自适应（仅用户手动拖拽时触发）
       const unlistenResize = await getCurrentWindow().onResized(async () => {
         if (programmaticResizeRef.current) return;
 
@@ -194,11 +233,10 @@ export function MainApp() {
         const scaleFactor = await appWindow.scaleFactor();
         const logicalW = innerSize.width / scaleFactor;
 
-        // 浏览器打开时宽度不足则隐藏
         if (showBrowserRef.current) {
           const mainEl = document.querySelector('main');
           const sidebarW = mainEl ? mainEl.offsetLeft : 0;
-          const browserSpace = logicalW - sidebarW - 400;
+          const browserSpace = logicalW - sidebarW - chatPanelWidthRef.current;
           if (browserSpace < MIN_BROWSER_WIDTH) {
             await api.browserHide().catch(console.error);
             savedWindowWidthRef.current = null;
@@ -207,7 +245,6 @@ export function MainApp() {
           }
         }
 
-        // 窗口宽度不足时临时隐藏侧边栏，宽度恢复后再按用户原状态恢复
         if (logicalW <= SIDEBAR_RESTORE_THRESHOLD) {
           setSidebarOpenByLayout(false);
         } else if (
@@ -243,13 +280,7 @@ export function MainApp() {
         setBrowserUrl(url);
         setNavigateUrl(url);
         if (!showBrowserRef.current) {
-          const appWindow = getCurrentWindow();
-          const innerSize = await appWindow.innerSize();
-          const scaleFactor = await appWindow.scaleFactor();
-          savedWindowWidthRef.current = innerSize.width / scaleFactor;
-          await expandWindowForBrowser(lockResize, unlockResize);
-          showBrowserRef.current = true;
-          setShowBrowser(true);
+          await openBrowserPanel();
         }
       }
     };
@@ -263,7 +294,7 @@ export function MainApp() {
       window.removeEventListener('tiangong:open-browser', onOpenBrowser);
       unlistenRef.current?.();
     };
-  }, [setSidebarOpenByLayout]);
+  }, [setSidebarOpenByLayout, openBrowserPanel]);
 
   return (
     <SidebarProvider open={sidebarOpen} onOpenChange={handleSidebarChange}>
@@ -280,7 +311,7 @@ export function MainApp() {
             <div className="flex flex-1 min-h-0">
               <div
                 className={`flex flex-col min-w-0 ${showBrowser ? 'shrink-0' : 'flex-1'}`}
-                style={showBrowser ? { width: 400 } : undefined}
+                style={showBrowser ? { width: chatPanelWidth } : undefined}
               >
                 <div className="flex-1 overflow-hidden">
                   <LazyMessageList />
@@ -288,6 +319,13 @@ export function MainApp() {
 
                 <LazyMessageInput />
               </div>
+
+              {showBrowser && (
+                <div
+                  className="w-[3px] shrink-0 cursor-col-resize bg-border hover:bg-muted-foreground/30 active:bg-muted-foreground/50 transition-colors"
+                  onMouseDown={handleDividerDrag}
+                />
+              )}
 
               {showBrowser && (
                 <BrowserPanel initialUrl={browserUrl} currentUrl={browserUrl} navigateUrl={navigateUrl} />

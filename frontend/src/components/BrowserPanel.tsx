@@ -228,7 +228,7 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
   }, [initialUrl, refreshTabs]);
 
   return (
-    <div className="flex flex-1 flex-col h-full border-l bg-background">
+    <div className="flex flex-1 flex-col h-full bg-background">
       {/* 标签栏 */}
       <div className="flex items-center gap-0.5 px-2 py-1 border-b shrink-0 overflow-x-auto">
         {tabs.map((tab) => (
