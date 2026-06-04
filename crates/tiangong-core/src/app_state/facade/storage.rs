@@ -33,6 +33,16 @@ impl TiangongState {
             .sync_mcp_dependency_lock(&self.store.agent.agent_config)
     }
 
+    /// 持久化 agent 配置但跳过 MCP 磁盘合并，用于删除操作。
+    pub(in crate::app_state) fn persist_agent_configs_no_merge_mcp(&self) -> Result<()> {
+        self.services
+            .repository
+            .persist_agent_configs_no_merge_mcp(&self.store.agent.agent_config)?;
+        self.services
+            .repository
+            .sync_mcp_dependency_lock(&self.store.agent.agent_config)
+    }
+
     pub(in crate::app_state) fn persist_to_disk(&mut self) -> Result<()> {
         self.normalize_sessions_for_storage();
         self.services.repository.persist_to_disk(&self.store)

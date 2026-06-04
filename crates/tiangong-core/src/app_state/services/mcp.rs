@@ -150,7 +150,9 @@ impl AppMcpService {
         validate_agent_config(&state.store.agent.agent_config)?;
         state.rebuild_runtime_for_agent_config();
         state.persist_app_only()?;
-        state.persist_agent_configs_only()?;
+        // 跳过 MCP 磁盘合并：否则 merge_mcp_with_disk 会将刚删除的 server
+        // 视为"其他进程新增"而重新加回，导致删除无法持久化。
+        state.persist_agent_configs_no_merge_mcp()?;
         audit::append_audit_log(&audit::AuditEntry::new(
             "mcp.remove",
             name,
