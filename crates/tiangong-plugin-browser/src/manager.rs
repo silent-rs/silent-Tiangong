@@ -146,6 +146,8 @@ impl BrowserManager {
                                     url: page_url.clone(),
                                     text: text.clone(),
                                     status: PageStatus::Loaded,
+                                    tabs: Vec::new(),
+                                    active_tab_id: None,
                                 };
                                 if let Ok(mut state) = state_clone2.lock() {
                                     state.latest_snapshot = Some(snapshot);
@@ -587,9 +589,18 @@ impl BrowserManager {
         let was_active = state.active_tab_id.as_deref() == Some(tab_id);
 
         if was_active {
-            // 切换到相邻标签
             if state.tabs.is_empty() {
-                state.active_tab_id = None;
+                // 关闭最后一个标签时创建空标签
+                let new_id = scru128::new().to_string();
+                state.tabs.push(BrowserTab {
+                    id: new_id.clone(),
+                    url: "about:blank".to_string(),
+                    title: String::new(),
+                });
+                state.active_tab_id = Some(new_id);
+                if let Some(webview) = &state.webview {
+                    let _ = webview.navigate(Url::parse("about:blank").unwrap());
+                }
             } else {
                 let new_pos = pos.min(state.tabs.len() - 1);
                 let (new_id, new_url) = {

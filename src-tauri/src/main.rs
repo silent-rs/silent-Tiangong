@@ -246,7 +246,7 @@ fn run_gui() {
                 state.register_tool_override("web_load_html", handler);
             }
 
-            // 监听浏览器页面加载事件，自动注入内容到活跃会话
+            // 监听浏览器页面加载事件，自动注入内容到当前活跃会话
             let inject_handle = app.handle().clone();
             app.listen("browser:page_loaded", move |event| {
                 let payload = event.payload().to_string();
@@ -258,7 +258,7 @@ fn run_gui() {
                     let title = data["title"].as_str().unwrap_or("").to_string();
                     let text = data["text"].as_str().unwrap_or("").to_string();
                     let state = inject_handle.state::<tiangong_app::TiangongApp>();
-                    state.inject_browser_content(title, url, text);
+                    state.inject_browser_content(title, url, text, vec![], None);
                 }
             });
 

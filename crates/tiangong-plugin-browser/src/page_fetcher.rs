@@ -6,7 +6,8 @@ use tokio::sync::mpsc;
 use crate::types::BrowserCommand;
 use tiangong_core::browser_trait::{
     ClickElementResult as CoreClickResult, FillFieldResult as CoreFillResult,
-    FormExtractResult as CoreFormExtractResult, PageFetcher,
+    FormExtractResult as CoreFormExtractResult, PageFetcher, TabInfo as CoreTabInfo,
+    TabListResult as CoreTabListResult,
 };
 
 /// 通过 BrowserCommand channel 实现 PageFetcher trait
@@ -88,6 +89,52 @@ impl PageFetcher for BrowserPageFetcher {
                 title: snapshot.title,
                 url: snapshot.url,
                 text: snapshot.text,
+                tabs: snapshot
+                    .tabs
+                    .into_iter()
+                    .map(|t| CoreTabInfo {
+                        id: t.id,
+                        url: t.url,
+                        title: t.title,
+                    })
+                    .collect(),
+                active_tab_id: snapshot.active_tab_id,
+            })
+        })
+    }
+
+    fn list_tabs(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Option<tiangong_core::browser_trait::TabListResult>>
+                + Send,
+        >,
+    > {
+        let tx = self.cmd_tx.clone();
+        Box::pin(async move {
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            let cmd = BrowserCommand::TabList { response_tx };
+
+            if tx.send(cmd).await.is_err() {
+                return None;
+            }
+
+            let tabs = tokio::time::timeout(Duration::from_secs(10), response_rx)
+                .await
+                .ok()?
+                .ok()?;
+
+            Some(CoreTabListResult {
+                tabs: tabs
+                    .into_iter()
+                    .map(|t| CoreTabInfo {
+                        id: t.id,
+                        url: t.url,
+                        title: t.title,
+                    })
+                    .collect(),
+                active_tab_id: None,
             })
         })
     }

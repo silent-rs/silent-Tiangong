@@ -253,8 +253,21 @@ impl TiangongCore {
     }
 
     /// 注入浏览器页面内容到当前会话（不触发 LLM 调用）
-    pub fn inject_browser_content(&self, title: String, url: String, text: String) -> bool {
-        self.send_cmd(Command::InjectBrowserContent { title, url, text })
+    pub fn inject_browser_content(
+        &self,
+        title: String,
+        url: String,
+        text: String,
+        tabs: Vec<(String, String, String)>,
+        active_tab_id: Option<String>,
+    ) -> bool {
+        self.send_cmd(Command::InjectBrowserContent {
+            title,
+            url,
+            text,
+            tabs,
+            active_tab_id,
+        })
     }
 
     /// 关闭并获取最终 session
@@ -588,13 +601,23 @@ async fn worker_loop_async(
                 }
                 continue;
             }
-            Command::InjectBrowserContent { title, url, text } => {
+            Command::InjectBrowserContent {
+                title,
+                url,
+                text,
+                tabs,
+                active_tab_id,
+            } => {
                 crate::react::message::inject_browser_content_to_session(
                     &mut session,
                     &stream_tx,
-                    &title,
-                    &url,
-                    &text,
+                    &crate::react::message::BrowserContent {
+                        title: &title,
+                        url: &url,
+                        text: &text,
+                        tabs: &tabs,
+                        active_tab_id: active_tab_id.as_deref(),
+                    },
                     false,
                 );
                 continue;

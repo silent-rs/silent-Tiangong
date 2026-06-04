@@ -70,12 +70,26 @@ impl TiangongApp {
         }
     }
 
-    /// 向所有活跃会话注入浏览器页面内容
-    pub fn inject_browser_content(&self, title: String, url: String, text: String) {
+    /// 向当前活跃会话注入浏览器页面内容
+    pub fn inject_browser_content(
+        &self,
+        title: String,
+        url: String,
+        text: String,
+        tabs: Vec<(String, String, String)>,
+        active_tab_id: Option<String>,
+    ) {
+        let session_id = match tokio::runtime::Handle::try_current() {
+            Ok(h) => {
+                let guard = h.block_on(self.state.lock());
+                guard.active_session_id().to_string()
+            }
+            Err(_) => return,
+        };
         let cores = self.lock_cores();
-        for core in cores.values() {
+        if let Some(core) = cores.get(&session_id) {
             if core.is_running() {
-                core.inject_browser_content(title.clone(), url.clone(), text.clone());
+                core.inject_browser_content(title, url, text, tabs, active_tab_id);
             }
         }
     }

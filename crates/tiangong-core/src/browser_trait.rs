@@ -19,6 +19,11 @@ pub trait PageFetcher: Send + Sync + 'static {
     /// 返回 None 表示浏览器未打开或能力不可用。
     fn observe_page(&self) -> Pin<Box<dyn Future<Output = Option<PageSnapshot>> + Send>>;
 
+    /// 获取标签列表。
+    fn list_tabs(&self) -> Pin<Box<dyn Future<Output = Option<TabListResult>> + Send>> {
+        Box::pin(async move { None })
+    }
+
     /// 提取当前页面的表单结构。
     fn form_extract(&self) -> Pin<Box<dyn Future<Output = Option<FormExtractResult>> + Send>> {
         Box::pin(async move { None })
@@ -68,6 +73,16 @@ pub struct PageSnapshot {
     pub title: String,
     pub url: String,
     pub text: String,
+    pub tabs: Vec<TabInfo>,
+    pub active_tab_id: Option<String>,
+}
+
+/// 标签信息
+#[derive(Debug, Clone)]
+pub struct TabInfo {
+    pub id: String,
+    pub url: String,
+    pub title: String,
 }
 
 /// 表单字段信息
@@ -124,4 +139,11 @@ pub struct FillFieldResult {
 pub struct ClickElementResult {
     pub ok: bool,
     pub error: Option<String>,
+}
+
+/// 标签列表结果
+#[derive(Debug, Clone)]
+pub struct TabListResult {
+    pub tabs: Vec<TabInfo>,
+    pub active_tab_id: Option<String>,
 }

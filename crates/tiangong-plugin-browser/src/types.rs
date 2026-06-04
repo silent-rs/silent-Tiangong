@@ -73,6 +73,8 @@ pub struct BrowserPageSnapshot {
     pub url: String,
     pub text: String,
     pub status: PageStatus,
+    pub tabs: Vec<BrowserTab>,
+    pub active_tab_id: Option<String>,
 }
 
 /// 页面状态

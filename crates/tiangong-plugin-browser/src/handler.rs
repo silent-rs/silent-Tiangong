@@ -79,6 +79,8 @@ pub async fn browser_command_handler(
                                 url: data["url"].as_str().unwrap_or("").to_string(),
                                 text: data["text"].as_str().unwrap_or("").to_string(),
                                 status: PageStatus::Loaded,
+                                tabs: Vec::new(),
+                                active_tab_id: None,
                             })
                         })
                         .unwrap_or(BrowserPageSnapshot {
@@ -86,6 +88,8 @@ pub async fn browser_command_handler(
                             url: String::new(),
                             text: String::new(),
                             status: PageStatus::Error("浏览器未打开或页面未加载".to_string()),
+                            tabs: Vec::new(),
+                            active_tab_id: None,
                         })
                 })
                 .await
@@ -94,7 +98,24 @@ pub async fn browser_command_handler(
                     url: String::new(),
                     text: String::new(),
                     status: PageStatus::Error("浏览器快照任务失败".to_string()),
+                    tabs: Vec::new(),
+                    active_tab_id: None,
                 });
+                // 补充标签信息
+                let tabs = {
+                    let s = match browser_state.lock() {
+                        Ok(s) => s,
+                        Err(e) => e.into_inner(),
+                    };
+                    let active_tab_id = s.active_tab_id.clone();
+                    let tabs = s.tabs.clone();
+                    (tabs, active_tab_id)
+                };
+                let snapshot = BrowserPageSnapshot {
+                    tabs: tabs.0,
+                    active_tab_id: tabs.1,
+                    ..snapshot
+                };
                 let _ = response_tx.send(snapshot);
             }
             BrowserCommand::FormExtract { response_tx } => {

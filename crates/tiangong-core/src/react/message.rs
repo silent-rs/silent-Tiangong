@@ -312,16 +312,27 @@ pub(crate) fn latest_user_message(session: &Session) -> String {
 }
 
 /// 注入浏览器页面内容到会话（合成 assistant + tool 消息对）
+/// 浏览器内容注入数据
+pub(crate) struct BrowserContent<'a> {
+    pub title: &'a str,
+    pub url: &'a str,
+    pub text: &'a str,
+    pub tabs: &'a [(String, String, String)],
+    pub active_tab_id: Option<&'a str>,
+}
+
 ///
 /// `force` 为 true 时跳过去重检查（用于内容变化但 URL 相同的场景）。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn inject_browser_content_to_session(
     session: &mut Session,
     stream_tx: &StdSender<StreamEvent>,
-    title: &str,
-    url: &str,
-    text: &str,
+    content: &BrowserContent<'_>,
     force: bool,
 ) {
+    let url = content.url;
+    let title = content.title;
+    let text = content.text;
     if !force
         && session.messages.iter().rev().take(6).any(|msg| {
             msg.role == MessageRole::Tool
@@ -354,20 +365,36 @@ pub(crate) fn inject_browser_content_to_session(
     } else {
         "[浏览器页面更新]"
     };
-    let content = if text.is_empty() {
+    let mut output = if text.is_empty() {
         format!("{header}\n标题：{title}\nURL：{url}\n状态：页面内容为空")
     } else {
         format!("{header}\n标题：{title}\nURL：{url}\n\n{text}")
     };
+    if !content.tabs.is_empty() {
+        output.push_str("\n\n[标签列表]");
+        for (id, tab_url, tab_title) in content.tabs {
+            let marker = if content.active_tab_id == Some(id.as_str()) {
+                " (活跃)"
+            } else {
+                ""
+            };
+            let display = if tab_title.is_empty() {
+                tab_url.clone()
+            } else {
+                tab_title.clone()
+            };
+            output.push_str(&format!("\n- {display}{marker}"));
+        }
+    }
 
     let _ = stream_tx.send(StreamEvent::ToolResult {
         name: tool_name.to_string(),
         tool_call_id: Some(tool_call_id.clone()),
         ok: true,
-        output: content.clone(),
-        full_output: Some(content.clone()),
+        output: output.clone(),
+        full_output: Some(output.clone()),
         media: vec![],
     });
 
-    append_tool_result_message(session, &tool_call_id, tool_name, content, false);
+    append_tool_result_message(session, &tool_call_id, tool_name, output, false);
 }

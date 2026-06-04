@@ -625,9 +625,24 @@ impl ReactEngine {
                             Some(Command::RegisterToolOverride { name, handler }) => {
                                 self.engine.register_tool_override(&name, handler);
                             }
-                            Some(Command::InjectBrowserContent { title, url, text }) => {
+                            Some(Command::InjectBrowserContent {
+                                title,
+                                url,
+                                text,
+                                tabs,
+                                active_tab_id,
+                            }) => {
                                 crate::react::message::inject_browser_content_to_session(
-                                    session, stream_tx, &title, &url, &text, false,
+                                    session,
+                                    stream_tx,
+                                    &crate::react::message::BrowserContent {
+                                        title: &title,
+                                        url: &url,
+                                        text: &text,
+                                        tabs: &tabs,
+                                        active_tab_id: active_tab_id.as_deref(),
+                                    },
+                                    false,
                                 );
                             }
                             Some(Command::CompressContext) => {
@@ -1109,9 +1124,24 @@ impl ReactEngine {
                                 Some(Command::RegisterToolOverride { name, handler }) => {
                                     self.engine.register_tool_override(&name, handler);
                                 }
-                                Some(Command::InjectBrowserContent { title, url, text }) => {
+                                Some(Command::InjectBrowserContent {
+                                    title,
+                                    url,
+                                    text,
+                                    tabs,
+                                    active_tab_id,
+                                }) => {
                                     crate::react::message::inject_browser_content_to_session(
-                                        session, stream_tx, &title, &url, &text, false,
+                                        session,
+                                        stream_tx,
+                                        &crate::react::message::BrowserContent {
+                                            title: &title,
+                                            url: &url,
+                                            text: &text,
+                                            tabs: &tabs,
+                                            active_tab_id: active_tab_id.as_deref(),
+                                        },
+                                        false,
                                     );
                                 }
                                 Some(Command::CompressContext) => {
@@ -1906,9 +1936,24 @@ impl ReactEngine {
                         Some(Command::RegisterToolOverride { name, handler }) => {
                             self.engine.register_tool_override(&name, handler);
                         }
-                        Some(Command::InjectBrowserContent { title, url, text }) => {
+                        Some(Command::InjectBrowserContent {
+                            title,
+                            url,
+                            text,
+                            tabs,
+                            active_tab_id,
+                        }) => {
                             crate::react::message::inject_browser_content_to_session(
-                                parent_session, stream_tx, &title, &url, &text, false,
+                                parent_session,
+                                stream_tx,
+                                &crate::react::message::BrowserContent {
+                                    title: &title,
+                                    url: &url,
+                                    text: &text,
+                                    tabs: &tabs,
+                                    active_tab_id: active_tab_id.as_deref(),
+                                },
+                                false,
                             );
                         }
                         None => break,
@@ -2068,9 +2113,24 @@ fn drain_pending_commands_async(
             Command::RegisterToolOverride { name, handler } => {
                 engine.register_tool_override(&name, handler);
             }
-            Command::InjectBrowserContent { title, url, text } => {
+            Command::InjectBrowserContent {
+                title,
+                url,
+                text,
+                tabs,
+                active_tab_id,
+            } => {
                 crate::react::message::inject_browser_content_to_session(
-                    session, stream_tx, &title, &url, &text, false,
+                    session,
+                    stream_tx,
+                    &crate::react::message::BrowserContent {
+                        title: &title,
+                        url: &url,
+                        text: &text,
+                        tabs: &tabs,
+                        active_tab_id: active_tab_id.as_deref(),
+                    },
+                    false,
                 );
             }
             Command::CompressContext => {
@@ -2126,12 +2186,21 @@ async fn maybe_inject_browser_update(
         None => false,
     };
 
+    let tabs: Vec<(String, String, String)> = snapshot
+        .tabs
+        .iter()
+        .map(|t| (t.id.clone(), t.url.clone(), t.title.clone()))
+        .collect();
     crate::react::message::inject_browser_content_to_session(
         session,
         stream_tx,
-        &snapshot.title,
-        &snapshot.url,
-        &snapshot.text,
+        &crate::react::message::BrowserContent {
+            title: &snapshot.title,
+            url: &snapshot.url,
+            text: &snapshot.text,
+            tabs: &tabs,
+            active_tab_id: snapshot.active_tab_id.as_deref(),
+        },
         force,
     );
     *last_snapshot = Some(snapshot);

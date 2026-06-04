@@ -24,8 +24,10 @@ function normalizeBrowserUrl(rawUrl: string): string {
   return `https://${trimmed}`;
 }
 
+const DEFAULT_URL = 'about:blank';
+
 export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPanelProps) {
-  const [url, setUrl] = useState(initialUrl || 'https://www.bing.com');
+  const [url, setUrl] = useState(initialUrl || '');
   const [tabs, setTabs] = useState<TabInfo[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [annotationActive, setAnnotationActive] = useState(false);
@@ -38,10 +40,19 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
   const refreshTabs = useCallback(async () => {
     try {
       const list = await api.browserTabList();
-      setTabs(list);
-      if (list.length > 0 && activeTabIdRef.current === null) {
-        activeTabIdRef.current = list[0].id;
-        setActiveTabId(list[0].id);
+      if (list.length === 0) {
+        // 标签列表为空时创建一个空标签
+        const tabId = await api.browserTabNew(DEFAULT_URL);
+        activeTabIdRef.current = tabId;
+        setActiveTabId(tabId);
+        setUrl('');
+        setTabs([{ id: tabId, url: DEFAULT_URL, title: '' }]);
+      } else {
+        setTabs(list);
+        if (activeTabIdRef.current === null) {
+          activeTabIdRef.current = list[0].id;
+          setActiveTabId(list[0].id);
+        }
       }
     } catch { /* ignore */ }
   }, []);
@@ -144,9 +155,9 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
 
   const handleTabNew = useCallback(async () => {
     try {
-      const tabId = await api.browserTabNew('https://www.bing.com');
+      const tabId = await api.browserTabNew(DEFAULT_URL);
       setActiveTabId(tabId);
-      setUrl('https://www.bing.com');
+      setUrl('');
       await refreshTabs();
     } catch (err) {
       console.error('新建标签失败：', err);
@@ -206,7 +217,7 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
           requestAnimationFrame(tryOpen);
           return;
         }
-        api.browserOpen(initialUrl || 'https://www.bing.com', rect.x, rect.y, rect.width, rect.height)
+        api.browserOpen(initialUrl || DEFAULT_URL, rect.x, rect.y, rect.width, rect.height)
           .then(() => { browserOpenedRef.current = true; })
           .then(() => refreshTabs())
           .catch(console.error);
@@ -219,40 +230,38 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
   return (
     <div className="flex flex-1 flex-col h-full border-l bg-background">
       {/* 标签栏 */}
-      {tabs.length > 0 && (
-        <div className="flex items-center gap-0.5 px-2 py-1 border-b shrink-0 overflow-x-auto">
-          {tabs.map((tab) => (
-            <div
-              key={tab.id}
-              className={`flex items-center gap-1 px-2 py-1 rounded text-xs cursor-pointer max-w-[150px] min-w-[80px] shrink-0 ${
-                tab.id === activeTabId
-                  ? 'bg-muted text-foreground'
-                  : 'text-muted-foreground hover:bg-muted/50'
-              }`}
-              onClick={() => handleTabSwitch(tab.id)}
-            >
-              <span className="truncate flex-1">
-                {tab.title || tab.url.replace(/^https?:\/\//, '').split('/')[0]}
-              </span>
-              <button
-                className="shrink-0 hover:text-destructive"
-                onClick={(e) => handleTabClose(tab.id, e)}
-              >
-                <X className="w-3 h-3" />
-              </button>
-            </div>
-          ))}
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={handleTabNew}
-            className="h-6 w-6 p-0 shrink-0"
-            title="新建标签"
+      <div className="flex items-center gap-0.5 px-2 py-1 border-b shrink-0 overflow-x-auto">
+        {tabs.map((tab) => (
+          <div
+            key={tab.id}
+            className={`flex items-center gap-1 px-2 py-1 rounded text-xs cursor-pointer max-w-[150px] min-w-[80px] shrink-0 ${
+              tab.id === activeTabId
+                ? 'bg-muted text-foreground'
+                : 'text-muted-foreground hover:bg-muted/50'
+            }`}
+            onClick={() => handleTabSwitch(tab.id)}
           >
-            <Plus className="w-3 h-3" />
-          </Button>
-        </div>
-      )}
+            <span className="truncate flex-1">
+              {tab.title || tab.url.replace(/^https?:\/\//, '').split('/')[0]}
+            </span>
+            <button
+              className="shrink-0 hover:text-destructive"
+              onClick={(e) => handleTabClose(tab.id, e)}
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+        ))}
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={handleTabNew}
+          className="h-6 w-6 p-0 shrink-0"
+          title="新建标签"
+        >
+          <Plus className="w-3 h-3" />
+        </Button>
+      </div>
 
       {/* 工具栏 */}
       <div className="flex items-center gap-1 px-2 py-2 border-b shrink-0">
@@ -280,15 +289,6 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
         >
           <RotateCw className="w-3.5 h-3.5" />
         </Button>
-        <Button
-          size="sm"
-          variant={annotationActive ? 'default' : 'ghost'}
-          onClick={handleToggleAnnotation}
-          className="h-7 w-7 p-0 shrink-0"
-          title={annotationActive ? '关闭批注' : '开启批注'}
-        >
-          <PenTool className="w-3.5 h-3.5" />
-        </Button>
         <Globe className="w-4 h-4 text-muted-foreground shrink-0 ml-1" />
         <Input
           value={url}
@@ -311,6 +311,15 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
         >
           <CornerDownRight className="w-3.5 h-3.5 mr-1" />
           <span className="text-xs">进入</span>
+        </Button>
+        <Button
+          size="sm"
+          variant={annotationActive ? 'default' : 'ghost'}
+          onClick={handleToggleAnnotation}
+          className="h-7 w-7 p-0 shrink-0"
+          title={annotationActive ? '关闭批注' : '开启批注'}
+        >
+          <PenTool className="w-3.5 h-3.5" />
         </Button>
       </div>
 

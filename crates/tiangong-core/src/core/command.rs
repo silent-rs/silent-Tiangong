@@ -42,6 +42,8 @@ pub(crate) enum Command {
         title: String,
         url: String,
         text: String,
+        tabs: Vec<(String, String, String)>,
+        active_tab_id: Option<String>,
     },
     /// 关闭
     Shutdown,
