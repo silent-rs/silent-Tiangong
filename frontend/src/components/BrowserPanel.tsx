@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { api } from '@/api/tauri';
+import { listen } from '@tauri-apps/api/event';
 import { Globe, ArrowRight, ArrowLeft, RotateCw, CornerDownRight, Plus, X, PenTool } from 'lucide-react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -51,15 +52,27 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
     }
   }, [currentUrl]);
 
-  // 监听标签更新事件
+  // 监听标签更新事件（使用 Tauri 的 listen API）
   useEffect(() => {
-    const handler = () => { refreshTabs(); };
-    window.addEventListener('browser:tab_updated', handler);
-    // 页面加载也刷新标签
-    window.addEventListener('browser:page_loaded', handler);
+    let unlistenTab: (() => void) | null = null;
+    let unlistenPage: (() => void) | null = null;
+
+    const setup = async () => {
+      unlistenTab = await listen('browser:tab_updated', () => { refreshTabs(); });
+      unlistenPage = await listen('browser:page_loaded', (event) => {
+        refreshTabs();
+        // 同步 URL 栏
+        const payload = event.payload as { url?: string };
+        if (payload?.url) {
+          setUrl(payload.url);
+        }
+      });
+    };
+    setup();
+
     return () => {
-      window.removeEventListener('browser:tab_updated', handler);
-      window.removeEventListener('browser:page_loaded', handler);
+      unlistenTab?.();
+      unlistenPage?.();
     };
   }, [refreshTabs]);
 
@@ -205,6 +218,42 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
 
   return (
     <div className="flex flex-1 flex-col h-full border-l bg-background">
+      {/* 标签栏 */}
+      {tabs.length > 0 && (
+        <div className="flex items-center gap-0.5 px-2 py-1 border-b shrink-0 overflow-x-auto">
+          {tabs.map((tab) => (
+            <div
+              key={tab.id}
+              className={`flex items-center gap-1 px-2 py-1 rounded text-xs cursor-pointer max-w-[150px] min-w-[80px] shrink-0 ${
+                tab.id === activeTabId
+                  ? 'bg-muted text-foreground'
+                  : 'text-muted-foreground hover:bg-muted/50'
+              }`}
+              onClick={() => handleTabSwitch(tab.id)}
+            >
+              <span className="truncate flex-1">
+                {tab.title || tab.url.replace(/^https?:\/\//, '').split('/')[0]}
+              </span>
+              <button
+                className="shrink-0 hover:text-destructive"
+                onClick={(e) => handleTabClose(tab.id, e)}
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </div>
+          ))}
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={handleTabNew}
+            className="h-6 w-6 p-0 shrink-0"
+            title="新建标签"
+          >
+            <Plus className="w-3 h-3" />
+          </Button>
+        </div>
+      )}
+
       {/* 工具栏 */}
       <div className="flex items-center gap-1 px-2 py-2 border-b shrink-0">
         <Button
@@ -264,42 +313,6 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
           <span className="text-xs">进入</span>
         </Button>
       </div>
-
-      {/* 标签栏 */}
-      {tabs.length > 0 && (
-        <div className="flex items-center gap-0.5 px-2 py-1 border-b shrink-0 overflow-x-auto">
-          {tabs.map((tab) => (
-            <div
-              key={tab.id}
-              className={`flex items-center gap-1 px-2 py-1 rounded text-xs cursor-pointer max-w-[150px] min-w-[80px] shrink-0 ${
-                tab.id === activeTabId
-                  ? 'bg-muted text-foreground'
-                  : 'text-muted-foreground hover:bg-muted/50'
-              }`}
-              onClick={() => handleTabSwitch(tab.id)}
-            >
-              <span className="truncate flex-1">
-                {tab.title || tab.url.replace(/^https?:\/\//, '').split('/')[0]}
-              </span>
-              <button
-                className="shrink-0 hover:text-destructive"
-                onClick={(e) => handleTabClose(tab.id, e)}
-              >
-                <X className="w-3 h-3" />
-              </button>
-            </div>
-          ))}
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={handleTabNew}
-            className="h-6 w-6 p-0 shrink-0"
-            title="新建标签"
-          >
-            <Plus className="w-3 h-3" />
-          </Button>
-        </div>
-      )}
 
       {/* WebView 容器 */}
       <div

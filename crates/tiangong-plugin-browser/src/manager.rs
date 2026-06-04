@@ -265,7 +265,7 @@ impl BrowserManager {
                     };
                     if changed {
                         eprintln!("[browser] url_poll detected change: {current_url}");
-                        // 仅更新标签 URL，不调用 eval_with_callback 以避免与 ObservePage 等命令冲突
+                        // 更新活跃标签 URL（标题通过 on_page_load 回调更新）
                         {
                             let mut s = match state.lock() {
                                 Ok(s) => s,
