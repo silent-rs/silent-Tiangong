@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { api } from '@/api/tauri';
-import { Globe, ArrowRight, ArrowLeft, RotateCw, CornerDownRight } from 'lucide-react';
+import { Globe, ArrowRight, ArrowLeft, RotateCw, CornerDownRight, Plus, X, PenTool } from 'lucide-react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 
@@ -8,6 +8,12 @@ interface BrowserPanelProps {
   initialUrl?: string;
   currentUrl?: string;
   navigateUrl?: string;
+}
+
+interface TabInfo {
+  id: string;
+  url: string;
+  title: string;
 }
 
 function normalizeBrowserUrl(rawUrl: string): string {
@@ -19,18 +25,44 @@ function normalizeBrowserUrl(rawUrl: string): string {
 
 export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPanelProps) {
   const [url, setUrl] = useState(initialUrl || 'https://www.bing.com');
+  const [tabs, setTabs] = useState<TabInfo[]>([]);
+  const [activeTabId, setActiveTabId] = useState<string | null>(null);
+  const [annotationActive, setAnnotationActive] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const initializedRef = useRef(false);
   const browserOpenedRef = useRef(false);
 
-  // 仅同步地址栏显示（来自 page_loaded 等浏览器内部导航）
+  const activeTabIdRef = useRef<string | null>(null);
+
+  const refreshTabs = useCallback(async () => {
+    try {
+      const list = await api.browserTabList();
+      setTabs(list);
+      if (list.length > 0 && activeTabIdRef.current === null) {
+        activeTabIdRef.current = list[0].id;
+        setActiveTabId(list[0].id);
+      }
+    } catch { /* ignore */ }
+  }, []);
+
   useEffect(() => {
     if (currentUrl) {
       setUrl(currentUrl);
     }
   }, [currentUrl]);
 
-  // 外部主动导航请求（来自对话链接点击、后端事件等）
+  // 监听标签更新事件
+  useEffect(() => {
+    const handler = () => { refreshTabs(); };
+    window.addEventListener('browser:tab_updated', handler);
+    // 页面加载也刷新标签
+    window.addEventListener('browser:page_loaded', handler);
+    return () => {
+      window.removeEventListener('browser:tab_updated', handler);
+      window.removeEventListener('browser:page_loaded', handler);
+    };
+  }, [refreshTabs]);
+
   useEffect(() => {
     if (!navigateUrl) return;
     if (browserOpenedRef.current) {
@@ -40,10 +72,11 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
       if (rect.width > 0 && rect.height > 0) {
         api.browserOpen(navigateUrl, rect.x, rect.y, rect.width, rect.height)
           .then(() => { browserOpenedRef.current = true; })
+          .then(() => refreshTabs())
           .catch(console.error);
       }
     }
-  }, [navigateUrl]);
+  }, [navigateUrl, refreshTabs]);
 
   const syncPosition = useCallback(async () => {
     if (!containerRef.current) return;
@@ -82,6 +115,53 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
     await api.browserEval('location.reload()').catch(console.error);
   }, []);
 
+  const handleToggleAnnotation = useCallback(async () => {
+    try {
+      if (annotationActive) {
+        await api.browserEval('window.__tiangong_bridge.annotation.stop()');
+        setAnnotationActive(false);
+      } else {
+        await api.browserEval('window.__tiangong_bridge.annotation.start("rect")');
+        setAnnotationActive(true);
+      }
+    } catch (err) {
+      console.error('批注切换失败：', err);
+    }
+  }, [annotationActive]);
+
+  const handleTabNew = useCallback(async () => {
+    try {
+      const tabId = await api.browserTabNew('https://www.bing.com');
+      setActiveTabId(tabId);
+      setUrl('https://www.bing.com');
+      await refreshTabs();
+    } catch (err) {
+      console.error('新建标签失败：', err);
+    }
+  }, [refreshTabs]);
+
+  const handleTabSwitch = useCallback(async (tabId: string) => {
+    try {
+      await api.browserTabSwitch(tabId);
+      activeTabIdRef.current = tabId;
+      setActiveTabId(tabId);
+      const tab = tabs.find(t => t.id === tabId);
+      if (tab) setUrl(tab.url);
+    } catch (err) {
+      console.error('切换标签失败：', err);
+    }
+  }, [tabs]);
+
+  const handleTabClose = useCallback(async (tabId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await api.browserTabClose(tabId);
+      await refreshTabs();
+    } catch (err) {
+      console.error('关闭标签失败：', err);
+    }
+  }, [refreshTabs]);
+
   useEffect(() => {
     if (!containerRef.current) return;
     const observer = new ResizeObserver(() => {
@@ -100,7 +180,6 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
     };
   }, [syncPosition]);
 
-  // 挂载时自动导航到 initialUrl（首次打开创建 webview）
   useEffect(() => {
     if (!initializedRef.current && containerRef.current) {
       initializedRef.current = true;
@@ -116,15 +195,17 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
         }
         api.browserOpen(initialUrl || 'https://www.bing.com', rect.x, rect.y, rect.width, rect.height)
           .then(() => { browserOpenedRef.current = true; })
+          .then(() => refreshTabs())
           .catch(console.error);
       };
       requestAnimationFrame(tryOpen);
       return () => { cancelled = true; };
     }
-  }, [initialUrl]);
+  }, [initialUrl, refreshTabs]);
 
   return (
     <div className="flex flex-1 flex-col h-full border-l bg-background">
+      {/* 工具栏 */}
       <div className="flex items-center gap-1 px-2 py-2 border-b shrink-0">
         <Button
           size="sm"
@@ -150,6 +231,15 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
         >
           <RotateCw className="w-3.5 h-3.5" />
         </Button>
+        <Button
+          size="sm"
+          variant={annotationActive ? 'default' : 'ghost'}
+          onClick={handleToggleAnnotation}
+          className="h-7 w-7 p-0 shrink-0"
+          title={annotationActive ? '关闭批注' : '开启批注'}
+        >
+          <PenTool className="w-3.5 h-3.5" />
+        </Button>
         <Globe className="w-4 h-4 text-muted-foreground shrink-0 ml-1" />
         <Input
           value={url}
@@ -174,6 +264,44 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
           <span className="text-xs">进入</span>
         </Button>
       </div>
+
+      {/* 标签栏 */}
+      {tabs.length > 0 && (
+        <div className="flex items-center gap-0.5 px-2 py-1 border-b shrink-0 overflow-x-auto">
+          {tabs.map((tab) => (
+            <div
+              key={tab.id}
+              className={`flex items-center gap-1 px-2 py-1 rounded text-xs cursor-pointer max-w-[150px] min-w-[80px] shrink-0 ${
+                tab.id === activeTabId
+                  ? 'bg-muted text-foreground'
+                  : 'text-muted-foreground hover:bg-muted/50'
+              }`}
+              onClick={() => handleTabSwitch(tab.id)}
+            >
+              <span className="truncate flex-1">
+                {tab.title || tab.url.replace(/^https?:\/\//, '').split('/')[0]}
+              </span>
+              <button
+                className="shrink-0 hover:text-destructive"
+                onClick={(e) => handleTabClose(tab.id, e)}
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </div>
+          ))}
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={handleTabNew}
+            className="h-6 w-6 p-0 shrink-0"
+            title="新建标签"
+          >
+            <Plus className="w-3 h-3" />
+          </Button>
+        </div>
+      )}
+
+      {/* WebView 容器 */}
       <div
         ref={containerRef}
         className="flex-1 bg-muted/30"

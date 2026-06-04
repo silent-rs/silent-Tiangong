@@ -6,10 +6,9 @@ use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Url, Webview, WebviewBuilder,
     WebviewUrl, Wry,
 };
-use tokio::sync::oneshot;
 
 use crate::bridge::BRIDGE_SCRIPT;
-use crate::types::{BrowserPageSnapshot, BrowserResponse, PageStatus};
+use crate::types::{BrowserPageSnapshot, BrowserResponse, BrowserTab, PageStatus};
 
 const BROWSER_WEBVIEW_LABEL: &str = "browser-webview";
 
@@ -24,6 +23,10 @@ pub struct BrowserState {
     pub last_known_url: String,
     /// 轮询线程停止信号
     pub poll_stop: Arc<std::sync::atomic::AtomicBool>,
+    /// 标签列表
+    pub tabs: Vec<BrowserTab>,
+    /// 活跃标签 ID
+    pub active_tab_id: Option<String>,
 }
 
 pub struct BrowserManager {
@@ -45,6 +48,8 @@ impl BrowserManager {
                 latest_snapshot: None,
                 last_known_url: String::new(),
                 poll_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                tabs: Vec::new(),
+                active_tab_id: None,
             })),
         }
     }
@@ -70,7 +75,7 @@ impl BrowserManager {
         h: f64,
     ) -> Result<(), String> {
         {
-            let state = self.state.lock().map_err(|e| e.to_string())?;
+            let mut state = self.state.lock().map_err(|e| e.to_string())?;
             if let Some(webview) = &state.webview {
                 webview
                     .set_position(LogicalPosition::new(x, y))
@@ -78,6 +83,18 @@ impl BrowserManager {
                 webview
                     .set_size(LogicalSize::new(w, h))
                     .map_err(|e| format!("恢复浏览器尺寸失败：{e}"))?;
+                // WebView 已存在：确保有标签并导航到目标 URL
+                if state.tabs.is_empty() {
+                    let tab_id = scru128::new().to_string();
+                    state.tabs.push(BrowserTab {
+                        id: tab_id.clone(),
+                        url: url.to_string(),
+                        title: String::new(),
+                    });
+                    state.active_tab_id = Some(tab_id);
+                }
+                drop(state);
+                self.navigate(url)?;
                 return Ok(());
             }
         }
@@ -132,6 +149,16 @@ impl BrowserManager {
                                 };
                                 if let Ok(mut state) = state_clone2.lock() {
                                     state.latest_snapshot = Some(snapshot);
+                                    // 更新活跃标签
+                                    let aid = state.active_tab_id.clone();
+                                    if let Some(active_id) = aid {
+                                        if let Some(tab) = state.tabs.iter_mut().find(|t| t.id == active_id) {
+                                            tab.url = page_url.clone();
+                                            if !title.is_empty() {
+                                                tab.title = title.clone();
+                                            }
+                                        }
+                                    }
                                 }
                                 let summary: String = text.chars().take(2000).collect();
                                 let _ = app_for_event.emit(
@@ -154,6 +181,14 @@ impl BrowserManager {
 
         if let Ok(mut state) = self.state.lock() {
             state.webview = Some(webview);
+            // 创建首个标签
+            let tab_id = scru128::new().to_string();
+            state.tabs.push(BrowserTab {
+                id: tab_id.clone(),
+                url: url.to_string(),
+                title: String::new(),
+            });
+            state.active_tab_id = Some(tab_id);
         }
 
         // 启动 URL 变化轮询线程（on_page_load 在子 WebView 后续导航中不触发）
@@ -177,6 +212,8 @@ impl BrowserManager {
             cvar.notify_all();
             state.latest_snapshot = None;
             state.last_known_url.clear();
+            state.tabs.clear();
+            state.active_tab_id = None;
         }
         Ok(())
     }
@@ -228,12 +265,23 @@ impl BrowserManager {
                     };
                     if changed {
                         eprintln!("[browser] url_poll detected change: {current_url}");
+                        // 仅更新标签 URL，不调用 eval_with_callback 以避免与 ObservePage 等命令冲突
+                        {
+                            let mut s = match state.lock() {
+                                Ok(s) => s,
+                                Err(e) => e.into_inner(),
+                            };
+                            let aid = s.active_tab_id.clone();
+                            if let Some(active_id) = aid {
+                                if let Some(tab) = s.tabs.iter_mut().find(|t| t.id == active_id) {
+                                    tab.url = current_url.clone();
+                                }
+                            }
+                        }
                         let _ = app.emit(
                             "browser:page_loaded",
                             serde_json::json!({
-                                "title": "",
                                 "url": current_url,
-                                "text": "",
                             }),
                         );
                     }
@@ -323,7 +371,7 @@ impl BrowserManager {
     }
 
     pub(crate) fn eval_with_result(&self, js: &str) -> Option<String> {
-        let (sender, rx) = oneshot::channel();
+        let (sender, rx) = std::sync::mpsc::channel();
         let tx = Arc::new(std::sync::Mutex::new(Some(sender)));
         {
             let state = self.state.lock().ok()?;
@@ -338,7 +386,7 @@ impl BrowserManager {
                 })
                 .ok()?;
         }
-        rx.blocking_recv().ok()
+        rx.recv_timeout(Duration::from_secs(10)).ok()
     }
 
     fn wait_for_page_load(&self, timeout_ms: u64) -> bool {
@@ -476,6 +524,102 @@ impl BrowserManager {
     pub fn get_snapshot(&self) -> Option<BrowserPageSnapshot> {
         let state = self.state.lock().ok()?;
         state.latest_snapshot.clone()
+    }
+
+    pub fn tab_list(&self) -> Vec<BrowserTab> {
+        self.state
+            .lock()
+            .map(|s| s.tabs.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn tab_new(&self, url: &str) -> Result<String, String> {
+        let tab_id = scru128::new().to_string();
+        let mut state = self.state.lock().map_err(|e| e.to_string())?;
+        state.tabs.push(BrowserTab {
+            id: tab_id.clone(),
+            url: url.to_string(),
+            title: String::new(),
+        });
+        state.active_tab_id = Some(tab_id.clone());
+        // 导航到新标签 URL
+        if let Some(webview) = &state.webview {
+            let parsed_url: Url = url.parse().map_err(|e| format!("URL 解析失败：{e}"))?;
+            webview
+                .navigate(parsed_url)
+                .map_err(|e| format!("导航失败：{e}"))?;
+        }
+        Ok(tab_id)
+    }
+
+    pub fn tab_switch(&self, tab_id: &str) -> Result<(), String> {
+        let mut state = self.state.lock().map_err(|e| e.to_string())?;
+        let tab_url = state
+            .tabs
+            .iter()
+            .find(|t| t.id == tab_id)
+            .map(|t| t.url.clone())
+            .ok_or_else(|| format!("标签 {tab_id} 不存在"))?;
+
+        if state.active_tab_id.as_deref() == Some(tab_id) {
+            return Ok(());
+        }
+
+        state.active_tab_id = Some(tab_id.to_string());
+        if let Some(webview) = &state.webview {
+            let parsed_url: Url = tab_url.parse().map_err(|e| format!("URL 解析失败：{e}"))?;
+            webview
+                .navigate(parsed_url)
+                .map_err(|e| format!("导航失败：{e}"))?;
+        }
+        Ok(())
+    }
+
+    pub fn tab_close(&self, tab_id: &str) -> Result<(), String> {
+        let mut state = self.state.lock().map_err(|e| e.to_string())?;
+        let pos = state
+            .tabs
+            .iter()
+            .position(|t| t.id == tab_id)
+            .ok_or_else(|| format!("标签 {tab_id} 不存在"))?;
+
+        state.tabs.remove(pos);
+        let was_active = state.active_tab_id.as_deref() == Some(tab_id);
+
+        if was_active {
+            // 切换到相邻标签
+            if state.tabs.is_empty() {
+                state.active_tab_id = None;
+            } else {
+                let new_pos = pos.min(state.tabs.len() - 1);
+                let (new_id, new_url) = {
+                    let t = &state.tabs[new_pos];
+                    (t.id.clone(), t.url.clone())
+                };
+                state.active_tab_id = Some(new_id);
+                if let Some(webview) = &state.webview {
+                    if let Ok(parsed_url) = new_url.parse::<Url>() {
+                        let _ = webview.navigate(parsed_url);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 更新活跃标签的 URL 和标题（页面加载/导航时调用）
+    pub fn update_active_tab(&self, url: &str, title: &str) {
+        if let Ok(mut state) = self.state.lock() {
+            let active_id = state.active_tab_id.clone();
+            if let Some(active_id) = active_id {
+                if let Some(tab) = state.tabs.iter_mut().find(|t| t.id == active_id) {
+                    tab.url = url.to_string();
+                    if !title.is_empty() {
+                        tab.title = title.to_string();
+                    }
+                }
+            }
+        }
     }
 }
 

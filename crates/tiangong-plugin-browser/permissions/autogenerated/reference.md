@@ -12,6 +12,10 @@
 - `allow-browser-eval`
 - `allow-browser-go-back`
 - `allow-browser-go-forward`
+- `allow-browser-tab-list`
+- `allow-browser-tab-new`
+- `allow-browser-tab-switch`
+- `allow-browser-tab-close`
 
 ## Permission Table
 
@@ -226,6 +230,110 @@ Enables the browser_set_position command without any pre-configured scope.
 <td>
 
 Denies the browser_set_position command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:allow-browser-tab-close`
+
+</td>
+<td>
+
+Enables the browser_tab_close command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:deny-browser-tab-close`
+
+</td>
+<td>
+
+Denies the browser_tab_close command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:allow-browser-tab-list`
+
+</td>
+<td>
+
+Enables the browser_tab_list command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:deny-browser-tab-list`
+
+</td>
+<td>
+
+Denies the browser_tab_list command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:allow-browser-tab-new`
+
+</td>
+<td>
+
+Enables the browser_tab_new command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:deny-browser-tab-new`
+
+</td>
+<td>
+
+Denies the browser_tab_new command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:allow-browser-tab-switch`
+
+</td>
+<td>
+
+Enables the browser_tab_switch command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:deny-browser-tab-switch`
+
+</td>
+<td>
+
+Denies the browser_tab_switch command without any pre-configured scope.
 
 </td>
 </tr>

@@ -1,5 +1,6 @@
 use tauri::{AppHandle, State};
 
+use crate::types::BrowserTab;
 use crate::BrowserPluginState;
 
 #[tauri::command]
@@ -58,4 +59,35 @@ pub async fn browser_go_back(state: State<'_, BrowserPluginState>) -> Result<(),
 #[tauri::command]
 pub async fn browser_go_forward(state: State<'_, BrowserPluginState>) -> Result<(), String> {
     state.manager.go_forward()
+}
+
+#[tauri::command]
+pub async fn browser_tab_list(
+    state: State<'_, BrowserPluginState>,
+) -> Result<Vec<BrowserTab>, String> {
+    Ok(state.manager.tab_list())
+}
+
+#[tauri::command]
+pub async fn browser_tab_new(
+    url: String,
+    state: State<'_, BrowserPluginState>,
+) -> Result<String, String> {
+    state.manager.tab_new(&url)
+}
+
+#[tauri::command]
+pub async fn browser_tab_switch(
+    tab_id: String,
+    state: State<'_, BrowserPluginState>,
+) -> Result<(), String> {
+    state.manager.tab_switch(&tab_id)
+}
+
+#[tauri::command]
+pub async fn browser_tab_close(
+    tab_id: String,
+    state: State<'_, BrowserPluginState>,
+) -> Result<(), String> {
+    state.manager.tab_close(&tab_id)
 }

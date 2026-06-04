@@ -1,7 +1,7 @@
 # TODO - 天工当前开发任务
 
 > 最后更新：2026-06-04
-> 当前主线：Phase 21 — 内嵌浏览器面板（0.5.0）— 全部子阶段已完成
+> 当前主线：Phase 21 — 内嵌浏览器面板（0.5.0）— H/I/J 已完成
 > 参考：`PLAN.md`、Issue #95
 
 ---
@@ -65,18 +65,30 @@
 - [x] G-3：应用层切换（`.plugin()` 注册、前端 invoke 前缀改为 `plugin:browser|`、移除内联 browser 代码）
 - [x] G-4：清理（删除 `src-tauri/src/browser.rs`、`tiangong-types/src/browser.rs`、移除 tokio 依赖）
 
+### Phase 21-H：UI 库适配与框架检测
+
+- [x] Bridge Script v0.8.0 新增 `detectFramework()` — 检测 React/Vue + Ant Design/Element Plus
+- [x] `extractForms()` 扩展 UI 库组件扫描（Ant Design Select/DatePicker、Element Plus Select/DatePicker）
+- [x] `fillComponent()` 新增 UI 库组件多步填写策略（Ant Design Select → 点击打开 → 选择匹配项）
+- [x] handler 自动回退：`fillField` 失败后尝试 `fillComponent`
+
+### Phase 21-I：多标签页支持
+
+- [x] `BrowserTab` 结构体和标签管理命令（TabList/TabNew/TabSwitch/TabClose）
+- [x] BrowserManager 标签状态管理（单渲染器 + 标签 URL/标题追踪）
+- [x] 页面加载和 URL 变化时自动更新活跃标签
+- [x] Tauri Commands（browser_tab_list/new/switch/close）
+- [x] 前端标签栏（多个标签时显示，点击切换，关闭按钮，新建按钮）
+
+### Phase 21-J：用户批注模式
+
+- [x] Bridge Script `annotation` 对象 — canvas 覆盖层 + 矩形/箭头绘制
+- [x] 批注数据结构化存储，`getAnnotations()` 返回标注列表
+- [x] `web_browse` 自动附加页面批注信息
+- [x] 前端批注按钮（画笔图标，点击切换批注模式）
+
 ---
 
-## 待开发
-
-### Phase 21-E（剩余）：UI 库适配
-
-- [ ] 适配 Ant Design、Element Plus 等 UI 库的 Select/DatePicker 组件
-- [ ] 自动检测页面框架类型（React/Vue/vanilla）
-
-### Phase 21-F（剩余）：完善与优化
-
-- [ ] 多标签页支持（可选）
-- [ ] 用户批注模式（在页面上标注，Agent 理解标注内容）
+*(Phase 21 浏览器面板功能已全部完成)*
 
 ---

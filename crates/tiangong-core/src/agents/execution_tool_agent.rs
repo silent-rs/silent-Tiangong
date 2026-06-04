@@ -155,7 +155,7 @@ pub(crate) fn basic_file_function_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "web_form_extract".to_string(),
-            description: "提取天工内嵌浏览器当前页面中所有表单的字段信息（标签、类型、当前值、选项等）。返回结构化的表单字段列表，供 web_form_fill 填写。当需要帮用户填写网页表单时，先调用此工具了解页面有哪些可填写字段。".to_string(),
+            description: "提取天工内嵌浏览器当前页面中所有表单的字段信息。支持原生 HTML 表单和 UI 库自定义组件（Ant Design Select/DatePicker、Element Plus Select/DatePicker 等）。返回结构化的字段列表（含框架检测信息），供 web_form_fill 填写。当需要帮用户填写网页表单时，先调用此工具了解页面有哪些可填写字段。".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
@@ -164,7 +164,7 @@ pub(crate) fn basic_file_function_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "web_form_fill".to_string(),
-            description: "在天工内嵌浏览器当前页面中填写指定表单字段。使用 selector 定位字段（从 web_form_extract 结果中获取 selector），自动采用三层填写策略（native setter → keyboard → paste）。填写前建议先调用 web_form_extract 了解页面表单结构。".to_string(),
+            description: "在天工内嵌浏览器当前页面中填写指定表单字段。支持原生 HTML 控件（input/select/textarea）和 UI 库自定义组件（Ant Design Select、Element Plus Select、DatePicker 等）。使用 selector 定位字段（从 web_form_extract 结果中获取 selector），自动采用最佳填写策略。填写前建议先调用 web_form_extract 了解页面表单结构。".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

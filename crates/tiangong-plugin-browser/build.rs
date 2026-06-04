@@ -7,6 +7,10 @@ const COMMANDS: &[&str] = &[
     "browser_eval",
     "browser_go_back",
     "browser_go_forward",
+    "browser_tab_list",
+    "browser_tab_new",
+    "browser_tab_switch",
+    "browser_tab_close",
 ];
 
 fn main() {

@@ -311,26 +311,36 @@ pub(crate) fn latest_user_message(session: &Session) -> String {
         .unwrap_or_default()
 }
 
-/// 注入浏览器页面内容变化到会话（合成 assistant + tool 消息对）
+/// 注入浏览器页面内容到会话（合成 assistant + tool 消息对）
+///
+/// `force` 为 true 时跳过去重检查（用于内容变化但 URL 相同的场景）。
 pub(crate) fn inject_browser_content_to_session(
     session: &mut Session,
     stream_tx: &StdSender<StreamEvent>,
     title: &str,
     url: &str,
     text: &str,
+    force: bool,
 ) {
-    if session.messages.iter().rev().take(6).any(|msg| {
-        msg.role == MessageRole::Tool
-            && msg.tool_name.as_deref() == Some("web_browse")
-            && msg.text_content().contains(url)
-    }) {
+    if !force
+        && session.messages.iter().rev().take(6).any(|msg| {
+            msg.role == MessageRole::Tool
+                && msg.tool_name.as_deref() == Some("web_browse")
+                && msg.text_content().contains(url)
+        })
+    {
         return;
     }
 
     let tool_call_id = format!("browser_auto_{}", scru128::new());
     let tool_name = "web_browse";
 
-    let assistant_text = format!("[自动感知] 用户在浏览器中导航到新页面：{url}");
+    let label = if force {
+        "[自动感知] 浏览器页面内容发生变化"
+    } else {
+        "[自动感知] 用户在浏览器中导航到新页面"
+    };
+    let assistant_text = format!("{label}：{url}");
     let mut assistant_msg = Message::new(MessageRole::Assistant, assistant_text);
     assistant_msg.tool_calls = vec![MessageToolCall {
         id: tool_call_id.clone(),
@@ -339,10 +349,15 @@ pub(crate) fn inject_browser_content_to_session(
     }];
     session.messages.push(assistant_msg);
 
-    let content = if text.is_empty() {
-        format!("[浏览器页面更新]\n标题：{title}\nURL：{url}\n状态：页面内容为空")
+    let header = if force {
+        "[浏览器内容变化]"
     } else {
-        format!("[浏览器页面更新]\n标题：{title}\nURL：{url}\n\n{text}")
+        "[浏览器页面更新]"
+    };
+    let content = if text.is_empty() {
+        format!("{header}\n标题：{title}\nURL：{url}\n状态：页面内容为空")
+    } else {
+        format!("{header}\n标题：{title}\nURL：{url}\n\n{text}")
     };
 
     let _ = stream_tx.send(StreamEvent::ToolResult {

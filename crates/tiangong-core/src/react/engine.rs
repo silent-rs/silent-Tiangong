@@ -476,6 +476,7 @@ impl ReactEngine {
         let mut failed_tool_names = HashSet::new();
         let mut memory_candidate_count = 0usize;
         let mut completion_check_count: u32 = 0;
+        let mut last_browser_snapshot: Option<crate::browser_trait::PageSnapshot> = None;
 
         if self.agent_id == "main" {
             let routed = self
@@ -527,6 +528,17 @@ impl ReactEngine {
                     memory_candidate_count = 0;
                 }
                 PendingCommandEffect::None => {}
+            }
+
+            // 首轮：主动获取浏览器当前状态并注入上下文
+            if round == 0 {
+                maybe_inject_browser_update(
+                    &self.engine,
+                    session,
+                    stream_tx,
+                    &mut last_browser_snapshot,
+                )
+                .await;
             }
 
             if round >= self.max_rounds {
@@ -615,7 +627,7 @@ impl ReactEngine {
                             }
                             Some(Command::InjectBrowserContent { title, url, text }) => {
                                 crate::react::message::inject_browser_content_to_session(
-                                    session, stream_tx, &title, &url, &text,
+                                    session, stream_tx, &title, &url, &text, false,
                                 );
                             }
                             Some(Command::CompressContext) => {
@@ -893,6 +905,15 @@ impl ReactEngine {
                     PendingCommandEffect::None => {}
                 }
 
+                // 工具执行间隙：检测浏览器状态变化
+                maybe_inject_browser_update(
+                    &self.engine,
+                    session,
+                    stream_tx,
+                    &mut last_browser_snapshot,
+                )
+                .await;
+
                 // 团队协作工具拦截
                 if crate::agent_team::lifecycle::is_team_tool(&call.name) {
                     let args_summary = format_call_args_summary(call);
@@ -1090,7 +1111,7 @@ impl ReactEngine {
                                 }
                                 Some(Command::InjectBrowserContent { title, url, text }) => {
                                     crate::react::message::inject_browser_content_to_session(
-                                        session, stream_tx, &title, &url, &text,
+                                        session, stream_tx, &title, &url, &text, false,
                                     );
                                 }
                                 Some(Command::CompressContext) => {
@@ -1385,6 +1406,15 @@ impl ReactEngine {
                     }
                     PendingCommandEffect::None => {}
                 }
+
+                // 工具执行后：检测浏览器状态变化
+                maybe_inject_browser_update(
+                    &self.engine,
+                    session,
+                    stream_tx,
+                    &mut last_browser_snapshot,
+                )
+                .await;
             }
 
             if need_failure_recovery_prompt {
@@ -1878,7 +1908,7 @@ impl ReactEngine {
                         }
                         Some(Command::InjectBrowserContent { title, url, text }) => {
                             crate::react::message::inject_browser_content_to_session(
-                                parent_session, stream_tx, &title, &url, &text,
+                                parent_session, stream_tx, &title, &url, &text, false,
                             );
                         }
                         None => break,
@@ -2040,7 +2070,7 @@ fn drain_pending_commands_async(
             }
             Command::InjectBrowserContent { title, url, text } => {
                 crate::react::message::inject_browser_content_to_session(
-                    session, stream_tx, &title, &url, &text,
+                    session, stream_tx, &title, &url, &text, false,
                 );
             }
             Command::CompressContext => {
@@ -2057,6 +2087,54 @@ fn drain_pending_commands_async(
     } else {
         PendingCommandEffect::None
     }
+}
+
+async fn maybe_inject_browser_update(
+    engine: &crate::runtime::RuntimeEngine,
+    session: &mut Session,
+    stream_tx: &StdSender<StreamEvent>,
+    last_snapshot: &mut Option<crate::browser_trait::PageSnapshot>,
+) {
+    let fetcher = match engine.page_fetcher() {
+        Some(f) => f,
+        None => return,
+    };
+    let snapshot =
+        match tokio::time::timeout(std::time::Duration::from_secs(3), fetcher.observe_page()).await
+        {
+            Ok(Some(s)) => s,
+            _ => return,
+        };
+    if snapshot.url.is_empty() {
+        return;
+    }
+
+    let should_inject = match last_snapshot {
+        None => true,
+        Some(prev) => {
+            prev.url != snapshot.url
+                || (snapshot.text.len() as i64 - prev.text.len() as i64).unsigned_abs() > 500
+        }
+    };
+    if !should_inject {
+        *last_snapshot = Some(snapshot);
+        return;
+    }
+
+    let force = match last_snapshot {
+        Some(prev) => prev.url == snapshot.url,
+        None => false,
+    };
+
+    crate::react::message::inject_browser_content_to_session(
+        session,
+        stream_tx,
+        &snapshot.title,
+        &snapshot.url,
+        &snapshot.text,
+        force,
+    );
+    *last_snapshot = Some(snapshot);
 }
 
 /// 非阻塞检查是否有取消或关闭命令待处理。

@@ -1,6 +1,14 @@
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
+/// 浏览器标签
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserTab {
+    pub id: String,
+    pub url: String,
+    pub title: String,
+}
+
 /// 浏览器命令（内部通道消息）
 pub enum BrowserCommand {
     /// 获取网页内容（替代 web_fetch）
@@ -36,6 +44,16 @@ pub enum BrowserCommand {
         html: String,
         response_tx: oneshot::Sender<Result<(), String>>,
     },
+    /// 获取标签列表
+    TabList {
+        response_tx: oneshot::Sender<Vec<BrowserTab>>,
+    },
+    /// 新建标签
+    TabNew { url: String },
+    /// 切换标签
+    TabSwitch { tab_id: String },
+    /// 关闭标签
+    TabClose { tab_id: String },
 }
 
 /// 浏览器响应

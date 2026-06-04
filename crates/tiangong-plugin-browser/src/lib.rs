@@ -35,6 +35,10 @@ pub fn init() -> TauriPlugin<Wry> {
             commands::browser_eval,
             commands::browser_go_back,
             commands::browser_go_forward,
+            commands::browser_tab_list,
+            commands::browser_tab_new,
+            commands::browser_tab_switch,
+            commands::browser_tab_close,
         ])
         .setup(|app, _api| {
             let (tx, rx) = mpsc::channel::<BrowserCommand>(16);

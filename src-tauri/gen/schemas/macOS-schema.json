@@ -2211,10 +2211,10 @@
       "description": "Permission identifier",
       "oneOf": [
         {
-          "description": "允许使用浏览器面板的全部功能。\n#### This default permission set includes:\n\n- `allow-browser-open`\n- `allow-browser-close`\n- `allow-browser-hide`\n- `allow-browser-set-position`\n- `allow-browser-navigate`\n- `allow-browser-eval`\n- `allow-browser-go-back`\n- `allow-browser-go-forward`",
+          "description": "允许使用浏览器面板的全部功能。\n#### This default permission set includes:\n\n- `allow-browser-open`\n- `allow-browser-close`\n- `allow-browser-hide`\n- `allow-browser-set-position`\n- `allow-browser-navigate`\n- `allow-browser-eval`\n- `allow-browser-go-back`\n- `allow-browser-go-forward`\n- `allow-browser-tab-list`\n- `allow-browser-tab-new`\n- `allow-browser-tab-switch`\n- `allow-browser-tab-close`",
           "type": "string",
           "const": "browser:default",
-          "markdownDescription": "允许使用浏览器面板的全部功能。\n#### This default permission set includes:\n\n- `allow-browser-open`\n- `allow-browser-close`\n- `allow-browser-hide`\n- `allow-browser-set-position`\n- `allow-browser-navigate`\n- `allow-browser-eval`\n- `allow-browser-go-back`\n- `allow-browser-go-forward`"
+          "markdownDescription": "允许使用浏览器面板的全部功能。\n#### This default permission set includes:\n\n- `allow-browser-open`\n- `allow-browser-close`\n- `allow-browser-hide`\n- `allow-browser-set-position`\n- `allow-browser-navigate`\n- `allow-browser-eval`\n- `allow-browser-go-back`\n- `allow-browser-go-forward`\n- `allow-browser-tab-list`\n- `allow-browser-tab-new`\n- `allow-browser-tab-switch`\n- `allow-browser-tab-close`"
         },
         {
           "description": "Enables the browser_close command without any pre-configured scope.",
@@ -2265,6 +2265,30 @@
           "markdownDescription": "Enables the browser_set_position command without any pre-configured scope."
         },
         {
+          "description": "Enables the browser_tab_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:allow-browser-tab-close",
+          "markdownDescription": "Enables the browser_tab_close command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the browser_tab_list command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:allow-browser-tab-list",
+          "markdownDescription": "Enables the browser_tab_list command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the browser_tab_new command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:allow-browser-tab-new",
+          "markdownDescription": "Enables the browser_tab_new command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the browser_tab_switch command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:allow-browser-tab-switch",
+          "markdownDescription": "Enables the browser_tab_switch command without any pre-configured scope."
+        },
+        {
           "description": "Denies the browser_close command without any pre-configured scope.",
           "type": "string",
           "const": "browser:deny-browser-close",
@@ -2311,6 +2335,30 @@
           "type": "string",
           "const": "browser:deny-browser-set-position",
           "markdownDescription": "Denies the browser_set_position command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the browser_tab_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:deny-browser-tab-close",
+          "markdownDescription": "Denies the browser_tab_close command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the browser_tab_list command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:deny-browser-tab-list",
+          "markdownDescription": "Denies the browser_tab_list command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the browser_tab_new command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:deny-browser-tab-new",
+          "markdownDescription": "Denies the browser_tab_new command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the browser_tab_switch command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:deny-browser-tab-switch",
+          "markdownDescription": "Denies the browser_tab_switch command without any pre-configured scope."
         },
         {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",

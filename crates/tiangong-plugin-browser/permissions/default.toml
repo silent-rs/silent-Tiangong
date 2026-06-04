@@ -9,4 +9,8 @@ permissions = [
     "allow-browser-eval",
     "allow-browser-go-back",
     "allow-browser-go-forward",
+    "allow-browser-tab-list",
+    "allow-browser-tab-new",
+    "allow-browser-tab-switch",
+    "allow-browser-tab-close",
 ]

@@ -79,6 +79,9 @@
 | 21-D | Agent 交互增强 — ObservePage 快照、web_browse 工具、页面内容注入对话链 | ✅ |
 | 21-E | 表单填写增强 — 三层策略（keyboard / native setter / paste）、表单提取、模拟点击、加载HTML | ✅ |
 | 21-F | 完善与优化 — Cookie 持久化、权限审批、导航控制 | ✅ |
+| 21-H | UI 库适配与框架检测 — detectFramework、UI 库组件提取和填写 | ✅ |
+| 21-I | 多标签页支持 — 单渲染器 + 标签状态管理、前端标签栏 | ✅ |
+| 21-J | 用户批注模式 — canvas 覆盖层绘制、Agent 读取批注 | ✅ |
 | 21-G | 浏览器能力插件化 — Core trait 抽象、Tauri Plugin 封装、应用层切换 | ✅ |
 
 ## 参考文档

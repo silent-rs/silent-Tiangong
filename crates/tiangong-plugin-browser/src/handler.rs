@@ -69,7 +69,9 @@ pub async fn browser_command_handler(
                 };
                 let snapshot = tokio::task::spawn_blocking(move || {
                     manager
-                        .eval_with_result("window.__tiangong_bridge.getFullText(12000)")
+                        .eval_with_result(
+                            "(function(){try{var t=window.__tiangong_bridge.getFullText(12000);var a=window.__tiangong_bridge.annotation.getAnnotations();if(a&&a.count>0){t.text+='\\n\\n[页面批注] '+JSON.stringify(a.annotations);}return t;}catch(e){return {title:'',url:'',text:'',error:e.message};}})()"
+                        )
                         .and_then(|raw| {
                             let data = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
                             Some(BrowserPageSnapshot {
@@ -119,13 +121,14 @@ pub async fn browser_command_handler(
                     state: browser_state.clone(),
                 };
                 let result = tokio::task::spawn_blocking(move || {
+                    // 先尝试原生 fillField
                     let js = format!(
                         "window.__tiangong_bridge.fillField({},{},{})",
                         serde_json::to_string(&selector).unwrap_or_default(),
                         serde_json::to_string(&value).unwrap_or_default(),
                         serde_json::to_string(&strategy).unwrap_or_default(),
                     );
-                    manager
+                    let native_result = manager
                         .eval_with_result(&js)
                         .and_then(|raw| serde_json::from_str::<FillFieldResult>(&raw).ok())
                         .unwrap_or(FillFieldResult {
@@ -133,7 +136,22 @@ pub async fn browser_command_handler(
                             strategy: None,
                             error: Some("填写字段执行失败".to_string()),
                             current_value: None,
-                        })
+                        });
+
+                    if native_result.ok {
+                        return native_result;
+                    }
+
+                    // 原生策略失败，尝试 UI 库组件填写
+                    let comp_js = format!(
+                        "window.__tiangong_bridge.fillComponent({},{})",
+                        serde_json::to_string(&selector).unwrap_or_default(),
+                        serde_json::to_string(&value).unwrap_or_default(),
+                    );
+                    manager
+                        .eval_with_result(&comp_js)
+                        .and_then(|raw| serde_json::from_str::<FillFieldResult>(&raw).ok())
+                        .unwrap_or(native_result)
                 })
                 .await
                 .unwrap_or(FillFieldResult {
@@ -179,6 +197,63 @@ pub async fn browser_command_handler(
                     .await
                     .unwrap_or(Err("加载 HTML 任务失败".to_string()));
                 let _ = response_tx.send(result);
+            }
+            BrowserCommand::TabList { response_tx } => {
+                let manager = BrowserManager {
+                    state: browser_state.clone(),
+                };
+                let tabs = manager.tab_list();
+                let _ = response_tx.send(tabs);
+            }
+            BrowserCommand::TabNew { url } => {
+                let manager = BrowserManager {
+                    state: browser_state.clone(),
+                };
+                let app_clone = app.clone();
+                let _ = tokio::task::spawn_blocking(move || match manager.tab_new(&url) {
+                    Ok(tab_id) => {
+                        let _ = app_clone.emit(
+                            "browser:tab_updated",
+                            serde_json::json!({ "action": "new", "tab_id": tab_id, "url": url }),
+                        );
+                    }
+                    Err(e) => eprintln!("[browser] tab_new error: {e}"),
+                })
+                .await;
+            }
+            BrowserCommand::TabSwitch { tab_id } => {
+                let manager = BrowserManager {
+                    state: browser_state.clone(),
+                };
+                let app_clone = app.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Err(e) = manager.tab_switch(&tab_id) {
+                        eprintln!("[browser] tab_switch error: {e}");
+                    } else {
+                        let _ = app_clone.emit(
+                            "browser:tab_updated",
+                            serde_json::json!({ "action": "switch", "tab_id": tab_id }),
+                        );
+                    }
+                })
+                .await;
+            }
+            BrowserCommand::TabClose { tab_id } => {
+                let manager = BrowserManager {
+                    state: browser_state.clone(),
+                };
+                let app_clone = app.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Err(e) = manager.tab_close(&tab_id) {
+                        eprintln!("[browser] tab_close error: {e}");
+                    } else {
+                        let _ = app_clone.emit(
+                            "browser:tab_updated",
+                            serde_json::json!({ "action": "close", "tab_id": tab_id }),
+                        );
+                    }
+                })
+                .await;
             }
         }
     }

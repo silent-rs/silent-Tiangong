@@ -803,4 +803,16 @@ export const api = {
 
   browserGoForward: (): Promise<void> =>
     invoke('plugin:browser|browser_go_forward'),
+
+  browserTabList: (): Promise<Array<{ id: string; url: string; title: string }>> =>
+    invoke('plugin:browser|browser_tab_list'),
+
+  browserTabNew: (url: string): Promise<string> =>
+    invoke('plugin:browser|browser_tab_new', { url }),
+
+  browserTabSwitch: (tabId: string): Promise<void> =>
+    invoke('plugin:browser|browser_tab_switch', { tabId }),
+
+  browserTabClose: (tabId: string): Promise<void> =>
+    invoke('plugin:browser|browser_tab_close', { tabId }),
 };

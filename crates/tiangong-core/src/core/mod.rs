@@ -595,6 +595,7 @@ async fn worker_loop_async(
                     &title,
                     &url,
                     &text,
+                    false,
                 );
                 continue;
             }
