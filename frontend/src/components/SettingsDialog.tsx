@@ -84,16 +84,6 @@ export function SettingsDialog() {
               {(saveStatus === 'saved' || saveStatus === 'idle') && '已自动保存'}
               {saveStatus === 'error' && '保存失败'}
             </span>
-            <Button
-              data-no-drag
-              variant="ghost"
-              size="icon"
-              className="ml-1 h-7 w-7 shrink-0"
-              onClick={() => setOpen(false)}
-            >
-              <X className="h-4 w-4" />
-              <span className="sr-only">退出设置</span>
-            </Button>
           </header>
 
           <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 overflow-hidden flex">
