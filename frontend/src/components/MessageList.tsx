@@ -25,7 +25,6 @@ import { MdPreview } from 'md-editor-rt';
 import 'md-editor-rt/lib/preview.css';
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from '@tauri-apps/plugin-dialog';
-import { open as openUrl } from '@tauri-apps/plugin-shell';
 import { ThinkingBlock } from "./ThinkingBlock";
 import { AgentPanel } from "./AgentPanel";
 import { api, textContent, type ContentBlock } from "@/api/tauri";
@@ -659,15 +658,17 @@ export function MessageList() {
     }
   }, [hasMultimodal]);
 
-  // 拦截 MdPreview 内的链接点击，用系统浏览器打开
+  // 拦截 MdPreview 内的链接点击：左键在嵌入浏览器中打开，右键保留系统默认
   useEffect(() => {
     const handler = (e: MouseEvent) => {
+      if (e.button !== 0) return; // 仅拦截左键
       const anchor = (e.target as HTMLElement).closest('a[href]');
       if (!anchor) return;
       const href = anchor.getAttribute('href');
       if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
       e.preventDefault();
-      openUrl(href).catch(console.error);
+      // 通过自定义事件通知 MainApp 打开浏览器
+      window.dispatchEvent(new CustomEvent('tiangong:open-browser', { detail: href }));
     };
     document.addEventListener('click', handler);
     return () => document.removeEventListener('click', handler);

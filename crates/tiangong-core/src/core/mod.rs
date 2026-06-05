@@ -235,6 +235,41 @@ impl TiangongCore {
         }
     }
 
+    /// 注入页面获取能力（GUI 模式下由 Tauri Plugin 提供）
+    pub fn set_page_fetcher(&self, fetcher: std::sync::Arc<dyn crate::browser_trait::PageFetcher>) {
+        let _ = self.send_cmd(Command::SetPageFetcher { fetcher });
+    }
+
+    /// 注册工具覆盖处理器
+    pub fn register_tool_override(
+        &self,
+        name: &str,
+        handler: std::sync::Arc<dyn crate::tool_override::ToolOverrideHandler>,
+    ) {
+        let _ = self.send_cmd(Command::RegisterToolOverride {
+            name: name.to_string(),
+            handler,
+        });
+    }
+
+    /// 注入浏览器页面内容到当前会话（不触发 LLM 调用）
+    pub fn inject_browser_content(
+        &self,
+        title: String,
+        url: String,
+        text: String,
+        tabs: Vec<(String, String, String)>,
+        active_tab_id: Option<String>,
+    ) -> bool {
+        self.send_cmd(Command::InjectBrowserContent {
+            title,
+            url,
+            text,
+            tabs,
+            active_tab_id,
+        })
+    }
+
     /// 关闭并获取最终 session
     pub fn into_session(mut self) -> Session {
         let _ = self.send_cmd(Command::Shutdown);
@@ -300,6 +335,12 @@ async fn worker_loop_async(
 ) -> Session {
     let session_id = session.id.clone();
     let mut last_cfg_gen = 0u64;
+    let mut saved_page_fetcher: Option<std::sync::Arc<dyn crate::browser_trait::PageFetcher>> =
+        None;
+    let mut saved_tool_overrides: std::collections::HashMap<
+        String,
+        std::sync::Arc<dyn crate::tool_override::ToolOverrideHandler>,
+    > = std::collections::HashMap::new();
 
     // 在 Worker 的 tokio runtime 中异步初始化 Memory Handle
     if let Some(ref cfg) = memory.initial_config_snapshot {
@@ -384,6 +425,16 @@ async fn worker_loop_async(
                 &stream_tx,
                 shared_trust_mode.clone(),
             ));
+            // 恢复 page_fetcher 和 tool_overrides 到新建的引擎
+            if let Some(ref fetcher) = saved_page_fetcher {
+                engine.as_ref().unwrap().set_page_fetcher(fetcher.clone());
+            }
+            for (name, handler) in &saved_tool_overrides {
+                engine
+                    .as_ref()
+                    .unwrap()
+                    .register_tool_override(name, handler.clone());
+            }
             let e = engine.as_ref().unwrap();
             let (all_tools, new_mcp_targets) = execution_function_tools(&e.agent_config().mcp);
             let mut new_tools: Vec<ToolSpec> = all_tools
@@ -536,6 +587,41 @@ async fn worker_loop_async(
                 }
             }
             Command::Shutdown => break,
+            Command::SetPageFetcher { fetcher } => {
+                saved_page_fetcher = Some(fetcher.clone());
+                if let Some(eng) = engine.as_ref() {
+                    eng.set_page_fetcher(fetcher);
+                }
+                continue;
+            }
+            Command::RegisterToolOverride { name, handler } => {
+                saved_tool_overrides.insert(name.clone(), handler.clone());
+                if let Some(eng) = engine.as_ref() {
+                    eng.register_tool_override(&name, handler);
+                }
+                continue;
+            }
+            Command::InjectBrowserContent {
+                title,
+                url,
+                text,
+                tabs,
+                active_tab_id,
+            } => {
+                crate::react::message::inject_browser_content_to_session(
+                    &mut session,
+                    &stream_tx,
+                    &crate::react::message::BrowserContent {
+                        title: &title,
+                        url: &url,
+                        text: &text,
+                        tabs: &tabs,
+                        active_tab_id: active_tab_id.as_deref(),
+                    },
+                    false,
+                );
+                continue;
+            }
             Command::CompressContext => {
                 compress_context_for_session(&mut session, engine.as_ref().unwrap(), &stream_tx);
                 continue;

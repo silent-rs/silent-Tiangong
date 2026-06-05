@@ -710,8 +710,22 @@ export function MessageInput() {
     : '';
 
   // ===== 渲染 =====
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [compact, setCompact] = useState(false);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(() => {
+      setCompact(el.clientWidth < 500);
+    });
+    observer.observe(el);
+    setCompact(el.clientWidth < 500);
+    return () => observer.disconnect();
+  }, []);
+
   return (
-    <div className="p-4 border-t bg-background">
+    <div ref={containerRef} className="p-4 border-t bg-background">
       <div className="max-w-3xl mx-auto">
         {voiceMode && hasStt ? (
           // ===== 语音模式 =====
@@ -994,11 +1008,11 @@ export function MessageInput() {
                 <button
                   onClick={handleChangeCwd}
                   disabled={!isIdle}
-                  className="flex items-center gap-1 hover:text-foreground transition-colors truncate max-w-[300px] disabled:opacity-50 disabled:cursor-default disabled:hover:text-muted-foreground shrink-0"
+                  className={`flex items-center gap-1 hover:text-foreground transition-colors disabled:opacity-50 disabled:cursor-default disabled:hover:text-muted-foreground shrink-0 ${compact ? '' : 'truncate max-w-[300px]'}`}
                   title={sessionCwd || '点击设置对话目录'}
                 >
                   <FolderOpen className="w-3 h-3 shrink-0" />
-                  <span className="truncate">{displayCwd || '设置对话目录'}</span>
+                  {!compact && <span className="truncate">{displayCwd || '设置对话目录'}</span>}
                 </button>
               </div>
               <div className="flex items-center gap-2 shrink-0">
@@ -1011,7 +1025,7 @@ export function MessageInput() {
                         : `当前 ${displayTokens.toLocaleString()} tokens / 压缩阈值 ${compressionThreshold.toLocaleString()} tokens / 总计 ${totalTokens.toLocaleString()} tokens`
                     }
                   >
-                    {lastDurationMs ? <span>{(lastDurationMs / 1000).toFixed(1)}s</span> : null}
+                    {!compact && lastDurationMs ? <span>{(lastDurationMs / 1000).toFixed(1)}s</span> : null}
                     {compressionThreshold > 0 && (
                       <div className="h-1.5 w-20 overflow-hidden rounded-full bg-muted">
                         <div
@@ -1026,11 +1040,15 @@ export function MessageInput() {
                         />
                       </div>
                     )}
-                    <span>
-                      {activeAgentLabel ? `[${activeAgentLabel}] ` : ''}
-                      {displayTokens.toLocaleString()}
-                    </span>
-                    <span>总计 {totalTokens.toLocaleString()}</span>
+                    {!compact && (
+                      <>
+                        <span>
+                          {activeAgentLabel ? `[${activeAgentLabel}] ` : ''}
+                          {displayTokens.toLocaleString()}
+                        </span>
+                        <span>总计 {totalTokens.toLocaleString()}</span>
+                      </>
+                    )}
                   </div>
                 )}
                 <button

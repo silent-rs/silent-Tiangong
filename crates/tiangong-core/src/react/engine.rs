@@ -32,6 +32,47 @@ use tiangong_types::{StreamEvent, StreamToolCall};
 
 use crate::agent_team::lifecycle::TeamContext;
 
+/// 处理插件相关的 Command 变体（SetPageFetcher / RegisterToolOverride / InjectBrowserContent）。
+/// 消除 4 处 match 分支的重复代码。
+///
+/// 调用点通过 or-pattern (`cmd @ (Some(Command::SetPageFetcher { .. }) | ...)`) 限定
+/// 只会将这三种 Command 传入，因此 `_ => unreachable!` 不会触发。新增变体时必须同步更新：
+/// 1. 此宏的 match 分支
+/// 2. 所有调用点的 or-pattern
+macro_rules! handle_plugin_commands {
+    ($cmd:expr, $engine:expr, $session:expr, $stream_tx:expr) => {
+        match $cmd {
+            Command::SetPageFetcher { fetcher } => {
+                $engine.set_page_fetcher(fetcher);
+            }
+            Command::RegisterToolOverride { name, handler } => {
+                $engine.register_tool_override(&name, handler);
+            }
+            Command::InjectBrowserContent {
+                title,
+                url,
+                text,
+                tabs,
+                active_tab_id,
+            } => {
+                crate::react::message::inject_browser_content_to_session(
+                    $session,
+                    $stream_tx,
+                    &crate::react::message::BrowserContent {
+                        title: &title,
+                        url: &url,
+                        text: &text,
+                        tabs: &tabs,
+                        active_tab_id: active_tab_id.as_deref(),
+                    },
+                    false,
+                );
+            }
+            _ => unreachable!("handle_plugin_commands: unexpected command — 调用点 or-pattern 与宏分支不同步"),
+        }
+    };
+}
+
 /// 取消时 LLM 请求的处理策略，按 Provider 协议区分。
 enum CancelStrategy {
     /// Anthropic: usage 在 message_start 就返回 prompt_tokens，可直接 abort
@@ -476,6 +517,8 @@ impl ReactEngine {
         let mut failed_tool_names = HashSet::new();
         let mut memory_candidate_count = 0usize;
         let mut completion_check_count: u32 = 0;
+        let mut last_browser_snapshot: Option<crate::browser_trait::PageSnapshot> = None;
+        let mut last_browser_check: Option<std::time::Instant> = None;
 
         if self.agent_id == "main" {
             let routed = self
@@ -527,6 +570,18 @@ impl ReactEngine {
                     memory_candidate_count = 0;
                 }
                 PendingCommandEffect::None => {}
+            }
+
+            // 首轮：主动获取浏览器当前状态并注入上下文
+            if round == 0 {
+                maybe_inject_browser_update(
+                    &self.engine,
+                    session,
+                    stream_tx,
+                    &mut last_browser_snapshot,
+                    &mut last_browser_check,
+                )
+                .await;
             }
 
             if round >= self.max_rounds {
@@ -607,6 +662,11 @@ impl ReactEngine {
                             Some(Command::ReloadConfig) => {}
                             Some(Command::Approval { .. }) => {}
                             Some(Command::CancelAgent { .. }) => {}
+                            cmd @ (Some(Command::SetPageFetcher { .. })
+                            | Some(Command::RegisterToolOverride { .. })
+                            | Some(Command::InjectBrowserContent { .. })) => {
+                                handle_plugin_commands!(cmd.unwrap(), &self.engine, session, stream_tx);
+                            }
                             Some(Command::CompressContext) => {
                                 crate::core::compress_context_for_session(
                                     session,
@@ -884,6 +944,16 @@ impl ReactEngine {
                     PendingCommandEffect::None => {}
                 }
 
+                // 工具执行间隙：检测浏览器状态变化
+                maybe_inject_browser_update(
+                    &self.engine,
+                    session,
+                    stream_tx,
+                    &mut last_browser_snapshot,
+                    &mut last_browser_check,
+                )
+                .await;
+
                 // 团队协作工具拦截
                 if crate::agent_team::lifecycle::is_team_tool(&call.name) {
                     let args_summary = format_call_args_summary(call);
@@ -1073,6 +1143,16 @@ impl ReactEngine {
                                 Some(Command::ReloadConfig) => {}
                                 Some(Command::Approval { .. }) => {}
                                 Some(Command::CancelAgent { .. }) => {}
+                                cmd @ (Some(Command::SetPageFetcher { .. })
+                                | Some(Command::RegisterToolOverride { .. })
+                                | Some(Command::InjectBrowserContent { .. })) => {
+                                    handle_plugin_commands!(
+                                        cmd.unwrap(),
+                                        &self.engine,
+                                        session,
+                                        stream_tx
+                                    );
+                                }
                                 Some(Command::CompressContext) => {
                                     crate::core::compress_context_for_session(
                                         session,
@@ -1365,6 +1445,16 @@ impl ReactEngine {
                     }
                     PendingCommandEffect::None => {}
                 }
+
+                // 工具执行后：检测浏览器状态变化
+                maybe_inject_browser_update(
+                    &self.engine,
+                    session,
+                    stream_tx,
+                    &mut last_browser_snapshot,
+                    &mut last_browser_check,
+                )
+                .await;
             }
 
             if need_failure_recovery_prompt {
@@ -1850,6 +1940,11 @@ impl ReactEngine {
                             crate::core::reset_context_for_session(parent_session, stream_tx, &self.engine);
                         }
                         Some(Command::ReloadConfig) | Some(Command::Approval { .. }) => {}
+                        cmd @ (Some(Command::SetPageFetcher { .. })
+                        | Some(Command::RegisterToolOverride { .. })
+                        | Some(Command::InjectBrowserContent { .. })) => {
+                            handle_plugin_commands!(cmd.unwrap(), &self.engine, parent_session, stream_tx);
+                        }
                         None => break,
                     }
                 }
@@ -2001,6 +2096,11 @@ fn drain_pending_commands_async(
             }
             Command::ReloadConfig => {}
             Command::Approval { .. } => {}
+            cmd @ (Command::SetPageFetcher { .. }
+            | Command::RegisterToolOverride { .. }
+            | Command::InjectBrowserContent { .. }) => {
+                handle_plugin_commands!(cmd, engine, session, stream_tx);
+            }
             Command::CompressContext => {
                 crate::core::compress_context_for_session(session, engine, stream_tx);
             }
@@ -2015,6 +2115,75 @@ fn drain_pending_commands_async(
     } else {
         PendingCommandEffect::None
     }
+}
+
+async fn maybe_inject_browser_update(
+    engine: &crate::runtime::RuntimeEngine,
+    session: &mut Session,
+    stream_tx: &StdSender<StreamEvent>,
+    last_snapshot: &mut Option<crate::browser_trait::PageSnapshot>,
+    last_check: &mut Option<std::time::Instant>,
+) {
+    let fetcher = match engine.page_fetcher() {
+        Some(f) => f,
+        None => return,
+    };
+    // 首次检测无间隔限制；后续检测至少间隔 5 秒，避免频繁 observe_page 拖慢执行
+    if last_snapshot.is_some() {
+        let min_interval = std::time::Duration::from_secs(5);
+        let now = std::time::Instant::now();
+        if let Some(prev) = last_check
+            && now.duration_since(*prev) < min_interval
+        {
+            return;
+        }
+        *last_check = Some(now);
+    }
+    let snapshot =
+        match tokio::time::timeout(std::time::Duration::from_secs(3), fetcher.observe_page()).await
+        {
+            Ok(Some(s)) => s,
+            _ => return,
+        };
+    if snapshot.url.is_empty() {
+        return;
+    }
+
+    let should_inject = match last_snapshot {
+        None => true,
+        Some(prev) => {
+            prev.url != snapshot.url
+                || (snapshot.text.len() as i64 - prev.text.len() as i64).unsigned_abs() > 500
+        }
+    };
+    if !should_inject {
+        *last_snapshot = Some(snapshot);
+        return;
+    }
+
+    let force = match last_snapshot {
+        Some(prev) => prev.url == snapshot.url,
+        None => false,
+    };
+
+    let tabs: Vec<(String, String, String)> = snapshot
+        .tabs
+        .iter()
+        .map(|t| (t.id.clone(), t.url.clone(), t.title.clone()))
+        .collect();
+    crate::react::message::inject_browser_content_to_session(
+        session,
+        stream_tx,
+        &crate::react::message::BrowserContent {
+            title: &snapshot.title,
+            url: &snapshot.url,
+            text: &snapshot.text,
+            tabs: &tabs,
+            active_tab_id: snapshot.active_tab_id.as_deref(),
+        },
+        force,
+    );
+    *last_snapshot = Some(snapshot);
 }
 
 /// 非阻塞检查是否有取消或关闭命令待处理。

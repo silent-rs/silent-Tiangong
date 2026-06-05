@@ -1,64 +1,91 @@
 # TODO - 天工当前开发任务
 
 > 最后更新：2026-06-04
-> 当前主线：0.6.0 发布准备
-> 参考：`PLAN.md`
+> 当前主线：Phase 21 浏览器面板已完成，0.6.0 发布准备中
+> 参考：`PLAN.md`、Issue #95
 
 ---
 
-## Phase 20-A：任务模型与存储
+## 已完成
 
-- [x] 定义 Job 数据模型（id / name / trigger_type / schedule / payload / enabled / created_at / updated_at）
-- [x] 定义 JobRun 数据模型（id / job_id / status / started_at / finished_at / result）
-- [x] 定义 JobDelivery 数据模型（id / job_run_id / channel / status / retry_count）
-- [x] 实现 SQLite job store（建表、CRUD）
-- [x] 实现 run history 存储（写入、查询、状态更新）
-- [x] 新增 Job CRUD API（`POST/GET/PUT/DELETE /api/v1/jobs`）
+### Phase 21-A：技术验证
 
-## Phase 20-B：Cron 调度器
+- [x] 验证 Tauri 2 多 WebView：在主窗口内创建第二个 WebView 加载外部 URL
+- [x] 验证 `initialization_script` 正确注入到外部 URL 页面
+- [x] 验证 IPC 双向通信（eval_with_callback 替代 title IPC）
+- [x] 验证 WebView 位置跟随前端容器动态调整
+- [x] 验证 data_directory 配置实现 Cookie 持久化
 
-- [x] 引入 cron 表达式解析库（如 `cron` 或 `saffron`）
-- [x] 实现 Scheduler 常驻执行器（tokio spawn，内嵌于 Server 启动流程）
-- [x] Cron job 触发 → 构造 RuntimeEvent → 进入现有执行链路
-- [x] Server 启动时从 job store 加载已启用的 cron job 并恢复调度
-- [x] 支持执行目标指定（main session / isolated session / skill）
-- [x] 手动触发 API（`POST /api/v1/jobs/:id/trigger`）
+### Phase 21-B：BrowserManager 核心
 
-## Phase 20-C：Webhook 触发器
+- [x] 新增 `src-tauri/src/browser.rs` — BrowserManager 模块
+- [x] Bridge Script v0.7.0 — getFullText、click、type、extractForms、fillField、clickElement
+- [x] Tauri Commands：`browser_open`、`browser_close`、`browser_set_position`、`browser_navigate`、`browser_eval`
+- [x] Agent `web_fetch` 拦截 → 浏览器获取页面内容（eval_with_callback + on_page_load + Condvar）
+- [x] 内容就绪检测（wait_for_content_ready：内容增长稳定策略）
+- [x] 新增 `BrowserPageSnapshot`、`PageStatus`、`ObservePage` 命令类型
+- [x] `on_page_load` 自动捕获页面快照到 `latest_snapshot`
+- [x] URL 轮询线程检测子 WebView 后续导航变化
 
-- [x] Webhook 端点注册（每个 webhook job 分配唯一路径）
-- [x] 实现 `POST /api/v1/webhooks/:token` 端点
-- [x] 请求签名验证（HMAC-SHA256）
-- [x] Webhook 触发 → 构造 RuntimeEvent → 进入现有执行链路
+### Phase 21-C：前端浏览器面板
 
-## Phase 20-D：Polling 触发器
+- [x] `BrowserPanel` 组件（地址栏 + WebView 容器 + 关闭按钮）
+- [x] 集成到主布局（右侧可折叠面板）
+- [x] 监听 `browser:open` 事件自动显示面板
+- [x] 容器位置同步（resize 时更新 WebView 位置）
+- [x] 拖拽手柄调整面板宽度
+- [x] StatusPanel 添加浏览器开关按钮
 
-- [x] 实现 HTTP polling 轮询执行器（定时请求指定 URL）
-- [x] 条件判断与去重（响应内容变化时才触发）
-- [x] Polling 触发 → 构造 RuntimeEvent → 进入现有执行链路
+### Phase 21-D：Agent 交互增强
 
-## Phase 20-E：结果投递与通知
+- [x] 注册 `web_browse` 工具 — Agent 主动获取当前浏览器页面快照
+- [x] `ObservePage` 命令接入 RuntimeEngine
+- [x] 页面导航事件通知前端（`browser:page_loaded`）
+- [x] 页面内容变化注入对话链（tool 消息格式）
 
-- [x] 执行结果投递到 IM 通道（复用 `POST /api/v1/messages` 或直接调用 MessageRouter）
-- [x] 失败重试机制（可配置重试次数与间隔）
-- [x] Run history 查询 API（`GET /api/v1/jobs/:id/runs`）
-- [x] 投递状态追踪与查询
+### Phase 21-E：表单填写增强
 
-## Phase 20-F：前端管理界面
+- [x] Bridge Script 实现三层表单填写策略（keyboard / native setter / paste）
+- [x] `web_form_extract` 工具 — 提取页面表单字段结构
+- [x] `web_form_fill` 工具 — 三层策略自动填写 + fallback
+- [x] `web_click` 工具 — 模拟鼠标事件点击（mouseover/mousedown/mouseup/click + 坐标）
+- [x] `web_load_html` 工具 — 加载 HTML 内容到浏览器（data URL）
 
-- [x] Job 列表页（展示所有 job、状态、下次执行时间）
-- [x] Job 创建/编辑表单（cron 表达式、webhook URL、polling 配置）
-- [x] Job 启停开关
-- [x] 执行历史查看（run 列表、状态、耗时、结果摘要）
-- [x] 手动触发按钮
+### Phase 21-F：完善与优化
 
-## 发布准备（0.4.0）
+- [x] 前进/后退/刷新导航控制（BrowserPanel 工具栏按钮）
+- [x] 窗口缩小时浏览器面板自动隐藏
+- [x] Cookie 持久化验证（data_directory 已设置，依赖 WKWebView 内置行为）
+- [x] 浏览器工具权限分类（web_browse/web_form_extract → Safe，web_form_fill/web_click/web_load_html → Elevated）
 
-- [x] 更新 `Cargo.toml` 版本号为 `0.4.0`
-- [x] 更新 `tauri.conf.json` 版本号
-- [x] 验证 cron / webhook / polling 端到端流程
-- [x] 验证 Server 启动恢复 cron job
-- [x] 验证前端 Job 管理界面
+### Phase 21-G：浏览器能力插件化
+
+- [x] G-1：Core 层 Trait 抽象（`PageFetcher`、`ToolOverrideHandler`、`SetPageFetcher`/`RegisterToolOverride` Command）
+- [x] G-2：创建 `tiangong-plugin-browser` crate（`manager`、`bridge`、`handler`、`commands`、`page_fetcher`、`types`）
+- [x] G-3：应用层切换（`.plugin()` 注册、前端 invoke 前缀改为 `plugin:browser|`、移除内联 browser 代码）
+- [x] G-4：清理（删除 `src-tauri/src/browser.rs`、`tiangong-types/src/browser.rs`、移除 tokio 依赖）
+
+### Phase 21-H：UI 库适配与框架检测
+
+- [x] Bridge Script v0.8.0 新增 `detectFramework()` — 检测 React/Vue + Ant Design/Element Plus
+- [x] `extractForms()` 扩展 UI 库组件扫描（Ant Design Select/DatePicker、Element Plus Select/DatePicker）
+- [x] `fillComponent()` 新增 UI 库组件多步填写策略（Ant Design Select → 点击打开 → 选择匹配项）
+- [x] handler 自动回退：`fillField` 失败后尝试 `fillComponent`
+
+### Phase 21-I：多标签页支持
+
+- [x] `BrowserTab` 结构体和标签管理命令（TabList/TabNew/TabSwitch/TabClose）
+- [x] BrowserManager 标签状态管理（单渲染器 + 标签 URL/标题追踪）
+- [x] 页面加载和 URL 变化时自动更新活跃标签
+- [x] Tauri Commands（browser_tab_list/new/switch/close）
+- [x] 前端标签栏（多个标签时显示，点击切换，关闭按钮，新建按钮）
+
+### Phase 21-J：用户批注模式
+
+- [x] Bridge Script `annotation` 对象 — canvas 覆盖层 + 矩形/箭头绘制
+- [x] 批注数据结构化存储，`getAnnotations()` 返回标注列表
+- [x] `web_browse` 自动附加页面批注信息
+- [x] 前端批注按钮（画笔图标，点击切换批注模式）
 
 ## 发布准备（0.6.0）
 
@@ -75,8 +102,6 @@
 
 ---
 
-## 文档同步要求
+*(Phase 21 浏览器面板功能已全部完成)*
 
-- `docs/requirements.md`：补充自动化触发层相关需求
-- `docs/server-api.md`：补充 Job / Webhook API 文档
-- Issue #38：开发完成后关闭
+---

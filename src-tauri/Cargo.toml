@@ -11,6 +11,7 @@ tiangong-types = { workspace = true }
 tiangong-cli = { workspace = true }
 tiangong-entry = { workspace = true }
 tiangong-server = { workspace = true }
+tiangong-plugin-browser = { workspace = true }
 tiangong-media = { workspace = true }
 tiangong-config = { workspace = true }
 tiangong-memory = { workspace = true }
@@ -27,6 +28,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 async-openai = { workspace = true, features = ["byot", "chat-completion", "model"] }
 tokio = { workspace = true, features = ["rt", "time", "process", "io-util", "sync"] }
+tracing = { workspace = true }
 rmcp = { workspace = true, default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 futures-util = { workspace = true }
 http = { workspace = true }
@@ -34,7 +36,7 @@ toml = { workspace = true }
 reqwest = { workspace = true, default-features = false, features = ["json", "rustls"] }
 
 # Tauri 相关依赖
-tauri = { workspace = true, features = ["protocol-asset", "tray-icon"] }
+tauri = { workspace = true, features = ["protocol-asset", "tray-icon", "unstable"] }
 tauri-plugin-shell = { workspace = true }
 tauri-plugin-fs = { workspace = true }
 tauri-plugin-dialog = { workspace = true }

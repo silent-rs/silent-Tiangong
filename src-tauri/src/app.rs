@@ -5,6 +5,7 @@ use tiangong_config::load_tiangong_config;
 use tiangong_core::core::TiangongCore;
 use tiangong_core::core_config::CoreConfigProvider;
 use tokio::sync::Mutex as AsyncMutex;
+use tracing::warn;
 
 /// 天工应用状态
 ///
@@ -17,6 +18,12 @@ pub struct TiangongApp {
     pub cores: Mutex<HashMap<String, TiangongCore>>,
     pub config: CoreConfigProvider,
     embedded_server: Mutex<Option<tiangong_server::EmbeddedServerHandle>>,
+    /// 浏览器页面获取能力（由 plugin 在 setup 阶段注入）
+    page_fetcher: Mutex<Option<std::sync::Arc<dyn tiangong_core::browser_trait::PageFetcher>>>,
+    /// 工具覆盖处理器（由 plugin 在 setup 阶段注入）
+    tool_overrides: Mutex<
+        HashMap<String, std::sync::Arc<dyn tiangong_core::tool_override::ToolOverrideHandler>>,
+    >,
 }
 
 impl Default for TiangongApp {
@@ -32,6 +39,8 @@ impl Default for TiangongApp {
             cores: Mutex::new(HashMap::new()),
             config,
             embedded_server: Mutex::new(None),
+            page_fetcher: Mutex::new(None),
+            tool_overrides: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -41,11 +50,56 @@ impl TiangongApp {
         Self::default()
     }
 
+    /// 注入浏览器页面获取能力（由 plugin 在 setup 阶段调用）
+    pub fn set_page_fetcher(
+        &self,
+        fetcher: std::sync::Arc<dyn tiangong_core::browser_trait::PageFetcher>,
+    ) {
+        if let Ok(mut guard) = self.page_fetcher.lock() {
+            *guard = Some(fetcher);
+        }
+    }
+
+    /// 注册工具覆盖处理器（由 plugin 在 setup 阶段调用）
+    pub fn register_tool_override(
+        &self,
+        name: &str,
+        handler: std::sync::Arc<dyn tiangong_core::tool_override::ToolOverrideHandler>,
+    ) {
+        if let Ok(mut guard) = self.tool_overrides.lock() {
+            guard.insert(name.to_string(), handler);
+        }
+    }
+
+    /// 向当前活跃会话注入浏览器页面内容
+    pub fn inject_browser_content(
+        &self,
+        title: String,
+        url: String,
+        text: String,
+        tabs: Vec<(String, String, String)>,
+        active_tab_id: Option<String>,
+    ) {
+        let session_id = match tokio::runtime::Handle::try_current() {
+            Ok(h) => {
+                let guard = h.block_on(self.state.lock());
+                guard.active_session_id().to_string()
+            }
+            Err(_) => return,
+        };
+        let cores = self.lock_cores();
+        if let Some(core) = cores.get(&session_id) {
+            if core.is_running() {
+                core.inject_browser_content(title, url, text, tabs, active_tab_id);
+            }
+        }
+    }
+
     fn lock_cores(&self) -> std::sync::MutexGuard<'_, HashMap<String, TiangongCore>> {
         match self.cores.lock() {
             Ok(guard) => guard,
             Err(err) => {
-                eprintln!("cores 锁已污染，尝试恢复: {}", err);
+                warn!(error = %err, "cores 锁已污染，尝试恢复");
                 err.into_inner()
             }
         }
@@ -57,7 +111,7 @@ impl TiangongApp {
         match self.embedded_server.lock() {
             Ok(guard) => guard,
             Err(err) => {
-                eprintln!("embedded_server 锁已污染，尝试恢复: {}", err);
+                warn!(error = %err, "embedded_server 锁已污染，尝试恢复");
                 err.into_inner()
             }
         }
@@ -111,10 +165,21 @@ impl TiangongApp {
                 core.set_trust_mode(session.trust_mode);
                 return (session_id.to_string(), false); // 已存在，复用
             }
-            eprintln!("移除已停止的 TiangongCore：{session_id}");
+            warn!(session_id, "移除已停止的 TiangongCore");
             cores.remove(session_id);
         }
         let core = TiangongCore::with_session_for_gui(self.config.clone(), session, stream_tx);
+        // 注入浏览器页面获取能力和工具覆盖（由 plugin setup 阶段注册）
+        if let Ok(guard) = self.page_fetcher.lock() {
+            if let Some(ref fetcher) = *guard {
+                core.set_page_fetcher(fetcher.clone());
+            }
+        }
+        if let Ok(guard) = self.tool_overrides.lock() {
+            for (name, handler) in guard.iter() {
+                core.register_tool_override(name, handler.clone());
+            }
+        }
         let id = core.session_id().to_string();
         cores.insert(id.clone(), core);
         (id, true) // 新创建
@@ -140,7 +205,7 @@ impl TiangongApp {
                 core.send_message(content)
             };
             if !sent {
-                eprintln!("TiangongCore 命令通道已关闭，移除僵尸 core：{session_id}");
+                warn!(session_id, "TiangongCore 命令通道已关闭，移除僵尸 core");
                 cores.remove(session_id);
             }
             sent

@@ -1,0 +1,16 @@
+[default]
+description = "允许使用浏览器面板的全部功能。"
+permissions = [
+    "allow-browser-open",
+    "allow-browser-close",
+    "allow-browser-hide",
+    "allow-browser-set-position",
+    "allow-browser-navigate",
+    "allow-browser-eval",
+    "allow-browser-go-back",
+    "allow-browser-go-forward",
+    "allow-browser-tab-list",
+    "allow-browser-tab-new",
+    "allow-browser-tab-switch",
+    "allow-browser-tab-close",
+]

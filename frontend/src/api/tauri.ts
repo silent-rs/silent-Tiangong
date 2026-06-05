@@ -776,4 +776,43 @@ export const api = {
 
   webhookListRuns: (id: string, limit?: number): Promise<WebhookRun[]> =>
     invoke('webhook_list_runs', { id, limit }),
+
+  // ----------------------------------------------------------------
+  // 浏览器面板（通过 plugin:browser）
+  // ----------------------------------------------------------------
+  browserOpen: (url: string, x: number, y: number, width: number, height: number): Promise<void> =>
+    invoke('plugin:browser|browser_open', { url, x, y, width, height }),
+
+  browserClose: (): Promise<void> =>
+    invoke('plugin:browser|browser_close'),
+
+  browserSetPosition: (x: number, y: number, width: number, height: number): Promise<void> =>
+    invoke('plugin:browser|browser_set_position', { x, y, width, height }),
+
+  browserNavigate: (url: string): Promise<void> =>
+    invoke('plugin:browser|browser_navigate', { url }),
+
+  browserEval: (js: string): Promise<void> =>
+    invoke('plugin:browser|browser_eval', { js }),
+
+  browserHide: (): Promise<void> =>
+    invoke('plugin:browser|browser_hide'),
+
+  browserGoBack: (): Promise<void> =>
+    invoke('plugin:browser|browser_go_back'),
+
+  browserGoForward: (): Promise<void> =>
+    invoke('plugin:browser|browser_go_forward'),
+
+  browserTabList: (): Promise<Array<{ id: string; url: string; title: string }>> =>
+    invoke('plugin:browser|browser_tab_list'),
+
+  browserTabNew: (url: string): Promise<string> =>
+    invoke('plugin:browser|browser_tab_new', { url }),
+
+  browserTabSwitch: (tabId: string): Promise<void> =>
+    invoke('plugin:browser|browser_tab_switch', { tabId }),
+
+  browserTabClose: (tabId: string): Promise<void> =>
+    invoke('plugin:browser|browser_tab_close', { tabId }),
 };

@@ -9,6 +9,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use tauri::Manager;
+use tracing::{info, warn};
 
 const TRAY_SHOW_WINDOW_ID: &str = "show_window";
 const TRAY_START_SERVER_ID: &str = "start_server";
@@ -224,12 +225,44 @@ fn run_gui() {
     tauri::Builder::default()
         .manage(tiangong_app::TiangongApp::new())
         .setup(|app| {
+            use tauri::Listener;
+
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Regular);
             setup_tray(app)?;
 
             // Desktop 端独立初始化调度器（不依赖 server）
             let state = app.state::<tiangong_app::TiangongApp>();
+
+            // 注入浏览器 Plugin 的 PageFetcher 和工具覆盖到 TiangongApp
+            if let Some(fetcher) = tiangong_plugin_browser::get_page_fetcher(app.handle()) {
+                state.set_page_fetcher(fetcher);
+            }
+            if let Some(handler) = tiangong_plugin_browser::get_tool_override(app.handle()) {
+                state.register_tool_override("web_fetch", handler.clone());
+                state.register_tool_override("web_browse", handler.clone());
+                state.register_tool_override("web_form_extract", handler.clone());
+                state.register_tool_override("web_form_fill", handler.clone());
+                state.register_tool_override("web_click", handler.clone());
+                state.register_tool_override("web_load_html", handler);
+            }
+
+            // 监听浏览器页面加载事件，自动注入内容到当前活跃会话
+            let inject_handle = app.handle().clone();
+            app.listen("browser:page_loaded", move |event| {
+                let payload = event.payload().to_string();
+                if let Ok(data) = serde_json::from_str::<serde_json::Value>(&payload) {
+                    let url = data["url"].as_str().unwrap_or("").to_string();
+                    if url.is_empty() {
+                        return;
+                    }
+                    let title = data["title"].as_str().unwrap_or("").to_string();
+                    let text = data["text"].as_str().unwrap_or("").to_string();
+                    let state = inject_handle.state::<tiangong_app::TiangongApp>();
+                    state.inject_browser_content(title, url, text, vec![], None);
+                }
+            });
+
             let scheduler_ctx = state.create_scheduler_context();
             tauri::async_runtime::spawn(async move {
                 tiangong_scheduler::executor::restore_cron_jobs(scheduler_ctx).await;
@@ -241,6 +274,9 @@ fn run_gui() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
+                // 通过 plugin state 关闭浏览器
+                let plugin_state = window.state::<tiangong_plugin_browser::BrowserPluginState>();
+                let _ = plugin_state.manager.close();
                 let _ = window.hide();
             }
         })
@@ -344,6 +380,7 @@ fn run_gui() {
             tiangong_app::commands::webhook_trigger,
             tiangong_app::commands::webhook_list_runs,
         ])
+        .plugin(tiangong_plugin_browser::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
@@ -446,10 +483,10 @@ fn auto_start_embedded_server(app: &tauri::AppHandle) {
     let state = app.state::<tiangong_app::TiangongApp>();
     match state.start_embedded_server(&config.host, config.port, config.auth_token.clone()) {
         Ok(()) => {
-            eprintln!("自动启动嵌入式 Server：{}:{}", config.host, config.port);
+            info!(host = %config.host, port = config.port, "自动启动嵌入式 Server");
         }
         Err(err) => {
-            eprintln!("自动启动嵌入式 Server 失败：{err}");
+            warn!(error = %err, "自动启动嵌入式 Server 失败");
             // 启动失败时重置标记，避免下次启动继续失败
             let mut config = config;
             config.enabled = false;
@@ -510,13 +547,13 @@ fn handle_tray_menu_event(
                     config.auth_token.clone(),
                 ) {
                     Ok(()) => {
-                        eprintln!("Server 已启动：{}:{}", config.host, config.port);
+                        info!(host = %config.host, port = config.port, "Server 已启动");
                         let mut config = config;
                         config.enabled = true;
                         let _ = tiangong_server::config::save_server_config(&config);
                     }
                     Err(err) => {
-                        eprintln!("菜单栏启动 Server 失败：{err}");
+                        warn!(error = %err, "菜单栏启动 Server 失败");
                     }
                 }
                 if let Some(tray) = tray.as_ref() {
@@ -544,9 +581,9 @@ fn handle_tray_menu_event(
                 let _ = status_item.set_text("Server 状态：停止中");
                 let state = app_clone.state::<tiangong_app::TiangongApp>();
                 if let Err(err) = state.stop_embedded_server() {
-                    eprintln!("菜单栏停止 Server 失败：{err}");
+                    warn!(error = %err, "菜单栏停止 Server 失败");
                 } else {
-                    eprintln!("Server 已停止");
+                    info!("Server 已停止");
                     let mut config = tiangong_server::config::load_server_config();
                     config.enabled = false;
                     let _ = tiangong_server::config::save_server_config(&config);
