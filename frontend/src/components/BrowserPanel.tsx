@@ -20,7 +20,9 @@ interface TabInfo {
 function normalizeBrowserUrl(rawUrl: string): string {
   const trimmed = rawUrl.trim();
   if (!trimmed) return '';
-  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//i.test(trimmed)) return trimmed;
+  if (/^about:/i.test(trimmed)) return trimmed;
+  if (/^\//.test(trimmed)) return `file://${trimmed}`;
   return `https://${trimmed}`;
 }
 

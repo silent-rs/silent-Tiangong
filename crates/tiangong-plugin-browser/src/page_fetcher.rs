@@ -236,13 +236,21 @@ impl BrowserToolOverride {
             .get("mode")
             .and_then(|v| v.as_str())
             .unwrap_or("text");
-        if mode != "text" {
-            return Box::pin(async { None });
-        }
         let url = match call.arguments.get("url").and_then(|v| v.as_str()) {
             Some(u) => u.to_string(),
             None => return Box::pin(async { None }),
         };
+
+        // 本地路径统一转为 file:// URL，与 HTTP 走同一条浏览器打开路径
+        let url = if url.starts_with('/') {
+            format!("file://{url}")
+        } else {
+            url
+        };
+
+        if mode != "text" {
+            return Box::pin(async { None });
+        }
         let max_chars = call
             .arguments
             .get("max_chars")
@@ -251,7 +259,19 @@ impl BrowserToolOverride {
 
         let fetcher = fetcher.clone();
         Box::pin(async move {
-            let result = fetcher.fetch_page(&url, max_chars).await?;
+            let result = match fetcher.fetch_page(&url, max_chars).await {
+                Some(r) => r,
+                None => {
+                    return Some(tiangong_core::tool::ToolResult {
+                        ok: false,
+                        summary: "浏览器获取页面失败".to_string(),
+                        stdout: String::new(),
+                        stderr: "浏览器无法获取页面内容".to_string(),
+                        exit_code: 1,
+                        execution: None,
+                    });
+                }
+            };
             let summary = if result.ok {
                 format!("浏览器获取成功：{}", result.title)
             } else {
@@ -286,7 +306,20 @@ impl BrowserToolOverride {
     > {
         let fetcher = fetcher.clone();
         Box::pin(async move {
-            let snapshot = fetcher.observe_page().await?;
+            let snapshot = match fetcher.observe_page().await {
+                Some(s) => s,
+                None => {
+                    return Some(tiangong_core::tool::ToolResult {
+                        ok: false,
+                        summary: "浏览器未打开或页面未加载".to_string(),
+                        stdout: String::new(),
+                        stderr: "请先使用 web_fetch 打开一个页面，或使用 browser_open 打开浏览器"
+                            .to_string(),
+                        exit_code: 1,
+                        execution: None,
+                    });
+                }
+            };
             let content = if snapshot.text.is_empty() {
                 format!(
                     "浏览器页面：{}\nURL：{}\n状态：页面内容为空",
@@ -316,7 +349,19 @@ impl BrowserToolOverride {
     > {
         let fetcher = fetcher.clone();
         Box::pin(async move {
-            let result = fetcher.form_extract().await?;
+            let result = match fetcher.form_extract().await {
+                Some(r) => r,
+                None => {
+                    return Some(tiangong_core::tool::ToolResult {
+                        ok: false,
+                        summary: "浏览器未打开，无法提取表单".to_string(),
+                        stdout: String::new(),
+                        stderr: "请先使用 web_fetch 打开页面".to_string(),
+                        exit_code: 1,
+                        execution: None,
+                    });
+                }
+            };
             let total_fields: usize = result.forms.iter().map(|f| f.fields.len()).sum();
             let output = serde_json::to_string_pretty(&result)
                 .unwrap_or_else(|_| "序列化表单数据失败".to_string());
@@ -361,7 +406,19 @@ impl BrowserToolOverride {
             .to_string();
         let fetcher = fetcher.clone();
         Box::pin(async move {
-            let result = fetcher.form_fill(&selector, &value, &strategy).await?;
+            let result = match fetcher.form_fill(&selector, &value, &strategy).await {
+                Some(r) => r,
+                None => {
+                    return Some(tiangong_core::tool::ToolResult {
+                        ok: false,
+                        summary: "浏览器未打开，无法填写字段".to_string(),
+                        stdout: String::new(),
+                        stderr: "请先使用 web_fetch 打开页面".to_string(),
+                        exit_code: 1,
+                        execution: None,
+                    });
+                }
+            };
             let strategy_used = result.strategy.clone().unwrap_or_default();
             if result.ok {
                 Some(tiangong_core::tool::ToolResult {
@@ -399,7 +456,19 @@ impl BrowserToolOverride {
             .to_string();
         let fetcher = fetcher.clone();
         Box::pin(async move {
-            let result = fetcher.click_element(&selector).await?;
+            let result = match fetcher.click_element(&selector).await {
+                Some(r) => r,
+                None => {
+                    return Some(tiangong_core::tool::ToolResult {
+                        ok: false,
+                        summary: "浏览器未打开，无法点击元素".to_string(),
+                        stdout: String::new(),
+                        stderr: "请先使用 web_fetch 打开页面".to_string(),
+                        exit_code: 1,
+                        execution: None,
+                    });
+                }
+            };
             if result.ok {
                 Some(tiangong_core::tool::ToolResult {
                     ok: true,
@@ -421,42 +490,6 @@ impl BrowserToolOverride {
             }
         })
     }
-
-    fn handle_web_load_html(
-        fetcher: &Arc<dyn PageFetcher>,
-        call: &tiangong_core::model::ToolCall,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Option<tiangong_core::tool::ToolResult>> + Send>,
-    > {
-        let html = call
-            .arguments
-            .get("html")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let fetcher = fetcher.clone();
-        Box::pin(async move {
-            let result = fetcher.load_html(&html).await?;
-            match result {
-                Ok(()) => Some(tiangong_core::tool::ToolResult {
-                    ok: true,
-                    summary: "HTML 内容已加载到浏览器".to_string(),
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    exit_code: 0,
-                    execution: None,
-                }),
-                Err(err) => Some(tiangong_core::tool::ToolResult {
-                    ok: false,
-                    summary: "加载 HTML 失败".to_string(),
-                    stdout: String::new(),
-                    stderr: err,
-                    exit_code: 1,
-                    execution: None,
-                }),
-            }
-        })
-    }
 }
 
 impl tiangong_core::tool_override::ToolOverrideHandler for BrowserToolOverride {
@@ -472,7 +505,6 @@ impl tiangong_core::tool_override::ToolOverrideHandler for BrowserToolOverride {
             "web_form_extract" => Self::handle_web_form_extract(&self.fetcher),
             "web_form_fill" => Self::handle_web_form_fill(&self.fetcher, call),
             "web_click" => Self::handle_web_click(&self.fetcher, call),
-            "web_load_html" => Self::handle_web_load_html(&self.fetcher, call),
             _ => Box::pin(async { None }),
         }
     }

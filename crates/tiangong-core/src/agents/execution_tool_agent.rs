@@ -94,7 +94,7 @@ pub(crate) fn basic_file_function_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "web_fetch".to_string(),
-            description: "受控获取 HTTP/HTTPS URL。text 模式读取网页/文本正文；download 模式下载在线文件到允许写入目录，可替代 curl/wget。".to_string(),
+            description: "使用内嵌浏览器获取 URL 内容。支持 HTTP/HTTPS 网页和本地 file:// 或绝对路径的 HTML 文件。当用户要求在浏览器中打开页面或预览 HTML 时必须使用此工具，不要使用 run_shell 调用系统浏览器。".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -184,17 +184,6 @@ pub(crate) fn basic_file_function_tools() -> Vec<ToolSpec> {
                     "selector": { "type": "string", "description": "要点击的元素的 CSS 选择器" }
                 },
                 "required": ["selector"]
-            }),
-        },
-        ToolSpec {
-            name: "web_load_html".to_string(),
-            description: "在天工内嵌浏览器中加载 HTML 内容。适用于预览本地 HTML 文件、展示生成的网页内容等场景。加载后可继续使用 web_browse 等工具交互。".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "html": { "type": "string", "description": "要加载的 HTML 内容（完整的 HTML 字符串）" }
-                },
-                "required": ["html"]
             }),
         },
         ToolSpec {

@@ -243,8 +243,7 @@ fn run_gui() {
                 state.register_tool_override("web_browse", handler.clone());
                 state.register_tool_override("web_form_extract", handler.clone());
                 state.register_tool_override("web_form_fill", handler.clone());
-                state.register_tool_override("web_click", handler.clone());
-                state.register_tool_override("web_load_html", handler);
+                state.register_tool_override("web_click", handler);
             }
 
             // 监听浏览器页面加载事件，自动注入内容到当前活跃会话
