@@ -1244,7 +1244,7 @@ fn attachment_notice_text(msg: &Message) -> String {
         .collect();
     let items = items.join("\n");
     format!(
-        "本条用户消息包含附件，但主模型请求不会直接携带附件内容。需要查看附件内容时，请调用 analyze_attachment 工具，并指定 message_id={} 和附件 index。\n{}",
+        "本条用户消息包含附件，但主模型请求不会直接携带附件内容。需要查看附件内容时，请调用 analyze_attachment 工具，必须使用本提示中的 message_id={}（不要使用其他消息的 ID），并指定附件 index。\n{}",
         msg.id, items
     )
 }

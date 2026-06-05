@@ -1341,7 +1341,7 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<ToolSpec>, engine: &RuntimeE
     if has_multimodal && !chat_is_multimodal {
         tools.push(ToolSpec {
             name: "analyze_attachment".to_string(),
-            description: "按需调用多模态模型解析用户上传的图片或文件附件。只有当用户问题确实需要查看附件内容时才调用；普通文本对话不要调用。".to_string(),
+            description: "按需调用多模态模型解析用户上传的图片或文件附件。只有当用户问题确实需要查看附件内容时才调用；普通文本对话不要调用。重要：message_id 必须使用用户消息中提示文字所标注的 ID，不要使用其他消息的 ID。".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
