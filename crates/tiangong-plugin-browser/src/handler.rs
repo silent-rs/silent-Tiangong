@@ -225,6 +225,13 @@ pub async fn browser_command_handler(
                 let manager = BrowserManager {
                     state: browser_state.clone(),
                 };
+                // 浏览器未打开时先打开，再加载 HTML
+                if !manager.is_open() {
+                    if let Some((x, y, w, h)) = default_browser_rect(&app) {
+                        let _ = manager.open(&app, "about:blank", x, y, w, h);
+                    }
+                    let _ = app.emit("browser:open", "about:blank");
+                }
                 let result = tokio::task::spawn_blocking(move || manager.load_html(&html))
                     .await
                     .unwrap_or(Err("加载 HTML 任务失败".to_string()));

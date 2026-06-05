@@ -248,10 +248,16 @@ impl BrowserManager {
                             Err(e) => e.into_inner(),
                         };
                         match s.webview {
-                            Some(ref wv) => match wv.url() {
-                                Ok(u) => u.to_string(),
-                                Err(_) => continue,
-                            },
+                            Some(ref wv) => {
+                                // wry 的 url() 在 WebView 无 URL 时会 panic（webview.URL().unwrap() on None），
+                                // 使用 catch_unwind 防止整个应用崩溃。
+                                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    wv.url()
+                                })) {
+                                    Ok(Ok(u)) => u.to_string(),
+                                    _ => continue,
+                                }
+                            }
                             None => break,
                         }
                     };
@@ -340,8 +346,12 @@ impl BrowserManager {
         }
         if let Some(webview) = &state.webview {
             let parsed_url: Url = url.parse().map_err(|e| format!("URL 解析失败：{e}"))?;
-            webview
-                .navigate(parsed_url)
+            // wry 的 navigate 内部 NSURL::URLWithString 可能 panic，用 catch_unwind 保护
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                webview.navigate(parsed_url)
+            }));
+            result
+                .map_err(|_| "WebView 导航内部错误".to_string())?
                 .map_err(|e| format!("导航失败：{e}"))?;
         }
         Ok(())
@@ -359,8 +369,11 @@ impl BrowserManager {
             let parsed_url: Url = data_url
                 .parse()
                 .map_err(|e| format!("data URL 构造失败：{e}"))?;
-            webview
-                .navigate(parsed_url)
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                webview.navigate(parsed_url)
+            }));
+            result
+                .map_err(|_| "WebView 导航内部错误".to_string())?
                 .map_err(|e| format!("加载 HTML 失败：{e}"))?;
         }
         Ok(())
@@ -550,9 +563,9 @@ impl BrowserManager {
         // 导航到新标签 URL
         if let Some(webview) = &state.webview {
             let parsed_url: Url = url.parse().map_err(|e| format!("URL 解析失败：{e}"))?;
-            webview
-                .navigate(parsed_url)
-                .map_err(|e| format!("导航失败：{e}"))?;
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = webview.navigate(parsed_url);
+            }));
         }
         Ok(tab_id)
     }
@@ -573,9 +586,9 @@ impl BrowserManager {
         state.active_tab_id = Some(tab_id.to_string());
         if let Some(webview) = &state.webview {
             let parsed_url: Url = tab_url.parse().map_err(|e| format!("URL 解析失败：{e}"))?;
-            webview
-                .navigate(parsed_url)
-                .map_err(|e| format!("导航失败：{e}"))?;
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = webview.navigate(parsed_url);
+            }));
         }
         Ok(())
     }
@@ -602,7 +615,11 @@ impl BrowserManager {
                 });
                 state.active_tab_id = Some(new_id);
                 if let Some(webview) = &state.webview {
-                    let _ = webview.navigate(Url::parse("about:blank").unwrap());
+                    if let Ok(parsed_url) = Url::parse("about:blank") {
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let _ = webview.navigate(parsed_url);
+                        }));
+                    }
                 }
             } else {
                 let new_pos = pos.min(state.tabs.len() - 1);
@@ -613,7 +630,9 @@ impl BrowserManager {
                 state.active_tab_id = Some(new_id);
                 if let Some(webview) = &state.webview {
                     if let Ok(parsed_url) = new_url.parse::<Url>() {
-                        let _ = webview.navigate(parsed_url);
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let _ = webview.navigate(parsed_url);
+                        }));
                     }
                 }
             }
