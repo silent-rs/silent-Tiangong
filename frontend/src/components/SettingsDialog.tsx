@@ -29,7 +29,19 @@ type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 
 export function SettingsDialog() {
   const [open, setOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState('agent');
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
+  const pendingSettingsTab = useStore((s) => s.pendingSettingsTab);
+  const setPendingSettingsTab = useStore((s) => s.setPendingSettingsTab);
+
+  // 响应外部触发打开设置页
+  useEffect(() => {
+    if (pendingSettingsTab) {
+      setActiveTab(pendingSettingsTab);
+      setOpen(true);
+      setPendingSettingsTab(null);
+    }
+  }, [pendingSettingsTab, setPendingSettingsTab]);
 
   useEffect(() => {
     if (!open) {
@@ -84,7 +96,7 @@ export function SettingsDialog() {
             </Button>
           </header>
 
-          <Tabs defaultValue="agent" className="flex-1 overflow-hidden flex">
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 overflow-hidden flex">
             <aside className="w-60 shrink-0 border-r bg-muted/30 flex flex-col">
               <TabsList className="h-auto w-full flex-1 flex-col items-stretch justify-start rounded-none bg-transparent p-2 pt-4">
                 <TabsTrigger value="agent" className="w-full justify-start px-3 py-2">
