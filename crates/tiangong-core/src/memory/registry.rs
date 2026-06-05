@@ -197,7 +197,7 @@ pub(crate) async fn get_or_init_memory_async(
             Some(handle)
         }
         Err(err) => {
-            tracing::warn!("Memory 启动或连接失败（非致命）: {}", err);
+            tracing::debug!("Memory 启动或连接失败（非致命）: {}", err);
             None
         }
     }

@@ -2526,7 +2526,7 @@ function AppUpdateSettings() {
               <div className="text-sm text-muted-foreground">当前版本</div>
               <div className="mt-1 text-2xl font-semibold">{currentVersion || '读取中...'}</div>
             </div>
-            <Badge variant="outline">GitHub Release</Badge>
+            <Badge variant="outline">GitHub / OSS</Badge>
           </div>
 
           {availableUpdate ? (
@@ -2544,7 +2544,7 @@ function AppUpdateSettings() {
             </div>
           ) : (
             <div className="rounded-md border p-3 text-sm text-muted-foreground">
-              更新检查会从 GitHub Release 获取最新版本信息。
+              更新检查会依次从 GitHub Release 和阿里云 OSS 获取最新版本信息。
             </div>
           )}
 
