@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, KeyboardEvent } from 'react';
 import { useStore } from '@/store/useStore';
 import { api } from '@/api/tauri';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { Sun, Moon, Monitor, PanelLeft, SquarePen, Volume2, VolumeX, AudioLines, Globe } from 'lucide-react';
+import { Sun, Moon, Monitor, PanelLeft, SquarePen, Volume2, VolumeX, AudioLines, Globe, ArrowUpCircle } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme';
 import { useStreamingTts } from '@/hooks/useStreamingTts';
 import { Separator } from './ui/separator';
@@ -23,7 +23,7 @@ interface StatusPanelProps {
 }
 
 export function StatusPanel({ showBrowser, onToggleBrowser }: StatusPanelProps) {
-  const { activeSessionId, isDraft, sessions, loadSessions, createSession } = useStore();
+  const { activeSessionId, isDraft, sessions, loadSessions, createSession, updateAvailable, setPendingSettingsTab } = useStore();
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
@@ -185,6 +185,17 @@ export function StatusPanel({ showBrowser, onToggleBrowser }: StatusPanelProps) 
             ) : (
               <VolumeX className="w-3.5 h-3.5" />
             )}
+          </button>
+        )}
+        {updateAvailable && (
+          <button
+            data-no-drag
+            onClick={() => setPendingSettingsTab('about')}
+            className="flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium text-white bg-sky-500 hover:bg-sky-400 transition-colors"
+            title={`发现新版本 ${updateAvailable.version}，点击查看`}
+          >
+            <ArrowUpCircle className="w-3.5 h-3.5" />
+            <span>v{updateAvailable.version}</span>
           </button>
         )}
         <button

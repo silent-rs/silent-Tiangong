@@ -6,6 +6,7 @@ import { SidebarProvider } from '@/components/ui/sidebar';
 import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components/LazyComponents';
 import { BrowserPanel } from '@/components/BrowserPanel';
 import { ensureDesktopNotificationPermission } from '@/utils/desktopNotification';
+import { useUpdateCheck } from '@/hooks/useUpdateCheck';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 
@@ -46,6 +47,7 @@ async function expandWindowForBrowser(lock?: () => void, unlock?: () => void) {
 
 export function MainApp() {
   const { loadSessions, updateFromSnapshot } = useStore();
+  useUpdateCheck();
   const [showBrowser, setShowBrowser] = useState(false);
   const [chatPanelWidth, setChatPanelWidth] = useState(MIN_CHAT_WIDTH);
   const [browserUrl, setBrowserUrl] = useState<string | undefined>(undefined);
