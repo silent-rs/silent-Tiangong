@@ -186,6 +186,14 @@ interface AppState {
   isLoadingSessions: boolean;
   isSending: boolean;
 
+  // 更新检查
+  updateAvailable: null | { version: string; body?: string; date?: string };
+  setUpdateAvailable: (info: null | { version: string; body?: string; date?: string }) => void;
+
+  // 从外部触发打开设置页到指定 tab
+  pendingSettingsTab: string | null;
+  setPendingSettingsTab: (tab: string | null) => void;
+
   // 操作
   loadSessions: () => Promise<void>;
   createSession: () => void;
@@ -229,6 +237,10 @@ export const useStore = create<AppState>((set, get) => ({
   mcpServers: null,
   skills: null,
   isDraft: true,
+  updateAvailable: null,
+  setUpdateAvailable: (info) => set({ updateAvailable: info }),
+  pendingSettingsTab: null,
+  setPendingSettingsTab: (tab) => set({ pendingSettingsTab: tab }),
   reasoningEffort: 'medium',
   reasoningEffortPerSession: {},
   setReasoningEffort: (effort: string) => {
