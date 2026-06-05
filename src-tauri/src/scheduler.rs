@@ -7,6 +7,7 @@ use tiangong_core::core_config::CoreConfigProvider;
 use tiangong_core::permission::TrustMode;
 use tiangong_scheduler::executor::SchedulerContext;
 use tokio::sync::Mutex as AsyncMutex;
+use tracing::debug;
 
 /// Desktop 端调度器执行上下文
 ///
@@ -117,7 +118,7 @@ impl DesktopSchedulerContext {
                         });
                     }
                 }
-                eprintln!("定时任务流消费线程退出：{sid}");
+                debug!(session_id = %sid, "定时任务流消费线程退出");
             })?;
 
         Ok(())

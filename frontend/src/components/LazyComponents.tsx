@@ -49,10 +49,12 @@ export function LazyPlanPanel() {
   );
 }
 
-export function LazyStatusPanel() {
+type StatusPanelProps = React.ComponentProps<typeof StatusPanelComponent>;
+
+export function LazyStatusPanel(props: StatusPanelProps) {
   return (
     <Suspense fallback={null}>
-      <StatusPanel />
+      <StatusPanel {...props} />
     </Suspense>
   );
 }

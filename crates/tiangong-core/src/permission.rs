@@ -292,11 +292,15 @@ pub(crate) fn classify_tool(tool_name: &str) -> PermissionLevel {
     match tool_name {
         // 安全：只读
         "read_file" | "list_dir" | "tree_dir" | "search_code" | "web_fetch" | "current_time"
-        | "get_skill_detail" | "recall_memory" => PermissionLevel::Safe,
+        | "get_skill_detail" | "recall_memory" | "web_browse" | "web_form_extract" => {
+            PermissionLevel::Safe
+        }
         // 标准：文件写入
         "write_file" | "replace_in_file" => PermissionLevel::Standard,
-        // 高级：命令执行
-        "run_command" | "run_shell" => PermissionLevel::Elevated,
+        // 高级：命令执行 + 浏览器操作
+        "run_command" | "run_shell" | "web_form_fill" | "web_click" | "web_load_html" => {
+            PermissionLevel::Elevated
+        }
         // 关键：补丁、后台任务、多媒体
         "apply_patch" | "spawn_task" | "cancel_task" => PermissionLevel::Critical,
         // MCP 工具和未知工具默认为关键
@@ -380,6 +384,16 @@ pub(crate) fn format_call_args_summary(call: &crate::model::ToolCall) -> String 
         && let Some(path) = args.get("path").and_then(Value::as_str)
     {
         return path.to_string();
+    }
+
+    if call.name == "web_form_fill" {
+        let selector = args.get("selector").and_then(Value::as_str).unwrap_or("");
+        let value = args.get("value").and_then(Value::as_str).unwrap_or("");
+        return format!("{selector} = {value}");
+    }
+    if call.name == "web_click" {
+        let selector = args.get("selector").and_then(Value::as_str).unwrap_or("");
+        return format!("click {selector}");
     }
 
     let obj = args.as_object().unwrap();
@@ -493,6 +507,9 @@ fn infer_tool_name_scope(
         "web_fetch" => "network",
         "analyze_attachment" | "generate_image" | "speech_to_text" | "text_to_speech" => "external",
         "run_command" | "run_shell" => "command",
+        "web_browse" | "web_form_extract" | "web_form_fill" | "web_click" | "web_load_html" => {
+            "browser"
+        }
         _ => return (None, summary),
     };
     (Some(scope.to_string()), summary)
@@ -660,9 +677,14 @@ mod tests {
     fn classify_tool_levels() {
         assert_eq!(classify_tool("read_file"), PermissionLevel::Safe);
         assert_eq!(classify_tool("tree_dir"), PermissionLevel::Safe);
+        assert_eq!(classify_tool("web_browse"), PermissionLevel::Safe);
+        assert_eq!(classify_tool("web_form_extract"), PermissionLevel::Safe);
         assert_eq!(classify_tool("write_file"), PermissionLevel::Standard);
         assert_eq!(classify_tool("replace_in_file"), PermissionLevel::Standard);
         assert_eq!(classify_tool("run_command"), PermissionLevel::Elevated);
+        assert_eq!(classify_tool("web_form_fill"), PermissionLevel::Elevated);
+        assert_eq!(classify_tool("web_click"), PermissionLevel::Elevated);
+        assert_eq!(classify_tool("web_load_html"), PermissionLevel::Elevated);
         assert_eq!(classify_tool("apply_patch"), PermissionLevel::Critical);
         assert_eq!(classify_tool("spawn_task"), PermissionLevel::Critical);
         assert_eq!(classify_tool("unknown_tool"), PermissionLevel::Critical);

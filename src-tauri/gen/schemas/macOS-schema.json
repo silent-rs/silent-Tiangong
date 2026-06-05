@@ -2211,16 +2211,166 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "允许使用浏览器面板的全部功能。\n#### This default permission set includes:\n\n- `allow-browser-open`\n- `allow-browser-close`\n- `allow-browser-hide`\n- `allow-browser-set-position`\n- `allow-browser-navigate`\n- `allow-browser-eval`\n- `allow-browser-go-back`\n- `allow-browser-go-forward`\n- `allow-browser-tab-list`\n- `allow-browser-tab-new`\n- `allow-browser-tab-switch`\n- `allow-browser-tab-close`",
+          "type": "string",
+          "const": "browser:default",
+          "markdownDescription": "允许使用浏览器面板的全部功能。\n#### This default permission set includes:\n\n- `allow-browser-open`\n- `allow-browser-close`\n- `allow-browser-hide`\n- `allow-browser-set-position`\n- `allow-browser-navigate`\n- `allow-browser-eval`\n- `allow-browser-go-back`\n- `allow-browser-go-forward`\n- `allow-browser-tab-list`\n- `allow-browser-tab-new`\n- `allow-browser-tab-switch`\n- `allow-browser-tab-close`"
+        },
+        {
+          "description": "Enables the browser_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:allow-browser-close",
+          "markdownDescription": "Enables the browser_close command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the browser_eval command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:allow-browser-eval",
+          "markdownDescription": "Enables the browser_eval command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the browser_go_back command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:allow-browser-go-back",
+          "markdownDescription": "Enables the browser_go_back command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the browser_go_forward command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:allow-browser-go-forward",
+          "markdownDescription": "Enables the browser_go_forward command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the browser_hide command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:allow-browser-hide",
+          "markdownDescription": "Enables the browser_hide command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the browser_navigate command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:allow-browser-navigate",
+          "markdownDescription": "Enables the browser_navigate command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the browser_open command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:allow-browser-open",
+          "markdownDescription": "Enables the browser_open command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the browser_set_position command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:allow-browser-set-position",
+          "markdownDescription": "Enables the browser_set_position command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the browser_tab_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:allow-browser-tab-close",
+          "markdownDescription": "Enables the browser_tab_close command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the browser_tab_list command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:allow-browser-tab-list",
+          "markdownDescription": "Enables the browser_tab_list command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the browser_tab_new command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:allow-browser-tab-new",
+          "markdownDescription": "Enables the browser_tab_new command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the browser_tab_switch command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:allow-browser-tab-switch",
+          "markdownDescription": "Enables the browser_tab_switch command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the browser_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:deny-browser-close",
+          "markdownDescription": "Denies the browser_close command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the browser_eval command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:deny-browser-eval",
+          "markdownDescription": "Denies the browser_eval command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the browser_go_back command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:deny-browser-go-back",
+          "markdownDescription": "Denies the browser_go_back command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the browser_go_forward command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:deny-browser-go-forward",
+          "markdownDescription": "Denies the browser_go_forward command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the browser_hide command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:deny-browser-hide",
+          "markdownDescription": "Denies the browser_hide command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the browser_navigate command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:deny-browser-navigate",
+          "markdownDescription": "Denies the browser_navigate command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the browser_open command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:deny-browser-open",
+          "markdownDescription": "Denies the browser_open command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the browser_set_position command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:deny-browser-set-position",
+          "markdownDescription": "Denies the browser_set_position command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the browser_tab_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:deny-browser-tab-close",
+          "markdownDescription": "Denies the browser_tab_close command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the browser_tab_list command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:deny-browser-tab-list",
+          "markdownDescription": "Denies the browser_tab_list command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the browser_tab_new command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:deny-browser-tab-new",
+          "markdownDescription": "Denies the browser_tab_new command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the browser_tab_switch command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:deny-browser-tab-switch",
+          "markdownDescription": "Denies the browser_tab_switch command without any pre-configured scope."
+        },
+        {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
           "type": "string",
           "const": "core:default",
           "markdownDescription": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`"
         },
         {
-          "description": "Default permissions for the plugin.\n#### This default permission set includes:\n\n- `allow-version`\n- `allow-name`\n- `allow-tauri-version`\n- `allow-identifier`\n- `allow-bundle-type`\n- `allow-register-listener`\n- `allow-remove-listener`",
+          "description": "Default permissions for the plugin.\n#### This default permission set includes:\n\n- `allow-version`\n- `allow-name`\n- `allow-tauri-version`\n- `allow-identifier`\n- `allow-bundle-type`\n- `allow-register-listener`\n- `allow-remove-listener`\n- `allow-supports-multiple-windows`",
           "type": "string",
           "const": "core:app:default",
-          "markdownDescription": "Default permissions for the plugin.\n#### This default permission set includes:\n\n- `allow-version`\n- `allow-name`\n- `allow-tauri-version`\n- `allow-identifier`\n- `allow-bundle-type`\n- `allow-register-listener`\n- `allow-remove-listener`"
+          "markdownDescription": "Default permissions for the plugin.\n#### This default permission set includes:\n\n- `allow-version`\n- `allow-name`\n- `allow-tauri-version`\n- `allow-identifier`\n- `allow-bundle-type`\n- `allow-register-listener`\n- `allow-remove-listener`\n- `allow-supports-multiple-windows`"
         },
         {
           "description": "Enables the app_hide command without any pre-configured scope.",
@@ -2293,6 +2443,12 @@
           "type": "string",
           "const": "core:app:allow-set-dock-visibility",
           "markdownDescription": "Enables the set_dock_visibility command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the supports_multiple_windows command without any pre-configured scope.",
+          "type": "string",
+          "const": "core:app:allow-supports-multiple-windows",
+          "markdownDescription": "Enables the supports_multiple_windows command without any pre-configured scope."
         },
         {
           "description": "Enables the tauri_version command without any pre-configured scope.",
@@ -2377,6 +2533,12 @@
           "type": "string",
           "const": "core:app:deny-set-dock-visibility",
           "markdownDescription": "Denies the set_dock_visibility command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the supports_multiple_windows command without any pre-configured scope.",
+          "type": "string",
+          "const": "core:app:deny-supports-multiple-windows",
+          "markdownDescription": "Denies the supports_multiple_windows command without any pre-configured scope."
         },
         {
           "description": "Denies the tauri_version command without any pre-configured scope.",
@@ -2901,10 +3063,10 @@
           "markdownDescription": "Denies the close command without any pre-configured scope."
         },
         {
-          "description": "Default permissions for the plugin, which enables all commands.\n#### This default permission set includes:\n\n- `allow-new`\n- `allow-get-by-id`\n- `allow-remove-by-id`\n- `allow-set-icon`\n- `allow-set-menu`\n- `allow-set-tooltip`\n- `allow-set-title`\n- `allow-set-visible`\n- `allow-set-temp-dir-path`\n- `allow-set-icon-as-template`\n- `allow-set-show-menu-on-left-click`",
+          "description": "Default permissions for the plugin, which enables all commands.\n#### This default permission set includes:\n\n- `allow-new`\n- `allow-get-by-id`\n- `allow-remove-by-id`\n- `allow-set-icon`\n- `allow-set-menu`\n- `allow-set-tooltip`\n- `allow-set-title`\n- `allow-set-visible`\n- `allow-set-temp-dir-path`\n- `allow-set-icon-as-template`\n- `allow-set-icon-with-as-template`\n- `allow-set-show-menu-on-left-click`",
           "type": "string",
           "const": "core:tray:default",
-          "markdownDescription": "Default permissions for the plugin, which enables all commands.\n#### This default permission set includes:\n\n- `allow-new`\n- `allow-get-by-id`\n- `allow-remove-by-id`\n- `allow-set-icon`\n- `allow-set-menu`\n- `allow-set-tooltip`\n- `allow-set-title`\n- `allow-set-visible`\n- `allow-set-temp-dir-path`\n- `allow-set-icon-as-template`\n- `allow-set-show-menu-on-left-click`"
+          "markdownDescription": "Default permissions for the plugin, which enables all commands.\n#### This default permission set includes:\n\n- `allow-new`\n- `allow-get-by-id`\n- `allow-remove-by-id`\n- `allow-set-icon`\n- `allow-set-menu`\n- `allow-set-tooltip`\n- `allow-set-title`\n- `allow-set-visible`\n- `allow-set-temp-dir-path`\n- `allow-set-icon-as-template`\n- `allow-set-icon-with-as-template`\n- `allow-set-show-menu-on-left-click`"
         },
         {
           "description": "Enables the get_by_id command without any pre-configured scope.",
@@ -2935,6 +3097,12 @@
           "type": "string",
           "const": "core:tray:allow-set-icon-as-template",
           "markdownDescription": "Enables the set_icon_as_template command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_icon_with_as_template command without any pre-configured scope.",
+          "type": "string",
+          "const": "core:tray:allow-set-icon-with-as-template",
+          "markdownDescription": "Enables the set_icon_with_as_template command without any pre-configured scope."
         },
         {
           "description": "Enables the set_menu command without any pre-configured scope.",
@@ -3001,6 +3169,12 @@
           "type": "string",
           "const": "core:tray:deny-set-icon-as-template",
           "markdownDescription": "Denies the set_icon_as_template command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_icon_with_as_template command without any pre-configured scope.",
+          "type": "string",
+          "const": "core:tray:deny-set-icon-with-as-template",
+          "markdownDescription": "Denies the set_icon_with_as_template command without any pre-configured scope."
         },
         {
           "description": "Denies the set_menu command without any pre-configured scope.",
@@ -3261,10 +3435,16 @@
           "markdownDescription": "Denies the webview_size command without any pre-configured scope."
         },
         {
-          "description": "Default permissions for the plugin.\n#### This default permission set includes:\n\n- `allow-get-all-windows`\n- `allow-scale-factor`\n- `allow-inner-position`\n- `allow-outer-position`\n- `allow-inner-size`\n- `allow-outer-size`\n- `allow-is-fullscreen`\n- `allow-is-minimized`\n- `allow-is-maximized`\n- `allow-is-focused`\n- `allow-is-decorated`\n- `allow-is-resizable`\n- `allow-is-maximizable`\n- `allow-is-minimizable`\n- `allow-is-closable`\n- `allow-is-visible`\n- `allow-is-enabled`\n- `allow-title`\n- `allow-current-monitor`\n- `allow-primary-monitor`\n- `allow-monitor-from-point`\n- `allow-available-monitors`\n- `allow-cursor-position`\n- `allow-theme`\n- `allow-is-always-on-top`\n- `allow-internal-toggle-maximize`",
+          "description": "Default permissions for the plugin.\n#### This default permission set includes:\n\n- `allow-get-all-windows`\n- `allow-scale-factor`\n- `allow-inner-position`\n- `allow-outer-position`\n- `allow-inner-size`\n- `allow-outer-size`\n- `allow-is-fullscreen`\n- `allow-is-minimized`\n- `allow-is-maximized`\n- `allow-is-focused`\n- `allow-is-decorated`\n- `allow-is-resizable`\n- `allow-is-maximizable`\n- `allow-is-minimizable`\n- `allow-is-closable`\n- `allow-is-visible`\n- `allow-is-enabled`\n- `allow-title`\n- `allow-current-monitor`\n- `allow-primary-monitor`\n- `allow-monitor-from-point`\n- `allow-available-monitors`\n- `allow-cursor-position`\n- `allow-theme`\n- `allow-is-always-on-top`\n- `allow-activity-name`\n- `allow-scene-identifier`\n- `allow-internal-toggle-maximize`",
           "type": "string",
           "const": "core:window:default",
-          "markdownDescription": "Default permissions for the plugin.\n#### This default permission set includes:\n\n- `allow-get-all-windows`\n- `allow-scale-factor`\n- `allow-inner-position`\n- `allow-outer-position`\n- `allow-inner-size`\n- `allow-outer-size`\n- `allow-is-fullscreen`\n- `allow-is-minimized`\n- `allow-is-maximized`\n- `allow-is-focused`\n- `allow-is-decorated`\n- `allow-is-resizable`\n- `allow-is-maximizable`\n- `allow-is-minimizable`\n- `allow-is-closable`\n- `allow-is-visible`\n- `allow-is-enabled`\n- `allow-title`\n- `allow-current-monitor`\n- `allow-primary-monitor`\n- `allow-monitor-from-point`\n- `allow-available-monitors`\n- `allow-cursor-position`\n- `allow-theme`\n- `allow-is-always-on-top`\n- `allow-internal-toggle-maximize`"
+          "markdownDescription": "Default permissions for the plugin.\n#### This default permission set includes:\n\n- `allow-get-all-windows`\n- `allow-scale-factor`\n- `allow-inner-position`\n- `allow-outer-position`\n- `allow-inner-size`\n- `allow-outer-size`\n- `allow-is-fullscreen`\n- `allow-is-minimized`\n- `allow-is-maximized`\n- `allow-is-focused`\n- `allow-is-decorated`\n- `allow-is-resizable`\n- `allow-is-maximizable`\n- `allow-is-minimizable`\n- `allow-is-closable`\n- `allow-is-visible`\n- `allow-is-enabled`\n- `allow-title`\n- `allow-current-monitor`\n- `allow-primary-monitor`\n- `allow-monitor-from-point`\n- `allow-available-monitors`\n- `allow-cursor-position`\n- `allow-theme`\n- `allow-is-always-on-top`\n- `allow-activity-name`\n- `allow-scene-identifier`\n- `allow-internal-toggle-maximize`"
+        },
+        {
+          "description": "Enables the activity_name command without any pre-configured scope.",
+          "type": "string",
+          "const": "core:window:allow-activity-name",
+          "markdownDescription": "Enables the activity_name command without any pre-configured scope."
         },
         {
           "description": "Enables the available_monitors command without any pre-configured scope.",
@@ -3457,6 +3637,12 @@
           "type": "string",
           "const": "core:window:allow-scale-factor",
           "markdownDescription": "Enables the scale_factor command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the scene_identifier command without any pre-configured scope.",
+          "type": "string",
+          "const": "core:window:allow-scene-identifier",
+          "markdownDescription": "Enables the scene_identifier command without any pre-configured scope."
         },
         {
           "description": "Enables the set_always_on_bottom command without any pre-configured scope.",
@@ -3723,6 +3909,12 @@
           "markdownDescription": "Enables the unminimize command without any pre-configured scope."
         },
         {
+          "description": "Denies the activity_name command without any pre-configured scope.",
+          "type": "string",
+          "const": "core:window:deny-activity-name",
+          "markdownDescription": "Denies the activity_name command without any pre-configured scope."
+        },
+        {
           "description": "Denies the available_monitors command without any pre-configured scope.",
           "type": "string",
           "const": "core:window:deny-available-monitors",
@@ -3913,6 +4105,12 @@
           "type": "string",
           "const": "core:window:deny-scale-factor",
           "markdownDescription": "Denies the scale_factor command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the scene_identifier command without any pre-configured scope.",
+          "type": "string",
+          "const": "core:window:deny-scene-identifier",
+          "markdownDescription": "Denies the scene_identifier command without any pre-configured scope."
         },
         {
           "description": "Denies the set_always_on_bottom command without any pre-configured scope.",

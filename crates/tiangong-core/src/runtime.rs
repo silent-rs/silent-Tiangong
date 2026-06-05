@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use crate::agent_config::{AgentConfig, McpConfig};
 use crate::agents::execution_mcp_agent::{
@@ -7,11 +8,13 @@ use crate::agents::execution_mcp_agent::{
 };
 use crate::agents::execution_tool_agent::build_tool_call_from_function;
 use crate::app_state::ManagementCommand;
+use crate::browser_trait::PageFetcher;
 use crate::model::ToolSpec;
 use crate::model::{ModelClient, SingleProviderClient, TokenUsage, ToolCall};
 use crate::models_config::{ModelCapability, ModelsConfig};
 use crate::planner::TaskPlan;
 use crate::tool::{LocalToolExecutor, ToolExecutionRecord, ToolExecutor, ToolResult};
+use crate::tool_override::ToolOverrideHandler;
 
 pub use tiangong_types::RunStatus;
 
@@ -59,7 +62,7 @@ pub struct TurnExecution {
     pub llm_calls: Vec<crate::session::LlmCallRecord>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RuntimeEngine {
     client: SingleProviderClient,
     /// 轻量级文本模型客户端（标题生成等简单任务，未配置时为 None，回退到 client）
@@ -72,6 +75,31 @@ pub struct RuntimeEngine {
     models_config: ModelsConfig,
     core_config: Option<crate::core_config::CoreConfig>,
     permission_gate: crate::permission::PermissionGate,
+    /// 浏览器页面获取能力（GUI 模式下注入）
+    page_fetcher: Arc<Mutex<Option<Arc<dyn PageFetcher>>>>,
+    /// 工具覆盖处理器（替代硬编码的工具名拦截）
+    tool_overrides: Arc<Mutex<HashMap<String, Arc<dyn ToolOverrideHandler>>>>,
+}
+
+impl std::fmt::Debug for RuntimeEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeEngine")
+            .field("client", &self.client)
+            .field("context_limit", &self.context_limit)
+            .field(
+                "page_fetcher",
+                &self
+                    .page_fetcher
+                    .lock()
+                    .map(|g| g.is_some())
+                    .unwrap_or(false),
+            )
+            .field(
+                "tool_overrides",
+                &self.tool_overrides.lock().map(|g| g.len()).unwrap_or(0),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl RuntimeEngine {
@@ -95,6 +123,8 @@ impl RuntimeEngine {
             models_config: ModelsConfig::default(),
             core_config: None,
             permission_gate,
+            page_fetcher: Arc::new(Mutex::new(None)),
+            tool_overrides: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -123,6 +153,8 @@ impl RuntimeEngine {
             models_config: ModelsConfig::default(),
             core_config: None,
             permission_gate,
+            page_fetcher: Arc::new(Mutex::new(None)),
+            tool_overrides: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -181,6 +213,33 @@ impl RuntimeEngine {
     /// 获取权限网关引用
     pub fn permission_gate(&self) -> &crate::permission::PermissionGate {
         &self.permission_gate
+    }
+
+    /// 注入页面获取能力（GUI 模式下由 Tauri Plugin 提供）
+    pub fn set_page_fetcher(&self, fetcher: Arc<dyn PageFetcher>) {
+        if let Ok(mut guard) = self.page_fetcher.lock() {
+            *guard = Some(fetcher);
+        }
+    }
+
+    /// 获取 page_fetcher 的克隆（用于 runtime 重建时保留）
+    pub fn page_fetcher(&self) -> Option<Arc<dyn PageFetcher>> {
+        self.page_fetcher.lock().ok()?.clone()
+    }
+
+    /// 注册工具覆盖处理器
+    pub fn register_tool_override(&self, name: &str, handler: Arc<dyn ToolOverrideHandler>) {
+        if let Ok(mut guard) = self.tool_overrides.lock() {
+            guard.insert(name.to_string(), handler);
+        }
+    }
+
+    /// 获取所有已注册的工具覆盖（用于 runtime 重建时保留）
+    pub fn tool_overrides(&self) -> HashMap<String, Arc<dyn ToolOverrideHandler>> {
+        self.tool_overrides
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     pub fn provider_label(&self) -> String {
@@ -290,6 +349,17 @@ impl RuntimeEngine {
                     execution: None,
                 },
             };
+        }
+
+        // 工具覆盖（Plugin 注入的浏览器获取等能力优先于默认行为）
+        if let Some(handler) = self
+            .tool_overrides
+            .lock()
+            .ok()
+            .and_then(|g| g.get(&call.name).cloned())
+            && let Some(result) = handler.handle(call).await
+        {
+            return result;
         }
 
         // 本地工具

@@ -1,4 +1,5 @@
 import * as React from "react"
+import { createPortal } from "react-dom"
 import { cn } from "@/lib/utils"
 
 interface DialogProps {
@@ -63,8 +64,8 @@ const DialogContent = React.forwardRef<
 
   if (!context.open) return null
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
+  return createPortal(
+    <div className="fixed inset-0 z-[70] flex items-center justify-center">
       <div className="fixed inset-0 bg-black/50" />
       <div
         ref={ref}
@@ -85,7 +86,8 @@ const DialogContent = React.forwardRef<
         )}
         {children}
       </div>
-    </div>
+    </div>,
+    document.body
   )
 })
 DialogContent.displayName = "DialogContent"

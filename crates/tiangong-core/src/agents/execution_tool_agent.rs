@@ -138,6 +138,66 @@ pub(crate) fn basic_file_function_tools() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "web_browse".to_string(),
+            description: "读取天工内嵌浏览器面板当前显示的页面内容（标题、URL、正文）。当用户询问浏览器当前页面、让你查看内嵌浏览器内容时使用此工具，不要使用 Playwright。注意：这是用户可见的嵌入式浏览器，与 Playwright headless 浏览器完全独立。".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "最多返回字符数，默认 12000",
+                        "minimum": 1,
+                        "maximum": 50000
+                    }
+                },
+                "required": []
+            }),
+        },
+        ToolSpec {
+            name: "web_form_extract".to_string(),
+            description: "提取天工内嵌浏览器当前页面中所有表单的字段信息。支持原生 HTML 表单和 UI 库自定义组件（Ant Design Select/DatePicker、Element Plus Select/DatePicker 等）。返回结构化的字段列表（含框架检测信息），供 web_form_fill 填写。当需要帮用户填写网页表单时，先调用此工具了解页面有哪些可填写字段。".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
+        },
+        ToolSpec {
+            name: "web_form_fill".to_string(),
+            description: "在天工内嵌浏览器当前页面中填写指定表单字段。支持原生 HTML 控件（input/select/textarea）和 UI 库自定义组件（Ant Design Select、Element Plus Select、DatePicker 等）。使用 selector 定位字段（从 web_form_extract 结果中获取 selector），自动采用最佳填写策略。填写前建议先调用 web_form_extract 了解页面表单结构。".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "selector": { "type": "string", "description": "表单字段的 CSS 选择器（从 web_form_extract 结果中获取）" },
+                    "value": { "type": "string", "description": "要填写的值" },
+                    "strategy": { "type": "string", "enum": ["auto", "native", "keyboard", "paste"], "description": "填写策略，默认 auto（自动选择最佳策略）" }
+                },
+                "required": ["selector", "value"]
+            }),
+        },
+        ToolSpec {
+            name: "web_click".to_string(),
+            description: "点击天工内嵌浏览器当前页面中的指定元素（按钮、链接等）。使用 CSS 选择器定位元素，元素会先滚动到可视区域再点击。常用于提交按钮、导航链接等交互。".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "selector": { "type": "string", "description": "要点击的元素的 CSS 选择器" }
+                },
+                "required": ["selector"]
+            }),
+        },
+        ToolSpec {
+            name: "web_load_html".to_string(),
+            description: "在天工内嵌浏览器中加载 HTML 内容。适用于预览本地 HTML 文件、展示生成的网页内容等场景。加载后可继续使用 web_browse 等工具交互。".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "html": { "type": "string", "description": "要加载的 HTML 内容（完整的 HTML 字符串）" }
+                },
+                "required": ["html"]
+            }),
+        },
+        ToolSpec {
             name: "write_file".to_string(),
             description: "写入文件内容（支持覆盖或追加）".to_string(),
             input_schema: serde_json::json!({

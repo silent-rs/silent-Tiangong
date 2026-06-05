@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-browser-eval"
+description = "Enables the browser_eval command without any pre-configured scope."
+commands.allow = ["browser_eval"]
+
+[[permission]]
+identifier = "deny-browser-eval"
+description = "Denies the browser_eval command without any pre-configured scope."
+commands.deny = ["browser_eval"]
