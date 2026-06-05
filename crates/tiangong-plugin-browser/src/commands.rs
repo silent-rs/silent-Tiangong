@@ -1,6 +1,6 @@
 use tauri::{AppHandle, State};
 
-use crate::types::BrowserTab;
+use crate::types::{AnnotationExtractResult, BrowserTab};
 use crate::BrowserPluginState;
 
 #[tauri::command]
@@ -90,4 +90,20 @@ pub async fn browser_tab_close(
     state: State<'_, BrowserPluginState>,
 ) -> Result<(), String> {
     state.manager.tab_close(&tab_id)
+}
+
+#[tauri::command]
+pub async fn browser_annotation_extract(
+    state: State<'_, BrowserPluginState>,
+) -> Result<AnnotationExtractResult, String> {
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    state
+        .cmd_tx
+        .send(crate::types::BrowserCommand::AnnotationExtract { response_tx })
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::time::timeout(std::time::Duration::from_secs(10), response_rx)
+        .await
+        .map_err(|_| "提取批注元素超时".to_string())?
+        .map_err(|_| "提取批注元素响应失败".to_string())
 }

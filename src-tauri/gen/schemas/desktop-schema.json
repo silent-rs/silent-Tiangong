@@ -2211,10 +2211,16 @@
       "description": "Permission identifier",
       "oneOf": [
         {
-          "description": "允许使用浏览器面板的全部功能。\n#### This default permission set includes:\n\n- `allow-browser-open`\n- `allow-browser-close`\n- `allow-browser-hide`\n- `allow-browser-set-position`\n- `allow-browser-navigate`\n- `allow-browser-eval`\n- `allow-browser-go-back`\n- `allow-browser-go-forward`\n- `allow-browser-tab-list`\n- `allow-browser-tab-new`\n- `allow-browser-tab-switch`\n- `allow-browser-tab-close`",
+          "description": "允许使用浏览器面板的全部功能。\n#### This default permission set includes:\n\n- `allow-browser-open`\n- `allow-browser-close`\n- `allow-browser-hide`\n- `allow-browser-set-position`\n- `allow-browser-navigate`\n- `allow-browser-eval`\n- `allow-browser-go-back`\n- `allow-browser-go-forward`\n- `allow-browser-tab-list`\n- `allow-browser-tab-new`\n- `allow-browser-tab-switch`\n- `allow-browser-tab-close`\n- `allow-browser-annotation-extract`",
           "type": "string",
           "const": "browser:default",
-          "markdownDescription": "允许使用浏览器面板的全部功能。\n#### This default permission set includes:\n\n- `allow-browser-open`\n- `allow-browser-close`\n- `allow-browser-hide`\n- `allow-browser-set-position`\n- `allow-browser-navigate`\n- `allow-browser-eval`\n- `allow-browser-go-back`\n- `allow-browser-go-forward`\n- `allow-browser-tab-list`\n- `allow-browser-tab-new`\n- `allow-browser-tab-switch`\n- `allow-browser-tab-close`"
+          "markdownDescription": "允许使用浏览器面板的全部功能。\n#### This default permission set includes:\n\n- `allow-browser-open`\n- `allow-browser-close`\n- `allow-browser-hide`\n- `allow-browser-set-position`\n- `allow-browser-navigate`\n- `allow-browser-eval`\n- `allow-browser-go-back`\n- `allow-browser-go-forward`\n- `allow-browser-tab-list`\n- `allow-browser-tab-new`\n- `allow-browser-tab-switch`\n- `allow-browser-tab-close`\n- `allow-browser-annotation-extract`"
+        },
+        {
+          "description": "Enables the browser_annotation_extract command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:allow-browser-annotation-extract",
+          "markdownDescription": "Enables the browser_annotation_extract command without any pre-configured scope."
         },
         {
           "description": "Enables the browser_close command without any pre-configured scope.",
@@ -2287,6 +2293,12 @@
           "type": "string",
           "const": "browser:allow-browser-tab-switch",
           "markdownDescription": "Enables the browser_tab_switch command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the browser_annotation_extract command without any pre-configured scope.",
+          "type": "string",
+          "const": "browser:deny-browser-annotation-extract",
+          "markdownDescription": "Denies the browser_annotation_extract command without any pre-configured scope."
         },
         {
           "description": "Denies the browser_close command without any pre-configured scope.",

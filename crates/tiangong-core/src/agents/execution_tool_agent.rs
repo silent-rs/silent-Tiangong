@@ -168,7 +168,7 @@ pub(crate) fn basic_file_function_tools() -> Vec<ToolSpec> {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "selector": { "type": "string", "description": "表单字段的 CSS 选择器（从 web_form_extract 结果中获取）" },
+                    "selector": { "type": "string", "description": "字段定位表达式，支持：CSS 选择器（如 #username）、文本匹配（如 用户名）、aria:标签（如 aria:用户名）、批注矩形（如 rect:100,200,300,50）" },
                     "value": { "type": "string", "description": "要填写的值" },
                     "strategy": { "type": "string", "enum": ["auto", "native", "keyboard", "paste"], "description": "填写策略，默认 auto（自动选择最佳策略）" }
                 },
@@ -177,11 +177,11 @@ pub(crate) fn basic_file_function_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "web_click".to_string(),
-            description: "点击天工内嵌浏览器当前页面中的指定元素（按钮、链接等）。使用 CSS 选择器定位元素，元素会先滚动到可视区域再点击。常用于提交按钮、导航链接等交互。".to_string(),
+            description: "点击天工内嵌浏览器当前页面中的指定元素（按钮、链接等）。支持智能定位：CSS 选择器、文本内容、ARIA 标签、批注矩形区域。元素会先滚动到可视区域再点击。常用于提交按钮、导航链接等交互。".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "selector": { "type": "string", "description": "要点击的元素的 CSS 选择器" }
+                    "selector": { "type": "string", "description": "元素定位表达式，支持：CSS 选择器（如 #btn-submit）、文本匹配（如 提交）、aria:标签（如 aria:确认）、批注矩形（如 rect:100,200,300,50）" }
                 },
                 "required": ["selector"]
             }),

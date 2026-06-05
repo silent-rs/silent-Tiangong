@@ -360,7 +360,7 @@
         },
 
         fillField: function(selector, value, strategy) {
-            var el = document.querySelector(selector);
+            var el = this.locateElement(selector);
             if (!el) return { ok: false, error: '元素未找到: ' + selector };
 
             // select 特殊处理
@@ -555,8 +555,193 @@
             return { ok: true, strategy: 'el-datepicker' };
         },
 
+        // 智能元素定位：根据多种格式自动选择定位策略
+        locateElement: function(selector) {
+            if (!selector) return null;
+            selector = selector.trim();
+
+            // 策略 1: rect:x,y,w,h — 批注矩形区域定位
+            if (selector.indexOf('rect:') === 0) {
+                var parts = selector.substring(5).split(',').map(Number);
+                if (parts.length >= 4 && parts.every(function(n) { return !isNaN(n); })) {
+                    return this._findElementInRect(parts[0], parts[1], parts[2], parts[3]);
+                }
+                return null;
+            }
+
+            // 策略 2: aria:label — ARIA 属性定位
+            if (selector.indexOf('aria:') === 0) {
+                var ariaVal = selector.substring(5);
+                var el = document.querySelector('[aria-label*="' + ariaVal + '"]');
+                if (el) return el;
+                el = document.querySelector('[role="' + ariaVal + '"]');
+                if (el) return el;
+                el = document.querySelector('[aria-roledescription*="' + ariaVal + '"]');
+                return el || null;
+            }
+
+            // 策略 3: CSS selector 尝试（#id, .class, tag, [attr], 组合选择器）
+            try {
+                var cssEl = document.querySelector(selector);
+                if (cssEl) return cssEl;
+            } catch(e) {
+                // 不是有效 CSS selector，继续其他策略
+            }
+
+            // 策略 4: XPath 文本匹配 — //*[contains(text(), '...')]
+            var xpathResult = document.evaluate(
+                './/*[contains(text(), ' + this._xpathLiteral(selector) + ')]',
+                document.body,
+                null,
+                XPathResult.FIRST_ORDERED_NODE_TYPE,
+                null
+            );
+            if (xpathResult.singleNodeValue) return xpathResult.singleNodeValue;
+
+            // 策略 5: 按钮文本模糊匹配
+            var buttons = document.querySelectorAll('button, a, [role="button"], input[type="submit"]');
+            var lowerSelector = selector.toLowerCase();
+            for (var bi = 0; bi < buttons.length; bi++) {
+                var btnText = (buttons[bi].textContent || '').trim().toLowerCase();
+                var btnTitle = (buttons[bi].getAttribute('title') || '').toLowerCase();
+                var btnAria = (buttons[bi].getAttribute('aria-label') || '').toLowerCase();
+                if (btnText.indexOf(lowerSelector) >= 0 ||
+                    btnTitle.indexOf(lowerSelector) >= 0 ||
+                    btnAria.indexOf(lowerSelector) >= 0) {
+                    return buttons[bi];
+                }
+            }
+
+            return null;
+        },
+
+        _xpathLiteral: function(s) {
+            if (s.indexOf('"') === -1) return '"' + s + '"';
+            if (s.indexOf("'") === -1) return "'" + s + "'";
+            var parts = s.split('"');
+            return 'concat("' + parts.join('", \'"\', "') + '")';
+        },
+
+        _findElementInRect: function(x, y, w, h) {
+            var candidates = [];
+            var allEls = document.querySelectorAll('*');
+            for (var i = 0; i < allEls.length; i++) {
+                var el = allEls[i];
+                var r = el.getBoundingClientRect();
+                if (r.width === 0 || r.height === 0) continue;
+                // 计算重叠面积
+                var ox = Math.max(0, Math.min(x + w, r.left + r.width) - Math.max(x, r.left));
+                var oy = Math.max(0, Math.min(y + h, r.top + r.height) - Math.max(y, r.top));
+                var overlap = ox * oy;
+                if (overlap > 0) {
+                    candidates.push({ el: el, overlap: overlap, area: r.width * r.height });
+                }
+            }
+            if (candidates.length === 0) return null;
+            // 按重叠率排序，优先选择重叠比高且面积适中的元素
+            candidates.sort(function(a, b) {
+                var ratioA = a.overlap / Math.max(a.area, 1);
+                var ratioB = b.overlap / Math.max(b.area, 1);
+                return ratioB - ratioA;
+            });
+            // 跳过过大的容器（body, html 等），取第一个有意义的元素
+            for (var ci = 0; ci < candidates.length; ci++) {
+                var tag = candidates[ci].el.tagName.toLowerCase();
+                if (tag !== 'body' && tag !== 'html' && candidates[ci].area < (w * h * 10)) {
+                    return candidates[ci].el;
+                }
+            }
+            return candidates[0].el;
+        },
+
+        // 根据元素生成 CSS selector
+        generateSelector: function(el) {
+            if (!el) return '';
+            if (el.id) return '#' + el.id.replace(/([^\w-])/g, '\\$1');
+            // 尝试 name 属性
+            if (el.name) return '[name="' + el.name + '"]';
+            // 向上生成路径
+            var parts = [];
+            var cur = el;
+            while (cur && cur !== document.body) {
+                var seg = cur.tagName.toLowerCase();
+                if (cur.id) {
+                    seg = '#' + cur.id.replace(/([^\w-])/g, '\\$1');
+                    parts.unshift(seg);
+                    break;
+                }
+                // 同级同名元素中排第几
+                if (cur.parentElement) {
+                    var siblings = cur.parentElement.children;
+                    var sameTag = [];
+                    for (var i = 0; i < siblings.length; i++) {
+                        if (siblings[i].tagName === cur.tagName) sameTag.push(siblings[i]);
+                    }
+                    if (sameTag.length > 1) {
+                        var idx = sameTag.indexOf(cur) + 1;
+                        seg += ':nth-of-type(' + idx + ')';
+                    }
+                }
+                parts.unshift(seg);
+                cur = cur.parentElement;
+            }
+            return parts.join(' > ');
+        },
+
+        // 提取矩形区域内的 DOM 元素信息
+        extractElementsInRect: function(x, y, w, h) {
+            var results = [];
+            var allEls = document.querySelectorAll('*');
+            for (var i = 0; i < allEls.length; i++) {
+                var el = allEls[i];
+                var r = el.getBoundingClientRect();
+                if (r.width === 0 || r.height === 0) continue;
+                var ox = Math.max(0, Math.min(x + w, r.left + r.width) - Math.max(x, r.left));
+                var oy = Math.max(0, Math.min(y + h, r.top + r.height) - Math.max(y, r.top));
+                var overlap = ox * oy;
+                if (overlap === 0) continue;
+                var tag = el.tagName.toLowerCase();
+                // 跳过无意义元素
+                if (tag === 'html' || tag === 'body' || tag === 'head' || tag === 'script' || tag === 'style') continue;
+                var overlapRatio = overlap / (r.width * r.height);
+                if (overlapRatio < 0.5) continue;
+                var text = (el.textContent || '').trim();
+                if (text.length > 200) text = text.substring(0, 200) + '...';
+                // 收集关键属性
+                var attrs = {};
+                var importantAttrs = ['id', 'class', 'name', 'type', 'href', 'src', 'placeholder',
+                    'aria-label', 'aria-role', 'role', 'title', 'alt', 'value', 'data-testid'];
+                for (var ai = 0; ai < importantAttrs.length; ai++) {
+                    var val = el.getAttribute(importantAttrs[ai]);
+                    if (val) attrs[importantAttrs[ai]] = val;
+                }
+                results.push({
+                    tag: tag,
+                    text: text,
+                    attributes: attrs,
+                    selector: this.generateSelector(el),
+                    rect: { x: Math.round(r.left), y: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) },
+                    overlapRatio: Math.round(overlapRatio * 100) / 100,
+                    area: Math.round(r.width * r.height)
+                });
+            }
+            // 按面积从小到大排序（小面积 = 更精确的元素）
+            results.sort(function(a, b) { return a.area - b.area; });
+            // 去重：如果父元素和子元素重叠比相同，保留子元素
+            var deduped = [];
+            var seen = {};
+            for (var ri = 0; ri < results.length; ri++) {
+                var key = results[ri].selector;
+                if (!seen[key]) {
+                    seen[key] = true;
+                    deduped.push(results[ri]);
+                }
+            }
+            return deduped.slice(0, 20);
+        },
+
         clickElement: function(selector) {
-            var el = document.querySelector(selector);
+            var el = this.locateElement(selector);
             if (!el) return { ok: false, error: '元素未找到: ' + selector };
             el.scrollIntoView({ block: 'center', behavior: 'instant' });
             var rect = el.getBoundingClientRect();
@@ -614,6 +799,23 @@
 
             getAnnotations: function() {
                 return { annotations: this._annotations, count: this._annotations.length };
+            },
+
+            extractAnnotatedElements: function() {
+                var bridge = window.__tiangong_bridge;
+                if (!bridge) return { elements: [], count: 0 };
+                var allElements = [];
+                for (var i = 0; i < this._annotations.length; i++) {
+                    var a = this._annotations[i];
+                    if (a.type !== 'rect') continue;
+                    var elements = bridge.extractElementsInRect(a.x, a.y, a.width, a.height);
+                    allElements.push({
+                        annotationIndex: i,
+                        rect: { x: a.x, y: a.y, width: a.width, height: a.height },
+                        elements: elements
+                    });
+                }
+                return { elements: allElements, count: allElements.length };
             },
 
             _ensureCanvas: function() {
@@ -696,6 +898,14 @@
                     annotation.y2 = e.clientY;
                 }
                 if (annotation.width > 5 || annotation.height > 5 || annotation.x1 !== undefined) {
+                    // 自动提取矩形区域内的 DOM 元素信息
+                    if (annotation.type === 'rect' && window.__tiangong_bridge) {
+                        try {
+                            annotation.elements = window.__tiangong_bridge.extractElementsInRect(
+                                annotation.x, annotation.y, annotation.width, annotation.height
+                            );
+                        } catch(ex) {}
+                    }
                     this._annotations.push(annotation);
                 }
                 this._render();

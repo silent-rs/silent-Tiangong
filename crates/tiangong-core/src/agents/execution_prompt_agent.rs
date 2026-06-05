@@ -89,6 +89,8 @@ pub(crate) fn build_step_execution_prompt(
 15. 当工具返回成功输出时，应先判断是否已满足用户请求；若仅是中间结果，调用 `mark_step_completed(continue_execution=true)` 并提供下一步。
 16. 当用户要求创建或安装 Skill 时，使用 `write_file` 将文件写入 Skill 目录（{skills_dir}/<skill-id>/）。每个 Skill 必须包含 skill.toml（清单）和 SKILL.md（入口文档），可选包含脚本等附加文件。skill.toml 格式：id（小写字母数字短横线）、name（显示名）、version、entry="SKILL.md"、available=true、[source] type="agent"、[requires] mcp=[]、[permissions]（fs_read/fs_write/cmd_exec/net 按需声明）。创建完成后告知用户刷新 Skill 列表即可使用。
 17. 当用户要求用浏览器打开页面或本地 HTML 文件时，必须使用 `web_fetch`（传入 file:// 路径或 URL），不要使用 `run_shell` 调用系统浏览器（如 open、xdg-open）。
+18. 浏览器元素定位支持多种格式：CSS 选择器（#id、.class、tag）、文本匹配（直接传入按钮或元素文本）、aria:标签（如 aria:提交）、批注矩形（rect:x,y,w,h）。优先使用最精确的定位方式。
+19. 当页面有用户批注时，`web_browse` 返回的内容会自动包含批注框选区域的元素信息（标签、文本、属性、CSS 选择器），无需额外调用其他工具。
 
 用户输入：
 {user_input}

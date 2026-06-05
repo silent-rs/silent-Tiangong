@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
@@ -54,6 +56,10 @@ pub enum BrowserCommand {
     TabSwitch { tab_id: String },
     /// 关闭标签
     TabClose { tab_id: String },
+    /// 提取批注区域的元素信息
+    AnnotationExtract {
+        response_tx: oneshot::Sender<AnnotationExtractResult>,
+    },
 }
 
 /// 浏览器响应
@@ -228,4 +234,40 @@ impl From<ClickElementResult> for tiangong_core::browser_trait::ClickElementResu
             error: r.error,
         }
     }
+}
+
+/// 批注矩形区域信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnnotationRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// 提取到的元素信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtractedElement {
+    pub tag: String,
+    pub text: String,
+    pub attributes: HashMap<String, String>,
+    pub selector: String,
+    pub rect: AnnotationRect,
+    pub overlap_ratio: f64,
+    pub area: f64,
+}
+
+/// 单个批注区域的提取结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnnotationRegionResult {
+    pub annotation_index: usize,
+    pub rect: AnnotationRect,
+    pub elements: Vec<ExtractedElement>,
+}
+
+/// 批注元素提取结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnnotationExtractResult {
+    pub elements: Vec<AnnotationRegionResult>,
+    pub count: usize,
 }

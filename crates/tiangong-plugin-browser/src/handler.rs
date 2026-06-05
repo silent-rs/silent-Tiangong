@@ -6,8 +6,8 @@ use tracing::warn;
 
 use crate::manager::{default_browser_rect, BrowserManager, BrowserState};
 use crate::types::{
-    BrowserCommand, BrowserPageSnapshot, BrowserResponse, ClickElementResult, FillFieldResult,
-    FormExtractResult, PageStatus,
+    AnnotationExtractResult, BrowserCommand, BrowserPageSnapshot, BrowserResponse,
+    ClickElementResult, FillFieldResult, FormExtractResult, PageStatus,
 };
 
 /// 浏览器命令处理循环
@@ -293,6 +293,28 @@ pub async fn browser_command_handler(
                     }
                 })
                 .await;
+            }
+            BrowserCommand::AnnotationExtract { response_tx } => {
+                let manager = BrowserManager {
+                    state: browser_state.clone(),
+                };
+                let result = tokio::task::spawn_blocking(move || {
+                    manager
+                        .eval_with_result(
+                            "window.__tiangong_bridge.annotation.extractAnnotatedElements()",
+                        )
+                        .and_then(|raw| serde_json::from_str::<AnnotationExtractResult>(&raw).ok())
+                        .unwrap_or(AnnotationExtractResult {
+                            elements: vec![],
+                            count: 0,
+                        })
+                })
+                .await
+                .unwrap_or(AnnotationExtractResult {
+                    elements: vec![],
+                    count: 0,
+                });
+                let _ = response_tx.send(result);
             }
         }
     }
