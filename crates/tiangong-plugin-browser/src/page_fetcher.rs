@@ -306,28 +306,30 @@ impl BrowserToolOverride {
                     });
                 }
             };
-            let summary = if result.ok {
-                format!("浏览器获取成功：{}", result.title)
-            } else {
-                format!(
-                    "浏览器获取失败：{}",
-                    result.error.clone().unwrap_or_default()
-                )
-            };
+            if !result.ok {
+                return Some(tiangong_core::tool::ToolResult {
+                    ok: false,
+                    summary: format!(
+                        "浏览器获取失败：{}",
+                        result.error.clone().unwrap_or_default()
+                    ),
+                    stdout: String::new(),
+                    stderr: result.error.unwrap_or_default(),
+                    exit_code: 1,
+                    execution: None,
+                });
+            }
+            // 桌面模式：浏览器已导航到目标 URL，页面内容由 observe_page 自动推送。
+            // 只返回摘要信息，避免与浏览器推送数据重复。
             Some(tiangong_core::tool::ToolResult {
-                ok: result.ok,
-                summary,
-                stdout: if result.ok {
-                    result.content
-                } else {
-                    String::new()
-                },
-                stderr: if result.ok {
-                    String::new()
-                } else {
-                    result.error.unwrap_or_default()
-                },
-                exit_code: if result.ok { 0 } else { 1 },
+                ok: true,
+                summary: format!("浏览器已打开：{}", result.title),
+                stdout: format!(
+                    "已在浏览器中打开页面\n标题：{}\nURL：{}\n\n页面内容将通过浏览器自动推送。",
+                    result.title, result.final_url
+                ),
+                stderr: String::new(),
+                exit_code: 0,
                 execution: None,
             })
         })
