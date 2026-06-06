@@ -11,8 +11,9 @@ use crate::types::{
     ClickElementResult, FillFieldResult, FormExtractResult, PageStatus,
 };
 
-/// 轮询等待页面内容变化（mainText 改变），返回 after-digest。
-/// 如果超时未变化，返回最后一次捕获的 digest。
+/// 轮询等待页面内容变化并稳定（mainText 不再改变），返回最终的 after-digest。
+/// 点击后页面可能经历多轮变化（对话框关闭 → AJAX 返回 → 新内容渲染），
+/// 需要等内容稳定后才返回，否则可能只捕获到中间状态。
 fn wait_for_content_change(
     manager: &BrowserManager,
     before_digest: &Option<String>,
@@ -25,31 +26,45 @@ fn wait_for_content_change(
     });
 
     let start = std::time::Instant::now();
-    let mut last = None;
+    let mut last_digest: Option<String> = None;
+    let mut prev_main = before_main.clone();
+    let mut any_change = false;
+    let mut stable_count: u32 = 0;
 
-    // 先等待一个最小间隔让点击事件处理完成
-    std::thread::sleep(Duration::from_millis(400));
+    // 先等待让点击事件传播完成
+    std::thread::sleep(Duration::from_millis(600));
 
     loop {
-        if let Some(digest) =
-            manager.eval_with_result("JSON.stringify(window.__tiangong_bridge.getPageDigest())")
-        {
-            let after_main = serde_json::from_str::<serde_json::Value>(&digest)
+        let digest =
+            manager.eval_with_result("JSON.stringify(window.__tiangong_bridge.getPageDigest())");
+
+        if let Some(ref d) = digest {
+            let current_main = serde_json::from_str::<serde_json::Value>(d)
                 .ok()
                 .and_then(|v| v.get("mainText").and_then(|t| t.as_str().map(String::from)));
 
-            // mainText 发生变化 → 立即返回
-            if let (Some(b), Some(a)) = (&before_main, &after_main) {
-                if b != a {
-                    return Some(digest);
+            let changed = match (&prev_main, &current_main) {
+                (Some(prev), Some(curr)) => prev != curr,
+                _ => prev_main.is_some() != current_main.is_some(),
+            };
+
+            if changed {
+                prev_main = current_main;
+                any_change = true;
+                stable_count = 0;
+            } else if any_change {
+                stable_count += 1;
+                // 内容稳定 2 个轮询周期（~600ms）后返回
+                if stable_count >= 2 {
+                    return Some(d.clone());
                 }
             }
 
-            last = Some(digest);
+            last_digest = Some(d.clone());
         }
 
         if start.elapsed() >= timeout {
-            return last;
+            return last_digest;
         }
 
         std::thread::sleep(Duration::from_millis(300));
