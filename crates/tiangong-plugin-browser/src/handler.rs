@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, Wry};
 use tokio::sync::mpsc;
@@ -201,6 +202,9 @@ pub async fn browser_command_handler(
                                 native_result.wait_result =
                                     serde_json::from_str(&wait_raw).ok();
                             }
+                        } else {
+                            // 无显式 wait_for 时，短暂等待让页面完成异步更新
+                            std::thread::sleep(Duration::from_millis(500));
                         }
 
                         // 操作后 digest 对比
@@ -271,6 +275,9 @@ pub async fn browser_command_handler(
                             if let Some(wait_raw) = manager.eval_with_result(&wait_js) {
                                 result.wait_result = serde_json::from_str(&wait_raw).ok();
                             }
+                        } else {
+                            // 无显式 wait_for 时，短暂等待让页面完成异步更新
+                            std::thread::sleep(Duration::from_millis(800));
                         }
 
                         // 操作后 digest 对比

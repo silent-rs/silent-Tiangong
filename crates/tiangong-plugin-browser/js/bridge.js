@@ -1036,11 +1036,23 @@
         // 获取页面摘要（用于操作前后对比）
         getPageDigest: function() {
             var dialog = this._getActiveDialog();
+            // 捕获对话框外的页面正文（排除 dialog、script、style）
+            var mainText = '';
+            try {
+                var clone = document.body.cloneNode(true);
+                // 移除对话框内容，只保留主页面
+                var dialogEls = clone.querySelectorAll('[role="dialog"], .ant-modal-wrap, .el-dialog__wrapper');
+                for (var di = 0; di < dialogEls.length; di++) dialogEls[di].remove();
+                var removes = clone.querySelectorAll('script,style,noscript');
+                for (var ri = 0; ri < removes.length; ri++) removes[ri].remove();
+                mainText = (clone.textContent || '').replace(/\s+/g, ' ').trim().substring(0, 3000);
+            } catch(e) {}
             return {
                 url: window.location.href,
                 title: document.title,
                 dialogOpen: !!dialog,
-                dialogText: dialog ? (dialog.textContent || '').substring(0, 500).trim() : ''
+                dialogText: dialog ? (dialog.textContent || '').substring(0, 500).trim() : '',
+                mainText: mainText
             };
         },
 
@@ -1060,10 +1072,41 @@
             if (before.dialogOpen && after.dialogOpen && before.dialogText !== after.dialogText) {
                 changes.push('对话框内容已变化：' + after.dialogText.substring(0, 200));
             }
+            // 页面正文内容变化
+            if (before.mainText !== after.mainText && after.mainText) {
+                // 找出新增内容：在 after 中但不在 before 中的文本片段
+                var newContent = this._textDiff(before.mainText, after.mainText);
+                if (newContent) {
+                    changes.push('页面内容变化：' + newContent);
+                }
+            }
             if (changes.length === 0) {
                 changes.push('页面无明显变化');
             }
             return changes.join('\n');
+        },
+
+        // 简单文本差异：提取 after 中新增的内容
+        _textDiff: function(before, after) {
+            if (!before || !after) return after ? after.substring(0, 500) : '';
+            // 按句子/片段分割
+            var beforeParts = before.split(/(?<=[。，！？；\n.!?;])|(?<=\s{2,})/);
+            var afterParts = after.split(/(?<=[。，！？；\n.!?;])|(?<=\s{2,})/);
+            var beforeSet = {};
+            for (var i = 0; i < beforeParts.length; i++) {
+                var p = beforeParts[i].trim();
+                if (p.length > 3) beforeSet[p] = true;
+            }
+            var newParts = [];
+            for (var j = 0; j < afterParts.length; j++) {
+                var ap = afterParts[j].trim();
+                if (ap.length > 3 && !beforeSet[ap]) {
+                    newParts.push(ap);
+                }
+            }
+            if (newParts.length === 0) return '';
+            var result = newParts.join(' ').trim();
+            return result.length > 1000 ? result.substring(0, 1000) + '...' : result;
         },
 
         _startMutationObserver: function() {

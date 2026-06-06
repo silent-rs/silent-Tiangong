@@ -543,3 +543,46 @@ describe('extractForms 非原生按钮', () => {
     expect(form.buttons[1].disabled).toBe(true);
   });
 });
+
+describe('diffDigest 内容变化检测', () => {
+  it('检测对话框关闭后页面内容变化', () => {
+    setupDOM(`
+      <div id="main">已有 API key 列表 key-001 active</div>
+    `);
+    const bridge = getBridge();
+    const before = { url: 'https://example.com', title: 'API Keys', dialogOpen: true, dialogText: '创建 API key', mainText: '已有 API key 列表 key-001 active' };
+    const after = { url: 'https://example.com', title: 'API Keys', dialogOpen: false, dialogText: '', mainText: '已有 API key 列表 key-001 active sk-abc123 新创建的key active' };
+    const diff = bridge.diffDigest(before, after);
+    expect(diff).toContain('对话框已关闭');
+    expect(diff).toContain('页面内容变化');
+    expect(diff).toContain('sk-abc123');
+  });
+
+  it('无变化时返回默认信息', () => {
+    setupDOM('<div>test</div>');
+    const bridge = getBridge();
+    const before = { url: 'https://example.com', title: 'Test', dialogOpen: false, dialogText: '', mainText: 'hello world' };
+    const after = { url: 'https://example.com', title: 'Test', dialogOpen: false, dialogText: '', mainText: 'hello world' };
+    const diff = bridge.diffDigest(before, after);
+    expect(diff).toContain('页面无明显变化');
+  });
+
+  it('_textDiff 提取新增内容', () => {
+    setupDOM('<div>test</div>');
+    const bridge = getBridge();
+    const result = bridge._textDiff(
+      '这是原来的内容。第一行不变。',
+      '这是原来的内容。第一行不变。这是新增的一行。'
+    );
+    expect(result).toContain('新增的一行');
+  });
+
+  it('_textDiff 内容过长时截断', () => {
+    setupDOM('<div>test</div>');
+    const bridge = getBridge();
+    const newPart = 'x'.repeat(2000);
+    const result = bridge._textDiff('before', newPart);
+    expect(result.length).toBeLessThanOrEqual(1004); // 1000 + '...'
+    expect(result).toContain('...');
+  });
+});
