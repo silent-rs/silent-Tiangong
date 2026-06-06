@@ -238,8 +238,20 @@
                     }
                     fields.push(field);
                 }
-                if (fields.length > 0) {
-                    forms.push({ fields: fields });
+                // 提取表单内/容器内的按钮
+                var buttons = [];
+                var btns = container.querySelectorAll('button, input[type="submit"], input[type="reset"]');
+                for (var bci = 0; bci < btns.length; bci++) {
+                    buttons.push({
+                        tag: btns[bci].tagName.toLowerCase(),
+                        type: btns[bci].type || '',
+                        text: (btns[bci].textContent || '').trim(),
+                        disabled: btns[bci].disabled || false,
+                        selector: this.generateSelector(btns[bci])
+                    });
+                }
+                if (fields.length > 0 || buttons.length > 0) {
+                    forms.push({ fields: fields, buttons: buttons });
                 }
             }
             return { forms: forms, framework: this.detectFramework(), uiComponents: this._extractUIComponents() };
@@ -365,8 +377,10 @@
 
             // select 特殊处理
             if (el.tagName === 'SELECT') {
+                el.focus();
                 el.value = value;
                 el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
                 return { ok: true, strategy: 'select-change' };
             }
 
@@ -376,34 +390,30 @@
                 if (el.checked !== shouldCheck) {
                     el.click();
                 }
+                el.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
                 return { ok: true, strategy: 'click-toggle' };
             }
 
             strategy = strategy || 'auto';
+            var result = null;
 
-            // 策略 1: 逐字符键盘输入（视觉层最可靠，适用于所有框架）
-            if (strategy === 'auto' || strategy === 'keyboard') {
+            // 策略 1: execCommand insertText（走浏览器原生编辑管线，产生 trusted 事件）
+            if (strategy === 'auto' || strategy === 'insertText') {
+                el.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
                 el.focus();
-                el.dispatchEvent(new KeyboardEvent('keydown', { key: '', bubbles: true }));
-                el.value = '';
-                el.dispatchEvent(new Event('input', { bubbles: true }));
-                for (var i = 0; i < value.length; i++) {
-                    var ch = value[i];
-                    el.value = el.value + ch;
-                    var keyInit = { key: ch, code: 'Key' + ch.toUpperCase(), bubbles: true };
-                    el.dispatchEvent(new KeyboardEvent('keydown', keyInit));
-                    el.dispatchEvent(new KeyboardEvent('keypress', keyInit));
-                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                    el.dispatchEvent(new KeyboardEvent('keyup', keyInit));
-                }
-                el.dispatchEvent(new Event('change', { bubbles: true }));
-                if (el.value === value) {
-                    return { ok: true, strategy: 'keyboard' };
-                }
+                el.select();
+                try {
+                    if (document.execCommand('insertText', false, value)) {
+                        if (el.value === value) {
+                            result = { ok: true, strategy: 'execCommand-insertText' };
+                        }
+                    }
+                } catch(e) {}
             }
 
-            // 策略 2: native setter（适用于 React 受控组件，视觉层可能不跟随）
-            if (strategy === 'auto' || strategy === 'native') {
+            // 策略 2: native setter（适用于 React 受控组件）
+            if (!result && (strategy === 'auto' || strategy === 'native')) {
+                el.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
                 el.focus();
                 var proto = Object.getPrototypeOf(el);
                 var descriptor = Object.getOwnPropertyDescriptor(proto, 'value') ||
@@ -414,27 +424,34 @@
                                      'value'
                                  );
                 if (descriptor && descriptor.set) {
-                    el.value = '';
+                    descriptor.set.call(el, '');
                     el.dispatchEvent(new Event('input', { bubbles: true }));
                     descriptor.set.call(el, value);
                     el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
                     el.dispatchEvent(new Event('change', { bubbles: true }));
                     if (el.value === value) {
-                        return { ok: true, strategy: 'native-setter' };
+                        result = { ok: true, strategy: 'native-setter' };
                     }
                 }
             }
 
-            // 策略 3: 粘贴（兜底）
-            if (strategy === 'auto' || strategy === 'paste') {
+            // 策略 3: 直接赋值 + 事件（兜底）
+            if (!result && (strategy === 'auto' || strategy === 'paste')) {
+                el.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
                 el.focus();
                 el.value = value;
                 el.dispatchEvent(new Event('input', { bubbles: true }));
                 el.dispatchEvent(new Event('change', { bubbles: true }));
-                return { ok: true, strategy: 'paste' };
+                result = { ok: true, strategy: 'direct-assign' };
             }
 
-            return { ok: false, error: '所有填写策略均未成功', currentValue: el.value };
+            if (!result) {
+                return { ok: false, error: '所有填写策略均未成功', currentValue: el.value };
+            }
+
+            // 填写完成后触发 blur 激活表单校验
+            el.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+            return result;
         },
 
         // UI 库组件填写（多步交互，异步返回）
@@ -561,6 +578,22 @@
             selector = selector.trim();
             if (!selector) return null;
 
+            // 策略 0: nth:N,selector — 选择第 N 个匹配
+            if (selector.indexOf('nth:') === 0) {
+                var commaIdx = selector.indexOf(',');
+                if (commaIdx > 4) {
+                    var idx = parseInt(selector.substring(4, commaIdx), 10);
+                    var innerSelector = selector.substring(commaIdx + 1);
+                    if (!isNaN(idx) && idx > 0) {
+                        var all = this.locateAll(innerSelector);
+                        if (all && all.length >= idx) {
+                            return all[idx - 1];
+                        }
+                    }
+                }
+                return null;
+            }
+
             // 策略 1: rect:x,y,w,h — 批注矩形区域定位
             if (selector.indexOf('rect:') === 0) {
                 var parts = selector.substring(5).split(',').map(Number);
@@ -589,31 +622,123 @@
                 // 不是有效 CSS selector，继续其他策略
             }
 
-            // 策略 4: XPath 文本匹配 — //*[contains(text(), '...')]
-            var xpathResult = document.evaluate(
-                './/*[contains(text(), ' + this._xpathLiteral(selector) + ')]',
-                document.body,
-                null,
-                XPathResult.FIRST_ORDERED_NODE_TYPE,
-                null
-            );
-            if (xpathResult.singleNodeValue) return xpathResult.singleNodeValue;
-
-            // 策略 5: 按钮文本模糊匹配
-            var buttons = document.querySelectorAll('button, a, [role="button"], input[type="submit"]');
+            // 检测当前打开的对话框，优先在其中查找
+            var dialog = this._getActiveDialog();
+            var contexts = dialog ? [dialog, document.body] : [document.body];
             var lowerSelector = selector.toLowerCase();
+            var xpathLit = this._xpathLiteral(selector);
+
+            // 策略 4: 精确文本匹配（对话框内 → 全局）
+            for (var ci = 0; ci < contexts.length; ci++) {
+                var exactResult = document.evaluate(
+                    './/*[text() = ' + xpathLit + ']',
+                    contexts[ci], null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
+                );
+                if (exactResult.singleNodeValue) return exactResult.singleNodeValue;
+            }
+
+            // 策略 5: 按钮精确文本（对话框内 → 全局）
+            var allButtons = document.querySelectorAll('button, a, [role="button"], input[type="submit"]');
+            for (var ci2 = 0; ci2 < contexts.length; ci2++) {
+                for (var bi = 0; bi < allButtons.length; bi++) {
+                    if (!contexts[ci2].contains(allButtons[bi])) continue;
+                    if ((allButtons[bi].textContent || '').trim().toLowerCase() === lowerSelector) {
+                        return allButtons[bi];
+                    }
+                }
+            }
+
+            // 策略 6: 部分文本匹配（对话框内 → 全局）
+            for (var ci3 = 0; ci3 < contexts.length; ci3++) {
+                var partialResult = document.evaluate(
+                    './/*[contains(text(), ' + xpathLit + ')]',
+                    contexts[ci3], null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
+                );
+                if (partialResult.singleNodeValue) return partialResult.singleNodeValue;
+            }
+
+            // 策略 7: 按钮模糊匹配（对话框内 → 全局）
+            for (var ci4 = 0; ci4 < contexts.length; ci4++) {
+                for (var bj = 0; bj < allButtons.length; bj++) {
+                    if (!contexts[ci4].contains(allButtons[bj])) continue;
+                    var btnText = (allButtons[bj].textContent || '').trim().toLowerCase();
+                    var btnTitle = (allButtons[bj].getAttribute('title') || '').toLowerCase();
+                    var btnAria = (allButtons[bj].getAttribute('aria-label') || '').toLowerCase();
+                    if (btnText.indexOf(lowerSelector) >= 0 ||
+                        btnTitle.indexOf(lowerSelector) >= 0 ||
+                        btnAria.indexOf(lowerSelector) >= 0) {
+                        return allButtons[bj];
+                    }
+                }
+            }
+
+            return null;
+        },
+
+        // 返回所有匹配的元素列表（用于候选提示和 nth 语法）
+        locateAll: function(selector) {
+            if (!selector || typeof selector !== 'string') return [];
+            selector = selector.trim();
+            if (!selector) return [];
+
+            var results = [];
+            var seen = {};
+            var lowerSelector = selector.toLowerCase();
+
+            // CSS selector
+            try {
+                var cssAll = document.querySelectorAll(selector);
+                for (var ci = 0; ci < cssAll.length; ci++) {
+                    var key = this._elementKey(cssAll[ci]);
+                    if (!seen[key]) {
+                        seen[key] = true;
+                        results.push(cssAll[ci]);
+                    }
+                }
+            } catch(e) {}
+
+            // XPath exact text
+            var exactIter = document.evaluate(
+                './/*[text() = ' + this._xpathLiteral(selector) + ']',
+                document.body, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null
+            );
+            for (var ei = 0; ei < exactIter.snapshotLength; ei++) {
+                var key2 = this._elementKey(exactIter.snapshotItem(ei));
+                if (!seen[key2]) { seen[key2] = true; results.push(exactIter.snapshotItem(ei)); }
+            }
+
+            // XPath partial text
+            var partialIter = document.evaluate(
+                './/*[contains(text(), ' + this._xpathLiteral(selector) + ')]',
+                document.body, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null
+            );
+            for (var pi = 0; pi < partialIter.snapshotLength; pi++) {
+                var key3 = this._elementKey(partialIter.snapshotItem(pi));
+                if (!seen[key3]) { seen[key3] = true; results.push(partialIter.snapshotItem(pi)); }
+            }
+
+            // Button text match
+            var buttons = document.querySelectorAll('button, a, [role="button"], input[type="submit"]');
             for (var bi = 0; bi < buttons.length; bi++) {
+                var key4 = this._elementKey(buttons[bi]);
+                if (seen[key4]) continue;
                 var btnText = (buttons[bi].textContent || '').trim().toLowerCase();
                 var btnTitle = (buttons[bi].getAttribute('title') || '').toLowerCase();
                 var btnAria = (buttons[bi].getAttribute('aria-label') || '').toLowerCase();
                 if (btnText.indexOf(lowerSelector) >= 0 ||
                     btnTitle.indexOf(lowerSelector) >= 0 ||
                     btnAria.indexOf(lowerSelector) >= 0) {
-                    return buttons[bi];
+                    seen[key4] = true;
+                    results.push(buttons[bi]);
                 }
             }
 
-            return null;
+            return results;
+        },
+
+        _elementKey: function(el) {
+            if (!el) return '';
+            return el.tagName + ':' + (el.id || '') + ':' + this.generateSelector(el);
         },
 
         _xpathLiteral: function(s) {
@@ -621,6 +746,25 @@
             if (s.indexOf("'") === -1) return "'" + s + "'";
             var parts = s.split('"');
             return 'concat("' + parts.join('", \'"\', "') + '")';
+        },
+
+        _getActiveDialog: function() {
+            // Ant Design modal
+            var antModals = document.querySelectorAll('.ant-modal-wrap');
+            for (var i = 0; i < antModals.length; i++) {
+                if (antModals[i].offsetHeight > 0) return antModals[i];
+            }
+            // Element Plus dialog
+            var elDialogs = document.querySelectorAll('.el-dialog__wrapper');
+            for (var j = 0; j < elDialogs.length; j++) {
+                if (elDialogs[j].offsetHeight > 0) return elDialogs[j];
+            }
+            // 通用 role="dialog"
+            var dialogs = document.querySelectorAll('[role="dialog"]');
+            for (var k = 0; k < dialogs.length; k++) {
+                if (dialogs[k].offsetHeight > 0) return dialogs[k];
+            }
+            return null;
         },
 
         _findElementInRect: function(x, y, w, h) {
@@ -743,21 +887,147 @@
 
         clickElement: function(selector) {
             var el = this.locateElement(selector);
-            if (!el) return { ok: false, error: '元素未找到: ' + selector };
-            el.scrollIntoView({ block: 'center', behavior: 'instant' });
-            var rect = el.getBoundingClientRect();
-            var x = rect.left + rect.width / 2;
-            var y = rect.top + rect.height / 2;
-            var opts = { bubbles: true, cancelable: true, view: window,
-                         clientX: x, clientY: y, screenX: x, screenY: y,
-                         button: 0, buttons: 1 };
-            el.dispatchEvent(new MouseEvent('mouseover', opts));
-            el.dispatchEvent(new MouseEvent('mouseenter', opts));
-            el.dispatchEvent(new MouseEvent('mousemove', opts));
-            el.dispatchEvent(new MouseEvent('mousedown', opts));
-            el.dispatchEvent(new MouseEvent('mouseup', opts));
-            el.dispatchEvent(new MouseEvent('click', opts));
-            return { ok: true, x: Math.round(x), y: Math.round(y) };
+            if (!el) {
+                // 尝试 locateAll 看是否有候选
+                var all = this.locateAll(selector);
+                if (all.length > 0) {
+                    return {
+                        ok: false,
+                        error: '元素未找到: ' + selector,
+                        candidates: all.slice(0, 5).map(function(c) {
+                            return {
+                                tag: (c.tagName || '').toLowerCase(),
+                                text: (c.textContent || '').trim().substring(0, 50),
+                                selector: window.__tiangong_bridge.generateSelector(c)
+                            };
+                        })
+                    };
+                }
+                return { ok: false, error: '元素未找到: ' + selector, candidates: [] };
+            }
+
+            // 如果找到的是内联元素（如 span），尝试点击其父级按钮/链接
+            var clickTarget = el;
+            var interactiveTags = ['BUTTON', 'A', 'INPUT', 'SELECT', 'TEXTAREA', 'SUMMARY', 'LABEL'];
+            if (interactiveTags.indexOf(el.tagName) === -1) {
+                var parent = el.closest('button, a, [role="button"], label, summary');
+                if (parent) clickTarget = parent;
+            }
+
+            // 检测 disabled 状态
+            if (clickTarget.disabled || clickTarget.getAttribute('aria-disabled') === 'true') {
+                return { ok: false, error: '元素已禁用: ' + selector, candidates: [] };
+            }
+
+            clickTarget.scrollIntoView({ block: 'center', behavior: 'instant' });
+            clickTarget.focus();
+
+            // 使用 el.click() 触发浏览器原生点击，产生 trusted 事件
+            clickTarget.click();
+            return { ok: true, candidates: [] };
+        },
+
+        // 等待页面条件满足（异步，返回 Promise）
+        // condition: 'navigation' | 'element:selector' | 'element!:selector' | 'stable'
+        waitFor: function(condition, timeoutMs) {
+            var self = this;
+            var startTime = Date.now();
+            var timeout = timeoutMs || 5000;
+            // 记录初始状态
+            this._waitInitialState = {
+                url: window.location.href,
+                lastMutationTime: Date.now()
+            };
+            // 启动 MutationObserver 追踪 DOM 变化（用于 stable 条件）
+            if (condition === 'stable' && !this._waitObserver) {
+                this._startMutationObserver();
+            }
+            return new Promise(function(resolve) {
+                var check = function() {
+                    if (self._checkWaitCondition(condition)) {
+                        self._stopMutationObserver();
+                        resolve({ ok: true, condition: condition, elapsed: Date.now() - startTime });
+                        return;
+                    }
+                    if (Date.now() - startTime > timeout) {
+                        self._stopMutationObserver();
+                        resolve({ ok: false, error: '等待超时', condition: condition, elapsed: Date.now() - startTime });
+                        return;
+                    }
+                    setTimeout(check, 200);
+                };
+                check();
+            });
+        },
+
+        _checkWaitCondition: function(condition) {
+            if (condition === 'navigation') {
+                return window.location.href !== this._waitInitialState.url;
+            }
+            if (condition === 'stable') {
+                return Date.now() - this._waitInitialState.lastMutationTime > 1000;
+            }
+            if (condition.indexOf('element!:') === 0) {
+                var sel = condition.substring(9);
+                try { return !document.querySelector(sel); } catch(e) { return true; }
+            }
+            if (condition.indexOf('element:') === 0) {
+                var sel2 = condition.substring(8);
+                try { return !!document.querySelector(sel2); } catch(e) { return false; }
+            }
+            return false;
+        },
+
+        // 获取页面摘要（用于操作前后对比）
+        getPageDigest: function() {
+            var dialog = this._getActiveDialog();
+            return {
+                url: window.location.href,
+                title: document.title,
+                dialogOpen: !!dialog,
+                dialogText: dialog ? (dialog.textContent || '').substring(0, 500).trim() : ''
+            };
+        },
+
+        // 对比前后摘要，返回差异描述
+        diffDigest: function(before, after) {
+            if (!before || !after) return '';
+            var changes = [];
+            if (before.url !== after.url) {
+                changes.push('页面已导航到 ' + after.url);
+            }
+            if (!before.dialogOpen && after.dialogOpen) {
+                changes.push('对话框已出现：' + after.dialogText.substring(0, 200));
+            }
+            if (before.dialogOpen && !after.dialogOpen) {
+                changes.push('对话框已关闭');
+            }
+            if (before.dialogOpen && after.dialogOpen && before.dialogText !== after.dialogText) {
+                changes.push('对话框内容已变化：' + after.dialogText.substring(0, 200));
+            }
+            if (changes.length === 0) {
+                changes.push('页面无明显变化');
+            }
+            return changes.join('\n');
+        },
+
+        _startMutationObserver: function() {
+            var self = this;
+            this._waitObserver = new MutationObserver(function() {
+                if (self._waitInitialState) {
+                    self._waitInitialState.lastMutationTime = Date.now();
+                }
+            });
+            this._waitObserver.observe(document.body, {
+                childList: true, subtree: true, characterData: true, attributes: true
+            });
+        },
+
+        _stopMutationObserver: function() {
+            if (this._waitObserver) {
+                this._waitObserver.disconnect();
+                this._waitObserver = null;
+            }
         },
 
         annotation: {

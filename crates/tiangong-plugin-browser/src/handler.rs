@@ -147,12 +147,17 @@ pub async fn browser_command_handler(
                 selector,
                 value,
                 strategy,
+                wait_for,
                 response_tx,
             } => {
                 let manager = BrowserManager {
                     state: browser_state.clone(),
                 };
                 let result = tokio::task::spawn_blocking(move || {
+                    // 操作前 digest
+                    let before_digest = manager
+                        .eval_with_result("JSON.stringify(window.__tiangong_bridge.getPageDigest())");
+
                     // 先尝试原生 fillField
                     let js = format!(
                         "window.__tiangong_bridge.fillField({},{},{})",
@@ -160,7 +165,7 @@ pub async fn browser_command_handler(
                         serde_json::to_string(&value).unwrap_or_default(),
                         serde_json::to_string(&strategy).unwrap_or_default(),
                     );
-                    let native_result = manager
+                    let mut native_result = manager
                         .eval_with_result(&js)
                         .and_then(|raw| serde_json::from_str::<FillFieldResult>(&raw).ok())
                         .unwrap_or(FillFieldResult {
@@ -168,22 +173,54 @@ pub async fn browser_command_handler(
                             strategy: None,
                             error: Some("填写字段执行失败".to_string()),
                             current_value: None,
+                            wait_result: None,
+                            page_diff: None,
                         });
 
-                    if native_result.ok {
-                        return native_result;
+                    if !native_result.ok {
+                        // 原生策略失败，尝试 UI 库组件填写
+                        let comp_js = format!(
+                            "window.__tiangong_bridge.fillComponent({},{})",
+                            serde_json::to_string(&selector).unwrap_or_default(),
+                            serde_json::to_string(&value).unwrap_or_default(),
+                        );
+                        native_result = manager
+                            .eval_with_result(&comp_js)
+                            .and_then(|raw| serde_json::from_str::<FillFieldResult>(&raw).ok())
+                            .unwrap_or(native_result);
                     }
 
-                    // 原生策略失败，尝试 UI 库组件填写
-                    let comp_js = format!(
-                        "window.__tiangong_bridge.fillComponent({},{})",
-                        serde_json::to_string(&selector).unwrap_or_default(),
-                        serde_json::to_string(&value).unwrap_or_default(),
-                    );
-                    manager
-                        .eval_with_result(&comp_js)
-                        .and_then(|raw| serde_json::from_str::<FillFieldResult>(&raw).ok())
-                        .unwrap_or(native_result)
+                    // 填写成功后执行等待
+                    if native_result.ok {
+                        if let Some(ref condition) = wait_for {
+                            let wait_js = format!(
+                                "(async function(){{return JSON.stringify(await window.__tiangong_bridge.waitFor({},5000))}})()",
+                                serde_json::to_string(condition).unwrap_or_default(),
+                            );
+                            if let Some(wait_raw) = manager.eval_with_result(&wait_js) {
+                                native_result.wait_result =
+                                    serde_json::from_str(&wait_raw).ok();
+                            }
+                        }
+
+                        // 操作后 digest 对比
+                        let after_digest = manager
+                            .eval_with_result("JSON.stringify(window.__tiangong_bridge.getPageDigest())");
+                        if let (Some(before), Some(after)) = (before_digest, after_digest) {
+                            let diff_js = format!(
+                                "JSON.stringify(window.__tiangong_bridge.diffDigest({},{}))",
+                                before, after
+                            );
+                            if let Some(diff_raw) = manager.eval_with_result(&diff_js) {
+                                let diff = diff_raw.trim_matches('"').replace("\\n", "\n");
+                                if !diff.is_empty() {
+                                    native_result.page_diff = Some(diff);
+                                }
+                            }
+                        }
+                    }
+
+                    native_result
                 })
                 .await
                 .unwrap_or(FillFieldResult {
@@ -191,33 +228,77 @@ pub async fn browser_command_handler(
                     strategy: None,
                     error: Some("填写字段任务失败".to_string()),
                     current_value: None,
+                    wait_result: None,
+                    page_diff: None,
                 });
                 let _ = response_tx.send(result);
             }
             BrowserCommand::ClickElement {
                 selector,
+                wait_for,
                 response_tx,
             } => {
                 let manager = BrowserManager {
                     state: browser_state.clone(),
                 };
                 let result = tokio::task::spawn_blocking(move || {
+                    // 操作前 digest
+                    let before_digest = manager
+                        .eval_with_result("JSON.stringify(window.__tiangong_bridge.getPageDigest())");
+
                     let js = format!(
                         "window.__tiangong_bridge.clickElement({})",
                         serde_json::to_string(&selector).unwrap_or_default(),
                     );
-                    manager
+                    let mut result = manager
                         .eval_with_result(&js)
                         .and_then(|raw| serde_json::from_str::<ClickElementResult>(&raw).ok())
                         .unwrap_or(ClickElementResult {
                             ok: false,
                             error: Some("点击元素执行失败".to_string()),
-                        })
+                            wait_result: None,
+                            candidates: vec![],
+                            page_diff: None,
+                        });
+
+                    // 点击成功后执行等待
+                    if result.ok {
+                        if let Some(ref condition) = wait_for {
+                            let wait_js = format!(
+                                "(async function(){{return JSON.stringify(await window.__tiangong_bridge.waitFor({},5000))}})()",
+                                serde_json::to_string(condition).unwrap_or_default(),
+                            );
+                            if let Some(wait_raw) = manager.eval_with_result(&wait_js) {
+                                result.wait_result = serde_json::from_str(&wait_raw).ok();
+                            }
+                        }
+
+                        // 操作后 digest 对比
+                        let after_digest = manager
+                            .eval_with_result("JSON.stringify(window.__tiangong_bridge.getPageDigest())");
+                        if let (Some(before), Some(after)) = (before_digest, after_digest) {
+                            let diff_js = format!(
+                                "JSON.stringify(window.__tiangong_bridge.diffDigest({},{}))",
+                                before, after
+                            );
+                            if let Some(diff_raw) = manager.eval_with_result(&diff_js) {
+                                let diff = diff_raw.trim_matches('"').replace("\\n", "\n");
+                                if !diff.is_empty() {
+                                    result.page_diff = Some(diff);
+                                }
+                            }
+                        }
+                    }
+
+                    result
                 })
                 .await
                 .unwrap_or(ClickElementResult {
                     ok: false,
                     error: Some("点击元素任务失败".to_string()),
+                    wait_result: None,
+                    candidates: vec![],
+                    page_diff: None,
                 });
                 let _ = response_tx.send(result);
             }

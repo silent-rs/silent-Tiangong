@@ -35,6 +35,7 @@ pub trait PageFetcher: Send + Sync + 'static {
         _selector: &str,
         _value: &str,
         _strategy: &str,
+        _wait_for: Option<&str>,
     ) -> Pin<Box<dyn Future<Output = Option<FillFieldResult>> + Send>> {
         Box::pin(async move { None })
     }
@@ -43,6 +44,7 @@ pub trait PageFetcher: Send + Sync + 'static {
     fn click_element(
         &self,
         _selector: &str,
+        _wait_for: Option<&str>,
     ) -> Pin<Box<dyn Future<Output = Option<ClickElementResult>> + Send>> {
         Box::pin(async move { None })
     }
@@ -112,10 +114,23 @@ pub struct SelectOption {
     pub text: String,
 }
 
+/// 表单按钮
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FormButton {
+    pub tag: String,
+    #[serde(rename = "type")]
+    pub button_type: String,
+    pub text: String,
+    pub disabled: bool,
+    pub selector: String,
+}
+
 /// 表单信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FormInfo {
     pub fields: Vec<FormField>,
+    #[serde(default)]
+    pub buttons: Vec<FormButton>,
 }
 
 /// 表单提取结果
@@ -130,8 +145,12 @@ pub struct FillFieldResult {
     pub ok: bool,
     pub strategy: Option<String>,
     pub error: Option<String>,
-    #[serde(rename = "currentValue")]
+    #[serde(rename = "currentValue", default)]
     pub current_value: Option<String>,
+    #[serde(default)]
+    pub wait_result: Option<WaitResult>,
+    #[serde(default)]
+    pub page_diff: Option<String>,
 }
 
 /// 元素点击结果
@@ -139,6 +158,29 @@ pub struct FillFieldResult {
 pub struct ClickElementResult {
     pub ok: bool,
     pub error: Option<String>,
+    #[serde(default)]
+    pub wait_result: Option<WaitResult>,
+    #[serde(default)]
+    pub candidates: Vec<ElementCandidate>,
+    #[serde(default)]
+    pub page_diff: Option<String>,
+}
+
+/// 等待条件结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaitResult {
+    pub ok: bool,
+    pub condition: String,
+    pub elapsed_ms: u64,
+    pub error: Option<String>,
+}
+
+/// 候选元素信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ElementCandidate {
+    pub tag: String,
+    pub text: String,
+    pub selector: String,
 }
 
 /// 标签列表结果

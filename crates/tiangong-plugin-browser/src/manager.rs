@@ -23,6 +23,8 @@ pub struct BrowserState {
     pub latest_snapshot: Option<BrowserPageSnapshot>,
     /// 轮询检测的最后一次已知 URL
     pub last_known_url: String,
+    /// 轮询检测的最后一次内容签名（前 500 字符）
+    pub last_known_text_signature: String,
     /// 轮询线程停止信号
     pub poll_stop: Arc<std::sync::atomic::AtomicBool>,
     /// 标签列表
@@ -49,6 +51,7 @@ impl BrowserManager {
                 page_loaded: Arc::new((Mutex::new(false), Condvar::new())),
                 latest_snapshot: None,
                 last_known_url: String::new(),
+                last_known_text_signature: String::new(),
                 poll_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 tabs: Vec::new(),
                 active_tab_id: None,
@@ -216,6 +219,7 @@ impl BrowserManager {
             cvar.notify_all();
             state.latest_snapshot = None;
             state.last_known_url.clear();
+            state.last_known_text_signature.clear();
             state.tabs.clear();
             state.active_tab_id = None;
         }
@@ -237,8 +241,10 @@ impl BrowserManager {
         std::thread::Builder::new()
             .name("browser-url-poll".into())
             .spawn(move || {
+                let mut tick: u32 = 0;
                 while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(500));
+                    tick += 1;
                     if stop.load(std::sync::atomic::Ordering::Relaxed) {
                         break;
                     }
@@ -294,6 +300,53 @@ impl BrowserManager {
                                 "url": current_url,
                             }),
                         );
+                    }
+
+                    // 每 3 秒检测页面内容变化（URL 不变但 DOM 变化，如用户手动操作）
+                    if tick.is_multiple_of(6) {
+                        let mgr = BrowserManager {
+                            state: state.clone(),
+                        };
+                        if let Some(sig) = mgr.eval_with_result(
+                            "(function(){try{return(document.body.innerText||'').substring(0,500).trim()}catch(e){return''}})()"
+                        ) {
+                            let content_changed = {
+                                let mut s = match state.lock() {
+                                    Ok(s) => s,
+                                    Err(e) => e.into_inner(),
+                                };
+                                if sig != s.last_known_text_signature && !sig.is_empty() {
+                                    s.last_known_text_signature = sig;
+                                    true
+                                } else {
+                                    false
+                                }
+                            };
+                            if content_changed {
+                                debug!("browser url_poll detected content change");
+                                let mgr2 = BrowserManager {
+                                    state: state.clone(),
+                                };
+                                if let Some(raw) = mgr2.eval_with_result(
+                                    "(function(){try{var t=window.__tiangong_bridge.getFullText(12000);return JSON.stringify(t)}catch(e){return '{}'}})()"
+                                ) {
+                                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&raw) {
+                                        let title = data["title"].as_str().unwrap_or("").to_string();
+                                        let url = data["url"].as_str().unwrap_or("").to_string();
+                                        let text: String =
+                                            data["text"].as_str().unwrap_or("").chars().take(2000).collect();
+                                        let _ = app.emit(
+                                            "browser:page_loaded",
+                                            serde_json::json!({
+                                                "title": title,
+                                                "url": url,
+                                                "text": text,
+                                            }),
+                                        );
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 debug!("browser url_poll thread exiting");

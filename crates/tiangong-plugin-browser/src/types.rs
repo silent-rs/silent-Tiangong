@@ -34,11 +34,13 @@ pub enum BrowserCommand {
         selector: String,
         value: String,
         strategy: String,
+        wait_for: Option<String>,
         response_tx: oneshot::Sender<FillFieldResult>,
     },
     /// 点击页面元素
     ClickElement {
         selector: String,
+        wait_for: Option<String>,
         response_tx: oneshot::Sender<ClickElementResult>,
     },
     /// 加载本地 HTML 内容
@@ -118,10 +120,23 @@ pub struct SelectOption {
     pub text: String,
 }
 
+/// 表单按钮
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FormButton {
+    pub tag: String,
+    #[serde(rename = "type")]
+    pub button_type: String,
+    pub text: String,
+    pub disabled: bool,
+    pub selector: String,
+}
+
 /// 表单信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FormInfo {
     pub fields: Vec<FormField>,
+    #[serde(default)]
+    pub buttons: Vec<FormButton>,
 }
 
 /// 表单提取结果
@@ -138,6 +153,10 @@ pub struct FillFieldResult {
     pub error: Option<String>,
     #[serde(rename = "currentValue")]
     pub current_value: Option<String>,
+    #[serde(default)]
+    pub wait_result: Option<WaitResult>,
+    #[serde(default)]
+    pub page_diff: Option<String>,
 }
 
 /// 元素点击结果
@@ -145,6 +164,30 @@ pub struct FillFieldResult {
 pub struct ClickElementResult {
     pub ok: bool,
     pub error: Option<String>,
+    #[serde(default)]
+    pub wait_result: Option<WaitResult>,
+    #[serde(default)]
+    pub candidates: Vec<ElementCandidate>,
+    #[serde(default)]
+    pub page_diff: Option<String>,
+}
+
+/// 等待条件结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaitResult {
+    pub ok: bool,
+    pub condition: String,
+    #[serde(rename = "elapsed")]
+    pub elapsed_ms: u64,
+    pub error: Option<String>,
+}
+
+/// 候选元素信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ElementCandidate {
+    pub tag: String,
+    pub text: String,
+    pub selector: String,
 }
 
 // ── 类型转换：plugin → core ──────────────────────────────────────────
@@ -200,10 +243,23 @@ impl From<FormField> for tiangong_core::browser_trait::FormField {
     }
 }
 
+impl From<FormButton> for tiangong_core::browser_trait::FormButton {
+    fn from(b: FormButton) -> Self {
+        Self {
+            tag: b.tag,
+            button_type: b.button_type,
+            text: b.text,
+            disabled: b.disabled,
+            selector: b.selector,
+        }
+    }
+}
+
 impl From<FormInfo> for tiangong_core::browser_trait::FormInfo {
     fn from(f: FormInfo) -> Self {
         Self {
             fields: f.fields.into_iter().map(Into::into).collect(),
+            buttons: f.buttons.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -223,6 +279,8 @@ impl From<FillFieldResult> for tiangong_core::browser_trait::FillFieldResult {
             strategy: r.strategy,
             error: r.error,
             current_value: r.current_value,
+            wait_result: r.wait_result.map(Into::into),
+            page_diff: r.page_diff,
         }
     }
 }
@@ -231,6 +289,28 @@ impl From<ClickElementResult> for tiangong_core::browser_trait::ClickElementResu
     fn from(r: ClickElementResult) -> Self {
         Self {
             ok: r.ok,
+            error: r.error,
+            wait_result: r.wait_result.map(Into::into),
+            candidates: r
+                .candidates
+                .into_iter()
+                .map(|c| tiangong_core::browser_trait::ElementCandidate {
+                    tag: c.tag,
+                    text: c.text,
+                    selector: c.selector,
+                })
+                .collect(),
+            page_diff: r.page_diff,
+        }
+    }
+}
+
+impl From<WaitResult> for tiangong_core::browser_trait::WaitResult {
+    fn from(r: WaitResult) -> Self {
+        Self {
+            ok: r.ok,
+            condition: r.condition,
+            elapsed_ms: r.elapsed_ms,
             error: r.error,
         }
     }
@@ -425,6 +505,9 @@ mod tests {
         let click = ClickElementResult {
             ok: true,
             error: None,
+            wait_result: None,
+            candidates: vec![],
+            page_diff: None,
         };
         let core: tiangong_core::browser_trait::ClickElementResult = click.into();
         assert!(core.ok);
@@ -438,6 +521,8 @@ mod tests {
             strategy: Some("auto".to_string()),
             error: None,
             current_value: Some("test@example.com".to_string()),
+            wait_result: None,
+            page_diff: None,
         };
         let core: tiangong_core::browser_trait::FillFieldResult = fill.into();
         assert!(core.ok);
@@ -464,6 +549,7 @@ mod tests {
                     selector: "#email".to_string(),
                     options: vec![],
                 }],
+                buttons: vec![],
             }],
         };
         let core: tiangong_core::browser_trait::FormExtractResult = form.into();

@@ -239,6 +239,189 @@ describe('fillField 智能定位', () => {
   });
 });
 
+describe('locateElement 对话框优先', () => {
+  it('对话框打开时优先匹配对话框内的元素', () => {
+    setupDOM(`
+      <div>
+        <button id="page-create">创建 API key</button>
+        <div class="ant-modal-wrap" role="dialog">
+          <div class="ant-modal">
+            <div class="ant-modal-content">
+              <div class="ant-modal-footer">
+                <button id="dialog-create">创建</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+
+    // ant-modal-wrap 需要 offsetHeight > 0
+    const modal = document.querySelector('.ant-modal-wrap')!;
+    Object.defineProperty(modal, 'offsetHeight', { value: 500, configurable: true });
+
+    const el = getBridge().locateElement('创建');
+    expect(el).not.toBeNull();
+    expect(el.id).toBe('dialog-create');
+  });
+
+  it('精确文本匹配优先于部分匹配', () => {
+    setupDOM(`
+      <div>
+        <a id="link-create">创建 API key</a>
+        <button id="btn-create">创建</button>
+      </div>
+    `);
+
+    const el = getBridge().locateElement('创建');
+    expect(el).not.toBeNull();
+    // XPath text() = '创建' 应优先匹配精确文本
+    expect(el.id).toBe('btn-create');
+  });
+
+  it('Element Plus 对话框内也能优先匹配', () => {
+    setupDOM(`
+      <div>
+        <button id="page-btn">确定</button>
+        <div class="el-dialog__wrapper">
+          <div class="el-dialog">
+            <button id="dialog-btn">确定</button>
+          </div>
+        </div>
+      </div>
+    `);
+
+    const wrapper = document.querySelector('.el-dialog__wrapper')!;
+    Object.defineProperty(wrapper, 'offsetHeight', { value: 300, configurable: true });
+
+    const el = getBridge().locateElement('确定');
+    expect(el).not.toBeNull();
+    expect(el.id).toBe('dialog-btn');
+  });
+
+  it('无对话框时全局精确匹配', () => {
+    setupDOM(`
+      <div>
+        <button id="save-btn">保存并继续</button>
+        <button id="save">保存</button>
+      </div>
+    `);
+
+    const el = getBridge().locateElement('保存');
+    expect(el).not.toBeNull();
+    expect(el.id).toBe('save');
+  });
+});
+
+describe('locateAll', () => {
+  it('返回所有匹配元素', () => {
+    setupDOM(`
+      <div>
+        <button id="b1">提交</button>
+        <button id="b2">取消</button>
+        <button id="b3">提交并继续</button>
+      </div>
+    `);
+    const results = getBridge().locateAll('提交');
+    expect(results.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('空选择器返回空数组', () => {
+    setupDOM('<div>hello</div>');
+    expect(getBridge().locateAll('').length).toBe(0);
+  });
+});
+
+describe('nth 语法', () => {
+  it('nth:2 选择第 2 个匹配', () => {
+    setupDOM(`
+      <div>
+        <button id="b1">提交</button>
+        <button id="b2">提交</button>
+        <button id="b3">提交</button>
+      </div>
+    `);
+    const el = getBridge().locateElement('nth:2,提交');
+    expect(el).not.toBeNull();
+    expect(el.id).toBe('b2');
+  });
+
+  it('nth 超出范围返回 null', () => {
+    setupDOM('<button id="b1">提交</button>');
+    expect(getBridge().locateElement('nth:5,提交')).toBeNull();
+  });
+
+  it('nth 无效格式返回 null', () => {
+    setupDOM('<button>提交</button>');
+    expect(getBridge().locateElement('nth:')).toBeNull();
+    expect(getBridge().locateElement('nth:abc,提交')).toBeNull();
+  });
+});
+
+describe('clickElement 候选列表', () => {
+  it('找不到元素但 locateAll 有结果时返回候选', () => {
+    setupDOM(`
+      <button id="b1" disabled>提交</button>
+      <button id="b2">取消</button>
+    `);
+    // CSS selector #nonexistent 不会 locateAll 到任何东西
+    const result = getBridge().clickElement('#nonexistent');
+    expect(result.ok).toBe(false);
+    expect(result.candidates).toBeDefined();
+  });
+});
+
+describe('_checkWaitCondition', () => {
+  it('navigation：URL 相同时返回 false', () => {
+    setupDOM('<div>test</div>');
+    getBridge()._waitInitialState = { url: window.location.href, lastMutationTime: Date.now() };
+    expect(getBridge()._checkWaitCondition('navigation')).toBe(false);
+  });
+
+  it('element：元素存在时返回 true', () => {
+    setupDOM('<div id="x">test</div>');
+    expect(getBridge()._checkWaitCondition('element:#x')).toBe(true);
+    expect(getBridge()._checkWaitCondition('element:#missing')).toBe(false);
+  });
+
+  it('element!：元素不存在时返回 true', () => {
+    setupDOM('<div>test</div>');
+    expect(getBridge()._checkWaitCondition('element!:#missing')).toBe(true);
+    expect(getBridge()._checkWaitCondition('element!:#x')).toBe(true);
+  });
+
+  it('stable：无 DOM 变化超 1 秒时返回 true', () => {
+    setupDOM('<div>test</div>');
+    getBridge()._waitInitialState = { url: '', lastMutationTime: Date.now() - 1100 };
+    expect(getBridge()._checkWaitCondition('stable')).toBe(true);
+    getBridge()._waitInitialState = { url: '', lastMutationTime: Date.now() - 100 };
+    expect(getBridge()._checkWaitCondition('stable')).toBe(false);
+  });
+});
+
+describe('waitFor', () => {
+
+  it('element 条件满足', async () => {
+    setupDOM('<div id="target">appeared</div>');
+    const result = await getBridge().waitFor('element:#target', 1000);
+    expect(result.ok).toBe(true);
+  });
+
+  it('element! 条件满足（元素不存在）', async () => {
+    setupDOM('<div>test</div>');
+    const result = await getBridge().waitFor('element!:#nonexistent', 1000);
+    expect(result.ok).toBe(true);
+  });
+
+  it('超时返回失败', async () => {
+    setupDOM('<div>test</div>');
+    // 等一个不存在的条件但给很短的超时
+    const result = await getBridge().waitFor('element:#never-exist', 100);
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('超时');
+  });
+});
+
 describe('annotation 自动提取元素', () => {
   it('getAnnotations 返回的 rect 批注包含 elements 字段', () => {
     setupDOM(`

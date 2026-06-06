@@ -136,6 +136,7 @@ impl PageFetcher for BrowserPageFetcher {
         selector: &str,
         value: &str,
         strategy: &str,
+        wait_for: Option<&str>,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<Output = Option<tiangong_core::browser_trait::FillFieldResult>>
@@ -146,6 +147,7 @@ impl PageFetcher for BrowserPageFetcher {
         let selector = selector.to_string();
         let value = value.to_string();
         let strategy = strategy.to_string();
+        let wait_for = wait_for.map(|s| s.to_string());
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
             let result: crate::types::FillFieldResult = send_and_wait!(
@@ -154,10 +156,11 @@ impl PageFetcher for BrowserPageFetcher {
                     selector,
                     value,
                     strategy,
+                    wait_for,
                     response_tx,
                 },
                 response_rx,
-                10
+                15
             );
             Some(result.into())
         })
@@ -166,6 +169,7 @@ impl PageFetcher for BrowserPageFetcher {
     fn click_element(
         &self,
         selector: &str,
+        wait_for: Option<&str>,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<
@@ -175,16 +179,18 @@ impl PageFetcher for BrowserPageFetcher {
     > {
         let tx = self.cmd_tx.clone();
         let selector = selector.to_string();
+        let wait_for = wait_for.map(|s| s.to_string());
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
             let result: crate::types::ClickElementResult = send_and_wait!(
                 tx,
                 BrowserCommand::ClickElement {
                     selector,
+                    wait_for,
                     response_tx
                 },
                 response_rx,
-                10
+                15
             );
             Some(result.into())
         })
@@ -215,7 +221,7 @@ impl PageFetcher for BrowserPageFetcher {
     }
 }
 
-/// 浏览器工具覆盖处理器（web_fetch / web_browse / web_form_extract / web_form_fill / web_click / web_load_html）
+/// 浏览器工具覆盖处理器（web_fetch / web_form_extract / web_form_fill / web_click / web_load_html）
 pub struct BrowserToolOverride {
     fetcher: Arc<dyn PageFetcher>,
 }
@@ -299,49 +305,6 @@ impl BrowserToolOverride {
         })
     }
 
-    fn handle_web_browse(
-        fetcher: &Arc<dyn PageFetcher>,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Option<tiangong_core::tool::ToolResult>> + Send>,
-    > {
-        let fetcher = fetcher.clone();
-        Box::pin(async move {
-            let snapshot = match fetcher.observe_page().await {
-                Some(s) => s,
-                None => {
-                    return Some(tiangong_core::tool::ToolResult {
-                        ok: false,
-                        summary: "浏览器未打开或页面未加载".to_string(),
-                        stdout: String::new(),
-                        stderr: "请先使用 web_fetch 打开一个页面，或使用 browser_open 打开浏览器"
-                            .to_string(),
-                        exit_code: 1,
-                        execution: None,
-                    });
-                }
-            };
-            let content = if snapshot.text.is_empty() {
-                format!(
-                    "浏览器页面：{}\nURL：{}\n状态：页面内容为空",
-                    snapshot.title, snapshot.url
-                )
-            } else {
-                format!(
-                    "浏览器页面：{}\nURL：{}\n\n{}",
-                    snapshot.title, snapshot.url, snapshot.text
-                )
-            };
-            Some(tiangong_core::tool::ToolResult {
-                ok: true,
-                summary: format!("浏览器当前页面：{}", snapshot.title),
-                stdout: content,
-                stderr: String::new(),
-                exit_code: 0,
-                execution: None,
-            })
-        })
-    }
-
     fn handle_web_form_extract(
         fetcher: &Arc<dyn PageFetcher>,
     ) -> std::pin::Pin<
@@ -363,16 +326,69 @@ impl BrowserToolOverride {
                 }
             };
             let total_fields: usize = result.forms.iter().map(|f| f.fields.len()).sum();
-            let output = serde_json::to_string_pretty(&result)
+            let total_buttons: usize = result.forms.iter().map(|f| f.buttons.len()).sum();
+            let json_output = serde_json::to_string_pretty(&result)
                 .unwrap_or_else(|_| "序列化表单数据失败".to_string());
+
+            // 人类可读摘要
+            let mut lines = Vec::new();
+            for (fi, form) in result.forms.iter().enumerate() {
+                if result.forms.len() > 1 {
+                    lines.push(format!("表单 {}:", fi + 1));
+                }
+                for field in &form.fields {
+                    let mut desc = format!(
+                        "  字段 {}: {} type={} label=\"{}\"",
+                        field.index + 1,
+                        field.selector,
+                        field.field_type,
+                        field.label
+                    );
+                    if !field.placeholder.is_empty() {
+                        desc.push_str(&format!(" placeholder=\"{}\"", field.placeholder));
+                    }
+                    if field.required {
+                        desc.push_str(" [必填]");
+                    }
+                    if field.readonly {
+                        desc.push_str(" [只读]");
+                    }
+                    if field.disabled {
+                        desc.push_str(" [禁用]");
+                    }
+                    if !field.options.is_empty() {
+                        let opts: Vec<String> = field
+                            .options
+                            .iter()
+                            .map(|o| format!("{}={}", o.text, o.value))
+                            .collect();
+                        desc.push_str(&format!(" 选项：[{}]", opts.join(", ")));
+                    }
+                    lines.push(desc);
+                }
+                for (bi, btn) in form.buttons.iter().enumerate() {
+                    let state = if btn.disabled { "disabled" } else { "enabled" };
+                    lines.push(format!(
+                        "  按钮 {}: <{}> [{}] ({}) {}",
+                        bi + 1,
+                        btn.tag,
+                        state,
+                        btn.selector,
+                        btn.text
+                    ));
+                }
+            }
+            let human_summary = lines.join("\n");
+
             Some(tiangong_core::tool::ToolResult {
                 ok: true,
                 summary: format!(
-                    "提取到 {} 个表单，共 {} 个字段",
+                    "提取到 {} 个表单，共 {} 个字段，{} 个按钮",
                     result.forms.len(),
-                    total_fields
+                    total_fields,
+                    total_buttons
                 ),
-                stdout: output,
+                stdout: format!("{human_summary}\n\n--- JSON ---\n{json_output}"),
                 stderr: String::new(),
                 exit_code: 0,
                 execution: None,
@@ -404,9 +420,17 @@ impl BrowserToolOverride {
             .and_then(|v| v.as_str())
             .unwrap_or("auto")
             .to_string();
+        let wait_for = call
+            .arguments
+            .get("wait_for")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let fetcher = fetcher.clone();
         Box::pin(async move {
-            let result = match fetcher.form_fill(&selector, &value, &strategy).await {
+            let result = match fetcher
+                .form_fill(&selector, &value, &strategy, wait_for.as_deref())
+                .await
+            {
                 Some(r) => r,
                 None => {
                     return Some(tiangong_core::tool::ToolResult {
@@ -421,10 +445,23 @@ impl BrowserToolOverride {
             };
             let strategy_used = result.strategy.clone().unwrap_or_default();
             if result.ok {
+                let wait_info = match &result.wait_result {
+                    Some(w) if w.ok => {
+                        format!("，等待条件满足：{}（{}ms）", w.condition, w.elapsed_ms)
+                    }
+                    Some(w) => format!("，等待超时：{}", w.error.as_deref().unwrap_or("超时")),
+                    None => String::new(),
+                };
+                let diff_info = match &result.page_diff {
+                    Some(d) if !d.is_empty() => format!("\n{d}"),
+                    _ => String::new(),
+                };
                 Some(tiangong_core::tool::ToolResult {
                     ok: true,
-                    summary: format!("字段填写成功（策略：{strategy_used}）"),
-                    stdout: format!("已填写字段 {selector}，使用策略：{strategy_used}"),
+                    summary: format!("字段填写成功（策略：{strategy_used}）{wait_info}{diff_info}"),
+                    stdout: format!(
+                        "已填写字段 {selector}，使用策略：{strategy_used}{wait_info}{diff_info}"
+                    ),
                     stderr: String::new(),
                     exit_code: 0,
                     execution: None,
@@ -454,9 +491,14 @@ impl BrowserToolOverride {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let wait_for = call
+            .arguments
+            .get("wait_for")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let fetcher = fetcher.clone();
         Box::pin(async move {
-            let result = match fetcher.click_element(&selector).await {
+            let result = match fetcher.click_element(&selector, wait_for.as_deref()).await {
                 Some(r) => r,
                 None => {
                     return Some(tiangong_core::tool::ToolResult {
@@ -470,20 +512,41 @@ impl BrowserToolOverride {
                 }
             };
             if result.ok {
+                let wait_info = match &result.wait_result {
+                    Some(w) if w.ok => {
+                        format!("，等待条件满足：{}（{}ms）", w.condition, w.elapsed_ms)
+                    }
+                    Some(w) => format!("，等待超时：{}", w.error.as_deref().unwrap_or("超时")),
+                    None => String::new(),
+                };
+                let diff_info = match &result.page_diff {
+                    Some(d) if !d.is_empty() => format!("\n{d}"),
+                    _ => String::new(),
+                };
                 Some(tiangong_core::tool::ToolResult {
                     ok: true,
-                    summary: format!("已点击元素 {}", selector),
-                    stdout: String::new(),
+                    summary: format!("已点击元素 {selector}{wait_info}{diff_info}"),
+                    stdout: diff_info,
                     stderr: String::new(),
                     exit_code: 0,
                     execution: None,
                 })
             } else {
+                let candidates_info = if result.candidates.is_empty() {
+                    String::new()
+                } else {
+                    let cands: Vec<String> = result
+                        .candidates
+                        .iter()
+                        .map(|c| format!("<{}> {} ({})", c.tag, c.text, c.selector))
+                        .collect();
+                    format!("。可能的目标：{}", cands.join("、"))
+                };
                 Some(tiangong_core::tool::ToolResult {
                     ok: false,
                     summary: "点击元素失败".to_string(),
                     stdout: String::new(),
-                    stderr: result.error.unwrap_or_default(),
+                    stderr: format!("{}{candidates_info}", result.error.unwrap_or_default()),
                     exit_code: 1,
                     execution: None,
                 })
@@ -501,7 +564,6 @@ impl tiangong_core::tool_override::ToolOverrideHandler for BrowserToolOverride {
     > {
         match call.name.as_str() {
             "web_fetch" => Self::handle_web_fetch(&self.fetcher, call),
-            "web_browse" => Self::handle_web_browse(&self.fetcher),
             "web_form_extract" => Self::handle_web_form_extract(&self.fetcher),
             "web_form_fill" => Self::handle_web_form_fill(&self.fetcher, call),
             "web_click" => Self::handle_web_click(&self.fetcher, call),

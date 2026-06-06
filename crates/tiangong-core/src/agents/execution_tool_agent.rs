@@ -138,22 +138,6 @@ pub(crate) fn basic_file_function_tools() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
-            name: "web_browse".to_string(),
-            description: "读取天工内嵌浏览器面板当前显示的页面内容（标题、URL、正文）。当用户询问浏览器当前页面、让你查看内嵌浏览器内容时使用此工具，不要使用 Playwright。注意：这是用户可见的嵌入式浏览器，与 Playwright headless 浏览器完全独立。".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "max_chars": {
-                        "type": "integer",
-                        "description": "最多返回字符数，默认 12000",
-                        "minimum": 1,
-                        "maximum": 50000
-                    }
-                },
-                "required": []
-            }),
-        },
-        ToolSpec {
             name: "web_form_extract".to_string(),
             description: "提取天工内嵌浏览器当前页面中所有表单的字段信息。支持原生 HTML 表单和 UI 库自定义组件（Ant Design Select/DatePicker、Element Plus Select/DatePicker 等）。返回结构化的字段列表（含框架检测信息），供 web_form_fill 填写。当需要帮用户填写网页表单时，先调用此工具了解页面有哪些可填写字段。".to_string(),
             input_schema: serde_json::json!({
@@ -168,20 +152,22 @@ pub(crate) fn basic_file_function_tools() -> Vec<ToolSpec> {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "selector": { "type": "string", "description": "字段定位表达式，支持：CSS 选择器（如 #username）、文本匹配（如 用户名）、aria:标签（如 aria:用户名）、批注矩形（如 rect:100,200,300,50）" },
+                    "selector": { "type": "string", "description": "字段定位表达式，支持：CSS 选择器（如 #username）、文本匹配（如 用户名）、aria:标签（如 aria:用户名）、批注矩形（如 rect:100,200,300,50）、序号选择（如 nth:2,用户名 表示第2个匹配）" },
                     "value": { "type": "string", "description": "要填写的值" },
-                    "strategy": { "type": "string", "enum": ["auto", "native", "keyboard", "paste"], "description": "填写策略，默认 auto（自动选择最佳策略）" }
+                    "strategy": { "type": "string", "enum": ["auto", "native", "keyboard", "paste"], "description": "填写策略，默认 auto（自动选择最佳策略）" },
+                    "wait_for": { "type": "string", "description": "可选。操作后等待条件：'navigation'=等URL变化，'element:选择器'=等元素出现，'element!:选择器'=等元素消失，'stable'=等DOM稳定。超时5秒。" }
                 },
                 "required": ["selector", "value"]
             }),
         },
         ToolSpec {
             name: "web_click".to_string(),
-            description: "点击天工内嵌浏览器当前页面中的指定元素（按钮、链接等）。支持智能定位：CSS 选择器、文本内容、ARIA 标签、批注矩形区域。元素会先滚动到可视区域再点击。常用于提交按钮、导航链接等交互。".to_string(),
+            description: "点击天工内嵌浏览器当前页面中的指定元素（按钮、链接等）。支持智能定位：CSS 选择器、文本内容、ARIA 标签、批注矩形区域、序号选择。元素会先滚动到可视区域再点击。常用于提交按钮、导航链接等交互。".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "selector": { "type": "string", "description": "元素定位表达式，支持：CSS 选择器（如 #btn-submit）、文本匹配（如 提交）、aria:标签（如 aria:确认）、批注矩形（如 rect:100,200,300,50）" }
+                    "selector": { "type": "string", "description": "元素定位表达式，支持：CSS 选择器（如 #btn-submit）、文本匹配（如 提交）、aria:标签（如 aria:确认）、批注矩形（如 rect:100,200,300,50）、序号选择（如 nth:2,提交 表示第2个匹配的提交按钮）" },
+                    "wait_for": { "type": "string", "description": "可选。操作后等待条件：'navigation'=等URL变化，'element:选择器'=等元素出现，'element!:选择器'=等元素消失，'stable'=等DOM稳定。超时5秒。" }
                 },
                 "required": ["selector"]
             }),
