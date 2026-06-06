@@ -11,6 +11,71 @@ use crate::types::{
     ClickElementResult, FillFieldResult, FormExtractResult, PageStatus,
 };
 
+/// 轮询等待页面内容变化（mainText 改变），返回 after-digest。
+/// 如果超时未变化，返回最后一次捕获的 digest。
+fn wait_for_content_change(
+    manager: &BrowserManager,
+    before_digest: &Option<String>,
+    timeout: Duration,
+) -> Option<String> {
+    let before_main = before_digest.as_ref().and_then(|b| {
+        serde_json::from_str::<serde_json::Value>(b)
+            .ok()
+            .and_then(|v| v.get("mainText").and_then(|t| t.as_str().map(String::from)))
+    });
+
+    let start = std::time::Instant::now();
+    let mut last = None;
+
+    // 先等待一个最小间隔让点击事件处理完成
+    std::thread::sleep(Duration::from_millis(400));
+
+    loop {
+        if let Some(digest) =
+            manager.eval_with_result("JSON.stringify(window.__tiangong_bridge.getPageDigest())")
+        {
+            let after_main = serde_json::from_str::<serde_json::Value>(&digest)
+                .ok()
+                .and_then(|v| v.get("mainText").and_then(|t| t.as_str().map(String::from)));
+
+            // mainText 发生变化 → 立即返回
+            if let (Some(b), Some(a)) = (&before_main, &after_main) {
+                if b != a {
+                    return Some(digest);
+                }
+            }
+
+            last = Some(digest);
+        }
+
+        if start.elapsed() >= timeout {
+            return last;
+        }
+
+        std::thread::sleep(Duration::from_millis(300));
+    }
+}
+
+/// 计算 digest 差异并返回 diff 字符串
+fn compute_page_diff(
+    manager: &BrowserManager,
+    before_digest: &Option<String>,
+    after_digest: &Option<String>,
+) -> Option<String> {
+    let (before, after) = (before_digest.as_ref()?, after_digest.as_ref()?);
+    let diff_js = format!(
+        "JSON.stringify(window.__tiangong_bridge.diffDigest({},{}))",
+        before, after
+    );
+    let diff_raw = manager.eval_with_result(&diff_js)?;
+    let diff = diff_raw.trim_matches('"').replace("\\n", "\n");
+    if diff.is_empty() {
+        None
+    } else {
+        Some(diff)
+    }
+}
+
 /// 浏览器命令处理循环
 pub async fn browser_command_handler(
     mut rx: mpsc::Receiver<BrowserCommand>,
@@ -202,26 +267,13 @@ pub async fn browser_command_handler(
                                 native_result.wait_result =
                                     serde_json::from_str(&wait_raw).ok();
                             }
-                        } else {
-                            // 无显式 wait_for 时，短暂等待让页面完成异步更新
-                            std::thread::sleep(Duration::from_millis(500));
                         }
 
-                        // 操作后 digest 对比
-                        let after_digest = manager
-                            .eval_with_result("JSON.stringify(window.__tiangong_bridge.getPageDigest())");
-                        if let (Some(before), Some(after)) = (before_digest, after_digest) {
-                            let diff_js = format!(
-                                "JSON.stringify(window.__tiangong_bridge.diffDigest({},{}))",
-                                before, after
-                            );
-                            if let Some(diff_raw) = manager.eval_with_result(&diff_js) {
-                                let diff = diff_raw.trim_matches('"').replace("\\n", "\n");
-                                if !diff.is_empty() {
-                                    native_result.page_diff = Some(diff);
-                                }
-                            }
-                        }
+                        // 智能等待页面内容变化（最多 2 秒）
+                        let after_digest =
+                            wait_for_content_change(&manager, &before_digest, Duration::from_secs(2));
+                        native_result.page_diff =
+                            compute_page_diff(&manager, &before_digest, &after_digest);
                     }
 
                     native_result
@@ -275,26 +327,12 @@ pub async fn browser_command_handler(
                             if let Some(wait_raw) = manager.eval_with_result(&wait_js) {
                                 result.wait_result = serde_json::from_str(&wait_raw).ok();
                             }
-                        } else {
-                            // 无显式 wait_for 时，短暂等待让页面完成异步更新
-                            std::thread::sleep(Duration::from_millis(800));
                         }
 
-                        // 操作后 digest 对比
-                        let after_digest = manager
-                            .eval_with_result("JSON.stringify(window.__tiangong_bridge.getPageDigest())");
-                        if let (Some(before), Some(after)) = (before_digest, after_digest) {
-                            let diff_js = format!(
-                                "JSON.stringify(window.__tiangong_bridge.diffDigest({},{}))",
-                                before, after
-                            );
-                            if let Some(diff_raw) = manager.eval_with_result(&diff_js) {
-                                let diff = diff_raw.trim_matches('"').replace("\\n", "\n");
-                                if !diff.is_empty() {
-                                    result.page_diff = Some(diff);
-                                }
-                            }
-                        }
+                        // 智能等待页面内容变化（最多 3 秒）
+                        let after_digest =
+                            wait_for_content_change(&manager, &before_digest, Duration::from_secs(3));
+                        result.page_diff = compute_page_diff(&manager, &before_digest, &after_digest);
                     }
 
                     result
