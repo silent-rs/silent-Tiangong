@@ -12,8 +12,12 @@ use crate::types::{
 };
 
 /// 轮询等待页面内容变化并稳定（mainText 不再改变），返回最终的 after-digest。
+///
 /// 点击后页面可能经历多轮变化（对话框关闭 → AJAX 返回 → 新内容渲染），
 /// 需要等内容稳定后才返回，否则可能只捕获到中间状态。
+///
+/// 首次变化后最多等 1.5 秒让内容稳定；如果页面有持续动画导致永远不稳定，
+/// 到点也会返回，避免无限等待。
 fn wait_for_content_change(
     manager: &BrowserManager,
     before_digest: &Option<String>,
@@ -26,9 +30,10 @@ fn wait_for_content_change(
     });
 
     let start = std::time::Instant::now();
+    let post_change_max = Duration::from_millis(1500);
     let mut last_digest: Option<String> = None;
     let mut prev_main = before_main.clone();
-    let mut any_change = false;
+    let mut first_change_time: Option<std::time::Instant> = None;
     let mut stable_count: u32 = 0;
 
     // 先等待让点击事件传播完成
@@ -50,9 +55,11 @@ fn wait_for_content_change(
 
             if changed {
                 prev_main = current_main;
-                any_change = true;
+                if first_change_time.is_none() {
+                    first_change_time = Some(std::time::Instant::now());
+                }
                 stable_count = 0;
-            } else if any_change {
+            } else if first_change_time.is_some() {
                 stable_count += 1;
                 // 内容稳定 2 个轮询周期（~600ms）后返回
                 if stable_count >= 2 {
@@ -61,6 +68,13 @@ fn wait_for_content_change(
             }
 
             last_digest = Some(d.clone());
+        }
+
+        // 首次变化后超过 post_change_max，不再等稳定，直接返回
+        if let Some(t) = first_change_time {
+            if t.elapsed() >= post_change_max {
+                return last_digest;
+            }
         }
 
         if start.elapsed() >= timeout {
