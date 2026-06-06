@@ -86,11 +86,11 @@
 
         // --- 4. 拦截 XHR ipc:// 协议 ---
         var _origXHR = window.XMLHttpRequest.prototype.open;
-        window.XMLHttpRequest.prototype.open = function(method, url) {
+        window.XMLHttpRequest.prototype.open = function(method, url, async, user, password) {
             if (typeof url === 'string' && url.indexOf('ipc://') === 0) {
                 return;
             }
-            return _origXHR.apply(this, arguments);
+            return _origXHR.call(this, method, url, async, user, password);
         };
     } catch(e) {}
 
@@ -986,9 +986,26 @@
             clickTarget.scrollIntoView({ block: 'center', behavior: 'instant' });
             clickTarget.focus();
 
-            // 使用 el.click() 触发浏览器原生点击，产生 trusted 事件
-            clickTarget.click();
+            // 非原生按钮（如 div[role="button"]）使用模拟鼠标事件，
+            // 确保 React/Vue 等框架的事件委托系统能正确捕获点击。
+            // 原生按钮直接用 .click() 产生 trusted 事件。
+            if (clickTarget.tagName === 'BUTTON' || clickTarget.tagName === 'A' || clickTarget.tagName === 'INPUT') {
+                clickTarget.click();
+            } else {
+                this._simulateClick(clickTarget);
+            }
             return { ok: true, candidates: [] };
+        },
+
+        // 模拟完整鼠标点击序列（mousedown → mouseup → click）
+        _simulateClick: function(el) {
+            var rect = el.getBoundingClientRect();
+            var x = rect.left + rect.width / 2;
+            var y = rect.top + rect.height / 2;
+            var opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y };
+            el.dispatchEvent(new MouseEvent('mousedown', opts));
+            el.dispatchEvent(new MouseEvent('mouseup', opts));
+            el.dispatchEvent(new MouseEvent('click', opts));
         },
 
         // 等待页面条件满足（异步，返回 Promise）
