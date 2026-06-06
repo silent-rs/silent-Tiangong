@@ -219,9 +219,37 @@ impl PageFetcher for BrowserPageFetcher {
                 .and_then(|r| r.ok())
         })
     }
+
+    fn query_dom(
+        &self,
+        selector: &str,
+        max_results: usize,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Option<tiangong_core::browser_trait::QueryDomResult>>
+                + Send,
+        >,
+    > {
+        let tx = self.cmd_tx.clone();
+        let selector = selector.to_string();
+        Box::pin(async move {
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            let result: crate::types::QueryDomResult = send_and_wait!(
+                tx,
+                BrowserCommand::QueryDom {
+                    selector,
+                    max_results,
+                    response_tx
+                },
+                response_rx,
+                10
+            );
+            Some(result.into())
+        })
+    }
 }
 
-/// 浏览器工具覆盖处理器（web_fetch / web_form_extract / web_form_fill / web_click / web_load_html）
+/// 浏览器工具覆盖处理器（web_fetch / web_form_extract / web_form_fill / web_click / web_load_html / web_query_dom）
 pub struct BrowserToolOverride {
     fetcher: Arc<dyn PageFetcher>,
 }
@@ -553,6 +581,91 @@ impl BrowserToolOverride {
             }
         })
     }
+
+    fn handle_web_query_dom(
+        fetcher: &Arc<dyn PageFetcher>,
+        call: &tiangong_core::model::ToolCall,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Option<tiangong_core::tool::ToolResult>> + Send>,
+    > {
+        let selector = call
+            .arguments
+            .get("selector")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let max_results = call
+            .arguments
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(20) as usize;
+        let fetcher = fetcher.clone();
+        Box::pin(async move {
+            let result = match fetcher.query_dom(&selector, max_results).await {
+                Some(r) => r,
+                None => {
+                    return Some(tiangong_core::tool::ToolResult {
+                        ok: false,
+                        summary: "浏览器未打开，无法查询 DOM".to_string(),
+                        stdout: String::new(),
+                        stderr: "请先使用 web_fetch 打开页面".to_string(),
+                        exit_code: 1,
+                        execution: None,
+                    });
+                }
+            };
+            if result.elements.is_empty() {
+                return Some(tiangong_core::tool::ToolResult {
+                    ok: true,
+                    summary: format!("选择器 \"{}\" 无匹配元素（共 0 个）", result.selector),
+                    stdout: format!("选择器 \"{}\" 未匹配到任何元素", result.selector),
+                    stderr: String::new(),
+                    exit_code: 0,
+                    execution: None,
+                });
+            }
+            let mut lines = Vec::new();
+            for el in &result.elements {
+                let mut attrs_parts = Vec::new();
+                for (k, v) in &el.attributes {
+                    attrs_parts.push(format!("{k}=\"{v}\""));
+                }
+                let attrs_str = if attrs_parts.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", attrs_parts.join(" "))
+                };
+                lines.push(format!("元素 {}: <{}>{}", el.index, el.tag, attrs_str));
+                if !el.text.is_empty() {
+                    let text_preview = if el.text.len() > 200 {
+                        format!("{}...", &el.text[..200])
+                    } else {
+                        el.text.clone()
+                    };
+                    for line in text_preview.split('\n') {
+                        if !line.trim().is_empty() {
+                            lines.push(format!("  {}", line.trim()));
+                        }
+                    }
+                }
+                lines.push(format!("  选择器: {}", el.selector));
+            }
+            let human_output = lines.join("\n");
+            let json_output = serde_json::to_string_pretty(&result)
+                .unwrap_or_else(|_| "序列化结果失败".to_string());
+            Some(tiangong_core::tool::ToolResult {
+                ok: true,
+                summary: format!(
+                    "选择器 \"{}\"：共 {} 个匹配（返回 {} 个）",
+                    result.selector, result.total, result.returned
+                ),
+                stdout: format!("{human_output}\n\n--- JSON ---\n{json_output}"),
+                stderr: String::new(),
+                exit_code: 0,
+                execution: None,
+            })
+        })
+    }
 }
 
 impl tiangong_core::tool_override::ToolOverrideHandler for BrowserToolOverride {
@@ -567,6 +680,7 @@ impl tiangong_core::tool_override::ToolOverrideHandler for BrowserToolOverride {
             "web_form_extract" => Self::handle_web_form_extract(&self.fetcher),
             "web_form_fill" => Self::handle_web_form_fill(&self.fetcher, call),
             "web_click" => Self::handle_web_click(&self.fetcher, call),
+            "web_query_dom" => Self::handle_web_query_dom(&self.fetcher, call),
             _ => Box::pin(async { None }),
         }
     }

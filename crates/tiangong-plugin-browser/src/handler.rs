@@ -8,31 +8,22 @@ use tracing::warn;
 use crate::manager::{default_browser_rect, BrowserManager, BrowserState};
 use crate::types::{
     AnnotationExtractResult, BrowserCommand, BrowserPageSnapshot, BrowserResponse,
-    ClickElementResult, FillFieldResult, FormExtractResult, PageStatus,
+    ClickElementResult, FillFieldResult, FormExtractResult, PageStatus, QueryDomResult,
 };
 
-/// 轮询等待页面内容变化并稳定（mainText 不再改变），返回最终的 after-digest。
+/// 轮询等待页面内容变化并稳定，返回最终的 after-digest。
 ///
-/// 点击后页面可能经历多轮变化（对话框关闭 → AJAX 返回 → 新内容渲染），
-/// 需要等内容稳定后才返回，否则可能只捕获到中间状态。
-///
-/// 首次变化后最多等 1.5 秒让内容稳定；如果页面有持续动画导致永远不稳定，
-/// 到点也会返回，避免无限等待。
-fn wait_for_content_change(
-    manager: &BrowserManager,
-    before_digest: &Option<String>,
-    timeout: Duration,
-) -> Option<String> {
-    let before_main = before_digest.as_ref().and_then(|b| {
-        serde_json::from_str::<serde_json::Value>(b)
-            .ok()
-            .and_then(|v| v.get("mainText").and_then(|t| t.as_str().map(String::from)))
-    });
+/// 使用轻量 `innerText` 签名做变更检测（不依赖 JSON 解析），
+/// 稳定后才捕获一次完整的 `getPageDigest` 用于 diff 计算。
+fn wait_for_content_change(manager: &BrowserManager, timeout: Duration) -> Option<String> {
+    // 初始签名：用 innerText 前 500 字符做轻量比较
+    let before_sig = manager.eval_with_result(
+        "(function(){try{return(document.body.innerText||'').substring(0,500).trim()}catch(e){return''}})()",
+    );
 
     let start = std::time::Instant::now();
     let post_change_max = Duration::from_millis(1500);
-    let mut last_digest: Option<String> = None;
-    let mut prev_main = before_main.clone();
+    let mut prev_sig = before_sig.clone();
     let mut first_change_time: Option<std::time::Instant> = None;
     let mut stable_count: u32 = 0;
 
@@ -40,45 +31,41 @@ fn wait_for_content_change(
     std::thread::sleep(Duration::from_millis(600));
 
     loop {
-        let digest =
-            manager.eval_with_result("JSON.stringify(window.__tiangong_bridge.getPageDigest())");
+        let current_sig = manager.eval_with_result(
+            "(function(){try{return(document.body.innerText||'').substring(0,500).trim()}catch(e){return''}})()",
+        );
 
-        if let Some(ref d) = digest {
-            let current_main = serde_json::from_str::<serde_json::Value>(d)
-                .ok()
-                .and_then(|v| v.get("mainText").and_then(|t| t.as_str().map(String::from)));
+        let changed = match (&prev_sig, &current_sig) {
+            (Some(p), Some(c)) => p != c,
+            _ => prev_sig.is_some() != current_sig.is_some(),
+        };
 
-            let changed = match (&prev_main, &current_main) {
-                (Some(prev), Some(curr)) => prev != curr,
-                _ => prev_main.is_some() != current_main.is_some(),
-            };
-
-            if changed {
-                prev_main = current_main;
-                if first_change_time.is_none() {
-                    first_change_time = Some(std::time::Instant::now());
-                }
-                stable_count = 0;
-            } else if first_change_time.is_some() {
-                stable_count += 1;
-                // 内容稳定 2 个轮询周期（~600ms）后返回
-                if stable_count >= 2 {
-                    return Some(d.clone());
-                }
+        if changed {
+            prev_sig = current_sig;
+            if first_change_time.is_none() {
+                first_change_time = Some(std::time::Instant::now());
             }
-
-            last_digest = Some(d.clone());
+            stable_count = 0;
+        } else if first_change_time.is_some() {
+            stable_count += 1;
+            // 内容稳定 2 个轮询周期（~600ms）后，捕获最终 digest 返回
+            if stable_count >= 2 {
+                return manager
+                    .eval_with_result("JSON.stringify(window.__tiangong_bridge.getPageDigest())");
+            }
         }
 
         // 首次变化后超过 post_change_max，不再等稳定，直接返回
         if let Some(t) = first_change_time {
             if t.elapsed() >= post_change_max {
-                return last_digest;
+                return manager
+                    .eval_with_result("JSON.stringify(window.__tiangong_bridge.getPageDigest())");
             }
         }
 
         if start.elapsed() >= timeout {
-            return last_digest;
+            return manager
+                .eval_with_result("JSON.stringify(window.__tiangong_bridge.getPageDigest())");
         }
 
         std::thread::sleep(Duration::from_millis(300));
@@ -300,7 +287,7 @@ pub async fn browser_command_handler(
 
                         // 智能等待页面内容变化（最多 2 秒）
                         let after_digest =
-                            wait_for_content_change(&manager, &before_digest, Duration::from_secs(2));
+                            wait_for_content_change(&manager, Duration::from_secs(2));
                         native_result.page_diff =
                             compute_page_diff(&manager, &before_digest, &after_digest);
                     }
@@ -360,7 +347,7 @@ pub async fn browser_command_handler(
 
                         // 智能等待页面内容变化（最多 3 秒）
                         let after_digest =
-                            wait_for_content_change(&manager, &before_digest, Duration::from_secs(3));
+                            wait_for_content_change(&manager, Duration::from_secs(3));
                         result.page_diff = compute_page_diff(&manager, &before_digest, &after_digest);
                     }
 
@@ -468,6 +455,38 @@ pub async fn browser_command_handler(
                 .unwrap_or(AnnotationExtractResult {
                     elements: vec![],
                     count: 0,
+                });
+                let _ = response_tx.send(result);
+            }
+            BrowserCommand::QueryDom {
+                selector,
+                max_results,
+                response_tx,
+            } => {
+                let manager = BrowserManager {
+                    state: browser_state.clone(),
+                };
+                let result = tokio::task::spawn_blocking(move || {
+                    let js = format!(
+                        "JSON.stringify(window.__tiangong_bridge.queryDom({},{max_results}))",
+                        serde_json::to_string(&selector).unwrap_or_default(),
+                    );
+                    manager
+                        .eval_with_result(&js)
+                        .and_then(|raw| serde_json::from_str::<QueryDomResult>(&raw).ok())
+                        .unwrap_or(QueryDomResult {
+                            selector,
+                            total: 0,
+                            returned: 0,
+                            elements: vec![],
+                        })
+                })
+                .await
+                .unwrap_or(QueryDomResult {
+                    selector: String::new(),
+                    total: 0,
+                    returned: 0,
+                    elements: vec![],
                 });
                 let _ = response_tx.send(result);
             }

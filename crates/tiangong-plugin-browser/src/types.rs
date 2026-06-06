@@ -62,6 +62,12 @@ pub enum BrowserCommand {
     AnnotationExtract {
         response_tx: oneshot::Sender<AnnotationExtractResult>,
     },
+    /// 用 CSS 选择器查询 DOM 元素
+    QueryDom {
+        selector: String,
+        max_results: usize,
+        response_tx: oneshot::Sender<QueryDomResult>,
+    },
 }
 
 /// 浏览器响应
@@ -190,6 +196,35 @@ pub struct ElementCandidate {
     pub selector: String,
 }
 
+/// DOM 查询结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryDomResult {
+    pub selector: String,
+    pub total: usize,
+    pub returned: usize,
+    pub elements: Vec<QueryDomElement>,
+}
+
+/// DOM 查询到的单个元素
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryDomElement {
+    pub index: usize,
+    pub tag: String,
+    pub text: String,
+    pub attributes: HashMap<String, String>,
+    pub selector: String,
+    pub rect: DomRect,
+}
+
+/// DOM 元素的矩形位置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
 // ── 类型转换：plugin → core ──────────────────────────────────────────
 
 impl From<BrowserTab> for tiangong_core::browser_trait::TabInfo {
@@ -312,6 +347,41 @@ impl From<WaitResult> for tiangong_core::browser_trait::WaitResult {
             condition: r.condition,
             elapsed_ms: r.elapsed_ms,
             error: r.error,
+        }
+    }
+}
+
+impl From<DomRect> for tiangong_core::browser_trait::DomRect {
+    fn from(r: DomRect) -> Self {
+        Self {
+            x: r.x,
+            y: r.y,
+            width: r.width,
+            height: r.height,
+        }
+    }
+}
+
+impl From<QueryDomElement> for tiangong_core::browser_trait::QueryDomElement {
+    fn from(e: QueryDomElement) -> Self {
+        Self {
+            index: e.index,
+            tag: e.tag,
+            text: e.text,
+            attributes: e.attributes,
+            selector: e.selector,
+            rect: e.rect.into(),
+        }
+    }
+}
+
+impl From<QueryDomResult> for tiangong_core::browser_trait::QueryDomResult {
+    fn from(r: QueryDomResult) -> Self {
+        Self {
+            selector: r.selector,
+            total: r.total,
+            returned: r.returned,
+            elements: r.elements.into_iter().map(Into::into).collect(),
         }
     }
 }

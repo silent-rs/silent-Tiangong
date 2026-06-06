@@ -173,6 +173,18 @@ pub(crate) fn basic_file_function_tools() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "web_query_dom".to_string(),
+            description: "在天工内嵌浏览器当前页面中，用 CSS 选择器查询 DOM 元素，返回匹配元素的标签、文本、属性和位置信息。常用于操作后确认结果（如检查新出现的元素、获取文本内容、验证状态变化），无需刷新页面。".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "selector": { "type": "string", "description": "CSS 选择器表达式（如 .api-key-value、#result、[data-testid]、div.success-message）" },
+                    "max_results": { "type": "integer", "description": "最大返回数量，默认 20", "minimum": 1, "maximum": 50 }
+                },
+                "required": ["selector"]
+            }),
+        },
+        ToolSpec {
             name: "write_file".to_string(),
             description: "写入文件内容（支持覆盖或追加）".to_string(),
             input_schema: serde_json::json!({

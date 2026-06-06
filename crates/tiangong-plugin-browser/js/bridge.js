@@ -919,6 +919,34 @@
             return deduped.slice(0, 20);
         },
 
+        queryDom: function(selector, maxResults) {
+            maxResults = maxResults || 20;
+            var els = document.querySelectorAll(selector);
+            var results = [];
+            for (var i = 0; i < Math.min(els.length, maxResults); i++) {
+                var el = els[i];
+                var text = (el.innerText || '').trim();
+                if (text.length > 500) text = text.substring(0, 500) + '...';
+                var attrs = {};
+                var importantAttrs = ['id','class','name','type','href','src','placeholder',
+                    'aria-label','role','title','alt','value','data-testid','disabled','readonly'];
+                for (var ai = 0; ai < importantAttrs.length; ai++) {
+                    var val = el.getAttribute(importantAttrs[ai]);
+                    if (val) attrs[importantAttrs[ai]] = val;
+                }
+                var r = el.getBoundingClientRect();
+                results.push({
+                    index: i,
+                    tag: el.tagName.toLowerCase(),
+                    text: text,
+                    attributes: attrs,
+                    selector: this.generateSelector(el),
+                    rect: { x: Math.round(r.left), y: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) }
+                });
+            }
+            return { selector: selector, total: els.length, returned: results.length, elements: results };
+        },
+
         // 综合检测元素是否处于禁用状态
         _isDisabled: function(el) {
             if (!el) return false;

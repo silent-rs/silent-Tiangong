@@ -57,6 +57,15 @@ pub trait PageFetcher: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Option<Result<(), String>>> + Send>> {
         Box::pin(async move { None })
     }
+
+    /// 用 CSS 选择器查询当前页面的 DOM 元素。
+    fn query_dom(
+        &self,
+        _selector: &str,
+        _max_results: usize,
+    ) -> Pin<Box<dyn Future<Output = Option<QueryDomResult>> + Send>> {
+        Box::pin(async move { None })
+    }
 }
 
 /// 页面获取结果（纯数据，无 tokio 依赖）
@@ -188,4 +197,33 @@ pub struct ElementCandidate {
 pub struct TabListResult {
     pub tabs: Vec<TabInfo>,
     pub active_tab_id: Option<String>,
+}
+
+/// DOM 查询结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryDomResult {
+    pub selector: String,
+    pub total: usize,
+    pub returned: usize,
+    pub elements: Vec<QueryDomElement>,
+}
+
+/// DOM 查询到的单个元素
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryDomElement {
+    pub index: usize,
+    pub tag: String,
+    pub text: String,
+    pub attributes: std::collections::HashMap<String, String>,
+    pub selector: String,
+    pub rect: DomRect,
+}
+
+/// DOM 元素的矩形位置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
 }
