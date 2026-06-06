@@ -65,8 +65,7 @@
             // window.ipc 不可重新配置，忽略
         }
 
-        // --- 3. 拦截 fetch ipc:// 协议 ---
-        // 返回包含 Tauri 期望头部的成功响应，避免回退到 postMessage 通道
+        // --- 3. 拦截 fetch ipc:// 协议 + 捕获 JSON 响应 ---
         var _origFetch = window.fetch;
         window.fetch = function(input, init) {
             var url = (typeof input === 'string') ? input : (input && input.url ? input.url : '');
@@ -81,16 +80,63 @@
                     }
                 }));
             }
-            return _origFetch.call(this, input, init);
+            return _origFetch.call(this, input, init).then(function(response) {
+                try {
+                    var ct = response.headers.get('content-type') || '';
+                    if (ct.indexOf('application/json') >= 0 || ct.indexOf('text/json') >= 0) {
+                        var cloned = response.clone();
+                        var method = (init && init.method) || 'GET';
+                        cloned.text().then(function(body) {
+                            if (window.__tiangong_bridge && window.__tiangong_bridge.observer) {
+                                window.__tiangong_bridge.observer._pushEvent({
+                                    type: 'network_response',
+                                    timestamp: Date.now(),
+                                    url: url,
+                                    method: method,
+                                    status: response.status,
+                                    detail: body.length > 500 ? body.substring(0, 500) : body
+                                });
+                            }
+                        }).catch(function() {});
+                    }
+                } catch(e) {}
+                return response;
+            });
         };
 
-        // --- 4. 拦截 XHR ipc:// 协议 ---
-        var _origXHR = window.XMLHttpRequest.prototype.open;
+        // --- 4. 拦截 XHR ipc:// 协议 + 捕获 JSON 响应 ---
+        var _origXHROpen = window.XMLHttpRequest.prototype.open;
+        var _origXHRSend = window.XMLHttpRequest.prototype.send;
         window.XMLHttpRequest.prototype.open = function(method, url, async, user, password) {
             if (typeof url === 'string' && url.indexOf('ipc://') === 0) {
                 return;
             }
-            return _origXHR.call(this, method, url, async, user, password);
+            this._tiangong_method = method;
+            this._tiangong_url = url;
+            return _origXHROpen.call(this, method, url, async, user, password);
+        };
+        window.XMLHttpRequest.prototype.send = function(body) {
+            var xhr = this;
+            if (xhr._tiangong_url && xhr._tiangong_url.indexOf('ipc://') !== 0) {
+                xhr.addEventListener('load', function() {
+                    try {
+                        var ct = xhr.getResponseHeader('content-type') || '';
+                        if (ct.indexOf('application/json') >= 0 || ct.indexOf('text/json') >= 0) {
+                            if (window.__tiangong_bridge && window.__tiangong_bridge.observer) {
+                                window.__tiangong_bridge.observer._pushEvent({
+                                    type: 'network_response',
+                                    timestamp: Date.now(),
+                                    url: xhr._tiangong_url || '',
+                                    method: xhr._tiangong_method || 'GET',
+                                    status: xhr.status,
+                                    detail: (xhr.responseText || '').substring(0, 500)
+                                });
+                            }
+                        }
+                    } catch(e) {}
+                });
+            }
+            return _origXHRSend.call(this, body);
         };
     } catch(e) {}
 

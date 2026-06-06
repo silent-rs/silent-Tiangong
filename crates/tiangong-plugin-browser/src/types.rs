@@ -259,6 +259,15 @@ pub enum BrowserEvent {
     },
     #[serde(rename = "user_navigation")]
     UserNavigation { timestamp: u64, url: String },
+    #[serde(rename = "network_response")]
+    NetworkResponse {
+        timestamp: u64,
+        url: String,
+        method: String,
+        status: u16,
+        #[serde(default)]
+        detail: String,
+    },
 }
 
 // ── 类型转换：plugin → core ──────────────────────────────────────────

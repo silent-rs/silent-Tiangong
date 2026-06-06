@@ -17,14 +17,14 @@ use crate::types::{
 /// 确保对话框（追加到 innerText 末尾）和覆盖层弹窗都能被捕获。
 /// 稳定后才捕获一次完整的 `getPageDigest` 用于 diff 计算。
 fn wait_for_content_change(manager: &BrowserManager, timeout: Duration) -> Option<String> {
-    // 签名：总长度 + ':' + 前200字符 + '|' + 后200字符 + '|' + overlay状态
-    // overlay 状态确保弹窗出现/消失时签名变化
-    let sig_js = "(function(){try{var t=document.body.innerText||'';var n=t.length;var h=t.substring(0,200);var e=n>200?t.substring(n-200):'';var o=window.__tiangong_bridge._getTopmostOverlay();var ov=o?'1:'+((o.innerText||'').length):'0';return n+':'+h+'|'+e+'|'+ov}catch(e){return'0:'}})()";
+    // 签名：总长度 + ':' + 前200字符 + '|' + 后200字符 + '|' + overlay文本前100字符
+    // overlay 内容直接纳入签名，确保弹窗内任何文本变化都能被捕获
+    let sig_js = "(function(){try{var t=document.body.innerText||'';var n=t.length;var h=t.substring(0,200);var e=n>200?t.substring(n-200):'';var o=window.__tiangong_bridge._getTopmostOverlay();var ov=o?'1:'+(o.innerText||'').substring(0,100):'0';return n+':'+h+'|'+e+'|'+ov}catch(e){return'0:'}})()";
 
     let before_sig = manager.eval_with_result(sig_js);
 
     let start = std::time::Instant::now();
-    let post_change_max = Duration::from_millis(1500);
+    let post_change_max = Duration::from_millis(2500);
     let mut prev_sig = before_sig.clone();
     let mut first_change_time: Option<std::time::Instant> = None;
     let mut stable_count: u32 = 0;
@@ -287,7 +287,7 @@ pub async fn browser_command_handler(
 
                         // 智能等待页面内容变化（最多 2 秒）
                         let after_digest =
-                            wait_for_content_change(&manager, Duration::from_secs(2));
+                            wait_for_content_change(&manager, Duration::from_secs(3));
                         native_result.page_diff =
                             compute_page_diff(&manager, &before_digest, &after_digest);
                     }
@@ -345,9 +345,9 @@ pub async fn browser_command_handler(
                             }
                         }
 
-                        // 智能等待页面内容变化（最多 3 秒）
+                        // 智能等待页面内容变化（最多 5 秒）
                         let after_digest =
-                            wait_for_content_change(&manager, Duration::from_secs(3));
+                            wait_for_content_change(&manager, Duration::from_secs(5));
                         result.page_diff = compute_page_diff(&manager, &before_digest, &after_digest);
                     }
 
