@@ -453,3 +453,93 @@ describe('annotation 自动提取元素', () => {
     expect(result.annotations[0].elements[0].tag).toBe('button');
   });
 });
+
+describe('_isDisabled', () => {
+  it('检测原生 disabled 属性', () => {
+    setupDOM('<button id="btn" disabled>按钮</button>');
+    const bridge = getBridge();
+    expect(bridge._isDisabled(document.getElementById('btn'))).toBe(true);
+  });
+
+  it('检测 aria-disabled="true"', () => {
+    setupDOM('<div id="el" aria-disabled="true">元素</div>');
+    const bridge = getBridge();
+    expect(bridge._isDisabled(document.getElementById('el'))).toBe(true);
+  });
+
+  it('检测 CSS 类名中包含 disabled（如 ds-button--disabled）', () => {
+    setupDOM('<div id="el" class="ds-button ds-button--disabled">创建</div>');
+    const bridge = getBridge();
+    expect(bridge._isDisabled(document.getElementById('el'))).toBe(true);
+  });
+
+  it('检测 is-disabled 类名（Element Plus）', () => {
+    setupDOM('<div id="el" class="el-button is-disabled">按钮</div>');
+    const bridge = getBridge();
+    expect(bridge._isDisabled(document.getElementById('el'))).toBe(true);
+  });
+
+  it('正常元素返回 false', () => {
+    setupDOM('<button id="btn">按钮</button>');
+    const bridge = getBridge();
+    expect(bridge._isDisabled(document.getElementById('btn'))).toBe(false);
+  });
+});
+
+describe('clickElement disabled 检测', () => {
+  it('CSS 类 disabled 的 div[role=button] 返回错误', () => {
+    setupDOM(`
+      <div id="dialog" role="dialog">
+        <input type="text" class="ds-input__input" placeholder="输入名称" value="">
+        <div role="button" class="ds-button ds-button--disabled">创建</div>
+      </div>
+    `);
+    const bridge = getBridge();
+    const result = bridge.clickElement('创建');
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('禁用');
+  });
+
+  it('正常按钮可以点击', () => {
+    setupDOM(`
+      <div role="dialog">
+        <input type="text" value="test">
+        <div role="button" class="ds-button ds-button--primary">创建</div>
+      </div>
+    `);
+    const bridge = getBridge();
+    const result = bridge.clickElement('创建');
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe('extractForms 非原生按钮', () => {
+  it('提取 div[role=button] 按钮', () => {
+    setupDOM(`
+      <div id="dialog" role="dialog">
+        <div class="ds-form-item">
+          <label class="ds-form-item__label"><span class="ds-form-item__label-text">名称</span></label>
+          <div class="ds-form-item__content">
+            <input type="text" class="ds-input__input" placeholder="输入名称" value="">
+          </div>
+        </div>
+        <div class="ds-modal-content__footer">
+          <div role="button" class="ds-button ds-button--outlinedNeutral">取消</div>
+          <div role="button" class="ds-button ds-button--primary ds-button--disabled">创建</div>
+        </div>
+      </div>
+    `);
+    const bridge = getBridge();
+    const result = bridge.extractForms();
+    expect(result.forms.length).toBeGreaterThan(0);
+    const form = result.forms[0];
+    expect(form.fields.length).toBe(1);
+    expect(form.fields[0].placeholder).toBe('输入名称');
+    // 应该提取到 div[role=button] 按钮
+    expect(form.buttons.length).toBe(2);
+    expect(form.buttons[0].text).toBe('取消');
+    expect(form.buttons[0].disabled).toBe(false);
+    expect(form.buttons[1].text).toBe('创建');
+    expect(form.buttons[1].disabled).toBe(true);
+  });
+});

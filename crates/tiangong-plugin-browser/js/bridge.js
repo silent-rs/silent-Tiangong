@@ -181,8 +181,10 @@
         extractForms: function() {
             var forms = [];
             var containers = document.querySelectorAll('form');
+            // 无 <form> 时，尝试在 dialog 或 body 中查找
             if (containers.length === 0) {
-                containers = [document.body];
+                var dialog = this._getActiveDialog();
+                containers = dialog ? [dialog] : [document.body];
             }
             for (var ci = 0; ci < containers.length; ci++) {
                 var container = containers[ci];
@@ -212,6 +214,17 @@
                         if (lbl) field.label = (lbl.textContent || '').trim();
                     }
                     if (!field.label) {
+                        // 向上查找 ds-form-item__label-text、ant-form-item-label、el-form-item__label
+                        var labelEl = el.closest('[class*="form-item"]') || el.closest('.ant-form-item') || el.closest('.el-form-item');
+                        if (labelEl) {
+                            var labelText = labelEl.querySelector('[class*="label-text"]') ||
+                                           labelEl.querySelector('.ant-form-item-label') ||
+                                           labelEl.querySelector('.el-form-item__label') ||
+                                           labelEl.querySelector('label');
+                            if (labelText) field.label = (labelText.textContent || '').trim();
+                        }
+                    }
+                    if (!field.label) {
                         var parent = el.parentElement;
                         if (parent && parent.tagName === 'LABEL') {
                             field.label = (parent.textContent || '').trim();
@@ -233,21 +246,26 @@
                         field.selector = '#' + el.id.replace(/([^\w-])/g, '\\$1');
                     } else if (el.name) {
                         field.selector = '[name="' + el.name + '"]';
+                    } else if (el.placeholder) {
+                        field.selector = '[placeholder="' + el.placeholder.replace(/"/g, '\\"') + '"]';
                     } else {
-                        field.selector = el.tagName.toLowerCase() + ':nth-of-type(' + (idx + 1) + ')';
+                        field.selector = this.generateSelector(el);
                     }
                     fields.push(field);
                 }
-                // 提取表单内/容器内的按钮
+                // 提取表单内/容器内的按钮（包含原生和 div[role="button"] 等）
                 var buttons = [];
-                var btns = container.querySelectorAll('button, input[type="submit"], input[type="reset"]');
+                var btns = container.querySelectorAll('button, input[type="submit"], input[type="reset"], [role="button"]');
                 for (var bci = 0; bci < btns.length; bci++) {
+                    var btn = btns[bci];
+                    var btnText = (btn.textContent || '').trim();
+                    if (!btnText) continue; // 跳过无文本的按钮（如图标按钮）
                     buttons.push({
-                        tag: btns[bci].tagName.toLowerCase(),
-                        type: btns[bci].type || '',
-                        text: (btns[bci].textContent || '').trim(),
-                        disabled: btns[bci].disabled || false,
-                        selector: this.generateSelector(btns[bci])
+                        tag: btn.tagName.toLowerCase(),
+                        type: btn.type || '',
+                        text: btnText,
+                        disabled: this._isDisabled(btn),
+                        selector: this.generateSelector(btn)
                     });
                 }
                 if (fields.length > 0 || buttons.length > 0) {
@@ -429,6 +447,8 @@
                     descriptor.set.call(el, value);
                     el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
                     el.dispatchEvent(new Event('change', { bubbles: true }));
+                    // 额外触发键盘事件，确保框架感知到用户交互
+                    el.dispatchEvent(new KeyboardEvent('keyup', { key: ' ', code: 'Space', keyCode: 32, bubbles: true }));
                     if (el.value === value) {
                         result = { ok: true, strategy: 'native-setter' };
                     }
@@ -451,6 +471,20 @@
 
             // 填写完成后触发 blur 激活表单校验
             el.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+
+            // 检查填写后是否有 disabled 按钮变为 enabled（返回提示信息）
+            result.currentValue = el.value;
+            var dialog = this._getActiveDialog();
+            if (dialog) {
+                var disabledBtns = dialog.querySelectorAll('[role="button"]');
+                for (var di = 0; di < disabledBtns.length; di++) {
+                    var btnText = (disabledBtns[di].textContent || '').trim();
+                    if (btnText && this._isDisabled(disabledBtns[di])) {
+                        result.note = '按钮 "' + btnText + '" 仍处于禁用状态，可能需要填写更多必填字段';
+                        break;
+                    }
+                }
+            }
             return result;
         },
 
@@ -885,6 +919,27 @@
             return deduped.slice(0, 20);
         },
 
+        // 综合检测元素是否处于禁用状态
+        _isDisabled: function(el) {
+            if (!el) return false;
+            // 原生 disabled 属性
+            if (el.disabled) return true;
+            if (el.hasAttribute && el.hasAttribute('disabled')) return true;
+            // aria-disabled
+            if (el.getAttribute && el.getAttribute('aria-disabled') === 'true') return true;
+            // CSS 类名包含 disabled 模式（如 ds-button--disabled、is-disabled、ant-btn-disabled）
+            if (el.classList) {
+                for (var i = 0; i < el.classList.length; i++) {
+                    var cls = el.classList[i].toLowerCase();
+                    if (cls.indexOf('disabled') >= 0 || cls.indexOf('-disabled') >= 0) {
+                        // 排除误判：如 "not-disabled"
+                        if (cls.indexOf('not-disabled') === -1) return true;
+                    }
+                }
+            }
+            return false;
+        },
+
         clickElement: function(selector) {
             var el = this.locateElement(selector);
             if (!el) {
@@ -915,7 +970,7 @@
             }
 
             // 检测 disabled 状态
-            if (clickTarget.disabled || clickTarget.getAttribute('aria-disabled') === 'true') {
+            if (this._isDisabled(clickTarget)) {
                 return { ok: false, error: '元素已禁用: ' + selector, candidates: [] };
             }
 
