@@ -271,3 +271,205 @@ pub struct AnnotationExtractResult {
     pub elements: Vec<AnnotationRegionResult>,
     pub count: usize,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn annotation_rect_roundtrip() {
+        let rect = AnnotationRect {
+            x: 10.5,
+            y: 20.0,
+            width: 100.0,
+            height: 50.0,
+        };
+        let json = serde_json::to_string(&rect).unwrap();
+        let back: AnnotationRect = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.x, 10.5);
+        assert_eq!(back.y, 20.0);
+        assert_eq!(back.width, 100.0);
+        assert_eq!(back.height, 50.0);
+    }
+
+    #[test]
+    fn extracted_element_roundtrip() {
+        let mut attrs = HashMap::new();
+        attrs.insert("id".to_string(), "btn".to_string());
+        attrs.insert("class".to_string(), "primary".to_string());
+
+        let el = ExtractedElement {
+            tag: "button".to_string(),
+            text: "提交".to_string(),
+            attributes: attrs,
+            selector: "#btn".to_string(),
+            rect: AnnotationRect {
+                x: 50.0,
+                y: 100.0,
+                width: 80.0,
+                height: 30.0,
+            },
+            overlap_ratio: 0.85,
+            area: 2400.0,
+        };
+        let json = serde_json::to_string(&el).unwrap();
+        let back: ExtractedElement = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tag, "button");
+        assert_eq!(back.text, "提交");
+        assert_eq!(back.selector, "#btn");
+        assert_eq!(back.overlap_ratio, 0.85);
+        assert_eq!(back.attributes.get("id").unwrap(), "btn");
+    }
+
+    #[test]
+    fn annotation_region_result_roundtrip() {
+        let region = AnnotationRegionResult {
+            annotation_index: 0,
+            rect: AnnotationRect {
+                x: 40.0,
+                y: 40.0,
+                width: 120.0,
+                height: 50.0,
+            },
+            elements: vec![ExtractedElement {
+                tag: "a".to_string(),
+                text: "链接".to_string(),
+                attributes: HashMap::new(),
+                selector: "a[href=\"/test\"]".to_string(),
+                rect: AnnotationRect {
+                    x: 50.0,
+                    y: 50.0,
+                    width: 100.0,
+                    height: 30.0,
+                },
+                overlap_ratio: 0.9,
+                area: 3000.0,
+            }],
+        };
+        let json = serde_json::to_string(&region).unwrap();
+        let back: AnnotationRegionResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.annotation_index, 0);
+        assert_eq!(back.elements.len(), 1);
+        assert_eq!(back.elements[0].tag, "a");
+    }
+
+    #[test]
+    fn annotation_extract_result_roundtrip() {
+        let result = AnnotationExtractResult {
+            elements: vec![AnnotationRegionResult {
+                annotation_index: 0,
+                rect: AnnotationRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 200.0,
+                    height: 100.0,
+                },
+                elements: vec![],
+            }],
+            count: 1,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let back: AnnotationExtractResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.count, 1);
+        assert_eq!(back.elements.len(), 1);
+    }
+
+    #[test]
+    fn extracted_element_from_bridge_json() {
+        let json = r#"{
+            "tag": "input",
+            "text": "",
+            "attributes": {"name": "email", "type": "email"},
+            "selector": "[name=\"email\"]",
+            "rect": {"x": 50, "y": 100, "width": 200, "height": 30},
+            "overlap_ratio": 0.75,
+            "area": 6000
+        }"#;
+        let el: ExtractedElement = serde_json::from_str(json).unwrap();
+        assert_eq!(el.tag, "input");
+        assert_eq!(el.attributes.get("name").unwrap(), "email");
+        assert_eq!(el.overlap_ratio, 0.75);
+    }
+
+    #[test]
+    fn plugin_to_core_tab_info_conversion() {
+        let tab = BrowserTab {
+            id: "tab-1".to_string(),
+            url: "https://example.com".to_string(),
+            title: "Example".to_string(),
+        };
+        let core: tiangong_core::browser_trait::TabInfo = tab.into();
+        assert_eq!(core.id, "tab-1");
+        assert_eq!(core.url, "https://example.com");
+        assert_eq!(core.title, "Example");
+    }
+
+    #[test]
+    fn plugin_to_core_fetch_result_conversion() {
+        let resp = BrowserResponse {
+            ok: true,
+            title: "Test".to_string(),
+            content: "Hello".to_string(),
+            final_url: "https://example.com".to_string(),
+            error: None,
+        };
+        let core: tiangong_core::browser_trait::FetchResult = resp.into();
+        assert!(core.ok);
+        assert_eq!(core.title, "Test");
+        assert_eq!(core.content, "Hello");
+        assert!(core.error.is_none());
+    }
+
+    #[test]
+    fn plugin_to_core_click_result_conversion() {
+        let click = ClickElementResult {
+            ok: true,
+            error: None,
+        };
+        let core: tiangong_core::browser_trait::ClickElementResult = click.into();
+        assert!(core.ok);
+        assert!(core.error.is_none());
+    }
+
+    #[test]
+    fn plugin_to_core_fill_result_conversion() {
+        let fill = FillFieldResult {
+            ok: true,
+            strategy: Some("auto".to_string()),
+            error: None,
+            current_value: Some("test@example.com".to_string()),
+        };
+        let core: tiangong_core::browser_trait::FillFieldResult = fill.into();
+        assert!(core.ok);
+        assert_eq!(core.strategy.unwrap(), "auto");
+        assert_eq!(core.current_value.unwrap(), "test@example.com");
+    }
+
+    #[test]
+    fn plugin_to_core_form_extract_conversion() {
+        let form = FormExtractResult {
+            forms: vec![FormInfo {
+                fields: vec![FormField {
+                    index: 0,
+                    tag: "input".to_string(),
+                    field_type: "email".to_string(),
+                    name: "email".to_string(),
+                    id: "email".to_string(),
+                    label: "Email".to_string(),
+                    placeholder: "Enter email".to_string(),
+                    value: String::new(),
+                    required: true,
+                    readonly: false,
+                    disabled: false,
+                    selector: "#email".to_string(),
+                    options: vec![],
+                }],
+            }],
+        };
+        let core: tiangong_core::browser_trait::FormExtractResult = form.into();
+        assert_eq!(core.forms.len(), 1);
+        assert_eq!(core.forms[0].fields.len(), 1);
+        assert_eq!(core.forms[0].fields[0].name, "email");
+        assert!(core.forms[0].fields[0].required);
+    }
+}

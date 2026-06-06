@@ -63,3 +63,11 @@ repos:
         files: ^frontend/
         pass_filenames: false
         stages: [pre-push]
+      - id: frontend-test
+        name: yarn test (frontend)
+        description: Run frontend unit tests.
+        entry: bash -lc 'cd frontend && yarn test'
+        language: system
+        files: ^frontend/
+        pass_filenames: false
+        stages: [pre-push]

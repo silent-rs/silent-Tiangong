@@ -557,8 +557,9 @@
 
         // 智能元素定位：根据多种格式自动选择定位策略
         locateElement: function(selector) {
-            if (!selector) return null;
+            if (!selector || typeof selector !== 'string') return null;
             selector = selector.trim();
+            if (!selector) return null;
 
             // 策略 1: rect:x,y,w,h — 批注矩形区域定位
             if (selector.indexOf('rect:') === 0) {
