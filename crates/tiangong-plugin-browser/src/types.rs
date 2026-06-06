@@ -225,6 +225,42 @@ pub struct DomRect {
     pub height: i32,
 }
 
+/// 浏览器语义事件（由 observer 模块产生）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum BrowserEvent {
+    #[serde(rename = "dialog_opened")]
+    DialogOpened {
+        timestamp: u64,
+        #[serde(default)]
+        detail: String,
+    },
+    #[serde(rename = "dialog_closed")]
+    DialogClosed { timestamp: u64 },
+    #[serde(rename = "content_changed")]
+    ContentChanged {
+        timestamp: u64,
+        #[serde(default)]
+        detail: String,
+    },
+    #[serde(rename = "user_click")]
+    UserClick {
+        timestamp: u64,
+        element: String,
+        text: String,
+        selector: String,
+    },
+    #[serde(rename = "user_input")]
+    UserInput {
+        timestamp: u64,
+        selector: String,
+        label: String,
+        value_length: usize,
+    },
+    #[serde(rename = "user_navigation")]
+    UserNavigation { timestamp: u64, url: String },
+}
+
 // ── 类型转换：plugin → core ──────────────────────────────────────────
 
 impl From<BrowserTab> for tiangong_core::browser_trait::TabInfo {

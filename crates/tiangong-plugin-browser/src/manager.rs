@@ -27,6 +27,8 @@ pub struct BrowserState {
     pub last_known_text_signature: String,
     /// 轮询线程停止信号
     pub poll_stop: Arc<std::sync::atomic::AtomicBool>,
+    /// 事件消费线程停止信号
+    pub event_poll_stop: Arc<std::sync::atomic::AtomicBool>,
     /// 标签列表
     pub tabs: Vec<BrowserTab>,
     /// 活跃标签 ID
@@ -53,6 +55,7 @@ impl BrowserManager {
                 last_known_url: String::new(),
                 last_known_text_signature: String::new(),
                 poll_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                event_poll_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 tabs: Vec::new(),
                 active_tab_id: None,
             })),
@@ -179,6 +182,8 @@ impl BrowserManager {
                             }
                         },
                     );
+                    // 启动持久观测层
+                    let _ = webview.eval("window.__tiangong_bridge.observer.start()");
                 }
             });
 
@@ -200,6 +205,7 @@ impl BrowserManager {
 
         // 启动 URL 变化轮询线程（on_page_load 在子 WebView 后续导航中不触发）
         self.start_url_poll(app, url);
+        self.start_event_poll(app);
 
         Ok(())
     }
@@ -208,6 +214,9 @@ impl BrowserManager {
         if let Ok(mut state) = self.state.lock() {
             state
                 .poll_stop
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            state
+                .event_poll_stop
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             if let Some(webview) = state.webview.take() {
                 let _ = webview.close();
@@ -379,6 +388,47 @@ impl BrowserManager {
                 .map_err(|e| format!("设置浏览器位置失败：{e}"))?;
         }
         Ok(())
+    }
+
+    /// 启动事件消费线程，定期读取 bridge.js observer 事件队列并 emit
+    fn start_event_poll(&self, app: &AppHandle<Wry>) {
+        let state = self.state.clone();
+        let app = app.clone();
+        let stop = {
+            let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            s.event_poll_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            s.event_poll_stop.clone()
+        };
+
+        std::thread::Builder::new()
+            .name("browser-event-poll".into())
+            .spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(1000));
+                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+
+                    let mgr = BrowserManager {
+                        state: state.clone(),
+                    };
+                    if let Some(raw) = mgr.eval_with_result(
+                        "(function(){try{return JSON.stringify(window.__tiangong_bridge.observer.drainEvents())}catch(e){return'[]'}})()",
+                    ) {
+                        if raw == "[]" || raw.is_empty() {
+                            continue;
+                        }
+                        if let Ok(events) =
+                            serde_json::from_str::<Vec<crate::types::BrowserEvent>>(&raw)
+                        {
+                            if !events.is_empty() {
+                                let _ = app.emit("browser:events", &events);
+                            }
+                        }
+                    }
+                }
+            })
+            .expect("failed to spawn browser event poll thread");
     }
 
     pub fn set_size(&self, w: f64, h: f64) -> Result<(), String> {

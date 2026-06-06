@@ -13,13 +13,13 @@ use crate::types::{
 
 /// 轮询等待页面内容变化并稳定，返回最终的 after-digest。
 ///
-/// 使用 `innerText` 总长度 + 头部 + 尾部组合签名做变更检测，
-/// 确保对话框（追加到 innerText 末尾）也能被捕获。
+/// 使用 `innerText` 总长度 + 头部 + 尾部 + 覆盖层状态组合签名做变更检测，
+/// 确保对话框（追加到 innerText 末尾）和覆盖层弹窗都能被捕获。
 /// 稳定后才捕获一次完整的 `getPageDigest` 用于 diff 计算。
 fn wait_for_content_change(manager: &BrowserManager, timeout: Duration) -> Option<String> {
-    // 签名：总长度 + ':' + 前200字符 + '|' + 后200字符
-    // 只看前500字符会漏掉追加到末尾的对话框内容
-    let sig_js = "(function(){try{var t=document.body.innerText||'';var n=t.length;var h=t.substring(0,200);var e=n>200?t.substring(n-200):'';return n+':'+h+'|'+e}catch(e){return'0:'}})()";
+    // 签名：总长度 + ':' + 前200字符 + '|' + 后200字符 + '|' + overlay状态
+    // overlay 状态确保弹窗出现/消失时签名变化
+    let sig_js = "(function(){try{var t=document.body.innerText||'';var n=t.length;var h=t.substring(0,200);var e=n>200?t.substring(n-200):'';var o=window.__tiangong_bridge._getTopmostOverlay();var ov=o?'1:'+((o.innerText||'').length):'0';return n+':'+h+'|'+e+'|'+ov}catch(e){return'0:'}})()";
 
     let before_sig = manager.eval_with_result(sig_js);
 

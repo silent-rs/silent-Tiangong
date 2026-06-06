@@ -81,7 +81,7 @@
                     }
                 }));
             }
-            return _origFetch.apply(this, arguments);
+            return _origFetch.call(this, input, init);
         };
 
         // --- 4. 拦截 XHR ipc:// 协议 ---
@@ -183,7 +183,7 @@
             var containers = document.querySelectorAll('form');
             // 无 <form> 时，尝试在 dialog 或 body 中查找
             if (containers.length === 0) {
-                var dialog = this._getActiveDialog();
+                var dialog = this._getTopmostOverlay();
                 containers = dialog ? [dialog] : [document.body];
             }
             for (var ci = 0; ci < containers.length; ci++) {
@@ -474,7 +474,7 @@
 
             // 检查填写后是否有 disabled 按钮变为 enabled（返回提示信息）
             result.currentValue = el.value;
-            var dialog = this._getActiveDialog();
+            var dialog = this._getTopmostOverlay();
             if (dialog) {
                 var disabledBtns = dialog.querySelectorAll('[role="button"]');
                 for (var di = 0; di < disabledBtns.length; di++) {
@@ -657,7 +657,7 @@
             }
 
             // 检测当前打开的对话框，优先在其中查找
-            var dialog = this._getActiveDialog();
+            var dialog = this._getTopmostOverlay();
             var contexts = dialog ? [dialog, document.body] : [document.body];
             var lowerSelector = selector.toLowerCase();
             var xpathLit = this._xpathLiteral(selector);
@@ -780,25 +780,6 @@
             if (s.indexOf("'") === -1) return "'" + s + "'";
             var parts = s.split('"');
             return 'concat("' + parts.join('", \'"\', "') + '")';
-        },
-
-        _getActiveDialog: function() {
-            // Ant Design modal
-            var antModals = document.querySelectorAll('.ant-modal-wrap');
-            for (var i = 0; i < antModals.length; i++) {
-                if (antModals[i].offsetHeight > 0) return antModals[i];
-            }
-            // Element Plus dialog
-            var elDialogs = document.querySelectorAll('.el-dialog__wrapper');
-            for (var j = 0; j < elDialogs.length; j++) {
-                if (elDialogs[j].offsetHeight > 0) return elDialogs[j];
-            }
-            // 通用 role="dialog"
-            var dialogs = document.querySelectorAll('[role="dialog"]');
-            for (var k = 0; k < dialogs.length; k++) {
-                if (dialogs[k].offsetHeight > 0) return dialogs[k];
-            }
-            return null;
         },
 
         _findElementInRect: function(x, y, w, h) {
@@ -1063,24 +1044,14 @@
 
         // 获取页面摘要（用于操作前后对比）
         getPageDigest: function() {
-            var dialog = this._getActiveDialog();
-            // 捕获对话框外的页面正文（排除 dialog、script、style）
-            var mainText = '';
-            try {
-                var clone = document.body.cloneNode(true);
-                // 移除对话框内容，只保留主页面
-                var dialogEls = clone.querySelectorAll('[role="dialog"], .ant-modal-wrap, .el-dialog__wrapper');
-                for (var di = 0; di < dialogEls.length; di++) dialogEls[di].remove();
-                var removes = clone.querySelectorAll('script,style,noscript');
-                for (var ri = 0; ri < removes.length; ri++) removes[ri].remove();
-                mainText = (clone.textContent || '').replace(/\s+/g, ' ').trim().substring(0, 3000);
-            } catch(e) {}
+            var overlay = this._getTopmostOverlay();
+            var fullText = (document.body.innerText || '').replace(/\s+/g, ' ').trim();
             return {
                 url: window.location.href,
                 title: document.title,
-                dialogOpen: !!dialog,
-                dialogText: dialog ? (dialog.textContent || '').substring(0, 500).trim() : '',
-                mainText: mainText
+                overlayOpen: !!overlay,
+                overlayText: overlay ? this._extractOverlayContent(overlay) : '',
+                mainTextTail: fullText.length > 3000 ? fullText.substring(fullText.length - 3000) : fullText
             };
         },
 
@@ -1091,19 +1062,18 @@
             if (before.url !== after.url) {
                 changes.push('页面已导航到 ' + after.url);
             }
-            if (!before.dialogOpen && after.dialogOpen) {
-                changes.push('对话框已出现：' + after.dialogText.substring(0, 200));
+            if (!before.overlayOpen && after.overlayOpen) {
+                changes.push('覆盖层已出现：' + after.overlayText.substring(0, 2000));
             }
-            if (before.dialogOpen && !after.dialogOpen) {
-                changes.push('对话框已关闭');
+            if (before.overlayOpen && !after.overlayOpen) {
+                changes.push('覆盖层已关闭');
             }
-            if (before.dialogOpen && after.dialogOpen && before.dialogText !== after.dialogText) {
-                changes.push('对话框内容已变化：' + after.dialogText.substring(0, 200));
+            if (before.overlayOpen && after.overlayOpen && before.overlayText !== after.overlayText) {
+                changes.push('覆盖层内容已变化：' + after.overlayText.substring(0, 2000));
             }
-            // 页面正文内容变化
-            if (before.mainText !== after.mainText && after.mainText) {
-                // 找出新增内容：在 after 中但不在 before 中的文本片段
-                var newContent = this._textDiff(before.mainText, after.mainText);
+            // 页面尾部内容变化
+            if (before.mainTextTail !== after.mainTextTail && after.mainTextTail) {
+                var newContent = this._textDiff(before.mainTextTail, after.mainTextTail);
                 if (newContent) {
                     changes.push('页面内容变化：' + newContent);
                 }
@@ -1334,6 +1304,356 @@
                     }
                 }
             }
+        },
+
+        // ── 持久观测层 ─────────────────────────────────────
+        observer: {
+            _eventQueue: [],
+            _mutationObserver: null,
+            _debounceTimer: null,
+            _pendingMutations: [],
+            _started: false,
+            _userEventBound: false,
+
+            start: function() {
+                if (this._started) return;
+                this._started = true;
+                this._startMutationObserver();
+                this._bindUserEvents();
+            },
+
+            stop: function() {
+                this._started = false;
+                if (this._mutationObserver) {
+                    this._mutationObserver.disconnect();
+                    this._mutationObserver = null;
+                }
+                if (this._debounceTimer) {
+                    clearTimeout(this._debounceTimer);
+                    this._debounceTimer = null;
+                }
+                this._pendingMutations = [];
+            },
+
+            drainEvents: function() {
+                var events = this._eventQueue;
+                this._eventQueue = [];
+                return events;
+            },
+
+            // ── MutationObserver ──
+
+            _startMutationObserver: function() {
+                var self = this;
+                this._mutationObserver = new MutationObserver(function(mutations) {
+                    if (!self._started) return;
+                    self._pendingMutations = self._pendingMutations.concat(mutations);
+                    if (self._debounceTimer) clearTimeout(self._debounceTimer);
+                    self._debounceTimer = setTimeout(function() {
+                        self._flushMutations();
+                    }, 500);
+                });
+                this._mutationObserver.observe(document.body, {
+                    childList: true,
+                    subtree: true,
+                    attributes: true,
+                    attributeFilter: [
+                        'class', 'style', 'disabled', 'readonly',
+                        'aria-busy', 'aria-hidden', 'aria-disabled',
+                        'aria-expanded', 'aria-selected'
+                    ]
+                });
+            },
+
+            _flushMutations: function() {
+                var mutations = this._pendingMutations;
+                this._pendingMutations = [];
+                var events = this._analyzeMutations(mutations);
+                for (var i = 0; i < events.length; i++) {
+                    this._pushEvent(events[i]);
+                }
+            },
+
+            _analyzeMutations: function(mutations) {
+                var events = [];
+                var dialogAdded = false;
+                var dialogRemoved = false;
+                var contentChanged = false;
+
+                for (var i = 0; i < mutations.length; i++) {
+                    var m = mutations[i];
+
+                    if (m.type === 'attributes') {
+                        continue;
+                    }
+
+                    if (m.type === 'childList') {
+                        for (var j = 0; j < m.addedNodes.length; j++) {
+                            var node = m.addedNodes[j];
+                            if (node.nodeType !== 1) continue;
+                            if (this._isDialog(node) || this._containsDialog(node)) {
+                                dialogAdded = true;
+                            }
+                            if (this._isMainContent(node) || this._isMainContent(m.target)) {
+                                contentChanged = true;
+                            }
+                        }
+                        for (var k = 0; k < m.removedNodes.length; k++) {
+                            var rNode = m.removedNodes[k];
+                            if (rNode.nodeType !== 1) continue;
+                            if (this._isDialog(rNode) || this._containsDialog(rNode)) {
+                                dialogRemoved = true;
+                            }
+                        }
+                    }
+                }
+
+                if (dialogAdded) {
+                    events.push({
+                        type: 'dialog_opened',
+                        timestamp: Date.now(),
+                        detail: this._describeActiveOverlay()
+                    });
+                }
+                if (dialogRemoved && !dialogAdded) {
+                    events.push({
+                        type: 'dialog_closed',
+                        timestamp: Date.now()
+                    });
+                }
+                if (contentChanged) {
+                    events.push({
+                        type: 'content_changed',
+                        timestamp: Date.now(),
+                        detail: this._getContentSummary()
+                    });
+                }
+
+                return events;
+            },
+
+            // ── 用户行为监听 ──
+
+            _bindUserEvents: function() {
+                if (this._userEventBound) return;
+                this._userEventBound = true;
+                var self = this;
+
+                document.addEventListener('click', function(e) {
+                    if (!self._started) return;
+                    var target = e.target;
+                    var interactive = target.closest(
+                        'button, a, input, select, textarea, [role="button"], [role="link"], [role="tab"], summary'
+                    );
+                    if (!interactive) return;
+                    var desc = self._describeElement(interactive);
+                    self._pushEvent({
+                        type: 'user_click',
+                        timestamp: Date.now(),
+                        element: desc.tag,
+                        text: desc.text,
+                        selector: desc.selector
+                    });
+                }, true);
+
+                var inputTimer = null;
+                var inputTarget = null;
+                document.addEventListener('input', function(e) {
+                    if (!self._started) return;
+                    inputTarget = e.target;
+                    if (inputTimer) clearTimeout(inputTimer);
+                    inputTimer = setTimeout(function() {
+                        if (!inputTarget) return;
+                        var desc = self._describeElement(inputTarget);
+                        self._pushEvent({
+                            type: 'user_input',
+                            timestamp: Date.now(),
+                            selector: desc.selector,
+                            label: desc.label || desc.placeholder,
+                            value_length: (inputTarget.value || '').length
+                        });
+                        inputTarget = null;
+                    }, 1000);
+                }, true);
+
+                window.addEventListener('popstate', function() {
+                    if (!self._started) return;
+                    self._pushEvent({
+                        type: 'user_navigation',
+                        timestamp: Date.now(),
+                        url: window.location.href
+                    });
+                });
+            },
+
+            // ── 辅助方法 ──
+
+            _isDialog: function(el) {
+                if (el.nodeType !== 1) return false;
+                if (el.getAttribute && el.getAttribute('role') === 'dialog') return true;
+                // 通过几何特征检测覆盖层
+                if (el.tagName) {
+                    var style = window.getComputedStyle(el);
+                    var pos = style.position;
+                    if (pos === 'fixed' || pos === 'absolute') {
+                        var rect = el.getBoundingClientRect();
+                        var W = window.innerWidth;
+                        var H = window.innerHeight;
+                        if (rect.width > 100 && rect.height > 50 &&
+                            rect.width < W - 10 && rect.height < H - 10) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            },
+
+            _containsDialog: function(el) {
+                if (el.nodeType !== 1) return false;
+                try {
+                    var dialogs = el.querySelectorAll('[role="dialog"]');
+                    if (dialogs.length > 0) return true;
+                    // 检查 fixed/absolute 子元素
+                    var fixed = el.querySelectorAll('*');
+                    for (var i = 0; i < Math.min(fixed.length, 50); i++) {
+                        var s = window.getComputedStyle(fixed[i]);
+                        if ((s.position === 'fixed' || s.position === 'absolute')) {
+                            var r = fixed[i].getBoundingClientRect();
+                            if (r.width > 100 && r.height > 50 &&
+                                r.width < window.innerWidth - 10 && r.height < window.innerHeight - 10) {
+                                return true;
+                            }
+                        }
+                    }
+                } catch(e) {}
+                return false;
+            },
+
+            _isMainContent: function(el) {
+                if (el.nodeType !== 1) return false;
+                var tag = el.tagName;
+                if (tag === 'MAIN' || tag === 'ARTICLE') return true;
+                if (el.id === 'app' || el.id === 'root' || el.id === '__next') return true;
+                return false;
+            },
+
+            _describeElement: function(el) {
+                var text = (el.textContent || '').trim().substring(0, 100);
+                var tag = (el.tagName || '').toLowerCase();
+                var selector = '';
+                if (el.id) {
+                    selector = '#' + el.id;
+                } else {
+                    selector = window.__tiangong_bridge.generateSelector(el);
+                }
+                var label = '';
+                var labelEl = el.closest('[class*="form-item"]');
+                if (labelEl) {
+                    var lbl = labelEl.querySelector('[class*="label"]');
+                    if (lbl) label = (lbl.textContent || '').trim();
+                }
+                var placeholder = el.placeholder || el.getAttribute('placeholder') || '';
+                return { tag: tag, text: text, selector: selector, label: label, placeholder: placeholder };
+            },
+
+            _describeActiveOverlay: function() {
+                var overlay = window.__tiangong_bridge._getTopmostOverlay();
+                if (!overlay) return '';
+                // 克隆后移除交互元素
+                var clone = overlay.cloneNode(true);
+                var interactive = clone.querySelectorAll('button, [role="button"], [class*="close"], [class*="Close"], [aria-label="Close"]');
+                for (var i = 0; i < interactive.length; i++) interactive[i].remove();
+                return (clone.innerText || '').trim().substring(0, 2000);
+            },
+
+            _getContentSummary: function() {
+                var text = (document.body.innerText || '').trim();
+                return text.length > 500 ? text.substring(0, 500) + '...' : text;
+            },
+
+            _pushEvent: function(event) {
+                this._eventQueue.push(event);
+                if (this._eventQueue.length > 100) {
+                    this._eventQueue = this._eventQueue.slice(-50);
+                }
+            }
+        },
+
+        // ── 泛化覆盖层检测（替代 _getActiveDialog）───────────
+        _getTopmostOverlay: function() {
+            var W = window.innerWidth;
+            var H = window.innerHeight;
+            var points = [
+                [Math.round(W / 2), Math.round(H / 3)],
+                [Math.round(W / 2), Math.round(H / 2)]
+            ];
+            // 方法 1：elementFromPoint + 向上遍历找非全屏 fixed/absolute 容器
+            for (var pi = 0; pi < points.length; pi++) {
+                var el = document.elementFromPoint(points[pi][0], points[pi][1]);
+                if (!el || el === document.body || el === document.documentElement) continue;
+                var overlay = this._walkUpToOverlay(el, W, H);
+                if (overlay) return overlay;
+            }
+            return null;
+        },
+
+        // 从命中元素向上找第一个 fixed/absolute 定位容器。
+        // 如果遇到全屏蒙层，尝试在蒙层内查找非全屏子覆盖层。
+        _walkUpToOverlay: function(el, W, H) {
+            var current = el;
+            while (current && current !== document.body && current !== document.documentElement) {
+                var style = window.getComputedStyle(current);
+                var pos = style.position;
+                if (pos === 'fixed' || pos === 'absolute') {
+                    var rect = current.getBoundingClientRect();
+                    if (rect.width > 50 && rect.height > 50 &&
+                        (rect.width < W - 10 || rect.height < H - 10)) {
+                        return current;
+                    }
+                    // 全屏 fixed/absolute 容器（蒙层）：
+                    // 在其内部查找非全屏的 fixed/absolute 子元素
+                    var inner = this._findInnerOverlay(current, W, H);
+                    if (inner) return inner;
+                    // 蒙层内没有非全屏子覆盖层，检查蒙层自身是否有有意义的文本内容
+                    var text = (current.innerText || '').replace(/\s+/g, ' ').trim();
+                    if (text.length > 10) return current;
+                    return null;
+                }
+                current = current.parentElement;
+            }
+            return null;
+        },
+
+        // 在全屏蒙层内查找面积适中的 fixed/absolute 子元素
+        _findInnerOverlay: function(backdrop, W, H) {
+            var candidates = backdrop.querySelectorAll('*');
+            var best = null;
+            var bestArea = 0;
+            for (var i = 0; i < candidates.length; i++) {
+                var child = candidates[i];
+                var style = window.getComputedStyle(child);
+                var pos = style.position;
+                if (pos === 'fixed' || pos === 'absolute') {
+                    var rect = child.getBoundingClientRect();
+                    if (rect.width > 50 && rect.height > 50 &&
+                        (rect.width < W - 10 || rect.height < H - 10)) {
+                        var area = rect.width * rect.height;
+                        if (area > bestArea) {
+                            bestArea = area;
+                            best = child;
+                        }
+                    }
+                }
+            }
+            return best;
+        },
+
+        _extractOverlayContent: function(overlay) {
+            if (!overlay) return '';
+            var clone = overlay.cloneNode(true);
+            var interactive = clone.querySelectorAll('button, [role="button"], [class*="close"], [class*="Close"], [aria-label="Close"]');
+            for (var i = 0; i < interactive.length; i++) interactive[i].remove();
+            return (clone.innerText || '').trim().substring(0, 3000);
         },
     };
 
