@@ -13,13 +13,15 @@ use crate::types::{
 
 /// 轮询等待页面内容变化并稳定，返回最终的 after-digest。
 ///
-/// 使用轻量 `innerText` 签名做变更检测（不依赖 JSON 解析），
+/// 使用 `innerText` 总长度 + 头部 + 尾部组合签名做变更检测，
+/// 确保对话框（追加到 innerText 末尾）也能被捕获。
 /// 稳定后才捕获一次完整的 `getPageDigest` 用于 diff 计算。
 fn wait_for_content_change(manager: &BrowserManager, timeout: Duration) -> Option<String> {
-    // 初始签名：用 innerText 前 500 字符做轻量比较
-    let before_sig = manager.eval_with_result(
-        "(function(){try{return(document.body.innerText||'').substring(0,500).trim()}catch(e){return''}})()",
-    );
+    // 签名：总长度 + ':' + 前200字符 + '|' + 后200字符
+    // 只看前500字符会漏掉追加到末尾的对话框内容
+    let sig_js = "(function(){try{var t=document.body.innerText||'';var n=t.length;var h=t.substring(0,200);var e=n>200?t.substring(n-200):'';return n+':'+h+'|'+e}catch(e){return'0:'}})()";
+
+    let before_sig = manager.eval_with_result(sig_js);
 
     let start = std::time::Instant::now();
     let post_change_max = Duration::from_millis(1500);
@@ -31,9 +33,7 @@ fn wait_for_content_change(manager: &BrowserManager, timeout: Duration) -> Optio
     std::thread::sleep(Duration::from_millis(600));
 
     loop {
-        let current_sig = manager.eval_with_result(
-            "(function(){try{return(document.body.innerText||'').substring(0,500).trim()}catch(e){return''}})()",
-        );
+        let current_sig = manager.eval_with_result(sig_js);
 
         let changed = match (&prev_sig, &current_sig) {
             (Some(p), Some(c)) => p != c,
