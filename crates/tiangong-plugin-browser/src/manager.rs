@@ -5,12 +5,11 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use tauri::{
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Url, Webview, WebviewBuilder,
-    WebviewUrl, Wry,
+    AppHandle, LogicalPosition, LogicalSize, Manager, Url, Webview, WebviewBuilder, WebviewUrl, Wry,
 };
 
 use crate::bridge::BRIDGE_SCRIPT;
-use crate::types::{BrowserPageSnapshot, BrowserResponse, BrowserTab, PageStatus};
+use crate::types::{BrowserPageSnapshot, BrowserResponse, BrowserTab};
 
 const BROWSER_WEBVIEW_LABEL: &str = "browser-webview";
 
@@ -21,10 +20,8 @@ pub struct BrowserState {
     pub page_loaded: Arc<(Mutex<bool>, Condvar)>,
     /// 最近一次页面快照
     pub latest_snapshot: Option<BrowserPageSnapshot>,
-    /// 轮询检测的最后一次已知 URL
-    pub last_known_url: String,
-    /// 轮询线程停止信号
-    pub poll_stop: Arc<std::sync::atomic::AtomicBool>,
+    /// 浏览器监测任务停止信号
+    pub watcher_stop: Arc<std::sync::atomic::AtomicBool>,
     /// 标签列表
     pub tabs: Vec<BrowserTab>,
     /// 活跃标签 ID
@@ -48,8 +45,7 @@ impl BrowserManager {
                 webview: None,
                 page_loaded: Arc::new((Mutex::new(false), Condvar::new())),
                 latest_snapshot: None,
-                last_known_url: String::new(),
-                poll_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                watcher_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 tabs: Vec::new(),
                 active_tab_id: None,
             })),
@@ -109,7 +105,6 @@ impl BrowserManager {
 
         let data_dir = browser_data_directory();
         let state_clone = self.state.clone();
-        let app_clone = app.clone();
 
         let builder = WebviewBuilder::new(BROWSER_WEBVIEW_LABEL, WebviewUrl::External(parsed_url))
             .initialization_script(BRIDGE_SCRIPT)
@@ -117,65 +112,18 @@ impl BrowserManager {
             .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/605.1.15")
             .enable_clipboard_access()
             .devtools(true)
-            .on_page_load(move |webview, payload| {
+            .on_page_load(move |_webview, payload| {
                 use tauri::webview::PageLoadEvent;
                 if payload.event() == PageLoadEvent::Finished {
-                    {
-                        let state = match state_clone.lock() {
-                            Ok(s) => s,
-                            Err(_) => return,
-                        };
-                        let (lock, cvar) = &*state.page_loaded;
-                        if let Ok(mut loaded) = lock.lock() {
-                            *loaded = true;
-                        }
-                        cvar.notify_all();
+                    let state = match state_clone.lock() {
+                        Ok(s) => s,
+                        Err(_) => return,
+                    };
+                    let (lock, cvar) = &*state.page_loaded;
+                    if let Ok(mut loaded) = lock.lock() {
+                        *loaded = true;
                     }
-
-                    let state_clone2 = state_clone.clone();
-                    let app_for_event = app_clone.clone();
-                    let _ = webview.eval_with_callback(
-                        "window.__tiangong_bridge.getFullText(12000)",
-                        move |result| {
-                            if let Ok(data) =
-                                serde_json::from_str::<serde_json::Value>(&result)
-                            {
-                                let title = data["title"].as_str().unwrap_or("").to_string();
-                                let page_url = data["url"].as_str().unwrap_or("").to_string();
-                                let text = data["text"].as_str().unwrap_or("").to_string();
-                                let snapshot = BrowserPageSnapshot {
-                                    title: title.clone(),
-                                    url: page_url.clone(),
-                                    text: text.clone(),
-                                    status: PageStatus::Loaded,
-                                    tabs: Vec::new(),
-                                    active_tab_id: None,
-                                };
-                                if let Ok(mut state) = state_clone2.lock() {
-                                    state.latest_snapshot = Some(snapshot);
-                                    // 更新活跃标签
-                                    let aid = state.active_tab_id.clone();
-                                    if let Some(active_id) = aid {
-                                        if let Some(tab) = state.tabs.iter_mut().find(|t| t.id == active_id) {
-                                            tab.url = page_url.clone();
-                                            if !title.is_empty() {
-                                                tab.title = title.clone();
-                                            }
-                                        }
-                                    }
-                                }
-                                let summary: String = text.chars().take(2000).collect();
-                                let _ = app_for_event.emit(
-                                    "browser:page_loaded",
-                                    serde_json::json!({
-                                        "title": title,
-                                        "url": page_url,
-                                        "text": summary,
-                                    }),
-                                );
-                            }
-                        },
-                    );
+                    cvar.notify_all();
                 }
             });
 
@@ -195,17 +143,11 @@ impl BrowserManager {
             state.active_tab_id = Some(tab_id);
         }
 
-        // 启动 URL 变化轮询线程（on_page_load 在子 WebView 后续导航中不触发）
-        self.start_url_poll(app, url);
-
         Ok(())
     }
 
     pub fn close(&self) -> Result<(), String> {
         if let Ok(mut state) = self.state.lock() {
-            state
-                .poll_stop
-                .store(true, std::sync::atomic::Ordering::Relaxed);
             if let Some(webview) = state.webview.take() {
                 let _ = webview.close();
             }
@@ -215,90 +157,10 @@ impl BrowserManager {
             }
             cvar.notify_all();
             state.latest_snapshot = None;
-            state.last_known_url.clear();
             state.tabs.clear();
             state.active_tab_id = None;
         }
         Ok(())
-    }
-
-    /// 启动后台轮询线程，检测 webview URL 变化并发射 browser:page_loaded 事件
-    fn start_url_poll(&self, app: &AppHandle<Wry>, initial_url: &str) {
-        let state = self.state.clone();
-        let app = app.clone();
-        let stop = {
-            let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            s.poll_stop
-                .store(false, std::sync::atomic::Ordering::Relaxed);
-            s.last_known_url = initial_url.to_string();
-            s.poll_stop.clone()
-        };
-
-        std::thread::Builder::new()
-            .name("browser-url-poll".into())
-            .spawn(move || {
-                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    std::thread::sleep(Duration::from_millis(500));
-                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
-                        break;
-                    }
-                    let current_url = {
-                        let s = match state.lock() {
-                            Ok(s) => s,
-                            Err(e) => e.into_inner(),
-                        };
-                        match s.webview {
-                            Some(ref wv) => {
-                                // wry 的 url() 在 WebView 无 URL 时会 panic（webview.URL().unwrap() on None），
-                                // 使用 catch_unwind 防止整个应用崩溃。
-                                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    wv.url()
-                                })) {
-                                    Ok(Ok(u)) => u.to_string(),
-                                    _ => continue,
-                                }
-                            }
-                            None => break,
-                        }
-                    };
-                    let changed = {
-                        let mut s = match state.lock() {
-                            Ok(s) => s,
-                            Err(e) => e.into_inner(),
-                        };
-                        if current_url != s.last_known_url {
-                            s.last_known_url = current_url.clone();
-                            true
-                        } else {
-                            false
-                        }
-                    };
-                    if changed {
-                        debug!(url = %current_url, "browser url_poll detected change");
-                        // 更新活跃标签 URL（标题通过 on_page_load 回调更新）
-                        {
-                            let mut s = match state.lock() {
-                                Ok(s) => s,
-                                Err(e) => e.into_inner(),
-                            };
-                            let aid = s.active_tab_id.clone();
-                            if let Some(active_id) = aid {
-                                if let Some(tab) = s.tabs.iter_mut().find(|t| t.id == active_id) {
-                                    tab.url = current_url.clone();
-                                }
-                            }
-                        }
-                        let _ = app.emit(
-                            "browser:page_loaded",
-                            serde_json::json!({
-                                "url": current_url,
-                            }),
-                        );
-                    }
-                }
-                debug!("browser url_poll thread exiting");
-            })
-            .expect("failed to spawn browser URL poll thread");
     }
 
     pub fn hide(&self) -> Result<(), String> {

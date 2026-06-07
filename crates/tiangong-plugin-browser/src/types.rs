@@ -1,6 +1,23 @@
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
+/// 浏览器事件（BrowserWatcher 发出的统一事件）
+#[derive(Debug, Clone)]
+pub enum BrowserEvent {
+    /// 页面导航完成（URL 变化或页面加载完成）
+    PageLoaded {
+        url: String,
+        title: String,
+        text: String,
+    },
+    /// 标签变化通知
+    TabUpdated {
+        action: String,
+        tab_id: String,
+        url: Option<String>,
+    },
+}
+
 /// 浏览器标签
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrowserTab {
@@ -227,5 +244,243 @@ impl From<ClickElementResult> for tiangong_core::browser_trait::ClickElementResu
             ok: r.ok,
             error: r.error,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_event_page_loaded_construct() {
+        let event = BrowserEvent::PageLoaded {
+            url: "https://example.com".to_string(),
+            title: "Example".to_string(),
+            text: "page content".to_string(),
+        };
+        match event {
+            BrowserEvent::PageLoaded { url, title, text } => {
+                assert_eq!(url, "https://example.com");
+                assert_eq!(title, "Example");
+                assert_eq!(text, "page content");
+            }
+            _ => panic!("expected PageLoaded"),
+        }
+    }
+
+    #[test]
+    fn browser_event_tab_updated_construct() {
+        let event = BrowserEvent::TabUpdated {
+            action: "new".to_string(),
+            tab_id: "tab-1".to_string(),
+            url: Some("https://example.com".to_string()),
+        };
+        match event {
+            BrowserEvent::TabUpdated {
+                action,
+                tab_id,
+                url,
+            } => {
+                assert_eq!(action, "new");
+                assert_eq!(tab_id, "tab-1");
+                assert_eq!(url.unwrap(), "https://example.com");
+            }
+            _ => panic!("expected TabUpdated"),
+        }
+    }
+
+    #[test]
+    fn browser_event_clone() {
+        let event = BrowserEvent::PageLoaded {
+            url: "https://example.com".to_string(),
+            title: "Title".to_string(),
+            text: "Text".to_string(),
+        };
+        let cloned = event.clone();
+        match cloned {
+            BrowserEvent::PageLoaded { url, title, text } => {
+                assert_eq!(url, "https://example.com");
+                assert_eq!(title, "Title");
+                assert_eq!(text, "Text");
+            }
+            _ => panic!("expected PageLoaded"),
+        }
+    }
+
+    #[tokio::test]
+    async fn event_channel_page_loaded() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<BrowserEvent>(8);
+        tx.send(BrowserEvent::PageLoaded {
+            url: "https://example.com".to_string(),
+            title: "Example".to_string(),
+            text: "content".to_string(),
+        })
+        .await
+        .unwrap();
+
+        let event = rx.recv().await.unwrap();
+        match event {
+            BrowserEvent::PageLoaded { url, title, text } => {
+                assert_eq!(url, "https://example.com");
+                assert_eq!(title, "Example");
+                assert_eq!(text, "content");
+            }
+            _ => panic!("expected PageLoaded"),
+        }
+    }
+
+    #[tokio::test]
+    async fn event_channel_tab_updated() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<BrowserEvent>(8);
+        tx.send(BrowserEvent::TabUpdated {
+            action: "close".to_string(),
+            tab_id: "tab-2".to_string(),
+            url: None,
+        })
+        .await
+        .unwrap();
+
+        let event = rx.recv().await.unwrap();
+        match event {
+            BrowserEvent::TabUpdated {
+                action,
+                tab_id,
+                url,
+            } => {
+                assert_eq!(action, "close");
+                assert_eq!(tab_id, "tab-2");
+                assert!(url.is_none());
+            }
+            _ => panic!("expected TabUpdated"),
+        }
+    }
+
+    #[tokio::test]
+    async fn event_channel_multiple_events() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<BrowserEvent>(32);
+
+        tx.send(BrowserEvent::PageLoaded {
+            url: "https://a.com".to_string(),
+            title: "A".to_string(),
+            text: String::new(),
+        })
+        .await
+        .unwrap();
+        tx.send(BrowserEvent::TabUpdated {
+            action: "new".to_string(),
+            tab_id: "t1".to_string(),
+            url: Some("https://b.com".to_string()),
+        })
+        .await
+        .unwrap();
+        tx.send(BrowserEvent::PageLoaded {
+            url: "https://c.com".to_string(),
+            title: "C".to_string(),
+            text: "content".to_string(),
+        })
+        .await
+        .unwrap();
+
+        let mut count = 0;
+        while let Ok(_event) = rx.try_recv() {
+            count += 1;
+        }
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn browser_tab_serde_roundtrip() {
+        let tab = BrowserTab {
+            id: "tab-1".to_string(),
+            url: "https://example.com".to_string(),
+            title: "Example".to_string(),
+        };
+        let json = serde_json::to_string(&tab).unwrap();
+        let parsed: BrowserTab = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.id, tab.id);
+        assert_eq!(parsed.url, tab.url);
+        assert_eq!(parsed.title, tab.title);
+    }
+
+    #[test]
+    fn browser_response_into_core_type() {
+        let resp = BrowserResponse {
+            ok: true,
+            title: "Title".to_string(),
+            content: "Content".to_string(),
+            final_url: "https://example.com".to_string(),
+            error: None,
+        };
+        let core: tiangong_core::browser_trait::FetchResult = resp.into();
+        assert!(core.ok);
+        assert_eq!(core.title, "Title");
+        assert_eq!(core.content, "Content");
+    }
+
+    #[test]
+    fn browser_tab_into_core_type() {
+        let tab = BrowserTab {
+            id: "tab-1".to_string(),
+            url: "https://example.com".to_string(),
+            title: "Example".to_string(),
+        };
+        let core: tiangong_core::browser_trait::TabInfo = tab.into();
+        assert_eq!(core.id, "tab-1");
+        assert_eq!(core.url, "https://example.com");
+        assert_eq!(core.title, "Example");
+    }
+
+    #[test]
+    fn fill_field_result_into_core_type() {
+        let result = FillFieldResult {
+            ok: true,
+            strategy: Some("native".to_string()),
+            error: None,
+            current_value: Some("filled".to_string()),
+        };
+        let core: tiangong_core::browser_trait::FillFieldResult = result.into();
+        assert!(core.ok);
+        assert_eq!(core.strategy.unwrap(), "native");
+        assert_eq!(core.current_value.unwrap(), "filled");
+    }
+
+    #[test]
+    fn click_element_result_into_core_type() {
+        let result = ClickElementResult {
+            ok: false,
+            error: Some("not found".to_string()),
+        };
+        let core: tiangong_core::browser_trait::ClickElementResult = result.into();
+        assert!(!core.ok);
+        assert_eq!(core.error.unwrap(), "not found");
+    }
+
+    #[test]
+    fn form_extract_result_serde_roundtrip() {
+        let result = FormExtractResult {
+            forms: vec![FormInfo {
+                fields: vec![FormField {
+                    index: 0,
+                    tag: "input".to_string(),
+                    field_type: "text".to_string(),
+                    name: "q".to_string(),
+                    id: "search".to_string(),
+                    label: "Search".to_string(),
+                    placeholder: "Type here".to_string(),
+                    value: String::new(),
+                    required: true,
+                    readonly: false,
+                    disabled: false,
+                    selector: "#search".to_string(),
+                    options: vec![],
+                }],
+            }],
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: FormExtractResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.forms.len(), 1);
+        assert_eq!(parsed.forms[0].fields.len(), 1);
+        assert_eq!(parsed.forms[0].fields[0].name, "q");
+        assert!(parsed.forms[0].fields[0].required);
     }
 }
