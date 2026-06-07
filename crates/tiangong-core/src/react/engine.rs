@@ -54,7 +54,19 @@ macro_rules! handle_plugin_commands {
                 text,
                 tabs,
                 active_tab_id,
+                feedback,
             } => {
+                let has_feedback = feedback
+                    .as_deref()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false);
+                tracing::info!(
+                    session_id = %$session.id,
+                    url = %url,
+                    text_len = text.len(),
+                    has_feedback,
+                    "react loop inject browser content command"
+                );
                 crate::react::message::inject_browser_content_to_session(
                     $session,
                     $stream_tx,
@@ -64,8 +76,9 @@ macro_rules! handle_plugin_commands {
                         text: &text,
                         tabs: &tabs,
                         active_tab_id: active_tab_id.as_deref(),
+                        feedback: feedback.as_deref(),
                     },
-                    false,
+                    has_feedback,
                 );
             }
             _ => unreachable!("handle_plugin_commands: unexpected command — 调用点 or-pattern 与宏分支不同步"),
@@ -580,6 +593,7 @@ impl ReactEngine {
                     stream_tx,
                     &mut last_browser_snapshot,
                     &mut last_browser_check,
+                    false,
                 )
                 .await;
             }
@@ -951,6 +965,7 @@ impl ReactEngine {
                     stream_tx,
                     &mut last_browser_snapshot,
                     &mut last_browser_check,
+                    false,
                 )
                 .await;
 
@@ -1453,6 +1468,7 @@ impl ReactEngine {
                     stream_tx,
                     &mut last_browser_snapshot,
                     &mut last_browser_check,
+                    true,
                 )
                 .await;
             }
@@ -2123,46 +2139,95 @@ async fn maybe_inject_browser_update(
     stream_tx: &StdSender<StreamEvent>,
     last_snapshot: &mut Option<crate::browser_trait::PageSnapshot>,
     last_check: &mut Option<std::time::Instant>,
+    force_check: bool,
 ) {
     let fetcher = match engine.page_fetcher() {
         Some(f) => f,
-        None => return,
+        None => {
+            tracing::debug!(
+                session_id = %session.id,
+                force_check,
+                "skip browser auto observe: no page fetcher"
+            );
+            return;
+        }
     };
     // 首次检测无间隔限制；后续检测至少间隔 5 秒，避免频繁 observe_page 拖慢执行
-    if last_snapshot.is_some() {
+    let now = std::time::Instant::now();
+    if last_snapshot.is_some() && !force_check {
         let min_interval = std::time::Duration::from_secs(5);
-        let now = std::time::Instant::now();
         if let Some(prev) = last_check
             && now.duration_since(*prev) < min_interval
         {
+            tracing::debug!(
+                session_id = %session.id,
+                elapsed_ms = now.duration_since(*prev).as_millis() as u64,
+                "skip browser auto observe: throttled"
+            );
             return;
         }
-        *last_check = Some(now);
     }
+    *last_check = Some(now);
     let snapshot =
         match tokio::time::timeout(std::time::Duration::from_secs(3), fetcher.observe_page()).await
         {
             Ok(Some(s)) => s,
-            _ => return,
+            Ok(None) => {
+                tracing::debug!(
+                    session_id = %session.id,
+                    "skip browser auto observe: no snapshot"
+                );
+                return;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    session_id = %session.id,
+                    "browser auto observe timeout"
+                );
+                return;
+            }
         };
     if snapshot.url.is_empty() {
+        tracing::debug!(
+            session_id = %session.id,
+            "skip browser auto observe: empty url"
+        );
         return;
     }
 
+    let feedback = crate::browser_trait::format_browser_events(&snapshot.events);
+    let has_feedback = feedback.is_some();
+    tracing::debug!(
+        session_id = %session.id,
+        url = %snapshot.url,
+        title = %snapshot.title,
+        text_len = snapshot.text.len(),
+        events_len = snapshot.events.len(),
+        has_feedback,
+        force_check,
+        "browser auto observe snapshot"
+    );
     let should_inject = match last_snapshot {
         None => true,
         Some(prev) => {
-            prev.url != snapshot.url
+            has_feedback
+                || prev.url != snapshot.url
                 || (snapshot.text.len() as i64 - prev.text.len() as i64).unsigned_abs() > 500
         }
     };
     if !should_inject {
+        tracing::debug!(
+            session_id = %session.id,
+            url = %snapshot.url,
+            text_len = snapshot.text.len(),
+            "skip browser auto inject: unchanged"
+        );
         *last_snapshot = Some(snapshot);
         return;
     }
 
     let force = match last_snapshot {
-        Some(prev) => prev.url == snapshot.url,
+        Some(prev) => has_feedback || prev.url == snapshot.url,
         None => false,
     };
 
@@ -2180,8 +2245,18 @@ async fn maybe_inject_browser_update(
             text: &snapshot.text,
             tabs: &tabs,
             active_tab_id: snapshot.active_tab_id.as_deref(),
+            feedback: feedback.as_deref(),
         },
         force,
+    );
+    tracing::info!(
+        session_id = %session.id,
+        url = %snapshot.url,
+        text_len = snapshot.text.len(),
+        events_len = snapshot.events.len(),
+        has_feedback,
+        force,
+        "browser auto content injected"
     );
     *last_snapshot = Some(snapshot);
 }

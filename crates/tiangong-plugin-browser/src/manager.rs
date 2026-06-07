@@ -10,7 +10,7 @@ use tauri::{
 };
 
 use crate::bridge::BRIDGE_SCRIPT;
-use crate::types::{BrowserPageSnapshot, BrowserResponse, BrowserTab, PageStatus};
+use crate::types::{BrowserEvent, BrowserPageSnapshot, BrowserResponse, BrowserTab, PageStatus};
 
 const BROWSER_WEBVIEW_LABEL: &str = "browser-webview";
 
@@ -29,12 +29,15 @@ pub struct BrowserState {
     pub poll_stop: Arc<std::sync::atomic::AtomicBool>,
     /// 事件消费线程停止信号
     pub event_poll_stop: Arc<std::sync::atomic::AtomicBool>,
+    /// 已由后台事件线程读取、等待 Agent 消费的浏览器事件
+    pub pending_events: Vec<BrowserEvent>,
     /// 标签列表
     pub tabs: Vec<BrowserTab>,
     /// 活跃标签 ID
     pub active_tab_id: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct BrowserManager {
     pub(crate) state: Arc<Mutex<BrowserState>>,
 }
@@ -56,6 +59,7 @@ impl BrowserManager {
                 last_known_text_signature: String::new(),
                 poll_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 event_poll_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                pending_events: Vec::new(),
                 tabs: Vec::new(),
                 active_tab_id: None,
             })),
@@ -156,6 +160,7 @@ impl BrowserManager {
                                     status: PageStatus::Loaded,
                                     tabs: Vec::new(),
                                     active_tab_id: None,
+                                    events: Vec::new(),
                                 };
                                 if let Ok(mut state) = state_clone2.lock() {
                                     state.latest_snapshot = Some(snapshot);
@@ -229,6 +234,7 @@ impl BrowserManager {
             state.latest_snapshot = None;
             state.last_known_url.clear();
             state.last_known_text_signature.clear();
+            state.pending_events.clear();
             state.tabs.clear();
             state.active_tab_id = None;
         }
@@ -413,7 +419,7 @@ impl BrowserManager {
                         state: state.clone(),
                     };
                     if let Some(raw) = mgr.eval_with_result(
-                        "(function(){try{return JSON.stringify(window.__tiangong_bridge.observer.drainEvents())}catch(e){return'[]'}})()",
+                        "(function(){try{return JSON.stringify(window.__tiangong_bridge.observer.drainAllEvents())}catch(e){return'[]'}})()",
                     ) {
                         if raw == "[]" || raw.is_empty() {
                             continue;
@@ -422,6 +428,27 @@ impl BrowserManager {
                             serde_json::from_str::<Vec<crate::types::BrowserEvent>>(&raw)
                         {
                             if !events.is_empty() {
+                                let network_count = events
+                                    .iter()
+                                    .filter(|event| {
+                                        matches!(event, BrowserEvent::NetworkResponse { .. })
+                                    })
+                                    .count();
+                                let mut pending_len = 0usize;
+                                if let Ok(mut s) = state.lock() {
+                                    s.pending_events.extend(events.clone());
+                                    if s.pending_events.len() > 200 {
+                                        let keep_from = s.pending_events.len() - 100;
+                                        s.pending_events.drain(0..keep_from);
+                                    }
+                                    pending_len = s.pending_events.len();
+                                }
+                                debug!(
+                                    count = events.len(),
+                                    network_count,
+                                    pending_len,
+                                    "browser event poll drained events"
+                                );
                                 let _ = app.emit("browser:events", &events);
                             }
                         }
@@ -507,6 +534,73 @@ impl BrowserManager {
                 .ok()?;
         }
         rx.recv_timeout(Duration::from_secs(10)).ok()
+    }
+
+    pub(crate) fn drain_events(&self) -> Vec<BrowserEvent> {
+        let mut live_count = 0usize;
+        let mut events = {
+            let mut state = match self.state.lock() {
+                Ok(state) => state,
+                Err(e) => e.into_inner(),
+            };
+            std::mem::take(&mut state.pending_events)
+        };
+        let cached_count = events.len();
+
+        if let Some(raw) = self.eval_with_result(
+            "(function(){try{return JSON.stringify(window.__tiangong_bridge.observer.drainAllEvents())}catch(e){return'[]'}})()",
+        ) {
+            if raw != "[]" && !raw.is_empty() {
+                if let Ok(mut current) = serde_json::from_str::<Vec<BrowserEvent>>(&raw) {
+                    live_count = current.len();
+                    events.append(&mut current);
+                }
+            }
+        }
+
+        events.sort_by_key(|event| match event {
+            BrowserEvent::DialogOpened { timestamp, .. }
+            | BrowserEvent::DialogClosed { timestamp }
+            | BrowserEvent::ContentChanged { timestamp, .. }
+            | BrowserEvent::UserClick { timestamp, .. }
+            | BrowserEvent::UserInput { timestamp, .. }
+            | BrowserEvent::UserNavigation { timestamp, .. }
+            | BrowserEvent::NetworkResponse { timestamp, .. } => *timestamp,
+        });
+        let network_count = events
+            .iter()
+            .filter(|event| matches!(event, BrowserEvent::NetworkResponse { .. }))
+            .count();
+        debug!(
+            cached_count,
+            live_count,
+            total_count = events.len(),
+            network_count,
+            "browser manager drain_events"
+        );
+        events
+    }
+
+    pub fn ack_events(&self, events: &[BrowserEvent]) -> usize {
+        if events.is_empty() {
+            return 0;
+        }
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(e) => e.into_inner(),
+        };
+        let before = state.pending_events.len();
+        state
+            .pending_events
+            .retain(|event| !events.iter().any(|acked| acked == event));
+        let removed = before.saturating_sub(state.pending_events.len());
+        debug!(
+            ack_count = events.len(),
+            removed,
+            pending_len = state.pending_events.len(),
+            "browser manager ack_events"
+        );
+        removed
     }
 
     fn wait_for_page_load(&self, timeout_ms: u64) -> bool {
@@ -647,6 +741,29 @@ impl BrowserManager {
         state.latest_snapshot.clone()
     }
 
+    pub fn current_snapshot_without_events(&self, max_chars: usize) -> Option<BrowserPageSnapshot> {
+        let raw = self.eval_with_result(&format!(
+            "(function(){{try{{var t=window.__tiangong_bridge.getFullText({max_chars});var a=window.__tiangong_bridge.annotation.getAnnotations();if(a&&a.count>0){{t.text+='\\n\\n[页面批注] '+JSON.stringify(a.annotations);}}return JSON.stringify(t);}}catch(e){{return ''}}}})()"
+        ))?;
+        let data = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+        let (tabs, active_tab_id) = {
+            let state = match self.state.lock() {
+                Ok(state) => state,
+                Err(e) => e.into_inner(),
+            };
+            (state.tabs.clone(), state.active_tab_id.clone())
+        };
+        Some(BrowserPageSnapshot {
+            title: data["title"].as_str().unwrap_or("").to_string(),
+            url: data["url"].as_str().unwrap_or("").to_string(),
+            text: data["text"].as_str().unwrap_or("").to_string(),
+            status: PageStatus::Loaded,
+            tabs,
+            active_tab_id,
+            events: Vec::new(),
+        })
+    }
+
     pub fn tab_list(&self) -> Vec<BrowserTab> {
         self.state
             .lock()
@@ -774,4 +891,37 @@ pub fn default_browser_rect(app: &AppHandle<Wry>) -> Option<(f64, f64, f64, f64)
     let h = size.height as f64 / scale;
     let browser_w = w * 0.5;
     Some((w - browser_w, 0.0, browser_w, h))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn network_event(timestamp: u64, url: &str) -> BrowserEvent {
+        BrowserEvent::NetworkResponse {
+            timestamp,
+            url: url.to_string(),
+            method: "POST".to_string(),
+            status: 200,
+            detail: "{}".to_string(),
+        }
+    }
+
+    #[test]
+    fn ack_events_removes_only_injected_events() {
+        let manager = BrowserManager::new();
+        let first = network_event(1, "/api/a");
+        let second = network_event(2, "/api/b");
+        {
+            let mut state = manager.state.lock().unwrap();
+            state.pending_events.push(first.clone());
+            state.pending_events.push(second.clone());
+        }
+
+        let removed = manager.ack_events(std::slice::from_ref(&first));
+
+        assert_eq!(removed, 1);
+        let state = manager.state.lock().unwrap();
+        assert_eq!(state.pending_events, vec![second]);
+    }
 }

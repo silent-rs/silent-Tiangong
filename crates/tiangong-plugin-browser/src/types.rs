@@ -89,6 +89,7 @@ pub struct BrowserPageSnapshot {
     pub status: PageStatus,
     pub tabs: Vec<BrowserTab>,
     pub active_tab_id: Option<String>,
+    pub events: Vec<BrowserEvent>,
 }
 
 /// 页面状态
@@ -226,7 +227,7 @@ pub struct DomRect {
 }
 
 /// 浏览器语义事件（由 observer 模块产生）
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum BrowserEvent {
     #[serde(rename = "dialog_opened")]
@@ -270,6 +271,101 @@ pub enum BrowserEvent {
     },
 }
 
+pub fn format_browser_events(events: &[BrowserEvent]) -> Option<String> {
+    if events.is_empty() {
+        return None;
+    }
+
+    let mut lines = Vec::new();
+    for event in events {
+        match event {
+            BrowserEvent::DialogOpened { detail, .. } => {
+                lines.push("[页面变化] 出现新的弹窗/覆盖层".to_string());
+                push_preview(&mut lines, detail, 1200);
+            }
+            BrowserEvent::DialogClosed { .. } => {
+                lines.push("[页面变化] 弹窗/覆盖层已关闭".to_string());
+            }
+            BrowserEvent::ContentChanged { detail, .. } => {
+                lines.push("[页面变化] 页面内容已更新".to_string());
+                push_preview(&mut lines, detail, 1000);
+            }
+            BrowserEvent::UserClick {
+                element,
+                text,
+                selector,
+                ..
+            } => {
+                let mut desc = format!("[用户操作] 点击 <{element}>");
+                if !text.trim().is_empty() {
+                    desc.push_str(&format!(" {}", text.trim()));
+                }
+                if !selector.trim().is_empty() {
+                    desc.push_str(&format!(" ({selector})"));
+                }
+                lines.push(desc);
+            }
+            BrowserEvent::UserInput {
+                selector,
+                label,
+                value_length,
+                ..
+            } => {
+                let target = if label.trim().is_empty() {
+                    selector.as_str()
+                } else {
+                    label.as_str()
+                };
+                lines.push(format!(
+                    "[用户操作] 输入字段 {target} 已变化（长度 {value_length}）"
+                ));
+            }
+            BrowserEvent::UserNavigation { url, .. } => {
+                lines.push(format!("[用户操作] 页面导航到 {url}"));
+            }
+            BrowserEvent::NetworkResponse {
+                url,
+                method,
+                status,
+                detail,
+                ..
+            } => {
+                lines.push(format!(
+                    "[网络响应] {} {} (状态 {})",
+                    method,
+                    truncate_chars(url, 120),
+                    status
+                ));
+                push_preview(&mut lines, detail, 500);
+            }
+        }
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
+fn push_preview(lines: &mut Vec<String>, text: &str, max_chars: usize) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    lines.push(truncate_chars(text, max_chars));
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
+}
+
 // ── 类型转换：plugin → core ──────────────────────────────────────────
 
 impl From<BrowserTab> for tiangong_core::browser_trait::TabInfo {
@@ -278,6 +374,60 @@ impl From<BrowserTab> for tiangong_core::browser_trait::TabInfo {
             id: t.id,
             url: t.url,
             title: t.title,
+        }
+    }
+}
+
+impl From<BrowserEvent> for tiangong_core::browser_trait::BrowserEvent {
+    fn from(event: BrowserEvent) -> Self {
+        match event {
+            BrowserEvent::DialogOpened { timestamp, detail } => {
+                tiangong_core::browser_trait::BrowserEvent::DialogOpened { timestamp, detail }
+            }
+            BrowserEvent::DialogClosed { timestamp } => {
+                tiangong_core::browser_trait::BrowserEvent::DialogClosed { timestamp }
+            }
+            BrowserEvent::ContentChanged { timestamp, detail } => {
+                tiangong_core::browser_trait::BrowserEvent::ContentChanged { timestamp, detail }
+            }
+            BrowserEvent::UserClick {
+                timestamp,
+                element,
+                text,
+                selector,
+            } => tiangong_core::browser_trait::BrowserEvent::UserClick {
+                timestamp,
+                element,
+                text,
+                selector,
+            },
+            BrowserEvent::UserInput {
+                timestamp,
+                selector,
+                label,
+                value_length,
+            } => tiangong_core::browser_trait::BrowserEvent::UserInput {
+                timestamp,
+                selector,
+                label,
+                value_length,
+            },
+            BrowserEvent::UserNavigation { timestamp, url } => {
+                tiangong_core::browser_trait::BrowserEvent::UserNavigation { timestamp, url }
+            }
+            BrowserEvent::NetworkResponse {
+                timestamp,
+                url,
+                method,
+                status,
+                detail,
+            } => tiangong_core::browser_trait::BrowserEvent::NetworkResponse {
+                timestamp,
+                url,
+                method,
+                status,
+                detail,
+            },
         }
     }
 }
@@ -672,5 +822,56 @@ mod tests {
         assert_eq!(core.forms[0].fields.len(), 1);
         assert_eq!(core.forms[0].fields[0].name, "email");
         assert!(core.forms[0].fields[0].required);
+    }
+
+    #[test]
+    fn network_response_deserialization() {
+        let json = r#"{"type":"network_response","timestamp":1700000000,"url":"https://api.example.com/keys","method":"POST","status":200,"detail":"{\"key\":\"sk-abc123\"}"}"#;
+        let event: BrowserEvent = serde_json::from_str(json).unwrap();
+        match event {
+            BrowserEvent::NetworkResponse {
+                timestamp,
+                url,
+                method,
+                status,
+                detail,
+            } => {
+                assert_eq!(timestamp, 1700000000);
+                assert_eq!(url, "https://api.example.com/keys");
+                assert_eq!(method, "POST");
+                assert_eq!(status, 200);
+                assert!(detail.contains("sk-abc123"));
+            }
+            _ => panic!("Expected NetworkResponse variant"),
+        }
+    }
+
+    #[test]
+    fn network_response_array_deserialization() {
+        let json = r#"[
+            {"type":"network_response","timestamp":100,"url":"/a","method":"GET","status":200,"detail":"{}"},
+            {"type":"content_changed","timestamp":200,"detail":"updated"},
+            {"type":"network_response","timestamp":300,"url":"/b","method":"POST","status":201,"detail":"{\"id\":1}"}
+        ]"#;
+        let events: Vec<BrowserEvent> = serde_json::from_str(json).unwrap();
+        assert_eq!(events.len(), 3);
+        let network_count = events
+            .iter()
+            .filter(|e| matches!(e, BrowserEvent::NetworkResponse { .. }))
+            .count();
+        assert_eq!(network_count, 2);
+    }
+
+    #[test]
+    fn network_response_default_detail() {
+        let json =
+            r#"{"type":"network_response","timestamp":1,"url":"/","method":"GET","status":204}"#;
+        let event: BrowserEvent = serde_json::from_str(json).unwrap();
+        match event {
+            BrowserEvent::NetworkResponse { detail, .. } => {
+                assert!(detail.is_empty());
+            }
+            _ => panic!("Expected NetworkResponse"),
+        }
     }
 }

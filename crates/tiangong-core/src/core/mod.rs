@@ -260,6 +260,7 @@ impl TiangongCore {
         text: String,
         tabs: Vec<(String, String, String)>,
         active_tab_id: Option<String>,
+        feedback: Option<String>,
     ) -> bool {
         self.send_cmd(Command::InjectBrowserContent {
             title,
@@ -267,6 +268,7 @@ impl TiangongCore {
             text,
             tabs,
             active_tab_id,
+            feedback,
         })
     }
 
@@ -607,7 +609,19 @@ async fn worker_loop_async(
                 text,
                 tabs,
                 active_tab_id,
+                feedback,
             } => {
+                let has_feedback = feedback
+                    .as_deref()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false);
+                tracing::info!(
+                    session_id = %session.id,
+                    url = %url,
+                    text_len = text.len(),
+                    has_feedback,
+                    "inject browser content command received"
+                );
                 crate::react::message::inject_browser_content_to_session(
                     &mut session,
                     &stream_tx,
@@ -617,8 +631,9 @@ async fn worker_loop_async(
                         text: &text,
                         tabs: &tabs,
                         active_tab_id: active_tab_id.as_deref(),
+                        feedback: feedback.as_deref(),
                     },
-                    false,
+                    has_feedback,
                 );
                 continue;
             }

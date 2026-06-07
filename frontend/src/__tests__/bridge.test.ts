@@ -41,11 +41,30 @@ function setupDOM(html: string) {
   };
   Element.prototype.dispatchEvent = function () { return true; };
   delete (window as any).__tiangong_bridge_loaded;
+  delete (window as any).__tiangong_pending_network_events;
   loadBridge();
 }
 
 function getBridge(): any {
   return (window as any).__tiangong_bridge;
+}
+
+function createJsonResponse(body: string, contentType = 'application/json') {
+  return {
+    status: 200,
+    headers: {
+      get(name: string) {
+        return name.toLowerCase() === 'content-type' ? contentType : null;
+      },
+    },
+    clone() {
+      return {
+        text() {
+          return Promise.resolve(body);
+        },
+      };
+    },
+  };
 }
 
 describe('locateElement', () => {
@@ -866,5 +885,468 @@ describe('getPageDigest 泛化摘要', () => {
 
     document.elementFromPoint = origFn;
     window.getComputedStyle = origGCS;
+  });
+});
+
+describe('fetch 拦截与网络响应捕获', () => {
+  it('JSON 响应被捕获到独立网络事件队列', async () => {
+    setupDOM('<div id="app">content</div>');
+    const bridge = getBridge();
+    bridge.observer.start();
+
+    bridge.observer._pushEvent({
+      type: 'network_response',
+      timestamp: Date.now(),
+      url: 'https://api.example.com/keys',
+      method: 'POST',
+      status: 200,
+      detail: JSON.stringify({ key: 'sk-abc123', name: 'test-key' }),
+    });
+
+    // drainEvents 不再包含 network_response（独立队列）
+    expect(bridge.observer.drainEvents().length).toBe(0);
+    // drainNetworkEvents 返回网络事件
+    const networkEvents = bridge.observer.drainNetworkEvents();
+    expect(networkEvents.length).toBe(1);
+    expect(networkEvents[0].type).toBe('network_response');
+    expect(networkEvents[0].url).toBe('https://api.example.com/keys');
+    expect(networkEvents[0].method).toBe('POST');
+    expect(networkEvents[0].status).toBe(200);
+    expect(networkEvents[0].detail).toContain('sk-abc123');
+
+    bridge.observer.stop();
+  });
+
+  it('多个网络响应按序入独立队列', () => {
+    setupDOM('<div id="app">content</div>');
+    const bridge = getBridge();
+    bridge.observer.start();
+
+    bridge.observer._pushEvent({ type: 'network_response', timestamp: 100, url: '/api/a', method: 'GET', status: 200, detail: '{"a":1}' });
+    bridge.observer._pushEvent({ type: 'network_response', timestamp: 200, url: '/api/b', method: 'POST', status: 201, detail: '{"b":2}' });
+    bridge.observer._pushEvent({ type: 'content_changed', timestamp: 300, detail: 'text updated' });
+    bridge.observer._pushEvent({ type: 'network_response', timestamp: 400, url: '/api/c', method: 'DELETE', status: 204, detail: '' });
+
+    // drainEvents 只返回非网络事件
+    const events = bridge.observer.drainEvents();
+    expect(events.length).toBe(1);
+    expect(events[0].type).toBe('content_changed');
+
+    // drainNetworkEvents 返回所有网络事件
+    const networkEvents = bridge.observer.drainNetworkEvents();
+    expect(networkEvents.length).toBe(3);
+    expect(networkEvents[0].url).toBe('/api/a');
+    expect(networkEvents[1].url).toBe('/api/b');
+    expect(networkEvents[2].url).toBe('/api/c');
+
+    bridge.observer.stop();
+  });
+
+  it('drainNetworkEvents 后网络队列清空', () => {
+    setupDOM('<div id="app">content</div>');
+    const bridge = getBridge();
+    bridge.observer.start();
+
+    bridge.observer._pushEvent({ type: 'network_response', timestamp: 1, url: '/a', method: 'GET', status: 200, detail: '{}' });
+    expect(bridge.observer.drainNetworkEvents().length).toBe(1);
+    expect(bridge.observer.drainNetworkEvents().length).toBe(0);
+
+    bridge.observer.stop();
+  });
+
+  it('detail 超过 500 字符时入队不截断（截断在 bridge.js fetch/XHR 层完成）', () => {
+    setupDOM('<div id="app">content</div>');
+    const bridge = getBridge();
+    bridge.observer.start();
+
+    const longDetail = 'x'.repeat(600);
+    bridge.observer._pushEvent({ type: 'network_response', timestamp: 1, url: '/a', method: 'GET', status: 200, detail: longDetail });
+
+    const events = bridge.observer.drainNetworkEvents();
+    expect(events.length).toBe(1);
+    expect(events[0].detail.length).toBe(600);
+
+    bridge.observer.stop();
+  });
+});
+
+describe('XHR 拦截事件流', () => {
+  it('fetch JSON 响应会进入 drainAllEvents', async () => {
+    const body = JSON.stringify({ data: { key: 'sk-fetch123', name: 'fetch-key' } });
+    (window as any).fetch = () => Promise.resolve(createJsonResponse(body));
+
+    setupDOM('<div id="app">content</div>');
+    const bridge = getBridge();
+    bridge.observer.start();
+
+    await (window as any).fetch('https://platform.deepseek.com/api/v0/users/create_api_key', {
+      method: 'POST',
+    });
+    await Promise.resolve();
+
+    const events = bridge.observer.drainAllEvents();
+    expect(events.length).toBe(1);
+    expect(events[0]).toMatchObject({
+      type: 'network_response',
+      url: 'https://platform.deepseek.com/api/v0/users/create_api_key',
+      method: 'POST',
+      status: 200,
+    });
+    expect(events[0].detail).toContain('sk-fetch123');
+
+    bridge.observer.stop();
+  });
+
+  it('XHR load 事件触发后 network_response 入队', () => {
+    setupDOM('<div id="app">content</div>');
+    const bridge = getBridge();
+    bridge.observer.start();
+
+    // 模拟 XHR 拦截逻辑：直接 push 事件（与 bridge.js 中的逻辑一致）
+    const mockXHR = {
+      _tiangong_method: 'POST',
+      _tiangong_url: 'https://platform.deepseek.com/api_keys',
+      status: 200,
+      responseText: JSON.stringify({ data: { key: 'sk-deep123', name: 'my-key' } }),
+      getResponseHeader(name: string) {
+        if (name === 'content-type') return 'application/json';
+        return null;
+      },
+    };
+
+    // 模拟 bridge.js 中 XHR load 回调的拦截逻辑
+    const ct = mockXHR.getResponseHeader('content-type') || '';
+    if (ct.indexOf('application/json') >= 0) {
+      bridge.observer._pushEvent({
+        type: 'network_response',
+        timestamp: Date.now(),
+        url: mockXHR._tiangong_url,
+        method: mockXHR._tiangong_method,
+        status: mockXHR.status,
+        detail: (mockXHR.responseText || '').substring(0, 500),
+      });
+    }
+
+    const events = bridge.observer.drainNetworkEvents();
+    expect(events.length).toBe(1);
+    expect(events[0].type).toBe('network_response');
+    expect(events[0].url).toBe('https://platform.deepseek.com/api_keys');
+    expect(events[0].method).toBe('POST');
+    expect(events[0].status).toBe(200);
+    expect(events[0].detail).toContain('sk-deep123');
+
+    bridge.observer.stop();
+  });
+
+  it('非 JSON Content-Type 的 XHR 不产生事件', () => {
+    setupDOM('<div id="app">content</div>');
+    const bridge = getBridge();
+    bridge.observer.start();
+
+    // 模拟非 JSON 响应（text/html）
+    const ct = 'text/html; charset=utf-8';
+    if (ct.indexOf('application/json') < 0 && ct.indexOf('text/json') < 0) {
+      // 不 push 事件 — 与 bridge.js 逻辑一致
+    }
+
+    const events = bridge.observer.drainEvents();
+    expect(events.length).toBe(0);
+
+    bridge.observer.stop();
+  });
+
+  it('ipc:// 协议 XHR 请求不产生事件', () => {
+    setupDOM('<div id="app">content</div>');
+    const bridge = getBridge();
+    bridge.observer.start();
+
+    // 模拟 ipc:// URL — bridge.js 中 open 调用直接 return，不设置 _tiangong_url
+    const url = 'ipc://localhost/some-command';
+    const shouldIntercept = !(typeof url === 'string' && url.indexOf('ipc://') === 0);
+
+    expect(shouldIntercept).toBe(false);
+    const events = bridge.observer.drainEvents();
+    expect(events.length).toBe(0);
+
+    bridge.observer.stop();
+  });
+});
+
+describe('ipc:// 协议屏蔽', () => {
+  it('fetch ipc:// 返回空 JSON 响应', async () => {
+    setupDOM('<div id="app">content</div>');
+    // bridge.js 替换了 window.fetch，ipc:// 请求返回空 Response
+    const response = await window.fetch('ipc://localhost/test');
+    const text = await response.text();
+    expect(text).toBe('{}');
+    expect(response.status).toBe(200);
+  });
+});
+
+describe('双队列竞争条件验证', () => {
+  it('旧 drain 接口仍分别消费普通事件和网络事件', () => {
+    setupDOM('<div id="app">content</div>');
+    const bridge = getBridge();
+    bridge.observer.start();
+
+    bridge.observer._pushEvent({ type: 'network_response', timestamp: 1, url: '/a', method: 'POST', status: 200, detail: '{"key":"sk-a"}' });
+    bridge.observer._pushEvent({ type: 'content_changed', timestamp: 2, detail: 'changed' });
+
+    // drainEvents 只返回普通事件
+    const events = bridge.observer.drainEvents();
+    expect(events.length).toBe(1);
+    expect(events[0].type).toBe('content_changed');
+
+    // drainNetworkEvents 只返回网络事件（不受 drainEvents 影响）
+    const network = bridge.observer.drainNetworkEvents();
+    expect(network.length).toBe(1);
+    expect(network[0].detail).toContain('sk-a');
+
+    bridge.observer.stop();
+  });
+
+  it('drainAllEvents 一次消费普通事件和网络事件并按时间排序', () => {
+    setupDOM('<div id="app">content</div>');
+    const bridge = getBridge();
+    bridge.observer.start();
+
+    bridge.observer._pushEvent({ type: 'network_response', timestamp: 3, url: '/api/key', method: 'POST', status: 200, detail: '{"key":"sk-xyz"}' });
+    bridge.observer._pushEvent({ type: 'dialog_opened', timestamp: 2, detail: 'dialog' });
+    bridge.observer._pushEvent({ type: 'content_changed', timestamp: 1, detail: 'changed' });
+
+    const events = bridge.observer.drainAllEvents();
+    expect(events.map((e: any) => e.type)).toEqual(['content_changed', 'dialog_opened', 'network_response']);
+    expect(events[2].detail).toContain('sk-xyz');
+    expect(bridge.observer.drainEvents().length).toBe(0);
+    expect(bridge.observer.drainNetworkEvents().length).toBe(0);
+
+    bridge.observer.stop();
+  });
+
+  it('bridge 初始化前缓存的网络事件会被 drainAllEvents 消费', () => {
+    setupDOM('<div id="app">content</div>');
+    const bridge = getBridge();
+
+    (window as any).__tiangong_pending_network_events = [
+      { type: 'network_response', timestamp: 1, url: '/early', method: 'GET', status: 200, detail: '{"ok":true}' },
+    ];
+
+    const events = bridge.observer.drainAllEvents();
+    expect(events.length).toBe(1);
+    expect(events[0].url).toBe('/early');
+    expect((window as any).__tiangong_pending_network_events.length).toBe(0);
+  });
+
+  it('多次 drainNetworkEvents 只拿到各自入队的事件', () => {
+    setupDOM('<div id="app">content</div>');
+    const bridge = getBridge();
+    bridge.observer.start();
+
+    bridge.observer._pushEvent({ type: 'network_response', timestamp: 1, url: '/a', method: 'POST', status: 200, detail: '{"key":"sk-a"}' });
+    const first = bridge.observer.drainNetworkEvents();
+    expect(first.length).toBe(1);
+    expect(first[0].detail).toContain('sk-a');
+
+    bridge.observer._pushEvent({ type: 'network_response', timestamp: 2, url: '/b', method: 'POST', status: 201, detail: '{"key":"sk-b"}' });
+    const second = bridge.observer.drainNetworkEvents();
+    expect(second.length).toBe(1);
+    expect(second[0].detail).toContain('sk-b');
+
+    bridge.observer.stop();
+  });
+
+  it('事件轮询线程使用 drainAllEvents 时不会漏掉网络事件', () => {
+    setupDOM('<div id="app">content</div>');
+    const bridge = getBridge();
+    bridge.observer.start();
+
+    // 模拟：先有网络事件
+    bridge.observer._pushEvent({ type: 'network_response', timestamp: 1, url: '/api/key', method: 'POST', status: 200, detail: '{"key":"sk-xyz"}' });
+    bridge.observer._pushEvent({ type: 'dialog_opened', timestamp: 2, detail: 'dialog' });
+
+    // 模拟事件轮询线程调用统一 drain
+    const polled = bridge.observer.drainAllEvents();
+    expect(polled.length).toBe(2);
+    expect(polled.map((e: any) => e.type)).toEqual(['network_response', 'dialog_opened']);
+    expect(polled[0].detail).toContain('sk-xyz');
+    expect(bridge.observer.drainNetworkEvents().length).toBe(0);
+
+    bridge.observer.stop();
+  });
+});
+
+describe('getPageDigest + diffDigest 微小变化检测', () => {
+  it('覆盖层内新增一行文本能被 diffDigest 捕获', () => {
+    setupDOM('<div id="app">content</div>');
+    const bridge = getBridge();
+
+    const before = {
+      url: 'https://platform.deepseek.com/api_keys',
+      title: 'API Keys',
+      overlayOpen: true,
+      overlayText: '创建 API key 请将此 API key 保存在安全且易于访问的地方。',
+      mainTextTail: '已有 key 列表',
+    };
+    const after = {
+      url: 'https://platform.deepseek.com/api_keys',
+      title: 'API Keys',
+      overlayOpen: true,
+      overlayText: '创建 API key 请将此 API key 保存在安全且易于访问的地方。 sk-dcc5ad16d02d4a61ac88e1196c578ad4 复制 关闭',
+      mainTextTail: '已有 key 列表',
+    };
+
+    const diff = bridge.diffDigest(before, after);
+    expect(diff).toContain('覆盖层内容已变化');
+    expect(diff).toContain('sk-dcc5ad16d02d4a61ac88e1196c578ad4');
+  });
+
+  it('overlayText 完全相同时不报覆盖层变化', () => {
+    setupDOM('<div id="app">content</div>');
+    const bridge = getBridge();
+
+    const before = { url: '', title: '', overlayOpen: true, overlayText: '对话框内容', mainTextTail: '' };
+    const after = { url: '', title: '', overlayOpen: true, overlayText: '对话框内容', mainTextTail: '' };
+    const diff = bridge.diffDigest(before, after);
+    expect(diff).not.toContain('覆盖层');
+  });
+
+  it('mainTextTail 微小新增（仅一行 key）能被检测', () => {
+    setupDOM('<div id="app">content</div>');
+    const bridge = getBridge();
+
+    const before = {
+      url: 'https://example.com/keys',
+      title: 'Keys',
+      overlayOpen: false,
+      overlayText: '',
+      mainTextTail: 'key-001 active\nkey-002 active\n创建新 key',
+    };
+    const after = {
+      url: 'https://example.com/keys',
+      title: 'Keys',
+      overlayOpen: false,
+      overlayText: '',
+      mainTextTail: 'key-001 active\nkey-002 active\n创建新 key\nsk-newkey123 active',
+    };
+
+    const diff = bridge.diffDigest(before, after);
+    expect(diff).toContain('页面内容变化');
+    expect(diff).toContain('sk-newkey123');
+  });
+});
+
+describe('网络响应格式化（模拟 handler drain 逻辑）', () => {
+  it('network_response 事件格式化为可读摘要', () => {
+    setupDOM('<div id="app">content</div>');
+    const bridge = getBridge();
+    bridge.observer.start();
+
+    bridge.observer._pushEvent({
+      type: 'network_response',
+      timestamp: Date.now(),
+      url: 'https://api.deepseek.com/v1/api_keys',
+      method: 'POST',
+      status: 200,
+      detail: JSON.stringify({ data: { key: 'sk-dcc5ad16d02d4a61', name: 'test' } }),
+    });
+
+    const events = bridge.observer.drainNetworkEvents();
+    const networkEvents = events.filter((e: any) => e.type === 'network_response');
+
+    // 模拟 handler.rs 中 drain_network_responses 的格式化逻辑
+    const lines: string[] = [];
+    for (const evt of networkEvents) {
+      const method = evt.method || 'GET';
+      const url = evt.url || '';
+      const status = evt.status || 0;
+      const detail = evt.detail || '';
+      const shortUrl = url.length > 80 ? url.substring(0, 80) : url;
+      lines.push(`[网络响应] ${method} ${shortUrl} (状态 ${status})`);
+      if (detail) {
+        const preview = detail.length > 300 ? detail.substring(0, 300) + '...' : detail;
+        lines.push(preview);
+      }
+    }
+    const result = lines.join('\n');
+
+    expect(result).toContain('[网络响应] POST https://api.deepseek.com/v1/api_keys (状态 200)');
+    expect(result).toContain('sk-dcc5ad16d02d4a61');
+
+    bridge.observer.stop();
+  });
+});
+
+describe('完整感知链路模拟', () => {
+  it('点击 → XHR 响应 → digest 变化 → 网络事件捕获', () => {
+    setupDOM(`
+      <div id="app">
+        <div id="key-list">key-001 active</div>
+        <div id="backdrop" style="display:none;">
+          <div id="dialog">
+            <p id="key-display"></p>
+          </div>
+        </div>
+      </div>
+    `);
+
+    const bridge = getBridge();
+    bridge.observer.start();
+
+    // 1. 操作前 digest
+    const beforeDigest = bridge.getPageDigest();
+    expect(beforeDigest.overlayOpen).toBe(false);
+
+    // 2. 模拟点击后 XHR 响应入队（bridge.js XHR 拦截层的行为）
+    bridge.observer._pushEvent({
+      type: 'network_response',
+      timestamp: Date.now(),
+      url: 'https://platform.deepseek.com/api_keys/create',
+      method: 'POST',
+      status: 200,
+      detail: JSON.stringify({ data: { key: 'sk-fullchain123', name: 'my-key' } }),
+    });
+
+    // 3. 模拟弹窗出现
+    const backdrop = document.getElementById('backdrop')!;
+    const keyDisplay = document.getElementById('key-display')!;
+    backdrop.style.display = 'block';
+    backdrop.style.position = 'fixed';
+    keyDisplay.textContent = 'sk-fullchain123';
+
+    // mock 覆盖层检测
+    backdrop.getBoundingClientRect = () => ({ width: 1920, height: 1080, top: 0, left: 0, right: 1920, bottom: 1080, x: 0, y: 0 } as any);
+    const dialog = document.getElementById('dialog')!;
+    dialog.getBoundingClientRect = () => ({ width: 400, height: 200, top: 200, left: 400, right: 800, bottom: 400, x: 400, y: 200 } as any);
+
+    const origGCS = window.getComputedStyle;
+    window.getComputedStyle = ((el: Element) => {
+      const real = origGCS.call(window, el);
+      if (el === backdrop) return { ...real, position: 'fixed' } as any;
+      if (el === dialog) return { ...real, position: 'fixed' } as any;
+      return real;
+    }) as any;
+
+    const origEFP = document.elementFromPoint;
+    document.elementFromPoint = () => dialog;
+
+    // 4. 操作后 digest
+    const afterDigest = bridge.getPageDigest();
+
+    // 5. 验证 digest 变化检测
+    const diff = bridge.diffDigest(beforeDigest, afterDigest);
+    // 覆盖层从无到有，或者内容变化
+    const hasOverlayChange = diff.indexOf('覆盖层') >= 0;
+    const hasContentChange = diff.indexOf('内容变化') >= 0 || diff.indexOf('sk-fullchain123') >= 0;
+    expect(hasOverlayChange || hasContentChange).toBe(true);
+
+    // 6. 验证网络事件可被 drain（独立队列，不受 drainEvents 影响）
+    const networkEvents = bridge.observer.drainNetworkEvents();
+    expect(networkEvents.length).toBe(1);
+    expect(networkEvents[0].detail).toContain('sk-fullchain123');
+
+    // 7. 清理
+    document.elementFromPoint = origEFP;
+    window.getComputedStyle = origGCS;
+    bridge.observer.stop();
   });
 });

@@ -85,6 +85,7 @@ impl PageFetcher for BrowserPageFetcher {
                 text: snapshot.text,
                 tabs: snapshot.tabs.into_iter().map(Into::into).collect(),
                 active_tab_id: snapshot.active_tab_id,
+                events: snapshot.events.into_iter().map(Into::into).collect(),
             })
         })
     }

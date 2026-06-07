@@ -319,6 +319,7 @@ pub(crate) struct BrowserContent<'a> {
     pub text: &'a str,
     pub tabs: &'a [(String, String, String)],
     pub active_tab_id: Option<&'a str>,
+    pub feedback: Option<&'a str>,
 }
 
 ///
@@ -340,13 +341,28 @@ pub(crate) fn inject_browser_content_to_session(
                 && msg.text_content().contains(url)
         })
     {
+        tracing::debug!(
+            session_id = %session.id,
+            url,
+            has_feedback = content
+                .feedback
+                .map(|feedback| !feedback.trim().is_empty())
+                .unwrap_or(false),
+            "skip browser content injection: duplicate recent url"
+        );
         return;
     }
 
     let tool_call_id = format!("browser_auto_{}", scru128::new());
     let tool_name = "web_browse";
 
-    let label = if force {
+    let has_feedback = content
+        .feedback
+        .map(|feedback| !feedback.trim().is_empty())
+        .unwrap_or(false);
+    let label = if has_feedback {
+        "[自动感知] 浏览器有新的操作或页面反馈"
+    } else if force {
         "[自动感知] 浏览器页面内容发生变化"
     } else {
         "[自动感知] 用户在浏览器中导航到新页面"
@@ -360,12 +376,20 @@ pub(crate) fn inject_browser_content_to_session(
     }];
     session.messages.push(assistant_msg);
 
-    let header = if force {
+    let header = if has_feedback {
+        "[浏览器反馈]"
+    } else if force {
         "[浏览器内容变化]"
     } else {
         "[浏览器页面更新]"
     };
-    let mut output = if text.is_empty() {
+    let mut output = if let Some(feedback) = content.feedback.filter(|s| !s.trim().is_empty()) {
+        if text.is_empty() {
+            format!("{header}\n标题：{title}\nURL：{url}\n\n{feedback}")
+        } else {
+            format!("{header}\n标题：{title}\nURL：{url}\n\n{feedback}\n\n[当前页面内容]\n{text}")
+        }
+    } else if text.is_empty() {
         format!("{header}\n标题：{title}\nURL：{url}\n状态：页面内容为空")
     } else {
         format!("{header}\n标题：{title}\nURL：{url}\n\n{text}")
@@ -397,4 +421,100 @@ pub(crate) fn inject_browser_content_to_session(
     });
 
     append_tool_result_message(session, &tool_call_id, tool_name, output, false);
+    tracing::info!(
+        session_id = %session.id,
+        url,
+        force,
+        has_feedback,
+        output_len = session
+            .messages
+            .last()
+            .map(|msg| msg.text_content().len())
+            .unwrap_or(0),
+        "browser content injected into session"
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inject_browser_content_keeps_feedback_in_tool_message() {
+        let mut session = Session::new("browser");
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        inject_browser_content_to_session(
+            &mut session,
+            &tx,
+            &BrowserContent {
+                title: "API Keys",
+                url: "https://platform.deepseek.com/api_keys",
+                text: "API keys page",
+                tabs: &[],
+                active_tab_id: None,
+                feedback: Some("[网络响应] POST /api_keys (状态 200)\n{\"key\":\"sk-test\"}"),
+            },
+            true,
+        );
+
+        assert_eq!(session.messages.len(), 2);
+        let tool_text = session.messages[1].text_content();
+        assert!(tool_text.contains("[浏览器反馈]"));
+        assert!(tool_text.contains("[网络响应] POST /api_keys (状态 200)"));
+        assert!(tool_text.contains("sk-test"));
+
+        let event = rx.recv().unwrap();
+        match event {
+            StreamEvent::ToolResult { output, .. } => {
+                assert!(output.contains("[浏览器反馈]"));
+                assert!(output.contains("sk-test"));
+            }
+            _ => panic!("expected browser feedback tool result"),
+        }
+    }
+
+    #[test]
+    fn inject_browser_feedback_bypasses_recent_url_dedup_when_forced() {
+        let mut session = Session::new("browser");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let url = "https://platform.deepseek.com/api_keys";
+
+        inject_browser_content_to_session(
+            &mut session,
+            &tx,
+            &BrowserContent {
+                title: "API Keys",
+                url,
+                text: "API keys page",
+                tabs: &[],
+                active_tab_id: None,
+                feedback: None,
+            },
+            false,
+        );
+        assert_eq!(session.messages.len(), 2);
+
+        inject_browser_content_to_session(
+            &mut session,
+            &tx,
+            &BrowserContent {
+                title: "API Keys",
+                url,
+                text: "API keys page",
+                tabs: &[],
+                active_tab_id: None,
+                feedback: Some("[网络响应] POST /api/v0/users/create_api_key (状态 200)"),
+            },
+            true,
+        );
+
+        assert_eq!(session.messages.len(), 4);
+        assert!(session.messages[3].text_content().contains("[浏览器反馈]"));
+        assert!(
+            session.messages[3]
+                .text_content()
+                .contains("create_api_key")
+        );
+    }
 }

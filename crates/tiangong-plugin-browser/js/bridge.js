@@ -66,6 +66,31 @@
         }
 
         // --- 3. 拦截 fetch ipc:// 协议 + 捕获 JSON 响应 ---
+        var _pendingNetworkEvents = window.__tiangong_pending_network_events || [];
+        window.__tiangong_pending_network_events = _pendingNetworkEvents;
+        var _isJsonContentType = function(contentType) {
+            contentType = (contentType || '').toLowerCase();
+            return contentType.indexOf('application/json') >= 0 ||
+                contentType.indexOf('text/json') >= 0 ||
+                contentType.indexOf('+json') >= 0;
+        };
+        var _pushNetworkEvent = function(event) {
+            try {
+                if (window.__tiangong_bridge && window.__tiangong_bridge.observer) {
+                    window.__tiangong_bridge.observer._pushEvent(event);
+                    return;
+                }
+            } catch(e) {}
+            _pendingNetworkEvents.push(event);
+            if (_pendingNetworkEvents.length > 100) {
+                _pendingNetworkEvents = _pendingNetworkEvents.slice(-50);
+                window.__tiangong_pending_network_events = _pendingNetworkEvents;
+            }
+        };
+        var _responsePreview = function(text) {
+            text = text || '';
+            return text.length > 500 ? text.substring(0, 500) : text;
+        };
         var _origFetch = window.fetch;
         window.fetch = function(input, init) {
             var url = (typeof input === 'string') ? input : (input && input.url ? input.url : '');
@@ -83,20 +108,18 @@
             return _origFetch.call(this, input, init).then(function(response) {
                 try {
                     var ct = response.headers.get('content-type') || '';
-                    if (ct.indexOf('application/json') >= 0 || ct.indexOf('text/json') >= 0) {
+                    if (_isJsonContentType(ct)) {
                         var cloned = response.clone();
-                        var method = (init && init.method) || 'GET';
+                        var method = (init && init.method) || (input && input.method) || 'GET';
                         cloned.text().then(function(body) {
-                            if (window.__tiangong_bridge && window.__tiangong_bridge.observer) {
-                                window.__tiangong_bridge.observer._pushEvent({
-                                    type: 'network_response',
-                                    timestamp: Date.now(),
-                                    url: url,
-                                    method: method,
-                                    status: response.status,
-                                    detail: body.length > 500 ? body.substring(0, 500) : body
-                                });
-                            }
+                            _pushNetworkEvent({
+                                type: 'network_response',
+                                timestamp: Date.now(),
+                                url: url,
+                                method: method,
+                                status: response.status,
+                                detail: _responsePreview(body)
+                            });
                         }).catch(function() {});
                     }
                 } catch(e) {}
@@ -109,29 +132,42 @@
         var _origXHRSend = window.XMLHttpRequest.prototype.send;
         window.XMLHttpRequest.prototype.open = function(method, url, async, user, password) {
             if (typeof url === 'string' && url.indexOf('ipc://') === 0) {
+                this._tiangong_blocked = true;
                 return;
             }
+            this._tiangong_blocked = false;
             this._tiangong_method = method;
             this._tiangong_url = url;
             return _origXHROpen.call(this, method, url, async, user, password);
         };
         window.XMLHttpRequest.prototype.send = function(body) {
             var xhr = this;
+            if (xhr._tiangong_blocked) {
+                return;
+            }
             if (xhr._tiangong_url && xhr._tiangong_url.indexOf('ipc://') !== 0) {
                 xhr.addEventListener('load', function() {
                     try {
                         var ct = xhr.getResponseHeader('content-type') || '';
-                        if (ct.indexOf('application/json') >= 0 || ct.indexOf('text/json') >= 0) {
-                            if (window.__tiangong_bridge && window.__tiangong_bridge.observer) {
-                                window.__tiangong_bridge.observer._pushEvent({
-                                    type: 'network_response',
-                                    timestamp: Date.now(),
-                                    url: xhr._tiangong_url || '',
-                                    method: xhr._tiangong_method || 'GET',
-                                    status: xhr.status,
-                                    detail: (xhr.responseText || '').substring(0, 500)
-                                });
+                        if (_isJsonContentType(ct)) {
+                            var detail = '';
+                            try {
+                                detail = xhr.responseText || '';
+                            } catch(e2) {
+                                try {
+                                    detail = JSON.stringify(xhr.response || '');
+                                } catch(e3) {
+                                    detail = '';
+                                }
                             }
+                            _pushNetworkEvent({
+                                type: 'network_response',
+                                timestamp: Date.now(),
+                                url: xhr._tiangong_url || '',
+                                method: xhr._tiangong_method || 'GET',
+                                status: xhr.status,
+                                detail: _responsePreview(detail)
+                            });
                         }
                     } catch(e) {}
                 });
@@ -1372,6 +1408,7 @@
         // ── 持久观测层 ─────────────────────────────────────
         observer: {
             _eventQueue: [],
+            _networkQueue: [],
             _mutationObserver: null,
             _debounceTimer: null,
             _pendingMutations: [],
@@ -1381,6 +1418,7 @@
             start: function() {
                 if (this._started) return;
                 this._started = true;
+                this._flushPendingNetworkEvents();
                 this._startMutationObserver();
                 this._bindUserEvents();
             },
@@ -1402,6 +1440,38 @@
                 var events = this._eventQueue;
                 this._eventQueue = [];
                 return events;
+            },
+
+            drainNetworkEvents: function() {
+                this._flushPendingNetworkEvents();
+                var events = this._networkQueue;
+                this._networkQueue = [];
+                return events;
+            },
+
+            drainAllEvents: function() {
+                this._flushPendingNetworkEvents();
+                var events = this._eventQueue.concat(this._networkQueue);
+                this._eventQueue = [];
+                this._networkQueue = [];
+                events.sort(function(a, b) {
+                    return (a.timestamp || 0) - (b.timestamp || 0);
+                });
+                return events;
+            },
+
+            hasPendingEvents: function() {
+                this._flushPendingNetworkEvents();
+                return this._eventQueue.length > 0 || this._networkQueue.length > 0;
+            },
+
+            _flushPendingNetworkEvents: function() {
+                var pending = window.__tiangong_pending_network_events || [];
+                if (!pending.length) return;
+                window.__tiangong_pending_network_events = [];
+                for (var i = 0; i < pending.length; i++) {
+                    this._pushEvent(pending[i]);
+                }
             },
 
             // ── MutationObserver ──
@@ -1635,9 +1705,16 @@
             },
 
             _pushEvent: function(event) {
-                this._eventQueue.push(event);
-                if (this._eventQueue.length > 100) {
-                    this._eventQueue = this._eventQueue.slice(-50);
+                if (event.type === 'network_response') {
+                    this._networkQueue.push(event);
+                    if (this._networkQueue.length > 100) {
+                        this._networkQueue = this._networkQueue.slice(-50);
+                    }
+                } else {
+                    this._eventQueue.push(event);
+                    if (this._eventQueue.length > 100) {
+                        this._eventQueue = this._eventQueue.slice(-50);
+                    }
                 }
             }
         },

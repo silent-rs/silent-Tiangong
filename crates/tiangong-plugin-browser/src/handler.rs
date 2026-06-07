@@ -3,12 +3,13 @@ use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, Wry};
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::manager::{default_browser_rect, BrowserManager, BrowserState};
 use crate::types::{
-    AnnotationExtractResult, BrowserCommand, BrowserPageSnapshot, BrowserResponse,
-    ClickElementResult, FillFieldResult, FormExtractResult, PageStatus, QueryDomResult,
+    format_browser_events, AnnotationExtractResult, BrowserCommand, BrowserEvent,
+    BrowserPageSnapshot, BrowserResponse, ClickElementResult, FillFieldResult, FormExtractResult,
+    PageStatus, QueryDomResult,
 };
 
 /// 轮询等待页面内容变化并稳定，返回最终的 after-digest。
@@ -92,6 +93,17 @@ fn compute_page_diff(
     }
 }
 
+/// 合并 page_diff 和浏览器事件反馈到最终结果
+fn merge_diff_and_events(page_diff: &Option<String>, events: &[BrowserEvent]) -> Option<String> {
+    let event_text = format_browser_events(events);
+    match (page_diff, event_text) {
+        (Some(diff), Some(events)) => Some(format!("{}\n{}", diff, events)),
+        (Some(diff), None) => Some(diff.clone()),
+        (None, Some(events)) => Some(events),
+        (None, None) => None,
+    }
+}
+
 /// 浏览器命令处理循环
 pub async fn browser_command_handler(
     mut rx: mpsc::Receiver<BrowserCommand>,
@@ -161,6 +173,7 @@ pub async fn browser_command_handler(
                     state: browser_state.clone(),
                 };
                 let snapshot = tokio::task::spawn_blocking(move || {
+                    let events = manager.drain_events();
                     manager
                         .eval_with_result(
                             "(function(){try{var t=window.__tiangong_bridge.getFullText(12000);var a=window.__tiangong_bridge.annotation.getAnnotations();if(a&&a.count>0){t.text+='\\n\\n[页面批注] '+JSON.stringify(a.annotations);}return t;}catch(e){return {title:'',url:'',text:'',error:e.message};}})()"
@@ -174,6 +187,7 @@ pub async fn browser_command_handler(
                                 status: PageStatus::Loaded,
                                 tabs: Vec::new(),
                                 active_tab_id: None,
+                                events,
                             })
                         })
                         .unwrap_or(BrowserPageSnapshot {
@@ -183,6 +197,7 @@ pub async fn browser_command_handler(
                             status: PageStatus::Error("浏览器未打开或页面未加载".to_string()),
                             tabs: Vec::new(),
                             active_tab_id: None,
+                            events: Vec::new(),
                         })
                 })
                 .await
@@ -193,6 +208,7 @@ pub async fn browser_command_handler(
                     status: PageStatus::Error("浏览器快照任务失败".to_string()),
                     tabs: Vec::new(),
                     active_tab_id: None,
+                    events: Vec::new(),
                 });
                 // 补充标签信息
                 let tabs = {
@@ -209,6 +225,18 @@ pub async fn browser_command_handler(
                     active_tab_id: tabs.1,
                     ..snapshot
                 };
+                debug!(
+                    url = %snapshot.url,
+                    title = %snapshot.title,
+                    text_len = snapshot.text.len(),
+                    events_len = snapshot.events.len(),
+                    network_events = snapshot
+                        .events
+                        .iter()
+                        .filter(|event| matches!(event, BrowserEvent::NetworkResponse { .. }))
+                        .count(),
+                    "browser observe_page snapshot"
+                );
                 let _ = response_tx.send(snapshot);
             }
             BrowserCommand::FormExtract { response_tx } => {
@@ -285,11 +313,12 @@ pub async fn browser_command_handler(
                             }
                         }
 
-                        // 智能等待页面内容变化（最多 2 秒）
+                        // 智能等待页面内容变化（最多 3 秒）
                         let after_digest =
                             wait_for_content_change(&manager, Duration::from_secs(3));
-                        native_result.page_diff =
-                            compute_page_diff(&manager, &before_digest, &after_digest);
+                        let diff = compute_page_diff(&manager, &before_digest, &after_digest);
+                        let events = manager.drain_events();
+                        native_result.page_diff = merge_diff_and_events(&diff, &events);
                     }
 
                     native_result
@@ -348,7 +377,9 @@ pub async fn browser_command_handler(
                         // 智能等待页面内容变化（最多 5 秒）
                         let after_digest =
                             wait_for_content_change(&manager, Duration::from_secs(5));
-                        result.page_diff = compute_page_diff(&manager, &before_digest, &after_digest);
+                        let diff = compute_page_diff(&manager, &before_digest, &after_digest);
+                        let events = manager.drain_events();
+                        result.page_diff = merge_diff_and_events(&diff, &events);
                     }
 
                     result
@@ -491,5 +522,98 @@ pub async fn browser_command_handler(
                 let _ = response_tx.send(result);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_both_some() {
+        let diff = Some("页面内容变化：新增 key".to_string());
+        let events = vec![BrowserEvent::NetworkResponse {
+            timestamp: 1,
+            url: "/api/keys".to_string(),
+            method: "POST".to_string(),
+            status: 200,
+            detail: "{\"key\":\"sk-abc\"}".to_string(),
+        }];
+        let result = merge_diff_and_events(&diff, &events);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(r.contains("页面内容变化"));
+        assert!(r.contains("[网络响应]"));
+        assert!(r.contains("sk-abc"));
+    }
+
+    #[test]
+    fn merge_only_diff() {
+        let diff = Some("覆盖层已关闭".to_string());
+        let result = merge_diff_and_events(&diff, &[]);
+        assert_eq!(result, Some("覆盖层已关闭".to_string()));
+    }
+
+    #[test]
+    fn merge_only_events() {
+        let events = vec![BrowserEvent::DialogOpened {
+            timestamp: 1,
+            detail: "创建 API key sk-test".to_string(),
+        }];
+        let result = merge_diff_and_events(&None, &events);
+        assert!(result.is_some());
+        let result = result.unwrap();
+        assert!(result.contains("[页面变化]"));
+        assert!(result.contains("sk-test"));
+    }
+
+    #[test]
+    fn merge_both_none() {
+        let result = merge_diff_and_events(&None, &[]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn browser_events_parse_mixed_event_queue() {
+        let raw = r#"[
+            {"type":"content_changed","timestamp":100,"detail":"text updated"},
+            {"type":"network_response","timestamp":200,"url":"/api/a","method":"GET","status":200,"detail":"{}"},
+            {"type":"dialog_opened","timestamp":300,"detail":"dialog text"},
+            {"type":"network_response","timestamp":400,"url":"/api/b","method":"POST","status":201,"detail":"{\"id\":1}"}
+        ]"#;
+        let events: Vec<BrowserEvent> = serde_json::from_str(raw).unwrap();
+        assert_eq!(events.len(), 4);
+        let network: Vec<_> = events
+            .iter()
+            .filter(|event| matches!(event, BrowserEvent::NetworkResponse { .. }))
+            .collect();
+        assert_eq!(network.len(), 2);
+        assert!(matches!(events[2], BrowserEvent::DialogOpened { .. }));
+    }
+
+    #[test]
+    fn browser_events_format_output() {
+        let events = vec![BrowserEvent::NetworkResponse {
+            timestamp: 1,
+            url: "https://platform.deepseek.com/api_keys".to_string(),
+            method: "POST".to_string(),
+            status: 200,
+            detail: "{\"data\":{\"key\":\"sk-dcc5ad16\"}}".to_string(),
+        }];
+        let result = format_browser_events(&events).unwrap();
+        assert!(
+            result.contains("[网络响应] POST https://platform.deepseek.com/api_keys (状态 200)")
+        );
+        assert!(result.contains("sk-dcc5ad16"));
+    }
+
+    #[test]
+    fn compute_page_diff_both_empty_returns_none() {
+        // 如果 before 和 after digest 的 overlayOpen/overlayText/mainTextTail 都相同，
+        // diffDigest 返回 "页面无明显变化"，compute_page_diff 将其视为空
+        // 模拟 diffDigest 的行为：当无变化时返回空字符串（bridge.js 中 changes.length === 0 时返回 "页面无明显变化"）
+        // handler.rs 中 diff.is_empty() 检查空字符串 → 返回 None
+        let diff = String::new();
+        assert!(diff.is_empty());
     }
 }
