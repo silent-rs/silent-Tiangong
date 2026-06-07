@@ -238,7 +238,6 @@ fn run_gui() {
             }
             if let Some(handler) = tiangong_plugin_browser::get_tool_override(app.handle()) {
                 state.register_tool_override("web_fetch", handler.clone());
-                state.register_tool_override("web_browse", handler.clone());
                 state.register_tool_override("web_form_extract", handler.clone());
                 state.register_tool_override("web_form_fill", handler.clone());
                 state.register_tool_override("web_click", handler);

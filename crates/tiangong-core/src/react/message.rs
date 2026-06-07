@@ -336,7 +336,7 @@ pub(crate) fn inject_browser_content_to_session(
     if !force
         && session.messages.iter().rev().take(6).any(|msg| {
             msg.role == MessageRole::Tool
-                && msg.tool_name.as_deref() == Some("web_browse")
+                && msg.tool_name.as_deref() == Some("web_fetch")
                 && msg.text_content().contains(url)
         })
     {
@@ -344,7 +344,7 @@ pub(crate) fn inject_browser_content_to_session(
     }
 
     let tool_call_id = format!("browser_auto_{}", scru128::new());
-    let tool_name = "web_browse";
+    let tool_name = "web_fetch";
 
     let label = if force {
         "[自动感知] 浏览器页面内容发生变化"
