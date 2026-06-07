@@ -124,6 +124,20 @@ pub struct FormExtractResult {
     pub forms: Vec<FormInfo>,
 }
 
+/// 智能定位候选元素
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ElementCandidate {
+    pub selector: String,
+    pub text: String,
+    pub tag: String,
+    pub role: String,
+    pub label: String,
+    pub score: i32,
+    pub reason: String,
+    pub x: Option<i32>,
+    pub y: Option<i32>,
+}
+
 /// 字段填写结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FillFieldResult {
@@ -132,6 +146,12 @@ pub struct FillFieldResult {
     pub error: Option<String>,
     #[serde(rename = "currentValue")]
     pub current_value: Option<String>,
+    #[serde(default)]
+    pub selector: Option<String>,
+    #[serde(default)]
+    pub target: Option<ElementCandidate>,
+    #[serde(default)]
+    pub candidates: Vec<ElementCandidate>,
 }
 
 /// 元素点击结果
@@ -139,6 +159,16 @@ pub struct FillFieldResult {
 pub struct ClickElementResult {
     pub ok: bool,
     pub error: Option<String>,
+    #[serde(default)]
+    pub selector: Option<String>,
+    #[serde(default)]
+    pub target: Option<ElementCandidate>,
+    #[serde(default)]
+    pub candidates: Vec<ElementCandidate>,
+    #[serde(default)]
+    pub x: Option<i32>,
+    #[serde(default)]
+    pub y: Option<i32>,
 }
 
 /// 标签列表结果

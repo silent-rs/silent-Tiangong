@@ -170,6 +170,12 @@
 - `web_fetch` 结果必须作为结构化工具结果进入会话层，不得追加到稳定 system prompt。
 - CLI、GUI、Server 必须通过同一 Core 工具链路获得一致行为，不允许前端重复实现抓取或下载逻辑。
 
+#### 嵌入式浏览器智能定位
+- 浏览器工具必须支持智能元素定位，除 CSS selector 外，还应支持按可见文本、ARIA label、role、表单 label、placeholder、name 和简单表格坐标定位元素。
+- 当智能定位存在多个候选时，工具必须返回候选列表供 Agent 选择，不得盲目点击或填写不确定目标。
+- `web_click` 和 `web_form_fill` 必须保持原有 `selector` 参数兼容性，同时允许该参数承载自然语言定位描述。
+- 用户在页面上绘制批注后，`web_browse` 必须主动提取批注覆盖区域内的可见文本和主要元素摘要，并作为工具结果反馈给 Agent。
+
 #### Skill 文件系统注册表
 - Skill 注册事实源必须从 `skills.json.installed[]` / `skills-lock.json` 迁移到 `~/.tiangong/skills/<id>/` 目录存在性。
 - Skill 的 `id` 必须作为稳定机器标识用于目录、引用和审计；`name` 仅作为展示名称，不参与寻址。

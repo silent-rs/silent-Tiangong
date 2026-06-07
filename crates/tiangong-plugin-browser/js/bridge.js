@@ -95,7 +95,7 @@
     } catch(e) {}
 
     window.__tiangong_bridge = {
-        version: '0.8.0',
+        version: '0.9.0',
 
         detectFramework: function() {
             var r = { frameworks: [], uiLibraries: [] };
@@ -155,6 +155,505 @@
             };
         },
 
+        _normalizeText: function(text) {
+            return (text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        },
+
+        _shortText: function(text, maxLen) {
+            maxLen = maxLen || 80;
+            text = (text || '').replace(/\s+/g, ' ').trim();
+            if (text.length > maxLen) {
+                return text.substring(0, maxLen - 1) + '…';
+            }
+            return text;
+        },
+
+        _escapeCssIdent: function(value) {
+            value = String(value || '');
+            if (window.CSS && window.CSS.escape) {
+                return window.CSS.escape(value);
+            }
+            return value.replace(/([^\w-])/g, '\\$1');
+        },
+
+        _escapeCssString: function(value) {
+            return String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\a ');
+        },
+
+        _isVisible: function(el) {
+            if (!el || el.nodeType !== 1) return false;
+            var style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+            if (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')) {
+                return false;
+            }
+            var rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+            if (rect && rect.width <= 0 && rect.height <= 0) return false;
+            return true;
+        },
+
+        _isDisabled: function(el) {
+            return !!(el && (el.disabled || el.getAttribute('aria-disabled') === 'true' || el.classList.contains('disabled') || el.classList.contains('is-disabled')));
+        },
+
+        _queryAll: function(selector) {
+            try {
+                return Array.from(document.querySelectorAll(selector));
+            } catch(e) {
+                return null;
+            }
+        },
+
+        _matches: function(el, selector) {
+            if (!el || !el.matches) return false;
+            try {
+                return el.matches(selector);
+            } catch(e) {
+                return false;
+            }
+        },
+
+        _selectorMatchesOnly: function(selector, el) {
+            var matches = this._queryAll(selector);
+            return !!(matches && matches.length === 1 && matches[0] === el);
+        },
+
+        _cssPath: function(el) {
+            if (!el || !el.tagName) return '';
+            var parts = [];
+            var node = el;
+            while (node && node.nodeType === 1 && node !== document) {
+                var tag = node.tagName.toLowerCase();
+                if (node.id) {
+                    var idSelector = '#' + this._escapeCssIdent(node.id);
+                    parts.unshift(idSelector);
+                    break;
+                }
+                var parent = node.parentElement;
+                if (!parent) {
+                    parts.unshift(tag);
+                    break;
+                }
+                var siblings = Array.from(parent.children).filter(function(child) {
+                    return child.tagName === node.tagName;
+                });
+                if (siblings.length > 1) {
+                    tag += ':nth-of-type(' + (siblings.indexOf(node) + 1) + ')';
+                }
+                parts.unshift(tag);
+                node = parent;
+            }
+            return parts.join(' > ');
+        },
+
+        generateSelector: function(el) {
+            if (!el || !el.tagName) return '';
+            var tag = el.tagName.toLowerCase();
+            var selector;
+
+            if (el.id) {
+                selector = '#' + this._escapeCssIdent(el.id);
+                if (this._selectorMatchesOnly(selector, el)) return selector;
+            }
+
+            var testAttr = '';
+            var testId = '';
+            if (el.getAttribute('data-testid')) {
+                testAttr = 'data-testid';
+                testId = el.getAttribute('data-testid');
+            } else if (el.getAttribute('data-test')) {
+                testAttr = 'data-test';
+                testId = el.getAttribute('data-test');
+            } else if (el.getAttribute('data-cy')) {
+                testAttr = 'data-cy';
+                testId = el.getAttribute('data-cy');
+            }
+            if (testId) {
+                selector = tag + '[' + testAttr + '="' + this._escapeCssString(testId) + '"]';
+                if (this._selectorMatchesOnly(selector, el)) return selector;
+                selector = '[' + testAttr + '="' + this._escapeCssString(testId) + '"]';
+                if (this._selectorMatchesOnly(selector, el)) return selector;
+            }
+
+            if (el.name) {
+                selector = tag + '[name="' + this._escapeCssString(el.name) + '"]';
+                if (this._selectorMatchesOnly(selector, el)) return selector;
+                selector = '[name="' + this._escapeCssString(el.name) + '"]';
+                if (this._selectorMatchesOnly(selector, el)) return selector;
+            }
+
+            var aria = el.getAttribute('aria-label');
+            if (aria) {
+                selector = tag + '[aria-label="' + this._escapeCssString(aria) + '"]';
+                if (this._selectorMatchesOnly(selector, el)) return selector;
+            }
+
+            var placeholder = el.getAttribute('placeholder');
+            if (placeholder) {
+                selector = tag + '[placeholder="' + this._escapeCssString(placeholder) + '"]';
+                if (this._selectorMatchesOnly(selector, el)) return selector;
+            }
+
+            return this._cssPath(el);
+        },
+
+        _formLabelFor: function(el) {
+            if (!el) return '';
+            if (el.id) {
+                var byFor = document.querySelector('label[for="' + this._escapeCssString(el.id) + '"]');
+                if (byFor) return this._shortText(byFor.textContent || '');
+            }
+            if (el.labels && el.labels.length > 0) {
+                return this._shortText(el.labels[0].textContent || '');
+            }
+            var closestLabel = el.closest ? el.closest('label') : null;
+            if (closestLabel) return this._shortText(closestLabel.textContent || '');
+            var antLabel = this._getAntFormItemLabel ? this._getAntFormItemLabel(el) : '';
+            if (antLabel) return this._shortText(antLabel);
+            var elLabel = this._getElFormItemLabel ? this._getElFormItemLabel(el) : '';
+            if (elLabel) return this._shortText(elLabel);
+            var formItem = el.closest ? el.closest('.form-item,.field,.form-group,[class*="form-item"],[class*="form-group"]') : null;
+            if (formItem) {
+                var label = formItem.querySelector('label');
+                if (label) return this._shortText(label.textContent || '');
+            }
+            return '';
+        },
+
+        _implicitRole: function(el) {
+            if (!el || !el.tagName) return '';
+            var tag = el.tagName.toLowerCase();
+            var type = (el.type || '').toLowerCase();
+            if (tag === 'button' || (tag === 'input' && ['button', 'submit', 'reset'].indexOf(type) >= 0)) return 'button';
+            if (tag === 'a' && el.getAttribute('href')) return 'link';
+            if (tag === 'select') return 'combobox';
+            if (tag === 'textarea') return 'textbox';
+            if (tag === 'input') {
+                if (type === 'checkbox') return 'checkbox';
+                if (type === 'radio') return 'radio';
+                if (type === 'range') return 'slider';
+                return 'textbox';
+            }
+            if (tag === 'summary') return 'button';
+            return '';
+        },
+
+        _accessibleName: function(el) {
+            if (!el) return '';
+            var aria = el.getAttribute('aria-label');
+            if (aria) return this._shortText(aria);
+            var labelledBy = el.getAttribute('aria-labelledby');
+            if (labelledBy) {
+                var texts = labelledBy.split(/\s+/).map(function(id) {
+                    var ref = document.getElementById(id);
+                    return ref ? (ref.textContent || '') : '';
+                }).filter(Boolean);
+                if (texts.length > 0) return this._shortText(texts.join(' '));
+            }
+            var label = this._formLabelFor(el);
+            if (label) return label;
+            var placeholder = el.getAttribute('placeholder');
+            if (placeholder) return this._shortText(placeholder);
+            var title = el.getAttribute('title');
+            if (title) return this._shortText(title);
+            var alt = el.getAttribute('alt');
+            if (alt) return this._shortText(alt);
+            if (el.value && this._matches(el, 'button,input[type="button"],input[type="submit"],input[type="reset"]')) {
+                return this._shortText(el.value);
+            }
+            return this._shortText(el.textContent || '');
+        },
+
+        _visibleText: function(el) {
+            if (!el) return '';
+            return this._shortText((el.innerText || el.textContent || '').replace(/\s+/g, ' '));
+        },
+
+        _candidateSelector: function(action, includeComponents) {
+            if (action === 'fill') {
+                if (includeComponents === 'only') {
+                    return '.ant-select,.ant-picker,.el-select,.el-date-editor';
+                }
+                var base = 'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]),textarea,select,[contenteditable="true"]';
+                if (includeComponents) {
+                    base += ',.ant-select,.ant-picker,.el-select,.el-date-editor';
+                }
+                return base;
+            }
+            return 'button,a,summary,[role="button"],[role="link"],[role="tab"],[role="menuitem"],[onclick],[tabindex],input[type="button"],input[type="submit"],input[type="reset"]';
+        },
+
+        _candidateElements: function(options) {
+            options = options || {};
+            var selector = this._candidateSelector(
+                options.action || 'click',
+                options.componentOnly ? 'only' : !!options.components
+            );
+            var elements = this._queryAll(selector) || [];
+            if ((options.action || 'click') === 'fill' && !options.components && !options.componentOnly) {
+                elements = elements.filter(function(el) {
+                    return !(el.closest && el.closest('.ant-select,.ant-picker,.el-select,.el-date-editor'));
+                });
+            }
+            if ((options.action || 'click') === 'click') {
+                var hasFallbackText = elements.length === 0;
+                if (!hasFallbackText) return elements;
+                elements = this._queryAll('body *') || [];
+                elements = elements.filter(function(el) {
+                    var tag = el.tagName ? el.tagName.toLowerCase() : '';
+                    if (['script', 'style', 'noscript', 'meta', 'link', 'svg', 'path'].indexOf(tag) >= 0) return false;
+                    var text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+                    return text.length > 0 && text.length <= 120;
+                });
+            }
+            return elements;
+        },
+
+        _primaryQueryText: function(query) {
+            query = (query || '').trim();
+            var quoted = query.match(/[“‘"']([^“”‘’"']+)[”’"']/);
+            if (quoted && quoted[1]) return quoted[1].trim();
+            var text = query
+                .replace(/^(请|帮我|帮忙)?\s*(点击|点一下|按下|打开|选择|填写|输入|填入|设置)\s*/g, '')
+                .replace(/\s*(按钮|按键|链接|入口|输入框|文本框|字段|下拉框|选择框|复选框|单选框|表单项|控件|元素)$/g, '')
+                .replace(/(包含|含有|文字|文本|名称|名为|叫做|为|的)/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+            return text || query;
+        },
+
+        _textScore: function(queryText, candidateText) {
+            var q = this._normalizeText(queryText);
+            var c = this._normalizeText(candidateText);
+            if (!q || !c) return 0;
+            if (q === c) return 100;
+            if (c.indexOf(q) >= 0) return 82;
+            if (q.indexOf(c) >= 0 && c.length >= 2) return 72;
+            return 0;
+        },
+
+        _typeBoost: function(query, el, action) {
+            query = query || '';
+            var role = (el.getAttribute('role') || this._implicitRole(el) || '').toLowerCase();
+            var tag = el.tagName ? el.tagName.toLowerCase() : '';
+            var type = (el.type || '').toLowerCase();
+            var boost = 0;
+            if (/按钮|按键|提交|登录|确认/.test(query) && (role === 'button' || tag === 'button' || ['button', 'submit', 'reset'].indexOf(type) >= 0)) boost += 12;
+            if (/链接|入口|打开/.test(query) && (role === 'link' || tag === 'a')) boost += 12;
+            if (/输入框|文本框|字段|填写|输入|邮箱|账号|密码|电话|手机/.test(query) && action === 'fill') boost += 10;
+            if (/下拉|选择/.test(query) && (tag === 'select' || role === 'combobox' || el.classList.contains('ant-select') || el.classList.contains('el-select'))) boost += 10;
+            return boost;
+        },
+
+        _describeCandidate: function(el, score, reason) {
+            var rect = el && el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+            return {
+                selector: this.generateSelector(el),
+                text: this._visibleText(el),
+                tag: el && el.tagName ? el.tagName.toLowerCase() : '',
+                role: (el && (el.getAttribute('role') || this._implicitRole(el))) || '',
+                label: this._accessibleName(el),
+                score: Math.round(score || 0),
+                reason: reason || '',
+                x: rect ? Math.round(rect.left + rect.width / 2) : null,
+                y: rect ? Math.round(rect.top + rect.height / 2) : null
+            };
+        },
+
+        _pushCandidate: function(list, seen, el, score, reason) {
+            if (!el || seen.indexOf(el) >= 0 || !this._isVisible(el) || this._isDisabled(el)) return;
+            seen.push(el);
+            list.push({ el: el, score: score, reason: reason });
+        },
+
+        _rankElement: function(el, query, options, reason) {
+            options = options || {};
+            var queryText = this._primaryQueryText(query);
+            var action = options.action || 'click';
+            var score = 0;
+            var visible = this._visibleText(el);
+            var name = this._accessibleName(el);
+            var label = this._formLabelFor(el);
+            var placeholder = el.getAttribute('placeholder') || '';
+            var attrName = el.getAttribute('name') || '';
+            var id = el.id || '';
+
+            score = Math.max(score, this._textScore(queryText, visible));
+            score = Math.max(score, this._textScore(queryText, name) + (name ? 8 : 0));
+            score = Math.max(score, this._textScore(queryText, label) + (label ? 12 : 0));
+            score = Math.max(score, this._textScore(queryText, placeholder) + (placeholder ? 8 : 0));
+            score = Math.max(score, this._textScore(queryText, attrName) + (attrName ? 4 : 0));
+            score = Math.max(score, this._textScore(queryText, id) + (id ? 2 : 0));
+            if (score > 0) score += this._typeBoost(query, el, action);
+            if (reason === 'css selector') score = 120;
+            return score;
+        },
+
+        _parseRoleQuery: function(query) {
+            var m = (query || '').match(/^role\s*=\s*([^\[\]]+)(?:\[\s*name\s*=\s*['"]?([^'"\]]+)['"]?\s*\])?$/i);
+            if (!m) return null;
+            return { role: (m[1] || '').trim().toLowerCase(), name: (m[2] || '').trim() };
+        },
+
+        _findExplicitCandidates: function(query, options, candidates, seen) {
+            var q = (query || '').trim();
+            var action = (options && options.action) || 'click';
+            var m = q.match(/^(text|aria|aria-label|label|placeholder|name)\s*=\s*(.+)$/i);
+            if (m) {
+                var kind = m[1].toLowerCase();
+                if (kind === 'aria-label') kind = 'aria';
+                var value = m[2].replace(/^[‘’“”'"]|[‘’“”'"]$/g, '').trim();
+                var elements = this._candidateElements(options);
+                for (var i = 0; i < elements.length; i++) {
+                    var el = elements[i];
+                    var field = '';
+                    if (kind === 'text') field = this._visibleText(el) || this._accessibleName(el);
+                    if (kind === 'aria') field = el.getAttribute('aria-label') || '';
+                    if (kind === 'label') field = this._formLabelFor(el) || this._accessibleName(el);
+                    if (kind === 'placeholder') field = el.getAttribute('placeholder') || '';
+                    if (kind === 'name') field = el.getAttribute('name') || '';
+                    var score = this._textScore(value, field);
+                    if (score > 0) {
+                        this._pushCandidate(candidates, seen, el, score + 18 + this._typeBoost(value, el, action), kind + ' match');
+                    }
+                }
+                return;
+            }
+
+            var roleQuery = this._parseRoleQuery(q);
+            if (roleQuery) {
+                var all = this._queryAll('[role],button,a,input,textarea,select,summary') || [];
+                for (var r = 0; r < all.length; r++) {
+                    var role = (all[r].getAttribute('role') || this._implicitRole(all[r]) || '').toLowerCase();
+                    if (role !== roleQuery.role) continue;
+                    var score = 92;
+                    if (roleQuery.name) {
+                        score = this._textScore(roleQuery.name, this._accessibleName(all[r]) || this._visibleText(all[r]));
+                        if (score === 0) continue;
+                        score += 18;
+                    }
+                    this._pushCandidate(candidates, seen, all[r], score, 'role match');
+                }
+            }
+        },
+
+        _parseChineseNumber: function(text) {
+            text = String(text || '').trim();
+            if (/^\d+$/.test(text)) return parseInt(text, 10);
+            var map = { '零': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9 };
+            if (text === '十') return 10;
+            var ten = text.indexOf('十');
+            if (ten >= 0) {
+                var left = text.substring(0, ten);
+                var right = text.substring(ten + 1);
+                return (left ? (map[left] || 0) : 1) * 10 + (right ? (map[right] || 0) : 0);
+            }
+            return map[text] || 0;
+        },
+
+        _findTableCellTarget: function(query, options, candidates, seen) {
+            var m = (query || '').match(/(?:表格|table).*?第?\s*([一二两三四五六七八九十\d]+)\s*行.*?第?\s*([一二两三四五六七八九十\d]+)\s*列/);
+            if (!m) return;
+            var rowIndex = this._parseChineseNumber(m[1]) - 1;
+            var colIndex = this._parseChineseNumber(m[2]) - 1;
+            if (rowIndex < 0 || colIndex < 0) return;
+            var wantLink = /链接|link/.test(query);
+            var wantButton = /按钮|按键|button/.test(query);
+            var tables = this._queryAll('table') || [];
+            for (var t = 0; t < tables.length; t++) {
+                if (!this._isVisible(tables[t])) continue;
+                var rows = Array.from(tables[t].querySelectorAll('tr')).filter(this._isVisible.bind(this));
+                if (rowIndex >= rows.length) continue;
+                var cells = Array.from(rows[rowIndex].querySelectorAll('th,td')).filter(this._isVisible.bind(this));
+                if (colIndex >= cells.length) continue;
+                var cell = cells[colIndex];
+                var target = cell;
+                if (wantLink) target = cell.querySelector('a,[role="link"]') || cell;
+                if (wantButton) target = cell.querySelector('button,[role="button"],input[type="button"],input[type="submit"]') || cell;
+                this._pushCandidate(candidates, seen, target, 118, 'table cell');
+            }
+        },
+
+        _findNaturalCandidates: function(query, options, candidates, seen) {
+            var elements = this._candidateElements(options);
+            for (var i = 0; i < elements.length; i++) {
+                var score = this._rankElement(elements[i], query, options, 'natural');
+                if (score > 0) {
+                    this._pushCandidate(candidates, seen, elements[i], score, 'smart match');
+                }
+            }
+        },
+
+        _resolveCandidates: function(query, candidates, options) {
+            options = options || {};
+            candidates.sort(function(a, b) { return b.score - a.score; });
+            var minScore = options.minScore || 55;
+            candidates = candidates.filter(function(c) { return c.score >= minScore; }).slice(0, 12);
+            var described = [];
+            for (var i = 0; i < candidates.length; i++) {
+                described.push(this._describeCandidate(candidates[i].el, candidates[i].score, candidates[i].reason));
+            }
+            if (candidates.length === 0) {
+                return { ok: false, error: '元素未找到: ' + query, candidates: [] };
+            }
+            if (candidates.length > 1) {
+                var gap = candidates[0].score - candidates[1].score;
+                if (options.strictMultiple || gap < 25) {
+                    return {
+                        ok: false,
+                        ambiguous: true,
+                        error: '找到多个候选元素，请选择更精确目标',
+                        candidates: described
+                    };
+                }
+            }
+            return {
+                ok: true,
+                element: candidates[0].el,
+                selector: described[0].selector,
+                target: described[0],
+                candidates: []
+            };
+        },
+
+        _locateElement: function(query, options) {
+            options = options || {};
+            query = (query || '').trim();
+            if (!query) return { ok: false, error: '定位描述不能为空', candidates: [] };
+            var candidates = [];
+            var seen = [];
+
+            var cssMatches = this._queryAll(query);
+            if (cssMatches && cssMatches.length > 0) {
+                for (var i = 0; i < cssMatches.length; i++) {
+                    this._pushCandidate(candidates, seen, cssMatches[i], 120, 'css selector');
+                }
+                return this._resolveCandidates(query, candidates, { strictMultiple: candidates.length > 1, minScore: 1 });
+            }
+
+            this._findExplicitCandidates(query, options, candidates, seen);
+            this._findTableCellTarget(query, options, candidates, seen);
+            this._findNaturalCandidates(query, options, candidates, seen);
+            return this._resolveCandidates(query, candidates, {});
+        },
+
+        locateElement: function(query, options) {
+            var result = this._locateElement(query, options || {});
+            if (!result.ok) {
+                return {
+                    ok: false,
+                    ambiguous: !!result.ambiguous,
+                    error: result.error,
+                    candidates: result.candidates || []
+                };
+            }
+            return {
+                ok: true,
+                selector: result.selector,
+                target: result.target,
+                candidates: []
+            };
+        },
+
         click: function(selector) {
             var el = document.querySelector(selector);
             if (el) { el.click(); return true; }
@@ -208,7 +707,7 @@
                     };
                     // 尝试关联 label
                     if (el.id) {
-                        var lbl = container.querySelector('label[for="' + el.id + '"]');
+                        var lbl = container.querySelector('label[for="' + this._escapeCssString(el.id) + '"]');
                         if (lbl) field.label = (lbl.textContent || '').trim();
                     }
                     if (!field.label) {
@@ -229,13 +728,7 @@
                         }
                     }
                     // 构造 selector
-                    if (el.id) {
-                        field.selector = '#' + el.id.replace(/([^\w-])/g, '\\$1');
-                    } else if (el.name) {
-                        field.selector = '[name="' + el.name + '"]';
-                    } else {
-                        field.selector = el.tagName.toLowerCase() + ':nth-of-type(' + (idx + 1) + ')';
-                    }
+                    field.selector = this.generateSelector(el);
                     fields.push(field);
                 }
                 if (fields.length > 0) {
@@ -256,7 +749,7 @@
                 var input = sel.querySelector('input');
                 components.push({
                     componentType: 'antd-select',
-                    selector: '.ant-select:nth-of-type(' + (i + 1) + ')',
+                    selector: this.generateSelector(sel),
                     label: this._getAntFormItemLabel(sel),
                     placeholder: placeholder ? (placeholder.textContent || '').trim() : '',
                     value: selItem ? (selItem.textContent || '').trim() : '',
@@ -277,7 +770,7 @@
                 var pickerInput = picker.querySelector('input');
                 components.push({
                     componentType: 'antd-datepicker',
-                    selector: '.ant-picker:nth-of-type(' + (j + 1) + ')',
+                    selector: this.generateSelector(picker),
                     label: this._getAntFormItemLabel(picker),
                     placeholder: pickerInput ? (pickerInput.placeholder || '') : '',
                     value: pickerInput ? (pickerInput.value || '') : '',
@@ -303,7 +796,7 @@
                                  es.querySelector('.el-input__inner');
                 components.push({
                     componentType: 'el-select',
-                    selector: '.el-select:nth-of-type(' + (k + 1) + ')',
+                    selector: this.generateSelector(es),
                     label: this._getElFormItemLabel(es),
                     placeholder: esPlaceholder,
                     value: esSelected ? (esSelected.textContent || '').trim() : '',
@@ -324,7 +817,7 @@
                 var edInput = ed.querySelector('input');
                 components.push({
                     componentType: 'el-datepicker',
-                    selector: '.el-date-editor:nth-of-type(' + (m + 1) + ')',
+                    selector: this.generateSelector(ed),
                     label: this._getElFormItemLabel(ed),
                     placeholder: edInput ? (edInput.placeholder || '') : '',
                     value: edInput ? (edInput.value || '') : '',
@@ -360,14 +853,31 @@
         },
 
         fillField: function(selector, value, strategy) {
-            var el = document.querySelector(selector);
-            if (!el) return { ok: false, error: '元素未找到: ' + selector };
+            var located = this._locateElement(selector, { action: 'fill', components: false });
+            if (!located.ok) {
+                return {
+                    ok: false,
+                    error: located.error || ('元素未找到: ' + selector),
+                    candidates: located.candidates || []
+                };
+            }
+            var el = located.element;
+            var locatedSelector = located.selector;
+            var target = located.target;
+
+            if (el.getAttribute && el.getAttribute('contenteditable') === 'true') {
+                el.focus();
+                el.textContent = value;
+                el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                return { ok: true, strategy: 'contenteditable', selector: locatedSelector, target: target, currentValue: el.textContent || '' };
+            }
 
             // select 特殊处理
             if (el.tagName === 'SELECT') {
                 el.value = value;
                 el.dispatchEvent(new Event('change', { bubbles: true }));
-                return { ok: true, strategy: 'select-change' };
+                return { ok: true, strategy: 'select-change', selector: locatedSelector, target: target, currentValue: el.value };
             }
 
             // checkbox / radio 特殊处理
@@ -376,7 +886,7 @@
                 if (el.checked !== shouldCheck) {
                     el.click();
                 }
-                return { ok: true, strategy: 'click-toggle' };
+                return { ok: true, strategy: 'click-toggle', selector: locatedSelector, target: target, currentValue: String(el.checked) };
             }
 
             strategy = strategy || 'auto';
@@ -398,7 +908,7 @@
                 }
                 el.dispatchEvent(new Event('change', { bubbles: true }));
                 if (el.value === value) {
-                    return { ok: true, strategy: 'keyboard' };
+                    return { ok: true, strategy: 'keyboard', selector: locatedSelector, target: target, currentValue: el.value };
                 }
             }
 
@@ -420,7 +930,7 @@
                     el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
                     el.dispatchEvent(new Event('change', { bubbles: true }));
                     if (el.value === value) {
-                        return { ok: true, strategy: 'native-setter' };
+                        return { ok: true, strategy: 'native-setter', selector: locatedSelector, target: target, currentValue: el.value };
                     }
                 }
             }
@@ -431,34 +941,48 @@
                 el.value = value;
                 el.dispatchEvent(new Event('input', { bubbles: true }));
                 el.dispatchEvent(new Event('change', { bubbles: true }));
-                return { ok: true, strategy: 'paste' };
+                return { ok: true, strategy: 'paste', selector: locatedSelector, target: target, currentValue: el.value };
             }
 
-            return { ok: false, error: '所有填写策略均未成功', currentValue: el.value };
+            return { ok: false, error: '所有填写策略均未成功', currentValue: el.value, selector: locatedSelector, target: target };
         },
 
         // UI 库组件填写（多步交互，异步返回）
         fillComponent: function(selector, value) {
-            var el = document.querySelector(selector);
-            if (!el) return { ok: false, error: '组件未找到: ' + selector };
+            var located = this._locateElement(selector, { action: 'fill', components: true, componentOnly: true });
+            if (!located.ok) {
+                return {
+                    ok: false,
+                    error: located.error || ('组件未找到: ' + selector),
+                    candidates: located.candidates || []
+                };
+            }
+            var el = located.element;
+            var result;
 
             // Ant Design Select
             if (el.classList.contains('ant-select')) {
-                return this._fillAntSelect(el, value);
+                result = this._fillAntSelect(el, value);
             }
             // Ant Design DatePicker
-            if (el.classList.contains('ant-picker')) {
-                return this._fillAntDatePicker(el, value);
+            else if (el.classList.contains('ant-picker')) {
+                result = this._fillAntDatePicker(el, value);
             }
             // Element Plus Select
-            if (el.classList.contains('el-select')) {
-                return this._fillElSelect(el, value);
+            else if (el.classList.contains('el-select')) {
+                result = this._fillElSelect(el, value);
             }
             // Element Plus DatePicker
-            if (el.classList.contains('el-date-editor')) {
-                return this._fillElDatePicker(el, value);
+            else if (el.classList.contains('el-date-editor')) {
+                result = this._fillElDatePicker(el, value);
+            } else {
+                result = { ok: false, error: '未知的 UI 库组件类型' };
             }
-            return { ok: false, error: '未知的 UI 库组件类型' };
+            if (result) {
+                result.selector = located.selector;
+                result.target = located.target;
+            }
+            return result;
         },
 
         _fillAntSelect: function(el, value) {
@@ -556,8 +1080,15 @@
         },
 
         clickElement: function(selector) {
-            var el = document.querySelector(selector);
-            if (!el) return { ok: false, error: '元素未找到: ' + selector };
+            var located = this._locateElement(selector, { action: 'click' });
+            if (!located.ok) {
+                return {
+                    ok: false,
+                    error: located.error || ('元素未找到: ' + selector),
+                    candidates: located.candidates || []
+                };
+            }
+            var el = located.element;
             el.scrollIntoView({ block: 'center', behavior: 'instant' });
             var rect = el.getBoundingClientRect();
             var x = rect.left + rect.width / 2;
@@ -571,7 +1102,14 @@
             el.dispatchEvent(new MouseEvent('mousedown', opts));
             el.dispatchEvent(new MouseEvent('mouseup', opts));
             el.dispatchEvent(new MouseEvent('click', opts));
-            return { ok: true, x: Math.round(x), y: Math.round(y) };
+            return {
+                ok: true,
+                selector: located.selector,
+                target: located.target,
+                candidates: [],
+                x: Math.round(x),
+                y: Math.round(y)
+            };
         },
 
         annotation: {
@@ -613,7 +1151,316 @@
             },
 
             getAnnotations: function() {
-                return { annotations: this._annotations, count: this._annotations.length };
+                var self = this;
+                var annotations = this._annotations.map(function(annotation, index) {
+                    return self._enrichAnnotation(annotation, index);
+                });
+                return {
+                    annotations: annotations,
+                    count: annotations.length,
+                    summary: this._formatAnnotationsForAgent(annotations)
+                };
+            },
+
+            _bridge: function() {
+                return window.__tiangong_bridge || {};
+            },
+
+            _annotationRect: function(annotation) {
+                if (!annotation) return null;
+                if (annotation.type === 'rect') {
+                    return {
+                        x: annotation.x,
+                        y: annotation.y,
+                        width: annotation.width,
+                        height: annotation.height
+                    };
+                }
+                if (annotation.type === 'arrow') {
+                    var minX = Math.min(annotation.x1, annotation.x2);
+                    var minY = Math.min(annotation.y1, annotation.y2);
+                    var maxX = Math.max(annotation.x1, annotation.x2);
+                    var maxY = Math.max(annotation.y1, annotation.y2);
+                    var padding = 16;
+                    return {
+                        x: Math.max(0, minX - padding),
+                        y: Math.max(0, minY - padding),
+                        width: Math.max(1, maxX - minX + padding * 2),
+                        height: Math.max(1, maxY - minY + padding * 2)
+                    };
+                }
+                return null;
+            },
+
+            _intersectArea: function(a, b) {
+                if (!a || !b) return 0;
+                var left = Math.max(a.x, b.x);
+                var top = Math.max(a.y, b.y);
+                var right = Math.min(a.x + a.width, b.x + b.width);
+                var bottom = Math.min(a.y + a.height, b.y + b.height);
+                if (right <= left || bottom <= top) return 0;
+                return (right - left) * (bottom - top);
+            },
+
+            _elementRect: function(el) {
+                if (!el || !el.getBoundingClientRect) return null;
+                var rect = el.getBoundingClientRect();
+                if (!rect || rect.width <= 0 || rect.height <= 0) return null;
+                return {
+                    x: rect.left,
+                    y: rect.top,
+                    width: rect.width,
+                    height: rect.height
+                };
+            },
+
+            _rectKey: function(rect) {
+                if (!rect) return '';
+                return [
+                    Math.round(rect.x),
+                    Math.round(rect.y),
+                    Math.round(rect.width),
+                    Math.round(rect.height)
+                ].join(',');
+            },
+
+            _normalizeText: function(text) {
+                var bridge = this._bridge();
+                if (bridge._normalizeText) return bridge._normalizeText(text);
+                return (text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+            },
+
+            _shortText: function(text, maxLen) {
+                var bridge = this._bridge();
+                if (bridge._shortText) return bridge._shortText(text, maxLen || 200);
+                text = (text || '').replace(/\s+/g, ' ').trim();
+                if (text.length > (maxLen || 200)) return text.substring(0, (maxLen || 200) - 1) + '…';
+                return text;
+            },
+
+            _isElementVisible: function(el) {
+                var bridge = this._bridge();
+                if (bridge._isVisible) return bridge._isVisible(el);
+                if (!el || !el.getBoundingClientRect) return false;
+                var rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            },
+
+            _extractTextInRect: function(regionRect) {
+                var texts = [];
+                var seen = {};
+                if (!document.body || !document.createTreeWalker || !document.createRange || !window.NodeFilter) {
+                    return '';
+                }
+                var walker = document.createTreeWalker(document.body, window.NodeFilter.SHOW_TEXT, {
+                    acceptNode: function(node) {
+                        var text = (node.nodeValue || '').replace(/\s+/g, ' ').trim();
+                        if (!text) return window.NodeFilter.FILTER_REJECT;
+                        var parent = node.parentElement;
+                        if (!parent || parent.id === '__tiangong_annotation_canvas') return window.NodeFilter.FILTER_REJECT;
+                        var tag = parent.tagName ? parent.tagName.toLowerCase() : '';
+                        if (['script', 'style', 'noscript', 'template'].indexOf(tag) >= 0) return window.NodeFilter.FILTER_REJECT;
+                        return window.NodeFilter.FILTER_ACCEPT;
+                    }
+                });
+                var node;
+                while ((node = walker.nextNode())) {
+                    var range = document.createRange();
+                    try {
+                        range.selectNodeContents(node);
+                        var rects = range.getClientRects ? Array.from(range.getClientRects()) : [];
+                        for (var i = 0; i < rects.length; i++) {
+                            var rect = {
+                                x: rects[i].left,
+                                y: rects[i].top,
+                                width: rects[i].width,
+                                height: rects[i].height
+                            };
+                            if (this._intersectArea(regionRect, rect) <= 0) continue;
+                            var value = this._shortText(node.nodeValue || '', 180);
+                            var key = this._normalizeText(value);
+                            if (key && !seen[key]) {
+                                seen[key] = true;
+                                texts.push(value);
+                            }
+                            break;
+                        }
+                    } catch(e) {
+                    } finally {
+                        if (range.detach) range.detach();
+                    }
+                    if (texts.join(' ').length > 1200) break;
+                }
+                return this._shortText(texts.join(' '), 1200);
+            },
+
+            _elementText: function(el) {
+                var bridge = this._bridge();
+                var label = bridge._accessibleName ? bridge._accessibleName(el) : '';
+                var text = bridge._visibleText ? bridge._visibleText(el) : (el ? (el.innerText || el.textContent || '') : '');
+                var value = '';
+                if (el && (el.value || el.placeholder)) {
+                    value = el.value || el.placeholder || '';
+                }
+                return this._shortText(label || text || value, 160);
+            },
+
+            _elementSummary: function(el, overlap) {
+                var bridge = this._bridge();
+                var rect = this._elementRect(el);
+                return {
+                    selector: bridge.generateSelector ? bridge.generateSelector(el) : '',
+                    tag: el && el.tagName ? el.tagName.toLowerCase() : '',
+                    role: (el && (el.getAttribute('role') || (bridge._implicitRole ? bridge._implicitRole(el) : ''))) || '',
+                    text: this._elementText(el),
+                    overlap: Math.round(overlap),
+                    x: rect ? Math.round(rect.x + rect.width / 2) : null,
+                    y: rect ? Math.round(rect.y + rect.height / 2) : null
+                };
+            },
+
+            _extractElementsInRect: function(regionRect) {
+                var selector = [
+                    'button',
+                    'a',
+                    'input',
+                    'textarea',
+                    'select',
+                    'label',
+                    'h1',
+                    'h2',
+                    'h3',
+                    'h4',
+                    'h5',
+                    'h6',
+                    'p',
+                    'li',
+                    'td',
+                    'th',
+                    'summary',
+                    '[role]',
+                    '[aria-label]',
+                    '[title]',
+                    '[placeholder]',
+                    'img'
+                ].join(',');
+                var elements = Array.from(document.querySelectorAll(selector));
+                var matches = [];
+                for (var i = 0; i < elements.length; i++) {
+                    var el = elements[i];
+                    if (!el || el.id === '__tiangong_annotation_canvas' || !this._isElementVisible(el)) continue;
+                    var rect = this._elementRect(el);
+                    if (!rect) continue;
+                    var overlap = this._intersectArea(regionRect, rect);
+                    if (overlap <= 0) continue;
+                    var elementArea = rect.width * rect.height;
+                    var regionArea = regionRect.width * regionRect.height;
+                    var centerInside = rect.x + rect.width / 2 >= regionRect.x &&
+                        rect.x + rect.width / 2 <= regionRect.x + regionRect.width &&
+                        rect.y + rect.height / 2 >= regionRect.y &&
+                        rect.y + rect.height / 2 <= regionRect.y + regionRect.height;
+                    if (!centerInside && overlap / elementArea < 0.18 && overlap / regionArea < 0.08) continue;
+                    var text = this._elementText(el);
+                    if (!text && !el.getAttribute('aria-label') && !el.getAttribute('title') && !el.getAttribute('placeholder')) continue;
+                    matches.push({ el: el, rect: rect, overlap: overlap });
+                }
+                matches.sort(function(a, b) {
+                    if (Math.abs(a.rect.y - b.rect.y) > 4) return a.rect.y - b.rect.y;
+                    if (Math.abs(a.rect.x - b.rect.x) > 4) return a.rect.x - b.rect.x;
+                    return b.overlap - a.overlap;
+                });
+
+                var result = [];
+                var seenText = {};
+                for (var j = 0; j < matches.length; j++) {
+                    var summary = this._elementSummary(matches[j].el, matches[j].overlap);
+                    var key = this._normalizeText(summary.tag + ' ' + summary.text + ' ' + summary.selector);
+                    if (!key || seenText[key]) continue;
+                    seenText[key] = true;
+                    result.push(summary);
+                    if (result.length >= 10) break;
+                }
+                return result;
+            },
+
+            _fallbackElementAtCenter: function(regionRect) {
+                if (!document.elementFromPoint) return [];
+                var x = regionRect.x + regionRect.width / 2;
+                var y = regionRect.y + regionRect.height / 2;
+                var el = document.elementFromPoint(x, y);
+                if (!el || el.id === '__tiangong_annotation_canvas') return [];
+                while (el && el !== document.body && !this._elementText(el)) {
+                    el = el.parentElement;
+                }
+                if (!el || el === document.body || !this._isElementVisible(el)) return [];
+                return [this._elementSummary(el, 0)];
+            },
+
+            _extractRegion: function(annotation) {
+                var rect = this._annotationRect(annotation);
+                if (!rect || rect.width <= 0 || rect.height <= 0) {
+                    return { text: '', elements: [], elementCount: 0 };
+                }
+                var text = this._extractTextInRect(rect);
+                var elements = this._extractElementsInRect(rect);
+                if (elements.length === 0) {
+                    elements = this._fallbackElementAtCenter(rect);
+                }
+                if (!text && elements.length > 0) {
+                    text = this._shortText(elements.map(function(el) { return el.text; }).filter(Boolean).join(' '), 1200);
+                }
+                return {
+                    x: Math.round(rect.x),
+                    y: Math.round(rect.y),
+                    width: Math.round(rect.width),
+                    height: Math.round(rect.height),
+                    text: text,
+                    elements: elements,
+                    elementCount: elements.length
+                };
+            },
+
+            _enrichAnnotation: function(annotation, index) {
+                var enriched = {};
+                for (var key in annotation) {
+                    if (Object.prototype.hasOwnProperty.call(annotation, key)) {
+                        enriched[key] = annotation[key];
+                    }
+                }
+                enriched.index = index + 1;
+                enriched.region = this._extractRegion(annotation);
+                return enriched;
+            },
+
+            _formatAnnotationsForAgent: function(annotations) {
+                if (!annotations || annotations.length === 0) return '';
+                var lines = ['[页面批注]'];
+                for (var i = 0; i < annotations.length; i++) {
+                    var annotation = annotations[i];
+                    var region = annotation.region || {};
+                    lines.push((i + 1) + '. ' + (annotation.type === 'arrow' ? '箭头批注' : '矩形批注') +
+                        ' 区域：x=' + (region.x || 0) +
+                        ', y=' + (region.y || 0) +
+                        ', w=' + (region.width || 0) +
+                        ', h=' + (region.height || 0));
+                    if (region.text) {
+                        lines.push('   区域文本：' + this._shortText(region.text, 600));
+                    }
+                    if (region.elements && region.elements.length > 0) {
+                        lines.push('   覆盖元素：');
+                        for (var j = 0; j < region.elements.length && j < 5; j++) {
+                            var el = region.elements[j];
+                            var identity = [el.tag, el.role ? 'role=' + el.role : '', el.text ? 'text="' + this._shortText(el.text, 80) + '"' : '']
+                                .filter(Boolean)
+                                .join(' ');
+                            lines.push('   - ' + identity + (el.selector ? ' | selector: ' + el.selector : ''));
+                        }
+                    }
+                    if (!region.text && (!region.elements || region.elements.length === 0)) {
+                        lines.push('   未提取到明显文本或元素');
+                    }
+                }
+                return lines.join('\n');
             },
 
             _ensureCanvas: function() {
@@ -756,5 +1603,5 @@
         }
     }, true);
 
-    console.log('[Tiangong Bridge] loaded v0.8.0');
+    console.log('[Tiangong Bridge] loaded v0.9.0');
 })();

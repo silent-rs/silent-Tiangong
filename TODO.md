@@ -1,12 +1,20 @@
 # TODO - 天工当前开发任务
 
-> 最后更新：2026-06-05
+> 最后更新：2026-06-07
 > 当前主线：0.7.0 发布准备
 > 参考：`PLAN.md`、Issue #95
 
 ---
 
 ## 已完成
+
+### Phase 21-K：智能元素定位（Issue #107，已完成）
+
+- [x] 恢复并修订 RFC 0012，聚焦 #107 智能元素定位
+- [x] Bridge Script 增加智能元素定位，支持文本、ARIA、role、label、placeholder、name 和简单表格坐标
+- [x] `web_click` / `web_form_fill` 保持 `selector` 参数兼容，同时返回实际命中目标和候选列表
+- [x] 更新工具提示，让 Agent 可以传入自然语言定位描述
+- [x] 为智能定位和候选返回补充测试
 
 ### Phase 21-A：技术验证
 
@@ -85,6 +93,7 @@
 - [x] Bridge Script `annotation` 对象 — canvas 覆盖层 + 矩形/箭头绘制
 - [x] 批注数据结构化存储，`getAnnotations()` 返回标注列表
 - [x] `web_browse` 自动附加页面批注信息
+- [x] `web_browse` 主动提取批注覆盖区域的可见文本和元素摘要并反馈给 Agent
 - [x] 前端批注按钮（画笔图标，点击切换批注模式）
 
 ## 发布准备（0.6.0）
