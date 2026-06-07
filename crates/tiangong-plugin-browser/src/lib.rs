@@ -56,6 +56,17 @@ pub fn init() -> TauriPlugin<Wry> {
             };
             app.manage(state);
 
+            // 将 event_tx 注入到 BrowserState，供 on_page_load 回调使用
+            {
+                let browser_state = app.state::<BrowserPluginState>();
+                let mut s = browser_state
+                    .manager
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                s.event_tx = Some(event_tx.clone());
+            }
+
             let browser_state = app.state::<BrowserPluginState>();
             let browser_manager_state = browser_state.manager.clone_state();
             let app_handle: tauri::AppHandle<Wry> = app.clone();

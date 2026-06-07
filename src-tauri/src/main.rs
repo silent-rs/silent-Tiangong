@@ -255,6 +255,16 @@ fn run_gui() {
                                 if url.is_empty() {
                                     continue;
                                 }
+                                // 通知前端更新地址栏和标签栏
+                                let _ = bridge_handle.emit(
+                                    "browser:page_loaded",
+                                    serde_json::json!({
+                                        "title": title,
+                                        "url": url,
+                                        "text": text,
+                                    }),
+                                );
+                                // 注入到 agent 会话
                                 let state = bridge_handle.state::<tiangong_app::TiangongApp>();
                                 state.inject_browser_content(title, url, text, vec![], None);
                             }

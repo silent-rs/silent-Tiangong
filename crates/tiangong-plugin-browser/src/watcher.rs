@@ -136,6 +136,7 @@ mod tests {
             page_loaded: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
             latest_snapshot: None,
             watcher_stop: Arc::new(AtomicBool::new(true)),
+            event_tx: None,
             tabs: Vec::new(),
             active_tab_id: None,
         }));
@@ -160,6 +161,7 @@ mod tests {
             page_loaded: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
             latest_snapshot: None,
             watcher_stop: stop.clone(),
+            event_tx: None,
             tabs: Vec::new(),
             active_tab_id: None,
         }));

@@ -7,9 +7,10 @@ use std::time::Duration;
 use tauri::{
     AppHandle, LogicalPosition, LogicalSize, Manager, Url, Webview, WebviewBuilder, WebviewUrl, Wry,
 };
+use tokio::sync::mpsc;
 
 use crate::bridge::BRIDGE_SCRIPT;
-use crate::types::{BrowserPageSnapshot, BrowserResponse, BrowserTab};
+use crate::types::{BrowserEvent, BrowserPageSnapshot, BrowserResponse, BrowserTab};
 
 const BROWSER_WEBVIEW_LABEL: &str = "browser-webview";
 
@@ -22,6 +23,8 @@ pub struct BrowserState {
     pub latest_snapshot: Option<BrowserPageSnapshot>,
     /// 浏览器监测任务停止信号
     pub watcher_stop: Arc<std::sync::atomic::AtomicBool>,
+    /// 事件发送端（用于 on_page_load 回调等即时通知）
+    pub event_tx: Option<mpsc::Sender<BrowserEvent>>,
     /// 标签列表
     pub tabs: Vec<BrowserTab>,
     /// 活跃标签 ID
@@ -46,6 +49,7 @@ impl BrowserManager {
                 page_loaded: Arc::new((Mutex::new(false), Condvar::new())),
                 latest_snapshot: None,
                 watcher_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                event_tx: None,
                 tabs: Vec::new(),
                 active_tab_id: None,
             })),
@@ -112,18 +116,80 @@ impl BrowserManager {
             .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/605.1.15")
             .enable_clipboard_access()
             .devtools(true)
-            .on_page_load(move |_webview, payload| {
+            .on_page_load(move |webview, payload| {
                 use tauri::webview::PageLoadEvent;
                 if payload.event() == PageLoadEvent::Finished {
-                    let state = match state_clone.lock() {
-                        Ok(s) => s,
-                        Err(_) => return,
-                    };
-                    let (lock, cvar) = &*state.page_loaded;
-                    if let Ok(mut loaded) = lock.lock() {
-                        *loaded = true;
+                    // 设置页面加载完成信号
+                    {
+                        let state = match state_clone.lock() {
+                            Ok(s) => s,
+                            Err(_) => return,
+                        };
+                        let (lock, cvar) = &*state.page_loaded;
+                        if let Ok(mut loaded) = lock.lock() {
+                            *loaded = true;
+                        }
+                        cvar.notify_all();
                     }
-                    cvar.notify_all();
+
+                    // 获取页面内容并通过事件通道发送
+                    let state_clone2 = state_clone.clone();
+                    let _ = webview.eval_with_callback(
+                        "window.__tiangong_bridge.getFullText(12000)",
+                        move |result| {
+                            let data = match serde_json::from_str::<serde_json::Value>(&result) {
+                                Ok(d) => d,
+                                Err(_) => return,
+                            };
+                            let title = data["title"].as_str().unwrap_or("").to_string();
+                            let page_url = data["url"].as_str().unwrap_or("").to_string();
+                            let text = data["text"].as_str().unwrap_or("").to_string();
+                            if page_url.is_empty() {
+                                return;
+                            }
+
+                            // 更新快照和标签
+                            let summary: String = text.chars().take(2000).collect();
+                            {
+                                let mut s = match state_clone2.lock() {
+                                    Ok(s) => s,
+                                    Err(e) => e.into_inner(),
+                                };
+                                s.latest_snapshot = Some(BrowserPageSnapshot {
+                                    title: title.clone(),
+                                    url: page_url.clone(),
+                                    text: text.clone(),
+                                    status: crate::types::PageStatus::Loaded,
+                                    tabs: Vec::new(),
+                                    active_tab_id: None,
+                                });
+                                let aid = s.active_tab_id.clone();
+                                if let Some(active_id) = aid {
+                                    if let Some(tab) = s.tabs.iter_mut().find(|t| t.id == active_id) {
+                                        tab.url = page_url.clone();
+                                        if !title.is_empty() {
+                                            tab.title = title.clone();
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 通过事件通道发送 PageLoaded 事件
+                            {
+                                let s = match state_clone2.lock() {
+                                    Ok(s) => s,
+                                    Err(e) => e.into_inner(),
+                                };
+                                if let Some(ref tx) = s.event_tx {
+                                    let _ = tx.try_send(BrowserEvent::PageLoaded {
+                                        url: page_url,
+                                        title,
+                                        text: summary,
+                                    });
+                                }
+                            }
+                        },
+                    );
                 }
             });
 
