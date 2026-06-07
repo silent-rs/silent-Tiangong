@@ -273,21 +273,17 @@ impl BrowserToolOverride {
                 }
             };
             let summary = if result.ok {
-                format!("浏览器获取成功：{}", result.title)
+                format!("已在浏览器中打开：{}", result.final_url)
             } else {
                 format!(
-                    "浏览器获取失败：{}",
+                    "浏览器打开失败：{}",
                     result.error.clone().unwrap_or_default()
                 )
             };
             Some(tiangong_core::tool::ToolResult {
                 ok: result.ok,
                 summary,
-                stdout: if result.ok {
-                    result.content
-                } else {
-                    String::new()
-                },
+                stdout: String::new(),
                 stderr: if result.ok {
                     String::new()
                 } else {

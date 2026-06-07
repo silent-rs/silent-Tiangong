@@ -21,7 +21,7 @@ pub async fn browser_command_handler(
         match cmd {
             BrowserCommand::FetchPage {
                 url,
-                max_chars,
+                max_chars: _,
                 response_tx,
             } => {
                 let url_for_error = url.clone();
@@ -29,28 +29,57 @@ pub async fn browser_command_handler(
                     state: browser_state.clone(),
                 };
 
-                let should_navigate = if !manager.is_open() {
+                let result = if !manager.is_open() {
+                    // 浏览器未打开：打开并导航
                     if let Some((x, y, w, h)) = default_browser_rect(&app) {
-                        let _ = manager.open(&app, &url, x, y, w, h);
+                        match manager.open(&app, &url, x, y, w, h) {
+                            Ok(()) => {
+                                let _ = app.emit("browser:open", &url);
+                                BrowserResponse {
+                                    ok: true,
+                                    title: String::new(),
+                                    content: String::new(),
+                                    final_url: url,
+                                    error: None,
+                                }
+                            }
+                            Err(e) => BrowserResponse {
+                                ok: false,
+                                title: String::new(),
+                                content: String::new(),
+                                final_url: url_for_error,
+                                error: Some(e),
+                            },
+                        }
+                    } else {
+                        BrowserResponse {
+                            ok: false,
+                            title: String::new(),
+                            content: String::new(),
+                            final_url: url_for_error,
+                            error: Some("主窗口未找到".to_string()),
+                        }
                     }
-                    let _ = app.emit("browser:open", &url);
-                    false
                 } else {
-                    true
+                    // 浏览器已打开：仅导航
+                    match manager.navigate(&url) {
+                        Ok(()) => BrowserResponse {
+                            ok: true,
+                            title: String::new(),
+                            content: String::new(),
+                            final_url: url,
+                            error: None,
+                        },
+                        Err(e) => BrowserResponse {
+                            ok: false,
+                            title: String::new(),
+                            content: String::new(),
+                            final_url: url_for_error,
+                            error: Some(e),
+                        },
+                    }
                 };
-
-                let result = tokio::task::spawn_blocking(move || {
-                    manager.fetch_page_content(&url, max_chars, should_navigate)
-                })
-                .await;
-                let response = result.unwrap_or(BrowserResponse {
-                    ok: false,
-                    title: String::new(),
-                    content: String::new(),
-                    final_url: url_for_error,
-                    error: Some("浏览器任务执行失败".to_string()),
-                });
-                let _ = response_tx.send(response);
+                let _ = response_tx.send(result);
             }
             BrowserCommand::OpenUrl { url } => {
                 let manager = BrowserManager {
