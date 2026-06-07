@@ -608,6 +608,7 @@ async fn worker_loop_async(
                 tabs,
                 active_tab_id,
             } => {
+                let turn_start_idx = session.messages.len();
                 crate::react::message::inject_browser_content_to_session(
                     &mut session,
                     &stream_tx,
@@ -620,7 +621,38 @@ async fn worker_loop_async(
                     },
                     false,
                 );
-                continue;
+                let browser_input = format!("[浏览器页面更新] {url}");
+                execute_turn_async(
+                    &mut session,
+                    &browser_input,
+                    engine.as_ref().unwrap(),
+                    &tools,
+                    &mcp_targets,
+                    &stream_tx,
+                    &mut cmd_rx,
+                    memory.handle.as_ref(),
+                    index_manager.clone(),
+                    team_context.clone(),
+                )
+                .await;
+                if let Some(ref im) = index_manager {
+                    index_turn_messages(im, &session, turn_start_idx);
+                }
+                if let Some(handle) = memory.handle.as_ref() {
+                    let enhanced_result = build_enhanced_memory_turn_result(
+                        &session,
+                        turn_start_idx,
+                        &browser_input,
+                        vec![],
+                    );
+                    tokio::task::block_in_place(|| {
+                        handle.run_enhanced_micro_rumination_blocking(enhanced_result);
+                    });
+                    turn_count += 1;
+                    if turn_count.is_multiple_of(10) {
+                        handle.run_meta_rumination();
+                    }
+                }
             }
             Command::CompressContext => {
                 compress_context_for_session(&mut session, engine.as_ref().unwrap(), &stream_tx);

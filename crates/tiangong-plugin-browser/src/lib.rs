@@ -90,7 +90,6 @@ pub fn init() -> TauriPlugin<Wry> {
             };
             tauri::async_runtime::spawn(run_browser_watcher(
                 browser_manager_state,
-                cmd_tx,
                 event_tx,
                 watcher_stop,
             ));

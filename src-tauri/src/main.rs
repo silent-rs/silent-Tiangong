@@ -250,11 +250,11 @@ fn run_gui() {
                     use tiangong_plugin_browser::types::BrowserEvent;
                     while let Some(event) = event_rx.recv().await {
                         match event {
-                            BrowserEvent::PageLoaded { url, title, text } => {
+                            BrowserEvent::PageData { url, title, text } => {
                                 if url.is_empty() {
                                     continue;
                                 }
-                                // 通知前端更新地址栏和标签栏
+                                // 始终通知前端更新地址栏和标签栏
                                 let _ = bridge_handle.emit(
                                     "browser:page_loaded",
                                     serde_json::json!({
@@ -263,11 +263,13 @@ fn run_gui() {
                                         "text": text,
                                     }),
                                 );
-                                // 注入到 agent 会话
-                                let state = bridge_handle.state::<tiangong_app::TiangongApp>();
-                                state.inject_browser_content(title, url, text, vec![], None);
+                                // 仅有内容时才注入到 agent 会话（空 text 表示仅 URL 变化通知）
+                                if !text.is_empty() {
+                                    let state = bridge_handle.state::<tiangong_app::TiangongApp>();
+                                    state.inject_browser_content(title, url, text, vec![], None);
+                                }
                             }
-                            BrowserEvent::TabUpdated {
+                            BrowserEvent::TabChanged {
                                 action,
                                 tab_id,
                                 url,

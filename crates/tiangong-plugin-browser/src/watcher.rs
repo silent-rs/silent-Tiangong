@@ -6,16 +6,15 @@ use tokio::sync::mpsc;
 use tracing::debug;
 
 use crate::manager::BrowserState;
-use crate::types::{BrowserCommand, BrowserEvent};
+use crate::types::BrowserEvent;
 
 /// 浏览器监测异步任务。
 ///
 /// 随插件启动常驻，浏览器未打开时跳过检测。
-/// 检测到 URL 变化后通过 ObservePage 命令获取页面内容，
-/// 再通过 event_tx 统一发出 BrowserEvent。
+/// 检测 URL 变化后更新活跃标签，并发送轻量级事件（用于前端地址栏更新等）。
+/// 页面内容由 on_page_load 回调延迟获取后通过事件通道推送。
 pub async fn run_browser_watcher(
     state: Arc<Mutex<BrowserState>>,
-    cmd_tx: mpsc::Sender<BrowserCommand>,
     event_tx: mpsc::Sender<BrowserEvent>,
     stop: Arc<AtomicBool>,
 ) {
@@ -39,30 +38,18 @@ pub async fn run_browser_watcher(
                 Some(ref wv) => {
                     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| wv.url())) {
                         Ok(Ok(u)) => u.to_string(),
-                        _ => {
-                            // URL 读取失败（wry 内部异常），跳过本轮
-                            continue;
-                        }
+                        _ => continue,
                     }
                 }
-                None => {
-                    // 浏览器未打开，休眠等待
-                    continue;
-                }
+                None => continue,
             }
         };
 
         // 检测 URL 变化
-        let url_changed = if current_url != last_url {
-            last_url = current_url.clone();
-            true
-        } else {
-            false
-        };
-
-        if !url_changed {
+        if current_url == last_url {
             continue;
         }
+        last_url = current_url.clone();
 
         debug!(url = %current_url, "browser watcher detected URL change");
 
@@ -80,38 +67,12 @@ pub async fn run_browser_watcher(
             }
         }
 
-        // 通过命令通道获取页面内容
-        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-        if cmd_tx
-            .send(BrowserCommand::ObservePage { response_tx })
-            .await
-            .is_err()
-        {
-            continue;
-        }
-
-        let snapshot = match tokio::time::timeout(Duration::from_secs(10), response_rx).await {
-            Ok(Ok(s)) => s,
-            _ => {
-                // 获取快照超时或失败，仍发送 URL 变化事件（无内容）
-                let _ = event_tx
-                    .send(BrowserEvent::PageLoaded {
-                        url: current_url,
-                        title: String::new(),
-                        text: String::new(),
-                    })
-                    .await;
-                continue;
-            }
-        };
-
-        let _ = event_tx
-            .send(BrowserEvent::PageLoaded {
-                url: snapshot.url.clone(),
-                title: snapshot.title,
-                text: snapshot.text.chars().take(2000).collect(),
-            })
-            .await;
+        // 发送轻量级 URL 变化事件（用于前端地址栏更新，不含页面内容）
+        let _ = event_tx.try_send(BrowserEvent::PageData {
+            url: current_url,
+            title: String::new(),
+            text: String::new(),
+        });
     }
 
     debug!("browser watcher task exiting");
@@ -140,14 +101,12 @@ mod tests {
             tabs: Vec::new(),
             active_tab_id: None,
         }));
-        let (cmd_tx, _cmd_rx) = mpsc::channel(8);
         let (event_tx, _event_rx) = mpsc::channel(8);
         let stop = Arc::new(AtomicBool::new(true));
 
-        // watcher 应在首个 tick 检测到 stop 后立即退出
         let result = timeout(
             Duration::from_secs(2),
-            run_browser_watcher(state, cmd_tx, event_tx, stop),
+            run_browser_watcher(state, event_tx, stop),
         )
         .await;
         assert!(result.is_ok(), "watcher 应在 stop 信号后退出");
@@ -165,18 +124,11 @@ mod tests {
             tabs: Vec::new(),
             active_tab_id: None,
         }));
-        let (cmd_tx, _cmd_rx) = mpsc::channel(8);
         let (event_tx, mut event_rx) = mpsc::channel(8);
 
-        // 启动 watcher，1 秒后设置 stop
         let watcher_state = state.clone();
         let watcher_stop = stop.clone();
-        let handle = tokio::spawn(run_browser_watcher(
-            watcher_state,
-            cmd_tx,
-            event_tx,
-            watcher_stop,
-        ));
+        let handle = tokio::spawn(run_browser_watcher(watcher_state, event_tx, watcher_stop));
 
         tokio::time::sleep(Duration::from_millis(800)).await;
         stop.store(true, Ordering::Relaxed);
@@ -184,7 +136,6 @@ mod tests {
         let result = timeout(Duration::from_secs(2), handle).await;
         assert!(result.is_ok(), "watcher 应在 stop 后退出");
 
-        // 无 webview 时不应产生任何事件
         assert!(event_rx.try_recv().is_err(), "无 webview 时不应发送事件");
     }
 }

@@ -1,21 +1,28 @@
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
-/// 浏览器事件（BrowserWatcher 发出的统一事件）
+/// 浏览器状态变化事件（由浏览器插件产生，App 层路由到活跃对话）
 #[derive(Debug, Clone)]
 pub enum BrowserEvent {
-    /// 页面导航完成（URL 变化或页面加载完成）
-    PageLoaded {
+    /// 页面数据就绪（页面加载/导航完成后的内容推送）
+    PageData {
         url: String,
         title: String,
         text: String,
     },
-    /// 标签变化通知
-    TabUpdated {
-        action: String,
+    /// 标签生命周期变化
+    TabChanged {
+        action: String, // "new" | "switch" | "close" | "update"
         tab_id: String,
         url: Option<String>,
     },
+    // 后续扩展预留：
+    // /// 页面表单状态变化
+    // FormStateChanged { ... },
+    // /// 页面元素交互结果
+    // ElementInteracted { ... },
+    // /// 下载/上传进度
+    // TransferProgress { ... },
 }
 
 /// 浏览器标签
@@ -252,31 +259,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn browser_event_page_loaded_construct() {
-        let event = BrowserEvent::PageLoaded {
+    fn browser_event_page_data_construct() {
+        let event = BrowserEvent::PageData {
             url: "https://example.com".to_string(),
             title: "Example".to_string(),
             text: "page content".to_string(),
         };
         match event {
-            BrowserEvent::PageLoaded { url, title, text } => {
+            BrowserEvent::PageData { url, title, text } => {
                 assert_eq!(url, "https://example.com");
                 assert_eq!(title, "Example");
                 assert_eq!(text, "page content");
             }
-            _ => panic!("expected PageLoaded"),
+            _ => panic!("expected PageData"),
         }
     }
 
     #[test]
-    fn browser_event_tab_updated_construct() {
-        let event = BrowserEvent::TabUpdated {
+    fn browser_event_tab_changed_construct() {
+        let event = BrowserEvent::TabChanged {
             action: "new".to_string(),
             tab_id: "tab-1".to_string(),
             url: Some("https://example.com".to_string()),
         };
         match event {
-            BrowserEvent::TabUpdated {
+            BrowserEvent::TabChanged {
                 action,
                 tab_id,
                 url,
@@ -285,32 +292,32 @@ mod tests {
                 assert_eq!(tab_id, "tab-1");
                 assert_eq!(url.unwrap(), "https://example.com");
             }
-            _ => panic!("expected TabUpdated"),
+            _ => panic!("expected TabChanged"),
         }
     }
 
     #[test]
     fn browser_event_clone() {
-        let event = BrowserEvent::PageLoaded {
+        let event = BrowserEvent::PageData {
             url: "https://example.com".to_string(),
             title: "Title".to_string(),
             text: "Text".to_string(),
         };
         let cloned = event.clone();
         match cloned {
-            BrowserEvent::PageLoaded { url, title, text } => {
+            BrowserEvent::PageData { url, title, text } => {
                 assert_eq!(url, "https://example.com");
                 assert_eq!(title, "Title");
                 assert_eq!(text, "Text");
             }
-            _ => panic!("expected PageLoaded"),
+            _ => panic!("expected PageData"),
         }
     }
 
     #[tokio::test]
-    async fn event_channel_page_loaded() {
+    async fn event_channel_page_data() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<BrowserEvent>(8);
-        tx.send(BrowserEvent::PageLoaded {
+        tx.send(BrowserEvent::PageData {
             url: "https://example.com".to_string(),
             title: "Example".to_string(),
             text: "content".to_string(),
@@ -320,19 +327,19 @@ mod tests {
 
         let event = rx.recv().await.unwrap();
         match event {
-            BrowserEvent::PageLoaded { url, title, text } => {
+            BrowserEvent::PageData { url, title, text } => {
                 assert_eq!(url, "https://example.com");
                 assert_eq!(title, "Example");
                 assert_eq!(text, "content");
             }
-            _ => panic!("expected PageLoaded"),
+            _ => panic!("expected PageData"),
         }
     }
 
     #[tokio::test]
-    async fn event_channel_tab_updated() {
+    async fn event_channel_tab_changed() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<BrowserEvent>(8);
-        tx.send(BrowserEvent::TabUpdated {
+        tx.send(BrowserEvent::TabChanged {
             action: "close".to_string(),
             tab_id: "tab-2".to_string(),
             url: None,
@@ -342,7 +349,7 @@ mod tests {
 
         let event = rx.recv().await.unwrap();
         match event {
-            BrowserEvent::TabUpdated {
+            BrowserEvent::TabChanged {
                 action,
                 tab_id,
                 url,
@@ -351,7 +358,7 @@ mod tests {
                 assert_eq!(tab_id, "tab-2");
                 assert!(url.is_none());
             }
-            _ => panic!("expected TabUpdated"),
+            _ => panic!("expected TabChanged"),
         }
     }
 
@@ -359,21 +366,21 @@ mod tests {
     async fn event_channel_multiple_events() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<BrowserEvent>(32);
 
-        tx.send(BrowserEvent::PageLoaded {
+        tx.send(BrowserEvent::PageData {
             url: "https://a.com".to_string(),
             title: "A".to_string(),
             text: String::new(),
         })
         .await
         .unwrap();
-        tx.send(BrowserEvent::TabUpdated {
+        tx.send(BrowserEvent::TabChanged {
             action: "new".to_string(),
             tab_id: "t1".to_string(),
             url: Some("https://b.com".to_string()),
         })
         .await
         .unwrap();
-        tx.send(BrowserEvent::PageLoaded {
+        tx.send(BrowserEvent::PageData {
             url: "https://c.com".to_string(),
             title: "C".to_string(),
             text: "content".to_string(),

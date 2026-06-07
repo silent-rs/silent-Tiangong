@@ -1,4 +1,4 @@
-use tracing::{debug, warn};
+use tracing::debug;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
@@ -116,7 +116,7 @@ impl BrowserManager {
             .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/605.1.15")
             .enable_clipboard_access()
             .devtools(true)
-            .on_page_load(move |webview, payload| {
+            .on_page_load(move |_webview, payload| {
                 use tauri::webview::PageLoadEvent;
                 if payload.event() == PageLoadEvent::Finished {
                     // 设置页面加载完成信号
@@ -132,64 +132,64 @@ impl BrowserManager {
                         cvar.notify_all();
                     }
 
-                    // 获取页面内容并通过事件通道发送
-                    let state_clone2 = state_clone.clone();
-                    let _ = webview.eval_with_callback(
-                        "window.__tiangong_bridge.getFullText(12000)",
-                        move |result| {
-                            let data = match serde_json::from_str::<serde_json::Value>(&result) {
-                                Ok(d) => d,
-                                Err(_) => return,
-                            };
-                            let title = data["title"].as_str().unwrap_or("").to_string();
-                            let page_url = data["url"].as_str().unwrap_or("").to_string();
-                            let text = data["text"].as_str().unwrap_or("").to_string();
-                            if page_url.is_empty() {
-                                return;
-                            }
+                    // 延迟获取页面内容（等待动态数据加载），然后通过事件通道发送
+                    let state_delayed = state_clone.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_secs(3));
+                        let manager = BrowserManager {
+                            state: state_delayed,
+                        };
+                        let result = manager.eval_with_result(
+                            "JSON.stringify(window.__tiangong_bridge.getFullText(12000))",
+                        );
+                        let raw = match result {
+                            Some(r) => r,
+                            None => return,
+                        };
+                        let data = match serde_json::from_str::<serde_json::Value>(&raw) {
+                            Ok(d) => d,
+                            Err(_) => return,
+                        };
+                        let title = data["title"].as_str().unwrap_or("").to_string();
+                        let page_url = data["url"].as_str().unwrap_or("").to_string();
+                        let text = data["text"].as_str().unwrap_or("").to_string();
+                        if page_url.is_empty() {
+                            return;
+                        }
 
-                            // 更新快照和标签
-                            let summary: String = text.chars().take(2000).collect();
-                            {
-                                let mut s = match state_clone2.lock() {
-                                    Ok(s) => s,
-                                    Err(e) => e.into_inner(),
-                                };
-                                s.latest_snapshot = Some(BrowserPageSnapshot {
-                                    title: title.clone(),
-                                    url: page_url.clone(),
-                                    text: text.clone(),
-                                    status: crate::types::PageStatus::Loaded,
-                                    tabs: Vec::new(),
-                                    active_tab_id: None,
-                                });
-                                let aid = s.active_tab_id.clone();
-                                if let Some(active_id) = aid {
-                                    if let Some(tab) = s.tabs.iter_mut().find(|t| t.id == active_id) {
-                                        tab.url = page_url.clone();
-                                        if !title.is_empty() {
-                                            tab.title = title.clone();
-                                        }
+                        let summary: String = text.chars().take(2000).collect();
+                        {
+                            let mut s = match manager.state.lock() {
+                                Ok(s) => s,
+                                Err(e) => e.into_inner(),
+                            };
+                            s.latest_snapshot = Some(BrowserPageSnapshot {
+                                title: title.clone(),
+                                url: page_url.clone(),
+                                text: text.clone(),
+                                status: crate::types::PageStatus::Loaded,
+                                tabs: Vec::new(),
+                                active_tab_id: None,
+                            });
+                            let aid = s.active_tab_id.clone();
+                            if let Some(active_id) = aid {
+                                if let Some(tab) = s.tabs.iter_mut().find(|t| t.id == active_id)
+                                {
+                                    tab.url = page_url.clone();
+                                    if !title.is_empty() {
+                                        tab.title = title.clone();
                                     }
                                 }
                             }
-
-                            // 通过事件通道发送 PageLoaded 事件
-                            {
-                                let s = match state_clone2.lock() {
-                                    Ok(s) => s,
-                                    Err(e) => e.into_inner(),
-                                };
-                                if let Some(ref tx) = s.event_tx {
-                                    let _ = tx.try_send(BrowserEvent::PageLoaded {
-                                        url: page_url,
-                                        title,
-                                        text: summary,
-                                    });
-                                }
+                            if let Some(ref tx) = s.event_tx {
+                                let _ = tx.try_send(BrowserEvent::PageData {
+                                    url: page_url,
+                                    title,
+                                    text: summary,
+                                });
                             }
-                        },
-                    );
+                        }
+                    });
                 }
             });
 
@@ -369,46 +369,10 @@ impl BrowserManager {
         }
     }
 
-    fn wait_for_content_ready(&self, timeout_ms: u64) {
-        let start = std::time::Instant::now();
-        let check_interval = Duration::from_millis(500);
-        let timeout = Duration::from_millis(timeout_ms);
-        let mut last_len: usize = 0;
-        let mut stable_count: usize = 0;
-        let mut content_grew = false;
-
-        loop {
-            let text_len = self
-                .eval_with_result("(function(){if(!document.body)return 0;var c=document.body.cloneNode(true);var r=c.querySelectorAll('script,style,noscript');for(var i=0;i<r.length;i++)r[i].parentNode.removeChild(r[i]);return(c.textContent||'').length})()")
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(0);
-
-            if text_len > last_len {
-                content_grew = true;
-                stable_count = 0;
-            } else {
-                stable_count += 1;
-            }
-            last_len = text_len;
-
-            if text_len > 1000 && stable_count >= 2 {
-                break;
-            }
-            if content_grew && stable_count >= 3 {
-                break;
-            }
-            if start.elapsed() >= timeout {
-                break;
-            }
-
-            std::thread::sleep(check_interval);
-        }
-    }
-
     pub fn fetch_page_content(
         &self,
         url: &str,
-        max_chars: usize,
+        _max_chars: usize,
         should_navigate: bool,
     ) -> BrowserResponse {
         let error_response = |err: String| BrowserResponse {
@@ -433,37 +397,17 @@ impl BrowserManager {
             "browser wait_for_page_load"
         );
 
-        let t1 = std::time::Instant::now();
-        self.wait_for_content_ready(15_000);
-        debug!(
-            elapsed_ms = t1.elapsed().as_millis() as u64,
-            "browser wait_for_content_ready"
-        );
+        if !loaded {
+            return error_response("页面加载超时".to_string());
+        }
 
-        let result = self.eval_with_result(&format!(
-            "window.__tiangong_bridge.getFullText({max_chars})"
-        ));
-
-        match result {
-            Some(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
-                Ok(data) => {
-                    let title = data["title"].as_str().unwrap_or("").to_string();
-                    let content = data["text"].as_str().unwrap_or("").to_string();
-                    let final_url = data["url"].as_str().unwrap_or(url).to_string();
-                    BrowserResponse {
-                        ok: true,
-                        title,
-                        content,
-                        final_url,
-                        error: None,
-                    }
-                }
-                Err(e) => {
-                    warn!(error = %e, "browser JSON parse error");
-                    error_response("解析页面内容失败".to_string())
-                }
-            },
-            None => error_response("获取页面内容超时".to_string()),
+        // 仅确认导航完成，内容由 on_page_load 通过事件通道推送
+        BrowserResponse {
+            ok: true,
+            title: String::new(),
+            content: String::new(),
+            final_url: url.to_string(),
+            error: None,
         }
     }
 

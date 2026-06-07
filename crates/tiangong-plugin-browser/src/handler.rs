@@ -252,7 +252,7 @@ pub async fn browser_command_handler(
                 let event_tx = event_tx.clone();
                 let _ = tokio::task::spawn_blocking(move || match manager.tab_new(&url) {
                     Ok(tab_id) => {
-                        let _ = event_tx.try_send(BrowserEvent::TabUpdated {
+                        let _ = event_tx.try_send(BrowserEvent::TabChanged {
                             action: "new".to_string(),
                             tab_id,
                             url: Some(url),
@@ -271,7 +271,7 @@ pub async fn browser_command_handler(
                     if let Err(e) = manager.tab_switch(&tab_id) {
                         warn!(error = %e, "tab_switch error");
                     } else {
-                        let _ = event_tx.try_send(BrowserEvent::TabUpdated {
+                        let _ = event_tx.try_send(BrowserEvent::TabChanged {
                             action: "switch".to_string(),
                             tab_id,
                             url: None,
@@ -289,7 +289,7 @@ pub async fn browser_command_handler(
                     if let Err(e) = manager.tab_close(&tab_id) {
                         warn!(error = %e, "tab_close error");
                     } else {
-                        let _ = event_tx.try_send(BrowserEvent::TabUpdated {
+                        let _ = event_tx.try_send(BrowserEvent::TabChanged {
                             action: "close".to_string(),
                             tab_id,
                             url: None,
