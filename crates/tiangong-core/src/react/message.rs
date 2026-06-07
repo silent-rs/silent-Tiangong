@@ -333,42 +333,25 @@ pub(crate) fn inject_browser_content_to_session(
     let url = content.url;
     let title = content.title;
     let text = content.text;
-    if !force
-        && session.messages.iter().rev().take(6).any(|msg| {
+
+    // 去重：同域名下的页面内容短期内不重复注入
+    if !force {
+        let domain = extract_domain(url);
+        let is_dup = session.messages.iter().rev().take(8).any(|msg| {
             msg.role == MessageRole::Tool
-                && msg.tool_name.as_deref() == Some("web_fetch")
-                && msg.text_content().contains(url)
-        })
-    {
-        return;
+                && msg.tool_name.as_deref() == Some("browser_data")
+                && extract_domain(&msg.text_content()) == domain
+        });
+        if is_dup {
+            return;
+        }
     }
 
-    let tool_call_id = format!("browser_auto_{}", scru128::new());
-    let tool_name = "web_fetch";
-
-    let label = if force {
-        "[自动感知] 浏览器页面内容发生变化"
-    } else {
-        "[自动感知] 用户在浏览器中导航到新页面"
-    };
-    let assistant_text = format!("{label}：{url}");
-    let mut assistant_msg = Message::new(MessageRole::Assistant, assistant_text);
-    assistant_msg.tool_calls = vec![MessageToolCall {
-        id: tool_call_id.clone(),
-        name: tool_name.to_string(),
-        arguments: serde_json::json!({"url": url}),
-    }];
-    session.messages.push(assistant_msg);
-
-    let header = if force {
-        "[浏览器内容变化]"
-    } else {
-        "[浏览器页面更新]"
-    };
+    // 构造页面内容文本
     let mut output = if text.is_empty() {
-        format!("{header}\n标题：{title}\nURL：{url}\n状态：页面内容为空")
+        format!("[浏览器页面更新]\n标题：{title}\nURL：{url}\n状态：页面内容为空")
     } else {
-        format!("{header}\n标题：{title}\nURL：{url}\n\n{text}")
+        format!("[浏览器页面更新]\n标题：{title}\nURL：{url}\n\n{text}")
     };
     if !content.tabs.is_empty() {
         output.push_str("\n\n[标签列表]");
@@ -387,6 +370,19 @@ pub(crate) fn inject_browser_content_to_session(
         }
     }
 
+    let tool_call_id = format!("browser_auto_{}", scru128::new());
+    let tool_name = "browser_data";
+
+    // 伪造 assistant 工具调用 + tool 结果，以 browser_data 工具形式注入
+    let assistant_text = format!("[自动感知] 浏览器页面数据就绪：{url}");
+    let mut assistant_msg = Message::new(MessageRole::Assistant, assistant_text);
+    assistant_msg.tool_calls = vec![MessageToolCall {
+        id: tool_call_id.clone(),
+        name: tool_name.to_string(),
+        arguments: serde_json::json!({"url": url}),
+    }];
+    session.messages.push(assistant_msg);
+
     let _ = stream_tx.send(StreamEvent::ToolResult {
         name: tool_name.to_string(),
         tool_call_id: Some(tool_call_id.clone()),
@@ -397,4 +393,14 @@ pub(crate) fn inject_browser_content_to_session(
     });
 
     append_tool_result_message(session, &tool_call_id, tool_name, output, false);
+}
+
+/// 从 URL 中提取域名部分，用于宽松匹配（忽略路径差异）
+fn extract_domain(url: &str) -> String {
+    url.trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_string()
 }

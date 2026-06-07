@@ -132,30 +132,17 @@ impl BrowserManager {
                         cvar.notify_all();
                     }
 
-                    // 延迟获取页面内容（等待动态数据加载），然后通过事件通道发送
+                    // 轮询获取稳定页面内容：等待动态数据加载完成后采集
                     let state_delayed = state_clone.clone();
                     std::thread::spawn(move || {
-                        std::thread::sleep(Duration::from_secs(3));
                         let manager = BrowserManager {
                             state: state_delayed,
                         };
-                        let result = manager.eval_with_result(
-                            "JSON.stringify(window.__tiangong_bridge.getFullText(12000))",
-                        );
-                        let raw = match result {
-                            Some(r) => r,
-                            None => return,
-                        };
-                        let data = match serde_json::from_str::<serde_json::Value>(&raw) {
-                            Ok(d) => d,
-                            Err(_) => return,
-                        };
-                        let title = data["title"].as_str().unwrap_or("").to_string();
-                        let page_url = data["url"].as_str().unwrap_or("").to_string();
-                        let text = data["text"].as_str().unwrap_or("").to_string();
-                        if page_url.is_empty() {
-                            return;
-                        }
+                        let (title, page_url, text) =
+                            match poll_stable_content(&manager, 12000) {
+                                Some(c) => c,
+                                None => return,
+                            };
 
                         let summary: String = text.chars().take(2000).collect();
                         {
@@ -533,6 +520,64 @@ fn browser_data_directory() -> PathBuf {
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".tiangong").join("browser-data")
+}
+
+/// 轮询页面内容直到稳定：连续两次采集结果完全相同则认为内容就绪。
+///
+/// 策略：初始等待 2 秒让框架初始化，之后每 1 秒采集一次，
+/// 最多轮询 10 次（总计约 12 秒）。连续两次 URL 和文本内容相同视为稳定。
+fn poll_stable_content(
+    manager: &BrowserManager,
+    max_chars: usize,
+) -> Option<(String, String, String)> {
+    let js = format!("JSON.stringify(window.__tiangong_bridge.getFullText({max_chars}))");
+
+    // 初始等待：让页面框架和 AJAX 启动
+    std::thread::sleep(Duration::from_secs(2));
+
+    let mut prev_text = String::new();
+    let mut prev_url = String::new();
+    let mut stable_count = 0;
+
+    for _ in 0..10 {
+        let raw = manager.eval_with_result(&js)?;
+        let data = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+        let url = data["url"].as_str().unwrap_or("").to_string();
+        if url.is_empty() {
+            std::thread::sleep(Duration::from_secs(1));
+            continue;
+        }
+        let text = data["text"].as_str().unwrap_or("").to_string();
+        let title = data["title"].as_str().unwrap_or("").to_string();
+
+        // 连续两次 URL 和文本完全相同 → 内容稳定
+        if url == prev_url && text == prev_text && !text.is_empty() {
+            stable_count += 1;
+            if stable_count >= 2 {
+                return Some((title, url, text));
+            }
+        } else {
+            stable_count = 0;
+        }
+
+        prev_text = text;
+        prev_url = url;
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
+    // 超时兜底：使用最后一次采集结果（如果有内容）
+    if !prev_text.is_empty() {
+        let raw = manager.eval_with_result(&js)?;
+        let data = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+        let title = data["title"].as_str().unwrap_or("").to_string();
+        let url = data["url"].as_str().unwrap_or("").to_string();
+        let text = data["text"].as_str().unwrap_or("").to_string();
+        if !url.is_empty() {
+            return Some((title, url, text));
+        }
+    }
+
+    None
 }
 
 pub fn default_browser_rect(app: &AppHandle<Wry>) -> Option<(f64, f64, f64, f64)> {
