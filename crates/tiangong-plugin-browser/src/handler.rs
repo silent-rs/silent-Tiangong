@@ -51,22 +51,19 @@ fn wait_for_content_change(manager: &BrowserManager, timeout: Duration) -> Optio
             stable_count += 1;
             // 内容稳定 2 个轮询周期（~600ms）后，捕获最终 digest 返回
             if stable_count >= 2 {
-                return manager
-                    .eval_with_result("JSON.stringify(window.__tiangong_bridge.getPageDigest())");
+                return manager.eval_with_result("window.__tiangong_bridge.getPageDigest()");
             }
         }
 
         // 首次变化后超过 post_change_max，不再等稳定，直接返回
         if let Some(t) = first_change_time {
             if t.elapsed() >= post_change_max {
-                return manager
-                    .eval_with_result("JSON.stringify(window.__tiangong_bridge.getPageDigest())");
+                return manager.eval_with_result("window.__tiangong_bridge.getPageDigest()");
             }
         }
 
         if start.elapsed() >= timeout {
-            return manager
-                .eval_with_result("JSON.stringify(window.__tiangong_bridge.getPageDigest())");
+            return manager.eval_with_result("window.__tiangong_bridge.getPageDigest()");
         }
 
         std::thread::sleep(Duration::from_millis(300));
@@ -80,10 +77,7 @@ fn compute_page_diff(
     after_digest: &Option<String>,
 ) -> Option<String> {
     let (before, after) = (before_digest.as_ref()?, after_digest.as_ref()?);
-    let diff_js = format!(
-        "JSON.stringify(window.__tiangong_bridge.diffDigest({},{}))",
-        before, after
-    );
+    let diff_js = format!("window.__tiangong_bridge.diffDigest({},{})", before, after);
     let diff_raw = manager.eval_with_result(&diff_js)?;
     let diff = diff_raw.trim_matches('"').replace("\\n", "\n");
     if diff.is_empty() {
@@ -266,7 +260,7 @@ pub async fn browser_command_handler(
                 let result = tokio::task::spawn_blocking(move || {
                     // 操作前 digest
                     let before_digest = manager
-                        .eval_with_result("JSON.stringify(window.__tiangong_bridge.getPageDigest())");
+                        .eval_with_result("window.__tiangong_bridge.getPageDigest()");
 
                     // 先尝试原生 fillField
                     let js = format!(
@@ -318,7 +312,26 @@ pub async fn browser_command_handler(
                             wait_for_content_change(&manager, Duration::from_secs(3));
                         let diff = compute_page_diff(&manager, &before_digest, &after_digest);
                         let events = manager.drain_events();
-                        native_result.page_diff = merge_diff_and_events(&diff, &events);
+                        let merged = merge_diff_and_events(&diff, &events);
+                        native_result.page_diff = match &merged {
+                            Some(d)
+                                if !d.is_empty()
+                                    && !d.trim().eq("页面无明显变化") =>
+                            {
+                                merged
+                            }
+                            _ => {
+                                let summary = manager.eval_with_result(
+                                    "(function(){try{var t=(document.body.innerText||'').replace(/\\s+/g,' ').trim();return t.length>800?t.substring(0,800)+'...':t}catch(e){return''}})()",
+                                );
+                                match summary {
+                                    Some(s) if !s.is_empty() => Some(format!(
+                                        "操作完成，当前页面内容：\n{s}"
+                                    )),
+                                    _ => merged,
+                                }
+                            }
+                        };
                     }
 
                     native_result
@@ -345,7 +358,7 @@ pub async fn browser_command_handler(
                 let result = tokio::task::spawn_blocking(move || {
                     // 操作前 digest
                     let before_digest = manager
-                        .eval_with_result("JSON.stringify(window.__tiangong_bridge.getPageDigest())");
+                        .eval_with_result("window.__tiangong_bridge.getPageDigest()");
 
                     let js = format!(
                         "window.__tiangong_bridge.clickElement({})",
@@ -379,7 +392,26 @@ pub async fn browser_command_handler(
                             wait_for_content_change(&manager, Duration::from_secs(5));
                         let diff = compute_page_diff(&manager, &before_digest, &after_digest);
                         let events = manager.drain_events();
-                        result.page_diff = merge_diff_and_events(&diff, &events);
+                        let merged = merge_diff_and_events(&diff, &events);
+                        result.page_diff = match &merged {
+                            Some(d)
+                                if !d.is_empty()
+                                    && !d.trim().eq("页面无明显变化") =>
+                            {
+                                merged
+                            }
+                            _ => {
+                                let summary = manager.eval_with_result(
+                                    "(function(){try{var t=(document.body.innerText||'').replace(/\\s+/g,' ').trim();return t.length>800?t.substring(0,800)+'...':t}catch(e){return''}})()",
+                                );
+                                match summary {
+                                    Some(s) if !s.is_empty() => Some(format!(
+                                        "操作完成，当前页面内容：\n{s}"
+                                    )),
+                                    _ => merged,
+                                }
+                            }
+                        };
                     }
 
                     result

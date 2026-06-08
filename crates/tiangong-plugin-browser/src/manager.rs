@@ -192,9 +192,41 @@ impl BrowserManager {
                 }
             });
 
-        let webview = window
-            .add_child(builder, LogicalPosition::new(x, y), LogicalSize::new(w, h))
-            .map_err(|e| format!("创建浏览器 WebView 失败：{e}"))?;
+        let webview =
+            match window.add_child(builder, LogicalPosition::new(x, y), LogicalSize::new(w, h)) {
+                Ok(wv) => wv,
+                Err(_) => {
+                    // label 冲突：尝试复用已有 WebView
+                    let existing = app.get_webview(BROWSER_WEBVIEW_LABEL);
+                    if let Some(wv) = existing {
+                        let _ = wv.set_position(LogicalPosition::new(x, y));
+                        let _ = wv.set_size(LogicalSize::new(w, h));
+                        // 重新导航并启动 observer
+                        let js = format!(
+                            "window.location.href={}",
+                            serde_json::to_string(url).unwrap_or_default()
+                        );
+                        let _ = wv.eval(&js);
+                        let _ = wv.eval("window.__tiangong_bridge.observer.start()");
+                        if let Ok(mut state) = self.state.lock() {
+                            state.webview = Some(wv.clone());
+                            if state.tabs.is_empty() {
+                                let tab_id = scru128::new().to_string();
+                                state.tabs.push(BrowserTab {
+                                    id: tab_id.clone(),
+                                    url: url.to_string(),
+                                    title: String::new(),
+                                });
+                                state.active_tab_id = Some(tab_id);
+                            }
+                        }
+                        self.start_url_poll(app, url);
+                        self.start_event_poll(app);
+                        return Ok(());
+                    }
+                    return Err("创建浏览器 WebView 失败：webview 已存在但无法获取".to_string());
+                }
+            };
 
         if let Ok(mut state) = self.state.lock() {
             state.webview = Some(webview);
@@ -402,6 +434,10 @@ impl BrowserManager {
         let app = app.clone();
         let stop = {
             let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            // 停止旧线程
+            s.event_poll_stop
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            // 创建新的 stop 标记
             s.event_poll_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             s.event_poll_stop.clone()
         };
@@ -419,7 +455,7 @@ impl BrowserManager {
                         state: state.clone(),
                     };
                     if let Some(raw) = mgr.eval_with_result(
-                        "(function(){try{return JSON.stringify(window.__tiangong_bridge.observer.drainAllEvents())}catch(e){return'[]'}})()",
+                        "(function(){try{return window.__tiangong_bridge.observer.drainAllEvents()}catch(e){return[]}})()",
                     ) {
                         if raw == "[]" || raw.is_empty() {
                             continue;
@@ -428,27 +464,13 @@ impl BrowserManager {
                             serde_json::from_str::<Vec<crate::types::BrowserEvent>>(&raw)
                         {
                             if !events.is_empty() {
-                                let network_count = events
-                                    .iter()
-                                    .filter(|event| {
-                                        matches!(event, BrowserEvent::NetworkResponse { .. })
-                                    })
-                                    .count();
-                                let mut pending_len = 0usize;
                                 if let Ok(mut s) = state.lock() {
                                     s.pending_events.extend(events.clone());
                                     if s.pending_events.len() > 200 {
                                         let keep_from = s.pending_events.len() - 100;
                                         s.pending_events.drain(0..keep_from);
                                     }
-                                    pending_len = s.pending_events.len();
                                 }
-                                debug!(
-                                    count = events.len(),
-                                    network_count,
-                                    pending_len,
-                                    "browser event poll drained events"
-                                );
                                 let _ = app.emit("browser:events", &events);
                             }
                         }
@@ -548,7 +570,7 @@ impl BrowserManager {
         let cached_count = events.len();
 
         if let Some(raw) = self.eval_with_result(
-            "(function(){try{return JSON.stringify(window.__tiangong_bridge.observer.drainAllEvents())}catch(e){return'[]'}})()",
+            "(function(){try{return window.__tiangong_bridge.observer.drainAllEvents()}catch(e){return[]}})()",
         ) {
             if raw != "[]" && !raw.is_empty() {
                 if let Ok(mut current) = serde_json::from_str::<Vec<BrowserEvent>>(&raw) {

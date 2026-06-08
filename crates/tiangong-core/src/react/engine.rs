@@ -2123,6 +2123,10 @@ fn drain_pending_commands_async(
                 active_tab_id,
                 feedback,
             } => {
+                let has_feedback = feedback
+                    .as_deref()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false);
                 crate::react::message::inject_browser_content_to_session(
                     session,
                     stream_tx,
@@ -2134,7 +2138,7 @@ fn drain_pending_commands_async(
                         active_tab_id: active_tab_id.as_deref(),
                         feedback: feedback.as_deref(),
                     },
-                    false,
+                    has_feedback,
                 );
                 injected_message = true;
             }

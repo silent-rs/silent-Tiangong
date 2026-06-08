@@ -72,7 +72,7 @@ impl TiangongApp {
     }
 
     /// 向当前活跃会话注入浏览器页面内容
-    pub fn inject_browser_content(
+    pub async fn inject_browser_content(
         &self,
         title: String,
         url: String,
@@ -81,20 +81,10 @@ impl TiangongApp {
         active_tab_id: Option<String>,
         feedback: Option<String>,
     ) -> bool {
-        let session_id = match tokio::runtime::Handle::try_current() {
-            Ok(h) => {
-                let guard = h.block_on(self.state.lock());
-                guard.active_session_id().to_string()
-            }
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    url = %url,
-                    "浏览器内容注入失败：当前线程没有 tokio runtime"
-                );
-                return false;
-            }
-        };
+        let guard = self.state.lock().await;
+        let session_id = guard.active_session_id().to_string();
+        drop(guard);
+
         let cores = self.lock_cores();
         if let Some(core) = cores.get(&session_id) {
             if core.is_running() {

@@ -290,7 +290,9 @@ fn run_gui() {
                 state.register_tool_override("web_browse", handler.clone());
                 state.register_tool_override("web_form_extract", handler.clone());
                 state.register_tool_override("web_form_fill", handler.clone());
-                state.register_tool_override("web_click", handler);
+                state.register_tool_override("web_click", handler.clone());
+                state.register_tool_override("web_query_dom", handler.clone());
+                state.register_tool_override("web_locate_element", handler);
             }
 
             // 监听浏览器页面加载事件，自动注入内容到当前活跃会话
@@ -304,8 +306,13 @@ fn run_gui() {
                     }
                     let title = data["title"].as_str().unwrap_or("").to_string();
                     let text = data["text"].as_str().unwrap_or("").to_string();
-                    let state = inject_handle.state::<tiangong_app::TiangongApp>();
-                    let _ = state.inject_browser_content(title, url, text, vec![], None, None);
+                    let app_handle = inject_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let state = app_handle.state::<tiangong_app::TiangongApp>();
+                        let _ = state
+                            .inject_browser_content(title, url, text, vec![], None, None)
+                            .await;
+                    });
                 }
             });
 
@@ -333,9 +340,11 @@ fn run_gui() {
                         .as_ref()
                         .map(|s| s.title.clone())
                         .unwrap_or_default();
+                    // 优先用 snapshot URL，其次用网络事件 URL，最后用 WebView 当前 URL
                     let url = snapshot
                         .as_ref()
                         .map(|s| s.url.clone())
+                        .filter(|u| !u.is_empty())
                         .or_else(|| {
                             network_events.iter().find_map(|event| match event {
                                 tiangong_plugin_browser::types::BrowserEvent::NetworkResponse {
@@ -360,7 +369,16 @@ fn run_gui() {
                         })
                         .unwrap_or_default();
                     let active_tab_id = snapshot.as_ref().and_then(|s| s.active_tab_id.clone());
-                    if url.is_empty() {
+                    let mut page_url = url;
+                    if page_url.is_empty() {
+                        // 尝试从 WebView 获取当前页面 URL
+                        page_url = app_handle
+                            .get_webview("browser-webview")
+                            .and_then(|wv| wv.url().ok())
+                            .map(|u| u.to_string())
+                            .unwrap_or_default();
+                    }
+                    if page_url.is_empty() {
                         warn!(
                             total_count,
                             network_count, "浏览器网络事件缺少页面 URL，无法注入"
@@ -369,16 +387,18 @@ fn run_gui() {
                     }
 
                     let state = app_handle.state::<tiangong_app::TiangongApp>();
-                    let injected = state.inject_browser_content(
-                        title,
-                        url.clone(),
-                        text,
-                        tabs,
-                        active_tab_id,
-                        Some(feedback),
-                    );
+                    let injected = state
+                        .inject_browser_content(
+                            title,
+                            page_url.clone(),
+                            text,
+                            tabs,
+                            active_tab_id,
+                            Some(feedback),
+                        )
+                        .await;
                     info!(
-                        url,
+                        url = %page_url,
                         total_count, network_count, injected, "浏览器网络事件注入检查完成"
                     );
                     if injected {

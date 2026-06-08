@@ -80,7 +80,8 @@
                     window.__tiangong_bridge.observer._pushEvent(event);
                     return;
                 }
-            } catch(e) {}
+            } catch(e) {
+            }
             _pendingNetworkEvents.push(event);
             if (_pendingNetworkEvents.length > 100) {
                 _pendingNetworkEvents = _pendingNetworkEvents.slice(-50);
@@ -108,19 +109,24 @@
             return _origFetch.call(this, input, init).then(function(response) {
                 try {
                     var ct = response.headers.get('content-type') || '';
+                    var method = (init && init.method) || (input && input.method) || 'GET';
+                    // 所有请求都记录元信息（URL、方法、状态码）
+                    var meta = {
+                        type: 'network_response',
+                        timestamp: Date.now(),
+                        url: url,
+                        method: method,
+                        status: response.status,
+                        detail: ''
+                    };
                     if (_isJsonContentType(ct)) {
                         var cloned = response.clone();
-                        var method = (init && init.method) || (input && input.method) || 'GET';
                         cloned.text().then(function(body) {
-                            _pushNetworkEvent({
-                                type: 'network_response',
-                                timestamp: Date.now(),
-                                url: url,
-                                method: method,
-                                status: response.status,
-                                detail: _responsePreview(body)
-                            });
-                        }).catch(function() {});
+                            meta.detail = _responsePreview(body);
+                            _pushNetworkEvent(meta);
+                        }).catch(function() { _pushNetworkEvent(meta); });
+                    } else {
+                        _pushNetworkEvent(meta);
                     }
                 } catch(e) {}
                 return response;
@@ -149,8 +155,8 @@
                 xhr.addEventListener('load', function() {
                     try {
                         var ct = xhr.getResponseHeader('content-type') || '';
+                        var detail = '';
                         if (_isJsonContentType(ct)) {
-                            var detail = '';
                             try {
                                 detail = xhr.responseText || '';
                             } catch(e2) {
@@ -160,15 +166,15 @@
                                     detail = '';
                                 }
                             }
-                            _pushNetworkEvent({
-                                type: 'network_response',
-                                timestamp: Date.now(),
-                                url: xhr._tiangong_url || '',
-                                method: xhr._tiangong_method || 'GET',
-                                status: xhr.status,
-                                detail: _responsePreview(detail)
-                            });
                         }
+                        _pushNetworkEvent({
+                            type: 'network_response',
+                            timestamp: Date.now(),
+                            url: xhr._tiangong_url || '',
+                            method: xhr._tiangong_method || 'GET',
+                            status: xhr.status,
+                            detail: _responsePreview(detail)
+                        });
                     } catch(e) {}
                 });
             }
@@ -661,6 +667,33 @@
                 var score = this._rankElement(elements[i], query, options, 'natural');
                 if (score > 0) {
                     this._pushCandidate(candidates, seen, elements[i], score, 'smart match');
+                }
+            }
+            // 标准候选未命中时，扩大范围到所有可见文本元素（排除祖先容器，只保留最内层匹配）
+            if (candidates.length === 0) {
+                var all = this._queryAll('body *') || [];
+                var rawMatches = [];
+                for (var j = 0; j < all.length; j++) {
+                    var tag = all[j].tagName ? all[j].tagName.toLowerCase() : '';
+                    if (['script', 'style', 'noscript', 'meta', 'link', 'svg', 'path'].indexOf(tag) >= 0) continue;
+                    var score2 = this._rankElement(all[j], query, options, 'natural');
+                    if (score2 > 0) rawMatches.push({ el: all[j], score: score2 });
+                }
+                // 去除祖先：如果 A 包含 B 且两者都匹配，保留 B（更精确的后代）
+                var filtered = [];
+                for (var m = 0; m < rawMatches.length; m++) {
+                    var isAncestor = false;
+                    for (var n = 0; n < rawMatches.length; n++) {
+                        if (m === n) continue;
+                        if (rawMatches[m].el.contains(rawMatches[n].el)) {
+                            isAncestor = true;
+                            break;
+                        }
+                    }
+                    if (!isAncestor) filtered.push(rawMatches[m]);
+                }
+                for (var k = 0; k < filtered.length; k++) {
+                    this._pushCandidate(candidates, seen, filtered[k].el, filtered[k].score, 'fallback match');
                 }
             }
         },
