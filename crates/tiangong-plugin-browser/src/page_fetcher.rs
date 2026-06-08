@@ -653,17 +653,22 @@ impl BrowserToolOverride {
             } else {
                 let candidates = Self::format_candidates(&result.candidates);
                 let error = result.error.unwrap_or_default();
-                let stderr = if candidates.is_empty() {
-                    error
+                let mut stdout = String::from("未找到匹配元素。");
+                if !candidates.is_empty() {
+                    stdout.push('\n');
+                    stdout.push_str(&candidates);
+                }
+                let stderr = if error.is_empty() {
+                    String::new()
                 } else {
-                    format!("{error}\n{candidates}")
+                    error
                 };
                 Some(tiangong_core::tool::ToolResult {
-                    ok: false,
-                    summary: "元素定位失败".to_string(),
-                    stdout: String::new(),
+                    ok: true,
+                    summary: "未找到匹配元素".to_string(),
+                    stdout,
                     stderr,
-                    exit_code: 1,
+                    exit_code: 0,
                     execution: None,
                 })
             }

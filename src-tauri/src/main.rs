@@ -240,7 +240,8 @@ fn run_gui() {
                 state.register_tool_override("web_fetch", handler.clone());
                 state.register_tool_override("web_form_extract", handler.clone());
                 state.register_tool_override("web_form_fill", handler.clone());
-                state.register_tool_override("web_click", handler);
+                state.register_tool_override("web_click", handler.clone());
+                state.register_tool_override("web_locate_element", handler);
             }
 
             // 浏览器事件桥接：从 Plugin 的 event_rx 接收事件，转发到 Core 和前端
