@@ -292,9 +292,7 @@ pub(crate) fn classify_tool(tool_name: &str) -> PermissionLevel {
     match tool_name {
         // 安全：只读
         "read_file" | "list_dir" | "tree_dir" | "search_code" | "web_fetch" | "current_time"
-        | "get_skill_detail" | "recall_memory" | "web_browse" | "web_form_extract" => {
-            PermissionLevel::Safe
-        }
+        | "get_skill_detail" | "recall_memory" | "web_form_extract" => PermissionLevel::Safe,
         // 标准：文件写入
         "write_file" | "replace_in_file" => PermissionLevel::Standard,
         // 高级：命令执行 + 浏览器操作
@@ -507,9 +505,7 @@ fn infer_tool_name_scope(
         "web_fetch" => "network",
         "analyze_attachment" | "generate_image" | "speech_to_text" | "text_to_speech" => "external",
         "run_command" | "run_shell" => "command",
-        "web_browse" | "web_form_extract" | "web_form_fill" | "web_click" | "web_load_html" => {
-            "browser"
-        }
+        "web_form_extract" | "web_form_fill" | "web_click" | "web_load_html" => "browser",
         _ => return (None, summary),
     };
     (Some(scope.to_string()), summary)
@@ -677,7 +673,6 @@ mod tests {
     fn classify_tool_levels() {
         assert_eq!(classify_tool("read_file"), PermissionLevel::Safe);
         assert_eq!(classify_tool("tree_dir"), PermissionLevel::Safe);
-        assert_eq!(classify_tool("web_browse"), PermissionLevel::Safe);
         assert_eq!(classify_tool("web_form_extract"), PermissionLevel::Safe);
         assert_eq!(classify_tool("write_file"), PermissionLevel::Standard);
         assert_eq!(classify_tool("replace_in_file"), PermissionLevel::Standard);

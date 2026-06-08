@@ -2096,10 +2096,29 @@ fn drain_pending_commands_async(
             }
             Command::ReloadConfig => {}
             Command::Approval { .. } => {}
-            cmd @ (Command::SetPageFetcher { .. }
-            | Command::RegisterToolOverride { .. }
-            | Command::InjectBrowserContent { .. }) => {
+            cmd @ (Command::SetPageFetcher { .. } | Command::RegisterToolOverride { .. }) => {
                 handle_plugin_commands!(cmd, engine, session, stream_tx);
+            }
+            Command::InjectBrowserContent {
+                title,
+                url,
+                text,
+                tabs,
+                active_tab_id,
+            } => {
+                crate::react::message::inject_browser_content_to_session(
+                    session,
+                    stream_tx,
+                    &crate::react::message::BrowserContent {
+                        title: &title,
+                        url: &url,
+                        text: &text,
+                        tabs: &tabs,
+                        active_tab_id: active_tab_id.as_deref(),
+                    },
+                    false,
+                );
+                injected_message = true;
             }
             Command::CompressContext => {
                 crate::core::compress_context_for_session(session, engine, stream_tx);

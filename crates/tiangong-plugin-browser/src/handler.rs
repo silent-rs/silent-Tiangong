@@ -6,8 +6,8 @@ use tracing::warn;
 
 use crate::manager::{default_browser_rect, BrowserManager, BrowserState};
 use crate::types::{
-    BrowserCommand, BrowserPageSnapshot, BrowserResponse, ClickElementResult, FillFieldResult,
-    FormExtractResult, PageStatus,
+    BrowserCommand, BrowserEvent, BrowserPageSnapshot, BrowserResponse, ClickElementResult,
+    FillFieldResult, FormExtractResult, PageStatus,
 };
 
 /// 浏览器命令处理循环
@@ -15,6 +15,7 @@ pub async fn browser_command_handler(
     mut rx: mpsc::Receiver<BrowserCommand>,
     browser_state: Arc<Mutex<BrowserState>>,
     app: AppHandle<Wry>,
+    event_tx: mpsc::Sender<BrowserEvent>,
 ) {
     while let Some(cmd) = rx.recv().await {
         match cmd {
@@ -248,13 +249,14 @@ pub async fn browser_command_handler(
                 let manager = BrowserManager {
                     state: browser_state.clone(),
                 };
-                let app_clone = app.clone();
+                let event_tx = event_tx.clone();
                 let _ = tokio::task::spawn_blocking(move || match manager.tab_new(&url) {
                     Ok(tab_id) => {
-                        let _ = app_clone.emit(
-                            "browser:tab_updated",
-                            serde_json::json!({ "action": "new", "tab_id": tab_id, "url": url }),
-                        );
+                        let _ = event_tx.try_send(BrowserEvent::TabChanged {
+                            action: "new".to_string(),
+                            tab_id,
+                            url: Some(url),
+                        });
                     }
                     Err(e) => warn!(error = %e, "tab_new error"),
                 })
@@ -264,15 +266,16 @@ pub async fn browser_command_handler(
                 let manager = BrowserManager {
                     state: browser_state.clone(),
                 };
-                let app_clone = app.clone();
+                let event_tx = event_tx.clone();
                 let _ = tokio::task::spawn_blocking(move || {
                     if let Err(e) = manager.tab_switch(&tab_id) {
                         warn!(error = %e, "tab_switch error");
                     } else {
-                        let _ = app_clone.emit(
-                            "browser:tab_updated",
-                            serde_json::json!({ "action": "switch", "tab_id": tab_id }),
-                        );
+                        let _ = event_tx.try_send(BrowserEvent::TabChanged {
+                            action: "switch".to_string(),
+                            tab_id,
+                            url: None,
+                        });
                     }
                 })
                 .await;
@@ -281,15 +284,16 @@ pub async fn browser_command_handler(
                 let manager = BrowserManager {
                     state: browser_state.clone(),
                 };
-                let app_clone = app.clone();
+                let event_tx = event_tx.clone();
                 let _ = tokio::task::spawn_blocking(move || {
                     if let Err(e) = manager.tab_close(&tab_id) {
                         warn!(error = %e, "tab_close error");
                     } else {
-                        let _ = app_clone.emit(
-                            "browser:tab_updated",
-                            serde_json::json!({ "action": "close", "tab_id": tab_id }),
-                        );
+                        let _ = event_tx.try_send(BrowserEvent::TabChanged {
+                            action: "close".to_string(),
+                            tab_id,
+                            url: None,
+                        });
                     }
                 })
                 .await;

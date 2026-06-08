@@ -8,7 +8,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tracing::{info, warn};
 
 const TRAY_SHOW_WINDOW_ID: &str = "show_window";
@@ -225,8 +225,6 @@ fn run_gui() {
     tauri::Builder::default()
         .manage(tiangong_app::TiangongApp::new())
         .setup(|app| {
-            use tauri::Listener;
-
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Regular);
             setup_tray(app)?;
@@ -240,27 +238,55 @@ fn run_gui() {
             }
             if let Some(handler) = tiangong_plugin_browser::get_tool_override(app.handle()) {
                 state.register_tool_override("web_fetch", handler.clone());
-                state.register_tool_override("web_browse", handler.clone());
                 state.register_tool_override("web_form_extract", handler.clone());
                 state.register_tool_override("web_form_fill", handler.clone());
                 state.register_tool_override("web_click", handler);
             }
 
-            // 监听浏览器页面加载事件，自动注入内容到当前活跃会话
-            let inject_handle = app.handle().clone();
-            app.listen("browser:page_loaded", move |event| {
-                let payload = event.payload().to_string();
-                if let Ok(data) = serde_json::from_str::<serde_json::Value>(&payload) {
-                    let url = data["url"].as_str().unwrap_or("").to_string();
-                    if url.is_empty() {
-                        return;
+            // 浏览器事件桥接：从 Plugin 的 event_rx 接收事件，转发到 Core 和前端
+            if let Some(mut event_rx) = tiangong_plugin_browser::take_event_rx(app.handle()) {
+                let bridge_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    use tiangong_plugin_browser::types::BrowserEvent;
+                    while let Some(event) = event_rx.recv().await {
+                        match event {
+                            BrowserEvent::PageData { url, title, text } => {
+                                if url.is_empty() {
+                                    continue;
+                                }
+                                // 始终通知前端更新地址栏和标签栏
+                                let _ = bridge_handle.emit(
+                                    "browser:page_loaded",
+                                    serde_json::json!({
+                                        "title": title,
+                                        "url": url,
+                                        "text": text,
+                                    }),
+                                );
+                                // 仅有内容时才注入到 agent 会话（空 text 表示仅 URL 变化通知）
+                                if !text.is_empty() {
+                                    let state = bridge_handle.state::<tiangong_app::TiangongApp>();
+                                    state.inject_browser_content(title, url, text, vec![], None);
+                                }
+                            }
+                            BrowserEvent::TabChanged {
+                                action,
+                                tab_id,
+                                url,
+                            } => {
+                                let _ = bridge_handle.emit(
+                                    "browser:tab_updated",
+                                    serde_json::json!({
+                                        "action": action,
+                                        "tab_id": tab_id,
+                                        "url": url,
+                                    }),
+                                );
+                            }
+                        }
                     }
-                    let title = data["title"].as_str().unwrap_or("").to_string();
-                    let text = data["text"].as_str().unwrap_or("").to_string();
-                    let state = inject_handle.state::<tiangong_app::TiangongApp>();
-                    state.inject_browser_content(title, url, text, vec![], None);
-                }
-            });
+                });
+            }
 
             let scheduler_ctx = state.create_scheduler_context();
             tauri::async_runtime::spawn(async move {
