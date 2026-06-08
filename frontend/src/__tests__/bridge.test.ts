@@ -16,6 +16,18 @@ function setupDOM(html: string) {
   if (!Element.prototype.scrollIntoView) {
     Element.prototype.scrollIntoView = function () {};
   }
+  // jsdom getBoundingClientRect 返回全零，polyfill 为非零尺寸
+  if (!Element.prototype.getBoundingClientRect.__polyfilled) {
+    const orig = Element.prototype.getBoundingClientRect;
+    Element.prototype.getBoundingClientRect = function () {
+      const rect = orig.call(this);
+      if (rect.width === 0 && rect.height === 0) {
+        return { x: 0, y: 0, width: 100, height: 30, top: 0, right: 100, bottom: 30, left: 0 };
+      }
+      return rect;
+    };
+    (Element.prototype.getBoundingClientRect as any).__polyfilled = true;
+  }
   // jsdom 不提供 elementFromPoint
   if (!document.elementFromPoint) {
     document.elementFromPoint = function () { return document.body; };

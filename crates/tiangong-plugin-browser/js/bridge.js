@@ -709,13 +709,36 @@
                 for (var i = 0; i < cssMatches.length; i++) {
                     this._pushCandidate(candidates, seen, cssMatches[i], 120, 'css selector');
                 }
-                return this._resolveCandidates(query, candidates, { strictMultiple: candidates.length > 1, minScore: 1 });
+                var result = this._resolveCandidates(query, candidates, { strictMultiple: candidates.length > 1, minScore: 1 });
+                if (!result.ok) {
+                    var disabledCheck = this._checkDisabledFallback(query, cssMatches);
+                    if (disabledCheck) return disabledCheck;
+                }
+                return result;
             }
 
             this._findExplicitCandidates(query, options, candidates, seen);
             this._findTableCellTarget(query, options, candidates, seen);
             this._findNaturalCandidates(query, options, candidates, seen);
-            return this._resolveCandidates(query, candidates, {});
+            var result = this._resolveCandidates(query, candidates, {});
+            if (!result.ok) {
+                var elements = this._candidateElements(options);
+                var disabledCheck = this._checkDisabledFallback(query, elements);
+                if (disabledCheck) return disabledCheck;
+            }
+            return result;
+        },
+
+        _checkDisabledFallback: function(query, elements) {
+            for (var i = 0; i < elements.length; i++) {
+                var el = elements[i];
+                if (!this._isVisible(el)) continue;
+                var text = (this._visibleText(el) || '').trim();
+                if (text === query && this._isDisabled(el)) {
+                    return { ok: false, error: '元素已禁用: ' + query, candidates: [] };
+                }
+            }
+            return null;
         },
 
         locateElement: function(query, options) {
