@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { api } from '@/api/tauri';
 import { listen } from '@tauri-apps/api/event';
-import { Globe, ArrowRight, ArrowLeft, RotateCw, CornerDownRight, Plus, X, PenTool } from 'lucide-react';
+import { Globe, ArrowRight, ArrowLeft, RotateCw, CornerDownRight, Plus, X, PenTool, ScanSearch } from 'lucide-react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 
@@ -33,6 +33,12 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
   const [tabs, setTabs] = useState<TabInfo[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [annotationActive, setAnnotationActive] = useState(false);
+  const [extractedElements, setExtractedElements] = useState<Array<{
+    tag: string;
+    text: string;
+    selector: string;
+    attributes: Record<string, string>;
+  }> | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const initializedRef = useRef(false);
   const browserOpenedRef = useRef(false);
@@ -154,6 +160,16 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
       console.error('批注切换失败：', err);
     }
   }, [annotationActive]);
+
+  const handleAnnotationExtract = useCallback(async () => {
+    try {
+      const result = await api.browserAnnotationExtract();
+      const allElements = result.elements.flatMap(r => r.elements);
+      setExtractedElements(allElements);
+    } catch (err) {
+      console.error('批注元素提取失败：', err);
+    }
+  }, []);
 
   const handleTabNew = useCallback(async () => {
     try {
@@ -322,7 +338,40 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
         >
           <PenTool className="w-3.5 h-3.5" />
         </Button>
+        {annotationActive && (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={handleAnnotationExtract}
+            className="h-7 w-7 p-0 shrink-0"
+            title="提取框选元素"
+          >
+            <ScanSearch className="w-3.5 h-3.5" />
+          </Button>
+        )}
       </div>
+
+      {/* 批注元素提取结果 */}
+      {extractedElements && extractedElements.length > 0 && (
+        <div className="px-2 py-2 border-b bg-muted/20 text-xs max-h-40 overflow-y-auto">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-muted-foreground font-medium">提取到 {extractedElements.length} 个元素</span>
+            <button
+              className="text-muted-foreground hover:text-foreground"
+              onClick={() => setExtractedElements(null)}
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+          {extractedElements.map((el, i) => (
+            <div key={i} className="py-1 border-b border-border/30 last:border-0">
+              <span className="text-primary font-mono">&lt;{el.tag}&gt;</span>
+              {el.text && <span className="ml-1 truncate max-w-[60%] inline-block align-bottom">{el.text}</span>}
+              <div className="text-muted-foreground font-mono text-[10px] truncate">{el.selector}</div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* WebView 容器 */}
       <div

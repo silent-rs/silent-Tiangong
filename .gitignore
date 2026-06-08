@@ -15,3 +15,5 @@ src-tauri/create_skill/
 .workers
 *.mp4
 .playwright-mcp
+src-tauri/gen/schemas/
+crates/tiangong-plugin-browser/permissions/schemas/

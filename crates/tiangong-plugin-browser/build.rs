@@ -11,6 +11,7 @@ const COMMANDS: &[&str] = &[
     "browser_tab_new",
     "browser_tab_switch",
     "browser_tab_close",
+    "browser_annotation_extract",
 ];
 
 fn main() {

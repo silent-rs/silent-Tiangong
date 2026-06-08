@@ -65,8 +65,32 @@
             // window.ipc 不可重新配置，忽略
         }
 
-        // --- 3. 拦截 fetch ipc:// 协议 ---
-        // 返回包含 Tauri 期望头部的成功响应，避免回退到 postMessage 通道
+        // --- 3. 拦截 fetch ipc:// 协议 + 捕获 JSON 响应 ---
+        var _pendingNetworkEvents = window.__tiangong_pending_network_events || [];
+        window.__tiangong_pending_network_events = _pendingNetworkEvents;
+        var _isJsonContentType = function(contentType) {
+            contentType = (contentType || '').toLowerCase();
+            return contentType.indexOf('application/json') >= 0 ||
+                contentType.indexOf('text/json') >= 0 ||
+                contentType.indexOf('+json') >= 0;
+        };
+        var _pushNetworkEvent = function(event) {
+            try {
+                if (window.__tiangong_bridge && window.__tiangong_bridge.observer) {
+                    window.__tiangong_bridge.observer._pushEvent(event);
+                    return;
+                }
+            } catch(e) {}
+            _pendingNetworkEvents.push(event);
+            if (_pendingNetworkEvents.length > 100) {
+                _pendingNetworkEvents = _pendingNetworkEvents.slice(-50);
+                window.__tiangong_pending_network_events = _pendingNetworkEvents;
+            }
+        };
+        var _responsePreview = function(text) {
+            text = text || '';
+            return text.length > 500 ? text.substring(0, 500) : text;
+        };
         var _origFetch = window.fetch;
         window.fetch = function(input, init) {
             var url = (typeof input === 'string') ? input : (input && input.url ? input.url : '');
@@ -81,16 +105,74 @@
                     }
                 }));
             }
-            return _origFetch.apply(this, arguments);
+            return _origFetch.call(this, input, init).then(function(response) {
+                try {
+                    var ct = response.headers.get('content-type') || '';
+                    if (_isJsonContentType(ct)) {
+                        var cloned = response.clone();
+                        var method = (init && init.method) || (input && input.method) || 'GET';
+                        cloned.text().then(function(body) {
+                            _pushNetworkEvent({
+                                type: 'network_response',
+                                timestamp: Date.now(),
+                                url: url,
+                                method: method,
+                                status: response.status,
+                                detail: _responsePreview(body)
+                            });
+                        }).catch(function() {});
+                    }
+                } catch(e) {}
+                return response;
+            });
         };
 
-        // --- 4. 拦截 XHR ipc:// 协议 ---
-        var _origXHR = window.XMLHttpRequest.prototype.open;
-        window.XMLHttpRequest.prototype.open = function(method, url) {
+        // --- 4. 拦截 XHR ipc:// 协议 + 捕获 JSON 响应 ---
+        var _origXHROpen = window.XMLHttpRequest.prototype.open;
+        var _origXHRSend = window.XMLHttpRequest.prototype.send;
+        window.XMLHttpRequest.prototype.open = function(method, url, async, user, password) {
             if (typeof url === 'string' && url.indexOf('ipc://') === 0) {
+                this._tiangong_blocked = true;
                 return;
             }
-            return _origXHR.apply(this, arguments);
+            this._tiangong_blocked = false;
+            this._tiangong_method = method;
+            this._tiangong_url = url;
+            return _origXHROpen.call(this, method, url, async, user, password);
+        };
+        window.XMLHttpRequest.prototype.send = function(body) {
+            var xhr = this;
+            if (xhr._tiangong_blocked) {
+                return;
+            }
+            if (xhr._tiangong_url && xhr._tiangong_url.indexOf('ipc://') !== 0) {
+                xhr.addEventListener('load', function() {
+                    try {
+                        var ct = xhr.getResponseHeader('content-type') || '';
+                        if (_isJsonContentType(ct)) {
+                            var detail = '';
+                            try {
+                                detail = xhr.responseText || '';
+                            } catch(e2) {
+                                try {
+                                    detail = JSON.stringify(xhr.response || '');
+                                } catch(e3) {
+                                    detail = '';
+                                }
+                            }
+                            _pushNetworkEvent({
+                                type: 'network_response',
+                                timestamp: Date.now(),
+                                url: xhr._tiangong_url || '',
+                                method: xhr._tiangong_method || 'GET',
+                                status: xhr.status,
+                                detail: _responsePreview(detail)
+                            });
+                        }
+                    } catch(e) {}
+                });
+            }
+            return _origXHRSend.call(this, body);
         };
     } catch(e) {}
 
@@ -680,8 +762,10 @@
         extractForms: function() {
             var forms = [];
             var containers = document.querySelectorAll('form');
+            // 无 <form> 时，尝试在 dialog 或 body 中查找
             if (containers.length === 0) {
-                containers = [document.body];
+                var dialog = this._getTopmostOverlay();
+                containers = dialog ? [dialog] : [document.body];
             }
             for (var ci = 0; ci < containers.length; ci++) {
                 var container = containers[ci];
@@ -711,6 +795,17 @@
                         if (lbl) field.label = (lbl.textContent || '').trim();
                     }
                     if (!field.label) {
+                        // 向上查找 ds-form-item__label-text、ant-form-item-label、el-form-item__label
+                        var labelEl = el.closest('[class*="form-item"]') || el.closest('.ant-form-item') || el.closest('.el-form-item');
+                        if (labelEl) {
+                            var labelText = labelEl.querySelector('[class*="label-text"]') ||
+                                           labelEl.querySelector('.ant-form-item-label') ||
+                                           labelEl.querySelector('.el-form-item__label') ||
+                                           labelEl.querySelector('label');
+                            if (labelText) field.label = (labelText.textContent || '').trim();
+                        }
+                    }
+                    if (!field.label) {
                         var parent = el.parentElement;
                         if (parent && parent.tagName === 'LABEL') {
                             field.label = (parent.textContent || '').trim();
@@ -727,23 +822,25 @@
                             });
                         }
                     }
-                    // 构造 selector 和 description
+                    // 构造 selector 和 description（智能选择器优先）
                     field.selector = this.generateSelector(el);
                     field.description = this._fieldDescription(field);
                     fields.push(field);
                 }
-                // 提取表单按钮
+                // 提取表单内/容器内的按钮（包含原生和 div[role="button"] 等）
                 var buttons = [];
-                var btnEls = container.querySelectorAll('button,input[type="submit"],input[type="button"],input[type="reset"]');
-                for (var bi = 0; bi < btnEls.length; bi++) {
-                    var btn = btnEls[bi];
-                    var btnText = (btn.textContent || btn.value || '').trim();
+                var btns = container.querySelectorAll('button, input[type="submit"], input[type="reset"], [role="button"]');
+                for (var bci = 0; bci < btns.length; bci++) {
+                    var btn = btns[bci];
+                    var btnText = (btn.textContent || '').trim();
+                    if (!btnText) continue; // 跳过无文本的按钮（如图标按钮）
                     buttons.push({
+                        tag: btn.tagName.toLowerCase(),
                         type: btn.type || 'button',
                         text: btnText,
                         selector: this.generateSelector(btn),
                         description: btnText ? 'text=' + btnText : this.generateSelector(btn),
-                        disabled: btn.disabled || false
+                        disabled: this._isDisabled(btn)
                     });
                 }
                 if (fields.length > 0 || buttons.length > 0) {
@@ -923,8 +1020,10 @@
 
             // select 特殊处理
             if (el.tagName === 'SELECT') {
+                el.focus();
                 el.value = value;
                 el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
                 return { ok: true, strategy: 'select-change', selector: locatedSelector, target: target, currentValue: el.value };
             }
 
@@ -934,34 +1033,50 @@
                 if (el.checked !== shouldCheck) {
                     el.click();
                 }
+                el.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
                 return { ok: true, strategy: 'click-toggle', selector: locatedSelector, target: target, currentValue: String(el.checked) };
             }
 
             strategy = strategy || 'auto';
+            var result = null;
 
-            // 策略 1: 逐字符键盘输入（视觉层最可靠，适用于所有框架）
-            if (strategy === 'auto' || strategy === 'keyboard') {
+            // 策略 1: execCommand insertText（走浏览器原生编辑管线，产生 trusted 事件）
+            if (strategy === 'auto' || strategy === 'insertText') {
+                el.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
                 el.focus();
-                el.dispatchEvent(new KeyboardEvent('keydown', { key: '', bubbles: true }));
-                el.value = '';
-                el.dispatchEvent(new Event('input', { bubbles: true }));
-                for (var i = 0; i < value.length; i++) {
-                    var ch = value[i];
-                    el.value = el.value + ch;
-                    var keyInit = { key: ch, code: 'Key' + ch.toUpperCase(), bubbles: true };
-                    el.dispatchEvent(new KeyboardEvent('keydown', keyInit));
-                    el.dispatchEvent(new KeyboardEvent('keypress', keyInit));
+                // 策略 1a: execCommand insertText（走浏览器原生编辑管线，产生 trusted 事件）
+                el.select();
+                try {
+                    if (document.execCommand('insertText', false, value)) {
+                        if (el.value === value) {
+                            result = { ok: true, strategy: 'execCommand-insertText', selector: locatedSelector, target: target, currentValue: el.value };
+                        }
+                    }
+                } catch(e) {}
+                // 策略 1b: 逐字符键盘模拟（兼容 execCommand 不生效的场景）
+                if (!result) {
+                    el.dispatchEvent(new KeyboardEvent('keydown', { key: '', bubbles: true }));
+                    el.value = '';
                     el.dispatchEvent(new Event('input', { bubbles: true }));
-                    el.dispatchEvent(new KeyboardEvent('keyup', keyInit));
-                }
-                el.dispatchEvent(new Event('change', { bubbles: true }));
-                if (el.value === value) {
-                    return { ok: true, strategy: 'keyboard', selector: locatedSelector, target: target, currentValue: el.value };
+                    for (var ci = 0; ci < value.length; ci++) {
+                        var ch = value[ci];
+                        el.value = el.value + ch;
+                        var keyInit = { key: ch, code: 'Key' + ch.toUpperCase(), bubbles: true };
+                        el.dispatchEvent(new KeyboardEvent('keydown', keyInit));
+                        el.dispatchEvent(new KeyboardEvent('keypress', keyInit));
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new KeyboardEvent('keyup', keyInit));
+                    }
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    if (el.value === value) {
+                        result = { ok: true, strategy: 'keyboard', selector: locatedSelector, target: target, currentValue: el.value };
+                    }
                 }
             }
 
-            // 策略 2: native setter（适用于 React 受控组件，视觉层可能不跟随）
-            if (strategy === 'auto' || strategy === 'native') {
+            // 策略 2: native setter（适用于 React 受控组件）
+            if (!result && (strategy === 'auto' || strategy === 'native')) {
+                el.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
                 el.focus();
                 var proto = Object.getPrototypeOf(el);
                 var descriptor = Object.getOwnPropertyDescriptor(proto, 'value') ||
@@ -972,27 +1087,52 @@
                                      'value'
                                  );
                 if (descriptor && descriptor.set) {
-                    el.value = '';
+                    descriptor.set.call(el, '');
                     el.dispatchEvent(new Event('input', { bubbles: true }));
                     descriptor.set.call(el, value);
                     el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
                     el.dispatchEvent(new Event('change', { bubbles: true }));
+                    // 额外触发键盘事件，确保框架感知到用户交互
+                    el.dispatchEvent(new KeyboardEvent('keyup', { key: ' ', code: 'Space', keyCode: 32, bubbles: true }));
                     if (el.value === value) {
-                        return { ok: true, strategy: 'native-setter', selector: locatedSelector, target: target, currentValue: el.value };
+                        result = { ok: true, strategy: 'native-setter', selector: locatedSelector, target: target, currentValue: el.value };
                     }
                 }
             }
 
-            // 策略 3: 粘贴（兜底）
-            if (strategy === 'auto' || strategy === 'paste') {
+            // 策略 3: 直接赋值 + 事件（兜底）
+            if (!result && (strategy === 'auto' || strategy === 'paste')) {
+                el.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
                 el.focus();
                 el.value = value;
                 el.dispatchEvent(new Event('input', { bubbles: true }));
                 el.dispatchEvent(new Event('change', { bubbles: true }));
-                return { ok: true, strategy: 'paste', selector: locatedSelector, target: target, currentValue: el.value };
+                result = { ok: true, strategy: 'direct-assign', selector: locatedSelector, target: target, currentValue: el.value };
             }
 
-            return { ok: false, error: '所有填写策略均未成功', currentValue: el.value, selector: locatedSelector, target: target };
+            if (!result) {
+                return { ok: false, error: '所有填写策略均未成功', currentValue: el.value, selector: locatedSelector, target: target };
+            }
+
+            // 填写完成后触发 blur 激活表单校验
+            el.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+
+            // 检查填写后是否有 disabled 按钮变为 enabled（返回提示信息）
+            result.currentValue = el.value;
+            if (!result.selector) result.selector = locatedSelector;
+            if (!result.target) result.target = target;
+            var dialog = this._getTopmostOverlay();
+            if (dialog) {
+                var disabledBtns = dialog.querySelectorAll('[role="button"]');
+                for (var di = 0; di < disabledBtns.length; di++) {
+                    var btnText = (disabledBtns[di].textContent || '').trim();
+                    if (btnText && this._isDisabled(disabledBtns[di])) {
+                        result.note = '按钮 "' + btnText + '" 仍处于禁用状态，可能需要填写更多必填字段';
+                        break;
+                    }
+                }
+            }
+            return result;
         },
 
         // UI 库组件填写（多步交互，异步返回）
@@ -1127,9 +1267,367 @@
             return { ok: true, strategy: 'el-datepicker' };
         },
 
+        // 智能元素定位：根据多种格式自动选择定位策略
+        locateElement: function(selector) {
+            if (!selector || typeof selector !== 'string') return null;
+            selector = selector.trim();
+            if (!selector) return null;
+
+            // 策略 0: nth:N,selector — 选择第 N 个匹配
+            if (selector.indexOf('nth:') === 0) {
+                var commaIdx = selector.indexOf(',');
+                if (commaIdx > 4) {
+                    var idx = parseInt(selector.substring(4, commaIdx), 10);
+                    var innerSelector = selector.substring(commaIdx + 1);
+                    if (!isNaN(idx) && idx > 0) {
+                        var all = this.locateAll(innerSelector);
+                        if (all && all.length >= idx) {
+                            return all[idx - 1];
+                        }
+                    }
+                }
+                return null;
+            }
+
+            // 策略 1: rect:x,y,w,h — 批注矩形区域定位
+            if (selector.indexOf('rect:') === 0) {
+                var parts = selector.substring(5).split(',').map(Number);
+                if (parts.length >= 4 && parts.every(function(n) { return !isNaN(n); })) {
+                    return this._findElementInRect(parts[0], parts[1], parts[2], parts[3]);
+                }
+                return null;
+            }
+
+            // 策略 2: aria:label — ARIA 属性定位
+            if (selector.indexOf('aria:') === 0) {
+                var ariaVal = selector.substring(5);
+                var el = document.querySelector('[aria-label*="' + ariaVal + '"]');
+                if (el) return el;
+                el = document.querySelector('[role="' + ariaVal + '"]');
+                if (el) return el;
+                el = document.querySelector('[aria-roledescription*="' + ariaVal + '"]');
+                return el || null;
+            }
+
+            // 策略 3: CSS selector 尝试（#id, .class, tag, [attr], 组合选择器）
+            try {
+                var cssEl = document.querySelector(selector);
+                if (cssEl) return cssEl;
+            } catch(e) {
+                // 不是有效 CSS selector，继续其他策略
+            }
+
+            // 检测当前打开的对话框，优先在其中查找
+            var dialog = this._getTopmostOverlay();
+            var contexts = dialog ? [dialog, document.body] : [document.body];
+            var lowerSelector = selector.toLowerCase();
+            var xpathLit = this._xpathLiteral(selector);
+
+            // 策略 4: 精确文本匹配（对话框内 → 全局）
+            for (var ci = 0; ci < contexts.length; ci++) {
+                var exactResult = document.evaluate(
+                    './/*[text() = ' + xpathLit + ']',
+                    contexts[ci], null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
+                );
+                if (exactResult.singleNodeValue) return exactResult.singleNodeValue;
+            }
+
+            // 策略 5: 按钮精确文本（对话框内 → 全局）
+            var allButtons = document.querySelectorAll('button, a, [role="button"], input[type="submit"]');
+            for (var ci2 = 0; ci2 < contexts.length; ci2++) {
+                for (var bi = 0; bi < allButtons.length; bi++) {
+                    if (!contexts[ci2].contains(allButtons[bi])) continue;
+                    if ((allButtons[bi].textContent || '').trim().toLowerCase() === lowerSelector) {
+                        return allButtons[bi];
+                    }
+                }
+            }
+
+            // 策略 6: 部分文本匹配（对话框内 → 全局）
+            for (var ci3 = 0; ci3 < contexts.length; ci3++) {
+                var partialResult = document.evaluate(
+                    './/*[contains(text(), ' + xpathLit + ')]',
+                    contexts[ci3], null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
+                );
+                if (partialResult.singleNodeValue) return partialResult.singleNodeValue;
+            }
+
+            // 策略 7: 按钮模糊匹配（对话框内 → 全局）
+            for (var ci4 = 0; ci4 < contexts.length; ci4++) {
+                for (var bj = 0; bj < allButtons.length; bj++) {
+                    if (!contexts[ci4].contains(allButtons[bj])) continue;
+                    var btnText = (allButtons[bj].textContent || '').trim().toLowerCase();
+                    var btnTitle = (allButtons[bj].getAttribute('title') || '').toLowerCase();
+                    var btnAria = (allButtons[bj].getAttribute('aria-label') || '').toLowerCase();
+                    if (btnText.indexOf(lowerSelector) >= 0 ||
+                        btnTitle.indexOf(lowerSelector) >= 0 ||
+                        btnAria.indexOf(lowerSelector) >= 0) {
+                        return allButtons[bj];
+                    }
+                }
+            }
+
+            return null;
+        },
+
+        // 返回所有匹配的元素列表（用于候选提示和 nth 语法）
+        locateAll: function(selector) {
+            if (!selector || typeof selector !== 'string') return [];
+            selector = selector.trim();
+            if (!selector) return [];
+
+            var results = [];
+            var seen = {};
+            var lowerSelector = selector.toLowerCase();
+
+            // CSS selector
+            try {
+                var cssAll = document.querySelectorAll(selector);
+                for (var ci = 0; ci < cssAll.length; ci++) {
+                    var key = this._elementKey(cssAll[ci]);
+                    if (!seen[key]) {
+                        seen[key] = true;
+                        results.push(cssAll[ci]);
+                    }
+                }
+            } catch(e) {}
+
+            // XPath exact text
+            var exactIter = document.evaluate(
+                './/*[text() = ' + this._xpathLiteral(selector) + ']',
+                document.body, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null
+            );
+            for (var ei = 0; ei < exactIter.snapshotLength; ei++) {
+                var key2 = this._elementKey(exactIter.snapshotItem(ei));
+                if (!seen[key2]) { seen[key2] = true; results.push(exactIter.snapshotItem(ei)); }
+            }
+
+            // XPath partial text
+            var partialIter = document.evaluate(
+                './/*[contains(text(), ' + this._xpathLiteral(selector) + ')]',
+                document.body, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null
+            );
+            for (var pi = 0; pi < partialIter.snapshotLength; pi++) {
+                var key3 = this._elementKey(partialIter.snapshotItem(pi));
+                if (!seen[key3]) { seen[key3] = true; results.push(partialIter.snapshotItem(pi)); }
+            }
+
+            // Button text match
+            var buttons = document.querySelectorAll('button, a, [role="button"], input[type="submit"]');
+            for (var bi = 0; bi < buttons.length; bi++) {
+                var key4 = this._elementKey(buttons[bi]);
+                if (seen[key4]) continue;
+                var btnText = (buttons[bi].textContent || '').trim().toLowerCase();
+                var btnTitle = (buttons[bi].getAttribute('title') || '').toLowerCase();
+                var btnAria = (buttons[bi].getAttribute('aria-label') || '').toLowerCase();
+                if (btnText.indexOf(lowerSelector) >= 0 ||
+                    btnTitle.indexOf(lowerSelector) >= 0 ||
+                    btnAria.indexOf(lowerSelector) >= 0) {
+                    seen[key4] = true;
+                    results.push(buttons[bi]);
+                }
+            }
+
+            return results;
+        },
+
+        _elementKey: function(el) {
+            if (!el) return '';
+            return el.tagName + ':' + (el.id || '') + ':' + this.generateSelector(el);
+        },
+
+        _xpathLiteral: function(s) {
+            if (s.indexOf('"') === -1) return '"' + s + '"';
+            if (s.indexOf("'") === -1) return "'" + s + "'";
+            var parts = s.split('"');
+            return 'concat("' + parts.join('", \'"\', "') + '")';
+        },
+
+        _findElementInRect: function(x, y, w, h) {
+            var candidates = [];
+            var allEls = document.querySelectorAll('*');
+            for (var i = 0; i < allEls.length; i++) {
+                var el = allEls[i];
+                var r = el.getBoundingClientRect();
+                if (r.width === 0 || r.height === 0) continue;
+                // 计算重叠面积
+                var ox = Math.max(0, Math.min(x + w, r.left + r.width) - Math.max(x, r.left));
+                var oy = Math.max(0, Math.min(y + h, r.top + r.height) - Math.max(y, r.top));
+                var overlap = ox * oy;
+                if (overlap > 0) {
+                    candidates.push({ el: el, overlap: overlap, area: r.width * r.height });
+                }
+            }
+            if (candidates.length === 0) return null;
+            // 按重叠率排序，优先选择重叠比高且面积适中的元素
+            candidates.sort(function(a, b) {
+                var ratioA = a.overlap / Math.max(a.area, 1);
+                var ratioB = b.overlap / Math.max(b.area, 1);
+                return ratioB - ratioA;
+            });
+            // 跳过过大的容器（body, html 等），取第一个有意义的元素
+            for (var ci = 0; ci < candidates.length; ci++) {
+                var tag = candidates[ci].el.tagName.toLowerCase();
+                if (tag !== 'body' && tag !== 'html' && candidates[ci].area < (w * h * 10)) {
+                    return candidates[ci].el;
+                }
+            }
+            return candidates[0].el;
+        },
+
+        // 根据元素生成 CSS selector
+        generateSelector: function(el) {
+            if (!el) return '';
+            if (el.id) return '#' + el.id.replace(/([^\w-])/g, '\\$1');
+            // 尝试 name 属性
+            if (el.name) return '[name="' + el.name + '"]';
+            // 向上生成路径
+            var parts = [];
+            var cur = el;
+            while (cur && cur !== document.body) {
+                var seg = cur.tagName.toLowerCase();
+                if (cur.id) {
+                    seg = '#' + cur.id.replace(/([^\w-])/g, '\\$1');
+                    parts.unshift(seg);
+                    break;
+                }
+                // 同级同名元素中排第几
+                if (cur.parentElement) {
+                    var siblings = cur.parentElement.children;
+                    var sameTag = [];
+                    for (var i = 0; i < siblings.length; i++) {
+                        if (siblings[i].tagName === cur.tagName) sameTag.push(siblings[i]);
+                    }
+                    if (sameTag.length > 1) {
+                        var idx = sameTag.indexOf(cur) + 1;
+                        seg += ':nth-of-type(' + idx + ')';
+                    }
+                }
+                parts.unshift(seg);
+                cur = cur.parentElement;
+            }
+            return parts.join(' > ');
+        },
+
+        // 提取矩形区域内的 DOM 元素信息
+        extractElementsInRect: function(x, y, w, h) {
+            var results = [];
+            var allEls = document.querySelectorAll('*');
+            for (var i = 0; i < allEls.length; i++) {
+                var el = allEls[i];
+                var r = el.getBoundingClientRect();
+                if (r.width === 0 || r.height === 0) continue;
+                var ox = Math.max(0, Math.min(x + w, r.left + r.width) - Math.max(x, r.left));
+                var oy = Math.max(0, Math.min(y + h, r.top + r.height) - Math.max(y, r.top));
+                var overlap = ox * oy;
+                if (overlap === 0) continue;
+                var tag = el.tagName.toLowerCase();
+                // 跳过无意义元素
+                if (tag === 'html' || tag === 'body' || tag === 'head' || tag === 'script' || tag === 'style') continue;
+                var overlapRatio = overlap / (r.width * r.height);
+                if (overlapRatio < 0.5) continue;
+                var text = (el.textContent || '').trim();
+                if (text.length > 200) text = text.substring(0, 200) + '...';
+                // 收集关键属性
+                var attrs = {};
+                var importantAttrs = ['id', 'class', 'name', 'type', 'href', 'src', 'placeholder',
+                    'aria-label', 'aria-role', 'role', 'title', 'alt', 'value', 'data-testid'];
+                for (var ai = 0; ai < importantAttrs.length; ai++) {
+                    var val = el.getAttribute(importantAttrs[ai]);
+                    if (val) attrs[importantAttrs[ai]] = val;
+                }
+                results.push({
+                    tag: tag,
+                    text: text,
+                    attributes: attrs,
+                    selector: this.generateSelector(el),
+                    rect: { x: Math.round(r.left), y: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) },
+                    overlapRatio: Math.round(overlapRatio * 100) / 100,
+                    area: Math.round(r.width * r.height)
+                });
+            }
+            // 按面积从小到大排序（小面积 = 更精确的元素）
+            results.sort(function(a, b) { return a.area - b.area; });
+            // 去重：如果父元素和子元素重叠比相同，保留子元素
+            var deduped = [];
+            var seen = {};
+            for (var ri = 0; ri < results.length; ri++) {
+                var key = results[ri].selector;
+                if (!seen[key]) {
+                    seen[key] = true;
+                    deduped.push(results[ri]);
+                }
+            }
+            return deduped.slice(0, 20);
+        },
+
+        queryDom: function(selector, maxResults) {
+            maxResults = maxResults || 20;
+            var els = document.querySelectorAll(selector);
+            var results = [];
+            for (var i = 0; i < Math.min(els.length, maxResults); i++) {
+                var el = els[i];
+                var text = (el.innerText || '').trim();
+                if (text.length > 500) text = text.substring(0, 500) + '...';
+                var attrs = {};
+                var importantAttrs = ['id','class','name','type','href','src','placeholder',
+                    'aria-label','role','title','alt','value','data-testid','disabled','readonly'];
+                for (var ai = 0; ai < importantAttrs.length; ai++) {
+                    var val = el.getAttribute(importantAttrs[ai]);
+                    if (val) attrs[importantAttrs[ai]] = val;
+                }
+                var r = el.getBoundingClientRect();
+                results.push({
+                    index: i,
+                    tag: el.tagName.toLowerCase(),
+                    text: text,
+                    attributes: attrs,
+                    selector: this.generateSelector(el),
+                    rect: { x: Math.round(r.left), y: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) }
+                });
+            }
+            return { selector: selector, total: els.length, returned: results.length, elements: results };
+        },
+
+        // 综合检测元素是否处于禁用状态
+        _isDisabled: function(el) {
+            if (!el) return false;
+            // 原生 disabled 属性
+            if (el.disabled) return true;
+            if (el.hasAttribute && el.hasAttribute('disabled')) return true;
+            // aria-disabled
+            if (el.getAttribute && el.getAttribute('aria-disabled') === 'true') return true;
+            // CSS 类名包含 disabled 模式（如 ds-button--disabled、is-disabled、ant-btn-disabled）
+            if (el.classList) {
+                for (var i = 0; i < el.classList.length; i++) {
+                    var cls = el.classList[i].toLowerCase();
+                    if (cls.indexOf('disabled') >= 0 || cls.indexOf('-disabled') >= 0) {
+                        // 排除误判：如 "not-disabled"
+                        if (cls.indexOf('not-disabled') === -1) return true;
+                    }
+                }
+            }
+            return false;
+        },
+
         clickElement: function(selector) {
             var located = this._locateElement(selector, { action: 'click' });
             if (!located.ok) {
+                // 尝试 locateAll 看是否有候选
+                var all = this.locateAll(selector);
+                if (all.length > 0) {
+                    return {
+                        ok: false,
+                        error: located.error || ('元素未找到: ' + selector),
+                        candidates: all.slice(0, 5).map(function(c) {
+                            return {
+                                tag: (c.tagName || '').toLowerCase(),
+                                text: (c.textContent || '').trim().substring(0, 50),
+                                selector: window.__tiangong_bridge.generateSelector(c)
+                            };
+                        })
+                    };
+                }
                 return {
                     ok: false,
                     error: located.error || ('元素未找到: ' + selector),
@@ -1137,27 +1635,185 @@
                 };
             }
             var el = located.element;
-            el.scrollIntoView({ block: 'center', behavior: 'instant' });
+            var locatedSelector = located.selector;
+            var target = located.target;
+
+            // 如果找到的是内联元素（如 span），尝试点击其父级按钮/链接
+            var clickTarget = el;
+            var interactiveTags = ['BUTTON', 'A', 'INPUT', 'SELECT', 'TEXTAREA', 'SUMMARY', 'LABEL'];
+            if (interactiveTags.indexOf(el.tagName) === -1) {
+                var parent = el.closest('button, a, [role="button"], label, summary');
+                if (parent) clickTarget = parent;
+            }
+
+            // 检测 disabled 状态
+            if (this._isDisabled(clickTarget)) {
+                return { ok: false, error: '元素已禁用: ' + selector, candidates: [] };
+            }
+
+            clickTarget.scrollIntoView({ block: 'center', behavior: 'instant' });
+            clickTarget.focus();
+
+            // 非原生按钮（如 div[role="button"]）使用模拟鼠标事件，
+            // 确保 React/Vue 等框架的事件委托系统能正确捕获点击。
+            // 原生按钮直接用 .click() 产生 trusted 事件。
+            if (clickTarget.tagName === 'BUTTON' || clickTarget.tagName === 'A' || clickTarget.tagName === 'INPUT') {
+                clickTarget.click();
+            } else {
+                this._simulateClick(clickTarget);
+            }
+            return {
+                ok: true,
+                selector: locatedSelector,
+                target: target,
+                candidates: []
+            };
+        },
+
+        // 模拟完整鼠标点击序列（mousedown → mouseup → click）
+        _simulateClick: function(el) {
             var rect = el.getBoundingClientRect();
             var x = rect.left + rect.width / 2;
             var y = rect.top + rect.height / 2;
-            var opts = { bubbles: true, cancelable: true, view: window,
-                         clientX: x, clientY: y, screenX: x, screenY: y,
-                         button: 0, buttons: 1 };
-            el.dispatchEvent(new MouseEvent('mouseover', opts));
-            el.dispatchEvent(new MouseEvent('mouseenter', opts));
-            el.dispatchEvent(new MouseEvent('mousemove', opts));
+            var opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y };
             el.dispatchEvent(new MouseEvent('mousedown', opts));
             el.dispatchEvent(new MouseEvent('mouseup', opts));
             el.dispatchEvent(new MouseEvent('click', opts));
-            return {
-                ok: true,
-                selector: located.selector,
-                target: located.target,
-                candidates: [],
-                x: Math.round(x),
-                y: Math.round(y)
+        },
+
+        // 等待页面条件满足（异步，返回 Promise）
+        // condition: 'navigation' | 'element:selector' | 'element!:selector' | 'stable'
+        waitFor: function(condition, timeoutMs) {
+            var self = this;
+            var startTime = Date.now();
+            var timeout = timeoutMs || 5000;
+            // 记录初始状态
+            this._waitInitialState = {
+                url: window.location.href,
+                lastMutationTime: Date.now()
             };
+            // 启动 MutationObserver 追踪 DOM 变化（用于 stable 条件）
+            if (condition === 'stable' && !this._waitObserver) {
+                this._startMutationObserver();
+            }
+            return new Promise(function(resolve) {
+                var check = function() {
+                    if (self._checkWaitCondition(condition)) {
+                        self._stopMutationObserver();
+                        resolve({ ok: true, condition: condition, elapsed: Date.now() - startTime });
+                        return;
+                    }
+                    if (Date.now() - startTime > timeout) {
+                        self._stopMutationObserver();
+                        resolve({ ok: false, error: '等待超时', condition: condition, elapsed: Date.now() - startTime });
+                        return;
+                    }
+                    setTimeout(check, 200);
+                };
+                check();
+            });
+        },
+
+        _checkWaitCondition: function(condition) {
+            if (condition === 'navigation') {
+                return window.location.href !== this._waitInitialState.url;
+            }
+            if (condition === 'stable') {
+                return Date.now() - this._waitInitialState.lastMutationTime > 1000;
+            }
+            if (condition.indexOf('element!:') === 0) {
+                var sel = condition.substring(9);
+                try { return !document.querySelector(sel); } catch(e) { return true; }
+            }
+            if (condition.indexOf('element:') === 0) {
+                var sel2 = condition.substring(8);
+                try { return !!document.querySelector(sel2); } catch(e) { return false; }
+            }
+            return false;
+        },
+
+        // 获取页面摘要（用于操作前后对比）
+        getPageDigest: function() {
+            var overlay = this._getTopmostOverlay();
+            var fullText = (document.body.innerText || '').replace(/\s+/g, ' ').trim();
+            return {
+                url: window.location.href,
+                title: document.title,
+                overlayOpen: !!overlay,
+                overlayText: overlay ? this._extractOverlayContent(overlay) : '',
+                mainTextTail: fullText.length > 3000 ? fullText.substring(fullText.length - 3000) : fullText
+            };
+        },
+
+        // 对比前后摘要，返回差异描述
+        diffDigest: function(before, after) {
+            if (!before || !after) return '';
+            var changes = [];
+            if (before.url !== after.url) {
+                changes.push('页面已导航到 ' + after.url);
+            }
+            if (!before.overlayOpen && after.overlayOpen) {
+                changes.push('覆盖层已出现：' + after.overlayText.substring(0, 2000));
+            }
+            if (before.overlayOpen && !after.overlayOpen) {
+                changes.push('覆盖层已关闭');
+            }
+            if (before.overlayOpen && after.overlayOpen && before.overlayText !== after.overlayText) {
+                changes.push('覆盖层内容已变化：' + after.overlayText.substring(0, 2000));
+            }
+            // 页面尾部内容变化
+            if (before.mainTextTail !== after.mainTextTail && after.mainTextTail) {
+                var newContent = this._textDiff(before.mainTextTail, after.mainTextTail);
+                if (newContent) {
+                    changes.push('页面内容变化：' + newContent);
+                }
+            }
+            if (changes.length === 0) {
+                changes.push('页面无明显变化');
+            }
+            return changes.join('\n');
+        },
+
+        // 简单文本差异：提取 after 中新增的内容
+        _textDiff: function(before, after) {
+            if (!before || !after) return after ? after.substring(0, 500) : '';
+            // 按句子/片段分割
+            var beforeParts = before.split(/(?<=[。，！？；\n.!?;])|(?<=\s{2,})/);
+            var afterParts = after.split(/(?<=[。，！？；\n.!?;])|(?<=\s{2,})/);
+            var beforeSet = {};
+            for (var i = 0; i < beforeParts.length; i++) {
+                var p = beforeParts[i].trim();
+                if (p.length > 3) beforeSet[p] = true;
+            }
+            var newParts = [];
+            for (var j = 0; j < afterParts.length; j++) {
+                var ap = afterParts[j].trim();
+                if (ap.length > 3 && !beforeSet[ap]) {
+                    newParts.push(ap);
+                }
+            }
+            if (newParts.length === 0) return '';
+            var result = newParts.join(' ').trim();
+            return result.length > 1000 ? result.substring(0, 1000) + '...' : result;
+        },
+
+        _startMutationObserver: function() {
+            var self = this;
+            this._waitObserver = new MutationObserver(function() {
+                if (self._waitInitialState) {
+                    self._waitInitialState.lastMutationTime = Date.now();
+                }
+            });
+            this._waitObserver.observe(document.body, {
+                childList: true, subtree: true, characterData: true, attributes: true
+            });
+        },
+
+        _stopMutationObserver: function() {
+            if (this._waitObserver) {
+                this._waitObserver.disconnect();
+                this._waitObserver = null;
+            }
         },
 
         annotation: {
@@ -1527,6 +2183,23 @@
                 return lines.join('\n');
             },
 
+            extractAnnotatedElements: function() {
+                var bridge = window.__tiangong_bridge;
+                if (!bridge) return { elements: [], count: 0 };
+                var allElements = [];
+                for (var i = 0; i < this._annotations.length; i++) {
+                    var a = this._annotations[i];
+                    if (a.type !== 'rect') continue;
+                    var elements = bridge.extractElementsInRect(a.x, a.y, a.width, a.height);
+                    allElements.push({
+                        annotationIndex: i,
+                        rect: { x: a.x, y: a.y, width: a.width, height: a.height },
+                        elements: elements
+                    });
+                }
+                return { elements: allElements, count: allElements.length };
+            },
+
             _ensureCanvas: function() {
                 if (this._canvas) return;
                 var c = document.createElement('canvas');
@@ -1832,6 +2505,14 @@
                     annotation.y2 = pg2.y;
                 }
                 if (annotation.width > 5 || annotation.height > 5 || annotation.x1 !== undefined) {
+                    // 自动提取矩形区域内的 DOM 元素信息
+                    if (annotation.type === 'rect' && window.__tiangong_bridge) {
+                        try {
+                            annotation.elements = window.__tiangong_bridge.extractElementsInRect(
+                                annotation.x, annotation.y, annotation.width, annotation.height
+                            );
+                        } catch(ex) {}
+                    }
                     this._annotations.push(annotation);
                 }
                 this._render();
@@ -1995,6 +2676,397 @@
                     span.textContent = this._annotations.length + ' 个';
                 }
             },
+        },
+
+        // ── 持久观测层 ─────────────────────────────────────
+        observer: {
+            _eventQueue: [],
+            _networkQueue: [],
+            _mutationObserver: null,
+            _debounceTimer: null,
+            _pendingMutations: [],
+            _started: false,
+            _userEventBound: false,
+
+            start: function() {
+                if (this._started) return;
+                this._started = true;
+                this._flushPendingNetworkEvents();
+                this._startMutationObserver();
+                this._bindUserEvents();
+            },
+
+            stop: function() {
+                this._started = false;
+                if (this._mutationObserver) {
+                    this._mutationObserver.disconnect();
+                    this._mutationObserver = null;
+                }
+                if (this._debounceTimer) {
+                    clearTimeout(this._debounceTimer);
+                    this._debounceTimer = null;
+                }
+                this._pendingMutations = [];
+            },
+
+            drainEvents: function() {
+                var events = this._eventQueue;
+                this._eventQueue = [];
+                return events;
+            },
+
+            drainNetworkEvents: function() {
+                this._flushPendingNetworkEvents();
+                var events = this._networkQueue;
+                this._networkQueue = [];
+                return events;
+            },
+
+            drainAllEvents: function() {
+                this._flushPendingNetworkEvents();
+                var events = this._eventQueue.concat(this._networkQueue);
+                this._eventQueue = [];
+                this._networkQueue = [];
+                events.sort(function(a, b) {
+                    return (a.timestamp || 0) - (b.timestamp || 0);
+                });
+                return events;
+            },
+
+            hasPendingEvents: function() {
+                this._flushPendingNetworkEvents();
+                return this._eventQueue.length > 0 || this._networkQueue.length > 0;
+            },
+
+            _flushPendingNetworkEvents: function() {
+                var pending = window.__tiangong_pending_network_events || [];
+                if (!pending.length) return;
+                window.__tiangong_pending_network_events = [];
+                for (var i = 0; i < pending.length; i++) {
+                    this._pushEvent(pending[i]);
+                }
+            },
+
+            // ── MutationObserver ──
+
+            _startMutationObserver: function() {
+                var self = this;
+                this._mutationObserver = new MutationObserver(function(mutations) {
+                    if (!self._started) return;
+                    self._pendingMutations = self._pendingMutations.concat(mutations);
+                    if (self._debounceTimer) clearTimeout(self._debounceTimer);
+                    self._debounceTimer = setTimeout(function() {
+                        self._flushMutations();
+                    }, 500);
+                });
+                this._mutationObserver.observe(document.body, {
+                    childList: true,
+                    subtree: true,
+                    attributes: true,
+                    attributeFilter: [
+                        'class', 'style', 'disabled', 'readonly',
+                        'aria-busy', 'aria-hidden', 'aria-disabled',
+                        'aria-expanded', 'aria-selected'
+                    ]
+                });
+            },
+
+            _flushMutations: function() {
+                var mutations = this._pendingMutations;
+                this._pendingMutations = [];
+                var events = this._analyzeMutations(mutations);
+                for (var i = 0; i < events.length; i++) {
+                    this._pushEvent(events[i]);
+                }
+            },
+
+            _analyzeMutations: function(mutations) {
+                var events = [];
+                var dialogAdded = false;
+                var dialogRemoved = false;
+                var contentChanged = false;
+
+                for (var i = 0; i < mutations.length; i++) {
+                    var m = mutations[i];
+
+                    if (m.type === 'attributes') {
+                        continue;
+                    }
+
+                    if (m.type === 'childList') {
+                        for (var j = 0; j < m.addedNodes.length; j++) {
+                            var node = m.addedNodes[j];
+                            if (node.nodeType !== 1) continue;
+                            if (this._isDialog(node) || this._containsDialog(node)) {
+                                dialogAdded = true;
+                            }
+                            if (this._isMainContent(node) || this._isMainContent(m.target)) {
+                                contentChanged = true;
+                            }
+                        }
+                        for (var k = 0; k < m.removedNodes.length; k++) {
+                            var rNode = m.removedNodes[k];
+                            if (rNode.nodeType !== 1) continue;
+                            if (this._isDialog(rNode) || this._containsDialog(rNode)) {
+                                dialogRemoved = true;
+                            }
+                        }
+                    }
+                }
+
+                if (dialogAdded) {
+                    events.push({
+                        type: 'dialog_opened',
+                        timestamp: Date.now(),
+                        detail: this._describeActiveOverlay()
+                    });
+                }
+                if (dialogRemoved && !dialogAdded) {
+                    events.push({
+                        type: 'dialog_closed',
+                        timestamp: Date.now()
+                    });
+                }
+                if (contentChanged) {
+                    events.push({
+                        type: 'content_changed',
+                        timestamp: Date.now(),
+                        detail: this._getContentSummary()
+                    });
+                }
+
+                return events;
+            },
+
+            // ── 用户行为监听 ──
+
+            _bindUserEvents: function() {
+                if (this._userEventBound) return;
+                this._userEventBound = true;
+                var self = this;
+
+                document.addEventListener('click', function(e) {
+                    if (!self._started) return;
+                    var target = e.target;
+                    var interactive = target.closest(
+                        'button, a, input, select, textarea, [role="button"], [role="link"], [role="tab"], summary'
+                    );
+                    if (!interactive) return;
+                    var desc = self._describeElement(interactive);
+                    self._pushEvent({
+                        type: 'user_click',
+                        timestamp: Date.now(),
+                        element: desc.tag,
+                        text: desc.text,
+                        selector: desc.selector
+                    });
+                }, true);
+
+                var inputTimer = null;
+                var inputTarget = null;
+                document.addEventListener('input', function(e) {
+                    if (!self._started) return;
+                    inputTarget = e.target;
+                    if (inputTimer) clearTimeout(inputTimer);
+                    inputTimer = setTimeout(function() {
+                        if (!inputTarget) return;
+                        var desc = self._describeElement(inputTarget);
+                        self._pushEvent({
+                            type: 'user_input',
+                            timestamp: Date.now(),
+                            selector: desc.selector,
+                            label: desc.label || desc.placeholder,
+                            value_length: (inputTarget.value || '').length
+                        });
+                        inputTarget = null;
+                    }, 1000);
+                }, true);
+
+                window.addEventListener('popstate', function() {
+                    if (!self._started) return;
+                    self._pushEvent({
+                        type: 'user_navigation',
+                        timestamp: Date.now(),
+                        url: window.location.href
+                    });
+                });
+            },
+
+            // ── 辅助方法 ──
+
+            _isDialog: function(el) {
+                if (el.nodeType !== 1) return false;
+                if (el.getAttribute && el.getAttribute('role') === 'dialog') return true;
+                // 通过几何特征检测覆盖层
+                if (el.tagName) {
+                    var style = window.getComputedStyle(el);
+                    var pos = style.position;
+                    if (pos === 'fixed' || pos === 'absolute') {
+                        var rect = el.getBoundingClientRect();
+                        var W = window.innerWidth;
+                        var H = window.innerHeight;
+                        if (rect.width > 100 && rect.height > 50 &&
+                            rect.width < W - 10 && rect.height < H - 10) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            },
+
+            _containsDialog: function(el) {
+                if (el.nodeType !== 1) return false;
+                try {
+                    var dialogs = el.querySelectorAll('[role="dialog"]');
+                    if (dialogs.length > 0) return true;
+                    // 检查 fixed/absolute 子元素
+                    var fixed = el.querySelectorAll('*');
+                    for (var i = 0; i < Math.min(fixed.length, 50); i++) {
+                        var s = window.getComputedStyle(fixed[i]);
+                        if ((s.position === 'fixed' || s.position === 'absolute')) {
+                            var r = fixed[i].getBoundingClientRect();
+                            if (r.width > 100 && r.height > 50 &&
+                                r.width < window.innerWidth - 10 && r.height < window.innerHeight - 10) {
+                                return true;
+                            }
+                        }
+                    }
+                } catch(e) {}
+                return false;
+            },
+
+            _isMainContent: function(el) {
+                if (el.nodeType !== 1) return false;
+                var tag = el.tagName;
+                if (tag === 'MAIN' || tag === 'ARTICLE') return true;
+                if (el.id === 'app' || el.id === 'root' || el.id === '__next') return true;
+                return false;
+            },
+
+            _describeElement: function(el) {
+                var text = (el.textContent || '').trim().substring(0, 100);
+                var tag = (el.tagName || '').toLowerCase();
+                var selector = '';
+                if (el.id) {
+                    selector = '#' + el.id;
+                } else {
+                    selector = window.__tiangong_bridge.generateSelector(el);
+                }
+                var label = '';
+                var labelEl = el.closest('[class*="form-item"]');
+                if (labelEl) {
+                    var lbl = labelEl.querySelector('[class*="label"]');
+                    if (lbl) label = (lbl.textContent || '').trim();
+                }
+                var placeholder = el.placeholder || el.getAttribute('placeholder') || '';
+                return { tag: tag, text: text, selector: selector, label: label, placeholder: placeholder };
+            },
+
+            _describeActiveOverlay: function() {
+                var overlay = window.__tiangong_bridge._getTopmostOverlay();
+                if (!overlay) return '';
+                // 克隆后移除交互元素
+                var clone = overlay.cloneNode(true);
+                var interactive = clone.querySelectorAll('button, [role="button"], [class*="close"], [class*="Close"], [aria-label="Close"]');
+                for (var i = 0; i < interactive.length; i++) interactive[i].remove();
+                return (clone.innerText || '').trim().substring(0, 2000);
+            },
+
+            _getContentSummary: function() {
+                var text = (document.body.innerText || '').trim();
+                return text.length > 500 ? text.substring(0, 500) + '...' : text;
+            },
+
+            _pushEvent: function(event) {
+                if (event.type === 'network_response') {
+                    this._networkQueue.push(event);
+                    if (this._networkQueue.length > 100) {
+                        this._networkQueue = this._networkQueue.slice(-50);
+                    }
+                } else {
+                    this._eventQueue.push(event);
+                    if (this._eventQueue.length > 100) {
+                        this._eventQueue = this._eventQueue.slice(-50);
+                    }
+                }
+            }
+        },
+
+        // ── 泛化覆盖层检测（替代 _getActiveDialog）───────────
+        _getTopmostOverlay: function() {
+            var W = window.innerWidth;
+            var H = window.innerHeight;
+            var points = [
+                [Math.round(W / 2), Math.round(H / 3)],
+                [Math.round(W / 2), Math.round(H / 2)]
+            ];
+            // 方法 1：elementFromPoint + 向上遍历找非全屏 fixed/absolute 容器
+            for (var pi = 0; pi < points.length; pi++) {
+                var el = document.elementFromPoint(points[pi][0], points[pi][1]);
+                if (!el || el === document.body || el === document.documentElement) continue;
+                var overlay = this._walkUpToOverlay(el, W, H);
+                if (overlay) return overlay;
+            }
+            return null;
+        },
+
+        // 从命中元素向上找第一个 fixed/absolute 定位容器。
+        // 如果遇到全屏蒙层，尝试在蒙层内查找非全屏子覆盖层。
+        _walkUpToOverlay: function(el, W, H) {
+            var current = el;
+            while (current && current !== document.body && current !== document.documentElement) {
+                var style = window.getComputedStyle(current);
+                var pos = style.position;
+                if (pos === 'fixed' || pos === 'absolute') {
+                    var rect = current.getBoundingClientRect();
+                    if (rect.width > 50 && rect.height > 50 &&
+                        (rect.width < W - 10 || rect.height < H - 10)) {
+                        return current;
+                    }
+                    // 全屏 fixed/absolute 容器（蒙层）：
+                    // 在其内部查找非全屏的 fixed/absolute 子元素
+                    var inner = this._findInnerOverlay(current, W, H);
+                    if (inner) return inner;
+                    // 蒙层内没有非全屏子覆盖层，检查蒙层自身是否有有意义的文本内容
+                    var text = (current.innerText || '').replace(/\s+/g, ' ').trim();
+                    if (text.length > 10) return current;
+                    return null;
+                }
+                current = current.parentElement;
+            }
+            return null;
+        },
+
+        // 在全屏蒙层内查找面积适中的 fixed/absolute 子元素
+        _findInnerOverlay: function(backdrop, W, H) {
+            var candidates = backdrop.querySelectorAll('*');
+            var best = null;
+            var bestArea = 0;
+            for (var i = 0; i < candidates.length; i++) {
+                var child = candidates[i];
+                var style = window.getComputedStyle(child);
+                var pos = style.position;
+                if (pos === 'fixed' || pos === 'absolute') {
+                    var rect = child.getBoundingClientRect();
+                    if (rect.width > 50 && rect.height > 50 &&
+                        (rect.width < W - 10 || rect.height < H - 10)) {
+                        var area = rect.width * rect.height;
+                        if (area > bestArea) {
+                            bestArea = area;
+                            best = child;
+                        }
+                    }
+                }
+            }
+            return best;
+        },
+
+        _extractOverlayContent: function(overlay) {
+            if (!overlay) return '';
+            var clone = overlay.cloneNode(true);
+            var interactive = clone.querySelectorAll('button, [role="button"], [class*="close"], [class*="Close"], [aria-label="Close"]');
+            for (var i = 0; i < interactive.length; i++) interactive[i].remove();
+            return (clone.innerText || '').trim().substring(0, 3000);
         },
     };
 
