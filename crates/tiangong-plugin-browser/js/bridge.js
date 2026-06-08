@@ -1623,12 +1623,17 @@
             },
 
             _handleKeyDown: function(e) {
-                if (this._selectedIndex < 0) return;
+                if (!this._active) return;
                 if (e.key === 'Delete' || e.key === 'Backspace') {
-                    this._annotations.splice(this._selectedIndex, 1);
-                    this._selectedIndex = -1;
-                    this._render();
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (this._selectedIndex >= 0) {
+                        this._annotations.splice(this._selectedIndex, 1);
+                        this._selectedIndex = -1;
+                        this._render();
+                    }
                 } else if (e.key === 'Escape') {
+                    e.preventDefault();
                     this._selectedIndex = -1;
                     this._render();
                 }
@@ -1955,17 +1960,6 @@
                 clearBtn.onmouseleave = function() { clearBtn.style.background = 'transparent'; };
                 clearBtn.onclick = function() { self.clear(); };
                 toolbar.appendChild(clearBtn);
-                var closeBtn = document.createElement('button');
-                closeBtn.textContent = '✕';
-                closeBtn.title = '关闭批注';
-                closeBtn.style.cssText = 'padding:4px 8px;border:1px solid rgba(255,255,255,0.15);border-radius:5px;background:transparent;color:#9ca3af;cursor:pointer;font-size:13px;line-height:1.2;transition:all 0.15s;';
-                closeBtn.onmouseenter = function() { closeBtn.style.background = 'rgba(255,255,255,0.1)'; };
-                closeBtn.onmouseleave = function() { closeBtn.style.background = 'transparent'; };
-                closeBtn.onclick = function() {
-                    var bridge = window.__tiangong_bridge;
-                    if (bridge && bridge.annotation) bridge.annotation.stop();
-                };
-                toolbar.appendChild(closeBtn);
                 document.body.appendChild(toolbar);
                 this._toolbar = toolbar;
             },
