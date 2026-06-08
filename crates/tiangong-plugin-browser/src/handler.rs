@@ -50,6 +50,14 @@ pub async fn browser_command_handler(
                     final_url: url_for_error,
                     error: Some("浏览器任务执行失败".to_string()),
                 });
+                // 通知前端更新地址栏（最终 URL 可能与导航 URL 不同）
+                if response.ok && !response.final_url.is_empty() {
+                    let _ = event_tx.try_send(BrowserEvent::PageData {
+                        url: response.final_url.clone(),
+                        title: response.title.clone(),
+                        text: String::new(),
+                    });
+                }
                 let _ = response_tx.send(response);
             }
             BrowserCommand::OpenUrl { url } => {
