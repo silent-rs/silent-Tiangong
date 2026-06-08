@@ -215,7 +215,7 @@ impl PageFetcher for BrowserPageFetcher {
     }
 }
 
-/// 浏览器工具覆盖处理器（web_fetch / web_browse / web_form_extract / web_form_fill / web_click / web_load_html）
+/// 浏览器工具覆盖处理器（web_fetch / web_form_extract / web_form_fill / web_click / web_load_html）
 pub struct BrowserToolOverride {
     fetcher: Arc<dyn PageFetcher>,
 }
@@ -273,7 +273,11 @@ impl BrowserToolOverride {
                 }
             };
             let summary = if result.ok {
-                format!("浏览器获取成功：{}", result.title)
+                if result.title.is_empty() {
+                    format!("浏览器获取成功：{}", result.final_url)
+                } else {
+                    format!("浏览器获取成功：{}", result.title)
+                }
             } else {
                 format!(
                     "浏览器获取失败：{}",
@@ -294,49 +298,6 @@ impl BrowserToolOverride {
                     result.error.unwrap_or_default()
                 },
                 exit_code: if result.ok { 0 } else { 1 },
-                execution: None,
-            })
-        })
-    }
-
-    fn handle_web_browse(
-        fetcher: &Arc<dyn PageFetcher>,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Option<tiangong_core::tool::ToolResult>> + Send>,
-    > {
-        let fetcher = fetcher.clone();
-        Box::pin(async move {
-            let snapshot = match fetcher.observe_page().await {
-                Some(s) => s,
-                None => {
-                    return Some(tiangong_core::tool::ToolResult {
-                        ok: false,
-                        summary: "浏览器未打开或页面未加载".to_string(),
-                        stdout: String::new(),
-                        stderr: "请先使用 web_fetch 打开一个页面，或使用 browser_open 打开浏览器"
-                            .to_string(),
-                        exit_code: 1,
-                        execution: None,
-                    });
-                }
-            };
-            let content = if snapshot.text.is_empty() {
-                format!(
-                    "浏览器页面：{}\nURL：{}\n状态：页面内容为空",
-                    snapshot.title, snapshot.url
-                )
-            } else {
-                format!(
-                    "浏览器页面：{}\nURL：{}\n\n{}",
-                    snapshot.title, snapshot.url, snapshot.text
-                )
-            };
-            Some(tiangong_core::tool::ToolResult {
-                ok: true,
-                summary: format!("浏览器当前页面：{}", snapshot.title),
-                stdout: content,
-                stderr: String::new(),
-                exit_code: 0,
                 execution: None,
             })
         })
@@ -501,7 +462,6 @@ impl tiangong_core::tool_override::ToolOverrideHandler for BrowserToolOverride {
     > {
         match call.name.as_str() {
             "web_fetch" => Self::handle_web_fetch(&self.fetcher, call),
-            "web_browse" => Self::handle_web_browse(&self.fetcher),
             "web_form_extract" => Self::handle_web_form_extract(&self.fetcher),
             "web_form_fill" => Self::handle_web_form_fill(&self.fetcher, call),
             "web_click" => Self::handle_web_click(&self.fetcher, call),

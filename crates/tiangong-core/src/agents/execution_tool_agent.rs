@@ -138,22 +138,6 @@ pub(crate) fn basic_file_function_tools() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
-            name: "web_browse".to_string(),
-            description: "读取天工内嵌浏览器面板当前显示的页面内容（标题、URL、正文）。当用户询问浏览器当前页面、让你查看内嵌浏览器内容时使用此工具，不要使用 Playwright。注意：这是用户可见的嵌入式浏览器，与 Playwright headless 浏览器完全独立。".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "max_chars": {
-                        "type": "integer",
-                        "description": "最多返回字符数，默认 12000",
-                        "minimum": 1,
-                        "maximum": 50000
-                    }
-                },
-                "required": []
-            }),
-        },
-        ToolSpec {
             name: "web_form_extract".to_string(),
             description: "提取天工内嵌浏览器当前页面中所有表单的字段信息。支持原生 HTML 表单和 UI 库自定义组件（Ant Design Select/DatePicker、Element Plus Select/DatePicker 等）。返回结构化的字段列表（含框架检测信息），供 web_form_fill 填写。当需要帮用户填写网页表单时，先调用此工具了解页面有哪些可填写字段。".to_string(),
             input_schema: serde_json::json!({
