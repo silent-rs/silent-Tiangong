@@ -7,7 +7,7 @@ use tracing::warn;
 use crate::manager::{default_browser_rect, BrowserManager, BrowserState};
 use crate::types::{
     BrowserCommand, BrowserEvent, BrowserPageSnapshot, BrowserResponse, ClickElementResult,
-    FillFieldResult, FormExtractResult, PageStatus,
+    FillFieldResult, FormExtractResult, LocateElementResult, PageStatus,
 };
 
 /// 浏览器命令处理循环
@@ -324,6 +324,44 @@ pub async fn browser_command_handler(
                     }
                 })
                 .await;
+            }
+            BrowserCommand::LocateElement { query, response_tx } => {
+                let manager = BrowserManager {
+                    state: browser_state.clone(),
+                };
+                let result = tokio::task::spawn_blocking(move || {
+                    let js = format!(
+                        "JSON.stringify(window.__tiangong_bridge.locateElement({}))",
+                        serde_json::to_string(&query).unwrap_or_default()
+                    );
+                    match manager.eval_with_result(&js) {
+                        Some(raw) => serde_json::from_str::<LocateElementResult>(&raw).unwrap_or(
+                            LocateElementResult {
+                                ok: false,
+                                error: Some("解析定位结果失败".to_string()),
+                                ambiguous: false,
+                                target: None,
+                                candidates: Vec::new(),
+                            },
+                        ),
+                        None => LocateElementResult {
+                            ok: false,
+                            error: Some("定位执行超时".to_string()),
+                            ambiguous: false,
+                            target: None,
+                            candidates: Vec::new(),
+                        },
+                    }
+                })
+                .await
+                .unwrap_or(LocateElementResult {
+                    ok: false,
+                    error: Some("定位任务失败".to_string()),
+                    ambiguous: false,
+                    target: None,
+                    candidates: Vec::new(),
+                });
+                let _ = response_tx.send(result);
             }
         }
     }

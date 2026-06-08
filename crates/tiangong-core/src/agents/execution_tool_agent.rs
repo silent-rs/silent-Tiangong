@@ -171,6 +171,17 @@ pub(crate) fn basic_file_function_tools() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "web_locate_element".to_string(),
+            description: "在天工内嵌浏览器当前页面中定位元素，不执行任何操作，仅返回匹配结果。用于在 click 或 fill 之前探测元素是否存在以及有多少候选。query 参数支持 CSS 选择器和自然语言定位描述（text=、role=、label=、placeholder= 等）。返回结果包含最佳匹配（target）和候选列表（candidates），供后续 web_click 或 web_form_fill 使用更精确的 selector。".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "元素定位描述。可用 CSS selector，也可用自然语言或 DSL，例如：登录按钮、text=提交、role=button[name=登录]、label=邮箱" }
+                },
+                "required": ["query"]
+            }),
+        },
+        ToolSpec {
             name: "write_file".to_string(),
             description: "写入文件内容（支持覆盖或追加）".to_string(),
             input_schema: serde_json::json!({

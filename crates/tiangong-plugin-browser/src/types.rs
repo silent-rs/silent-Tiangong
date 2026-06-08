@@ -78,6 +78,11 @@ pub enum BrowserCommand {
     TabSwitch { tab_id: String },
     /// 关闭标签
     TabClose { tab_id: String },
+    /// 智能元素定位（不执行操作，仅查询候选）
+    LocateElement {
+        query: String,
+        response_tx: oneshot::Sender<LocateElementResult>,
+    },
 }
 
 /// 浏览器响应
@@ -195,6 +200,44 @@ pub struct ClickElementResult {
     pub y: Option<i32>,
 }
 
+/// 智能元素定位结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocateElementResult {
+    pub ok: bool,
+    pub error: Option<String>,
+    #[serde(default)]
+    pub ambiguous: bool,
+    #[serde(default)]
+    pub target: Option<ElementCandidate>,
+    #[serde(default)]
+    pub candidates: Vec<ElementCandidate>,
+}
+
+/// 页面可交互元素
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InteractiveElement {
+    pub tag: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub selector: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub disabled: bool,
+    #[serde(default)]
+    pub href: Option<String>,
+}
+
+/// 可交互元素提取结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InteractiveElementsResult {
+    pub elements: Vec<InteractiveElement>,
+    pub count: usize,
+}
+
 // ── 类型转换：plugin → core ──────────────────────────────────────────
 
 impl From<BrowserTab> for tiangong_core::browser_trait::TabInfo {
@@ -276,6 +319,18 @@ impl From<ElementCandidate> for tiangong_core::browser_trait::ElementCandidate {
             reason: c.reason,
             x: c.x,
             y: c.y,
+        }
+    }
+}
+
+impl From<LocateElementResult> for tiangong_core::browser_trait::LocateElementResult {
+    fn from(r: LocateElementResult) -> Self {
+        Self {
+            ok: r.ok,
+            error: r.error,
+            ambiguous: r.ambiguous,
+            target: r.target.map(Into::into),
+            candidates: r.candidates.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -565,6 +620,39 @@ mod tests {
         assert_eq!(parsed.forms[0].fields.len(), 1);
         assert_eq!(parsed.forms[0].fields[0].name, "q");
         assert!(parsed.forms[0].fields[0].required);
+    }
+
+    #[test]
+    fn locate_element_result_into_core_type() {
+        let result = LocateElementResult {
+            ok: true,
+            error: None,
+            ambiguous: false,
+            target: Some(candidate()),
+            candidates: vec![candidate()],
+        };
+        let core: tiangong_core::browser_trait::LocateElementResult = result.into();
+        assert!(core.ok);
+        assert!(!core.ambiguous);
+        assert!(core.target.is_some());
+        assert_eq!(core.candidates.len(), 1);
+        assert_eq!(core.target.unwrap().selector, "#submit");
+    }
+
+    #[test]
+    fn locate_element_result_ambiguous_into_core() {
+        let result = LocateElementResult {
+            ok: false,
+            error: Some("多个候选匹配".to_string()),
+            ambiguous: true,
+            target: None,
+            candidates: vec![candidate()],
+        };
+        let core: tiangong_core::browser_trait::LocateElementResult = result.into();
+        assert!(!core.ok);
+        assert!(core.ambiguous);
+        assert!(core.target.is_none());
+        assert_eq!(core.candidates.len(), 1);
     }
 
     #[test]

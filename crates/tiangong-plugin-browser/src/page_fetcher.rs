@@ -213,6 +213,30 @@ impl PageFetcher for BrowserPageFetcher {
                 .and_then(|r| r.ok())
         })
     }
+
+    fn locate_element(
+        &self,
+        query: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Option<tiangong_core::browser_trait::LocateElementResult>,
+                > + Send,
+        >,
+    > {
+        let tx = self.cmd_tx.clone();
+        let query = query.to_string();
+        Box::pin(async move {
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            let resp: crate::types::LocateElementResult = send_and_wait!(
+                tx,
+                BrowserCommand::LocateElement { query, response_tx },
+                response_rx,
+                15
+            );
+            Some(resp.into())
+        })
+    }
 }
 
 /// 浏览器工具覆盖处理器（web_fetch / web_form_extract / web_form_fill / web_click / web_load_html）
@@ -578,6 +602,73 @@ impl BrowserToolOverride {
             }
         })
     }
+
+    fn handle_web_locate_element(
+        fetcher: &Arc<dyn PageFetcher>,
+        call: &tiangong_core::model::ToolCall,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Option<tiangong_core::tool::ToolResult>> + Send>,
+    > {
+        let query = call
+            .arguments
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let fetcher = fetcher.clone();
+        Box::pin(async move {
+            let result = match fetcher.locate_element(&query).await {
+                Some(r) => r,
+                None => {
+                    return Some(tiangong_core::tool::ToolResult {
+                        ok: false,
+                        summary: "浏览器未打开，无法定位元素".to_string(),
+                        stdout: String::new(),
+                        stderr: "请先使用 web_fetch 打开页面".to_string(),
+                        exit_code: 1,
+                        execution: None,
+                    });
+                }
+            };
+            if result.ok {
+                let target = result
+                    .target
+                    .as_ref()
+                    .map(|t| Self::format_target(Some(t), &t.selector))
+                    .unwrap_or_default();
+                let candidates = Self::format_candidates(&result.candidates);
+                let mut stdout = format!("定位成功。\n{target}");
+                if !candidates.is_empty() {
+                    stdout.push('\n');
+                    stdout.push_str(&candidates);
+                }
+                Some(tiangong_core::tool::ToolResult {
+                    ok: true,
+                    summary: "元素定位成功".to_string(),
+                    stdout,
+                    stderr: String::new(),
+                    exit_code: 0,
+                    execution: None,
+                })
+            } else {
+                let candidates = Self::format_candidates(&result.candidates);
+                let error = result.error.unwrap_or_default();
+                let stderr = if candidates.is_empty() {
+                    error
+                } else {
+                    format!("{error}\n{candidates}")
+                };
+                Some(tiangong_core::tool::ToolResult {
+                    ok: false,
+                    summary: "元素定位失败".to_string(),
+                    stdout: String::new(),
+                    stderr,
+                    exit_code: 1,
+                    execution: None,
+                })
+            }
+        })
+    }
 }
 
 impl tiangong_core::tool_override::ToolOverrideHandler for BrowserToolOverride {
@@ -592,6 +683,7 @@ impl tiangong_core::tool_override::ToolOverrideHandler for BrowserToolOverride {
             "web_form_extract" => Self::handle_web_form_extract(&self.fetcher),
             "web_form_fill" => Self::handle_web_form_fill(&self.fetcher, call),
             "web_click" => Self::handle_web_click(&self.fetcher, call),
+            "web_locate_element" => Self::handle_web_locate_element(&self.fetcher, call),
             _ => Box::pin(async { None }),
         }
     }
@@ -637,5 +729,94 @@ mod tests {
         assert!(output.contains("目标：button role=button label=\"登录\""));
         assert!(output.contains("实际选择器：#login"));
         assert!(!output.contains(".fallback"));
+    }
+
+    #[test]
+    fn format_target_without_candidate_uses_fallback_selector() {
+        let output = BrowserToolOverride::format_target(None, ".btn-primary");
+
+        assert!(!output.contains("目标"));
+        assert!(output.contains("实际选择器：.btn-primary"));
+    }
+
+    #[test]
+    fn format_candidates_truncates_at_eight() {
+        let candidates: Vec<ElementCandidate> = (0..12)
+            .map(|i| ElementCandidate {
+                selector: format!("#item-{i}"),
+                text: format!("Item {i}"),
+                tag: "div".to_string(),
+                role: String::new(),
+                label: String::new(),
+                score: 50,
+                reason: "match".to_string(),
+                x: None,
+                y: None,
+            })
+            .collect();
+
+        let output = BrowserToolOverride::format_candidates(&candidates);
+
+        assert!(output.contains("#item-0"));
+        assert!(output.contains("#item-7"));
+        assert!(!output.contains("#item-8"));
+        assert!(output.contains("还有 4 个候选"));
+    }
+
+    #[test]
+    fn format_candidates_empty_returns_empty_string() {
+        let output = BrowserToolOverride::format_candidates(&[]);
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn candidate_identity_with_all_fields() {
+        let c = ElementCandidate {
+            selector: "#email".to_string(),
+            text: "邮箱地址".to_string(),
+            tag: "input".to_string(),
+            role: "textbox".to_string(),
+            label: "邮箱".to_string(),
+            score: 90,
+            reason: String::new(),
+            x: None,
+            y: None,
+        };
+        let id = BrowserToolOverride::candidate_identity(&c);
+        assert!(id.contains("input"));
+        assert!(id.contains("role=textbox"));
+        assert!(id.contains("label=\"邮箱\""));
+        assert!(id.contains("text=\"邮箱地址\""));
+    }
+
+    #[test]
+    fn candidate_identity_label_equals_text_skips_duplicate() {
+        let c = ElementCandidate {
+            selector: "#btn".to_string(),
+            text: "提交".to_string(),
+            tag: "button".to_string(),
+            role: "button".to_string(),
+            label: "提交".to_string(),
+            score: 80,
+            reason: String::new(),
+            x: None,
+            y: None,
+        };
+        let id = BrowserToolOverride::candidate_identity(&c);
+        // text 和 label 相同时只显示 label
+        assert!(id.contains("label=\"提交\""));
+        assert!(!id.contains("text=\"提交\""));
+    }
+
+    #[test]
+    fn truncate_text_under_limit_keeps_full() {
+        let result = BrowserToolOverride::truncate_text("hello", 10);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn truncate_text_over_limit_adds_ellipsis() {
+        let result = BrowserToolOverride::truncate_text("abcdefghij", 5);
+        assert_eq!(result, "abcde…");
     }
 }

@@ -727,15 +727,63 @@
                             });
                         }
                     }
-                    // 构造 selector
+                    // 构造 selector 和 description
                     field.selector = this.generateSelector(el);
+                    field.description = this._fieldDescription(field);
                     fields.push(field);
                 }
-                if (fields.length > 0) {
-                    forms.push({ fields: fields });
+                // 提取表单按钮
+                var buttons = [];
+                var btnEls = container.querySelectorAll('button,input[type="submit"],input[type="button"],input[type="reset"]');
+                for (var bi = 0; bi < btnEls.length; bi++) {
+                    var btn = btnEls[bi];
+                    var btnText = (btn.textContent || btn.value || '').trim();
+                    buttons.push({
+                        type: btn.type || 'button',
+                        text: btnText,
+                        selector: this.generateSelector(btn),
+                        description: btnText ? 'text=' + btnText : this.generateSelector(btn),
+                        disabled: btn.disabled || false
+                    });
+                }
+                if (fields.length > 0 || buttons.length > 0) {
+                    forms.push({ fields: fields, buttons: buttons });
                 }
             }
             return { forms: forms, framework: this.detectFramework(), uiComponents: this._extractUIComponents() };
+        },
+
+        _fieldDescription: function(field) {
+            if (field.label) return 'label=' + field.label;
+            if (field.placeholder) return 'placeholder=' + field.placeholder;
+            if (field.name) return 'name=' + field.name;
+            return field.selector || '';
+        },
+
+        extractInteractiveElements: function() {
+            var result = [];
+            var sel = 'button,a,input[type="button"],input[type="submit"],input[type="reset"],[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="treeitem"],[role="listitem"],summary,details';
+            var els = this._queryAll(sel) || [];
+            for (var i = 0; i < els.length && result.length < 50; i++) {
+                var el = els[i];
+                if (!this._isVisible(el)) continue;
+                var text = (el.textContent || el.value || '').trim();
+                if (text.length > 80) text = text.substring(0, 80) + '...';
+                var tag = el.tagName.toLowerCase();
+                var role = el.getAttribute('role') || '';
+                var href = tag === 'a' ? (el.href || '') : '';
+                var item = {
+                    tag: tag,
+                    text: text,
+                    role: role,
+                    selector: this.generateSelector(el),
+                    description: text ? 'text=' + text : this.generateSelector(el),
+                    disabled: el.disabled || false
+                };
+                if (href) item.href = href;
+                result.push(item);
+            }
+            return { elements: result, count: result.length };
         },
 
         _extractUIComponents: function() {

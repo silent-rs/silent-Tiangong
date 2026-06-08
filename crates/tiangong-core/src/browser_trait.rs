@@ -55,6 +55,14 @@ pub trait PageFetcher: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Option<Result<(), String>>> + Send>> {
         Box::pin(async move { None })
     }
+
+    /// 智能元素定位（不执行操作，仅查询候选）。
+    fn locate_element(
+        &self,
+        _query: &str,
+    ) -> Pin<Box<dyn Future<Output = Option<LocateElementResult>> + Send>> {
+        Box::pin(async move { None })
+    }
 }
 
 /// 页面获取结果（纯数据，无 tokio 依赖）
@@ -176,4 +184,17 @@ pub struct ClickElementResult {
 pub struct TabListResult {
     pub tabs: Vec<TabInfo>,
     pub active_tab_id: Option<String>,
+}
+
+/// 智能元素定位结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocateElementResult {
+    pub ok: bool,
+    pub error: Option<String>,
+    #[serde(default)]
+    pub ambiguous: bool,
+    #[serde(default)]
+    pub target: Option<ElementCandidate>,
+    #[serde(default)]
+    pub candidates: Vec<ElementCandidate>,
 }
