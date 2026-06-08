@@ -7,7 +7,7 @@ use tracing::warn;
 use crate::manager::{default_browser_rect, BrowserManager, BrowserState};
 use crate::types::{
     BrowserCommand, BrowserEvent, BrowserPageSnapshot, BrowserResponse, ClickElementResult,
-    FillFieldResult, FormExtractResult, PageStatus,
+    FillFieldResult, FormExtractResult, LocateElementResult, PageStatus,
 };
 
 /// 浏览器命令处理循环
@@ -50,6 +50,14 @@ pub async fn browser_command_handler(
                     final_url: url_for_error,
                     error: Some("浏览器任务执行失败".to_string()),
                 });
+                // 通知前端更新地址栏（最终 URL 可能与导航 URL 不同）
+                if response.ok && !response.final_url.is_empty() {
+                    let _ = event_tx.try_send(BrowserEvent::PageData {
+                        url: response.final_url.clone(),
+                        title: response.title.clone(),
+                        text: String::new(),
+                    });
+                }
                 let _ = response_tx.send(response);
             }
             BrowserCommand::OpenUrl { url } => {
@@ -82,7 +90,7 @@ pub async fn browser_command_handler(
                 let snapshot = tokio::task::spawn_blocking(move || {
                     manager
                         .eval_with_result(
-                            "(function(){try{var t=window.__tiangong_bridge.getFullText(12000);var a=window.__tiangong_bridge.annotation.getAnnotations();if(a&&a.count>0){t.text+='\\n\\n[页面批注] '+JSON.stringify(a.annotations);}return t;}catch(e){return {title:'',url:'',text:'',error:e.message};}})()"
+                            "(function(){try{var t=window.__tiangong_bridge.getFullText(12000);var a=window.__tiangong_bridge.annotation.getAnnotations();if(a&&a.count>0){t.text+='\\n\\n'+(a.summary||('[页面批注] '+JSON.stringify(a.annotations)));}return t;}catch(e){return {title:'',url:'',text:'',error:e.message};}})()"
                         )
                         .and_then(|raw| {
                             let data = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
@@ -169,9 +177,15 @@ pub async fn browser_command_handler(
                             strategy: None,
                             error: Some("填写字段执行失败".to_string()),
                             current_value: None,
+                            selector: None,
+                            target: None,
+                            candidates: Vec::new(),
                         });
 
                     if native_result.ok {
+                        return native_result;
+                    }
+                    if native_result.target.is_some() || !native_result.candidates.is_empty() {
                         return native_result;
                     }
 
@@ -181,10 +195,18 @@ pub async fn browser_command_handler(
                         serde_json::to_string(&selector).unwrap_or_default(),
                         serde_json::to_string(&value).unwrap_or_default(),
                     );
-                    manager
+                    let component_result = manager
                         .eval_with_result(&comp_js)
                         .and_then(|raw| serde_json::from_str::<FillFieldResult>(&raw).ok())
-                        .unwrap_or(native_result)
+                        .unwrap_or_else(|| native_result.clone());
+                    if component_result.ok
+                        || component_result.target.is_some()
+                        || !component_result.candidates.is_empty()
+                    {
+                        component_result
+                    } else {
+                        native_result
+                    }
                 })
                 .await
                 .unwrap_or(FillFieldResult {
@@ -192,6 +214,9 @@ pub async fn browser_command_handler(
                     strategy: None,
                     error: Some("填写字段任务失败".to_string()),
                     current_value: None,
+                    selector: None,
+                    target: None,
+                    candidates: Vec::new(),
                 });
                 let _ = response_tx.send(result);
             }
@@ -213,12 +238,22 @@ pub async fn browser_command_handler(
                         .unwrap_or(ClickElementResult {
                             ok: false,
                             error: Some("点击元素执行失败".to_string()),
+                            selector: None,
+                            target: None,
+                            candidates: Vec::new(),
+                            x: None,
+                            y: None,
                         })
                 })
                 .await
                 .unwrap_or(ClickElementResult {
                     ok: false,
                     error: Some("点击元素任务失败".to_string()),
+                    selector: None,
+                    target: None,
+                    candidates: Vec::new(),
+                    x: None,
+                    y: None,
                 });
                 let _ = response_tx.send(result);
             }
@@ -297,6 +332,44 @@ pub async fn browser_command_handler(
                     }
                 })
                 .await;
+            }
+            BrowserCommand::LocateElement { query, response_tx } => {
+                let manager = BrowserManager {
+                    state: browser_state.clone(),
+                };
+                let result = tokio::task::spawn_blocking(move || {
+                    let js = format!(
+                        "JSON.stringify(window.__tiangong_bridge.locateElement({}))",
+                        serde_json::to_string(&query).unwrap_or_default()
+                    );
+                    match manager.eval_with_result(&js) {
+                        Some(raw) => serde_json::from_str::<LocateElementResult>(&raw).unwrap_or(
+                            LocateElementResult {
+                                ok: false,
+                                error: Some("解析定位结果失败".to_string()),
+                                ambiguous: false,
+                                target: None,
+                                candidates: Vec::new(),
+                            },
+                        ),
+                        None => LocateElementResult {
+                            ok: false,
+                            error: Some("定位执行超时".to_string()),
+                            ambiguous: false,
+                            target: None,
+                            candidates: Vec::new(),
+                        },
+                    }
+                })
+                .await
+                .unwrap_or(LocateElementResult {
+                    ok: false,
+                    error: Some("定位任务失败".to_string()),
+                    ambiguous: false,
+                    target: None,
+                    candidates: Vec::new(),
+                });
+                let _ = response_tx.send(result);
             }
         }
     }

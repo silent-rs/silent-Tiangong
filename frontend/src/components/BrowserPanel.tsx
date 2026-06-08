@@ -312,7 +312,6 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
           title="进入"
         >
           <CornerDownRight className="w-3.5 h-3.5 mr-1" />
-          <span className="text-xs">进入</span>
         </Button>
         <Button
           size="sm"

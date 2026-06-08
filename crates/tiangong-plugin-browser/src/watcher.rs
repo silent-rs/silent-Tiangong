@@ -47,8 +47,8 @@ pub async fn run_browser_watcher(
             }
         };
 
-        // 检测 URL 变化
-        if current_url == last_url {
+        // 检测 URL 变化（忽略 about:blank 等导航中间状态）
+        if current_url == last_url || current_url == "about:blank" {
             continue;
         }
         last_url = current_url.clone();
@@ -81,12 +81,20 @@ pub async fn run_browser_watcher(
         if sync_active {
             // 同步获取进行中，只发送轻量级事件
             let _ = event_tx.try_send(BrowserEvent::PageData {
-                url: current_url,
+                url: current_url.clone(),
+
                 title: String::new(),
                 text: String::new(),
             });
             continue;
         }
+
+        // 先发送轻量级事件让前端立即更新地址栏，不等待内容采集
+        let _ = event_tx.try_send(BrowserEvent::PageData {
+            url: current_url,
+            title: String::new(),
+            text: String::new(),
+        });
 
         // 被动浏览（非 web_fetch 触发的 URL 变化）：采集内容并推送
         let state_clone = state.clone();

@@ -78,6 +78,11 @@ pub enum BrowserCommand {
     TabSwitch { tab_id: String },
     /// 关闭标签
     TabClose { tab_id: String },
+    /// 智能元素定位（不执行操作，仅查询候选）
+    LocateElement {
+        query: String,
+        response_tx: oneshot::Sender<LocateElementResult>,
+    },
 }
 
 /// 浏览器响应
@@ -148,6 +153,20 @@ pub struct FormExtractResult {
     pub forms: Vec<FormInfo>,
 }
 
+/// 智能定位候选元素
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ElementCandidate {
+    pub selector: String,
+    pub text: String,
+    pub tag: String,
+    pub role: String,
+    pub label: String,
+    pub score: i32,
+    pub reason: String,
+    pub x: Option<i32>,
+    pub y: Option<i32>,
+}
+
 /// 字段填写结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FillFieldResult {
@@ -156,6 +175,12 @@ pub struct FillFieldResult {
     pub error: Option<String>,
     #[serde(rename = "currentValue")]
     pub current_value: Option<String>,
+    #[serde(default)]
+    pub selector: Option<String>,
+    #[serde(default)]
+    pub target: Option<ElementCandidate>,
+    #[serde(default)]
+    pub candidates: Vec<ElementCandidate>,
 }
 
 /// 元素点击结果
@@ -163,6 +188,54 @@ pub struct FillFieldResult {
 pub struct ClickElementResult {
     pub ok: bool,
     pub error: Option<String>,
+    #[serde(default)]
+    pub selector: Option<String>,
+    #[serde(default)]
+    pub target: Option<ElementCandidate>,
+    #[serde(default)]
+    pub candidates: Vec<ElementCandidate>,
+    #[serde(default)]
+    pub x: Option<i32>,
+    #[serde(default)]
+    pub y: Option<i32>,
+}
+
+/// 智能元素定位结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocateElementResult {
+    pub ok: bool,
+    pub error: Option<String>,
+    #[serde(default)]
+    pub ambiguous: bool,
+    #[serde(default)]
+    pub target: Option<ElementCandidate>,
+    #[serde(default)]
+    pub candidates: Vec<ElementCandidate>,
+}
+
+/// 页面可交互元素
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InteractiveElement {
+    pub tag: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub selector: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub disabled: bool,
+    #[serde(default)]
+    pub href: Option<String>,
+}
+
+/// 可交互元素提取结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InteractiveElementsResult {
+    pub elements: Vec<InteractiveElement>,
+    pub count: usize,
 }
 
 // ── 类型转换：plugin → core ──────────────────────────────────────────
@@ -234,6 +307,34 @@ impl From<FormExtractResult> for tiangong_core::browser_trait::FormExtractResult
     }
 }
 
+impl From<ElementCandidate> for tiangong_core::browser_trait::ElementCandidate {
+    fn from(c: ElementCandidate) -> Self {
+        Self {
+            selector: c.selector,
+            text: c.text,
+            tag: c.tag,
+            role: c.role,
+            label: c.label,
+            score: c.score,
+            reason: c.reason,
+            x: c.x,
+            y: c.y,
+        }
+    }
+}
+
+impl From<LocateElementResult> for tiangong_core::browser_trait::LocateElementResult {
+    fn from(r: LocateElementResult) -> Self {
+        Self {
+            ok: r.ok,
+            error: r.error,
+            ambiguous: r.ambiguous,
+            target: r.target.map(Into::into),
+            candidates: r.candidates.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 impl From<FillFieldResult> for tiangong_core::browser_trait::FillFieldResult {
     fn from(r: FillFieldResult) -> Self {
         Self {
@@ -241,6 +342,9 @@ impl From<FillFieldResult> for tiangong_core::browser_trait::FillFieldResult {
             strategy: r.strategy,
             error: r.error,
             current_value: r.current_value,
+            selector: r.selector,
+            target: r.target.map(Into::into),
+            candidates: r.candidates.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -250,6 +354,11 @@ impl From<ClickElementResult> for tiangong_core::browser_trait::ClickElementResu
         Self {
             ok: r.ok,
             error: r.error,
+            selector: r.selector,
+            target: r.target.map(Into::into),
+            candidates: r.candidates.into_iter().map(Into::into).collect(),
+            x: r.x,
+            y: r.y,
         }
     }
 }
@@ -257,6 +366,20 @@ impl From<ClickElementResult> for tiangong_core::browser_trait::ClickElementResu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn candidate() -> ElementCandidate {
+        ElementCandidate {
+            selector: "#submit".to_string(),
+            text: "提交".to_string(),
+            tag: "button".to_string(),
+            role: "button".to_string(),
+            label: "提交".to_string(),
+            score: 96,
+            reason: "text match".to_string(),
+            x: Some(42),
+            y: Some(24),
+        }
+    }
 
     #[test]
     fn browser_event_page_data_construct() {
@@ -444,6 +567,9 @@ mod tests {
             strategy: Some("native".to_string()),
             error: None,
             current_value: Some("filled".to_string()),
+            selector: None,
+            target: None,
+            candidates: Vec::new(),
         };
         let core: tiangong_core::browser_trait::FillFieldResult = result.into();
         assert!(core.ok);
@@ -456,6 +582,11 @@ mod tests {
         let result = ClickElementResult {
             ok: false,
             error: Some("not found".to_string()),
+            selector: None,
+            target: None,
+            candidates: Vec::new(),
+            x: None,
+            y: None,
         };
         let core: tiangong_core::browser_trait::ClickElementResult = result.into();
         assert!(!core.ok);
@@ -489,5 +620,81 @@ mod tests {
         assert_eq!(parsed.forms[0].fields.len(), 1);
         assert_eq!(parsed.forms[0].fields[0].name, "q");
         assert!(parsed.forms[0].fields[0].required);
+    }
+
+    #[test]
+    fn locate_element_result_into_core_type() {
+        let result = LocateElementResult {
+            ok: true,
+            error: None,
+            ambiguous: false,
+            target: Some(candidate()),
+            candidates: vec![candidate()],
+        };
+        let core: tiangong_core::browser_trait::LocateElementResult = result.into();
+        assert!(core.ok);
+        assert!(!core.ambiguous);
+        assert!(core.target.is_some());
+        assert_eq!(core.candidates.len(), 1);
+        assert_eq!(core.target.unwrap().selector, "#submit");
+    }
+
+    #[test]
+    fn locate_element_result_ambiguous_into_core() {
+        let result = LocateElementResult {
+            ok: false,
+            error: Some("多个候选匹配".to_string()),
+            ambiguous: true,
+            target: None,
+            candidates: vec![candidate()],
+        };
+        let core: tiangong_core::browser_trait::LocateElementResult = result.into();
+        assert!(!core.ok);
+        assert!(core.ambiguous);
+        assert!(core.target.is_none());
+        assert_eq!(core.candidates.len(), 1);
+    }
+
+    #[test]
+    fn fill_result_conversion_keeps_target_and_candidates() {
+        let result = FillFieldResult {
+            ok: false,
+            strategy: None,
+            error: Some("找到多个候选元素".to_string()),
+            current_value: None,
+            selector: None,
+            target: None,
+            candidates: vec![candidate()],
+        };
+
+        let converted: tiangong_core::browser_trait::FillFieldResult = result.into();
+
+        assert_eq!(converted.candidates.len(), 1);
+        assert_eq!(converted.candidates[0].selector, "#submit");
+        assert_eq!(converted.candidates[0].score, 96);
+    }
+
+    #[test]
+    fn click_result_conversion_keeps_actual_target() {
+        let target = candidate();
+        let result = ClickElementResult {
+            ok: true,
+            error: None,
+            selector: Some("#submit".to_string()),
+            target: Some(target),
+            candidates: Vec::new(),
+            x: Some(42),
+            y: Some(24),
+        };
+
+        let converted: tiangong_core::browser_trait::ClickElementResult = result.into();
+
+        assert_eq!(converted.selector.as_deref(), Some("#submit"));
+        assert_eq!(
+            converted.target.as_ref().map(|t| t.text.as_str()),
+            Some("提交")
+        );
+        assert_eq!(converted.x, Some(42));
+        assert_eq!(converted.y, Some(24));
     }
 }

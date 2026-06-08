@@ -148,11 +148,11 @@ pub(crate) fn basic_file_function_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "web_form_fill".to_string(),
-            description: "在天工内嵌浏览器当前页面中填写指定表单字段。支持原生 HTML 控件（input/select/textarea）和 UI 库自定义组件（Ant Design Select、Element Plus Select、DatePicker 等）。使用 selector 定位字段（从 web_form_extract 结果中获取 selector），自动采用最佳填写策略。填写前建议先调用 web_form_extract 了解页面表单结构。".to_string(),
+            description: "在天工内嵌浏览器当前页面中填写指定表单字段。支持原生 HTML 控件（input/select/textarea）和 UI 库自定义组件（Ant Design Select、Element Plus Select、DatePicker 等）。selector 参数可传 CSS 选择器，也可传自然语言定位描述；支持 text=、role=、aria=、label=、placeholder=、name= 以及“邮箱输入框”这类描述。填写前建议先调用 web_form_extract；如果工具返回候选列表，下一次调用要使用候选中的 selector 或更精确描述。".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "selector": { "type": "string", "description": "表单字段的 CSS 选择器（从 web_form_extract 结果中获取）" },
+                    "selector": { "type": "string", "description": "字段定位描述。可用 CSS selector，也可用自然语言或 DSL，例如：邮箱输入框、label=邮箱、placeholder=请输入邮箱、name=email、role=textbox[name=邮箱]" },
                     "value": { "type": "string", "description": "要填写的值" },
                     "strategy": { "type": "string", "enum": ["auto", "native", "keyboard", "paste"], "description": "填写策略，默认 auto（自动选择最佳策略）" }
                 },
@@ -161,13 +161,24 @@ pub(crate) fn basic_file_function_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "web_click".to_string(),
-            description: "点击天工内嵌浏览器当前页面中的指定元素（按钮、链接等）。使用 CSS 选择器定位元素，元素会先滚动到可视区域再点击。常用于提交按钮、导航链接等交互。".to_string(),
+            description: "点击天工内嵌浏览器当前页面中的指定元素（按钮、链接等）。selector 参数可传 CSS 选择器，也可传自然语言定位描述；支持 text=、role=button[name=登录]、aria=关闭、label=提交、placeholder=搜索，以及“登录按钮”“表格第三行第二列的链接”等描述。元素会先滚动到可视区域再点击；如果工具返回候选列表，下一次调用要使用候选中的 selector 或更精确描述。".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "selector": { "type": "string", "description": "要点击的元素的 CSS 选择器" }
+                    "selector": { "type": "string", "description": "点击目标定位描述。可用 CSS selector，也可用自然语言或 DSL，例如：登录按钮、text=提交、role=button[name=登录]、aria=关闭、表格第三行第二列的链接" }
                 },
                 "required": ["selector"]
+            }),
+        },
+        ToolSpec {
+            name: "web_locate_element".to_string(),
+            description: "在天工内嵌浏览器当前页面中定位元素，不执行任何操作，仅返回匹配结果。用于在 click 或 fill 之前探测元素是否存在以及有多少候选。query 参数支持 CSS 选择器和自然语言定位描述（text=、role=、label=、placeholder= 等）。返回结果包含最佳匹配（target）和候选列表（candidates），供后续 web_click 或 web_form_fill 使用更精确的 selector。".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "元素定位描述。可用 CSS selector，也可用自然语言或 DSL，例如：登录按钮、text=提交、role=button[name=登录]、label=邮箱" }
+                },
+                "required": ["query"]
             }),
         },
         ToolSpec {
