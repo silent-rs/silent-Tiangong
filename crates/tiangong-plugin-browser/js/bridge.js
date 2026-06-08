@@ -1170,13 +1170,24 @@
             _startY: 0,
             _color: '#ff0000',
             _strokeWidth: 2,
+            _selectedIndex: -1,
+            _dragging: false,
+            _dragOffsetX: 0,
+            _dragOffsetY: 0,
+            _drawing: false,
+            _resizing: false,
+            _resizeHandle: -1,
+            _hoveredHandle: -1,
 
             start: function(tool) {
                 if (this._active) return { ok: true, note: 'already active' };
                 this._currentTool = tool || 'rect';
                 this._active = true;
+                this._annotations = [];
+                this._selectedIndex = -1;
                 this._ensureCanvas();
                 this._bindEvents();
+                this._showToolbar();
                 return { ok: true };
             },
 
@@ -1189,11 +1200,13 @@
                 }
                 this._canvas = null;
                 this._ctx = null;
+                this._hideToolbar();
                 return { ok: true };
             },
 
             clear: function() {
                 this._annotations = [];
+                this._selectedIndex = -1;
                 this._render();
                 return { ok: true };
             },
@@ -1449,10 +1462,13 @@
                 if (!rect || rect.width <= 0 || rect.height <= 0) {
                     return { text: '', elements: [], elementCount: 0 };
                 }
-                var text = this._extractTextInRect(rect);
-                var elements = this._extractElementsInRect(rect);
+                // 将页面坐标转为视口坐标用于文本/元素提取
+                var vp = this._toViewport(rect.x, rect.y);
+                var viewportRect = { x: vp.x, y: vp.y, width: rect.width, height: rect.height };
+                var text = this._extractTextInRect(viewportRect);
+                var elements = this._extractElementsInRect(viewportRect);
                 if (elements.length === 0) {
-                    elements = this._fallbackElementAtCenter(rect);
+                    elements = this._fallbackElementAtCenter(viewportRect);
                 }
                 if (!text && elements.length > 0) {
                     text = this._shortText(elements.map(function(el) { return el.text; }).filter(Boolean).join(' '), 1200);
@@ -1521,7 +1537,9 @@
                 this._ctx = c.getContext('2d');
                 var self = this;
                 this._resizeHandler = function() { self._resize(); };
+                this._scrollHandler = function() { self._render(); };
                 window.addEventListener('resize', this._resizeHandler);
+                window.addEventListener('scroll', this._scrollHandler, true);
                 this._resize();
             },
 
@@ -1532,14 +1550,59 @@
                 this._render();
             },
 
+            // 将页面坐标转换为视口坐标
+            _toViewport: function(px, py) {
+                return { x: px - window.scrollX, y: py - window.scrollY };
+            },
+
+            // 将视口坐标转换为页面坐标
+            _toPage: function(vx, vy) {
+                return { x: vx + window.scrollX, y: vy + window.scrollY };
+            },
+
+            // 判断视口坐标是否命中某个批注
+            _hitTest: function(vx, vy, annotation) {
+                if (annotation.type === 'rect') {
+                    var vp = this._toViewport(annotation.x, annotation.y);
+                    // 矩形内部全部可选中，外围扩展 6px
+                    return vx >= vp.x - 6 && vx <= vp.x + annotation.width + 6 &&
+                           vy >= vp.y - 6 && vy <= vp.y + annotation.height + 6;
+                }
+                if (annotation.type === 'arrow') {
+                    var a = this._toViewport(annotation.x1, annotation.y1);
+                    var b = this._toViewport(annotation.x2, annotation.y2);
+                    // 箭头线段容差 14px，端点单独检测（半径 18px）
+                    if (this._pointDist(vx, vy, a.x, a.y) < 18) return true;
+                    if (this._pointDist(vx, vy, b.x, b.y) < 18) return true;
+                    return this._pointToSegmentDist(vx, vy, a.x, a.y, b.x, b.y) < 14;
+                }
+                return false;
+            },
+
+            _pointDist: function(px, py, x, y) {
+                var dx = px - x, dy = py - y;
+                return Math.sqrt(dx * dx + dy * dy);
+            },
+
+            _pointToSegmentDist: function(px, py, x1, y1, x2, y2) {
+                var dx = x2 - x1, dy = y2 - y1;
+                var len2 = dx * dx + dy * dy;
+                if (len2 === 0) return Math.sqrt((px - x1) * (px - x1) + (py - y1) * (py - y1));
+                var t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / len2));
+                var cx = x1 + t * dx, cy = y1 + t * dy;
+                return Math.sqrt((px - cx) * (px - cx) + (py - cy) * (py - cy));
+            },
+
             _bindEvents: function() {
                 var self = this;
                 this._onDown = function(e) { self._handleDown(e); };
                 this._onMove = function(e) { self._handleMove(e); };
                 this._onUp = function(e) { self._handleUp(e); };
+                this._onKeyDown = function(e) { self._handleKeyDown(e); };
                 this._canvas.addEventListener('mousedown', this._onDown);
                 this._canvas.addEventListener('mousemove', this._onMove);
                 this._canvas.addEventListener('mouseup', this._onUp);
+                document.addEventListener('keydown', this._onKeyDown);
             },
 
             _unbindEvents: function() {
@@ -1551,44 +1614,217 @@
                 if (this._resizeHandler) {
                     window.removeEventListener('resize', this._resizeHandler);
                 }
+                if (this._scrollHandler) {
+                    window.removeEventListener('scroll', this._scrollHandler, true);
+                }
+                if (this._onKeyDown) {
+                    document.removeEventListener('keydown', this._onKeyDown);
+                }
+            },
+
+            _handleKeyDown: function(e) {
+                if (this._selectedIndex < 0) return;
+                if (e.key === 'Delete' || e.key === 'Backspace') {
+                    this._annotations.splice(this._selectedIndex, 1);
+                    this._selectedIndex = -1;
+                    this._render();
+                } else if (e.key === 'Escape') {
+                    this._selectedIndex = -1;
+                    this._render();
+                }
             },
 
             _handleDown: function(e) {
-                this._startX = e.clientX;
-                this._startY = e.clientY;
+                var vx = e.clientX, vy = e.clientY;
+
+                // 1. 如果已有选中批注，先检测是否点击了控制点
+                if (this._selectedIndex >= 0 && this._selectedIndex < this._annotations.length) {
+                    var sel = this._annotations[this._selectedIndex];
+                    var handles = sel.type === 'rect' ? this._getRectHandles(sel) : this._getArrowHandles(sel);
+                    for (var h = 0; h < handles.length; h++) {
+                        if (Math.abs(vx - handles[h].x) < 10 && Math.abs(vy - handles[h].y) < 10) {
+                            this._resizing = true;
+                            this._resizeHandle = h;
+                            this._dragging = false;
+                            this._drawing = false;
+                            return;
+                        }
+                    }
+                }
+
+                // 2. 检测是否点击了已有批注（不含控制点）
+                for (var i = this._annotations.length - 1; i >= 0; i--) {
+                    if (this._hitTest(vx, vy, this._annotations[i])) {
+                        this._selectedIndex = i;
+                        this._dragging = true;
+                        this._drawing = false;
+                        this._resizing = false;
+                        var a = this._annotations[i];
+                        if (a.type === 'rect') {
+                            var vp = this._toViewport(a.x, a.y);
+                            this._dragOffsetX = vx - vp.x;
+                            this._dragOffsetY = vy - vp.y;
+                        } else {
+                            this._dragOffsetX = vx;
+                            this._dragOffsetY = vy;
+                        }
+                        this._render();
+                        return;
+                    }
+                }
+
+                // 3. 未命中任何批注，开始新绘制
+                this._selectedIndex = -1;
+                this._startX = vx;
+                this._startY = vy;
                 this._drawing = true;
+                this._dragging = false;
+                this._resizing = false;
             },
 
             _handleMove: function(e) {
+                var vx = e.clientX, vy = e.clientY;
+
+                // 更新光标样式
+                this._updateCursor(vx, vy);
+
+                // 控制点拖拽调整大小
+                if (this._resizing && this._selectedIndex >= 0) {
+                    var a = this._annotations[this._selectedIndex];
+                    var pg = this._toPage(vx, vy);
+                    if (a.type === 'rect') {
+                        this._resizeRect(a, this._resizeHandle, pg.x, pg.y);
+                    } else if (a.type === 'arrow') {
+                        if (this._resizeHandle === 0) {
+                            a.x1 = pg.x; a.y1 = pg.y;
+                        } else {
+                            a.x2 = pg.x; a.y2 = pg.y;
+                        }
+                    }
+                    this._render();
+                    return;
+                }
+
+                // 拖拽移动已选中的批注
+                if (this._dragging && this._selectedIndex >= 0) {
+                    var a = this._annotations[this._selectedIndex];
+                    var pg;
+                    if (a.type === 'rect') {
+                        pg = this._toPage(vx - this._dragOffsetX, vy - this._dragOffsetY);
+                        a.x = pg.x;
+                        a.y = pg.y;
+                    } else {
+                        var dx = vx - this._dragOffsetX;
+                        var dy = vy - this._dragOffsetY;
+                        pg = this._toPage(a.x1 + dx, a.y1 + dy);
+                        var pg2 = this._toPage(a.x2 + dx, a.y2 + dy);
+                        a.x1 = pg.x; a.y1 = pg.y;
+                        a.x2 = pg2.x; a.y2 = pg2.y;
+                        this._dragOffsetX = vx;
+                        this._dragOffsetY = vy;
+                    }
+                    this._render();
+                    return;
+                }
+
+                // 绘制新批注预览
                 if (!this._drawing) return;
                 this._render();
                 var ctx = this._ctx;
                 ctx.strokeStyle = this._color;
                 ctx.lineWidth = this._strokeWidth;
+                ctx.setLineDash([6, 4]);
                 if (this._currentTool === 'rect') {
-                    ctx.strokeRect(this._startX, this._startY, e.clientX - this._startX, e.clientY - this._startY);
+                    ctx.strokeRect(this._startX, this._startY, vx - this._startX, vy - this._startY);
                 } else if (this._currentTool === 'arrow') {
-                    this._drawArrow(ctx, this._startX, this._startY, e.clientX, e.clientY);
+                    this._drawArrow(ctx, this._startX, this._startY, vx, vy);
                 }
+                ctx.setLineDash([]);
+            },
+
+            _updateCursor: function(vx, vy) {
+                if (!this._canvas) return;
+                var prevHover = this._hoveredHandle;
+                this._hoveredHandle = -1;
+                // 1. 检测控制点悬停
+                if (this._selectedIndex >= 0 && this._selectedIndex < this._annotations.length) {
+                    var sel = this._annotations[this._selectedIndex];
+                    var handles = sel.type === 'rect' ? this._getRectHandles(sel) : this._getArrowHandles(sel);
+                    for (var h = 0; h < handles.length; h++) {
+                        if (Math.abs(vx - handles[h].x) < 10 && Math.abs(vy - handles[h].y) < 10) {
+                            this._hoveredHandle = h;
+                            if (sel.type === 'rect') {
+                                var cursors = ['nwse-resize','ns-resize','nesw-resize','ew-resize','nwse-resize','ns-resize','nesw-resize','ew-resize'];
+                                this._canvas.style.cursor = cursors[h];
+                            } else {
+                                this._canvas.style.cursor = 'grab';
+                            }
+                            if (prevHover !== h) this._render();
+                            return;
+                        }
+                    }
+                }
+                // 2. 检测批注悬停
+                for (var i = this._annotations.length - 1; i >= 0; i--) {
+                    if (this._hitTest(vx, vy, this._annotations[i])) {
+                        this._canvas.style.cursor = 'move';
+                        if (prevHover !== -1) this._render();
+                        return;
+                    }
+                }
+                this._canvas.style.cursor = 'crosshair';
+                if (prevHover !== -1) this._render();
+            },
+
+            _resizeRect: function(a, handle, px, py) {
+                var right = a.x + a.width;
+                var bottom = a.y + a.height;
+                switch (handle) {
+                    case 0: a.x = px; a.y = py; a.width = right - px; a.height = bottom - py; break;
+                    case 1: a.y = py; a.height = bottom - py; break;
+                    case 2: a.width = px - a.x; a.y = py; a.height = bottom - py; break;
+                    case 3: a.width = px - a.x; break;
+                    case 4: a.width = px - a.x; a.height = py - a.y; break;
+                    case 5: a.height = py - a.y; break;
+                    case 6: a.x = px; a.width = right - px; a.height = py - a.y; break;
+                    case 7: a.x = px; a.width = right - px; break;
+                }
+                // 防止翻转（宽高为负时修正）
+                if (a.width < 0) { a.x += a.width; a.width = -a.width; }
+                if (a.height < 0) { a.y += a.height; a.height = -a.height; }
             },
 
             _handleUp: function(e) {
+                // 完成控制点拖拽
+                if (this._resizing) {
+                    this._resizing = false;
+                    this._resizeHandle = -1;
+                    return;
+                }
+                // 完成拖拽移动
+                if (this._dragging) {
+                    this._dragging = false;
+                    return;
+                }
                 if (!this._drawing) return;
                 this._drawing = false;
+                var vx = e.clientX, vy = e.clientY;
+                var pg = this._toPage(this._startX, this._startY);
+                var pg2 = this._toPage(vx, vy);
                 var annotation = {
                     type: this._currentTool,
                     color: this._color
                 };
                 if (this._currentTool === 'rect') {
-                    annotation.x = Math.min(this._startX, e.clientX);
-                    annotation.y = Math.min(this._startY, e.clientY);
-                    annotation.width = Math.abs(e.clientX - this._startX);
-                    annotation.height = Math.abs(e.clientY - this._startY);
+                    annotation.x = Math.min(pg.x, pg2.x);
+                    annotation.y = Math.min(pg.y, pg2.y);
+                    annotation.width = Math.abs(pg2.x - pg.x);
+                    annotation.height = Math.abs(pg2.y - pg.y);
                 } else if (this._currentTool === 'arrow') {
-                    annotation.x1 = this._startX;
-                    annotation.y1 = this._startY;
-                    annotation.x2 = e.clientX;
-                    annotation.y2 = e.clientY;
+                    annotation.x1 = pg.x;
+                    annotation.y1 = pg.y;
+                    annotation.x2 = pg2.x;
+                    annotation.y2 = pg2.y;
                 }
                 if (annotation.width > 5 || annotation.height > 5 || annotation.x1 !== undefined) {
                     this._annotations.push(annotation);
@@ -1608,20 +1844,163 @@
                 ctx.stroke();
             },
 
+            // 获取矩形 8 个控制点的视口坐标（顺时针：TL, T, TR, R, BR, B, BL, L）
+            _getRectHandles: function(a) {
+                var vp = this._toViewport(a.x, a.y);
+                var x = vp.x, y = vp.y, w = a.width, h = a.height;
+                return [
+                    { x: x, y: y },           // 0: TL
+                    { x: x + w / 2, y: y },   // 1: T
+                    { x: x + w, y: y },        // 2: TR
+                    { x: x + w, y: y + h / 2 },// 3: R
+                    { x: x + w, y: y + h },    // 4: BR
+                    { x: x + w / 2, y: y + h },// 5: B
+                    { x: x, y: y + h },         // 6: BL
+                    { x: x, y: y + h / 2 }      // 7: L
+                ];
+            },
+
+            // 获取箭头 2 个端点的视口坐标
+            _getArrowHandles: function(a) {
+                var va = this._toViewport(a.x1, a.y1);
+                var vb = this._toViewport(a.x2, a.y2);
+                return [{ x: va.x, y: va.y }, { x: vb.x, y: vb.y }];
+            },
+
+            _drawHandle: function(ctx, x, y, isHovered) {
+                var r = isHovered ? 7 : 4;
+                ctx.fillStyle = isHovered ? '#6366f1' : '#fff';
+                ctx.strokeStyle = 'rgba(99,102,241,0.9)';
+                ctx.lineWidth = isHovered ? 2 : 1.5;
+                ctx.beginPath();
+                ctx.arc(x, y, r, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.stroke();
+            },
+
             _render: function() {
                 if (!this._ctx) return;
                 this._ctx.clearRect(0, 0, this._canvas.width, this._canvas.height);
                 for (var i = 0; i < this._annotations.length; i++) {
                     var a = this._annotations[i];
+                    var isSelected = (i === this._selectedIndex);
                     this._ctx.strokeStyle = a.color;
                     this._ctx.lineWidth = 2;
+                    this._ctx.setLineDash([]);
                     if (a.type === 'rect') {
-                        this._ctx.strokeRect(a.x, a.y, a.width, a.height);
+                        var vp = this._toViewport(a.x, a.y);
+                        this._ctx.strokeRect(vp.x, vp.y, a.width, a.height);
+                        if (isSelected) {
+                            var handles = this._getRectHandles(a);
+                            for (var h = 0; h < handles.length; h++) {
+                                this._drawHandle(this._ctx, handles[h].x, handles[h].y, h === this._hoveredHandle);
+                            }
+                        }
                     } else if (a.type === 'arrow') {
-                        this._drawArrow(this._ctx, a.x1, a.y1, a.x2, a.y2);
+                        var va = this._toViewport(a.x1, a.y1);
+                        var vb = this._toViewport(a.x2, a.y2);
+                        this._drawArrow(this._ctx, va.x, va.y, vb.x, vb.y);
+                        if (isSelected) {
+                            var handles = this._getArrowHandles(a);
+                            for (var h = 0; h < handles.length; h++) {
+                                this._drawHandle(this._ctx, handles[h].x, handles[h].y, h === this._hoveredHandle);
+                            }
+                        }
                     }
                 }
-            }
+                this._updateToolbarCount();
+            },
+
+            _showToolbar: function() {
+                if (this._toolbar) return;
+                var self = this;
+                var toolbar = document.createElement('div');
+                toolbar.id = '__tiangong_annotation_toolbar';
+                toolbar.style.cssText = 'position:fixed;bottom:16px;right:16px;z-index:2147483647;display:flex;align-items:center;gap:6px;padding:6px 10px;background:rgba(30,30,30,0.92);border-radius:8px;box-shadow:0 2px 12px rgba(0,0,0,0.3);font-family:system-ui,-apple-system,sans-serif;font-size:13px;color:#e5e5e5;user-select:none;backdrop-filter:blur(8px);';
+                var tools = [
+                    { key: 'rect', label: '矩形', icon: '▭' },
+                    { key: 'arrow', label: '箭头', icon: '→' }
+                ];
+                for (var i = 0; i < tools.length; i++) {
+                    (function(t) {
+                        var btn = document.createElement('button');
+                        btn.setAttribute('data-tool', t.key);
+                        btn.textContent = t.icon + ' ' + t.label;
+                        btn.title = t.label + '工具';
+                        btn.style.cssText = 'padding:4px 10px;border:1px solid rgba(255,255,255,0.15);border-radius:5px;background:transparent;color:#e5e5e5;cursor:pointer;font-size:13px;line-height:1.2;transition:all 0.15s;';
+                        if (self._currentTool === t.key) {
+                            btn.style.background = 'rgba(99,102,241,0.8)';
+                            btn.style.borderColor = 'rgba(99,102,241,0.9)';
+                        }
+                        btn.onmouseenter = function() { if (self._currentTool !== t.key) btn.style.background = 'rgba(255,255,255,0.1)'; };
+                        btn.onmouseleave = function() { if (self._currentTool !== t.key) btn.style.background = 'transparent'; };
+                        btn.onclick = function() { self._switchTool(t.key); };
+                        toolbar.appendChild(btn);
+                    })(tools[i]);
+                }
+                var sep = document.createElement('span');
+                sep.style.cssText = 'width:1px;height:18px;background:rgba(255,255,255,0.15);margin:0 2px;';
+                toolbar.appendChild(sep);
+                var countSpan = document.createElement('span');
+                countSpan.setAttribute('data-role', 'count');
+                countSpan.style.cssText = 'font-size:12px;color:#9ca3af;min-width:32px;text-align:center;';
+                countSpan.textContent = '0 个';
+                toolbar.appendChild(countSpan);
+                var clearBtn = document.createElement('button');
+                clearBtn.setAttribute('data-role', 'clear');
+                clearBtn.textContent = '清除';
+                clearBtn.title = '清除所有批注';
+                clearBtn.style.cssText = 'padding:4px 10px;border:1px solid rgba(239,68,68,0.3);border-radius:5px;background:transparent;color:#f87171;cursor:pointer;font-size:13px;line-height:1.2;transition:all 0.15s;';
+                clearBtn.onmouseenter = function() { clearBtn.style.background = 'rgba(239,68,68,0.15)'; };
+                clearBtn.onmouseleave = function() { clearBtn.style.background = 'transparent'; };
+                clearBtn.onclick = function() { self.clear(); };
+                toolbar.appendChild(clearBtn);
+                var closeBtn = document.createElement('button');
+                closeBtn.textContent = '✕';
+                closeBtn.title = '关闭批注';
+                closeBtn.style.cssText = 'padding:4px 8px;border:1px solid rgba(255,255,255,0.15);border-radius:5px;background:transparent;color:#9ca3af;cursor:pointer;font-size:13px;line-height:1.2;transition:all 0.15s;';
+                closeBtn.onmouseenter = function() { closeBtn.style.background = 'rgba(255,255,255,0.1)'; };
+                closeBtn.onmouseleave = function() { closeBtn.style.background = 'transparent'; };
+                closeBtn.onclick = function() {
+                    var bridge = window.__tiangong_bridge;
+                    if (bridge && bridge.annotation) bridge.annotation.stop();
+                };
+                toolbar.appendChild(closeBtn);
+                document.body.appendChild(toolbar);
+                this._toolbar = toolbar;
+            },
+
+            _hideToolbar: function() {
+                if (this._toolbar && this._toolbar.parentNode) {
+                    this._toolbar.parentNode.removeChild(this._toolbar);
+                }
+                this._toolbar = null;
+            },
+
+            _switchTool: function(tool) {
+                this._currentTool = tool;
+                this._selectedIndex = -1;
+                var buttons = this._toolbar.querySelectorAll('[data-tool]');
+                for (var i = 0; i < buttons.length; i++) {
+                    var btn = buttons[i];
+                    if (btn.getAttribute('data-tool') === tool) {
+                        btn.style.background = 'rgba(99,102,241,0.8)';
+                        btn.style.borderColor = 'rgba(99,102,241,0.9)';
+                    } else {
+                        btn.style.background = 'transparent';
+                        btn.style.borderColor = 'rgba(255,255,255,0.15)';
+                    }
+                }
+                this._render();
+            },
+
+            _updateToolbarCount: function() {
+                if (!this._toolbar) return;
+                var span = this._toolbar.querySelector('[data-role="count"]');
+                if (span) {
+                    span.textContent = this._annotations.length + ' 个';
+                }
+            },
         },
     };
 
