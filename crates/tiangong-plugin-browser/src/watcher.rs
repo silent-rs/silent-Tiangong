@@ -82,6 +82,7 @@ pub async fn run_browser_watcher(
             // 同步获取进行中，只发送轻量级事件
             let _ = event_tx.try_send(BrowserEvent::PageData {
                 url: current_url.clone(),
+
                 title: String::new(),
                 text: String::new(),
             });
