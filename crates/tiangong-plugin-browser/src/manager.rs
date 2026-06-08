@@ -1,7 +1,8 @@
-use tracing::debug;
+use tracing::{debug, warn};
 
 use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tauri::{
@@ -17,18 +18,18 @@ const BROWSER_WEBVIEW_LABEL: &str = "browser-webview";
 /// 浏览器 WebView 的共享状态
 pub struct BrowserState {
     pub webview: Option<Webview<Wry>>,
-    /// 页面加载完成信号
-    pub page_loaded: Arc<(Mutex<bool>, Condvar)>,
     /// 最近一次页面快照
     pub latest_snapshot: Option<BrowserPageSnapshot>,
     /// 浏览器监测任务停止信号
-    pub watcher_stop: Arc<std::sync::atomic::AtomicBool>,
-    /// 事件发送端（用于 on_page_load 回调等即时通知）
+    pub watcher_stop: Arc<AtomicBool>,
+    /// 事件发送端（用于 watcher 等即时通知）
     pub event_tx: Option<mpsc::Sender<BrowserEvent>>,
     /// 标签列表
     pub tabs: Vec<BrowserTab>,
     /// 活跃标签 ID
     pub active_tab_id: Option<String>,
+    /// web_fetch 同步获取内容时设为 true，阻止 watcher 推送重复内容
+    pub sync_fetch_in_progress: Arc<AtomicBool>,
 }
 
 pub struct BrowserManager {
@@ -46,12 +47,12 @@ impl BrowserManager {
         Self {
             state: Arc::new(Mutex::new(BrowserState {
                 webview: None,
-                page_loaded: Arc::new((Mutex::new(false), Condvar::new())),
                 latest_snapshot: None,
-                watcher_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                watcher_stop: Arc::new(AtomicBool::new(false)),
                 event_tx: None,
                 tabs: Vec::new(),
                 active_tab_id: None,
+                sync_fetch_in_progress: Arc::new(AtomicBool::new(false)),
             })),
         }
     }
@@ -108,77 +109,16 @@ impl BrowserManager {
         let parsed_url: Url = url.parse().map_err(|e| format!("URL 解析失败：{e}"))?;
 
         let data_dir = browser_data_directory();
-        let state_clone = self.state.clone();
 
+        // 注意：不使用 .on_page_load()，因为 wry 内部的 url_from_webview
+        // 会在 WebView URL 为 None 时 panic（wry bug）。
+        // 页面加载状态改由 wait_for_page_ready 通过 JS 轮询检测。
         let builder = WebviewBuilder::new(BROWSER_WEBVIEW_LABEL, WebviewUrl::External(parsed_url))
             .initialization_script(BRIDGE_SCRIPT)
             .data_directory(data_dir)
             .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/605.1.15")
             .enable_clipboard_access()
-            .devtools(true)
-            .on_page_load(move |_webview, payload| {
-                use tauri::webview::PageLoadEvent;
-                if payload.event() == PageLoadEvent::Finished {
-                    // 设置页面加载完成信号
-                    {
-                        let state = match state_clone.lock() {
-                            Ok(s) => s,
-                            Err(_) => return,
-                        };
-                        let (lock, cvar) = &*state.page_loaded;
-                        if let Ok(mut loaded) = lock.lock() {
-                            *loaded = true;
-                        }
-                        cvar.notify_all();
-                    }
-
-                    // 轮询获取稳定页面内容：等待动态数据加载完成后采集
-                    let state_delayed = state_clone.clone();
-                    std::thread::spawn(move || {
-                        let manager = BrowserManager {
-                            state: state_delayed,
-                        };
-                        let (title, page_url, text) =
-                            match poll_stable_content(&manager, 12000) {
-                                Some(c) => c,
-                                None => return,
-                            };
-
-                        let summary: String = text.chars().take(2000).collect();
-                        {
-                            let mut s = match manager.state.lock() {
-                                Ok(s) => s,
-                                Err(e) => e.into_inner(),
-                            };
-                            s.latest_snapshot = Some(BrowserPageSnapshot {
-                                title: title.clone(),
-                                url: page_url.clone(),
-                                text: text.clone(),
-                                status: crate::types::PageStatus::Loaded,
-                                tabs: Vec::new(),
-                                active_tab_id: None,
-                            });
-                            let aid = s.active_tab_id.clone();
-                            if let Some(active_id) = aid {
-                                if let Some(tab) = s.tabs.iter_mut().find(|t| t.id == active_id)
-                                {
-                                    tab.url = page_url.clone();
-                                    if !title.is_empty() {
-                                        tab.title = title.clone();
-                                    }
-                                }
-                            }
-                            if let Some(ref tx) = s.event_tx {
-                                let _ = tx.try_send(BrowserEvent::PageData {
-                                    url: page_url,
-                                    title,
-                                    text: summary,
-                                });
-                            }
-                        }
-                    });
-                }
-            });
+            .devtools(true);
 
         let webview = window
             .add_child(builder, LogicalPosition::new(x, y), LogicalSize::new(w, h))
@@ -204,11 +144,6 @@ impl BrowserManager {
             if let Some(webview) = state.webview.take() {
                 let _ = webview.close();
             }
-            let (lock, cvar) = &*state.page_loaded;
-            if let Ok(mut loaded) = lock.lock() {
-                *loaded = false;
-            }
-            cvar.notify_all();
             state.latest_snapshot = None;
             state.tabs.clear();
             state.active_tab_id = None;
@@ -255,10 +190,6 @@ impl BrowserManager {
 
     pub fn navigate(&self, url: &str) -> Result<(), String> {
         let state = self.state.lock().map_err(|e| e.to_string())?;
-        let (lock, _cvar) = &*state.page_loaded;
-        if let Ok(mut loaded) = lock.lock() {
-            *loaded = false;
-        }
         if let Some(webview) = &state.webview {
             let parsed_url: Url = url.parse().map_err(|e| format!("URL 解析失败：{e}"))?;
             // wry 的 navigate 内部 NSURL::URLWithString 可能 panic，用 catch_unwind 保护
@@ -274,10 +205,6 @@ impl BrowserManager {
 
     pub fn load_html(&self, html: &str) -> Result<(), String> {
         let state = self.state.lock().map_err(|e| e.to_string())?;
-        let (lock, _cvar) = &*state.page_loaded;
-        if let Ok(mut loaded) = lock.lock() {
-            *loaded = false;
-        }
         if let Some(webview) = &state.webview {
             let encoded = base64_url::encode(html.as_bytes());
             let data_url = format!("data:text/html;base64,{encoded}");
@@ -321,45 +248,67 @@ impl BrowserManager {
         rx.recv_timeout(Duration::from_secs(10)).ok()
     }
 
-    fn wait_for_page_load(&self, timeout_ms: u64) -> bool {
-        let page_loaded = {
-            let state = match self.state.lock() {
-                Ok(s) => s,
-                Err(_) => return false,
-            };
-            state.page_loaded.clone()
-        };
-        let (lock, cvar) = &*page_loaded;
-        let start = std::time::Instant::now();
-        let mut guard = match lock.lock() {
-            Ok(g) => g,
-            Err(_) => return false,
-        };
-        if *guard {
-            return true;
+    fn reset_sync_fetch_flag(&self) {
+        if let Ok(state) = self.state.lock() {
+            state.sync_fetch_in_progress.store(false, Ordering::Relaxed);
         }
+    }
+
+    /// 通过 JS 轮询等待页面加载完成（document.readyState === 'complete'）。
+    pub(crate) fn wait_for_page_ready(&self, timeout_ms: u64) -> bool {
+        let start = std::time::Instant::now();
+        let check_interval = Duration::from_millis(300);
+
         loop {
-            let remaining = timeout_ms.saturating_sub(start.elapsed().as_millis() as u64);
-            if remaining == 0 {
-                return *guard;
-            }
-            let result = cvar.wait_timeout(guard, Duration::from_millis(remaining));
-            match result {
-                Ok((g, _)) => {
-                    guard = g;
-                    if *guard {
-                        return true;
-                    }
+            if let Some(result) = self.eval_with_result("document.readyState") {
+                if result.contains("complete") || result.contains("interactive") {
+                    return true;
                 }
-                Err(_) => return false,
             }
+
+            if start.elapsed() >= Duration::from_millis(timeout_ms) {
+                return false;
+            }
+            std::thread::sleep(check_interval);
+        }
+    }
+
+    /// 等待页面内容稳定：连续两次采集到完全相同的文本内容视为就绪。
+    pub(crate) fn wait_for_content_ready(&self, timeout_ms: u64) {
+        let start = std::time::Instant::now();
+        let check_interval = Duration::from_millis(500);
+        let mut prev_text = String::new();
+        let mut stable_count: usize = 0;
+
+        loop {
+            if let Some(raw) =
+                self.eval_with_result("JSON.stringify(window.__tiangong_bridge.getFullText(12000))")
+            {
+                if let Ok(data) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    let text = data["text"].as_str().unwrap_or("").to_string();
+                    if !text.is_empty() && text == prev_text {
+                        stable_count += 1;
+                        if stable_count >= 2 {
+                            break;
+                        }
+                    } else {
+                        stable_count = 0;
+                    }
+                    prev_text = text;
+                }
+            }
+
+            if start.elapsed() >= Duration::from_millis(timeout_ms) {
+                break;
+            }
+            std::thread::sleep(check_interval);
         }
     }
 
     pub fn fetch_page_content(
         &self,
         url: &str,
-        _max_chars: usize,
+        max_chars: usize,
         should_navigate: bool,
     ) -> BrowserResponse {
         let error_response = |err: String| BrowserResponse {
@@ -370,31 +319,90 @@ impl BrowserManager {
             error: Some(err),
         };
 
+        // 标记同步获取进行中，阻止 watcher 推送重复内容
+        {
+            let state = match self.state.lock() {
+                Ok(s) => s,
+                Err(e) => e.into_inner(),
+            };
+            state.sync_fetch_in_progress.store(true, Ordering::Relaxed);
+        }
+
         if should_navigate {
             if let Err(err) = self.navigate(url) {
+                self.reset_sync_fetch_flag();
                 return error_response(err);
             }
         }
 
         let t0 = std::time::Instant::now();
-        let loaded = self.wait_for_page_load(15_000);
+        let ready = self.wait_for_page_ready(15_000);
         debug!(
-            loaded,
+            ready,
             elapsed_ms = t0.elapsed().as_millis() as u64,
-            "browser wait_for_page_load"
+            "browser wait_for_page_ready"
         );
 
-        if !loaded {
+        if !ready {
+            self.reset_sync_fetch_flag();
             return error_response("页面加载超时".to_string());
         }
 
-        // 仅确认导航完成，内容由 on_page_load 通过事件通道推送
-        BrowserResponse {
-            ok: true,
-            title: String::new(),
-            content: String::new(),
-            final_url: url.to_string(),
-            error: None,
+        let t1 = std::time::Instant::now();
+        self.wait_for_content_ready(15_000);
+        debug!(
+            elapsed_ms = t1.elapsed().as_millis() as u64,
+            "browser wait_for_content_ready"
+        );
+
+        let result = self.eval_with_result(&format!(
+            "JSON.stringify(window.__tiangong_bridge.getFullText({max_chars}))"
+        ));
+
+        self.reset_sync_fetch_flag();
+
+        match result {
+            Some(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(data) => {
+                    let title = data["title"].as_str().unwrap_or("").to_string();
+                    let content = data["text"].as_str().unwrap_or("").to_string();
+                    let final_url = data["url"].as_str().unwrap_or(url).to_string();
+
+                    // 同步更新快照和活跃标签
+                    if let Ok(mut state) = self.state.lock() {
+                        state.latest_snapshot = Some(BrowserPageSnapshot {
+                            title: title.clone(),
+                            url: final_url.clone(),
+                            text: content.clone(),
+                            status: crate::types::PageStatus::Loaded,
+                            tabs: Vec::new(),
+                            active_tab_id: None,
+                        });
+                        let aid = state.active_tab_id.clone();
+                        if let Some(active_id) = aid {
+                            if let Some(tab) = state.tabs.iter_mut().find(|t| t.id == active_id) {
+                                tab.url = final_url.clone();
+                                if !title.is_empty() {
+                                    tab.title = title.clone();
+                                }
+                            }
+                        }
+                    }
+
+                    BrowserResponse {
+                        ok: true,
+                        title,
+                        content,
+                        final_url,
+                        error: None,
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "browser JSON parse error");
+                    error_response("解析页面内容失败".to_string())
+                }
+            },
+            None => error_response("获取页面内容超时".to_string()),
         }
     }
 
@@ -520,64 +528,6 @@ fn browser_data_directory() -> PathBuf {
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".tiangong").join("browser-data")
-}
-
-/// 轮询页面内容直到稳定：连续两次采集结果完全相同则认为内容就绪。
-///
-/// 策略：初始等待 2 秒让框架初始化，之后每 1 秒采集一次，
-/// 最多轮询 10 次（总计约 12 秒）。连续两次 URL 和文本内容相同视为稳定。
-fn poll_stable_content(
-    manager: &BrowserManager,
-    max_chars: usize,
-) -> Option<(String, String, String)> {
-    let js = format!("JSON.stringify(window.__tiangong_bridge.getFullText({max_chars}))");
-
-    // 初始等待：让页面框架和 AJAX 启动
-    std::thread::sleep(Duration::from_secs(2));
-
-    let mut prev_text = String::new();
-    let mut prev_url = String::new();
-    let mut stable_count = 0;
-
-    for _ in 0..10 {
-        let raw = manager.eval_with_result(&js)?;
-        let data = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
-        let url = data["url"].as_str().unwrap_or("").to_string();
-        if url.is_empty() {
-            std::thread::sleep(Duration::from_secs(1));
-            continue;
-        }
-        let text = data["text"].as_str().unwrap_or("").to_string();
-        let title = data["title"].as_str().unwrap_or("").to_string();
-
-        // 连续两次 URL 和文本完全相同 → 内容稳定
-        if url == prev_url && text == prev_text && !text.is_empty() {
-            stable_count += 1;
-            if stable_count >= 2 {
-                return Some((title, url, text));
-            }
-        } else {
-            stable_count = 0;
-        }
-
-        prev_text = text;
-        prev_url = url;
-        std::thread::sleep(Duration::from_secs(1));
-    }
-
-    // 超时兜底：使用最后一次采集结果（如果有内容）
-    if !prev_text.is_empty() {
-        let raw = manager.eval_with_result(&js)?;
-        let data = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
-        let title = data["title"].as_str().unwrap_or("").to_string();
-        let url = data["url"].as_str().unwrap_or("").to_string();
-        let text = data["text"].as_str().unwrap_or("").to_string();
-        if !url.is_empty() {
-            return Some((title, url, text));
-        }
-    }
-
-    None
 }
 
 pub fn default_browser_rect(app: &AppHandle<Wry>) -> Option<(f64, f64, f64, f64)> {

@@ -272,28 +272,32 @@ impl BrowserToolOverride {
                     });
                 }
             };
-            if !result.ok {
-                return Some(tiangong_core::tool::ToolResult {
-                    ok: false,
-                    summary: format!(
-                        "浏览器导航失败：{}",
-                        result.error.clone().unwrap_or_default()
-                    ),
-                    stdout: String::new(),
-                    stderr: result.error.unwrap_or_default(),
-                    exit_code: 1,
-                    execution: None,
-                });
-            }
+            let summary = if result.ok {
+                if result.title.is_empty() {
+                    format!("浏览器获取成功：{}", result.final_url)
+                } else {
+                    format!("浏览器获取成功：{}", result.title)
+                }
+            } else {
+                format!(
+                    "浏览器获取失败：{}",
+                    result.error.clone().unwrap_or_default()
+                )
+            };
             Some(tiangong_core::tool::ToolResult {
-                ok: true,
-                summary: format!("已导航到 {}", result.final_url),
-                stdout: format!(
-                    "已导航到 {}，页面加载后将自动推送内容到对话。",
-                    result.final_url
-                ),
-                stderr: String::new(),
-                exit_code: 0,
+                ok: result.ok,
+                summary,
+                stdout: if result.ok {
+                    result.content
+                } else {
+                    String::new()
+                },
+                stderr: if result.ok {
+                    String::new()
+                } else {
+                    result.error.unwrap_or_default()
+                },
+                exit_code: if result.ok { 0 } else { 1 },
                 execution: None,
             })
         })
