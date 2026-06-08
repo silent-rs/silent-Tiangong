@@ -47,8 +47,8 @@ pub async fn run_browser_watcher(
             }
         };
 
-        // 检测 URL 变化
-        if current_url == last_url {
+        // 检测 URL 变化（忽略 about:blank 等导航中间状态）
+        if current_url == last_url || current_url == "about:blank" {
             continue;
         }
         last_url = current_url.clone();
