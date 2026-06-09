@@ -236,12 +236,17 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
     await api.browserSetPosition(rect.x, rect.y, rect.width, rect.height).catch(console.error);
   }, []);
 
-  // 非空白页时同步 WebView 位置
+  // Modal 打开时将 WebView 移到屏幕外，关闭时恢复位置
   useEffect(() => {
-    if (browserOpenedRef.current) {
+    if (showHistoryModal) {
+      if (containerRef.current) {
+        const rect = containerRef.current.getBoundingClientRect();
+        api.browserSetPosition(-10000, -10000, rect.width, rect.height).catch(console.error);
+      }
+    } else if (browserOpenedRef.current) {
       syncPosition();
     }
-  }, [syncPosition]);
+  }, [showHistoryModal, syncPosition]);
 
   const handleNavigate = useCallback(async () => {
     const nextUrl = normalizeBrowserUrl(url);
