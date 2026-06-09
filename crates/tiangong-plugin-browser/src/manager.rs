@@ -1308,7 +1308,7 @@ impl BrowserManager {
         })
     }
 
-    /// 获取全局浏览历史（分页）
+    /// 获取全局浏览历史（分页，最新在前）
     pub fn get_global_history(&self, offset: usize, limit: usize) -> Vec<HistoryEntry> {
         let state = match self.state.lock() {
             Ok(s) => s,
@@ -1318,10 +1318,14 @@ impl BrowserManager {
         if offset >= total {
             return Vec::new();
         }
-        // 倒序返回（最新在前）
-        let start = total.saturating_sub(offset + limit);
+        // 倒序切片：offset=0 取最后 limit 条
         let end = total.saturating_sub(offset);
-        state.global_history[start..end].to_vec()
+        let start = end.saturating_sub(limit);
+        state.global_history[start..end]
+            .iter()
+            .rev()
+            .cloned()
+            .collect()
     }
 
     /// 清除指定标签页的历史

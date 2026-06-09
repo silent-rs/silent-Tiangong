@@ -130,15 +130,16 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
       }
       setGlobalHistoryHasMore(entries.length >= HISTORY_PAGE_SIZE);
       setGlobalHistoryOffset(offset + entries.length);
-    } catch {
+    } catch (err) {
+      console.error('加载全局历史失败：', err);
       setGlobalHistoryHasMore(false);
     } finally {
       setGlobalHistoryLoading(false);
     }
   }, []);
 
-  // 判断当前是否在空白页
-  const isOnBlankPage = activeTabId && tabs.find(t => t.id === activeTabId)?.url === 'about:blank';
+  // 判断当前是否在空白页（优先用 url 状态，fallback 到 tabs）
+  const isOnBlankPage = activeTabId && (!url || url === 'about:blank' || tabs.find(t => t.id === activeTabId)?.url === 'about:blank');
 
   // 空白页时加载全局历史
   useEffect(() => {
