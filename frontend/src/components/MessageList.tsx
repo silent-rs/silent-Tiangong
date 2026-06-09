@@ -257,6 +257,7 @@ function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessages, edi
   const isEditing = editingMessageId === message.id;
   const searchQuery = useSearchStore(s => s.searchQuery);
   const currentMessageId = useSearchStore(s => s.currentMessageId);
+  const currentMatchStart = useSearchStore(s => s.currentMatchStart);
   const caseSensitive = useSearchStore(s => s.caseSensitive);
 
   const renderUserText = (text: string) => {
@@ -264,7 +265,7 @@ function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessages, edi
     const occurrences = findTextOccurrences(text, searchQuery, caseSensitive);
     if (occurrences.length === 0) return text;
     const isCurrent = message.id === currentMessageId;
-    return <HighlightText text={text} matches={occurrences} currentMatchStart={isCurrent ? occurrences[0]?.start ?? null : null} />;
+    return <HighlightText text={text} matches={occurrences} currentMatchStart={isCurrent ? currentMatchStart : null} />;
   };
 
   return (
@@ -1249,6 +1250,7 @@ function AgentTurnView({
 }: AgentTurnProps) {
   const searchQuery = useSearchStore(s => s.searchQuery);
   const currentMessageId = useSearchStore(s => s.currentMessageId);
+  const currentMatchStart = useSearchStore(s => s.currentMatchStart);
   const caseSensitive = useSearchStore(s => s.caseSensitive);
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
   const [expandedToolGroups, setExpandedToolGroups] = useState<Set<string>>(new Set());
@@ -1276,7 +1278,7 @@ function AgentTurnView({
     const occurrences = findTextOccurrences(text, searchQuery, caseSensitive);
     if (occurrences.length === 0) return text;
     const isCurrent = msgId === currentMessageId;
-    return <HighlightText text={text} matches={occurrences} currentMatchStart={isCurrent ? occurrences[0]?.start ?? null : null} />;
+    return <HighlightText text={text} matches={occurrences} currentMatchStart={isCurrent ? currentMatchStart : null} />;
   };
 
   // 将消息序列解析为渲染片段

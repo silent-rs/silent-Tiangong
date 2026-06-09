@@ -9,13 +9,14 @@ interface SearchState {
   searchScope: SearchScope;
   caseSensitive: boolean;
   currentMessageId: string | null;
+  currentMatchStart: number | null;
 
   openSearch: () => void;
   closeSearch: () => void;
   setSearchQuery: (query: string) => void;
   setSearchScope: (scope: SearchScope) => void;
   setCaseSensitive: (v: boolean) => void;
-  setCurrentMatchMessageId: (id: string | null) => void;
+  setCurrentMatchInfo: (id: string | null, start: number | null) => void;
   nextMatch: (total: number) => void;
   prevMatch: (total: number) => void;
   setCurrentMatchIndex: (index: number) => void;
@@ -28,10 +29,11 @@ export const useSearchStore = create<SearchState>((set) => ({
   searchScope: 'messages',
   caseSensitive: false,
   currentMessageId: null,
+  currentMatchStart: null,
 
   openSearch: () => set({ searchActive: true }),
 
-  closeSearch: () => set({ searchActive: false, searchQuery: '', currentMatchIndex: 0, currentMessageId: null }),
+  closeSearch: () => set({ searchActive: false, searchQuery: '', currentMatchIndex: 0, currentMessageId: null, currentMatchStart: null }),
 
   setSearchQuery: (query) => set({ searchQuery: query, currentMatchIndex: 0 }),
 
@@ -39,7 +41,7 @@ export const useSearchStore = create<SearchState>((set) => ({
 
   setCaseSensitive: (v) => set({ caseSensitive: v, currentMatchIndex: 0 }),
 
-  setCurrentMatchMessageId: (id) => set({ currentMessageId: id }),
+  setCurrentMatchInfo: (id, start) => set({ currentMessageId: id, currentMatchStart: start }),
 
   nextMatch: (total) =>
     set((state) => ({

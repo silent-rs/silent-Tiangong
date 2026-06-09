@@ -26,7 +26,7 @@ export function SearchBar() {
   const scopeRef = useRef<HTMLDivElement>(null);
 
   const messages = useStore((s) => s.messages);
-  const setCurrentMatchMessageId = useSearchStore((s) => s.setCurrentMatchMessageId);
+  const setCurrentMatchInfo = useSearchStore((s) => s.setCurrentMatchInfo);
 
   const searchResults = useMemo(() => {
     if (!searchQuery) return [] as ReturnType<typeof findSearchMatches>;
@@ -34,11 +34,11 @@ export function SearchBar() {
   }, [messages, searchQuery, searchScope, caseSensitive]);
   const matchCount = searchResults.length;
 
-  // 同步当前匹配的 messageId 到 store
+  // 同步当前匹配信息到 store
   useEffect(() => {
     const match = matchCount > 0 ? searchResults[currentMatchIndex] : null;
-    setCurrentMatchMessageId(match?.messageId ?? null);
-  }, [matchCount, searchResults, currentMatchIndex, setCurrentMatchMessageId]);
+    setCurrentMatchInfo(match?.messageId ?? null, match?.start ?? null);
+  }, [matchCount, searchResults, currentMatchIndex, setCurrentMatchInfo]);
 
   useEffect(() => {
     inputRef.current?.focus();
