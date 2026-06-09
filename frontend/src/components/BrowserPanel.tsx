@@ -149,11 +149,6 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
     loadGlobalHistory(0);
   }, [loadGlobalHistory]);
 
-  useEffect(() => {
-    if (isOnBlankPage) {
-      showGlobalHistory();
-    }
-  }, [isOnBlankPage, showGlobalHistory]);
 
   useEffect(() => {
     if (currentUrl) {
@@ -240,6 +235,16 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
     const rect = containerRef.current.getBoundingClientRect();
     await api.browserSetPosition(rect.x, rect.y, rect.width, rect.height).catch(console.error);
   }, []);
+
+  // 空白页时：隐藏原生 WebView 并加载全局历史；非空白页时：恢复 WebView 位置
+  useEffect(() => {
+    if (isOnBlankPage) {
+      api.browserHide().catch(console.error);
+      showGlobalHistory();
+    } else if (browserOpenedRef.current) {
+      syncPosition();
+    }
+  }, [isOnBlankPage, showGlobalHistory, syncPosition]);
 
   const handleNavigate = useCallback(async () => {
     const nextUrl = normalizeBrowserUrl(url);
