@@ -17,6 +17,8 @@
 - `allow-browser-tab-switch`
 - `allow-browser-tab-close`
 - `allow-browser-annotation-extract`
+- `allow-browser-tab-history`
+- `allow-browser-global-history`
 
 ## Permission Table
 
@@ -101,6 +103,32 @@ Enables the browser_eval command without any pre-configured scope.
 <td>
 
 Denies the browser_eval command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:allow-browser-global-history`
+
+</td>
+<td>
+
+Enables the browser_global_history command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:deny-browser-global-history`
+
+</td>
+<td>
+
+Denies the browser_global_history command without any pre-configured scope.
 
 </td>
 </tr>
@@ -283,6 +311,32 @@ Enables the browser_tab_close command without any pre-configured scope.
 <td>
 
 Denies the browser_tab_close command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:allow-browser-tab-history`
+
+</td>
+<td>
+
+Enables the browser_tab_history command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:deny-browser-tab-history`
+
+</td>
+<td>
+
+Denies the browser_tab_history command without any pre-configured scope.
 
 </td>
 </tr>

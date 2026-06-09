@@ -14,4 +14,6 @@ permissions = [
     "allow-browser-tab-switch",
     "allow-browser-tab-close",
     "allow-browser-annotation-extract",
+    "allow-browser-tab-history",
+    "allow-browser-global-history",
 ]
