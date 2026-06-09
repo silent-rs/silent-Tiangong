@@ -241,3 +241,26 @@
 .animate-fade-in {
   animation: fade-in 0.2s ease-out;
 }
+
+/* 搜索高亮样式 */
+.search-highlight {
+  background-color: hsl(50 80% 60% / 0.3);
+  border-radius: 2px;
+  padding: 1px 0;
+}
+
+.search-highlight-current {
+  background-color: hsl(50 100% 50%);
+  border-radius: 2px;
+  padding: 1px 2px;
+  box-shadow: 0 0 0 2px hsl(50 100% 50% / 0.4);
+}
+
+.dark .search-highlight {
+  background-color: hsl(50 70% 40% / 0.35);
+}
+
+.dark .search-highlight-current {
+  background-color: hsl(50 95% 55%);
+  box-shadow: 0 0 0 2px hsl(50 95% 55% / 0.4);
+}

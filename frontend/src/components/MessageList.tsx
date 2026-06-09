@@ -1,4 +1,8 @@
 import { useStore } from "@/store/useStore";
+import { useSearchStore } from "@/store/useSearchStore";
+import { findSearchMatches, findTextOccurrences } from "@/utils/search";
+import { HighlightText } from "./HighlightText";
+import { SearchBar } from "./SearchBar";
 import { ScrollArea } from "./ui/scroll-area";
 import { Textarea } from "./ui/textarea";
 import {
@@ -251,6 +255,18 @@ function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessages, edi
   const message = group.messages[0];
   const voiceInfo = voiceMessages[message.id];
   const isEditing = editingMessageId === message.id;
+  const searchQuery = useSearchStore(s => s.searchQuery);
+  const currentMessageId = useSearchStore(s => s.currentMessageId);
+  const currentMatchStart = useSearchStore(s => s.currentMatchStart);
+  const caseSensitive = useSearchStore(s => s.caseSensitive);
+
+  const renderUserText = (text: string) => {
+    if (!searchQuery) return text;
+    const occurrences = findTextOccurrences(text, searchQuery, caseSensitive);
+    if (occurrences.length === 0) return text;
+    const isCurrent = message.id === currentMessageId;
+    return <HighlightText text={text} matches={occurrences} currentMatchStart={isCurrent ? currentMatchStart : null} />;
+  };
 
   return (
     <div className="mt-3 first:mt-0">
@@ -354,7 +370,7 @@ function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessages, edi
               {renderContentMedia(message)}
               {textContent(message) && (
                 <p className="whitespace-pre-wrap break-words text-sm">
-                  {textContent(message)}
+                  {renderUserText(textContent(message))}
                 </p>
               )}
             </div>
@@ -393,6 +409,20 @@ export function MessageList() {
   const voiceMessages = useStore(s => s.voiceMessages);
   const approvalRequestId = useStore(s => s.approvalRequestId);
   const editAndResend = useStore(s => s.editAndResend);
+  const activeSessionId = useStore(s => s.activeSessionId);
+
+  const searchActive = useSearchStore(s => s.searchActive);
+
+  // 用 ref 持有搜索 query 和 matchIndex，避免每次按键导致 MessageList 重渲染
+  const searchQueryRef = useRef(useSearchStore.getState().searchQuery);
+  const currentMatchIndexRef = useRef(useSearchStore.getState().currentMatchIndex);
+  useEffect(() => {
+    const unsub = useSearchStore.subscribe((s) => {
+      searchQueryRef.current = s.searchQuery;
+      currentMatchIndexRef.current = s.currentMatchIndex;
+    });
+    return unsub;
+  }, []);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -414,6 +444,30 @@ export function MessageList() {
   // 检查多模态能力
   useEffect(() => {
     api.hasModelCapability('multimodal').then(setHasMultimodal).catch(() => setHasMultimodal(false));
+  }, []);
+
+  // 切换会话时关闭搜索
+  useEffect(() => {
+    useSearchStore.getState().closeSearch();
+  }, [activeSessionId]);
+
+  // Cmd/Ctrl+F 全局快捷键
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
+        e.preventDefault();
+        e.stopPropagation();
+        const store = useSearchStore.getState();
+        if (!store.searchActive) {
+          store.openSearch();
+        } else {
+          const input = document.querySelector<HTMLInputElement>('[data-search-input]');
+          if (input) input.focus();
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
   }, []);
 
   const isThinking = runStatus !== "idle";
@@ -498,6 +552,52 @@ export function MessageList() {
     },
     overscan: 5,
   });
+
+  // 搜索导航：通过 store subscription 监听 searchQuery 和 currentMatchIndex 变化
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  const filteredGroupsRef = useRef(filteredGroups);
+  filteredGroupsRef.current = filteredGroups;
+  useEffect(() => {
+    if (!searchActive) return;
+    let prevIndex = useSearchStore.getState().currentMatchIndex;
+    let prevQuery = useSearchStore.getState().searchQuery;
+    let prevScope = useSearchStore.getState().searchScope;
+    const scrollToMatch = (query: string, index: number, scope: string) => {
+      if (!query) return;
+      const groups = filteredGroupsRef.current;
+      const cs = useSearchStore.getState().caseSensitive;
+      const matches = findSearchMatches(messagesRef.current, query, groups, scope as 'messages' | 'withThinking' | 'all', cs);
+      if (matches.length === 0 || index >= matches.length) return;
+      const match = matches[index];
+      const targetIndex = groups.findIndex(g =>
+        g.messages.some(m => m.id === match.messageId),
+      );
+      if (targetIndex >= 0) {
+        virtualizer.scrollToIndex(targetIndex, { behavior: 'smooth', align: 'center' });
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            const el = document.querySelector('.search-highlight-current');
+            if (el) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          });
+        });
+      }
+    };
+    const unsub = useSearchStore.subscribe((s) => {
+      const queryChanged = s.searchQuery !== prevQuery;
+      const indexChanged = s.currentMatchIndex !== prevIndex;
+      const scopeChanged = s.searchScope !== prevScope;
+      if (!queryChanged && !indexChanged && !scopeChanged) return;
+      prevIndex = s.currentMatchIndex;
+      prevQuery = s.searchQuery;
+      prevScope = s.searchScope;
+      scrollToMatch(s.searchQuery, s.currentMatchIndex, s.searchScope);
+    });
+    // 首次激活时也滚动到第一个匹配
+    const { searchQuery, currentMatchIndex, searchScope } = useSearchStore.getState();
+    scrollToMatch(searchQuery, currentMatchIndex, searchScope);
+    return unsub;
+  }, [searchActive, virtualizer]);
 
   // 新消息到达时滚动到底部
   useEffect(() => {
@@ -698,6 +798,8 @@ export function MessageList() {
                 </div>
               )}
 
+              {searchActive && <SearchBar />}
+
               {/* 虚拟化渲染已完成消息 */}
               <div
                 style={{
@@ -713,9 +815,7 @@ export function MessageList() {
                       <div
                         key={virtualItem.key}
                         data-index={virtualItem.index}
-                        ref={(el) => {
-                          if (el) virtualizer.measureElement(el);
-                        }}
+                        ref={virtualizer.measureElement}
                         style={{
                           position: "absolute",
                           top: 0,
@@ -752,9 +852,7 @@ export function MessageList() {
                       <div
                         key={virtualItem.key}
                         data-index={virtualItem.index}
-                        ref={(el) => {
-                          if (el) virtualizer.measureElement(el);
-                        }}
+                        ref={virtualizer.measureElement}
                         style={{
                           position: "absolute",
                           top: 0,
@@ -1150,6 +1248,10 @@ function AgentTurnView({
   hasTts,
   selectedAgentTab,
 }: AgentTurnProps) {
+  const searchQuery = useSearchStore(s => s.searchQuery);
+  const currentMessageId = useSearchStore(s => s.currentMessageId);
+  const currentMatchStart = useSearchStore(s => s.currentMatchStart);
+  const caseSensitive = useSearchStore(s => s.caseSensitive);
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
   const [expandedToolGroups, setExpandedToolGroups] = useState<Set<string>>(new Set());
   const agents = useStore((state) => state.agents);
@@ -1168,6 +1270,15 @@ function AgentTurnView({
       next.has(key) ? next.delete(key) : next.add(key);
       return next;
     });
+  };
+
+  /** 带搜索高亮渲染文本（搜索激活时使用 HighlightText，否则返回原始文本） */
+  const renderWithHighlight = (msgId: string, text: string) => {
+    if (!searchQuery) return text;
+    const occurrences = findTextOccurrences(text, searchQuery, caseSensitive);
+    if (occurrences.length === 0) return text;
+    const isCurrent = msgId === currentMessageId;
+    return <HighlightText text={text} matches={occurrences} currentMatchStart={isCurrent ? currentMatchStart : null} />;
   };
 
   // 将消息序列解析为渲染片段
@@ -1460,7 +1571,9 @@ function AgentTurnView({
                 </div>
                 <div className="border-l-2 border-green-500/50 pl-3">
                   {agentReply.body ? (
-                    <MdPreview modelValue={resolveMarkdownImages(agentReply.body)} theme={resolvedTheme} previewTheme="github" />
+                    searchQuery && findTextOccurrences(textContent(msg), searchQuery, caseSensitive).length > 0
+                      ? <div className="text-sm whitespace-pre-wrap break-words">{renderWithHighlight(msg.id, agentReply.body)}</div>
+                      : <MdPreview modelValue={resolveMarkdownImages(agentReply.body)} theme={resolvedTheme} previewTheme="github" />
                   ) : null}
                 </div>
                 {agentReply.body && <MessageActions text={agentReply.body} showTts={hasTts} />}
@@ -1477,7 +1590,10 @@ function AgentTurnView({
               ) : textContent(msg) || (msg.media && msg.media.length > 0) || msg.content.some(b => b.type === "media") ? (
                 <div>
                   {renderContentMedia(msg)}
-                  <MdPreview modelValue={resolveMarkdownImages(textContent(msg))} theme={resolvedTheme} previewTheme="github" />
+                  {searchQuery && findTextOccurrences(textContent(msg), searchQuery, caseSensitive).length > 0
+                    ? <div className="text-sm whitespace-pre-wrap break-words">{renderWithHighlight(msg.id, textContent(msg))}</div>
+                    : <MdPreview modelValue={resolveMarkdownImages(textContent(msg))} theme={resolvedTheme} previewTheme="github" />
+                  }
                 </div>
               ) : null}
               {!isStreaming && msg.content && <MessageActions text={textContent(msg)} showTts={hasTts} />}
