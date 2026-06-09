@@ -148,7 +148,7 @@ pub(crate) fn basic_file_function_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "web_form_fill".to_string(),
-            description: "在天工内嵌浏览器当前页面中填写指定表单字段。支持原生 HTML 控件（input/select/textarea）和 UI 库自定义组件（Ant Design Select、Element Plus Select、DatePicker 等）。selector 参数可传 CSS 选择器，也可传自然语言定位描述；支持 text=、role=、aria=、label=、placeholder=、name= 以及“邮箱输入框”这类描述。填写前建议先调用 web_form_extract；如果工具返回候选列表，下一次调用要使用候选中的 selector 或更精确描述。".to_string(),
+            description: "在天工内嵌浏览器当前页面中填写指定表单字段。支持原生 HTML 控件（input/select/textarea）和 UI 库自定义组件（Ant Design Select、Element Plus Select、DatePicker 等）。selector 参数可传 CSS 选择器，也可传自然语言定位描述；支持 text=、role=、aria=、label=、placeholder=、name= 以及「邮箱输入框」这类描述。填写前建议先调用 web_form_extract；如果工具返回候选列表，下一次调用要使用候选中的 selector 或更精确描述。".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -161,11 +161,23 @@ pub(crate) fn basic_file_function_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "web_click".to_string(),
-            description: "点击天工内嵌浏览器当前页面中的指定元素（按钮、链接等）。selector 参数可传 CSS 选择器，也可传自然语言定位描述；支持 text=、role=button[name=登录]、aria=关闭、label=提交、placeholder=搜索，以及“登录按钮”“表格第三行第二列的链接”等描述。元素会先滚动到可视区域再点击；如果工具返回候选列表，下一次调用要使用候选中的 selector 或更精确描述。".to_string(),
+            description: "点击天工内嵌浏览器当前页面中的指定元素（按钮、链接等）。selector 参数可传 CSS 选择器，也可传自然语言定位描述；支持 text=、role=button[name=登录]、aria=关闭、label=提交、placeholder=搜索，以及「登录按钮」「表格第三行第二列的链接」等描述。元素会先滚动到可视区域再点击；如果工具返回候选列表，下一次调用要使用候选中的 selector 或更精确描述。操作完成后会自动等待页面响应。".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "selector": { "type": "string", "description": "点击目标定位描述。可用 CSS selector，也可用自然语言或 DSL，例如：登录按钮、text=提交、role=button[name=登录]、aria=关闭、表格第三行第二列的链接" }
+                },
+                "required": ["selector"]
+            }),
+        },
+        ToolSpec {
+            name: "web_query_dom".to_string(),
+            description: "在天工内嵌浏览器当前页面中，用 CSS 选择器查询 DOM 元素，返回匹配元素的标签、文本、属性和位置信息。常用于操作后确认结果（如检查新出现的元素、获取文本内容、验证状态变化），无需刷新页面。".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "selector": { "type": "string", "description": "CSS 选择器表达式（如 .api-key-value、#result、[data-testid]、div.success-message）" },
+                    "max_results": { "type": "integer", "description": "最大返回数量，默认 20", "minimum": 1, "maximum": 50 }
                 },
                 "required": ["selector"]
             }),

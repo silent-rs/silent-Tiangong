@@ -1,6 +1,6 @@
 # TODO - 天工当前开发任务
 
-> 最后更新：2026-06-07
+> 最后更新：2026-06-05
 > 当前主线：0.7.0 发布准备
 > 参考：`PLAN.md`、Issue #95
 
@@ -8,13 +8,12 @@
 
 ## 已完成
 
-### Phase 21-K：智能元素定位（Issue #107，已完成）
+### Phase 21-K：嵌入式浏览器感知链路修复
 
-- [x] 恢复并修订 RFC 0012，聚焦 #107 智能元素定位
-- [x] Bridge Script 增加智能元素定位，支持文本、ARIA、role、label、placeholder、name 和简单表格坐标
-- [x] `web_click` / `web_form_fill` 保持 `selector` 参数兼容，同时返回实际命中目标和候选列表
-- [x] 更新工具提示，让 Agent 可以传入自然语言定位描述
-- [x] 为智能定位和候选返回补充测试
+- [x] 修复页面小幅变化、弹窗变化无法稳定注入 Agent 上下文的问题
+- [x] 修复 fetch/XHR JSON 网络响应未进入 Agent 可见反馈的问题
+- [x] 合并浏览器普通事件与网络事件的消费链路，避免后台轮询与工具结果互相抢占事件
+- [x] 增加浏览器观测层与 Agent 注入链路的聚焦测试
 
 ### Phase 21-A：技术验证
 
@@ -93,7 +92,6 @@
 - [x] Bridge Script `annotation` 对象 — canvas 覆盖层 + 矩形/箭头绘制
 - [x] 批注数据结构化存储，`getAnnotations()` 返回标注列表
 - [x] `web_browse` 自动附加页面批注信息
-- [x] `web_browse` 主动提取批注覆盖区域的可见文本和元素摘要并反馈给 Agent
 - [x] 前端批注按钮（画笔图标，点击切换批注模式）
 
 ## 发布准备（0.6.0）
@@ -125,5 +123,19 @@
 ---
 
 *(Phase 21 浏览器面板功能已全部完成)*
+
+---
+
+## Phase 21-L：Agent 页面操作等待机制（Issue #106）
+
+- [x] 合并 feature/smart-element-location 分支的自动等待机制
+- [x] click/fill 操作后自动等待页面内容变化（wait_for_content_change）
+- [x] 签名轮询检测内容变化 + 稳定性确认后返回
+- [x] compute_page_diff 对比操作前后 digest 返回差异
+- [x] drain_events 收集浏览器事件队列
+- [x] Agent 工具定义中不暴露 wait_for 参数（自动等待，无需 Agent 指定）
+- [x] 合并 web_query_dom 工具（CSS 选择器查询 DOM）
+- [x] 合并 bridge.js 的 waitFor、getPageDigest、diffDigest 等功能
+- [x] 更新测试以适配新的消息注入格式
 
 ---

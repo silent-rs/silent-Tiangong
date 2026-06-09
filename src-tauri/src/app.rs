@@ -72,27 +72,56 @@ impl TiangongApp {
     }
 
     /// 向当前活跃会话注入浏览器页面内容
-    pub fn inject_browser_content(
+    pub async fn inject_browser_content(
         &self,
         title: String,
         url: String,
         text: String,
         tabs: Vec<(String, String, String)>,
         active_tab_id: Option<String>,
-    ) {
-        let session_id = match tokio::runtime::Handle::try_current() {
-            Ok(h) => {
-                let guard = h.block_on(self.state.lock());
-                guard.active_session_id().to_string()
-            }
-            Err(_) => return,
-        };
+        feedback: Option<String>,
+    ) -> bool {
+        let guard = self.state.lock().await;
+        let session_id = guard.active_session_id().to_string();
+        drop(guard);
+
         let cores = self.lock_cores();
         if let Some(core) = cores.get(&session_id) {
             if core.is_running() {
-                core.inject_browser_content(title, url, text, tabs, active_tab_id);
+                let has_feedback = feedback
+                    .as_deref()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false);
+                tracing::info!(
+                    session_id,
+                    url = %url,
+                    text_len = text.len(),
+                    has_feedback,
+                    "向当前会话注入浏览器内容"
+                );
+                return core.inject_browser_content(
+                    title,
+                    url,
+                    text,
+                    tabs,
+                    active_tab_id,
+                    feedback,
+                );
+            } else {
+                tracing::debug!(
+                    session_id,
+                    url = %url,
+                    "跳过浏览器内容注入：当前会话 core 未运行"
+                );
             }
+        } else {
+            tracing::debug!(
+                session_id,
+                url = %url,
+                "跳过浏览器内容注入：当前会话没有活跃 core"
+            );
         }
+        false
     }
 
     fn lock_cores(&self) -> std::sync::MutexGuard<'_, HashMap<String, TiangongCore>> {

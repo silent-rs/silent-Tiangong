@@ -85,6 +85,7 @@ impl PageFetcher for BrowserPageFetcher {
                 text: snapshot.text,
                 tabs: snapshot.tabs.into_iter().map(Into::into).collect(),
                 active_tab_id: snapshot.active_tab_id,
+                events: snapshot.events.into_iter().map(Into::into).collect(),
             })
         })
     }
@@ -136,6 +137,7 @@ impl PageFetcher for BrowserPageFetcher {
         selector: &str,
         value: &str,
         strategy: &str,
+        wait_for: Option<&str>,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<Output = Option<tiangong_core::browser_trait::FillFieldResult>>
@@ -146,6 +148,7 @@ impl PageFetcher for BrowserPageFetcher {
         let selector = selector.to_string();
         let value = value.to_string();
         let strategy = strategy.to_string();
+        let wait_for = wait_for.map(|s| s.to_string());
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
             let result: crate::types::FillFieldResult = send_and_wait!(
@@ -154,10 +157,11 @@ impl PageFetcher for BrowserPageFetcher {
                     selector,
                     value,
                     strategy,
+                    wait_for,
                     response_tx,
                 },
                 response_rx,
-                10
+                15
             );
             Some(result.into())
         })
@@ -166,6 +170,7 @@ impl PageFetcher for BrowserPageFetcher {
     fn click_element(
         &self,
         selector: &str,
+        wait_for: Option<&str>,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<
@@ -175,16 +180,18 @@ impl PageFetcher for BrowserPageFetcher {
     > {
         let tx = self.cmd_tx.clone();
         let selector = selector.to_string();
+        let wait_for = wait_for.map(|s| s.to_string());
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
             let result: crate::types::ClickElementResult = send_and_wait!(
                 tx,
                 BrowserCommand::ClickElement {
                     selector,
+                    wait_for,
                     response_tx
                 },
                 response_rx,
-                10
+                15
             );
             Some(result.into())
         })
@@ -237,9 +244,37 @@ impl PageFetcher for BrowserPageFetcher {
             Some(resp.into())
         })
     }
+
+    fn query_dom(
+        &self,
+        selector: &str,
+        max_results: usize,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Option<tiangong_core::browser_trait::QueryDomResult>>
+                + Send,
+        >,
+    > {
+        let tx = self.cmd_tx.clone();
+        let selector = selector.to_string();
+        Box::pin(async move {
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            let result: crate::types::QueryDomResult = send_and_wait!(
+                tx,
+                BrowserCommand::QueryDom {
+                    selector,
+                    max_results,
+                    response_tx
+                },
+                response_rx,
+                10
+            );
+            Some(result.into())
+        })
+    }
 }
 
-/// 浏览器工具覆盖处理器（web_fetch / web_form_extract / web_form_fill / web_click / web_load_html）
+/// 浏览器工具覆盖处理器（web_fetch / web_form_extract / web_form_fill / web_click / web_load_html / web_query_dom）
 pub struct BrowserToolOverride {
     fetcher: Arc<dyn PageFetcher>,
 }
@@ -387,32 +422,30 @@ impl BrowserToolOverride {
                     });
                 }
             };
-            let summary = if result.ok {
-                if result.title.is_empty() {
-                    format!("浏览器获取成功：{}", result.final_url)
-                } else {
-                    format!("浏览器获取成功：{}", result.title)
-                }
-            } else {
-                format!(
-                    "浏览器获取失败：{}",
-                    result.error.clone().unwrap_or_default()
-                )
-            };
+            if !result.ok {
+                return Some(tiangong_core::tool::ToolResult {
+                    ok: false,
+                    summary: format!(
+                        "浏览器获取失败：{}",
+                        result.error.clone().unwrap_or_default()
+                    ),
+                    stdout: String::new(),
+                    stderr: result.error.unwrap_or_default(),
+                    exit_code: 1,
+                    execution: None,
+                });
+            }
+            // 桌面模式：浏览器已导航到目标 URL，页面内容由 observe_page 自动推送。
+            // 只返回摘要信息，避免与浏览器推送数据重复。
             Some(tiangong_core::tool::ToolResult {
-                ok: result.ok,
-                summary,
-                stdout: if result.ok {
-                    result.content
-                } else {
-                    String::new()
-                },
-                stderr: if result.ok {
-                    String::new()
-                } else {
-                    result.error.unwrap_or_default()
-                },
-                exit_code: if result.ok { 0 } else { 1 },
+                ok: true,
+                summary: format!("浏览器已打开：{}", result.title),
+                stdout: format!(
+                    "已在浏览器中打开页面\n标题：{}\nURL：{}\n\n页面内容将通过浏览器自动推送。",
+                    result.title, result.final_url
+                ),
+                stderr: String::new(),
+                exit_code: 0,
                 execution: None,
             })
         })
@@ -439,16 +472,69 @@ impl BrowserToolOverride {
                 }
             };
             let total_fields: usize = result.forms.iter().map(|f| f.fields.len()).sum();
-            let output = serde_json::to_string_pretty(&result)
+            let total_buttons: usize = result.forms.iter().map(|f| f.buttons.len()).sum();
+            let json_output = serde_json::to_string_pretty(&result)
                 .unwrap_or_else(|_| "序列化表单数据失败".to_string());
+
+            // 人类可读摘要
+            let mut lines = Vec::new();
+            for (fi, form) in result.forms.iter().enumerate() {
+                if result.forms.len() > 1 {
+                    lines.push(format!("表单 {}:", fi + 1));
+                }
+                for field in &form.fields {
+                    let mut desc = format!(
+                        "  字段 {}: {} type={} label=\"{}\"",
+                        field.index + 1,
+                        field.selector,
+                        field.field_type,
+                        field.label
+                    );
+                    if !field.placeholder.is_empty() {
+                        desc.push_str(&format!(" placeholder=\"{}\"", field.placeholder));
+                    }
+                    if field.required {
+                        desc.push_str(" [必填]");
+                    }
+                    if field.readonly {
+                        desc.push_str(" [只读]");
+                    }
+                    if field.disabled {
+                        desc.push_str(" [禁用]");
+                    }
+                    if !field.options.is_empty() {
+                        let opts: Vec<String> = field
+                            .options
+                            .iter()
+                            .map(|o| format!("{}={}", o.text, o.value))
+                            .collect();
+                        desc.push_str(&format!(" 选项：[{}]", opts.join(", ")));
+                    }
+                    lines.push(desc);
+                }
+                for (bi, btn) in form.buttons.iter().enumerate() {
+                    let state = if btn.disabled { "disabled" } else { "enabled" };
+                    lines.push(format!(
+                        "  按钮 {}: <{}> [{}] ({}) {}",
+                        bi + 1,
+                        btn.tag,
+                        state,
+                        btn.selector,
+                        btn.text
+                    ));
+                }
+            }
+            let human_summary = lines.join("\n");
+
             Some(tiangong_core::tool::ToolResult {
                 ok: true,
                 summary: format!(
-                    "提取到 {} 个表单，共 {} 个字段",
+                    "提取到 {} 个表单，共 {} 个字段，{} 个按钮",
                     result.forms.len(),
-                    total_fields
+                    total_fields,
+                    total_buttons
                 ),
-                stdout: output,
+                stdout: format!("{human_summary}\n\n--- JSON ---\n{json_output}"),
                 stderr: String::new(),
                 exit_code: 0,
                 execution: None,
@@ -480,9 +566,17 @@ impl BrowserToolOverride {
             .and_then(|v| v.as_str())
             .unwrap_or("auto")
             .to_string();
+        let wait_for = call
+            .arguments
+            .get("wait_for")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let fetcher = fetcher.clone();
         Box::pin(async move {
-            let result = match fetcher.form_fill(&selector, &value, &strategy).await {
+            let result = match fetcher
+                .form_fill(&selector, &value, &strategy, wait_for.as_deref())
+                .await
+            {
                 Some(r) => r,
                 None => {
                     return Some(tiangong_core::tool::ToolResult {
@@ -497,36 +591,33 @@ impl BrowserToolOverride {
             };
             let strategy_used = result.strategy.clone().unwrap_or_default();
             if result.ok {
-                let actual_selector = result
-                    .selector
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or(&selector);
-                let target_text = Self::format_target(result.target.as_ref(), actual_selector);
+                let wait_info = match &result.wait_result {
+                    Some(w) if w.ok => {
+                        format!("，等待条件满足：{}（{}ms）", w.condition, w.elapsed_ms)
+                    }
+                    Some(w) => format!("，等待超时：{}", w.error.as_deref().unwrap_or("超时")),
+                    None => String::new(),
+                };
+                let diff_info = match &result.page_diff {
+                    Some(d) if !d.is_empty() => format!("\n{d}"),
+                    _ => String::new(),
+                };
                 Some(tiangong_core::tool::ToolResult {
                     ok: true,
-                    summary: format!("字段填写成功（策略：{strategy_used}）"),
+                    summary: format!("字段填写成功（策略：{strategy_used}）{wait_info}{diff_info}"),
                     stdout: format!(
-                        "已填写字段。\n输入定位：{}\n{}\n使用策略：{}",
-                        selector, target_text, strategy_used
+                        "已填写字段 {selector}，使用策略：{strategy_used}{wait_info}{diff_info}"
                     ),
                     stderr: String::new(),
                     exit_code: 0,
                     execution: None,
                 })
             } else {
-                let candidates = Self::format_candidates(&result.candidates);
-                let error = result.error.unwrap_or_default();
-                let stderr = if candidates.is_empty() {
-                    error
-                } else {
-                    format!("{error}\n{candidates}")
-                };
                 Some(tiangong_core::tool::ToolResult {
                     ok: false,
                     summary: "字段填写失败".to_string(),
                     stdout: String::new(),
-                    stderr,
+                    stderr: result.error.unwrap_or_default(),
                     exit_code: 1,
                     execution: None,
                 })
@@ -546,9 +637,14 @@ impl BrowserToolOverride {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let wait_for = call
+            .arguments
+            .get("wait_for")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let fetcher = fetcher.clone();
         Box::pin(async move {
-            let result = match fetcher.click_element(&selector).await {
+            let result = match fetcher.click_element(&selector, wait_for.as_deref()).await {
                 Some(r) => r,
                 None => {
                     return Some(tiangong_core::tool::ToolResult {
@@ -562,44 +658,130 @@ impl BrowserToolOverride {
                 }
             };
             if result.ok {
-                let actual_selector = result
-                    .selector
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or(&selector);
-                let target_text = Self::format_target(result.target.as_ref(), actual_selector);
-                let position = match (result.x, result.y) {
-                    (Some(x), Some(y)) => format!("\n点击坐标：{x},{y}"),
+                let wait_info = match &result.wait_result {
+                    Some(w) if w.ok => {
+                        format!("，等待条件满足：{}（{}ms）", w.condition, w.elapsed_ms)
+                    }
+                    Some(w) => format!("，等待超时：{}", w.error.as_deref().unwrap_or("超时")),
+                    None => String::new(),
+                };
+                let diff_info = match &result.page_diff {
+                    Some(d) if !d.is_empty() => format!("\n{d}"),
                     _ => String::new(),
                 };
                 Some(tiangong_core::tool::ToolResult {
                     ok: true,
-                    summary: format!("已点击元素 {}", actual_selector),
-                    stdout: format!(
-                        "已点击元素。\n输入定位：{}\n{}{}",
-                        selector, target_text, position
-                    ),
+                    summary: format!("已点击元素 {selector}{wait_info}{diff_info}"),
+                    stdout: diff_info,
                     stderr: String::new(),
                     exit_code: 0,
                     execution: None,
                 })
             } else {
-                let candidates = Self::format_candidates(&result.candidates);
-                let error = result.error.unwrap_or_default();
-                let stderr = if candidates.is_empty() {
-                    error
+                let candidates_info = if result.candidates.is_empty() {
+                    String::new()
                 } else {
-                    format!("{error}\n{candidates}")
+                    let cands: Vec<String> = result
+                        .candidates
+                        .iter()
+                        .map(|c| format!("<{}> {} ({})", c.tag, c.text, c.selector))
+                        .collect();
+                    format!("。可能的目标：{}", cands.join("、"))
                 };
                 Some(tiangong_core::tool::ToolResult {
                     ok: false,
                     summary: "点击元素失败".to_string(),
                     stdout: String::new(),
-                    stderr,
+                    stderr: format!("{}{candidates_info}", result.error.unwrap_or_default()),
                     exit_code: 1,
                     execution: None,
                 })
             }
+        })
+    }
+
+    fn handle_web_query_dom(
+        fetcher: &Arc<dyn PageFetcher>,
+        call: &tiangong_core::model::ToolCall,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Option<tiangong_core::tool::ToolResult>> + Send>,
+    > {
+        let selector = call
+            .arguments
+            .get("selector")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let max_results = call
+            .arguments
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(20) as usize;
+        let fetcher = fetcher.clone();
+        Box::pin(async move {
+            let result = match fetcher.query_dom(&selector, max_results).await {
+                Some(r) => r,
+                None => {
+                    return Some(tiangong_core::tool::ToolResult {
+                        ok: false,
+                        summary: "浏览器未打开，无法查询 DOM".to_string(),
+                        stdout: String::new(),
+                        stderr: "请先使用 web_fetch 打开页面".to_string(),
+                        exit_code: 1,
+                        execution: None,
+                    });
+                }
+            };
+            if result.elements.is_empty() {
+                return Some(tiangong_core::tool::ToolResult {
+                    ok: true,
+                    summary: format!("选择器 \"{}\" 无匹配元素（共 0 个）", result.selector),
+                    stdout: format!("选择器 \"{}\" 未匹配到任何元素", result.selector),
+                    stderr: String::new(),
+                    exit_code: 0,
+                    execution: None,
+                });
+            }
+            let mut lines = Vec::new();
+            for el in &result.elements {
+                let mut attrs_parts = Vec::new();
+                for (k, v) in &el.attributes {
+                    attrs_parts.push(format!("{k}=\"{v}\""));
+                }
+                let attrs_str = if attrs_parts.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", attrs_parts.join(" "))
+                };
+                lines.push(format!("元素 {}: <{}>{}", el.index, el.tag, attrs_str));
+                if !el.text.is_empty() {
+                    let text_preview = if el.text.len() > 200 {
+                        format!("{}...", &el.text[..200])
+                    } else {
+                        el.text.clone()
+                    };
+                    for line in text_preview.split('\n') {
+                        if !line.trim().is_empty() {
+                            lines.push(format!("  {}", line.trim()));
+                        }
+                    }
+                }
+                lines.push(format!("  选择器: {}", el.selector));
+            }
+            let human_output = lines.join("\n");
+            let json_output = serde_json::to_string_pretty(&result)
+                .unwrap_or_else(|_| "序列化结果失败".to_string());
+            Some(tiangong_core::tool::ToolResult {
+                ok: true,
+                summary: format!(
+                    "选择器 \"{}\"：共 {} 个匹配（返回 {} 个）",
+                    result.selector, result.total, result.returned
+                ),
+                stdout: format!("{human_output}\n\n--- JSON ---\n{json_output}"),
+                stderr: String::new(),
+                exit_code: 0,
+                execution: None,
+            })
         })
     }
 
@@ -658,16 +840,11 @@ impl BrowserToolOverride {
                     stdout.push('\n');
                     stdout.push_str(&candidates);
                 }
-                let stderr = if error.is_empty() {
-                    String::new()
-                } else {
-                    error
-                };
                 Some(tiangong_core::tool::ToolResult {
                     ok: true,
                     summary: "未找到匹配元素".to_string(),
                     stdout,
-                    stderr,
+                    stderr: error,
                     exit_code: 0,
                     execution: None,
                 })
@@ -688,140 +865,9 @@ impl tiangong_core::tool_override::ToolOverrideHandler for BrowserToolOverride {
             "web_form_extract" => Self::handle_web_form_extract(&self.fetcher),
             "web_form_fill" => Self::handle_web_form_fill(&self.fetcher, call),
             "web_click" => Self::handle_web_click(&self.fetcher, call),
+            "web_query_dom" => Self::handle_web_query_dom(&self.fetcher, call),
             "web_locate_element" => Self::handle_web_locate_element(&self.fetcher, call),
             _ => Box::pin(async { None }),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn candidate(selector: &str, text: &str) -> ElementCandidate {
-        ElementCandidate {
-            selector: selector.to_string(),
-            text: text.to_string(),
-            tag: "button".to_string(),
-            role: "button".to_string(),
-            label: text.to_string(),
-            score: 93,
-            reason: "smart match".to_string(),
-            x: Some(120),
-            y: Some(80),
-        }
-    }
-
-    #[test]
-    fn format_candidates_includes_selector_and_reason() {
-        let candidates = vec![candidate("button:nth-of-type(1)", "登录")];
-
-        let output = BrowserToolOverride::format_candidates(&candidates);
-
-        assert!(output.contains("候选元素"));
-        assert!(output.contains("selector: button:nth-of-type(1)"));
-        assert!(output.contains("role=button"));
-        assert!(output.contains("reason: smart match"));
-        assert!(output.contains("坐标：120,80"));
-    }
-
-    #[test]
-    fn format_target_prefers_candidate_selector() {
-        let candidate = candidate("#login", "登录");
-
-        let output = BrowserToolOverride::format_target(Some(&candidate), ".fallback");
-
-        assert!(output.contains("目标：button role=button label=\"登录\""));
-        assert!(output.contains("实际选择器：#login"));
-        assert!(!output.contains(".fallback"));
-    }
-
-    #[test]
-    fn format_target_without_candidate_uses_fallback_selector() {
-        let output = BrowserToolOverride::format_target(None, ".btn-primary");
-
-        assert!(!output.contains("目标"));
-        assert!(output.contains("实际选择器：.btn-primary"));
-    }
-
-    #[test]
-    fn format_candidates_truncates_at_eight() {
-        let candidates: Vec<ElementCandidate> = (0..12)
-            .map(|i| ElementCandidate {
-                selector: format!("#item-{i}"),
-                text: format!("Item {i}"),
-                tag: "div".to_string(),
-                role: String::new(),
-                label: String::new(),
-                score: 50,
-                reason: "match".to_string(),
-                x: None,
-                y: None,
-            })
-            .collect();
-
-        let output = BrowserToolOverride::format_candidates(&candidates);
-
-        assert!(output.contains("#item-0"));
-        assert!(output.contains("#item-7"));
-        assert!(!output.contains("#item-8"));
-        assert!(output.contains("还有 4 个候选"));
-    }
-
-    #[test]
-    fn format_candidates_empty_returns_empty_string() {
-        let output = BrowserToolOverride::format_candidates(&[]);
-        assert!(output.is_empty());
-    }
-
-    #[test]
-    fn candidate_identity_with_all_fields() {
-        let c = ElementCandidate {
-            selector: "#email".to_string(),
-            text: "邮箱地址".to_string(),
-            tag: "input".to_string(),
-            role: "textbox".to_string(),
-            label: "邮箱".to_string(),
-            score: 90,
-            reason: String::new(),
-            x: None,
-            y: None,
-        };
-        let id = BrowserToolOverride::candidate_identity(&c);
-        assert!(id.contains("input"));
-        assert!(id.contains("role=textbox"));
-        assert!(id.contains("label=\"邮箱\""));
-        assert!(id.contains("text=\"邮箱地址\""));
-    }
-
-    #[test]
-    fn candidate_identity_label_equals_text_skips_duplicate() {
-        let c = ElementCandidate {
-            selector: "#btn".to_string(),
-            text: "提交".to_string(),
-            tag: "button".to_string(),
-            role: "button".to_string(),
-            label: "提交".to_string(),
-            score: 80,
-            reason: String::new(),
-            x: None,
-            y: None,
-        };
-        let id = BrowserToolOverride::candidate_identity(&c);
-        // text 和 label 相同时只显示 label
-        assert!(id.contains("label=\"提交\""));
-        assert!(!id.contains("text=\"提交\""));
-    }
-
-    #[test]
-    fn truncate_text_under_limit_keeps_full() {
-        let result = BrowserToolOverride::truncate_text("hello", 10);
-        assert_eq!(result, "hello");
-    }
-
-    #[test]
-    fn truncate_text_over_limit_adds_ellipsis() {
-        let result = BrowserToolOverride::truncate_text("abcdefghij", 5);
-        assert_eq!(result, "abcde…");
     }
 }

@@ -16,6 +16,7 @@
 - `allow-browser-tab-new`
 - `allow-browser-tab-switch`
 - `allow-browser-tab-close`
+- `allow-browser-annotation-extract`
 
 ## Permission Table
 
@@ -25,6 +26,32 @@
 <th>Description</th>
 </tr>
 
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:allow-browser-annotation-extract`
+
+</td>
+<td>
+
+Enables the browser_annotation_extract command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:deny-browser-annotation-extract`
+
+</td>
+<td>
+
+Denies the browser_annotation_extract command without any pre-configured scope.
+
+</td>
+</tr>
 
 <tr>
 <td>

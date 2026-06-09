@@ -89,6 +89,13 @@ pub(crate) fn build_step_execution_prompt(
 15. 当工具返回成功输出时，应先判断是否已满足用户请求；若仅是中间结果，调用 `mark_step_completed(continue_execution=true)` 并提供下一步。
 16. 当用户要求创建或安装 Skill 时，使用 `write_file` 将文件写入 Skill 目录（{skills_dir}/<skill-id>/）。每个 Skill 必须包含 skill.toml（清单）和 SKILL.md（入口文档），可选包含脚本等附加文件。skill.toml 格式：id（小写字母数字短横线）、name（显示名）、version、entry="SKILL.md"、available=true、[source] type="agent"、[requires] mcp=[]、[permissions]（fs_read/fs_write/cmd_exec/net 按需声明）。创建完成后告知用户刷新 Skill 列表即可使用。
 17. 当用户要求用浏览器打开页面或本地 HTML 文件时，必须使用 `web_fetch`（传入 file:// 路径或 URL），不要使用 `run_shell` 调用系统浏览器（如 open、xdg-open）。
+18. 浏览器元素定位支持多种格式：CSS 选择器（#id、.class、tag）、文本匹配（直接传入按钮或元素文本）、aria:标签（如 aria:提交）、批注矩形（rect:x,y,w,h）。优先使用最精确的定位方式。
+19. 当页面有用户批注时，浏览器推送的内容会自动包含批注框选区域的元素信息（标签、文本、属性、CSS 选择器），无需额外调用其他工具。
+20. `web_click` 和 `web_form_fill` 操作后会自动返回页面变化（URL 变化、对话框出现/关闭、页面内容变化）和关键 JSON 网络响应，无需额外调用工具确认。操作后直接根据返回的差异信息决定下一步。
+21. 多个元素匹配同一文本时，使用 `nth:N,选择器` 格式选择第 N 个匹配（如 `nth:2,提交` 表示第 2 个"提交"按钮）。工具返回错误时会附带候选元素列表。
+22. 使用 `web_form_extract` 获取表单结构时，返回值包含所有字段和关联按钮。根据返回的按钮选择器执行提交操作。
+23. 执行不可逆操作（创建、删除、提交表单、确认订单等）前，必须先告知用户即将执行的操作内容并等待用户确认后再执行。不要自动点击"创建"、"提交"、"确认"、"删除"等按钮。可以先填写所有表单字段，然后告知用户表单已填写完成、即将点击某按钮，等待用户确认。
+24. 操作后如需确认结果，使用 `web_query_dom` 传入 CSS 选择器查询页面元素（如检查新出现的文本、验证元素状态），无需刷新页面。
 
 用户输入：
 {user_input}

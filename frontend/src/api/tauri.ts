@@ -815,4 +815,22 @@ export const api = {
 
   browserTabClose: (tabId: string): Promise<void> =>
     invoke('plugin:browser|browser_tab_close', { tabId }),
+
+  browserAnnotationExtract: (): Promise<{
+    elements: Array<{
+      annotation_index: number;
+      rect: { x: number; y: number; width: number; height: number };
+      elements: Array<{
+        tag: string;
+        text: string;
+        attributes: Record<string, string>;
+        selector: string;
+        rect: { x: number; y: number; width: number; height: number };
+        overlap_ratio: number;
+        area: number;
+      }>;
+    }>;
+    count: number;
+  }> =>
+    invoke('plugin:browser|browser_annotation_extract'),
 };

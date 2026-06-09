@@ -8,14 +8,61 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use tauri::{Emitter, Manager};
-use tracing::{info, warn};
+use tauri::Manager;
+use tracing::{debug, info, warn};
 
 const TRAY_SHOW_WINDOW_ID: &str = "show_window";
 const TRAY_START_SERVER_ID: &str = "start_server";
 const TRAY_STOP_SERVER_ID: &str = "stop_server";
 const TRAY_STATUS_ID: &str = "server_status";
 const TRAY_QUIT_ID: &str = "quit";
+
+fn browser_events_to_feedback(
+    events: Vec<tiangong_plugin_browser::types::BrowserEvent>,
+) -> Option<(Vec<tiangong_plugin_browser::types::BrowserEvent>, String)> {
+    let network_events: Vec<_> = events
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                tiangong_plugin_browser::types::BrowserEvent::NetworkResponse { .. }
+            )
+        })
+        .collect();
+    let feedback = tiangong_plugin_browser::types::format_browser_events(&network_events)?;
+    Some((network_events, feedback))
+}
+
+async fn observe_browser_snapshot_for_injection(
+    app: tauri::AppHandle,
+) -> Option<tiangong_plugin_browser::types::BrowserPageSnapshot> {
+    let manager = {
+        let state = app.state::<tiangong_plugin_browser::BrowserPluginState>();
+        state.manager.clone()
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        tokio::task::spawn_blocking(move || manager.current_snapshot_without_events(12000)),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .flatten()
+}
+
+async fn ack_browser_events(
+    app: tauri::AppHandle,
+    events: Vec<tiangong_plugin_browser::types::BrowserEvent>,
+) {
+    let removed = {
+        let state = app.state::<tiangong_plugin_browser::BrowserPluginState>();
+        state.manager.ack_events(&events)
+    };
+    debug!(
+        ack_count = events.len(),
+        removed, "browser events acknowledged after session injection"
+    );
+}
 
 /// 初始化日志（所有模式统一）
 ///
@@ -225,6 +272,8 @@ fn run_gui() {
     tauri::Builder::default()
         .manage(tiangong_app::TiangongApp::new())
         .setup(|app| {
+            use tauri::Listener;
+
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Regular);
             setup_tray(app)?;
@@ -238,56 +287,125 @@ fn run_gui() {
             }
             if let Some(handler) = tiangong_plugin_browser::get_tool_override(app.handle()) {
                 state.register_tool_override("web_fetch", handler.clone());
+                state.register_tool_override("web_browse", handler.clone());
                 state.register_tool_override("web_form_extract", handler.clone());
                 state.register_tool_override("web_form_fill", handler.clone());
                 state.register_tool_override("web_click", handler.clone());
+                state.register_tool_override("web_query_dom", handler.clone());
                 state.register_tool_override("web_locate_element", handler);
             }
 
-            // 浏览器事件桥接：从 Plugin 的 event_rx 接收事件，转发到 Core 和前端
-            if let Some(mut event_rx) = tiangong_plugin_browser::take_event_rx(app.handle()) {
-                let bridge_handle = app.handle().clone();
+            // 监听浏览器页面加载事件，自动注入内容到当前活跃会话
+            let inject_handle = app.handle().clone();
+            app.listen("browser:page_loaded", move |event| {
+                let payload = event.payload().to_string();
+                if let Ok(data) = serde_json::from_str::<serde_json::Value>(&payload) {
+                    let url = data["url"].as_str().unwrap_or("").to_string();
+                    if url.is_empty() {
+                        return;
+                    }
+                    let title = data["title"].as_str().unwrap_or("").to_string();
+                    let text = data["text"].as_str().unwrap_or("").to_string();
+                    let app_handle = inject_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let state = app_handle.state::<tiangong_app::TiangongApp>();
+                        let _ = state
+                            .inject_browser_content(title, url, text, vec![], None, None)
+                            .await;
+                    });
+                }
+            });
+
+            // 监听浏览器网络响应事件，主动注入到当前 Agent 会话。
+            // 这覆盖页面 JS 自行发起 XHR/fetch、且 DOM 没有明显变化的场景。
+            let event_inject_handle = app.handle().clone();
+            app.listen("browser:events", move |event| {
+                let payload = event.payload().to_string();
+                let Ok(events) = serde_json::from_str::<
+                    Vec<tiangong_plugin_browser::types::BrowserEvent>,
+                >(&payload) else {
+                    warn!("浏览器事件 payload 解析失败");
+                    return;
+                };
+                let total_count = events.len();
+                let Some((network_events, feedback)) = browser_events_to_feedback(events) else {
+                    debug!(total_count, "浏览器事件无网络响应，跳过主动注入");
+                    return;
+                };
+                let network_count = network_events.len();
+                let app_handle = event_inject_handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    use tiangong_plugin_browser::types::BrowserEvent;
-                    while let Some(event) = event_rx.recv().await {
-                        match event {
-                            BrowserEvent::PageData { url, title, text } => {
-                                if url.is_empty() {
-                                    continue;
-                                }
-                                // 始终通知前端更新地址栏和标签栏
-                                let _ = bridge_handle.emit(
-                                    "browser:page_loaded",
-                                    serde_json::json!({
-                                        "title": title,
-                                        "url": url,
-                                        "text": text,
-                                    }),
-                                );
-                                // 仅有内容时才注入到 agent 会话（空 text 表示仅 URL 变化通知）
-                                if !text.is_empty() {
-                                    let state = bridge_handle.state::<tiangong_app::TiangongApp>();
-                                    state.inject_browser_content(title, url, text, vec![], None);
-                                }
-                            }
-                            BrowserEvent::TabChanged {
-                                action,
-                                tab_id,
-                                url,
-                            } => {
-                                let _ = bridge_handle.emit(
-                                    "browser:tab_updated",
-                                    serde_json::json!({
-                                        "action": action,
-                                        "tab_id": tab_id,
-                                        "url": url,
-                                    }),
-                                );
-                            }
-                        }
+                    let snapshot = observe_browser_snapshot_for_injection(app_handle.clone()).await;
+                    let title = snapshot
+                        .as_ref()
+                        .map(|s| s.title.clone())
+                        .unwrap_or_default();
+                    // 优先用 snapshot URL，其次用网络事件 URL，最后用 WebView 当前 URL
+                    let url = snapshot
+                        .as_ref()
+                        .map(|s| s.url.clone())
+                        .filter(|u| !u.is_empty())
+                        .or_else(|| {
+                            network_events.iter().find_map(|event| match event {
+                                tiangong_plugin_browser::types::BrowserEvent::NetworkResponse {
+                                    url,
+                                    ..
+                                } => Some(url.clone()),
+                                _ => None,
+                            })
+                        })
+                        .unwrap_or_default();
+                    let text = snapshot
+                        .as_ref()
+                        .map(|s| s.text.clone())
+                        .unwrap_or_default();
+                    let tabs = snapshot
+                        .as_ref()
+                        .map(|s| {
+                            s.tabs
+                                .iter()
+                                .map(|tab| (tab.id.clone(), tab.url.clone(), tab.title.clone()))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    let active_tab_id = snapshot.as_ref().and_then(|s| s.active_tab_id.clone());
+                    let mut page_url = url;
+                    if page_url.is_empty() {
+                        // 尝试从 WebView 获取当前页面 URL
+                        page_url = app_handle
+                            .get_webview("browser-webview")
+                            .and_then(|wv| wv.url().ok())
+                            .map(|u| u.to_string())
+                            .unwrap_or_default();
+                    }
+                    if page_url.is_empty() {
+                        warn!(
+                            total_count,
+                            network_count, "浏览器网络事件缺少页面 URL，无法注入"
+                        );
+                        return;
+                    }
+
+                    let state = app_handle.state::<tiangong_app::TiangongApp>();
+                    let injected = state
+                        .inject_browser_content(
+                            title,
+                            page_url.clone(),
+                            text,
+                            tabs,
+                            active_tab_id,
+                            Some(feedback),
+                        )
+                        .await;
+                    info!(
+                        url = %page_url,
+                        total_count, network_count, injected, "浏览器网络事件注入检查完成"
+                    );
+                    if injected {
+                        ack_browser_events(app_handle, network_events).await;
                     }
                 });
-            }
+            });
 
             let scheduler_ctx = state.create_scheduler_context();
             tauri::async_runtime::spawn(async move {

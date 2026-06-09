@@ -35,6 +35,7 @@ pub trait PageFetcher: Send + Sync + 'static {
         _selector: &str,
         _value: &str,
         _strategy: &str,
+        _wait_for: Option<&str>,
     ) -> Pin<Box<dyn Future<Output = Option<FillFieldResult>> + Send>> {
         Box::pin(async move { None })
     }
@@ -43,6 +44,7 @@ pub trait PageFetcher: Send + Sync + 'static {
     fn click_element(
         &self,
         _selector: &str,
+        _wait_for: Option<&str>,
     ) -> Pin<Box<dyn Future<Output = Option<ClickElementResult>> + Send>> {
         Box::pin(async move { None })
     }
@@ -61,6 +63,15 @@ pub trait PageFetcher: Send + Sync + 'static {
         &self,
         _query: &str,
     ) -> Pin<Box<dyn Future<Output = Option<LocateElementResult>> + Send>> {
+        Box::pin(async move { None })
+    }
+
+    /// 用 CSS 选择器查询当前页面的 DOM 元素。
+    fn query_dom(
+        &self,
+        _selector: &str,
+        _max_results: usize,
+    ) -> Pin<Box<dyn Future<Output = Option<QueryDomResult>> + Send>> {
         Box::pin(async move { None })
     }
 }
@@ -83,6 +94,147 @@ pub struct PageSnapshot {
     pub text: String,
     pub tabs: Vec<TabInfo>,
     pub active_tab_id: Option<String>,
+    pub events: Vec<BrowserEvent>,
+}
+
+/// 浏览器观测事件。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum BrowserEvent {
+    #[serde(rename = "dialog_opened")]
+    DialogOpened {
+        timestamp: u64,
+        #[serde(default)]
+        detail: String,
+    },
+    #[serde(rename = "dialog_closed")]
+    DialogClosed { timestamp: u64 },
+    #[serde(rename = "content_changed")]
+    ContentChanged {
+        timestamp: u64,
+        #[serde(default)]
+        detail: String,
+    },
+    #[serde(rename = "user_click")]
+    UserClick {
+        timestamp: u64,
+        element: String,
+        text: String,
+        selector: String,
+    },
+    #[serde(rename = "user_input")]
+    UserInput {
+        timestamp: u64,
+        selector: String,
+        label: String,
+        value_length: usize,
+    },
+    #[serde(rename = "user_navigation")]
+    UserNavigation { timestamp: u64, url: String },
+    #[serde(rename = "network_response")]
+    NetworkResponse {
+        timestamp: u64,
+        url: String,
+        method: String,
+        status: u16,
+        #[serde(default)]
+        detail: String,
+    },
+}
+
+pub fn format_browser_events(events: &[BrowserEvent]) -> Option<String> {
+    if events.is_empty() {
+        return None;
+    }
+
+    let mut lines = Vec::new();
+    for event in events {
+        match event {
+            BrowserEvent::DialogOpened { detail, .. } => {
+                lines.push("[页面变化] 出现新的弹窗/覆盖层".to_string());
+                push_preview(&mut lines, detail, 1200);
+            }
+            BrowserEvent::DialogClosed { .. } => {
+                lines.push("[页面变化] 弹窗/覆盖层已关闭".to_string());
+            }
+            BrowserEvent::ContentChanged { detail, .. } => {
+                lines.push("[页面变化] 页面内容已更新".to_string());
+                push_preview(&mut lines, detail, 1000);
+            }
+            BrowserEvent::UserClick {
+                element,
+                text,
+                selector,
+                ..
+            } => {
+                let mut desc = format!("[用户操作] 点击 <{element}>");
+                if !text.trim().is_empty() {
+                    desc.push_str(&format!(" {}", text.trim()));
+                }
+                if !selector.trim().is_empty() {
+                    desc.push_str(&format!(" ({selector})"));
+                }
+                lines.push(desc);
+            }
+            BrowserEvent::UserInput {
+                selector,
+                label,
+                value_length,
+                ..
+            } => {
+                let target = if label.trim().is_empty() {
+                    selector.as_str()
+                } else {
+                    label.as_str()
+                };
+                lines.push(format!(
+                    "[用户操作] 输入字段 {target} 已变化（长度 {value_length}）"
+                ));
+            }
+            BrowserEvent::UserNavigation { url, .. } => {
+                lines.push(format!("[用户操作] 页面导航到 {url}"));
+            }
+            BrowserEvent::NetworkResponse {
+                url,
+                method,
+                status,
+                detail,
+                ..
+            } => {
+                lines.push(format!(
+                    "[网络响应] {} {} (状态 {})",
+                    method,
+                    truncate_chars(url, 120),
+                    status
+                ));
+                push_preview(&mut lines, detail, 500);
+            }
+        }
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
+fn push_preview(lines: &mut Vec<String>, text: &str, max_chars: usize) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    lines.push(truncate_chars(text, max_chars));
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
 }
 
 /// 标签信息
@@ -120,10 +272,23 @@ pub struct SelectOption {
     pub text: String,
 }
 
+/// 表单按钮
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FormButton {
+    pub tag: String,
+    #[serde(rename = "type")]
+    pub button_type: String,
+    pub text: String,
+    pub disabled: bool,
+    pub selector: String,
+}
+
 /// 表单信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FormInfo {
     pub fields: Vec<FormField>,
+    #[serde(default)]
+    pub buttons: Vec<FormButton>,
 }
 
 /// 表单提取结果
@@ -152,7 +317,7 @@ pub struct FillFieldResult {
     pub ok: bool,
     pub strategy: Option<String>,
     pub error: Option<String>,
-    #[serde(rename = "currentValue")]
+    #[serde(rename = "currentValue", default)]
     pub current_value: Option<String>,
     #[serde(default)]
     pub selector: Option<String>,
@@ -160,6 +325,10 @@ pub struct FillFieldResult {
     pub target: Option<ElementCandidate>,
     #[serde(default)]
     pub candidates: Vec<ElementCandidate>,
+    #[serde(default)]
+    pub wait_result: Option<WaitResult>,
+    #[serde(default)]
+    pub page_diff: Option<String>,
 }
 
 /// 元素点击结果
@@ -177,6 +346,19 @@ pub struct ClickElementResult {
     pub x: Option<i32>,
     #[serde(default)]
     pub y: Option<i32>,
+    #[serde(default)]
+    pub wait_result: Option<WaitResult>,
+    #[serde(default)]
+    pub page_diff: Option<String>,
+}
+
+/// 等待条件结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaitResult {
+    pub ok: bool,
+    pub condition: String,
+    pub elapsed_ms: u64,
+    pub error: Option<String>,
 }
 
 /// 标签列表结果
@@ -197,4 +379,65 @@ pub struct LocateElementResult {
     pub target: Option<ElementCandidate>,
     #[serde(default)]
     pub candidates: Vec<ElementCandidate>,
+}
+
+/// DOM 查询结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryDomResult {
+    pub selector: String,
+    pub total: usize,
+    pub returned: usize,
+    pub elements: Vec<QueryDomElement>,
+}
+
+/// DOM 查询到的单个元素
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryDomElement {
+    pub index: usize,
+    pub tag: String,
+    pub text: String,
+    pub attributes: std::collections::HashMap<String, String>,
+    pub selector: String,
+    pub rect: DomRect,
+}
+
+/// DOM 元素的矩形位置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_browser_events_includes_small_page_and_network_feedback() {
+        let events = vec![
+            BrowserEvent::DialogOpened {
+                timestamp: 1,
+                detail: "创建 API key sk-test".to_string(),
+            },
+            BrowserEvent::NetworkResponse {
+                timestamp: 2,
+                url: "https://platform.deepseek.com/api_keys".to_string(),
+                method: "POST".to_string(),
+                status: 200,
+                detail: "{\"key\":\"sk-test\"}".to_string(),
+            },
+        ];
+
+        let text = format_browser_events(&events).unwrap();
+        assert!(text.contains("[页面变化]"));
+        assert!(text.contains("[网络响应] POST https://platform.deepseek.com/api_keys (状态 200)"));
+        assert!(text.contains("sk-test"));
+    }
+
+    #[test]
+    fn format_browser_events_returns_none_for_empty_events() {
+        assert!(format_browser_events(&[]).is_none());
+    }
 }

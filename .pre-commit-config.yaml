@@ -14,7 +14,7 @@ repos:
       - id: check-toml
       - id: check-yaml
       - id: end-of-file-fixer
-        exclude: ^src-tauri/gen/schemas/.*\.json$
+        exclude: ^(src-tauri/gen/schemas|crates/tiangong-plugin-browser/permissions/schemas)/
       - id: mixed-line-ending
       - id: trailing-whitespace
   - repo: https://github.com/psf/black
@@ -59,6 +59,14 @@ repos:
         name: yarn build (frontend)
         description: Build the frontend bundle.
         entry: bash -lc 'cd frontend && yarn build'
+        language: system
+        files: ^frontend/
+        pass_filenames: false
+        stages: [pre-push]
+      - id: frontend-test
+        name: yarn test (frontend)
+        description: Run frontend unit tests.
+        entry: bash -lc 'cd frontend && yarn test'
         language: system
         files: ^frontend/
         pass_filenames: false

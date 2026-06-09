@@ -13,4 +13,5 @@ permissions = [
     "allow-browser-tab-new",
     "allow-browser-tab-switch",
     "allow-browser-tab-close",
+    "allow-browser-annotation-extract",
 ]
