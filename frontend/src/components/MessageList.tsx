@@ -786,7 +786,7 @@ export function MessageList() {
                 </div>
               )}
 
-              {searchActive && <SearchBar matchCount={searchMatches.length} />}
+              {searchActive && <SearchBar />}
 
               {/* 虚拟化渲染已完成消息 */}
               <div

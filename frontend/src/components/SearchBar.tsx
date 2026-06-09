@@ -1,12 +1,11 @@
-import { useEffect, useRef, KeyboardEvent } from 'react';
+import { useEffect, useRef, useMemo, KeyboardEvent } from 'react';
 import { ChevronUp, ChevronDown, X } from 'lucide-react';
 import { useSearchStore } from '@/store/useSearchStore';
+import { useStore } from '@/store/useStore';
+import { textContent } from '@/api/tauri';
+import { findTextOccurrences } from '@/utils/search';
 
-interface SearchBarProps {
-  matchCount: number;
-}
-
-export function SearchBar({ matchCount }: SearchBarProps) {
+export function SearchBar() {
   const searchQuery = useSearchStore((s) => s.searchQuery);
   const currentMatchIndex = useSearchStore((s) => s.currentMatchIndex);
   const setSearchQuery = useSearchStore((s) => s.setSearchQuery);
@@ -14,6 +13,19 @@ export function SearchBar({ matchCount }: SearchBarProps) {
   const nextMatch = useSearchStore((s) => s.nextMatch);
   const prevMatch = useSearchStore((s) => s.prevMatch);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  const messages = useStore((s) => s.messages);
+
+  const matchCount = useMemo(() => {
+    if (!searchQuery) return 0;
+    let count = 0;
+    for (const msg of messages) {
+      const content = textContent(msg);
+      if (content) count += findTextOccurrences(content, searchQuery).length;
+      if (msg.reasoning_content) count += findTextOccurrences(msg.reasoning_content, searchQuery).length;
+    }
+    return count;
+  }, [messages, searchQuery]);
 
   useEffect(() => {
     inputRef.current?.focus();
