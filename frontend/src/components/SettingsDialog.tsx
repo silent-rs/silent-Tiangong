@@ -2412,6 +2412,7 @@ function formatBytes(value: number) {
 }
 
 function AppUpdateSettings() {
+  const storeUpdate = useStore((s) => s.updateAvailable);
   const [currentVersion, setCurrentVersion] = useState('');
   const [availableUpdate, setAvailableUpdate] = useState<{
     version: string;
@@ -2443,6 +2444,38 @@ function AppUpdateSettings() {
       updateRef.current = null;
     };
   }, []);
+
+  // 从全局 store 预填充更新信息并静默获取可用的 Update 对象
+  useEffect(() => {
+    if (!storeUpdate || updateRef.current) return;
+    let mounted = true;
+    setAvailableUpdate({
+      version: storeUpdate.version,
+      currentVersion: '',
+      date: storeUpdate.date,
+      body: storeUpdate.body,
+    });
+    (async () => {
+      try {
+        const { check } = await import('@tauri-apps/plugin-updater');
+        const update = await check({ timeout: 30000 });
+        if (!mounted) return;
+        await updateRef.current?.close().catch(() => {});
+        updateRef.current = update;
+        if (update) {
+          setAvailableUpdate({
+            version: update.version,
+            currentVersion: update.currentVersion,
+            date: update.date,
+            body: update.body,
+          });
+        }
+      } catch {
+        // 静默失败，用户可手动重试
+      }
+    })();
+    return () => { mounted = false; };
+  }, [storeUpdate]);
 
   const handleCheckUpdate = async () => {
     setIsChecking(true);
@@ -2568,7 +2601,7 @@ function AppUpdateSettings() {
                 </>
               )}
             </Button>
-            <Button onClick={handleInstallUpdate} disabled={!availableUpdate || isChecking || isInstalling}>
+            <Button onClick={handleInstallUpdate} disabled={!updateRef.current || isChecking || isInstalling}>
               {isInstalling ? (
                 <>
                   <Loader2 className="w-4 h-4 mr-2 animate-spin" />
