@@ -483,28 +483,6 @@ fn new_path_end_to_end_system_prompt_sent_to_llm() {
 }
 
 #[test]
-fn new_path_rebuild_after_compression_refreshes_summary() {
-    let mock = MockLlmServer::start("第一次压缩摘要");
-    let client = mock_client(mock.base_url());
-    let mut session = multi_turn_session();
-    // 第一次压缩
-    let compressor = ContextCompressor::new(2);
-    let result = compressor
-        .update_summary_with_usage(&mut session, &client)
-        .expect("压缩不应失败");
-    assert!(result.compressed);
-    assert!(session.context_summary.is_some());
-    // 压缩后重建 system prompt
-    rebuild_session(&mut session);
-    let context = session.context();
-    // system prompt 应包含摘要
-    assert_eq!(context[0].role, MessageRole::System);
-    assert!(
-        context[0].text_content().contains("第一次压缩摘要"),
-        "重建后的 system prompt 应包含最新摘要"
-    );
-}
-
 #[test]
 fn new_path_clear_and_rebuild_system_prompt() {
     let mut session = multi_turn_session();

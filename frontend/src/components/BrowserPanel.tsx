@@ -1,9 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { api } from '@/api/tauri';
 import { listen } from '@tauri-apps/api/event';
-import { Globe, ArrowRight, ArrowLeft, RotateCw, CornerDownRight, Plus, X, PenTool, ScanSearch, ChevronDown, Clock, ExternalLink } from 'lucide-react';
+import { Globe, ArrowRight, ArrowLeft, RotateCw, CornerDownRight, Plus, X, PenTool, ScanSearch, ChevronDown, Clock, ExternalLink, History } from 'lucide-react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 
 interface BrowserPanelProps {
   initialUrl?: string;
@@ -77,7 +78,8 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
   // 后退/前进下拉面板
   const [showBackHistory, setShowBackHistory] = useState(false);
   const [showForwardHistory, setShowForwardHistory] = useState(false);
-  // 全局历史面板（空白页时显示）
+  // 全局历史 Modal
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [globalHistoryEntries, setGlobalHistoryEntries] = useState<HistoryEntry[]>([]);
   const [globalHistoryOffset, setGlobalHistoryOffset] = useState(0);
   const [globalHistoryHasMore, setGlobalHistoryHasMore] = useState(true);
@@ -98,6 +100,7 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
         const activeId = result.active_tab_id || result.tabs[0].id;
         activeTabIdRef.current = activeId;
         setActiveTabId(activeId);
+        browserOpenedRef.current = true;
       }
     } catch { /* ignore */ }
   }, []);
@@ -138,17 +141,14 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
     }
   }, []);
 
-  // 判断当前是否在空白页（优先用 url 状态，fallback 到 tabs）
-  const isOnBlankPage = activeTabId && (!url || url === 'about:blank' || tabs.find(t => t.id === activeTabId)?.url === 'about:blank');
-
-  // 空白页时加载全局历史
-  const showGlobalHistory = useCallback(() => {
+  // 打开历史 Modal
+  const openHistoryModal = useCallback(() => {
     setGlobalHistoryEntries([]);
     setGlobalHistoryOffset(0);
     setGlobalHistoryHasMore(true);
     loadGlobalHistory(0);
+    setShowHistoryModal(true);
   }, [loadGlobalHistory]);
-
 
   useEffect(() => {
     if (currentUrl) {
@@ -236,15 +236,12 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
     await api.browserSetPosition(rect.x, rect.y, rect.width, rect.height).catch(console.error);
   }, []);
 
-  // 空白页时：隐藏原生 WebView 并加载全局历史；非空白页时：恢复 WebView 位置
+  // 非空白页时同步 WebView 位置
   useEffect(() => {
-    if (isOnBlankPage) {
-      api.browserHide().catch(console.error);
-      showGlobalHistory();
-    } else if (browserOpenedRef.current) {
+    if (browserOpenedRef.current) {
       syncPosition();
     }
-  }, [isOnBlankPage, showGlobalHistory, syncPosition]);
+  }, [syncPosition]);
 
   const handleNavigate = useCallback(async () => {
     const nextUrl = normalizeBrowserUrl(url);
@@ -315,12 +312,11 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
         next.set(tabId, { entries: [], currentIndex: -1 });
         return next;
       });
-      showGlobalHistory();
       await refreshTabs();
     } catch (err) {
       console.error('新建标签失败：', err);
     }
-  }, [refreshTabs, showGlobalHistory]);
+  }, [refreshTabs]);
 
   const handleTabSwitch = useCallback(async (tabId: string) => {
     try {
@@ -333,14 +329,11 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
       const tab = tabs.find(t => t.id === tabId);
       if (tab) {
         setUrl(tab.url);
-        if (tab.url === 'about:blank' || !tab.url) {
-          showGlobalHistory();
-        }
       }
     } catch (err) {
       console.error('切换标签失败：', err);
     }
-  }, [tabs, showGlobalHistory]);
+  }, [tabs]);
 
   const handleTabClose = useCallback(async (tabId: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -363,6 +356,7 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
     navigationIntentRef.current = 'new';
     setShowBackHistory(false);
     setShowForwardHistory(false);
+    setShowHistoryModal(false);
     try {
       if (!containerRef.current) return;
       const rect = containerRef.current.getBoundingClientRect();
@@ -373,6 +367,7 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
         await api.browserOpen(targetUrl, rect.x, rect.y, rect.width, rect.height);
         browserOpenedRef.current = true;
       }
+      setUrl(targetUrl);
     } catch (err) {
       console.error('历史跳转失败：', err);
     }
@@ -580,6 +575,15 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
         >
           <RotateCw className="w-3.5 h-3.5" />
         </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={openHistoryModal}
+          className="h-7 w-7 p-0 shrink-0"
+          title="浏览历史"
+        >
+          <History className="w-3.5 h-3.5" />
+        </Button>
         <Globe className="w-4 h-4 text-muted-foreground shrink-0 ml-1" />
         <Input
           value={url}
@@ -646,17 +650,25 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
         </div>
       )}
 
-      {/* WebView 容器 / 空白页全局历史面板 */}
+      {/* WebView 容器 */}
       <div className="relative flex-1">
         <div
           ref={containerRef}
           className="absolute inset-0 bg-muted/30"
         />
+      </div>
 
-        {/* 空白页历史面板 */}
-        {isOnBlankPage && (
+      {/* 全局历史 Modal */}
+      <Dialog open={showHistoryModal} onOpenChange={setShowHistoryModal}>
+        <DialogContent className="max-w-xl p-0 overflow-hidden">
+          <DialogHeader className="px-4 pt-4 pb-2">
+            <DialogTitle className="flex items-center gap-2 text-base">
+              <Clock className="w-4 h-4" />
+              浏览历史
+            </DialogTitle>
+          </DialogHeader>
           <div
-            className="absolute inset-0 z-10 bg-background overflow-y-auto"
+            className="px-4 pb-4 max-h-[60vh] overflow-y-auto"
             onScroll={(e) => {
               const el = e.currentTarget;
               if (el.scrollHeight - el.scrollTop - el.clientHeight < 100 && globalHistoryHasMore && !globalHistoryLoading) {
@@ -664,47 +676,41 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
               }
             }}
           >
-            <div className="max-w-2xl mx-auto px-4 py-6">
-              <div className="flex items-center gap-2 mb-4 text-muted-foreground">
-                <Clock className="w-4 h-4" />
-                <span className="text-sm font-medium">浏览历史</span>
+            {globalHistoryEntries.length === 0 && !globalHistoryLoading && (
+              <div className="text-center py-12 text-muted-foreground text-sm">
+                暂无浏览历史
               </div>
-              {globalHistoryEntries.length === 0 && !globalHistoryLoading && (
-                <div className="text-center py-12 text-muted-foreground text-sm">
-                  暂无浏览历史
-                </div>
-              )}
-              {globalHistoryEntries.map((entry, i) => (
-                <div
-                  key={`${entry.url}-${entry.timestamp}-${i}`}
-                  className="flex items-start gap-3 px-3 py-2.5 rounded-md hover:bg-muted/50 cursor-pointer group border-b border-border/20 last:border-0"
-                  onClick={() => handleHistoryJump(entry.url)}
-                >
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium truncate group-hover:text-primary transition-colors">
-                      {entry.title || entry.url}
-                    </div>
-                    <div className="flex items-center gap-2 mt-0.5">
-                      <span className="text-xs text-muted-foreground truncate">
-                        {entry.url.replace(/^https?:\/\//, '').split('/')[0]}
-                      </span>
-                      <span className="text-xs text-muted-foreground">
-                        {formatTime(entry.timestamp)}
-                      </span>
-                    </div>
+            )}
+            {globalHistoryEntries.map((entry, i) => (
+              <div
+                key={`${entry.url}-${entry.timestamp}-${i}`}
+                className="flex items-start gap-3 px-3 py-2.5 rounded-md hover:bg-muted/50 cursor-pointer group border-b border-border/20 last:border-0"
+                onClick={() => handleHistoryJump(entry.url)}
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium truncate group-hover:text-primary transition-colors">
+                    {entry.title || entry.url}
                   </div>
-                  <ExternalLink className="w-3.5 h-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity mt-0.5 shrink-0" />
+                  <div className="flex items-center gap-2 mt-0.5">
+                    <span className="text-xs text-muted-foreground truncate">
+                      {entry.url.replace(/^https?:\/\//, '').split('/')[0]}
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      {formatTime(entry.timestamp)}
+                    </span>
+                  </div>
                 </div>
-              ))}
-              {globalHistoryLoading && (
-                <div className="text-center py-4 text-muted-foreground text-sm">
-                  加载中...
-                </div>
-              )}
-            </div>
+                <ExternalLink className="w-3.5 h-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity mt-0.5 shrink-0" />
+              </div>
+            ))}
+            {globalHistoryLoading && (
+              <div className="text-center py-4 text-muted-foreground text-sm">
+                加载中...
+              </div>
+            )}
           </div>
-        )}
-      </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
