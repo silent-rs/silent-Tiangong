@@ -143,10 +143,12 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
 
   // 打开历史 Modal（先将 WebView 移到屏幕外，再显示 Modal）
   const openHistoryModal = useCallback(async () => {
-    if (containerRef.current && browserOpenedRef.current) {
-      const rect = containerRef.current.getBoundingClientRect();
-      await api.browserSetPosition(-10000, -10000, rect.width, rect.height);
-    }
+    try {
+      if (containerRef.current && browserOpenedRef.current) {
+        const rect = containerRef.current.getBoundingClientRect();
+        await api.browserSetPosition(-10000, -10000, rect.width, rect.height);
+      }
+    } catch { /* WebView 可能不存在，忽略 */ }
     setGlobalHistoryEntries([]);
     setGlobalHistoryOffset(0);
     setGlobalHistoryHasMore(true);
@@ -400,14 +402,29 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
     return () => observer.disconnect();
   }, [syncPosition]);
 
+  // 恢复浏览器面板时：重新检查 WebView 状态并同步位置
   useEffect(() => {
+    const handleRestore = async () => {
+      if (browserOpenedRef.current) {
+        await syncPosition();
+      } else if (containerRef.current) {
+        const rect = containerRef.current.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          api.browserOpen(DEFAULT_URL, rect.x, rect.y, rect.width, rect.height)
+            .then(() => { browserOpenedRef.current = true; })
+            .then(() => refreshTabs())
+            .catch(console.error);
+        }
+      }
+      refreshTabs();
+    };
     window.addEventListener('resize', syncPosition);
-    window.addEventListener('tiangong:restore-browser-panel', syncPosition);
+    window.addEventListener('tiangong:restore-browser-panel', handleRestore);
     return () => {
       window.removeEventListener('resize', syncPosition);
-      window.removeEventListener('tiangong:restore-browser-panel', syncPosition);
+      window.removeEventListener('tiangong:restore-browser-panel', handleRestore);
     };
-  }, [syncPosition]);
+  }, [syncPosition, refreshTabs]);
 
   useEffect(() => {
     if (!initializedRef.current && containerRef.current) {
