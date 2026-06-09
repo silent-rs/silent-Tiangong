@@ -74,6 +74,23 @@ pub trait PageFetcher: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Option<QueryDomResult>> + Send>> {
         Box::pin(async move { None })
     }
+
+    /// 获取标签页浏览历史。
+    fn tab_history(
+        &self,
+        _tab_id: Option<&str>,
+    ) -> Pin<Box<dyn Future<Output = Option<TabHistoryResult>> + Send>> {
+        Box::pin(async move { None })
+    }
+
+    /// 获取全局浏览历史（分页，最新在前）。
+    fn global_history(
+        &self,
+        _offset: usize,
+        _limit: usize,
+    ) -> Pin<Box<dyn Future<Output = Option<Vec<HistoryEntry>>> + Send>> {
+        Box::pin(async move { None })
+    }
 }
 
 /// 页面获取结果（纯数据，无 tokio 依赖）
@@ -366,6 +383,22 @@ pub struct WaitResult {
 pub struct TabListResult {
     pub tabs: Vec<TabInfo>,
     pub active_tab_id: Option<String>,
+}
+
+/// 浏览历史条目
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    pub url: String,
+    pub title: String,
+    pub timestamp: u64,
+}
+
+/// 标签页浏览历史结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TabHistoryResult {
+    pub tab_id: String,
+    pub entries: Vec<HistoryEntry>,
+    pub current_index: i32,
 }
 
 /// 智能元素定位结果

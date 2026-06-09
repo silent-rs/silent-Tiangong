@@ -833,4 +833,16 @@ export const api = {
     count: number;
   }> =>
     invoke('plugin:browser|browser_annotation_extract'),
+
+  browserTabHistory: (tabId?: string): Promise<{
+    tab_id: string;
+    entries: Array<{ url: string; title: string; timestamp: number }>;
+    current_index: number;
+  }> =>
+    invoke('plugin:browser|browser_tab_history', { tabId: tabId ?? null }),
+
+  browserGlobalHistory: (offset: number, limit: number): Promise<
+    Array<{ url: string; title: string; timestamp: number }>
+  > =>
+    invoke('plugin:browser|browser_global_history', { offset, limit }),
 };

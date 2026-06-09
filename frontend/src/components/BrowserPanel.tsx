@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { api } from '@/api/tauri';
 import { listen } from '@tauri-apps/api/event';
-import { Globe, ArrowRight, ArrowLeft, RotateCw, CornerDownRight, Plus, X, PenTool, ScanSearch } from 'lucide-react';
+import { Globe, ArrowRight, ArrowLeft, RotateCw, CornerDownRight, Plus, X, PenTool, ScanSearch, ChevronDown, Clock, ExternalLink } from 'lucide-react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 
@@ -16,6 +16,17 @@ interface TabInfo {
   title: string;
 }
 
+interface HistoryEntry {
+  url: string;
+  title: string;
+  timestamp: number;
+}
+
+interface TabHistory {
+  entries: HistoryEntry[];
+  currentIndex: number;
+}
+
 function normalizeBrowserUrl(rawUrl: string): string {
   const trimmed = rawUrl.trim();
   if (!trimmed) return '';
@@ -25,7 +36,22 @@ function normalizeBrowserUrl(rawUrl: string): string {
   return `https://${trimmed}`;
 }
 
+function formatTime(ts: number): string {
+  const d = new Date(ts);
+  const now = new Date();
+  const diffMs = now.getTime() - d.getTime();
+  const diffMin = Math.floor(diffMs / 60000);
+  if (diffMin < 1) return '刚刚';
+  if (diffMin < 60) return `${diffMin} 分钟前`;
+  const diffHour = Math.floor(diffMin / 60);
+  if (diffHour < 24) return `${diffHour} 小时前`;
+  const diffDay = Math.floor(diffHour / 24);
+  if (diffDay < 7) return `${diffDay} 天前`;
+  return d.toLocaleDateString();
+}
+
 const DEFAULT_URL = 'about:blank';
+const HISTORY_PAGE_SIZE = 20;
 
 export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
   const [url, setUrl] = useState(initialUrl || '');
@@ -43,6 +69,19 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
   const browserOpenedRef = useRef(false);
 
   const activeTabIdRef = useRef<string | null>(null);
+
+  // 每个 tab 的浏览历史栈
+  const [tabHistories, setTabHistories] = useState<Map<string, TabHistory>>(new Map());
+  // 导航意图标记
+  const navigationIntentRef = useRef<'new' | 'back' | 'forward' | null>(null);
+  // 后退/前进下拉面板
+  const [showBackHistory, setShowBackHistory] = useState(false);
+  const [showForwardHistory, setShowForwardHistory] = useState(false);
+  // 全局历史面板（空白页时显示）
+  const [globalHistoryEntries, setGlobalHistoryEntries] = useState<HistoryEntry[]>([]);
+  const [globalHistoryOffset, setGlobalHistoryOffset] = useState(0);
+  const [globalHistoryHasMore, setGlobalHistoryHasMore] = useState(true);
+  const [globalHistoryLoading, setGlobalHistoryLoading] = useState(false);
 
   const refreshTabs = useCallback(async () => {
     try {
@@ -63,13 +102,61 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
     } catch { /* ignore */ }
   }, []);
 
+  // 获取当前 tab 的历史
+  const getCurrentHistory = useCallback((tabId: string | null): TabHistory => {
+    if (!tabId) return { entries: [], currentIndex: -1 };
+    return tabHistories.get(tabId) ?? { entries: [], currentIndex: -1 };
+  }, [tabHistories]);
+
+  const canGoBack = useCallback((tabId: string | null): boolean => {
+    const h = getCurrentHistory(tabId);
+    return h.currentIndex > 0;
+  }, [getCurrentHistory]);
+
+  const canGoForward = useCallback((tabId: string | null): boolean => {
+    const h = getCurrentHistory(tabId);
+    return h.currentIndex >= 0 && h.currentIndex < h.entries.length - 1;
+  }, [getCurrentHistory]);
+
+  // 加载全局历史
+  const loadGlobalHistory = useCallback(async (offset: number) => {
+    setGlobalHistoryLoading(true);
+    try {
+      const entries = await api.browserGlobalHistory(offset, HISTORY_PAGE_SIZE);
+      if (offset === 0) {
+        setGlobalHistoryEntries(entries);
+      } else {
+        setGlobalHistoryEntries(prev => [...prev, ...entries]);
+      }
+      setGlobalHistoryHasMore(entries.length >= HISTORY_PAGE_SIZE);
+      setGlobalHistoryOffset(offset + entries.length);
+    } catch {
+      setGlobalHistoryHasMore(false);
+    } finally {
+      setGlobalHistoryLoading(false);
+    }
+  }, []);
+
+  // 判断当前是否在空白页
+  const isOnBlankPage = activeTabId && tabs.find(t => t.id === activeTabId)?.url === 'about:blank';
+
+  // 空白页时加载全局历史
+  useEffect(() => {
+    if (isOnBlankPage) {
+      setGlobalHistoryEntries([]);
+      setGlobalHistoryOffset(0);
+      setGlobalHistoryHasMore(true);
+      loadGlobalHistory(0);
+    }
+  }, [isOnBlankPage, loadGlobalHistory]);
+
   useEffect(() => {
     if (currentUrl) {
       setUrl(currentUrl);
     }
   }, [currentUrl]);
 
-  // 监听标签更新事件（使用 Tauri 的 listen API）
+  // 监听标签更新事件
   useEffect(() => {
     let unlistenTab: (() => void) | null = null;
     let unlistenPage: (() => void) | null = null;
@@ -78,11 +165,61 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
       unlistenTab = await listen('browser:tab_updated', () => { refreshTabs(); });
       unlistenPage = await listen('browser:page_loaded', (event) => {
         refreshTabs();
-        // 同步 URL 栏
-        const payload = event.payload as { url?: string };
+        const payload = event.payload as { url?: string; title?: string };
         if (payload?.url) {
           setUrl(payload.url);
         }
+
+        // 根据导航意图更新历史栈
+        const intent = navigationIntentRef.current;
+        navigationIntentRef.current = null;
+
+        const pageUrl = payload?.url;
+        const pageTitle = payload?.title ?? '';
+        if (!pageUrl || pageUrl.startsWith('about:')) return;
+
+        const tabId = activeTabIdRef.current;
+        if (!tabId) return;
+
+        setTabHistories(prev => {
+          const next = new Map(prev);
+          let history = next.get(tabId) ?? { entries: [], currentIndex: -1 };
+
+          if (intent === 'back' || intent === 'forward') {
+            // 后退/前进：查找匹配的 URL，移动索引
+            const direction = intent === 'back' ? -1 : 1;
+            const expectedIdx = history.currentIndex + direction;
+            if (expectedIdx >= 0 && expectedIdx < history.entries.length && history.entries[expectedIdx].url === pageUrl) {
+              history = { ...history, currentIndex: expectedIdx };
+            } else {
+              const foundIdx = history.entries.findIndex(e => e.url === pageUrl);
+              if (foundIdx >= 0) {
+                history = { ...history, currentIndex: foundIdx };
+              } else {
+                // 未找到匹配，按新导航处理
+                const entries = [
+                  ...history.entries.slice(0, history.currentIndex + 1),
+                  { url: pageUrl, title: pageTitle, timestamp: Date.now() },
+                ];
+                history = { entries, currentIndex: entries.length - 1 };
+              }
+            }
+          } else {
+            // 新导航：截断并追加
+            // 去重：URL 与最新条目相同时跳过
+            if (history.entries.length > 0 && history.entries[history.currentIndex]?.url === pageUrl) {
+              return prev;
+            }
+            const entries = [
+              ...history.entries.slice(0, history.currentIndex + 1),
+              { url: pageUrl, title: pageTitle, timestamp: Date.now() },
+            ];
+            history = { entries, currentIndex: entries.length - 1 };
+          }
+
+          next.set(tabId, history);
+          return next;
+        });
       });
     };
     setup();
@@ -102,6 +239,10 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
   const handleNavigate = useCallback(async () => {
     const nextUrl = normalizeBrowserUrl(url);
     if (!nextUrl) return;
+
+    navigationIntentRef.current = 'new';
+
+    try {
     try {
       await api.browserNavigate(nextUrl);
     } catch (err) {
@@ -110,12 +251,20 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
   }, [url]);
 
   const handleGoBack = useCallback(async () => {
+    if (!activeTabId || !canGoBack(activeTabId)) return;
+    navigationIntentRef.current = 'back';
+    setShowBackHistory(false);
+    setShowForwardHistory(false);
     await api.browserGoBack().catch(console.error);
-  }, []);
+  }, [activeTabId, canGoBack]);
 
   const handleGoForward = useCallback(async () => {
+    if (!activeTabId || !canGoForward(activeTabId)) return;
+    navigationIntentRef.current = 'forward';
+    setShowBackHistory(false);
+    setShowForwardHistory(false);
     await api.browserGoForward().catch(console.error);
-  }, []);
+  }, [activeTabId, canGoForward]);
 
   const handleReload = useCallback(async () => {
     await api.browserEval('location.reload()').catch(console.error);
@@ -150,6 +299,12 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
       const tabId = await api.browserTabNew(DEFAULT_URL);
       setActiveTabId(tabId);
       setUrl('');
+      // 初始化空历史
+      setTabHistories(prev => {
+        const next = new Map(prev);
+        next.set(tabId, { entries: [], currentIndex: -1 });
+        return next;
+      });
       await refreshTabs();
     } catch (err) {
       console.error('新建标签失败：', err);
@@ -158,6 +313,9 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
 
   const handleTabSwitch = useCallback(async (tabId: string) => {
     try {
+      navigationIntentRef.current = null;
+      setShowBackHistory(false);
+      setShowForwardHistory(false);
       await api.browserTabSwitch(tabId);
       activeTabIdRef.current = tabId;
       setActiveTabId(tabId);
@@ -172,11 +330,51 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
     e.stopPropagation();
     try {
       await api.browserTabClose(tabId);
+      // 清除该 tab 的历史
+      setTabHistories(prev => {
+        const next = new Map(prev);
+        next.delete(tabId);
+        return next;
+      });
       await refreshTabs();
     } catch (err) {
       console.error('关闭标签失败：', err);
     }
   }, [refreshTabs]);
+
+  // 从历史记录跳转
+  const handleHistoryJump = useCallback(async (targetUrl: string) => {
+    navigationIntentRef.current = 'new';
+    setShowBackHistory(false);
+    setShowForwardHistory(false);
+    try {
+      if (!containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      if (browserOpenedRef.current) {
+        await api.browserSetPosition(rect.x, rect.y, rect.width, rect.height);
+        await api.browserNavigate(targetUrl);
+      } else {
+        await api.browserOpen(targetUrl, rect.x, rect.y, rect.width, rect.height);
+        browserOpenedRef.current = true;
+      }
+    } catch (err) {
+      console.error('历史跳转失败：', err);
+    }
+  }, []);
+
+  // 关闭下拉菜单（点击外部）
+  useEffect(() => {
+    if (!showBackHistory && !showForwardHistory) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('.history-dropdown-container')) {
+        setShowBackHistory(false);
+        setShowForwardHistory(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [showBackHistory, showForwardHistory]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -228,6 +426,10 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
     }
   }, [initialUrl, refreshTabs]);
 
+  const history = getCurrentHistory(activeTabId);
+  const backEntries = history.entries.slice(0, history.currentIndex).reverse();
+  const forwardEntries = history.entries.slice(history.currentIndex + 1);
+
   return (
     <div className="flex flex-1 flex-col h-full bg-background">
       {/* 标签栏 */}
@@ -266,22 +468,94 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
 
       {/* 工具栏 */}
       <div className="flex items-center gap-1 px-2 py-2 border-b shrink-0">
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={handleGoBack}
-          className="h-7 w-7 p-0 shrink-0"
-        >
-          <ArrowLeft className="w-3.5 h-3.5" />
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={handleGoForward}
-          className="h-7 w-7 p-0 shrink-0"
-        >
-          <ArrowRight className="w-3.5 h-3.5" />
-        </Button>
+        {/* 后退按钮 + 下拉 */}
+        <div className="relative history-dropdown-container">
+          <div className="flex items-center">
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={handleGoBack}
+              className="h-7 w-7 p-0 shrink-0"
+              disabled={!canGoBack(activeTabId)}
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+            </Button>
+            {backEntries.length > 0 && (
+              <button
+                className="h-7 w-3 flex items-center justify-center shrink-0 text-muted-foreground hover:text-foreground"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowBackHistory(!showBackHistory);
+                  setShowForwardHistory(false);
+                }}
+              >
+                <ChevronDown className="w-2.5 h-2.5" />
+              </button>
+            )}
+          </div>
+          {showBackHistory && backEntries.length > 0 && (
+            <div className="absolute top-full left-0 mt-1 w-72 max-h-60 overflow-y-auto bg-popover border rounded-md shadow-lg z-50 text-xs">
+              {backEntries.map((entry, i) => (
+                <div
+                  key={`${entry.url}-${entry.timestamp}-${i}`}
+                  className="px-2 py-1.5 hover:bg-muted cursor-pointer border-b last:border-0"
+                  onClick={() => {
+                    handleHistoryJump(entry.url);
+                    setShowBackHistory(false);
+                  }}
+                >
+                  <div className="font-medium truncate">{entry.title || '(无标题)'}</div>
+                  <div className="text-muted-foreground truncate">{entry.url}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* 前进按钮 + 下拉 */}
+        <div className="relative history-dropdown-container">
+          <div className="flex items-center">
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={handleGoForward}
+              className="h-7 w-7 p-0 shrink-0"
+              disabled={!canGoForward(activeTabId)}
+            >
+              <ArrowRight className="w-3.5 h-3.5" />
+            </Button>
+            {forwardEntries.length > 0 && (
+              <button
+                className="h-7 w-3 flex items-center justify-center shrink-0 text-muted-foreground hover:text-foreground"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowForwardHistory(!showForwardHistory);
+                  setShowBackHistory(false);
+                }}
+              >
+                <ChevronDown className="w-2.5 h-2.5" />
+              </button>
+            )}
+          </div>
+          {showForwardHistory && forwardEntries.length > 0 && (
+            <div className="absolute top-full left-0 mt-1 w-72 max-h-60 overflow-y-auto bg-popover border rounded-md shadow-lg z-50 text-xs">
+              {forwardEntries.map((entry, i) => (
+                <div
+                  key={`${entry.url}-${entry.timestamp}-${i}`}
+                  className="px-2 py-1.5 hover:bg-muted cursor-pointer border-b last:border-0"
+                  onClick={() => {
+                    handleHistoryJump(entry.url);
+                    setShowForwardHistory(false);
+                  }}
+                >
+                  <div className="font-medium truncate">{entry.title || '(无标题)'}</div>
+                  <div className="text-muted-foreground truncate">{entry.url}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
         <Button
           size="sm"
           variant="ghost"
@@ -356,11 +630,65 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
         </div>
       )}
 
-      {/* WebView 容器 */}
-      <div
-        ref={containerRef}
-        className="flex-1 bg-muted/30"
-      />
+      {/* WebView 容器 / 空白页全局历史面板 */}
+      <div className="relative flex-1">
+        <div
+          ref={containerRef}
+          className="absolute inset-0 bg-muted/30"
+        />
+
+        {/* 空白页历史面板 */}
+        {isOnBlankPage && (
+          <div
+            className="absolute inset-0 z-10 bg-background overflow-y-auto"
+            onScroll={(e) => {
+              const el = e.currentTarget;
+              if (el.scrollHeight - el.scrollTop - el.clientHeight < 100 && globalHistoryHasMore && !globalHistoryLoading) {
+                loadGlobalHistory(globalHistoryOffset);
+              }
+            }}
+          >
+            <div className="max-w-2xl mx-auto px-4 py-6">
+              <div className="flex items-center gap-2 mb-4 text-muted-foreground">
+                <Clock className="w-4 h-4" />
+                <span className="text-sm font-medium">浏览历史</span>
+              </div>
+              {globalHistoryEntries.length === 0 && !globalHistoryLoading && (
+                <div className="text-center py-12 text-muted-foreground text-sm">
+                  暂无浏览历史
+                </div>
+              )}
+              {globalHistoryEntries.map((entry, i) => (
+                <div
+                  key={`${entry.url}-${entry.timestamp}-${i}`}
+                  className="flex items-start gap-3 px-3 py-2.5 rounded-md hover:bg-muted/50 cursor-pointer group border-b border-border/20 last:border-0"
+                  onClick={() => handleHistoryJump(entry.url)}
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium truncate group-hover:text-primary transition-colors">
+                      {entry.title || entry.url}
+                    </div>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <span className="text-xs text-muted-foreground truncate">
+                        {entry.url.replace(/^https?:\/\//, '').split('/')[0]}
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        {formatTime(entry.timestamp)}
+                      </span>
+                    </div>
+                  </div>
+                  <ExternalLink className="w-3.5 h-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity mt-0.5 shrink-0" />
+                </div>
+              ))}
+              {globalHistoryLoading && (
+                <div className="text-center py-4 text-muted-foreground text-sm">
+                  加载中...
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

@@ -12,7 +12,8 @@ use tauri::{
 
 use crate::bridge::BRIDGE_SCRIPT;
 use crate::types::{
-    BrowserEvent, BrowserPageSnapshot, BrowserResponse, BrowserTab, PageStatus, TabListResponse,
+    BrowserEvent, BrowserPageSnapshot, BrowserResponse, BrowserTab, HistoryEntry, PageStatus,
+    TabHistoryResult, TabListResponse,
 };
 
 fn webview_label(tab_id: &str) -> String {
@@ -49,6 +50,12 @@ pub struct BrowserState {
     pub active_tab_id: Option<String>,
     /// 当前可见区域 (x, y, w, h)，用于标签切换时定位新 WebView
     pub browser_rect: (f64, f64, f64, f64),
+    /// 全局浏览历史（所有标签页共享，持久化）
+    pub global_history: Vec<HistoryEntry>,
+    /// 每个标签页的浏览历史栈
+    pub tab_histories: HashMap<String, Vec<HistoryEntry>>,
+    /// 每个标签页当前在历史栈中的位置
+    pub tab_history_indices: HashMap<String, usize>,
 }
 
 impl BrowserState {
@@ -76,6 +83,7 @@ impl Default for BrowserManager {
 
 impl BrowserManager {
     pub fn new() -> Self {
+        let global_history = load_global_history();
         Self {
             state: Arc::new(Mutex::new(BrowserState {
                 webviews: HashMap::new(),
@@ -89,6 +97,9 @@ impl BrowserManager {
                 tabs: Vec::new(),
                 active_tab_id: None,
                 browser_rect: (0.0, 0.0, 0.0, 0.0),
+                global_history,
+                tab_histories: HashMap::new(),
+                tab_history_indices: HashMap::new(),
             })),
         }
     }
@@ -188,6 +199,44 @@ impl BrowserManager {
                                         if !title.is_empty() {
                                             tab.title = title.clone();
                                         }
+                                    }
+                                    // 记录浏览历史
+                                    let should_persist = {
+                                        let active_id = state.active_tab_id.clone();
+                                        let last_same = state.global_history.last().map(|e| e.url.as_str()) == Some(&page_url);
+                                        if !last_same && !page_url.starts_with("about:") {
+                                            let entry = HistoryEntry {
+                                                url: page_url.clone(),
+                                                title: if title.is_empty() { page_url.clone() } else { title.clone() },
+                                                timestamp: std::time::SystemTime::now()
+                                                    .duration_since(std::time::UNIX_EPOCH)
+                                                    .unwrap_or_default()
+                                                    .as_millis() as u64,
+                                            };
+                                            // 写入标签历史
+                                            if let Some(active_id) = active_id {
+                                                {
+                                                    let tab_entries = state.tab_histories.entry(active_id.clone()).or_default();
+                                                    if tab_entries.last().map(|e| e.url.as_str()) != Some(&page_url) {
+                                                        tab_entries.push(entry.clone());
+                                                    }
+                                                }
+                                                let idx = state.tab_histories.get(&active_id).map(|te| te.len() - 1).unwrap_or(0);
+                                                state.tab_history_indices.insert(active_id, idx);
+                                            }
+                                            state.global_history.push(entry);
+                                            if state.global_history.len() > 1000 {
+                                                let keep = state.global_history.len() - 800;
+                                                state.global_history.drain(0..keep);
+                                            }
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    };
+                                    drop(state);
+                                    if should_persist {
+                                        persist_global_history(&state_clone2);
                                     }
                                 }
                                 let summary: String = text.chars().take(2000).collect();
@@ -295,6 +344,19 @@ impl BrowserManager {
                 tab_id.clone(),
                 Arc::new((Mutex::new(false), Condvar::new())),
             );
+            // 初始化标签页历史（排除 about: 页面）
+            if !url.starts_with("about:") {
+                let entry = HistoryEntry {
+                    url: url.to_string(),
+                    title: url.to_string(),
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64,
+                };
+                state.tab_histories.insert(tab_id.clone(), vec![entry]);
+                state.tab_history_indices.insert(tab_id.clone(), 0);
+            }
             state.tabs.push(BrowserTab {
                 id: tab_id.clone(),
                 url: url.to_string(),
@@ -335,6 +397,8 @@ impl BrowserManager {
             state.pending_events.clear();
             state.tabs.clear();
             state.active_tab_id = None;
+            state.tab_histories.clear();
+            state.tab_history_indices.clear();
         }
         Ok(())
     }
@@ -401,17 +465,52 @@ impl BrowserManager {
                     };
                     if changed {
                         debug!(url = %current_url, "browser url_poll detected change");
-                        {
+                        // 更新活跃标签 URL 并记录历史
+                        let should_persist = {
                             let mut s = match state.lock() {
                                 Ok(s) => s,
                                 Err(e) => e.into_inner(),
                             };
                             let aid = s.active_tab_id.clone();
+                            let mut did_record = false;
                             if let Some(active_id) = aid {
                                 if let Some(tab) = s.tabs.iter_mut().find(|t| t.id == active_id) {
                                     tab.url = current_url.clone();
                                 }
+                                // 记录浏览历史（排除 about: 页面）
+                                if !current_url.starts_with("about:") {
+                                    let last_same = s.global_history.last().map(|e| e.url.as_str()) == Some(current_url.as_str());
+                                    if !last_same {
+                                        let entry = HistoryEntry {
+                                            url: current_url.clone(),
+                                            title: current_url.clone(),
+                                            timestamp: std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .unwrap_or_default()
+                                                .as_millis() as u64,
+                                        };
+                                        {
+                                            let tab_entries = s.tab_histories.entry(active_id.clone()).or_default();
+                                            if tab_entries.last().map(|e| e.url.as_str()) != Some(current_url.as_str()) {
+                                                tab_entries.push(entry.clone());
+                                            }
+                                        }
+                                        let idx = s.tab_histories.get(&active_id).map(|te| te.len() - 1).unwrap_or(0);
+                                        s.tab_history_indices.insert(active_id, idx);
+                                        s.global_history.push(entry);
+                                        if s.global_history.len() > 1000 {
+                                            let keep = s.global_history.len() - 800;
+                                            s.global_history.drain(0..keep);
+                                        }
+                                        did_record = true;
+                                    }
+                                }
                             }
+                            drop(s);
+                            did_record
+                        };
+                        if should_persist {
+                            persist_global_history(&state);
                         }
                         let _ = app.emit(
                             "browser:page_loaded",
@@ -985,6 +1084,19 @@ impl BrowserManager {
                 tab_id.clone(),
                 Arc::new((Mutex::new(false), Condvar::new())),
             );
+            // 初始化标签页历史（排除 about: 页面）
+            if !url.starts_with("about:") {
+                let entry = HistoryEntry {
+                    url: url.to_string(),
+                    title: url.to_string(),
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64,
+                };
+                state.tab_histories.insert(tab_id.clone(), vec![entry]);
+                state.tab_history_indices.insert(tab_id.clone(), 0);
+            }
             state.tabs.push(BrowserTab {
                 id: tab_id.clone(),
                 url: url.to_string(),
@@ -1055,6 +1167,9 @@ impl BrowserManager {
             }
             state.page_loaded_signals.remove(tab_id);
             state.latest_snapshots.remove(tab_id);
+            // 清除该标签页的历史
+            state.tab_histories.remove(tab_id);
+            state.tab_history_indices.remove(tab_id);
             let was_active = state.active_tab_id.as_deref() == Some(tab_id);
             (was_active, pos)
         };
@@ -1110,6 +1225,162 @@ impl BrowserManager {
             Ok(Ok(u)) => Some(u.to_string()),
             _ => None,
         }
+    }
+
+    /// 记录 URL 访问到活跃标签历史和全局历史
+    pub fn record_history(&self, url: &str, title: &str) {
+        let should_persist = {
+            let mut state = match self.state.lock() {
+                Ok(s) => s,
+                Err(e) => e.into_inner(),
+            };
+            let entry = HistoryEntry {
+                url: url.to_string(),
+                title: if title.is_empty() {
+                    url.to_string()
+                } else {
+                    title.to_string()
+                },
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+            };
+
+            // 写入活跃标签历史
+            let active_id = state.active_tab_id.clone();
+            if let Some(ref aid) = active_id {
+                let tab_entries = state.tab_histories.entry(aid.clone()).or_default();
+                // 去重：与最新条目 URL 相同时跳过
+                if tab_entries.last().map(|e| e.url.as_str()) != Some(url) {
+                    tab_entries.push(entry.clone());
+                    // 标签历史上限 200 条
+                    if tab_entries.len() > 200 {
+                        let keep_from = tab_entries.len() - 160;
+                        tab_entries.drain(0..keep_from);
+                    }
+                }
+            }
+            // 更新标签历史索引
+            if let Some(ref aid) = active_id {
+                let idx = state
+                    .tab_histories
+                    .get(aid)
+                    .map(|te| te.len() - 1)
+                    .unwrap_or(0);
+                state.tab_history_indices.insert(aid.clone(), idx);
+            }
+
+            // 写入全局历史
+            if state.global_history.last().map(|e| e.url.as_str()) != Some(url) {
+                state.global_history.push(entry);
+                // 全局历史上限 1000 条，超出时保留最近 800 条
+                if state.global_history.len() > 1000 {
+                    let keep_from = state.global_history.len() - 800;
+                    state.global_history.drain(0..keep_from);
+                }
+                true
+            } else {
+                false
+            }
+        };
+        if should_persist {
+            persist_global_history(&self.state);
+        }
+    }
+
+    /// 获取标签页浏览历史
+    pub fn get_tab_history(&self, tab_id: Option<&str>) -> Option<TabHistoryResult> {
+        let state = self.state.lock().ok()?;
+        let target_id = tab_id
+            .map(|s| s.to_string())
+            .or_else(|| state.active_tab_id.clone())?;
+        let entries = state.tab_histories.get(&target_id)?.clone();
+        let current_index = state
+            .tab_history_indices
+            .get(&target_id)
+            .copied()
+            .unwrap_or(0) as i32;
+        Some(TabHistoryResult {
+            tab_id: target_id,
+            entries,
+            current_index,
+        })
+    }
+
+    /// 获取全局浏览历史（分页）
+    pub fn get_global_history(&self, offset: usize, limit: usize) -> Vec<HistoryEntry> {
+        let state = match self.state.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        let total = state.global_history.len();
+        if offset >= total {
+            return Vec::new();
+        }
+        // 倒序返回（最新在前）
+        let start = total.saturating_sub(offset + limit);
+        let end = total.saturating_sub(offset);
+        state.global_history[start..end].to_vec()
+    }
+
+    /// 清除指定标签页的历史
+    pub fn clear_tab_history(&self, tab_id: &str) {
+        if let Ok(mut state) = self.state.lock() {
+            state.tab_histories.remove(tab_id);
+            state.tab_history_indices.remove(tab_id);
+        }
+    }
+
+    /// 初始化标签页历史
+    pub fn init_tab_history(&self, tab_id: &str, url: &str, title: &str) {
+        if let Ok(mut state) = self.state.lock() {
+            let entry = HistoryEntry {
+                url: url.to_string(),
+                title: if title.is_empty() {
+                    url.to_string()
+                } else {
+                    title.to_string()
+                },
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+            };
+            state.tab_histories.insert(tab_id.to_string(), vec![entry]);
+            state.tab_history_indices.insert(tab_id.to_string(), 0);
+        }
+    }
+}
+
+fn global_history_path() -> PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".tiangong")
+        .join("browser-history.json")
+}
+
+fn load_global_history() -> Vec<HistoryEntry> {
+    let path = global_history_path();
+    match std::fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn persist_global_history(state: &Arc<Mutex<BrowserState>>) {
+    let entries = {
+        let state = match state.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        state.global_history.clone()
+    };
+    let path = global_history_path();
+    if let Ok(content) = serde_json::to_string(&entries) {
+        let _ = std::fs::write(path, content);
     }
 }
 
