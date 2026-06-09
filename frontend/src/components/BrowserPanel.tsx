@@ -142,14 +142,18 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
   const isOnBlankPage = activeTabId && (!url || url === 'about:blank' || tabs.find(t => t.id === activeTabId)?.url === 'about:blank');
 
   // 空白页时加载全局历史
+  const showGlobalHistory = useCallback(() => {
+    setGlobalHistoryEntries([]);
+    setGlobalHistoryOffset(0);
+    setGlobalHistoryHasMore(true);
+    loadGlobalHistory(0);
+  }, [loadGlobalHistory]);
+
   useEffect(() => {
     if (isOnBlankPage) {
-      setGlobalHistoryEntries([]);
-      setGlobalHistoryOffset(0);
-      setGlobalHistoryHasMore(true);
-      loadGlobalHistory(0);
+      showGlobalHistory();
     }
-  }, [isOnBlankPage, loadGlobalHistory]);
+  }, [isOnBlankPage, showGlobalHistory]);
 
   useEffect(() => {
     if (currentUrl) {
@@ -306,11 +310,12 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
         next.set(tabId, { entries: [], currentIndex: -1 });
         return next;
       });
+      showGlobalHistory();
       await refreshTabs();
     } catch (err) {
       console.error('新建标签失败：', err);
     }
-  }, [refreshTabs]);
+  }, [refreshTabs, showGlobalHistory]);
 
   const handleTabSwitch = useCallback(async (tabId: string) => {
     try {
@@ -321,11 +326,16 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
       activeTabIdRef.current = tabId;
       setActiveTabId(tabId);
       const tab = tabs.find(t => t.id === tabId);
-      if (tab) setUrl(tab.url);
+      if (tab) {
+        setUrl(tab.url);
+        if (tab.url === 'about:blank' || !tab.url) {
+          showGlobalHistory();
+        }
+      }
     } catch (err) {
       console.error('切换标签失败：', err);
     }
-  }, [tabs]);
+  }, [tabs, showGlobalHistory]);
 
   const handleTabClose = useCallback(async (tabId: string, e: React.MouseEvent) => {
     e.stopPropagation();
