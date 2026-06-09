@@ -256,12 +256,15 @@ function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessages, edi
   const voiceInfo = voiceMessages[message.id];
   const isEditing = editingMessageId === message.id;
   const searchQuery = useSearchStore(s => s.searchQuery);
+  const currentMessageId = useSearchStore(s => s.currentMessageId);
+  const caseSensitive = useSearchStore(s => s.caseSensitive);
 
   const renderUserText = (text: string) => {
     if (!searchQuery) return text;
-    const occurrences = findTextOccurrences(text, searchQuery);
+    const occurrences = findTextOccurrences(text, searchQuery, caseSensitive);
     if (occurrences.length === 0) return text;
-    return <HighlightText text={text} matches={occurrences} currentMatchStart={null} />;
+    const isCurrent = message.id === currentMessageId;
+    return <HighlightText text={text} matches={occurrences} currentMatchStart={isCurrent ? occurrences[0]?.start ?? null : null} />;
   };
 
   return (
@@ -490,13 +493,6 @@ export function MessageList() {
     });
   }, [messageGroups, selectedAgentTab, agents]);
 
-  // 搜索匹配计算（仅用于 matchCount 和 SearchBar）
-  const searchMatches = useMemo(() => {
-    const query = searchQueryRef.current;
-    if (!searchActive || !query) return [];
-    return findSearchMatches(messages, query, filteredGroups);
-  }, [messages, searchActive, filteredGroups]);
-
   // 分离流式消息：正在流式输出的 agent_turn 不参与虚拟化
   const { completedGroups, streamingGroup } = useMemo(() => {
     if (!streamingMessageId || filteredGroups.length === 0) {
@@ -556,22 +552,24 @@ export function MessageList() {
     overscan: 5,
   });
 
-  // 搜索导航：通过 store subscription 监听 currentMatchIndex 变化
-  const searchMatchesRef = useRef(searchMatches);
-  searchMatchesRef.current = searchMatches;
-  const completedGroupsRef = useRef(completedGroups);
-  completedGroupsRef.current = completedGroups;
+  // 搜索导航：通过 store subscription 监听 searchQuery 和 currentMatchIndex 变化
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  const filteredGroupsRef = useRef(filteredGroups);
+  filteredGroupsRef.current = filteredGroups;
   useEffect(() => {
     if (!searchActive) return;
     let prevIndex = useSearchStore.getState().currentMatchIndex;
-    const unsub = useSearchStore.subscribe((s) => {
-      if (s.currentMatchIndex === prevIndex) return;
-      prevIndex = s.currentMatchIndex;
-      const matches = searchMatchesRef.current;
-      if (matches.length === 0) return;
-      const match = matches[s.currentMatchIndex];
-      if (!match || match.groupIndex < 0) return;
-      const targetIndex = completedGroupsRef.current.findIndex(g =>
+    let prevQuery = useSearchStore.getState().searchQuery;
+    let prevScope = useSearchStore.getState().searchScope;
+    const scrollToMatch = (query: string, index: number, scope: string) => {
+      if (!query) return;
+      const groups = filteredGroupsRef.current;
+      const cs = useSearchStore.getState().caseSensitive;
+      const matches = findSearchMatches(messagesRef.current, query, groups, scope as 'messages' | 'withThinking' | 'all', cs);
+      if (matches.length === 0 || index >= matches.length) return;
+      const match = matches[index];
+      const targetIndex = groups.findIndex(g =>
         g.messages.some(m => m.id === match.messageId),
       );
       if (targetIndex >= 0) {
@@ -583,7 +581,20 @@ export function MessageList() {
           });
         });
       }
+    };
+    const unsub = useSearchStore.subscribe((s) => {
+      const queryChanged = s.searchQuery !== prevQuery;
+      const indexChanged = s.currentMatchIndex !== prevIndex;
+      const scopeChanged = s.searchScope !== prevScope;
+      if (!queryChanged && !indexChanged && !scopeChanged) return;
+      prevIndex = s.currentMatchIndex;
+      prevQuery = s.searchQuery;
+      prevScope = s.searchScope;
+      scrollToMatch(s.searchQuery, s.currentMatchIndex, s.searchScope);
     });
+    // 首次激活时也滚动到第一个匹配
+    const { searchQuery, currentMatchIndex, searchScope } = useSearchStore.getState();
+    scrollToMatch(searchQuery, currentMatchIndex, searchScope);
     return unsub;
   }, [searchActive, virtualizer]);
 
@@ -1237,6 +1248,8 @@ function AgentTurnView({
   selectedAgentTab,
 }: AgentTurnProps) {
   const searchQuery = useSearchStore(s => s.searchQuery);
+  const currentMessageId = useSearchStore(s => s.currentMessageId);
+  const caseSensitive = useSearchStore(s => s.caseSensitive);
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
   const [expandedToolGroups, setExpandedToolGroups] = useState<Set<string>>(new Set());
   const agents = useStore((state) => state.agents);
@@ -1258,11 +1271,12 @@ function AgentTurnView({
   };
 
   /** 带搜索高亮渲染文本（搜索激活时使用 HighlightText，否则返回原始文本） */
-  const renderWithHighlight = (_msgId: string, text: string) => {
+  const renderWithHighlight = (msgId: string, text: string) => {
     if (!searchQuery) return text;
-    const occurrences = findTextOccurrences(text, searchQuery);
+    const occurrences = findTextOccurrences(text, searchQuery, caseSensitive);
     if (occurrences.length === 0) return text;
-    return <HighlightText text={text} matches={occurrences} currentMatchStart={null} />;
+    const isCurrent = msgId === currentMessageId;
+    return <HighlightText text={text} matches={occurrences} currentMatchStart={isCurrent ? occurrences[0]?.start ?? null : null} />;
   };
 
   // 将消息序列解析为渲染片段
@@ -1555,7 +1569,7 @@ function AgentTurnView({
                 </div>
                 <div className="border-l-2 border-green-500/50 pl-3">
                   {agentReply.body ? (
-                    searchQuery && findTextOccurrences(textContent(msg), searchQuery).length > 0
+                    searchQuery && findTextOccurrences(textContent(msg), searchQuery, caseSensitive).length > 0
                       ? <div className="text-sm whitespace-pre-wrap break-words">{renderWithHighlight(msg.id, agentReply.body)}</div>
                       : <MdPreview modelValue={resolveMarkdownImages(agentReply.body)} theme={resolvedTheme} previewTheme="github" />
                   ) : null}
@@ -1574,7 +1588,7 @@ function AgentTurnView({
               ) : textContent(msg) || (msg.media && msg.media.length > 0) || msg.content.some(b => b.type === "media") ? (
                 <div>
                   {renderContentMedia(msg)}
-                  {searchQuery && findTextOccurrences(textContent(msg), searchQuery).length > 0
+                  {searchQuery && findTextOccurrences(textContent(msg), searchQuery, caseSensitive).length > 0
                     ? <div className="text-sm whitespace-pre-wrap break-words">{renderWithHighlight(msg.id, textContent(msg))}</div>
                     : <MdPreview modelValue={resolveMarkdownImages(textContent(msg))} theme={resolvedTheme} previewTheme="github" />
                   }

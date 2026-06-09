@@ -1,9 +1,9 @@
 import { textContent, type Message } from '@/api/tauri';
+import type { SearchScope } from '@/store/useSearchStore';
 
 export interface SearchMatch {
   messageId: string;
   groupIndex: number;
-  field: 'content' | 'reasoning_content' | 'tool_name';
   start: number;
   end: number;
 }
@@ -13,51 +13,49 @@ export interface TextMatch {
   end: number;
 }
 
-/** 大小写不敏感纯文本匹配，返回所有 (start, end) 位置 */
-export function findTextOccurrences(text: string, query: string): TextMatch[] {
+/** 纯文本匹配，返回所有 (start, end) 位置 */
+export function findTextOccurrences(text: string, query: string, caseSensitive: boolean = false): TextMatch[] {
   if (!query) return [];
-  const lower = text.toLowerCase();
-  const q = query.toLowerCase();
+  const hay = caseSensitive ? text : text.toLowerCase();
+  const needle = caseSensitive ? query : query.toLowerCase();
   const matches: TextMatch[] = [];
   let offset = 0;
-  while (offset < lower.length) {
-    const idx = lower.indexOf(q, offset);
+  while (offset < hay.length) {
+    const idx = hay.indexOf(needle, offset);
     if (idx < 0) break;
-    matches.push({ start: idx, end: idx + q.length });
+    matches.push({ start: idx, end: idx + needle.length });
     offset = idx + 1;
   }
   return matches;
 }
 
-/** 为单条消息拼接所有可搜索字段 */
-function buildSearchableTexts(
-  msg: Message,
-): Array<{ field: SearchMatch['field']; text: string }> {
-  const parts: Array<{ field: SearchMatch['field']; text: string }> = [];
-  const content = textContent(msg);
-  if (content) parts.push({ field: 'content', text: content });
-  if (msg.reasoning_content) {
-    parts.push({ field: 'reasoning_content', text: msg.reasoning_content });
-  }
-  if (msg.tool_name) {
-    parts.push({ field: 'tool_name', text: msg.tool_name });
-  }
-  return parts;
+/** 去掉 agent 回复消息的注释头，只保留用户可见的正文 */
+function stripAgentReplyHeader(content: string): string {
+  const m = content.match(/^<!-- tiangong-agent-reply -->\n<!-- label:[^\n]* -->\n\n?([\s\S]*)$/);
+  return m ? m[1].trim() : content;
 }
 
 export interface MessageGroupLike {
   messages: Array<{ id: string }>;
 }
 
-/** 遍历所有消息和分组，收集搜索匹配 */
+/** 获取消息的可搜索正文（assistant 消息会去掉 agent reply header） */
+function getSearchableContent(msg: Message): string {
+  const raw = textContent(msg);
+  if (msg.role === 'assistant') return stripAgentReplyHeader(raw);
+  return raw;
+}
+
+/** 根据搜索范围遍历消息，收集匹配 */
 export function findSearchMatches(
   messages: Message[],
   query: string,
   groups: MessageGroupLike[],
+  scope: SearchScope = 'messages',
+  caseSensitive: boolean = false,
 ): SearchMatch[] {
   if (!query) return [];
 
-  // 建立 messageId → groupIndex 映射
   const msgGroupMap = new Map<string, number>();
   for (let gi = 0; gi < groups.length; gi++) {
     for (const msg of groups[gi].messages) {
@@ -68,17 +66,38 @@ export function findSearchMatches(
   const matches: SearchMatch[] = [];
   for (const msg of messages) {
     const groupIndex = msgGroupMap.get(msg.id) ?? -1;
-    const fields = buildSearchableTexts(msg);
-    for (const { field, text } of fields) {
-      const occurrences = findTextOccurrences(text, query);
-      for (const occ of occurrences) {
-        matches.push({
-          messageId: msg.id,
-          groupIndex,
-          field,
-          start: occ.start,
-          end: occ.end,
-        });
+
+    if (scope === 'messages') {
+      if (msg.role !== 'user' && msg.role !== 'assistant') continue;
+      const content = getSearchableContent(msg);
+      if (!content) continue;
+      for (const occ of findTextOccurrences(content, query, caseSensitive)) {
+        matches.push({ messageId: msg.id, groupIndex, start: occ.start, end: occ.end });
+      }
+    } else if (scope === 'withThinking') {
+      if (msg.role !== 'user' && msg.role !== 'assistant') continue;
+      const content = getSearchableContent(msg);
+      if (content) {
+        for (const occ of findTextOccurrences(content, query, caseSensitive)) {
+          matches.push({ messageId: msg.id, groupIndex, start: occ.start, end: occ.end });
+        }
+      }
+      if (msg.reasoning_content) {
+        for (const occ of findTextOccurrences(msg.reasoning_content, query, caseSensitive)) {
+          matches.push({ messageId: msg.id, groupIndex, start: occ.start, end: occ.end });
+        }
+      }
+    } else {
+      const content = getSearchableContent(msg);
+      if (content) {
+        for (const occ of findTextOccurrences(content, query, caseSensitive)) {
+          matches.push({ messageId: msg.id, groupIndex, start: occ.start, end: occ.end });
+        }
+      }
+      if (msg.reasoning_content) {
+        for (const occ of findTextOccurrences(msg.reasoning_content, query, caseSensitive)) {
+          matches.push({ messageId: msg.id, groupIndex, start: occ.start, end: occ.end });
+        }
       }
     }
   }
