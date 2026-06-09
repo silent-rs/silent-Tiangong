@@ -2,8 +2,9 @@ import { useState, useRef, useEffect, KeyboardEvent } from 'react';
 import { useStore } from '@/store/useStore';
 import { api } from '@/api/tauri';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { Sun, Moon, Monitor, PanelLeft, SquarePen, Volume2, VolumeX, AudioLines, Globe, ArrowUpCircle } from 'lucide-react';
+import { Sun, Moon, Monitor, PanelLeft, SquarePen, Volume2, VolumeX, AudioLines, Globe, ArrowUpCircle, Search } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme';
+import { useSearchStore } from '@/store/useSearchStore';
 import { useStreamingTts } from '@/hooks/useStreamingTts';
 import { Separator } from './ui/separator';
 import { useSidebar } from './ui/sidebar';
@@ -20,6 +21,27 @@ const appWindow = getCurrentWindow();
 interface StatusPanelProps {
   showBrowser?: boolean;
   onToggleBrowser?: () => void;
+}
+
+function SearchButton() {
+  const searchActive = useSearchStore((s) => s.searchActive);
+  return (
+    <button
+      data-no-drag
+      onClick={() => {
+        const store = useSearchStore.getState();
+        store.searchActive ? store.closeSearch() : store.openSearch();
+      }}
+      className={`transition-colors ${
+        searchActive
+          ? 'text-primary'
+          : 'text-muted-foreground hover:text-foreground'
+      }`}
+      title="搜索消息"
+    >
+      <Search className="w-4 h-4" />
+    </button>
+  );
 }
 
 export function StatusPanel({ showBrowser, onToggleBrowser }: StatusPanelProps) {
@@ -198,6 +220,7 @@ export function StatusPanel({ showBrowser, onToggleBrowser }: StatusPanelProps) 
             <span>v{updateAvailable.version}</span>
           </button>
         )}
+        <SearchButton />
         <button
           data-no-drag
           onClick={onToggleBrowser}
