@@ -141,8 +141,12 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
     }
   }, []);
 
-  // 打开历史 Modal
-  const openHistoryModal = useCallback(() => {
+  // 打开历史 Modal（先将 WebView 移到屏幕外，再显示 Modal）
+  const openHistoryModal = useCallback(async () => {
+    if (containerRef.current && browserOpenedRef.current) {
+      const rect = containerRef.current.getBoundingClientRect();
+      await api.browserSetPosition(-10000, -10000, rect.width, rect.height);
+    }
     setGlobalHistoryEntries([]);
     setGlobalHistoryOffset(0);
     setGlobalHistoryHasMore(true);
@@ -236,14 +240,9 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
     await api.browserSetPosition(rect.x, rect.y, rect.width, rect.height).catch(console.error);
   }, []);
 
-  // Modal 打开时将 WebView 移到屏幕外，关闭时恢复位置
+  // 关闭 Modal 时恢复 WebView 位置
   useEffect(() => {
-    if (showHistoryModal) {
-      if (containerRef.current) {
-        const rect = containerRef.current.getBoundingClientRect();
-        api.browserSetPosition(-10000, -10000, rect.width, rect.height).catch(console.error);
-      }
-    } else if (browserOpenedRef.current) {
+    if (!showHistoryModal && browserOpenedRef.current) {
       syncPosition();
     }
   }, [showHistoryModal, syncPosition]);
