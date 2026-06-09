@@ -616,11 +616,13 @@ async fn worker_loop_async(
                     .as_deref()
                     .map(|s| !s.trim().is_empty())
                     .unwrap_or(false);
+                let agent_triggered = session_has_recent_browser_tool_call(&session);
                 tracing::info!(
                     session_id = %session.id,
                     url = %url,
                     text_len = text.len(),
                     has_feedback,
+                    agent_triggered,
                     "inject browser content command received"
                 );
                 crate::react::message::inject_browser_content_to_session(
@@ -636,6 +638,15 @@ async fn worker_loop_async(
                     },
                     has_feedback,
                 );
+                if !agent_triggered {
+                    tracing::info!(
+                        session_id = %session.id,
+                        url = %url,
+                        "browser content injected without triggering agent execution"
+                    );
+                    let _ = stream_tx.send(StreamEvent::Done { usage: None });
+                    continue;
+                }
                 let browser_input = format!("[浏览器页面更新] {url}");
                 execute_turn_async(
                     &mut session,
@@ -700,6 +711,28 @@ async fn worker_loop_async(
     }
 
     session
+}
+
+/// Agent 通过 tool_override 调用的浏览器相关工具名称
+const BROWSER_TOOL_NAMES: &[&str] = &[
+    "web_fetch",
+    "web_form_extract",
+    "web_form_fill",
+    "web_click",
+    "web_query_dom",
+    "web_locate_element",
+];
+
+/// 检查 session 最近消息中是否存在 agent 发起的浏览器工具调用。
+/// 用于判断浏览器反馈是否需要触发 agent 执行。
+fn session_has_recent_browser_tool_call(session: &Session) -> bool {
+    session.messages.iter().rev().take(16).any(|msg| {
+        msg.role == MessageRole::Assistant
+            && msg
+                .tool_calls
+                .iter()
+                .any(|tc| BROWSER_TOOL_NAMES.contains(&tc.name.as_str()))
+    })
 }
 
 fn index_turn_messages(
