@@ -356,28 +356,10 @@ pub(crate) fn inject_browser_content_to_session(
         }
     }
 
-    let tool_call_id = format!("browser_auto_{}", scru128::new());
-    let tool_name = "web_browse";
-
     let has_feedback = content
         .feedback
         .map(|feedback| !feedback.trim().is_empty())
         .unwrap_or(false);
-    let label = if has_feedback {
-        "[自动感知] 浏览器有新的操作或页面反馈"
-    } else if force {
-        "[自动感知] 浏览器页面内容发生变化"
-    } else {
-        "[自动感知] 用户在浏览器中导航到新页面"
-    };
-    let assistant_text = format!("{label}：{url}");
-    let mut assistant_msg = Message::new(MessageRole::Assistant, assistant_text);
-    assistant_msg.tool_calls = vec![MessageToolCall {
-        id: tool_call_id.clone(),
-        name: tool_name.to_string(),
-        arguments: serde_json::json!({"url": url}),
-    }];
-    session.messages.push(assistant_msg);
 
     let header = if has_feedback {
         "[浏览器反馈]"
@@ -417,7 +399,8 @@ pub(crate) fn inject_browser_content_to_session(
     let tool_call_id = format!("browser_auto_{}", scru128::new());
     let tool_name = "browser_data";
 
-    // 伪造 assistant 工具调用 + tool 结果，以 browser_data 工具形式注入
+    // 伪造 assistant 工具调用 + tool 结果，以 browser_data 工具形式注入。
+    // 这组消息必须一一配对，否则 OpenAI 兼容接口会拒绝缺少结果的 tool_call。
     let assistant_text = format!("[自动感知] 浏览器页面数据就绪：{url}");
     let mut assistant_msg = Message::new(MessageRole::Assistant, assistant_text);
     assistant_msg.tool_calls = vec![MessageToolCall {
@@ -454,6 +437,27 @@ pub(crate) fn inject_browser_content_to_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+
+    fn assert_no_unmatched_tool_calls(session: &Session) {
+        let tool_result_ids = session
+            .messages
+            .iter()
+            .filter_map(|message| message.tool_call_id.as_deref())
+            .collect::<HashSet<_>>();
+
+        for call in session
+            .messages
+            .iter()
+            .flat_map(|message| message.tool_calls.iter())
+        {
+            assert!(
+                tool_result_ids.contains(call.id.as_str()),
+                "tool_call must have matching tool result: {}",
+                call.id
+            );
+        }
+    }
 
     #[test]
     fn inject_browser_content_keeps_feedback_in_tool_message() {
@@ -474,8 +478,14 @@ mod tests {
             true,
         );
 
-        assert_eq!(session.messages.len(), 3);
-        let tool_text = session.messages[2].text_content();
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[0].tool_calls.len(), 1);
+        assert_eq!(
+            session.messages[1].tool_call_id.as_deref(),
+            Some(session.messages[0].tool_calls[0].id.as_str())
+        );
+        assert_no_unmatched_tool_calls(&session);
+        let tool_text = session.messages[1].text_content();
         assert!(tool_text.contains("[浏览器反馈]"));
         assert!(tool_text.contains("[网络响应] POST /api_keys (状态 200)"));
         assert!(tool_text.contains("sk-test"));
@@ -509,7 +519,7 @@ mod tests {
             },
             false,
         );
-        assert_eq!(session.messages.len(), 3);
+        assert_eq!(session.messages.len(), 2);
 
         inject_browser_content_to_session(
             &mut session,
@@ -525,10 +535,11 @@ mod tests {
             true,
         );
 
-        assert_eq!(session.messages.len(), 6);
-        assert!(session.messages[5].text_content().contains("[浏览器反馈]"));
+        assert_eq!(session.messages.len(), 4);
+        assert_no_unmatched_tool_calls(&session);
+        assert!(session.messages[3].text_content().contains("[浏览器反馈]"));
         assert!(
-            session.messages[5]
+            session.messages[3]
                 .text_content()
                 .contains("create_api_key")
         );
