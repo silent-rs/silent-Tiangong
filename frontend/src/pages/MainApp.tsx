@@ -218,7 +218,9 @@ export function MainApp() {
         setBrowserUrl(url);
         if (!showBrowserRef.current) {
           await openBrowserPanel();
+          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
         }
+        await api.browserNavigate(url).catch(console.error);
       });
 
       const unlistenBrowserPageLoaded = await listen<{ title: string; url: string; text: string }>('browser:page_loaded', (event) => {
@@ -280,9 +282,10 @@ export function MainApp() {
         setBrowserUrl(url);
         if (!showBrowserRef.current) {
           await openBrowserPanel();
-        } else {
-          await api.browserNavigate(url).catch(console.error);
+          // 等待面板渲染后再导航
+          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
         }
+        await api.browserNavigate(url).catch(console.error);
       }
     };
     window.addEventListener('tiangong:open-browser', onOpenBrowser);

@@ -804,7 +804,7 @@ export const api = {
   browserGoForward: (): Promise<void> =>
     invoke('plugin:browser|browser_go_forward'),
 
-  browserTabList: (): Promise<Array<{ id: string; url: string; title: string }>> =>
+  browserTabList: (): Promise<{ tabs: Array<{ id: string; url: string; title: string }>; active_tab_id: string | null }> =>
     invoke('plugin:browser|browser_tab_list'),
 
   browserTabNew: (url: string): Promise<string> =>

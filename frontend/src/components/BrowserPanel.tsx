@@ -46,8 +46,8 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
 
   const refreshTabs = useCallback(async () => {
     try {
-      const list = await api.browserTabList();
-      if (list.length === 0) {
+      const result = await api.browserTabList();
+      if (result.tabs.length === 0) {
         // 标签列表为空时创建一个空标签
         const tabId = await api.browserTabNew(DEFAULT_URL);
         activeTabIdRef.current = tabId;
@@ -55,11 +55,10 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
         setUrl('');
         setTabs([{ id: tabId, url: DEFAULT_URL, title: '' }]);
       } else {
-        setTabs(list);
-        if (activeTabIdRef.current === null) {
-          activeTabIdRef.current = list[0].id;
-          setActiveTabId(list[0].id);
-        }
+        setTabs(result.tabs);
+        const activeId = result.active_tab_id || result.tabs[0].id;
+        activeTabIdRef.current = activeId;
+        setActiveTabId(activeId);
       }
     } catch { /* ignore */ }
   }, []);
@@ -212,7 +211,15 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
         }
         api.browserOpen(initialUrl || DEFAULT_URL, rect.x, rect.y, rect.width, rect.height)
           .then(() => { browserOpenedRef.current = true; })
-          .then(() => api.browserSetPosition(rect.x, rect.y, rect.width, rect.height))
+          .then(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())))
+          .then(() => {
+            if (containerRef.current) {
+              const r = containerRef.current.getBoundingClientRect();
+              if (r.width > 0 && r.height > 0) {
+                return api.browserSetPosition(r.x, r.y, r.width, r.height);
+              }
+            }
+          })
           .then(() => refreshTabs())
           .catch(console.error);
       };

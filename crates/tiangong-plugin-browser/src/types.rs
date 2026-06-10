@@ -11,6 +11,13 @@ pub struct BrowserTab {
     pub title: String,
 }
 
+/// 标签列表响应（包含活跃标签 ID）
+#[derive(Debug, Clone, Serialize)]
+pub struct TabListResponse {
+    pub tabs: Vec<BrowserTab>,
+    pub active_tab_id: Option<String>,
+}
+
 /// 浏览器命令（内部通道消息）
 pub enum BrowserCommand {
     /// 获取网页内容（替代 web_fetch）

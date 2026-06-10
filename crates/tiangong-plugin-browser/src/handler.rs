@@ -121,6 +121,7 @@ pub async fn browser_command_handler(
                     let _ = app.emit("browser:open", &url);
                 }
                 let _ = manager.navigate_with_app(&app, &url);
+                let _ = app.emit("browser:tab_updated", ());
 
                 let should_navigate = false;
                 let result = tokio::task::spawn_blocking(move || {
@@ -144,6 +145,7 @@ pub async fn browser_command_handler(
                     let _ = app.emit("browser:open", &url);
                 }
                 let _ = manager.navigate_with_app(&app, &url);
+                let _ = app.emit("browser:tab_updated", ());
             }
             BrowserCommand::ObservePage { response_tx } => {
                 // 浏览器未打开时不返回响应，让 observe_page() 返回 None

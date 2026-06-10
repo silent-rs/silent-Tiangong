@@ -1,6 +1,6 @@
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 
-use crate::types::{AnnotationExtractResult, BrowserTab};
+use crate::types::{AnnotationExtractResult, TabListResponse};
 use crate::BrowserPluginState;
 
 #[tauri::command]
@@ -39,7 +39,9 @@ pub async fn browser_navigate(
     app: AppHandle,
     state: State<'_, BrowserPluginState>,
 ) -> Result<(), String> {
-    state.manager.navigate_with_app(&app, &url)
+    state.manager.navigate_with_app(&app, &url)?;
+    let _ = app.emit("browser:tab_updated", ());
+    Ok(())
 }
 
 #[tauri::command]
@@ -65,8 +67,8 @@ pub async fn browser_go_forward(state: State<'_, BrowserPluginState>) -> Result<
 #[tauri::command]
 pub async fn browser_tab_list(
     state: State<'_, BrowserPluginState>,
-) -> Result<Vec<BrowserTab>, String> {
-    Ok(state.manager.tab_list())
+) -> Result<TabListResponse, String> {
+    Ok(state.manager.tab_list_with_active())
 }
 
 #[tauri::command]
@@ -75,23 +77,31 @@ pub async fn browser_tab_new(
     app: AppHandle,
     state: State<'_, BrowserPluginState>,
 ) -> Result<String, String> {
-    state.manager.tab_new(&app, &url)
+    let result = state.manager.tab_new(&app, &url);
+    let _ = app.emit("browser:tab_updated", ());
+    result
 }
 
 #[tauri::command]
 pub async fn browser_tab_switch(
     tab_id: String,
+    app: AppHandle,
     state: State<'_, BrowserPluginState>,
 ) -> Result<(), String> {
-    state.manager.tab_switch(&tab_id)
+    state.manager.tab_switch(&tab_id)?;
+    let _ = app.emit("browser:tab_updated", ());
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn browser_tab_close(
     tab_id: String,
+    app: AppHandle,
     state: State<'_, BrowserPluginState>,
 ) -> Result<(), String> {
-    state.manager.tab_close(&tab_id)
+    state.manager.tab_close(&tab_id)?;
+    let _ = app.emit("browser:tab_updated", ());
+    Ok(())
 }
 
 #[tauri::command]

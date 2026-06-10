@@ -11,7 +11,9 @@ use tauri::{
 };
 
 use crate::bridge::BRIDGE_SCRIPT;
-use crate::types::{BrowserEvent, BrowserPageSnapshot, BrowserResponse, BrowserTab, PageStatus};
+use crate::types::{
+    BrowserEvent, BrowserPageSnapshot, BrowserResponse, BrowserTab, PageStatus, TabListResponse,
+};
 
 fn webview_label(tab_id: &str) -> String {
     format!("browser-webview-{tab_id}")
@@ -551,15 +553,15 @@ impl BrowserManager {
     }
 
     /// 导航到 URL，自动处理所有场景：
-    /// 1. 浏览器未打开 → 打开浏览器并导航
+    /// 1. 浏览器未打开 → 在屏幕外创建 WebView，等待前端设置正确位置
     /// 2. 已有匹配 URL 的标签 → 切换到该标签
     /// 3. 当前活跃标签无 WebView → 创建 WebView
     /// 4. 正常导航当前活跃 WebView
     pub fn navigate_with_app(&self, app: &AppHandle<Wry>, url: &str) -> Result<(), String> {
-        // 场景 1：浏览器完全未打开
+        // 场景 1：浏览器完全未打开 → 在屏幕外创建，前端会通过 set_position 设置正确位置
         if !self.is_open() {
-            if let Some((x, y, w, h)) = default_browser_rect(app) {
-                return self.open(app, url, x, y, w, h);
+            if let Some((_, _, w, h)) = default_browser_rect(app) {
+                return self.open(app, url, -10000.0, -10000.0, w, h);
             }
             return Err("无法确定浏览器位置".to_string());
         }
@@ -913,6 +915,22 @@ impl BrowserManager {
             .lock()
             .map(|s| s.tabs.clone())
             .unwrap_or_default()
+    }
+
+    pub fn tab_list_with_active(&self) -> TabListResponse {
+        match self.state.lock() {
+            Ok(s) => TabListResponse {
+                tabs: s.tabs.clone(),
+                active_tab_id: s.active_tab_id.clone(),
+            },
+            Err(e) => {
+                let s = e.into_inner();
+                TabListResponse {
+                    tabs: s.tabs.clone(),
+                    active_tab_id: s.active_tab_id.clone(),
+                }
+            }
+        }
     }
 
     pub fn tab_new(&self, app: &AppHandle<Wry>, url: &str) -> Result<String, String> {
