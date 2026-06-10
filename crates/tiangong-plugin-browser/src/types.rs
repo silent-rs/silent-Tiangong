@@ -18,6 +18,22 @@ pub struct TabListResponse {
     pub active_tab_id: Option<String>,
 }
 
+/// 浏览历史条目
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    pub url: String,
+    pub title: String,
+    pub timestamp: u64,
+}
+
+/// 标签页浏览历史结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TabHistoryResult {
+    pub tab_id: String,
+    pub entries: Vec<HistoryEntry>,
+    pub current_index: i32,
+}
+
 /// 浏览器命令（内部通道消息）
 pub enum BrowserCommand {
     /// 获取网页内容（替代 web_fetch）
@@ -79,6 +95,17 @@ pub enum BrowserCommand {
         selector: String,
         max_results: usize,
         response_tx: oneshot::Sender<QueryDomResult>,
+    },
+    /// 获取标签页浏览历史
+    TabHistory {
+        tab_id: Option<String>,
+        response_tx: oneshot::Sender<TabHistoryResult>,
+    },
+    /// 获取全局浏览历史（分页）
+    GlobalHistory {
+        offset: usize,
+        limit: usize,
+        response_tx: oneshot::Sender<Vec<HistoryEntry>>,
     },
 }
 
@@ -629,6 +656,26 @@ impl From<LocateElementResult> for tiangong_core::browser_trait::LocateElementRe
             ambiguous: r.ambiguous,
             target: r.target.map(Into::into),
             candidates: r.candidates.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<HistoryEntry> for tiangong_core::browser_trait::HistoryEntry {
+    fn from(e: HistoryEntry) -> Self {
+        Self {
+            url: e.url,
+            title: e.title,
+            timestamp: e.timestamp,
+        }
+    }
+}
+
+impl From<TabHistoryResult> for tiangong_core::browser_trait::TabHistoryResult {
+    fn from(r: TabHistoryResult) -> Self {
+        Self {
+            tab_id: r.tab_id,
+            entries: r.entries.into_iter().map(Into::into).collect(),
+            current_index: r.current_index,
         }
     }
 }

@@ -1,19 +1,32 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { api } from '@/api/tauri';
 import { listen } from '@tauri-apps/api/event';
-import { Globe, ArrowRight, ArrowLeft, RotateCw, CornerDownRight, Plus, X, PenTool, ScanSearch } from 'lucide-react';
+import { Globe, ArrowRight, ArrowLeft, RotateCw, CornerDownRight, Plus, X, PenTool, ScanSearch, Clock, History, Trash2 } from 'lucide-react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 
 interface BrowserPanelProps {
   initialUrl?: string;
   currentUrl?: string;
+  onClose?: () => void;
 }
 
 interface TabInfo {
   id: string;
   url: string;
   title: string;
+}
+
+interface HistoryEntry {
+  url: string;
+  title: string;
+  timestamp: number;
+}
+
+interface TabHistory {
+  entries: HistoryEntry[];
+  currentIndex: number;
 }
 
 function normalizeBrowserUrl(rawUrl: string): string {
@@ -25,9 +38,24 @@ function normalizeBrowserUrl(rawUrl: string): string {
   return `https://${trimmed}`;
 }
 
-const DEFAULT_URL = 'about:blank';
+function formatTime(ts: number): string {
+  const d = new Date(ts);
+  const now = new Date();
+  const diffMs = now.getTime() - d.getTime();
+  const diffMin = Math.floor(diffMs / 60000);
+  if (diffMin < 1) return '刚刚';
+  if (diffMin < 60) return `${diffMin} 分钟前`;
+  const diffHour = Math.floor(diffMin / 60);
+  if (diffHour < 24) return `${diffHour} 小时前`;
+  const diffDay = Math.floor(diffHour / 24);
+  if (diffDay < 7) return `${diffDay} 天前`;
+  return d.toLocaleDateString();
+}
 
-export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
+const DEFAULT_URL = 'about:blank';
+const HISTORY_PAGE_SIZE = 20;
+
+export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelProps) {
   const [url, setUrl] = useState(initialUrl || '');
   const [tabs, setTabs] = useState<TabInfo[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
@@ -44,24 +72,111 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
 
   const activeTabIdRef = useRef<string | null>(null);
 
+  // 每个 tab 的浏览历史栈
+  const [tabHistories, setTabHistories] = useState<Map<string, TabHistory>>(new Map());
+  // 导航意图标记
+  const navigationIntentRef = useRef<'new' | 'back' | 'forward' | null>(null);
+  // 全局历史 Modal
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [globalHistoryEntries, setGlobalHistoryEntries] = useState<HistoryEntry[]>([]);
+  const [globalHistoryOffset, setGlobalHistoryOffset] = useState(0);
+  const [globalHistoryHasMore, setGlobalHistoryHasMore] = useState(true);
+  const [globalHistoryLoading, setGlobalHistoryLoading] = useState(false);
+
   const refreshTabs = useCallback(async () => {
     try {
       const result = await api.browserTabList();
       if (result.tabs.length === 0) {
-        // 标签列表为空时创建一个空标签
-        const tabId = await api.browserTabNew(DEFAULT_URL);
-        activeTabIdRef.current = tabId;
-        setActiveTabId(tabId);
+        // 所有 tab 已关闭，关闭浏览器面板
+        browserOpenedRef.current = false;
+        setTabs([]);
+        setActiveTabId(null);
+        activeTabIdRef.current = null;
         setUrl('');
-        setTabs([{ id: tabId, url: DEFAULT_URL, title: '' }]);
+        onClose?.();
       } else {
         setTabs(result.tabs);
         const activeId = result.active_tab_id || result.tabs[0].id;
         activeTabIdRef.current = activeId;
         setActiveTabId(activeId);
+        browserOpenedRef.current = true;
       }
     } catch { /* ignore */ }
+  }, [onClose]);
+
+  // 获取当前 tab 的历史
+  const getCurrentHistory = useCallback((tabId: string | null): TabHistory => {
+    if (!tabId) return { entries: [], currentIndex: -1 };
+    return tabHistories.get(tabId) ?? { entries: [], currentIndex: -1 };
+  }, [tabHistories]);
+
+  const canGoBack = useCallback((tabId: string | null): boolean => {
+    const h = getCurrentHistory(tabId);
+    return h.currentIndex > 0;
+  }, [getCurrentHistory]);
+
+  const canGoForward = useCallback((tabId: string | null): boolean => {
+    const h = getCurrentHistory(tabId);
+    return h.currentIndex >= 0 && h.currentIndex < h.entries.length - 1;
+  }, [getCurrentHistory]);
+
+  // 加载全局历史
+  const loadGlobalHistory = useCallback(async (offset: number) => {
+    setGlobalHistoryLoading(true);
+    try {
+      const entries = await api.browserGlobalHistory(offset, HISTORY_PAGE_SIZE);
+      if (offset === 0) {
+        setGlobalHistoryEntries(entries);
+      } else {
+        setGlobalHistoryEntries(prev => [...prev, ...entries]);
+      }
+      setGlobalHistoryHasMore(entries.length >= HISTORY_PAGE_SIZE);
+      setGlobalHistoryOffset(offset + entries.length);
+    } catch (err) {
+      console.error('加载全局历史失败：', err);
+      setGlobalHistoryHasMore(false);
+    } finally {
+      setGlobalHistoryLoading(false);
+    }
   }, []);
+
+  // 清空全部全局历史
+  const handleClearAllHistory = useCallback(async () => {
+    try {
+      await api.browserGlobalHistoryClear();
+      setGlobalHistoryEntries([]);
+      setGlobalHistoryOffset(0);
+      setGlobalHistoryHasMore(false);
+    } catch (err) {
+      console.error('清空历史失败：', err);
+    }
+  }, []);
+
+  // 删除单条全局历史
+  const handleDeleteHistoryEntry = useCallback(async (url: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await api.browserGlobalHistoryDelete(url);
+      setGlobalHistoryEntries(prev => prev.filter(entry => entry.url !== url));
+    } catch (err) {
+      console.error('删除历史条目失败：', err);
+    }
+  }, []);
+
+  // 打开历史 Modal（先将 WebView 移到屏幕外，再显示 Modal）
+  const openHistoryModal = useCallback(async () => {
+    try {
+      if (containerRef.current && browserOpenedRef.current) {
+        const rect = containerRef.current.getBoundingClientRect();
+        await api.browserSetPosition(-10000, -10000, rect.width, rect.height);
+      }
+    } catch { /* WebView 可能不存在，忽略 */ }
+    setGlobalHistoryEntries([]);
+    setGlobalHistoryOffset(0);
+    setGlobalHistoryHasMore(true);
+    loadGlobalHistory(0);
+    setShowHistoryModal(true);
+  }, [loadGlobalHistory]);
 
   useEffect(() => {
     if (currentUrl) {
@@ -69,20 +184,74 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
     }
   }, [currentUrl]);
 
-  // 监听标签更新事件（使用 Tauri 的 listen API）
+  // 监听标签更新事件
   useEffect(() => {
     let unlistenTab: (() => void) | null = null;
     let unlistenPage: (() => void) | null = null;
 
     const setup = async () => {
-      unlistenTab = await listen('browser:tab_updated', () => { refreshTabs(); });
+      unlistenTab = await listen('browser:tab_updated', () => {
+        refreshTabs();
+        // WebView 可能刚被创建（about:blank 标签延迟创建），需要同步位置到容器
+        syncPosition();
+      });
       unlistenPage = await listen('browser:page_loaded', (event) => {
         refreshTabs();
-        // 同步 URL 栏
-        const payload = event.payload as { url?: string };
+        const payload = event.payload as { url?: string; title?: string };
         if (payload?.url) {
           setUrl(payload.url);
         }
+
+        // 根据导航意图更新历史栈
+        const intent = navigationIntentRef.current;
+        navigationIntentRef.current = null;
+
+        const pageUrl = payload?.url;
+        const pageTitle = payload?.title ?? '';
+        if (!pageUrl || pageUrl.startsWith('about:')) return;
+
+        const tabId = activeTabIdRef.current;
+        if (!tabId) return;
+
+        setTabHistories(prev => {
+          const next = new Map(prev);
+          let history = next.get(tabId) ?? { entries: [], currentIndex: -1 };
+
+          if (intent === 'back' || intent === 'forward') {
+            // 后退/前进：查找匹配的 URL，移动索引
+            const direction = intent === 'back' ? -1 : 1;
+            const expectedIdx = history.currentIndex + direction;
+            if (expectedIdx >= 0 && expectedIdx < history.entries.length && history.entries[expectedIdx].url === pageUrl) {
+              history = { ...history, currentIndex: expectedIdx };
+            } else {
+              const foundIdx = history.entries.findIndex(e => e.url === pageUrl);
+              if (foundIdx >= 0) {
+                history = { ...history, currentIndex: foundIdx };
+              } else {
+                // 未找到匹配，按新导航处理
+                const entries = [
+                  ...history.entries.slice(0, history.currentIndex + 1),
+                  { url: pageUrl, title: pageTitle, timestamp: Date.now() },
+                ];
+                history = { entries, currentIndex: entries.length - 1 };
+              }
+            }
+          } else {
+            // 新导航：截断并追加
+            // 去重：URL 与最新条目相同时跳过
+            if (history.entries.length > 0 && history.entries[history.currentIndex]?.url === pageUrl) {
+              return prev;
+            }
+            const entries = [
+              ...history.entries.slice(0, history.currentIndex + 1),
+              { url: pageUrl, title: pageTitle, timestamp: Date.now() },
+            ];
+            history = { entries, currentIndex: entries.length - 1 };
+          }
+
+          next.set(tabId, history);
+          return next;
+        });
       });
     };
     setup();
@@ -99,9 +268,19 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
     await api.browserSetPosition(rect.x, rect.y, rect.width, rect.height).catch(console.error);
   }, []);
 
+  // 关闭 Modal 时恢复 WebView 位置
+  useEffect(() => {
+    if (!showHistoryModal && browserOpenedRef.current) {
+      syncPosition();
+    }
+  }, [showHistoryModal, syncPosition]);
+
   const handleNavigate = useCallback(async () => {
     const nextUrl = normalizeBrowserUrl(url);
     if (!nextUrl) return;
+
+    navigationIntentRef.current = 'new';
+
     try {
       await api.browserNavigate(nextUrl);
     } catch (err) {
@@ -110,12 +289,16 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
   }, [url]);
 
   const handleGoBack = useCallback(async () => {
+    if (!activeTabId || !canGoBack(activeTabId)) return;
+    navigationIntentRef.current = 'back';
     await api.browserGoBack().catch(console.error);
-  }, []);
+  }, [activeTabId, canGoBack]);
 
   const handleGoForward = useCallback(async () => {
+    if (!activeTabId || !canGoForward(activeTabId)) return;
+    navigationIntentRef.current = 'forward';
     await api.browserGoForward().catch(console.error);
-  }, []);
+  }, [activeTabId, canGoForward]);
 
   const handleReload = useCallback(async () => {
     await api.browserEval('location.reload()').catch(console.error);
@@ -150,6 +333,12 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
       const tabId = await api.browserTabNew(DEFAULT_URL);
       setActiveTabId(tabId);
       setUrl('');
+      // 初始化空历史
+      setTabHistories(prev => {
+        const next = new Map(prev);
+        next.set(tabId, { entries: [], currentIndex: -1 });
+        return next;
+      });
       await refreshTabs();
     } catch (err) {
       console.error('新建标签失败：', err);
@@ -158,11 +347,14 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
 
   const handleTabSwitch = useCallback(async (tabId: string) => {
     try {
+      navigationIntentRef.current = null;
       await api.browserTabSwitch(tabId);
       activeTabIdRef.current = tabId;
       setActiveTabId(tabId);
       const tab = tabs.find(t => t.id === tabId);
-      if (tab) setUrl(tab.url);
+      if (tab) {
+        setUrl(tab.url);
+      }
     } catch (err) {
       console.error('切换标签失败：', err);
     }
@@ -172,11 +364,37 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
     e.stopPropagation();
     try {
       await api.browserTabClose(tabId);
+      // 清除该 tab 的历史
+      setTabHistories(prev => {
+        const next = new Map(prev);
+        next.delete(tabId);
+        return next;
+      });
       await refreshTabs();
     } catch (err) {
       console.error('关闭标签失败：', err);
     }
   }, [refreshTabs]);
+
+  // 从历史记录跳转（全局历史 Modal 使用：作为新导航）
+  const handleHistoryJump = useCallback(async (targetUrl: string) => {
+    navigationIntentRef.current = 'new';
+    setShowHistoryModal(false);
+    try {
+      if (!containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      if (browserOpenedRef.current) {
+        await api.browserSetPosition(rect.x, rect.y, rect.width, rect.height);
+        await api.browserNavigate(targetUrl);
+      } else {
+        await api.browserOpen(targetUrl, rect.x, rect.y, rect.width, rect.height);
+        browserOpenedRef.current = true;
+      }
+      setUrl(targetUrl);
+    } catch (err) {
+      console.error('历史跳转失败：', err);
+    }
+  }, []);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -187,14 +405,46 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
     return () => observer.disconnect();
   }, [syncPosition]);
 
+  // 恢复浏览器面板时：重新检查 WebView 状态并同步位置
   useEffect(() => {
-    window.addEventListener('resize', syncPosition);
-    window.addEventListener('tiangong:restore-browser-panel', syncPosition);
-    return () => {
-      window.removeEventListener('resize', syncPosition);
-      window.removeEventListener('tiangong:restore-browser-panel', syncPosition);
+    const handleRestore = async () => {
+      if (browserOpenedRef.current) {
+        await syncPosition();
+      } else if (containerRef.current) {
+        const rect = containerRef.current.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          api.browserOpen(DEFAULT_URL, rect.x, rect.y, rect.width, rect.height)
+            .then(() => { browserOpenedRef.current = true; })
+            .then(() => refreshTabs())
+            .catch(console.error);
+        }
+      }
+      refreshTabs();
     };
-  }, [syncPosition]);
+    // 窗口获得焦点时同步 WebView 位置
+    const handleFocus = () => {
+      if (browserOpenedRef.current) {
+        syncPosition();
+      }
+    };
+
+    let unlistenRestore: (() => void) | null = null;
+    listen('browser:restore', () => {
+      if (browserOpenedRef.current) {
+        syncPosition();
+      }
+    }).then(fn => { unlistenRestore = fn; });
+
+    window.addEventListener('resize', syncPosition);
+    window.addEventListener('tiangong:restore-browser-panel', handleRestore);
+    window.addEventListener('focus', handleFocus);
+    return () => {
+      unlistenRestore?.();
+      window.removeEventListener('resize', syncPosition);
+      window.removeEventListener('tiangong:restore-browser-panel', handleRestore);
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, [syncPosition, refreshTabs]);
 
   useEffect(() => {
     if (!initializedRef.current && containerRef.current) {
@@ -271,6 +521,7 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
           variant="ghost"
           onClick={handleGoBack}
           className="h-7 w-7 p-0 shrink-0"
+          disabled={!canGoBack(activeTabId)}
         >
           <ArrowLeft className="w-3.5 h-3.5" />
         </Button>
@@ -279,9 +530,11 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
           variant="ghost"
           onClick={handleGoForward}
           className="h-7 w-7 p-0 shrink-0"
+          disabled={!canGoForward(activeTabId)}
         >
           <ArrowRight className="w-3.5 h-3.5" />
         </Button>
+
         <Button
           size="sm"
           variant="ghost"
@@ -289,6 +542,15 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
           className="h-7 w-7 p-0 shrink-0"
         >
           <RotateCw className="w-3.5 h-3.5" />
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={openHistoryModal}
+          className="h-7 w-7 p-0 shrink-0"
+          title="浏览历史"
+        >
+          <History className="w-3.5 h-3.5" />
         </Button>
         <Globe className="w-4 h-4 text-muted-foreground shrink-0 ml-1" />
         <Input
@@ -357,10 +619,84 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
       )}
 
       {/* WebView 容器 */}
-      <div
-        ref={containerRef}
-        className="flex-1 bg-muted/30"
-      />
+      <div className="relative flex-1">
+        <div
+          ref={containerRef}
+          className="absolute inset-0 bg-muted/30"
+        />
+      </div>
+
+      {/* 全局历史 Modal */}
+      <Dialog open={showHistoryModal} onOpenChange={setShowHistoryModal}>
+        <DialogContent className="max-w-xl p-0 overflow-hidden">
+          <DialogHeader className="px-4 pt-4 pb-2">
+            <DialogTitle className="flex items-center gap-2 text-base">
+              <Clock className="w-4 h-4" />
+              浏览历史
+            </DialogTitle>
+          </DialogHeader>
+          <div
+            className="px-4 max-h-[60vh] overflow-y-auto"
+            onScroll={(e) => {
+              const el = e.currentTarget;
+              if (el.scrollHeight - el.scrollTop - el.clientHeight < 100 && globalHistoryHasMore && !globalHistoryLoading) {
+                loadGlobalHistory(globalHistoryOffset);
+              }
+            }}
+          >
+            {globalHistoryEntries.length === 0 && !globalHistoryLoading && (
+              <div className="text-center py-12 text-muted-foreground text-sm">
+                暂无浏览历史
+              </div>
+            )}
+            {globalHistoryEntries.map((entry, i) => (
+              <div
+                key={`${entry.url}-${entry.timestamp}-${i}`}
+                className="flex items-start gap-3 px-3 py-2.5 rounded-md hover:bg-muted/50 cursor-pointer group border-b border-border/20 last:border-0"
+                onClick={() => handleHistoryJump(entry.url)}
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium truncate group-hover:text-primary transition-colors">
+                    {entry.title || entry.url}
+                  </div>
+                  <div className="flex items-center gap-2 mt-0.5">
+                    <span className="text-xs text-muted-foreground truncate">
+                      {entry.url.replace(/^https?:\/\//, '').split('/')[0]}
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      {formatTime(entry.timestamp)}
+                    </span>
+                  </div>
+                </div>
+                <button
+                  className="shrink-0 mt-0.5 p-1 rounded opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive transition-opacity"
+                  onClick={(e) => handleDeleteHistoryEntry(entry.url, e)}
+                  title="删除"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            ))}
+            {globalHistoryLoading && (
+              <div className="text-center py-4 text-muted-foreground text-sm">
+                加载中...
+              </div>
+            )}
+          </div>
+          {globalHistoryEntries.length > 0 && (
+            <div className="px-4 py-3 border-t">
+              <Button
+                size="sm"
+                onClick={handleClearAllHistory}
+                className="w-full bg-destructive text-white hover:bg-destructive/90"
+              >
+                <Trash2 className="w-3.5 h-3.5 mr-1.5" />
+                清空全部历史
+              </Button>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

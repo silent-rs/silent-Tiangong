@@ -1,6 +1,6 @@
 use tauri::{AppHandle, Emitter, State};
 
-use crate::types::{AnnotationExtractResult, TabListResponse};
+use crate::types::{AnnotationExtractResult, HistoryEntry, TabHistoryResult, TabListResponse};
 use crate::BrowserPluginState;
 
 #[tauri::command]
@@ -118,4 +118,45 @@ pub async fn browser_annotation_extract(
         .await
         .map_err(|_| "提取批注元素超时".to_string())?
         .map_err(|_| "提取批注元素响应失败".to_string())
+}
+
+#[tauri::command]
+pub async fn browser_tab_history(
+    tab_id: Option<String>,
+    state: State<'_, BrowserPluginState>,
+) -> Result<TabHistoryResult, String> {
+    Ok(state
+        .manager
+        .get_tab_history(tab_id.as_deref())
+        .unwrap_or(TabHistoryResult {
+            tab_id: String::new(),
+            entries: Vec::new(),
+            current_index: -1,
+        }))
+}
+
+#[tauri::command]
+pub async fn browser_global_history(
+    offset: usize,
+    limit: usize,
+    state: State<'_, BrowserPluginState>,
+) -> Result<Vec<HistoryEntry>, String> {
+    Ok(state.manager.get_global_history(offset, limit))
+}
+
+#[tauri::command]
+pub async fn browser_global_history_clear(
+    state: State<'_, BrowserPluginState>,
+) -> Result<(), String> {
+    state.manager.clear_global_history();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn browser_global_history_delete(
+    url: String,
+    state: State<'_, BrowserPluginState>,
+) -> Result<(), String> {
+    state.manager.delete_global_history_entry(&url);
+    Ok(())
 }

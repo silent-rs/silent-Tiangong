@@ -8,6 +8,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use tauri::Emitter;
 use tauri::Manager;
 use tracing::{debug, info, warn};
 
@@ -416,9 +417,7 @@ fn run_gui() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                // 通过 plugin state 关闭浏览器
-                let plugin_state = window.state::<tiangong_plugin_browser::BrowserPluginState>();
-                let _ = plugin_state.manager.close();
+                // 只隐藏窗口，浏览器 WebView 作为子视图会随窗口一起隐藏/显示
                 let _ = window.hide();
             }
         })
@@ -670,7 +669,10 @@ fn handle_tray_menu_event(
     icon_running: Option<tauri::image::Image<'static>>,
 ) {
     match menu_id {
-        TRAY_SHOW_WINDOW_ID => show_main_window(&app),
+        TRAY_SHOW_WINDOW_ID => {
+            info!("tray: 显示天工 clicked");
+            show_main_window(&app);
+        }
         TRAY_START_SERVER_ID => {
             let app_clone = app.clone();
             let status_item = status_item.clone();
@@ -751,11 +753,28 @@ fn handle_tray_menu_event(
 fn show_main_window(app: &tauri::AppHandle) {
     use tauri::Manager;
 
+    info!("show_main_window called");
     let Some(window) = app.get_webview_window("main") else {
+        warn!("show_main_window: get_webview_window('main') returned None");
+        // 尝试用 get_window 作为后备
+        if let Some(win) = app.get_window("main") {
+            info!("show_main_window: fallback get_window succeeded");
+            let _ = win.show();
+            let _ = win.set_focus();
+        } else {
+            warn!("show_main_window: get_window('main') also returned None");
+        }
         return;
     };
+    info!("show_main_window: got window, calling show()");
     let _ = window.show();
     let _ = window.set_focus();
+    // 延迟通知前端恢复浏览器 WebView 位置（等窗口渲染完成）
+    let app_clone = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let _ = app_clone.emit("browser:restore", ());
+    });
 }
 
 fn refresh_tray_server_status(

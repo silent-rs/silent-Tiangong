@@ -113,27 +113,37 @@ export function MainApp() {
     setShowBrowser(true);
   }, [lockResize, setSidebarOpenByLayout, unlockResize]);
 
-  const handleToggleBrowser = useCallback(async () => {
-    if (!showBrowserRef.current) {
-      await openBrowserPanel();
-    } else {
+  const closeBrowserPanel = useCallback(async (restoreSize = true) => {
+    if (!showBrowserRef.current) return;
+    const restoreW = savedWindowWidthRef.current;
+    savedWindowWidthRef.current = null;
+    showBrowserRef.current = false;
+    setShowBrowser(false);
+    await api.browserHide().catch(console.error);
+    if (restoreSize) {
       const appWindow = getCurrentWindow();
       const innerSize = await appWindow.innerSize();
       const scaleFactor = await appWindow.scaleFactor();
       const logicalH = innerSize.height / scaleFactor;
-      const restoreW = savedWindowWidthRef.current ?? (innerSize.width / scaleFactor - calcBrowserWidth(logicalH));
-      savedWindowWidthRef.current = null;
-      showBrowserRef.current = false;
-      setShowBrowser(false);
-      await api.browserHide().catch(console.error);
+      const targetW = restoreW ?? (innerSize.width / scaleFactor - calcBrowserWidth(logicalH));
       lockResize();
-      await appWindow.setSize(new LogicalSize(restoreW, logicalH));
+      await appWindow.setSize(new LogicalSize(targetW, logicalH));
       unlockResize();
-      if (restoreW > SIDEBAR_RESTORE_THRESHOLD && preferredSidebarOpenRef.current) {
+      if (targetW > SIDEBAR_RESTORE_THRESHOLD && preferredSidebarOpenRef.current) {
         setSidebarOpenByLayout(true);
       }
+    } else if (preferredSidebarOpenRef.current) {
+      setSidebarOpenByLayout(true);
     }
-  }, [openBrowserPanel, lockResize, setSidebarOpenByLayout, unlockResize]);
+  }, [lockResize, setSidebarOpenByLayout, unlockResize]);
+
+  const handleToggleBrowser = useCallback(async () => {
+    if (!showBrowserRef.current) {
+      await openBrowserPanel();
+    } else {
+      await closeBrowserPanel();
+    }
+  }, [openBrowserPanel, closeBrowserPanel]);
 
   const handleDividerDrag = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -157,10 +167,7 @@ export function MainApp() {
       const next = ev.clientX - rect.left;
       if (rect.width - next < MIN_BROWSER_WIDTH) {
         cleanup();
-        api.browserHide().catch(console.error);
-        savedWindowWidthRef.current = null;
-        showBrowserRef.current = false;
-        setShowBrowser(false);
+        closeBrowserPanel(false);
         return;
       }
       const clamped = Math.max(MIN_CHAT_WIDTH, next);
@@ -218,8 +225,8 @@ export function MainApp() {
         setBrowserUrl(url);
         if (!showBrowserRef.current) {
           await openBrowserPanel();
-          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
         }
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
         await api.browserNavigate(url).catch(console.error);
       });
 
@@ -240,10 +247,7 @@ export function MainApp() {
           const sidebarW = mainEl ? mainEl.offsetLeft : 0;
           const browserSpace = logicalW - sidebarW - chatPanelWidthRef.current;
           if (browserSpace < MIN_BROWSER_WIDTH) {
-            await api.browserHide().catch(console.error);
-            savedWindowWidthRef.current = null;
-            showBrowserRef.current = false;
-            setShowBrowser(false);
+            await closeBrowserPanel(false);
           }
         }
 
@@ -282,9 +286,9 @@ export function MainApp() {
         setBrowserUrl(url);
         if (!showBrowserRef.current) {
           await openBrowserPanel();
-          // 等待面板渲染后再导航
-          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
         }
+        // 等待面板渲染和位置同步后再导航
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
         await api.browserNavigate(url).catch(console.error);
       }
     };
@@ -332,7 +336,7 @@ export function MainApp() {
               )}
 
               {showBrowser && (
-                <BrowserPanel initialUrl={browserUrl} currentUrl={browserUrl} />
+                <BrowserPanel initialUrl={browserUrl} currentUrl={browserUrl} onClose={closeBrowserPanel} />
               )}
             </div>
           </main>

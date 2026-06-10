@@ -9,7 +9,7 @@ use crate::manager::{default_browser_rect, BrowserManager, BrowserState};
 use crate::types::{
     format_browser_events, AnnotationExtractResult, BrowserCommand, BrowserEvent,
     BrowserPageSnapshot, BrowserResponse, ClickElementResult, FillFieldResult, FormExtractResult,
-    LocateElementResult, PageStatus, QueryDomResult,
+    LocateElementResult, PageStatus, QueryDomResult, TabHistoryResult,
 };
 
 /// 轮询等待页面内容变化并稳定，返回最终的 after-digest。
@@ -578,6 +578,31 @@ pub async fn browser_command_handler(
                     elements: vec![],
                 });
                 let _ = response_tx.send(result);
+            }
+            BrowserCommand::TabHistory {
+                tab_id,
+                response_tx,
+            } => {
+                let manager = BrowserManager {
+                    state: browser_state.clone(),
+                };
+                let result = manager.get_tab_history(tab_id.as_deref());
+                let _ = response_tx.send(result.unwrap_or(TabHistoryResult {
+                    tab_id: String::new(),
+                    entries: Vec::new(),
+                    current_index: -1,
+                }));
+            }
+            BrowserCommand::GlobalHistory {
+                offset,
+                limit,
+                response_tx,
+            } => {
+                let manager = BrowserManager {
+                    state: browser_state.clone(),
+                };
+                let entries = manager.get_global_history(offset, limit);
+                let _ = response_tx.send(entries);
             }
         }
     }
