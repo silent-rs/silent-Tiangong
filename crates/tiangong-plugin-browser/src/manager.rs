@@ -203,28 +203,60 @@ impl BrowserManager {
                                     // 记录浏览历史
                                     let should_persist = {
                                         let active_id = state.active_tab_id.clone();
-                                        let last_same = state.global_history.last().map(|e| e.url.as_str()) == Some(&page_url);
-                                        if !last_same && !page_url.starts_with("about:") {
-                                            let entry = HistoryEntry {
-                                                url: page_url.clone(),
-                                                title: if title.is_empty() { page_url.clone() } else { title.clone() },
-                                                timestamp: std::time::SystemTime::now()
-                                                    .duration_since(std::time::UNIX_EPOCH)
-                                                    .unwrap_or_default()
-                                                    .as_millis() as u64,
-                                            };
+                                        if !page_url.starts_with("about:") {
                                             // 写入标签历史
                                             if let Some(active_id) = active_id {
                                                 {
                                                     let tab_entries = state.tab_histories.entry(active_id.clone()).or_default();
-                                                    if tab_entries.last().map(|e| e.url.as_str()) != Some(&page_url) {
-                                                        tab_entries.push(entry.clone());
+                                                    let existing_pos = tab_entries.iter().position(|e| e.url == page_url);
+                                                    match existing_pos {
+                                                        Some(pos) => {
+                                                            // URL 已在栈中，更新索引（不追加）
+                                                            tab_entries[pos].title = if title.is_empty() { page_url.clone() } else { title.clone() };
+                                                            tab_entries[pos].timestamp = std::time::SystemTime::now()
+                                                                .duration_since(std::time::UNIX_EPOCH)
+                                                                .unwrap_or_default()
+                                                                .as_millis() as u64;
+                                                            state.tab_history_indices.insert(active_id.clone(), pos);
+                                                        }
+                                                        None => {
+                                                            tab_entries.push(HistoryEntry {
+                                                                url: page_url.clone(),
+                                                                title: if title.is_empty() { page_url.clone() } else { title.clone() },
+                                                                timestamp: std::time::SystemTime::now()
+                                                                    .duration_since(std::time::UNIX_EPOCH)
+                                                                    .unwrap_or_default()
+                                                                    .as_millis() as u64,
+                                                            });
+                                                            let idx = tab_entries.len() - 1;
+                                                            state.tab_history_indices.insert(active_id.clone(), idx);
+                                                        }
                                                     }
                                                 }
-                                                let idx = state.tab_histories.get(&active_id).map(|te| te.len() - 1).unwrap_or(0);
-                                                state.tab_history_indices.insert(active_id, idx);
                                             }
-                                            state.global_history.push(entry);
+                                            // 写入全局历史（去重：移到末尾并更新时间戳）
+                                            let pos = state.global_history.iter().position(|e| e.url == page_url);
+                                            match pos {
+                                                Some(i) => {
+                                                    state.global_history[i].title = if title.is_empty() { page_url.clone() } else { title.clone() };
+                                                    state.global_history[i].timestamp = std::time::SystemTime::now()
+                                                        .duration_since(std::time::UNIX_EPOCH)
+                                                        .unwrap_or_default()
+                                                        .as_millis() as u64;
+                                                    let entry = state.global_history.remove(i);
+                                                    state.global_history.push(entry);
+                                                }
+                                                None => {
+                                                    state.global_history.push(HistoryEntry {
+                                                        url: page_url.clone(),
+                                                        title: if title.is_empty() { page_url.clone() } else { title.clone() },
+                                                        timestamp: std::time::SystemTime::now()
+                                                            .duration_since(std::time::UNIX_EPOCH)
+                                                            .unwrap_or_default()
+                                                            .as_millis() as u64,
+                                                    });
+                                                }
+                                            }
                                             if state.global_history.len() > 1000 {
                                                 let keep = state.global_history.len() - 800;
                                                 state.global_history.drain(0..keep);
@@ -479,31 +511,59 @@ impl BrowserManager {
                                 }
                                 // 记录浏览历史（排除 about: 页面）
                                 if !current_url.starts_with("about:") {
-                                    let last_same = s.global_history.last().map(|e| e.url.as_str()) == Some(current_url.as_str());
-                                    if !last_same {
-                                        let entry = HistoryEntry {
-                                            url: current_url.clone(),
-                                            title: current_url.clone(),
-                                            timestamp: std::time::SystemTime::now()
-                                                .duration_since(std::time::UNIX_EPOCH)
-                                                .unwrap_or_default()
-                                                .as_millis() as u64,
-                                        };
-                                        {
-                                            let tab_entries = s.tab_histories.entry(active_id.clone()).or_default();
-                                            if tab_entries.last().map(|e| e.url.as_str()) != Some(current_url.as_str()) {
-                                                tab_entries.push(entry.clone());
+                                    // 写入标签历史
+                                    {
+                                        let tab_entries = s.tab_histories.entry(active_id.clone()).or_default();
+                                        let existing_pos = tab_entries.iter().position(|e| e.url == current_url);
+                                        match existing_pos {
+                                            Some(pos) => {
+                                                tab_entries[pos].timestamp = std::time::SystemTime::now()
+                                                    .duration_since(std::time::UNIX_EPOCH)
+                                                    .unwrap_or_default()
+                                                    .as_millis() as u64;
+                                                s.tab_history_indices.insert(active_id.clone(), pos);
+                                            }
+                                            None => {
+                                                tab_entries.push(HistoryEntry {
+                                                    url: current_url.clone(),
+                                                    title: current_url.clone(),
+                                                    timestamp: std::time::SystemTime::now()
+                                                        .duration_since(std::time::UNIX_EPOCH)
+                                                        .unwrap_or_default()
+                                                        .as_millis() as u64,
+                                                });
+                                                let idx = tab_entries.len() - 1;
+                                                s.tab_history_indices.insert(active_id.clone(), idx);
                                             }
                                         }
-                                        let idx = s.tab_histories.get(&active_id).map(|te| te.len() - 1).unwrap_or(0);
-                                        s.tab_history_indices.insert(active_id, idx);
-                                        s.global_history.push(entry);
-                                        if s.global_history.len() > 1000 {
-                                            let keep = s.global_history.len() - 800;
-                                            s.global_history.drain(0..keep);
-                                        }
-                                        did_record = true;
                                     }
+                                    // 写入全局历史（去重：移到末尾并更新时间戳）
+                                    let pos = s.global_history.iter().position(|e| e.url == current_url);
+                                    match pos {
+                                        Some(i) => {
+                                            s.global_history[i].timestamp = std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .unwrap_or_default()
+                                                .as_millis() as u64;
+                                            let entry = s.global_history.remove(i);
+                                            s.global_history.push(entry);
+                                        }
+                                        None => {
+                                            s.global_history.push(HistoryEntry {
+                                                url: current_url.clone(),
+                                                title: current_url.clone(),
+                                                timestamp: std::time::SystemTime::now()
+                                                    .duration_since(std::time::UNIX_EPOCH)
+                                                    .unwrap_or_default()
+                                                    .as_millis() as u64,
+                                            });
+                                        }
+                                    }
+                                    if s.global_history.len() > 1000 {
+                                        let keep = s.global_history.len() - 800;
+                                        s.global_history.drain(0..keep);
+                                    }
+                                    did_record = true;
                                 }
                             }
                             drop(s);
@@ -1271,17 +1331,24 @@ impl BrowserManager {
                 state.tab_history_indices.insert(aid.clone(), idx);
             }
 
-            // 写入全局历史
-            if state.global_history.last().map(|e| e.url.as_str()) != Some(url) {
-                state.global_history.push(entry);
-                // 全局历史上限 1000 条，超出时保留最近 800 条
-                if state.global_history.len() > 1000 {
-                    let keep_from = state.global_history.len() - 800;
-                    state.global_history.drain(0..keep_from);
+            // 写入全局历史（去重：移到末尾并更新时间戳）
+            let pos = state.global_history.iter().position(|e| e.url == url);
+            match pos {
+                Some(i) => {
+                    state.global_history[i].title = entry.title.clone();
+                    state.global_history[i].timestamp = entry.timestamp;
+                    let moved = state.global_history.remove(i);
+                    state.global_history.push(moved);
+                    true
                 }
-                true
-            } else {
-                false
+                None => {
+                    state.global_history.push(entry);
+                    if state.global_history.len() > 1000 {
+                        let keep_from = state.global_history.len() - 800;
+                        state.global_history.drain(0..keep_from);
+                    }
+                    true
+                }
             }
         };
         if should_persist {

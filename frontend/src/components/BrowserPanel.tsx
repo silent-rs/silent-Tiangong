@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { api } from '@/api/tauri';
 import { listen } from '@tauri-apps/api/event';
-import { Globe, ArrowRight, ArrowLeft, RotateCw, CornerDownRight, Plus, X, PenTool, ScanSearch, ChevronDown, Clock, ExternalLink, History } from 'lucide-react';
+import { Globe, ArrowRight, ArrowLeft, RotateCw, CornerDownRight, Plus, X, PenTool, ScanSearch, Clock, ExternalLink, History } from 'lucide-react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
@@ -75,9 +75,6 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
   const [tabHistories, setTabHistories] = useState<Map<string, TabHistory>>(new Map());
   // 导航意图标记
   const navigationIntentRef = useRef<'new' | 'back' | 'forward' | null>(null);
-  // 后退/前进下拉面板
-  const [showBackHistory, setShowBackHistory] = useState(false);
-  const [showForwardHistory, setShowForwardHistory] = useState(false);
   // 全局历史 Modal
   const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [globalHistoryEntries, setGlobalHistoryEntries] = useState<HistoryEntry[]>([]);
@@ -265,16 +262,12 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
   const handleGoBack = useCallback(async () => {
     if (!activeTabId || !canGoBack(activeTabId)) return;
     navigationIntentRef.current = 'back';
-    setShowBackHistory(false);
-    setShowForwardHistory(false);
     await api.browserGoBack().catch(console.error);
   }, [activeTabId, canGoBack]);
 
   const handleGoForward = useCallback(async () => {
     if (!activeTabId || !canGoForward(activeTabId)) return;
     navigationIntentRef.current = 'forward';
-    setShowBackHistory(false);
-    setShowForwardHistory(false);
     await api.browserGoForward().catch(console.error);
   }, [activeTabId, canGoForward]);
 
@@ -326,8 +319,6 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
   const handleTabSwitch = useCallback(async (tabId: string) => {
     try {
       navigationIntentRef.current = null;
-      setShowBackHistory(false);
-      setShowForwardHistory(false);
       await api.browserTabSwitch(tabId);
       activeTabIdRef.current = tabId;
       setActiveTabId(tabId);
@@ -356,11 +347,9 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
     }
   }, [refreshTabs]);
 
-  // 从历史记录跳转
+  // 从历史记录跳转（全局历史 Modal 使用：作为新导航）
   const handleHistoryJump = useCallback(async (targetUrl: string) => {
     navigationIntentRef.current = 'new';
-    setShowBackHistory(false);
-    setShowForwardHistory(false);
     setShowHistoryModal(false);
     try {
       if (!containerRef.current) return;
@@ -377,20 +366,6 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
       console.error('历史跳转失败：', err);
     }
   }, []);
-
-  // 关闭下拉菜单（点击外部）
-  useEffect(() => {
-    if (!showBackHistory && !showForwardHistory) return;
-    const handler = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (!target.closest('.history-dropdown-container')) {
-        setShowBackHistory(false);
-        setShowForwardHistory(false);
-      }
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [showBackHistory, showForwardHistory]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -457,10 +432,6 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
     }
   }, [initialUrl, refreshTabs]);
 
-  const history = getCurrentHistory(activeTabId);
-  const backEntries = history.entries.slice(0, history.currentIndex).reverse();
-  const forwardEntries = history.entries.slice(history.currentIndex + 1);
-
   return (
     <div className="flex flex-1 flex-col h-full bg-background">
       {/* 标签栏 */}
@@ -499,93 +470,24 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
 
       {/* 工具栏 */}
       <div className="flex items-center gap-1 px-2 py-2 border-b shrink-0">
-        {/* 后退按钮 + 下拉 */}
-        <div className="relative history-dropdown-container">
-          <div className="flex items-center">
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={handleGoBack}
-              className="h-7 w-7 p-0 shrink-0"
-              disabled={!canGoBack(activeTabId)}
-            >
-              <ArrowLeft className="w-3.5 h-3.5" />
-            </Button>
-            {backEntries.length > 0 && (
-              <button
-                className="h-7 w-3 flex items-center justify-center shrink-0 text-muted-foreground hover:text-foreground"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setShowBackHistory(!showBackHistory);
-                  setShowForwardHistory(false);
-                }}
-              >
-                <ChevronDown className="w-2.5 h-2.5" />
-              </button>
-            )}
-          </div>
-          {showBackHistory && backEntries.length > 0 && (
-            <div className="absolute top-full left-0 mt-1 w-72 max-h-60 overflow-y-auto bg-popover border rounded-md shadow-lg z-50 text-xs">
-              {backEntries.map((entry, i) => (
-                <div
-                  key={`${entry.url}-${entry.timestamp}-${i}`}
-                  className="px-2 py-1.5 hover:bg-muted cursor-pointer border-b last:border-0"
-                  onClick={() => {
-                    handleHistoryJump(entry.url);
-                    setShowBackHistory(false);
-                  }}
-                >
-                  <div className="font-medium truncate">{entry.title || '(无标题)'}</div>
-                  <div className="text-muted-foreground truncate">{entry.url}</div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* 前进按钮 + 下拉 */}
-        <div className="relative history-dropdown-container">
-          <div className="flex items-center">
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={handleGoForward}
-              className="h-7 w-7 p-0 shrink-0"
-              disabled={!canGoForward(activeTabId)}
-            >
-              <ArrowRight className="w-3.5 h-3.5" />
-            </Button>
-            {forwardEntries.length > 0 && (
-              <button
-                className="h-7 w-3 flex items-center justify-center shrink-0 text-muted-foreground hover:text-foreground"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setShowForwardHistory(!showForwardHistory);
-                  setShowBackHistory(false);
-                }}
-              >
-                <ChevronDown className="w-2.5 h-2.5" />
-              </button>
-            )}
-          </div>
-          {showForwardHistory && forwardEntries.length > 0 && (
-            <div className="absolute top-full left-0 mt-1 w-72 max-h-60 overflow-y-auto bg-popover border rounded-md shadow-lg z-50 text-xs">
-              {forwardEntries.map((entry, i) => (
-                <div
-                  key={`${entry.url}-${entry.timestamp}-${i}`}
-                  className="px-2 py-1.5 hover:bg-muted cursor-pointer border-b last:border-0"
-                  onClick={() => {
-                    handleHistoryJump(entry.url);
-                    setShowForwardHistory(false);
-                  }}
-                >
-                  <div className="font-medium truncate">{entry.title || '(无标题)'}</div>
-                  <div className="text-muted-foreground truncate">{entry.url}</div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={handleGoBack}
+          className="h-7 w-7 p-0 shrink-0"
+          disabled={!canGoBack(activeTabId)}
+        >
+          <ArrowLeft className="w-3.5 h-3.5" />
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={handleGoForward}
+          className="h-7 w-7 p-0 shrink-0"
+          disabled={!canGoForward(activeTabId)}
+        >
+          <ArrowRight className="w-3.5 h-3.5" />
+        </Button>
 
         <Button
           size="sm"
