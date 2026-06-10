@@ -256,7 +256,6 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
     navigationIntentRef.current = 'new';
 
     try {
-    try {
       await api.browserNavigate(nextUrl);
     } catch (err) {
       console.error('打开浏览器失败：', err);
