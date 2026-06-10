@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { api } from '@/api/tauri';
 import { listen } from '@tauri-apps/api/event';
-import { Globe, ArrowRight, ArrowLeft, RotateCw, CornerDownRight, Plus, X, PenTool, ScanSearch, Clock, ExternalLink, History } from 'lucide-react';
+import { Globe, ArrowRight, ArrowLeft, RotateCw, CornerDownRight, Plus, X, PenTool, ScanSearch, Clock, History, Trash2 } from 'lucide-react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
@@ -135,6 +135,29 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
       setGlobalHistoryHasMore(false);
     } finally {
       setGlobalHistoryLoading(false);
+    }
+  }, []);
+
+  // 清空全部全局历史
+  const handleClearAllHistory = useCallback(async () => {
+    try {
+      await api.browserGlobalHistoryClear();
+      setGlobalHistoryEntries([]);
+      setGlobalHistoryOffset(0);
+      setGlobalHistoryHasMore(false);
+    } catch (err) {
+      console.error('清空历史失败：', err);
+    }
+  }, []);
+
+  // 删除单条全局历史
+  const handleDeleteHistoryEntry = useCallback(async (url: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await api.browserGlobalHistoryDelete(url);
+      setGlobalHistoryEntries(prev => prev.filter(entry => entry.url !== url));
+    } catch (err) {
+      console.error('删除历史条目失败：', err);
     }
   }, []);
 
@@ -590,7 +613,7 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
             </DialogTitle>
           </DialogHeader>
           <div
-            className="px-4 pb-4 max-h-[60vh] overflow-y-auto"
+            className="px-4 max-h-[60vh] overflow-y-auto"
             onScroll={(e) => {
               const el = e.currentTarget;
               if (el.scrollHeight - el.scrollTop - el.clientHeight < 100 && globalHistoryHasMore && !globalHistoryLoading) {
@@ -622,7 +645,13 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
                     </span>
                   </div>
                 </div>
-                <ExternalLink className="w-3.5 h-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity mt-0.5 shrink-0" />
+                <button
+                  className="shrink-0 mt-0.5 p-1 rounded opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive transition-opacity"
+                  onClick={(e) => handleDeleteHistoryEntry(entry.url, e)}
+                  title="删除"
+                >
+                  <X className="w-3 h-3" />
+                </button>
               </div>
             ))}
             {globalHistoryLoading && (
@@ -631,6 +660,18 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
               </div>
             )}
           </div>
+          {globalHistoryEntries.length > 0 && (
+            <div className="px-4 py-3 border-t">
+              <Button
+                size="sm"
+                onClick={handleClearAllHistory}
+                className="w-full bg-destructive text-white hover:bg-destructive/90"
+              >
+                <Trash2 className="w-3.5 h-3.5 mr-1.5" />
+                清空全部历史
+              </Button>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </div>

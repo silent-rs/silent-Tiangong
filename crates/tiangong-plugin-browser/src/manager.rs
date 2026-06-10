@@ -497,80 +497,18 @@ impl BrowserManager {
                     };
                     if changed {
                         debug!(url = %current_url, "browser url_poll detected change");
-                        // 更新活跃标签 URL 并记录历史
-                        let should_persist = {
+                        // 更新活跃标签 URL（历史记录由 on_page_load 回调负责）
+                        {
                             let mut s = match state.lock() {
                                 Ok(s) => s,
                                 Err(e) => e.into_inner(),
                             };
                             let aid = s.active_tab_id.clone();
-                            let mut did_record = false;
                             if let Some(active_id) = aid {
                                 if let Some(tab) = s.tabs.iter_mut().find(|t| t.id == active_id) {
                                     tab.url = current_url.clone();
                                 }
-                                // 记录浏览历史（排除 about: 页面）
-                                if !current_url.starts_with("about:") {
-                                    // 写入标签历史
-                                    {
-                                        let tab_entries = s.tab_histories.entry(active_id.clone()).or_default();
-                                        let existing_pos = tab_entries.iter().position(|e| e.url == current_url);
-                                        match existing_pos {
-                                            Some(pos) => {
-                                                tab_entries[pos].timestamp = std::time::SystemTime::now()
-                                                    .duration_since(std::time::UNIX_EPOCH)
-                                                    .unwrap_or_default()
-                                                    .as_millis() as u64;
-                                                s.tab_history_indices.insert(active_id.clone(), pos);
-                                            }
-                                            None => {
-                                                tab_entries.push(HistoryEntry {
-                                                    url: current_url.clone(),
-                                                    title: current_url.clone(),
-                                                    timestamp: std::time::SystemTime::now()
-                                                        .duration_since(std::time::UNIX_EPOCH)
-                                                        .unwrap_or_default()
-                                                        .as_millis() as u64,
-                                                });
-                                                let idx = tab_entries.len() - 1;
-                                                s.tab_history_indices.insert(active_id.clone(), idx);
-                                            }
-                                        }
-                                    }
-                                    // 写入全局历史（去重：移到末尾并更新时间戳）
-                                    let pos = s.global_history.iter().position(|e| e.url == current_url);
-                                    match pos {
-                                        Some(i) => {
-                                            s.global_history[i].timestamp = std::time::SystemTime::now()
-                                                .duration_since(std::time::UNIX_EPOCH)
-                                                .unwrap_or_default()
-                                                .as_millis() as u64;
-                                            let entry = s.global_history.remove(i);
-                                            s.global_history.push(entry);
-                                        }
-                                        None => {
-                                            s.global_history.push(HistoryEntry {
-                                                url: current_url.clone(),
-                                                title: current_url.clone(),
-                                                timestamp: std::time::SystemTime::now()
-                                                    .duration_since(std::time::UNIX_EPOCH)
-                                                    .unwrap_or_default()
-                                                    .as_millis() as u64,
-                                            });
-                                        }
-                                    }
-                                    if s.global_history.len() > 1000 {
-                                        let keep = s.global_history.len() - 800;
-                                        s.global_history.drain(0..keep);
-                                    }
-                                    did_record = true;
-                                }
                             }
-                            drop(s);
-                            did_record
-                        };
-                        if should_persist {
-                            persist_global_history(&state);
                         }
                         let _ = app.emit(
                             "browser:page_loaded",
@@ -1393,6 +1331,30 @@ impl BrowserManager {
             .rev()
             .cloned()
             .collect()
+    }
+
+    /// 清空全局浏览历史
+    pub fn clear_global_history(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.global_history.clear();
+        }
+        persist_global_history(&self.state);
+    }
+
+    /// 删除全局历史中指定 URL 的条目
+    pub fn delete_global_history_entry(&self, url: &str) {
+        let should_persist = {
+            let mut state = match self.state.lock() {
+                Ok(s) => s,
+                Err(e) => e.into_inner(),
+            };
+            let before = state.global_history.len();
+            state.global_history.retain(|e| e.url != url);
+            before != state.global_history.len()
+        };
+        if should_persist {
+            persist_global_history(&self.state);
+        }
     }
 
     /// 清除指定标签页的历史

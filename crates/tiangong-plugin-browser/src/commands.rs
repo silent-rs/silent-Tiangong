@@ -143,3 +143,20 @@ pub async fn browser_global_history(
 ) -> Result<Vec<HistoryEntry>, String> {
     Ok(state.manager.get_global_history(offset, limit))
 }
+
+#[tauri::command]
+pub async fn browser_global_history_clear(
+    state: State<'_, BrowserPluginState>,
+) -> Result<(), String> {
+    state.manager.clear_global_history();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn browser_global_history_delete(
+    url: String,
+    state: State<'_, BrowserPluginState>,
+) -> Result<(), String> {
+    state.manager.delete_global_history_entry(&url);
+    Ok(())
+}

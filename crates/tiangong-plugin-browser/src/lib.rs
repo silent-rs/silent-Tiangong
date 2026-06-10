@@ -42,6 +42,8 @@ pub fn init() -> TauriPlugin<Wry> {
             commands::browser_annotation_extract,
             commands::browser_tab_history,
             commands::browser_global_history,
+            commands::browser_global_history_clear,
+            commands::browser_global_history_delete,
         ])
         .setup(|app, _api| {
             let (tx, rx) = mpsc::channel::<BrowserCommand>(16);

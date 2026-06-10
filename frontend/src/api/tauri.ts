@@ -845,4 +845,10 @@ export const api = {
     Array<{ url: string; title: string; timestamp: number }>
   > =>
     invoke('plugin:browser|browser_global_history', { offset, limit }),
+
+  browserGlobalHistoryClear: (): Promise<void> =>
+    invoke('plugin:browser|browser_global_history_clear'),
+
+  browserGlobalHistoryDelete: (url: string): Promise<void> =>
+    invoke('plugin:browser|browser_global_history_delete', { url }),
 };

@@ -16,4 +16,6 @@ permissions = [
     "allow-browser-annotation-extract",
     "allow-browser-tab-history",
     "allow-browser-global-history",
+    "allow-browser-global-history-clear",
+    "allow-browser-global-history-delete",
 ]
