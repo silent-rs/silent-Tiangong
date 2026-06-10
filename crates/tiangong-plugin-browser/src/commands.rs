@@ -36,9 +36,10 @@ pub async fn browser_set_position(
 #[tauri::command]
 pub async fn browser_navigate(
     url: String,
+    app: AppHandle,
     state: State<'_, BrowserPluginState>,
 ) -> Result<(), String> {
-    state.manager.navigate(&url)
+    state.manager.navigate_with_app(&app, &url)
 }
 
 #[tauri::command]
@@ -71,9 +72,10 @@ pub async fn browser_tab_list(
 #[tauri::command]
 pub async fn browser_tab_new(
     url: String,
+    app: AppHandle,
     state: State<'_, BrowserPluginState>,
 ) -> Result<String, String> {
-    state.manager.tab_new(&url)
+    state.manager.tab_new(&app, &url)
 }
 
 #[tauri::command]

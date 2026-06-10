@@ -149,7 +149,7 @@ pub async fn browser_command_handler(
                     }
                     let _ = app.emit("browser:open", &url);
                 } else {
-                    let _ = manager.navigate(&url);
+                    let _ = manager.navigate_or_switch(&app, &url);
                 }
             }
             BrowserCommand::ObservePage { response_tx } => {
@@ -159,7 +159,7 @@ pub async fn browser_command_handler(
                         Ok(s) => s,
                         Err(e) => e.into_inner(),
                     };
-                    if s.webview.is_none() {
+                    if s.webviews.is_empty() {
                         continue;
                     }
                 }
@@ -454,16 +454,17 @@ pub async fn browser_command_handler(
                     state: browser_state.clone(),
                 };
                 let app_clone = app.clone();
-                let _ = tokio::task::spawn_blocking(move || match manager.tab_new(&url) {
-                    Ok(tab_id) => {
-                        let _ = app_clone.emit(
+                let _ =
+                    tokio::task::spawn_blocking(move || match manager.tab_new(&app_clone, &url) {
+                        Ok(tab_id) => {
+                            let _ = app_clone.emit(
                             "browser:tab_updated",
                             serde_json::json!({ "action": "new", "tab_id": tab_id, "url": url }),
                         );
-                    }
-                    Err(e) => warn!(error = %e, "tab_new error"),
-                })
-                .await;
+                        }
+                        Err(e) => warn!(error = %e, "tab_new error"),
+                    })
+                    .await;
             }
             BrowserCommand::TabSwitch { tab_id } => {
                 let manager = BrowserManager {

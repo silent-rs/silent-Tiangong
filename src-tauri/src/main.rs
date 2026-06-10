@@ -371,12 +371,10 @@ fn run_gui() {
                     let active_tab_id = snapshot.as_ref().and_then(|s| s.active_tab_id.clone());
                     let mut page_url = url;
                     if page_url.is_empty() {
-                        // 尝试从 WebView 获取当前页面 URL
-                        page_url = app_handle
-                            .get_webview("browser-webview")
-                            .and_then(|wv| wv.url().ok())
-                            .map(|u| u.to_string())
-                            .unwrap_or_default();
+                        // 尝试从活跃标签的 WebView 获取当前页面 URL
+                        let browser_state =
+                            app_handle.state::<tiangong_plugin_browser::BrowserPluginState>();
+                        page_url = browser_state.manager.current_url().unwrap_or_default();
                     }
                     if page_url.is_empty() {
                         warn!(
