@@ -751,7 +751,14 @@ impl BrowserManager {
                     app, &tab_id, url, rect.0, rect.1, rect.2, rect.3,
                 )?;
                 let mut state = self.state.lock().map_err(|e| e.to_string())?;
-                state.webviews.insert(tab_id, webview);
+                state.webviews.insert(tab_id.clone(), webview);
+                // 确保 WebView 在显示区内
+                if let Some(wv) = state.webviews.get(&tab_id) {
+                    let _ = wv.set_position(LogicalPosition::new(rect.0, rect.1));
+                    let _ = wv.set_size(LogicalSize::new(rect.2, rect.3));
+                }
+                drop(state);
+                self.start_url_poll(app, url);
                 return Ok(());
             }
         }

@@ -225,8 +225,8 @@ export function MainApp() {
         setBrowserUrl(url);
         if (!showBrowserRef.current) {
           await openBrowserPanel();
-          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
         }
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
         await api.browserNavigate(url).catch(console.error);
       });
 
@@ -286,9 +286,9 @@ export function MainApp() {
         setBrowserUrl(url);
         if (!showBrowserRef.current) {
           await openBrowserPanel();
-          // 等待面板渲染后再导航
-          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
         }
+        // 等待面板渲染和位置同步后再导航
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
         await api.browserNavigate(url).catch(console.error);
       }
     };

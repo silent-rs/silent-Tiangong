@@ -190,7 +190,11 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
     let unlistenPage: (() => void) | null = null;
 
     const setup = async () => {
-      unlistenTab = await listen('browser:tab_updated', () => { refreshTabs(); });
+      unlistenTab = await listen('browser:tab_updated', () => {
+        refreshTabs();
+        // WebView 可能刚被创建（about:blank 标签延迟创建），需要同步位置到容器
+        syncPosition();
+      });
       unlistenPage = await listen('browser:page_loaded', (event) => {
         refreshTabs();
         const payload = event.payload as { url?: string; title?: string };
