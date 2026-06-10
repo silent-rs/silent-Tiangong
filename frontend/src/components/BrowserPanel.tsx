@@ -8,7 +8,6 @@ import { Input } from './ui/input';
 interface BrowserPanelProps {
   initialUrl?: string;
   currentUrl?: string;
-  navigateUrl?: string;
 }
 
 interface TabInfo {
@@ -28,7 +27,7 @@ function normalizeBrowserUrl(rawUrl: string): string {
 
 const DEFAULT_URL = 'about:blank';
 
-export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPanelProps) {
+export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
   const [url, setUrl] = useState(initialUrl || '');
   const [tabs, setTabs] = useState<TabInfo[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
@@ -95,21 +94,6 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
     };
   }, [refreshTabs]);
 
-  useEffect(() => {
-    if (!navigateUrl) return;
-    if (browserOpenedRef.current) {
-      api.browserNavigate(navigateUrl).catch(console.error);
-    } else if (containerRef.current) {
-      const rect = containerRef.current.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0) {
-        api.browserOpen(navigateUrl, rect.x, rect.y, rect.width, rect.height)
-          .then(() => { browserOpenedRef.current = true; })
-          .then(() => refreshTabs())
-          .catch(console.error);
-      }
-    }
-  }, [navigateUrl, refreshTabs]);
-
   const syncPosition = useCallback(async () => {
     if (!containerRef.current) return;
     const rect = containerRef.current.getBoundingClientRect();
@@ -119,17 +103,8 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
   const handleNavigate = useCallback(async () => {
     const nextUrl = normalizeBrowserUrl(url);
     if (!nextUrl) return;
-
     try {
-      if (!containerRef.current) return;
-      const rect = containerRef.current.getBoundingClientRect();
-      if (browserOpenedRef.current) {
-        await api.browserSetPosition(rect.x, rect.y, rect.width, rect.height);
-        await api.browserNavigate(nextUrl);
-      } else {
-        await api.browserOpen(nextUrl, rect.x, rect.y, rect.width, rect.height);
-        browserOpenedRef.current = true;
-      }
+      await api.browserNavigate(nextUrl);
     } catch (err) {
       console.error('打开浏览器失败：', err);
     }
@@ -237,6 +212,7 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
         }
         api.browserOpen(initialUrl || DEFAULT_URL, rect.x, rect.y, rect.width, rect.height)
           .then(() => { browserOpenedRef.current = true; })
+          .then(() => api.browserSetPosition(rect.x, rect.y, rect.width, rect.height))
           .then(() => refreshTabs())
           .catch(console.error);
       };

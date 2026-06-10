@@ -116,16 +116,13 @@ pub async fn browser_command_handler(
                     state: browser_state.clone(),
                 };
 
-                let should_navigate = if !manager.is_open() {
-                    if let Some((x, y, w, h)) = default_browser_rect(&app) {
-                        let _ = manager.open(&app, &url, x, y, w, h);
-                    }
+                let was_open = manager.is_open();
+                if !was_open {
                     let _ = app.emit("browser:open", &url);
-                    false
-                } else {
-                    true
-                };
+                }
+                let _ = manager.navigate_with_app(&app, &url);
 
+                let should_navigate = false;
                 let result = tokio::task::spawn_blocking(move || {
                     manager.fetch_page_content(&url, max_chars, should_navigate)
                 })
@@ -144,13 +141,9 @@ pub async fn browser_command_handler(
                     state: browser_state.clone(),
                 };
                 if !manager.is_open() {
-                    if let Some((x, y, w, h)) = default_browser_rect(&app) {
-                        let _ = manager.open(&app, &url, x, y, w, h);
-                    }
                     let _ = app.emit("browser:open", &url);
-                } else {
-                    let _ = manager.navigate_or_switch(&app, &url);
                 }
+                let _ = manager.navigate_with_app(&app, &url);
             }
             BrowserCommand::ObservePage { response_tx } => {
                 // 浏览器未打开时不返回响应，让 observe_page() 返回 None

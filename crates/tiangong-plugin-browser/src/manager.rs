@@ -90,10 +90,11 @@ impl BrowserManager {
         self.state.clone()
     }
 
+    /// 浏览器是否已初始化（有标签即为已打开，包括 about:blank 延迟创建 WebView 的情况）
     pub fn is_open(&self) -> bool {
         self.state
             .lock()
-            .map(|s| !s.webviews.is_empty())
+            .map(|s| !s.tabs.is_empty())
             .unwrap_or(false)
     }
 
@@ -210,8 +211,8 @@ impl BrowserManager {
     ) -> Result<(), String> {
         {
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
-            if !state.webviews.is_empty() {
-                // 已有 WebView：检查是否已有匹配 URL 的标签
+            if !state.tabs.is_empty() {
+                // 已初始化：更新活跃标签（有 WebView 则导航，无则标记 URL 等待按需创建）
                 if let Some(matching_tab) = state
                     .tabs
                     .iter()
@@ -286,10 +287,7 @@ impl BrowserManager {
             state.browser_rect = (x, y, w, h);
         }
 
-        if !is_blank {
-            self.start_url_poll(app, url);
-            self.start_event_poll(app);
-        }
+        self.start_url_poll(app, url);
         self.start_event_poll(app);
 
         Ok(())
@@ -552,84 +550,73 @@ impl BrowserManager {
         Ok(())
     }
 
-    /// 导航到 URL，若活跃标签无 WebView 则自动创建
+    /// 导航到 URL，自动处理所有场景：
+    /// 1. 浏览器未打开 → 打开浏览器并导航
+    /// 2. 已有匹配 URL 的标签 → 切换到该标签
+    /// 3. 当前活跃标签无 WebView → 创建 WebView
+    /// 4. 正常导航当前活跃 WebView
     pub fn navigate_with_app(&self, app: &AppHandle<Wry>, url: &str) -> Result<(), String> {
-        let (needs_create, tab_id, rect) = {
+        // 场景 1：浏览器完全未打开
+        if !self.is_open() {
+            if let Some((x, y, w, h)) = default_browser_rect(app) {
+                return self.open(app, url, x, y, w, h);
+            }
+            return Err("无法确定浏览器位置".to_string());
+        }
+
+        let (matching_tab_id, needs_create, active_id, rect) = {
             let state = self.state.lock().map_err(|e| e.to_string())?;
-            let has_webview = state
+
+            // 场景 2：检查已有匹配 URL 的标签
+            let matching = state
+                .tabs
+                .iter()
+                .find(|t| normalize_url_for_compare(&t.url) == normalize_url_for_compare(url))
+                .map(|t| t.id.clone());
+
+            let needs_create = state
                 .active_tab_id
                 .as_ref()
-                .map(|id| state.webviews.contains_key(id))
+                .map(|id| !state.webviews.contains_key(id))
                 .unwrap_or(false);
+
             (
-                !has_webview,
+                matching,
+                needs_create,
                 state.active_tab_id.clone(),
                 state.browser_rect,
             )
         };
 
-        if needs_create {
-            if let Some(tab_id) = tab_id {
-                let webview = Self::create_webview_for_tab(
-                    app, &tab_id, url, rect.0, rect.1, rect.2, rect.3,
-                )?;
-                let mut state = self.state.lock().map_err(|e| e.to_string())?;
-                state.webviews.insert(tab_id, webview);
-                return Ok(());
-            }
-        }
-
-        self.navigate(url)
-    }
-
-    /// 打开 URL：已有匹配标签则切换过去，否则导航当前活跃标签
-    pub fn navigate_or_switch(&self, app: &AppHandle<Wry>, url: &str) -> Result<(), String> {
-        let mut state = self.state.lock().map_err(|e| e.to_string())?;
-
-        // 检查是否有 URL 匹配的已有标签
-        if let Some(matching_tab) = state
-            .tabs
-            .iter()
-            .find(|t| normalize_url_for_compare(&t.url) == normalize_url_for_compare(url))
-        {
-            let matching_id = matching_tab.id.clone();
+        // 场景 2：切换到已有标签
+        if let Some(matching_id) = matching_tab_id {
+            let mut state = self.state.lock().map_err(|e| e.to_string())?;
             if state.active_tab_id.as_deref() != Some(&matching_id) {
-                let rect = state.browser_rect;
-                // 隐藏旧活跃 WebView
                 if let Some(old_id) = &state.active_tab_id {
                     if let Some(old_wv) = state.webviews.get(old_id) {
                         let _ = old_wv.set_position(LogicalPosition::new(-10000, -10000));
                     }
                 }
-                // 显示目标 WebView
                 if let Some(new_wv) = state.webviews.get(&matching_id) {
                     let _ = new_wv.set_position(LogicalPosition::new(rect.0, rect.1));
                     let _ = new_wv.set_size(LogicalSize::new(rect.2, rect.3));
                 }
                 state.active_tab_id = Some(matching_id);
             }
-            drop(state);
             return Ok(());
         }
 
-        // 无匹配标签，导航当前活跃标签（若该标签无 WebView 则创建）
-        let needs_create = state
-            .active_tab_id
-            .as_ref()
-            .map(|id| !state.webviews.contains_key(id))
-            .unwrap_or(false);
-        let active_id = state.active_tab_id.clone();
-        let rect = state.browser_rect;
-
         // 更新活跃标签 URL
-        if let Some(ref active_id) = active_id {
-            if let Some(tab) = state.tabs.iter_mut().find(|t| t.id == *active_id) {
-                tab.url = url.to_string();
+        {
+            let mut state = self.state.lock().map_err(|e| e.to_string())?;
+            if let Some(ref id) = active_id {
+                if let Some(tab) = state.tabs.iter_mut().find(|t| t.id == *id) {
+                    tab.url = url.to_string();
+                }
             }
         }
 
-        drop(state);
-
+        // 场景 3：活跃标签无 WebView，创建一个
         if needs_create {
             if let Some(tab_id) = active_id {
                 let webview = Self::create_webview_for_tab(
@@ -641,6 +628,7 @@ impl BrowserManager {
             }
         }
 
+        // 场景 4：正常导航
         self.navigate(url)
     }
 
