@@ -8,7 +8,6 @@ import { Input } from './ui/input';
 interface BrowserPanelProps {
   initialUrl?: string;
   currentUrl?: string;
-  navigateUrl?: string;
 }
 
 interface TabInfo {
@@ -28,7 +27,7 @@ function normalizeBrowserUrl(rawUrl: string): string {
 
 const DEFAULT_URL = 'about:blank';
 
-export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPanelProps) {
+export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
   const [url, setUrl] = useState(initialUrl || '');
   const [tabs, setTabs] = useState<TabInfo[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
@@ -47,8 +46,8 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
 
   const refreshTabs = useCallback(async () => {
     try {
-      const list = await api.browserTabList();
-      if (list.length === 0) {
+      const result = await api.browserTabList();
+      if (result.tabs.length === 0) {
         // 标签列表为空时创建一个空标签
         const tabId = await api.browserTabNew(DEFAULT_URL);
         activeTabIdRef.current = tabId;
@@ -56,11 +55,10 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
         setUrl('');
         setTabs([{ id: tabId, url: DEFAULT_URL, title: '' }]);
       } else {
-        setTabs(list);
-        if (activeTabIdRef.current === null) {
-          activeTabIdRef.current = list[0].id;
-          setActiveTabId(list[0].id);
-        }
+        setTabs(result.tabs);
+        const activeId = result.active_tab_id || result.tabs[0].id;
+        activeTabIdRef.current = activeId;
+        setActiveTabId(activeId);
       }
     } catch { /* ignore */ }
   }, []);
@@ -95,21 +93,6 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
     };
   }, [refreshTabs]);
 
-  useEffect(() => {
-    if (!navigateUrl) return;
-    if (browserOpenedRef.current) {
-      api.browserNavigate(navigateUrl).catch(console.error);
-    } else if (containerRef.current) {
-      const rect = containerRef.current.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0) {
-        api.browserOpen(navigateUrl, rect.x, rect.y, rect.width, rect.height)
-          .then(() => { browserOpenedRef.current = true; })
-          .then(() => refreshTabs())
-          .catch(console.error);
-      }
-    }
-  }, [navigateUrl, refreshTabs]);
-
   const syncPosition = useCallback(async () => {
     if (!containerRef.current) return;
     const rect = containerRef.current.getBoundingClientRect();
@@ -119,17 +102,8 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
   const handleNavigate = useCallback(async () => {
     const nextUrl = normalizeBrowserUrl(url);
     if (!nextUrl) return;
-
     try {
-      if (!containerRef.current) return;
-      const rect = containerRef.current.getBoundingClientRect();
-      if (browserOpenedRef.current) {
-        await api.browserSetPosition(rect.x, rect.y, rect.width, rect.height);
-        await api.browserNavigate(nextUrl);
-      } else {
-        await api.browserOpen(nextUrl, rect.x, rect.y, rect.width, rect.height);
-        browserOpenedRef.current = true;
-      }
+      await api.browserNavigate(nextUrl);
     } catch (err) {
       console.error('打开浏览器失败：', err);
     }
@@ -237,6 +211,15 @@ export function BrowserPanel({ initialUrl, currentUrl, navigateUrl }: BrowserPan
         }
         api.browserOpen(initialUrl || DEFAULT_URL, rect.x, rect.y, rect.width, rect.height)
           .then(() => { browserOpenedRef.current = true; })
+          .then(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())))
+          .then(() => {
+            if (containerRef.current) {
+              const r = containerRef.current.getBoundingClientRect();
+              if (r.width > 0 && r.height > 0) {
+                return api.browserSetPosition(r.x, r.y, r.width, r.height);
+              }
+            }
+          })
           .then(() => refreshTabs())
           .catch(console.error);
       };

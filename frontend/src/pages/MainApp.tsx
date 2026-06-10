@@ -51,7 +51,6 @@ export function MainApp() {
   const [showBrowser, setShowBrowser] = useState(false);
   const [chatPanelWidth, setChatPanelWidth] = useState(MIN_CHAT_WIDTH);
   const [browserUrl, setBrowserUrl] = useState<string | undefined>(undefined);
-  const [navigateUrl, setNavigateUrl] = useState<string | undefined>(undefined);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const showBrowserRef = useRef(false);
   const chatPanelWidthRef = useRef(MIN_CHAT_WIDTH);
@@ -217,10 +216,11 @@ export function MainApp() {
       const unlistenBrowserOpen = await listen<string>('browser:open', async (event) => {
         const url = event.payload;
         setBrowserUrl(url);
-        setNavigateUrl(url);
         if (!showBrowserRef.current) {
           await openBrowserPanel();
+          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
         }
+        await api.browserNavigate(url).catch(console.error);
       });
 
       const unlistenBrowserPageLoaded = await listen<{ title: string; url: string; text: string }>('browser:page_loaded', (event) => {
@@ -280,10 +280,12 @@ export function MainApp() {
       const url = (e as CustomEvent).detail;
       if (typeof url === 'string') {
         setBrowserUrl(url);
-        setNavigateUrl(url);
         if (!showBrowserRef.current) {
           await openBrowserPanel();
+          // 等待面板渲染后再导航
+          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
         }
+        await api.browserNavigate(url).catch(console.error);
       }
     };
     window.addEventListener('tiangong:open-browser', onOpenBrowser);
@@ -330,7 +332,7 @@ export function MainApp() {
               )}
 
               {showBrowser && (
-                <BrowserPanel initialUrl={browserUrl} currentUrl={browserUrl} navigateUrl={navigateUrl} />
+                <BrowserPanel initialUrl={browserUrl} currentUrl={browserUrl} />
               )}
             </div>
           </main>

@@ -116,16 +116,14 @@ pub async fn browser_command_handler(
                     state: browser_state.clone(),
                 };
 
-                let should_navigate = if !manager.is_open() {
-                    if let Some((x, y, w, h)) = default_browser_rect(&app) {
-                        let _ = manager.open(&app, &url, x, y, w, h);
-                    }
+                let was_open = manager.is_open();
+                if !was_open {
                     let _ = app.emit("browser:open", &url);
-                    false
-                } else {
-                    true
-                };
+                }
+                let _ = manager.navigate_with_app(&app, &url);
+                let _ = app.emit("browser:tab_updated", ());
 
+                let should_navigate = false;
                 let result = tokio::task::spawn_blocking(move || {
                     manager.fetch_page_content(&url, max_chars, should_navigate)
                 })
@@ -144,13 +142,10 @@ pub async fn browser_command_handler(
                     state: browser_state.clone(),
                 };
                 if !manager.is_open() {
-                    if let Some((x, y, w, h)) = default_browser_rect(&app) {
-                        let _ = manager.open(&app, &url, x, y, w, h);
-                    }
                     let _ = app.emit("browser:open", &url);
-                } else {
-                    let _ = manager.navigate(&url);
                 }
+                let _ = manager.navigate_with_app(&app, &url);
+                let _ = app.emit("browser:tab_updated", ());
             }
             BrowserCommand::ObservePage { response_tx } => {
                 // 浏览器未打开时不返回响应，让 observe_page() 返回 None
@@ -159,7 +154,7 @@ pub async fn browser_command_handler(
                         Ok(s) => s,
                         Err(e) => e.into_inner(),
                     };
-                    if s.webview.is_none() {
+                    if s.webviews.is_empty() {
                         continue;
                     }
                 }
@@ -454,16 +449,17 @@ pub async fn browser_command_handler(
                     state: browser_state.clone(),
                 };
                 let app_clone = app.clone();
-                let _ = tokio::task::spawn_blocking(move || match manager.tab_new(&url) {
-                    Ok(tab_id) => {
-                        let _ = app_clone.emit(
+                let _ =
+                    tokio::task::spawn_blocking(move || match manager.tab_new(&app_clone, &url) {
+                        Ok(tab_id) => {
+                            let _ = app_clone.emit(
                             "browser:tab_updated",
                             serde_json::json!({ "action": "new", "tab_id": tab_id, "url": url }),
                         );
-                    }
-                    Err(e) => warn!(error = %e, "tab_new error"),
-                })
-                .await;
+                        }
+                        Err(e) => warn!(error = %e, "tab_new error"),
+                    })
+                    .await;
             }
             BrowserCommand::TabSwitch { tab_id } => {
                 let manager = BrowserManager {
