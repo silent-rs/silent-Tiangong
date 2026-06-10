@@ -421,11 +421,28 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
       }
       refreshTabs();
     };
+    // 窗口获得焦点时同步 WebView 位置
+    const handleFocus = () => {
+      if (browserOpenedRef.current) {
+        syncPosition();
+      }
+    };
+
+    let unlistenRestore: (() => void) | null = null;
+    listen('browser:restore', () => {
+      if (browserOpenedRef.current) {
+        syncPosition();
+      }
+    }).then(fn => { unlistenRestore = fn; });
+
     window.addEventListener('resize', syncPosition);
     window.addEventListener('tiangong:restore-browser-panel', handleRestore);
+    window.addEventListener('focus', handleFocus);
     return () => {
+      unlistenRestore?.();
       window.removeEventListener('resize', syncPosition);
       window.removeEventListener('tiangong:restore-browser-panel', handleRestore);
+      window.removeEventListener('focus', handleFocus);
     };
   }, [syncPosition, refreshTabs]);
 
