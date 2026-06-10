@@ -29,10 +29,10 @@ fn normalize_url_for_compare(url: &str) -> String {
 pub struct BrowserState {
     /// 每个标签页对应的独立 WebView 实例
     pub webviews: HashMap<String, Webview<Wry>>,
-    /// 页面加载完成信号
-    pub page_loaded: Arc<(Mutex<bool>, Condvar)>,
-    /// 最近一次页面快照
-    pub latest_snapshot: Option<BrowserPageSnapshot>,
+    /// 每个标签页的页面加载完成信号
+    pub page_loaded_signals: HashMap<String, Arc<(Mutex<bool>, Condvar)>>,
+    /// 每个标签页的最近一次页面快照
+    pub latest_snapshots: HashMap<String, BrowserPageSnapshot>,
     /// 轮询检测的最后一次已知 URL
     pub last_known_url: String,
     /// 轮询检测的最后一次内容签名（前 500 字符）
@@ -56,6 +56,11 @@ impl BrowserState {
         let active_id = self.active_tab_id.as_ref()?;
         self.webviews.get(active_id)
     }
+
+    fn active_page_loaded_signal(&self) -> Option<Arc<(Mutex<bool>, Condvar)>> {
+        let active_id = self.active_tab_id.as_ref()?;
+        self.page_loaded_signals.get(active_id).cloned()
+    }
 }
 
 #[derive(Clone)]
@@ -74,8 +79,8 @@ impl BrowserManager {
         Self {
             state: Arc::new(Mutex::new(BrowserState {
                 webviews: HashMap::new(),
-                page_loaded: Arc::new((Mutex::new(false), Condvar::new())),
-                latest_snapshot: None,
+                page_loaded_signals: HashMap::new(),
+                latest_snapshots: HashMap::new(),
                 last_known_url: String::new(),
                 last_known_text_signature: String::new(),
                 poll_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -140,11 +145,15 @@ impl BrowserManager {
                             Ok(s) => s,
                             Err(_) => return,
                         };
-                        let (lock, cvar) = &*state.page_loaded;
-                        if let Ok(mut loaded) = lock.lock() {
-                            *loaded = true;
+                        if let Some(signal) =
+                            state.page_loaded_signals.get(&tab_id_for_closure)
+                        {
+                            let (lock, cvar) = &**signal;
+                            if let Ok(mut loaded) = lock.lock() {
+                                *loaded = true;
+                            }
+                            cvar.notify_all();
                         }
-                        cvar.notify_all();
                     }
 
                     let state_clone2 = state_clone_holder.clone();
@@ -169,7 +178,9 @@ impl BrowserManager {
                                     events: Vec::new(),
                                 };
                                 if let Ok(mut state) = state_clone2.lock() {
-                                    state.latest_snapshot = Some(snapshot);
+                                    state
+                                        .latest_snapshots
+                                        .insert(tab_id_in_closure.clone(), snapshot);
                                     if let Some(tab) =
                                         state.tabs.iter_mut().find(|t| t.id == tab_id_in_closure)
                                     {
@@ -280,6 +291,10 @@ impl BrowserManager {
         }
 
         if let Ok(mut state) = self.state.lock() {
+            state.page_loaded_signals.insert(
+                tab_id.clone(),
+                Arc::new((Mutex::new(false), Condvar::new())),
+            );
             state.tabs.push(BrowserTab {
                 id: tab_id.clone(),
                 url: url.to_string(),
@@ -306,12 +321,15 @@ impl BrowserManager {
             for (_, webview) in state.webviews.drain() {
                 let _ = webview.close();
             }
-            let (lock, cvar) = &*state.page_loaded;
-            if let Ok(mut loaded) = lock.lock() {
-                *loaded = false;
+            for signal in state.page_loaded_signals.values() {
+                let (lock, cvar) = &**signal;
+                if let Ok(mut loaded) = lock.lock() {
+                    *loaded = false;
+                }
+                cvar.notify_all();
             }
-            cvar.notify_all();
-            state.latest_snapshot = None;
+            state.page_loaded_signals.clear();
+            state.latest_snapshots.clear();
             state.last_known_url.clear();
             state.last_known_text_signature.clear();
             state.pending_events.clear();
@@ -337,6 +355,7 @@ impl BrowserManager {
             .name("browser-url-poll".into())
             .spawn(move || {
                 let mut tick: u32 = 0;
+                let mut no_webview_ticks: u32 = 0;
                 while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(500));
                     tick += 1;
@@ -350,6 +369,7 @@ impl BrowserManager {
                         };
                         match s.active_webview() {
                             Some(wv) => {
+                                no_webview_ticks = 0;
                                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                     wv.url()
                                 })) {
@@ -357,7 +377,14 @@ impl BrowserManager {
                                     _ => continue,
                                 }
                             }
-                            None => break,
+                            None => {
+                                no_webview_ticks += 1;
+                                // 无 WebView 时等待最多 30 秒（60 个 tick），超时退出
+                                if no_webview_ticks > 60 {
+                                    break;
+                                }
+                                continue;
+                            }
                         }
                     };
                     let changed = {
@@ -448,7 +475,7 @@ impl BrowserManager {
 
     pub fn hide(&self) -> Result<(), String> {
         let state = self.state.lock().map_err(|e| e.to_string())?;
-        if let Some(wv) = state.active_webview() {
+        for wv in state.webviews.values() {
             let _ = wv.set_size(LogicalSize::new(0.0, 0.0));
             let _ = wv.set_position(LogicalPosition::new(-10000, -10000));
         }
@@ -537,9 +564,11 @@ impl BrowserManager {
 
     pub fn navigate(&self, url: &str) -> Result<(), String> {
         let state = self.state.lock().map_err(|e| e.to_string())?;
-        let (lock, _cvar) = &*state.page_loaded;
-        if let Ok(mut loaded) = lock.lock() {
-            *loaded = false;
+        if let Some(signal) = state.active_page_loaded_signal() {
+            let (lock, _cvar) = &*signal;
+            if let Ok(mut loaded) = lock.lock() {
+                *loaded = false;
+            }
         }
         if let Some(wv) = state.active_webview() {
             let parsed_url: Url = url.parse().map_err(|e| format!("URL 解析失败：{e}"))?;
@@ -636,9 +665,11 @@ impl BrowserManager {
 
     pub fn load_html(&self, html: &str) -> Result<(), String> {
         let state = self.state.lock().map_err(|e| e.to_string())?;
-        let (lock, _cvar) = &*state.page_loaded;
-        if let Ok(mut loaded) = lock.lock() {
-            *loaded = false;
+        if let Some(signal) = state.active_page_loaded_signal() {
+            let (lock, _cvar) = &*signal;
+            if let Ok(mut loaded) = lock.lock() {
+                *loaded = false;
+            }
         }
         if let Some(wv) = state.active_webview() {
             let encoded = base64_url::encode(html.as_bytes());
@@ -755,7 +786,10 @@ impl BrowserManager {
                 Ok(s) => s,
                 Err(_) => return false,
             };
-            state.page_loaded.clone()
+            state.active_page_loaded_signal()
+        };
+        let Some(page_loaded) = page_loaded else {
+            return false;
         };
         let (lock, cvar) = &*page_loaded;
         let start = std::time::Instant::now();
@@ -884,7 +918,8 @@ impl BrowserManager {
 
     pub fn get_snapshot(&self) -> Option<BrowserPageSnapshot> {
         let state = self.state.lock().ok()?;
-        state.latest_snapshot.clone()
+        let active_id = state.active_tab_id.as_ref()?;
+        state.latest_snapshots.get(active_id).cloned()
     }
 
     pub fn current_snapshot_without_events(&self, max_chars: usize) -> Option<BrowserPageSnapshot> {
@@ -946,6 +981,10 @@ impl BrowserManager {
                 }
             }
             let rect = state.browser_rect;
+            state.page_loaded_signals.insert(
+                tab_id.clone(),
+                Arc::new((Mutex::new(false), Condvar::new())),
+            );
             state.tabs.push(BrowserTab {
                 id: tab_id.clone(),
                 url: url.to_string(),
@@ -990,7 +1029,7 @@ impl BrowserManager {
             }
         }
 
-        // 显示目标 WebView
+        // 显示目标 WebView（about:blank 标签可能没有 WebView，属于正常情况）
         if let Some(new_wv) = state.webviews.get(tab_id) {
             let _ = new_wv.set_position(LogicalPosition::new(rect.0, rect.1));
             let _ = new_wv.set_size(LogicalSize::new(rect.2, rect.3));
@@ -1001,7 +1040,7 @@ impl BrowserManager {
     }
 
     pub fn tab_close(&self, tab_id: &str) -> Result<(), String> {
-        let was_active = {
+        let (was_active, closed_pos) = {
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
             let pos = state
                 .tabs
@@ -1014,8 +1053,10 @@ impl BrowserManager {
             if let Some(webview) = state.webviews.remove(tab_id) {
                 let _ = webview.close();
             }
+            state.page_loaded_signals.remove(tab_id);
+            state.latest_snapshots.remove(tab_id);
             let was_active = state.active_tab_id.as_deref() == Some(tab_id);
-            was_active
+            (was_active, pos)
         };
 
         if was_active {
@@ -1030,12 +1071,12 @@ impl BrowserManager {
                 });
                 state.active_tab_id = Some(new_id);
             } else {
-                // 切换到相邻标签
-                let new_pos = 0;
+                // 切换到关闭位置处的相邻标签
+                let new_pos = closed_pos.min(state.tabs.len().saturating_sub(1));
                 let new_id = state.tabs[new_pos].id.clone();
                 let rect = state.browser_rect;
 
-                // 隐藏旧活跃（已在上面关闭），显示新活跃
+                // 显示新活跃标签的 WebView
                 if let Some(new_wv) = state.webviews.get(&new_id) {
                     let _ = new_wv.set_position(LogicalPosition::new(rect.0, rect.1));
                     let _ = new_wv.set_size(LogicalSize::new(rect.2, rect.3));
