@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 interface BrowserPanelProps {
   initialUrl?: string;
   currentUrl?: string;
+  onClose?: () => void;
 }
 
 interface TabInfo {
@@ -54,7 +55,7 @@ function formatTime(ts: number): string {
 const DEFAULT_URL = 'about:blank';
 const HISTORY_PAGE_SIZE = 20;
 
-export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
+export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelProps) {
   const [url, setUrl] = useState(initialUrl || '');
   const [tabs, setTabs] = useState<TabInfo[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
@@ -86,12 +87,13 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
     try {
       const result = await api.browserTabList();
       if (result.tabs.length === 0) {
-        // 标签列表为空时创建一个空标签
-        const tabId = await api.browserTabNew(DEFAULT_URL);
-        activeTabIdRef.current = tabId;
-        setActiveTabId(tabId);
+        // 所有 tab 已关闭，关闭浏览器面板
+        browserOpenedRef.current = false;
+        setTabs([]);
+        setActiveTabId(null);
+        activeTabIdRef.current = null;
         setUrl('');
-        setTabs([{ id: tabId, url: DEFAULT_URL, title: '' }]);
+        onClose?.();
       } else {
         setTabs(result.tabs);
         const activeId = result.active_tab_id || result.tabs[0].id;
@@ -100,7 +102,7 @@ export function BrowserPanel({ initialUrl, currentUrl }: BrowserPanelProps) {
         browserOpenedRef.current = true;
       }
     } catch { /* ignore */ }
-  }, []);
+  }, [onClose]);
 
   // 获取当前 tab 的历史
   const getCurrentHistory = useCallback((tabId: string | null): TabHistory => {

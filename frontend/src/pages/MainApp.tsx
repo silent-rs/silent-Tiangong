@@ -332,7 +332,7 @@ export function MainApp() {
               )}
 
               {showBrowser && (
-                <BrowserPanel initialUrl={browserUrl} currentUrl={browserUrl} />
+                <BrowserPanel initialUrl={browserUrl} currentUrl={browserUrl} onClose={() => setShowBrowser(false)} />
               )}
             </div>
           </main>

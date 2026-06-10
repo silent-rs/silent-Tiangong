@@ -1175,14 +1175,21 @@ impl BrowserManager {
         if was_active {
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
             if state.tabs.is_empty() {
-                // 创建空白标签（不创建 WebView，避免 about:blank 导致 wry panic）
-                let new_id = scru128::new().to_string();
-                state.tabs.push(BrowserTab {
-                    id: new_id.clone(),
-                    url: "about:blank".to_string(),
-                    title: String::new(),
-                });
-                state.active_tab_id = Some(new_id);
+                // 最后一个 tab 关闭，完全关闭浏览器
+                state
+                    .poll_stop
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                state
+                    .event_poll_stop
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                state.page_loaded_signals.clear();
+                state.latest_snapshots.clear();
+                state.last_known_url.clear();
+                state.last_known_text_signature.clear();
+                state.pending_events.clear();
+                state.active_tab_id = None;
+                state.tab_histories.clear();
+                state.tab_history_indices.clear();
             } else {
                 // 切换到关闭位置处的相邻标签
                 let new_pos = closed_pos.min(state.tabs.len().saturating_sub(1));
