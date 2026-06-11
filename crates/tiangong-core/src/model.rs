@@ -1356,7 +1356,106 @@ fn sanitize_provider_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     }
 
     flush_deferred_messages(&mut sanitized, &mut deferred_tool_contexts);
+
+    // 修复上下文截断导致的 tool_call/tool_result 配对不一致
+    sanitize_tool_call_pairing(&mut sanitized);
+
     sanitized
+}
+
+/// 确保消息序列中 tool_call 与 tool_result 一一配对。
+///
+/// 上下文压缩或截断可能在不安全的位置切断消息序列，导致：
+/// - 头部出现孤立的 tool result（对应的 assistant tool_call 被截掉了）
+/// - 尾部的 assistant 消息包含 tool_call 但没有后续的 tool result
+///
+/// Anthropic 等提供商会校验配对关系，不一致时直接拒绝请求。
+fn sanitize_tool_call_pairing(messages: &mut Vec<ChatMessage>) {
+    if messages.is_empty() {
+        return;
+    }
+
+    // 第一遍：收集所有 tool_call id
+    let mut valid_call_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for msg in messages.iter() {
+        for content in &msg.content {
+            if let LlmMessageContent::ToolCall(tc) = content {
+                valid_call_ids.insert(tc.id.clone());
+            }
+        }
+    }
+
+    // 第二遍：移除没有对应 tool_call 的 tool result（可能是截断残留）
+    for msg in messages.iter_mut() {
+        if msg.role != LlmMessageRole::Tool {
+            continue;
+        }
+        msg.content.retain(|content| {
+            if let LlmMessageContent::ToolResult(tr) = content {
+                valid_call_ids.contains(&tr.tool_call_id)
+            } else {
+                true
+            }
+        });
+    }
+
+    // 移除内容被清空的 tool 消息
+    messages.retain(|msg| {
+        if msg.role == LlmMessageRole::Tool {
+            !msg.content.is_empty()
+        } else {
+            true
+        }
+    });
+
+    // 第三遍：处理尾部 assistant 消息中有 tool_call 但无后续 tool_result 的情况
+    // 收集所有 tool_result 的 tool_call_id
+    let mut result_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for msg in messages.iter() {
+        for content in &msg.content {
+            if let LlmMessageContent::ToolResult(tr) = content {
+                result_ids.insert(tr.tool_call_id.clone());
+            }
+        }
+    }
+
+    // 从尾部 assistant 消息中移除没有对应 tool_result 的 tool_call
+    // 如果 assistant 消息只剩下 tool_call（没有文本），则整条移除
+    let mut i = messages.len();
+    while i > 0 {
+        i -= 1;
+        let msg = &mut messages[i];
+        if msg.role != LlmMessageRole::Assistant {
+            break;
+        }
+        let had_tool_calls = msg
+            .content
+            .iter()
+            .any(|c| matches!(c, LlmMessageContent::ToolCall(_)));
+        if !had_tool_calls {
+            break;
+        }
+
+        msg.content.retain(|content| {
+            if let LlmMessageContent::ToolCall(tc) = content {
+                result_ids.contains(&tc.id)
+            } else {
+                true
+            }
+        });
+
+        // 如果 assistant 消息被清空，移除整条
+        if msg.content.is_empty() {
+            messages.remove(i);
+        } else if !msg
+            .content
+            .iter()
+            .any(|c| matches!(c, LlmMessageContent::ToolCall(_)))
+        {
+            // 不再有 tool_call 了，不需要继续向前处理
+            break;
+        }
+    }
 }
 
 fn provider_message_tool_call_count(message: &ChatMessage) -> usize {
