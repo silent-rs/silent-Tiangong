@@ -339,7 +339,7 @@ pub(crate) fn inject_browser_content_to_session(
     if !force {
         let is_dup = session.messages.iter().rev().take(8).any(|msg| {
             msg.role == MessageRole::Tool
-                && msg.tool_name.as_deref() == Some("web_browse")
+                && msg.tool_name.as_deref() == Some("browser_data")
                 && msg.text_content().contains(url)
         });
         if is_dup {
