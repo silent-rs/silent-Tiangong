@@ -154,7 +154,9 @@ pub async fn browser_command_handler(
                         Ok(s) => s,
                         Err(e) => e.into_inner(),
                     };
-                    if s.webviews.is_empty() {
+                    if s.webviews.is_empty()
+                        || !s.visible.load(std::sync::atomic::Ordering::Relaxed)
+                    {
                         continue;
                     }
                 }
