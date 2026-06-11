@@ -42,6 +42,8 @@ pub struct BrowserState {
     pub poll_stop: Arc<std::sync::atomic::AtomicBool>,
     /// 事件消费线程停止信号
     pub event_poll_stop: Arc<std::sync::atomic::AtomicBool>,
+    /// 浏览器面板是否可见（不可见时跳过页面数据读取）
+    pub visible: Arc<std::sync::atomic::AtomicBool>,
     /// 已由后台事件线程读取、等待 Agent 消费的浏览器事件
     pub pending_events: Vec<BrowserEvent>,
     /// 标签列表
@@ -93,6 +95,7 @@ impl BrowserManager {
                 last_known_text_signature: String::new(),
                 poll_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 event_poll_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
                 pending_events: Vec::new(),
                 tabs: Vec::new(),
                 active_tab_id: None,
@@ -114,6 +117,20 @@ impl BrowserManager {
             .lock()
             .map(|s| !s.tabs.is_empty())
             .unwrap_or(false)
+    }
+
+    pub fn is_visible(&self) -> bool {
+        self.state
+            .lock()
+            .map(|s| s.visible.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(false)
+    }
+
+    pub fn set_visible(&self, visible: bool) {
+        if let Ok(s) = self.state.lock() {
+            s.visible
+                .store(visible, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     /// 为指定标签创建独立的 WebView 实例
@@ -356,6 +373,9 @@ impl BrowserManager {
                     }
                 }
                 state.browser_rect = (x, y, w, h);
+                state
+                    .visible
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 return Ok(());
             }
         }
@@ -396,6 +416,9 @@ impl BrowserManager {
             });
             state.active_tab_id = Some(tab_id);
             state.browser_rect = (x, y, w, h);
+            state
+                .visible
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
         self.start_url_poll(app, url);
@@ -431,6 +454,9 @@ impl BrowserManager {
             state.active_tab_id = None;
             state.tab_histories.clear();
             state.tab_history_indices.clear();
+            state
+                .visible
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(())
     }
@@ -446,6 +472,10 @@ impl BrowserManager {
             s.last_known_url = initial_url.to_string();
             s.poll_stop.clone()
         };
+        let visible = {
+            let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            s.visible.clone()
+        };
 
         std::thread::Builder::new()
             .name("browser-url-poll".into())
@@ -457,6 +487,9 @@ impl BrowserManager {
                     tick += 1;
                     if stop.load(std::sync::atomic::Ordering::Relaxed) {
                         break;
+                    }
+                    if !visible.load(std::sync::atomic::Ordering::Relaxed) {
+                        continue;
                     }
                     let current_url = {
                         let s = match state.lock() {
@@ -576,6 +609,9 @@ impl BrowserManager {
             let _ = wv.set_size(LogicalSize::new(0.0, 0.0));
             let _ = wv.set_position(LogicalPosition::new(-10000, -10000));
         }
+        state
+            .visible
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -609,6 +645,10 @@ impl BrowserManager {
             s.event_poll_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             s.event_poll_stop.clone()
         };
+        let visible = {
+            let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            s.visible.clone()
+        };
 
         std::thread::Builder::new()
             .name("browser-event-poll".into())
@@ -617,6 +657,9 @@ impl BrowserManager {
                     std::thread::sleep(std::time::Duration::from_millis(1000));
                     if stop.load(std::sync::atomic::Ordering::Relaxed) {
                         break;
+                    }
+                    if !visible.load(std::sync::atomic::Ordering::Relaxed) {
+                        continue;
                     }
 
                     let mgr = BrowserManager {
@@ -684,6 +727,8 @@ impl BrowserManager {
     /// 3. 当前活跃标签无 WebView → 创建 WebView
     /// 4. 正常导航当前活跃 WebView
     pub fn navigate_with_app(&self, app: &AppHandle<Wry>, url: &str) -> Result<(), String> {
+        // Agent 主动导航时恢复可见状态，使数据读取路径可用
+        self.set_visible(true);
         // 场景 1：浏览器完全未打开 → 在屏幕外创建，前端会通过 set_position 设置正确位置
         if !self.is_open() {
             if let Some((_, _, w, h)) = default_browser_rect(app) {
@@ -1027,6 +1072,9 @@ impl BrowserManager {
     }
 
     pub fn current_snapshot_without_events(&self, max_chars: usize) -> Option<BrowserPageSnapshot> {
+        if !self.is_visible() {
+            return None;
+        }
         let raw = self.eval_with_result(&format!(
             "(function(){{try{{var t=window.__tiangong_bridge.getFullText({max_chars});var a=window.__tiangong_bridge.annotation.getAnnotations();if(a&&a.count>0){{t.text+='\\n\\n[页面批注] '+JSON.stringify(a.annotations);}}return JSON.stringify(t);}}catch(e){{return ''}}}})()"
         ))?;
