@@ -28,7 +28,7 @@ export function AppSidebar() {
   };
 
   const content = (
-    <div className="flex flex-col h-full min-w-[var(--sidebar-width,16rem)]">
+    <div className="flex flex-col h-full min-h-0 min-w-[var(--sidebar-width,16rem)]">
       {/* 新建会话 */}
       <div className="p-2 shrink-0">
         <Button
@@ -43,7 +43,7 @@ export function AppSidebar() {
       </div>
 
       {/* 会话列表 */}
-      <ScrollArea className="flex-1 px-2">
+      <ScrollArea className="flex-1 min-h-0 px-2">
         <div className="space-y-1 py-1">
           {isLoadingSessions ? (
             <div className="px-3 py-2 text-sm text-muted-foreground">加载中...</div>
@@ -119,7 +119,7 @@ export function AppSidebar() {
 
   return (
     <aside
-      className="shrink-0 border-r bg-sidebar text-sidebar-foreground flex flex-col overflow-hidden transition-[width] duration-200 ease-linear"
+      className="shrink-0 min-h-0 border-r bg-sidebar text-sidebar-foreground flex flex-col overflow-hidden transition-[width] duration-200 ease-linear"
       style={{ width: open ? 'var(--sidebar-width, 16rem)' : '0px' }}
     >
       {content}
