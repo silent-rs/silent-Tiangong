@@ -9,40 +9,9 @@ use tracing::{error, info};
 use crate::command_protocol;
 use crate::output_processor;
 use crate::types::{contains_marker, PtyState, TerminalCommand};
+use crate::util::shell_quote;
 
 const DEFAULT_BUFFER_LINES: usize = 5000;
-
-fn shell_quote_cwd(s: &str) -> String {
-    if s.is_empty()
-        || s.contains(|c: char| {
-            c.is_whitespace()
-                || c == '\''
-                || c == '"'
-                || c == '\\'
-                || c == '$'
-                || c == '`'
-                || c == '!'
-                || c == '*'
-                || c == '?'
-                || c == '['
-                || c == ']'
-                || c == '('
-                || c == ')'
-                || c == '{'
-                || c == '}'
-                || c == '|'
-                || c == '&'
-                || c == ';'
-                || c == '<'
-                || c == '>'
-                || c == '~'
-        })
-    {
-        format!("'{}'", s.replace('\'', "'\\''"))
-    } else {
-        s.to_string()
-    }
-}
 
 pub struct TerminalManager {
     pub(crate) state: Arc<Mutex<TerminalState>>,
@@ -284,8 +253,10 @@ pub(crate) async fn spawn_command_loop(
                 }
                 if let Some(ref ps) = pty_state {
                     if let Ok(mut writer) = ps.writer.lock() {
-                        let quoted = shell_quote_cwd(&cwd);
-                        let _ = writer.write_all(format!("cd {}\n", quoted).as_bytes());
+                        let quoted = shell_quote(&cwd);
+                        // 用 `\r`（CR）而非 `\n`（LF）：PTY 线路规程只识别 CR 作为回车提交，
+                        // 发 LF 在 zsh ZLE 等场景下 cd 命令不会执行
+                        let _ = writer.write_all(format!("cd {}\r", quoted).as_bytes());
                         let _ = writer.flush();
                     }
                 }
@@ -373,7 +344,7 @@ pub(crate) async fn spawn_command_loop(
     info!(session_id = %session_id, "终端命令处理器退出");
 }
 
-pub(crate) fn start_pty(_session_id: &str, cwd: &str, shell: &str) -> anyhow::Result<PtyState> {
+pub(crate) fn start_pty(session_id: &str, cwd: &str, shell: &str) -> anyhow::Result<PtyState> {
     let pty_system = portable_pty::native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -387,6 +358,8 @@ pub(crate) fn start_pty(_session_id: &str, cwd: &str, shell: &str) -> anyhow::Re
     let mut cmd = CommandBuilder::new(shell);
     cmd.cwd(cwd);
     cmd.env("TERM", "xterm-256color");
+
+    tracing::debug!(session_id, cwd, shell, "正在启动 PTY 子进程");
 
     let child = pair
         .slave

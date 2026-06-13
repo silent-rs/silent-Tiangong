@@ -22,6 +22,7 @@ pub mod manager;
 pub mod output_processor;
 pub mod registry;
 pub mod types;
+pub mod util;
 
 /// 终端 Plugin 共享状态
 pub struct TerminalPluginState {
@@ -47,6 +48,8 @@ pub fn init(session_id: String, cwd: String) -> TauriPlugin<Wry> {
             commands::terminal_session_send_input,
             commands::terminal_session_recent_output,
             commands::terminal_session_info,
+            commands::terminal_session_status,
+            commands::terminal_list_statuses,
             commands::terminal_session_set_cwd,
             commands::terminal_session_resize,
             commands::terminal_session_reset,

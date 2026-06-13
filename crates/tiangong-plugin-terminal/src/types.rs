@@ -114,3 +114,14 @@ pub struct TerminalSessionInfo {
     pub shell: String,
     pub alive: bool,
 }
+
+/// 终端会话状态摘要（前端轮询用），含协作状态 phase
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalSessionStatus {
+    pub session_id: String,
+    pub alive: bool,
+    pub cwd: String,
+    pub shell: String,
+    /// 协作阶段：Idle / Running / Interactive / UserActive
+    pub phase: String,
+}

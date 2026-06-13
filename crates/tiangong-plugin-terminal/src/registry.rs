@@ -7,6 +7,7 @@ use tracing::{error, info};
 use crate::manager::{spawn_command_loop, TerminalManager};
 
 /// 单个 session 的 PTY 槽位
+#[derive(Clone)]
 pub struct SessionSlot {
     pub manager: Arc<TerminalManager>,
     pub cmd_tx: mpsc::Sender<crate::types::TerminalCommand>,
@@ -39,7 +40,7 @@ impl TerminalSessionRegistry {
     }
 
     /// 获取面板 session 的 slot（面板打开且 session 存在时返回）
-    pub fn get_panel_slot(&self) -> Option<Arc<SessionSlot>> {
+    pub fn get_panel_slot(&self) -> Option<SessionSlot> {
         let panel_id = self.panel_session.lock().unwrap().clone();
         panel_id.as_ref().and_then(|id| self.get_slot(id))
     }
@@ -95,17 +96,16 @@ impl TerminalSessionRegistry {
         true
     }
 
-    /// 获取指定 session 的 slot
-    pub fn get_slot(&self, session_id: &str) -> Option<Arc<SessionSlot>> {
-        // Slot 内部字段本身是 Arc，但这里返回一个包裹以便使用
-        // 实际上直接返回引用即可，但 Tauri 命令是 async 的需要所有权
+    /// 获取指定 session 的 slot。
+    ///
+    /// `SessionSlot` 内部字段（manager、cmd_tx、activity）本身已是 `Arc`/`Sender`，
+    /// clone 开销很低，因此直接返回值而非再包一层 `Arc`。
+    pub fn get_slot(&self, session_id: &str) -> Option<SessionSlot> {
         let slots = self.slots.lock().unwrap();
-        slots.get(session_id).map(|s| {
-            Arc::new(SessionSlot {
-                manager: s.manager.clone(),
-                cmd_tx: s.cmd_tx.clone(),
-                activity: s.activity.clone(),
-            })
+        slots.get(session_id).map(|s| SessionSlot {
+            manager: s.manager.clone(),
+            cmd_tx: s.cmd_tx.clone(),
+            activity: s.activity.clone(),
         })
     }
 
@@ -121,5 +121,23 @@ impl TerminalSessionRegistry {
             drop(slot);
             info!(session_id, "交互 PTY 已销毁");
         }
+    }
+
+    /// 列出所有 session 的状态摘要（含协作 phase）
+    pub fn list_statuses(&self) -> Vec<crate::types::TerminalSessionStatus> {
+        let slots = self.slots.lock().unwrap();
+        slots
+            .iter()
+            .map(|(id, slot)| {
+                let manager = &slot.manager;
+                crate::types::TerminalSessionStatus {
+                    session_id: id.clone(),
+                    alive: manager.is_alive(),
+                    cwd: manager.cwd(),
+                    shell: manager.shell(),
+                    phase: slot.activity.busy_state().phase_label().to_string(),
+                }
+            })
+            .collect()
     }
 }

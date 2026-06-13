@@ -98,3 +98,15 @@ impl TerminalActivityTracker {
             .unwrap_or(false)
     }
 }
+
+impl TerminalBusyState {
+    /// 转为前端可读的 phase 字符串
+    pub(crate) fn phase_label(&self) -> &'static str {
+        match self {
+            TerminalBusyState::Idle => "Idle",
+            TerminalBusyState::UserActive => "UserActive",
+            TerminalBusyState::AgentRunning { .. } => "Running",
+            TerminalBusyState::AgentInteractive { .. } => "Interactive",
+        }
+    }
+}

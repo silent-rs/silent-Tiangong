@@ -1,9 +1,7 @@
-use std::sync::Arc;
-
 use tauri::State;
 
 use crate::registry::SessionSlot;
-use crate::types::TerminalSessionInfo;
+use crate::types::{TerminalSessionInfo, TerminalSessionStatus};
 use crate::TerminalPluginState;
 
 // ===== 系统 PTY 命令（agent 工具执行用）=====
@@ -128,7 +126,7 @@ pub async fn terminal_resize(
 fn get_slot(
     session_id: &str,
     state: &State<'_, TerminalPluginState>,
-) -> Result<Arc<SessionSlot>, String> {
+) -> Result<SessionSlot, String> {
     state
         .registry
         .get_slot(session_id)
@@ -198,6 +196,29 @@ pub async fn terminal_session_info(
         shell: manager.shell(),
         alive: manager.is_alive(),
     })
+}
+
+#[tauri::command]
+pub async fn terminal_session_status(
+    session_id: String,
+    state: State<'_, TerminalPluginState>,
+) -> Result<TerminalSessionStatus, String> {
+    let slot = get_slot(&session_id, &state)?;
+    let manager = &slot.manager;
+    Ok(TerminalSessionStatus {
+        session_id: manager.session_id(),
+        alive: manager.is_alive(),
+        cwd: manager.cwd(),
+        shell: manager.shell(),
+        phase: slot.activity.busy_state().phase_label().to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn terminal_list_statuses(
+    state: State<'_, TerminalPluginState>,
+) -> Result<Vec<TerminalSessionStatus>, String> {
+    Ok(state.registry.list_statuses())
 }
 
 #[tauri::command]

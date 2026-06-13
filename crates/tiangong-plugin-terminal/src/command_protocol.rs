@@ -20,6 +20,51 @@ fn send_to_pty(writer: &mut Box<dyn std::io::Write + Send>, input: &str) -> anyh
     Ok(())
 }
 
+/// 把 `total_lines_pushed` 轨道值换算为环形缓冲区当前索引。
+/// 环形缓冲区会从头部淘汰旧行，因此越早推入的行对应索引越小；
+/// 若该时刻的行已被淘汰则返回 0（从缓冲区开头兜底）。
+fn buf_idx_from_pushed(state: &crate::manager::TerminalState, pushed: usize) -> usize {
+    let total = state.total_lines_pushed;
+    if pushed >= total {
+        0
+    } else {
+        let offset = total - pushed;
+        state.output_buffer.len().saturating_sub(offset)
+    }
+}
+
+/// 系统 PTY 启动失败或退出后的恢复：尝试重新拉起一次。
+/// 成功时重置输出缓冲并启动输出读取线程，返回新的 PtyState；失败返回 None。
+fn ensure_system_pty(manager: &Arc<TerminalManager>, app: &tauri::AppHandle) -> Option<PtyState> {
+    let session_id = manager.session_id();
+    let cwd = manager.cwd();
+    let shell = manager.shell();
+    tracing::info!(session_id = %session_id, "系统 PTY 不可用，尝试重新启动");
+    match crate::manager::start_pty(&session_id, &cwd, &shell) {
+        Ok(new_ps) => {
+            manager.set_alive(true);
+            {
+                let mut state = manager.state.lock().unwrap();
+                state.output_buffer.clear();
+                state.last_read_line = 0;
+                state.current_line.clear();
+            }
+            crate::output_processor::spawn_output_reader(
+                new_ps.reader.clone(),
+                manager.clone_state(),
+                app.clone(),
+                session_id.clone(),
+            );
+            tracing::info!(session_id = %session_id, "系统 PTY 已重新启动");
+            Some(new_ps)
+        }
+        Err(e) => {
+            tracing::error!(session_id = %session_id, error = %e, "系统 PTY 重新启动失败");
+            None
+        }
+    }
+}
+
 fn collect_command_output(
     manager: &Arc<TerminalManager>,
     start_marker: &str,
@@ -27,6 +72,9 @@ fn collect_command_output(
     cwd_marker: &str,
     rc_marker: &str,
     include_current_line: bool,
+    // 未命中 start marker 时的兜底起点（环形缓冲区索引）。
+    // 传 None 表示不限制（仅用于无法确定边界的场景）。
+    fallback_start_idx: Option<usize>,
 ) -> (String, bool) {
     let state = manager.state.lock().unwrap();
     let mut in_range = false;
@@ -48,9 +96,12 @@ fn collect_command_output(
         }
     }
     if !in_range {
+        // 兜底：start marker 未命中（可能被环形缓冲区淘汰）。
+        // 仅返回本次命令开始后新增的行，避免上次命令的残留输出混入。
         lines.clear();
-        for line in &state.output_buffer {
-            if !contains_marker(line) {
+        let start = fallback_start_idx.unwrap_or(0);
+        for line in state.output_buffer.iter().skip(start) {
+            if !contains_marker(line) && !line.contains(cwd_marker) && !line.contains(rc_marker) {
                 lines.push(line.clone());
             }
         }
@@ -85,7 +136,14 @@ fn looks_like_interactive_prompt(text: &str) -> bool {
     if line.ends_with('$') || line.ends_with('%') || line.ends_with('#') {
         return true;
     }
-    if line.ends_with('?') {
+    // 以 `?` 结尾的行：仅当它是短行（≤ 80 字符，排除正常程序输出中的疑问句）
+    // 或包含明确的 yes/no 提示词时才判定为交互提示，避免把普通输出里的问句误判。
+    if line.ends_with('?')
+        && (line.chars().count() <= 80
+            || lower.contains("yes/no")
+            || lower.contains("(y/n")
+            || lower.contains("[y/n"))
+    {
         return true;
     }
 
@@ -151,16 +209,26 @@ pub(crate) async fn handle_exec(
     let ps = match pty_state {
         Some(ps) => ps,
         None => {
-            let _ = response_tx.send(TerminalExecResponse {
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: "终端会话不可用".to_string(),
-                timed_out: false,
-                cwd_after: manager.cwd(),
-                interrupted_by_user: false,
-                interactive_mode: false,
-            });
-            return;
+            // 系统 PTY 启动失败或已退出的恢复路径：尝试重新拉起一次再执行，
+            // 避免用户全程只能得到"终端会话不可用"。重试仍失败才返回错误。
+            match ensure_system_pty(manager, app) {
+                Some(new_ps) => {
+                    *pty_state = Some(new_ps);
+                    pty_state.as_mut().expect("PTY 刚写入，必然存在")
+                }
+                None => {
+                    let _ = response_tx.send(TerminalExecResponse {
+                        exit_code: -1,
+                        stdout: String::new(),
+                        stderr: "终端会话不可用".to_string(),
+                        timed_out: false,
+                        cwd_after: manager.cwd(),
+                        interrupted_by_user: false,
+                        interactive_mode: false,
+                    });
+                    return;
+                }
+            }
         }
     };
 
@@ -219,6 +287,11 @@ pub(crate) async fn handle_exec(
         let state = manager.state.lock().unwrap();
         state.total_lines_pushed
     };
+
+    // 兜底起点：未命中 start marker 时，仅收集本命令发出后新增的行，
+    // 避免环形缓冲区中上次命令的残留输出混入。环形缓冲区会从头部淘汰，
+    // 因此这里用 (当前累计行 - 命令起点累计行) 反推缓冲区索引。
+    let fallback_start_pushed = last_seen_pushed;
 
     // 发送组合命令：start marker → 用户命令（禁用 pager）→ 捕获退出码 → pwd → end marker
     // PAGER=cat 禁用所有命令的分页器，GIT_PAGER=cat 兼容 git 特有变量
@@ -311,6 +384,10 @@ pub(crate) async fn handle_exec(
 
         if let Some(collect) = result {
             // 收集 start marker 和 end marker 之间的输出
+            let fallback_idx = {
+                let state = manager.state.lock().unwrap();
+                buf_idx_from_pushed(&state, fallback_start_pushed)
+            };
             let (stdout_text, interrupted) = collect_command_output(
                 manager,
                 &start_marker,
@@ -318,6 +395,7 @@ pub(crate) async fn handle_exec(
                 &cwd_marker,
                 &rc_marker,
                 false,
+                Some(fallback_idx),
             );
 
             let cwd = if collect.cwd.is_empty() {
@@ -347,6 +425,10 @@ pub(crate) async fn handle_exec(
 
         // 兜底交互检测：start marker 已出现但 end marker 未出现，且终端已经有可见输出。
         if let Some(smt) = start_marker_time {
+            let fallback_idx = {
+                let state = manager.state.lock().unwrap();
+                buf_idx_from_pushed(&state, fallback_start_pushed)
+            };
             let (stdout_text, interrupted) = collect_command_output(
                 manager,
                 &start_marker,
@@ -354,6 +436,7 @@ pub(crate) async fn handle_exec(
                 &cwd_marker,
                 &rc_marker,
                 true,
+                Some(fallback_idx),
             );
             if stdout_text != last_visible_snapshot {
                 last_visible_snapshot = stdout_text.clone();
@@ -405,16 +488,22 @@ pub(crate) async fn handle_exec(
             }
             // 等待短暂时间让 shell 回到 prompt
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            // 再发一次 Ctrl+C 并发送换行确保 shell 回到干净状态
+            // 再发一次 Ctrl+C 并发送回车确保 shell 回到干净状态
+            // 注意用 `\r`（CR）而非 `\n`：PTY 线路规程只识别 CR 作为回车提交，
+            // 发 LF 在 zsh ZLE / 交互程序中无效，可能导致 shell 卡在未提交状态
             {
                 if let Ok(mut writer) = ps.writer.lock() {
-                    let _ = writer.write_all(b"\x03\n");
+                    let _ = writer.write_all(b"\x03\r");
                     let _ = writer.flush();
                 }
             }
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
             // 收集已捕获的输出
+            let fallback_idx = {
+                let state = manager.state.lock().unwrap();
+                buf_idx_from_pushed(&state, fallback_start_pushed)
+            };
             let (stdout_text, interrupted) = collect_command_output(
                 manager,
                 &start_marker,
@@ -422,6 +511,7 @@ pub(crate) async fn handle_exec(
                 &cwd_marker,
                 &rc_marker,
                 true,
+                Some(fallback_idx),
             );
 
             let tracker_interrupted = activity.map(|t| t.take_user_intervened()).unwrap_or(false);
@@ -520,12 +610,15 @@ pub(crate) async fn handle_exec_interactive(
     // 等待初始输出
     tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
 
+    // 收集本次命令后的输出，过滤掉内部 marker（start/end/cwd/rc），
+    // 避免上一次 exec 残留的 marker 行泄漏到交互输出中
     let stdout_text = {
         let state = manager.state.lock().unwrap();
         state
             .output_buffer
             .iter()
             .skip(record_start)
+            .filter(|line| !contains_marker(line))
             .cloned()
             .collect::<Vec<_>>()
             .join("\n")
@@ -540,4 +633,125 @@ pub(crate) async fn handle_exec_interactive(
         interrupted_by_user: false,
         interactive_mode: true,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_manager_with_lines(lines: &[&str]) -> Arc<TerminalManager> {
+        let manager = Arc::new(TerminalManager::new("test".to_string(), "/tmp".to_string()));
+        {
+            let mut state = manager.state.lock().unwrap();
+            for line in lines {
+                crate::manager::push_output(&mut state, line.to_string());
+            }
+        }
+        manager
+    }
+
+    #[test]
+    fn collect_extracts_range_between_markers() {
+        let manager = make_manager_with_lines(&[
+            "old output",
+            "__TIANGONG_START_abc__",
+            "hello",
+            "world",
+            "__TIANGONG_CWD_abc__/tmp",
+            "__TIANGONG_RC_abc__0",
+            "__TIANGONG_END_abc__",
+        ]);
+        let (out, interrupted) = collect_command_output(
+            &manager,
+            "__TIANGONG_START_abc__",
+            "__TIANGONG_END_abc__",
+            "__TIANGONG_CWD_abc__",
+            "__TIANGONG_RC_abc__",
+            false,
+            None,
+        );
+        assert_eq!(out, "hello\nworld");
+        assert!(!interrupted);
+    }
+
+    #[test]
+    fn collect_detects_interrupt_in_range() {
+        let manager = make_manager_with_lines(&[
+            "__TIANGONG_START_abc__",
+            "running",
+            "^C",
+            "__TIANGONG_END_abc__",
+        ]);
+        let (_, interrupted) = collect_command_output(
+            &manager,
+            "__TIANGONG_START_abc__",
+            "__TIANGONG_END_abc__",
+            "__TIANGONG_CWD_abc__",
+            "__TIANGONG_RC_abc__",
+            false,
+            None,
+        );
+        assert!(interrupted);
+    }
+
+    #[test]
+    fn collect_fallback_respects_start_idx() {
+        // 缓冲区：[旧行, 新行1, 新行2]，start marker 缺失。
+        // fallback_start_idx=1 时只应返回"新行1/新行2"，不含旧行。
+        let manager = make_manager_with_lines(&["old residual", "new line 1", "new line 2"]);
+        let (out, _) = collect_command_output(
+            &manager,
+            "__TIANGONG_START_missing__",
+            "__TIANGONG_END_missing__",
+            "__TIANGONG_CWD_missing__",
+            "__TIANGONG_RC_missing__",
+            false,
+            Some(1),
+        );
+        assert_eq!(out, "new line 1\nnew line 2");
+    }
+
+    #[test]
+    fn collect_fallback_without_idx_returns_all() {
+        let manager = make_manager_with_lines(&["old", "new"]);
+        let (out, _) = collect_command_output(
+            &manager,
+            "__TIANGONG_START_missing__",
+            "__TIANGONG_END_missing__",
+            "__TIANGONG_CWD_missing__",
+            "__TIANGONG_RC_missing__",
+            false,
+            None,
+        );
+        assert_eq!(out, "old\nnew");
+    }
+
+    #[test]
+    fn interactive_prompt_matches_shell_prompts() {
+        assert!(looks_like_interactive_prompt("user@host:~$"));
+        assert!(looks_like_interactive_prompt(">>> "));
+        assert!(looks_like_interactive_prompt("Password:"));
+        assert!(looks_like_interactive_prompt("Continue? [y/n] "));
+    }
+
+    #[test]
+    fn interactive_prompt_short_question_matches() {
+        // 短问句（≤ 80 字符）视为交互提示
+        assert!(looks_like_interactive_prompt("Proceed with installation?"));
+    }
+
+    #[test]
+    fn interactive_prompt_long_question_does_not_match() {
+        // 长疑问句（> 80 字符）不应误判为交互提示
+        let long = "这是一段非常长的程序输出文字".repeat(10) + "?";
+        assert!(!looks_like_interactive_prompt(&long));
+    }
+
+    #[test]
+    fn interactive_prompt_plain_output_does_not_match() {
+        assert!(!looks_like_interactive_prompt(
+            "Build completed successfully"
+        ));
+        assert!(!looks_like_interactive_prompt(""));
+    }
 }

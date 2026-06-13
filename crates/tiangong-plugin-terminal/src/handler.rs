@@ -7,43 +7,12 @@ use tokio::sync::mpsc;
 
 use crate::registry::TerminalSessionRegistry;
 use crate::types::TerminalCommand;
+use crate::util::shell_quote;
 
 const OUTPUT_THRESHOLD: usize = 2000;
 const TERMINAL_INPUT_DEFAULT_WAIT_MS: u64 = 300;
 const TERMINAL_INPUT_DEFAULT_OUTPUT_LINES: usize = 80;
 const TERMINAL_INPUT_MAX_WAIT_MS: u64 = 5_000;
-
-fn shell_quote(s: &str) -> String {
-    if s.is_empty()
-        || s.contains(|c: char| {
-            c.is_whitespace()
-                || c == '\''
-                || c == '"'
-                || c == '\\'
-                || c == '$'
-                || c == '`'
-                || c == '!'
-                || c == '*'
-                || c == '?'
-                || c == '['
-                || c == ']'
-                || c == '('
-                || c == ')'
-                || c == '{'
-                || c == '}'
-                || c == '|'
-                || c == '&'
-                || c == ';'
-                || c == '<'
-                || c == '>'
-                || c == '~'
-        })
-    {
-        format!("'{}'", s.replace('\'', "'\\''"))
-    } else {
-        s.to_string()
-    }
-}
 
 /// 将原始 cmd + args 格式化为终端可执行的命令字符串
 fn format_command(cmd: &str, args: &[String]) -> String {
