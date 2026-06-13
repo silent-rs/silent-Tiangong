@@ -8,7 +8,7 @@ import { BrowserPanel } from '@/components/BrowserPanel';
 import { ensureDesktopNotificationPermission } from '@/utils/desktopNotification';
 import { useUpdateCheck } from '@/hooks/useUpdateCheck';
 import type { UnlistenFn } from '@tauri-apps/api/event';
-import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
+import { getCurrentWindow, LogicalSize, currentMonitor } from '@tauri-apps/api/window';
 
 /** 根据窗口逻辑高度计算 4:3 浏览器宽度 */
 function calcBrowserWidth(logicalHeight: number): number {
@@ -30,6 +30,48 @@ const SIDEBAR_WIDTH = 256;
 
 /** 主内容在打开侧边栏后保留的最小可用宽度 */
 const MIN_CONTENT_WIDTH_WITH_SIDEBAR = 400;
+
+/** 屏幕工作区四周保留的边距，避免初始窗口贴边 */
+const SCREEN_EDGE_MARGIN = 32;
+
+/** 启动时裁剪窗口的最小高度兜底 */
+const MIN_INITIAL_HEIGHT = 480;
+
+/** 启动时按当前屏幕工作区裁剪窗口：仅当默认/上次的窗口尺寸超出屏幕可视区时才缩小 */
+async function fitWindowToScreen(
+  lock: () => void,
+  unlock: () => void,
+  onNarrow?: (logicalW: number) => void,
+): Promise<void> {
+  try {
+    const appWindow = getCurrentWindow();
+    const [monitor, scaleFactor, innerSize] = await Promise.all([
+      currentMonitor(),
+      appWindow.scaleFactor(),
+      appWindow.innerSize(),
+    ]);
+    if (!monitor) return;
+
+    const monitorW = monitor.size.width / scaleFactor;
+    const monitorH = monitor.size.height / scaleFactor;
+    const maxW = Math.max(MIN_CHAT_WIDTH, monitorW - SCREEN_EDGE_MARGIN * 2);
+    const maxH = Math.max(MIN_INITIAL_HEIGHT, monitorH - SCREEN_EDGE_MARGIN * 2);
+
+    let logicalW = innerSize.width / scaleFactor;
+    let logicalH = innerSize.height / scaleFactor;
+    let changed = false;
+    if (logicalW > maxW) { logicalW = maxW; changed = true; }
+    if (logicalH > maxH) { logicalH = maxH; changed = true; }
+    if (!changed) return;
+
+    lock();
+    await appWindow.setSize(new LogicalSize(logicalW, logicalH));
+    unlock();
+    onNarrow?.(logicalW);
+  } catch (error) {
+    console.warn('适配窗口到屏幕失败:', error);
+  }
+}
 
 /** 扩展窗口以容纳浏览器面板：对话区缩至最小宽度 + 浏览器面板宽度 */
 async function expandWindowForBrowser(lock?: () => void, unlock?: () => void) {
@@ -184,6 +226,13 @@ export function MainApp() {
   useEffect(() => {
     ensureDesktopNotificationPermission().catch(console.warn);
 
+    // 启动时按当前屏幕工作区裁剪初始窗口，避免低分辨率屏幕上窗口超出可视区
+    fitWindowToScreen(lockResize, unlockResize, (logicalW) => {
+      if (logicalW <= SIDEBAR_RESTORE_THRESHOLD) {
+        setSidebarOpenByLayout(false);
+      }
+    }).catch(console.warn);
+
     loadSessions();
 
     const flushSnapshot = () => {
@@ -302,7 +351,7 @@ export function MainApp() {
       window.removeEventListener('tiangong:open-browser', onOpenBrowser);
       unlistenRef.current?.();
     };
-  }, [setSidebarOpenByLayout, openBrowserPanel]);
+  }, [setSidebarOpenByLayout, openBrowserPanel, lockResize, unlockResize]);
 
   return (
     <SidebarProvider open={sidebarOpen} onOpenChange={handleSidebarChange}>
