@@ -92,6 +92,7 @@ impl LocalToolExecutor {
 
         // 提取 LLM 指定的超时（在 validate 之前，避免被当成路径参数）
         let timeout_ms = extract_timeout_meta(&mut args).unwrap_or_else(command_timeout_ms);
+        let interactive = extract_interactive_meta(&mut args);
 
         // 信任模式下跳过命令白名单和路径安全检查
         if !self.is_full_trust() {
@@ -104,6 +105,19 @@ impl LocalToolExecutor {
                 validate_command_args_in_allowed_roots(&cmd, &args, &effective_cwd)?;
             }
         }
+
+        // 校验通过后，有 PTY provider 则走终端执行（输出出现在嵌入式终端面板）
+        if let Some(provider) = self.terminal_provider() {
+            return self.run_command_via_pty(
+                provider,
+                &cmd,
+                &args,
+                &effective_cwd,
+                timeout_ms,
+                interactive,
+            );
+        }
+
         let env_allowlist = command_env_allowlist();
         let runtime_env = self.runtime_env();
         let file_env = load_local_env(&effective_cwd);
@@ -152,6 +166,70 @@ impl LocalToolExecutor {
             execution: None,
         })
     }
+
+    /// 通过 PTY 执行命令（校验已通过）。
+    ///
+    /// 与独立子进程不同，PTY 路径会把命令输出回显到嵌入式终端面板，
+    /// 让用户能看到 agent 正在做什么。命令白名单/路径校验已在 `run_command` 中完成。
+    ///
+    /// cwd 处理：`exec_command` trait 方法不携带 cwd，因此当 `effective_cwd`
+    /// 与终端当前 cwd 不同时，把命令包装为 `cd <cwd> && <cmd> <args>`，
+    /// 确保 agent 指定的工作目录被尊重（修复集成分支丢失 cwd 的缺陷）。
+    fn run_command_via_pty(
+        &self,
+        provider: &std::sync::Arc<dyn crate::terminal_trait::TerminalProvider>,
+        cmd: &str,
+        args: &[String],
+        effective_cwd: &std::path::Path,
+        timeout_ms: u64,
+        interactive: bool,
+    ) -> Result<ToolResult> {
+        let timeout_secs = if timeout_ms > 0 {
+            Some(timeout_ms / 1000)
+        } else {
+            None
+        };
+
+        let result = if interactive {
+            exec_via_pty_interactive(provider, cmd, args, effective_cwd, 3)?
+        } else {
+            exec_via_pty(provider, cmd, args, effective_cwd, timeout_secs)?
+        };
+
+        match result {
+            Some(r) => {
+                let stdout = truncate_output(&r.stdout);
+                let stderr = if r.interactive_mode {
+                    let mut s = truncate_output(&r.stderr);
+                    s.push_str(
+                        "\n[提示] 命令已进入交互模式，可使用 terminal_input 发送键盘输入（如 \\x03 发送 Ctrl+C），terminal_output 查看终端输出",
+                    );
+                    s
+                } else {
+                    truncate_output(&r.stderr)
+                };
+                let ok = !r.timed_out && (r.interactive_mode || r.exit_code == 0);
+                let summary = if r.interactive_mode {
+                    format!("命令已进入交互模式：{cmd}")
+                } else if ok {
+                    format!("命令执行成功：{cmd}")
+                } else if r.timed_out {
+                    format!("命令执行超时：{cmd}")
+                } else {
+                    format!("命令执行失败：{cmd} (exit_code={})", r.exit_code)
+                };
+                Ok(ToolResult {
+                    ok,
+                    summary,
+                    stdout,
+                    stderr,
+                    exit_code: r.exit_code,
+                    execution: None,
+                })
+            }
+            None => Err(anyhow!("终端会话不可用")),
+        }
+    }
 }
 
 fn extract_cwd_meta(args: &mut Vec<String>) -> Option<String> {
@@ -165,6 +243,20 @@ fn extract_cwd_meta(args: &mut Vec<String>) -> Option<String> {
         }
     });
     cwd
+}
+
+const INTERNAL_INTERACTIVE: &str = "__tiangong_interactive__";
+
+/// 从参数列表中提取 __tiangong_interactive__ 元数据，决定是否走交互式 PTY 执行
+fn extract_interactive_meta(args: &mut Vec<String>) -> bool {
+    let idx = args.iter().position(|a| a == INTERNAL_INTERACTIVE);
+    match idx {
+        Some(i) => {
+            args.remove(i);
+            true
+        }
+        None => false,
+    }
 }
 
 fn load_local_env(cwd: &Path) -> Vec<(String, String)> {
@@ -328,5 +420,152 @@ async fn exec_command(
         Ok(timeout(Duration::from_millis(timeout_ms), command.output()).await)
     } else {
         Ok(Ok(command.output().await))
+    }
+}
+
+// ===== PTY 路由辅助：校验通过后把命令经嵌入式终端执行 =====
+
+/// 需要单引号包裹的 shell 元字符集合（含空白、引号、转义、通配、控制操作符等）。
+///
+/// 用 `&str::contains` 表达，避免在 `matches!(c, '"' | '\\' | ...)` 里写
+/// 带单引号/反斜杠的字符字面量——这类字面量在编辑往返中易被破坏。
+const SHELL_METACHARS: &str = " \t\n\r\"$`!*?[](){}|&;<>~'\\";
+
+/// 判断字符是否为需要单引号包裹的 shell 元字符
+fn is_shell_metachar(c: char) -> bool {
+    c.is_whitespace() || SHELL_METACHARS.contains(c)
+}
+
+/// 对单个 shell 参数做单引号转义（与终端插件 shell_quote 一致）
+fn shell_quote(s: &str) -> String {
+    if s.is_empty() || s.contains(is_shell_metachar) {
+        let escaped = s.replace('\'', "'\\''");
+        format!("'{}'", escaped)
+    } else {
+        s.to_string()
+    }
+}
+
+/// 将 `cd <cwd> && <cmd> <args>` 包装为一条命令字符串，仅在 cwd 与终端
+/// 当前 cwd 不同时包装。返回 (命令字符串, 用于 provider 的 args)。
+fn build_pty_command_with_cwd(
+    provider: &std::sync::Arc<dyn crate::terminal_trait::TerminalProvider>,
+    cmd: &str,
+    args: &[String],
+    effective_cwd: &Path,
+) -> (String, Vec<String>) {
+    // 判断是否需要切到 effective_cwd：解析 PTY 当前 cwd，不同则前置 cd。
+    let current = pty_current_cwd_blocking(provider);
+    let need_cd = match (current.as_deref(), effective_cwd.to_str()) {
+        (Some(cur), Some(want)) => !cur
+            .trim_end_matches('/')
+            .eq_ignore_ascii_case(want.trim_end_matches('/')),
+        (None, Some(_)) => true,
+        _ => false,
+    };
+
+    if need_cd {
+        // 包装成单条 shell 命令：cd <cwd> && <cmd> <args>
+        let mut parts = vec![format!(
+            "cd {}",
+            shell_quote(&effective_cwd.to_string_lossy())
+        )];
+        parts.push(cmd.to_string());
+        for arg in args {
+            parts.push(shell_quote(arg));
+        }
+        (parts.join(" && "), Vec::new())
+    } else {
+        (cmd.to_string(), args.to_vec())
+    }
+}
+
+/// 阻塞读取 PTY 当前 cwd（用于决定是否需要前置 cd）
+fn pty_current_cwd_blocking(
+    provider: &std::sync::Arc<dyn crate::terminal_trait::TerminalProvider>,
+) -> Option<String> {
+    let handle = tokio::runtime::Handle::try_current();
+    match handle {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| h.block_on(provider.current_cwd()))
+        }
+        _ => std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let rt = TokioRuntimeBuilder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("初始化 PTY cwd 读取运行时失败");
+                    rt.block_on(provider.current_cwd())
+                })
+                .join()
+                .expect("PTY cwd 读取线程 panic")
+        }),
+    }
+}
+
+/// 通过 PTY 执行命令（非交互）
+fn exec_via_pty(
+    provider: &std::sync::Arc<dyn crate::terminal_trait::TerminalProvider>,
+    cmd: &str,
+    args: &[String],
+    effective_cwd: &Path,
+    timeout_secs: Option<u64>,
+) -> anyhow::Result<Option<crate::terminal_trait::TerminalExecResult>> {
+    let (pty_cmd, pty_args) = build_pty_command_with_cwd(provider, cmd, args, effective_cwd);
+    let provider = provider.clone();
+
+    let handle = tokio::runtime::Handle::try_current();
+    match handle {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            Ok(tokio::task::block_in_place(|| {
+                h.block_on(provider.exec_command(&pty_cmd, &pty_args, timeout_secs))
+            }))
+        }
+        _ => Ok(std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let rt = TokioRuntimeBuilder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("初始化 PTY 执行运行时失败");
+                    rt.block_on(provider.exec_command(&pty_cmd, &pty_args, timeout_secs))
+                })
+                .join()
+                .expect("PTY 执行线程 panic")
+        })),
+    }
+}
+
+/// 通过 PTY 交互式执行命令（不使用 marker，直接发送并等待初始输出）
+fn exec_via_pty_interactive(
+    provider: &std::sync::Arc<dyn crate::terminal_trait::TerminalProvider>,
+    cmd: &str,
+    args: &[String],
+    effective_cwd: &Path,
+    wait_secs: u64,
+) -> anyhow::Result<Option<crate::terminal_trait::TerminalExecResult>> {
+    let (pty_cmd, pty_args) = build_pty_command_with_cwd(provider, cmd, args, effective_cwd);
+    let provider = provider.clone();
+
+    let handle = tokio::runtime::Handle::try_current();
+    match handle {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            Ok(tokio::task::block_in_place(|| {
+                h.block_on(provider.exec_command_interactive(&pty_cmd, &pty_args, wait_secs))
+            }))
+        }
+        _ => Ok(std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let rt = TokioRuntimeBuilder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("初始化 PTY 执行运行时失败");
+                    rt.block_on(provider.exec_command_interactive(&pty_cmd, &pty_args, wait_secs))
+                })
+                .join()
+                .expect("PTY 交互执行线程 panic")
+        })),
     }
 }

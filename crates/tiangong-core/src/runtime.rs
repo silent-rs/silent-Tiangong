@@ -69,7 +69,7 @@ pub struct RuntimeEngine {
     lite_client: Option<SingleProviderClient>,
     /// 多模态模型客户端（由主模型通过附件解析工具按需调用）
     multimodal_client: Option<SingleProviderClient>,
-    tool_executor: LocalToolExecutor,
+    tool_executor: Arc<Mutex<LocalToolExecutor>>,
     pub context_limit: usize,
     agent_config: AgentConfig,
     models_config: ModelsConfig,
@@ -123,7 +123,9 @@ impl RuntimeEngine {
             client,
             lite_client: None,
             multimodal_client: None,
-            tool_executor: LocalToolExecutor::from_agent_config(&agent_config),
+            tool_executor: Arc::new(Mutex::new(LocalToolExecutor::from_agent_config(
+                &agent_config,
+            ))),
             context_limit,
             agent_config,
             models_config: ModelsConfig::default(),
@@ -155,8 +157,10 @@ impl RuntimeEngine {
             client,
             lite_client: None,
             multimodal_client: None,
-            tool_executor: LocalToolExecutor::from_agent_config(&agent_config)
-                .with_shared_trust_mode(shared_trust_mode),
+            tool_executor: Arc::new(Mutex::new(
+                LocalToolExecutor::from_agent_config(&agent_config)
+                    .with_shared_trust_mode(shared_trust_mode),
+            )),
             context_limit,
             agent_config,
             models_config: ModelsConfig::default(),
@@ -240,12 +244,16 @@ impl RuntimeEngine {
     }
 
     /// 注入终端能力（GUI 模式下由 Tauri Plugin 提供）
+    /// 同步更新 tool_executor 使 run_command 校验后走 PTY 执行
     pub fn set_terminal_provider(
         &self,
         provider: Arc<dyn crate::terminal_trait::TerminalProvider>,
     ) {
         if let Ok(mut guard) = self.terminal_provider.lock() {
-            *guard = Some(provider);
+            *guard = Some(provider.clone());
+        }
+        if let Ok(mut guard) = self.tool_executor.lock() {
+            *guard = guard.clone().with_terminal_provider(provider);
         }
     }
 
@@ -446,8 +454,13 @@ impl RuntimeEngine {
         }
 
         // 本地工具
+        let executor = self
+            .tool_executor
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_else(|_| LocalToolExecutor::from_agent_config(&self.agent_config));
         match build_tool_call_from_function(call) {
-            Ok(tool_call) => match self.tool_executor.execute(&tool_call) {
+            Ok(tool_call) => match executor.execute(&tool_call) {
                 Ok(result) => result,
                 Err(err) => ToolResult {
                     ok: false,
@@ -517,10 +530,14 @@ impl RuntimeEngine {
 
                 let env = self
                     .tool_executor
-                    .runtime_env()
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
+                    .lock()
+                    .map(|g| {
+                        g.runtime_env()
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
 
                 match task_registry().lock() {
                     Ok(mut reg) => match reg.spawn(name, cmd, args, cwd, env) {
