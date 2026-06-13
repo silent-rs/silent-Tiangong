@@ -240,6 +240,14 @@ impl TiangongCore {
         let _ = self.send_cmd(Command::SetPageFetcher { fetcher });
     }
 
+    /// 注入终端能力（GUI 模式下由 Tauri Plugin 提供）
+    pub fn set_terminal_provider(
+        &self,
+        provider: std::sync::Arc<dyn crate::terminal_trait::TerminalProvider>,
+    ) {
+        let _ = self.send_cmd(Command::SetTerminalProvider { provider });
+    }
+
     /// 注册工具覆盖处理器
     pub fn register_tool_override(
         &self,
@@ -250,6 +258,22 @@ impl TiangongCore {
             name: name.to_string(),
             handler,
         });
+    }
+
+    /// 注册工具规格提供者（plugin 注入新工具）
+    pub fn register_tool_spec_provider(
+        &self,
+        provider: std::sync::Arc<dyn crate::tool_override::ToolSpecProvider>,
+    ) {
+        let _ = self.send_cmd(Command::RegisterToolSpecProvider { provider });
+    }
+
+    /// 注册 Prompt 段落提供者（plugin 注入 system prompt 规则）
+    pub fn register_prompt_section_provider(
+        &self,
+        provider: std::sync::Arc<dyn crate::tool_override::PromptSectionProvider>,
+    ) {
+        let _ = self.send_cmd(Command::RegisterPromptSectionProvider { provider });
     }
 
     /// 注入浏览器页面内容到当前会话（不触发 LLM 调用）
@@ -339,10 +363,19 @@ async fn worker_loop_async(
     let mut last_cfg_gen = 0u64;
     let mut saved_page_fetcher: Option<std::sync::Arc<dyn crate::browser_trait::PageFetcher>> =
         None;
+    let mut saved_terminal_provider: Option<
+        std::sync::Arc<dyn crate::terminal_trait::TerminalProvider>,
+    > = None;
     let mut saved_tool_overrides: std::collections::HashMap<
         String,
         std::sync::Arc<dyn crate::tool_override::ToolOverrideHandler>,
     > = std::collections::HashMap::new();
+    let mut saved_tool_spec_providers: Vec<
+        std::sync::Arc<dyn crate::tool_override::ToolSpecProvider>,
+    > = Vec::new();
+    let mut saved_prompt_section_providers: Vec<
+        std::sync::Arc<dyn crate::tool_override::PromptSectionProvider>,
+    > = Vec::new();
 
     // 在 Worker 的 tokio runtime 中异步初始化 Memory Handle
     if let Some(ref cfg) = memory.initial_config_snapshot {
@@ -427,9 +460,15 @@ async fn worker_loop_async(
                 &stream_tx,
                 shared_trust_mode.clone(),
             ));
-            // 恢复 page_fetcher 和 tool_overrides 到新建的引擎
+            // 恢复 page_fetcher / terminal_provider / tool_overrides / spec_providers 到新建的引擎
             if let Some(ref fetcher) = saved_page_fetcher {
                 engine.as_ref().unwrap().set_page_fetcher(fetcher.clone());
+            }
+            if let Some(ref provider) = saved_terminal_provider {
+                engine
+                    .as_ref()
+                    .unwrap()
+                    .set_terminal_provider(provider.clone());
             }
             for (name, handler) in &saved_tool_overrides {
                 engine
@@ -437,12 +476,26 @@ async fn worker_loop_async(
                     .unwrap()
                     .register_tool_override(name, handler.clone());
             }
+            for provider in &saved_tool_spec_providers {
+                engine
+                    .as_ref()
+                    .unwrap()
+                    .register_tool_spec_provider(provider.clone());
+            }
+            for provider in &saved_prompt_section_providers {
+                engine
+                    .as_ref()
+                    .unwrap()
+                    .register_prompt_section_provider(provider.clone());
+            }
             let e = engine.as_ref().unwrap();
             let (all_tools, new_mcp_targets) = execution_function_tools(&e.agent_config().mcp);
             let mut new_tools: Vec<ToolSpec> = all_tools
                 .into_iter()
                 .filter(|t| t.name != "mark_step_completed")
                 .collect();
+            // 合并 plugin 注册的工具规格
+            new_tools.extend(e.collect_plugin_tool_specs());
             inject_enhanced_tools(&mut new_tools, e);
             if index_manager.is_some() {
                 crate::index::inject_index_search_tool(&mut new_tools);
@@ -600,6 +653,45 @@ async fn worker_loop_async(
                 saved_tool_overrides.insert(name.clone(), handler.clone());
                 if let Some(eng) = engine.as_ref() {
                     eng.register_tool_override(&name, handler);
+                }
+                continue;
+            }
+            Command::SetTerminalProvider { provider } => {
+                saved_terminal_provider = Some(provider.clone());
+                if let Some(eng) = engine.as_ref() {
+                    eng.set_terminal_provider(provider);
+                }
+                continue;
+            }
+            Command::RegisterToolSpecProvider { provider } => {
+                saved_tool_spec_providers.push(provider.clone());
+                if let Some(eng) = engine.as_ref() {
+                    eng.register_tool_spec_provider(provider);
+                    // 重建工具列表以包含新注册的 ToolSpec
+                    let e = eng;
+                    let (all_tools, new_mcp_targets) =
+                        execution_function_tools(&e.agent_config().mcp);
+                    let mut new_tools: Vec<_> = all_tools
+                        .into_iter()
+                        .filter(|t| t.name != "mark_step_completed")
+                        .collect();
+                    new_tools.extend(e.collect_plugin_tool_specs());
+                    inject_enhanced_tools(&mut new_tools, e);
+                    if index_manager.is_some() {
+                        crate::index::inject_index_search_tool(&mut new_tools);
+                    }
+                    if memory.handle.is_some() {
+                        inject_memory_recall_tool(&mut new_tools);
+                    }
+                    tools = new_tools;
+                    mcp_targets = new_mcp_targets;
+                }
+                continue;
+            }
+            Command::RegisterPromptSectionProvider { provider } => {
+                saved_prompt_section_providers.push(provider.clone());
+                if let Some(eng) = engine.as_ref() {
+                    eng.register_prompt_section_provider(provider);
                 }
                 continue;
             }

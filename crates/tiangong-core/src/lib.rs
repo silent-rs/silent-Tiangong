@@ -31,5 +31,6 @@ pub mod session;
 pub mod skill;
 mod stream_throttle;
 pub mod task;
+pub mod terminal_trait;
 pub mod tool;
 pub mod tool_override;

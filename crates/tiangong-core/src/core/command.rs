@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use crate::browser_trait::PageFetcher;
-use crate::tool_override::ToolOverrideHandler;
+use crate::terminal_trait::TerminalProvider;
+use crate::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
 
 /// 用户命令
 pub(crate) enum Command {
@@ -32,10 +33,18 @@ pub(crate) enum Command {
     ResetContext,
     /// 注入页面获取能力（GUI 模式下由 Tauri Plugin 提供）
     SetPageFetcher { fetcher: Arc<dyn PageFetcher> },
+    /// 注入终端能力（GUI 模式下由 Tauri Plugin 提供）
+    SetTerminalProvider { provider: Arc<dyn TerminalProvider> },
     /// 注册工具覆盖处理器
     RegisterToolOverride {
         name: String,
         handler: Arc<dyn ToolOverrideHandler>,
+    },
+    /// 注册工具规格提供者（plugin 注入新工具）
+    RegisterToolSpecProvider { provider: Arc<dyn ToolSpecProvider> },
+    /// 注册 Prompt 段落提供者（plugin 注入 system prompt 规则）
+    RegisterPromptSectionProvider {
+        provider: Arc<dyn PromptSectionProvider>,
     },
     /// 浏览器页面内容自动注入（页面加载完成时触发）
     InjectBrowserContent {

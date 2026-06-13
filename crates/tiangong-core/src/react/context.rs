@@ -12,11 +12,13 @@ use tiangong_types::StreamEvent;
 
 /// 从 RuntimeEngine 配置构建 SystemPromptConfig 并重建 session 的 system prompt
 pub(crate) fn rebuild_system_prompt(session: &mut Session, engine: &RuntimeEngine) {
+    let plugin_sections = engine.collect_plugin_prompt_sections();
     let config = SystemPromptConfig::from_configs(
         engine.models_config(),
         engine.agent_config(),
         &session.id,
-    );
+    )
+    .with_plugin_sections(plugin_sections);
     session.rebuild_system_prompt(&config);
 }
 

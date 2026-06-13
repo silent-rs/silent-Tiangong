@@ -155,6 +155,8 @@ pub struct SystemPromptConfig {
     pub media_text: String,
     pub team_text: String,
     pub user_context: Vec<String>,
+    /// Plugin 注入的额外段落（如终端交互引导、浏览器使用规范等）
+    pub plugin_sections: Vec<String>,
 }
 
 impl SystemPromptConfig {
@@ -170,7 +172,14 @@ impl SystemPromptConfig {
             media_text: build_media_section(models_config),
             team_text: build_agent_team_section(),
             user_context: build_user_context(session_id, None),
+            plugin_sections: Vec::new(),
         }
+    }
+
+    /// 注入 Plugin 提供的 prompt 段落（在 from_configs 基础上追加）
+    pub fn with_plugin_sections(mut self, sections: Vec<String>) -> Self {
+        self.plugin_sections = sections;
+        self
     }
 }
 
@@ -230,6 +239,13 @@ fn collect_dynamic_parts(config: &SystemPromptConfig) -> Vec<String> {
     }
     if !config.team_text.is_empty() {
         parts.push(config.team_text.clone());
+    }
+    // Plugin 注入的规则段落（终端交互、浏览器使用规范等）
+    for section in &config.plugin_sections {
+        let trimmed = section.trim();
+        if !trimmed.is_empty() {
+            parts.push(trimmed.to_string());
+        }
     }
     if !config.user_context.is_empty() {
         parts.push(format!(

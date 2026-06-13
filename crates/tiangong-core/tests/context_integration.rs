@@ -111,6 +111,7 @@ fn new_path_system_prompt_includes_all_sections() {
         media_text: "已配置的多媒体能力：\n- 图片生成：已配置".to_string(),
         team_text: "团队协作能力".to_string(),
         user_context: vec!["用户偏好深色主题".to_string()],
+        plugin_sections: vec!["插件规则段：终端交互引导".to_string()],
     };
     let msg = tiangong_core::prompt::sections::build_full_system_prompt(&session, &config);
     assert_eq!(msg.role, MessageRole::System);
