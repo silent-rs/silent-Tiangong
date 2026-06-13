@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-terminal-session-recent-output"
+description = "Enables the terminal_session_recent_output command without any pre-configured scope."
+commands.allow = ["terminal_session_recent_output"]
+
+[[permission]]
+identifier = "deny-terminal-session-recent-output"
+description = "Denies the terminal_session_recent_output command without any pre-configured scope."
+commands.deny = ["terminal_session_recent_output"]

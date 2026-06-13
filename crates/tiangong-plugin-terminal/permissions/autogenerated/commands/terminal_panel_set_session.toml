@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-terminal-panel-set-session"
+description = "Enables the terminal_panel_set_session command without any pre-configured scope."
+commands.allow = ["terminal_panel_set_session"]
+
+[[permission]]
+identifier = "deny-terminal-panel-set-session"
+description = "Denies the terminal_panel_set_session command without any pre-configured scope."
+commands.deny = ["terminal_panel_set_session"]
