@@ -1,7 +1,7 @@
 # TODO - 天工当前开发任务
 
 > 最后更新：2026-06-05
-> 当前主线：0.8.2 发布准备
+> 当前主线：0.8.3 发布准备
 > 参考：`PLAN.md`、Issue #95
 
 ---
@@ -107,19 +107,19 @@
 - [x] 运行前端构建
 - [x] 创建发布提交与 `v0.6.0` 标签
 
-## 发布准备（0.8.2）
+## 发布准备（0.8.3）
 
-- [x] 从最新主分支创建 `release/0.8.2` worktree
-- [x] 更新 `Cargo.toml` 版本号为 `0.8.2`
-- [x] 更新 `frontend/package.json` 版本号为 `0.8.2`
-- [x] 更新 `tauri.conf.json` 版本号为 `0.8.2`
-- [x] 更新发布流水线默认标签、Release 标题和 OSS 上传默认标签为 `v0.8.2`
+- [x] 从最新主分支创建 `release/0.8.3` worktree
+- [x] 更新 `Cargo.toml` 版本号为 `0.8.3`
+- [x] 更新 `frontend/package.json` 版本号为 `0.8.3`
+- [x] 更新 `tauri.conf.json` 版本号为 `0.8.3`
+- [x] 更新发布流水线默认标签、Release 标题和 OSS 上传默认标签为 `v0.8.3`
 - [x] 运行 Rust 检查
 - [x] 运行 Rust lint
 - [x] 运行 Rust 测试（323 通过、1 失败、2 跳过；失败项：`recall_benchmark_compares_bm25_only_and_hybrid_hit_rate`）
 - [x] 运行前端构建
-- [x] 合并发布分支到 `main`
-- [x] 在 `main` 最终发布提交创建并推送 `v0.8.2` 标签
+- [ ] 合并发布分支到 `main`
+- [ ] 在 `main` 最终发布提交创建并推送 `v0.8.3` 标签
 
 ---
 

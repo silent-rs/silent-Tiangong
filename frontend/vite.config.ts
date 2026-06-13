@@ -18,6 +18,9 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    // 绑定所有接口（IPv4 + IPv6）：node 18+ 默认只绑 ::1，Tauri 用 127.0.0.1 探测
+    // 时会一直 Waiting for your frontend dev server。host:true 同时绑 0.0.0.0 和 [::]。
+    host: true,
     watch: {
       // 3. tell vite to ignore watching `src-tauri`
       ignored: ['**/src-tauri/**'],
