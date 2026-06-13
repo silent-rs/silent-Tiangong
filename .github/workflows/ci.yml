@@ -149,6 +149,9 @@ jobs:
 
       - name: Install Tauri system dependencies
         run: |
+          # GitHub runner 预装的 Microsoft apt 源（azure-cli / ubuntu prod）偶发 403，
+          # 与本仓库无关，提前移除避免污染 apt-get update
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
           sudo apt-get update
           sudo apt-get install -y \
             protobuf-compiler \

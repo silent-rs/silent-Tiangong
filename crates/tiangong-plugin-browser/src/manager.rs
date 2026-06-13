@@ -20,6 +20,11 @@ fn webview_label(tab_id: &str) -> String {
     format!("browser-webview-{tab_id}")
 }
 
+/// 缩放下限：避免内容过小不可读
+const MIN_ZOOM: f64 = 0.25;
+/// 缩放上限：避免 WebKitGTK 高倍率渲染锯齿
+const MAX_ZOOM: f64 = 5.0;
+
 /// 规范化 URL 用于比较：去除末尾的 /，统一 https://
 fn normalize_url_for_compare(url: &str) -> String {
     let s = url.trim_end_matches('/');
@@ -58,6 +63,8 @@ pub struct BrowserState {
     pub tab_histories: HashMap<String, Vec<HistoryEntry>>,
     /// 每个标签页当前在历史栈中的位置
     pub tab_history_indices: HashMap<String, usize>,
+    /// 当前页面缩放比例，clamp 到 [0.25, 5.0]，持久化在 ~/.tiangong/browser-zoom.json
+    pub zoom_factor: f64,
 }
 
 impl BrowserState {
@@ -86,6 +93,7 @@ impl Default for BrowserManager {
 impl BrowserManager {
     pub fn new() -> Self {
         let global_history = load_global_history();
+        let zoom_factor = load_zoom();
         Self {
             state: Arc::new(Mutex::new(BrowserState {
                 webviews: HashMap::new(),
@@ -103,6 +111,7 @@ impl BrowserManager {
                 global_history,
                 tab_histories: HashMap::new(),
                 tab_history_indices: HashMap::new(),
+                zoom_factor,
             })),
         }
     }
@@ -133,6 +142,38 @@ impl BrowserManager {
         }
     }
 
+    /// 当前页面缩放比例（来自持久化状态）
+    pub fn zoom(&self) -> f64 {
+        self.state.lock().map(|s| s.zoom_factor).unwrap_or(1.0)
+    }
+
+    /// 设置缩放：clamp 到 [MIN_ZOOM, MAX_ZOOM]，同步到所有 webview 并持久化，返回生效值
+    pub fn set_zoom(&self, scale: f64) -> Result<f64, String> {
+        let clamped = scale.clamp(MIN_ZOOM, MAX_ZOOM);
+        {
+            let mut s = self
+                .state
+                .lock()
+                .map_err(|e| format!("锁 BrowserState 失败：{e}"))?;
+            if (s.zoom_factor - clamped).abs() < f64::EPSILON {
+                return Ok(clamped);
+            }
+            s.zoom_factor = clamped;
+            for webview in s.webviews.values() {
+                if let Err(e) = webview.set_zoom(clamped) {
+                    warn!(error = %e, "webview set_zoom 失败");
+                }
+            }
+        }
+        persist_zoom(&self.state);
+        Ok(clamped)
+    }
+
+    /// 重置缩放到 1.0
+    pub fn reset_zoom(&self) -> Result<f64, String> {
+        self.set_zoom(1.0)
+    }
+
     /// 为指定标签创建独立的 WebView 实例
     fn create_webview_for_tab(
         app: &AppHandle<Wry>,
@@ -157,6 +198,11 @@ impl BrowserManager {
             let plugin_state = app.state::<crate::BrowserPluginState>();
             plugin_state.manager.clone_state()
         };
+        // 在 state_clone_holder 被 move 进 on_page_load 闭包前读出当前缩放，用于新建 webview 即时应用
+        let initial_zoom = state_clone_holder
+            .lock()
+            .map(|s| s.zoom_factor)
+            .unwrap_or(1.0);
         let app_clone = app.clone();
 
         let builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed_url))
@@ -307,6 +353,13 @@ impl BrowserManager {
         let webview = window
             .add_child(builder, LogicalPosition::new(x, y), LogicalSize::new(w, h))
             .map_err(|e| format!("创建浏览器 WebView 失败：{e}"))?;
+
+        // 创建后立即应用当前缩放，避免首屏以 100% 渲染再跳变
+        if (initial_zoom - 1.0).abs() > f64::EPSILON {
+            if let Err(e) = webview.set_zoom(initial_zoom) {
+                warn!(error = %e, "新建 webview 应用初始缩放失败");
+            }
+        }
 
         Ok(webview)
     }
@@ -1475,6 +1528,37 @@ fn persist_global_history(state: &Arc<Mutex<BrowserState>>) {
     };
     let path = global_history_path();
     if let Ok(content) = serde_json::to_string(&entries) {
+        let _ = std::fs::write(path, content);
+    }
+}
+
+fn zoom_path() -> PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".tiangong")
+        .join("browser-zoom.json")
+}
+
+fn load_zoom() -> f64 {
+    let path = zoom_path();
+    match std::fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str::<f64>(&content).unwrap_or(1.0),
+        Err(_) => 1.0,
+    }
+}
+
+fn persist_zoom(state: &Arc<Mutex<BrowserState>>) {
+    let zoom = {
+        let state = match state.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        state.zoom_factor
+    };
+    let path = zoom_path();
+    if let Ok(content) = serde_json::to_string(&zoom) {
         let _ = std::fs::write(path, content);
     }
 }
