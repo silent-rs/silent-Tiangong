@@ -118,8 +118,8 @@
 - [x] 运行 Rust lint
 - [x] 运行 Rust 测试（323 通过、1 失败、2 跳过；失败项：`recall_benchmark_compares_bm25_only_and_hybrid_hit_rate`）
 - [x] 运行前端构建
-- [ ] 合并发布分支到 `main`
-- [ ] 在 `main` 最终发布提交创建并推送 `v0.8.3` 标签
+- [x] 合并发布分支到 `main`
+- [x] 在 `main` 最终发布提交创建并推送 `v0.8.3` 标签
 
 ---
 
