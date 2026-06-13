@@ -9457,6 +9457,7 @@ dependencies = [
  "tiangong-media",
  "tiangong-memory",
  "tiangong-plugin-browser",
+ "tiangong-plugin-terminal",
  "tiangong-scheduler",
  "tiangong-server",
  "tiangong-types",

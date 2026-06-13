@@ -24,6 +24,7 @@
     "notification:default",
     "process:default",
     "updater:default",
-    "browser:default"
+    "browser:default",
+    "terminal:default"
   ]
 }
