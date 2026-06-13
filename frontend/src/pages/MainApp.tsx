@@ -5,6 +5,7 @@ import { AppSidebar } from '@/components/AppSidebar';
 import { SidebarProvider } from '@/components/ui/sidebar';
 import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components/LazyComponents';
 import { BrowserPanel } from '@/components/BrowserPanel';
+import { TerminalPanel } from '@/components/TerminalPanel';
 import { ensureDesktopNotificationPermission } from '@/utils/desktopNotification';
 import { useUpdateCheck } from '@/hooks/useUpdateCheck';
 import type { UnlistenFn } from '@tauri-apps/api/event';
@@ -91,6 +92,7 @@ export function MainApp() {
   const { loadSessions, updateFromSnapshot } = useStore();
   useUpdateCheck();
   const [showBrowser, setShowBrowser] = useState(false);
+  const [showTerminal, setShowTerminal] = useState(false);
   const [chatPanelWidth, setChatPanelWidth] = useState(MIN_CHAT_WIDTH);
   const [browserUrl, setBrowserUrl] = useState<string | undefined>(undefined);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -359,6 +361,8 @@ export function MainApp() {
         <LazyStatusPanel
           showBrowser={showBrowser}
           onToggleBrowser={handleToggleBrowser}
+          showTerminal={showTerminal}
+          onToggleTerminal={() => setShowTerminal((v) => !v)}
         />
 
         <div className="flex flex-1 min-h-0">
@@ -367,8 +371,8 @@ export function MainApp() {
           <main className="flex flex-1 flex-col min-w-0 bg-background">
             <div className="flex flex-1 min-h-0">
               <div
-                className={`flex flex-col min-w-0 ${showBrowser ? 'shrink-0' : 'flex-1'}`}
-                style={showBrowser ? { width: chatPanelWidth } : undefined}
+                className={`flex flex-col min-w-0 ${showBrowser || showTerminal ? 'shrink-0' : 'flex-1'}`}
+                style={showBrowser || showTerminal ? { width: chatPanelWidth } : undefined}
               >
                 <div className="flex-1 overflow-hidden">
                   <LazyMessageList />
@@ -386,6 +390,18 @@ export function MainApp() {
 
               {showBrowser && (
                 <BrowserPanel initialUrl={browserUrl} currentUrl={browserUrl} onClose={closeBrowserPanel} />
+              )}
+
+              {showTerminal && !showBrowser && (
+                <>
+                  <div
+                    className="w-[3px] shrink-0 cursor-col-resize bg-border hover:bg-muted-foreground/30 active:bg-muted-foreground/50 transition-colors"
+                    onMouseDown={handleDividerDrag}
+                  />
+                  <div className="flex-1 min-w-0">
+                    <TerminalPanel onClose={() => setShowTerminal(false)} />
+                  </div>
+                </>
               )}
             </div>
           </main>

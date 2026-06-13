@@ -860,4 +860,45 @@ export const api = {
 
   browserGlobalHistoryDelete: (url: string): Promise<void> =>
     invoke('plugin:browser|browser_global_history_delete', { url }),
+
+  // 终端面板（通过 plugin:terminal）
+  terminalEnsureSession: (sessionId: string, cwd: string): Promise<boolean> =>
+    invoke('plugin:terminal|terminal_ensure_session', { sessionId, cwd }),
+
+  terminalSessionSendInput: (sessionId: string, input: string): Promise<void> =>
+    invoke('plugin:terminal|terminal_session_send_input', { sessionId, input }),
+
+  terminalSessionRecentOutput: (sessionId: string, lines?: number): Promise<string> =>
+    invoke('plugin:terminal|terminal_session_recent_output', { sessionId, lines: lines ?? null }),
+
+  terminalSessionResize: (sessionId: string, cols: number, rows: number): Promise<void> =>
+    invoke('plugin:terminal|terminal_session_resize', { sessionId, cols, rows }),
+
+  terminalSessionStatus: (sessionId: string): Promise<{
+    session_id: string;
+    alive: boolean;
+    cwd: string;
+    shell: string;
+    phase: string;
+  }> => invoke('plugin:terminal|terminal_session_status', { sessionId }),
+
+  terminalSessionSetCwd: (sessionId: string, cwd: string): Promise<void> =>
+    invoke('plugin:terminal|terminal_session_set_cwd', { sessionId, cwd }),
+
+  terminalSessionReset: (sessionId: string): Promise<void> =>
+    invoke('plugin:terminal|terminal_session_reset', { sessionId }),
+
+  terminalDestroySession: (sessionId: string): Promise<void> =>
+    invoke('plugin:terminal|terminal_destroy_session', { sessionId }),
+
+  terminalPanelSetSession: (sessionId: string | null): Promise<void> =>
+    invoke('plugin:terminal|terminal_panel_set_session', { sessionId }),
+
+  terminalListStatuses: (): Promise<Array<{
+    session_id: string;
+    alive: boolean;
+    cwd: string;
+    shell: string;
+    phase: string;
+  }>> => invoke('plugin:terminal|terminal_list_statuses'),
 };
