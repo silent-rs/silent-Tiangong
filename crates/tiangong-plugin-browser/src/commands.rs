@@ -65,6 +65,24 @@ pub async fn browser_go_forward(state: State<'_, BrowserPluginState>) -> Result<
 }
 
 #[tauri::command]
+pub async fn browser_set_zoom(
+    scale: f64,
+    state: State<'_, BrowserPluginState>,
+) -> Result<f64, String> {
+    state.manager.set_zoom(scale)
+}
+
+#[tauri::command]
+pub async fn browser_get_zoom(state: State<'_, BrowserPluginState>) -> Result<f64, String> {
+    Ok(state.manager.zoom())
+}
+
+#[tauri::command]
+pub async fn browser_reset_zoom(state: State<'_, BrowserPluginState>) -> Result<f64, String> {
+    state.manager.reset_zoom()
+}
+
+#[tauri::command]
 pub async fn browser_tab_list(
     state: State<'_, BrowserPluginState>,
 ) -> Result<TabListResponse, String> {

@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { api } from '@/api/tauri';
 import { listen } from '@tauri-apps/api/event';
-import { Globe, ArrowRight, ArrowLeft, RotateCw, CornerDownRight, Plus, X, PenTool, ScanSearch, Clock, History, Trash2 } from 'lucide-react';
+import { Globe, ArrowRight, ArrowLeft, RotateCw, CornerDownRight, Plus, X, PenTool, ScanSearch, Clock, History, Trash2, ZoomIn, ZoomOut } from 'lucide-react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
@@ -60,6 +60,7 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
   const [tabs, setTabs] = useState<TabInfo[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [annotationActive, setAnnotationActive] = useState(false);
+  const [zoom, setZoom] = useState(1);
   const [extractedElements, setExtractedElements] = useState<Array<{
     tag: string;
     text: string;
@@ -304,6 +305,60 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
     await api.browserEval('location.reload()').catch(console.error);
   }, []);
 
+  const handleZoomIn = useCallback(async () => {
+    try {
+      const next = await api.browserSetZoom(+(zoom + 0.1).toFixed(2));
+      setZoom(next);
+    } catch (err) {
+      console.error('放大失败：', err);
+    }
+  }, [zoom]);
+
+  const handleZoomOut = useCallback(async () => {
+    try {
+      const next = await api.browserSetZoom(+(zoom - 0.1).toFixed(2));
+      setZoom(next);
+    } catch (err) {
+      console.error('缩小失败：', err);
+    }
+  }, [zoom]);
+
+  const handleZoomReset = useCallback(async () => {
+    try {
+      const next = await api.browserResetZoom();
+      setZoom(next);
+    } catch (err) {
+      console.error('重置缩放失败：', err);
+    }
+  }, []);
+
+  // 初始化：读取持久化的缩放比例
+  useEffect(() => {
+    api.browserGetZoom().then(setZoom).catch((err) => {
+      console.error('读取缩放失败：', err);
+    });
+  }, []);
+
+  // 快捷键：Cmd/Ctrl +/-/0（仅在浏览器面板挂载时注册）
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const key = e.key.toLowerCase();
+      if (key === '=' || key === '+') {
+        e.preventDefault();
+        handleZoomIn();
+      } else if (key === '-') {
+        e.preventDefault();
+        handleZoomOut();
+      } else if (key === '0') {
+        e.preventDefault();
+        handleZoomReset();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
+  }, [handleZoomIn, handleZoomOut, handleZoomReset]);
+
   const handleToggleAnnotation = useCallback(async () => {
     try {
       if (annotationActive) {
@@ -542,6 +597,34 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
           className="h-7 w-7 p-0 shrink-0"
         >
           <RotateCw className="w-3.5 h-3.5" />
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={handleZoomOut}
+          className="h-7 w-7 p-0 shrink-0"
+          title="缩小 (Cmd/Ctrl -)"
+          disabled={zoom <= 0.25 + 1e-6}
+        >
+          <ZoomOut className="w-3.5 h-3.5" />
+        </Button>
+        <button
+          type="button"
+          onDoubleClick={handleZoomReset}
+          className="h-7 px-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors shrink-0 tabular-nums"
+          title="双击重置为 100% (Cmd/Ctrl 0)"
+        >
+          {Math.round(zoom * 100)}%
+        </button>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={handleZoomIn}
+          className="h-7 w-7 p-0 shrink-0"
+          title="放大 (Cmd/Ctrl +)"
+          disabled={zoom >= 5.0 - 1e-6}
+        >
+          <ZoomIn className="w-3.5 h-3.5" />
         </Button>
         <Button
           size="sm"

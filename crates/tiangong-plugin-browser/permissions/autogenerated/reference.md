@@ -12,6 +12,9 @@
 - `allow-browser-eval`
 - `allow-browser-go-back`
 - `allow-browser-go-forward`
+- `allow-browser-set-zoom`
+- `allow-browser-get-zoom`
+- `allow-browser-reset-zoom`
 - `allow-browser-tab-list`
 - `allow-browser-tab-new`
 - `allow-browser-tab-switch`
@@ -105,6 +108,32 @@ Enables the browser_eval command without any pre-configured scope.
 <td>
 
 Denies the browser_eval command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:allow-browser-get-zoom`
+
+</td>
+<td>
+
+Enables the browser_get_zoom command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:deny-browser-get-zoom`
+
+</td>
+<td>
+
+Denies the browser_get_zoom command without any pre-configured scope.
 
 </td>
 </tr>
@@ -320,6 +349,32 @@ Denies the browser_open command without any pre-configured scope.
 <tr>
 <td>
 
+`tiangong-plugin-browser:allow-browser-reset-zoom`
+
+</td>
+<td>
+
+Enables the browser_reset_zoom command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:deny-browser-reset-zoom`
+
+</td>
+<td>
+
+Denies the browser_reset_zoom command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `tiangong-plugin-browser:allow-browser-set-position`
 
 </td>
@@ -339,6 +394,32 @@ Enables the browser_set_position command without any pre-configured scope.
 <td>
 
 Denies the browser_set_position command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:allow-browser-set-zoom`
+
+</td>
+<td>
+
+Enables the browser_set_zoom command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:deny-browser-set-zoom`
+
+</td>
+<td>
+
+Denies the browser_set_zoom command without any pre-configured scope.
 
 </td>
 </tr>

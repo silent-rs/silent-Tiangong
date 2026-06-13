@@ -804,6 +804,15 @@ export const api = {
   browserGoForward: (): Promise<void> =>
     invoke('plugin:browser|browser_go_forward'),
 
+  browserSetZoom: (scale: number): Promise<number> =>
+    invoke('plugin:browser|browser_set_zoom', { scale }),
+
+  browserGetZoom: (): Promise<number> =>
+    invoke('plugin:browser|browser_get_zoom'),
+
+  browserResetZoom: (): Promise<number> =>
+    invoke('plugin:browser|browser_reset_zoom'),
+
   browserTabList: (): Promise<{ tabs: Array<{ id: string; url: string; title: string }>; active_tab_id: string | null }> =>
     invoke('plugin:browser|browser_tab_list'),
 
