@@ -305,32 +305,47 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
     await api.browserEval('location.reload()').catch(console.error);
   }, []);
 
+  // 缩放前关闭批注：批注 canvas 是 webview 内 DOM，set_zoom 会等比缩放整个 webview，
+  // 因此缩放前若批注处于激活状态则先关闭并清空，避免视觉错位；用户可在缩放后重新开启。
+  const dismissAnnotationBeforeZoom = useCallback(async () => {
+    if (!annotationActive) return;
+    try {
+      await api.browserEval('window.__tiangong_bridge && window.__tiangong_bridge.annotation && window.__tiangong_bridge.annotation.stop();');
+    } catch (err) {
+      console.error('关闭批注失败：', err);
+    }
+    setAnnotationActive(false);
+  }, [annotationActive]);
+
   const handleZoomIn = useCallback(async () => {
+    await dismissAnnotationBeforeZoom();
     try {
       const next = await api.browserSetZoom(+(zoom + 0.1).toFixed(2));
       setZoom(next);
     } catch (err) {
       console.error('放大失败：', err);
     }
-  }, [zoom]);
+  }, [zoom, dismissAnnotationBeforeZoom]);
 
   const handleZoomOut = useCallback(async () => {
+    await dismissAnnotationBeforeZoom();
     try {
       const next = await api.browserSetZoom(+(zoom - 0.1).toFixed(2));
       setZoom(next);
     } catch (err) {
       console.error('缩小失败：', err);
     }
-  }, [zoom]);
+  }, [zoom, dismissAnnotationBeforeZoom]);
 
   const handleZoomReset = useCallback(async () => {
+    await dismissAnnotationBeforeZoom();
     try {
       const next = await api.browserResetZoom();
       setZoom(next);
     } catch (err) {
       console.error('重置缩放失败：', err);
     }
-  }, []);
+  }, [dismissAnnotationBeforeZoom]);
 
   // 初始化：读取持久化的缩放比例
   useEffect(() => {
