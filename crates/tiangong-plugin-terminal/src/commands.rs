@@ -3,6 +3,20 @@ use tauri::State;
 use crate::types::{TerminalSessionInfo, TerminalSessionStatus};
 use crate::TerminalPluginState;
 
+/// 等待命令循环的响应，并附加 300s 兜底超时。
+///
+/// 各命令内部（handle_exec 等）已有自己的超时循环，这里仅作为最后防线：
+/// 若 command loop 因 Mutex 中毒等原因死锁，避免 Tauri 命令永久挂起、
+/// 前端 invoke 的 Promise 永不 resolve。
+async fn await_response<T: std::fmt::Debug>(
+    rx: tokio::sync::oneshot::Receiver<T>,
+) -> Result<T, String> {
+    match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
+        Ok(Ok(v)) => Ok(v),
+        _ => Err("终端命令执行超时".to_string()),
+    }
+}
+
 #[tauri::command]
 pub async fn terminal_exec(
     command: String,
@@ -19,7 +33,7 @@ pub async fn terminal_exec(
         })
         .await
         .map_err(|e| e.to_string())?;
-    let resp = response_rx.await.map_err(|e| e.to_string())?;
+    let resp = await_response(response_rx).await?;
     Ok(resp.stdout)
 }
 
@@ -37,7 +51,7 @@ pub async fn terminal_recent_output(
         })
         .await
         .map_err(|e| e.to_string())?;
-    response_rx.await.map_err(|e| e.to_string())
+    await_response(response_rx).await
 }
 
 #[tauri::command]
@@ -55,7 +69,7 @@ pub async fn terminal_send_input(
         })
         .await
         .map_err(|e| e.to_string())?;
-    response_rx.await.map_err(|e| e.to_string())
+    await_response(response_rx).await
 }
 
 #[tauri::command]
@@ -66,7 +80,7 @@ pub async fn terminal_reset(state: State<'_, TerminalPluginState>) -> Result<(),
         .send(crate::types::TerminalCommand::Reset { response_tx })
         .await
         .map_err(|e| e.to_string())?;
-    response_rx.await.map_err(|e| e.to_string())
+    await_response(response_rx).await
 }
 
 #[tauri::command]
@@ -143,7 +157,7 @@ pub async fn terminal_session_send_input(
         })
         .await
         .map_err(|e| e.to_string())?;
-    response_rx.await.map_err(|e| e.to_string())
+    await_response(response_rx).await
 }
 
 #[tauri::command]
@@ -161,7 +175,7 @@ pub async fn terminal_session_recent_output(
         })
         .await
         .map_err(|e| e.to_string())?;
-    response_rx.await.map_err(|e| e.to_string())
+    await_response(response_rx).await
 }
 
 #[tauri::command]
@@ -246,7 +260,7 @@ pub async fn terminal_session_reset(
         .send(crate::types::TerminalCommand::Reset { response_tx })
         .await
         .map_err(|e| e.to_string())?;
-    response_rx.await.map_err(|e| e.to_string())
+    await_response(response_rx).await
 }
 
 /// 单 PTY 模型下无需选择面板 session（系统 PTY 唯一）。保留命令签名，恒为 no-op。

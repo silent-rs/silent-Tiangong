@@ -88,9 +88,20 @@ impl OutputLogger {
 }
 
 /// 滚动日志：读取文件尾部一半，truncate 后重写，使文件回到约一半大小。
+///
+/// 注意：`len / 2` 是任意字节偏移，可能落在 UTF-8 多字节字符中间。
+/// 直接 `read_to_string` 会因无效 UTF-8 返回 `InvalidData`，导致滚动失败、
+/// 日志无限增长。因此先跳过到下一个 `\n`（丢弃可能不完整的行），再读取。
 fn rotate_tail(file: &mut File, len: u64) -> std::io::Result<()> {
     let keep_from = len / 2;
     file.seek(SeekFrom::Start(keep_from))?;
+    // 跳过 keep_from 处可能不完整的首行（避免 UTF-8 字符被截断）
+    let mut skip_buf = [0u8; 1];
+    while file.read(&mut skip_buf)? > 0 {
+        if skip_buf[0] == b'\n' {
+            break;
+        }
+    }
     let mut tail = String::new();
     file.read_to_string(&mut tail)?;
     file.seek(SeekFrom::Start(0))?;

@@ -33,11 +33,13 @@ const TERMINAL_CONFIG = {
 };
 
 /**
- * 终端面板（与旧分支 UX 对齐）：
- * - 每个 session 一个独立子容器 div，切换时 display 切换不重建 xterm
- * - 前端池化最多 5 个 xterm，淘汰老的但保留后端 PTY（下次切回时从历史输出恢复）
- * - 显式调用 ensureSession 确认 PTY 启动成功
- * - 工具栏：cwd 显示 + 重置按钮（重启 shell）
+ * 终端面板（单 PTY 模型）：
+ * - effectiveId 固定为系统 PTY 的 session_id（agent 命令与面板操作共享同一条终端会话）
+ * - 挂载时通过 terminalSystemSessionInfo 获取系统 id，历史输出与实时事件都用它
+ * - 切换对话不再销毁/重建 PTY（系统 PTY 跨对话共享）
+ * - 池化结构（poolRef/MAX_POOL_SIZE）为历史遗留，单 PTY 下实际只有 1 个条目，
+ *   保留以便未来扩展，后续迭代可简化为单实例管理
+ * - 工具栏：cwd 显示 + 重置按钮（重启 shell 并清空日志）
  */
 export function TerminalPanel({ onClose }: { onClose: () => void }) {
   const sessionCwd = useStore((s) => s.sessionCwd);

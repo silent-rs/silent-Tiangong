@@ -19,7 +19,6 @@ pub mod commands;
 pub mod handler;
 pub mod manager;
 pub mod output_processor;
-pub mod registry;
 pub mod types;
 pub mod util;
 
