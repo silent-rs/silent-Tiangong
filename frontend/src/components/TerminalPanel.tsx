@@ -40,7 +40,6 @@ const TERMINAL_CONFIG = {
  * - 工具栏：cwd 显示 + 重置按钮（重启 shell）
  */
 export function TerminalPanel({ onClose }: { onClose: () => void }) {
-  const activeSessionId = useStore((s) => s.activeSessionId);
   const sessionCwd = useStore((s) => s.sessionCwd);
   const workspaceDir = useStore((s) => s.workspaceDir);
 
@@ -61,20 +60,24 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
     alive: false,
   });
 
-  const effectiveId = activeSessionId || '__tiangong_draft__';
-
-  // 通知后端面板状态
+  // 单 PTY 模型：effectiveId 固定为系统 PTY 的 session_id（由后端分配的 SCRU128）。
+  // agent 命令和面板操作共享同一条终端会话，历史互通。
+  const [systemSessionId, setSystemSessionId] = useState<string | null>(null);
   useEffect(() => {
-    if (activeSessionId) {
-      api.terminalPanelSetSession(activeSessionId).catch(() => {});
-    }
-  }, [activeSessionId]);
-
-  useEffect(() => {
+    let cancelled = false;
+    api.terminalSystemSessionInfo()
+      .then((info) => {
+        if (!cancelled) setSystemSessionId(info.session_id);
+      })
+      .catch(() => {
+        if (!cancelled) setSystemSessionId('__tiangong_system__');
+      });
     return () => {
-      api.terminalPanelSetSession(null).catch(() => {});
+      cancelled = true;
     };
   }, []);
+
+  const effectiveId = systemSessionId;
 
   // 全局 output listener（按 session_id 分发）
   useEffect(() => {
@@ -129,26 +132,15 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
 
   // 切换对话时挂载/创建 xterm（仅在 effectiveId 变化时触发）
   useEffect(() => {
+    // 系统 PTY id 尚未就绪时跳过（单 PTY 模型下 effectiveId 即系统 id）
+    if (!effectiveId) return;
     if (effectiveId === currentIdRef.current && poolRef.current.has(effectiveId)) {
       return;
     }
     const container = containerRef.current;
     if (!container) return;
 
-    // 切换时销毁草稿终端的后端 PTY（如果是切到真实会话）
-    if (
-      effectiveId !== '__tiangong_draft__' &&
-      currentIdRef.current === '__tiangong_draft__'
-    ) {
-      const draftEntry = poolRef.current.get('__tiangong_draft__');
-      if (draftEntry) {
-        draftEntry.container.remove();
-        draftEntry.term.dispose();
-        poolRef.current.delete('__tiangong_draft__');
-        api.terminalDestroySession('__tiangong_draft__').catch(() => {});
-      }
-    }
-
+    // 单 PTY 模型：effectiveId 固定为系统 PTY，不再有「草稿终端」与销毁逻辑。
     currentIdRef.current = effectiveId;
 
     const switchTo = async () => {

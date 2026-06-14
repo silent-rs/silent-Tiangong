@@ -1,3 +1,6 @@
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use tauri::Emitter;
@@ -7,6 +10,114 @@ use crate::manager::{push_output, TerminalState};
 use crate::types::{contains_marker, TerminalOutputEvent};
 
 const READ_BUF_SIZE: usize = 4096;
+
+/// 终端输出持久化日志器：把系统 PTY 的 marker 过滤后输出追加写到磁盘，
+/// 应用重启后可回填到环形缓冲区，实现「终端历史保留」。
+///
+/// 仅用于系统 PTY（跨会话全局）；面板交互 PTY 不落盘。
+pub(crate) struct OutputLogger {
+    file: Arc<Mutex<File>>,
+    path: PathBuf,
+}
+
+/// 日志文件大小上限（1 MiB），超过则保留尾部一半后重写，防无限增长
+const MAX_LOG_BYTES: u64 = 1024 * 1024;
+
+impl OutputLogger {
+    /// 打开（或创建）日志文件。失败时返回 None，调用方应优雅降级（不持久化）。
+    pub fn open(path: PathBuf) -> Option<Self> {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .read(true)
+            .open(&path)
+            .map_err(|e| warn!(error = %e, path = %path.display(), "打开终端日志文件失败"))
+            .ok()?;
+        Some(Self {
+            file: Arc::new(Mutex::new(file)),
+            path,
+        })
+    }
+
+    /// 追加写一段文本。超过上限时滚动（保留尾部一半），防日志无限膨胀。
+    /// 写失败仅记录警告，不影响终端主流程。
+    pub fn append(&self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let mut guard = match self.file.lock() {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        if let Err(e) = guard.write_all(text.as_bytes()) {
+            warn!(error = %e, "写终端日志失败");
+            return;
+        }
+        // 滚动检查：追加后若超过上限，保留尾部一半重写
+        if let Ok(meta) = guard.metadata() {
+            let len = meta.len();
+            if len > MAX_LOG_BYTES {
+                if let Err(e) = rotate_tail(&mut guard, len) {
+                    warn!(error = %e, "滚动终端日志失败");
+                }
+            }
+        }
+    }
+
+    /// 清空日志（用户主动重置终端时调用）。
+    pub fn clear(&self) {
+        let mut guard = match self.file.lock() {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        if let Err(e) = guard
+            .set_len(0)
+            .and_then(|_| guard.seek(SeekFrom::Start(0)))
+        {
+            warn!(error = %e, "清空终端日志失败");
+        }
+    }
+
+    /// 日志文件路径（供回填/调试用）
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// 滚动日志：读取文件尾部一半，truncate 后重写，使文件回到约一半大小。
+fn rotate_tail(file: &mut File, len: u64) -> std::io::Result<()> {
+    let keep_from = len / 2;
+    file.seek(SeekFrom::Start(keep_from))?;
+    let mut tail = String::new();
+    file.read_to_string(&mut tail)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.set_len(0)?;
+    file.write_all(tail.as_bytes())?;
+    Ok(())
+}
+
+/// 读取日志文件末尾最多 `max_lines` 行，用于启动时回填环形缓冲区。
+/// 返回 (按行分割的 Vec<String>, 完整文本)。失败返回空。
+pub(crate) fn read_log_tail(path: &Path, max_lines: usize) -> Vec<String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let mut lines: Vec<&str> = content.lines().collect();
+    if lines.len() > max_lines {
+        lines = lines.split_off(lines.len() - max_lines);
+    }
+    lines.into_iter().map(String::from).collect()
+}
+
+/// 把一行历史输出回填进环形缓冲区（启动时从日志恢复历史用）。
+/// 复用 manager 的 push_output，保证缓冲区计数与正常写入一致。
+pub(crate) fn backfill_line(state: &mut crate::manager::TerminalState, line: String) {
+    crate::manager::push_output(state, line);
+}
 
 /// 终端行处理器，模拟光标行为以正确处理 zsh 行编辑器的重绘。
 /// 维护 pending 缓冲区处理跨 chunk 的不完整 ESC 序列。
@@ -285,12 +396,14 @@ impl RawOutputFilter {
     }
 }
 
-/// 后台读取 PTY 输出并推送到环形缓冲区和前端
+/// 后台读取 PTY 输出并推送到环形缓冲区和前端。
+/// `logger` 为 Some 时同时把 marker 过滤后的输出落盘（仅系统 PTY 传 Some）。
 pub(crate) fn spawn_output_reader(
     reader: Arc<Mutex<Box<dyn std::io::Read + Send>>>,
     state: Arc<Mutex<TerminalState>>,
     app: tauri::AppHandle,
     session_id: String,
+    logger: Option<Arc<OutputLogger>>,
 ) {
     std::thread::spawn(move || {
         let mut buf = [0u8; READ_BUF_SIZE];
@@ -320,6 +433,10 @@ pub(crate) fn spawn_output_reader(
             // 行级 marker 过滤后推送给 xterm.js
             let filtered = output_filter.filter(&raw_text);
             if !filtered.is_empty() {
+                // 落盘（marker 过滤后的纯文本，与 xterm 看到的一致）
+                if let Some(ref logger) = logger {
+                    logger.append(&filtered);
+                }
                 let event = TerminalOutputEvent {
                     session_id: session_id.clone(),
                     text: filtered,

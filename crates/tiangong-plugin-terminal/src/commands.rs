@@ -1,17 +1,14 @@
 use tauri::State;
 
-use crate::registry::SessionSlot;
 use crate::types::{TerminalSessionInfo, TerminalSessionStatus};
 use crate::TerminalPluginState;
-
-// ===== 系统 PTY 命令（agent 工具执行用）=====
 
 #[tauri::command]
 pub async fn terminal_exec(
     command: String,
     timeout_secs: Option<u64>,
     state: State<'_, TerminalPluginState>,
-) -> Result<crate::types::TerminalExecResponse, String> {
+) -> Result<String, String> {
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
     state
         .cmd_tx
@@ -22,10 +19,8 @@ pub async fn terminal_exec(
         })
         .await
         .map_err(|e| e.to_string())?;
-    tokio::time::timeout(std::time::Duration::from_secs(180), response_rx)
-        .await
-        .map_err(|_| "终端命令执行超时".to_string())?
-        .map_err(|_| "终端命令执行响应失败".to_string())
+    let resp = response_rx.await.map_err(|e| e.to_string())?;
+    Ok(resp.stdout)
 }
 
 #[tauri::command]
@@ -42,10 +37,7 @@ pub async fn terminal_recent_output(
         })
         .await
         .map_err(|e| e.to_string())?;
-    tokio::time::timeout(std::time::Duration::from_secs(5), response_rx)
-        .await
-        .map_err(|_| "获取终端输出超时".to_string())?
-        .map_err(|_| "获取终端输出响应失败".to_string())
+    response_rx.await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -58,15 +50,12 @@ pub async fn terminal_send_input(
         .cmd_tx
         .send(crate::types::TerminalCommand::SendInput {
             input,
-            source: crate::collaboration::InputSource::User,
+            source: crate::collaboration::InputSource::Agent,
             response_tx,
         })
         .await
         .map_err(|e| e.to_string())?;
-    tokio::time::timeout(std::time::Duration::from_secs(5), response_rx)
-        .await
-        .map_err(|_| "发送终端输入超时".to_string())?
-        .map_err(|_| "发送终端输入响应失败".to_string())
+    response_rx.await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -77,10 +66,7 @@ pub async fn terminal_reset(state: State<'_, TerminalPluginState>) -> Result<(),
         .send(crate::types::TerminalCommand::Reset { response_tx })
         .await
         .map_err(|e| e.to_string())?;
-    tokio::time::timeout(std::time::Duration::from_secs(10), response_rx)
-        .await
-        .map_err(|_| "终端重置超时".to_string())?
-        .map_err(|_| "终端重置响应失败".to_string())
+    response_rx.await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -101,11 +87,11 @@ pub async fn terminal_set_cwd(
     cwd: String,
     state: State<'_, TerminalPluginState>,
 ) -> Result<(), String> {
-    state
+    let _ = state
         .cmd_tx
         .send(crate::types::TerminalCommand::SetCwd { cwd })
-        .await
-        .map_err(|e| e.to_string())
+        .await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -114,82 +100,76 @@ pub async fn terminal_resize(
     rows: u16,
     state: State<'_, TerminalPluginState>,
 ) -> Result<(), String> {
-    state
+    let _ = state
         .cmd_tx
         .send(crate::types::TerminalCommand::Resize { cols, rows })
-        .await
-        .map_err(|e| e.to_string())
+        .await;
+    Ok(())
 }
 
-// ===== 交互 PTY 命令（按对话独立）=====
-
-fn get_slot(
-    session_id: &str,
-    state: &State<'_, TerminalPluginState>,
-) -> Result<SessionSlot, String> {
-    state
-        .registry
-        .get_slot(session_id)
-        .ok_or_else(|| format!("终端会话 {} 不存在", session_id))
-}
-
+/// 单 PTY 模型下，会话已随系统 PTY 常驻存在，恒返回系统 PTY 存活状态。
 #[tauri::command]
 pub async fn terminal_ensure_session(
-    session_id: String,
-    cwd: String,
+    _session_id: String,
+    _cwd: String,
     state: State<'_, TerminalPluginState>,
 ) -> Result<bool, String> {
-    Ok(state.registry.ensure_slot(&session_id, &cwd))
+    Ok(state.manager.is_alive())
 }
 
+/// 单 PTY 模型下，销毁对话不再销毁 PTY（系统 PTY 跨对话共享）。恒为 no-op。
 #[tauri::command]
 pub async fn terminal_destroy_session(
-    session_id: String,
-    state: State<'_, TerminalPluginState>,
+    _session_id: String,
+    _state: State<'_, TerminalPluginState>,
 ) -> Result<(), String> {
-    state.registry.destroy_slot(&session_id);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn terminal_session_send_input(
-    session_id: String,
+    _session_id: String,
     input: String,
     state: State<'_, TerminalPluginState>,
 ) -> Result<(), String> {
-    let slot = get_slot(&session_id, &state)?;
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-    slot.cmd_tx
+    state
+        .cmd_tx
         .send(crate::types::TerminalCommand::SendInput {
             input,
+            // 面板用户输入，需记录为用户活跃来源以驱动协作状态机
             source: crate::collaboration::InputSource::User,
             response_tx,
         })
         .await
         .map_err(|e| e.to_string())?;
-    tokio::time::timeout(std::time::Duration::from_secs(5), response_rx)
-        .await
-        .map_err(|_| "发送终端输入超时".to_string())?
-        .map_err(|_| "发送终端输入响应失败".to_string())
+    response_rx.await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn terminal_session_recent_output(
-    session_id: String,
+    _session_id: String,
     lines: Option<usize>,
     state: State<'_, TerminalPluginState>,
 ) -> Result<String, String> {
-    let slot = get_slot(&session_id, &state)?;
-    Ok(slot.manager.recent_output(lines.unwrap_or(50)))
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    state
+        .cmd_tx
+        .send(crate::types::TerminalCommand::RecentOutput {
+            lines: lines.unwrap_or(50),
+            response_tx,
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    response_rx.await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn terminal_session_info(
-    session_id: String,
+    _session_id: String,
     state: State<'_, TerminalPluginState>,
 ) -> Result<TerminalSessionInfo, String> {
-    let slot = get_slot(&session_id, &state)?;
-    let manager = &slot.manager;
+    let manager = &state.manager;
     Ok(TerminalSessionInfo {
         session_id: manager.session_id(),
         cwd: manager.cwd(),
@@ -200,17 +180,16 @@ pub async fn terminal_session_info(
 
 #[tauri::command]
 pub async fn terminal_session_status(
-    session_id: String,
+    _session_id: String,
     state: State<'_, TerminalPluginState>,
 ) -> Result<TerminalSessionStatus, String> {
-    let slot = get_slot(&session_id, &state)?;
-    let manager = &slot.manager;
+    let manager = &state.manager;
     Ok(TerminalSessionStatus {
         session_id: manager.session_id(),
         alive: manager.is_alive(),
         cwd: manager.cwd(),
         shell: manager.shell(),
-        phase: slot.activity.busy_state().phase_label().to_string(),
+        phase: state.activity.busy_state().phase_label().to_string(),
     })
 }
 
@@ -218,60 +197,63 @@ pub async fn terminal_session_status(
 pub async fn terminal_list_statuses(
     state: State<'_, TerminalPluginState>,
 ) -> Result<Vec<TerminalSessionStatus>, String> {
-    Ok(state.registry.list_statuses())
+    // 单 PTY 模型：返回唯一的系统 PTY 条目（StatusPanel 绿点逻辑继续工作）
+    let manager = &state.manager;
+    Ok(vec![TerminalSessionStatus {
+        session_id: manager.session_id(),
+        alive: manager.is_alive(),
+        cwd: manager.cwd(),
+        shell: manager.shell(),
+        phase: state.activity.busy_state().phase_label().to_string(),
+    }])
 }
 
 #[tauri::command]
 pub async fn terminal_session_set_cwd(
-    session_id: String,
+    _session_id: String,
     cwd: String,
     state: State<'_, TerminalPluginState>,
 ) -> Result<(), String> {
-    let slot = get_slot(&session_id, &state)?;
-    slot.cmd_tx
+    let _ = state
+        .cmd_tx
         .send(crate::types::TerminalCommand::SetCwd { cwd })
-        .await
-        .map_err(|e| e.to_string())
+        .await;
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn terminal_session_resize(
-    session_id: String,
+    _session_id: String,
     cols: u16,
     rows: u16,
     state: State<'_, TerminalPluginState>,
 ) -> Result<(), String> {
-    let slot = get_slot(&session_id, &state)?;
-    slot.cmd_tx
+    let _ = state
+        .cmd_tx
         .send(crate::types::TerminalCommand::Resize { cols, rows })
-        .await
-        .map_err(|e| e.to_string())
+        .await;
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn terminal_session_reset(
-    session_id: String,
+    _session_id: String,
     state: State<'_, TerminalPluginState>,
 ) -> Result<(), String> {
-    let slot = get_slot(&session_id, &state)?;
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-    slot.cmd_tx
+    state
+        .cmd_tx
         .send(crate::types::TerminalCommand::Reset { response_tx })
         .await
         .map_err(|e| e.to_string())?;
-    tokio::time::timeout(std::time::Duration::from_secs(10), response_rx)
-        .await
-        .map_err(|_| "终端重置超时".to_string())?
-        .map_err(|_| "终端重置响应失败".to_string())
+    response_rx.await.map_err(|e| e.to_string())
 }
 
-// ===== 面板状态命令 =====
-
+/// 单 PTY 模型下无需选择面板 session（系统 PTY 唯一）。保留命令签名，恒为 no-op。
 #[tauri::command]
 pub async fn terminal_panel_set_session(
-    session_id: Option<String>,
-    state: State<'_, TerminalPluginState>,
+    _session_id: Option<String>,
+    _state: State<'_, TerminalPluginState>,
 ) -> Result<(), String> {
-    state.registry.set_panel_session(session_id.as_deref());
     Ok(())
 }

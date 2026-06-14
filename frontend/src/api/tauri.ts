@@ -862,6 +862,13 @@ export const api = {
     invoke('plugin:browser|browser_global_history_delete', { url }),
 
   // 终端面板（通过 plugin:terminal）
+  terminalSystemSessionInfo: (): Promise<{
+    session_id: string;
+    cwd: string;
+    shell: string;
+    alive: boolean;
+  }> => invoke('plugin:terminal|terminal_system_session_info'),
+
   terminalEnsureSession: (sessionId: string, cwd: string): Promise<boolean> =>
     invoke('plugin:terminal|terminal_ensure_session', { sessionId, cwd }),
 

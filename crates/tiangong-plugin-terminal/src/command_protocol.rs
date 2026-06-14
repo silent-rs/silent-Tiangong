@@ -54,6 +54,7 @@ fn ensure_system_pty(manager: &Arc<TerminalManager>, app: &tauri::AppHandle) -> 
                 manager.clone_state(),
                 app.clone(),
                 session_id.clone(),
+                manager.logger.clone(),
             );
             tracing::info!(session_id = %session_id, "系统 PTY 已重新启动");
             Some(new_ps)

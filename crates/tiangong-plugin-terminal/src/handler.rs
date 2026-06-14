@@ -5,7 +5,6 @@ use tiangong_core::terminal_trait::{TerminalExecResult, TerminalProvider};
 use tiangong_core::tool::ToolResult;
 use tokio::sync::mpsc;
 
-use crate::registry::TerminalSessionRegistry;
 use crate::types::TerminalCommand;
 use crate::util::shell_quote;
 
@@ -276,106 +275,15 @@ fn reject_interactive_script(script: &str, interactive: bool) -> Option<ToolResu
 }
 
 /// 通过 TerminalCommand channel 实现 TerminalProvider trait，支持面板打开时路由到交互 PTY
+/// 终端能力实现：单 PTY 模型，所有执行/输入/输出/重置都路由到系统 PTY。
+/// 历史上的双 PTY（系统 + 面板）已合并，不再有面板专属 PTY。
 pub struct TerminalProviderImpl {
     system_tx: mpsc::Sender<TerminalCommand>,
-    registry: Arc<TerminalSessionRegistry>,
 }
 
 impl TerminalProviderImpl {
-    pub fn new(
-        system_tx: mpsc::Sender<TerminalCommand>,
-        registry: Arc<TerminalSessionRegistry>,
-    ) -> Self {
-        Self {
-            system_tx,
-            registry,
-        }
-    }
-
-    /// 获取面板 session 的 cmd_tx（面板打开且 PTY 存活时）
-    fn panel_tx(&self) -> Option<mpsc::Sender<TerminalCommand>> {
-        let slot = self.registry.get_panel_slot()?;
-        if slot.manager.is_alive() {
-            Some(slot.cmd_tx.clone())
-        } else {
-            None
-        }
-    }
-
-    /// exec 路由（非交互）：面板终端空闲且用户不活跃时走面板，否则回退系统 PTY
-    /// 返回 (sender, 是否回退到系统 PTY)
-    fn tx_for_exec(&self) -> (mpsc::Sender<TerminalCommand>, bool) {
-        let slot = self.registry.get_panel_slot();
-        match slot {
-            Some(slot) if slot.manager.is_alive() => {
-                let busy = slot.activity.busy_state();
-                let user_active = slot
-                    .activity
-                    .is_user_active(std::time::Duration::from_secs(2));
-                match &busy {
-                    crate::collaboration::TerminalBusyState::Idle if !user_active => {
-                        (slot.cmd_tx.clone(), false)
-                    }
-                    crate::collaboration::TerminalBusyState::AgentInteractive { .. } => {
-                        // AgentInteractive：交互程序可能已退出（如 vi :wq 后），允许走面板 PTY
-                        // handle_exec 会在发送 marker 前先发 Ctrl+C 清理残留前台进程
-                        tracing::debug!("AgentInteractive 状态，尝试走面板 PTY 并清理前台进程");
-                        (slot.cmd_tx.clone(), false)
-                    }
-                    _ => {
-                        tracing::debug!(
-                            ?busy,
-                            user_active,
-                            "终端忙碌或用户活跃，exec 回退系统 PTY"
-                        );
-                        (self.system_tx.clone(), true)
-                    }
-                }
-            }
-            _ => (self.system_tx.clone(), true),
-        }
-    }
-
-    /// exec_interactive 路由：**只要面板存活就走面板**，不因 user_active 回退系统 PTY。
-    ///
-    /// 历史 bug：用户先在终端面板敲过键（2s 内），agent 调 `run_shell(interactive=true)`
-    /// 时 tx_for_exec 把命令送进系统 PTY，但后续 `terminal_input/output/reset` 永远走面板 PTY，
-    /// 导致 vi 实际跑在系统 PTY、agent 读到的却是面板 shell 提示符——交互彻底断开。
-    /// 交互式命令必须保证启动 + 后续输入输出在同一个 PTY 上，所以这里放弃 user_active 退路，
-    /// 至多在面板 AgentRunning（非交互执行中）时才回退。
-    fn tx_for_exec_interactive(&self) -> (mpsc::Sender<TerminalCommand>, bool) {
-        let slot = self.registry.get_panel_slot();
-        match slot {
-            Some(slot) if slot.manager.is_alive() => {
-                let busy = slot.activity.busy_state();
-                match &busy {
-                    crate::collaboration::TerminalBusyState::AgentRunning { .. } => {
-                        tracing::debug!(
-                            ?busy,
-                            "面板正在跑非交互命令，exec_interactive 回退系统 PTY"
-                        );
-                        (self.system_tx.clone(), true)
-                    }
-                    _ => (slot.cmd_tx.clone(), false),
-                }
-            }
-            _ => (self.system_tx.clone(), true),
-        }
-    }
-
-    /// input 路由：优先面板 session（包括 AgentInteractive），无面板时系统 PTY
-    fn tx_for_input(&self) -> mpsc::Sender<TerminalCommand> {
-        self.panel_tx().unwrap_or_else(|| self.system_tx.clone())
-    }
-
-    /// output 路由：优先面板 session，无面板时系统 PTY
-    fn tx_for_output(&self) -> mpsc::Sender<TerminalCommand> {
-        self.panel_tx().unwrap_or_else(|| self.system_tx.clone())
-    }
-
-    /// reset 路由：优先面板 session，无面板时系统 PTY
-    fn tx_for_reset(&self) -> mpsc::Sender<TerminalCommand> {
-        self.panel_tx().unwrap_or_else(|| self.system_tx.clone())
+    pub fn new(system_tx: mpsc::Sender<TerminalCommand>) -> Self {
+        Self { system_tx }
     }
 }
 
@@ -398,11 +306,11 @@ impl TerminalProvider for TerminalProviderImpl {
         timeout_secs: Option<u64>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<TerminalExecResult>> + Send>>
     {
-        let (tx, fallback) = self.tx_for_exec();
+        let tx = self.system_tx.clone();
         let command = command.to_string();
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-            let mut resp: crate::types::TerminalExecResponse = send_and_wait!(
+            let resp: crate::types::TerminalExecResponse = send_and_wait!(
                 tx,
                 TerminalCommand::Exec {
                     command,
@@ -412,10 +320,6 @@ impl TerminalProvider for TerminalProviderImpl {
                 response_rx,
                 180
             );
-            if fallback {
-                resp.stderr
-                    .push_str("\n[提示] 面板终端忙碌或用户正在操作，本次命令在后台系统终端执行");
-            }
             Some(resp.into())
         })
     }
@@ -437,11 +341,11 @@ impl TerminalProvider for TerminalProviderImpl {
         wait_secs: u64,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<TerminalExecResult>> + Send>>
     {
-        let (tx, fallback) = self.tx_for_exec_interactive();
+        let tx = self.system_tx.clone();
         let command = command.to_string();
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-            let mut resp: crate::types::TerminalExecResponse = send_and_wait!(
+            let resp: crate::types::TerminalExecResponse = send_and_wait!(
                 tx,
                 TerminalCommand::ExecInteractive {
                     command,
@@ -451,10 +355,6 @@ impl TerminalProvider for TerminalProviderImpl {
                 response_rx,
                 180
             );
-            if fallback {
-                resp.stderr
-                    .push_str("\n[提示] 面板终端忙碌或用户正在操作，本次命令在后台系统终端执行");
-            }
             Some(resp.into())
         })
     }
@@ -474,7 +374,7 @@ impl TerminalProvider for TerminalProviderImpl {
         &self,
         lines: usize,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>> {
-        let tx = self.tx_for_output();
+        let tx = self.system_tx.clone();
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
             let output: String = send_and_wait!(
@@ -490,7 +390,7 @@ impl TerminalProvider for TerminalProviderImpl {
     fn current_cwd(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>> {
-        let tx = self.tx_for_output();
+        let tx = self.system_tx.clone();
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
             let cwd: Option<String> = send_and_wait!(
@@ -507,7 +407,7 @@ impl TerminalProvider for TerminalProviderImpl {
         &self,
         input: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<()>> + Send>> {
-        let tx = self.tx_for_input();
+        let tx = self.system_tx.clone();
         let input = input.to_string();
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
@@ -526,7 +426,7 @@ impl TerminalProvider for TerminalProviderImpl {
     }
 
     fn reset(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<()>> + Send>> {
-        let tx = self.tx_for_reset();
+        let tx = self.system_tx.clone();
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
             send_and_wait!(tx, TerminalCommand::Reset { response_tx }, response_rx, 10);
@@ -569,6 +469,14 @@ impl TerminalToolOverride {
             .get("interactive")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        // 读取 agent 指定的工作目录（run_shell schema 含 cwd 字段）。
+        // 与 run_command_via_pty 一致：cwd 与终端当前目录不同时，把 script
+        // 包装成 `cd <cwd> && <script>`，避免命令在错误的目录执行。
+        let cwd = call
+            .arguments
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
         if let Some(result) = reject_interactive_script(&command, interactive) {
             return Box::pin(async move { Some(result) });
@@ -576,6 +484,25 @@ impl TerminalToolOverride {
 
         let provider = provider.clone();
         Box::pin(async move {
+            // 若 agent 指定了 cwd 且与终端当前 cwd 不同，包装为 cd <cwd> && <script>。
+            // exec_command trait 方法不携带 cwd，这里手动前置 cd。
+            let command = match cwd.as_deref() {
+                Some(want) if !want.is_empty() => {
+                    let current = provider.current_cwd().await;
+                    let need_cd = match current.as_deref() {
+                        Some(cur) => !cur
+                            .trim_end_matches('/')
+                            .eq_ignore_ascii_case(want.trim_end_matches('/')),
+                        None => true,
+                    };
+                    if need_cd {
+                        format!("cd {} && {}", shell_quote(want), command)
+                    } else {
+                        command
+                    }
+                }
+                _ => command,
+            };
             let result = if interactive {
                 match provider.exec_interactive(&command, 3).await {
                     Some(r) => r,

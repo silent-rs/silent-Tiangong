@@ -15,6 +15,8 @@ const DEFAULT_BUFFER_LINES: usize = 5000;
 
 pub struct TerminalManager {
     pub(crate) state: Arc<Mutex<TerminalState>>,
+    /// 系统 PTY 输出日志器（仅系统 PTY 有；面板 PTY 为 None）。用于持久化历史与重置时清空。
+    pub(crate) logger: Option<Arc<crate::output_processor::OutputLogger>>,
 }
 
 pub(crate) struct TerminalState {
@@ -47,6 +49,19 @@ impl TerminalManager {
                 total_lines_pushed: 0,
                 current_line: String::new(),
             })),
+            logger: None,
+        }
+    }
+
+    /// 设置系统 PTY 输出日志器（启动时回填历史后调用）
+    pub(crate) fn set_logger(&mut self, logger: Arc<crate::output_processor::OutputLogger>) {
+        self.logger = Some(logger);
+    }
+
+    /// 清空输出日志（用户主动重置终端时调用），无日志器时为空操作
+    pub(crate) fn clear_log(&self) {
+        if let Some(ref logger) = self.logger {
+            logger.clear();
         }
     }
 
@@ -94,6 +109,7 @@ impl TerminalManager {
             self.state.clone(),
             app,
             session_id.to_string(),
+            self.logger.clone(),
         );
         info!(session_id, "PTY 进程已启动");
         Some(ps)
@@ -306,6 +322,8 @@ pub(crate) async fn spawn_command_loop(
                     state.last_read_line = 0;
                     state.current_line.clear();
                 }
+                // 用户主动重置视为刷新，清空持久化日志
+                manager.clear_log();
                 match start_pty(&session_id, &cwd, &shell) {
                     Ok(new_ps) => {
                         {
@@ -320,6 +338,7 @@ pub(crate) async fn spawn_command_loop(
                             state,
                             app_handle,
                             sid,
+                            manager.logger.clone(),
                         );
                         pty_state = Some(new_ps);
                         info!(session_id = %session_id, "PTY 进程已重置");

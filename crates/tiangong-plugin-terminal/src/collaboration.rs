@@ -25,7 +25,7 @@ pub enum InputSource {
 }
 
 /// 终端活跃状态追踪器
-pub(crate) struct TerminalActivityTracker {
+pub struct TerminalActivityTracker {
     last_user_input: Mutex<Instant>,
     busy_state: Mutex<TerminalBusyState>,
     /// 当前 Agent 命令期间用户是否干预过
@@ -60,6 +60,7 @@ impl TerminalActivityTracker {
     }
 
     /// 检查用户是否在指定时间内活跃
+    #[allow(dead_code)]
     pub(crate) fn is_user_active(&self, threshold: std::time::Duration) -> bool {
         self.last_user_input
             .lock()
