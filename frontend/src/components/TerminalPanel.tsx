@@ -240,17 +240,10 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
       }
     };
     switchTo();
-  }, [effectiveId, sessionCwd, workspaceDir]);
+  }, [effectiveId]);
 
-  // CWD 变化时单独同步（不触发终端重建）
-  useEffect(() => {
-    if (!currentIdRef.current) return;
-    if (Date.now() - createdTimeRef.current < 3000) return;
-    const targetCwd = sessionCwd || workspaceDir;
-    if (targetCwd) {
-      api.terminalSessionSetCwd(currentIdRef.current, targetCwd).catch(() => {});
-    }
-  }, [sessionCwd, workspaceDir]);
+  // 会话独立终端模型：PTY 创建时已用 workspace cwd，之后 cwd 由用户/命令
+  // 自然管理。切换会话时不强制 cd，避免覆盖用户在终端内的 cd 操作。
 
   // 卸载时只销毁前端 xterm（保留后端 PTY 和历史）
   useEffect(() => {
