@@ -33,15 +33,15 @@ const TERMINAL_CONFIG = {
 };
 
 /**
- * 终端面板（单 PTY 模型）：
- * - effectiveId 固定为系统 PTY 的 session_id（agent 命令与面板操作共享同一条终端会话）
- * - 挂载时通过 terminalSystemSessionInfo 获取系统 id，历史输出与实时事件都用它
- * - 切换对话不再销毁/重建 PTY（系统 PTY 跨对话共享）
- * - 池化结构（poolRef/MAX_POOL_SIZE）为历史遗留，单 PTY 下实际只有 1 个条目，
- *   保留以便未来扩展，后续迭代可简化为单实例管理
+ * 终端面板（按对话 PTY 模型）：
+ * - effectiveId 取当前对话 id（activeSessionId），每个对话拥有独立 PTY
+ * - 切换对话时懒创建/挂载对应对话的 xterm，历史输出与实时事件按 session_id 分发
+ * - 池化结构（poolRef/MAX_POOL_SIZE）限制前端 xterm 实例数量，超出时淘汰最久未访问
+ *   （仅销毁前端 xterm，后端 PTY 保留以便切回时恢复历史）
  * - 工具栏：cwd 显示 + 重置按钮（重启 shell 并清空日志）
  */
 export function TerminalPanel({ onClose }: { onClose: () => void }) {
+  const activeSessionId = useStore((s) => s.activeSessionId);
   const sessionCwd = useStore((s) => s.sessionCwd);
   const workspaceDir = useStore((s) => s.workspaceDir);
 
@@ -62,24 +62,8 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
     alive: false,
   });
 
-  // 单 PTY 模型：effectiveId 固定为系统 PTY 的 session_id（由后端分配的 SCRU128）。
-  // agent 命令和面板操作共享同一条终端会话，历史互通。
-  const [systemSessionId, setSystemSessionId] = useState<string | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    api.terminalSystemSessionInfo()
-      .then((info) => {
-        if (!cancelled) setSystemSessionId(info.session_id);
-      })
-      .catch(() => {
-        if (!cancelled) setSystemSessionId('__tiangong_system__');
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const effectiveId = systemSessionId;
+  // 按对话 PTY 模型：effectiveId 为当前对话 id，每个对话有独立终端会话
+  const effectiveId = activeSessionId || null;
 
   // 全局 output listener（按 session_id 分发）
   useEffect(() => {
@@ -134,7 +118,7 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
 
   // 切换对话时挂载/创建 xterm（仅在 effectiveId 变化时触发）
   useEffect(() => {
-    // 系统 PTY id 尚未就绪时跳过（单 PTY 模型下 effectiveId 即系统 id）
+    // 按对话 PTY 模型：effectiveId 即当前对话 id，尚未就绪时跳过
     if (!effectiveId) return;
     if (effectiveId === currentIdRef.current && poolRef.current.has(effectiveId)) {
       return;
@@ -142,7 +126,6 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
     const container = containerRef.current;
     if (!container) return;
 
-    // 单 PTY 模型：effectiveId 固定为系统 PTY，不再有「草稿终端」与销毁逻辑。
     currentIdRef.current = effectiveId;
 
     const switchTo = async () => {

@@ -119,7 +119,7 @@ pub async fn execute_single_plan_step_with_execution_agent(
                 execute_mcp_tool_call_with_args(&target, args, mcp_config).await
             } else {
                 match build_tool_call_from_function(tool_call) {
-                    Ok(call) => tool_executor.execute(&call),
+                    Ok(call) => tool_executor.execute(&call, &session.id),
                     Err(err) => {
                         if let Some(target) =
                             resolve_unique_mcp_target_by_raw_name(&tool_call.name, mcp_config)

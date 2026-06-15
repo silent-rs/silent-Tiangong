@@ -1338,6 +1338,7 @@ impl ReactEngine {
                                         call,
                                         &self.mcp_targets,
                                         &self.engine.agent_config().mcp,
+                                        &session.id,
                                     )
                                     .await,
                                 tiangong_types::TokenUsage::default(),

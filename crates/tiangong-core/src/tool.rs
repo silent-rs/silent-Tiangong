@@ -86,7 +86,7 @@ pub struct ToolResult {
 }
 
 pub trait ToolExecutor {
-    fn execute(&self, call: &ToolCall) -> Result<ToolResult>;
+    fn execute(&self, call: &ToolCall, session_id: &str) -> Result<ToolResult>;
 }
 
 #[derive(Clone, Default)]
@@ -99,13 +99,13 @@ pub struct LocalToolExecutor {
 }
 
 impl ToolExecutor for LocalToolExecutor {
-    fn execute(&self, call: &ToolCall) -> Result<ToolResult> {
+    fn execute(&self, call: &ToolCall, session_id: &str) -> Result<ToolResult> {
         let started = Instant::now();
         let result = match call.name {
             ToolName::ReadFile => self.read_file(call),
             ToolName::ListDir => self.list_dir(call),
             ToolName::TreeDir => self.tree_dir(call),
-            ToolName::RunCommand => self.run_command(call),
+            ToolName::RunCommand => self.run_command(call, session_id),
             ToolName::SearchCode => self.search_code(call),
             ToolName::CurrentTime => self.current_time(call),
             ToolName::Scheduler => self.scheduler(call),

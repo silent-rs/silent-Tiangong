@@ -67,7 +67,7 @@ pub(super) fn collect_runtime_env(agent_config: &AgentConfig) -> BTreeMap<String
 }
 
 impl LocalToolExecutor {
-    pub(super) fn run_command(&self, call: &ToolCall) -> Result<ToolResult> {
+    pub(super) fn run_command(&self, call: &ToolCall, session_id: &str) -> Result<ToolResult> {
         let raw_cmd = call
             .args
             .first()
@@ -106,7 +106,14 @@ impl LocalToolExecutor {
 
         // 校验通过后，有 PTY provider 则走终端执行（输出出现在嵌入式终端面板）
         if let Some(provider) = self.terminal_provider() {
-            return self.run_command_via_pty(provider, &cmd, &args, &effective_cwd, timeout_ms);
+            return self.run_command_via_pty(
+                provider,
+                &cmd,
+                &args,
+                &effective_cwd,
+                timeout_ms,
+                session_id,
+            );
         }
 
         let env_allowlist = command_env_allowlist();
@@ -173,6 +180,7 @@ impl LocalToolExecutor {
         args: &[String],
         effective_cwd: &std::path::Path,
         timeout_ms: u64,
+        session_id: &str,
     ) -> Result<ToolResult> {
         let timeout_secs = if timeout_ms > 0 {
             Some(timeout_ms / 1000)
@@ -180,7 +188,7 @@ impl LocalToolExecutor {
             None
         };
 
-        let result = exec_via_pty(provider, cmd, args, effective_cwd, timeout_secs)?;
+        let result = exec_via_pty(provider, cmd, args, effective_cwd, timeout_secs, session_id)?;
 
         match result {
             Some(r) => {
@@ -415,9 +423,10 @@ fn build_pty_command_with_cwd(
     cmd: &str,
     args: &[String],
     effective_cwd: &Path,
+    session_id: &str,
 ) -> (String, Vec<String>) {
     // 判断是否需要切到 effective_cwd：解析 PTY 当前 cwd，不同则前置 cd。
-    let current = pty_current_cwd_blocking(provider);
+    let current = pty_current_cwd_blocking(provider, session_id);
     let need_cd = match (current.as_deref(), effective_cwd.to_str()) {
         (Some(cur), Some(want)) => !cur
             .trim_end_matches('/')
@@ -445,11 +454,12 @@ fn build_pty_command_with_cwd(
 /// 阻塞读取 PTY 当前 cwd（用于决定是否需要前置 cd）
 fn pty_current_cwd_blocking(
     provider: &std::sync::Arc<dyn crate::terminal_trait::TerminalProvider>,
+    session_id: &str,
 ) -> Option<String> {
     let handle = tokio::runtime::Handle::try_current();
     match handle {
         Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| h.block_on(provider.current_cwd()))
+            tokio::task::block_in_place(|| h.block_on(provider.current_cwd(session_id)))
         }
         _ => std::thread::scope(|scope| {
             scope
@@ -458,7 +468,7 @@ fn pty_current_cwd_blocking(
                         .enable_all()
                         .build()
                         .expect("初始化 PTY cwd 读取运行时失败");
-                    rt.block_on(provider.current_cwd())
+                    rt.block_on(provider.current_cwd(session_id))
                 })
                 .join()
                 .expect("PTY cwd 读取线程 panic")
@@ -473,15 +483,17 @@ fn exec_via_pty(
     args: &[String],
     effective_cwd: &Path,
     timeout_secs: Option<u64>,
+    session_id: &str,
 ) -> anyhow::Result<Option<crate::terminal_trait::TerminalExecResult>> {
-    let (pty_cmd, pty_args) = build_pty_command_with_cwd(provider, cmd, args, effective_cwd);
+    let (pty_cmd, pty_args) =
+        build_pty_command_with_cwd(provider, cmd, args, effective_cwd, session_id);
     let provider = provider.clone();
 
     let handle = tokio::runtime::Handle::try_current();
     match handle {
         Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
             Ok(tokio::task::block_in_place(|| {
-                h.block_on(provider.exec_command(&pty_cmd, &pty_args, timeout_secs))
+                h.block_on(provider.exec_command(session_id, &pty_cmd, &pty_args, timeout_secs))
             }))
         }
         _ => Ok(std::thread::scope(|scope| {
@@ -491,7 +503,12 @@ fn exec_via_pty(
                         .enable_all()
                         .build()
                         .expect("初始化 PTY 执行运行时失败");
-                    rt.block_on(provider.exec_command(&pty_cmd, &pty_args, timeout_secs))
+                    rt.block_on(provider.exec_command(
+                        session_id,
+                        &pty_cmd,
+                        &pty_args,
+                        timeout_secs,
+                    ))
                 })
                 .join()
                 .expect("PTY 执行线程 panic")

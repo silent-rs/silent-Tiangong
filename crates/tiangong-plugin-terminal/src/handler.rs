@@ -1,29 +1,11 @@
 use std::sync::Arc;
-use std::time::Duration;
 
-use tiangong_core::terminal_trait::{TerminalExecResult, TerminalProvider};
+use tiangong_core::terminal_trait::TerminalProvider;
 use tiangong_core::tool::ToolResult;
-use tokio::sync::mpsc;
 
-use crate::types::TerminalCommand;
 use crate::util::shell_quote;
 
 const OUTPUT_THRESHOLD: usize = 2000;
-
-/// 将原始 cmd + args 格式化为终端可执行的命令字符串
-fn format_command(cmd: &str, args: &[String]) -> String {
-    if matches!(cmd, "bash" | "sh" | "powershell" | "pwsh") {
-        // shell 命令：args 已经是 [flag, script] 格式，取 script 部分
-        args.last().map(|s| s.as_str()).unwrap_or("").to_string()
-    } else {
-        // 普通命令：cmd + args 拼成一行
-        let mut parts = vec![cmd.to_string()];
-        for arg in args {
-            parts.push(shell_quote(arg));
-        }
-        parts.join(" ")
-    }
-}
 
 fn first_shell_word(line: &str) -> Option<&str> {
     let trimmed = line.trim_start();
@@ -81,161 +63,24 @@ fn is_interactive_program(word: &str) -> bool {
     )
 }
 
-fn script_uses_stdin_automation(script: &str) -> bool {
-    let lower = script.to_ascii_lowercase();
-    script.contains("<<")
-        || script.contains('|')
-        || lower.contains("printf ")
-        || lower.contains("echo ")
-        || lower.contains(" -es")
-        || lower.contains(" -e ")
-        || lower.contains(" --cmd")
-}
-
-/// 拦截尝试自动驱动交互式终端程序的脚本。
+/// 拦截 Agent 发起的交互式终端程序。
 ///
-/// 当前环境不支持交互式终端程序（terminal_input/output/reset 已移除）。
-/// 检测到脚本尝试用 heredoc、管道、ex 模式等驱动 vi/vim/nano/ssh 等交互式程序时，
-/// 拒绝并引导改用 write_file/sed 等非交互方式。
+/// 当前基础终端分支不支持 Agent 自动操作交互式终端程序
+/// （terminal_input/output/reset 等交互能力在独立分支开发）。
+/// 一旦检测到脚本中出现 vi/vim/nano/ssh/python REPL 等交互程序，
+/// 无论是否伴随 stdin 自动化，都直接拒绝，避免 PTY 进入前台交互后卡死。
 fn reject_interactive_script(script: &str) -> Option<ToolResult> {
     if !script_uses_interactive_terminal_program(script) {
         return None;
     }
-    if !script_uses_stdin_automation(script) {
-        return None;
-    }
     Some(ToolResult {
         ok: false,
-        summary: "当前环境不支持交互式终端程序".to_string(),
+        summary: "不支持 Agent 自动操作交互式终端程序".to_string(),
         stdout: String::new(),
-        stderr: "检测到脚本尝试用 heredoc、管道或 ex 模式自动驱动 vi/vim/nano/ssh 等交互式程序。当前环境暂不支持交互式终端程序，请改用 write_file、sed、awk 等非交互方式完成文件编辑或自动化操作。".to_string(),
+        stderr: "检测到脚本中包含 vi/vim/nano/ssh/python REPL 等交互式终端程序。当前基础终端分支不支持 Agent 自动操作交互式终端程序，请改用 write_file / replace_in_file 完成文件编辑，或使用非交互 shell 命令（如 sed、awk）。交互式终端能力在独立分支开发。".to_string(),
         exit_code: 2,
         execution: None,
     })
-}
-
-/// 终端能力实现：单 PTY 模型，所有执行都路由到系统 PTY。
-pub struct TerminalProviderImpl {
-    system_tx: mpsc::Sender<TerminalCommand>,
-}
-
-impl TerminalProviderImpl {
-    pub fn new(system_tx: mpsc::Sender<TerminalCommand>) -> Self {
-        Self { system_tx }
-    }
-}
-
-macro_rules! send_and_wait {
-    ($tx:expr, $cmd:expr, $rx:expr, $timeout:expr) => {{
-        if $tx.send($cmd).await.is_err() {
-            return None;
-        }
-        tokio::time::timeout(Duration::from_secs($timeout), $rx)
-            .await
-            .ok()?
-            .ok()?
-    }};
-}
-
-impl TerminalProvider for TerminalProviderImpl {
-    fn exec(
-        &self,
-        command: &str,
-        timeout_secs: Option<u64>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<TerminalExecResult>> + Send>>
-    {
-        let tx = self.system_tx.clone();
-        let command = command.to_string();
-        Box::pin(async move {
-            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-            let resp: crate::types::TerminalExecResponse = send_and_wait!(
-                tx,
-                TerminalCommand::Exec {
-                    command,
-                    timeout_secs,
-                    response_tx
-                },
-                response_rx,
-                180
-            );
-            Some(resp.into())
-        })
-    }
-
-    fn exec_command(
-        &self,
-        cmd: &str,
-        args: &[String],
-        timeout_secs: Option<u64>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<TerminalExecResult>> + Send>>
-    {
-        let command = format_command(cmd, args);
-        self.exec(&command, timeout_secs)
-    }
-
-    fn recent_output(
-        &self,
-        lines: usize,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>> {
-        let tx = self.system_tx.clone();
-        Box::pin(async move {
-            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-            let output: String = send_and_wait!(
-                tx,
-                TerminalCommand::RecentOutput { lines, response_tx },
-                response_rx,
-                5
-            );
-            Some(output)
-        })
-    }
-
-    fn current_cwd(
-        &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>> {
-        let tx = self.system_tx.clone();
-        Box::pin(async move {
-            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-            let cwd: Option<String> = send_and_wait!(
-                tx,
-                TerminalCommand::CurrentCwd { response_tx },
-                response_rx,
-                5
-            );
-            cwd
-        })
-    }
-
-    fn send_input(
-        &self,
-        input: &str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<()>> + Send>> {
-        let tx = self.system_tx.clone();
-        let input = input.to_string();
-        Box::pin(async move {
-            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-            send_and_wait!(
-                tx,
-                TerminalCommand::SendInput {
-                    input,
-                    source: crate::collaboration::InputSource::Agent,
-                    response_tx,
-                },
-                response_rx,
-                5
-            );
-            Some(())
-        })
-    }
-
-    fn reset(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<()>> + Send>> {
-        let tx = self.system_tx.clone();
-        Box::pin(async move {
-            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-            send_and_wait!(tx, TerminalCommand::Reset { response_tx }, response_rx, 10);
-            Some(())
-        })
-    }
 }
 
 /// 终端工具覆盖处理器（run_shell）。
@@ -261,6 +106,7 @@ impl TerminalToolOverride {
     fn handle_run_shell(
         provider: &Arc<dyn TerminalProvider>,
         call: &tiangong_core::model::ToolCall,
+        session_id: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ToolResult>> + Send>> {
         let command = match call.arguments.get("script").and_then(|v| v.as_str()) {
             Some(c) => c.to_string(),
@@ -281,12 +127,13 @@ impl TerminalToolOverride {
         }
 
         let provider = provider.clone();
+        let session_id = session_id.to_string();
         Box::pin(async move {
             // 若 agent 指定了 cwd 且与终端当前 cwd 不同，包装为 cd <cwd> && <script>。
             // exec_command trait 方法不携带 cwd，这里手动前置 cd。
             let command = match cwd.as_deref() {
                 Some(want) if !want.is_empty() => {
-                    let current = provider.current_cwd().await;
+                    let current = provider.current_cwd(&session_id).await;
                     let need_cd = match current.as_deref() {
                         Some(cur) => !cur
                             .trim_end_matches('/')
@@ -301,7 +148,7 @@ impl TerminalToolOverride {
                 }
                 _ => command,
             };
-            let result = match provider.exec(&command, timeout_secs).await {
+            let result = match provider.exec(&session_id, &command, timeout_secs).await {
                 Some(r) => r,
                 None => return None, // 终端不可用，回退到默认 run_shell
             };
@@ -343,9 +190,10 @@ impl tiangong_core::tool_override::ToolOverrideHandler for TerminalToolOverride 
     fn handle(
         &self,
         call: &tiangong_core::model::ToolCall,
+        session_id: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ToolResult>> + Send>> {
         match call.name.as_str() {
-            "run_shell" => Self::handle_run_shell(&self.provider, call),
+            "run_shell" => Self::handle_run_shell(&self.provider, call, session_id),
             _ => Box::pin(async { None }),
         }
     }
@@ -358,6 +206,7 @@ impl tiangong_core::tool_override::PromptSectionProvider for TerminalPromptSecti
     fn prompt_sections(&self) -> Vec<String> {
         vec![
             "当用户请求涉及命令行操作（安装依赖、创建项目、编译构建、文件操作等），必须逐步使用 `run_shell` 实际执行命令，不要仅以文本或代码块形式展示命令给用户。每步执行一条命令，根据执行结果决定下一步操作。回复中可以用代码块展示已执行的命令，但必须先通过 `run_shell` 实际执行。".to_string(),
+            "当前基础终端能力不支持 Agent 自动操作交互式终端程序（如 vi/vim/nano/ssh/python REPL）。遇到文件编辑应使用 write_file / replace_in_file，或使用非交互 shell 命令（如 sed、awk）完成。".to_string(),
         ]
     }
 }
@@ -398,9 +247,30 @@ mod tests {
     }
 
     #[test]
-    fn allows_vi_without_automation() {
-        // Simple vi invocation without heredoc/pipe should not be rejected
+    fn rejects_plain_vi() {
+        // 裸 vi 调用（无 heredoc/pipe）也应被拒绝：当前分支不支持 Agent 操作交互式程序
         let result = reject_interactive_script("vi hello.txt");
-        assert!(result.is_none());
+        assert!(result.is_some());
+        let result = result.unwrap();
+        assert!(!result.ok);
+        assert_eq!(result.exit_code, 2);
+    }
+
+    #[test]
+    fn rejects_python_repl() {
+        let result = reject_interactive_script("python");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn rejects_node_repl() {
+        let result = reject_interactive_script("node");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn rejects_ssh() {
+        let result = reject_interactive_script("ssh user@host");
+        assert!(result.is_some());
     }
 }

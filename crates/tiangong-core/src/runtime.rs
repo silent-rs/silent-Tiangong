@@ -359,6 +359,7 @@ impl RuntimeEngine {
         call: &ToolCall,
         mcp_targets: &HashMap<String, McpFunctionTarget>,
         mcp_config: &McpConfig,
+        session_id: &str,
     ) -> ToolResult {
         // 权限检查
         use crate::permission::PermissionDecision;
@@ -448,7 +449,7 @@ impl RuntimeEngine {
             .lock()
             .ok()
             .and_then(|g| g.get(&call.name).cloned())
-            && let Some(result) = handler.handle(call).await
+            && let Some(result) = handler.handle(call, session_id).await
         {
             return result;
         }
@@ -460,7 +461,7 @@ impl RuntimeEngine {
             .map(|g| g.clone())
             .unwrap_or_else(|_| LocalToolExecutor::from_agent_config(&self.agent_config));
         match build_tool_call_from_function(call) {
-            Ok(tool_call) => match executor.execute(&tool_call) {
+            Ok(tool_call) => match executor.execute(&tool_call, session_id) {
                 Ok(result) => result,
                 Err(err) => ToolResult {
                     ok: false,
