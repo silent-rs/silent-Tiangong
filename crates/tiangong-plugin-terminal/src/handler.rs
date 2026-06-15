@@ -155,7 +155,12 @@ impl TerminalToolOverride {
 
             let stdout = Self::truncate_text(&result.stdout, OUTPUT_THRESHOLD);
 
-            let mut summary = if result.timed_out {
+            // 当前基础终端分支不支持 Agent 交互式终端：interactive_mode 为 true
+            // 时 PTY 前台进程仍在运行，必须报告失败，避免 Agent 误判成功后在卡住
+            // 的 PTY 上继续执行后续命令。
+            let mut summary = if result.interactive_mode {
+                "命令进入交互模式（当前不支持 Agent 交互式终端）".to_string()
+            } else if result.timed_out {
                 "命令执行超时".to_string()
             } else if result.interrupted_by_user {
                 "命令被用户中断".to_string()
@@ -170,12 +175,18 @@ impl TerminalToolOverride {
             }
 
             let mut stderr = result.stderr.clone();
-            if result.interrupted_by_user {
+            if result.interactive_mode {
+                stderr.push_str(
+                    "\n[提示] 命令似乎进入了交互模式（等待输入或未正常退出）。\
+当前基础终端分支不支持 Agent 自动操作交互式终端程序，请改用 write_file / \
+replace_in_file，或使用非交互 shell 命令完成。",
+                );
+            } else if result.interrupted_by_user {
                 stderr.push_str("\n[提示] 命令被用户中断，建议询问用户是否需要调整执行计划");
             }
 
             Some(ToolResult {
-                ok: result.exit_code == 0 && !result.timed_out,
+                ok: result.exit_code == 0 && !result.timed_out && !result.interactive_mode,
                 summary,
                 stdout,
                 stderr,
