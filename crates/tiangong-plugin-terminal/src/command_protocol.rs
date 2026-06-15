@@ -233,23 +233,6 @@ pub(crate) async fn handle_exec(
         }
     };
 
-    // 如果当前处于 AgentInteractive 状态，先发送 Ctrl+C 清理残留前台进程
-    // 场景：Agent 先用 interactive=true 启动 vi，vi 退出后 shell 回到 prompt，
-    // 但状态仍为 AgentInteractive。后续 exec 需要确保 shell 回到干净状态。
-    if let Some(tracker) = activity {
-        if matches!(
-            tracker.busy_state(),
-            crate::collaboration::TerminalBusyState::AgentInteractive { .. }
-        ) {
-            if let Ok(mut writer) = ps.writer.lock() {
-                let _ = writer.write_all(b"\x03");
-                let _ = writer.flush();
-            }
-            // 等待 shell 处理 SIGINT 并回到 prompt
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        }
-    }
-
     // 生成 start marker 和 end marker
     let marker_id = scru128::new();
     let command_id = marker_id.to_string();
@@ -451,7 +434,7 @@ pub(crate) async fn handle_exec(
 
             if prompt_ready || fallback_ready {
                 let reason = if prompt_ready {
-                    "命令正在等待交互输入"
+                    "命令似乎在等待交互输入，当前环境暂不支持交互式终端操作，建议终止后改用非交互方式"
                 } else {
                     "命令未返回结束标记，已返回当前终端显示内容"
                 };
@@ -459,11 +442,7 @@ pub(crate) async fn handle_exec(
                 let tracker_interrupted =
                     activity.map(|t| t.take_user_intervened()).unwrap_or(false);
                 if let Some(tracker) = activity {
-                    tracker.set_busy_state(
-                        crate::collaboration::TerminalBusyState::AgentInteractive {
-                            command_id: command_id.clone(),
-                        },
-                    );
+                    tracker.set_busy_state(crate::collaboration::TerminalBusyState::Idle);
                 }
                 let _ = response_tx.send(TerminalExecResponse {
                     exit_code: 0,
@@ -533,107 +512,6 @@ pub(crate) async fn handle_exec(
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-}
-
-/// 交互式命令执行：不使用 marker，直接发送命令，等待初始输出后返回
-pub(crate) async fn handle_exec_interactive(
-    manager: &Arc<TerminalManager>,
-    pty_state: &mut Option<PtyState>,
-    command: &str,
-    wait_secs: u64,
-    response_tx: oneshot::Sender<TerminalExecResponse>,
-    activity: Option<&Arc<crate::collaboration::TerminalActivityTracker>>,
-) {
-    let ps = match pty_state {
-        Some(ps) => ps,
-        None => {
-            let _ = response_tx.send(TerminalExecResponse {
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: "终端会话不可用".to_string(),
-                timed_out: false,
-                cwd_after: manager.cwd(),
-                interrupted_by_user: false,
-                interactive_mode: false,
-            });
-            return;
-        }
-    };
-
-    let record_start = {
-        let state = manager.state.lock().unwrap();
-        state.output_buffer.len()
-    };
-
-    // 先设置协作状态为 AgentInteractive
-    let command_id = scru128::new().to_string();
-    if let Some(tracker) = activity {
-        tracker.set_busy_state(crate::collaboration::TerminalBusyState::AgentInteractive {
-            command_id: command_id.clone(),
-        });
-    }
-
-    // 清理残留进程 + 发送命令
-    // 注意：用 `\r`（CR）而非 `\n`（LF）作为回车键。zsh 的 ZLE、vim、less 等
-    // TUI 程序在 raw 模式下只识别 CR 作为"提交本行"，发 LF 会导致命令停留在
-    // 输入行不执行——历史上观察到 `vi hello.txt\n` 后 shell 不执行的现象。
-    // （终端上看到的 `vvi hello.txt` 是 zsh autosuggestion 的视觉提示，与
-    // 实际行缓冲无关，无需为此加 sleep。）
-    let send_result = {
-        match ps.writer.lock() {
-            Ok(mut writer) => {
-                let _ = writer.write_all(b"\x03");
-                let _ = writer.flush();
-                let _ = writer.write_all(b"\x15");
-                let _ = writer.flush();
-                let cmd = format!("{}\r", command);
-                send_to_pty(&mut writer, &cmd)
-            }
-            Err(e) => Err(anyhow::anyhow!("获取 writer 锁失败: {}", e)),
-        }
-    };
-    if let Err(e) = send_result {
-        if let Some(tracker) = activity {
-            tracker.set_busy_state(crate::collaboration::TerminalBusyState::Idle);
-        }
-        let _ = response_tx.send(TerminalExecResponse {
-            exit_code: -1,
-            stdout: String::new(),
-            stderr: format!("发送命令到终端失败: {}", e),
-            timed_out: false,
-            cwd_after: manager.cwd(),
-            interrupted_by_user: false,
-            interactive_mode: false,
-        });
-        return;
-    }
-
-    // 等待初始输出
-    tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
-
-    // 收集本次命令后的输出，过滤掉内部 marker（start/end/cwd/rc），
-    // 避免上一次 exec 残留的 marker 行泄漏到交互输出中
-    let stdout_text = {
-        let state = manager.state.lock().unwrap();
-        state
-            .output_buffer
-            .iter()
-            .skip(record_start)
-            .filter(|line| !contains_marker(line))
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-
-    let _ = response_tx.send(TerminalExecResponse {
-        exit_code: 0,
-        stdout: stdout_text,
-        stderr: String::new(),
-        timed_out: false,
-        cwd_after: manager.cwd(),
-        interrupted_by_user: false,
-        interactive_mode: true,
-    });
 }
 
 #[cfg(test)]

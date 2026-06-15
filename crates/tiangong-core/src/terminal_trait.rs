@@ -21,21 +21,6 @@ pub trait TerminalProvider: Send + Sync + 'static {
         timeout_secs: Option<u64>,
     ) -> Pin<Box<dyn Future<Output = Option<TerminalExecResult>> + Send>>;
 
-    /// 在终端会话中执行交互式命令（不使用 marker，直接发送并等待初始输出）。
-    fn exec_interactive(
-        &self,
-        command: &str,
-        wait_secs: u64,
-    ) -> Pin<Box<dyn Future<Output = Option<TerminalExecResult>> + Send>>;
-
-    /// 交互式执行原始命令（run_command 用）。
-    fn exec_command_interactive(
-        &self,
-        cmd: &str,
-        args: &[String],
-        wait_secs: u64,
-    ) -> Pin<Box<dyn Future<Output = Option<TerminalExecResult>> + Send>>;
-
     /// 获取终端最近的输出（环形缓冲区）。
     fn recent_output(&self, lines: usize) -> Pin<Box<dyn Future<Output = Option<String>> + Send>>;
 

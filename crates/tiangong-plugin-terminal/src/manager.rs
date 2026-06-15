@@ -205,21 +205,6 @@ pub(crate) async fn spawn_command_loop(
                 )
                 .await;
             }
-            TerminalCommand::ExecInteractive {
-                command,
-                wait_secs,
-                response_tx,
-            } => {
-                command_protocol::handle_exec_interactive(
-                    &manager,
-                    &mut pty_state,
-                    &command,
-                    wait_secs,
-                    response_tx,
-                    activity.as_ref(),
-                )
-                .await;
-            }
             TerminalCommand::RecentOutput { lines, response_tx } => {
                 let output = manager.recent_output(lines);
                 let _ = response_tx.send(output);

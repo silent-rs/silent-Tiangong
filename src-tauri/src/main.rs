@@ -301,14 +301,8 @@ fn run_gui() {
                 state.set_terminal_provider(provider.clone());
                 let terminal_override = tiangong_plugin_terminal::get_tool_override(app.handle());
                 if let Some(handler) = terminal_override {
-                    state.register_tool_override("run_shell", handler.clone());
-                    state.register_tool_override("terminal_output", handler.clone());
-                    state.register_tool_override("terminal_input", handler.clone());
-                    state.register_tool_override("terminal_reset", handler);
+                    state.register_tool_override("run_shell", handler);
                 }
-                state.register_tool_spec_provider(
-                    tiangong_plugin_terminal::get_tool_spec_provider(),
-                );
                 state.register_prompt_section_provider(
                     tiangong_plugin_terminal::get_prompt_section_provider(),
                 );

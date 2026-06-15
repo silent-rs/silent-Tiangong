@@ -7,10 +7,7 @@ use tauri::{
 use tokio::sync::mpsc;
 use tracing::error;
 
-use crate::handler::{
-    TerminalPromptSectionProvider, TerminalProviderImpl, TerminalToolOverride,
-    TerminalToolSpecProvider,
-};
+use crate::handler::{TerminalPromptSectionProvider, TerminalProviderImpl, TerminalToolOverride};
 use crate::manager::{spawn_command_loop, TerminalManager};
 
 pub mod collaboration;
@@ -134,11 +131,6 @@ pub fn get_tool_override(
 ) -> Option<Arc<dyn tiangong_core::tool_override::ToolOverrideHandler>> {
     let provider = get_terminal_provider(app)?;
     Some(Arc::new(TerminalToolOverride::new(provider)))
-}
-
-/// 获取 Plugin 的工具规格提供者（用于注册到 core）
-pub fn get_tool_spec_provider() -> Arc<dyn tiangong_core::tool_override::ToolSpecProvider> {
-    Arc::new(TerminalToolSpecProvider)
 }
 
 /// 获取 Plugin 的 Prompt 规则提供者（用于注册到 core）

@@ -11,8 +11,6 @@ pub enum TerminalBusyState {
     UserActive,
     /// Agent 正在执行非交互命令
     AgentRunning { command_id: String },
-    /// 终端有前台交互进程（用户或 Agent 启动的）
-    AgentInteractive { command_id: String },
 }
 
 /// 终端输入来源
@@ -48,10 +46,7 @@ impl TerminalActivityTracker {
         }
         // Agent 执行期间用户输入 → 标记干预
         if let Ok(state) = self.busy_state.lock() {
-            if matches!(
-                &*state,
-                TerminalBusyState::AgentRunning { .. } | TerminalBusyState::AgentInteractive { .. }
-            ) {
+            if matches!(&*state, TerminalBusyState::AgentRunning { .. }) {
                 if let Ok(mut flag) = self.user_intervened.lock() {
                     *flag = true;
                 }
@@ -107,7 +102,6 @@ impl TerminalBusyState {
             TerminalBusyState::Idle => "Idle",
             TerminalBusyState::UserActive => "UserActive",
             TerminalBusyState::AgentRunning { .. } => "Running",
-            TerminalBusyState::AgentInteractive { .. } => "Interactive",
         }
     }
 }

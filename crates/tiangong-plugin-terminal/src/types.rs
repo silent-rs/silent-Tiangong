@@ -40,11 +40,6 @@ pub enum TerminalCommand {
         timeout_secs: Option<u64>,
         response_tx: oneshot::Sender<TerminalExecResponse>,
     },
-    ExecInteractive {
-        command: String,
-        wait_secs: u64,
-        response_tx: oneshot::Sender<TerminalExecResponse>,
-    },
     RecentOutput {
         lines: usize,
         response_tx: oneshot::Sender<String>,

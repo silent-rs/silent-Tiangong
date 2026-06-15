@@ -92,8 +92,6 @@ impl LocalToolExecutor {
 
         // 提取 LLM 指定的超时（在 validate 之前，避免被当成路径参数）
         let timeout_ms = extract_timeout_meta(&mut args).unwrap_or_else(command_timeout_ms);
-        let interactive = extract_interactive_meta(&mut args);
-
         // 信任模式下跳过命令白名单和路径安全检查
         if !self.is_full_trust() {
             if matches!(cmd.as_str(), "bash" | "sh" | "powershell" | "pwsh") {
@@ -108,14 +106,7 @@ impl LocalToolExecutor {
 
         // 校验通过后，有 PTY provider 则走终端执行（输出出现在嵌入式终端面板）
         if let Some(provider) = self.terminal_provider() {
-            return self.run_command_via_pty(
-                provider,
-                &cmd,
-                &args,
-                &effective_cwd,
-                timeout_ms,
-                interactive,
-            );
+            return self.run_command_via_pty(provider, &cmd, &args, &effective_cwd, timeout_ms);
         }
 
         let env_allowlist = command_env_allowlist();
@@ -182,7 +173,6 @@ impl LocalToolExecutor {
         args: &[String],
         effective_cwd: &std::path::Path,
         timeout_ms: u64,
-        interactive: bool,
     ) -> Result<ToolResult> {
         let timeout_secs = if timeout_ms > 0 {
             Some(timeout_ms / 1000)
@@ -190,28 +180,14 @@ impl LocalToolExecutor {
             None
         };
 
-        let result = if interactive {
-            exec_via_pty_interactive(provider, cmd, args, effective_cwd, 3)?
-        } else {
-            exec_via_pty(provider, cmd, args, effective_cwd, timeout_secs)?
-        };
+        let result = exec_via_pty(provider, cmd, args, effective_cwd, timeout_secs)?;
 
         match result {
             Some(r) => {
                 let stdout = truncate_output(&r.stdout);
-                let stderr = if r.interactive_mode {
-                    let mut s = truncate_output(&r.stderr);
-                    s.push_str(
-                        "\n[提示] 命令已进入交互模式，可使用 terminal_input 发送键盘输入（如 \\x03 发送 Ctrl+C），terminal_output 查看终端输出",
-                    );
-                    s
-                } else {
-                    truncate_output(&r.stderr)
-                };
+                let stderr = truncate_output(&r.stderr);
                 let ok = !r.timed_out && (r.interactive_mode || r.exit_code == 0);
-                let summary = if r.interactive_mode {
-                    format!("命令已进入交互模式：{cmd}")
-                } else if ok {
+                let summary = if ok {
                     format!("命令执行成功：{cmd}")
                 } else if r.timed_out {
                     format!("命令执行超时：{cmd}")
@@ -243,20 +219,6 @@ fn extract_cwd_meta(args: &mut Vec<String>) -> Option<String> {
         }
     });
     cwd
-}
-
-const INTERNAL_INTERACTIVE: &str = "__tiangong_interactive__";
-
-/// 从参数列表中提取 __tiangong_interactive__ 元数据，决定是否走交互式 PTY 执行
-fn extract_interactive_meta(args: &mut Vec<String>) -> bool {
-    let idx = args.iter().position(|a| a == INTERNAL_INTERACTIVE);
-    match idx {
-        Some(i) => {
-            args.remove(i);
-            true
-        }
-        None => false,
-    }
 }
 
 fn load_local_env(cwd: &Path) -> Vec<(String, String)> {
@@ -533,39 +495,6 @@ fn exec_via_pty(
                 })
                 .join()
                 .expect("PTY 执行线程 panic")
-        })),
-    }
-}
-
-/// 通过 PTY 交互式执行命令（不使用 marker，直接发送并等待初始输出）
-fn exec_via_pty_interactive(
-    provider: &std::sync::Arc<dyn crate::terminal_trait::TerminalProvider>,
-    cmd: &str,
-    args: &[String],
-    effective_cwd: &Path,
-    wait_secs: u64,
-) -> anyhow::Result<Option<crate::terminal_trait::TerminalExecResult>> {
-    let (pty_cmd, pty_args) = build_pty_command_with_cwd(provider, cmd, args, effective_cwd);
-    let provider = provider.clone();
-
-    let handle = tokio::runtime::Handle::try_current();
-    match handle {
-        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            Ok(tokio::task::block_in_place(|| {
-                h.block_on(provider.exec_command_interactive(&pty_cmd, &pty_args, wait_secs))
-            }))
-        }
-        _ => Ok(std::thread::scope(|scope| {
-            scope
-                .spawn(|| {
-                    let rt = TokioRuntimeBuilder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .expect("初始化 PTY 执行运行时失败");
-                    rt.block_on(provider.exec_command_interactive(&pty_cmd, &pty_args, wait_secs))
-                })
-                .join()
-                .expect("PTY 交互执行线程 panic")
         })),
     }
 }

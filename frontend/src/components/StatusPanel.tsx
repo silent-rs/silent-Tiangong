@@ -75,7 +75,7 @@ export function StatusPanel({ showBrowser, onToggleBrowser, showTerminal, onTogg
         const statuses = await api.terminalListStatuses();
         if (cancelled) return;
         const busy = statuses.some(
-          (s) => s.alive && (s.phase === 'Interactive' || s.phase === 'Running'),
+          (s) => s.alive && s.phase === 'Running',
         );
         setTerminalBusy(busy);
         // 从空闲变忙时弹一次 toast（且当前面板未开）
