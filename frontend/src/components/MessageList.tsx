@@ -1100,18 +1100,18 @@ export function MessageList() {
       </div>
     </ScrollArea>
 
-    {/* 右侧导航：离开底部时显示。定位点轨道 + 底部滚动按钮合并为单一容器，
-        消除两个独立绝对定位元素争抢右下角导致的遮挡 */}
+    {/* 右侧导航：离开底部时显示。定位点轨道与滚动按钮各自独立绝对定位，
+        彻底解耦：点过多时按钮组以不透明面板遮挡溢出，不依赖 overflow-hidden（保持 tooltip 可用） */}
     {userGroupIndices.length > 0 && (
       <div
-        className={`absolute top-4 bottom-4 right-4 z-20 flex flex-col items-end transition-all duration-200 ${
+        className={`pointer-events-none absolute inset-y-4 right-4 z-20 flex flex-col items-end transition-all duration-200 ${
           isAtBottom
-            ? 'opacity-0 translate-x-2 pointer-events-none'
+            ? 'opacity-0 translate-x-2'
             : 'opacity-100 translate-x-0'
         }`}
       >
-        {/* 定位点轨道：等间距占据除按钮区外的剩余空间 */}
-        <div className="flex flex-1 flex-col items-end justify-between py-1">
+        {/* 定位点轨道：可滚动，点过多时向下溢出，由下方按钮组的不透明面板遮挡 */}
+        <div className="pointer-events-auto flex min-h-0 flex-1 flex-col items-end gap-1.5 overflow-y-auto overflow-x-visible py-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           <TooltipProvider delayDuration={300}>
             {userGroupIndices.map((groupIndex, i) => {
               const group = completedGroups[groupIndex];
@@ -1141,12 +1141,12 @@ export function MessageList() {
           </TooltipProvider>
         </div>
 
-        {/* 滚动按钮组：固定在轨道下方 */}
-        <div className="mt-2 flex flex-col items-center gap-2">
+        {/* 滚动按钮组：独立绝对钉在右下角，不透明背景作为溢出遮挡面板，z-30 盖在轨道之上 */}
+        <div className="pointer-events-auto relative z-30 mt-2 flex flex-col items-center gap-2 rounded-lg bg-background/80 p-1 shadow-md backdrop-blur">
           <button
             type="button"
             onClick={scrollToPrevUserMessage}
-            className="flex h-9 w-9 items-center justify-center rounded-full border border-border/60 bg-background/80 text-foreground shadow-md backdrop-blur transition-colors hover:bg-accent"
+            className="flex h-9 w-9 items-center justify-center rounded-full border border-border/60 bg-background/80 text-foreground transition-colors hover:bg-accent"
             title="滚动到上一条用户提问"
             aria-label="滚动到上一条用户提问"
           >
@@ -1155,7 +1155,7 @@ export function MessageList() {
           <button
             type="button"
             onClick={scrollToNextUserMessage}
-            className="flex h-9 w-9 items-center justify-center rounded-full border border-border/60 bg-background/80 text-foreground shadow-md backdrop-blur transition-colors hover:bg-accent"
+            className="flex h-9 w-9 items-center justify-center rounded-full border border-border/60 bg-background/80 text-foreground transition-colors hover:bg-accent"
             title="滚动到下一条用户提问"
             aria-label="滚动到下一条用户提问"
           >
@@ -1164,7 +1164,7 @@ export function MessageList() {
           <button
             type="button"
             onClick={scrollToBottom}
-            className="flex h-9 w-9 items-center justify-center rounded-full border border-border/60 bg-background/80 text-foreground shadow-md backdrop-blur transition-colors hover:bg-accent"
+            className="flex h-9 w-9 items-center justify-center rounded-full border border-border/60 bg-background/80 text-foreground transition-colors hover:bg-accent"
             title="滚动到底部"
             aria-label="滚动到底部"
           >
