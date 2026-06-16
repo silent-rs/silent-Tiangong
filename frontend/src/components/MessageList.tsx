@@ -1103,7 +1103,7 @@ export function MessageList() {
     {/* 右侧用户提问导航轨道：离开底部时显示，每条用户消息一个定位点 */}
     {userGroupIndices.length > 0 && (
       <div
-        className={`absolute top-4 bottom-36 right-4 z-20 flex flex-col items-end justify-between overflow-hidden transition-all duration-200 ${
+        className={`absolute top-4 bottom-36 right-4 z-20 flex flex-col items-end justify-between transition-all duration-200 ${
           isAtBottom
             ? 'opacity-0 translate-x-2 pointer-events-none'
             : 'opacity-100 translate-x-0'
