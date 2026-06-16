@@ -490,8 +490,8 @@ export function MessageList() {
     // 期望的块顶边 = 目标中心 Y - 块高/2
     const desired = ratio * trackH - dotsH / 2;
     let top = Math.max(0, Math.min(maxTop, desired));
-    // 端点吸附：离顶/底阈值内吸到端点
-    const snapThreshold = dotsH * 0.6;
+    // 端点吸附：仅在真正接近顶/底时吸附（块高 20%，约 30px），避免过早吸附导致交互不自然
+    const snapThreshold = dotsH * 0.2;
     if (top < snapThreshold) top = 0;
     else if (top > maxTop - snapThreshold) top = maxTop;
     return top;
