@@ -24,6 +24,9 @@ import {
   Pencil,
   X,
   Paperclip,
+  ArrowUp,
+  ArrowDown,
+  ArrowDownToLine,
 } from "lucide-react";
 import { MdPreview } from 'md-editor-rt';
 import 'md-editor-rt/lib/preview.css';
@@ -31,6 +34,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from '@tauri-apps/plugin-dialog';
 import { ThinkingBlock } from "./ThinkingBlock";
 import { AgentPanel } from "./AgentPanel";
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
 import { api, textContent, type ContentBlock } from "@/api/tauri";
 import {
   type Attachment,
@@ -435,6 +439,8 @@ export function MessageList() {
   const [editingAttachments, setEditingAttachments] = useState<Attachment[]>([]);
   const editingTextareaRef = useRef<HTMLTextAreaElement>(null!);
   const [hasMultimodal, setHasMultimodal] = useState(false);
+  const [isAtBottom, setIsAtBottom] = useState(true);
+  const isAtBottomRef = useRef(true);
 
   // 检查 TTS 能力
   useEffect(() => {
@@ -449,6 +455,26 @@ export function MessageList() {
   // 切换会话时关闭搜索
   useEffect(() => {
     useSearchStore.getState().closeSearch();
+    // 切换会话视为重新进入，默认在底部
+    isAtBottomRef.current = true;
+    setIsAtBottom(true);
+  }, [activeSessionId]);
+
+  // 监听滚动位置，维护 isAtBottom 状态
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const handleScroll = () => {
+      const threshold = 80;
+      const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+      const next = distance < threshold;
+      if (next !== isAtBottomRef.current) {
+        isAtBottomRef.current = next;
+        setIsAtBottom(next);
+      }
+    };
+    el.addEventListener('scroll', handleScroll, { passive: true });
+    return () => el.removeEventListener('scroll', handleScroll);
   }, [activeSessionId]);
 
   // Cmd/Ctrl+F 全局快捷键
@@ -509,6 +535,15 @@ export function MessageList() {
     }
     return { completedGroups: filteredGroups, streamingGroup: null };
   }, [filteredGroups, streamingMessageId]);
+
+  // 提取用户消息分组的索引列表，用于"滚动到上一条/下一条用户提问"
+  const userGroupIndices = useMemo(() => {
+    const indices: number[] = [];
+    completedGroups.forEach((g, i) => {
+      if (g.type === 'user') indices.push(i);
+    });
+    return indices;
+  }, [completedGroups]);
 
   // 计算 compact 边界
   const nonEditableIds = useMemo(() => {
@@ -602,10 +637,15 @@ export function MessageList() {
   // 新消息到达时滚动到底部
   useEffect(() => {
     const tabChanged = selectedAgentTab !== prevSelectedAgentTabRef.current;
+    const newMessageArrived = messages.length > prevMessagesLengthRef.current;
+    const streamingIdChanged = streamingMessageId !== prevStreamingIdRef.current;
+    const lastMsg = messages[messages.length - 1];
+    const isUserSelfSent = newMessageArrived && lastMsg?.role === 'user';
+    // 用户离开底部时，新消息/流式 id 变化不强制拉回；tab 切换与用户主动发送始终跟随
     const shouldScroll =
-      messages.length > prevMessagesLengthRef.current ||
-      streamingMessageId !== prevStreamingIdRef.current ||
-      tabChanged;
+      tabChanged
+      || isUserSelfSent
+      || ((newMessageArrived || streamingIdChanged) && isAtBottomRef.current);
 
     if (shouldScroll) {
       if (completedGroups.length > 0 && !streamingGroup) {
@@ -639,7 +679,9 @@ export function MessageList() {
       if (ticking) return;
       ticking = true;
       requestAnimationFrame(() => {
-        el.scrollIntoView({ behavior: "smooth", block: "end" });
+        if (isAtBottomRef.current) {
+          el.scrollIntoView({ behavior: "smooth", block: "end" });
+        }
         ticking = false;
       });
     });
@@ -650,6 +692,67 @@ export function MessageList() {
     });
     return () => observer.disconnect();
   }, [streamingMessageId]);
+
+  // 滚动到底部
+  const scrollToBottom = useCallback(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    isAtBottomRef.current = true;
+    setIsAtBottom(true);
+  }, []);
+
+  // 滚动到指定 group 并对齐到视口顶部：两阶段定位避免虚拟列表估算高度导致的偏差
+  const scrollToUserGroupTop = useCallback((targetIndex: number) => {
+    virtualizer.scrollToIndex(targetIndex, { align: 'start' });
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const el = viewportRef.current?.querySelector(`[data-index="${targetIndex}"]`);
+        if (el) {
+          el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        }
+      });
+    });
+    isAtBottomRef.current = false;
+    setIsAtBottom(false);
+  }, [virtualizer]);
+
+  // 根据参考 index 找到当前"游标"在 userGroupIndices 中的位置
+  // 返回 userGroupIndices 中 <= refIndex 的最大位置；都没有则返回 -1
+  const findUserCursorPos = useCallback((refIndex: number): number => {
+    let pos = -1;
+    for (let i = 0; i < userGroupIndices.length; i++) {
+      if (userGroupIndices[i] <= refIndex) pos = i;
+      else break;
+    }
+    return pos;
+  }, [userGroupIndices]);
+
+  // 滚动到当前可见区域之上的最近一条用户提问
+  const scrollToPrevUserMessage = useCallback(() => {
+    if (userGroupIndices.length === 0) return;
+    const virtualItems = virtualizer.getVirtualItems();
+    const centerItem = virtualItems[Math.floor(virtualItems.length / 2)];
+    const refIndex = centerItem?.index ?? virtualItems[0]?.index ?? 0;
+    const cursorPos = findUserCursorPos(refIndex);
+    // 在头部（cursorPos <= 0）时停在第一条；否则向前一个
+    const targetPos = cursorPos <= 0 ? 0 : cursorPos - 1;
+    scrollToUserGroupTop(userGroupIndices[targetPos]);
+  }, [virtualizer, userGroupIndices, findUserCursorPos, scrollToUserGroupTop]);
+
+  // 滚动到当前可见区域之下的最近一条用户提问
+  const scrollToNextUserMessage = useCallback(() => {
+    if (userGroupIndices.length === 0) return;
+    const virtualItems = virtualizer.getVirtualItems();
+    const centerItem = virtualItems[Math.floor(virtualItems.length / 2)];
+    const refIndex = centerItem?.index ?? virtualItems[virtualItems.length - 1]?.index ?? 0;
+    const cursorPos = findUserCursorPos(refIndex);
+    const lastPos = userGroupIndices.length - 1;
+    // 视口中心在所有 user group 之前（cursorPos === -1）时跳到第一条
+    // 在尾部（cursorPos === lastPos）时停在最后一条；否则向后一个
+    const targetPos = cursorPos === -1 ? 0 : cursorPos >= lastPos ? lastPos : cursorPos + 1;
+    scrollToUserGroupTop(userGroupIndices[targetPos]);
+  }, [virtualizer, userGroupIndices, findUserCursorPos, scrollToUserGroupTop]);
 
   // 编辑相关回调
   const handleStartEdit = useCallback((messageId: string, text: string) => {
@@ -774,7 +877,17 @@ export function MessageList() {
     return () => document.removeEventListener('click', handler);
   }, []);
 
+  // 当前视口顶部对应的用户提问序号，用于导航轨道点激活
+  // 滚动时 virtualizer 触发 rerender，render 期即可读到最新 scrollOffset
+  const activeUserPos = (() => {
+    if (userGroupIndices.length === 0) return -1;
+    const item = virtualizer.getVirtualItemForOffset(virtualizer.scrollOffset ?? 0);
+    if (!item) return -1;
+    return findUserCursorPos(item.index);
+  })();
+
   return (
+    <div className="relative h-full">
     <ScrollArea className="h-full" viewportRef={viewportRef}>
       <div className="p-4">
         <div className="max-w-3xl mx-auto space-y-2">
@@ -822,6 +935,7 @@ export function MessageList() {
                           left: 0,
                           width: "100%",
                           transform: `translateY(${virtualItem.start}px)`,
+                          scrollMarginTop: '0.5rem',
                         }}
                       >
                         <UserMessageGroup
@@ -983,6 +1097,83 @@ export function MessageList() {
         </div>
       </div>
     </ScrollArea>
+
+    {/* 右侧用户提问导航轨道：离开底部时显示，每条用户消息一个定位点 */}
+    {userGroupIndices.length > 0 && (
+      <div
+        className={`absolute top-4 bottom-16 right-4 z-20 flex flex-col items-end justify-between transition-all duration-200 ${
+          isAtBottom
+            ? 'opacity-0 translate-x-2 pointer-events-none'
+            : 'opacity-100 translate-x-0'
+        }`}
+      >
+        <TooltipProvider delayDuration={300}>
+          {userGroupIndices.map((groupIndex, i) => {
+            const group = completedGroups[groupIndex];
+            const raw = textContent(group.messages[0]);
+            const preview = (raw.length > 15 ? raw.slice(0, 15) + '...' : raw) || '(空消息)';
+            const active = i === activeUserPos;
+            return (
+              <Tooltip key={group.messages[0].id}>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={() => scrollToUserGroupTop(groupIndex)}
+                    aria-label={`跳转到用户提问：${preview}`}
+                    className={`rounded-full transition-colors ${
+                      active
+                        ? 'h-2.5 w-2.5 bg-primary'
+                        : 'h-2 w-2 bg-muted-foreground/40 hover:bg-muted-foreground'
+                    }`}
+                  />
+                </TooltipTrigger>
+                <TooltipContent side="left" className="max-w-[200px] text-xs break-all">
+                  {preview}
+                </TooltipContent>
+              </Tooltip>
+            );
+          })}
+        </TooltipProvider>
+      </div>
+    )}
+
+    {/* 浮动滚动按钮：离开底部时显示 */}
+    <div
+      className={`absolute bottom-4 right-4 z-20 flex flex-col items-center gap-2 transition-all duration-200 ${
+        isAtBottom
+          ? 'opacity-0 translate-y-2 pointer-events-none'
+          : 'opacity-100 translate-y-0'
+      }`}
+    >
+      <button
+        type="button"
+        onClick={scrollToPrevUserMessage}
+        className="flex h-9 w-9 items-center justify-center rounded-full border border-border/60 bg-background/80 text-foreground shadow-md backdrop-blur transition-colors hover:bg-accent"
+        title="滚动到上一条用户提问"
+        aria-label="滚动到上一条用户提问"
+      >
+        <ArrowUp className="h-4 w-4" />
+      </button>
+      <button
+        type="button"
+        onClick={scrollToNextUserMessage}
+        className="flex h-9 w-9 items-center justify-center rounded-full border border-border/60 bg-background/80 text-foreground shadow-md backdrop-blur transition-colors hover:bg-accent"
+        title="滚动到下一条用户提问"
+        aria-label="滚动到下一条用户提问"
+      >
+        <ArrowDown className="h-4 w-4" />
+      </button>
+      <button
+        type="button"
+        onClick={scrollToBottom}
+        className="flex h-9 w-9 items-center justify-center rounded-full border border-border/60 bg-background/80 text-foreground shadow-md backdrop-blur transition-colors hover:bg-accent"
+        title="滚动到底部"
+        aria-label="滚动到底部"
+      >
+        <ArrowDownToLine className="h-4 w-4" />
+      </button>
+    </div>
+    </div>
   );
 }
 
