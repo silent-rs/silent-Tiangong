@@ -454,8 +454,6 @@ export function MessageList() {
   // 点列块与轨道主体，用于计算平移量
   const railTrackRef = useRef<HTMLDivElement>(null);
   const railDotsRef = useRef<HTMLDivElement>(null);
-  // 滚动位置（0~1），用于滑轨 thumb 指示当前视图在整条消息里的位置
-  const [scrollProgress, setScrollProgress] = useState(0);
 
   // 检查 TTS 能力
   useEffect(() => {
@@ -507,9 +505,6 @@ export function MessageList() {
         isAtBottomRef.current = next;
         setIsAtBottom(next);
       }
-      // 同步滚动位置（0~1），供滑轨 thumb 指示当前视图
-      const max = el.scrollHeight - el.clientHeight;
-      setScrollProgress(max > 0 ? Math.min(1, Math.max(0, el.scrollTop / max)) : 0);
     };
     el.addEventListener('scroll', handleScroll, { passive: true });
     return () => el.removeEventListener('scroll', handleScroll);
@@ -1228,21 +1223,8 @@ export function MessageList() {
             }, 1500);
           }}
         >
-          {/* 轨道背景条 + 滚动位置 thumb：贴右边缘，替代原生滚动条 */}
-          <div className="absolute inset-y-2 right-1 flex w-[15px] flex-col">
-            <div className="relative flex-1 rounded-full bg-muted-foreground/15">
-              {/* thumb：按 scrollProgress 定位，高度按可见区占比，指示当前视图位置 */}
-              <div
-                className="absolute left-0 w-full rounded-full bg-muted-foreground/40"
-                style={{
-                  top: `${scrollProgress * 100}%`,
-                  height: '40px',
-                  transform: 'translateY(-50%)',
-                  transition: 'top 0.1s ease-out',
-                }}
-              />
-            </div>
-          </div>
+          {/* 轨道背景条：贴右边缘，替代原生滚动条 */}
+          <div className="absolute inset-y-2 right-1 w-[15px] rounded-full bg-muted-foreground/15" />
           <button
             type="button"
             data-rail="bg"
