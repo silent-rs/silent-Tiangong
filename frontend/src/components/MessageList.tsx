@@ -447,6 +447,12 @@ export function MessageList() {
   // 正态点显隐：鼠标进入轨道时显示，离开 1.5s 后隐藏
   const [railHovered, setRailHovered] = useState(false);
   const railHideTimerRef = useRef<number | null>(null);
+  // 鼠标在轨道内的 Y 比例（0~1），用于点列块平移跟随；-1 表示未在轨道内
+  const [hoverRatio, setHoverRatio] = useState(-1);
+  const hoverRatioRef = useRef(-1);
+  // 点列块与轨道主体，用于计算平移量
+  const railTrackRef = useRef<HTMLDivElement>(null);
+  const railDotsRef = useRef<HTMLDivElement>(null);
 
   // 检查 TTS 能力
   useEffect(() => {
@@ -1162,14 +1168,19 @@ export function MessageList() {
             : 'opacity-100 translate-x-0'
         }`}
       >
-        {/* 轨道主体：百分比磁吸。点的屏幕位置固定（9 个等间距槽位），
-            内容（对应哪条提问）随鼠标 Y 比例滑动 —— 鼠标对准固定槽位即可 hover/点选，
-            上下滑动改变窗口内容，实现跟随与百分比 */}
+        {/* 轨道主体：百分比磁吸。点列块整体跟随鼠标 Y 平移（中心点贴鼠标），
+            内容随游标变化 —— 跟随、可点选、百分比三者统一 */}
         <div
-          className="pointer-events-auto relative flex min-h-0 flex-1 flex-col items-end justify-center py-1"
+          ref={railTrackRef}
+          className="pointer-events-auto relative flex min-h-0 flex-1 flex-col items-end py-1"
           onMouseMove={(e) => {
             const rect = e.currentTarget.getBoundingClientRect();
             const ratio = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
+            // 更新点列块平移比例
+            if (ratio !== hoverRatioRef.current) {
+              hoverRatioRef.current = ratio;
+              setHoverRatio(ratio);
+            }
             // 鼠标 Y 比例映射到用户提问序号
             const pos = Math.round(ratio * (userCount - 1));
             if (pos >= 0 && pos < userCount && pos !== hoverUserPosRef.current) {
@@ -1187,6 +1198,8 @@ export function MessageList() {
           onMouseLeave={() => {
             hoverUserPosRef.current = -1;
             setHoverUserPos(-1);
+            hoverRatioRef.current = -1;
+            setHoverRatio(-1);
             // 离开 1.5s 后隐藏正态点
             if (railHideTimerRef.current) window.clearTimeout(railHideTimerRef.current);
             railHideTimerRef.current = window.setTimeout(() => {
@@ -1214,8 +1227,18 @@ export function MessageList() {
           />
           {(railSpread ? showRailDots : true) && (
           <TooltipProvider delayDuration={200}>
-            {/* 9 个固定等间距槽位：key 用槽位偏移保证位置稳定，内容随游标滑动 */}
-            <div className="relative flex flex-col items-end justify-center gap-1">
+            {/* 点列块：absolute 定位，top 按鼠标 Y 比例 + translateY(-50%) 自身居中，
+                使中心点（最大）始终贴在鼠标 Y 位置 —— 鼠标移动块跟着移，停住即可点选。
+                内容（每点代表哪条提问）随游标变化 */}
+            <div
+              ref={railDotsRef}
+              className="absolute right-2 flex flex-col items-end gap-1.5"
+              style={{
+                top: `${hoverRatio >= 0 ? hoverRatio * 100 : 50}%`,
+                transform: 'translateY(-50%)',
+                transition: hoverRatio >= 0 ? 'opacity 0.15s' : 'top 0.2s ease-out, opacity 0.15s',
+              }}
+            >
               {railPoints.map((p, slotIdx) => {
                 const preview = userPreviews[p.pos];
                 const active = p.pos === activeUserPos;
