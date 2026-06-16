@@ -441,7 +441,10 @@ export function MessageList() {
   const [hasMultimodal, setHasMultimodal] = useState(false);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const isAtBottomRef = useRef(true);
-  // 百分比轨道：鼠标进入时显示正态点，离开 1.5s 后隐藏
+  // 百分比轨道：鼠标 Y 比例映射到的用户提问序号，-1 表示未在轨道内
+  const [hoverUserPos, setHoverUserPos] = useState(-1);
+  const hoverUserPosRef = useRef(-1);
+  // 正态点显隐：鼠标进入轨道时显示，离开 1.5s 后隐藏
   const [railHovered, setRailHovered] = useState(false);
   const railHideTimerRef = useRef<number | null>(null);
 
@@ -907,11 +910,10 @@ export function MessageList() {
     [userGroupIndices, completedGroups],
   );
 
-  // ≤9 条直接平铺；>9 条按激活序号做高斯窗口，渲染离激活点最近的 9 个点
-  // 注意：游标固定为激活序号（视口顶部对齐），不跟随鼠标 —— 否则点会一直以鼠标为中心
-  // 重新排布，鼠标永远追不上任何点。鼠标仅控制显隐。
+  // ≤9 条直接平铺；>9 条按鼠标 Y 比例（无 hover 时回退到激活序号）做高斯窗口
   const railSpread = userCount > 9;
-  const railCursor = Math.max(0, activeUserPos);
+  // 游标：鼠标 hover 时跟随鼠标比例，否则回退到当前激活序号
+  const railCursor = hoverUserPos >= 0 ? hoverUserPos : Math.max(0, activeUserPos);
   // 正态点仅在鼠标位于轨道内时显示；>9 条且未悬停时只渲染细条背景
   const showRailDots = railHovered;
   // 高斯窗口：σ 越小点收缩越快；此处用 σ=2 让 9 个点呈现明显的大小渐变
@@ -1160,9 +1162,21 @@ export function MessageList() {
             : 'opacity-100 translate-x-0'
         }`}
       >
-        {/* 轨道主体：百分比磁吸。点固定以激活序号为中心，鼠标仅控制显隐 */}
+        {/* 轨道主体：百分比磁吸。点的屏幕位置固定（9 个等间距槽位），
+            内容（对应哪条提问）随鼠标 Y 比例滑动 —— 鼠标对准固定槽位即可 hover/点选，
+            上下滑动改变窗口内容，实现跟随与百分比 */}
         <div
           className="pointer-events-auto relative flex min-h-0 flex-1 flex-col items-end justify-center py-1"
+          onMouseMove={(e) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            const ratio = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
+            // 鼠标 Y 比例映射到用户提问序号
+            const pos = Math.round(ratio * (userCount - 1));
+            if (pos >= 0 && pos < userCount && pos !== hoverUserPosRef.current) {
+              hoverUserPosRef.current = pos;
+              setHoverUserPos(pos);
+            }
+          }}
           onMouseEnter={() => {
             if (railHideTimerRef.current) {
               window.clearTimeout(railHideTimerRef.current);
@@ -1171,6 +1185,8 @@ export function MessageList() {
             setRailHovered(true);
           }}
           onMouseLeave={() => {
+            hoverUserPosRef.current = -1;
+            setHoverUserPos(-1);
             // 离开 1.5s 后隐藏正态点
             if (railHideTimerRef.current) window.clearTimeout(railHideTimerRef.current);
             railHideTimerRef.current = window.setTimeout(() => {
@@ -1179,14 +1195,17 @@ export function MessageList() {
             }, 1500);
           }}
         >
-          {/* 轨道背景条：始终显示。点击跳转到激活序号对应的消息 */}
+          {/* 轨道背景条：始终显示。点击按鼠标比例（百分比）跳转到对应消息 */}
           <button
             type="button"
             data-rail="bg"
-            aria-label="跳转到当前用户提问"
-            onClick={() => {
-              if (railCursor >= 0 && railCursor < userCount) {
-                scrollToUserGroupTop(userGroupIndices[railCursor]);
+            aria-label="按百分比跳转到用户提问"
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const ratio = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
+              const pos = Math.round(ratio * (userCount - 1));
+              if (pos >= 0 && pos < userCount) {
+                scrollToUserGroupTop(userGroupIndices[pos]);
               }
             }}
             className={`absolute inset-y-0 right-1 w-1 rounded-full transition-colors ${
@@ -1195,16 +1214,17 @@ export function MessageList() {
           />
           {(railSpread ? showRailDots : true) && (
           <TooltipProvider delayDuration={200}>
+            {/* 9 个固定等间距槽位：key 用槽位偏移保证位置稳定，内容随游标滑动 */}
             <div className="relative flex flex-col items-end justify-center gap-1">
-              {railPoints.map((p) => {
+              {railPoints.map((p, slotIdx) => {
                 const preview = userPreviews[p.pos];
                 const active = p.pos === activeUserPos;
-                // 点直径 6~12px（size 0.5~1.0）
+                // 点直径 6~12px（size 0.5~1.0），中心点最大
                 const dim = Math.round(6 + (p.size - 0.5) * 12);
                 // 仅在高斯窗口模式下，中心点（size>=0.99）旁显示 15 字符预览
                 const isMax = railSpread && p.size >= 0.99;
                 return (
-                  <div key={userGroupIndices[p.pos]} className="flex items-center gap-1.5">
+                  <div key={slotIdx} className="flex items-center gap-1.5">
                     {isMax && (
                       <span className="max-w-[140px] truncate text-[10px] text-muted-foreground">
                         {preview}
@@ -1217,7 +1237,7 @@ export function MessageList() {
                           onClick={() => scrollToUserGroupTop(p.groupIndex)}
                           aria-label={`跳转到用户提问：${preview}`}
                           style={{ width: dim, height: dim }}
-                          className={`rounded-full transition-colors ${
+                          className={`rounded-full transition-all ${
                             active
                               ? 'bg-primary'
                               : 'bg-muted-foreground/50 hover:bg-muted-foreground'
