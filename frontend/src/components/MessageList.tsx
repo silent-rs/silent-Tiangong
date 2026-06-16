@@ -1219,24 +1219,24 @@ export function MessageList() {
                 scrollToUserGroupTop(userGroupIndices[pos]);
               }
             }}
-            className={`absolute inset-y-0 right-1 w-1 rounded-full transition-colors ${
-              railSpread ? 'bg-muted-foreground/15 hover:bg-muted-foreground/25' : 'bg-transparent'
+            className={`absolute inset-y-0 right-1 w-1.5 rounded-full transition-colors ${
+              railSpread ? 'bg-muted-foreground/20 hover:bg-muted-foreground/35' : 'bg-transparent'
             }`}
           />
           {(railSpread ? showRailDots : true) && (
           <TooltipProvider delayDuration={200}>
             {/* 点列块：absolute 定位，top 按鼠标 Y 比例 + translateY(-50%) 自身居中，
                 使中心点（最大）始终贴在鼠标 Y 位置 —— 鼠标移动块跟着移，停住即可点选。
-                内容（每点代表哪条提问）随游标变化 */}
+                内容（每点代表哪条提问）随游标变化。
+                right-5 与滑轨（right-1）拉开间距；top 始终带缓动让滑动更顺滑 */}
             <div
               ref={railDotsRef}
-              className="absolute right-2 flex flex-col items-end gap-1.5"
-              // 阻止冒泡：鼠标在正态点上移动时不触发轨道跟随，避免点列块跳动干扰点选
+              className="absolute right-5 flex flex-col items-end gap-1.5"
               onMouseMove={(e) => e.stopPropagation()}
               style={{
                 top: `${hoverRatio >= 0 ? hoverRatio * 100 : 50}%`,
                 transform: 'translateY(-50%)',
-                transition: hoverRatio >= 0 ? 'opacity 0.15s' : 'top 0.2s ease-out, opacity 0.15s',
+                transition: 'top 0.18s cubic-bezier(0.22, 0.61, 0.36, 1), opacity 0.15s',
               }}
             >
               {railPoints.map((p, slotIdx) => {
@@ -1244,15 +1244,17 @@ export function MessageList() {
                 const active = p.pos === activeUserPos;
                 // 点直径 6~12px（size 0.5~1.0），中心点最大
                 const dim = Math.round(6 + (p.size - 0.5) * 12);
-                // 仅在高斯窗口模式下，中心点（size>=0.99）旁显示 15 字符预览
-                const isMax = railSpread && p.size >= 0.99;
+                // 每个点都显示消息预览：按高斯权重调整字号与透明度，中心点最醒目
+                const opacity = 0.45 + p.size * 0.55;
+                const fontSize = 9 + Math.round(p.size * 3); // 9~12px
                 return (
                   <div key={slotIdx} className="flex items-center gap-1.5">
-                    {isMax && (
-                      <span className="max-w-[140px] truncate text-[10px] text-muted-foreground">
-                        {preview}
-                      </span>
-                    )}
+                    <span
+                      className="max-w-[140px] truncate text-muted-foreground"
+                      style={{ opacity, fontSize: `${fontSize}px` }}
+                    >
+                      {preview}
+                    </span>
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <button
