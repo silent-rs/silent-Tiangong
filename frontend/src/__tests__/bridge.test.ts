@@ -1,6 +1,11 @@
-import { readFileSync } from 'fs';
-import { resolve } from 'path';
 import { beforeEach, describe, expect, it } from 'vitest';
+
+// vitest 4 + jsdom 下静态 import 'fs'/'path' 会被 Vite 浏览器外部化而报
+// "No such built-in module: node:"（vitest#8674/#9279），用 eval('require')
+// 在运行时加载 Node 内置模块，绕开静态分析
+const _require = eval('require') as NodeRequire;
+const { readFileSync } = _require('fs') as typeof import('fs');
+const { resolve } = _require('path') as typeof import('path');
 
 const BRIDGE_PATH = resolve(__dirname, '../../../crates/tiangong-plugin-browser/js/bridge.js');
 
