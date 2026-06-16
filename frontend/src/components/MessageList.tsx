@@ -769,14 +769,37 @@ export function MessageList() {
     return findUserCursorPos(item.index);
   }, [virtualizer, findUserCursorPos]);
 
-  // 滚动到当前可见区域之上的最近一条用户提问
-  // 以"当前激活的提问序号"为基准，与轨道点击完全同源，避免基于视口中心导致的跨节点/无法到首尾
+  // 检查指定 group 是否在视口内可见（顶部落在视口范围内）
+  const isGroupInView = useCallback((groupIndex: number): boolean => {
+    const viewport = viewportRef.current;
+    if (!viewport) return false;
+    const el = viewport.querySelector(`[data-index="${groupIndex}"]`);
+    if (!el) return false;
+    const viewportRect = viewport.getBoundingClientRect();
+    const elRect = el.getBoundingClientRect();
+    return elRect.top >= viewportRect.top && elRect.top < viewportRect.bottom;
+  }, []);
+
+  // 滚动到上一条用户提问：
+  // 若当前游标对应的用户提问不在视口内（已被滚出顶部），先将其带入视口；
+  // 已在视口内时才跳到上一条
   const scrollToPrevUserMessage = useCallback(() => {
     if (userGroupIndices.length === 0) return;
     const cursorPos = getActiveUserPos();
+    if (cursorPos < 0) {
+      scrollToUserGroupTop(userGroupIndices[0]);
+      return;
+    }
+    // 当前游标提问不在视口内 → 先跳到本条
+    const cursorGroupIndex = userGroupIndices[cursorPos];
+    if (!isGroupInView(cursorGroupIndex)) {
+      scrollToUserGroupTop(cursorGroupIndex);
+      return;
+    }
+    // 已在视口内 → 跳到上一条
     const targetPos = cursorPos <= 0 ? 0 : cursorPos - 1;
     scrollToUserGroupTop(userGroupIndices[targetPos]);
-  }, [userGroupIndices, getActiveUserPos, scrollToUserGroupTop]);
+  }, [userGroupIndices, getActiveUserPos, scrollToUserGroupTop, isGroupInView]);
 
   // 滚动到当前可见区域之下的最近一条用户提问
   const scrollToNextUserMessage = useCallback(() => {
