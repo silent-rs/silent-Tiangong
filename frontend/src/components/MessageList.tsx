@@ -441,9 +441,9 @@ export function MessageList() {
   const [hasMultimodal, setHasMultimodal] = useState(false);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const isAtBottomRef = useRef(true);
-  // 百分比轨道：鼠标当前悬停位置（0~1）映射到的用户提问序号，-1 表示未悬停
-  const [hoverUserPos, setHoverUserPos] = useState(-1);
-  const hoverUserPosRef = useRef(-1);
+  // 百分比轨道：鼠标进入时显示正态点，离开 1.5s 后隐藏
+  const [railHovered, setRailHovered] = useState(false);
+  const railHideTimerRef = useRef<number | null>(null);
 
   // 检查 TTS 能力
   useEffect(() => {
@@ -462,6 +462,11 @@ export function MessageList() {
     isAtBottomRef.current = true;
     setIsAtBottom(true);
   }, [activeSessionId]);
+
+  // 卸载时清理正态点隐藏定时器
+  useEffect(() => () => {
+    if (railHideTimerRef.current) window.clearTimeout(railHideTimerRef.current);
+  }, []);
 
   // 监听滚动位置，维护 isAtBottom 状态
   useEffect(() => {
@@ -902,10 +907,13 @@ export function MessageList() {
     [userGroupIndices, completedGroups],
   );
 
-  // ≤9 条直接平铺；>9 条按 hover/active 游标做高斯窗口，渲染离游标最近的 9 个点
+  // ≤9 条直接平铺；>9 条按激活序号做高斯窗口，渲染离激活点最近的 9 个点
+  // 注意：游标固定为激活序号（视口顶部对齐），不跟随鼠标 —— 否则点会一直以鼠标为中心
+  // 重新排布，鼠标永远追不上任何点。鼠标仅控制显隐。
   const railSpread = userCount > 9;
-  // 游标：优先 hover，其次当前激活序号
-  const railCursor = hoverUserPos >= 0 ? hoverUserPos : Math.max(0, activeUserPos);
+  const railCursor = Math.max(0, activeUserPos);
+  // 正态点仅在鼠标位于轨道内时显示；>9 条且未悬停时只渲染细条背景
+  const showRailDots = railHovered;
   // 高斯窗口：σ 越小点收缩越快；此处用 σ=2 让 9 个点呈现明显的大小渐变
   const railPoints = useMemo<{ groupIndex: number; pos: number; size: number }[]>(() => {
     if (!railSpread) {
@@ -1152,25 +1160,26 @@ export function MessageList() {
             : 'opacity-100 translate-x-0'
         }`}
       >
-        {/* 轨道主体：百分比磁吸 */}
+        {/* 轨道主体：百分比磁吸。点固定以激活序号为中心，鼠标仅控制显隐 */}
         <div
           className="pointer-events-auto relative flex min-h-0 flex-1 flex-col items-end justify-center py-1"
-          onMouseMove={(e) => {
-            const rect = e.currentTarget.getBoundingClientRect();
-            const ratio = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
-            // 鼠标 Y 比例映射到用户提问序号
-            const pos = Math.round(ratio * (userCount - 1));
-            if (pos >= 0 && pos < userCount && pos !== hoverUserPosRef.current) {
-              hoverUserPosRef.current = pos;
-              setHoverUserPos(pos);
+          onMouseEnter={() => {
+            if (railHideTimerRef.current) {
+              window.clearTimeout(railHideTimerRef.current);
+              railHideTimerRef.current = null;
             }
+            setRailHovered(true);
           }}
           onMouseLeave={() => {
-            hoverUserPosRef.current = -1;
-            setHoverUserPos(-1);
+            // 离开 1.5s 后隐藏正态点
+            if (railHideTimerRef.current) window.clearTimeout(railHideTimerRef.current);
+            railHideTimerRef.current = window.setTimeout(() => {
+              setRailHovered(false);
+              railHideTimerRef.current = null;
+            }, 1500);
           }}
         >
-          {/* 轨道背景条：点击跳转到当前游标（鼠标位置/激活）对应的消息 */}
+          {/* 轨道背景条：始终显示。点击跳转到激活序号对应的消息 */}
           <button
             type="button"
             data-rail="bg"
@@ -1180,8 +1189,11 @@ export function MessageList() {
                 scrollToUserGroupTop(userGroupIndices[railCursor]);
               }
             }}
-            className="absolute inset-y-0 right-1 w-1 rounded-full bg-muted-foreground/15 transition-colors hover:bg-muted-foreground/25"
+            className={`absolute inset-y-0 right-1 w-1 rounded-full transition-colors ${
+              railSpread ? 'bg-muted-foreground/15 hover:bg-muted-foreground/25' : 'bg-transparent'
+            }`}
           />
+          {(railSpread ? showRailDots : true) && (
           <TooltipProvider delayDuration={200}>
             <div className="relative flex flex-col items-end justify-center gap-1">
               {railPoints.map((p) => {
@@ -1221,6 +1233,7 @@ export function MessageList() {
               })}
             </div>
           </TooltipProvider>
+          )}
         </div>
 
         {/* 滚动按钮组：独立钉在右下角，不透明背景遮挡溢出 */}
