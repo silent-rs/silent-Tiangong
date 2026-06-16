@@ -1100,81 +1100,79 @@ export function MessageList() {
       </div>
     </ScrollArea>
 
-    {/* 右侧用户提问导航轨道：离开底部时显示，每条用户消息一个定位点 */}
+    {/* 右侧导航：离开底部时显示。定位点轨道 + 底部滚动按钮合并为单一容器，
+        消除两个独立绝对定位元素争抢右下角导致的遮挡 */}
     {userGroupIndices.length > 0 && (
       <div
-        className={`absolute top-4 bottom-36 right-4 z-20 flex flex-col items-end justify-between transition-all duration-200 ${
+        className={`absolute top-4 bottom-4 right-4 z-20 flex flex-col items-end transition-all duration-200 ${
           isAtBottom
             ? 'opacity-0 translate-x-2 pointer-events-none'
             : 'opacity-100 translate-x-0'
         }`}
       >
-        <TooltipProvider delayDuration={300}>
-          {userGroupIndices.map((groupIndex, i) => {
-            const group = completedGroups[groupIndex];
-            const raw = textContent(group.messages[0]);
-            const preview = (raw.length > 15 ? raw.slice(0, 15) + '...' : raw) || '(空消息)';
-            const active = i === activeUserPos;
-            return (
-              <Tooltip key={group.messages[0].id}>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    onClick={() => scrollToUserGroupTop(groupIndex)}
-                    aria-label={`跳转到用户提问：${preview}`}
-                    className={`shrink-0 rounded-full transition-colors ${
-                      active
-                        ? 'h-2.5 w-2.5 bg-primary'
-                        : 'h-2 w-2 bg-muted-foreground/40 hover:bg-muted-foreground'
-                    }`}
-                  />
-                </TooltipTrigger>
-                <TooltipContent side="left" className="max-w-[200px] text-xs break-all">
-                  {preview}
-                </TooltipContent>
-              </Tooltip>
-            );
-          })}
-        </TooltipProvider>
+        {/* 定位点轨道：等间距占据除按钮区外的剩余空间 */}
+        <div className="flex flex-1 flex-col items-end justify-between py-1">
+          <TooltipProvider delayDuration={300}>
+            {userGroupIndices.map((groupIndex, i) => {
+              const group = completedGroups[groupIndex];
+              const raw = textContent(group.messages[0]);
+              const preview = (raw.length > 15 ? raw.slice(0, 15) + '...' : raw) || '(空消息)';
+              const active = i === activeUserPos;
+              return (
+                <Tooltip key={group.messages[0].id}>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      onClick={() => scrollToUserGroupTop(groupIndex)}
+                      aria-label={`跳转到用户提问：${preview}`}
+                      className={`shrink-0 rounded-full transition-colors ${
+                        active
+                          ? 'h-2.5 w-2.5 bg-primary'
+                          : 'h-2 w-2 bg-muted-foreground/40 hover:bg-muted-foreground'
+                      }`}
+                    />
+                  </TooltipTrigger>
+                  <TooltipContent side="left" className="max-w-[200px] text-xs break-all">
+                    {preview}
+                  </TooltipContent>
+                </Tooltip>
+              );
+            })}
+          </TooltipProvider>
+        </div>
+
+        {/* 滚动按钮组：固定在轨道下方 */}
+        <div className="mt-2 flex flex-col items-center gap-2">
+          <button
+            type="button"
+            onClick={scrollToPrevUserMessage}
+            className="flex h-9 w-9 items-center justify-center rounded-full border border-border/60 bg-background/80 text-foreground shadow-md backdrop-blur transition-colors hover:bg-accent"
+            title="滚动到上一条用户提问"
+            aria-label="滚动到上一条用户提问"
+          >
+            <ArrowUp className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            onClick={scrollToNextUserMessage}
+            className="flex h-9 w-9 items-center justify-center rounded-full border border-border/60 bg-background/80 text-foreground shadow-md backdrop-blur transition-colors hover:bg-accent"
+            title="滚动到下一条用户提问"
+            aria-label="滚动到下一条用户提问"
+          >
+            <ArrowDown className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            onClick={scrollToBottom}
+            className="flex h-9 w-9 items-center justify-center rounded-full border border-border/60 bg-background/80 text-foreground shadow-md backdrop-blur transition-colors hover:bg-accent"
+            title="滚动到底部"
+            aria-label="滚动到底部"
+          >
+            <ArrowDownToLine className="h-4 w-4" />
+          </button>
+        </div>
       </div>
     )}
-
-    {/* 浮动滚动按钮：离开底部时显示 */}
-    <div
-      className={`absolute bottom-4 right-4 z-20 flex flex-col items-center gap-2 transition-all duration-200 ${
-        isAtBottom
-          ? 'opacity-0 translate-y-2 pointer-events-none'
-          : 'opacity-100 translate-y-0'
-      }`}
-    >
-      <button
-        type="button"
-        onClick={scrollToPrevUserMessage}
-        className="flex h-9 w-9 items-center justify-center rounded-full border border-border/60 bg-background/80 text-foreground shadow-md backdrop-blur transition-colors hover:bg-accent"
-        title="滚动到上一条用户提问"
-        aria-label="滚动到上一条用户提问"
-      >
-        <ArrowUp className="h-4 w-4" />
-      </button>
-      <button
-        type="button"
-        onClick={scrollToNextUserMessage}
-        className="flex h-9 w-9 items-center justify-center rounded-full border border-border/60 bg-background/80 text-foreground shadow-md backdrop-blur transition-colors hover:bg-accent"
-        title="滚动到下一条用户提问"
-        aria-label="滚动到下一条用户提问"
-      >
-        <ArrowDown className="h-4 w-4" />
-      </button>
-      <button
-        type="button"
-        onClick={scrollToBottom}
-        className="flex h-9 w-9 items-center justify-center rounded-full border border-border/60 bg-background/80 text-foreground shadow-md backdrop-blur transition-colors hover:bg-accent"
-        title="滚动到底部"
-        aria-label="滚动到底部"
-      >
-        <ArrowDownToLine className="h-4 w-4" />
-      </button>
-    </div>
     </div>
   );
 }
