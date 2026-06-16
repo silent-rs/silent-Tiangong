@@ -1062,6 +1062,11 @@ export function MessageList() {
                   }
 
                   // agent_turn
+                  // 末尾轮次且无单独的 streamingGroup、整轮仍在进行中时，视为当前活动轮（工具调用阶段）
+                  const isLiveTurn =
+                    isThinking
+                    && !streamingGroup
+                    && virtualItem.index === completedGroups.length - 1;
                   return (
                     <div
                       key={virtualItem.key}
@@ -1078,12 +1083,14 @@ export function MessageList() {
                       }}
                     >
                       <AgentTurn
+                        key={`turn-virtual-${virtualItem.key}-${isLiveTurn ? 'active' : 'done'}`}
                         messages={group.messages}
                         streamingMessageId={null}
                         streamingContent=""
                         streamingReasoningContent=""
                         hasTts={hasTts}
                         selectedAgentTab={selectedAgentTab}
+                        isActive={isLiveTurn}
                       />
                     </div>
                   );
@@ -1094,12 +1101,14 @@ export function MessageList() {
               {streamingGroup && (
                 <div className="mt-3">
                   <AgentTurn
+                    key={`turn-streaming-${isThinking ? 'active' : 'done'}`}
                     messages={streamingGroup.messages}
                     streamingMessageId={streamingMessageId}
                     streamingContent={streamingContent}
                     streamingReasoningContent={streamingReasoningContent}
                     hasTts={hasTts}
                     selectedAgentTab={selectedAgentTab}
+                    isActive={isThinking}
                   />
                 </div>
               )}
@@ -1480,7 +1489,8 @@ function StreamingMessage({
   return (
     <div>
       {reasoningContent && (
-        <ThinkingBlock content={reasoningContent} defaultExpanded={false} />
+        // 本组件仅在流式输出（活跃态）时渲染，故 thinking 始终默认展开以实时跟随
+        <ThinkingBlock content={reasoningContent} defaultExpanded={true} />
       )}
       <MdPreview modelValue={resolveMarkdownImages(content)} theme={resolvedTheme} previewTheme="github" />
       {content.length > 0 && (
@@ -1569,6 +1579,39 @@ interface AgentTurnProps {
   streamingReasoningContent: string;
   hasTts: boolean;
   selectedAgentTab: string | null;
+  /** 是否为当前正在进行的轮次（输出中）：强制展开 thinking/工具/记忆，完成后随 key 重挂载自动收起 */
+  isActive?: boolean;
+}
+
+/**
+ * 展开/收起状态：活跃态默认全展开，用户仍可手动收起（记录到 userCollapsed 覆盖默认）；
+ * 非活跃态默认全收起，用户手动展开才进入 expanded。
+ * 轮次完成（key 变化）触发组件重挂载，两个集合都会重置。
+ */
+function useExpansionState(isActive: boolean) {
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [userCollapsed, setUserCollapsed] = useState<Set<string>>(new Set());
+
+  const isExpanded = (id: string) =>
+    isActive ? !userCollapsed.has(id) : expanded.has(id);
+
+  const toggle = useCallback((id: string) => {
+    if (isActive) {
+      setUserCollapsed((prev) => {
+        const next = new Set(prev);
+        next.has(id) ? next.delete(id) : next.add(id);
+        return next;
+      });
+    } else {
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        next.has(id) ? next.delete(id) : next.add(id);
+        return next;
+      });
+    }
+  }, [isActive]);
+
+  return { isExpanded, toggle };
 }
 
 /** 从 agent_event 内容中提取相关 agent role */
@@ -1604,30 +1647,16 @@ function AgentTurnView({
   streamingReasoningContent,
   hasTts,
   selectedAgentTab,
+  isActive = false,
 }: AgentTurnProps) {
   const searchQuery = useSearchStore(s => s.searchQuery);
   const currentMessageId = useSearchStore(s => s.currentMessageId);
   const currentMatchStart = useSearchStore(s => s.currentMatchStart);
   const caseSensitive = useSearchStore(s => s.caseSensitive);
-  const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
-  const [expandedToolGroups, setExpandedToolGroups] = useState<Set<string>>(new Set());
+  const itemExpansion = useExpansionState(isActive);
+  const toolGroupExpansion = useExpansionState(isActive);
   const agents = useStore((state) => state.agents);
   const resolvedTheme = useResolvedTheme();
-
-  const toggleItem = (id: string) => {
-    setExpandedItems((prev) => {
-      const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
-      return next;
-    });
-  };
-  const toggleToolGroup = (key: string) => {
-    setExpandedToolGroups((prev) => {
-      const next = new Set(prev);
-      next.has(key) ? next.delete(key) : next.add(key);
-      return next;
-    });
-  };
 
   /** 带搜索高亮渲染文本（搜索激活时使用 HighlightText，否则返回原始文本） */
   const renderWithHighlight = (msgId: string, text: string) => {
@@ -1808,12 +1837,12 @@ function AgentTurnView({
   /** 渲染工具条目 */
   const renderToolItem = (tool: MessageItem) => {
     const meta = getSystemMessageMeta(textContent(tool));
-    const expanded = expandedItems.has(tool.id);
+    const expanded = itemExpansion.isExpanded(tool.id);
     return (
       <div key={tool.id} title={formatMessageTime(tool.created_at)}>
         <button
           className="w-full flex items-center gap-2 px-2 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 transition-colors text-left"
-          onClick={() => toggleItem(tool.id)}
+          onClick={() => itemExpansion.toggle(tool.id)}
         >
           {expanded ? <ChevronDown className="w-3 h-3 shrink-0" /> : <ChevronRight className="w-3 h-3 shrink-0" />}
           <meta.icon className="w-3 h-3 shrink-0" />
@@ -1841,7 +1870,7 @@ function AgentTurnView({
         if (frag.type === "thinking") {
           return (
             <div key={`think-${i}`} title={formatMessageTime(frag.time)}>
-              <ThinkingBlock content={frag.content} defaultExpanded={false} />
+              <ThinkingBlock content={frag.content} defaultExpanded={isActive} />
             </div>
           );
         }
@@ -1853,13 +1882,13 @@ function AgentTurnView({
           );
         }
         if (frag.type === "tool_group") {
-          const collapsed = !expandedToolGroups.has(frag.key);
+          const collapsed = !toolGroupExpansion.isExpanded(frag.key);
           const groupTime = frag.tools.length > 0 ? formatMessageTime(frag.tools[0].created_at) : "";
           return (
             <div key={`tools-${frag.key}`} title={groupTime}>
               <button
                 className="flex items-center gap-2 px-2 py-0.5 text-xs text-muted-foreground hover:bg-muted/50 rounded transition-colors"
-                onClick={() => toggleToolGroup(frag.key)}
+                onClick={() => toolGroupExpansion.toggle(frag.key)}
               >
                 {collapsed ? <ChevronRight className="w-3 h-3 shrink-0" /> : <ChevronDown className="w-3 h-3 shrink-0" />}
                 <Cpu className="w-3 h-3 shrink-0" />
@@ -1870,12 +1899,12 @@ function AgentTurnView({
           );
         }
         if (frag.type === "memory_recall") {
-          const expanded = expandedItems.has(frag.key);
+          const expanded = itemExpansion.isExpanded(frag.key);
           return (
             <div key={`recall-${frag.key}`}>
               <button
                 className="flex items-center gap-2 px-2 py-0.5 text-xs text-muted-foreground hover:bg-muted/50 rounded transition-colors"
-                onClick={() => toggleItem(frag.key)}
+                onClick={() => itemExpansion.toggle(frag.key)}
               >
                 {expanded ? <ChevronDown className="w-3 h-3 shrink-0" /> : <ChevronRight className="w-3 h-3 shrink-0" />}
                 <Brain className="w-3 h-3 shrink-0" />
@@ -2025,6 +2054,7 @@ const AgentTurn = memo(AgentTurnView, (prev, next) => {
     prev.hasTts !== next.hasTts
     || !sameMessageRefs(prev.messages, next.messages)
     || prev.selectedAgentTab !== next.selectedAgentTab
+    || prev.isActive !== next.isActive
   ) {
     return false;
   }
