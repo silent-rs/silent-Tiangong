@@ -1265,8 +1265,6 @@ export function MessageList() {
               {railPoints.map((p, slotIdx) => {
                 const preview = userPreviews[p.pos];
                 const active = p.pos === activeUserPos;
-                // 点直径 6~12px（size 0.5~1.0），中心点最大
-                const dim = Math.round(6 + (p.size - 0.5) * 12);
                 // 每个点都显示消息预览：按高斯权重调整字号与透明度，中心点最醒目
                 const opacity = 0.45 + p.size * 0.55;
                 const fontSize = 9 + Math.round(p.size * 3); // 9~12px
@@ -1290,10 +1288,12 @@ export function MessageList() {
                           onClick={() => scrollToUserGroupTop(p.groupIndex)}
                           aria-label={`跳转到用户提问：${preview}`}
                           style={{
-                            width: dim,
-                            height: dim,
-                            // 点尺寸随高斯权重变化时平滑过渡，鼠标滑动时大小渐变更柔和
-                            transition: 'width 0.2s ease-out, height 0.2s ease-out, background-color 0.15s ease-out',
+                            // 固定基础尺寸 12px（中心点最大），用 transform: scale 按高斯权重
+                            // 缩放（0.5~1.0）。transform 走 GPU 合成层，过渡比 width/height 更流畅
+                            width: 12,
+                            height: 12,
+                            transform: `scale(${p.size})`,
+                            transition: 'transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), background-color 0.15s ease-out',
                           }}
                           className={`rounded-full ${
                             active
