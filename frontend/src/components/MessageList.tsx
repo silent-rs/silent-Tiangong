@@ -1274,7 +1274,12 @@ export function MessageList() {
                   <div key={slotIdx} className="flex items-center gap-1.5">
                     <span
                       className="max-w-[140px] truncate text-muted-foreground"
-                      style={{ opacity, fontSize: `${fontSize}px` }}
+                      style={{
+                        opacity,
+                        fontSize: `${fontSize}px`,
+                        // 文本透明度与字号变化平滑过渡，与点动画同步
+                        transition: 'opacity 0.2s ease-out, font-size 0.2s ease-out',
+                      }}
                     >
                       {preview}
                     </span>
@@ -1284,8 +1289,13 @@ export function MessageList() {
                           type="button"
                           onClick={() => scrollToUserGroupTop(p.groupIndex)}
                           aria-label={`跳转到用户提问：${preview}`}
-                          style={{ width: dim, height: dim }}
-                          className={`rounded-full transition-all ${
+                          style={{
+                            width: dim,
+                            height: dim,
+                            // 点尺寸随高斯权重变化时平滑过渡，鼠标滑动时大小渐变更柔和
+                            transition: 'width 0.2s ease-out, height 0.2s ease-out, background-color 0.15s ease-out',
+                          }}
+                          className={`rounded-full ${
                             active
                               ? 'bg-primary'
                               : 'bg-muted-foreground/50 hover:bg-muted-foreground'
