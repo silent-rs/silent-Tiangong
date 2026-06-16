@@ -448,8 +448,9 @@ export function MessageList() {
   const [railHovered, setRailHovered] = useState(false);
   const railHideTimerRef = useRef<number | null>(null);
   // 鼠标在轨道内的 Y 比例（0~1），用于点列块平移跟随；-1 表示未在轨道内
-  const [hoverRatio, setHoverRatio] = useState(-1);
   const hoverRatioRef = useRef(-1);
+  // 点列块的 top 像素值（已 clamp + 吸附），避免滑到顶/底时块超出轨道被裁
+  const [dotsTopPx, setDotsTopPx] = useState<number | null>(null);
   // 点列块与轨道主体，用于计算平移量
   const railTrackRef = useRef<HTMLDivElement>(null);
   const railDotsRef = useRef<HTMLDivElement>(null);
@@ -475,6 +476,25 @@ export function MessageList() {
   // 卸载时清理正态点隐藏定时器
   useEffect(() => () => {
     if (railHideTimerRef.current) window.clearTimeout(railHideTimerRef.current);
+  }, []);
+
+  // 根据鼠标 Y 比例计算点列块 top（像素），含 clamp 与端点吸附，避免滑到顶/底时块被裁
+  const calcDotsTop = useCallback((ratio: number): number => {
+    const track = railTrackRef.current;
+    const dots = railDotsRef.current;
+    if (!track || !dots) return 0;
+    const trackH = track.clientHeight;
+    const dotsH = dots.offsetHeight;
+    // 块可活动范围：[0, 轨道高 - 块高]；块高大于轨道高时退化为 0
+    const maxTop = Math.max(0, trackH - dotsH);
+    // 期望的块顶边 = 目标中心 Y - 块高/2
+    const desired = ratio * trackH - dotsH / 2;
+    let top = Math.max(0, Math.min(maxTop, desired));
+    // 端点吸附：离顶/底阈值内吸到端点
+    const snapThreshold = dotsH * 0.6;
+    if (top < snapThreshold) top = 0;
+    else if (top > maxTop - snapThreshold) top = maxTop;
+    return top;
   }, []);
 
   // 监听滚动位置，维护 isAtBottom 状态
@@ -1179,7 +1199,8 @@ export function MessageList() {
             // 更新点列块平移比例
             if (ratio !== hoverRatioRef.current) {
               hoverRatioRef.current = ratio;
-              setHoverRatio(ratio);
+              // 计算 clamp + 吸附后的 top 像素，避免滑到顶/底时块超出轨道被裁
+              setDotsTopPx(calcDotsTop(ratio));
             }
             // 鼠标 Y 比例映射到用户提问序号
             const pos = Math.round(ratio * (userCount - 1));
@@ -1234,8 +1255,10 @@ export function MessageList() {
               className="absolute right-5 flex flex-col items-end gap-1.5"
               onMouseMove={(e) => e.stopPropagation()}
               style={{
-                top: `${hoverRatio >= 0 ? hoverRatio * 100 : 50}%`,
-                transform: 'translateY(-50%)',
+                // 顶边定位（已 clamp + 吸附），避免 translateY(-50%) 在端点溢出被裁；
+                // dotsTopPx 为 null（首次未移动）时居中兜底
+                top: dotsTopPx != null ? `${dotsTopPx}px` : '50%',
+                transform: dotsTopPx != null ? 'none' : 'translateY(-50%)',
                 transition: 'top 0.18s cubic-bezier(0.22, 0.61, 0.36, 1), opacity 0.15s',
               }}
             >
