@@ -487,13 +487,9 @@ export function MessageList() {
     const dotsH = dots.offsetHeight;
     // 块可活动范围：[0, 轨道高 - 块高]；块高大于轨道高时退化为 0
     const maxTop = Math.max(0, trackH - dotsH);
-    // 期望的块顶边 = 目标中心 Y - 块高/2
-    const desired = ratio * trackH - dotsH / 2;
-    let top = Math.max(0, Math.min(maxTop, desired));
-    // 端点吸附：仅在真正接近顶/底时吸附（块高 20%，约 30px），避免过早吸附导致交互不自然
-    const snapThreshold = dotsH * 0.2;
-    if (top < snapThreshold) top = 0;
-    else if (top > maxTop - snapThreshold) top = maxTop;
+    // 期望的块顶边 = 目标中心 Y - 块高/2，clamp 到可活动范围防止溢出被裁
+    // 不做吸附：直接跟随鼠标到端点贴住，避免"咬"的吸附感
+    const top = Math.max(0, Math.min(maxTop, ratio * trackH - dotsH / 2));
     return top;
   }, []);
 
