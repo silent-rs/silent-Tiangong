@@ -728,31 +728,33 @@ export function MessageList() {
     return pos;
   }, [userGroupIndices]);
 
+  // 获取当前激活的用户提问序号（视口顶部对齐到的那一条）
+  // 与轨道点的 activeUserPos 同源，作为上下切换的统一基准
+  const getActiveUserPos = useCallback((): number => {
+    const item = virtualizer.getVirtualItemForOffset(virtualizer.scrollOffset ?? 0);
+    if (!item) return -1;
+    return findUserCursorPos(item.index);
+  }, [virtualizer, findUserCursorPos]);
+
   // 滚动到当前可见区域之上的最近一条用户提问
+  // 以"当前激活的提问序号"为基准，与轨道点击完全同源，避免基于视口中心导致的跨节点/无法到首尾
   const scrollToPrevUserMessage = useCallback(() => {
     if (userGroupIndices.length === 0) return;
-    const virtualItems = virtualizer.getVirtualItems();
-    const centerItem = virtualItems[Math.floor(virtualItems.length / 2)];
-    const refIndex = centerItem?.index ?? virtualItems[0]?.index ?? 0;
-    const cursorPos = findUserCursorPos(refIndex);
-    // 在头部（cursorPos <= 0）时停在第一条；否则向前一个
+    const cursorPos = getActiveUserPos();
     const targetPos = cursorPos <= 0 ? 0 : cursorPos - 1;
     scrollToUserGroupTop(userGroupIndices[targetPos]);
-  }, [virtualizer, userGroupIndices, findUserCursorPos, scrollToUserGroupTop]);
+  }, [userGroupIndices, getActiveUserPos, scrollToUserGroupTop]);
 
   // 滚动到当前可见区域之下的最近一条用户提问
   const scrollToNextUserMessage = useCallback(() => {
     if (userGroupIndices.length === 0) return;
-    const virtualItems = virtualizer.getVirtualItems();
-    const centerItem = virtualItems[Math.floor(virtualItems.length / 2)];
-    const refIndex = centerItem?.index ?? virtualItems[virtualItems.length - 1]?.index ?? 0;
-    const cursorPos = findUserCursorPos(refIndex);
     const lastPos = userGroupIndices.length - 1;
-    // 视口中心在所有 user group 之前（cursorPos === -1）时跳到第一条
-    // 在尾部（cursorPos === lastPos）时停在最后一条；否则向后一个
+    const cursorPos = getActiveUserPos();
+    // 视口顶部在所有用户提问之前（cursorPos === -1）时跳到第一条
+    // 已在最后一条时停在最后一条；否则向后一个
     const targetPos = cursorPos === -1 ? 0 : cursorPos >= lastPos ? lastPos : cursorPos + 1;
     scrollToUserGroupTop(userGroupIndices[targetPos]);
-  }, [virtualizer, userGroupIndices, findUserCursorPos, scrollToUserGroupTop]);
+  }, [userGroupIndices, getActiveUserPos, scrollToUserGroupTop]);
 
   // 编辑相关回调
   const handleStartEdit = useCallback((messageId: string, text: string) => {
@@ -1101,7 +1103,7 @@ export function MessageList() {
     {/* 右侧用户提问导航轨道：离开底部时显示，每条用户消息一个定位点 */}
     {userGroupIndices.length > 0 && (
       <div
-        className={`absolute top-4 bottom-16 right-4 z-20 flex flex-col items-end justify-between transition-all duration-200 ${
+        className={`absolute top-4 bottom-36 right-4 z-20 flex flex-col items-end justify-between overflow-hidden transition-all duration-200 ${
           isAtBottom
             ? 'opacity-0 translate-x-2 pointer-events-none'
             : 'opacity-100 translate-x-0'
@@ -1120,7 +1122,7 @@ export function MessageList() {
                     type="button"
                     onClick={() => scrollToUserGroupTop(groupIndex)}
                     aria-label={`跳转到用户提问：${preview}`}
-                    className={`rounded-full transition-colors ${
+                    className={`shrink-0 rounded-full transition-colors ${
                       active
                         ? 'h-2.5 w-2.5 bg-primary'
                         : 'h-2 w-2 bg-muted-foreground/40 hover:bg-muted-foreground'
