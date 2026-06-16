@@ -1242,10 +1242,10 @@ export function MessageList() {
           {(railSpread ? showRailDots : true) && (
           <TooltipProvider delayDuration={200}>
             {/* 点列块：absolute 定位，top 按鼠标 Y 计算（clamp 防溢出），
-                内容随游标变化。right-4 与滑轨（right-1 w-[15px]）拉开间距 */}
+                内容随游标变化。right-7 让点列位于 15px 滑轨左侧并留出间距 */}
             <div
               ref={railDotsRef}
-              className="absolute right-4 flex flex-col items-end gap-1.5"
+              className="absolute right-7 flex flex-col items-end gap-1.5"
               onMouseMove={(e) => e.stopPropagation()}
               style={{
                 // 顶边定位（已 clamp + 吸附），避免 translateY(-50%) 在端点溢出被裁；
