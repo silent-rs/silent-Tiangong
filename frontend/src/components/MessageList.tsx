@@ -24,6 +24,9 @@ import {
   Pencil,
   X,
   Paperclip,
+  ArrowUp,
+  ArrowDown,
+  ArrowDownToLine,
 } from "lucide-react";
 import { MdPreview } from 'md-editor-rt';
 import 'md-editor-rt/lib/preview.css';
@@ -31,6 +34,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from '@tauri-apps/plugin-dialog';
 import { ThinkingBlock } from "./ThinkingBlock";
 import { AgentPanel } from "./AgentPanel";
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
 import { api, textContent, type ContentBlock } from "@/api/tauri";
 import {
   type Attachment,
@@ -435,6 +439,21 @@ export function MessageList() {
   const [editingAttachments, setEditingAttachments] = useState<Attachment[]>([]);
   const editingTextareaRef = useRef<HTMLTextAreaElement>(null!);
   const [hasMultimodal, setHasMultimodal] = useState(false);
+  const [isAtBottom, setIsAtBottom] = useState(true);
+  const isAtBottomRef = useRef(true);
+  // 百分比轨道：鼠标 Y 比例映射到的用户提问序号，-1 表示未在轨道内
+  const [hoverUserPos, setHoverUserPos] = useState(-1);
+  const hoverUserPosRef = useRef(-1);
+  // 正态点显隐：鼠标进入轨道时显示，离开 1.5s 后隐藏
+  const [railHovered, setRailHovered] = useState(false);
+  const railHideTimerRef = useRef<number | null>(null);
+  // 鼠标在轨道内的 Y 比例（0~1），用于点列块平移跟随；-1 表示未在轨道内
+  const hoverRatioRef = useRef(-1);
+  // 点列块的 top 像素值（已 clamp + 吸附），避免滑到顶/底时块超出轨道被裁
+  const [dotsTopPx, setDotsTopPx] = useState<number | null>(null);
+  // 点列块与轨道主体，用于计算平移量
+  const railTrackRef = useRef<HTMLDivElement>(null);
+  const railDotsRef = useRef<HTMLDivElement>(null);
 
   // 检查 TTS 能力
   useEffect(() => {
@@ -449,6 +468,46 @@ export function MessageList() {
   // 切换会话时关闭搜索
   useEffect(() => {
     useSearchStore.getState().closeSearch();
+    // 切换会话视为重新进入，默认在底部
+    isAtBottomRef.current = true;
+    setIsAtBottom(true);
+  }, [activeSessionId]);
+
+  // 卸载时清理正态点隐藏定时器
+  useEffect(() => () => {
+    if (railHideTimerRef.current) window.clearTimeout(railHideTimerRef.current);
+  }, []);
+
+  // 根据鼠标 Y 比例计算点列块 top（像素），含 clamp 与端点吸附，避免滑到顶/底时块被裁
+  const calcDotsTop = useCallback((ratio: number): number => {
+    const track = railTrackRef.current;
+    const dots = railDotsRef.current;
+    if (!track || !dots) return 0;
+    const trackH = track.clientHeight;
+    const dotsH = dots.offsetHeight;
+    // 块可活动范围：[0, 轨道高 - 块高]；块高大于轨道高时退化为 0
+    const maxTop = Math.max(0, trackH - dotsH);
+    // 期望的块顶边 = 目标中心 Y - 块高/2，clamp 到可活动范围防止溢出被裁
+    // 不做吸附：直接跟随鼠标到端点贴住，避免"咬"的吸附感
+    const top = Math.max(0, Math.min(maxTop, ratio * trackH - dotsH / 2));
+    return top;
+  }, []);
+
+  // 监听滚动位置，维护 isAtBottom 状态
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const handleScroll = () => {
+      const threshold = 80;
+      const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+      const next = distance < threshold;
+      if (next !== isAtBottomRef.current) {
+        isAtBottomRef.current = next;
+        setIsAtBottom(next);
+      }
+    };
+    el.addEventListener('scroll', handleScroll, { passive: true });
+    return () => el.removeEventListener('scroll', handleScroll);
   }, [activeSessionId]);
 
   // Cmd/Ctrl+F 全局快捷键
@@ -509,6 +568,15 @@ export function MessageList() {
     }
     return { completedGroups: filteredGroups, streamingGroup: null };
   }, [filteredGroups, streamingMessageId]);
+
+  // 提取用户消息分组的索引列表，用于"滚动到上一条/下一条用户提问"
+  const userGroupIndices = useMemo(() => {
+    const indices: number[] = [];
+    completedGroups.forEach((g, i) => {
+      if (g.type === 'user') indices.push(i);
+    });
+    return indices;
+  }, [completedGroups]);
 
   // 计算 compact 边界
   const nonEditableIds = useMemo(() => {
@@ -602,10 +670,15 @@ export function MessageList() {
   // 新消息到达时滚动到底部
   useEffect(() => {
     const tabChanged = selectedAgentTab !== prevSelectedAgentTabRef.current;
+    const newMessageArrived = messages.length > prevMessagesLengthRef.current;
+    const streamingIdChanged = streamingMessageId !== prevStreamingIdRef.current;
+    const lastMsg = messages[messages.length - 1];
+    const isUserSelfSent = newMessageArrived && lastMsg?.role === 'user';
+    // 用户离开底部时，新消息/流式 id 变化不强制拉回；tab 切换与用户主动发送始终跟随
     const shouldScroll =
-      messages.length > prevMessagesLengthRef.current ||
-      streamingMessageId !== prevStreamingIdRef.current ||
-      tabChanged;
+      tabChanged
+      || isUserSelfSent
+      || ((newMessageArrived || streamingIdChanged) && isAtBottomRef.current);
 
     if (shouldScroll) {
       if (completedGroups.length > 0 && !streamingGroup) {
@@ -639,7 +712,9 @@ export function MessageList() {
       if (ticking) return;
       ticking = true;
       requestAnimationFrame(() => {
-        el.scrollIntoView({ behavior: "smooth", block: "end" });
+        if (isAtBottomRef.current) {
+          el.scrollIntoView({ behavior: "smooth", block: "end" });
+        }
         ticking = false;
       });
     });
@@ -650,6 +725,69 @@ export function MessageList() {
     });
     return () => observer.disconnect();
   }, [streamingMessageId]);
+
+  // 滚动到底部
+  const scrollToBottom = useCallback(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    isAtBottomRef.current = true;
+    setIsAtBottom(true);
+  }, []);
+
+  // 滚动到指定 group 并对齐到视口顶部：两阶段定位避免虚拟列表估算高度导致的偏差
+  const scrollToUserGroupTop = useCallback((targetIndex: number) => {
+    virtualizer.scrollToIndex(targetIndex, { align: 'start' });
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const el = viewportRef.current?.querySelector(`[data-index="${targetIndex}"]`);
+        if (el) {
+          el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        }
+      });
+    });
+    isAtBottomRef.current = false;
+    setIsAtBottom(false);
+  }, [virtualizer]);
+
+  // 根据参考 index 找到当前"游标"在 userGroupIndices 中的位置
+  // 返回 userGroupIndices 中 <= refIndex 的最大位置；都没有则返回 -1
+  const findUserCursorPos = useCallback((refIndex: number): number => {
+    let pos = -1;
+    for (let i = 0; i < userGroupIndices.length; i++) {
+      if (userGroupIndices[i] <= refIndex) pos = i;
+      else break;
+    }
+    return pos;
+  }, [userGroupIndices]);
+
+  // 获取当前激活的用户提问序号（视口顶部对齐到的那一条）
+  // 与轨道点的 activeUserPos 同源，作为上下切换的统一基准
+  const getActiveUserPos = useCallback((): number => {
+    const item = virtualizer.getVirtualItemForOffset(virtualizer.scrollOffset ?? 0);
+    if (!item) return -1;
+    return findUserCursorPos(item.index);
+  }, [virtualizer, findUserCursorPos]);
+
+  // 滚动到当前可见区域之上的最近一条用户提问
+  // 以"当前激活的提问序号"为基准，与轨道点击完全同源，避免基于视口中心导致的跨节点/无法到首尾
+  const scrollToPrevUserMessage = useCallback(() => {
+    if (userGroupIndices.length === 0) return;
+    const cursorPos = getActiveUserPos();
+    const targetPos = cursorPos <= 0 ? 0 : cursorPos - 1;
+    scrollToUserGroupTop(userGroupIndices[targetPos]);
+  }, [userGroupIndices, getActiveUserPos, scrollToUserGroupTop]);
+
+  // 滚动到当前可见区域之下的最近一条用户提问
+  const scrollToNextUserMessage = useCallback(() => {
+    if (userGroupIndices.length === 0) return;
+    const lastPos = userGroupIndices.length - 1;
+    const cursorPos = getActiveUserPos();
+    // 视口顶部在所有用户提问之前（cursorPos === -1）时跳到第一条
+    // 已在最后一条时停在最后一条；否则向后一个
+    const targetPos = cursorPos === -1 ? 0 : cursorPos >= lastPos ? lastPos : cursorPos + 1;
+    scrollToUserGroupTop(userGroupIndices[targetPos]);
+  }, [userGroupIndices, getActiveUserPos, scrollToUserGroupTop]);
 
   // 编辑相关回调
   const handleStartEdit = useCallback((messageId: string, text: string) => {
@@ -774,8 +912,57 @@ export function MessageList() {
     return () => document.removeEventListener('click', handler);
   }, []);
 
+  // 当前视口顶部对应的用户提问序号，用于导航轨道点激活
+  // 滚动时 virtualizer 触发 rerender，render 期即可读到最新 scrollOffset
+  const activeUserPos = (() => {
+    if (userGroupIndices.length === 0) return -1;
+    const item = virtualizer.getVirtualItemForOffset(virtualizer.scrollOffset ?? 0);
+    if (!item) return -1;
+    return findUserCursorPos(item.index);
+  })();
+
+  // ---- 百分比磁吸轨道的派生数据 ----
+  const userCount = userGroupIndices.length;
+  // 每条用户提问的预览文本（前 15 字符，超出补 ...）
+  const userPreviews = useMemo(
+    () => userGroupIndices.map(idx => {
+      const raw = textContent(completedGroups[idx].messages[0]);
+      return (raw.length > 15 ? raw.slice(0, 15) + '...' : raw) || '(空消息)';
+    }),
+    [userGroupIndices, completedGroups],
+  );
+
+  // ≤9 条直接平铺；>9 条按鼠标 Y 比例（无 hover 时回退到激活序号）做高斯窗口
+  const railSpread = userCount > 9;
+  // 游标：鼠标 hover 时跟随鼠标比例，否则回退到当前激活序号
+  const railCursor = hoverUserPos >= 0 ? hoverUserPos : Math.max(0, activeUserPos);
+  // 正态点仅在鼠标位于轨道内时显示；>9 条且未悬停时只渲染细条背景
+  const showRailDots = railHovered;
+  // 高斯窗口：σ 越小点收缩越快；此处用 σ=2 让 9 个点呈现明显的大小渐变
+  const railPoints = useMemo<{ groupIndex: number; pos: number; size: number }[]>(() => {
+    if (!railSpread) {
+      // 平铺模式：所有点等大（size=1），均可视为候选最大点
+      return userGroupIndices.map((groupIndex, pos) => ({ groupIndex, pos, size: 1 }));
+    }
+    const sigma = 2;
+    const windowSize = 9;
+    const half = Math.floor(windowSize / 2);
+    // 以游标为中心取 [-half, +half] 范围，裁剪到 [0, userCount-1]
+    const points: { groupIndex: number; pos: number; size: number }[] = [];
+    for (let off = -half; off <= half; off++) {
+      const pos = railCursor + off;
+      if (pos < 0 || pos >= userCount) continue;
+      // 高斯权重映射到点尺寸（0.5 ~ 1.0），中心 1.0，边缘 ~0.5
+      const w = Math.exp(-(off * off) / (2 * sigma * sigma));
+      const size = 0.5 + 0.5 * w;
+      points.push({ groupIndex: userGroupIndices[pos], pos, size });
+    }
+    return points;
+  }, [railSpread, userGroupIndices, railCursor, userCount]);
+
   return (
-    <ScrollArea className="h-full" viewportRef={viewportRef}>
+    <div className="relative h-full">
+    <ScrollArea className="h-full" viewportRef={viewportRef} viewportClassName="[scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       <div className="p-4">
         <div className="max-w-3xl mx-auto space-y-2">
           {messages.length === 0 && !isThinking ? (
@@ -822,6 +1009,7 @@ export function MessageList() {
                           left: 0,
                           width: "100%",
                           transform: `translateY(${virtualItem.start}px)`,
+                          scrollMarginTop: '0.5rem',
                         }}
                       >
                         <UserMessageGroup
@@ -983,6 +1171,175 @@ export function MessageList() {
         </div>
       </div>
     </ScrollArea>
+
+    {/* 右侧百分比磁吸轨道：离开底部时显示。替代原生滚动条，贴右边缘。
+        ≤9 条平铺等间距；>9 条按游标（hover/激活）做高斯窗口，渲染离游标最近的 9 个点，
+        中心点最大并向两侧正态衰减；每点显示预览，点 hover 可点选跳转，
+        点击轨道空白按百分比跳转；背景条带滚动位置 thumb 指示当前视图 */}
+    {userCount > 0 && (
+      <div
+        className={`pointer-events-none absolute inset-y-0 right-0 z-20 flex flex-col items-end transition-all duration-200 ${
+          isAtBottom
+            ? 'opacity-0 translate-x-2'
+            : 'opacity-100 translate-x-0'
+        }`}
+      >
+        {/* 轨道主体：百分比磁吸。点列块整体跟随鼠标 Y 平移（中心点贴鼠标），
+            内容随游标变化 —— 跟随、可点选、百分比三者统一 */}
+        <div
+          ref={railTrackRef}
+          className="pointer-events-auto relative flex min-h-0 flex-1 flex-col items-end py-1"
+          onMouseMove={(e) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            const ratio = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
+            // 更新点列块平移比例
+            if (ratio !== hoverRatioRef.current) {
+              hoverRatioRef.current = ratio;
+              // 计算 clamp + 吸附后的 top 像素，避免滑到顶/底时块超出轨道被裁
+              setDotsTopPx(calcDotsTop(ratio));
+            }
+            // 鼠标 Y 比例映射到用户提问序号
+            const pos = Math.round(ratio * (userCount - 1));
+            if (pos >= 0 && pos < userCount && pos !== hoverUserPosRef.current) {
+              hoverUserPosRef.current = pos;
+              setHoverUserPos(pos);
+            }
+          }}
+          onMouseEnter={() => {
+            if (railHideTimerRef.current) {
+              window.clearTimeout(railHideTimerRef.current);
+              railHideTimerRef.current = null;
+            }
+            setRailHovered(true);
+          }}
+          onMouseLeave={() => {
+            // 冻结在鼠标移出时的最后位置：不重置 hoverRatio/hoverUserPos，
+            // 保证鼠标移到正态点上点选时仍是正确的消息位置；
+            // 仅启动 1.5s 隐藏定时器
+            if (railHideTimerRef.current) window.clearTimeout(railHideTimerRef.current);
+            railHideTimerRef.current = window.setTimeout(() => {
+              setRailHovered(false);
+              railHideTimerRef.current = null;
+            }, 1500);
+          }}
+        >
+          {/* 轨道背景条：贴右边缘，替代原生滚动条 */}
+          <div className="absolute inset-y-2 right-1 w-[15px] rounded-full bg-muted-foreground/15" />
+          <button
+            type="button"
+            data-rail="bg"
+            aria-label="按百分比跳转到用户提问"
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const ratio = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
+              const pos = Math.round(ratio * (userCount - 1));
+              if (pos >= 0 && pos < userCount) {
+                scrollToUserGroupTop(userGroupIndices[pos]);
+              }
+            }}
+            className="absolute inset-y-2 right-1 w-[15px] cursor-pointer"
+          />
+          {(railSpread ? showRailDots : true) && (
+          <TooltipProvider delayDuration={200}>
+            {/* 点列块：absolute 定位，top 按鼠标 Y 计算（clamp 防溢出），
+                内容随游标变化。right-7 让点列位于 15px 滑轨左侧并留出间距 */}
+            <div
+              ref={railDotsRef}
+              className="absolute right-7 flex flex-col items-end gap-1.5"
+              onMouseMove={(e) => e.stopPropagation()}
+              style={{
+                // 顶边定位（已 clamp + 吸附），避免 translateY(-50%) 在端点溢出被裁；
+                // dotsTopPx 为 null（首次未移动）时居中兜底
+                top: dotsTopPx != null ? `${dotsTopPx}px` : '50%',
+                transform: dotsTopPx != null ? 'none' : 'translateY(-50%)',
+                transition: 'top 0.18s cubic-bezier(0.22, 0.61, 0.36, 1), opacity 0.15s',
+              }}
+            >
+              {railPoints.map((p, slotIdx) => {
+                const preview = userPreviews[p.pos];
+                const active = p.pos === activeUserPos;
+                // 每个点都显示消息预览：按高斯权重调整字号与透明度，中心点最醒目
+                const opacity = 0.45 + p.size * 0.55;
+                const fontSize = 9 + Math.round(p.size * 3); // 9~12px
+                return (
+                  <div key={slotIdx} className="flex items-center gap-1.5">
+                    <span
+                      className="max-w-[140px] truncate text-muted-foreground"
+                      style={{
+                        opacity,
+                        fontSize: `${fontSize}px`,
+                        // 文本透明度与字号变化平滑过渡，与点动画同步
+                        transition: 'opacity 0.2s ease-out, font-size 0.2s ease-out',
+                      }}
+                    >
+                      {preview}
+                    </span>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          onClick={() => scrollToUserGroupTop(p.groupIndex)}
+                          aria-label={`跳转到用户提问：${preview}`}
+                          style={{
+                            // 固定基础尺寸 12px（中心点最大），用 transform: scale 按高斯权重
+                            // 缩放（0.5~1.0）。transform 走 GPU 合成层，过渡比 width/height 更流畅
+                            width: 12,
+                            height: 12,
+                            transform: `scale(${p.size})`,
+                            transition: 'transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), background-color 0.15s ease-out',
+                          }}
+                          className={`rounded-full ${
+                            active
+                              ? 'bg-primary'
+                              : 'bg-muted-foreground/50 hover:bg-muted-foreground'
+                          }`}
+                        />
+                      </TooltipTrigger>
+                      <TooltipContent side="left" className="max-w-[200px] text-xs break-all">
+                        {preview}
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                );
+              })}
+            </div>
+          </TooltipProvider>
+          )}
+        </div>
+
+        {/* 滚动按钮组：独立钉在右下角，不透明背景遮挡溢出 */}
+        <div className="pointer-events-auto relative z-30 mt-2 flex flex-col items-center gap-2 rounded-lg bg-background/80 p-1 shadow-md backdrop-blur">
+          <button
+            type="button"
+            onClick={scrollToPrevUserMessage}
+            className="flex h-9 w-9 items-center justify-center rounded-full border border-border/60 bg-background/80 text-foreground transition-colors hover:bg-accent"
+            title="滚动到上一条用户提问"
+            aria-label="滚动到上一条用户提问"
+          >
+            <ArrowUp className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            onClick={scrollToNextUserMessage}
+            className="flex h-9 w-9 items-center justify-center rounded-full border border-border/60 bg-background/80 text-foreground transition-colors hover:bg-accent"
+            title="滚动到下一条用户提问"
+            aria-label="滚动到下一条用户提问"
+          >
+            <ArrowDown className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            onClick={scrollToBottom}
+            className="flex h-9 w-9 items-center justify-center rounded-full border border-border/60 bg-background/80 text-foreground transition-colors hover:bg-accent"
+            title="滚动到底部"
+            aria-label="滚动到底部"
+          >
+            <ArrowDownToLine className="h-4 w-4" />
+          </button>
+        </div>
+      </div>
+    )}
+    </div>
   );
 }
 

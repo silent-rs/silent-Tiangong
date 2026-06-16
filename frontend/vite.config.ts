@@ -27,19 +27,14 @@ export default defineConfig({
     },
   },
   build: {
-    rollupOptions: {
+        rollupOptions: {
       output: {
-        manualChunks: {
-          // React 核心库
-          'react-core': ['react', 'react-dom', 'react-dom/client'],
-          // UI 组件库
-          'ui-components': ['lucide-react'],
-          // Markdown 渲染
-          'markdown': ['md-editor-rt'],
-          // Tauri API
-          'tauri': ['@tauri-apps/api/core', '@tauri-apps/api/event'],
-          // 工具库
-          'utils': ['zustand', 'clsx', 'tailwind-merge'],
+        manualChunks(id) {
+          if (id.includes('react-dom') || id.includes('/react/')) return 'react-core'
+          if (id.includes('lucide-react')) return 'ui-components'
+          if (id.includes('md-editor-rt')) return 'markdown'
+          if (id.includes('@tauri-apps/api')) return 'tauri'
+          if (id.includes('zustand') || id.includes('clsx') || id.includes('tailwind-merge')) return 'utils'
         },
       },
     },
