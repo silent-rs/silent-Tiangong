@@ -454,6 +454,8 @@ export function MessageList() {
   // 点列块与轨道主体，用于计算平移量
   const railTrackRef = useRef<HTMLDivElement>(null);
   const railDotsRef = useRef<HTMLDivElement>(null);
+  // 滚动位置（0~1），用于滑轨 thumb 指示当前视图在整条消息里的位置
+  const [scrollProgress, setScrollProgress] = useState(0);
 
   // 检查 TTS 能力
   useEffect(() => {
@@ -505,6 +507,9 @@ export function MessageList() {
         isAtBottomRef.current = next;
         setIsAtBottom(next);
       }
+      // 同步滚动位置（0~1），供滑轨 thumb 指示当前视图
+      const max = el.scrollHeight - el.clientHeight;
+      setScrollProgress(max > 0 ? Math.min(1, Math.max(0, el.scrollTop / max)) : 0);
     };
     el.addEventListener('scroll', handleScroll, { passive: true });
     return () => el.removeEventListener('scroll', handleScroll);
@@ -962,7 +967,7 @@ export function MessageList() {
 
   return (
     <div className="relative h-full">
-    <ScrollArea className="h-full" viewportRef={viewportRef}>
+    <ScrollArea className="h-full" viewportRef={viewportRef} viewportClassName="[scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       <div className="p-4">
         <div className="max-w-3xl mx-auto space-y-2">
           {messages.length === 0 && !isThinking ? (
@@ -1172,13 +1177,13 @@ export function MessageList() {
       </div>
     </ScrollArea>
 
-    {/* 右侧百分比磁吸轨道：离开底部时显示。
+    {/* 右侧百分比磁吸轨道：离开底部时显示。替代原生滚动条，贴右边缘。
         ≤9 条平铺等间距；>9 条按游标（hover/激活）做高斯窗口，渲染离游标最近的 9 个点，
-        中心点最大并向两侧正态衰减；最大点旁显示 15 字符预览，点 hover 显示其预览并可点选跳转，
-        点击轨道空白跳转到当前最大点对应的消息 */}
+        中心点最大并向两侧正态衰减；每点显示预览，点 hover 可点选跳转，
+        点击轨道空白按百分比跳转；背景条带滚动位置 thumb 指示当前视图 */}
     {userCount > 0 && (
       <div
-        className={`pointer-events-none absolute inset-y-4 right-4 z-20 flex flex-col items-end transition-all duration-200 ${
+        className={`pointer-events-none absolute inset-y-0 right-0 z-20 flex flex-col items-end transition-all duration-200 ${
           isAtBottom
             ? 'opacity-0 translate-x-2'
             : 'opacity-100 translate-x-0'
@@ -1223,7 +1228,21 @@ export function MessageList() {
             }, 1500);
           }}
         >
-          {/* 轨道背景条：始终显示。点击按鼠标比例（百分比）跳转到对应消息 */}
+          {/* 轨道背景条 + 滚动位置 thumb：贴右边缘，替代原生滚动条 */}
+          <div className="absolute inset-y-2 right-1 flex w-[15px] flex-col">
+            <div className="relative flex-1 rounded-full bg-muted-foreground/15">
+              {/* thumb：按 scrollProgress 定位，高度按可见区占比，指示当前视图位置 */}
+              <div
+                className="absolute left-0 w-full rounded-full bg-muted-foreground/40"
+                style={{
+                  top: `${scrollProgress * 100}%`,
+                  height: '40px',
+                  transform: 'translateY(-50%)',
+                  transition: 'top 0.1s ease-out',
+                }}
+              />
+            </div>
+          </div>
           <button
             type="button"
             data-rail="bg"
@@ -1236,19 +1255,15 @@ export function MessageList() {
                 scrollToUserGroupTop(userGroupIndices[pos]);
               }
             }}
-            className={`absolute inset-y-0 right-1 w-1.5 rounded-full transition-colors ${
-              railSpread ? 'bg-muted-foreground/20 hover:bg-muted-foreground/35' : 'bg-transparent'
-            }`}
+            className="absolute inset-y-2 right-1 w-[15px] cursor-pointer"
           />
           {(railSpread ? showRailDots : true) && (
           <TooltipProvider delayDuration={200}>
-            {/* 点列块：absolute 定位，top 按鼠标 Y 比例 + translateY(-50%) 自身居中，
-                使中心点（最大）始终贴在鼠标 Y 位置 —— 鼠标移动块跟着移，停住即可点选。
-                内容（每点代表哪条提问）随游标变化。
-                right-5 与滑轨（right-1）拉开间距；top 始终带缓动让滑动更顺滑 */}
+            {/* 点列块：absolute 定位，top 按鼠标 Y 计算（clamp 防溢出），
+                内容随游标变化。right-4 与滑轨（right-1 w-[15px]）拉开间距 */}
             <div
               ref={railDotsRef}
-              className="absolute right-5 flex flex-col items-end gap-1.5"
+              className="absolute right-4 flex flex-col items-end gap-1.5"
               onMouseMove={(e) => e.stopPropagation()}
               style={{
                 // 顶边定位（已 clamp + 吸附），避免 translateY(-50%) 在端点溢出被裁；
