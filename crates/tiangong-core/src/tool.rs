@@ -86,24 +86,26 @@ pub struct ToolResult {
 }
 
 pub trait ToolExecutor {
-    fn execute(&self, call: &ToolCall) -> Result<ToolResult>;
+    fn execute(&self, call: &ToolCall, session_id: &str) -> Result<ToolResult>;
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct LocalToolExecutor {
     runtime_env: BTreeMap<String, String>,
     /// 共享信任模式引用，FullTrust 时跳过路径越界和命令白名单检查
     shared_trust_mode: Option<std::sync::Arc<std::sync::RwLock<crate::permission::TrustMode>>>,
+    /// 终端会话能力（GUI 模式下由 Tauri Plugin 提供，校验通过后 run_command 走 PTY）
+    terminal_provider: Option<std::sync::Arc<dyn crate::terminal_trait::TerminalProvider>>,
 }
 
 impl ToolExecutor for LocalToolExecutor {
-    fn execute(&self, call: &ToolCall) -> Result<ToolResult> {
+    fn execute(&self, call: &ToolCall, session_id: &str) -> Result<ToolResult> {
         let started = Instant::now();
         let result = match call.name {
             ToolName::ReadFile => self.read_file(call),
             ToolName::ListDir => self.list_dir(call),
             ToolName::TreeDir => self.tree_dir(call),
-            ToolName::RunCommand => self.run_command(call),
+            ToolName::RunCommand => self.run_command(call, session_id),
             ToolName::SearchCode => self.search_code(call),
             ToolName::CurrentTime => self.current_time(call),
             ToolName::Scheduler => self.scheduler(call),
@@ -154,6 +156,7 @@ impl LocalToolExecutor {
         Self {
             runtime_env: run_command::collect_runtime_env(agent_config),
             shared_trust_mode: None,
+            terminal_provider: None,
         }
     }
 
@@ -163,6 +166,15 @@ impl LocalToolExecutor {
         shared: std::sync::Arc<std::sync::RwLock<crate::permission::TrustMode>>,
     ) -> Self {
         self.shared_trust_mode = Some(shared);
+        self
+    }
+
+    /// 设置终端会话能力（校验通过后可通过 PTY 执行命令）
+    pub fn with_terminal_provider(
+        mut self,
+        provider: std::sync::Arc<dyn crate::terminal_trait::TerminalProvider>,
+    ) -> Self {
+        self.terminal_provider = Some(provider);
         self
     }
 
@@ -177,5 +189,11 @@ impl LocalToolExecutor {
 
     pub(super) fn runtime_env(&self) -> &BTreeMap<String, String> {
         &self.runtime_env
+    }
+
+    pub(super) fn terminal_provider(
+        &self,
+    ) -> &Option<std::sync::Arc<dyn crate::terminal_trait::TerminalProvider>> {
+        &self.terminal_provider
     }
 }

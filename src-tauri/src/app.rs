@@ -24,6 +24,15 @@ pub struct TiangongApp {
     tool_overrides: Mutex<
         HashMap<String, std::sync::Arc<dyn tiangong_core::tool_override::ToolOverrideHandler>>,
     >,
+    /// 终端能力（由 plugin 在 setup 阶段注入）
+    terminal_provider:
+        Mutex<Option<std::sync::Arc<dyn tiangong_core::terminal_trait::TerminalProvider>>>,
+    /// Plugin 工具规格提供者
+    tool_spec_providers:
+        Mutex<Vec<std::sync::Arc<dyn tiangong_core::tool_override::ToolSpecProvider>>>,
+    /// Plugin Prompt 段落提供者
+    prompt_section_providers:
+        Mutex<Vec<std::sync::Arc<dyn tiangong_core::tool_override::PromptSectionProvider>>>,
 }
 
 impl Default for TiangongApp {
@@ -41,6 +50,9 @@ impl Default for TiangongApp {
             embedded_server: Mutex::new(None),
             page_fetcher: Mutex::new(None),
             tool_overrides: Mutex::new(HashMap::new()),
+            terminal_provider: Mutex::new(None),
+            tool_spec_providers: Mutex::new(Vec::new()),
+            prompt_section_providers: Mutex::new(Vec::new()),
         }
     }
 }
@@ -57,6 +69,36 @@ impl TiangongApp {
     ) {
         if let Ok(mut guard) = self.page_fetcher.lock() {
             *guard = Some(fetcher);
+        }
+    }
+
+    /// 注入终端能力（由 plugin 在 setup 阶段调用）
+    pub fn set_terminal_provider(
+        &self,
+        provider: std::sync::Arc<dyn tiangong_core::terminal_trait::TerminalProvider>,
+    ) {
+        if let Ok(mut guard) = self.terminal_provider.lock() {
+            *guard = Some(provider);
+        }
+    }
+
+    /// 注册 Plugin 工具规格提供者
+    pub fn register_tool_spec_provider(
+        &self,
+        provider: std::sync::Arc<dyn tiangong_core::tool_override::ToolSpecProvider>,
+    ) {
+        if let Ok(mut guard) = self.tool_spec_providers.lock() {
+            guard.push(provider);
+        }
+    }
+
+    /// 注册 Plugin Prompt 段落提供者
+    pub fn register_prompt_section_provider(
+        &self,
+        provider: std::sync::Arc<dyn tiangong_core::tool_override::PromptSectionProvider>,
+    ) {
+        if let Ok(mut guard) = self.prompt_section_providers.lock() {
+            guard.push(provider);
         }
     }
 
@@ -207,6 +249,22 @@ impl TiangongApp {
         if let Ok(guard) = self.tool_overrides.lock() {
             for (name, handler) in guard.iter() {
                 core.register_tool_override(name, handler.clone());
+            }
+        }
+        // 注入终端能力、工具规格、Prompt 段落
+        if let Ok(guard) = self.terminal_provider.lock() {
+            if let Some(ref provider) = *guard {
+                core.set_terminal_provider(provider.clone());
+            }
+        }
+        if let Ok(guard) = self.tool_spec_providers.lock() {
+            for provider in guard.iter() {
+                core.register_tool_spec_provider(provider.clone());
+            }
+        }
+        if let Ok(guard) = self.prompt_section_providers.lock() {
+            for provider in guard.iter() {
+                core.register_prompt_section_provider(provider.clone());
             }
         }
         let id = core.session_id().to_string();

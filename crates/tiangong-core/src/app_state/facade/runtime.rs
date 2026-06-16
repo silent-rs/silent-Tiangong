@@ -4,14 +4,17 @@ impl TiangongState {
     pub(in crate::app_state) fn rebuild_runtime_from_current_config(&mut self) {
         let config = self.store.provider.models_config.to_chat_provider_config();
         self.store.provider.model_config = config.clone();
-        // 保留旧 RuntimeEngine 的共享信任模式引用、page_fetcher 和 tool_overrides
+        // 保留旧 RuntimeEngine 的共享信任模式引用、page_fetcher、terminal_provider 和 tool_overrides
         let shared_trust_mode = self
             .services
             .runtime
             .permission_gate()
             .shared_trust_mode_ref();
         let page_fetcher = self.services.runtime.page_fetcher();
+        let terminal_provider = self.services.runtime.terminal_provider();
         let tool_overrides = self.services.runtime.tool_overrides();
+        let tool_spec_providers = self.services.runtime.tool_spec_providers();
+        let prompt_section_providers = self.services.runtime.prompt_section_providers();
         let context_limit =
             crate::core_config::resolve_context_limit(&self.store.provider.model_config.api_model);
         let new_runtime = RuntimeEngine::with_shared_trust_mode(
@@ -24,8 +27,17 @@ impl TiangongState {
         if let Some(fetcher) = page_fetcher {
             new_runtime.set_page_fetcher(fetcher);
         }
+        if let Some(provider) = terminal_provider {
+            new_runtime.set_terminal_provider(provider);
+        }
         for (name, handler) in tool_overrides {
             new_runtime.register_tool_override(&name, handler);
+        }
+        for provider in tool_spec_providers {
+            new_runtime.register_tool_spec_provider(provider);
+        }
+        for provider in prompt_section_providers {
+            new_runtime.register_prompt_section_provider(provider);
         }
         self.services.runtime = new_runtime;
     }

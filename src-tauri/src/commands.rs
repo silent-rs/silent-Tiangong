@@ -584,10 +584,19 @@ pub async fn switch_session(
 
 /// 删除当前会话
 #[tauri::command]
-pub async fn delete_session(state: State<'_, TiangongApp>) -> Result<(), String> {
-    state
-        .with_state(|core_state| core_state.delete_active_session())
-        .await
+pub async fn delete_session(app: AppHandle, state: State<'_, TiangongApp>) -> Result<(), String> {
+    let deleted_id = state
+        .with_state(|core_state| {
+            // 在 delete_active_session 清空 active_session_id 之前先捕获，
+            // 以便随后销毁该对话专属的交互 PTY，避免进程泄漏
+            let id = core_state.active_session_id().to_string();
+            core_state.delete_active_session()?;
+            Ok::<String, anyhow::Error>(id)
+        })
+        .await?;
+    // 删除对话后销毁其交互 PTY（drop cmd_tx → 命令循环退出 → 子进程终止）
+    tiangong_plugin_terminal::destroy_session_pty(&app, &deleted_id);
+    Ok(())
 }
 
 /// 更新会话标题

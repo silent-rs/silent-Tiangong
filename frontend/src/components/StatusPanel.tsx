@@ -2,10 +2,11 @@ import { useState, useRef, useEffect, KeyboardEvent } from 'react';
 import { useStore } from '@/store/useStore';
 import { api } from '@/api/tauri';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { Sun, Moon, Monitor, PanelLeft, SquarePen, Volume2, VolumeX, AudioLines, Globe, ArrowUpCircle, Search } from 'lucide-react';
+import { Sun, Moon, Monitor, PanelLeft, SquarePen, Volume2, VolumeX, AudioLines, Globe, ArrowUpCircle, Search, TerminalSquare } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme';
 import { useSearchStore } from '@/store/useSearchStore';
 import { useStreamingTts } from '@/hooks/useStreamingTts';
+import { useToast } from './Toast';
 import { Separator } from './ui/separator';
 import { useSidebar } from './ui/sidebar';
 import { Button } from './ui/button';
@@ -21,6 +22,8 @@ const appWindow = getCurrentWindow();
 interface StatusPanelProps {
   showBrowser?: boolean;
   onToggleBrowser?: () => void;
+  showTerminal?: boolean;
+  onToggleTerminal?: () => void;
 }
 
 function SearchButton() {
@@ -44,7 +47,7 @@ function SearchButton() {
   );
 }
 
-export function StatusPanel({ showBrowser, onToggleBrowser }: StatusPanelProps) {
+export function StatusPanel({ showBrowser, onToggleBrowser, showTerminal, onToggleTerminal }: StatusPanelProps) {
   const { activeSessionId, isDraft, sessions, loadSessions, createSession, updateAvailable, setPendingSettingsTab } = useStore();
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState('');
@@ -55,10 +58,42 @@ export function StatusPanel({ showBrowser, onToggleBrowser }: StatusPanelProps) 
   const { toggleSidebar, open: sidebarOpen } = useSidebar();
   const streamingTts = useStreamingTts();
   const [hasTts, setHasTts] = useState(false);
+  // 终端绿点：有任意会话 PTY 处于 Interactive/Running 时点亮
+  const [terminalBusy, setTerminalBusy] = useState(false);
+  const toast = useToast();
+  const lastBusyRef = useRef(false);
 
   useEffect(() => {
     api.hasTtsCapability().then(setHasTts).catch(() => setHasTts(false));
   }, []);
+
+  // 轮询终端状态（每 1.5s）→ 绿点 + toast 提示后台命令
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const statuses = await api.terminalListStatuses();
+        if (cancelled) return;
+        const busy = statuses.some(
+          (s) => s.alive && s.phase === 'Running',
+        );
+        setTerminalBusy(busy);
+        // 从空闲变忙时弹一次 toast（且当前面板未开）
+        if (busy && !lastBusyRef.current && !showTerminal) {
+          toast.showInfo('命令在终端执行中', '点击终端按钮查看输出', 2500);
+        }
+        lastBusyRef.current = busy;
+      } catch {
+        // plugin 未注册时静默
+      }
+    };
+    poll();
+    const id = window.setInterval(poll, 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [showTerminal, onToggleTerminal, toast]);
 
   const activeSession = isDraft ? null : sessions.find((s) => s.id === activeSessionId);
   const currentTitle = isDraft ? '新对话' : (activeSession?.title || '新对话');
@@ -221,6 +256,26 @@ export function StatusPanel({ showBrowser, onToggleBrowser }: StatusPanelProps) 
           </button>
         )}
         <SearchButton />
+        {onToggleTerminal && (
+          <button
+            data-no-drag
+            onClick={onToggleTerminal}
+            className={`relative transition-colors ${
+              showTerminal
+                ? 'text-primary'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+            title={showTerminal ? '关闭终端' : '打开终端'}
+          >
+            <TerminalSquare className="w-4 h-4" />
+            {terminalBusy && !showTerminal && (
+              <span
+                className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-500 animate-pulse"
+                title="有命令在终端执行中"
+              />
+            )}
+          </button>
+        )}
         <button
           data-no-drag
           onClick={onToggleBrowser}
