@@ -441,6 +441,9 @@ export function MessageList() {
   const [hasMultimodal, setHasMultimodal] = useState(false);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const isAtBottomRef = useRef(true);
+  // 百分比轨道：鼠标当前悬停位置（0~1）映射到的用户提问序号，-1 表示未悬停
+  const [hoverUserPos, setHoverUserPos] = useState(-1);
+  const hoverUserPosRef = useRef(-1);
 
   // 检查 TTS 能力
   useEffect(() => {
@@ -888,6 +891,43 @@ export function MessageList() {
     return findUserCursorPos(item.index);
   })();
 
+  // ---- 百分比磁吸轨道的派生数据 ----
+  const userCount = userGroupIndices.length;
+  // 每条用户提问的预览文本（前 15 字符，超出补 ...）
+  const userPreviews = useMemo(
+    () => userGroupIndices.map(idx => {
+      const raw = textContent(completedGroups[idx].messages[0]);
+      return (raw.length > 15 ? raw.slice(0, 15) + '...' : raw) || '(空消息)';
+    }),
+    [userGroupIndices, completedGroups],
+  );
+
+  // ≤9 条直接平铺；>9 条按 hover/active 游标做高斯窗口，渲染离游标最近的 9 个点
+  const railSpread = userCount > 9;
+  // 游标：优先 hover，其次当前激活序号
+  const railCursor = hoverUserPos >= 0 ? hoverUserPos : Math.max(0, activeUserPos);
+  // 高斯窗口：σ 越小点收缩越快；此处用 σ=2 让 9 个点呈现明显的大小渐变
+  const railPoints = useMemo<{ groupIndex: number; pos: number; size: number }[]>(() => {
+    if (!railSpread) {
+      // 平铺模式：所有点等大（size=1），均可视为候选最大点
+      return userGroupIndices.map((groupIndex, pos) => ({ groupIndex, pos, size: 1 }));
+    }
+    const sigma = 2;
+    const windowSize = 9;
+    const half = Math.floor(windowSize / 2);
+    // 以游标为中心取 [-half, +half] 范围，裁剪到 [0, userCount-1]
+    const points: { groupIndex: number; pos: number; size: number }[] = [];
+    for (let off = -half; off <= half; off++) {
+      const pos = railCursor + off;
+      if (pos < 0 || pos >= userCount) continue;
+      // 高斯权重映射到点尺寸（0.5 ~ 1.0），中心 1.0，边缘 ~0.5
+      const w = Math.exp(-(off * off) / (2 * sigma * sigma));
+      const size = 0.5 + 0.5 * w;
+      points.push({ groupIndex: userGroupIndices[pos], pos, size });
+    }
+    return points;
+  }, [railSpread, userGroupIndices, railCursor, userCount]);
+
   return (
     <div className="relative h-full">
     <ScrollArea className="h-full" viewportRef={viewportRef}>
@@ -1100,9 +1140,11 @@ export function MessageList() {
       </div>
     </ScrollArea>
 
-    {/* 右侧导航：离开底部时显示。定位点轨道与滚动按钮各自独立绝对定位，
-        彻底解耦：点过多时按钮组以不透明面板遮挡溢出，不依赖 overflow-hidden（保持 tooltip 可用） */}
-    {userGroupIndices.length > 0 && (
+    {/* 右侧百分比磁吸轨道：离开底部时显示。
+        ≤9 条平铺等间距；>9 条按游标（hover/激活）做高斯窗口，渲染离游标最近的 9 个点，
+        中心点最大并向两侧正态衰减；最大点旁显示 15 字符预览，点 hover 显示其预览并可点选跳转，
+        点击轨道空白跳转到当前最大点对应的消息 */}
+    {userCount > 0 && (
       <div
         className={`pointer-events-none absolute inset-y-4 right-4 z-20 flex flex-col items-end transition-all duration-200 ${
           isAtBottom
@@ -1110,38 +1152,78 @@ export function MessageList() {
             : 'opacity-100 translate-x-0'
         }`}
       >
-        {/* 定位点轨道：可滚动，点过多时向下溢出，由下方按钮组的不透明面板遮挡 */}
-        <div className="pointer-events-auto flex min-h-0 flex-1 flex-col items-end gap-1.5 overflow-y-auto overflow-x-visible py-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-          <TooltipProvider delayDuration={300}>
-            {userGroupIndices.map((groupIndex, i) => {
-              const group = completedGroups[groupIndex];
-              const raw = textContent(group.messages[0]);
-              const preview = (raw.length > 15 ? raw.slice(0, 15) + '...' : raw) || '(空消息)';
-              const active = i === activeUserPos;
-              return (
-                <Tooltip key={group.messages[0].id}>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      onClick={() => scrollToUserGroupTop(groupIndex)}
-                      aria-label={`跳转到用户提问：${preview}`}
-                      className={`shrink-0 rounded-full transition-colors ${
-                        active
-                          ? 'h-2.5 w-2.5 bg-primary'
-                          : 'h-2 w-2 bg-muted-foreground/40 hover:bg-muted-foreground'
-                      }`}
-                    />
-                  </TooltipTrigger>
-                  <TooltipContent side="left" className="max-w-[200px] text-xs break-all">
-                    {preview}
-                  </TooltipContent>
-                </Tooltip>
-              );
-            })}
+        {/* 轨道主体：百分比磁吸 */}
+        <div
+          className="pointer-events-auto relative flex min-h-0 flex-1 flex-col items-end justify-center py-1"
+          onMouseMove={(e) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            const ratio = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
+            // 鼠标 Y 比例映射到用户提问序号
+            const pos = Math.round(ratio * (userCount - 1));
+            if (pos >= 0 && pos < userCount && pos !== hoverUserPosRef.current) {
+              hoverUserPosRef.current = pos;
+              setHoverUserPos(pos);
+            }
+          }}
+          onMouseLeave={() => {
+            hoverUserPosRef.current = -1;
+            setHoverUserPos(-1);
+          }}
+        >
+          {/* 轨道背景条：点击跳转到当前游标（鼠标位置/激活）对应的消息 */}
+          <button
+            type="button"
+            data-rail="bg"
+            aria-label="跳转到当前用户提问"
+            onClick={() => {
+              if (railCursor >= 0 && railCursor < userCount) {
+                scrollToUserGroupTop(userGroupIndices[railCursor]);
+              }
+            }}
+            className="absolute inset-y-0 right-1 w-1 rounded-full bg-muted-foreground/15 transition-colors hover:bg-muted-foreground/25"
+          />
+          <TooltipProvider delayDuration={200}>
+            <div className="relative flex flex-col items-end justify-center gap-1">
+              {railPoints.map((p) => {
+                const preview = userPreviews[p.pos];
+                const active = p.pos === activeUserPos;
+                // 点直径 6~12px（size 0.5~1.0）
+                const dim = Math.round(6 + (p.size - 0.5) * 12);
+                // 仅在高斯窗口模式下，中心点（size>=0.99）旁显示 15 字符预览
+                const isMax = railSpread && p.size >= 0.99;
+                return (
+                  <div key={userGroupIndices[p.pos]} className="flex items-center gap-1.5">
+                    {isMax && (
+                      <span className="max-w-[140px] truncate text-[10px] text-muted-foreground">
+                        {preview}
+                      </span>
+                    )}
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          onClick={() => scrollToUserGroupTop(p.groupIndex)}
+                          aria-label={`跳转到用户提问：${preview}`}
+                          style={{ width: dim, height: dim }}
+                          className={`rounded-full transition-colors ${
+                            active
+                              ? 'bg-primary'
+                              : 'bg-muted-foreground/50 hover:bg-muted-foreground'
+                          }`}
+                        />
+                      </TooltipTrigger>
+                      <TooltipContent side="left" className="max-w-[200px] text-xs break-all">
+                        {preview}
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                );
+              })}
+            </div>
           </TooltipProvider>
         </div>
 
-        {/* 滚动按钮组：独立绝对钉在右下角，不透明背景作为溢出遮挡面板，z-30 盖在轨道之上 */}
+        {/* 滚动按钮组：独立钉在右下角，不透明背景遮挡溢出 */}
         <div className="pointer-events-auto relative z-30 mt-2 flex flex-col items-center gap-2 rounded-lg bg-background/80 p-1 shadow-md backdrop-blur">
           <button
             type="button"
