@@ -1196,11 +1196,9 @@ export function MessageList() {
             setRailHovered(true);
           }}
           onMouseLeave={() => {
-            hoverUserPosRef.current = -1;
-            setHoverUserPos(-1);
-            hoverRatioRef.current = -1;
-            setHoverRatio(-1);
-            // 离开 1.5s 后隐藏正态点
+            // 冻结在鼠标移出时的最后位置：不重置 hoverRatio/hoverUserPos，
+            // 保证鼠标移到正态点上点选时仍是正确的消息位置；
+            // 仅启动 1.5s 隐藏定时器
             if (railHideTimerRef.current) window.clearTimeout(railHideTimerRef.current);
             railHideTimerRef.current = window.setTimeout(() => {
               setRailHovered(false);
