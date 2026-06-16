@@ -1231,6 +1231,8 @@ export function MessageList() {
             <div
               ref={railDotsRef}
               className="absolute right-2 flex flex-col items-end gap-1.5"
+              // 阻止冒泡：鼠标在正态点上移动时不触发轨道跟随，避免点列块跳动干扰点选
+              onMouseMove={(e) => e.stopPropagation()}
               style={{
                 top: `${hoverRatio >= 0 ? hoverRatio * 100 : 50}%`,
                 transform: 'translateY(-50%)',
