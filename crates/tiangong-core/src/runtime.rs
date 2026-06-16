@@ -69,7 +69,7 @@ pub struct RuntimeEngine {
     lite_client: Option<SingleProviderClient>,
     /// 多模态模型客户端（由主模型通过附件解析工具按需调用）
     multimodal_client: Option<SingleProviderClient>,
-    tool_executor: LocalToolExecutor,
+    tool_executor: Arc<Mutex<LocalToolExecutor>>,
     pub context_limit: usize,
     agent_config: AgentConfig,
     models_config: ModelsConfig,
@@ -77,8 +77,14 @@ pub struct RuntimeEngine {
     permission_gate: crate::permission::PermissionGate,
     /// 浏览器页面获取能力（GUI 模式下注入）
     page_fetcher: Arc<Mutex<Option<Arc<dyn PageFetcher>>>>,
+    /// 终端能力（GUI 模式下注入）
+    terminal_provider: Arc<Mutex<Option<Arc<dyn crate::terminal_trait::TerminalProvider>>>>,
     /// 工具覆盖处理器（替代硬编码的工具名拦截）
     tool_overrides: Arc<Mutex<HashMap<String, Arc<dyn ToolOverrideHandler>>>>,
+    /// Plugin 注册的工具规格提供者
+    tool_spec_providers: Arc<Mutex<Vec<Arc<dyn crate::tool_override::ToolSpecProvider>>>>,
+    /// Plugin 注册的 Prompt 段落提供者
+    prompt_section_providers: Arc<Mutex<Vec<Arc<dyn crate::tool_override::PromptSectionProvider>>>>,
 }
 
 impl std::fmt::Debug for RuntimeEngine {
@@ -117,14 +123,19 @@ impl RuntimeEngine {
             client,
             lite_client: None,
             multimodal_client: None,
-            tool_executor: LocalToolExecutor::from_agent_config(&agent_config),
+            tool_executor: Arc::new(Mutex::new(LocalToolExecutor::from_agent_config(
+                &agent_config,
+            ))),
             context_limit,
             agent_config,
             models_config: ModelsConfig::default(),
             core_config: None,
             permission_gate,
             page_fetcher: Arc::new(Mutex::new(None)),
+            terminal_provider: Arc::new(Mutex::new(None)),
             tool_overrides: Arc::new(Mutex::new(HashMap::new())),
+            tool_spec_providers: Arc::new(Mutex::new(Vec::new())),
+            prompt_section_providers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -146,15 +157,20 @@ impl RuntimeEngine {
             client,
             lite_client: None,
             multimodal_client: None,
-            tool_executor: LocalToolExecutor::from_agent_config(&agent_config)
-                .with_shared_trust_mode(shared_trust_mode),
+            tool_executor: Arc::new(Mutex::new(
+                LocalToolExecutor::from_agent_config(&agent_config)
+                    .with_shared_trust_mode(shared_trust_mode),
+            )),
             context_limit,
             agent_config,
             models_config: ModelsConfig::default(),
             core_config: None,
             permission_gate,
             page_fetcher: Arc::new(Mutex::new(None)),
+            terminal_provider: Arc::new(Mutex::new(None)),
             tool_overrides: Arc::new(Mutex::new(HashMap::new())),
+            tool_spec_providers: Arc::new(Mutex::new(Vec::new())),
+            prompt_section_providers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -227,6 +243,25 @@ impl RuntimeEngine {
         self.page_fetcher.lock().ok()?.clone()
     }
 
+    /// 注入终端能力（GUI 模式下由 Tauri Plugin 提供）
+    /// 同步更新 tool_executor 使 run_command 校验后走 PTY 执行
+    pub fn set_terminal_provider(
+        &self,
+        provider: Arc<dyn crate::terminal_trait::TerminalProvider>,
+    ) {
+        if let Ok(mut guard) = self.terminal_provider.lock() {
+            *guard = Some(provider.clone());
+        }
+        if let Ok(mut guard) = self.tool_executor.lock() {
+            *guard = guard.clone().with_terminal_provider(provider);
+        }
+    }
+
+    /// 获取 terminal_provider 的克隆
+    pub fn terminal_provider(&self) -> Option<Arc<dyn crate::terminal_trait::TerminalProvider>> {
+        self.terminal_provider.lock().ok()?.clone()
+    }
+
     /// 注册工具覆盖处理器
     pub fn register_tool_override(&self, name: &str, handler: Arc<dyn ToolOverrideHandler>) {
         if let Ok(mut guard) = self.tool_overrides.lock() {
@@ -237,6 +272,62 @@ impl RuntimeEngine {
     /// 获取所有已注册的工具覆盖（用于 runtime 重建时保留）
     pub fn tool_overrides(&self) -> HashMap<String, Arc<dyn ToolOverrideHandler>> {
         self.tool_overrides
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    /// 注册 Plugin 工具规格提供者
+    pub fn register_tool_spec_provider(
+        &self,
+        provider: Arc<dyn crate::tool_override::ToolSpecProvider>,
+    ) {
+        if let Ok(mut guard) = self.tool_spec_providers.lock() {
+            guard.push(provider);
+        }
+    }
+
+    /// 收集所有 Plugin 注册的工具规格
+    pub fn collect_plugin_tool_specs(&self) -> Vec<crate::model::ToolSpec> {
+        self.tool_spec_providers
+            .lock()
+            .ok()
+            .map(|guard| guard.iter().flat_map(|p| p.tool_specs()).collect())
+            .unwrap_or_default()
+    }
+
+    /// 获取所有已注册的工具规格提供者（用于 runtime 重建时保留）
+    pub fn tool_spec_providers(&self) -> Vec<Arc<dyn crate::tool_override::ToolSpecProvider>> {
+        self.tool_spec_providers
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    /// 注册 Plugin Prompt 段落提供者
+    pub fn register_prompt_section_provider(
+        &self,
+        provider: Arc<dyn crate::tool_override::PromptSectionProvider>,
+    ) {
+        if let Ok(mut guard) = self.prompt_section_providers.lock() {
+            guard.push(provider);
+        }
+    }
+
+    /// 收集所有 Plugin 注册的 Prompt 段落
+    pub fn collect_plugin_prompt_sections(&self) -> Vec<String> {
+        self.prompt_section_providers
+            .lock()
+            .ok()
+            .map(|guard| guard.iter().flat_map(|p| p.prompt_sections()).collect())
+            .unwrap_or_default()
+    }
+
+    /// 获取所有已注册的 Prompt 段落提供者（用于 runtime 重建时保留）
+    pub fn prompt_section_providers(
+        &self,
+    ) -> Vec<Arc<dyn crate::tool_override::PromptSectionProvider>> {
+        self.prompt_section_providers
             .lock()
             .map(|g| g.clone())
             .unwrap_or_default()
@@ -268,6 +359,7 @@ impl RuntimeEngine {
         call: &ToolCall,
         mcp_targets: &HashMap<String, McpFunctionTarget>,
         mcp_config: &McpConfig,
+        session_id: &str,
     ) -> ToolResult {
         // 权限检查
         use crate::permission::PermissionDecision;
@@ -357,14 +449,19 @@ impl RuntimeEngine {
             .lock()
             .ok()
             .and_then(|g| g.get(&call.name).cloned())
-            && let Some(result) = handler.handle(call).await
+            && let Some(result) = handler.handle(call, session_id).await
         {
             return result;
         }
 
         // 本地工具
+        let executor = self
+            .tool_executor
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_else(|_| LocalToolExecutor::from_agent_config(&self.agent_config));
         match build_tool_call_from_function(call) {
-            Ok(tool_call) => match self.tool_executor.execute(&tool_call) {
+            Ok(tool_call) => match executor.execute(&tool_call, session_id) {
                 Ok(result) => result,
                 Err(err) => ToolResult {
                     ok: false,
@@ -434,10 +531,14 @@ impl RuntimeEngine {
 
                 let env = self
                     .tool_executor
-                    .runtime_env()
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
+                    .lock()
+                    .map(|g| {
+                        g.runtime_env()
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
 
                 match task_registry().lock() {
                     Ok(mut reg) => match reg.spawn(name, cmd, args, cwd, env) {

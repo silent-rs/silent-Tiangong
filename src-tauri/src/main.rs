@@ -296,6 +296,31 @@ fn run_gui() {
                 state.register_tool_override("web_locate_element", handler);
             }
 
+            // 注入终端 Plugin 的 TerminalProvider / ToolOverride / ToolSpecProvider / PromptSectionProvider
+            if let Some(provider) = tiangong_plugin_terminal::get_terminal_provider(app.handle()) {
+                state.set_terminal_provider(provider.clone());
+                let terminal_override = tiangong_plugin_terminal::get_tool_override(app.handle());
+                if let Some(handler) = terminal_override {
+                    state.register_tool_override("run_shell", handler);
+                }
+                state.register_prompt_section_provider(
+                    tiangong_plugin_terminal::get_prompt_section_provider(),
+                );
+
+                // 将 workspace 目录设为系统 PTY 默认 cwd。
+                // 系统 PTY 启动时 cwd 取自环境变量（HOME/tmp），若不在此 cd，
+                // agent 命令会在用户主目录而非 workspace 执行。
+                let app_handle = app.handle().clone();
+                let core_state = state.state.clone();
+                tauri::async_runtime::spawn(async move {
+                    let workspace = {
+                        let guard = core_state.lock().await;
+                        guard.workspace_dir().to_string()
+                    };
+                    tiangong_plugin_terminal::set_cwd(&app_handle, workspace).await;
+                });
+            }
+
             // 监听浏览器页面加载事件，自动注入内容到当前活跃会话
             let inject_handle = app.handle().clone();
             app.listen("browser:page_loaded", move |event| {
@@ -533,6 +558,13 @@ fn run_gui() {
             tiangong_app::commands::webhook_list_runs,
         ])
         .plugin(tiangong_plugin_browser::init())
+        .plugin(tiangong_plugin_terminal::init(
+            scru128::new().to_string(),
+            std::env::var("TIANGONG_WORKSPACE")
+                .ok()
+                .or_else(|| std::env::var("HOME").ok())
+                .unwrap_or_else(|| "/tmp".to_string()),
+        ))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())

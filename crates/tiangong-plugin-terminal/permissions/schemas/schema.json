@@ -1,0 +1,498 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PermissionFile",
+  "description": "Permission file that can define a default permission, a set of permissions or a list of inlined permissions.",
+  "type": "object",
+  "properties": {
+    "default": {
+      "description": "The default permission set for the plugin",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DefaultPermission"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "set": {
+      "description": "A list of permissions sets defined",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/PermissionSet"
+      }
+    },
+    "permission": {
+      "description": "A list of inlined permissions",
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Permission"
+      }
+    }
+  },
+  "definitions": {
+    "DefaultPermission": {
+      "description": "The default permission set of the plugin.\n\nWorks similarly to a permission with the \"default\" identifier.",
+      "type": "object",
+      "required": [
+        "permissions"
+      ],
+      "properties": {
+        "version": {
+          "description": "The version of the permission.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 1.0
+        },
+        "description": {
+          "description": "Human-readable description of what the permission does. Tauri convention is to use `<h4>` headings in markdown content for Tauri documentation generation purposes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "permissions": {
+          "description": "All permissions this set contains.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "PermissionSet": {
+      "description": "A set of direct permissions grouped together under a new name.",
+      "type": "object",
+      "required": [
+        "description",
+        "identifier",
+        "permissions"
+      ],
+      "properties": {
+        "identifier": {
+          "description": "A unique identifier for the permission.",
+          "type": "string"
+        },
+        "description": {
+          "description": "Human-readable description of what the permission does.",
+          "type": "string"
+        },
+        "permissions": {
+          "description": "All permissions this set contains.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PermissionKind"
+          }
+        }
+      }
+    },
+    "Permission": {
+      "description": "Descriptions of explicit privileges of commands.\n\nIt can enable commands to be accessible in the frontend of the application.\n\nIf the scope is defined it can be used to fine grain control the access of individual or multiple commands.",
+      "type": "object",
+      "required": [
+        "identifier"
+      ],
+      "properties": {
+        "version": {
+          "description": "The version of the permission.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 1.0
+        },
+        "identifier": {
+          "description": "A unique identifier for the permission.",
+          "type": "string"
+        },
+        "description": {
+          "description": "Human-readable description of what the permission does. Tauri internal convention is to use `<h4>` headings in markdown content for Tauri documentation generation purposes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "commands": {
+          "description": "Allowed or denied commands when using this permission.",
+          "default": {
+            "allow": [],
+            "deny": []
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/Commands"
+            }
+          ]
+        },
+        "scope": {
+          "description": "Allowed or denied scoped when using this permission.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/Scopes"
+            }
+          ]
+        },
+        "platforms": {
+          "description": "Target platforms this permission applies. By default all platforms are affected by this permission.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/Target"
+          }
+        }
+      }
+    },
+    "Commands": {
+      "description": "Allowed and denied commands inside a permission.\n\nIf two commands clash inside of `allow` and `deny`, it should be denied by default.",
+      "type": "object",
+      "properties": {
+        "allow": {
+          "description": "Allowed command.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deny": {
+          "description": "Denied command, which takes priority.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "Scopes": {
+      "description": "An argument for fine grained behavior control of Tauri commands.\n\nIt can be of any serde serializable type and is used to allow or prevent certain actions inside a Tauri command. The configured scope is passed to the command and will be enforced by the command implementation.\n\n## Example\n\n```json { \"allow\": [{ \"path\": \"$HOME/**\" }], \"deny\": [{ \"path\": \"$HOME/secret.txt\" }] } ```",
+      "type": "object",
+      "properties": {
+        "allow": {
+          "description": "Data that defines what is allowed by the scope.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/Value"
+          }
+        },
+        "deny": {
+          "description": "Data that defines what is denied by the scope. This should be prioritized by validation logic.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/Value"
+          }
+        }
+      }
+    },
+    "Value": {
+      "description": "All supported ACL values.",
+      "anyOf": [
+        {
+          "description": "Represents a null JSON value.",
+          "type": "null"
+        },
+        {
+          "description": "Represents a [`bool`].",
+          "type": "boolean"
+        },
+        {
+          "description": "Represents a valid ACL [`Number`].",
+          "allOf": [
+            {
+              "$ref": "#/definitions/Number"
+            }
+          ]
+        },
+        {
+          "description": "Represents a [`String`].",
+          "type": "string"
+        },
+        {
+          "description": "Represents a list of other [`Value`]s.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Value"
+          }
+        },
+        {
+          "description": "Represents a map of [`String`] keys to [`Value`]s.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/Value"
+          }
+        }
+      ]
+    },
+    "Number": {
+      "description": "A valid ACL number.",
+      "anyOf": [
+        {
+          "description": "Represents an [`i64`].",
+          "type": "integer",
+          "format": "int64"
+        },
+        {
+          "description": "Represents a [`f64`].",
+          "type": "number",
+          "format": "double"
+        }
+      ]
+    },
+    "Target": {
+      "description": "Platform target.",
+      "oneOf": [
+        {
+          "description": "MacOS.",
+          "type": "string",
+          "enum": [
+            "macOS"
+          ]
+        },
+        {
+          "description": "Windows.",
+          "type": "string",
+          "enum": [
+            "windows"
+          ]
+        },
+        {
+          "description": "Linux.",
+          "type": "string",
+          "enum": [
+            "linux"
+          ]
+        },
+        {
+          "description": "Android.",
+          "type": "string",
+          "enum": [
+            "android"
+          ]
+        },
+        {
+          "description": "iOS.",
+          "type": "string",
+          "enum": [
+            "iOS"
+          ]
+        }
+      ]
+    },
+    "PermissionKind": {
+      "type": "string",
+      "oneOf": [
+        {
+          "description": "Enables the terminal_destroy_session command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-terminal-destroy-session",
+          "markdownDescription": "Enables the terminal_destroy_session command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the terminal_destroy_session command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-terminal-destroy-session",
+          "markdownDescription": "Denies the terminal_destroy_session command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the terminal_ensure_session command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-terminal-ensure-session",
+          "markdownDescription": "Enables the terminal_ensure_session command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the terminal_ensure_session command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-terminal-ensure-session",
+          "markdownDescription": "Denies the terminal_ensure_session command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the terminal_exec command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-terminal-exec",
+          "markdownDescription": "Enables the terminal_exec command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the terminal_exec command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-terminal-exec",
+          "markdownDescription": "Denies the terminal_exec command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the terminal_panel_set_session command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-terminal-panel-set-session",
+          "markdownDescription": "Enables the terminal_panel_set_session command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the terminal_panel_set_session command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-terminal-panel-set-session",
+          "markdownDescription": "Denies the terminal_panel_set_session command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the terminal_recent_output command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-terminal-recent-output",
+          "markdownDescription": "Enables the terminal_recent_output command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the terminal_recent_output command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-terminal-recent-output",
+          "markdownDescription": "Denies the terminal_recent_output command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the terminal_reset command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-terminal-reset",
+          "markdownDescription": "Enables the terminal_reset command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the terminal_reset command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-terminal-reset",
+          "markdownDescription": "Denies the terminal_reset command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the terminal_resize command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-terminal-resize",
+          "markdownDescription": "Enables the terminal_resize command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the terminal_resize command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-terminal-resize",
+          "markdownDescription": "Denies the terminal_resize command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the terminal_send_input command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-terminal-send-input",
+          "markdownDescription": "Enables the terminal_send_input command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the terminal_send_input command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-terminal-send-input",
+          "markdownDescription": "Denies the terminal_send_input command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the terminal_session_info command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-terminal-session-info",
+          "markdownDescription": "Enables the terminal_session_info command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the terminal_session_info command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-terminal-session-info",
+          "markdownDescription": "Denies the terminal_session_info command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the terminal_session_recent_output command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-terminal-session-recent-output",
+          "markdownDescription": "Enables the terminal_session_recent_output command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the terminal_session_recent_output command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-terminal-session-recent-output",
+          "markdownDescription": "Denies the terminal_session_recent_output command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the terminal_session_reset command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-terminal-session-reset",
+          "markdownDescription": "Enables the terminal_session_reset command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the terminal_session_reset command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-terminal-session-reset",
+          "markdownDescription": "Denies the terminal_session_reset command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the terminal_session_resize command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-terminal-session-resize",
+          "markdownDescription": "Enables the terminal_session_resize command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the terminal_session_resize command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-terminal-session-resize",
+          "markdownDescription": "Denies the terminal_session_resize command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the terminal_session_send_input command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-terminal-session-send-input",
+          "markdownDescription": "Enables the terminal_session_send_input command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the terminal_session_send_input command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-terminal-session-send-input",
+          "markdownDescription": "Denies the terminal_session_send_input command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the terminal_session_set_cwd command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-terminal-session-set-cwd",
+          "markdownDescription": "Enables the terminal_session_set_cwd command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the terminal_session_set_cwd command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-terminal-session-set-cwd",
+          "markdownDescription": "Denies the terminal_session_set_cwd command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the terminal_set_cwd command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-terminal-set-cwd",
+          "markdownDescription": "Enables the terminal_set_cwd command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the terminal_set_cwd command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-terminal-set-cwd",
+          "markdownDescription": "Denies the terminal_set_cwd command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the terminal_system_session_info command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-terminal-system-session-info",
+          "markdownDescription": "Enables the terminal_system_session_info command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the terminal_system_session_info command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-terminal-system-session-info",
+          "markdownDescription": "Denies the terminal_system_session_info command without any pre-configured scope."
+        },
+        {
+          "description": "允许使用终端面板的全部功能。\n#### This default permission set includes:\n\n- `allow-terminal-exec`\n- `allow-terminal-recent-output`\n- `allow-terminal-send-input`\n- `allow-terminal-reset`\n- `allow-terminal-system-session-info`\n- `allow-terminal-set-cwd`\n- `allow-terminal-resize`\n- `allow-terminal-ensure-session`\n- `allow-terminal-destroy-session`\n- `allow-terminal-session-send-input`\n- `allow-terminal-session-recent-output`\n- `allow-terminal-session-info`\n- `allow-terminal-session-set-cwd`\n- `allow-terminal-session-resize`\n- `allow-terminal-session-reset`\n- `allow-terminal-panel-set-session`",
+          "type": "string",
+          "const": "default",
+          "markdownDescription": "允许使用终端面板的全部功能。\n#### This default permission set includes:\n\n- `allow-terminal-exec`\n- `allow-terminal-recent-output`\n- `allow-terminal-send-input`\n- `allow-terminal-reset`\n- `allow-terminal-system-session-info`\n- `allow-terminal-set-cwd`\n- `allow-terminal-resize`\n- `allow-terminal-ensure-session`\n- `allow-terminal-destroy-session`\n- `allow-terminal-session-send-input`\n- `allow-terminal-session-recent-output`\n- `allow-terminal-session-info`\n- `allow-terminal-session-set-cwd`\n- `allow-terminal-session-resize`\n- `allow-terminal-session-reset`\n- `allow-terminal-panel-set-session`"
+        }
+      ]
+    }
+  }
+}

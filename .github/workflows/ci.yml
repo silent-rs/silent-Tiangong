@@ -20,17 +20,21 @@ jobs:
     name: Detect Changes
     runs-on: ubuntu-latest
     outputs:
-      code: ${{ steps.filter.outputs.code }}
+      # 按改动范围拆分：纯前端只跑 frontend，纯后端只跑 rust/tauri，都改时全跑
+      frontend: ${{ steps.filter.outputs.frontend }}
+      rust: ${{ steps.filter.outputs.rust }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
         id: filter
         with:
           filters: |
-            code:
+            frontend:
+              - 'frontend/**'
+              - '.github/workflows/**'
+            rust:
               - 'crates/**'
               - 'src-tauri/**'
-              - 'frontend/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/**'
@@ -38,7 +42,7 @@ jobs:
   rust:
     name: Rust Workspace
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -100,7 +104,7 @@ jobs:
   frontend:
     name: Frontend Build
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -129,7 +133,7 @@ jobs:
   tauri:
     name: Tauri Shell Check
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
 
     steps:

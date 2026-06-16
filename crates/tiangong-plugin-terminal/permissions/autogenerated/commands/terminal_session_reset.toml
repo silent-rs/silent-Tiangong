@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-terminal-session-reset"
+description = "Enables the terminal_session_reset command without any pre-configured scope."
+commands.allow = ["terminal_session_reset"]
+
+[[permission]]
+identifier = "deny-terminal-session-reset"
+description = "Denies the terminal_session_reset command without any pre-configured scope."
+commands.deny = ["terminal_session_reset"]

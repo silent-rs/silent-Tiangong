@@ -5,6 +5,7 @@ import { AppSidebar } from '@/components/AppSidebar';
 import { SidebarProvider } from '@/components/ui/sidebar';
 import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components/LazyComponents';
 import { BrowserPanel } from '@/components/BrowserPanel';
+import { TerminalPanel } from '@/components/TerminalPanel';
 import { ensureDesktopNotificationPermission } from '@/utils/desktopNotification';
 import { useUpdateCheck } from '@/hooks/useUpdateCheck';
 import type { UnlistenFn } from '@tauri-apps/api/event';
@@ -91,10 +92,12 @@ export function MainApp() {
   const { loadSessions, updateFromSnapshot } = useStore();
   useUpdateCheck();
   const [showBrowser, setShowBrowser] = useState(false);
+  const [showTerminal, setShowTerminal] = useState(false);
   const [chatPanelWidth, setChatPanelWidth] = useState(MIN_CHAT_WIDTH);
   const [browserUrl, setBrowserUrl] = useState<string | undefined>(undefined);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const showBrowserRef = useRef(false);
+  const showTerminalRef = useRef(false);
   const chatPanelWidthRef = useRef(MIN_CHAT_WIDTH);
   const isDraggingRef = useRef(false);
   const unlistenRef = useRef<UnlistenFn | null>(null);
@@ -187,6 +190,42 @@ export function MainApp() {
     }
   }, [openBrowserPanel, closeBrowserPanel]);
 
+  // 打开终端面板：收起侧边栏，对话区与终端对半分（区别于浏览器固定 400px），
+  // 不扩展窗口（对半分是在现有窗口内重排）。保留拖拉分隔条调整宽度的能力。
+  // 若浏览器面板已打开，先关闭它（二者互斥，终端优先在当前窗口对半分）。
+  const openTerminalPanel = useCallback(() => {
+    if (showBrowserRef.current) {
+      void closeBrowserPanel(false);
+    }
+    setSidebarOpenByLayout(false);
+    const mainEl = document.querySelector('main');
+    if (mainEl) {
+      const half = Math.floor(mainEl.getBoundingClientRect().width / 2);
+      const clamped = Math.max(MIN_CHAT_WIDTH, half);
+      chatPanelWidthRef.current = clamped;
+      setChatPanelWidth(clamped);
+    }
+    showTerminalRef.current = true;
+    setShowTerminal(true);
+  }, [closeBrowserPanel, setSidebarOpenByLayout]);
+
+  const closeTerminalPanel = useCallback(() => {
+    if (!showTerminalRef.current) return;
+    showTerminalRef.current = false;
+    setShowTerminal(false);
+    if (preferredSidebarOpenRef.current) {
+      setSidebarOpenByLayout(true);
+    }
+  }, [setSidebarOpenByLayout]);
+
+  const handleToggleTerminal = useCallback(() => {
+    if (!showTerminalRef.current) {
+      openTerminalPanel();
+    } else {
+      closeTerminalPanel();
+    }
+  }, [openTerminalPanel, closeTerminalPanel]);
+
   const handleDividerDrag = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     isDraggingRef.current = true;
@@ -207,9 +246,14 @@ export function MainApp() {
       if (!isDraggingRef.current) return;
       const rect = mainEl.getBoundingClientRect();
       const next = ev.clientX - rect.left;
+      // 拖到右侧剩余宽度小于面板最小宽度时，关闭当前打开的面板（浏览器优先，否则终端）
       if (rect.width - next < MIN_BROWSER_WIDTH) {
         cleanup();
-        closeBrowserPanel(false);
+        if (showBrowserRef.current) {
+          closeBrowserPanel(false);
+        } else if (showTerminalRef.current) {
+          closeTerminalPanel();
+        }
         return;
       }
       const clamped = Math.max(MIN_CHAT_WIDTH, next);
@@ -221,7 +265,7 @@ export function MainApp() {
     document.body.style.userSelect = 'none';
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
-  }, []);
+  }, [closeBrowserPanel, closeTerminalPanel]);
 
   useEffect(() => {
     ensureDesktopNotificationPermission().catch(console.warn);
@@ -359,6 +403,8 @@ export function MainApp() {
         <LazyStatusPanel
           showBrowser={showBrowser}
           onToggleBrowser={handleToggleBrowser}
+          showTerminal={showTerminal}
+          onToggleTerminal={handleToggleTerminal}
         />
 
         <div className="flex flex-1 min-h-0">
@@ -367,8 +413,8 @@ export function MainApp() {
           <main className="flex flex-1 flex-col min-w-0 bg-background">
             <div className="flex flex-1 min-h-0">
               <div
-                className={`flex flex-col min-w-0 ${showBrowser ? 'shrink-0' : 'flex-1'}`}
-                style={showBrowser ? { width: chatPanelWidth } : undefined}
+                className={`flex flex-col min-w-0 ${showBrowser || showTerminal ? 'shrink-0' : 'flex-1'}`}
+                style={showBrowser || showTerminal ? { width: chatPanelWidth } : undefined}
               >
                 <div className="flex-1 overflow-hidden">
                   <LazyMessageList />
@@ -386,6 +432,18 @@ export function MainApp() {
 
               {showBrowser && (
                 <BrowserPanel initialUrl={browserUrl} currentUrl={browserUrl} onClose={closeBrowserPanel} />
+              )}
+
+              {showTerminal && !showBrowser && (
+                <>
+                  <div
+                    className="w-[3px] shrink-0 cursor-col-resize bg-border hover:bg-muted-foreground/30 active:bg-muted-foreground/50 transition-colors"
+                    onMouseDown={handleDividerDrag}
+                  />
+                  <div className="flex-1 min-w-0">
+                    <TerminalPanel onClose={closeTerminalPanel} />
+                  </div>
+                </>
               )}
             </div>
           </main>

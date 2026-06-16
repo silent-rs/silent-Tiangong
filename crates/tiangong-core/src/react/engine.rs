@@ -32,11 +32,12 @@ use tiangong_types::{StreamEvent, StreamToolCall};
 
 use crate::agent_team::lifecycle::TeamContext;
 
-/// 处理插件相关的 Command 变体（SetPageFetcher / RegisterToolOverride / InjectBrowserContent）。
+/// 处理插件相关的 Command 变体（SetPageFetcher / SetTerminalProvider / RegisterToolOverride /
+/// RegisterToolSpecProvider / RegisterPromptSectionProvider / InjectBrowserContent）。
 /// 消除 4 处 match 分支的重复代码。
 ///
 /// 调用点通过 or-pattern (`cmd @ (Some(Command::SetPageFetcher { .. }) | ...)`) 限定
-/// 只会将这三种 Command 传入，因此 `_ => unreachable!` 不会触发。新增变体时必须同步更新：
+/// 只会将这些 Command 传入，因此 `_ => unreachable!` 不会触发。新增变体时必须同步更新：
 /// 1. 此宏的 match 分支
 /// 2. 所有调用点的 or-pattern
 macro_rules! handle_plugin_commands {
@@ -45,8 +46,17 @@ macro_rules! handle_plugin_commands {
             Command::SetPageFetcher { fetcher } => {
                 $engine.set_page_fetcher(fetcher);
             }
+            Command::SetTerminalProvider { provider } => {
+                $engine.set_terminal_provider(provider);
+            }
             Command::RegisterToolOverride { name, handler } => {
                 $engine.register_tool_override(&name, handler);
+            }
+            Command::RegisterToolSpecProvider { provider } => {
+                $engine.register_tool_spec_provider(provider);
+            }
+            Command::RegisterPromptSectionProvider { provider } => {
+                $engine.register_prompt_section_provider(provider);
             }
             Command::InjectBrowserContent {
                 title,
@@ -677,7 +687,10 @@ impl ReactEngine {
                             Some(Command::Approval { .. }) => {}
                             Some(Command::CancelAgent { .. }) => {}
                             cmd @ (Some(Command::SetPageFetcher { .. })
+                            | Some(Command::SetTerminalProvider { .. })
                             | Some(Command::RegisterToolOverride { .. })
+                            | Some(Command::RegisterToolSpecProvider { .. })
+                            | Some(Command::RegisterPromptSectionProvider { .. })
                             | Some(Command::InjectBrowserContent { .. })) => {
                                 handle_plugin_commands!(cmd.unwrap(), &self.engine, session, stream_tx);
                             }
@@ -1159,7 +1172,10 @@ impl ReactEngine {
                                 Some(Command::Approval { .. }) => {}
                                 Some(Command::CancelAgent { .. }) => {}
                                 cmd @ (Some(Command::SetPageFetcher { .. })
+                                | Some(Command::SetTerminalProvider { .. })
                                 | Some(Command::RegisterToolOverride { .. })
+                                | Some(Command::RegisterToolSpecProvider { .. })
+                                | Some(Command::RegisterPromptSectionProvider { .. })
                                 | Some(Command::InjectBrowserContent { .. })) => {
                                     handle_plugin_commands!(
                                         cmd.unwrap(),
@@ -1322,6 +1338,7 @@ impl ReactEngine {
                                         call,
                                         &self.mcp_targets,
                                         &self.engine.agent_config().mcp,
+                                        &session.id,
                                     )
                                     .await,
                                 tiangong_types::TokenUsage::default(),
@@ -1957,7 +1974,10 @@ impl ReactEngine {
                         }
                         Some(Command::ReloadConfig) | Some(Command::Approval { .. }) => {}
                         cmd @ (Some(Command::SetPageFetcher { .. })
+                        | Some(Command::SetTerminalProvider { .. })
                         | Some(Command::RegisterToolOverride { .. })
+                        | Some(Command::RegisterToolSpecProvider { .. })
+                        | Some(Command::RegisterPromptSectionProvider { .. })
                         | Some(Command::InjectBrowserContent { .. })) => {
                             handle_plugin_commands!(cmd.unwrap(), &self.engine, parent_session, stream_tx);
                         }
@@ -2112,7 +2132,11 @@ fn drain_pending_commands_async(
             }
             Command::ReloadConfig => {}
             Command::Approval { .. } => {}
-            cmd @ (Command::SetPageFetcher { .. } | Command::RegisterToolOverride { .. }) => {
+            cmd @ (Command::SetPageFetcher { .. }
+            | Command::SetTerminalProvider { .. }
+            | Command::RegisterToolOverride { .. }
+            | Command::RegisterToolSpecProvider { .. }
+            | Command::RegisterPromptSectionProvider { .. }) => {
                 handle_plugin_commands!(cmd, engine, session, stream_tx);
             }
             Command::InjectBrowserContent {

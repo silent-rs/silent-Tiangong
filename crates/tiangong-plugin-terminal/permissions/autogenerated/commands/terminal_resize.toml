@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-terminal-resize"
+description = "Enables the terminal_resize command without any pre-configured scope."
+commands.allow = ["terminal_resize"]
+
+[[permission]]
+identifier = "deny-terminal-resize"
+description = "Denies the terminal_resize command without any pre-configured scope."
+commands.deny = ["terminal_resize"]

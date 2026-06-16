@@ -1,0 +1,21 @@
+[package]
+name = "tiangong-plugin-terminal"
+version.workspace = true
+edition = "2021"
+license = "Apache-2.0"
+links = "terminal"
+
+[dependencies]
+tiangong-core = { workspace = true }
+tiangong-types = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time", "sync", "process", "io-util"] }
+tauri = { workspace = true, features = ["unstable"] }
+portable-pty = "0.8"
+scru128 = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }

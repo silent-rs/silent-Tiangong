@@ -1,0 +1,20 @@
+[default]
+description = "允许使用终端面板的全部功能。"
+permissions = [
+    "allow-terminal-exec",
+    "allow-terminal-recent-output",
+    "allow-terminal-send-input",
+    "allow-terminal-reset",
+    "allow-terminal-system-session-info",
+    "allow-terminal-set-cwd",
+    "allow-terminal-resize",
+    "allow-terminal-ensure-session",
+    "allow-terminal-destroy-session",
+    "allow-terminal-session-send-input",
+    "allow-terminal-session-recent-output",
+    "allow-terminal-session-info",
+    "allow-terminal-session-set-cwd",
+    "allow-terminal-session-resize",
+    "allow-terminal-session-reset",
+    "allow-terminal-panel-set-session",
+]
