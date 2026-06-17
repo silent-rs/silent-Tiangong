@@ -295,6 +295,18 @@
       "type": "string",
       "oneOf": [
         {
+          "description": "Enables the terminal_attach_session command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-terminal-attach-session",
+          "markdownDescription": "Enables the terminal_attach_session command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the terminal_attach_session command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-terminal-attach-session",
+          "markdownDescription": "Denies the terminal_attach_session command without any pre-configured scope."
+        },
+        {
           "description": "Enables the terminal_destroy_session command without any pre-configured scope.",
           "type": "string",
           "const": "allow-terminal-destroy-session",
@@ -463,6 +475,18 @@
           "markdownDescription": "Denies the terminal_session_set_cwd command without any pre-configured scope."
         },
         {
+          "description": "Enables the terminal_session_update_screen command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-terminal-session-update-screen",
+          "markdownDescription": "Enables the terminal_session_update_screen command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the terminal_session_update_screen command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-terminal-session-update-screen",
+          "markdownDescription": "Denies the terminal_session_update_screen command without any pre-configured scope."
+        },
+        {
           "description": "Enables the terminal_set_cwd command without any pre-configured scope.",
           "type": "string",
           "const": "allow-terminal-set-cwd",
@@ -487,10 +511,10 @@
           "markdownDescription": "Denies the terminal_system_session_info command without any pre-configured scope."
         },
         {
-          "description": "允许使用终端面板的全部功能。\n#### This default permission set includes:\n\n- `allow-terminal-exec`\n- `allow-terminal-recent-output`\n- `allow-terminal-send-input`\n- `allow-terminal-reset`\n- `allow-terminal-system-session-info`\n- `allow-terminal-set-cwd`\n- `allow-terminal-resize`\n- `allow-terminal-ensure-session`\n- `allow-terminal-destroy-session`\n- `allow-terminal-session-send-input`\n- `allow-terminal-session-recent-output`\n- `allow-terminal-session-info`\n- `allow-terminal-session-set-cwd`\n- `allow-terminal-session-resize`\n- `allow-terminal-session-reset`\n- `allow-terminal-panel-set-session`",
+          "description": "允许使用终端面板的全部功能。\n#### This default permission set includes:\n\n- `allow-terminal-exec`\n- `allow-terminal-recent-output`\n- `allow-terminal-send-input`\n- `allow-terminal-reset`\n- `allow-terminal-system-session-info`\n- `allow-terminal-set-cwd`\n- `allow-terminal-resize`\n- `allow-terminal-ensure-session`\n- `allow-terminal-destroy-session`\n- `allow-terminal-attach-session`\n- `allow-terminal-session-send-input`\n- `allow-terminal-session-recent-output`\n- `allow-terminal-session-info`\n- `allow-terminal-session-set-cwd`\n- `allow-terminal-session-resize`\n- `allow-terminal-session-reset`\n- `allow-terminal-session-update-screen`\n- `allow-terminal-panel-set-session`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "允许使用终端面板的全部功能。\n#### This default permission set includes:\n\n- `allow-terminal-exec`\n- `allow-terminal-recent-output`\n- `allow-terminal-send-input`\n- `allow-terminal-reset`\n- `allow-terminal-system-session-info`\n- `allow-terminal-set-cwd`\n- `allow-terminal-resize`\n- `allow-terminal-ensure-session`\n- `allow-terminal-destroy-session`\n- `allow-terminal-session-send-input`\n- `allow-terminal-session-recent-output`\n- `allow-terminal-session-info`\n- `allow-terminal-session-set-cwd`\n- `allow-terminal-session-resize`\n- `allow-terminal-session-reset`\n- `allow-terminal-panel-set-session`"
+          "markdownDescription": "允许使用终端面板的全部功能。\n#### This default permission set includes:\n\n- `allow-terminal-exec`\n- `allow-terminal-recent-output`\n- `allow-terminal-send-input`\n- `allow-terminal-reset`\n- `allow-terminal-system-session-info`\n- `allow-terminal-set-cwd`\n- `allow-terminal-resize`\n- `allow-terminal-ensure-session`\n- `allow-terminal-destroy-session`\n- `allow-terminal-attach-session`\n- `allow-terminal-session-send-input`\n- `allow-terminal-session-recent-output`\n- `allow-terminal-session-info`\n- `allow-terminal-session-set-cwd`\n- `allow-terminal-session-resize`\n- `allow-terminal-session-reset`\n- `allow-terminal-session-update-screen`\n- `allow-terminal-panel-set-session`"
         }
       ]
     }

@@ -40,6 +40,12 @@ pub enum TerminalCommand {
         timeout_secs: Option<u64>,
         response_tx: oneshot::Sender<TerminalExecResponse>,
     },
+    /// 交互式命令执行（vi/nano/REPL 等），不使用 marker 协议，直接 CR 提交并等待初始输出
+    ExecInteractive {
+        command: String,
+        wait_secs: u64,
+        response_tx: oneshot::Sender<TerminalExecResponse>,
+    },
     RecentOutput {
         lines: usize,
         response_tx: oneshot::Sender<String>,
@@ -51,6 +57,12 @@ pub enum TerminalCommand {
         input: String,
         source: crate::collaboration::InputSource,
         response_tx: oneshot::Sender<()>,
+    },
+    /// 交互式输入：向已进入交互态的终端发送按键/文本，等待屏幕变化后返回快照
+    SendInteractive {
+        input: String,
+        wait_secs: u64,
+        response_tx: oneshot::Sender<TerminalExecResponse>,
     },
     Reset {
         response_tx: oneshot::Sender<()>,

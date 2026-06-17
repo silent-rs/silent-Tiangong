@@ -53,6 +53,23 @@ pub async fn terminal_destroy_session(
     Ok(())
 }
 
+/// 把草稿态临时 id 的 PTY 迁移到真实 session_id（草稿态转正时调用）。
+///
+/// 草稿态新对话用稳定临时 id 创建 PTY；首条消息创建后端 session 拿到真实 id 后，
+/// 调用此命令把 PTY 归属、日志迁移到真实 id。幂等：草稿 id 不存在或真实 id 已
+/// 存在时安全返回。
+#[tauri::command]
+pub async fn terminal_attach_session(
+    draft_session_id: String,
+    persistent_session_id: String,
+    state: State<'_, TerminalPluginState>,
+) -> Result<(), String> {
+    state
+        .registry
+        .attach_persistent_session_id(&draft_session_id, &persistent_session_id);
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn terminal_session_send_input(
     session_id: String,
@@ -169,5 +186,22 @@ pub async fn terminal_panel_set_session(
     _session_id: Option<String>,
     _state: State<'_, TerminalPluginState>,
 ) -> Result<(), String> {
+    Ok(())
+}
+
+/// 前端 xterm.js 回传当前屏幕快照。
+///
+/// 前端在终端内容变化时，把 xterm.js buffer.active 的可见区域序列化成文本回传。
+/// 后端缓存到对应 session 的 TerminalManager，`handle_exec_interactive` 读取此快照
+/// 返回给 Agent——这样 Agent 看到的是与用户一致的屏幕内容（含 vim/nano 全屏界面），
+/// 而非后端单行 processor 无法重建的碎片。
+#[tauri::command]
+pub async fn terminal_session_update_screen(
+    session_id: String,
+    snapshot: String,
+    state: State<'_, TerminalPluginState>,
+) -> Result<(), String> {
+    let pty = ensure_pty(&state, &session_id)?;
+    pty.manager.update_screen_snapshot(snapshot);
     Ok(())
 }

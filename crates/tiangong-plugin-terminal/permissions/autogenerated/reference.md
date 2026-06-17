@@ -13,12 +13,14 @@
 - `allow-terminal-resize`
 - `allow-terminal-ensure-session`
 - `allow-terminal-destroy-session`
+- `allow-terminal-attach-session`
 - `allow-terminal-session-send-input`
 - `allow-terminal-session-recent-output`
 - `allow-terminal-session-info`
 - `allow-terminal-session-set-cwd`
 - `allow-terminal-session-resize`
 - `allow-terminal-session-reset`
+- `allow-terminal-session-update-screen`
 - `allow-terminal-panel-set-session`
 
 ## Permission Table
@@ -29,6 +31,32 @@
 <th>Description</th>
 </tr>
 
+
+<tr>
+<td>
+
+`tiangong-plugin-terminal:allow-terminal-attach-session`
+
+</td>
+<td>
+
+Enables the terminal_attach_session command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-terminal:deny-terminal-attach-session`
+
+</td>
+<td>
+
+Denies the terminal_attach_session command without any pre-configured scope.
+
+</td>
+</tr>
 
 <tr>
 <td>
@@ -390,6 +418,32 @@ Enables the terminal_session_set_cwd command without any pre-configured scope.
 <td>
 
 Denies the terminal_session_set_cwd command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-terminal:allow-terminal-session-update-screen`
+
+</td>
+<td>
+
+Enables the terminal_session_update_screen command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-terminal:deny-terminal-session-update-screen`
+
+</td>
+<td>
+
+Denies the terminal_session_update_screen command without any pre-configured scope.
 
 </td>
 </tr>

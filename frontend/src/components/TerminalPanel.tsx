@@ -18,6 +18,34 @@ interface TerminalEntry {
 
 const MAX_POOL_SIZE = 5;
 
+// 草稿态终端的稳定临时 id（与 store 中 createSession 生成的一致）。
+// 草稿态用此 id 创建 PTY；转正后前端把 pool 的 key 从此 id 迁移到真实 session_id。
+const DRAFT_TERMINAL_ID = '__draft_terminal__';
+// 屏幕快照回传节流间隔（毫秒）：xterm 每次输出后都序列化屏幕会过于频繁，
+// 用此间隔合并短时间内的多次输出为一次回传。
+const SCREEN_SNAPSHOT_THROTTLE_MS = 50;
+
+/**
+ * 序列化 xterm.js 当前可见屏幕（baseY..baseY+rows）为纯文本。
+ * 这是终端真正渲染的画面（含 vim/nano 全屏界面），后端单行 processor 无法重建，
+ * 由前端回传供 handle_exec_interactive 返回给 Agent。
+ */
+function snapshotVisibleScreen(term: Terminal): string {
+  const buffer = term.buffer.active;
+  const start = buffer.baseY;
+  const end = start + term.rows;
+  const lines: string[] = [];
+  for (let y = start; y < end; y++) {
+    const line = buffer.getLine(y);
+    lines.push(line ? line.translateToString(true) : '');
+  }
+  // 裁掉尾部空行（vim 底部的 ~ 占位行保留，但纯空白行精简输出）
+  while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
+    lines.pop();
+  }
+  return lines.join('\n');
+}
+
 const TERMINAL_CONFIG = {
   cursorBlink: true,
   fontSize: 13,
@@ -42,6 +70,7 @@ const TERMINAL_CONFIG = {
  */
 export function TerminalPanel({ onClose }: { onClose: () => void }) {
   const activeSessionId = useStore((s) => s.activeSessionId);
+  const draftTerminalId = useStore((s) => s.draftTerminalId);
   const sessionCwd = useStore((s) => s.sessionCwd);
   const workspaceDir = useStore((s) => s.workspaceDir);
 
@@ -52,6 +81,8 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const pendingCreateRef = useRef<Set<string>>(new Set());
   const createdTimeRef = useRef<number>(0);
+  // 上次屏幕快照回传时间戳（节流用）
+  const lastSnapshotPushRef = useRef<number>(0);
 
   const [displayInfo, setDisplayInfo] = useState<{
     cwd: string;
@@ -62,8 +93,10 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
     alive: false,
   });
 
-  // 按对话 PTY 模型：effectiveId 为当前对话 id，每个对话有独立终端会话
-  const effectiveId = activeSessionId || null;
+  // 按对话 PTY 模型：effectiveId 为当前对话 id。
+  // 草稿态（activeSessionId=null）用 draftTerminalId 作为临时 id 创建草稿 PTY，
+  // 转正后切换为真实 session_id（后端 PTY 已通过 terminalAttachSession 迁移归属）。
+  const effectiveId = activeSessionId || draftTerminalId || null;
 
   // 全局 output listener（按 session_id 分发）
   useEffect(() => {
@@ -78,6 +111,16 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
           const entry = poolRef.current.get(session_id);
           if (entry) {
             entry.term.write(text);
+            // write 是同步的，写完 buffer 立即可读。节流后把当前可见屏幕回传后端，
+            // 供 handle_exec_interactive 检测变化并返回给 Agent（vi/nano 全屏界面）。
+            const now = Date.now();
+            if (now - lastSnapshotPushRef.current >= SCREEN_SNAPSHOT_THROTTLE_MS) {
+              lastSnapshotPushRef.current = now;
+              const snapshot = snapshotVisibleScreen(entry.term);
+              api
+                .terminalSessionUpdateScreen(session_id, snapshot)
+                .catch(() => {});
+            }
           }
         },
       );
@@ -120,6 +163,24 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     // 按对话 PTY 模型：effectiveId 即当前对话 id，尚未就绪时跳过
     if (!effectiveId) return;
+
+    // 草稿态转正过渡：effectiveId 从 DRAFT_TERMINAL_ID 切换到真实 session_id 时，
+    // 把前端 pool 里的 xterm entry key 从草稿 id 迁移到真实 id。
+    // 后端 PTY 已通过 terminalAttachSession 改名，前端 pool 同步改名后，
+    // 输出 listener（按 session_id 分发）和后续 ensure（命中后端已迁移的 PTY）
+    // 都能用真实 id 正确工作，避免重建 xterm 丢失草稿期已渲染的内容。
+    if (
+      effectiveId !== DRAFT_TERMINAL_ID &&
+      effectiveId !== currentIdRef.current &&
+      poolRef.current.has(DRAFT_TERMINAL_ID)
+    ) {
+      const draftEntry = poolRef.current.get(DRAFT_TERMINAL_ID);
+      if (draftEntry) {
+        poolRef.current.delete(DRAFT_TERMINAL_ID);
+        poolRef.current.set(effectiveId, draftEntry);
+      }
+    }
+
     if (effectiveId === currentIdRef.current && poolRef.current.has(effectiveId)) {
       return;
     }

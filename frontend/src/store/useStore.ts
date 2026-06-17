@@ -141,6 +141,14 @@ interface AppState {
   // 状态
   sessions: Session[];
   activeSessionId: string | null;
+  /**
+   * 草稿态终端的稳定临时 id。
+   * 草稿态（activeSessionId=null）无法用真实 session_id 创建 PTY，
+   * 用此临时 id 先创建一个草稿 PTY 供用户在终端面板操作；
+   * 首条消息转正后，该 PTY 会迁移归属到真实 session_id。
+   * 转正完成（或切换/删除对话）时清空。
+   */
+  draftTerminalId: string | null;
   messages: Message[];
   runStatus: string;
   runSummary: string;
@@ -225,6 +233,7 @@ export const useStore = create<AppState>((set, get) => ({
   // 初始状态
   sessions: [],
   activeSessionId: null as string | null,
+  draftTerminalId: null as string | null,
   messages: [],
   runStatus: 'idle',
   runSummary: '',
@@ -316,9 +325,13 @@ export const useStore = create<AppState>((set, get) => ({
     const workspaceDir = get().workspaceDir;
     const { reasoningEffortPerSession } = get();
     const draftEffort = reasoningEffortPerSession['__draft__'] || 'medium';
+    // 为草稿态终端生成稳定临时 id：同一时刻只有一个草稿，用固定常量即可。
+    // TerminalPanel 草稿态会以此 id 创建 PTY；转正时迁移归属到真实 session_id。
+    const draftTerminalId = '__draft_terminal__';
     set({
       isDraft: true,
       activeSessionId: null,
+      draftTerminalId,
       messages: [],
       inputContent: '',
       runStatus: 'idle',
@@ -350,6 +363,7 @@ export const useStore = create<AppState>((set, get) => ({
       set({
         isDraft: false,
         activeSessionId: id,
+        draftTerminalId: null,
         messages: snapshot.messages,
         inputContent: snapshot.input_draft,
         runStatus: snapshot.status,
@@ -384,6 +398,7 @@ export const useStore = create<AppState>((set, get) => ({
         sessions,
         isDraft: false,
         activeSessionId: snapshot.messages.length > 0 ? snapshot.messages[0].id : null,
+        draftTerminalId: null,
         messages: snapshot.messages,
         inputContent: snapshot.input_draft,
         runStatus: snapshot.status,
@@ -413,11 +428,29 @@ export const useStore = create<AppState>((set, get) => ({
         if (draftCwd) {
           await api.setSessionCwd(draftCwd).catch(console.error);
         }
+        // 草稿 PTY 转正：把草稿态临时 id 的 PTY 迁移归属到真实 session_id。
+        // 草稿态若用户打开过终端，已用 draftTerminalId 创建了 PTY，这里迁移它
+        // （PTY 内 shell 历史、cwd 一并保留）；若草稿态没开终端（draftTerminalId
+        // 不存在或未创建），迁移是幂等的 no-op。
+        const draftId = get().draftTerminalId;
+        if (draftId) {
+          await api
+            .terminalAttachSession(draftId, session.id)
+            .catch(e => console.error('草稿终端 PTY 转正迁移失败:', e));
+        }
         set(state => ({
           sessions: [session, ...state.sessions],
           activeSessionId: session.id,
           isDraft: false,
+          draftTerminalId: null,
         }));
+        // 兜底：确保转正后真实 session 一定有 PTY。
+        // 草稿态未开终端时迁移是 no-op，这里补建；草稿态开过终端时迁移已完成，
+        // ensure 命中已存在直接返回 true，不会重复创建。
+        const ensureCwd = draftCwd || get().workspaceDir || '';
+        await api
+          .terminalEnsureSession(session.id, ensureCwd)
+          .catch(e => console.error('新会话终端 PTY 创建失败:', e));
       } catch (error) {
         console.error('创建会话失败:', error);
         return;

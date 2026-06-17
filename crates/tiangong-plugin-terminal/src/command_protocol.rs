@@ -20,6 +20,33 @@ fn send_to_pty(writer: &mut Box<dyn std::io::Write + Send>, input: &str) -> anyh
     Ok(())
 }
 
+/// 解码 Agent 在 terminal_send input 中使用的转义序列为真实控制字节。
+///
+/// Agent 按工具规格用字面转义序列表示特殊键（如 `\x1b:wq\r`），但 JSON 字符串里
+/// `` 是 4 个字面字符（反斜杠+x+1+b）。写入 PTY 前需解码为真实控制字节（0x1b），
+/// 否则 vi 等程序会把它当普通文本插入而非 ESC 指令。
+///
+/// 转义在终端执行侧（写入 PTY 前）处理，而非 handler 发送侧——这样 handler 只负责
+/// 取参数原样传递，转义细节内聚在终端层。
+///
+/// 使用 descape 库解码（支持 \e/\x1b=ESC、\r=CR、\n=LF、\xHH=任意字节、
+/// \uXXXX=unicode 等完整 C 风格转义）。解码失败（含非法转义）时回退到原文，
+/// 保证不丢数据——最坏情况是字面字符写入 PTY（与修复前行为一致）。
+fn decode_terminal_escapes(input: &str) -> String {
+    use descape::UnescapeExt;
+    match input.to_unescaped() {
+        Ok(cow) => cow.into_owned(),
+        Err(e) => {
+            tracing::warn!(
+                index = e.index,
+                input_len = input.len(),
+                "terminal_send input 含非法转义序列，原样写入 PTY"
+            );
+            input.to_string()
+        }
+    }
+}
+
 /// 把 `total_lines_pushed` 轨道值换算为环形缓冲区当前索引。
 /// 环形缓冲区会从头部淘汰旧行，因此越早推入的行对应索引越小；
 /// 若该时刻的行已被淘汰则返回 0（从缓冲区开头兜底）。
@@ -514,9 +541,313 @@ pub(crate) async fn handle_exec(
     }
 }
 
+/// 交互式命令执行：不使用 marker 协议，直接以 CR 提交命令，
+/// 轮询等待终端"第一次变化"后返回完整可见内容。
+///
+/// 适用场景：vi/nano/python REPL 等需要持续键盘交互的程序。
+/// 与 `handle_exec` 的关键差异：
+/// - 不发 marker（交互程序前台时 marker 会污染屏幕甚至被读走）
+/// - 协作状态进入 `AgentInteractive` 而非 `AgentRunning`
+/// - 不轮询 marker，而是检测 output_buffer 相比基线是否出现增长（程序开始渲染）
+/// - 退出码恒为 0、不更新 cwd（交互程序不会回 end/cwd marker）
+///
+/// 返回内容：终端当前可见文本（ANSI 已处理）。交互程序进入任何状态
+///（编辑页 / swap 提示 / 等待输入）都会在第一次渲染时被捕获，
+/// Agent 直接阅读返回内容即可判断当前状态，无需后端识别提示类型。
+/// 等待终端屏幕发生变化（双信号 + 稳定窗口），用于交互程序首屏/响应检测。
+///
+/// 双信号策略：
+/// - `screen_updates`（前端 xterm 快照）：最准确的屏幕内容，优先等此信号
+/// - `output_pushed`（后端 buffer）：可靠的后端信号，前端未回传时退到此信号
+///
+/// 稳定窗口：信号首次触发后，继续轮询 `stable_window`（300ms）确认无进一步变化，
+/// 认为屏幕已渲染稳定。快照信号用 1x 窗口，output 信号用 2x 窗口（精度较低等更久）。
+/// 超过 `wait_secs` 仍无信号则放弃等待（返回，调用方用当前快照兜底）。
+async fn wait_for_screen_change(
+    manager: &Arc<TerminalManager>,
+    baseline_pushed: usize,
+    baseline_updates: u64,
+    wait_secs: u64,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs.max(1));
+    let stable_window = std::time::Duration::from_millis(300);
+    let poll_interval = std::time::Duration::from_millis(50);
+    let mut output_changed_at: Option<std::time::Instant> = None;
+    let mut screen_changed_at: Option<std::time::Instant> = None;
+
+    loop {
+        let now_pushed = manager.total_lines_pushed();
+        let now_updates = manager.screen_updates();
+        if output_changed_at.is_none() && now_pushed > baseline_pushed {
+            output_changed_at = Some(std::time::Instant::now());
+        }
+        if screen_changed_at.is_none() && now_updates > baseline_updates {
+            screen_changed_at = Some(std::time::Instant::now());
+        }
+        if let Some(change_time) = screen_changed_at {
+            if change_time.elapsed() >= stable_window {
+                break;
+            }
+        }
+        if screen_changed_at.is_none() {
+            if let Some(change_time) = output_changed_at {
+                if change_time.elapsed() >= stable_window * 2 {
+                    break;
+                }
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
+pub(crate) async fn handle_exec_interactive(
+    manager: &Arc<TerminalManager>,
+    pty_state: &mut Option<PtyState>,
+    app: &tauri::AppHandle,
+    command: &str,
+    wait_secs: u64,
+    response_tx: oneshot::Sender<TerminalExecResponse>,
+    activity: Option<&Arc<crate::collaboration::TerminalActivityTracker>>,
+) {
+    let ps = match pty_state {
+        Some(ps) => ps,
+        None => {
+            // PTY 不可用时尝试恢复一次，逻辑与 handle_exec 一致
+            match ensure_system_pty(manager, app) {
+                Some(new_ps) => {
+                    *pty_state = Some(new_ps);
+                    pty_state.as_mut().expect("PTY 刚写入，必然存在")
+                }
+                None => {
+                    let _ = response_tx.send(TerminalExecResponse {
+                        exit_code: -1,
+                        stdout: String::new(),
+                        stderr: "终端会话不可用".to_string(),
+                        timed_out: false,
+                        cwd_after: manager.cwd(),
+                        interrupted_by_user: false,
+                        interactive_mode: false,
+                    });
+                    return;
+                }
+            }
+        }
+    };
+
+    // 发送命令前记录双信号基线：
+    // - output_pushed：程序输出到达后端 buffer 的可靠信号（立即可知）
+    // - screen_updates：前端 xterm 渲染并回传快照的信号（最终屏幕内容来源）
+    let baseline_pushed = manager.total_lines_pushed();
+    let baseline_updates = manager.screen_updates();
+
+    // 清理残留进程 + 发送命令
+    // 注意：用 `\r`（CR）而非 `\n`（LF）作为回车键。zsh 的 ZLE、vim、less 等
+    // TUI 程序在 raw 模式下只识别 CR 作为"提交本行"，发 LF 会导致命令停留在
+    // 输入行不执行。
+    // 先发 \x03(Ctrl+C) 清理可能残留的前台进程，再发 \x15(Ctrl+U) 清空当前行，
+    // 最后以 CR 提交命令。
+    let send_result = {
+        match ps.writer.lock() {
+            Ok(mut writer) => {
+                let _ = writer.write_all(b"\x03");
+                let _ = writer.flush();
+                let _ = writer.write_all(b"\x15");
+                let _ = writer.flush();
+                let cmd = format!("{}\r", command);
+                send_to_pty(&mut writer, &cmd)
+            }
+            Err(e) => Err(anyhow::anyhow!("获取 writer 锁失败: {}", e)),
+        }
+    };
+    if let Err(e) = send_result {
+        if let Some(tracker) = activity {
+            tracker.set_busy_state(crate::collaboration::TerminalBusyState::Idle);
+        }
+        let _ = response_tx.send(TerminalExecResponse {
+            exit_code: -1,
+            stdout: String::new(),
+            stderr: format!("发送命令到终端失败: {}", e),
+            timed_out: false,
+            cwd_after: manager.cwd(),
+            interrupted_by_user: false,
+            interactive_mode: false,
+        });
+        return;
+    }
+
+    // 命令已成功发送，设置协作状态为 AgentInteractive：该 session 的 tracker
+    // 会被标记为"Agent 正在交互执行"，用户在面板输入会被记为干预。
+    let command_id = scru128::new().to_string();
+    if let Some(tracker) = activity {
+        tracker.set_busy_state(crate::collaboration::TerminalBusyState::AgentInteractive {
+            command_id: command_id.clone(),
+        });
+    }
+
+    // 双信号等待：交互程序首屏渲染（见 wait_for_screen_change）
+    wait_for_screen_change(manager, baseline_pushed, baseline_updates, wait_secs).await;
+
+    // 返回终端当前可见内容：优先前端 xterm 回传的屏幕快照（与用户看到的画面一致，
+    // vim/nano 全屏界面、swap 提示都能完整呈现），若前端尚未回传（面板未挂载等）
+    // 则回退到后端 output_buffer 的可见内容（recent_output 兜底，保证即时可见性）。
+    let stdout_text = manager
+        .screen_snapshot()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| manager.recent_output(80));
+
+    let _ = response_tx.send(TerminalExecResponse {
+        exit_code: 0,
+        stdout: stdout_text,
+        stderr: String::new(),
+        timed_out: false,
+        cwd_after: manager.cwd(),
+        interrupted_by_user: false,
+        interactive_mode: true,
+    });
+}
+
+/// 向已进入交互态的终端发送输入（按键/文本），等待屏幕变化后返回新快照。
+///
+/// 这是 Agent 持续操作交互程序的核心：每发一次按键，等待屏幕渲染稳定后返回
+/// 当前可见内容。Agent 据此观察程序反应，形成"输入→观察→输入"闭环。
+/// 不发 marker、不设置协作状态（交互程序启动时已是 AgentInteractive 态）。
+/// 复用 `handle_exec_interactive` 的"等待 screen_updates 变化 + 稳定窗口"轮询逻辑。
+pub(crate) async fn handle_send_interactive(
+    manager: &Arc<TerminalManager>,
+    pty_state: &mut Option<PtyState>,
+    _app: &tauri::AppHandle,
+    input: &str,
+    wait_secs: u64,
+    response_tx: oneshot::Sender<TerminalExecResponse>,
+    // _activity 不使用：send_interactive 发的是对已运行交互程序的按键，
+    // 此时协作状态在 exec_interactive 启动时已设为 AgentInteractive，无需重复设置。
+    _activity: Option<&Arc<crate::collaboration::TerminalActivityTracker>>,
+) {
+    let ps = match pty_state {
+        Some(ps) => ps,
+        None => {
+            let _ = response_tx.send(TerminalExecResponse {
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: "终端会话不可用".to_string(),
+                timed_out: false,
+                cwd_after: manager.cwd(),
+                interrupted_by_user: false,
+                interactive_mode: false,
+            });
+            return;
+        }
+    };
+
+    // 发送前记录双信号基线：
+    // - output_pushed：程序响应输出到达后端 buffer 的可靠信号（立即可知）
+    // - screen_updates：前端 xterm 渲染并回传快照的信号（最终屏幕内容来源）
+    let baseline_pushed = manager.total_lines_pushed();
+    let baseline_updates = manager.screen_updates();
+
+    // 把输入写入 PTY。输入由 Agent 给出（vi 按键、REPL 命令等）。
+    // Agent 用转义序列表示特殊键（\x1b=ESC、\r=CR），在终端执行侧解码为真实控制字节。
+    // 不做 LF 转 CR：send_interactive 发的是对前台程序的原始输入，由 Agent 控制按键。
+    let decoded_input = decode_terminal_escapes(input);
+    let send_result = {
+        match ps.writer.lock() {
+            Ok(mut writer) => send_to_pty(&mut writer, &decoded_input),
+            Err(e) => Err(anyhow::anyhow!("获取 writer 锁失败: {}", e)),
+        }
+    };
+    if let Err(e) = send_result {
+        let _ = response_tx.send(TerminalExecResponse {
+            exit_code: -1,
+            stdout: String::new(),
+            stderr: format!("发送输入到终端失败: {}", e),
+            timed_out: false,
+            cwd_after: manager.cwd(),
+            interrupted_by_user: false,
+            interactive_mode: false,
+        });
+        return;
+    }
+
+    // 双信号等待：交互程序对输入的响应（见 wait_for_screen_change）
+    wait_for_screen_change(manager, baseline_pushed, baseline_updates, wait_secs).await;
+
+    let stdout_text = manager
+        .screen_snapshot()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| manager.recent_output(80));
+
+    let _ = response_tx.send(TerminalExecResponse {
+        exit_code: 0,
+        stdout: stdout_text,
+        stderr: String::new(),
+        timed_out: false,
+        cwd_after: manager.cwd(),
+        interrupted_by_user: false,
+        interactive_mode: true,
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_esc_sequence_for_vi_save_quit() {
+        // vi 保存退出：ESC + :wq + CR
+        let decoded = decode_terminal_escapes("\\x1b:wq\\r");
+        assert_eq!(decoded.as_bytes(), &[0x1b, b':', b'w', b'q', 0x0d]);
+    }
+
+    #[test]
+    fn decode_ctrl_c_as_etx() {
+        // Ctrl+C = ETX (0x03)
+        let decoded = decode_terminal_escapes("\\x03");
+        assert_eq!(decoded.as_bytes(), &[0x03]);
+    }
+
+    #[test]
+    fn decode_carriage_return_and_newline() {
+        let decoded = decode_terminal_escapes("abc\\r\\n");
+        assert_eq!(decoded.as_bytes(), &[b'a', b'b', b'c', 0x0d, 0x0a]);
+    }
+
+    #[test]
+    fn decode_escape_letter_e() {
+        // \e 也表示 ESC
+        let decoded = decode_terminal_escapes("\\e");
+        assert_eq!(decoded.as_bytes(), &[0x1b]);
+    }
+
+    #[test]
+    fn decode_preserves_plain_text() {
+        // 普通文本无转义，原样返回
+        let decoded = decode_terminal_escapes("hello world");
+        assert_eq!(decoded, "hello world");
+    }
+
+    #[test]
+    fn decode_unknown_escape_preserved() {
+        // 不识别的转义（如 \d）回退原文（保留反斜杠+字符）
+        let decoded = decode_terminal_escapes("a\\db");
+        assert_eq!(decoded, "a\\db");
+    }
+
+    #[test]
+    fn decode_literal_backslash() {
+        // \\ → 字面反斜杠
+        let decoded = decode_terminal_escapes("a\\\\b");
+        assert_eq!(decoded, "a\\b");
+    }
+
+    #[test]
+    fn decode_arrow_key_sequence() {
+        // 上方向键 = ESC[A
+        let decoded = decode_terminal_escapes("\\x1b[A");
+        assert_eq!(decoded.as_bytes(), &[0x1b, b'[', b'A']);
+    }
 
     fn make_manager_with_lines(lines: &[&str]) -> Arc<TerminalManager> {
         let manager = Arc::new(TerminalManager::new("test".to_string(), "/tmp".to_string()));
