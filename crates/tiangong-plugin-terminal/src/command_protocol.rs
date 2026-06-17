@@ -20,6 +20,33 @@ fn send_to_pty(writer: &mut Box<dyn std::io::Write + Send>, input: &str) -> anyh
     Ok(())
 }
 
+/// 解码 Agent 在 terminal_send input 中使用的转义序列为真实控制字节。
+///
+/// Agent 按工具规格用字面转义序列表示特殊键（如 `\x1b:wq\r`），但 JSON 字符串里
+/// `` 是 4 个字面字符（反斜杠+x+1+b）。写入 PTY 前需解码为真实控制字节（0x1b），
+/// 否则 vi 等程序会把它当普通文本插入而非 ESC 指令。
+///
+/// 转义在终端执行侧（写入 PTY 前）处理，而非 handler 发送侧——这样 handler 只负责
+/// 取参数原样传递，转义细节内聚在终端层。
+///
+/// 使用 descape 库解码（支持 \e/\x1b=ESC、\r=CR、\n=LF、\xHH=任意字节、
+/// \uXXXX=unicode 等完整 C 风格转义）。解码失败（含非法转义）时回退到原文，
+/// 保证不丢数据——最坏情况是字面字符写入 PTY（与修复前行为一致）。
+fn decode_terminal_escapes(input: &str) -> String {
+    use descape::UnescapeExt;
+    match input.to_unescaped() {
+        Ok(cow) => cow.into_owned(),
+        Err(e) => {
+            tracing::warn!(
+                index = e.index,
+                input_len = input.len(),
+                "terminal_send input 含非法转义序列，原样写入 PTY"
+            );
+            input.to_string()
+        }
+    }
+}
+
 /// 把 `total_lines_pushed` 轨道值换算为环形缓冲区当前索引。
 /// 环形缓冲区会从头部淘汰旧行，因此越早推入的行对应索引越小；
 /// 若该时刻的行已被淘汰则返回 0（从缓冲区开头兜底）。
@@ -702,11 +729,13 @@ pub(crate) async fn handle_send_interactive(
     let baseline_pushed = manager.total_lines_pushed();
     let baseline_updates = manager.screen_updates();
 
-    // 把输入写入 PTY。输入由 Agent 给出（vi 按键、REPL 命令等），原样写入。
+    // 把输入写入 PTY。输入由 Agent 给出（vi 按键、REPL 命令等）。
+    // Agent 用转义序列表示特殊键（\x1b=ESC、\r=CR），在终端执行侧解码为真实控制字节。
     // 不做 LF 转 CR：send_interactive 发的是对前台程序的原始输入，由 Agent 控制按键。
+    let decoded_input = decode_terminal_escapes(input);
     let send_result = {
         match ps.writer.lock() {
-            Ok(mut writer) => send_to_pty(&mut writer, input),
+            Ok(mut writer) => send_to_pty(&mut writer, &decoded_input),
             Err(e) => Err(anyhow::anyhow!("获取 writer 锁失败: {}", e)),
         }
     };
@@ -777,6 +806,61 @@ pub(crate) async fn handle_send_interactive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_esc_sequence_for_vi_save_quit() {
+        // vi 保存退出：ESC + :wq + CR
+        let decoded = decode_terminal_escapes("\\x1b:wq\\r");
+        assert_eq!(decoded.as_bytes(), &[0x1b, b':', b'w', b'q', 0x0d]);
+    }
+
+    #[test]
+    fn decode_ctrl_c_as_etx() {
+        // Ctrl+C = ETX (0x03)
+        let decoded = decode_terminal_escapes("\\x03");
+        assert_eq!(decoded.as_bytes(), &[0x03]);
+    }
+
+    #[test]
+    fn decode_carriage_return_and_newline() {
+        let decoded = decode_terminal_escapes("abc\\r\\n");
+        assert_eq!(decoded.as_bytes(), &[b'a', b'b', b'c', 0x0d, 0x0a]);
+    }
+
+    #[test]
+    fn decode_escape_letter_e() {
+        // \e 也表示 ESC
+        let decoded = decode_terminal_escapes("\\e");
+        assert_eq!(decoded.as_bytes(), &[0x1b]);
+    }
+
+    #[test]
+    fn decode_preserves_plain_text() {
+        // 普通文本无转义，原样返回
+        let decoded = decode_terminal_escapes("hello world");
+        assert_eq!(decoded, "hello world");
+    }
+
+    #[test]
+    fn decode_unknown_escape_preserved() {
+        // 不识别的转义（如 \d）回退原文（保留反斜杠+字符）
+        let decoded = decode_terminal_escapes("a\\db");
+        assert_eq!(decoded, "a\\db");
+    }
+
+    #[test]
+    fn decode_literal_backslash() {
+        // \\ → 字面反斜杠
+        let decoded = decode_terminal_escapes("a\\\\b");
+        assert_eq!(decoded, "a\\b");
+    }
+
+    #[test]
+    fn decode_arrow_key_sequence() {
+        // 上方向键 = ESC[A
+        let decoded = decode_terminal_escapes("\\x1b[A");
+        assert_eq!(decoded.as_bytes(), &[0x1b, b'[', b'A']);
+    }
 
     fn make_manager_with_lines(lines: &[&str]) -> Arc<TerminalManager> {
         let manager = Arc::new(TerminalManager::new("test".to_string(), "/tmp".to_string()));

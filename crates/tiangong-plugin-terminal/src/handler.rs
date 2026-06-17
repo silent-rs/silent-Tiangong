@@ -7,30 +7,6 @@ use crate::util::shell_quote;
 
 const OUTPUT_THRESHOLD: usize = 2000;
 
-/// 解码 Agent 在 terminal_send input 中使用的转义序列。
-///
-/// Agent 按工具规格用字面转义序列表示特殊键（如 `\x1b:wq\r`），但 JSON 字符串里
-/// `` 是 4 个字面字符（反斜杠+x+1+b），写入 PTY 时需解码为真实控制字节（0x1b），
-/// 否则 vi 等程序会把它当普通文本插入而非 ESC 指令。
-///
-/// 使用 descape 库解码（支持 \e/\x1b=ESC、\r=CR、\n=LF、\xHH=任意字节、
-/// \uXXXX=unicode 等完整 C 风格转义）。解码失败（含非法转义）时回退到原文，
-/// 保证不丢数据——最坏情况是字面字符写入 PTY（与修复前行为一致）。
-fn decode_terminal_escapes(input: &str) -> String {
-    use descape::UnescapeExt;
-    match input.to_unescaped() {
-        Ok(cow) => cow.into_owned(),
-        Err(e) => {
-            tracing::warn!(
-                index = e.index,
-                input_len = input.len(),
-                "terminal_send input 含非法转义序列，原样写入 PTY"
-            );
-            input.to_string()
-        }
-    }
-}
-
 fn first_shell_word(line: &str) -> Option<&str> {
     let trimmed = line.trim_start();
     if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -299,10 +275,9 @@ impl TerminalToolOverride {
         call: &tiangong_core::model::ToolCall,
         session_id: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ToolResult>> + Send>> {
-        // input：要发送的按键/文本。Agent 用转义序列表示特殊键（\x1b=ESC、\r=CR），
-        // JSON 字符串里这些是字面字符，写入 PTY 前需解码为真实控制字节。
+        // input：要发送的按键/文本（原样传递，转义由终端执行侧 command_protocol 处理）。
         let input = match call.arguments.get("input").and_then(|v| v.as_str()) {
-            Some(s) => decode_terminal_escapes(s),
+            Some(s) => s.to_string(),
             None => {
                 return Box::pin(async {
                     Some(ToolResult {
@@ -385,61 +360,6 @@ impl tiangong_core::tool_override::PromptSectionProvider for TerminalPromptSecti
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn decode_esc_sequence_for_vi_save_quit() {
-        // vi 保存退出：ESC + :wq + CR
-        let decoded = decode_terminal_escapes("\\x1b:wq\\r");
-        assert_eq!(decoded.as_bytes(), &[0x1b, b':', b'w', b'q', 0x0d]);
-    }
-
-    #[test]
-    fn decode_ctrl_c_as_etx() {
-        // Ctrl+C = ETX (0x03)
-        let decoded = decode_terminal_escapes("\\x03");
-        assert_eq!(decoded.as_bytes(), &[0x03]);
-    }
-
-    #[test]
-    fn decode_carriage_return_and_newline() {
-        let decoded = decode_terminal_escapes("abc\\r\\n");
-        assert_eq!(decoded.as_bytes(), &[b'a', b'b', b'c', 0x0d, 0x0a]);
-    }
-
-    #[test]
-    fn decode_escape_letter_e() {
-        // \e 也表示 ESC
-        let decoded = decode_terminal_escapes("\\e");
-        assert_eq!(decoded.as_bytes(), &[0x1b]);
-    }
-
-    #[test]
-    fn decode_preserves_plain_text() {
-        // 普通文本无转义，原样返回
-        let decoded = decode_terminal_escapes("hello world");
-        assert_eq!(decoded, "hello world");
-    }
-
-    #[test]
-    fn decode_unknown_escape_preserved() {
-        // 不识别的转义（如 \d）保留反斜杠
-        let decoded = decode_terminal_escapes("a\\db");
-        assert_eq!(decoded, "a\\db");
-    }
-
-    #[test]
-    fn decode_literal_backslash() {
-        // \\ → 字面反斜杠
-        let decoded = decode_terminal_escapes("a\\\\b");
-        assert_eq!(decoded, "a\\b");
-    }
-
-    #[test]
-    fn decode_arrow_key_sequence() {
-        // 上方向键 = ESC[A
-        let decoded = decode_terminal_escapes("\\x1b[A");
-        assert_eq!(decoded.as_bytes(), &[0x1b, b'[', b'A']);
-    }
 
     #[test]
     fn rejects_heredoc_driven_vi_non_interactive() {
