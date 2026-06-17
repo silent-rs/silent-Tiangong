@@ -32,6 +32,16 @@ pub(crate) struct TerminalState {
     pub total_lines_pushed: usize,
     /// 当前尚未换行的屏幕行（如 Password:、Proceed? [Y/n] 等提示）
     pub current_line: String,
+    /// 前端 xterm.js 回传的屏幕快照（终端可见区域的文本序列化）。
+    ///
+    /// 后端的 `TerminalLineProcessor` 是单行模型，无法重建 vim/nano 等全屏 TUI 界面
+    ///（光标在屏幕各处定位、多行同时存在）。前端 xterm.js 维护了完整的二维屏幕缓冲区，
+    ///（正是它渲染了用户看到的终端画面），由前端在内容变化时序列化回传。
+    /// `handle_exec_interactive` 返回此快照，让 Agent 看到与用户一致的屏幕内容。
+    pub screen_snapshot: Option<String>,
+    /// 屏幕快照更新计数：每次前端回传新快照时递增。
+    /// `handle_exec_interactive` 用它检测"屏幕是否发生变化"（替代 output_buffer 计数）。
+    pub screen_updates: u64,
 }
 
 impl TerminalManager {
@@ -48,6 +58,8 @@ impl TerminalManager {
                 last_read_line: 0,
                 total_lines_pushed: 0,
                 current_line: String::new(),
+                screen_snapshot: None,
+                screen_updates: 0,
             })),
             logger: None,
         }
@@ -72,6 +84,41 @@ impl TerminalManager {
 
     pub fn session_id(&self) -> String {
         self.state.lock().unwrap().session_id.clone()
+    }
+
+    /// 更新 PTY 所属的 session_id（草稿态 PTY 转正时使用）。
+    ///
+    /// 草稿态用临时 id 创建 PTY，首条消息转正后调用此方法把 PTY 归属迁移到
+    /// 真实 session_id。更新后：
+    /// - 命令循环内通过 `manager.session_id()` 读取的操作（如 reset 重启 shell）
+    ///   会使用新 id
+    /// - 输出读取线程 emit 的事件会以新 session_id 推送（output_reader 动态读取）
+    /// - 配合 `SessionPtyRegistry::attach_persistent_session_id` 重命名注册表 key
+    ///   和日志文件，完成完整迁移
+    pub(crate) fn set_session_id(&self, session_id: String) {
+        self.state.lock().unwrap().session_id = session_id;
+    }
+
+    /// 更新前端 xterm.js 回传的屏幕快照（前端内容变化时调用）。
+    pub(crate) fn update_screen_snapshot(&self, snapshot: String) {
+        let mut state = self.state.lock().unwrap();
+        state.screen_snapshot = Some(snapshot);
+        state.screen_updates = state.screen_updates.saturating_add(1);
+    }
+
+    /// 获取当前屏幕快照（前端回传的可见区域文本）。
+    pub fn screen_snapshot(&self) -> Option<String> {
+        self.state.lock().unwrap().screen_snapshot.clone()
+    }
+
+    /// 获取屏幕快照更新计数（用于检测变化）。
+    pub fn screen_updates(&self) -> u64 {
+        self.state.lock().unwrap().screen_updates
+    }
+
+    /// 获取累计输出行数（程序向终端写数据的可靠信号，用于检测交互程序响应）。
+    pub fn total_lines_pushed(&self) -> usize {
+        self.state.lock().unwrap().total_lines_pushed
     }
 
     pub fn cwd(&self) -> String {
@@ -205,6 +252,22 @@ pub(crate) async fn spawn_command_loop(
                 )
                 .await;
             }
+            TerminalCommand::ExecInteractive {
+                command,
+                wait_secs,
+                response_tx,
+            } => {
+                command_protocol::handle_exec_interactive(
+                    &manager,
+                    &mut pty_state,
+                    &app,
+                    &command,
+                    wait_secs,
+                    response_tx,
+                    activity.as_ref(),
+                )
+                .await;
+            }
             TerminalCommand::RecentOutput { lines, response_tx } => {
                 let output = manager.recent_output(lines);
                 let _ = response_tx.send(output);
@@ -246,6 +309,22 @@ pub(crate) async fn spawn_command_loop(
                     }
                 }
                 let _ = response_tx.send(());
+            }
+            TerminalCommand::SendInteractive {
+                input,
+                wait_secs,
+                response_tx,
+            } => {
+                command_protocol::handle_send_interactive(
+                    &manager,
+                    &mut pty_state,
+                    &app,
+                    &input,
+                    wait_secs,
+                    response_tx,
+                    activity.as_ref(),
+                )
+                .await;
             }
             TerminalCommand::SetCwd { cwd } => {
                 {
@@ -403,6 +482,8 @@ mod tests {
             last_read_line: 0,
             total_lines_pushed: 0,
             current_line: String::new(),
+            screen_snapshot: None,
+            screen_updates: 0,
         };
 
         for i in 0..8 {

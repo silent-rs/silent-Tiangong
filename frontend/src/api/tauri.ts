@@ -865,6 +865,16 @@ export const api = {
   terminalEnsureSession: (sessionId: string, cwd: string): Promise<boolean> =>
     invoke('plugin:terminal|terminal_ensure_session', { sessionId, cwd }),
 
+  // 把草稿态临时 id 的 PTY 迁移到真实 session_id（草稿态转正时调用）
+  terminalAttachSession: (
+    draftSessionId: string,
+    persistentSessionId: string,
+  ): Promise<void> =>
+    invoke('plugin:terminal|terminal_attach_session', {
+      draftSessionId,
+      persistentSessionId,
+    }),
+
   terminalSessionSendInput: (sessionId: string, input: string): Promise<void> =>
     invoke('plugin:terminal|terminal_session_send_input', { sessionId, input }),
 
@@ -887,6 +897,10 @@ export const api = {
 
   terminalSessionReset: (sessionId: string): Promise<void> =>
     invoke('plugin:terminal|terminal_session_reset', { sessionId }),
+
+  // 前端 xterm.js 把当前屏幕可见区域序列化回传后端（供 handle_exec_interactive 返回给 Agent）
+  terminalSessionUpdateScreen: (sessionId: string, snapshot: string): Promise<void> =>
+    invoke('plugin:terminal|terminal_session_update_screen', { sessionId, snapshot }),
 
   terminalDestroySession: (sessionId: string): Promise<void> =>
     invoke('plugin:terminal|terminal_destroy_session', { sessionId }),

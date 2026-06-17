@@ -514,6 +514,266 @@ pub(crate) async fn handle_exec(
     }
 }
 
+/// 交互式命令执行：不使用 marker 协议，直接以 CR 提交命令，
+/// 轮询等待终端"第一次变化"后返回完整可见内容。
+///
+/// 适用场景：vi/nano/python REPL 等需要持续键盘交互的程序。
+/// 与 `handle_exec` 的关键差异：
+/// - 不发 marker（交互程序前台时 marker 会污染屏幕甚至被读走）
+/// - 协作状态进入 `AgentInteractive` 而非 `AgentRunning`
+/// - 不轮询 marker，而是检测 output_buffer 相比基线是否出现增长（程序开始渲染）
+/// - 退出码恒为 0、不更新 cwd（交互程序不会回 end/cwd marker）
+///
+/// 返回内容：终端当前可见文本（ANSI 已处理）。交互程序进入任何状态
+///（编辑页 / swap 提示 / 等待输入）都会在第一次渲染时被捕获，
+/// Agent 直接阅读返回内容即可判断当前状态，无需后端识别提示类型。
+pub(crate) async fn handle_exec_interactive(
+    manager: &Arc<TerminalManager>,
+    pty_state: &mut Option<PtyState>,
+    app: &tauri::AppHandle,
+    command: &str,
+    wait_secs: u64,
+    response_tx: oneshot::Sender<TerminalExecResponse>,
+    activity: Option<&Arc<crate::collaboration::TerminalActivityTracker>>,
+) {
+    let ps = match pty_state {
+        Some(ps) => ps,
+        None => {
+            // PTY 不可用时尝试恢复一次，逻辑与 handle_exec 一致
+            match ensure_system_pty(manager, app) {
+                Some(new_ps) => {
+                    *pty_state = Some(new_ps);
+                    pty_state.as_mut().expect("PTY 刚写入，必然存在")
+                }
+                None => {
+                    let _ = response_tx.send(TerminalExecResponse {
+                        exit_code: -1,
+                        stdout: String::new(),
+                        stderr: "终端会话不可用".to_string(),
+                        timed_out: false,
+                        cwd_after: manager.cwd(),
+                        interrupted_by_user: false,
+                        interactive_mode: false,
+                    });
+                    return;
+                }
+            }
+        }
+    };
+
+    // 发送命令前记录双信号基线：
+    // - output_pushed：程序输出到达后端 buffer 的可靠信号（立即可知）
+    // - screen_updates：前端 xterm 渲染并回传快照的信号（最终屏幕内容来源）
+    let baseline_pushed = manager.total_lines_pushed();
+    let baseline_updates = manager.screen_updates();
+
+    // 清理残留进程 + 发送命令
+    // 注意：用 `\r`（CR）而非 `\n`（LF）作为回车键。zsh 的 ZLE、vim、less 等
+    // TUI 程序在 raw 模式下只识别 CR 作为"提交本行"，发 LF 会导致命令停留在
+    // 输入行不执行。
+    // 先发 \x03(Ctrl+C) 清理可能残留的前台进程，再发 \x15(Ctrl+U) 清空当前行，
+    // 最后以 CR 提交命令。
+    let send_result = {
+        match ps.writer.lock() {
+            Ok(mut writer) => {
+                let _ = writer.write_all(b"\x03");
+                let _ = writer.flush();
+                let _ = writer.write_all(b"\x15");
+                let _ = writer.flush();
+                let cmd = format!("{}\r", command);
+                send_to_pty(&mut writer, &cmd)
+            }
+            Err(e) => Err(anyhow::anyhow!("获取 writer 锁失败: {}", e)),
+        }
+    };
+    if let Err(e) = send_result {
+        if let Some(tracker) = activity {
+            tracker.set_busy_state(crate::collaboration::TerminalBusyState::Idle);
+        }
+        let _ = response_tx.send(TerminalExecResponse {
+            exit_code: -1,
+            stdout: String::new(),
+            stderr: format!("发送命令到终端失败: {}", e),
+            timed_out: false,
+            cwd_after: manager.cwd(),
+            interrupted_by_user: false,
+            interactive_mode: false,
+        });
+        return;
+    }
+
+    // 命令已成功发送，设置协作状态为 AgentInteractive：该 session 的 tracker
+    // 会被标记为"Agent 正在交互执行"，用户在面板输入会被记为干预。
+    let command_id = scru128::new().to_string();
+    if let Some(tracker) = activity {
+        tracker.set_busy_state(crate::collaboration::TerminalBusyState::AgentInteractive {
+            command_id: command_id.clone(),
+        });
+    }
+
+    // 双信号等待：output_pushed 触发"程序已开始输出"，screen_updates 确认"快照已更新"。
+    // 优先等快照更新（最准确的屏幕内容），前端未回传时退到 output_pushed 变化。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs.max(1));
+    let stable_window = std::time::Duration::from_millis(300);
+    let poll_interval = std::time::Duration::from_millis(50);
+    let mut output_changed_at: Option<std::time::Instant> = None;
+    let mut screen_changed_at: Option<std::time::Instant> = None;
+
+    loop {
+        let now_pushed = manager.total_lines_pushed();
+        let now_updates = manager.screen_updates();
+        if output_changed_at.is_none() && now_pushed > baseline_pushed {
+            output_changed_at = Some(std::time::Instant::now());
+        }
+        if screen_changed_at.is_none() && now_updates > baseline_updates {
+            screen_changed_at = Some(std::time::Instant::now());
+        }
+        if let Some(change_time) = screen_changed_at {
+            if change_time.elapsed() >= stable_window {
+                break;
+            }
+        }
+        if screen_changed_at.is_none() {
+            if let Some(change_time) = output_changed_at {
+                if change_time.elapsed() >= stable_window * 2 {
+                    break;
+                }
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+
+    // 返回终端当前可见内容：优先前端 xterm 回传的屏幕快照（与用户看到的画面一致，
+    // vim/nano 全屏界面、swap 提示都能完整呈现），若前端尚未回传（面板未挂载等）
+    // 则回退到后端 output_buffer 的可见内容（recent_output 兜底，保证即时可见性）。
+    let stdout_text = manager
+        .screen_snapshot()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| manager.recent_output(80));
+
+    let _ = response_tx.send(TerminalExecResponse {
+        exit_code: 0,
+        stdout: stdout_text,
+        stderr: String::new(),
+        timed_out: false,
+        cwd_after: manager.cwd(),
+        interrupted_by_user: false,
+        interactive_mode: true,
+    });
+}
+
+/// 向已进入交互态的终端发送输入（按键/文本），等待屏幕变化后返回新快照。
+///
+/// 这是 Agent 持续操作交互程序的核心：每发一次按键，等待屏幕渲染稳定后返回
+/// 当前可见内容。Agent 据此观察程序反应，形成"输入→观察→输入"闭环。
+/// 不发 marker、不设置协作状态（交互程序启动时已是 AgentInteractive 态）。
+/// 复用 `handle_exec_interactive` 的"等待 screen_updates 变化 + 稳定窗口"轮询逻辑。
+pub(crate) async fn handle_send_interactive(
+    manager: &Arc<TerminalManager>,
+    pty_state: &mut Option<PtyState>,
+    _app: &tauri::AppHandle,
+    input: &str,
+    wait_secs: u64,
+    response_tx: oneshot::Sender<TerminalExecResponse>,
+    _activity: Option<&Arc<crate::collaboration::TerminalActivityTracker>>,
+) {
+    let ps = match pty_state {
+        Some(ps) => ps,
+        None => {
+            let _ = response_tx.send(TerminalExecResponse {
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: "终端会话不可用".to_string(),
+                timed_out: false,
+                cwd_after: manager.cwd(),
+                interrupted_by_user: false,
+                interactive_mode: false,
+            });
+            return;
+        }
+    };
+
+    // 发送前记录双信号基线：
+    // - output_pushed：程序响应输出到达后端 buffer 的可靠信号（立即可知）
+    // - screen_updates：前端 xterm 渲染并回传快照的信号（最终屏幕内容来源）
+    let baseline_pushed = manager.total_lines_pushed();
+    let baseline_updates = manager.screen_updates();
+
+    // 把输入写入 PTY。输入由 Agent 给出（vi 按键、REPL 命令等），原样写入。
+    // 不做 LF 转 CR：send_interactive 发的是对前台程序的原始输入，由 Agent 控制按键。
+    let send_result = {
+        match ps.writer.lock() {
+            Ok(mut writer) => send_to_pty(&mut writer, input),
+            Err(e) => Err(anyhow::anyhow!("获取 writer 锁失败: {}", e)),
+        }
+    };
+    if let Err(e) = send_result {
+        let _ = response_tx.send(TerminalExecResponse {
+            exit_code: -1,
+            stdout: String::new(),
+            stderr: format!("发送输入到终端失败: {}", e),
+            timed_out: false,
+            cwd_after: manager.cwd(),
+            interrupted_by_user: false,
+            interactive_mode: false,
+        });
+        return;
+    }
+
+    // 双信号等待：output_pushed 触发"程序已响应"，screen_updates 确认"快照已更新"。
+    // 优先等快照更新（最准确），若前端未回传（面板未挂载）则退到 output_pushed 变化。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs.max(1));
+    let stable_window = std::time::Duration::from_millis(300);
+    let poll_interval = std::time::Duration::from_millis(50);
+    let mut output_changed_at: Option<std::time::Instant> = None;
+    let mut screen_changed_at: Option<std::time::Instant> = None;
+
+    loop {
+        let now_pushed = manager.total_lines_pushed();
+        let now_updates = manager.screen_updates();
+        if output_changed_at.is_none() && now_pushed > baseline_pushed {
+            output_changed_at = Some(std::time::Instant::now());
+        }
+        if screen_changed_at.is_none() && now_updates > baseline_updates {
+            screen_changed_at = Some(std::time::Instant::now());
+        }
+        if let Some(change_time) = screen_changed_at {
+            if change_time.elapsed() >= stable_window {
+                break;
+            }
+        }
+        if screen_changed_at.is_none() {
+            if let Some(change_time) = output_changed_at {
+                if change_time.elapsed() >= stable_window * 2 {
+                    break;
+                }
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+
+    let stdout_text = manager
+        .screen_snapshot()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| manager.recent_output(80));
+
+    let _ = response_tx.send(TerminalExecResponse {
+        exit_code: 0,
+        stdout: stdout_text,
+        stderr: String::new(),
+        timed_out: false,
+        cwd_after: manager.cwd(),
+        interrupted_by_user: false,
+        interactive_mode: true,
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -296,9 +296,8 @@ pub(crate) fn classify_tool(tool_name: &str) -> PermissionLevel {
         // 标准：文件写入
         "write_file" | "replace_in_file" => PermissionLevel::Standard,
         // 高级：命令执行 + 浏览器操作
-        "run_command" | "run_shell" | "web_form_fill" | "web_click" | "web_load_html" => {
-            PermissionLevel::Elevated
-        }
+        "run_command" | "run_shell" | "terminal_send" | "web_form_fill" | "web_click"
+        | "web_load_html" => PermissionLevel::Elevated,
         // 关键：补丁、后台任务、多媒体
         "apply_patch" | "spawn_task" | "cancel_task" => PermissionLevel::Critical,
         // MCP 工具和未知工具默认为关键
@@ -504,7 +503,7 @@ fn infer_tool_name_scope(
         "read_file" | "write_file" | "replace_in_file" | "list_dir" | "tree_dir" => "path",
         "web_fetch" => "network",
         "analyze_attachment" | "generate_image" | "speech_to_text" | "text_to_speech" => "external",
-        "run_command" | "run_shell" => "command",
+        "run_command" | "run_shell" | "terminal_send" => "command",
         "web_form_extract" | "web_form_fill" | "web_click" | "web_load_html" => "browser",
         _ => return (None, summary),
     };

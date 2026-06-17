@@ -29,6 +29,7 @@ pub fn init(session_id: String, cwd: String) -> TauriPlugin<Wry> {
         .invoke_handler(tauri::generate_handler![
             commands::terminal_ensure_session,
             commands::terminal_destroy_session,
+            commands::terminal_attach_session,
             commands::terminal_session_send_input,
             commands::terminal_session_recent_output,
             commands::terminal_session_info,
@@ -37,6 +38,7 @@ pub fn init(session_id: String, cwd: String) -> TauriPlugin<Wry> {
             commands::terminal_session_set_cwd,
             commands::terminal_session_resize,
             commands::terminal_session_reset,
+            commands::terminal_session_update_screen,
             commands::terminal_panel_set_session,
         ])
         .setup(move |app, _api| {

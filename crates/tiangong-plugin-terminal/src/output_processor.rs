@@ -448,8 +448,14 @@ pub(crate) fn spawn_output_reader(
                 if let Some(ref logger) = logger {
                     logger.append(&filtered);
                 }
+                // session_id 从 state 动态读取：草稿态 PTY 转正时会更新 state.session_id，
+                // 这样事件能以新（真实）session_id 推送，前端按 session_id 分发能正确命中。
+                let current_session_id = state
+                    .lock()
+                    .map(|s| s.session_id.clone())
+                    .unwrap_or_else(|_| session_id.clone());
                 let event = TerminalOutputEvent {
-                    session_id: session_id.clone(),
+                    session_id: current_session_id,
                     text: filtered,
                     is_echo: false,
                 };

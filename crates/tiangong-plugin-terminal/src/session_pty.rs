@@ -139,6 +139,68 @@ impl SessionPtyRegistry {
         }
     }
 
+    /// 把临时草稿 id 的 PTY 迁移到真实 session_id（草稿态转正时调用）。
+    ///
+    /// 草稿态新对话用稳定临时 id 创建 PTY（如 `__draft_<n>`），首条消息创建后端
+    /// session 拿到真实 id 后调用此方法完成迁移：
+    /// - 注册表 key：临时 id → 真实 id
+    /// - manager 内部 session_id：更新（命令循环/输出线程后续用新 id）
+    /// - 持久化日志文件：临时目录 → 真实目录（rename，保留草稿期已产生的历史）
+    ///
+    /// 幂等：真实 id 已存在或临时 id 不存在时安全返回（不破坏已有状态）。
+    /// 前端调用前应保证真实 id 尚未创建 PTY（否则会与转正迁移冲突）。
+    pub fn attach_persistent_session_id(&self, draft_id: &str, persistent_id: &str) {
+        if draft_id == persistent_id {
+            return;
+        }
+        let slot = {
+            let mut sessions = self.sessions.lock().unwrap();
+            // 真实 id 已存在：说明 session 已有自己的 PTY，无需迁移
+            if sessions.contains_key(persistent_id) {
+                info!(
+                    draft_id,
+                    persistent_id, "真实 session 已有 PTY，跳过草稿迁移"
+                );
+                return;
+            }
+            sessions.remove(draft_id)
+        };
+
+        let Some(slot) = slot else {
+            // 草稿 id 不存在（用户草稿态没打开终端就没创建），无需迁移
+            return;
+        };
+
+        // 更新 manager 内部 session_id（命令循环/输出线程动态读取，自动生效）
+        slot.manager.set_session_id(persistent_id.to_string());
+
+        // 迁移持久化日志：草稿目录 → 真实目录
+        let draft_log = terminal_log_path(draft_id);
+        let real_log = terminal_log_path(persistent_id);
+        if draft_log.exists() {
+            if let Some(parent) = real_log.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    error!(
+                        draft_id, persistent_id, error = %e,
+                        "迁移终端日志：创建真实 session 目录失败"
+                    );
+                }
+            }
+            if let Err(e) = std::fs::rename(&draft_log, &real_log) {
+                // rename 失败不阻塞迁移：日志是辅助的，PTY 本身已就绪
+                error!(
+                    draft_id, persistent_id, error = %e,
+                    "迁移终端日志文件失败（PTY 已迁移，日志保留在草稿目录）"
+                );
+            }
+        }
+
+        // 重新 insert 到真实 key
+        let mut sessions = self.sessions.lock().unwrap();
+        sessions.insert(persistent_id.to_string(), slot);
+        info!(draft_id, persistent_id, "草稿 PTY 已转正迁移到真实 session");
+    }
+
     /// 列出所有 session 的状态摘要（phase 取自各对话的协作状态机）
     pub fn list_statuses(&self) -> Vec<crate::types::TerminalSessionStatus> {
         let sessions = self.sessions.lock().unwrap();
@@ -290,6 +352,61 @@ impl tiangong_core::terminal_trait::TerminalProvider for SessionAwareTerminalPro
         self.exec(session_id, &command, timeout_secs)
     }
 
+    fn exec_interactive(
+        &self,
+        session_id: &str,
+        command: &str,
+        wait_secs: u64,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Option<tiangong_core::terminal_trait::TerminalExecResult>,
+                > + Send,
+        >,
+    > {
+        let tx = match self.tx(session_id) {
+            Some(tx) => tx,
+            None => return Box::pin(async { None }),
+        };
+        let command = command.to_string();
+        Box::pin(async move {
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            let resp: crate::types::TerminalExecResponse = send_and_wait!(
+                tx,
+                TerminalCommand::ExecInteractive {
+                    command,
+                    wait_secs,
+                    response_tx,
+                },
+                response_rx,
+                180
+            );
+            Some(resp.into())
+        })
+    }
+
+    fn exec_command_interactive(
+        &self,
+        session_id: &str,
+        cmd: &str,
+        args: &[String],
+        wait_secs: u64,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Option<tiangong_core::terminal_trait::TerminalExecResult>,
+                > + Send,
+        >,
+    > {
+        // 拼装命令字符串，委托给 exec_interactive
+        let mut parts = vec![cmd.to_string()];
+        for arg in args {
+            parts.push(shell_quote(arg));
+        }
+        let command = parts.join(" ");
+        self.exec_interactive(session_id, &command, wait_secs)
+    }
+
     fn recent_output(
         &self,
         session_id: &str,
@@ -336,6 +453,39 @@ impl tiangong_core::terminal_trait::TerminalProvider for SessionAwareTerminalPro
                 5
             );
             Some(())
+        })
+    }
+
+    fn send_interactive(
+        &self,
+        session_id: &str,
+        input: &str,
+        wait_secs: u64,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Option<tiangong_core::terminal_trait::TerminalExecResult>,
+                > + Send,
+        >,
+    > {
+        let tx = match self.tx(session_id) {
+            Some(tx) => tx,
+            None => return Box::pin(async { None }),
+        };
+        let input = input.to_string();
+        Box::pin(async move {
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            let resp: crate::types::TerminalExecResponse = send_and_wait!(
+                tx,
+                TerminalCommand::SendInteractive {
+                    input,
+                    wait_secs,
+                    response_tx,
+                },
+                response_rx,
+                180
+            );
+            Some(resp.into())
         })
     }
 

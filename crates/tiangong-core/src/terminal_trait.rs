@@ -26,6 +26,28 @@ pub trait TerminalProvider: Send + Sync + 'static {
         timeout_secs: Option<u64>,
     ) -> Pin<Box<dyn Future<Output = Option<TerminalExecResult>> + Send>>;
 
+    /// 在指定对话的终端会话中以交互模式启动命令（如 vi/nano/python REPL）。
+    ///
+    /// 与 `exec` 不同：不使用 marker 协议包裹命令，直接以 CR 提交命令行；
+    /// 等待 `wait_secs` 秒后收集初始输出并返回 `interactive_mode: true`，
+    /// 终端协作状态进入 `AgentInteractive`，前台交互进程继续运行。
+    /// 后续输入由用户在终端面板手动操作，或由 Agent 通过 `send_input` 驱动。
+    fn exec_interactive(
+        &self,
+        session_id: &str,
+        command: &str,
+        wait_secs: u64,
+    ) -> Pin<Box<dyn Future<Output = Option<TerminalExecResult>> + Send>>;
+
+    /// 在指定对话的终端会话中以交互模式启动原始命令（cmd + args）。
+    fn exec_command_interactive(
+        &self,
+        session_id: &str,
+        cmd: &str,
+        args: &[String],
+        wait_secs: u64,
+    ) -> Pin<Box<dyn Future<Output = Option<TerminalExecResult>> + Send>>;
+
     /// 获取指定对话终端最近的输出（环形缓冲区）。
     fn recent_output(
         &self,
@@ -43,6 +65,19 @@ pub trait TerminalProvider: Send + Sync + 'static {
         session_id: &str,
         input: &str,
     ) -> Pin<Box<dyn Future<Output = Option<()>> + Send>>;
+
+    /// 向已进入交互态的终端发送输入（按键/文本），并等待屏幕变化后返回新快照。
+    ///
+    /// 这是 Agent 持续操作交互程序（vi/nano/REPL）的核心能力：每发一次按键，
+    /// 自动等待屏幕渲染稳定，返回当前可见内容。Agent 据此观察程序对输入的反应，
+    /// 形成持续的"输入→观察→输入"闭环（如看到 swap 提示→发 d 删除→看 vi 界面）。
+    /// 与 `exec_interactive`（首次启动交互程序）配套使用。
+    fn send_interactive(
+        &self,
+        session_id: &str,
+        input: &str,
+        wait_secs: u64,
+    ) -> Pin<Box<dyn Future<Output = Option<TerminalExecResult>> + Send>>;
 
     /// 重置指定对话的终端会话（清理状态，重新初始化）。
     fn reset(&self, session_id: &str) -> Pin<Box<dyn Future<Output = Option<()>> + Send>>;

@@ -242,16 +242,29 @@ pub(crate) fn basic_file_function_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "run_shell".to_string(),
-            description: "执行 shell 脚本，自动派生 bash/sh/powershell 参数".to_string(),
+            description: "执行 shell 脚本，自动派生 bash/sh/powershell 参数。需启动交互式程序（vi/nano/REPL）时传 interactive=true，命令在终端面板进入交互态供用户操作".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "script": { "type": "string", "description": "shell 脚本文本" },
                     "shell": { "type": "string", "description": "shell 类型：auto/bash/sh/powershell/pwsh，默认 auto" },
                     "cwd": { "type": "string", "description": "工作目录（可选）" },
-                    "timeout": { "type": "integer", "description": "超时时间（秒），0 或不填表示不限时", "minimum": 0 }
+                    "timeout": { "type": "integer", "description": "超时时间（秒），0 或不填表示不限时", "minimum": 0 },
+                    "interactive": { "type": "boolean", "description": "是否以交互模式启动（用于 vi/vim/nano/ssh/python REPL 等交互程序）。true 时命令在终端面板进入交互态，用户可手动操作；禁止配合 heredoc/管道使用。默认 false" }
                 },
                 "required": ["script"]
+            }),
+        },
+        ToolSpec {
+            name: "terminal_send".to_string(),
+            description: "向已进入交互态的终端发送按键/文本，并返回屏幕新快照。用于持续操作交互程序（vi/nano/REPL）：每次发送后自动等待屏幕变化，返回当前显示内容。先用 run_shell{interactive:true} 启动交互程序，再用本工具操作。例如 vi 遇到 swap 提示时发 \"d\" 删除 swap、编辑后发 \"\\x1b:wq\\r\" 保存退出。input 原样写入终端，需用转义序列表示特殊键（\\r 回车、\\x1b Esc、\\x03 Ctrl+C）".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "input": { "type": "string", "description": "要发送到终端的按键/文本。原样写入 PTY，用转义序列表示特殊键：\\r=回车、\\x1b=Esc、\\x03=Ctrl+C、\\x1b[A=上方向键等" },
+                    "wait": { "type": "integer", "description": "发送后等待屏幕变化的秒数（给程序渲染时间），默认 3", "minimum": 1 }
+                },
+                "required": ["input"]
             }),
         },
         ToolSpec {
