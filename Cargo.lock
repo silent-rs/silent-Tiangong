@@ -2405,6 +2405,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "descape"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "700357d9fb22b5232a85e34a413c1a76ae649f532c31107e402dc84e9c03bfb2"
+
+[[package]]
 name = "diffy"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9638,6 +9644,7 @@ name = "tiangong-plugin-terminal"
 version = "0.8.3"
 dependencies = [
  "anyhow",
+ "descape",
  "portable-pty",
  "scru128",
  "serde",
