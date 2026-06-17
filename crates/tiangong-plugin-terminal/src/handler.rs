@@ -66,6 +66,9 @@ fn is_interactive_program(word: &str) -> bool {
 /// 检测脚本是否使用 stdin 自动化（heredoc/管道/echo 注入）驱动交互程序。
 /// 这是反模式：即便交互式终端能力已启用，用 heredoc 自动化 vi 仍不可靠
 /// （vi 的 ex 模式行为不稳定、转义复杂），应拒绝并引导 Agent 分步操作。
+/// 注意：`|` 检测会匹配任意管道，`vi file | tee backup` 这类合法用法理论上会被误拒。
+/// 但本函数仅在 `script_uses_interactive_terminal_program` 也为 true 时才被调用
+///（双重条件），实际误判率极低，可接受。
 fn script_uses_stdin_automation(script: &str) -> bool {
     let lower = script.to_ascii_lowercase();
     script.contains("<<")
@@ -319,7 +322,9 @@ impl TerminalToolOverride {
             };
 
             Some(ToolResult {
-                ok: true,
+                // ok 与 exit_code 一致：send_interactive 在 PTY 不可用或写入失败时
+                // 返回 exit_code: -1，此时 ok 必须为 false，否则 Agent 会误以为成功
+                ok: result.exit_code == 0,
                 summary,
                 stdout,
                 stderr: String::new(),

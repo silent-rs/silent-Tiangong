@@ -554,6 +554,55 @@ pub(crate) async fn handle_exec(
 /// 返回内容：终端当前可见文本（ANSI 已处理）。交互程序进入任何状态
 ///（编辑页 / swap 提示 / 等待输入）都会在第一次渲染时被捕获，
 /// Agent 直接阅读返回内容即可判断当前状态，无需后端识别提示类型。
+/// 等待终端屏幕发生变化（双信号 + 稳定窗口），用于交互程序首屏/响应检测。
+///
+/// 双信号策略：
+/// - `screen_updates`（前端 xterm 快照）：最准确的屏幕内容，优先等此信号
+/// - `output_pushed`（后端 buffer）：可靠的后端信号，前端未回传时退到此信号
+///
+/// 稳定窗口：信号首次触发后，继续轮询 `stable_window`（300ms）确认无进一步变化，
+/// 认为屏幕已渲染稳定。快照信号用 1x 窗口，output 信号用 2x 窗口（精度较低等更久）。
+/// 超过 `wait_secs` 仍无信号则放弃等待（返回，调用方用当前快照兜底）。
+async fn wait_for_screen_change(
+    manager: &Arc<TerminalManager>,
+    baseline_pushed: usize,
+    baseline_updates: u64,
+    wait_secs: u64,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs.max(1));
+    let stable_window = std::time::Duration::from_millis(300);
+    let poll_interval = std::time::Duration::from_millis(50);
+    let mut output_changed_at: Option<std::time::Instant> = None;
+    let mut screen_changed_at: Option<std::time::Instant> = None;
+
+    loop {
+        let now_pushed = manager.total_lines_pushed();
+        let now_updates = manager.screen_updates();
+        if output_changed_at.is_none() && now_pushed > baseline_pushed {
+            output_changed_at = Some(std::time::Instant::now());
+        }
+        if screen_changed_at.is_none() && now_updates > baseline_updates {
+            screen_changed_at = Some(std::time::Instant::now());
+        }
+        if let Some(change_time) = screen_changed_at {
+            if change_time.elapsed() >= stable_window {
+                break;
+            }
+        }
+        if screen_changed_at.is_none() {
+            if let Some(change_time) = output_changed_at {
+                if change_time.elapsed() >= stable_window * 2 {
+                    break;
+                }
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
 pub(crate) async fn handle_exec_interactive(
     manager: &Arc<TerminalManager>,
     pty_state: &mut Option<PtyState>,
@@ -638,40 +687,8 @@ pub(crate) async fn handle_exec_interactive(
         });
     }
 
-    // 双信号等待：output_pushed 触发"程序已开始输出"，screen_updates 确认"快照已更新"。
-    // 优先等快照更新（最准确的屏幕内容），前端未回传时退到 output_pushed 变化。
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs.max(1));
-    let stable_window = std::time::Duration::from_millis(300);
-    let poll_interval = std::time::Duration::from_millis(50);
-    let mut output_changed_at: Option<std::time::Instant> = None;
-    let mut screen_changed_at: Option<std::time::Instant> = None;
-
-    loop {
-        let now_pushed = manager.total_lines_pushed();
-        let now_updates = manager.screen_updates();
-        if output_changed_at.is_none() && now_pushed > baseline_pushed {
-            output_changed_at = Some(std::time::Instant::now());
-        }
-        if screen_changed_at.is_none() && now_updates > baseline_updates {
-            screen_changed_at = Some(std::time::Instant::now());
-        }
-        if let Some(change_time) = screen_changed_at {
-            if change_time.elapsed() >= stable_window {
-                break;
-            }
-        }
-        if screen_changed_at.is_none() {
-            if let Some(change_time) = output_changed_at {
-                if change_time.elapsed() >= stable_window * 2 {
-                    break;
-                }
-            }
-        }
-        if std::time::Instant::now() >= deadline {
-            break;
-        }
-        tokio::time::sleep(poll_interval).await;
-    }
+    // 双信号等待：交互程序首屏渲染（见 wait_for_screen_change）
+    wait_for_screen_change(manager, baseline_pushed, baseline_updates, wait_secs).await;
 
     // 返回终端当前可见内容：优先前端 xterm 回传的屏幕快照（与用户看到的画面一致，
     // vim/nano 全屏界面、swap 提示都能完整呈现），若前端尚未回传（面板未挂载等）
@@ -705,6 +722,8 @@ pub(crate) async fn handle_send_interactive(
     input: &str,
     wait_secs: u64,
     response_tx: oneshot::Sender<TerminalExecResponse>,
+    // _activity 不使用：send_interactive 发的是对已运行交互程序的按键，
+    // 此时协作状态在 exec_interactive 启动时已设为 AgentInteractive，无需重复设置。
     _activity: Option<&Arc<crate::collaboration::TerminalActivityTracker>>,
 ) {
     let ps = match pty_state {
@@ -752,40 +771,8 @@ pub(crate) async fn handle_send_interactive(
         return;
     }
 
-    // 双信号等待：output_pushed 触发"程序已响应"，screen_updates 确认"快照已更新"。
-    // 优先等快照更新（最准确），若前端未回传（面板未挂载）则退到 output_pushed 变化。
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs.max(1));
-    let stable_window = std::time::Duration::from_millis(300);
-    let poll_interval = std::time::Duration::from_millis(50);
-    let mut output_changed_at: Option<std::time::Instant> = None;
-    let mut screen_changed_at: Option<std::time::Instant> = None;
-
-    loop {
-        let now_pushed = manager.total_lines_pushed();
-        let now_updates = manager.screen_updates();
-        if output_changed_at.is_none() && now_pushed > baseline_pushed {
-            output_changed_at = Some(std::time::Instant::now());
-        }
-        if screen_changed_at.is_none() && now_updates > baseline_updates {
-            screen_changed_at = Some(std::time::Instant::now());
-        }
-        if let Some(change_time) = screen_changed_at {
-            if change_time.elapsed() >= stable_window {
-                break;
-            }
-        }
-        if screen_changed_at.is_none() {
-            if let Some(change_time) = output_changed_at {
-                if change_time.elapsed() >= stable_window * 2 {
-                    break;
-                }
-            }
-        }
-        if std::time::Instant::now() >= deadline {
-            break;
-        }
-        tokio::time::sleep(poll_interval).await;
-    }
+    // 双信号等待：交互程序对输入的响应（见 wait_for_screen_change）
+    wait_for_screen_change(manager, baseline_pushed, baseline_updates, wait_secs).await;
 
     let stdout_text = manager
         .screen_snapshot()
