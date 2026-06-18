@@ -101,12 +101,19 @@ pub async fn terminal_report_user_command(
     state: State<'_, TerminalPluginState>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
+    tracing::info!(
+        session_id = %session_id,
+        command = %command,
+        "terminal_report_user_command 被调用"
+    );
     let pty = ensure_pty(&state, &session_id)?;
     pty.activity.record_user_command(command.clone());
-    let _ = app_handle.emit(
+    if let Err(e) = app_handle.emit(
         "terminal:user_command",
         serde_json::json!({ "session_id": session_id, "command": command }),
-    );
+    ) {
+        tracing::warn!(error = %e, "emit terminal:user_command 失败");
+    }
     Ok(())
 }
 

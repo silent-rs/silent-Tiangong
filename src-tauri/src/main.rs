@@ -449,6 +449,7 @@ fn run_gui() {
             let terminal_inject_handle = app.handle().clone();
             app.listen("terminal:user_command", move |event| {
                 let payload = event.payload().to_string();
+                tracing::info!(payload = %payload, "收到 terminal:user_command 事件");
                 let Ok(data) = serde_json::from_str::<serde_json::Value>(&payload) else {
                     warn!("终端用户命令 payload 解析失败");
                     return;

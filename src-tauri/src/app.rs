@@ -184,12 +184,14 @@ impl TiangongApp {
                 running = core.is_running(),
                 "向当前会话注入用户终端操作"
             );
-            return core.inject_terminal_user_input(command);
+            let sent = core.inject_terminal_user_input(command);
+            tracing::info!(session_id, sent, "终端用户操作注入命令已发送到 core");
+            return sent;
         }
-        tracing::debug!(
+        tracing::warn!(
             session_id,
             command = %command,
-            "跳过终端用户操作注入：当前会话没有活跃 core"
+            "跳过终端用户操作注入：当前会话没有活跃 core（cores 中无此 session）"
         );
         false
     }
