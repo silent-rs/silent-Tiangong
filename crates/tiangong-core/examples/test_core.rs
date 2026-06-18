@@ -1,4 +1,5 @@
 use std::sync::mpsc;
+use tiangong_core::agent_input::{AgentInput, AgentInputKind};
 use tiangong_core::core::TiangongCore;
 use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
 use tiangong_types::{SessionStreamEvent, StreamEvent};
@@ -10,7 +11,7 @@ fn main() {
     let core = TiangongCore::new(config, tx);
 
     println!("=== 发送: 你好 ===");
-    core.send_message("你好".into());
+    core.deliver(AgentInputKind::message("你好"));
 
     let mut got_done = false;
     loop {
@@ -44,7 +45,7 @@ fn main() {
 
     if got_done {
         println!("\n=== 发送: 1+1=? ===");
-        core.send_message("1+1=?".into());
+        core.deliver(AgentInputKind::message("1+1=?"));
 
         loop {
             match rx.recv_timeout(std::time::Duration::from_secs(30)) {

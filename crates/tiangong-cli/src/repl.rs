@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use tiangong_config::load_tiangong_config;
+use tiangong_core::agent_input::AgentInput;
 use tiangong_core::app_state::TiangongState;
 use tiangong_core::core::{TiangongCore, shutdown_memory_registry_blocking};
 use tiangong_types::{SessionStreamEvent, StreamEvent};
@@ -83,7 +84,9 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         }
 
         // 发送消息
-        core.send_message(trimmed.to_string());
+        core.deliver(tiangong_core::agent_input::AgentInputKind::message(
+            trimmed.to_string(),
+        ));
 
         // 处理响应流
         handle_response(&stream_rx, &core);
@@ -228,7 +231,10 @@ impl ResponseState {
                         }
                     }
                 };
-                core.respond_approval(request_id.clone(), approved);
+                core.deliver(tiangong_core::agent_input::AgentInputKind::approval(
+                    request_id.clone(),
+                    approved,
+                ));
                 if approved {
                     output::status("已允许");
                 } else {

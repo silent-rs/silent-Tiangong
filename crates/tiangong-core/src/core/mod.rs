@@ -160,70 +160,8 @@ impl TiangongCore {
         tx.send(cmd).is_ok()
     }
 
-    pub fn send_message(&self, content: String) -> bool {
-        use crate::agent_input::{AgentInput, AgentInputKind, MessageInput};
-        self.deliver(AgentInputKind::Message(MessageInput::UserMessage {
-            content,
-            message_id: None,
-            media: Vec::new(),
-        }))
-    }
-
-    pub fn send_message_with_id(
-        &self,
-        content: String,
-        message_id: String,
-        media: Vec<tiangong_types::MediaAsset>,
-    ) -> bool {
-        use crate::agent_input::{AgentInput, AgentInputKind, MessageInput};
-        self.deliver(AgentInputKind::Message(MessageInput::UserMessage {
-            content,
-            message_id: Some(message_id),
-            media,
-        }))
-    }
-
-    pub fn update_cwd(&self, cwd: String) -> bool {
-        use crate::agent_input::{AgentInput, AgentInputKind, CommandInput};
-        self.deliver(AgentInputKind::Command(CommandInput::UpdateCwd { cwd }))
-    }
-
-    pub fn reload_config(&self) -> bool {
-        use crate::agent_input::{AgentInput, AgentInputKind, CommandInput};
-        self.deliver(AgentInputKind::Command(CommandInput::ReloadConfig))
-    }
-
-    pub fn cancel(&self) -> bool {
-        // cancel_flag 由 deliver 内部设置（见 AgentInput impl）
-        use crate::agent_input::{AgentInput, AgentInputKind, CommandInput};
-        self.deliver(AgentInputKind::Command(CommandInput::Cancel))
-    }
-
     pub fn cancel_flag(&self) -> Arc<AtomicBool> {
         self.cancel_flag.clone()
-    }
-
-    pub fn cancel_agent(&self, role: String) -> bool {
-        use crate::agent_input::{AgentInput, AgentInputKind, CommandInput};
-        self.deliver(AgentInputKind::Command(CommandInput::CancelAgent { role }))
-    }
-
-    pub fn compress_context(&self) -> bool {
-        use crate::agent_input::{AgentInput, AgentInputKind, CommandInput};
-        self.deliver(AgentInputKind::Command(CommandInput::CompressContext))
-    }
-
-    pub fn reset_context(&self) -> bool {
-        use crate::agent_input::{AgentInput, AgentInputKind, CommandInput};
-        self.deliver(AgentInputKind::Command(CommandInput::ResetContext))
-    }
-
-    pub fn respond_approval(&self, request_id: String, approved: bool) -> bool {
-        use crate::agent_input::{AgentInput, AgentInputKind, ApprovalInput};
-        self.deliver(AgentInputKind::Approval(ApprovalInput::Response {
-            request_id,
-            approved,
-        }))
     }
 
     pub fn session_id(&self) -> &str {
