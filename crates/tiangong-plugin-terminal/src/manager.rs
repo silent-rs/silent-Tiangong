@@ -46,7 +46,7 @@ pub(crate) struct TerminalState {
 
 impl TerminalManager {
     pub fn new(session_id: String, cwd: String) -> Self {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        let shell = default_shell();
         Self {
             state: Arc::new(Mutex::new(TerminalState {
                 session_id,
@@ -425,6 +425,23 @@ pub(crate) async fn spawn_command_loop(
         state.alive = false;
     }
     info!(session_id = %session_id, "终端命令处理器退出");
+}
+
+/// 解析默认 shell 可执行文件路径。
+///
+/// 与 `tiangong_core::tool::common::derive_shell_exec_args` 的跨平台约定保持一致：
+///
+/// - **非 Windows**：读取 `SHELL` 环境变量，缺失时 fallback 到 `/bin/bash`。
+/// - **Windows**：`SHELL` 是 Unix 概念，Windows 几乎从不设置，且即使设置也通常指向
+///   Git Bash 之类的非标准 shell。Windows 默认走 `powershell.exe`（通过 PATH 解析）。
+///   旧版 `SHELL` fallback 到 `/bin/bash` 在 Windows 上不存在该路径，会导致
+///   `spawn_command` 失败、终端面板提示"PTY 启动失败"（见 issue #151）。
+fn default_shell() -> String {
+    if cfg!(target_os = "windows") {
+        "powershell.exe".to_string()
+    } else {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+    }
 }
 
 pub(crate) fn start_pty(session_id: &str, cwd: &str, shell: &str) -> anyhow::Result<PtyState> {
