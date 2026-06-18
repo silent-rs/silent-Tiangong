@@ -313,103 +313,52 @@ pub(crate) fn latest_user_message(session: &Session) -> String {
 
 /// 注入浏览器页面内容到会话（合成 assistant + tool 消息对）
 /// 浏览器内容注入数据
-pub(crate) struct BrowserContent<'a> {
-    pub title: &'a str,
-    pub url: &'a str,
-    pub text: &'a str,
-    pub tabs: &'a [(String, String, String)],
-    pub active_tab_id: Option<&'a str>,
-    pub feedback: Option<&'a str>,
-}
-
+/// 统一的工具类注入函数：根据 tool_name 渲染 JSON payload 为对话文本。
 ///
-/// `force` 为 true 时跳过去重检查（用于内容变化但 URL 相同的场景）。
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn inject_browser_content_to_session(
+/// 所有 ToolInput（终端操作、浏览器内容等）经 AgentInput trait 投递后，
+/// 最终到达此函数。tool_name 决定呈现格式，payload 是结构化 JSON。
+/// 伪造 assistant tool_call + tool result 消息对（仿浏览器注入模式）。
+/// 去重：最近 8 条 tool 消息中已有相同 tool_name 且 payload 相同则跳过。
+pub(crate) fn inject_tool_to_session(
     session: &mut Session,
     stream_tx: &StdSender<StreamEvent>,
-    content: &BrowserContent<'_>,
-    force: bool,
+    tool_name: &str,
+    payload: &serde_json::Value,
 ) {
-    let url = content.url;
-    let title = content.title;
-    let text = content.text;
-
-    // 去重：同域名下的页面内容短期内不重复注入
-    if !force {
+    let output = render_tool_output(tool_name, payload);
+    if output.trim().is_empty() {
+        return;
+    }
+    // 去重：检查 payload 是否包含可标识的字段（url 或 command）
+    let dedup_key = payload
+        .get("url")
+        .or_else(|| payload.get("command"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if !dedup_key.is_empty() {
         let is_dup = session.messages.iter().rev().take(8).any(|msg| {
             msg.role == MessageRole::Tool
-                && msg.tool_name.as_deref() == Some("browser_data")
-                && msg.text_content().contains(url)
+                && msg.tool_name.as_deref() == Some(tool_name)
+                && msg.text_content().contains(dedup_key)
         });
         if is_dup {
             tracing::debug!(
                 session_id = %session.id,
-                url,
-                has_feedback = content
-                    .feedback
-                    .map(|feedback| !feedback.trim().is_empty())
-                    .unwrap_or(false),
-                "skip browser content injection: duplicate recent url"
+                tool_name,
+                "skip tool injection: duplicate recent content"
             );
             return;
         }
     }
-
-    let has_feedback = content
-        .feedback
-        .map(|feedback| !feedback.trim().is_empty())
-        .unwrap_or(false);
-
-    let header = if has_feedback {
-        "[浏览器反馈]"
-    } else if force {
-        "[浏览器内容变化]"
-    } else {
-        "[浏览器页面更新]"
-    };
-    let mut output = if let Some(feedback) = content.feedback.filter(|s| !s.trim().is_empty()) {
-        if text.is_empty() {
-            format!("{header}\n标题：{title}\nURL：{url}\n\n{feedback}")
-        } else {
-            format!("{header}\n标题：{title}\nURL：{url}\n\n{feedback}\n\n[当前页面内容]\n{text}")
-        }
-    } else if text.is_empty() {
-        format!("{header}\n标题：{title}\nURL：{url}\n状态：页面内容为空")
-    } else {
-        format!("[浏览器页面更新]\n标题：{title}\nURL：{url}\n\n{text}")
-    };
-    if !content.tabs.is_empty() {
-        output.push_str("\n\n[标签列表]");
-        for (id, tab_url, tab_title) in content.tabs {
-            let marker = if content.active_tab_id == Some(id.as_str()) {
-                " (活跃)"
-            } else {
-                ""
-            };
-            let display = if tab_title.is_empty() {
-                tab_url.clone()
-            } else {
-                tab_title.clone()
-            };
-            output.push_str(&format!("\n- {display}{marker}"));
-        }
-    }
-
-    let tool_call_id = format!("browser_auto_{}", scru128::new());
-    let tool_name = "browser_data";
-
-    // 伪造 assistant 工具调用 + tool 结果，以 browser_data 工具形式注入。
-    // 这组消息必须一一配对，否则 OpenAI 兼容接口会拒绝缺少结果的 tool_call。
-    let assistant_text = format!("[自动感知] 浏览器页面数据就绪：{url}");
+    let tool_call_id = format!("tool_auto_{}", scru128::new());
+    let assistant_text = format!("[自动感知] 工具数据就绪: {tool_name}");
     let mut assistant_msg = Message::new(MessageRole::Assistant, assistant_text);
     assistant_msg.tool_calls = vec![MessageToolCall {
         id: tool_call_id.clone(),
         name: tool_name.to_string(),
-        arguments: serde_json::json!({"url": url}),
+        arguments: payload.clone(),
     }];
     session.messages.push(assistant_msg);
-
     let _ = stream_tx.send(StreamEvent::ToolResult {
         name: tool_name.to_string(),
         tool_call_id: Some(tool_call_id.clone()),
@@ -418,20 +367,64 @@ pub(crate) fn inject_browser_content_to_session(
         full_output: Some(output.clone()),
         media: vec![],
     });
-
     append_tool_result_message(session, &tool_call_id, tool_name, output, false);
     tracing::info!(
         session_id = %session.id,
-        url,
-        force,
-        has_feedback,
-        output_len = session
-            .messages
-            .last()
-            .map(|msg| msg.text_content().len())
-            .unwrap_or(0),
-        "browser content injected into session"
+        tool_name,
+        "tool content injected into session"
     );
+}
+
+/// 根据 tool_name 渲染 JSON payload 为对话文本。
+fn render_tool_output(tool_name: &str, payload: &serde_json::Value) -> String {
+    match tool_name {
+        "browser_data" => {
+            let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            let url = payload.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            let feedback = payload
+                .get("feedback")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let has_feedback = !feedback.trim().is_empty();
+            let header = if has_feedback {
+                "[浏览器反馈]"
+            } else {
+                "[浏览器页面更新]"
+            };
+            let mut output = format!(
+                "{header}
+标题：{title}
+URL：{url}
+
+{text}"
+            );
+            if has_feedback {
+                output.push_str(&format!(
+                    "
+
+[用户操作反馈]
+{feedback}"
+                ));
+            }
+            output
+        }
+        "terminal_user_input" => {
+            let command = payload
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            format!("[用户终端操作] 用户在终端执行了: {command}")
+        }
+        _ => {
+            // 未知 tool_name：原样输出 JSON
+            format!(
+                "[{tool_name}]
+{}",
+                serde_json::to_string_pretty(payload).unwrap_or_default()
+            )
+        }
+    }
 }
 
 #[cfg(test)]
@@ -460,22 +453,22 @@ mod tests {
     }
 
     #[test]
-    fn inject_browser_content_keeps_feedback_in_tool_message() {
+    fn inject_tool_renders_browser_feedback() {
         let mut session = Session::new("browser");
         let (tx, rx) = std::sync::mpsc::channel();
 
-        inject_browser_content_to_session(
+        inject_tool_to_session(
             &mut session,
             &tx,
-            &BrowserContent {
-                title: "API Keys",
-                url: "https://platform.deepseek.com/api_keys",
-                text: "API keys page",
-                tabs: &[],
-                active_tab_id: None,
-                feedback: Some("[网络响应] POST /api_keys (状态 200)\n{\"key\":\"sk-test\"}"),
-            },
-            true,
+            "browser_data",
+            &serde_json::json!({
+                "title": "API Keys",
+                "url": "https://platform.deepseek.com/api_keys",
+                "text": "API keys page",
+                "tabs": [],
+                "active_tab_id": null,
+                "feedback": "[网络响应] POST /api_keys (状态 200)\n{\"key\":\"sk-test\"}",
+            }),
         );
 
         assert_eq!(session.messages.len(), 2);
@@ -501,47 +494,41 @@ mod tests {
     }
 
     #[test]
-    fn inject_browser_feedback_bypasses_recent_url_dedup_when_forced() {
+    fn inject_tool_dedup_by_url() {
         let mut session = Session::new("browser");
         let (tx, _rx) = std::sync::mpsc::channel();
-        let url = "https://platform.deepseek.com/api_keys";
+        let payload = serde_json::json!({
+            "title": "API Keys",
+            "url": "https://platform.deepseek.com/api_keys",
+            "text": "API keys page",
+        });
 
-        inject_browser_content_to_session(
-            &mut session,
-            &tx,
-            &BrowserContent {
-                title: "API Keys",
-                url,
-                text: "API keys page",
-                tabs: &[],
-                active_tab_id: None,
-                feedback: None,
-            },
-            false,
-        );
+        inject_tool_to_session(&mut session, &tx, "browser_data", &payload);
         assert_eq!(session.messages.len(), 2);
 
-        inject_browser_content_to_session(
+        // 同 URL 无 feedback → 去重跳过
+        inject_tool_to_session(&mut session, &tx, "browser_data", &payload);
+        assert_eq!(session.messages.len(), 2);
+    }
+
+    #[test]
+    fn inject_tool_renders_terminal_user_input() {
+        let mut session = Session::new("terminal");
+        let (tx, _rx) = std::sync::mpsc::channel();
+
+        inject_tool_to_session(
             &mut session,
             &tx,
-            &BrowserContent {
-                title: "API Keys",
-                url,
-                text: "API keys page",
-                tabs: &[],
-                active_tab_id: None,
-                feedback: Some("[网络响应] POST /api/v0/users/create_api_key (状态 200)"),
-            },
-            true,
+            "terminal_user_input",
+            &serde_json::json!({ "command": "ls -la" }),
         );
 
-        assert_eq!(session.messages.len(), 4);
-        assert_no_unmatched_tool_calls(&session);
-        assert!(session.messages[3].text_content().contains("[浏览器反馈]"));
+        assert_eq!(session.messages.len(), 2);
         assert!(
-            session.messages[3]
+            session.messages[1]
                 .text_content()
-                .contains("create_api_key")
+                .contains("[用户终端操作]")
         );
+        assert!(session.messages[1].text_content().contains("ls -la"));
     }
 }

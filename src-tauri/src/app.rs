@@ -141,14 +141,18 @@ impl TiangongApp {
                     has_feedback,
                     "向当前会话注入浏览器内容"
                 );
-                return core.inject_browser_content(
-                    title,
-                    url,
-                    text,
-                    tabs,
-                    active_tab_id,
-                    feedback,
-                );
+                return {
+                    use tiangong_core::agent_input::{AgentInput, AgentInputKind};
+                    use tiangong_plugin_browser::page_fetcher::BrowserContent;
+                    core.deliver(AgentInputKind::Tool(Box::new(BrowserContent {
+                        title,
+                        url,
+                        text,
+                        tabs,
+                        active_tab_id,
+                        feedback,
+                    })))
+                };
             } else {
                 tracing::debug!(
                     session_id,

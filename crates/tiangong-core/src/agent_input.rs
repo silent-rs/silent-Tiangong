@@ -7,7 +7,7 @@
 //! - [`AgentInputKind::Message`]：对话消息（触发 turn）
 //! - [`AgentInputKind::Tool`]：工具类输入（伪造 tool result 注入对话，不触发 turn）
 //! - [`AgentInputKind::Approval`]：审批响应（解锁阻塞等待的 turn）
-//! - [`AgentInputKind::Command`]：控制指令（预留：cancel/reset 等控制类）
+//! - [`AgentInputKind::Command`]：控制指令
 
 /// 外部与 Agent 交互的统一通道。
 pub trait AgentInput: Send + Sync {
@@ -19,14 +19,58 @@ pub trait AgentInput: Send + Sync {
 pub enum AgentInputKind {
     /// 对话消息层：用户消息等，会触发 Agent 执行一轮 turn。
     Message(MessageInput),
-    /// 工具类输入层：伪造 tool result 注入对话（不触发 turn），
-    /// 如用户终端操作、浏览器内容变化。
-    Tool(ToolInput),
+    /// 工具类输入层：伪造 tool result 注入对话（不触发 turn）。
+    /// 用 `Box<dyn ToolInput>` trait object，具体实现由各插件提供。
+    Tool(Box<dyn ToolInput>),
     /// 审批层：审批响应，解锁阻塞等待审批的 turn。
     Approval(ApprovalInput),
-    /// 控制层：控制指令（预留扩展，当前无变体）。
+    /// 控制层：控制指令。
     Command(CommandInput),
 }
+
+impl AgentInputKind {
+    /// 便捷构造：直接传 tool_name + JSON payload，无需定义 struct 实现 ToolInput。
+    ///
+    /// 适合匿名/一次性工具注入。有复用需求的工具类型建议在插件侧定义 struct
+    /// 实现 `ToolInput` trait（类型更安全、render 逻辑内聚）。
+    pub fn tool(tool_name: impl Into<String>, payload: serde_json::Value) -> Self {
+        struct AnonymousToolInput {
+            name: String,
+            payload: serde_json::Value,
+        }
+        impl ToolInput for AnonymousToolInput {
+            fn tool_name(&self) -> &str {
+                &self.name
+            }
+            fn render(&self) -> serde_json::Value {
+                self.payload.clone()
+            }
+        }
+        AgentInputKind::Tool(Box::new(AnonymousToolInput {
+            name: tool_name.into(),
+            payload,
+        }))
+    }
+}
+
+/// 工具类注入的统一协议。
+///
+/// core 定义此 trait，各插件（浏览器、终端等）在自己的 crate 里实现它，
+/// 通过 `AgentInputKind::Tool(Box::new(XxxInput { ... }))` 投递。
+/// core 的 worker 侧统一调用 `tool_name` + `render` 生成伪造的 tool result 消息，
+/// 新增工具类型只需在插件侧实现此 trait，无需改动 core。
+pub trait ToolInput: Send + Sync {
+    /// 工具名（伪造 tool_call 的 name 字段）。
+    fn tool_name(&self) -> &str;
+
+    /// 注入到对话的结构化内容（JSON）。
+    ///
+    /// 返回 JSON 而非文本，让 worker 侧根据 tool_name 决定呈现格式，
+    /// 同时保留结构化数据供去重等逻辑使用。
+    fn render(&self) -> serde_json::Value;
+}
+
+// ===== Message 层 =====
 
 /// 对话消息层输入。
 pub enum MessageInput {
@@ -39,20 +83,7 @@ pub enum MessageInput {
     },
 }
 
-/// 工具类输入层（注入对话，不触发 turn）。
-pub enum ToolInput {
-    /// 用户终端操作：用户在终端提交命令（回车截断）时触发。
-    TerminalUserInput { command: String },
-    /// 浏览器内容注入：页面加载完成或内容变化时自动注入。
-    BrowserContent {
-        title: String,
-        url: String,
-        text: String,
-        tabs: Vec<(String, String, String)>,
-        active_tab_id: Option<String>,
-        feedback: Option<String>,
-    },
-}
+// ===== Approval 层 =====
 
 /// 审批层输入。
 pub enum ApprovalInput {
@@ -60,8 +91,20 @@ pub enum ApprovalInput {
     Response { request_id: String, approved: bool },
 }
 
-/// 控制层输入（预留扩展，当前无变体）。
-///
-/// 未来 cancel/reset 等控制类操作可从 TiangongCore 的独立 pub 方法
-/// 迁移到此枚举，实现完全统一的交互入口。
-pub enum CommandInput {}
+// ===== Command 层 =====
+
+/// 控制层输入。
+pub enum CommandInput {
+    /// 取消当前执行。
+    Cancel,
+    /// 取消指定 Agent 的当前执行。
+    CancelAgent { role: String },
+    /// 更新当前会话工作目录。
+    UpdateCwd { cwd: String },
+    /// 重新加载共享配置。
+    ReloadConfig,
+    /// 手动触发上下文压缩。
+    CompressContext,
+    /// 清理上下文（重置摘要，LLM 下次只看到 system prompt）。
+    ResetContext,
+}
