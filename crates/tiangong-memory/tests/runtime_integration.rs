@@ -93,24 +93,19 @@ impl MockMemoryLlmServer {
                     break;
                 }
                 match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let request = read_http_request(&mut stream);
-                        let body = request
-                            .as_deref()
-                            .map(memory_llm_mock_response)
-                            .unwrap_or_else(|| serde_json::json!({"error": "bad request"}));
-                        let payload = body.to_string();
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                            payload.len(),
-                            payload
-                        );
-                        let _ = stream.write_all(response.as_bytes());
+                    Ok((stream, _)) => {
+                        // per-request 多线程：每个连接独立处理，避免 Deep Recall 的多轮
+                        // LLM 调用因串行排队而超时。Mock 响应是纯计算（无 IO），线程开销可忽略。
+                        std::thread::spawn(move || handle_mock_request(stream));
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(10));
                     }
-                    Err(_) => break,
+                    Err(err) => {
+                        // accept 错误不终止服务器：瞬时 socket 错误不应让后续 LLM 调用全部失败
+                        eprintln!("[mock-llm] accept 错误，继续轮询: {err}");
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
                 }
             }
         });
@@ -124,6 +119,22 @@ impl MockMemoryLlmServer {
     fn base_url(&self) -> String {
         self.base_url.clone()
     }
+}
+
+/// 处理单个 Mock LLM 请求（在独立线程中运行）。
+fn handle_mock_request(mut stream: std::net::TcpStream) {
+    let request = read_http_request(&mut stream);
+    let body = request
+        .as_deref()
+        .map(memory_llm_mock_response)
+        .unwrap_or_else(|| serde_json::json!({"error": "bad request"}));
+    let payload = body.to_string();
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        payload.len(),
+        payload
+    );
+    let _ = stream.write_all(response.as_bytes());
 }
 
 impl Drop for MockMemoryLlmServer {
@@ -1246,8 +1257,11 @@ async fn deep_recall_fixed_scenario_traces_cross_session_artifact_entity_and_dec
         base_url: mock_llm.base_url(),
         model: "memory-deep-recall-mock".to_string(),
         protocol: ProviderProtocol::OpenAiCompatible,
-        timeout: Duration::from_secs(5),
-        max_retries: 0,
+        // Deep Recall 会触发 5-7 轮 LLM 调用（裁决器 + 锚点规划器 + 整理器），
+        // CI 慢环境下累积延迟可能超过 5s。加大超时并允许 1 次重试，避免瞬时超时
+        // 导致 LLM 返回空 → deep→Normal 降级。
+        timeout: Duration::from_secs(15),
+        max_retries: 1,
     };
     let handle = start_with_options(MemoryOptions::new().with_model(model))
         .expect("启动带 mock Memory LLM 的 memory 失败");
