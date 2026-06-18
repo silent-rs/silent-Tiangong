@@ -51,6 +51,66 @@ impl AgentInputKind {
             payload,
         }))
     }
+
+    /// 便捷构造：用户消息（触发 turn）。
+    pub fn message(content: impl Into<String>) -> Self {
+        AgentInputKind::Message(MessageInput::UserMessage {
+            content: content.into(),
+            message_id: None,
+            media: Vec::new(),
+        })
+    }
+
+    /// 便捷构造：带 ID + 媒体的用户消息（前端预生成 ID 时使用）。
+    pub fn message_with_id(
+        content: impl Into<String>,
+        message_id: impl Into<String>,
+        media: Vec<tiangong_types::MediaAsset>,
+    ) -> Self {
+        AgentInputKind::Message(MessageInput::UserMessage {
+            content: content.into(),
+            message_id: Some(message_id.into()),
+            media,
+        })
+    }
+
+    /// 便捷构造：审批响应。
+    pub fn approval(request_id: impl Into<String>, approved: bool) -> Self {
+        AgentInputKind::Approval(ApprovalInput::Response {
+            request_id: request_id.into(),
+            approved,
+        })
+    }
+
+    /// 便捷构造：取消当前执行（cancel_flag 由 deliver 内部设置）。
+    pub fn cancel() -> Self {
+        AgentInputKind::Command(CommandInput::Cancel)
+    }
+
+    /// 便捷构造：取消指定 Agent。
+    pub fn cancel_agent(role: impl Into<String>) -> Self {
+        AgentInputKind::Command(CommandInput::CancelAgent { role: role.into() })
+    }
+
+    /// 便捷构造：更新工作目录。
+    pub fn update_cwd(cwd: impl Into<String>) -> Self {
+        AgentInputKind::Command(CommandInput::UpdateCwd { cwd: cwd.into() })
+    }
+
+    /// 便捷构造：重新加载配置。
+    pub fn reload_config() -> Self {
+        AgentInputKind::Command(CommandInput::ReloadConfig)
+    }
+
+    /// 便捷构造：手动触发上下文压缩。
+    pub fn compress_context() -> Self {
+        AgentInputKind::Command(CommandInput::CompressContext)
+    }
+
+    /// 便捷构造：重置上下文。
+    pub fn reset_context() -> Self {
+        AgentInputKind::Command(CommandInput::ResetContext)
+    }
 }
 
 /// 工具类注入的统一协议。

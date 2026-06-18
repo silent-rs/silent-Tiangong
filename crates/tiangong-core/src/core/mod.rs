@@ -194,7 +194,7 @@ impl TiangongCore {
     }
 
     pub fn cancel(&self) -> bool {
-        self.cancel_flag.store(true, Ordering::Release);
+        // cancel_flag 由 deliver 内部设置（见 AgentInput impl）
         use crate::agent_input::{AgentInput, AgentInputKind, CommandInput};
         self.deliver(AgentInputKind::Command(CommandInput::Cancel))
     }
@@ -302,6 +302,13 @@ impl TiangongCore {
 impl crate::agent_input::AgentInput for TiangongCore {
     fn deliver(&self, input: crate::agent_input::AgentInputKind) -> bool {
         use crate::agent_input::{AgentInputKind, ApprovalInput, CommandInput, MessageInput};
+
+        // Cancel 副作用内化：在发送命令前先置 cancel_flag（与原 cancel() 方法时序一致）。
+        // 这样外部调用 deliver(Cancel) 无需知道 cancel_flag 的存在，封装更完整。
+        if matches!(&input, AgentInputKind::Command(CommandInput::Cancel)) {
+            self.cancel_flag.store(true, Ordering::Release);
+        }
+
         match input {
             AgentInputKind::Message(MessageInput::UserMessage {
                 content,
