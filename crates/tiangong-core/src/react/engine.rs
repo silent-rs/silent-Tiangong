@@ -2226,11 +2226,6 @@ async fn maybe_inject_browser_update(
         return;
     }
 
-    let force = match last_snapshot {
-        Some(prev) => has_feedback || prev.url == snapshot.url,
-        None => false,
-    };
-
     let tabs: Vec<(String, String, String)> = snapshot
         .tabs
         .iter()
@@ -2255,7 +2250,6 @@ async fn maybe_inject_browser_update(
         text_len = snapshot.text.len(),
         events_len = snapshot.events.len(),
         has_feedback,
-        force,
         "browser auto content injected"
     );
     *last_snapshot = Some(snapshot);
