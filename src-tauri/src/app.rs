@@ -166,10 +166,11 @@ impl TiangongApp {
         false
     }
 
-    /// 注入用户终端操作到当前会话的对话链（仅 Agent 运行时生效）。
+    /// 注入用户终端操作到当前会话的对话链。
     ///
     /// 用户在终端提交命令时由 main.rs 的 `terminal:user_command` 事件监听器调用。
-    /// Agent 运行时命令注入对话链让 Agent 理解用户意图；Agent 空闲时安全跳过。
+    /// 无论 Agent 是否运行都注入：运行时 Agent 在下一轮看到；空闲时记入对话历史，
+    /// Agent 下次被唤醒时能看到。空闲时不触发新 turn（由 worker 主循环保证）。
     pub async fn inject_terminal_user_input(&self, command: String) -> bool {
         let guard = self.state.lock().await;
         let session_id = guard.active_session_id().to_string();
@@ -177,27 +178,19 @@ impl TiangongApp {
 
         let cores = self.lock_cores();
         if let Some(core) = cores.get(&session_id) {
-            if core.is_running() {
-                tracing::info!(
-                    session_id,
-                    command = %command,
-                    "向当前会话注入用户终端操作"
-                );
-                return core.inject_terminal_user_input(command);
-            } else {
-                tracing::debug!(
-                    session_id,
-                    command = %command,
-                    "跳过终端用户操作注入：当前会话 core 未运行"
-                );
-            }
-        } else {
-            tracing::debug!(
+            tracing::info!(
                 session_id,
                 command = %command,
-                "跳过终端用户操作注入：当前会话没有活跃 core"
+                running = core.is_running(),
+                "向当前会话注入用户终端操作"
             );
+            return core.inject_terminal_user_input(command);
         }
+        tracing::debug!(
+            session_id,
+            command = %command,
+            "跳过终端用户操作注入：当前会话没有活跃 core"
+        );
         false
     }
 

@@ -747,12 +747,17 @@ async fn worker_loop_async(
                 continue;
             }
             Command::InjectTerminalUserInput { command } => {
-                // Agent 空闲时收到用户终端操作：按设计不注入（不触发新 turn）。
-                // 仅记日志，命令被安全丢弃。用户操作只在 Agent 运行期间才有意义。
-                tracing::debug!(
+                // Agent 空闲时也注入用户终端操作到对话历史（但不触发新 turn）。
+                // 这样用户在终端的操作会被记录，Agent 下次被唤醒时能看到。
+                tracing::info!(
                     session_id = %session.id,
                     command = %command,
-                    "terminal user input received while idle, skipped (agent not running)"
+                    "inject terminal user input while idle (no turn triggered)"
+                );
+                crate::react::message::inject_terminal_user_input_to_session(
+                    &mut session,
+                    &stream_tx,
+                    &command,
                 );
             }
         }
