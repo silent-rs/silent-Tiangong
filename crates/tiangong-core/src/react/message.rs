@@ -434,6 +434,61 @@ pub(crate) fn inject_browser_content_to_session(
     );
 }
 
+/// 注入用户终端操作到会话（合成 assistant + tool 消息对），仿浏览器注入。
+///
+/// 用户在终端提交命令时触发。让 Agent 直接理解用户意图（如手动 cd 到其他目录、
+/// 启动了某个服务），而非仅感知"发生了干预"。
+/// tool_name 用 `terminal_user_input`，格式：`[用户终端操作] 用户在终端执行了: {command}`。
+/// 去重：最近 8 条 tool 消息中已有相同命令则跳过。
+pub(crate) fn inject_terminal_user_input_to_session(
+    session: &mut Session,
+    stream_tx: &StdSender<StreamEvent>,
+    command: &str,
+) {
+    let command = command.trim();
+    if command.is_empty() {
+        return;
+    }
+    let is_dup = session.messages.iter().rev().take(8).any(|msg| {
+        msg.role == MessageRole::Tool
+            && msg.tool_name.as_deref() == Some("terminal_user_input")
+            && msg.text_content().contains(command)
+    });
+    if is_dup {
+        tracing::debug!(
+            session_id = %session.id,
+            command,
+            "skip terminal user input injection: duplicate recent command"
+        );
+        return;
+    }
+    let output = format!("[用户终端操作] 用户在终端执行了: {command}");
+    let tool_call_id = format!("terminal_user_{}", scru128::new());
+    let tool_name = "terminal_user_input";
+    let assistant_text = "[自动感知] 用户在终端提交了命令".to_string();
+    let mut assistant_msg = Message::new(MessageRole::Assistant, assistant_text);
+    assistant_msg.tool_calls = vec![MessageToolCall {
+        id: tool_call_id.clone(),
+        name: tool_name.to_string(),
+        arguments: serde_json::json!({"command": command}),
+    }];
+    session.messages.push(assistant_msg);
+    let _ = stream_tx.send(StreamEvent::ToolResult {
+        name: tool_name.to_string(),
+        tool_call_id: Some(tool_call_id.clone()),
+        ok: true,
+        output: output.clone(),
+        full_output: Some(output.clone()),
+        media: vec![],
+    });
+    append_tool_result_message(session, &tool_call_id, tool_name, output, false);
+    tracing::info!(
+        session_id = %session.id,
+        command,
+        "terminal user input injected into session"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

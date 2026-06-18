@@ -296,6 +296,11 @@ impl TiangongCore {
         })
     }
 
+    /// 注入用户终端操作到对话链（用户在终端提交命令时触发）。
+    pub fn inject_terminal_user_input(&self, command: String) -> bool {
+        self.send_cmd(Command::InjectTerminalUserInput { command })
+    }
+
     /// 关闭并获取最终 session
     pub fn into_session(mut self) -> Session {
         let _ = self.send_cmd(Command::Shutdown);
@@ -736,6 +741,14 @@ async fn worker_loop_async(
             Command::ResetContext => {
                 reset_context_for_session(&mut session, &stream_tx, engine.as_ref().unwrap());
                 continue;
+            }
+            Command::InjectTerminalUserInput { command } => {
+                // Agent 空闲时也注入到对话历史（不触发新 turn）。
+                crate::react::message::inject_terminal_user_input_to_session(
+                    &mut session,
+                    &stream_tx,
+                    &command,
+                );
             }
         }
     }

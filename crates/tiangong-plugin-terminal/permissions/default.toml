@@ -12,6 +12,7 @@ permissions = [
     "allow-terminal-destroy-session",
     "allow-terminal-attach-session",
     "allow-terminal-session-send-input",
+    "allow-terminal-report-user-command",
     "allow-terminal-session-recent-output",
     "allow-terminal-session-info",
     "allow-terminal-session-set-cwd",
