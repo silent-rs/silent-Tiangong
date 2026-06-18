@@ -310,6 +310,51 @@ impl TiangongCore {
     }
 }
 
+impl crate::agent_input::AgentInput for TiangongCore {
+    fn deliver(&self, input: crate::agent_input::AgentInputKind) -> bool {
+        use crate::agent_input::{AgentInputKind, ApprovalInput, MessageInput, ToolInput};
+        match input {
+            AgentInputKind::Message(MessageInput::UserMessage {
+                content,
+                message_id,
+                media,
+            }) => self.send_cmd(Command::Message {
+                content,
+                message_id,
+                media,
+            }),
+            AgentInputKind::Tool(ToolInput::BrowserContent {
+                title,
+                url,
+                text,
+                tabs,
+                active_tab_id,
+                feedback,
+            }) => self.send_cmd(Command::InjectBrowserContent {
+                title,
+                url,
+                text,
+                tabs,
+                active_tab_id,
+                feedback,
+            }),
+            AgentInputKind::Tool(ToolInput::TerminalUserInput { .. }) => {
+                // 终端用户操作注入功能尚未实现（Command::InjectTerminalUserInput 变体待后续 PR 添加）
+                tracing::warn!("TerminalUserInput 尚未实现，忽略");
+                false
+            }
+            AgentInputKind::Approval(ApprovalInput::Response {
+                request_id,
+                approved,
+            }) => self.send_cmd(Command::Approval {
+                request_id,
+                approved,
+            }),
+            AgentInputKind::Command(_) => unreachable!("CommandInput 暂无变体"),
+        }
+    }
+}
+
 impl Drop for TiangongCore {
     fn drop(&mut self) {
         if let Some(ref tx) = self.cmd_tx {
