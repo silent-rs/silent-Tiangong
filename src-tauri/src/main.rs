@@ -444,6 +444,27 @@ fn run_gui() {
                 });
             });
 
+            // 监听终端用户命令提交事件，主动注入到当前 Agent 会话（仅 Agent 运行时）。
+            // 用户在终端面板输入命令回车时，前端上报完整命令行 → plugin emit 此事件。
+            let terminal_inject_handle = app.handle().clone();
+            app.listen("terminal:user_command", move |event| {
+                let payload = event.payload().to_string();
+                let Ok(data) = serde_json::from_str::<serde_json::Value>(&payload) else {
+                    warn!("终端用户命令 payload 解析失败");
+                    return;
+                };
+                let command = data["command"].as_str().unwrap_or("").to_string();
+                if command.trim().is_empty() {
+                    return;
+                }
+                let app_handle = terminal_inject_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = app_handle.state::<tiangong_app::TiangongApp>();
+                    let injected = state.inject_terminal_user_input(command).await;
+                    debug!(injected, "终端用户命令注入检查完成");
+                });
+            });
+
             let scheduler_ctx = state.create_scheduler_context();
             tauri::async_runtime::spawn(async move {
                 tiangong_scheduler::executor::restore_cron_jobs(scheduler_ctx).await;

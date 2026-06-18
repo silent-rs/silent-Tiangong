@@ -296,6 +296,15 @@ impl TiangongCore {
         })
     }
 
+    /// 注入用户终端操作到对话链（用户在终端提交命令时触发）。
+    ///
+    /// 仅在 Agent 运行时生效——命令经 worker → ReAct 循环的 drain_pending_commands_async
+    /// 处理，伪造 terminal_user_input tool result 注入对话。Agent 空闲时命令被丢弃
+    ///（不触发新 turn，避免用户每次敲命令都唤醒 Agent）。
+    pub fn inject_terminal_user_input(&self, command: String) -> bool {
+        self.send_cmd(Command::InjectTerminalUserInput { command })
+    }
+
     /// 关闭并获取最终 session
     pub fn into_session(mut self) -> Session {
         let _ = self.send_cmd(Command::Shutdown);
@@ -736,6 +745,15 @@ async fn worker_loop_async(
             Command::ResetContext => {
                 reset_context_for_session(&mut session, &stream_tx, engine.as_ref().unwrap());
                 continue;
+            }
+            Command::InjectTerminalUserInput { command } => {
+                // Agent 空闲时收到用户终端操作：按设计不注入（不触发新 turn）。
+                // 仅记日志，命令被安全丢弃。用户操作只在 Agent 运行期间才有意义。
+                tracing::debug!(
+                    session_id = %session.id,
+                    command = %command,
+                    "terminal user input received while idle, skipped (agent not running)"
+                );
             }
         }
     }

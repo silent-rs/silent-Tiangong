@@ -30,6 +30,12 @@ pub struct TerminalActivityTracker {
     busy_state: Mutex<TerminalBusyState>,
     /// 当前 Agent 命令期间用户是否干预过
     user_intervened: Mutex<bool>,
+    /// 用户在终端提交的命令行队列（回车截断的完整命令，供注入 Agent 对话链）。
+    ///
+    /// 与 `record_user_input`（逐按键翻转标记）区分：这里存的是完整命令文本，
+    /// 由前端在回车时通过 `terminal_report_user_command` 上报。Agent 运行期间
+    /// 这些命令会注入对话链，让 Agent 理解用户意图（而非仅感知"发生了干预"）。
+    pending_user_commands: Mutex<Vec<String>>,
 }
 
 impl TerminalActivityTracker {
@@ -38,6 +44,7 @@ impl TerminalActivityTracker {
             last_user_input: Mutex::new(Instant::now() - std::time::Duration::from_secs(3600)),
             busy_state: Mutex::new(TerminalBusyState::Idle),
             user_intervened: Mutex::new(false),
+            pending_user_commands: Mutex::new(Vec::new()),
         }
     }
 
@@ -97,6 +104,36 @@ impl TerminalActivityTracker {
                 v
             })
             .unwrap_or(false)
+    }
+
+    /// 记录用户在终端提交的完整命令行（回车截断后上报）。
+    ///
+    /// 与 `record_user_input`（逐按键翻转标记）不同，这里存储命令文本本身，
+    /// 供后续注入 Agent 对话链。空命令（纯空白）会被忽略。
+    pub(crate) fn record_user_command(&self, command: String) {
+        let trimmed = command.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if let Ok(mut cmds) = self.pending_user_commands.lock() {
+            cmds.push(trimmed.to_string());
+        }
+    }
+
+    /// 取出并清空用户命令队列（consume 语义，仿 `take_user_intervened`）。
+    ///
+    /// 当前注入走 emit 事件路径（terminal:user_command → main.rs 监听），
+    /// 此方法预留给未来"Agent 主动读取待处理命令"的场景。
+    #[allow(dead_code)]
+    pub(crate) fn take_user_commands(&self) -> Vec<String> {
+        self.pending_user_commands
+            .lock()
+            .map(|mut cmds| {
+                let v = cmds.clone();
+                cmds.clear();
+                v
+            })
+            .unwrap_or_default()
     }
 }
 

@@ -91,6 +91,18 @@ macro_rules! handle_plugin_commands {
                     has_feedback,
                 );
             }
+            Command::InjectTerminalUserInput { command } => {
+                tracing::info!(
+                    session_id = %$session.id,
+                    command = %command,
+                    "react loop inject terminal user input command"
+                );
+                crate::react::message::inject_terminal_user_input_to_session(
+                    $session,
+                    $stream_tx,
+                    &command,
+                );
+            }
             _ => unreachable!("handle_plugin_commands: unexpected command — 调用点 or-pattern 与宏分支不同步"),
         }
     };
@@ -691,7 +703,8 @@ impl ReactEngine {
                             | Some(Command::RegisterToolOverride { .. })
                             | Some(Command::RegisterToolSpecProvider { .. })
                             | Some(Command::RegisterPromptSectionProvider { .. })
-                            | Some(Command::InjectBrowserContent { .. })) => {
+                            | Some(Command::InjectBrowserContent { .. })
+                            | Some(Command::InjectTerminalUserInput { .. })) => {
                                 handle_plugin_commands!(cmd.unwrap(), &self.engine, session, stream_tx);
                             }
                             Some(Command::CompressContext) => {
@@ -1176,7 +1189,8 @@ impl ReactEngine {
                                 | Some(Command::RegisterToolOverride { .. })
                                 | Some(Command::RegisterToolSpecProvider { .. })
                                 | Some(Command::RegisterPromptSectionProvider { .. })
-                                | Some(Command::InjectBrowserContent { .. })) => {
+                                | Some(Command::InjectBrowserContent { .. })
+                                | Some(Command::InjectTerminalUserInput { .. })) => {
                                     handle_plugin_commands!(
                                         cmd.unwrap(),
                                         &self.engine,
@@ -1978,7 +1992,8 @@ impl ReactEngine {
                         | Some(Command::RegisterToolOverride { .. })
                         | Some(Command::RegisterToolSpecProvider { .. })
                         | Some(Command::RegisterPromptSectionProvider { .. })
-                        | Some(Command::InjectBrowserContent { .. })) => {
+                        | Some(Command::InjectBrowserContent { .. })
+                        | Some(Command::InjectTerminalUserInput { .. })) => {
                             handle_plugin_commands!(cmd.unwrap(), &self.engine, parent_session, stream_tx);
                         }
                         None => break,
@@ -2163,6 +2178,12 @@ fn drain_pending_commands_async(
                         feedback: feedback.as_deref(),
                     },
                     has_feedback,
+                );
+                injected_message = true;
+            }
+            Command::InjectTerminalUserInput { command } => {
+                crate::react::message::inject_terminal_user_input_to_session(
+                    session, stream_tx, &command,
                 );
                 injected_message = true;
             }

@@ -15,6 +15,7 @@
 - `allow-terminal-destroy-session`
 - `allow-terminal-attach-session`
 - `allow-terminal-session-send-input`
+- `allow-terminal-report-user-command`
 - `allow-terminal-session-recent-output`
 - `allow-terminal-session-info`
 - `allow-terminal-session-set-cwd`
@@ -184,6 +185,32 @@ Enables the terminal_recent_output command without any pre-configured scope.
 <td>
 
 Denies the terminal_recent_output command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-terminal:allow-terminal-report-user-command`
+
+</td>
+<td>
+
+Enables the terminal_report_user_command command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-terminal:deny-terminal-report-user-command`
+
+</td>
+<td>
+
+Denies the terminal_report_user_command command without any pre-configured scope.
 
 </td>
 </tr>

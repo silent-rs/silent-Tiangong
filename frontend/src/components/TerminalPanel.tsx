@@ -83,6 +83,9 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
   const createdTimeRef = useRef<number>(0);
   // 上次屏幕快照回传时间戳（节流用）
   const lastSnapshotPushRef = useRef<number>(0);
+  // 用户输入行缓冲：按 session_id 独立累积，遇回车截断上报完整命令行。
+  // 尽力而为的累积——粘贴多行、vi/REPL 等场景可能不准，但覆盖最常见的 shell 命令输入。
+  const inputBufferRef = useRef<Map<string, string>>(new Map());
 
   const [displayInfo, setDisplayInfo] = useState<{
     cwd: string;
@@ -218,6 +221,28 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
           term.onData((data) => {
             const sid = currentIdRef.current;
             if (sid) api.terminalSessionSendInput(sid, data).catch(() => {});
+
+            // 累积当前行，遇回车截断并上报完整命令（供注入 Agent 对话链）。
+            // 这是"尽力而为"的累积：处理可见字符、退格修正，忽略控制字符。
+            if (!sid) return;
+            if (data === '\r') {
+              const cmd = (inputBufferRef.current.get(sid) ?? '').trim();
+              if (cmd) {
+                api.terminalReportUserCommand(sid, cmd).catch(() => {});
+              }
+              inputBufferRef.current.set(sid, '');
+            } else if (data === '\x7f' || data === '\b') {
+              // 退格/删除：移除最后一个字符
+              const buf = inputBufferRef.current.get(sid) ?? '';
+              inputBufferRef.current.set(sid, buf.slice(0, -1));
+            } else if (data >= ' ' || data.length > 1) {
+              // 可见单字符或粘贴的多字符：仅保留可打印部分（滤除控制字符）
+              const cleaned = data.replace(/[\x00-\x1f\x7f]/g, '');
+              if (cleaned) {
+                const buf = inputBufferRef.current.get(sid) ?? '';
+                inputBufferRef.current.set(sid, buf + cleaned);
+              }
+            }
           });
 
           term.onResize(({ cols, rows }) => {

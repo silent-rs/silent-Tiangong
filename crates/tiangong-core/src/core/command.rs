@@ -55,6 +55,8 @@ pub(crate) enum Command {
         active_tab_id: Option<String>,
         feedback: Option<String>,
     },
+    /// 终端用户操作自动注入（用户在终端提交命令时触发，仅 Agent 运行时生效）
+    InjectTerminalUserInput { command: String },
     /// 关闭
     Shutdown,
 }
