@@ -235,8 +235,15 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
               // 退格/删除：移除最后一个字符
               const buf = inputBufferRef.current.get(sid) ?? '';
               inputBufferRef.current.set(sid, buf.slice(0, -1));
-            } else if (data >= ' ' || data.length > 1) {
-              // 可见单字符或粘贴的多字符：仅保留可打印部分（滤除控制字符）
+            } else if (data[0] === '\x1b') {
+              // ESC 开头的序列（方向键、功能键、终端报告响应等）：整体忽略，不累积。
+              // 这些不是用户输入的文本，混入会导致 command 乱码。
+            } else if (data.length === 1 && data >= ' ') {
+              // 可见单字符（ASCII 可打印范围）
+              const buf = inputBufferRef.current.get(sid) ?? '';
+              inputBufferRef.current.set(sid, buf + data);
+            } else if (data.length > 1) {
+              // 粘贴的多字符：仅保留可打印部分（滤除控制字符），避免 ANSI 序列污染
               const cleaned = data.replace(/[\x00-\x1f\x7f]/g, '');
               if (cleaned) {
                 const buf = inputBufferRef.current.get(sid) ?? '';

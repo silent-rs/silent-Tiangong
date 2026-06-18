@@ -169,31 +169,55 @@ impl TiangongApp {
     /// 注入用户终端操作到当前会话的对话链。
     ///
     /// 用户在终端提交命令时由 main.rs 的 `terminal:user_command` 事件监听器调用。
-    /// 无论 Agent 是否运行都注入：运行时 Agent 在下一轮看到；空闲时记入对话历史，
-    /// Agent 下次被唤醒时能看到。空闲时不触发新 turn（由 worker 主循环保证）。
+    /// 无论 Agent 是否运行都注入：
+    /// - core 存在时走 command channel（ReAct 循环内伪造 tool result 对，Agent 下轮看到）
+    /// - core 不存在时直接 append 到 session.messages（Agent 下次被唤醒时看到）
     pub async fn inject_terminal_user_input(&self, command: String) -> bool {
         let guard = self.state.lock().await;
         let session_id = guard.active_session_id().to_string();
         drop(guard);
 
-        let cores = self.lock_cores();
-        if let Some(core) = cores.get(&session_id) {
-            tracing::info!(
-                session_id,
-                command = %command,
-                running = core.is_running(),
-                "向当前会话注入用户终端操作"
-            );
-            let sent = core.inject_terminal_user_input(command);
-            tracing::info!(session_id, sent, "终端用户操作注入命令已发送到 core");
-            return sent;
-        }
-        tracing::warn!(
+        // 优先走 core command channel（ReAct 循环内的标准注入路径）
+        let core_exists = {
+            let cores = self.lock_cores();
+            if let Some(core) = cores.get(&session_id) {
+                tracing::info!(
+                    session_id,
+                    command = %command,
+                    running = core.is_running(),
+                    "向当前会话注入用户终端操作（via core）"
+                );
+                let sent = core.inject_terminal_user_input(command.clone());
+                tracing::info!(session_id, sent, "终端用户操作注入命令已发送到 core");
+                return sent;
+            }
+            false
+        };
+
+        // core 不存在时回退：直接 append 到 session.messages
+        // 此时不在 ReAct 循环中，不需要伪造 tool_call 配对，直接 append Tool 消息即可。
+        // Agent 下次被唤醒执行时在 messages 里能看到这条记录。
+        tracing::info!(
             session_id,
             command = %command,
-            "跳过终端用户操作注入：当前会话没有活跃 core（cores 中无此 session）"
+            core_exists,
+            "core 不存在，直接 append 用户终端操作到 session"
         );
-        false
+        let mut state = self.state.lock().await;
+        let sessions = state.sessions_mut();
+        if let Some(session) = sessions.iter_mut().find(|s| s.id == session_id) {
+            let content = format!("[用户终端操作] 用户在终端执行了: {command}");
+            session.append_message(tiangong_types::MessageRole::Tool, content);
+            session.persist_to_disk();
+            true
+        } else {
+            tracing::warn!(
+                session_id,
+                command = %command,
+                "用户终端操作注入失败：session 不存在"
+            );
+            false
+        }
     }
 
     fn lock_cores(&self) -> std::sync::MutexGuard<'_, HashMap<String, TiangongCore>> {
