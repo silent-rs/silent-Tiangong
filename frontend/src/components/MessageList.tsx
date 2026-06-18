@@ -1204,23 +1204,28 @@ export function MessageList() {
       </div>
     </ScrollArea>
 
-    {/* 右侧百分比磁吸轨道：离开底部时显示。替代原生滚动条，贴右边缘。
+    {/* 右侧百分比磁吸轨道：离开底部时，鼠标移入右侧区域才显示。替代原生滚动条，贴右边缘。
         ≤9 条平铺等间距；>9 条按游标（hover/激活）做高斯窗口，渲染离游标最近的 9 个点，
         中心点最大并向两侧正态衰减；每点显示预览，点 hover 可点选跳转，
-        点击轨道空白按百分比跳转；背景条带滚动位置 thumb 指示当前视图 */}
+        点击轨道空白按百分比跳转；背景条带滚动位置 thumb 指示当前视图。
+        外层为 group + 透明感应条（w-6）捕获 hover；内部交互层用 group-hover 控制显隐，
+        避免感应区过大遮挡消息内容。 */}
     {userCount > 0 && (
       <div
-        className={`pointer-events-none absolute inset-y-0 right-0 z-20 flex flex-col items-end transition-all duration-200 ${
-          isAtBottom
-            ? 'opacity-0 translate-x-2'
-            : 'opacity-100 translate-x-0'
+        className={`group absolute inset-y-0 right-0 z-20 flex flex-col items-end transition-opacity duration-200 ${
+          isAtBottom ? 'opacity-0' : 'opacity-100'
         }`}
       >
+        {/* 透明 hover 感应条：贴右边缘（24px 宽），仅捕获鼠标进出触发 group-hover。
+            不影响消息内容交互（消息内容不延伸到最右 24px 内的概率极低）。 */}
+        <div className="absolute inset-y-0 right-0 w-6" />
         {/* 轨道主体：百分比磁吸。点列块整体跟随鼠标 Y 平移（中心点贴鼠标），
             内容随游标变化 —— 跟随、可点选、百分比三者统一 */}
         <div
           ref={railTrackRef}
-          className="pointer-events-auto relative flex min-h-0 flex-1 flex-col items-end py-1"
+          className={`pointer-events-none relative flex min-h-0 flex-1 flex-col items-end py-1 transition-opacity duration-150 opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 ${
+            railHovered ? 'pointer-events-auto !opacity-100' : ''
+          }`}
           onMouseMove={(e) => {
             const rect = e.currentTarget.getBoundingClientRect();
             const ratio = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
