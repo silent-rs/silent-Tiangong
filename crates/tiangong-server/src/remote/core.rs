@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::api::SharedState;
 use crate::remote::event::{EventBus, TiangongEvent};
 use anyhow::{Result, anyhow};
-use tiangong_core::agent_input::AgentInput;
+use tiangong_core::agent_input::{AgentInput, AgentInputKind};
 use tiangong_core::core_config::CoreConfigProvider;
 use tiangong_core::permission::TrustMode;
 use tiangong_core::session::{Message, MessageRole, MessageToolCall, Session, now_text};
@@ -66,7 +66,7 @@ impl ServerCoreManager {
             return Err(anyhow!("会话 core 不存在：{session_id}"));
         };
         let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
-        core.deliver(tiangong_core::agent_input::AgentInputKind::message_with_id(
+        core.deliver(AgentInputKind::message_with_id(
             content, msg_id, media,
         ));
         Ok(())
@@ -93,7 +93,7 @@ impl ServerCoreManager {
                 return Err(anyhow!("会话 core 不存在：{session_id}"));
             };
             let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
-            core.deliver(tiangong_core::agent_input::AgentInputKind::message_with_id(
+            core.deliver(AgentInputKind::message_with_id(
                 content, msg_id, media,
             ));
         }

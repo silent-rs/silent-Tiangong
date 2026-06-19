@@ -1,7 +1,7 @@
 use crate::app::TiangongApp;
 use crate::view::*;
 use base64::{engine::general_purpose, Engine as _};
-use tiangong_core::agent_input::AgentInput;
+use tiangong_core::agent_input::{AgentInput, AgentInputKind};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
@@ -679,7 +679,7 @@ async fn send_message_inner(
     {
         let cores = state.cores.lock().map_err(|e| e.to_string())?;
         if let Some(core) = cores.get(&sid) {
-            if !core.deliver(tiangong_core::agent_input::AgentInputKind::message_with_id(
+            if !core.deliver(AgentInputKind::message_with_id(
                 content.clone(),
                 user_message_id,
                 command_media,
@@ -1490,7 +1490,7 @@ pub async fn edit_and_resend(
     {
         let cores = state.cores.lock().map_err(|e| e.to_string())?;
         if let Some(core) = cores.get(&sid) {
-            if !core.deliver(tiangong_core::agent_input::AgentInputKind::message_with_id(
+            if !core.deliver(AgentInputKind::message_with_id(
                 new_content.clone(),
                 message_id.clone(),
                 message_media.clone(),
@@ -2268,7 +2268,7 @@ pub async fn set_workspace_dir(
     if let Some(sid) = &active_session_id {
         let cores = state.cores.lock().map_err(|e| e.to_string())?;
         if let Some(core) = cores.get(sid) {
-            let _ = core.deliver(tiangong_core::agent_input::AgentInputKind::update_cwd(
+            let _ = core.deliver(AgentInputKind::update_cwd(
                 workspace_dir.clone(),
             ));
         }
@@ -2295,7 +2295,7 @@ pub async fn set_session_cwd(cwd: String, state: State<'_, TiangongApp>) -> Resu
     {
         let cores = state.cores.lock().map_err(|e| e.to_string())?;
         if let Some(core) = cores.get(&active_session_id) {
-            let _ = core.deliver(tiangong_core::agent_input::AgentInputKind::update_cwd(
+            let _ = core.deliver(AgentInputKind::update_cwd(
                 cwd.clone(),
             ));
         }

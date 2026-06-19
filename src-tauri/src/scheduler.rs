@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tiangong_core::agent_input::AgentInput;
+use tiangong_core::agent_input::{AgentInput, AgentInputKind};
 use tiangong_core::core::TiangongCore;
 use tiangong_core::core_config::CoreConfigProvider;
 use tiangong_core::permission::TrustMode;
@@ -49,7 +49,7 @@ impl SchedulerContext for DesktopSchedulerContext {
         let core = cores
             .get(session_id)
             .ok_or_else(|| anyhow::anyhow!("定时任务 core 不存在：{session_id}"))?;
-        if !core.deliver(tiangong_core::agent_input::AgentInputKind::message(content)) {
+        if !core.deliver(AgentInputKind::message(content)) {
             return Err(anyhow::anyhow!("定时任务 core 命令通道已关闭"));
         }
         Ok(())

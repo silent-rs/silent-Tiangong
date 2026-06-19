@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use tiangong_config::load_tiangong_config;
-use tiangong_core::agent_input::AgentInput;
+use tiangong_core::agent_input::{AgentInput, AgentInputKind};
 use tiangong_core::core::TiangongCore;
 use tiangong_core::core_config::CoreConfigProvider;
 use tokio::sync::Mutex as AsyncMutex;
@@ -201,7 +201,7 @@ impl TiangongApp {
         self.config.replace(next);
         if let Ok(cores) = self.cores.lock() {
             for core in cores.values() {
-                let _ = core.deliver(tiangong_core::agent_input::AgentInputKind::reload_config());
+                let _ = core.deliver(AgentInputKind::reload_config());
             }
         }
         Ok(())
@@ -236,8 +236,8 @@ impl TiangongApp {
         let mut cores = self.lock_cores();
         if let Some(core) = cores.get(session_id) {
             if core.is_running() {
-                let _ = core.deliver(tiangong_core::agent_input::AgentInputKind::reload_config());
-                let _ = core.deliver(tiangong_core::agent_input::AgentInputKind::update_cwd(
+                let _ = core.deliver(AgentInputKind::reload_config());
+                let _ = core.deliver(AgentInputKind::update_cwd(
                     session.cwd.clone(),
                 ));
                 core.set_trust_mode(session.trust_mode);
@@ -294,13 +294,13 @@ impl TiangongApp {
         let mut cores = self.lock_cores();
         if let Some(core) = cores.get(session_id) {
             let sent = if let Some(message_id) = message_id {
-                core.deliver(tiangong_core::agent_input::AgentInputKind::message_with_id(
+                core.deliver(AgentInputKind::message_with_id(
                     content,
                     message_id,
                     Vec::new(),
                 ))
             } else {
-                core.deliver(tiangong_core::agent_input::AgentInputKind::message(content))
+                core.deliver(AgentInputKind::message(content))
             };
             if !sent {
                 warn!(session_id, "TiangongCore 命令通道已关闭，移除僵尸 core");
@@ -322,7 +322,7 @@ impl TiangongApp {
     pub fn cancel_core(&self, session_id: &str) {
         let cores = self.lock_cores();
         if let Some(core) = cores.get(session_id) {
-            core.deliver(tiangong_core::agent_input::AgentInputKind::cancel());
+            core.deliver(AgentInputKind::cancel());
         }
     }
 
@@ -332,7 +332,7 @@ impl TiangongApp {
         cores
             .get(session_id)
             .map(|core| {
-                core.deliver(tiangong_core::agent_input::AgentInputKind::cancel_agent(
+                core.deliver(AgentInputKind::cancel_agent(
                     role,
                 ))
             })
@@ -343,7 +343,7 @@ impl TiangongApp {
     pub fn respond_approval_to_core(&self, session_id: &str, request_id: String, approved: bool) {
         let cores = self.lock_cores();
         if let Some(core) = cores.get(session_id) {
-            core.deliver(tiangong_core::agent_input::AgentInputKind::approval(
+            core.deliver(AgentInputKind::approval(
                 request_id, approved,
             ));
         }
@@ -381,7 +381,7 @@ impl TiangongApp {
         cores
             .get(session_id)
             .map(|core| {
-                core.deliver(tiangong_core::agent_input::AgentInputKind::compress_context())
+                core.deliver(AgentInputKind::compress_context())
             })
             .unwrap_or(false)
     }
@@ -391,7 +391,7 @@ impl TiangongApp {
         let cores = self.lock_cores();
         cores
             .get(session_id)
-            .map(|core| core.deliver(tiangong_core::agent_input::AgentInputKind::reset_context()))
+            .map(|core| core.deliver(AgentInputKind::reset_context()))
             .unwrap_or(false)
     }
 

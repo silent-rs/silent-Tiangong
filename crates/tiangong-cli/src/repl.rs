@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use tiangong_config::load_tiangong_config;
-use tiangong_core::agent_input::AgentInput;
+use tiangong_core::agent_input::{AgentInput, AgentInputKind};
 use tiangong_core::app_state::TiangongState;
 use tiangong_core::core::{TiangongCore, shutdown_memory_registry_blocking};
 use tiangong_types::{SessionStreamEvent, StreamEvent};
@@ -84,7 +84,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         }
 
         // 发送消息
-        core.deliver(tiangong_core::agent_input::AgentInputKind::message(
+        core.deliver(AgentInputKind::message(
             trimmed.to_string(),
         ));
 
@@ -231,7 +231,7 @@ impl ResponseState {
                         }
                     }
                 };
-                core.deliver(tiangong_core::agent_input::AgentInputKind::approval(
+                core.deliver(AgentInputKind::approval(
                     request_id.clone(),
                     approved,
                 ));
