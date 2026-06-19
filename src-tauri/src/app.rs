@@ -237,9 +237,7 @@ impl TiangongApp {
         if let Some(core) = cores.get(session_id) {
             if core.is_running() {
                 let _ = core.deliver(AgentInputKind::reload_config());
-                let _ = core.deliver(AgentInputKind::update_cwd(
-                    session.cwd.clone(),
-                ));
+                let _ = core.deliver(AgentInputKind::update_cwd(session.cwd.clone()));
                 core.set_trust_mode(session.trust_mode);
                 return (session_id.to_string(), false); // 已存在，复用
             }
@@ -331,11 +329,7 @@ impl TiangongApp {
         let cores = self.lock_cores();
         cores
             .get(session_id)
-            .map(|core| {
-                core.deliver(AgentInputKind::cancel_agent(
-                    role,
-                ))
-            })
+            .map(|core| core.deliver(AgentInputKind::cancel_agent(role)))
             .unwrap_or(false)
     }
 
@@ -343,9 +337,7 @@ impl TiangongApp {
     pub fn respond_approval_to_core(&self, session_id: &str, request_id: String, approved: bool) {
         let cores = self.lock_cores();
         if let Some(core) = cores.get(session_id) {
-            core.deliver(AgentInputKind::approval(
-                request_id, approved,
-            ));
+            core.deliver(AgentInputKind::approval(request_id, approved));
         }
     }
 
@@ -380,9 +372,7 @@ impl TiangongApp {
         let cores = self.lock_cores();
         cores
             .get(session_id)
-            .map(|core| {
-                core.deliver(AgentInputKind::compress_context())
-            })
+            .map(|core| core.deliver(AgentInputKind::compress_context()))
             .unwrap_or(false)
     }
 

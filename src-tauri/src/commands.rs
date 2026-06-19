@@ -1,7 +1,6 @@
 use crate::app::TiangongApp;
 use crate::view::*;
 use base64::{engine::general_purpose, Engine as _};
-use tiangong_core::agent_input::{AgentInput, AgentInputKind};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
@@ -11,6 +10,7 @@ use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 use tauri_plugin_notification::{NotificationExt, PermissionState};
+use tiangong_core::agent_input::{AgentInput, AgentInputKind};
 use tracing::{debug, warn};
 
 const MAX_ATTACHMENT_BASE64_BYTES: u64 = 50 * 1024 * 1024;
@@ -2268,9 +2268,7 @@ pub async fn set_workspace_dir(
     if let Some(sid) = &active_session_id {
         let cores = state.cores.lock().map_err(|e| e.to_string())?;
         if let Some(core) = cores.get(sid) {
-            let _ = core.deliver(AgentInputKind::update_cwd(
-                workspace_dir.clone(),
-            ));
+            let _ = core.deliver(AgentInputKind::update_cwd(workspace_dir.clone()));
         }
     }
 
@@ -2295,9 +2293,7 @@ pub async fn set_session_cwd(cwd: String, state: State<'_, TiangongApp>) -> Resu
     {
         let cores = state.cores.lock().map_err(|e| e.to_string())?;
         if let Some(core) = cores.get(&active_session_id) {
-            let _ = core.deliver(AgentInputKind::update_cwd(
-                cwd.clone(),
-            ));
+            let _ = core.deliver(AgentInputKind::update_cwd(cwd.clone()));
         }
     }
 

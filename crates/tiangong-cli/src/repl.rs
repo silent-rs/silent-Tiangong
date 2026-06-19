@@ -84,9 +84,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         }
 
         // 发送消息
-        core.deliver(AgentInputKind::message(
-            trimmed.to_string(),
-        ));
+        core.deliver(AgentInputKind::message(trimmed.to_string()));
 
         // 处理响应流
         handle_response(&stream_rx, &core);
@@ -231,10 +229,7 @@ impl ResponseState {
                         }
                     }
                 };
-                core.deliver(AgentInputKind::approval(
-                    request_id.clone(),
-                    approved,
-                ));
+                core.deliver(AgentInputKind::approval(request_id.clone(), approved));
                 if approved {
                     output::status("已允许");
                 } else {
