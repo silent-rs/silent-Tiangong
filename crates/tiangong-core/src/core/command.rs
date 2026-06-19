@@ -46,14 +46,13 @@ pub(crate) enum Command {
     RegisterPromptSectionProvider {
         provider: Arc<dyn PromptSectionProvider>,
     },
-    /// 浏览器页面内容自动注入（页面加载完成时触发）
-    InjectBrowserContent {
-        title: String,
-        url: String,
-        text: String,
-        tabs: Vec<(String, String, String)>,
-        active_tab_id: Option<String>,
-        feedback: Option<String>,
+    /// 工具类内容自动注入（浏览器页面、终端用户操作等，不触发 turn）。
+    ///
+    /// 统一入口：tool_name + JSON payload 由 ToolInput trait 的 render 产出，
+    /// worker 侧统一调用 inject_tool_to_session 处理。
+    InjectTool {
+        tool_name: String,
+        payload: serde_json::Value,
     },
     /// 关闭
     Shutdown,

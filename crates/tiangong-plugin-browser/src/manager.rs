@@ -912,7 +912,7 @@ impl BrowserManager {
                 })
                 .ok()?;
         }
-        rx.recv_timeout(Duration::from_secs(10)).ok()
+        rx.recv_timeout(Duration::from_secs(15)).ok()
     }
 
     pub(crate) fn drain_events(&self) -> Vec<BrowserEvent> {

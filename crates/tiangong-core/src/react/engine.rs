@@ -33,7 +33,7 @@ use tiangong_types::{StreamEvent, StreamToolCall};
 use crate::agent_team::lifecycle::TeamContext;
 
 /// 处理插件相关的 Command 变体（SetPageFetcher / SetTerminalProvider / RegisterToolOverride /
-/// RegisterToolSpecProvider / RegisterPromptSectionProvider / InjectBrowserContent）。
+/// RegisterToolSpecProvider / RegisterPromptSectionProvider / InjectTool）。
 /// 消除 4 处 match 分支的重复代码。
 ///
 /// 调用点通过 or-pattern (`cmd @ (Some(Command::SetPageFetcher { .. }) | ...)`) 限定
@@ -58,37 +58,9 @@ macro_rules! handle_plugin_commands {
             Command::RegisterPromptSectionProvider { provider } => {
                 $engine.register_prompt_section_provider(provider);
             }
-            Command::InjectBrowserContent {
-                title,
-                url,
-                text,
-                tabs,
-                active_tab_id,
-                feedback,
-            } => {
-                let has_feedback = feedback
-                    .as_deref()
-                    .map(|s| !s.trim().is_empty())
-                    .unwrap_or(false);
-                tracing::info!(
-                    session_id = %$session.id,
-                    url = %url,
-                    text_len = text.len(),
-                    has_feedback,
-                    "react loop inject browser content command"
-                );
-                crate::react::message::inject_browser_content_to_session(
-                    $session,
-                    $stream_tx,
-                    &crate::react::message::BrowserContent {
-                        title: &title,
-                        url: &url,
-                        text: &text,
-                        tabs: &tabs,
-                        active_tab_id: active_tab_id.as_deref(),
-                        feedback: feedback.as_deref(),
-                    },
-                    has_feedback,
+            Command::InjectTool { tool_name, payload } => {
+                crate::react::message::inject_tool_to_session(
+                    $session, $stream_tx, &tool_name, &payload,
                 );
             }
             _ => unreachable!("handle_plugin_commands: unexpected command — 调用点 or-pattern 与宏分支不同步"),
@@ -691,7 +663,7 @@ impl ReactEngine {
                             | Some(Command::RegisterToolOverride { .. })
                             | Some(Command::RegisterToolSpecProvider { .. })
                             | Some(Command::RegisterPromptSectionProvider { .. })
-                            | Some(Command::InjectBrowserContent { .. })) => {
+                            | Some(Command::InjectTool { .. })) => {
                                 handle_plugin_commands!(cmd.unwrap(), &self.engine, session, stream_tx);
                             }
                             Some(Command::CompressContext) => {
@@ -1176,7 +1148,7 @@ impl ReactEngine {
                                 | Some(Command::RegisterToolOverride { .. })
                                 | Some(Command::RegisterToolSpecProvider { .. })
                                 | Some(Command::RegisterPromptSectionProvider { .. })
-                                | Some(Command::InjectBrowserContent { .. })) => {
+                                | Some(Command::InjectTool { .. })) => {
                                     handle_plugin_commands!(
                                         cmd.unwrap(),
                                         &self.engine,
@@ -1978,7 +1950,7 @@ impl ReactEngine {
                         | Some(Command::RegisterToolOverride { .. })
                         | Some(Command::RegisterToolSpecProvider { .. })
                         | Some(Command::RegisterPromptSectionProvider { .. })
-                        | Some(Command::InjectBrowserContent { .. })) => {
+                        | Some(Command::InjectTool { .. })) => {
                             handle_plugin_commands!(cmd.unwrap(), &self.engine, parent_session, stream_tx);
                         }
                         None => break,
@@ -2139,30 +2111,9 @@ fn drain_pending_commands_async(
             | Command::RegisterPromptSectionProvider { .. }) => {
                 handle_plugin_commands!(cmd, engine, session, stream_tx);
             }
-            Command::InjectBrowserContent {
-                title,
-                url,
-                text,
-                tabs,
-                active_tab_id,
-                feedback,
-            } => {
-                let has_feedback = feedback
-                    .as_deref()
-                    .map(|s| !s.trim().is_empty())
-                    .unwrap_or(false);
-                crate::react::message::inject_browser_content_to_session(
-                    session,
-                    stream_tx,
-                    &crate::react::message::BrowserContent {
-                        title: &title,
-                        url: &url,
-                        text: &text,
-                        tabs: &tabs,
-                        active_tab_id: active_tab_id.as_deref(),
-                        feedback: feedback.as_deref(),
-                    },
-                    has_feedback,
+            Command::InjectTool { tool_name, payload } => {
+                crate::react::message::inject_tool_to_session(
+                    session, stream_tx, &tool_name, &payload,
                 );
                 injected_message = true;
             }
@@ -2275,28 +2226,23 @@ async fn maybe_inject_browser_update(
         return;
     }
 
-    let force = match last_snapshot {
-        Some(prev) => has_feedback || prev.url == snapshot.url,
-        None => false,
-    };
-
     let tabs: Vec<(String, String, String)> = snapshot
         .tabs
         .iter()
         .map(|t| (t.id.clone(), t.url.clone(), t.title.clone()))
         .collect();
-    crate::react::message::inject_browser_content_to_session(
+    crate::react::message::inject_tool_to_session(
         session,
         stream_tx,
-        &crate::react::message::BrowserContent {
-            title: &snapshot.title,
-            url: &snapshot.url,
-            text: &snapshot.text,
-            tabs: &tabs,
-            active_tab_id: snapshot.active_tab_id.as_deref(),
-            feedback: feedback.as_deref(),
-        },
-        force,
+        "browser_data",
+        &serde_json::json!({
+            "title": snapshot.title,
+            "url": snapshot.url,
+            "text": snapshot.text,
+            "tabs": tabs,
+            "active_tab_id": snapshot.active_tab_id,
+            "feedback": feedback,
+        }),
     );
     tracing::info!(
         session_id = %session.id,
@@ -2304,7 +2250,6 @@ async fn maybe_inject_browser_update(
         text_len = snapshot.text.len(),
         events_len = snapshot.events.len(),
         has_feedback,
-        force,
         "browser auto content injected"
     );
     *last_snapshot = Some(snapshot);

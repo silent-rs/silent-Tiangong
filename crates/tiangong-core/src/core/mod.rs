@@ -160,61 +160,8 @@ impl TiangongCore {
         tx.send(cmd).is_ok()
     }
 
-    pub fn send_message(&self, content: String) -> bool {
-        self.send_cmd(Command::Message {
-            content,
-            message_id: None,
-            media: Vec::new(),
-        })
-    }
-
-    pub fn send_message_with_id(
-        &self,
-        content: String,
-        message_id: String,
-        media: Vec<tiangong_types::MediaAsset>,
-    ) -> bool {
-        self.send_cmd(Command::Message {
-            content,
-            message_id: Some(message_id),
-            media,
-        })
-    }
-
-    pub fn update_cwd(&self, cwd: String) -> bool {
-        self.send_cmd(Command::UpdateCwd { cwd })
-    }
-
-    pub fn reload_config(&self) -> bool {
-        self.send_cmd(Command::ReloadConfig)
-    }
-
-    pub fn cancel(&self) -> bool {
-        self.cancel_flag.store(true, Ordering::Release);
-        self.send_cmd(Command::Cancel)
-    }
-
     pub fn cancel_flag(&self) -> Arc<AtomicBool> {
         self.cancel_flag.clone()
-    }
-
-    pub fn cancel_agent(&self, role: String) -> bool {
-        self.send_cmd(Command::CancelAgent { role })
-    }
-
-    pub fn compress_context(&self) -> bool {
-        self.send_cmd(Command::CompressContext)
-    }
-
-    pub fn reset_context(&self) -> bool {
-        self.send_cmd(Command::ResetContext)
-    }
-
-    pub fn respond_approval(&self, request_id: String, approved: bool) -> bool {
-        self.send_cmd(Command::Approval {
-            request_id,
-            approved,
-        })
     }
 
     pub fn session_id(&self) -> &str {
@@ -276,26 +223,6 @@ impl TiangongCore {
         let _ = self.send_cmd(Command::RegisterPromptSectionProvider { provider });
     }
 
-    /// 注入浏览器页面内容到当前会话（不触发 LLM 调用）
-    pub fn inject_browser_content(
-        &self,
-        title: String,
-        url: String,
-        text: String,
-        tabs: Vec<(String, String, String)>,
-        active_tab_id: Option<String>,
-        feedback: Option<String>,
-    ) -> bool {
-        self.send_cmd(Command::InjectBrowserContent {
-            title,
-            url,
-            text,
-            tabs,
-            active_tab_id,
-            feedback,
-        })
-    }
-
     /// 关闭并获取最终 session
     pub fn into_session(mut self) -> Session {
         let _ = self.send_cmd(Command::Shutdown);
@@ -307,6 +234,53 @@ impl TiangongCore {
             }
         }
         Session::new("recovered")
+    }
+}
+
+impl crate::agent_input::AgentInput for TiangongCore {
+    fn deliver(&self, input: crate::agent_input::AgentInputKind) -> bool {
+        use crate::agent_input::{AgentInputKind, ApprovalInput, CommandInput, MessageInput};
+
+        // Cancel 副作用内化：在发送命令前先置 cancel_flag（与原 cancel() 方法时序一致）。
+        // 这样外部调用 deliver(Cancel) 无需知道 cancel_flag 的存在，封装更完整。
+        if matches!(&input, AgentInputKind::Command(CommandInput::Cancel)) {
+            self.cancel_flag.store(true, Ordering::Release);
+        }
+
+        match input {
+            AgentInputKind::Message(MessageInput::UserMessage {
+                content,
+                message_id,
+                media,
+            }) => self.send_cmd(Command::Message {
+                content,
+                message_id,
+                media,
+            }),
+            AgentInputKind::Tool(tool) => {
+                // ToolInput trait object：提取 tool_name + JSON payload，发送统一 InjectTool 命令。
+                // worker 侧根据 tool_name 决定呈现格式（见 inject_tool_to_session）。
+                self.send_cmd(Command::InjectTool {
+                    tool_name: tool.tool_name().to_string(),
+                    payload: tool.render(),
+                })
+            }
+            AgentInputKind::Approval(ApprovalInput::Response {
+                request_id,
+                approved,
+            }) => self.send_cmd(Command::Approval {
+                request_id,
+                approved,
+            }),
+            AgentInputKind::Command(cmd) => match cmd {
+                CommandInput::Cancel => self.send_cmd(Command::Cancel),
+                CommandInput::CancelAgent { role } => self.send_cmd(Command::CancelAgent { role }),
+                CommandInput::UpdateCwd { cwd } => self.send_cmd(Command::UpdateCwd { cwd }),
+                CommandInput::ReloadConfig => self.send_cmd(Command::ReloadConfig),
+                CommandInput::CompressContext => self.send_cmd(Command::CompressContext),
+                CommandInput::ResetContext => self.send_cmd(Command::ResetContext),
+            },
+        }
     }
 }
 
@@ -695,37 +669,12 @@ async fn worker_loop_async(
                 }
                 continue;
             }
-            Command::InjectBrowserContent {
-                title,
-                url,
-                text,
-                tabs,
-                active_tab_id,
-                feedback,
-            } => {
-                let has_feedback = feedback
-                    .as_deref()
-                    .map(|s| !s.trim().is_empty())
-                    .unwrap_or(false);
-                tracing::info!(
-                    session_id = %session.id,
-                    url = %url,
-                    text_len = text.len(),
-                    has_feedback,
-                    "inject browser content command received"
-                );
-                crate::react::message::inject_browser_content_to_session(
+            Command::InjectTool { tool_name, payload } => {
+                crate::react::message::inject_tool_to_session(
                     &mut session,
                     &stream_tx,
-                    &crate::react::message::BrowserContent {
-                        title: &title,
-                        url: &url,
-                        text: &text,
-                        tabs: &tabs,
-                        active_tab_id: active_tab_id.as_deref(),
-                        feedback: feedback.as_deref(),
-                    },
-                    has_feedback,
+                    &tool_name,
+                    &payload,
                 );
                 let _ = stream_tx.send(StreamEvent::Done { usage: None });
             }

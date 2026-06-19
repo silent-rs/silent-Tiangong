@@ -10,6 +10,7 @@ use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 use tauri_plugin_notification::{NotificationExt, PermissionState};
+use tiangong_core::agent_input::{AgentInput, AgentInputKind};
 use tracing::{debug, warn};
 
 const MAX_ATTACHMENT_BASE64_BYTES: u64 = 50 * 1024 * 1024;
@@ -678,7 +679,11 @@ async fn send_message_inner(
     {
         let cores = state.cores.lock().map_err(|e| e.to_string())?;
         if let Some(core) = cores.get(&sid) {
-            if !core.send_message_with_id(content.clone(), user_message_id, command_media) {
+            if !core.deliver(AgentInputKind::message_with_id(
+                content.clone(),
+                user_message_id,
+                command_media,
+            )) {
                 return Err("会话 core 已停止，请重试发送".to_string());
             }
         }
@@ -1485,11 +1490,11 @@ pub async fn edit_and_resend(
     {
         let cores = state.cores.lock().map_err(|e| e.to_string())?;
         if let Some(core) = cores.get(&sid) {
-            if !core.send_message_with_id(
+            if !core.deliver(AgentInputKind::message_with_id(
                 new_content.clone(),
                 message_id.clone(),
                 message_media.clone(),
-            ) {
+            )) {
                 return Err("会话 core 已停止，请重试".to_string());
             }
         }
@@ -2263,7 +2268,7 @@ pub async fn set_workspace_dir(
     if let Some(sid) = &active_session_id {
         let cores = state.cores.lock().map_err(|e| e.to_string())?;
         if let Some(core) = cores.get(sid) {
-            let _ = core.update_cwd(workspace_dir.clone());
+            let _ = core.deliver(AgentInputKind::update_cwd(workspace_dir.clone()));
         }
     }
 
@@ -2288,7 +2293,7 @@ pub async fn set_session_cwd(cwd: String, state: State<'_, TiangongApp>) -> Resu
     {
         let cores = state.cores.lock().map_err(|e| e.to_string())?;
         if let Some(core) = cores.get(&active_session_id) {
-            let _ = core.update_cwd(cwd.clone());
+            let _ = core.deliver(AgentInputKind::update_cwd(cwd.clone()));
         }
     }
 

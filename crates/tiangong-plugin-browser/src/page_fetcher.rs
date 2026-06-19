@@ -872,3 +872,33 @@ impl tiangong_core::tool_override::ToolOverrideHandler for BrowserToolOverride {
         }
     }
 }
+
+/// 浏览器内容注入（ToolInput 实现）。
+///
+/// 页面加载完成或内容变化时，通过 AgentInput trait 统一投递到 Agent 对话链。
+/// tool_name 为 `browser_data`，render 返回结构化 JSON。
+pub struct BrowserContent {
+    pub title: String,
+    pub url: String,
+    pub text: String,
+    pub tabs: Vec<(String, String, String)>,
+    pub active_tab_id: Option<String>,
+    pub feedback: Option<String>,
+}
+
+impl tiangong_core::agent_input::ToolInput for BrowserContent {
+    fn tool_name(&self) -> &str {
+        "browser_data"
+    }
+
+    fn render(&self) -> serde_json::Value {
+        serde_json::json!({
+            "title": self.title,
+            "url": self.url,
+            "text": self.text,
+            "tabs": self.tabs,
+            "active_tab_id": self.active_tab_id,
+            "feedback": self.feedback,
+        })
+    }
+}

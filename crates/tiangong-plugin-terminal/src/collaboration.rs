@@ -111,3 +111,24 @@ impl TerminalBusyState {
         }
     }
 }
+
+/// 用户终端操作注入（ToolInput 实现）。
+///
+/// 用户在终端提交命令（回车截断）时，通过 AgentInput trait 统一投递到 Agent 对话链。
+/// tool_name 为 `terminal_user_input`，render 返回结构化 JSON。
+pub struct TerminalUserInput {
+    pub command: String,
+}
+
+impl tiangong_core::agent_input::ToolInput for TerminalUserInput {
+    fn tool_name(&self) -> &str {
+        "terminal_user_input"
+    }
+
+    fn render(&self) -> serde_json::Value {
+        serde_json::json!({
+            "action": "user_executed",
+            "command": self.command.trim(),
+        })
+    }
+}
