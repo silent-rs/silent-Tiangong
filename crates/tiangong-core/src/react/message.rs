@@ -434,6 +434,56 @@ pub(crate) fn inject_browser_content_to_session(
     );
 }
 
+/// 注入用户终端操作到会话（合成 assistant + tool 消息对），仿浏览器注入。
+///
+/// 用户在终端提交命令（回车截断）时触发，让 Agent 直接理解用户意图。
+/// tool_name 用 `terminal_user_input`，去重：与上一个同 tool_name 消息渲染文本相同则跳过。
+pub(crate) fn inject_terminal_user_input_to_session(
+    session: &mut Session,
+    stream_tx: &StdSender<StreamEvent>,
+    command: &str,
+) {
+    let command = command.trim();
+    if command.is_empty() {
+        return;
+    }
+    let output = format!("[用户终端操作] 用户在终端执行了: {command}");
+    // 去重：与上一个同 tool_name 的 Tool 消息比较渲染文本，完全相同则跳过
+    let is_dup = session
+        .messages
+        .iter()
+        .rev()
+        .find(|msg| {
+            msg.role == MessageRole::Tool && msg.tool_name.as_deref() == Some("terminal_user_input")
+        })
+        .is_some_and(|msg| msg.text_content() == output);
+    if is_dup {
+        tracing::debug!(session_id = %session.id, command, "skip terminal injection: identical to previous");
+        return;
+    }
+    let tool_call_id = format!("terminal_user_{}", scru128::new());
+    let mut assistant_msg = Message::new(
+        MessageRole::Assistant,
+        "[自动感知] 用户在终端提交了命令".to_string(),
+    );
+    assistant_msg.tool_calls = vec![MessageToolCall {
+        id: tool_call_id.clone(),
+        name: "terminal_user_input".to_string(),
+        arguments: serde_json::json!({"command": command}),
+    }];
+    session.messages.push(assistant_msg);
+    let _ = stream_tx.send(StreamEvent::ToolResult {
+        name: "terminal_user_input".to_string(),
+        tool_call_id: Some(tool_call_id.clone()),
+        ok: true,
+        output: output.clone(),
+        full_output: Some(output.clone()),
+        media: vec![],
+    });
+    append_tool_result_message(session, &tool_call_id, "terminal_user_input", output, false);
+    tracing::info!(session_id = %session.id, command, "terminal user input injected");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

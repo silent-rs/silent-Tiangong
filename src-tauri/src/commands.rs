@@ -395,7 +395,7 @@ fn has_capability_in_state(
 // 辅助函数：构建完整的 RunSnapshot
 // ============================================================================
 
-fn build_full_snapshot_with_status(
+pub fn build_full_snapshot_with_status(
     core_state: &tiangong_core::app_state::TiangongState,
     is_executing: bool,
 ) -> RunSnapshotView {

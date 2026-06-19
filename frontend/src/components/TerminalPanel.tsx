@@ -83,6 +83,8 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
   const createdTimeRef = useRef<number>(0);
   // 上次屏幕快照回传时间戳（节流用）
   const lastSnapshotPushRef = useRef<number>(0);
+  // 用户输入行缓冲：按 session_id 独立累积，遇回车截断上报完整命令行。
+  const inputBufferRef = useRef<Map<string, string>>(new Map());
 
   const [displayInfo, setDisplayInfo] = useState<{
     cwd: string;
@@ -218,6 +220,30 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
           term.onData((data) => {
             const sid = currentIdRef.current;
             if (sid) api.terminalSessionSendInput(sid, data).catch(() => {});
+
+            // 累积当前行，遇回车截断并上报完整命令（供注入 Agent 对话链）。
+            if (!sid) return;
+            if (data === '\r') {
+              const cmd = (inputBufferRef.current.get(sid) ?? '').trim();
+              if (cmd) {
+                api.terminalReportUserCommand(sid, cmd).catch(() => {});
+              }
+              inputBufferRef.current.set(sid, '');
+            } else if (data === '\x7f' || data === '\b') {
+              const buf = inputBufferRef.current.get(sid) ?? '';
+              inputBufferRef.current.set(sid, buf.slice(0, -1));
+            } else if (data[0] === '\x1b') {
+              // ESC 开头的序列（方向键/功能键/终端报告）：整体忽略，不累积
+            } else if (data.length === 1 && data >= ' ') {
+              const buf = inputBufferRef.current.get(sid) ?? '';
+              inputBufferRef.current.set(sid, buf + data);
+            } else if (data.length > 1) {
+              const cleaned = data.replace(/[\x00-\x1f\x7f]/g, '');
+              if (cleaned) {
+                const buf = inputBufferRef.current.get(sid) ?? '';
+                inputBufferRef.current.set(sid, buf + cleaned);
+              }
+            }
           });
 
           term.onResize(({ cols, rows }) => {

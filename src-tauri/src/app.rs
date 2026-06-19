@@ -166,6 +166,38 @@ impl TiangongApp {
         false
     }
 
+    /// 注入用户终端操作到指定会话的对话链。
+    ///
+    /// core 存在时走 command channel；不存在时直接 append 到 state session。
+    /// 返回注入是否成功，调用方据此 emit run_snapshot 刷新前端。
+    pub async fn inject_terminal_user_input(&self, session_id: String, command: String) -> bool {
+        let core_sent = {
+            let cores = self.lock_cores();
+            if let Some(core) = cores.get(&session_id) {
+                tracing::info!(session_id, command = %command, running = core.is_running(), "注入用户终端操作 via core");
+                core.inject_terminal_user_input(command.clone())
+            } else {
+                false
+            }
+        };
+        if core_sent {
+            return true;
+        }
+        // core 不存在：直接 append 到 state session
+        tracing::info!(session_id, command = %command, "core 不存在，直接 append 到 state session");
+        let mut state = self.state.lock().await;
+        let sessions = state.sessions_mut();
+        if let Some(session) = sessions.iter_mut().find(|s| s.id == session_id) {
+            let content = format!("[用户终端操作] 用户在终端执行了: {command}");
+            session.append_message(tiangong_types::MessageRole::Tool, content);
+            session.persist_to_disk();
+            true
+        } else {
+            tracing::warn!(session_id, command = %command, "用户终端操作注入失败：session 不存在");
+            false
+        }
+    }
+
     fn lock_cores(&self) -> std::sync::MutexGuard<'_, HashMap<String, TiangongCore>> {
         match self.cores.lock() {
             Ok(guard) => guard,

@@ -444,6 +444,36 @@ fn run_gui() {
                 });
             });
 
+            // 监听终端用户命令提交事件，注入到对应会话的对话链。
+            // 用 payload 里的 session_id 路由。注入成功后 emit run_snapshot 刷新前端。
+            let terminal_inject_handle = app.handle().clone();
+            app.listen("terminal:user_command", move |event| {
+                let payload = event.payload().to_string();
+                let Ok(data) = serde_json::from_str::<serde_json::Value>(&payload) else {
+                    warn!("终端用户命令 payload 解析失败");
+                    return;
+                };
+                let session_id = data["session_id"].as_str().unwrap_or("").to_string();
+                let command = data["command"].as_str().unwrap_or("").to_string();
+                if session_id.is_empty() || command.trim().is_empty() {
+                    return;
+                }
+                let app_handle = terminal_inject_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = app_handle.state::<tiangong_app::TiangongApp>();
+                    let injected = state.inject_terminal_user_input(session_id, command).await;
+                    debug!(injected, "终端用户命令注入完成");
+                    // 注入后 emit run_snapshot 刷新前端（空闲时前端不会自动刷新）
+                    if injected {
+                        let guard = state.state.lock().await;
+                        let snapshot =
+                            tiangong_app::commands::build_full_snapshot_with_status(&guard, false);
+                        drop(guard);
+                        let _ = app_handle.emit("run_snapshot", &snapshot);
+                    }
+                });
+            });
+
             let scheduler_ctx = state.create_scheduler_context();
             tauri::async_runtime::spawn(async move {
                 tiangong_scheduler::executor::restore_cron_jobs(scheduler_ctx).await;
