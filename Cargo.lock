@@ -9409,7 +9409,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "tiangong-config",
@@ -9418,7 +9418,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-anthropic"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "eventsource-stream",
  "futures-util",
@@ -9430,7 +9430,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-app"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -9475,7 +9475,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-cli"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -9490,7 +9490,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-config"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -9503,7 +9503,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-core"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -9550,7 +9550,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-entry"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -9565,7 +9565,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-llm"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -9585,7 +9585,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-media"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9598,7 +9598,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-memory"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -9625,7 +9625,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-browser"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "base64-url",
  "scru128",
@@ -9641,7 +9641,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-terminal"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "descape",
@@ -9659,7 +9659,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-scheduler"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9676,7 +9676,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-server"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -9707,7 +9707,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-types"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "chrono",
  "scru128",
