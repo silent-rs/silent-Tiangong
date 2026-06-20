@@ -1,4 +1,4 @@
-use tauri::State;
+use tauri::{Emitter, State};
 
 use crate::session_pty::SessionPty;
 use crate::types::{TerminalSessionInfo, TerminalSessionStatus};
@@ -87,6 +87,24 @@ pub async fn terminal_session_send_input(
         .await
         .map_err(|e| e.to_string())?;
     await_response(response_rx).await
+}
+
+/// 上报用户在终端提交的完整命令行（回车截断后由前端累积上报）。
+/// emit `terminal:user_command` 事件，供 main.rs 监听后注入 Agent 对话链。
+#[tauri::command]
+pub async fn terminal_report_user_command(
+    session_id: String,
+    command: String,
+    state: State<'_, TerminalPluginState>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let pty = ensure_pty(&state, &session_id)?;
+    pty.activity.record_user_command(command.clone());
+    let _ = app_handle.emit(
+        "terminal:user_command",
+        serde_json::json!({ "session_id": session_id, "command": command }),
+    );
+    Ok(())
 }
 
 #[tauri::command]

@@ -20,7 +20,9 @@ pub enum AgentInputKind {
     /// 对话消息层：用户消息等，会触发 Agent 执行一轮 turn。
     Message(MessageInput),
     /// 工具类输入层：伪造 tool result 注入对话（不触发 turn）。
-    /// 用 `Box<dyn ToolInput>` trait object，具体实现由各插件提供。
+    /// 用 `Box<dyn ToolInput>` trait object：插件可定义 struct 实现类型安全的注入，
+    /// 也可通过 `AgentInputKind::tool(name, json)` 匿名注入。
+    /// 渲染由 core 的 render_tool_output 统一处理。
     Tool(Box<dyn ToolInput>),
     /// 审批层：审批响应，解锁阻塞等待审批的 turn。
     Approval(ApprovalInput),
@@ -29,9 +31,9 @@ pub enum AgentInputKind {
 }
 
 impl AgentInputKind {
-    /// 便捷构造：直接传 tool_name + JSON payload，无需定义 struct 实现 ToolInput。
+    /// 便捷构造：工具类注入（tool_name + JSON payload），无需定义 struct 实现 ToolInput。
     ///
-    /// 适合匿名/一次性工具注入。有复用需求的工具类型建议在插件侧定义 struct
+    /// 适合匿名/一次性注入。有复用需求的工具类型建议在插件侧定义 struct
     /// 实现 `ToolInput` trait（类型更安全、render 逻辑内聚）。
     pub fn tool(tool_name: impl Into<String>, payload: serde_json::Value) -> Self {
         struct AnonymousToolInput {
@@ -113,23 +115,6 @@ impl AgentInputKind {
     }
 }
 
-/// 工具类注入的统一协议。
-///
-/// core 定义此 trait，各插件（浏览器、终端等）在自己的 crate 里实现它，
-/// 通过 `AgentInputKind::Tool(Box::new(XxxInput { ... }))` 投递。
-/// core 的 worker 侧统一调用 `tool_name` + `render` 生成伪造的 tool result 消息，
-/// 新增工具类型只需在插件侧实现此 trait，无需改动 core。
-pub trait ToolInput: Send + Sync {
-    /// 工具名（伪造 tool_call 的 name 字段）。
-    fn tool_name(&self) -> &str;
-
-    /// 注入到对话的结构化内容（JSON）。
-    ///
-    /// 返回 JSON 而非文本，让 worker 侧根据 tool_name 决定呈现格式，
-    /// 同时保留结构化数据供去重等逻辑使用。
-    fn render(&self) -> serde_json::Value;
-}
-
 // ===== Message 层 =====
 
 /// 对话消息层输入。
@@ -167,4 +152,23 @@ pub enum CommandInput {
     CompressContext,
     /// 清理上下文（重置摘要，LLM 下次只看到 system prompt）。
     ResetContext,
+}
+
+/// 工具类注入的统一协议。
+///
+/// core 定义此 trait，各插件（浏览器、终端等）在自己的 crate 里实现它，
+/// 通过 `AgentInputKind::Tool(Box::new(XxxInput { ... }))` 投递。
+/// core 的 worker 侧统一调用 `tool_name` + `render` 生成伪造的 tool result 消息，
+/// 新增工具类型只需在插件侧实现此 trait，无需改动 core。
+///
+/// 对于一次性/匿名场景，可用 `AgentInputKind::tool(name, json)` 便捷构造。
+pub trait ToolInput: Send + Sync {
+    /// 工具名（伪造 tool_call 的 name 字段）。
+    fn tool_name(&self) -> &str;
+
+    /// 注入到对话的结构化内容（JSON）。
+    ///
+    /// 返回 JSON 而非文本，让 worker 侧根据 tool_name 决定呈现格式，
+    /// 同时保留结构化数据供去重等逻辑使用。
+    fn render(&self) -> serde_json::Value;
 }

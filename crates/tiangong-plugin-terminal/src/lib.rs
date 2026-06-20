@@ -31,6 +31,7 @@ pub fn init(session_id: String, cwd: String) -> TauriPlugin<Wry> {
             commands::terminal_destroy_session,
             commands::terminal_attach_session,
             commands::terminal_session_send_input,
+            commands::terminal_report_user_command,
             commands::terminal_session_recent_output,
             commands::terminal_session_info,
             commands::terminal_session_status,

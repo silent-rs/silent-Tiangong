@@ -371,7 +371,7 @@ pub(crate) fn inject_tool_to_session(
 }
 
 /// 根据 tool_name 渲染 JSON payload 为对话文本。
-fn render_tool_output(tool_name: &str, payload: &serde_json::Value) -> String {
+pub fn render_tool_output(tool_name: &str, payload: &serde_json::Value) -> String {
     match tool_name {
         "browser_data" => {
             let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("");

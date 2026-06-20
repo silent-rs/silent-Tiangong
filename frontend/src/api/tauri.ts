@@ -878,6 +878,10 @@ export const api = {
   terminalSessionSendInput: (sessionId: string, input: string): Promise<void> =>
     invoke('plugin:terminal|terminal_session_send_input', { sessionId, input }),
 
+  // 上报用户在终端提交的完整命令行（回车截断后上报，供注入 Agent 对话链）
+  terminalReportUserCommand: (sessionId: string, command: string): Promise<void> =>
+    invoke('plugin:terminal|terminal_report_user_command', { sessionId, command }),
+
   terminalSessionRecentOutput: (sessionId: string, lines?: number): Promise<string> =>
     invoke('plugin:terminal|terminal_session_recent_output', { sessionId, lines: lines ?? null }),
 
