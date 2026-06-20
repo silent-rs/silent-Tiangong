@@ -712,7 +712,7 @@ fn get_cancel_flag(
 }
 
 /// 消费 SessionStreamEvent：emit 给前端 + 更新 RunStatus + Done 时同步 session
-fn start_stream_consumer(
+pub(crate) fn start_stream_consumer(
     app: AppHandle,
     stream_rx: std::sync::mpsc::Receiver<tiangong_types::SessionStreamEvent>,
     cancel_flag: Arc<std::sync::atomic::AtomicBool>,

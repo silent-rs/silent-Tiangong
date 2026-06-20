@@ -173,10 +173,51 @@ impl TiangongApp {
                 };
 
                 let tool_name = req.tool.tool_name().to_string();
-                let payload = req.tool.render();
 
-                // 通过 app_handle 获取 cores（避免跨任务共享 Mutex）
+                // 通过 app_handle 获取 TiangongApp
                 let app_state = app_handle.state::<TiangongApp>();
+
+                // core 不存在 → 自动恢复（ensure_core），保证 stream_tx 可用
+                let core_exists = {
+                    let cores = app_state.lock_cores();
+                    cores.get(&session_id).is_some()
+                };
+                if !core_exists {
+                    // 从 state 取 session 快照
+                    let session_snapshot = {
+                        let guard = state.lock().await;
+                        guard
+                            .sessions()
+                            .iter()
+                            .find(|s| s.id == session_id)
+                            .cloned()
+                    };
+                    if let Some(session) = session_snapshot {
+                        use std::sync::mpsc;
+                        use tiangong_types::SessionStreamEvent;
+                        let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
+                        let (_sid, _is_new) =
+                            app_state.ensure_core(&session_id, session, stream_tx);
+                        // 启动 stream_consumer 同步 worker session → TiangongState session
+                        let cancel_flag = {
+                            let cores = app_state.lock_cores();
+                            cores.get(&session_id).map(|c| c.cancel_flag())
+                        };
+                        if let Some(cancel_flag) = cancel_flag {
+                            crate::commands::start_stream_consumer(
+                                app_handle.clone(),
+                                stream_rx,
+                                cancel_flag,
+                            );
+                        }
+                        tracing::info!(session_id, "消费者自动恢复 core");
+                    } else {
+                        tracing::warn!(session_id, "消费者无法恢复 core：session 不存在");
+                        continue;
+                    }
+                }
+
+                // core 存在 → deliver(Tool)，worker 通过 StreamEvent 处理注入
                 let core_sent = {
                     let cores = app_state.lock_cores();
                     if let Some(core) = cores.get(&session_id) {
@@ -190,24 +231,7 @@ impl TiangongApp {
                 };
 
                 if !core_sent {
-                    // core 不存在 → 直接注入消息对到 state session（复用 core 的 inject_tool_to_messages）
-                    let mut s = state.lock().await;
-                    let sessions = s.sessions_mut();
-                    if let Some(session) = sessions.iter_mut().find(|s| s.id == session_id) {
-                        if tiangong_core::react::message::inject_tool_to_messages(
-                            session, &tool_name, &payload,
-                        ) {
-                            session.persist_to_disk();
-                        }
-                    }
-                }
-
-                // 注入后刷新前端（终端等空闲场景需要）
-                if req.refresh_frontend {
-                    let guard = state.lock().await;
-                    let snapshot = crate::commands::build_full_snapshot_with_status(&guard, false);
-                    drop(guard);
-                    let _ = app_handle.emit("run_snapshot", &snapshot);
+                    tracing::warn!(session_id, tool_name, "deliver 失败（core 通道已关闭）");
                 }
 
                 tracing::debug!(session_id, tool_name, "工具消息注入完成");
@@ -216,53 +240,35 @@ impl TiangongApp {
         });
     }
 
-    /// 统一的工具消息注入入口（同步调用，不经 channel）。
+    /// 同步工具消息注入（供需要同步返回值的场景，如 browser:events 的 ack 判断）。
     ///
-    /// 保留此方法供少数需要同步注入的场景使用。
-    /// 大多数场景应通过 [`Self::tool_injection_tx`] push 到 channel，
-    /// 由消费者统一处理。
+    /// core 不存在时返回 false。大多数场景应通过 [`Self::tool_injection_tx`] push 到 channel，
+    /// 消费者会自动 ensure_core 恢复 core 后注入。
     pub async fn inject_tool(&self, tool: Box<dyn tiangong_core::agent_input::ToolInput>) -> bool {
         let tool_name = tool.tool_name().to_string();
-        let payload = tool.render();
         let session_id = {
             let guard = self.state.lock().await;
             guard.active_session_id().to_string()
         };
 
-        // core 存在 → 通过 deliver(Tool) 通道（deliver 是同步方法，锁块内直接调用后释放）
-        {
-            let cores = self.lock_cores();
-            if let Some(core) = cores.get(&session_id) {
-                use tiangong_core::agent_input::{AgentInput, AgentInputKind};
-                tracing::info!(
-                    session_id,
-                    tool_name,
-                    running = core.is_running(),
-                    "注入工具消息 via core deliver"
-                );
-                // deliver → send_cmd 全程同步（不 await），锁块内安全调用
-                let sent = core.deliver(AgentInputKind::Tool(tool));
-                drop(cores);
-                return sent;
-            }
+        let cores = self.lock_cores();
+        if let Some(core) = cores.get(&session_id) {
+            use tiangong_core::agent_input::{AgentInput, AgentInputKind};
+            tracing::info!(
+                session_id,
+                tool_name,
+                running = core.is_running(),
+                "注入工具消息 via deliver"
+            );
+            core.deliver(AgentInputKind::Tool(tool))
+        } else {
+            tracing::warn!(
+                session_id,
+                tool_name,
+                "inject_tool: core 不存在，返回 false（应走 channel 消费者自动恢复）"
+            );
+            false
         }
-
-        // core 不存在 → 直接 append 到 state session
-        tracing::info!(
-            session_id,
-            tool_name,
-            "core 不存在，直接 append 到 state session"
-        );
-        let mut state = self.state.lock().await;
-        let sessions = state.sessions_mut();
-        if let Some(session) = sessions.iter_mut().find(|s| s.id == session_id) {
-            if tiangong_core::react::message::inject_tool_to_messages(session, &tool_name, &payload)
-            {
-                session.persist_to_disk();
-                return true;
-            }
-        }
-        false
     }
 
     fn lock_cores(&self) -> std::sync::MutexGuard<'_, HashMap<String, TiangongCore>> {
