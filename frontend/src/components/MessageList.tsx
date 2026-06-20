@@ -1798,6 +1798,10 @@ function AgentTurnView({
           pendingRecall = { strategy: "recall", key: msg.id };
           flushRecall(msg);
         }
+      } else if (toolName === "plugin_injection") {
+        // 插件注入消息：渲染为工具执行块（显示注入内容）
+        flushTools();
+        fragments.push({ type: "explanation", text: textContent(msg), time: msg.created_at });
       }
       continue;
     } else if (msg.role === "assistant") {

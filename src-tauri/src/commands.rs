@@ -847,19 +847,13 @@ fn start_stream_consumer(
                             let persisted_output = full_output.as_deref().unwrap_or(output);
                             let status = if *ok { "ok=true" } else { "ok=false" };
 
-                            // plugin_injection 注入结果：System 摘要（前端可渲染）+ Tool result（配对 assistant tool_call）
+                            // plugin_injection 注入结果：追加完整消息对（与 worker session 一致）
                             if name == tiangong_core::react::message::INJECTION_TOOL_NAME {
                                 use tiangong_core::session::{Message, MessageRole};
                                 let tc_id = tool_call_id.clone().unwrap_or_default();
-                                // System 摘要（前端已有渲染逻辑：含 tool_name: 的 system 消息显示为工具执行块）
-                                session.append_message(
-                                    tiangong_types::MessageRole::System,
-                                    format!("工具执行 [{name}]\ntool_name: {name}\n{status} exit_code=0\nsummary: {name}\nstdout:\n{persisted_output}"),
-                                );
-                                // 配对的 assistant(tool_call) + tool(result) 消息对
                                 let mut assistant_msg = Message::new(
                                     MessageRole::Assistant,
-                                    "[自动感知] 插件数据就绪".to_string(),
+                                    format!("[自动感知] {name} 数据就绪"),
                                 );
                                 assistant_msg.tool_calls =
                                     vec![tiangong_core::session::MessageToolCall {
