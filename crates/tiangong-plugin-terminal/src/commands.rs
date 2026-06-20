@@ -98,8 +98,7 @@ pub async fn terminal_report_user_command(
     state: State<'_, TerminalPluginState>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    let pty = ensure_pty(&state, &session_id)?;
-    pty.activity.record_user_command(command.clone());
+    let _ = ensure_pty(&state, &session_id)?;
     let _ = app_handle.emit(
         "terminal:user_command",
         serde_json::json!({ "session_id": session_id, "command": command }),

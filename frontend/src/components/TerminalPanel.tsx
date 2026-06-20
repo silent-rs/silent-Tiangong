@@ -238,10 +238,22 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
               const buf = inputBufferRef.current.get(sid) ?? '';
               inputBufferRef.current.set(sid, buf + data);
             } else if (data.length > 1) {
-              const cleaned = data.replace(/[\x00-\x1f\x7f]/g, '');
-              if (cleaned) {
-                const buf = inputBufferRef.current.get(sid) ?? '';
-                inputBufferRef.current.set(sid, buf + cleaned);
+              // 粘贴多字符：按行分割处理，遇换行触发截断上报（与单字符回车一致）
+              const lines = data.split(/\r\n|\r|\n/);
+              for (let i = 0; i < lines.length; i++) {
+                const line = lines[i].replace(/[\x00-\x1f\x7f]/g, '');
+                if (line) {
+                  const buf = inputBufferRef.current.get(sid) ?? '';
+                  inputBufferRef.current.set(sid, buf + line);
+                }
+                // 非最后一行（含换行）→ 触发截断上报
+                if (i < lines.length - 1) {
+                  const cmd = (inputBufferRef.current.get(sid) ?? '').trim();
+                  if (cmd) {
+                    api.terminalReportUserCommand(sid, cmd).catch(() => {});
+                  }
+                  inputBufferRef.current.set(sid, '');
+                }
               }
             }
           });

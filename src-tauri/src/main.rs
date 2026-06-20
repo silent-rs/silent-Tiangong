@@ -363,7 +363,6 @@ fn run_gui() {
 
             // 监听浏览器网络响应事件，push 到注入 channel（消费者统一处理）。
             // 这覆盖页面 JS 自行发起 XHR/fetch、且 DOM 没有明显变化的场景。
-            let tx2 = injection_tx.clone();
             let event_inject_handle = app.handle().clone();
             app.listen("browser:events", move |event| {
                 let browser_state =
@@ -447,7 +446,6 @@ fn run_gui() {
                             feedback: Some(feedback),
                         }))
                         .await;
-                    let _ = tx2; // events 场景需要同步结果，直接调 inject_tool
                     info!(
                         url = %page_url,
                         total_count, network_count, injected, "浏览器网络事件注入检查完成"

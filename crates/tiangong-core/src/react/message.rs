@@ -319,18 +319,20 @@ pub(crate) fn latest_user_message(session: &Session) -> String {
 /// 最终到达此函数。tool_name 决定呈现格式，payload 是结构化 JSON。
 /// 伪造 assistant tool_call + tool result 消息对（仿浏览器注入模式）。
 /// 去重：最近 8 条 tool 消息中已有相同 tool_name 且 payload 相同则跳过。
-pub(crate) fn inject_tool_to_session(
+/// 向 session 注入工具消息（assistant tool_call + tool result 消息对）。
+///
+/// 纯 session 操作，不发送 StreamEvent。供 core worker 路径
+///（`inject_tool_to_session` 发 StreamEvent）和 app fallback 路径共用。
+/// 去重：与上一个同 tool_name 的 Tool 消息渲染文本完全相同则跳过。
+pub fn inject_tool_to_messages(
     session: &mut Session,
-    stream_tx: &StdSender<StreamEvent>,
     tool_name: &str,
     payload: &serde_json::Value,
-) {
+) -> bool {
     let output = render_tool_output(tool_name, payload);
     if output.trim().is_empty() {
-        return;
+        return false;
     }
-    // 去重：只与上一个同 tool_name 的 Tool 消息比较，渲染文本完全相同则跳过。
-    // payload 任何变化（如同 URL 不同 text、新增 feedback）会正常注入。
     let is_dup = session
         .messages
         .iter()
@@ -338,12 +340,8 @@ pub(crate) fn inject_tool_to_session(
         .find(|msg| msg.role == MessageRole::Tool && msg.tool_name.as_deref() == Some(tool_name))
         .is_some_and(|msg| msg.text_content() == output);
     if is_dup {
-        tracing::debug!(
-            session_id = %session.id,
-            tool_name,
-            "skip tool injection: identical to previous"
-        );
-        return;
+        tracing::debug!(session_id = %session.id, tool_name, "skip tool injection: identical to previous");
+        return false;
     }
     let tool_call_id = format!("tool_auto_{}", scru128::new());
     let assistant_text = format!("[自动感知] 工具数据就绪: {tool_name}");
@@ -354,20 +352,42 @@ pub(crate) fn inject_tool_to_session(
         arguments: payload.clone(),
     }];
     session.messages.push(assistant_msg);
-    let _ = stream_tx.send(StreamEvent::ToolResult {
-        name: tool_name.to_string(),
-        tool_call_id: Some(tool_call_id.clone()),
-        ok: true,
-        output: output.clone(),
-        full_output: Some(output.clone()),
-        media: vec![],
-    });
     append_tool_result_message(session, &tool_call_id, tool_name, output, false);
-    tracing::info!(
-        session_id = %session.id,
-        tool_name,
-        "tool content injected into session"
-    );
+    tracing::info!(session_id = %session.id, tool_name, "tool content injected into session");
+    true
+}
+
+/// 向 session 注入工具消息并发送 StreamEvent（core worker 路径使用）。
+pub(crate) fn inject_tool_to_session(
+    session: &mut Session,
+    stream_tx: &StdSender<StreamEvent>,
+    tool_name: &str,
+    payload: &serde_json::Value,
+) {
+    // 先注入消息对（共用逻辑）
+    let was_injected = inject_tool_to_messages(session, tool_name, payload);
+    if !was_injected {
+        return;
+    }
+    // 找到刚注入的 tool result 消息，发送 StreamEvent
+    //（tool result 是最后一条消息，tool_call_id 在倒数第二条的 tool_calls[0].id）
+    if let Some(assistant_msg) = session.messages.iter().rev().nth(1)
+        && let Some(tc) = assistant_msg.tool_calls.first()
+    {
+        let output = session
+            .messages
+            .last()
+            .map(|m| m.text_content())
+            .unwrap_or_default();
+        let _ = stream_tx.send(StreamEvent::ToolResult {
+            name: tool_name.to_string(),
+            tool_call_id: Some(tc.id.clone()),
+            ok: true,
+            output,
+            full_output: None,
+            media: vec![],
+        });
+    }
 }
 
 /// 根据 tool_name 渲染 JSON payload 为对话文本。

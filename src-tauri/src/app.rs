@@ -136,10 +136,6 @@ impl TiangongApp {
         }
     }
 
-    /// 统一的工具消息注入入口。
-    ///
-    /// 所有插件（浏览器、终端等）通过此方法注入，无论 core 处于何种状态都注入到 session。
-    /// core 存在时通过 deliver(Tool) 发送到 worker；core 不存在时直接 append 到 state session。
     /// 获取工具消息注入 channel sender。
     ///
     /// 插件持有此 sender 后可直接投递 `ToolInjection`，无需经过 emit/listen 事件中转。
@@ -194,14 +190,13 @@ impl TiangongApp {
                 };
 
                 if !core_sent {
-                    // core 不存在 → 直接 append 到 state session
+                    // core 不存在 → 直接注入消息对到 state session（复用 core 的 inject_tool_to_messages）
                     let mut s = state.lock().await;
                     let sessions = s.sessions_mut();
                     if let Some(session) = sessions.iter_mut().find(|s| s.id == session_id) {
-                        use tiangong_core::react::message::render_tool_output;
-                        let content = render_tool_output(&tool_name, &payload);
-                        if !content.trim().is_empty() {
-                            session.append_message(tiangong_types::MessageRole::Tool, content);
+                        if tiangong_core::react::message::inject_tool_to_messages(
+                            session, &tool_name, &payload,
+                        ) {
                             session.persist_to_disk();
                         }
                     }
@@ -261,10 +256,8 @@ impl TiangongApp {
         let mut state = self.state.lock().await;
         let sessions = state.sessions_mut();
         if let Some(session) = sessions.iter_mut().find(|s| s.id == session_id) {
-            use tiangong_core::react::message::render_tool_output;
-            let content = render_tool_output(&tool_name, &payload);
-            if !content.trim().is_empty() {
-                session.append_message(tiangong_types::MessageRole::Tool, content);
+            if tiangong_core::react::message::inject_tool_to_messages(session, &tool_name, &payload)
+            {
                 session.persist_to_disk();
                 return true;
             }

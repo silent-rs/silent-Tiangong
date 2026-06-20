@@ -30,8 +30,6 @@ pub struct TerminalActivityTracker {
     busy_state: Mutex<TerminalBusyState>,
     /// 当前 Agent 命令期间用户是否干预过
     user_intervened: Mutex<bool>,
-    /// 用户在终端提交的命令行队列（回车截断的完整命令，供注入 Agent 对话链）
-    pending_user_commands: Mutex<Vec<String>>,
 }
 
 impl TerminalActivityTracker {
@@ -40,7 +38,6 @@ impl TerminalActivityTracker {
             last_user_input: Mutex::new(Instant::now() - std::time::Duration::from_secs(3600)),
             busy_state: Mutex::new(TerminalBusyState::Idle),
             user_intervened: Mutex::new(false),
-            pending_user_commands: Mutex::new(Vec::new()),
         }
     }
 
@@ -100,17 +97,6 @@ impl TerminalActivityTracker {
                 v
             })
             .unwrap_or(false)
-    }
-
-    /// 记录用户在终端提交的完整命令行（回车截断后上报）。
-    pub(crate) fn record_user_command(&self, command: String) {
-        let trimmed = command.trim();
-        if trimmed.is_empty() {
-            return;
-        }
-        if let Ok(mut cmds) = self.pending_user_commands.lock() {
-            cmds.push(trimmed.to_string());
-        }
     }
 }
 
