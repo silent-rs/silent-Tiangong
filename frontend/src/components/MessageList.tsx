@@ -24,6 +24,7 @@ import {
   Pencil,
   X,
   Paperclip,
+  Plug,
   ArrowUp,
   ArrowDown,
   ArrowDownToLine,
@@ -1798,10 +1799,9 @@ function AgentTurnView({
           pendingRecall = { strategy: "recall", key: msg.id };
           flushRecall(msg);
         }
-      } else if (toolName === "plugin_injection") {
-        // 插件注入消息：渲染为工具执行块（显示注入内容）
-        flushTools();
-        fragments.push({ type: "explanation", text: textContent(msg), time: msg.created_at });
+      } else {
+        // 所有 tool 消息（含 plugin_injection）统一加入 pendingTools，渲染为工具卡片
+        pendingTools.push(msg);
       }
       continue;
     } else if (msg.role === "assistant") {
@@ -2115,6 +2115,25 @@ function getSystemMessageMeta(content: string): SystemMessageMeta {
     const match = content.match(/^LLM 输出 \[(.+?)\]/);
     const label = match ? match[1] : "LLM";
     return { icon: Cpu, label, summary: content.split("\n")[0] };
+  }
+  // 插件注入消息（数据来源：xxx 格式）
+  if (content.startsWith("数据来源：")) {
+    const sourceMatch = content.match(/^数据来源：(\S+)/);
+    const source = sourceMatch ? sourceMatch[1] : "plugin";
+    // 从相关数据中提取关键信息作为摘要
+    const cmdMatch = content.match(/command:\s*(.+)/);
+    const urlMatch = content.match(/url:\s*(.+)/);
+    const titleMatch = content.match(/title:\s*(.+)/);
+    const detail = cmdMatch?.[1] || urlMatch?.[1] || titleMatch?.[1] || "";
+    const summary = detail
+      ? `${source} · ${detail.length > 50 ? detail.slice(0, 47) + "..." : detail}`
+      : source;
+    return {
+      icon: Plug,
+      label: "插件注入",
+      summary,
+      toolName: source,
+    };
   }
   if (content.includes("tool_name:") || content.includes("exit_code") || content.startsWith("工具执行 [")) {
     const nameMatch = content.match(/tool_name:\s*(\S+)/) || content.match(/^工具执行 \[(.+?)\]/);
