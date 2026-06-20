@@ -1586,10 +1586,7 @@ function summarizeToolGroup(tools: MessageItem[]): string {
   const names = Array.from(
     new Set(
       tools
-        .map((tool) => {
-          const meta = getSystemMessageMeta(textContent(tool));
-          return meta.toolName || meta.summary.split(" · ")[0] || "";
-        })
+        .map((tool) => tool.tool_name || getToolMessageMeta(tool).toolName || "")
         .filter(Boolean)
     )
   );
@@ -1701,7 +1698,6 @@ function AgentTurnView({
     | { type: "explanation"; text: string; time?: string }
     | { type: "thinking"; content: string; time?: string }
     | { type: "tool_group"; key: string; brief: string; tools: MessageItem[] }
-    | { type: "memory_recall"; key: string; strategy: string; brief: string; hits: string[] }
     | { type: "user"; msg: MessageItem }
     | { type: "assistant"; msg: MessageItem; isStreaming: boolean }
     | { type: "error_system"; msg: MessageItem }
@@ -1713,7 +1709,6 @@ function AgentTurnView({
   const fragments: Fragment[] = [];
   const shownReasonings = new Set<string>();
   let pendingTools: MessageItem[] = [];
-  let pendingRecall: { strategy: string; key: string } | null = null;
 
   const flushTools = () => {
     if (pendingTools.length === 0) return;
@@ -1727,43 +1722,16 @@ function AgentTurnView({
     pendingTools = [];
   };
 
-  const flushRecall = (resultMsg?: MessageItem) => {
-    if (!pendingRecall) return;
-    const strategy = pendingRecall.strategy;
-    const key = pendingRecall.key;
-    let brief: string;
-    let hits: string[] = [];
-
-    if (!resultMsg) {
-      brief = `记忆检索 (${strategy})`;
-    } else if (textContent(resultMsg).includes("无相关记忆")) {
-      brief = `记忆检索 (${strategy}) · 无命中`;
-    } else {
-      const countMatch = textContent(resultMsg).match(/命中 (\d+) 条/);
-      const count = countMatch ? countMatch[1] : "?";
-      brief = `记忆检索 (${strategy}) · ${count} 条命中`;
-      const lines = textContent(resultMsg).split("\n").slice(1);
-      hits = lines.filter(l => l.startsWith("- "));
-    }
-    fragments.push({ type: "memory_recall", key, strategy, brief, hits });
-    pendingRecall = null;
-  };
-
   for (const msg of messages) {
     if (msg.role === "user") {
       flushTools();
-      flushRecall();
       fragments.push({ type: "user", msg });
     } else if (msg.role === "system" && textContent(msg).startsWith("[记忆检索] 策略:")) {
-      flushTools();
-      flushRecall();
-      const strategyMatch = textContent(msg).match(/策略:\s*(.+)/);
-      pendingRecall = {
-        strategy: strategyMatch ? strategyMatch[1].trim() : "auto",
-        key: msg.id,
-      };
-    } else if (msg.role === "system" && textContent(msg).startsWith("[记忆检索]") && pendingRecall) {
-      flushRecall(msg);
+      // recall_memory 策略消息：加入 pendingTools（统一工具卡片）
+      pendingTools.push(msg);
+    } else if (msg.role === "system" && textContent(msg).startsWith("[记忆检索]")) {
+      // recall_memory 结果消息：加入 pendingTools
+      pendingTools.push(msg);
     } else if (msg.role === "system" && textContent(msg).startsWith("LLM 输出")) {
       const reasoning = msgReasoning(msg);
       const explanation = extractLlmExplanation(textContent(msg));
@@ -1781,28 +1749,8 @@ function AgentTurnView({
     } else if (msg.role === "system" && (textContent(msg).includes("tool_name:") || textContent(msg).includes("exit_code") || textContent(msg).startsWith("工具执行 ["))) {
       pendingTools.push(msg);
     } else if (msg.role === "tool") {
-      const toolName = msg.tool_name || "";
-      if (toolName === "recall_memory") {
-        flushTools();
-        const isStart = textContent(msg).startsWith("[记忆检索] 策略:");
-        if (isStart && !pendingRecall) {
-          flushRecall();
-          const strategyMatch = textContent(msg).match(/策略:\s*(\S+)/);
-          pendingRecall = {
-            strategy: strategyMatch ? strategyMatch[1] : "recall",
-            key: msg.id,
-          };
-        } else if (pendingRecall) {
-          flushRecall(msg);
-        } else {
-          flushRecall();
-          pendingRecall = { strategy: "recall", key: msg.id };
-          flushRecall(msg);
-        }
-      } else {
-        // 所有 tool 消息（含 plugin_injection）统一加入 pendingTools，渲染为工具卡片
-        pendingTools.push(msg);
-      }
+      // 所有 tool 消息（含 recall_memory、plugin_injection）统一加入 pendingTools
+      pendingTools.push(msg);
       continue;
     } else if (msg.role === "assistant") {
       const isStreaming = msg.id === streamingMessageId;
@@ -1853,7 +1801,6 @@ function AgentTurnView({
     }
   }
   flushTools();
-  flushRecall();
 
   const mergedFragments: Fragment[] = [];
   for (const frag of fragments) {
@@ -1868,7 +1815,7 @@ function AgentTurnView({
 
   /** 渲染工具条目 */
   const renderToolItem = (tool: MessageItem) => {
-    const meta = getSystemMessageMeta(textContent(tool));
+    const meta = getToolMessageMeta(tool);
     const expanded = itemExpansion.isExpanded(tool.id);
     return (
       <div key={tool.id} title={formatMessageTime(tool.created_at)}>
@@ -1927,44 +1874,6 @@ function AgentTurnView({
                 <span>{frag.brief}</span>
               </button>
               {!collapsed && <div className="ml-4 space-y-0">{frag.tools.map(t => renderToolItem(t))}</div>}
-            </div>
-          );
-        }
-        if (frag.type === "memory_recall") {
-          const expanded = itemExpansion.isExpanded(frag.key);
-          return (
-            <div key={`recall-${frag.key}`}>
-              <button
-                className="flex items-center gap-2 px-2 py-0.5 text-xs text-muted-foreground hover:bg-muted/50 rounded transition-colors"
-                onClick={() => itemExpansion.toggle(frag.key)}
-              >
-                {expanded ? <ChevronDown className="w-3 h-3 shrink-0" /> : <ChevronRight className="w-3 h-3 shrink-0" />}
-                <Brain className="w-3 h-3 shrink-0" />
-                <span>{frag.brief}</span>
-              </button>
-              {expanded && frag.hits.length > 0 && (
-                <div className="ml-6 mt-0.5 space-y-0.5">
-                  {frag.hits.map((hit, idx) => {
-                    const trimmed = hit.replace(/^-\s*/, "");
-                    const scoreMatch = trimmed.match(/^\[([0-9.]+)\]\s*/);
-                    const score = scoreMatch ? scoreMatch[1] : null;
-                    const rest = scoreMatch ? trimmed.slice(scoreMatch[0].length) : trimmed;
-                    const colonIdx = rest.indexOf(": ");
-                    const title = colonIdx > 0 ? rest.slice(0, colonIdx) : rest;
-                    const summary = colonIdx > 0 ? rest.slice(colonIdx + 2) : "";
-                    const displaySummary = summary.length > 80 ? summary.slice(0, 77) + "..." : summary;
-                    return (
-                      <div key={idx} className="flex items-start gap-1.5 text-xs text-muted-foreground px-2 py-0.5">
-                        {score && (
-                          <span className="shrink-0 text-[10px] font-mono opacity-60">[{score}]</span>
-                        )}
-                        <span className="font-medium shrink-0">{title}</span>
-                        {displaySummary && <span className="opacity-70 truncate">{displaySummary}</span>}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
             </div>
           );
         }
@@ -2110,63 +2019,57 @@ interface SystemMessageMeta {
   toolName?: string;
 }
 
-function getSystemMessageMeta(content: string): SystemMessageMeta {
-  if (content.startsWith("LLM 输出")) {
-    const match = content.match(/^LLM 输出 \[(.+?)\]/);
-    const label = match ? match[1] : "LLM";
-    return { icon: Cpu, label, summary: content.split("\n")[0] };
-  }
-  // 插件注入消息（数据来源：xxx 格式）
+
+/** 从 Tool result 消息提取元数据（不依赖 System 摘要格式）。 */
+function getToolMessageMeta(msg: MessageItem): SystemMessageMeta {
+  const content = textContent(msg);
+  const toolName = msg.tool_name || "";
+  const isError = msg.tool_result_is_error;
+
+  // 注入消息格式（数据来源：xxx）
   if (content.startsWith("数据来源：")) {
     const sourceMatch = content.match(/^数据来源：(\S+)/);
     const source = sourceMatch ? sourceMatch[1] : "plugin";
-    // 从相关数据中提取关键信息作为摘要
     const cmdMatch = content.match(/command:\s*(.+)/);
     const urlMatch = content.match(/url:\s*(.+)/);
     const titleMatch = content.match(/title:\s*(.+)/);
     const detail = cmdMatch?.[1] || urlMatch?.[1] || titleMatch?.[1] || "";
-    const summary = detail
-      ? `${source} · ${detail.length > 50 ? detail.slice(0, 47) + "..." : detail}`
-      : source;
     return {
       icon: Plug,
       label: "插件注入",
-      summary,
+      summary: detail
+        ? `${source} · ${detail.length > 50 ? detail.slice(0, 47) + "..." : detail}`
+        : source,
       toolName: source,
     };
   }
-  if (content.includes("tool_name:") || content.includes("exit_code") || content.startsWith("工具执行 [")) {
-    const nameMatch = content.match(/tool_name:\s*(\S+)/) || content.match(/^工具执行 \[(.+?)\]/);
-    const okMatch = content.match(/ok=(\w+)/);
-    const cmdMatch = content.match(/命令:\s*(.+)/);
-    const parts = [];
-    if (nameMatch) parts.push(nameMatch[1]);
-    if (okMatch) parts.push(okMatch[1] === "true" ? "OK" : "FAIL");
-    if (cmdMatch) {
-      const cmd = cmdMatch[1];
-      parts.push(cmd.length > 60 ? cmd.slice(0, 57) + "..." : cmd);
-    }
+
+  // recall_memory
+  if (toolName === "recall_memory" || content.startsWith("[记忆检索]")) {
+    const countMatch = content.match(/命中 (\d+) 条/);
+    const count = countMatch ? countMatch[1] : "";
+    const noHit = content.includes("无相关记忆");
     return {
-      icon: Terminal,
-      label: "工具执行",
-      summary: parts.join(" · ") || content.split("\n")[0],
-      toolName: nameMatch?.[1],
+      icon: Brain,
+      label: "记忆检索",
+      summary: noHit ? "无命中" : count ? `${count} 条命中` : "记忆检索",
+      toolName: "recall_memory",
     };
   }
-  if (
-    content.startsWith("Plan 执行总结") ||
-    content.includes("plan_execution_summary")
-  ) {
-    return {
-      icon: FileText,
-      label: "Plan 总结",
-      summary: content.split("\n")[0],
-    };
+
+  // 正常工具结果
+  const parts: string[] = [];
+  if (toolName) parts.push(toolName);
+  parts.push(isError ? "FAIL" : "OK");
+  const cmdMatch = content.match(/命令:\s*(.+)/);
+  if (cmdMatch) {
+    const cmd = cmdMatch[1];
+    parts.push(cmd.length > 50 ? cmd.slice(0, 47) + "..." : cmd);
   }
-  const firstLine = content.split("\n")[0];
   return {
-    icon: FileText,
-    label: "系统",
-    summary: firstLine.length > 80 ? firstLine.slice(0, 80) + "..." : firstLine,
+    icon: Terminal,
+    label: "工具执行",
+    summary: parts.join(" · ") || content.split("\n")[0].slice(0, 60),
+    toolName: toolName || undefined,
   };
 }
