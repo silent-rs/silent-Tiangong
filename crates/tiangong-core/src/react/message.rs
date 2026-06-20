@@ -319,11 +319,11 @@ pub(crate) fn latest_user_message(session: &Session) -> String {
 /// 最终到达此函数。tool_name 决定呈现格式，payload 是结构化 JSON。
 /// 伪造 assistant tool_call + tool result 消息对（仿浏览器注入模式）。
 /// 去重：最近 8 条 tool 消息中已有相同 tool_name 且 payload 相同则跳过。
-/// 向 session 注入工具消息（System 消息，非 tool 结对）。
+/// 向 session 注入工具消息（assistant tool_call + tool result 消息对）。
 ///
-/// 注入本质是被动通知，不是 ReAct 工具执行。用 System 消息承载，避免
-/// assistant(tool_call) + tool(result) 配对在双 session 架构下的不一致问题。
-/// 去重：与上一条 System 消息文本完全相同则跳过。
+/// 纯 session 操作，不发送 StreamEvent。供 core worker 路径
+///（`inject_tool_to_session` 发 StreamEvent）和 app fallback 路径共用。
+/// 去重：与上一个同 tool_name 的 Tool 消息渲染文本完全相同则跳过。
 pub fn inject_tool_to_messages(
     session: &mut Session,
     tool_name: &str,
@@ -335,51 +335,59 @@ pub fn inject_tool_to_messages(
     }
     let is_dup = session
         .messages
-        .last()
-        .is_some_and(|msg| msg.role == MessageRole::System && msg.text_content() == output);
+        .iter()
+        .rev()
+        .find(|msg| msg.role == MessageRole::Tool && msg.tool_name.as_deref() == Some(tool_name))
+        .is_some_and(|msg| msg.text_content() == output);
     if is_dup {
         tracing::debug!(session_id = %session.id, tool_name, "skip tool injection: identical to previous");
         return false;
     }
-    session.append_message(MessageRole::System, output);
+    let tool_call_id = format!("tool_auto_{}", scru128::new());
+    let assistant_text = format!("[自动感知] 工具数据就绪: {tool_name}");
+    let mut assistant_msg = Message::new(MessageRole::Assistant, assistant_text);
+    assistant_msg.tool_calls = vec![MessageToolCall {
+        id: tool_call_id.clone(),
+        name: tool_name.to_string(),
+        arguments: payload.clone(),
+    }];
+    session.messages.push(assistant_msg);
+    append_tool_result_message(session, &tool_call_id, tool_name, output, false);
     tracing::info!(session_id = %session.id, tool_name, "tool content injected into session");
     true
 }
 
 /// 向 session 注入工具消息并发送 StreamEvent（core worker 路径使用）。
-///
-/// tool_call_id 为 None：stream_consumer 的 append_tool_result_message 在
-/// tool_call_id 为 None 时直接跳过（不追加 Tool 消息），只在 System 消息里
-/// 承载内容，worker session 与 TiangongState session 保持一致。
 pub(crate) fn inject_tool_to_session(
     session: &mut Session,
     stream_tx: &StdSender<StreamEvent>,
     tool_name: &str,
     payload: &serde_json::Value,
 ) {
-    let output = render_tool_output(tool_name, payload);
-    if output.trim().is_empty() {
+    // 先注入消息对（共用逻辑）
+    let was_injected = inject_tool_to_messages(session, tool_name, payload);
+    if !was_injected {
         return;
     }
-    let is_dup = session
-        .messages
-        .last()
-        .is_some_and(|msg| msg.role == MessageRole::System && msg.text_content() == output);
-    if is_dup {
-        tracing::debug!(session_id = %session.id, tool_name, "skip tool injection: identical to previous");
-        return;
+    // 找到刚注入的 tool result 消息，发送 StreamEvent
+    //（tool result 是最后一条消息，tool_call_id 在倒数第二条的 tool_calls[0].id）
+    if let Some(assistant_msg) = session.messages.iter().rev().nth(1)
+        && let Some(tc) = assistant_msg.tool_calls.first()
+    {
+        let output = session
+            .messages
+            .last()
+            .map(|m| m.text_content())
+            .unwrap_or_default();
+        let _ = stream_tx.send(StreamEvent::ToolResult {
+            name: tool_name.to_string(),
+            tool_call_id: Some(tc.id.clone()),
+            ok: true,
+            output,
+            full_output: None,
+            media: vec![],
+        });
     }
-    session.append_message(MessageRole::System, output.clone());
-    // tool_call_id: None → stream_consumer 不追加孤立 Tool 消息
-    let _ = stream_tx.send(StreamEvent::ToolResult {
-        name: tool_name.to_string(),
-        tool_call_id: None,
-        ok: true,
-        output: output.clone(),
-        full_output: Some(output),
-        media: vec![],
-    });
-    tracing::info!(session_id = %session.id, tool_name, "tool content injected into session");
 }
 
 /// 根据 tool_name 渲染 JSON payload 为对话文本。
@@ -472,26 +480,26 @@ mod tests {
             }),
         );
 
-        // System 消息（非 tool 结对）
-        assert_eq!(session.messages.len(), 1);
-        assert_eq!(session.messages[0].role, MessageRole::System);
-        let text = session.messages[0].text_content();
-        assert!(text.contains("[浏览器反馈]"));
-        assert!(text.contains("[网络响应] POST /api_keys (状态 200)"));
-        assert!(text.contains("sk-test"));
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[0].tool_calls.len(), 1);
+        assert_eq!(
+            session.messages[1].tool_call_id.as_deref(),
+            Some(session.messages[0].tool_calls[0].id.as_str())
+        );
+        // 每个 tool_call 必须有配对的 tool result
+        assert!(!session.messages[0].tool_calls.is_empty());
+        let tool_text = session.messages[1].text_content();
+        assert!(tool_text.contains("[浏览器反馈]"));
+        assert!(tool_text.contains("[网络响应] POST /api_keys (状态 200)"));
+        assert!(tool_text.contains("sk-test"));
 
         let event = rx.recv().unwrap();
         match event {
-            StreamEvent::ToolResult {
-                output,
-                tool_call_id,
-                ..
-            } => {
+            StreamEvent::ToolResult { output, .. } => {
                 assert!(output.contains("[浏览器反馈]"));
                 assert!(output.contains("sk-test"));
-                assert!(tool_call_id.is_none(), "注入的 tool_call_id 应为 None");
             }
-            _ => panic!("expected tool result event"),
+            _ => panic!("expected browser feedback tool result"),
         }
     }
 
@@ -506,11 +514,11 @@ mod tests {
         });
 
         inject_tool_to_session(&mut session, &tx, "browser_data", &payload);
-        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.messages.len(), 2);
 
-        // 同 payload → 去重跳过
+        // 同 URL 无 feedback → 去重跳过
         inject_tool_to_session(&mut session, &tx, "browser_data", &payload);
-        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.messages.len(), 2);
     }
 
     #[test]
@@ -525,10 +533,12 @@ mod tests {
             &serde_json::json!({ "command": "ls -la" }),
         );
 
-        assert_eq!(session.messages.len(), 1);
-        assert_eq!(session.messages[0].role, MessageRole::System);
-        let text = session.messages[0].text_content();
-        assert!(text.contains("[用户终端操作]"));
-        assert!(text.contains("ls -la"));
+        assert_eq!(session.messages.len(), 2);
+        assert!(
+            session.messages[1]
+                .text_content()
+                .contains("[用户终端操作]")
+        );
+        assert!(session.messages[1].text_content().contains("ls -la"));
     }
 }
