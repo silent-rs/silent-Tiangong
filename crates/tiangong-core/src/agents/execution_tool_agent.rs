@@ -303,6 +303,17 @@ pub(crate) fn basic_file_function_tools() -> Vec<ToolSpec> {
                 "required": ["continue_execution"]
             }),
         },
+        ToolSpec {
+            name: "plugin_injection".to_string(),
+            description: "插件单向注入通道。浏览器页面变化、终端用户操作等外部事件通过此工具自动注入对话。\n\n重要：你不需要主动调用此工具，它由系统在检测到外部变化时自动触发。注入的内容会以 tool result 形式出现在对话中，请据此理解用户环境和操作意图。".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "source": { "type": "string", "description": "数据来源（如 browser_data / terminal_user_input）" }
+                },
+                "required": []
+            }),
+        },
     ]
 }
 

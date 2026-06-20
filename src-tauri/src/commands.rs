@@ -847,22 +847,13 @@ fn start_stream_consumer(
                             let persisted_output = full_output.as_deref().unwrap_or(output);
                             let status = if *ok { "ok=true" } else { "ok=false" };
 
-                            // 注入产生的 ToolResult（tool_call_id 以 tool_auto_ 开头）：
-                            // worker 侧已创建 assistant(tool_call) + tool(result) 消息对，
-                            // 但那在 worker 的 session 副本里。stream_consumer 同步到
-                            // TiangongState session 时需要追加完整的消息对（而非孤立的 Tool），
-                            // 否则下次 ensure_core 加载时 LLM 看到孤立 Tool 消息会报错。
-                            let is_injection = tool_call_id
-                                .as_deref()
-                                .is_some_and(|id| id.starts_with("tool_auto_"));
-
-                            if is_injection {
-                                // 注入结果：追加 assistant(tool_call) + tool(result) 消息对
+                            // plugin_injection 注入结果：追加完整消息对（与 worker session 一致）
+                            if name == tiangong_core::react::message::INJECTION_TOOL_NAME {
                                 use tiangong_core::session::{Message, MessageRole};
                                 let tc_id = tool_call_id.clone().unwrap_or_default();
                                 let mut assistant_msg = Message::new(
                                     MessageRole::Assistant,
-                                    format!("[自动感知] 工具数据就绪: {name}"),
+                                    "[自动感知] 插件数据就绪".to_string(),
                                 );
                                 assistant_msg.tool_calls =
                                     vec![tiangong_core::session::MessageToolCall {
@@ -879,7 +870,7 @@ fn start_stream_consumer(
                                     !*ok,
                                 );
                             } else {
-                                // 正常工具结果：保留原有的 System 摘要 + Tool result 逻辑
+                                // 正常工具结果：System 摘要 + Tool result
                                 let mut lines = vec![format!("工具执行 [{name}]")];
                                 if !last_tool_args_summary.is_empty() {
                                     lines.push(format!("命令: {last_tool_args_summary}"));
@@ -916,7 +907,6 @@ fn start_stream_consumer(
                                 );
                             }
                             last_tool_args_summary.clear();
-                            // 每次工具执行后立即持久化，防止中断丢失工具调用记录
                             let _ = core_state.persist_session_and_app(&sid);
                         }
                         StreamEvent::ApprovalNeeded { .. } => {
