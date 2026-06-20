@@ -851,10 +851,8 @@ fn start_stream_consumer(
                             if name == tiangong_core::react::message::INJECTION_TOOL_NAME {
                                 use tiangong_core::session::{Message, MessageRole};
                                 let tc_id = tool_call_id.clone().unwrap_or_default();
-                                let mut assistant_msg = Message::new(
-                                    MessageRole::Assistant,
-                                    format!("[自动感知] {name} 数据就绪"),
-                                );
+                                let mut assistant_msg =
+                                    Message::new(MessageRole::Assistant, String::new());
                                 assistant_msg.tool_calls =
                                     vec![tiangong_core::session::MessageToolCall {
                                         id: tc_id.clone(),

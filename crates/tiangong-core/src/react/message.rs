@@ -357,8 +357,8 @@ pub fn inject_tool_to_messages(
         return false;
     }
     let tool_call_id = format!("inj_{}", scru128::new());
-    let assistant_text = format!("[自动感知] {tool_name} 数据就绪");
-    let mut assistant_msg = Message::new(MessageRole::Assistant, assistant_text);
+    // assistant 消息只承载 tool_call，text 留空（前端不显示空 text 的 assistant 消息）
+    let mut assistant_msg = Message::new(MessageRole::Assistant, String::new());
     assistant_msg.tool_calls = vec![MessageToolCall {
         id: tool_call_id.clone(),
         name: INJECTION_TOOL_NAME.to_string(),
