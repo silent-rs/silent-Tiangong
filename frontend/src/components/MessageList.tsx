@@ -9,7 +9,6 @@ import {
   Loader2,
   ChevronRight,
   ChevronDown,
-  Terminal,
   Cpu,
   FileText,
   Volume2,
@@ -20,18 +19,15 @@ import {
   ChevronUp,
   ShieldCheck,
   ShieldX,
-  Brain,
   Pencil,
   X,
   Paperclip,
-  Plug,
   ArrowUp,
   ArrowDown,
   ArrowDownToLine,
 } from "lucide-react";
 import { MdPreview } from 'md-editor-rt';
 import 'md-editor-rt/lib/preview.css';
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from '@tauri-apps/plugin-dialog';
 import { ThinkingBlock } from "./ThinkingBlock";
 import { AgentPanel } from "./AgentPanel";
@@ -50,20 +46,26 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { memo, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useResolvedTheme } from "@/hooks/useTheme";
+import {
+  type MessageItem,
+  type MessageGroup,
+  formatMessageTime,
+  msgReasoning,
+  resolveAssetUrl,
+  resolveMarkdownImages,
+  extractLlmExplanation,
+  llmOutputHasToolCalls,
+  summarizeToolGroup,
+  getToolMessageMeta,
+  groupMessages,
+  workerContentMessages,
+  sameMessageRefs,
+  hasMessage,
+  extractAgentRoles,
+  parseAgentReply,
+} from "./message";
 
 /** 格式化消息时间（hover 显示） */
-function formatMessageTime(createdAt?: string): string {
-  if (!createdAt) return "";
-  try {
-    const d = new Date(createdAt);
-    if (isNaN(d.getTime())) return createdAt;
-    const pad = (n: number) => n.toString().padStart(2, "0");
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-  } catch {
-    return createdAt;
-  }
-}
-
 function MessageActions({ text, showTts }: { text: string; showTts: boolean }) {
   const [copied, setCopied] = useState(false);
   const [playing, setPlaying] = useState(false);
@@ -227,10 +229,6 @@ function VoiceBubble({ messageId, audioPath, duration, showText, content }: {
       )}
     </div>
   );
-}
-
-function workerContentMessages(messages: MessageItem[]): MessageItem[] {
-  return messages.filter(m => !(m.role === "system" && textContent(m).startsWith("🔧 Worker:")));
 }
 
 // ---------------------------------------------------------------------------
@@ -1385,56 +1383,6 @@ export function MessageList() {
 // 消息分组：User 消息单独成组，其余合并为 agent_turn
 // ---------------------------------------------------------------------------
 
-interface MessageItem {
-  id: string;
-  role: "system" | "user" | "assistant" | "tool";
-  content: ContentBlock[];
-  reasoning_content: string;
-  worker_id?: string;
-  media?: {
-    kind: "image" | "video" | "audio" | "file";
-    url: string;
-    mime_type?: string;
-    title?: string;
-    capability?: string;
-  }[];
-  tool_calls?: { id: string; name: string; arguments?: unknown }[];
-  tool_call_id?: string;
-  tool_name?: string;
-  tool_result_is_error?: boolean;
-  compact?: boolean;
-  created_at: string;
-}
-
-interface MessageGroup {
-  key: string;
-  type: "user" | "agent_turn" | "worker";
-  worker_id?: string;
-  messages: MessageItem[];
-}
-
-function msgReasoning(message: MessageItem): string {
-  return message.reasoning_content.trim();
-}
-
-function resolveAssetUrl(url: string): string {
-  if (!url) return "";
-  if (url.startsWith("http://") || url.startsWith("https://") || url.startsWith("asset://")) {
-    return url;
-  }
-  if (url.startsWith("/")) {
-    return convertFileSrc(url);
-  }
-  return url;
-}
-
-function resolveMarkdownImages(md: string): string {
-  return md.replace(
-    /(!\[[^\]]*\]\()(\/[^\s)]+)(\))/g,
-    (_, prefix, path, suffix) => prefix + resolveAssetUrl(path) + suffix,
-  );
-}
-
 function renderContentMedia(message: MessageItem) {
   const content = Array.isArray(message.content) ? message.content : [];
   const mediaBlocks = content.filter((b) => b.type === 'media');
@@ -1529,73 +1477,9 @@ function StreamingMessage({
   );
 }
 
-function groupMessages(messages: MessageItem[]): MessageGroup[] {
-  const groups: MessageGroup[] = [];
-  let currentAgentTurn: MessageGroup | null = null;
-
-  for (const msg of messages) {
-    if (msg.worker_id) {
-      if (currentAgentTurn) { groups.push(currentAgentTurn); currentAgentTurn = null; }
-      const previous = groups[groups.length - 1];
-      if (previous?.type === "worker" && previous.worker_id === msg.worker_id) {
-        previous.messages.push(msg);
-      } else {
-        groups.push({ key: `worker-${msg.worker_id}-${msg.id}`, type: "worker", worker_id: msg.worker_id, messages: [msg] });
-      }
-    } else if (msg.role === "user") {
-      if (currentAgentTurn) { groups.push(currentAgentTurn); currentAgentTurn = null; }
-      groups.push({ key: msg.id, type: "user", messages: [msg] });
-    } else {
-      if (!currentAgentTurn) {
-        currentAgentTurn = { key: `turn-${msg.id}`, type: "agent_turn", messages: [] };
-      }
-      currentAgentTurn.messages.push(msg);
-    }
-  }
-  if (currentAgentTurn) groups.push(currentAgentTurn);
-  return groups;
-}
-
 // ---------------------------------------------------------------------------
 // 从 LLM 输出系统消息中提取解释文本
 // ---------------------------------------------------------------------------
-
-function extractLlmExplanation(content: string): string {
-  const lines = content.split("\n");
-  const contentIdx = lines.findIndex((l) => l.startsWith("content:"));
-  if (contentIdx >= 0 && contentIdx + 1 < lines.length) {
-    return lines.slice(contentIdx + 1).join("\n").trim();
-  }
-  return "";
-}
-
-function llmOutputHasToolCalls(content: string): boolean {
-  return content
-    .split("\n")
-    .some((line) => line.trim().startsWith("tool_calls:"));
-}
-
-function toolItemSucceeded(tool: MessageItem): boolean {
-  return !textContent(tool).includes("ok=false") && !tool.tool_result_is_error;
-}
-
-function summarizeToolGroup(tools: MessageItem[]): string {
-  const total = tools.length;
-  const failed = tools.filter((tool) => !toolItemSucceeded(tool)).length;
-  const succeeded = total - failed;
-  const names = Array.from(
-    new Set(
-      tools
-        .map((tool) => tool.tool_name || getToolMessageMeta(tool).toolName || "")
-        .filter(Boolean)
-    )
-  );
-  const nameSummary = names.length > 0
-    ? ` · ${names.slice(0, 3).join(", ")}${names.length > 3 ? ` 等 ${names.length} 类` : ""}`
-    : "";
-  const statusSummary = failed > 0 ? `成功 ${succeeded} / 失败 ${failed}` : `成功 ${succeeded}`;
-  return `工具调用 ${total} 次 · ${statusSummary}${nameSummary}`;
-}
 
 /** 统一的智能体回合渲染 — 将系统消息（事件）和 assistant 消息（回复）合并展示 */
 interface AgentTurnProps {
@@ -1641,31 +1525,6 @@ function useExpansionState(isActive: boolean) {
 }
 
 /** 从 agent_event 内容中提取相关 agent role */
-function extractAgentRoles(content: string, agents: { role: string; label: string }[]): string[] {
-  const roles = new Set<string>();
-  const addByLabel = (label?: string) => {
-    if (!label || label === "User") return;
-    const agent = agents.find((item) => item.label === label);
-    if (agent) roles.add(agent.role);
-  };
-  const createMatch = content.match(/^\[Agent\] .+? \((.+?)\)/);
-  if (createMatch) roles.add(createMatch[1]);
-  const statusMatch = content.match(/^\[Agent\] (.+?) 状态变更:/);
-  if (statusMatch) addByLabel(statusMatch[1]);
-  const lockMatch = content.match(/^\[文件锁\] .+ by (.+)$/);
-  if (lockMatch) addByLabel(lockMatch[1]);
-  return Array.from(roles);
-}
-
-function parseAgentReply(content: string): { label: string; body: string } | null {
-  const match = content.match(/^<!-- tiangong-agent-reply -->\n<!-- label:([^\n]*) -->\n\n?([\s\S]*)$/);
-  if (!match) return null;
-  return {
-    label: match[1].trim() || "Agent",
-    body: match[2].trim(),
-  };
-}
-
 function AgentTurnView({
   messages,
   streamingMessageId,
@@ -1978,18 +1837,6 @@ function AgentTurnView({
   );
 }
 
-function sameMessageRefs(left: MessageItem[], right: MessageItem[]): boolean {
-  if (left.length !== right.length) return false;
-  for (let i = 0; i < left.length; i++) {
-    if (left[i] !== right[i]) return false;
-  }
-  return true;
-}
-
-function hasMessage(messages: MessageItem[], id: string | null): boolean {
-  return !!id && messages.some((message) => message.id === message.id);
-}
-
 const AgentTurn = memo(AgentTurnView, (prev, next) => {
   if (
     prev.hasTts !== next.hasTts
@@ -2012,64 +1859,3 @@ const AgentTurn = memo(AgentTurnView, (prev, next) => {
     && prev.streamingReasoningContent === next.streamingReasoningContent;
 });
 
-interface SystemMessageMeta {
-  icon: React.ComponentType<{ className?: string }>;
-  label: string;
-  summary: string;
-  toolName?: string;
-}
-
-
-/** 从 Tool result 消息提取元数据（不依赖 System 摘要格式）。 */
-function getToolMessageMeta(msg: MessageItem): SystemMessageMeta {
-  const content = textContent(msg);
-  const toolName = msg.tool_name || "";
-  const isError = msg.tool_result_is_error;
-
-  // 注入消息格式（数据来源：xxx）
-  if (content.startsWith("数据来源：")) {
-    const sourceMatch = content.match(/^数据来源：(\S+)/);
-    const source = sourceMatch ? sourceMatch[1] : "plugin";
-    const cmdMatch = content.match(/command:\s*(.+)/);
-    const urlMatch = content.match(/url:\s*(.+)/);
-    const titleMatch = content.match(/title:\s*(.+)/);
-    const detail = cmdMatch?.[1] || urlMatch?.[1] || titleMatch?.[1] || "";
-    return {
-      icon: Plug,
-      label: "插件注入",
-      summary: detail
-        ? `${source} · ${detail.length > 50 ? detail.slice(0, 47) + "..." : detail}`
-        : source,
-      toolName: source,
-    };
-  }
-
-  // recall_memory
-  if (toolName === "recall_memory" || content.startsWith("[记忆检索]")) {
-    const countMatch = content.match(/命中 (\d+) 条/);
-    const count = countMatch ? countMatch[1] : "";
-    const noHit = content.includes("无相关记忆");
-    return {
-      icon: Brain,
-      label: "记忆检索",
-      summary: noHit ? "无命中" : count ? `${count} 条命中` : "记忆检索",
-      toolName: "recall_memory",
-    };
-  }
-
-  // 正常工具结果
-  const parts: string[] = [];
-  if (toolName) parts.push(toolName);
-  parts.push(isError ? "FAIL" : "OK");
-  const cmdMatch = content.match(/命令:\s*(.+)/);
-  if (cmdMatch) {
-    const cmd = cmdMatch[1];
-    parts.push(cmd.length > 50 ? cmd.slice(0, 47) + "..." : cmd);
-  }
-  return {
-    icon: Terminal,
-    label: "工具执行",
-    summary: parts.join(" · ") || content.split("\n")[0].slice(0, 60),
-    toolName: toolName || undefined,
-  };
-}
