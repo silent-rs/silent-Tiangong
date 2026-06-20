@@ -402,69 +402,59 @@ pub(crate) fn inject_tool_to_session(
     }
 }
 
-/// 根据 tool_name 渲染 JSON payload 为对话文本。
+/// 渲染 JSON payload 为对话文本（通用格式）。
+///
+/// 格式：
+/// ```text
+/// 数据来源：browser_data
+/// 相关数据：
+///   title: API Keys
+///   url: https://example.com
+///   text: 页面文本内容...
+/// ```
+///
+/// 递归展开嵌套对象和数组，适合任意插件注入。
 pub fn render_tool_output(tool_name: &str, payload: &serde_json::Value) -> String {
-    match tool_name {
-        "browser_data" => {
-            let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("");
-            let url = payload.get("url").and_then(|v| v.as_str()).unwrap_or("");
-            let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            let feedback = payload
-                .get("feedback")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.trim().is_empty());
-            let has_feedback = feedback.is_some();
-            let header = if has_feedback {
-                "[浏览器反馈]"
+    let mut output = format!("数据来源：{tool_name}");
+    if let Some(obj) = payload.as_object()
+        && !obj.is_empty()
+    {
+        output.push_str("\n相关数据：");
+        for (key, value) in obj {
+            output.push_str(&format!("\n    {key}: {}", format_payload_value(value)));
+        }
+    }
+    output
+}
+
+/// 递归格式化 payload 值为可读文本。
+fn format_payload_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(arr) => {
+            if arr.is_empty() {
+                "[]".to_string()
             } else {
-                "[浏览器页面更新]"
-            };
-            let mut output = if let Some(fb) = feedback {
-                if text.is_empty() {
-                    format!("{header}\n标题：{title}\nURL：{url}\n\n{fb}")
-                } else {
-                    format!("{header}\n标题：{title}\nURL：{url}\n\n{fb}\n\n[当前页面内容]\n{text}")
-                }
-            } else if text.is_empty() {
-                format!("{header}\n标题：{title}\nURL：{url}\n状态：页面内容为空")
-            } else {
-                format!("{header}\n标题：{title}\nURL：{url}\n\n{text}")
-            };
-            if let Some(tabs) = payload.get("tabs").and_then(|v| v.as_array())
-                && !tabs.is_empty()
-            {
-                let active_tab_id = payload
-                    .get("active_tab_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                output.push_str("\n\n[标签列表]");
-                for tab in tabs {
-                    let id = tab.get(0).and_then(|v| v.as_str()).unwrap_or("");
-                    let tab_url = tab.get(1).and_then(|v| v.as_str()).unwrap_or("");
-                    let tab_title = tab.get(2).and_then(|v| v.as_str()).unwrap_or("");
-                    let marker = if active_tab_id == id { " (活跃)" } else { "" };
-                    let display = if tab_title.is_empty() {
-                        tab_url.to_string()
-                    } else {
-                        tab_title.to_string()
-                    };
-                    output.push_str(&format!("\n- {display}{marker}"));
-                }
+                let items: Vec<String> = arr
+                    .iter()
+                    .map(|item| format!("        - {}", format_payload_value(item)))
+                    .collect();
+                format!("\n{}", items.join("\n"))
             }
-            output
         }
-        "terminal_user_input" => {
-            let command = payload
-                .get("command")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            format!("[用户终端操作] 用户在终端执行了: {command}")
-        }
-        _ => {
-            format!(
-                "[{tool_name}]\n{}",
-                serde_json::to_string_pretty(payload).unwrap_or_default()
-            )
+        serde_json::Value::Object(obj) => {
+            if obj.is_empty() {
+                "{}".to_string()
+            } else {
+                let items: Vec<String> = obj
+                    .iter()
+                    .map(|(k, v)| format!("        {k}: {}", format_payload_value(v)))
+                    .collect();
+                format!("\n{}", items.join("\n"))
+            }
         }
     }
 }
@@ -486,32 +476,30 @@ mod tests {
                 "title": "API Keys",
                 "url": "https://platform.deepseek.com/api_keys",
                 "text": "API keys page",
-                "tabs": [],
-                "active_tab_id": null,
-                "feedback": "[网络响应] POST /api_keys (状态 200)\n{\"key\":\"sk-test\"}",
+                "feedback": "POST /api_keys (状态 200)\n{\"key\":\"sk-test\"}",
             }),
         );
 
+        // 消息对：assistant(tool_call) + tool(result)
         assert_eq!(session.messages.len(), 2);
         assert_eq!(session.messages[0].tool_calls.len(), 1);
         assert_eq!(
             session.messages[1].tool_call_id.as_deref(),
             Some(session.messages[0].tool_calls[0].id.as_str())
         );
-        // 每个 tool_call 必须有配对的 tool result
-        assert!(!session.messages[0].tool_calls.is_empty());
+
         let tool_text = session.messages[1].text_content();
-        assert!(tool_text.contains("[浏览器反馈]"));
-        assert!(tool_text.contains("[网络响应] POST /api_keys (状态 200)"));
+        assert!(tool_text.contains("数据来源：browser_data"));
+        assert!(tool_text.contains("title: API Keys"));
         assert!(tool_text.contains("sk-test"));
 
         let event = rx.recv().unwrap();
         match event {
             StreamEvent::ToolResult { output, .. } => {
-                assert!(output.contains("[浏览器反馈]"));
+                assert!(output.contains("数据来源：browser_data"));
                 assert!(output.contains("sk-test"));
             }
-            _ => panic!("expected browser feedback tool result"),
+            _ => panic!("expected tool result event"),
         }
     }
 
@@ -528,7 +516,7 @@ mod tests {
         inject_tool_to_session(&mut session, &tx, "browser_data", &payload);
         assert_eq!(session.messages.len(), 2);
 
-        // 同 URL 无 feedback → 去重跳过
+        // 同 payload → 去重跳过
         inject_tool_to_session(&mut session, &tx, "browser_data", &payload);
         assert_eq!(session.messages.len(), 2);
     }
@@ -546,11 +534,8 @@ mod tests {
         );
 
         assert_eq!(session.messages.len(), 2);
-        assert!(
-            session.messages[1]
-                .text_content()
-                .contains("[用户终端操作]")
-        );
-        assert!(session.messages[1].text_content().contains("ls -la"));
+        let tool_text = session.messages[1].text_content();
+        assert!(tool_text.contains("数据来源：terminal_user_input"));
+        assert!(tool_text.contains("command: ls -la"));
     }
 }
