@@ -311,14 +311,6 @@ pub(crate) fn latest_user_message(session: &Session) -> String {
         .unwrap_or_default()
 }
 
-/// 注入浏览器页面内容到会话（合成 assistant + tool 消息对）
-/// 浏览器内容注入数据
-/// 统一的工具类注入函数：根据 tool_name 渲染 JSON payload 为对话文本。
-///
-/// 所有 ToolInput（终端操作、浏览器内容等）经 AgentInput trait 投递后，
-/// 最终到达此函数。tool_name 决定呈现格式，payload 是结构化 JSON。
-/// 伪造 assistant tool_call + tool result 消息对（仿浏览器注入模式）。
-/// 去重：最近 8 条 tool 消息中已有相同 tool_name 且 payload 相同则跳过。
 /// 注入工具的 tool_call name（注册在 tool spec 中，声明 Agent 不调用）。
 pub const INJECTION_TOOL_NAME: &str = "plugin_injection";
 
