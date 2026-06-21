@@ -14,9 +14,18 @@ pub mod commands;
 pub mod handler;
 pub mod manager;
 pub mod output_processor;
+pub mod plugin;
 pub mod session_pty;
 pub mod types;
 pub mod util;
+
+/// 构造终端进程内插件（issue #156 自注册架构）。
+///
+/// 供 main.rs setup 阶段调用，返回的 `TerminalPlugin` 通过
+/// `TiangongApp::register_plugin` 注册到 app，在 core 构造时传入。
+pub fn build_plugin(app: &tauri::AppHandle<Wry>) -> Option<Arc<plugin::TerminalPlugin>> {
+    plugin::TerminalPlugin::from_app_handle(app).map(Arc::new)
+}
 
 /// 终端 Plugin 共享状态
 pub struct TerminalPluginState {

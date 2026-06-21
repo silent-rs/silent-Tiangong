@@ -16,7 +16,16 @@ pub mod commands;
 pub mod handler;
 pub mod manager;
 pub mod page_fetcher;
+pub mod plugin;
 pub mod types;
+
+/// 构造浏览器进程内插件（issue #156 自注册架构）。
+///
+/// 供 main.rs setup 阶段调用，返回的 `BrowserPlugin` 通过
+/// `TiangongApp::register_plugin` 注册到 app，在 core 构造时传入。
+pub fn build_plugin(app: &tauri::AppHandle<Wry>) -> Option<Arc<plugin::BrowserPlugin>> {
+    plugin::BrowserPlugin::from_app_handle(app).map(Arc::new)
+}
 
 /// 浏览器 Plugin 共享状态
 pub struct BrowserPluginState {
