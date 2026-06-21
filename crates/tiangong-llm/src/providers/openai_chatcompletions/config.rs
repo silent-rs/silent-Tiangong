@@ -1,12 +1,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-/// 重试通知回调。
 pub type RetryNotifier = Arc<dyn Fn(u32, u32, u64, &str) + Send + Sync>;
 
-/// OpenAI Responses provider 配置。
 #[derive(Clone)]
-pub struct OpenAiResponsesConfig {
+pub struct OpenAiChatConfig {
     pub api_key: String,
     pub base_url: String,
     pub timeout: Duration,
@@ -14,7 +12,7 @@ pub struct OpenAiResponsesConfig {
     pub retry_notifier: Option<RetryNotifier>,
 }
 
-impl OpenAiResponsesConfig {
+impl OpenAiChatConfig {
     pub fn new(api_key: impl Into<String>, base_url: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
@@ -26,9 +24,9 @@ impl OpenAiResponsesConfig {
     }
 }
 
-impl std::fmt::Debug for OpenAiResponsesConfig {
+impl std::fmt::Debug for OpenAiChatConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OpenAiResponsesConfig")
+        f.debug_struct("OpenAiChatConfig")
             .field("api_key", &(!self.api_key.is_empty()))
             .field("base_url", &self.base_url)
             .field("timeout", &self.timeout)

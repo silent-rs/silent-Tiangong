@@ -1,63 +1,54 @@
 use async_trait::async_trait;
 use futures_util::{StreamExt, stream};
-use serde::Deserialize;
+use serde_json::Value;
 
 use crate::error::LlmError;
 use crate::model::ProviderModelInfo;
 use crate::provider::{LlmProvider, ProviderCapabilities};
 use crate::request::ProviderRequest;
-use crate::rerank::{RerankProvider, RerankRequest, RerankResponse, RerankResult};
 use crate::response::ProviderResponse;
-use crate::stream::ProviderStream;
+use crate::stream::{ProviderStream, ProviderStreamEvent};
 
-use super::client::OpenAiClient;
-use super::config::OpenAiCompatibleConfig;
-use super::error::map_openai_error;
+use super::client::ResponsesClient;
+use super::config::OpenAiResponsesConfig;
+use super::error::map_responses_error;
 use super::mapping::{build_request_json, parse_complete_response};
+use super::stream::{extract_completed_reasoning, parse_stream_event};
 
 #[derive(Clone)]
-pub struct OpenAiCompatibleProvider {
-    client: OpenAiClient,
+pub struct OpenAiResponsesProvider {
+    client: ResponsesClient,
 }
 
-#[derive(Clone)]
-pub struct OpenAiCompatibleRerankProvider {
-    client: OpenAiClient,
-    model: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiRerankResponse {
-    #[serde(default)]
-    results: Vec<OpenAiRerankResult>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiRerankResult {
-    index: usize,
-    #[serde(alias = "score")]
-    relevance_score: f64,
-}
-
-impl OpenAiCompatibleProvider {
-    pub fn new(config: OpenAiCompatibleConfig) -> Self {
+impl OpenAiResponsesProvider {
+    pub fn new(config: OpenAiResponsesConfig) -> Self {
         Self {
-            client: OpenAiClient::new(config),
+            client: ResponsesClient::new(config),
         }
     }
 }
 
-impl OpenAiCompatibleRerankProvider {
-    pub fn new(config: OpenAiCompatibleConfig, model: impl Into<String>) -> Self {
-        Self {
-            client: OpenAiClient::new(config),
-            model: model.into(),
-        }
+/// 对 completed 事件的 reasoning 兜底做条件去重。
+///
+/// OpenAI Responses 的思考内容主要靠流式增量事件（`reasoning_summary_text.delta` 等）
+/// 多段拼接，这些增量**必须全部保留**。只有当整个流式过程**完全没有收到任何 reasoning
+/// delta** 时，才从 `response.completed` 的最终 `output[]` 中兜底提取 reasoning。
+///
+/// 因此去重只针对 completed 兜底：`received_delta` 为 true 时跳过兜底 reasoning。
+fn maybe_completed_reasoning(
+    completed_payload: &Value,
+    received_delta: bool,
+) -> Option<ProviderStreamEvent> {
+    if received_delta {
+        return None;
     }
+    extract_completed_reasoning(completed_payload)
+        .filter(|text| !text.trim().is_empty())
+        .map(ProviderStreamEvent::ReasoningDelta)
 }
 
 #[async_trait]
-impl LlmProvider for OpenAiCompatibleProvider {
+impl LlmProvider for OpenAiResponsesProvider {
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             streaming: true,
@@ -83,12 +74,43 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let payload = build_request_json(&req, true)
             .map_err(|err| LlmError::InvalidRequest(err.to_string()))?;
         let stream = self.client.stream(&model, payload).await?;
-        let mapped = stream
-            .map(|item| match item {
-                Ok(payload) => super::stream::parse_stream_payload(&payload),
-                Err(err) => vec![Err(map_openai_error(&err))],
-            })
-            .flat_map(stream::iter);
+
+        // 维护流式状态：记录是否收到过 reasoning delta 增量。
+        // 流式增量一律保留；仅在全程无 delta 时，从 completed 兜底补发 reasoning。
+        let mut received_reasoning_delta = false;
+        let mapped = stream.flat_map(move |item| {
+            let raw_payload = match item {
+                Ok(payload) => payload,
+                Err(err) => {
+                    return stream::iter(vec![Err(map_responses_error(&err))]);
+                }
+            };
+
+            // 记录本条事件是否产生 reasoning delta（用于 completed 兜底判断）。
+            let is_completed = raw_payload
+                .get("type")
+                .and_then(Value::as_str)
+                .map(|t| t == "response.completed")
+                .unwrap_or(false);
+
+            let mut events = parse_stream_event(&raw_payload);
+
+            if is_completed {
+                // 仅当流式过程未收到任何 reasoning delta 时，兜底补发最终 reasoning。
+                if let Some(fallback) =
+                    maybe_completed_reasoning(&raw_payload, received_reasoning_delta)
+                {
+                    events.insert(0, Ok(fallback));
+                }
+            } else if events
+                .iter()
+                .any(|e| matches!(e, Ok(ProviderStreamEvent::ReasoningDelta(_))))
+            {
+                received_reasoning_delta = true;
+            }
+
+            stream::iter(events)
+        });
         Ok(Box::pin(mapped))
     }
 
@@ -97,24 +119,48 @@ impl LlmProvider for OpenAiCompatibleProvider {
     }
 }
 
-#[async_trait]
-impl RerankProvider for OpenAiCompatibleRerankProvider {
-    async fn rerank(&self, request: RerankRequest) -> anyhow::Result<RerankResponse> {
-        let response = self.client.rerank(&self.model, &request).await?;
-        let parsed: OpenAiRerankResponse = serde_json::from_value(response)?;
-        Ok(RerankResponse {
-            results: parsed
-                .results
-                .into_iter()
-                .map(|item| RerankResult {
-                    index: item.index,
-                    relevance_score: item.relevance_score,
-                })
-                .collect(),
-        })
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fallback_emitted_when_no_delta_received() {
+        let completed = serde_json::json!({
+            "response": {
+                "output": [
+                    { "type": "reasoning", "summary": [{ "type": "summary_text", "text": "最终思考" }] }
+                ]
+            }
+        });
+        let event = maybe_completed_reasoning(&completed, false);
+        let ok = matches!(
+            event.as_ref(),
+            Some(ProviderStreamEvent::ReasoningDelta(t)) if t == "最终思考"
+        );
+        assert!(ok, "无 delta 时应兜底: {event:?}");
     }
 
-    fn model(&self) -> &str {
-        &self.model
+    #[test]
+    fn fallback_skipped_when_delta_received() {
+        // 已通过流式 delta 收到思考，completed 兜底应跳过，避免重复（关键 bug 修复）。
+        let completed = serde_json::json!({
+            "response": {
+                "output": [
+                    { "type": "reasoning", "summary": [{ "type": "summary_text", "text": "最终思考" }] }
+                ]
+            }
+        });
+        let event = maybe_completed_reasoning(&completed, true);
+        assert!(event.is_none(), "已收到 delta 时不应兜底重复: {event:?}");
+    }
+
+    #[test]
+    fn fallback_none_when_completed_has_no_reasoning() {
+        let completed = serde_json::json!({
+            "response": {
+                "output": [{ "type": "message", "content": [{ "type": "output_text", "text": "答案" }] }]
+            }
+        });
+        assert!(maybe_completed_reasoning(&completed, false).is_none());
     }
 }

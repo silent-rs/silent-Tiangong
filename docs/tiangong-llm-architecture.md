@@ -26,7 +26,9 @@
   - `crates/tiangong-llm/src/provider.rs`
 - 维护 provider 适配入口：
   - `crates/tiangong-llm/src/providers/anthropic`
-  - `crates/tiangong-llm/src/providers/openai`
+  - `crates/tiangong-llm/src/providers/openai`（Responses API）
+  - `crates/tiangong-llm/src/providers/openai_chatcompletions`（Chat Completions API）
+  - `crates/tiangong-llm/src/providers/deepseek`
 - 在 provider 内完成统一模型与协议模型之间的映射
 - 在 provider 内完成统一错误模型与协议错误之间的映射
 
@@ -73,8 +75,8 @@
 - Anthropic 链路相对符合目标结构
   - `crates/tiangong-anthropic` 承担了原生 transport
   - `tiangong-llm` 中 Anthropic provider 主要负责映射和封装
-- OpenAI 兼容链路仍处于过渡态
-  - `crates/tiangong-llm/src/providers/openai/provider.rs` 目前同时承担了 client 构建、重试、timeout、list models、错误分类等职责
+- OpenAI 链路分为 Responses（`providers/openai`）与 Chat Completions（`providers/openai_chatcompletions`）两套适配，仍处于过渡态
+  - `crates/tiangong-llm/src/providers/openai_chatcompletions/provider.rs` 目前同时承担了 client 构建、重试、timeout、list models、错误分类等职责
   - 这部分后续应拆出独立 transport 或共享执行层，但当前不作为阻塞其他功能开发的前置任务
 
 结论：
@@ -99,7 +101,7 @@
 
 以下事项属于后续收敛方向，但当前不阻塞其他主功能开发：
 
-- 将 OpenAI 兼容 transport 从 `crates/tiangong-llm/src/providers/openai/provider.rs` 中拆出
+- 将 OpenAI transport 从 `crates/tiangong-llm/src/providers/openai_chatcompletions/provider.rs` 中拆出
 - 抽取 provider 共用的 retry/logging 执行器
 - 统一 `list_models` 的 transport 承载方式
 - 继续缩减 provider 文件中的 HTTP 直连细节

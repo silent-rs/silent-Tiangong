@@ -42,7 +42,8 @@ pub fn embedding_provider_from_config(
     config: &EmbeddingEndpointConfig,
 ) -> Result<Arc<dyn EmbeddingProvider>> {
     match config.protocol {
-        ProviderProtocol::OpenAiCompatible => {
+        // Embedding 端点（/v1/embeddings）与 OpenAI 两种协议变体兼容。
+        ProviderProtocol::OpenAi | ProviderProtocol::OpenAiChatCompletions => {
             Ok(Arc::new(OpenAiEmbeddingProvider::from_config(config)?))
         }
         protocol => anyhow::bail!(
@@ -104,7 +105,10 @@ impl OpenAiEmbeddingProvider {
 
     /// 从统一 Embedding 端点配置创建 provider。
     pub fn from_config(config: &EmbeddingEndpointConfig) -> Result<Self> {
-        if config.protocol != ProviderProtocol::OpenAiCompatible {
+        if !matches!(
+            config.protocol,
+            ProviderProtocol::OpenAi | ProviderProtocol::OpenAiChatCompletions
+        ) {
             anyhow::bail!(
                 "OpenAI Embedding Provider 不支持 {} 协议",
                 config.protocol.as_str()
