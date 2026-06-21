@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tauri::{
     plugin::{Builder, TauriPlugin},
-    Manager, Wry,
+    Emitter, Manager, Wry,
 };
 
 use crate::session_pty::SessionPtyRegistry;
@@ -74,6 +74,21 @@ pub fn init(session_id: String, cwd: String) -> TauriPlugin<Wry> {
 pub async fn set_cwd(app: &tauri::AppHandle<Wry>, cwd: String) {
     let state = app.state::<TerminalPluginState>();
     state.registry.set_default_cwd(cwd);
+}
+
+/// workspace 切换时同步终端：更新默认 cwd 并销毁所有存活 PTY。
+///
+/// workspace 切换发生在尚未产生对话的阶段，直接销毁重建 PTY 比发送 `cd`
+/// 更干净（不留历史命令、不误发到交互式程序）。用户下次打开终端时 `ensure`
+/// 用新 `default_cwd` 创建全新 PTY（见 [`SessionPtyRegistry::reset_all_for_workspace`]）。
+///
+/// 销毁后通过 `terminal:reset` 事件通知前端丢弃 xterm 缓存并重新 `ensure`，
+/// 使当前已打开的终端面板也能感知到后端 PTY 重建。
+pub fn sync_workspace_cwd(app: &tauri::AppHandle<Wry>, cwd: &str) {
+    let state = app.state::<TerminalPluginState>();
+    state.registry.reset_all_for_workspace(cwd);
+    // 通知前端：所有 PTY 已重置，丢弃 xterm 缓存后由 ensure 重建
+    let _ = app.emit("terminal:reset", ());
 }
 
 /// 销毁指定对话的 PTY（删除对话时调用）

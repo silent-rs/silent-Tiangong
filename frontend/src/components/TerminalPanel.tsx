@@ -77,7 +77,7 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const poolRef = useRef<Map<string, TerminalEntry>>(new Map());
   const currentIdRef = useRef<string>('');
-  const globalUnlistenRef = useRef<(() => void) | null>(null);
+  const globalUnlistenRef = useRef<Array<() => void>>([]);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const pendingCreateRef = useRef<Set<string>>(new Set());
   const createdTimeRef = useRef<number>(0);
@@ -94,6 +94,10 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
     cwd: '',
     alive: false,
   });
+  // PTY 重建版本：terminal:reset 事件递增，作为 mount effect 依赖强制重新 ensure。
+  // workspace 切换时后端销毁所有 PTY 后发出 reset，前端 pool 已清空，需重跑 ensure
+  // 重建当前会话的 xterm（effectiveId 不变，仅靠它无法触发重挂载）。
+  const [ptyVersion, setPtyVersion] = useState(0);
 
   // 按对话 PTY 模型：effectiveId 为当前对话 id。
   // 草稿态（activeSessionId=null）用 draftTerminalId 作为临时 id 创建草稿 PTY，
@@ -130,13 +134,49 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
         unlisten();
         return;
       }
-      globalUnlistenRef.current = unlisten;
+      globalUnlistenRef.current.push(unlisten);
     };
     setup();
     return () => {
       cancelled = true;
-      globalUnlistenRef.current?.();
-      globalUnlistenRef.current = null;
+      for (const fn of globalUnlistenRef.current) fn();
+      globalUnlistenRef.current = [];
+    };
+  }, []);
+
+  // 监听后端 terminal:reset 事件（workspace 切换等场景，后端销毁所有 PTY 后发出）。
+  // 前端需丢弃所有 xterm 缓存，使切换对话的 ensure effect 重新用新 workspace 创建 PTY。
+  useEffect(() => {
+    let cancelled = false;
+    const setup = async () => {
+      const unlisten = await listen('terminal:reset', () => {
+        if (cancelled) return;
+        // 销毁所有缓存的 xterm entry（DOM 容器由 React 卸载/重挂）
+        for (const entry of poolRef.current.values()) {
+          try {
+            entry.term.dispose();
+          } catch {
+            // ignore
+          }
+        }
+        poolRef.current.clear();
+        // 清空 currentIdRef，强制下方「切换对话挂载」effect 重建当前会话的 xterm
+        currentIdRef.current = '';
+        // 递增版本号触发 mount effect 重跑（effectiveId 不变时唯一可靠的重建入口）
+        setPtyVersion((v) => v + 1);
+        setDisplayInfo({ cwd: '', alive: false });
+      });
+      if (cancelled) {
+        unlisten();
+        return;
+      }
+      globalUnlistenRef.current.push(unlisten);
+    };
+    setup();
+    return () => {
+      cancelled = true;
+      for (const fn of globalUnlistenRef.current) fn();
+      globalUnlistenRef.current = [];
     };
   }, []);
 
@@ -339,7 +379,7 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
       }
     };
     switchTo();
-  }, [effectiveId]);
+  }, [effectiveId, ptyVersion]);
 
   // 会话独立终端模型：PTY 创建时已用 workspace cwd，之后 cwd 由用户/命令
   // 自然管理。切换会话时不强制 cd，避免覆盖用户在终端内的 cd 操作。
