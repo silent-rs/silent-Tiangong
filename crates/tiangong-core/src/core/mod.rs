@@ -38,6 +38,8 @@ pub use crate::memory::registry::{
 
 pub(crate) mod command;
 pub(crate) use command::Command;
+pub mod plugin;
+pub use plugin::Plugin;
 
 /// 天工智能体核心
 pub struct TiangongCore {
