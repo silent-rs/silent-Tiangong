@@ -4,10 +4,17 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 /// Provider 协议类型。
+///
+/// `OpenAi` 走 OpenAI Responses API（`/responses`，需显式选择）；`OpenAiChatCompletions`
+/// 走 Chat Completions API（`/chat/completions`），是默认协议，适用于官方 OpenAI 端点以及
+/// vLLM/Ollama/智谱等第三方 OpenAI 兼容端点。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProviderProtocol {
+    /// OpenAI Responses API（`/responses`）。
+    OpenAi,
+    /// OpenAI Chat Completions API（`/chat/completions`）。
     #[default]
-    OpenAiCompatible,
+    OpenAiChatCompletions,
     Anthropic,
     DeepSeek,
 }
@@ -28,7 +35,8 @@ impl<'de> Deserialize<'de> for ProviderProtocol {
 impl ProviderProtocol {
     pub fn as_str(&self) -> &'static str {
         match self {
-            ProviderProtocol::OpenAiCompatible => "openai",
+            ProviderProtocol::OpenAi => "openai",
+            ProviderProtocol::OpenAiChatCompletions => "openai_chatcompletions",
             ProviderProtocol::Anthropic => "anthropic",
             ProviderProtocol::DeepSeek => "deepseek",
         }
@@ -40,8 +48,19 @@ impl FromStr for ProviderProtocol {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim() {
-            "" | "openai" | "openai_compatible" | "open_ai_compatible" => {
-                Ok(ProviderProtocol::OpenAiCompatible)
+            // 空值回退到默认协议（Chat Completions），避免未配置端点误走 Responses。
+            "" => Ok(ProviderProtocol::OpenAiChatCompletions),
+            "openai" => Ok(ProviderProtocol::OpenAi),
+            "openai_responses" | "openai-responses" | "responses" => Ok(ProviderProtocol::OpenAi),
+            "openai_chatcompletions"
+            | "openai_chat_completions"
+            | "openai_chat"
+            | "openai-chat"
+            | "chat_completions"
+            | "chat-completions" => Ok(ProviderProtocol::OpenAiChatCompletions),
+            // 历史别名：旧的 "openai_compatible" 归入 Chat Completions。
+            "openai_compatible" | "open_ai_compatible" => {
+                Ok(ProviderProtocol::OpenAiChatCompletions)
             }
             "anthropic" => Ok(ProviderProtocol::Anthropic),
             "deepseek" | "deep_seek" => Ok(ProviderProtocol::DeepSeek),

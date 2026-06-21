@@ -1,63 +1,34 @@
 use async_trait::async_trait;
 use futures_util::{StreamExt, stream};
-use serde::Deserialize;
 
 use crate::error::LlmError;
 use crate::model::ProviderModelInfo;
 use crate::provider::{LlmProvider, ProviderCapabilities};
 use crate::request::ProviderRequest;
-use crate::rerank::{RerankProvider, RerankRequest, RerankResponse, RerankResult};
 use crate::response::ProviderResponse;
 use crate::stream::ProviderStream;
 
-use super::client::OpenAiClient;
-use super::config::OpenAiCompatibleConfig;
-use super::error::map_openai_error;
+use super::client::ResponsesClient;
+use super::config::OpenAiResponsesConfig;
+use super::error::map_responses_error;
 use super::mapping::{build_request_json, parse_complete_response};
+use super::stream::parse_stream_event;
 
 #[derive(Clone)]
-pub struct OpenAiCompatibleProvider {
-    client: OpenAiClient,
+pub struct OpenAiResponsesProvider {
+    client: ResponsesClient,
 }
 
-#[derive(Clone)]
-pub struct OpenAiCompatibleRerankProvider {
-    client: OpenAiClient,
-    model: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiRerankResponse {
-    #[serde(default)]
-    results: Vec<OpenAiRerankResult>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiRerankResult {
-    index: usize,
-    #[serde(alias = "score")]
-    relevance_score: f64,
-}
-
-impl OpenAiCompatibleProvider {
-    pub fn new(config: OpenAiCompatibleConfig) -> Self {
+impl OpenAiResponsesProvider {
+    pub fn new(config: OpenAiResponsesConfig) -> Self {
         Self {
-            client: OpenAiClient::new(config),
-        }
-    }
-}
-
-impl OpenAiCompatibleRerankProvider {
-    pub fn new(config: OpenAiCompatibleConfig, model: impl Into<String>) -> Self {
-        Self {
-            client: OpenAiClient::new(config),
-            model: model.into(),
+            client: ResponsesClient::new(config),
         }
     }
 }
 
 #[async_trait]
-impl LlmProvider for OpenAiCompatibleProvider {
+impl LlmProvider for OpenAiResponsesProvider {
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             streaming: true,
@@ -85,8 +56,8 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let stream = self.client.stream(&model, payload).await?;
         let mapped = stream
             .map(|item| match item {
-                Ok(payload) => super::stream::parse_stream_payload(&payload),
-                Err(err) => vec![Err(map_openai_error(&err))],
+                Ok(payload) => parse_stream_event(&payload),
+                Err(err) => vec![Err(map_responses_error(&err))],
             })
             .flat_map(stream::iter);
         Ok(Box::pin(mapped))
@@ -94,27 +65,5 @@ impl LlmProvider for OpenAiCompatibleProvider {
 
     async fn list_models(&self) -> Result<Vec<ProviderModelInfo>, LlmError> {
         self.client.list_models().await
-    }
-}
-
-#[async_trait]
-impl RerankProvider for OpenAiCompatibleRerankProvider {
-    async fn rerank(&self, request: RerankRequest) -> anyhow::Result<RerankResponse> {
-        let response = self.client.rerank(&self.model, &request).await?;
-        let parsed: OpenAiRerankResponse = serde_json::from_value(response)?;
-        Ok(RerankResponse {
-            results: parsed
-                .results
-                .into_iter()
-                .map(|item| RerankResult {
-                    index: item.index,
-                    relevance_score: item.relevance_score,
-                })
-                .collect(),
-        })
-    }
-
-    fn model(&self) -> &str {
-        &self.model
     }
 }

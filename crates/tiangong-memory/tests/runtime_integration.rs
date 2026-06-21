@@ -1256,7 +1256,7 @@ async fn deep_recall_fixed_scenario_traces_cross_session_artifact_entity_and_dec
         api_key: "test-memory-key".to_string(),
         base_url: mock_llm.base_url(),
         model: "memory-deep-recall-mock".to_string(),
-        protocol: ProviderProtocol::OpenAiCompatible,
+        protocol: ProviderProtocol::OpenAiChatCompletions,
         // Deep Recall 会触发 5-7 轮 LLM 调用（裁决器 + 锚点规划器 + 整理器），
         // CI 慢环境下累积延迟可能超过 5s。加大超时并允许 1 次重试，避免瞬时超时
         // 导致 LLM 返回空 → deep→Normal 降级。

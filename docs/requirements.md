@@ -52,6 +52,7 @@
 - 核心对话链路必须按 Provider 协议动态构建请求，不允许将所有聊天模型强制视为 OpenAI 兼容接口。
 - 当 `chat` 或 `lite` routing 指向 `anthropic` Provider 时，必须支持 Anthropic Messages 请求格式的同步、流式、工具调用与轻量模型调用，并保持 CLI/GUI/Server 行为一致。
 - 当 `chat` 或 `lite` routing 指向 `deepseek` Provider 时，必须支持 DeepSeek Chat Completions 请求格式的同步、流式、工具调用与轻量模型调用，包括思考模式（thinking）控制、reasoning_effort 映射（Low/Medium/High → high，Max → max）以及上下文缓存 token 报告，并保持 CLI/GUI/Server 行为一致。
+- OpenAI 协议层必须同时支持 Responses API（`/responses`，协议值 `openai`）与 Chat Completions API（`/chat/completions`，协议值 `openai_chatcompletions`，默认协议）；Responses 路径必须支持文本、工具调用、思考摘要（reasoning summary）与流式事件映射，并通过 `max_output_tokens` / `reasoning.effort` 等字段对齐统一请求模型。第三方 OpenAI 兼容端点（vLLM/Ollama/智谱等）应使用 `openai_chatcompletions` 或旧别名 `openai_compatible`，避免触发不支持的 `/responses`。
 - Rust 侧 LLM 协议层必须沉淀为独立库（当前为 `tiangong-llm`），由该库统一维护 Provider 抽象、领域模型与错误边界；Anthropic 适配层必须拆分为独立 crate `tiangong-anthropic`，DeepSeek 适配层必须拆分为独立 crate `tiangong-deepseek`，由该 crate 内部使用 `reqwest + serde` 原生实现 DeepSeek Chat Completions 与 SSE 解析，并通过 `tiangong-llm` 接入上层；OpenAI 兼容适配层内部可接入 `async-openai`，但第三方 SDK 类型不允许泄漏到上层业务。
 - 必须维护 `tiangong-llm` 的架构约束文档，明确其职责仅限统一抽象、Provider 封装、请求/响应映射、错误边界与流事件边界；新增协议或修复兼容问题时不得继续将 transport、业务规则和上层策略堆叠进该 crate，后续若需拆分 transport 或共享执行器，必须以该文档为准。
 

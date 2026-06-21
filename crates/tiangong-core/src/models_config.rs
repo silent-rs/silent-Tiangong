@@ -778,7 +778,7 @@ mod tests {
                 base_url: "https://api.test.com".to_string(),
                 api_key: "key".to_string(),
                 timeout_ms: 60_000,
-                protocol: ProviderProtocol::OpenAiCompatible,
+                protocol: ProviderProtocol::OpenAiChatCompletions,
             },
         );
         config.models.insert(
@@ -816,7 +816,7 @@ mod tests {
                 base_url: "https://api.test.com".to_string(),
                 api_key: "key".to_string(),
                 timeout_ms: 60_000,
-                protocol: ProviderProtocol::OpenAiCompatible,
+                protocol: ProviderProtocol::OpenAiChatCompletions,
             },
         );
         config.routing.insert(
@@ -905,7 +905,7 @@ mod tests {
                 base_url: "https://api.test.com".to_string(),
                 api_key: "key".to_string(),
                 timeout_ms: 60_000,
-                protocol: ProviderProtocol::OpenAiCompatible,
+                protocol: ProviderProtocol::OpenAiChatCompletions,
             },
         );
         config.models.insert(
@@ -954,7 +954,7 @@ mod tests {
                 base_url: "https://api.test.com".to_string(),
                 api_key: "k".to_string(),
                 timeout_ms: 60_000,
-                protocol: ProviderProtocol::OpenAiCompatible,
+                protocol: ProviderProtocol::OpenAiChatCompletions,
             },
         );
         config.routing.insert(

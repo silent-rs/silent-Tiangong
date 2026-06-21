@@ -11,7 +11,8 @@ use crate::model::ProviderProtocol;
 use crate::provider::LlmProvider;
 use crate::providers::anthropic::{AnthropicConfig, AnthropicProvider};
 use crate::providers::deepseek::{DeepSeekConfig, DeepSeekProvider};
-use crate::providers::openai::{OpenAiCompatibleConfig, OpenAiCompatibleProvider};
+use crate::providers::openai::{OpenAiResponsesConfig, OpenAiResponsesProvider};
+use crate::providers::openai_chatcompletions::{OpenAiChatCompletionsProvider, OpenAiChatConfig};
 use crate::request::ProviderRequest;
 
 #[derive(Debug, Clone)]
@@ -90,12 +91,22 @@ pub async fn complete_text_with_usage(
 
 fn build_provider(config: &LlmEndpointConfig) -> Result<Box<dyn LlmProvider>, LlmError> {
     match config.protocol {
-        ProviderProtocol::OpenAiCompatible => {
+        ProviderProtocol::OpenAi => {
             let mut provider_config =
-                OpenAiCompatibleConfig::new(config.api_key.clone(), config.base_url.clone());
+                OpenAiResponsesConfig::new(config.api_key.clone(), config.base_url.clone());
             provider_config.timeout = config.timeout;
             provider_config.max_retries = config.max_retries;
-            Ok(Box::new(OpenAiCompatibleProvider::new(provider_config)))
+            Ok(Box::new(OpenAiResponsesProvider::new(provider_config)))
+        }
+        // Chat Completions（含旧 openai_compatible 别名）。
+        ProviderProtocol::OpenAiChatCompletions => {
+            let mut provider_config =
+                OpenAiChatConfig::new(config.api_key.clone(), config.base_url.clone());
+            provider_config.timeout = config.timeout;
+            provider_config.max_retries = config.max_retries;
+            Ok(Box::new(OpenAiChatCompletionsProvider::new(
+                provider_config,
+            )))
         }
         ProviderProtocol::Anthropic => {
             let mut provider_config = AnthropicConfig::new(config.api_key.clone());

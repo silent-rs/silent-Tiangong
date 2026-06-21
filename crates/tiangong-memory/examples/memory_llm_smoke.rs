@@ -165,7 +165,7 @@ fn print_sample_config() -> Result<()> {
             base_url: "https://api.example.com/v1".to_string(),
             api_key: "${MEMORY_LLM_API_KEY}".to_string(),
             model: "memory-model-name".to_string(),
-            protocol: ProviderProtocol::OpenAiCompatible,
+            protocol: ProviderProtocol::OpenAiChatCompletions,
             timeout_ms: 60_000,
         }),
         ..Default::default()

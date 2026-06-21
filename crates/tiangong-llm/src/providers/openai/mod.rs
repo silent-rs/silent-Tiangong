@@ -1,3 +1,8 @@
+//! OpenAI Responses API（`/responses`）适配层。
+//!
+//! 与 `providers/openai_chatcompletions`（Chat Completions）并列，二者共享 `async-openai`
+//! 客户端与重试/错误映射基础能力，但请求/响应/流式结构各自独立实现。
+
 mod client;
 mod config;
 mod error;
@@ -5,5 +10,5 @@ mod mapping;
 mod provider;
 mod stream;
 
-pub use config::OpenAiCompatibleConfig;
-pub use provider::{OpenAiCompatibleProvider, OpenAiCompatibleRerankProvider};
+pub use config::OpenAiResponsesConfig;
+pub use provider::OpenAiResponsesProvider;

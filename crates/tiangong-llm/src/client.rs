@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::model::ProviderProtocol;
-use crate::providers::openai::{OpenAiCompatibleConfig, OpenAiCompatibleRerankProvider};
+use crate::providers::openai_chatcompletions::{OpenAiChatConfig, OpenAiChatRerankProvider};
 use crate::rerank::{RerankEndpointConfig, RerankProvider};
 
 /// 根据端点配置创建 RerankProvider。
@@ -13,11 +13,12 @@ pub fn rerank_provider_from_config(
     config: &RerankEndpointConfig,
 ) -> Result<Arc<dyn RerankProvider>> {
     match config.protocol {
-        ProviderProtocol::OpenAiCompatible => {
+        // Rerank 端点（/rerank）与 OpenAI 两种协议变体兼容。
+        ProviderProtocol::OpenAi | ProviderProtocol::OpenAiChatCompletions => {
             let mut provider_config =
-                OpenAiCompatibleConfig::new(config.api_key.clone(), config.base_url.clone());
+                OpenAiChatConfig::new(config.api_key.clone(), config.base_url.clone());
             provider_config.timeout = config.timeout;
-            Ok(Arc::new(OpenAiCompatibleRerankProvider::new(
+            Ok(Arc::new(OpenAiChatRerankProvider::new(
                 provider_config,
                 config.model.clone(),
             )))

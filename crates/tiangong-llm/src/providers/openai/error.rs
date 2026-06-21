@@ -1,38 +1,8 @@
-use crate::error::LlmError;
+//! Responses API 错误映射。
+//!
+//! 与 Chat Completions 共用 `async-openai` 错误类型，直接复用 Chat Completions 模块的映射逻辑。
 
-pub fn map_openai_error(error: &async_openai::error::OpenAIError) -> LlmError {
-    let text = error.to_string();
-    if text.contains("401") {
-        return LlmError::Authentication(text);
-    }
-    if is_rate_limited_text(&text) {
-        return LlmError::RateLimited(text);
-    }
-    if text.contains("400") {
-        return LlmError::InvalidRequest(text);
-    }
-    if text.contains("timeout") {
-        return LlmError::Timeout(0);
-    }
-    LlmError::Transport(text)
-}
-
-pub fn is_retryable_openai_error(err: &async_openai::error::OpenAIError) -> bool {
-    let text = err.to_string();
-    is_rate_limited_text(&text)
-        || text.contains("500 Internal Server Error")
-        || text.contains("502 Bad Gateway")
-        || text.contains("503 Service Unavailable")
-        || text.contains("504 Gateway Timeout")
-        || text.contains("connection reset")
-        || text.contains("connection refused")
-}
-
-fn is_rate_limited_text(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    text.contains("429")
-        || text.contains("529")
-        || lower.contains("rate limit")
-        || lower.contains("too many requests")
-        || lower.contains("overloaded_error")
-}
+pub(super) use crate::providers::openai_chatcompletions::error::{
+    is_retryable_openai_error as is_retryable_responses_error,
+    map_openai_error as map_responses_error,
+};

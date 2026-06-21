@@ -15,7 +15,10 @@ use tiangong_llm::message::{
 use tiangong_llm::provider::LlmProvider;
 use tiangong_llm::providers::anthropic::{AnthropicConfig, AnthropicProvider};
 use tiangong_llm::providers::deepseek::{DeepSeekConfig, DeepSeekProvider};
-use tiangong_llm::providers::openai::{OpenAiCompatibleConfig, OpenAiCompatibleProvider};
+use tiangong_llm::providers::openai::{OpenAiResponsesConfig, OpenAiResponsesProvider};
+use tiangong_llm::providers::openai_chatcompletions::{
+    OpenAiChatCompletionsProvider, OpenAiChatConfig,
+};
 use tiangong_llm::request::ProviderRequest;
 use tiangong_llm::response::{ProviderResponse, StopReason};
 use tiangong_llm::stream::{ProviderStream, ProviderStreamEvent};
@@ -252,6 +255,13 @@ impl SingleProviderClient {
                 .await
                 .map(|items| items.into_iter().map(|item| item.id).collect::<Vec<_>>())
                 .map_err(map_llm_error)?
+        } else if cfg.api_protocol == ProviderProtocol::OpenAi {
+            let provider = build_openai_responses_provider_from_config(cfg, timeout_ms, None)?;
+            provider
+                .list_models()
+                .await
+                .map(|items| items.into_iter().map(|item| item.id).collect::<Vec<_>>())
+                .map_err(map_llm_error)?
         } else {
             let provider = build_openai_provider_from_config(cfg, timeout_ms, None)?;
             provider
@@ -300,6 +310,20 @@ impl SingleProviderClient {
             models.dedup();
             return Ok(models);
         }
+        if cfg.api_protocol == ProviderProtocol::OpenAi {
+            let provider = build_openai_responses_provider_from_config(cfg, timeout_ms, None)?;
+            let runtime = TokioRuntimeBuilder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("初始化异步运行时失败")?;
+            let mut models = runtime
+                .block_on(provider.list_models())
+                .map(|items| items.into_iter().map(|item| item.id).collect::<Vec<_>>())
+                .map_err(map_llm_error)?;
+            models.sort();
+            models.dedup();
+            return Ok(models);
+        }
         let provider = build_openai_provider_from_config(cfg, timeout_ms, None)?;
         let runtime = TokioRuntimeBuilder::new_current_thread()
             .enable_all()
@@ -322,12 +346,43 @@ impl SingleProviderClient {
         build_anthropic_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())
     }
 
+    /// 根据协议构建 OpenAI 变体 provider（Responses 或 Chat Completions）。
+    ///
+    /// 用于非流式 complete 路径：Anthropic/DeepSeek 已在各方法内单独处理，
+    /// 此处仅覆盖 OpenAI 两种变体。
+    fn build_openai_variant_provider(&self, timeout_ms: u64) -> Result<Box<dyn LlmProvider>> {
+        match self.protocol() {
+            ProviderProtocol::OpenAi => Ok(Box::new(build_openai_responses_provider_from_config(
+                &self.cfg,
+                timeout_ms,
+                self.on_retry.clone(),
+            )?)),
+            // Chat Completions（含旧 openai_compatible 别名）。
+            ProviderProtocol::OpenAiChatCompletions => Ok(Box::new(
+                build_openai_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())?,
+            )),
+            // 其它协议（Anthropic/DeepSeek）不应进入此方法，给出明确错误。
+            protocol => Err(anyhow!(
+                "build_openai_variant_provider 不支持协议 {}",
+                protocol.as_str()
+            )),
+        }
+    }
+
     fn build_provider_dispatch(&self, timeout_ms: u64) -> Result<ProviderDispatch> {
         match self.protocol() {
             ProviderProtocol::Anthropic => Ok(ProviderDispatch::Anthropic(Box::new(
                 self.build_anthropic_provider(timeout_ms)?,
             ))),
-            ProviderProtocol::OpenAiCompatible => Ok(ProviderDispatch::OpenAi(Box::new(
+            ProviderProtocol::OpenAi => Ok(ProviderDispatch::OpenAiResponses(Box::new(
+                build_openai_responses_provider_from_config(
+                    &self.cfg,
+                    timeout_ms,
+                    self.on_retry.clone(),
+                )?,
+            ))),
+            // Chat Completions（含旧 openai_compatible 别名）。
+            ProviderProtocol::OpenAiChatCompletions => Ok(ProviderDispatch::OpenAi(Box::new(
                 build_openai_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())?,
             ))),
             ProviderProtocol::DeepSeek => {
@@ -498,8 +553,7 @@ impl SingleProviderClient {
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起轻量级模型请求"));
         }
-        let provider =
-            build_openai_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())?;
+        let provider = self.build_openai_variant_provider(timeout_ms)?;
         let request = ProviderRequest {
             model: model.to_string(),
             system: Some(
@@ -556,8 +610,7 @@ impl SingleProviderClient {
                 .trim()
                 .to_string());
         }
-        let provider =
-            build_openai_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())?;
+        let provider = self.build_openai_variant_provider(timeout_ms)?;
         let response = self.block_on_llm(provider.complete(request))?;
         Ok(collect_provider_text(&response).trim().to_string())
     }
@@ -792,8 +845,7 @@ impl SingleProviderClient {
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起工具模型请求"));
         }
-        let provider =
-            build_openai_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())?;
+        let provider = self.build_openai_variant_provider(timeout_ms)?;
         let request = build_provider_request(req, model, MAX_TOKENS_MAIN, functions, tool_choice);
         let response = self.block_on_llm(provider.complete(request))?;
         convert_provider_response_to_function_response(response)
@@ -888,8 +940,7 @@ impl ModelClient for SingleProviderClient {
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起模型请求"));
         }
-        let provider =
-            build_openai_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())?;
+        let provider = self.build_openai_variant_provider(timeout_ms)?;
         let request = build_provider_request(req, model, MAX_TOKENS_MAIN, &[], None);
         let response = self.block_on_llm(provider.complete(request))?;
         Ok(ModelResponse {
@@ -955,16 +1006,34 @@ fn build_openai_provider_from_config(
     cfg: &ModelProviderConfig,
     timeout_ms: u64,
     on_retry: Option<OnRetryCallback>,
-) -> Result<OpenAiCompatibleProvider> {
+) -> Result<OpenAiChatCompletionsProvider> {
     let token = cfg.api_auth_token.trim();
     if token.is_empty() {
         return Err(anyhow!("API_AUTH_TOKEN 不能为空，无法发起 OpenAI 兼容请求"));
     }
-    let mut config = OpenAiCompatibleConfig::new(token.to_string(), cfg.api_base_url.clone());
+    let mut config = OpenAiChatConfig::new(token.to_string(), cfg.api_base_url.clone());
     config.timeout = Duration::from_millis(timeout_ms);
     config.max_retries = MAX_RETRIES;
     config.retry_notifier = on_retry;
-    Ok(OpenAiCompatibleProvider::new(config))
+    Ok(OpenAiChatCompletionsProvider::new(config))
+}
+
+fn build_openai_responses_provider_from_config(
+    cfg: &ModelProviderConfig,
+    timeout_ms: u64,
+    on_retry: Option<OnRetryCallback>,
+) -> Result<OpenAiResponsesProvider> {
+    let token = cfg.api_auth_token.trim();
+    if token.is_empty() {
+        return Err(anyhow!(
+            "API_AUTH_TOKEN 不能为空，无法发起 OpenAI Responses 请求"
+        ));
+    }
+    let mut config = OpenAiResponsesConfig::new(token.to_string(), cfg.api_base_url.clone());
+    config.timeout = Duration::from_millis(timeout_ms);
+    config.max_retries = MAX_RETRIES;
+    config.retry_notifier = on_retry;
+    Ok(OpenAiResponsesProvider::new(config))
 }
 
 fn build_deepseek_provider_from_config(
@@ -1773,7 +1842,8 @@ async fn consume_provider_stream_events_async(
 
 enum ProviderDispatch {
     Anthropic(Box<AnthropicProvider>),
-    OpenAi(Box<OpenAiCompatibleProvider>),
+    OpenAi(Box<OpenAiChatCompletionsProvider>),
+    OpenAiResponses(Box<OpenAiResponsesProvider>),
     DeepSeek(Box<DeepSeekProvider>),
 }
 
@@ -1785,6 +1855,7 @@ impl ProviderDispatch {
         match self {
             ProviderDispatch::Anthropic(provider) => provider.stream(request).await,
             ProviderDispatch::OpenAi(provider) => provider.stream(request).await,
+            ProviderDispatch::OpenAiResponses(provider) => provider.stream(request).await,
             ProviderDispatch::DeepSeek(provider) => provider.stream(request).await,
         }
     }

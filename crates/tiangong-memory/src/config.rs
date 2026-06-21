@@ -60,7 +60,8 @@ impl Default for MemoryLlmConfig {
             base_url: String::new(),
             api_key: String::new(),
             model: String::new(),
-            protocol: ProviderProtocol::default(),
+            // Memory 模型端点通常为第三方 OpenAI 兼容服务，默认走 Chat Completions。
+            protocol: ProviderProtocol::OpenAiChatCompletions,
             timeout_ms: DEFAULT_TIMEOUT_MS,
         }
     }
@@ -88,7 +89,8 @@ impl Default for MemoryEmbeddingConfig {
             base_url: String::new(),
             api_key: String::new(),
             model: String::new(),
-            protocol: ProviderProtocol::default(),
+            // Embedding 端点通常为第三方 OpenAI 兼容服务，默认走 Chat Completions。
+            protocol: ProviderProtocol::OpenAiChatCompletions,
             timeout_ms: DEFAULT_TIMEOUT_MS,
             dimension: 0,
         }
@@ -115,7 +117,8 @@ impl Default for MemoryRerankConfig {
             base_url: String::new(),
             api_key: String::new(),
             model: String::new(),
-            protocol: ProviderProtocol::default(),
+            // Rerank 端点通常为第三方 OpenAI 兼容服务，默认走 Chat Completions。
+            protocol: ProviderProtocol::OpenAiChatCompletions,
             timeout_ms: DEFAULT_TIMEOUT_MS,
         }
     }
