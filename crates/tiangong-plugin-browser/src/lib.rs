@@ -8,7 +8,6 @@ use tokio::sync::mpsc;
 
 use crate::handler::browser_command_handler;
 use crate::manager::BrowserManager;
-use crate::page_fetcher::{BrowserPageFetcher, BrowserToolOverride};
 use crate::types::BrowserCommand;
 
 pub mod bridge;
@@ -79,20 +78,4 @@ pub fn init() -> TauriPlugin<Wry> {
             Ok(())
         })
         .build()
-}
-
-/// 获取 Plugin 的 BrowserPageFetcher（用于注入到 core）
-pub fn get_page_fetcher(
-    app: &tauri::AppHandle<Wry>,
-) -> Option<Arc<dyn tiangong_core::browser_trait::PageFetcher>> {
-    let state = app.state::<BrowserPluginState>();
-    Some(Arc::new(BrowserPageFetcher::new(state.cmd_tx.clone())))
-}
-
-/// 获取 Plugin 的工具覆盖处理器（用于注入到 core）
-pub fn get_tool_override(
-    app: &tauri::AppHandle<Wry>,
-) -> Option<Arc<dyn tiangong_core::tool_override::ToolOverrideHandler>> {
-    let fetcher = get_page_fetcher(app)?;
-    Some(Arc::new(BrowserToolOverride::new(fetcher)))
 }

@@ -5,7 +5,6 @@ use tauri::{
     Manager, Wry,
 };
 
-use crate::handler::{TerminalPromptSectionProvider, TerminalToolOverride};
 use crate::session_pty::SessionPtyRegistry;
 
 pub mod collaboration;
@@ -66,30 +65,6 @@ pub fn init(session_id: String, cwd: String) -> TauriPlugin<Wry> {
             Ok(())
         })
         .build()
-}
-
-/// 获取 Plugin 的 TerminalProvider（用于注入到 core）
-pub fn get_terminal_provider(
-    app: &tauri::AppHandle<Wry>,
-) -> Option<Arc<dyn tiangong_core::terminal_trait::TerminalProvider>> {
-    let state = app.state::<TerminalPluginState>();
-    Some(Arc::new(
-        crate::session_pty::SessionAwareTerminalProvider::new(state.registry.clone()),
-    ))
-}
-
-/// 获取 Plugin 的工具覆盖处理器（用于注入到 core）
-pub fn get_tool_override(
-    app: &tauri::AppHandle<Wry>,
-) -> Option<Arc<dyn tiangong_core::tool_override::ToolOverrideHandler>> {
-    let provider = get_terminal_provider(app)?;
-    Some(Arc::new(TerminalToolOverride::new(provider)))
-}
-
-/// 获取 Plugin 的 Prompt 规则提供者（用于注册到 core）
-pub fn get_prompt_section_provider() -> Arc<dyn tiangong_core::tool_override::PromptSectionProvider>
-{
-    Arc::new(TerminalPromptSectionProvider)
 }
 
 /// 更新终端的默认 cwd（用于初始化同步和 workspace 切换）。

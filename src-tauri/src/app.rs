@@ -21,21 +21,11 @@ pub struct TiangongApp {
     pub cores: Mutex<HashMap<String, TiangongCore>>,
     pub config: CoreConfigProvider,
     embedded_server: Mutex<Option<tiangong_server::EmbeddedServerHandle>>,
-    /// 浏览器页面获取能力（由 plugin 在 setup 阶段注入）
-    page_fetcher: Mutex<Option<std::sync::Arc<dyn tiangong_core::browser_trait::PageFetcher>>>,
-    /// 工具覆盖处理器（由 plugin 在 setup 阶段注入）
-    tool_overrides: Mutex<
-        HashMap<String, std::sync::Arc<dyn tiangong_core::tool_override::ToolOverrideHandler>>,
-    >,
-    /// 终端能力（由 plugin 在 setup 阶段注入）
-    terminal_provider:
-        Mutex<Option<std::sync::Arc<dyn tiangong_core::terminal_trait::TerminalProvider>>>,
-    /// Plugin 工具规格提供者
-    tool_spec_providers:
-        Mutex<Vec<std::sync::Arc<dyn tiangong_core::tool_override::ToolSpecProvider>>>,
-    /// Plugin Prompt 段落提供者
-    prompt_section_providers:
-        Mutex<Vec<std::sync::Arc<dyn tiangong_core::tool_override::PromptSectionProvider>>>,
+    /// 进程内插件集合（issue #156 自注册架构）。
+    ///
+    /// 每个插件封装自己的全部能力，在 [`Self::ensure_core`] 创建 core 时传入，
+    /// 由 worker_loop 在 engine 创建/重建时遍历调用 `Plugin::register`。
+    plugins: Mutex<Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>>>,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
     /// 插件通过 [`Self::tool_injection_tx`] 获取 sender，直接 push `ToolInjection`。
     /// 消费者任务由 [`Self::start_tool_injection_consumer`] 启动。
@@ -69,11 +59,7 @@ impl Default for TiangongApp {
             cores: Mutex::new(HashMap::new()),
             config,
             embedded_server: Mutex::new(None),
-            page_fetcher: Mutex::new(None),
-            tool_overrides: Mutex::new(HashMap::new()),
-            terminal_provider: Mutex::new(None),
-            tool_spec_providers: Mutex::new(Vec::new()),
-            prompt_section_providers: Mutex::new(Vec::new()),
+            plugins: Mutex::new(Vec::new()),
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
         }
@@ -85,54 +71,14 @@ impl TiangongApp {
         Self::default()
     }
 
-    /// 注入浏览器页面获取能力（由 plugin 在 setup 阶段调用）
-    pub fn set_page_fetcher(
-        &self,
-        fetcher: std::sync::Arc<dyn tiangong_core::browser_trait::PageFetcher>,
-    ) {
-        if let Ok(mut guard) = self.page_fetcher.lock() {
-            *guard = Some(fetcher);
-        }
-    }
-
-    /// 注入终端能力（由 plugin 在 setup 阶段调用）
-    pub fn set_terminal_provider(
-        &self,
-        provider: std::sync::Arc<dyn tiangong_core::terminal_trait::TerminalProvider>,
-    ) {
-        if let Ok(mut guard) = self.terminal_provider.lock() {
-            *guard = Some(provider);
-        }
-    }
-
-    /// 注册 Plugin 工具规格提供者
-    pub fn register_tool_spec_provider(
-        &self,
-        provider: std::sync::Arc<dyn tiangong_core::tool_override::ToolSpecProvider>,
-    ) {
-        if let Ok(mut guard) = self.tool_spec_providers.lock() {
-            guard.push(provider);
-        }
-    }
-
-    /// 注册 Plugin Prompt 段落提供者
-    pub fn register_prompt_section_provider(
-        &self,
-        provider: std::sync::Arc<dyn tiangong_core::tool_override::PromptSectionProvider>,
-    ) {
-        if let Ok(mut guard) = self.prompt_section_providers.lock() {
-            guard.push(provider);
-        }
-    }
-
-    /// 注册工具覆盖处理器（由 plugin 在 setup 阶段调用）
-    pub fn register_tool_override(
-        &self,
-        name: &str,
-        handler: std::sync::Arc<dyn tiangong_core::tool_override::ToolOverrideHandler>,
-    ) {
-        if let Ok(mut guard) = self.tool_overrides.lock() {
-            guard.insert(name.to_string(), handler);
+    /// 注册进程内插件（issue #156 自注册架构）。
+    ///
+    /// 由 main.rs setup 阶段调用：插件在 engine 创建/重建时自行向 engine 注册
+    /// 全部能力（页面获取、终端能力、工具覆盖、Prompt 段落等），替代旧的
+    /// `set_page_fetcher` / `register_tool_override` 等逐字段注册。
+    pub fn register_plugin(&self, plugin: std::sync::Arc<dyn tiangong_core::core::Plugin>) {
+        if let Ok(mut guard) = self.plugins.lock() {
+            guard.push(plugin);
         }
     }
 
@@ -342,34 +288,15 @@ impl TiangongApp {
             warn!(session_id, "移除已停止的 TiangongCore");
             cores.remove(session_id);
         }
-        let core = TiangongCore::with_session_for_gui(self.config.clone(), session, stream_tx);
-        // 注入浏览器页面获取能力和工具覆盖（由 plugin setup 阶段注册）
-        if let Ok(guard) = self.page_fetcher.lock() {
-            if let Some(ref fetcher) = *guard {
-                core.set_page_fetcher(fetcher.clone());
-            }
-        }
-        if let Ok(guard) = self.tool_overrides.lock() {
-            for (name, handler) in guard.iter() {
-                core.register_tool_override(name, handler.clone());
-            }
-        }
-        // 注入终端能力、工具规格、Prompt 段落
-        if let Ok(guard) = self.terminal_provider.lock() {
-            if let Some(ref provider) = *guard {
-                core.set_terminal_provider(provider.clone());
-            }
-        }
-        if let Ok(guard) = self.tool_spec_providers.lock() {
-            for provider in guard.iter() {
-                core.register_tool_spec_provider(provider.clone());
-            }
-        }
-        if let Ok(guard) = self.prompt_section_providers.lock() {
-            for provider in guard.iter() {
-                core.register_prompt_section_provider(provider.clone());
-            }
-        }
+        let plugins = self
+            .plugins
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        let core =
+            TiangongCore::with_session_for_gui(self.config.clone(), session, stream_tx, plugins);
+        // plugins 已随构造传入 worker_loop，在 engine 创建/重建时遍历调用
+        // Plugin::register 完成能力注入（issue #156），无需在此逐字段灌入。
         let id = core.session_id().to_string();
         cores.insert(id.clone(), core);
         (id, true) // 新创建

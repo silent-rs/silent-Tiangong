@@ -32,42 +32,6 @@ use tiangong_types::{StreamEvent, StreamToolCall};
 
 use crate::agent_team::lifecycle::TeamContext;
 
-/// 处理插件相关的 Command 变体（SetPageFetcher / SetTerminalProvider / RegisterToolOverride /
-/// RegisterToolSpecProvider / RegisterPromptSectionProvider / InjectTool）。
-/// 消除 4 处 match 分支的重复代码。
-///
-/// 调用点通过 or-pattern (`cmd @ (Some(Command::SetPageFetcher { .. }) | ...)`) 限定
-/// 只会将这些 Command 传入，因此 `_ => unreachable!` 不会触发。新增变体时必须同步更新：
-/// 1. 此宏的 match 分支
-/// 2. 所有调用点的 or-pattern
-macro_rules! handle_plugin_commands {
-    ($cmd:expr, $engine:expr, $session:expr, $stream_tx:expr) => {
-        match $cmd {
-            Command::SetPageFetcher { fetcher } => {
-                $engine.set_page_fetcher(fetcher);
-            }
-            Command::SetTerminalProvider { provider } => {
-                $engine.set_terminal_provider(provider);
-            }
-            Command::RegisterToolOverride { name, handler } => {
-                $engine.register_tool_override(&name, handler);
-            }
-            Command::RegisterToolSpecProvider { provider } => {
-                $engine.register_tool_spec_provider(provider);
-            }
-            Command::RegisterPromptSectionProvider { provider } => {
-                $engine.register_prompt_section_provider(provider);
-            }
-            Command::InjectTool { tool_name, payload } => {
-                crate::react::message::inject_tool_to_session(
-                    $session, $stream_tx, &tool_name, &payload,
-                );
-            }
-            _ => unreachable!("handle_plugin_commands: unexpected command — 调用点 or-pattern 与宏分支不同步"),
-        }
-    };
-}
-
 /// 取消时 LLM 请求的处理策略，按 Provider 协议区分。
 enum CancelStrategy {
     /// Anthropic: usage 在 message_start 就返回 prompt_tokens，可直接 abort
@@ -658,13 +622,13 @@ impl ReactEngine {
                             Some(Command::ReloadConfig) => {}
                             Some(Command::Approval { .. }) => {}
                             Some(Command::CancelAgent { .. }) => {}
-                            cmd @ (Some(Command::SetPageFetcher { .. })
-                            | Some(Command::SetTerminalProvider { .. })
-                            | Some(Command::RegisterToolOverride { .. })
-                            | Some(Command::RegisterToolSpecProvider { .. })
-                            | Some(Command::RegisterPromptSectionProvider { .. })
-                            | Some(Command::InjectTool { .. })) => {
-                                handle_plugin_commands!(cmd.unwrap(), &self.engine, session, stream_tx);
+                            Some(Command::InjectTool { tool_name, payload }) => {
+                                crate::react::message::inject_tool_to_session(
+                                    session,
+                                    stream_tx,
+                                    &tool_name,
+                                    &payload,
+                                );
                             }
                             Some(Command::CompressContext) => {
                                 crate::core::compress_context_for_session(
@@ -1143,17 +1107,9 @@ impl ReactEngine {
                                 Some(Command::ReloadConfig) => {}
                                 Some(Command::Approval { .. }) => {}
                                 Some(Command::CancelAgent { .. }) => {}
-                                cmd @ (Some(Command::SetPageFetcher { .. })
-                                | Some(Command::SetTerminalProvider { .. })
-                                | Some(Command::RegisterToolOverride { .. })
-                                | Some(Command::RegisterToolSpecProvider { .. })
-                                | Some(Command::RegisterPromptSectionProvider { .. })
-                                | Some(Command::InjectTool { .. })) => {
-                                    handle_plugin_commands!(
-                                        cmd.unwrap(),
-                                        &self.engine,
-                                        session,
-                                        stream_tx
+                                Some(Command::InjectTool { tool_name, payload }) => {
+                                    crate::react::message::inject_tool_to_session(
+                                        session, stream_tx, &tool_name, &payload,
                                     );
                                 }
                                 Some(Command::CompressContext) => {
@@ -1945,13 +1901,13 @@ impl ReactEngine {
                             crate::core::reset_context_for_session(parent_session, stream_tx, &self.engine);
                         }
                         Some(Command::ReloadConfig) | Some(Command::Approval { .. }) => {}
-                        cmd @ (Some(Command::SetPageFetcher { .. })
-                        | Some(Command::SetTerminalProvider { .. })
-                        | Some(Command::RegisterToolOverride { .. })
-                        | Some(Command::RegisterToolSpecProvider { .. })
-                        | Some(Command::RegisterPromptSectionProvider { .. })
-                        | Some(Command::InjectTool { .. })) => {
-                            handle_plugin_commands!(cmd.unwrap(), &self.engine, parent_session, stream_tx);
+                        Some(Command::InjectTool { tool_name, payload }) => {
+                            crate::react::message::inject_tool_to_session(
+                                parent_session,
+                                stream_tx,
+                                &tool_name,
+                                &payload,
+                            );
                         }
                         None => break,
                     }
@@ -2104,13 +2060,6 @@ fn drain_pending_commands_async(
             }
             Command::ReloadConfig => {}
             Command::Approval { .. } => {}
-            cmd @ (Command::SetPageFetcher { .. }
-            | Command::SetTerminalProvider { .. }
-            | Command::RegisterToolOverride { .. }
-            | Command::RegisterToolSpecProvider { .. }
-            | Command::RegisterPromptSectionProvider { .. }) => {
-                handle_plugin_commands!(cmd, engine, session, stream_tx);
-            }
             Command::InjectTool { tool_name, payload } => {
                 crate::react::message::inject_tool_to_session(
                     session, stream_tx, &tool_name, &payload,

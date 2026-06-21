@@ -1,11 +1,5 @@
 //! Agent 命令与执行效果类型
 
-use std::sync::Arc;
-
-use crate::browser_trait::PageFetcher;
-use crate::terminal_trait::TerminalProvider;
-use crate::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
-
 /// 用户命令
 pub(crate) enum Command {
     /// 发送消息
@@ -31,21 +25,6 @@ pub(crate) enum Command {
     /// 清理上下文（重置摘要，LLM 下次只看到 system prompt）
     #[allow(dead_code)]
     ResetContext,
-    /// 注入页面获取能力（GUI 模式下由 Tauri Plugin 提供）
-    SetPageFetcher { fetcher: Arc<dyn PageFetcher> },
-    /// 注入终端能力（GUI 模式下由 Tauri Plugin 提供）
-    SetTerminalProvider { provider: Arc<dyn TerminalProvider> },
-    /// 注册工具覆盖处理器
-    RegisterToolOverride {
-        name: String,
-        handler: Arc<dyn ToolOverrideHandler>,
-    },
-    /// 注册工具规格提供者（plugin 注入新工具）
-    RegisterToolSpecProvider { provider: Arc<dyn ToolSpecProvider> },
-    /// 注册 Prompt 段落提供者（plugin 注入 system prompt 规则）
-    RegisterPromptSectionProvider {
-        provider: Arc<dyn PromptSectionProvider>,
-    },
     /// 工具类内容自动注入（浏览器页面、终端用户操作等，不触发 turn）。
     ///
     /// 统一入口：tool_name + JSON payload 由 ToolInput trait 的 render 产出，

@@ -92,7 +92,8 @@ impl DesktopSchedulerContext {
 
         let (stream_tx, stream_rx) =
             std::sync::mpsc::channel::<tiangong_types::SessionStreamEvent>();
-        let core = TiangongCore::with_session_for_gui(self.config.clone(), session, stream_tx);
+        let core =
+            TiangongCore::with_session_for_gui(self.config.clone(), session, stream_tx, Vec::new());
         core.set_trust_mode(TrustMode::FullTrust);
 
         {

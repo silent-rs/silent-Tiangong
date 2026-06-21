@@ -282,33 +282,13 @@ fn run_gui() {
             // Desktop 端独立初始化调度器（不依赖 server）
             let state = app.state::<tiangong_app::TiangongApp>();
 
-            // 注入浏览器 Plugin 的 PageFetcher 和工具覆盖到 TiangongApp
-            if let Some(fetcher) = tiangong_plugin_browser::get_page_fetcher(app.handle()) {
-                state.set_page_fetcher(fetcher);
+            // 注册进程内插件（issue #156）：每个插件封装自己的全部能力，
+            // 在 engine 创建/重建时自行注册，替代旧的逐字段手工注册。
+            if let Some(plugin) = tiangong_plugin_browser::build_plugin(app.handle()) {
+                state.register_plugin(plugin);
             }
-            if let Some(handler) = tiangong_plugin_browser::get_tool_override(app.handle()) {
-                state.register_tool_override("web_fetch", handler.clone());
-                state.register_tool_override("web_browse", handler.clone());
-                state.register_tool_override("web_form_extract", handler.clone());
-                state.register_tool_override("web_form_fill", handler.clone());
-                state.register_tool_override("web_click", handler.clone());
-                state.register_tool_override("web_query_dom", handler.clone());
-                state.register_tool_override("web_locate_element", handler);
-            }
-
-            // 注入终端 Plugin 的 TerminalProvider / ToolOverride / ToolSpecProvider / PromptSectionProvider
-            if let Some(provider) = tiangong_plugin_terminal::get_terminal_provider(app.handle()) {
-                state.set_terminal_provider(provider.clone());
-                let terminal_override = tiangong_plugin_terminal::get_tool_override(app.handle());
-                if let Some(handler) = terminal_override {
-                    // 同一 TerminalToolOverride 分发 run_shell（执行命令/启动交互程序）
-                    // 和 terminal_send（持续操作交互程序：发送按键+返回屏幕快照）
-                    state.register_tool_override("run_shell", handler.clone());
-                    state.register_tool_override("terminal_send", handler);
-                }
-                state.register_prompt_section_provider(
-                    tiangong_plugin_terminal::get_prompt_section_provider(),
-                );
+            if let Some(plugin) = tiangong_plugin_terminal::build_plugin(app.handle()) {
+                state.register_plugin(plugin);
 
                 // 将 workspace 目录设为系统 PTY 默认 cwd。
                 // 系统 PTY 启动时 cwd 取自环境变量（HOME/tmp），若不在此 cd，
