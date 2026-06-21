@@ -149,8 +149,6 @@ impl TiangongApp {
     /// 循环接收插件 push 的 `ToolInjection`，统一处理注入到 session。
     /// 注入逻辑与 [`Self::inject_tool`] 相同，但支持指定 session_id 和前端刷新。
     pub fn start_tool_injection_consumer(&self, app_handle: tauri::AppHandle) {
-        use tauri::Emitter;
-
         let rx = {
             let mut guard = self.tool_injection_rx.lock().unwrap();
             guard.take()
