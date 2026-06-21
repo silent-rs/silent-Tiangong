@@ -62,21 +62,31 @@ pub fn build_request_json(req: &ProviderRequest, stream: bool) -> Result<Value> 
     }
 
     // 思考/推理配置：优先 reasoning_effort，其次 thinking。
+    // 注意：Responses API 的 reasoning summary 必须显式请求（summary: "auto"），
+    // 否则服务端不会返回可展示的思考摘要，前端 thinking 链路将无内容。
     if let Some(effort) = &req.reasoning_effort {
         payload.insert(
             "reasoning".to_string(),
-            json!({ "effort": effort_to_str(effort) }),
+            build_reasoning(effort_to_str(effort)),
         );
     } else if req.thinking_disabled {
         // Responses API 没有 disabled 语义，省略 reasoning 字段即不强制思考。
     } else if let Some(thinking) = &req.thinking {
         payload.insert(
             "reasoning".to_string(),
-            json!({ "effort": budget_to_effort(thinking.budget_tokens) }),
+            build_reasoning(budget_to_effort(thinking.budget_tokens)),
         );
     }
 
     Ok(Value::Object(payload))
+}
+
+/// 构建 reasoning 请求字段。
+///
+/// `summary: "auto"` 让模型返回 reasoning summary（思考摘要），是 Responses API
+/// 暴露 reasoning 内容的必要条件；缺省时模型不会输出可展示的思考链。
+fn build_reasoning(effort: &str) -> Value {
+    json!({ "effort": effort, "summary": "auto" })
 }
 
 fn effort_to_str(effort: &ReasoningEffort) -> &'static str {
@@ -353,7 +363,7 @@ pub fn parse_complete_response(payload: &Value) -> Result<ProviderResponse> {
     })
 }
 
-fn extract_reasoning_text(item: &Value) -> String {
+pub(super) fn extract_reasoning_text(item: &Value) -> String {
     // 优先取 content[].text（reasoning_text），其次取 summary[].text。
     if let Some(content) = item.get("content").and_then(Value::as_array)
         && !content.is_empty()
@@ -603,6 +613,75 @@ mod tests {
         assert_eq!(payload["tools"][0]["name"], "get_weather");
         assert_eq!(payload["tool_choice"], "required");
         assert_eq!(payload["stream"], true);
+    }
+
+    #[test]
+    fn reasoning_effort_requests_summary_auto() {
+        // reasoning_effort 分支必须带上 summary: "auto"，否则服务端不返回思考摘要。
+        let req = ProviderRequest {
+            model: "o3".to_string(),
+            system: None,
+            messages: vec![crate::message::ChatMessage::text(MessageRole::User, "hi")],
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: 0,
+            temperature: None,
+            top_p: None,
+            stop_sequences: Vec::new(),
+            metadata: None,
+            thinking: None,
+            reasoning_effort: Some(ReasoningEffort::High),
+            thinking_disabled: false,
+        };
+        let payload = build_request_json(&req, false).unwrap();
+        assert_eq!(payload["reasoning"]["effort"], "high");
+        assert_eq!(payload["reasoning"]["summary"], "auto");
+    }
+
+    #[test]
+    fn thinking_budget_requests_summary_auto() {
+        // thinking 分支（通过 budget_tokens 映射 effort）同样必须带上 summary。
+        let req = ProviderRequest {
+            model: "o3".to_string(),
+            system: None,
+            messages: vec![crate::message::ChatMessage::text(MessageRole::User, "hi")],
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: 0,
+            temperature: None,
+            top_p: None,
+            stop_sequences: Vec::new(),
+            metadata: None,
+            thinking: Some(crate::request::ThinkingConfig {
+                budget_tokens: 8_192,
+            }),
+            reasoning_effort: None,
+            thinking_disabled: false,
+        };
+        let payload = build_request_json(&req, false).unwrap();
+        assert_eq!(payload["reasoning"]["effort"], "medium");
+        assert_eq!(payload["reasoning"]["summary"], "auto");
+    }
+
+    #[test]
+    fn thinking_disabled_omits_reasoning() {
+        let req = ProviderRequest {
+            model: "gpt-4o".to_string(),
+            system: None,
+            messages: vec![crate::message::ChatMessage::text(MessageRole::User, "hi")],
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: 0,
+            temperature: None,
+            top_p: None,
+            stop_sequences: Vec::new(),
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: true,
+        };
+        let payload = build_request_json(&req, false).unwrap();
+        assert!(payload.get("reasoning").is_none());
     }
 
     #[test]
