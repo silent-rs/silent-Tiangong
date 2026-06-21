@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use tauri::Manager;
+
 use tiangong_config::load_tiangong_config;
 use tiangong_core::agent_input::{AgentInput, AgentInputKind};
 use tiangong_core::core::TiangongCore;
@@ -34,6 +36,22 @@ pub struct TiangongApp {
     /// Plugin Prompt 段落提供者
     prompt_section_providers:
         Mutex<Vec<std::sync::Arc<dyn tiangong_core::tool_override::PromptSectionProvider>>>,
+    /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
+    /// 插件通过 [`Self::tool_injection_tx`] 获取 sender，直接 push `ToolInjection`。
+    /// 消费者任务由 [`Self::start_tool_injection_consumer`] 启动。
+    tool_injection_tx: tokio::sync::mpsc::UnboundedSender<ToolInjection>,
+    /// 消费者 receiver（Option：take 出来启动消费者任务后变 None）。
+    tool_injection_rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<ToolInjection>>>,
+}
+
+/// 工具消息注入请求（插件 → app 消费者）。
+pub struct ToolInjection {
+    /// 注入到哪个 session（None = 当前活跃 session）。
+    pub session_id: Option<String>,
+    /// 注入的工具数据。
+    pub tool: Box<dyn tiangong_core::agent_input::ToolInput>,
+    /// 注入后是否需要刷新前端（emit run_snapshot）。
+    pub refresh_frontend: bool,
 }
 
 impl Default for TiangongApp {
@@ -41,6 +59,8 @@ impl Default for TiangongApp {
         let app_config = load_tiangong_config();
         let core_config = app_config.to_core_config();
         let config = CoreConfigProvider::new(core_config);
+
+        let (tool_injection_tx, tool_injection_rx) = tokio::sync::mpsc::unbounded_channel();
 
         Self {
             state: std::sync::Arc::new(AsyncMutex::new(
@@ -54,6 +74,8 @@ impl Default for TiangongApp {
             terminal_provider: Mutex::new(None),
             tool_spec_providers: Mutex::new(Vec::new()),
             prompt_section_providers: Mutex::new(Vec::new()),
+            tool_injection_tx,
+            tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
         }
     }
 }
@@ -114,61 +136,137 @@ impl TiangongApp {
         }
     }
 
-    /// 向当前活跃会话注入浏览器页面内容
-    pub async fn inject_browser_content(
-        &self,
-        title: String,
-        url: String,
-        text: String,
-        tabs: Vec<(String, String, String)>,
-        active_tab_id: Option<String>,
-        feedback: Option<String>,
-    ) -> bool {
-        let guard = self.state.lock().await;
-        let session_id = guard.active_session_id().to_string();
-        drop(guard);
+    /// 获取工具消息注入 channel sender。
+    ///
+    /// 插件持有此 sender 后可直接投递 `ToolInjection`，无需经过 emit/listen 事件中转。
+    /// 消费者任务由 [`Self::start_tool_injection_consumer`] 启动后统一处理。
+    pub fn tool_injection_tx(&self) -> tokio::sync::mpsc::UnboundedSender<ToolInjection> {
+        self.tool_injection_tx.clone()
+    }
+
+    /// 启动工具消息注入消费者任务（main.rs setup 阶段调用一次）。
+    ///
+    /// 循环接收插件 push 的 `ToolInjection`，统一处理注入到 session。
+    /// 注入逻辑与 [`Self::inject_tool`] 相同，但支持指定 session_id 和前端刷新。
+    pub fn start_tool_injection_consumer(&self, app_handle: tauri::AppHandle) {
+        let rx = {
+            let mut guard = self.tool_injection_rx.lock().unwrap();
+            guard.take()
+        };
+        let Some(mut rx) = rx else {
+            tracing::warn!("工具消息注入消费者已启动，跳过重复启动");
+            return;
+        };
+
+        // 持有 Arc<state> 让消费者任务独立存活
+        let state = self.state.clone();
+        tauri::async_runtime::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                let session_id = match req.session_id {
+                    Some(id) => id,
+                    None => {
+                        let guard = state.lock().await;
+                        guard.active_session_id().to_string()
+                    }
+                };
+
+                let tool_name = req.tool.tool_name().to_string();
+
+                // 通过 app_handle 获取 TiangongApp
+                let app_state = app_handle.state::<TiangongApp>();
+
+                // core 不存在 → 自动恢复（ensure_core），保证 stream_tx 可用
+                let core_exists = {
+                    let cores = app_state.lock_cores();
+                    cores.get(&session_id).is_some()
+                };
+                if !core_exists {
+                    // 从 state 取 session 快照
+                    let session_snapshot = {
+                        let guard = state.lock().await;
+                        guard
+                            .sessions()
+                            .iter()
+                            .find(|s| s.id == session_id)
+                            .cloned()
+                    };
+                    if let Some(session) = session_snapshot {
+                        use std::sync::mpsc;
+                        use tiangong_types::SessionStreamEvent;
+                        let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
+                        let (_sid, _is_new) =
+                            app_state.ensure_core(&session_id, session, stream_tx);
+                        // 启动 stream_consumer 同步 worker session → TiangongState session
+                        let cancel_flag = {
+                            let cores = app_state.lock_cores();
+                            cores.get(&session_id).map(|c| c.cancel_flag())
+                        };
+                        if let Some(cancel_flag) = cancel_flag {
+                            crate::commands::start_stream_consumer(
+                                app_handle.clone(),
+                                stream_rx,
+                                cancel_flag,
+                            );
+                        }
+                        tracing::info!(session_id, "消费者自动恢复 core");
+                    } else {
+                        tracing::warn!(session_id, "消费者无法恢复 core：session 不存在");
+                        continue;
+                    }
+                }
+
+                // core 存在 → deliver(Tool)，worker 通过 StreamEvent 处理注入
+                let core_sent = {
+                    let cores = app_state.lock_cores();
+                    if let Some(core) = cores.get(&session_id) {
+                        use tiangong_core::agent_input::{AgentInput, AgentInputKind};
+                        let sent = core.deliver(AgentInputKind::Tool(req.tool));
+                        drop(cores);
+                        sent
+                    } else {
+                        false
+                    }
+                };
+
+                if !core_sent {
+                    tracing::warn!(session_id, tool_name, "deliver 失败（core 通道已关闭）");
+                }
+
+                tracing::debug!(session_id, tool_name, "工具消息注入完成");
+            }
+            tracing::info!("工具消息注入消费者任务结束");
+        });
+    }
+
+    /// 同步工具消息注入（供需要同步返回值的场景，如 browser:events 的 ack 判断）。
+    ///
+    /// core 不存在时返回 false。大多数场景应通过 [`Self::tool_injection_tx`] push 到 channel，
+    /// 消费者会自动 ensure_core 恢复 core 后注入。
+    pub async fn inject_tool(&self, tool: Box<dyn tiangong_core::agent_input::ToolInput>) -> bool {
+        let tool_name = tool.tool_name().to_string();
+        let session_id = {
+            let guard = self.state.lock().await;
+            guard.active_session_id().to_string()
+        };
 
         let cores = self.lock_cores();
         if let Some(core) = cores.get(&session_id) {
-            if core.is_running() {
-                let has_feedback = feedback
-                    .as_deref()
-                    .map(|s| !s.trim().is_empty())
-                    .unwrap_or(false);
-                tracing::info!(
-                    session_id,
-                    url = %url,
-                    text_len = text.len(),
-                    has_feedback,
-                    "向当前会话注入浏览器内容"
-                );
-                return {
-                    use tiangong_core::agent_input::{AgentInput, AgentInputKind};
-                    use tiangong_plugin_browser::page_fetcher::BrowserContent;
-                    core.deliver(AgentInputKind::Tool(Box::new(BrowserContent {
-                        title,
-                        url,
-                        text,
-                        tabs,
-                        active_tab_id,
-                        feedback,
-                    })))
-                };
-            } else {
-                tracing::debug!(
-                    session_id,
-                    url = %url,
-                    "跳过浏览器内容注入：当前会话 core 未运行"
-                );
-            }
-        } else {
-            tracing::debug!(
+            use tiangong_core::agent_input::{AgentInput, AgentInputKind};
+            tracing::info!(
                 session_id,
-                url = %url,
-                "跳过浏览器内容注入：当前会话没有活跃 core"
+                tool_name,
+                running = core.is_running(),
+                "注入工具消息 via deliver"
             );
+            core.deliver(AgentInputKind::Tool(tool))
+        } else {
+            tracing::warn!(
+                session_id,
+                tool_name,
+                "inject_tool: core 不存在，返回 false（应走 channel 消费者自动恢复）"
+            );
+            false
         }
-        false
     }
 
     fn lock_cores(&self) -> std::sync::MutexGuard<'_, HashMap<String, TiangongCore>> {

@@ -10,6 +10,7 @@ const COMMANDS: &[&str] = &[
     "terminal_destroy_session",
     "terminal_attach_session",
     "terminal_session_send_input",
+    "terminal_report_user_command",
     "terminal_session_recent_output",
     "terminal_session_info",
     "terminal_session_set_cwd",

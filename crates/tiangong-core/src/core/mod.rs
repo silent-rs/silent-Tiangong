@@ -257,14 +257,10 @@ impl crate::agent_input::AgentInput for TiangongCore {
                 message_id,
                 media,
             }),
-            AgentInputKind::Tool(tool) => {
-                // ToolInput trait object：提取 tool_name + JSON payload，发送统一 InjectTool 命令。
-                // worker 侧根据 tool_name 决定呈现格式（见 inject_tool_to_session）。
-                self.send_cmd(Command::InjectTool {
-                    tool_name: tool.tool_name().to_string(),
-                    payload: tool.render(),
-                })
-            }
+            AgentInputKind::Tool(tool) => self.send_cmd(Command::InjectTool {
+                tool_name: tool.tool_name().to_string(),
+                payload: tool.render(),
+            }),
             AgentInputKind::Approval(ApprovalInput::Response {
                 request_id,
                 approved,

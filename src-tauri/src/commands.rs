@@ -396,7 +396,7 @@ fn has_capability_in_state(
 // 辅助函数：构建完整的 RunSnapshot
 // ============================================================================
 
-fn build_full_snapshot_with_status(
+pub fn build_full_snapshot_with_status(
     core_state: &tiangong_core::app_state::TiangongState,
     is_executing: bool,
 ) -> RunSnapshotView {
@@ -712,7 +712,7 @@ fn get_cancel_flag(
 }
 
 /// 消费 SessionStreamEvent：emit 给前端 + 更新 RunStatus + Done 时同步 session
-fn start_stream_consumer(
+pub(crate) fn start_stream_consumer(
     app: AppHandle,
     stream_rx: std::sync::mpsc::Receiver<tiangong_types::SessionStreamEvent>,
     cancel_flag: Arc<std::sync::atomic::AtomicBool>,
@@ -847,43 +847,64 @@ fn start_stream_consumer(
                             let persisted_output = full_output.as_deref().unwrap_or(output);
                             let status = if *ok { "ok=true" } else { "ok=false" };
 
-                            let mut lines = vec![format!("工具执行 [{name}]")];
-                            if !last_tool_args_summary.is_empty() {
-                                lines.push(format!("命令: {last_tool_args_summary}"));
+                            // plugin_injection 注入结果：追加完整消息对（与 worker session 一致）
+                            if name == tiangong_core::react::message::INJECTION_TOOL_NAME {
+                                use tiangong_core::session::{Message, MessageRole};
+                                let tc_id = tool_call_id.clone().unwrap_or_default();
+                                let mut assistant_msg =
+                                    Message::new(MessageRole::Assistant, String::new());
+                                assistant_msg.tool_calls =
+                                    vec![tiangong_core::session::MessageToolCall {
+                                        id: tc_id.clone(),
+                                        name: name.clone(),
+                                        arguments: serde_json::json!({}),
+                                    }];
+                                session.messages.push(assistant_msg);
+                                append_tool_result_message(
+                                    session,
+                                    Some(&tc_id),
+                                    name,
+                                    persisted_output.to_string(),
+                                    !*ok,
+                                );
+                            } else {
+                                // 正常工具结果：System 摘要 + Tool result
+                                let mut lines = vec![format!("工具执行 [{name}]")];
+                                if !last_tool_args_summary.is_empty() {
+                                    lines.push(format!("命令: {last_tool_args_summary}"));
+                                }
+                                lines.push(format!("{status} exit_code=0"));
+                                lines.push(format!("summary: {name}"));
+                                if !media.is_empty() {
+                                    let media_desc = media
+                                        .iter()
+                                        .map(|a| match a.kind {
+                                            tiangong_types::MediaKind::Image => "图片",
+                                            tiangong_types::MediaKind::Video => "视频",
+                                            tiangong_types::MediaKind::Audio => "音频",
+                                            _ => "文件",
+                                        })
+                                        .next()
+                                        .unwrap_or("媒体");
+                                    let count = media.len();
+                                    lines.push(format!("stdout: 已生成 {count} 个{media_desc}"));
+                                    append_assistant_media(session, media.clone());
+                                } else if !persisted_output.trim().is_empty() {
+                                    lines.push(format!("stdout:\n{persisted_output}"));
+                                }
+                                session.append_message(
+                                    tiangong_types::MessageRole::System,
+                                    lines.join("\n"),
+                                );
+                                append_tool_result_message(
+                                    session,
+                                    tool_call_id.as_deref(),
+                                    name,
+                                    persisted_output.to_string(),
+                                    !*ok,
+                                );
                             }
-                            lines.push(format!("{status} exit_code=0"));
-                            lines.push(format!("summary: {name}"));
-                            if !media.is_empty() {
-                                let media_desc = media
-                                    .iter()
-                                    .map(|a| match a.kind {
-                                        tiangong_types::MediaKind::Image => "图片",
-                                        tiangong_types::MediaKind::Video => "视频",
-                                        tiangong_types::MediaKind::Audio => "音频",
-                                        _ => "文件",
-                                    })
-                                    .next()
-                                    .unwrap_or("媒体");
-                                let count = media.len();
-                                lines.push(format!("stdout: 已生成 {count} 个{media_desc}"));
-                                // 媒体资源立即绑定到 assistant 消息，前端可实时渲染
-                                append_assistant_media(session, media.clone());
-                            } else if !persisted_output.trim().is_empty() {
-                                lines.push(format!("stdout:\n{persisted_output}"));
-                            }
-                            session.append_message(
-                                tiangong_core::session::MessageRole::System,
-                                lines.join("\n"),
-                            );
-                            append_tool_result_message(
-                                session,
-                                tool_call_id.as_deref(),
-                                name,
-                                persisted_output.to_string(),
-                                !*ok,
-                            );
                             last_tool_args_summary.clear();
-                            // 每次工具执行后立即持久化，防止中断丢失工具调用记录
                             let _ = core_state.persist_session_and_app(&sid);
                         }
                         StreamEvent::ApprovalNeeded { .. } => {

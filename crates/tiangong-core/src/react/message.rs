@@ -311,128 +311,142 @@ pub(crate) fn latest_user_message(session: &Session) -> String {
         .unwrap_or_default()
 }
 
-/// 注入浏览器页面内容到会话（合成 assistant + tool 消息对）
-/// 浏览器内容注入数据
-/// 统一的工具类注入函数：根据 tool_name 渲染 JSON payload 为对话文本。
+/// 注入工具的 tool_call name（注册在 tool spec 中，声明 Agent 不调用）。
+pub const INJECTION_TOOL_NAME: &str = "plugin_injection";
+
+/// 向 session 注入工具消息（assistant tool_call + tool result 消息对）。
 ///
-/// 所有 ToolInput（终端操作、浏览器内容等）经 AgentInput trait 投递后，
-/// 最终到达此函数。tool_name 决定呈现格式，payload 是结构化 JSON。
-/// 伪造 assistant tool_call + tool result 消息对（仿浏览器注入模式）。
-/// 去重：最近 8 条 tool 消息中已有相同 tool_name 且 payload 相同则跳过。
+/// tool_call name 统一用 `plugin_injection`（注册的注入工具），原始来源 tool_name
+/// 放入 payload 的 `source` 字段，让 Agent 知道数据来源。
+/// 去重：与上一条 plugin_injection 消息渲染文本完全相同则跳过。
+pub fn inject_tool_to_messages(
+    session: &mut Session,
+    tool_name: &str,
+    payload: &serde_json::Value,
+) -> bool {
+    // 把来源 tool_name 注入 payload
+    let mut full_payload = payload.clone();
+    if let Some(obj) = full_payload.as_object_mut() {
+        obj.insert(
+            "source".to_string(),
+            serde_json::Value::String(tool_name.to_string()),
+        );
+    }
+    let output = render_tool_output(tool_name, payload);
+    if output.trim().is_empty() {
+        return false;
+    }
+    let is_dup = session
+        .messages
+        .iter()
+        .rev()
+        .find(|msg| {
+            msg.role == MessageRole::Tool && msg.tool_name.as_deref() == Some(INJECTION_TOOL_NAME)
+        })
+        .is_some_and(|msg| msg.text_content() == output);
+    if is_dup {
+        tracing::debug!(session_id = %session.id, tool_name, "skip tool injection: identical to previous");
+        return false;
+    }
+    let tool_call_id = format!("inj_{}", scru128::new());
+    // assistant 消息只承载 tool_call，text 留空（前端不显示空 text 的 assistant 消息）
+    let mut assistant_msg = Message::new(MessageRole::Assistant, String::new());
+    assistant_msg.tool_calls = vec![MessageToolCall {
+        id: tool_call_id.clone(),
+        name: INJECTION_TOOL_NAME.to_string(),
+        arguments: full_payload,
+    }];
+    session.messages.push(assistant_msg);
+    append_tool_result_message(session, &tool_call_id, INJECTION_TOOL_NAME, output, false);
+    tracing::info!(session_id = %session.id, tool_name, "tool content injected into session");
+    true
+}
+
+/// 向 session 注入工具消息并发送 StreamEvent（core worker 路径使用）。
 pub(crate) fn inject_tool_to_session(
     session: &mut Session,
     stream_tx: &StdSender<StreamEvent>,
     tool_name: &str,
     payload: &serde_json::Value,
 ) {
-    let output = render_tool_output(tool_name, payload);
-    if output.trim().is_empty() {
+    // 先注入消息对（共用逻辑）
+    let was_injected = inject_tool_to_messages(session, tool_name, payload);
+    if !was_injected {
         return;
     }
-    // 去重：只与上一个同 tool_name 的 Tool 消息比较，渲染文本完全相同则跳过。
-    // payload 任何变化（如同 URL 不同 text、新增 feedback）会正常注入。
-    let is_dup = session
-        .messages
-        .iter()
-        .rev()
-        .find(|msg| msg.role == MessageRole::Tool && msg.tool_name.as_deref() == Some(tool_name))
-        .is_some_and(|msg| msg.text_content() == output);
-    if is_dup {
-        tracing::debug!(
-            session_id = %session.id,
-            tool_name,
-            "skip tool injection: identical to previous"
-        );
-        return;
+    // 找到刚注入的 tool result 消息，发送 StreamEvent
+    if let Some(assistant_msg) = session.messages.iter().rev().nth(1)
+        && let Some(tc) = assistant_msg.tool_calls.first()
+    {
+        let output = session
+            .messages
+            .last()
+            .map(|m| m.text_content())
+            .unwrap_or_default();
+        let _ = stream_tx.send(StreamEvent::ToolResult {
+            name: INJECTION_TOOL_NAME.to_string(),
+            tool_call_id: Some(tc.id.clone()),
+            ok: true,
+            output,
+            full_output: None,
+            media: vec![],
+        });
     }
-    let tool_call_id = format!("tool_auto_{}", scru128::new());
-    let assistant_text = format!("[自动感知] 工具数据就绪: {tool_name}");
-    let mut assistant_msg = Message::new(MessageRole::Assistant, assistant_text);
-    assistant_msg.tool_calls = vec![MessageToolCall {
-        id: tool_call_id.clone(),
-        name: tool_name.to_string(),
-        arguments: payload.clone(),
-    }];
-    session.messages.push(assistant_msg);
-    let _ = stream_tx.send(StreamEvent::ToolResult {
-        name: tool_name.to_string(),
-        tool_call_id: Some(tool_call_id.clone()),
-        ok: true,
-        output: output.clone(),
-        full_output: Some(output.clone()),
-        media: vec![],
-    });
-    append_tool_result_message(session, &tool_call_id, tool_name, output, false);
-    tracing::info!(
-        session_id = %session.id,
-        tool_name,
-        "tool content injected into session"
-    );
 }
 
-/// 根据 tool_name 渲染 JSON payload 为对话文本。
-fn render_tool_output(tool_name: &str, payload: &serde_json::Value) -> String {
-    match tool_name {
-        "browser_data" => {
-            let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("");
-            let url = payload.get("url").and_then(|v| v.as_str()).unwrap_or("");
-            let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            let feedback = payload
-                .get("feedback")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.trim().is_empty());
-            let has_feedback = feedback.is_some();
-            let header = if has_feedback {
-                "[浏览器反馈]"
+/// 渲染 JSON payload 为对话文本（通用格式）。
+///
+/// 格式：
+/// ```text
+/// 数据来源：browser_data
+/// 相关数据：
+///   title: API Keys
+///   url: https://example.com
+///   text: 页面文本内容...
+/// ```
+///
+/// 递归展开嵌套对象和数组，适合任意插件注入。
+pub fn render_tool_output(tool_name: &str, payload: &serde_json::Value) -> String {
+    let mut output = format!("数据来源：{tool_name}");
+    if let Some(obj) = payload.as_object()
+        && !obj.is_empty()
+    {
+        output.push_str("\n相关数据：");
+        for (key, value) in obj {
+            output.push_str(&format!("\n    {key}: {}", format_payload_value(value)));
+        }
+    }
+    output
+}
+
+/// 递归格式化 payload 值为可读文本。
+fn format_payload_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(arr) => {
+            if arr.is_empty() {
+                "[]".to_string()
             } else {
-                "[浏览器页面更新]"
-            };
-            let mut output = if let Some(fb) = feedback {
-                if text.is_empty() {
-                    format!("{header}\n标题：{title}\nURL：{url}\n\n{fb}")
-                } else {
-                    format!("{header}\n标题：{title}\nURL：{url}\n\n{fb}\n\n[当前页面内容]\n{text}")
-                }
-            } else if text.is_empty() {
-                format!("{header}\n标题：{title}\nURL：{url}\n状态：页面内容为空")
-            } else {
-                format!("{header}\n标题：{title}\nURL：{url}\n\n{text}")
-            };
-            if let Some(tabs) = payload.get("tabs").and_then(|v| v.as_array())
-                && !tabs.is_empty()
-            {
-                let active_tab_id = payload
-                    .get("active_tab_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                output.push_str("\n\n[标签列表]");
-                for tab in tabs {
-                    let id = tab.get(0).and_then(|v| v.as_str()).unwrap_or("");
-                    let tab_url = tab.get(1).and_then(|v| v.as_str()).unwrap_or("");
-                    let tab_title = tab.get(2).and_then(|v| v.as_str()).unwrap_or("");
-                    let marker = if active_tab_id == id { " (活跃)" } else { "" };
-                    let display = if tab_title.is_empty() {
-                        tab_url.to_string()
-                    } else {
-                        tab_title.to_string()
-                    };
-                    output.push_str(&format!("\n- {display}{marker}"));
-                }
+                let items: Vec<String> = arr
+                    .iter()
+                    .map(|item| format!("        - {}", format_payload_value(item)))
+                    .collect();
+                format!("\n{}", items.join("\n"))
             }
-            output
         }
-        "terminal_user_input" => {
-            let command = payload
-                .get("command")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            format!("[用户终端操作] 用户在终端执行了: {command}")
-        }
-        _ => {
-            format!(
-                "[{tool_name}]\n{}",
-                serde_json::to_string_pretty(payload).unwrap_or_default()
-            )
+        serde_json::Value::Object(obj) => {
+            if obj.is_empty() {
+                "{}".to_string()
+            } else {
+                let items: Vec<String> = obj
+                    .iter()
+                    .map(|(k, v)| format!("        {k}: {}", format_payload_value(v)))
+                    .collect();
+                format!("\n{}", items.join("\n"))
+            }
         }
     }
 }
@@ -454,32 +468,30 @@ mod tests {
                 "title": "API Keys",
                 "url": "https://platform.deepseek.com/api_keys",
                 "text": "API keys page",
-                "tabs": [],
-                "active_tab_id": null,
-                "feedback": "[网络响应] POST /api_keys (状态 200)\n{\"key\":\"sk-test\"}",
+                "feedback": "POST /api_keys (状态 200)\n{\"key\":\"sk-test\"}",
             }),
         );
 
+        // 消息对：assistant(tool_call) + tool(result)
         assert_eq!(session.messages.len(), 2);
         assert_eq!(session.messages[0].tool_calls.len(), 1);
         assert_eq!(
             session.messages[1].tool_call_id.as_deref(),
             Some(session.messages[0].tool_calls[0].id.as_str())
         );
-        // 每个 tool_call 必须有配对的 tool result
-        assert!(!session.messages[0].tool_calls.is_empty());
+
         let tool_text = session.messages[1].text_content();
-        assert!(tool_text.contains("[浏览器反馈]"));
-        assert!(tool_text.contains("[网络响应] POST /api_keys (状态 200)"));
+        assert!(tool_text.contains("数据来源：browser_data"));
+        assert!(tool_text.contains("title: API Keys"));
         assert!(tool_text.contains("sk-test"));
 
         let event = rx.recv().unwrap();
         match event {
             StreamEvent::ToolResult { output, .. } => {
-                assert!(output.contains("[浏览器反馈]"));
+                assert!(output.contains("数据来源：browser_data"));
                 assert!(output.contains("sk-test"));
             }
-            _ => panic!("expected browser feedback tool result"),
+            _ => panic!("expected tool result event"),
         }
     }
 
@@ -496,7 +508,7 @@ mod tests {
         inject_tool_to_session(&mut session, &tx, "browser_data", &payload);
         assert_eq!(session.messages.len(), 2);
 
-        // 同 URL 无 feedback → 去重跳过
+        // 同 payload → 去重跳过
         inject_tool_to_session(&mut session, &tx, "browser_data", &payload);
         assert_eq!(session.messages.len(), 2);
     }
@@ -514,11 +526,8 @@ mod tests {
         );
 
         assert_eq!(session.messages.len(), 2);
-        assert!(
-            session.messages[1]
-                .text_content()
-                .contains("[用户终端操作]")
-        );
-        assert!(session.messages[1].text_content().contains("ls -la"));
+        let tool_text = session.messages[1].text_content();
+        assert!(tool_text.contains("数据来源：terminal_user_input"));
+        assert!(tool_text.contains("command: ls -la"));
     }
 }

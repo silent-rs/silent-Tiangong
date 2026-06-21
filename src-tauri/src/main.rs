@@ -324,7 +324,12 @@ fn run_gui() {
                 });
             }
 
-            // 监听浏览器页面加载事件，自动注入内容到当前活跃会话
+            // 启动工具消息注入消费者任务（插件 push → 消费者统一处理）
+            let injection_tx = state.tool_injection_tx();
+            state.start_tool_injection_consumer(app.handle().clone());
+
+            // 监听浏览器页面加载事件，push 到注入 channel（消费者统一处理）
+            let tx1 = injection_tx.clone();
             let inject_handle = app.handle().clone();
             app.listen("browser:page_loaded", move |event| {
                 let payload = event.payload().to_string();
@@ -340,17 +345,23 @@ fn run_gui() {
                     }
                     let title = data["title"].as_str().unwrap_or("").to_string();
                     let text = data["text"].as_str().unwrap_or("").to_string();
-                    let app_handle = inject_handle.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let state = app_handle.state::<tiangong_app::TiangongApp>();
-                        let _ = state
-                            .inject_browser_content(title, url, text, vec![], None, None)
-                            .await;
+                    use tiangong_plugin_browser::page_fetcher::BrowserContent;
+                    let _ = tx1.send(tiangong_app::ToolInjection {
+                        session_id: None,
+                        tool: Box::new(BrowserContent {
+                            title,
+                            url,
+                            text,
+                            tabs: vec![],
+                            active_tab_id: None,
+                            feedback: None,
+                        }),
+                        refresh_frontend: false,
                     });
                 }
             });
 
-            // 监听浏览器网络响应事件，主动注入到当前 Agent 会话。
+            // 监听浏览器网络响应事件，push 到注入 channel（消费者统一处理）。
             // 这覆盖页面 JS 自行发起 XHR/fetch、且 DOM 没有明显变化的场景。
             let event_inject_handle = app.handle().clone();
             app.listen("browser:events", move |event| {
@@ -424,15 +435,16 @@ fn run_gui() {
                     }
 
                     let state = app_handle.state::<tiangong_app::TiangongApp>();
+                    use tiangong_plugin_browser::page_fetcher::BrowserContent;
                     let injected = state
-                        .inject_browser_content(
+                        .inject_tool(Box::new(BrowserContent {
                             title,
-                            page_url.clone(),
+                            url: page_url.clone(),
                             text,
                             tabs,
                             active_tab_id,
-                            Some(feedback),
-                        )
+                            feedback: Some(feedback),
+                        }))
                         .await;
                     info!(
                         url = %page_url,
@@ -441,6 +453,25 @@ fn run_gui() {
                     if injected {
                         ack_browser_events(app_handle, network_events).await;
                     }
+                });
+            });
+
+            // 监听终端用户命令提交事件，push 到注入 channel（消费者统一处理 + 刷新前端）。
+            let tx3 = injection_tx.clone();
+            app.listen("terminal:user_command", move |event| {
+                let payload = event.payload().to_string();
+                let Ok(data) = serde_json::from_str::<serde_json::Value>(&payload) else {
+                    return;
+                };
+                let command = data["command"].as_str().unwrap_or("").to_string();
+                if command.trim().is_empty() {
+                    return;
+                }
+                use tiangong_plugin_terminal::collaboration::TerminalUserInput;
+                let _ = tx3.send(tiangong_app::ToolInjection {
+                    session_id: data["session_id"].as_str().map(|s| s.to_string()),
+                    tool: Box::new(TerminalUserInput { command }),
+                    refresh_frontend: true,
                 });
             });
 
