@@ -95,6 +95,9 @@ fn mime_type_from_path(path: &std::path::Path) -> String {
         "webp" => "image/webp",
         "gif" => "image/gif",
         "pdf" => "application/pdf",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "txt" => "text/plain",
         "md" | "markdown" => "text/markdown",
         "json" => "application/json",
@@ -102,6 +105,38 @@ fn mime_type_from_path(path: &std::path::Path) -> String {
         _ => "application/octet-stream",
     }
     .to_string()
+}
+
+/// 从消息的 content blocks 提取 media 资产（新格式）。
+///
+/// `append_message_with_id_and_media` 把附件存进 `content` 的 `ContentBlock::Media`，
+/// 而非旧的 `media` 字段。提取时必须从 content blocks 取，否则附件会丢失。
+fn extract_media_from_content(
+    message: &tiangong_types::Message,
+) -> Vec<tiangong_types::MediaAsset> {
+    message
+        .content
+        .iter()
+        .filter_map(|block| {
+            if let tiangong_types::message::ContentBlock::Media {
+                kind,
+                url,
+                mime_type,
+                title,
+            } = block
+            {
+                Some(tiangong_types::MediaAsset {
+                    kind: *kind,
+                    url: url.clone(),
+                    mime_type: mime_type.clone(),
+                    title: title.clone(),
+                    capability: None,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 async fn ensure_multimodal_enabled(state: &State<'_, TiangongApp>) -> Result<(), String> {
@@ -665,11 +700,14 @@ async fn send_message_inner(
             core_state.prepare_active_user_message_ingress_with_media(content.clone(), media)
         })
         .await?;
+    // 从 content blocks 提取 media（新格式），而非旧 media 字段。
+    // append_message_with_id_and_media 把 media 存进 content blocks，
+    // 旧 media 字段为空。若取旧字段会导致附件丢失（issue #149）。
     let command_media = session_snapshot
         .messages
         .iter()
         .find(|message| message.id == user_message_id)
-        .map(|message| message.media.clone())
+        .map(extract_media_from_content)
         .unwrap_or_default();
 
     // 获取或创建 TiangongCore

@@ -1209,30 +1209,13 @@ fn provider_message_from_session(msg: &Message, include_media: bool) -> Option<C
                     content.push(LlmMessageContent::Image(img_content));
                 }
             }
+            // 文件类附件（PDF/Office）不内联注入主请求。
+            // 统一交给下方的 attachment_notice 提示 + system prompt 中的
+            // 「文档附件解析规则」引导 agent 用本地脚本解析（issue #149）。
             ContentBlock::Media {
                 kind: MediaKind::File,
-                url,
-                mime_type,
-                title,
                 ..
-            } => {
-                if include_media
-                    && msg.role == MessageRole::User
-                    && url.trim_start().starts_with("data:")
-                    && !looks_like_image_reference(url)
-                {
-                    content.push(LlmMessageContent::File(
-                        tiangong_llm::message::FileContent {
-                            mime_type: mime_type
-                                .clone()
-                                .or_else(|| mime_from_data_url(url))
-                                .unwrap_or_else(|| "application/octet-stream".to_string()),
-                            data: url.clone(),
-                            title: title.clone(),
-                        },
-                    ));
-                }
-            }
+            } => {}
             ContentBlock::Media { .. } => {}
         }
     }
@@ -1254,21 +1237,15 @@ fn provider_message_from_session(msg: &Message, include_media: bool) -> Option<C
                 .unwrap_or(content.len());
             content.insert(pos, notice);
         }
-        let file_count = content
-            .iter()
-            .filter(|c| matches!(c, LlmMessageContent::File(_)))
-            .count();
-        if file_count > 0 {
-            let notice = LlmMessageContent::Text(format!(
-                "本条用户消息包含 {file_count} 个文件附件，文件内容已以 base64 data URL 随消息提供，请直接基于附件分析。"
-            ));
-            let pos = content
-                .iter()
-                .position(|c| matches!(c, LlmMessageContent::File(_)))
-                .unwrap_or(content.len());
-            content.insert(pos, notice);
-        }
-    } else if msg.role == MessageRole::User && msg.has_media() {
+    }
+    // 文件附件（PDF/Office）统一走 attachment_notice 提示，不内联进请求。
+    // 无论 include_media 与否，只要用户消息含文件附件就注入提示，
+    // 由 system prompt 中的「文档附件解析规则」引导 agent 本地解析。
+    // 对于图片类附件：当 include_media=false 时（chat 模型非多模态）也走提示，
+    // 引导调用 analyze_attachment 工具。
+    let needs_attachment_notice = msg.role == MessageRole::User
+        && (msg.has_file_media() || (!include_media && msg.has_media()));
+    if needs_attachment_notice {
         content.push(LlmMessageContent::Text(attachment_notice_text(msg)));
     }
 
@@ -1288,23 +1265,35 @@ fn provider_message_from_session(msg: &Message, include_media: bool) -> Option<C
 
 fn attachment_notice_text(msg: &Message) -> String {
     let mut media_index = 0usize;
+    let mut has_file_attachment = false;
     let items: Vec<String> = msg
         .content
         .iter()
         .filter_map(|block| {
             if let ContentBlock::Media {
                 kind,
-                url: _,
+                url,
                 mime_type,
                 title,
             } = block
             {
+                if matches!(kind, MediaKind::File) {
+                    has_file_attachment = true;
+                }
                 let title = title.as_deref().unwrap_or("未命名附件");
                 let mime = mime_type.as_deref().unwrap_or("unknown");
                 let idx = media_index;
                 media_index += 1;
+                // 归档成功的附件 url 是本地路径，可直接引用。
+                // 归档失败的附件 url 仍是 data URL（可能长达数 MB），
+                // 绝不能原样塞进提示文本，否则会撑爆上下文窗口。
+                let path_field = if url.trim_start().starts_with("data:") {
+                    "<归档失败，仅有内联 data URL；请告知用户重新上传>".to_string()
+                } else {
+                    url.clone()
+                };
                 Some(format!(
-                    "- index={idx} kind={kind:?} title={title} mime_type={mime}",
+                    "- index={idx} kind={kind:?} title={title} mime_type={mime} path={path_field}",
                 ))
             } else {
                 None
@@ -1312,10 +1301,21 @@ fn attachment_notice_text(msg: &Message) -> String {
         })
         .collect();
     let items = items.join("\n");
-    format!(
-        "本条用户消息包含附件，但主模型请求不会直接携带附件内容。需要查看附件内容时，请调用 analyze_attachment 工具，必须使用本提示中的 message_id={}（不要使用其他消息的 ID），并指定附件 index。\n{}",
-        msg.id, items
-    )
+    if has_file_attachment {
+        // 文件类附件（PDF/Office）统一走本地脚本解析（issue #149）。
+        // path 字段为本地归档路径（~/.tiangong/media/files/...），
+        // agent 据此用 run_command 读取并解析，具体方法见 system prompt 中的
+        // 「文档附件解析规则」段。
+        format!(
+            "本条用户消息包含文件附件，文件内容不会直接发送给模型。请使用 run_command 工具按「文档附件解析规则」读取上述 path 路径的文件并解析（path 为本地归档路径，可直接读取）。\n{}",
+            items
+        )
+    } else {
+        format!(
+            "本条用户消息包含附件，但主模型请求不会直接携带附件内容。需要查看附件内容时，请调用 analyze_attachment 工具，必须使用本提示中的 message_id={}（不要使用其他消息的 ID），并指定附件 index。\n{}",
+            msg.id, items
+        )
+    }
 }
 
 fn image_content_from_reference(value: &str) -> Option<tiangong_llm::message::ImageContent> {
@@ -1340,16 +1340,6 @@ fn image_content_from_reference(value: &str) -> Option<tiangong_llm::message::Im
     Some(tiangong_llm::message::ImageContent { mime_type, data })
 }
 
-fn looks_like_image_reference(value: &str) -> bool {
-    let lower = value.trim().to_ascii_lowercase();
-    lower.starts_with("data:image/")
-        || lower.ends_with(".png")
-        || lower.ends_with(".jpg")
-        || lower.ends_with(".jpeg")
-        || lower.ends_with(".webp")
-        || lower.ends_with(".gif")
-}
-
 fn image_mime_from_reference(value: &str) -> Option<String> {
     let lower = value.trim().to_ascii_lowercase();
     if lower.starts_with("data:image/") {
@@ -1368,15 +1358,6 @@ fn image_mime_from_reference(value: &str) -> Option<String> {
     } else {
         None
     }
-}
-
-fn mime_from_data_url(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    trimmed
-        .strip_prefix("data:")
-        .and_then(|raw| raw.split(';').next())
-        .filter(|mime| !mime.trim().is_empty())
-        .map(str::to_string)
 }
 
 fn sanitize_provider_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
@@ -2098,5 +2079,191 @@ mod tests {
         assert_eq!(provider_message_tool_result_count(&sanitized[2]), 2);
         assert_eq!(sanitized[3].role, LlmMessageRole::User);
         assert!(is_internal_tool_context_message(&sanitized[3]));
+    }
+
+    #[test]
+    fn file_attachment_injects_notice_with_path() {
+        // 含 PDF 文件附件的 user 消息，必须注入 attachment_notice（含 path），
+        // 而不是把文件内联或静默丢弃（issue #149 的核心保证）。
+        let msg = test_user_message_with_media(
+            "请处理这些附件。",
+            MediaKind::File,
+            "/Users/test/.tiangong/media/files/abc.pdf",
+            Some("application/pdf"),
+            Some("测试文档.pdf"),
+        );
+
+        // include_media=true（chat 模型多模态）：文件仍走 notice，不内联
+        let result = provider_message_from_session(&msg, true).expect("应生成消息");
+        let texts: Vec<&str> = result
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                LlmMessageContent::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        let notice = texts
+            .iter()
+            .find(|t| t.contains("path="))
+            .unwrap_or_else(|| panic!("应包含 attachment_notice，实际 texts: {texts:?}"));
+        assert!(
+            notice.contains("path=/Users/test/.tiangong/media/files/abc.pdf"),
+            "notice 应含文件路径，实际：{notice}"
+        );
+        assert!(
+            notice.contains("文件附件"),
+            "notice 应说明是文件附件，实际：{notice}"
+        );
+        // 不应有内联 File content
+        assert!(
+            !result
+                .content
+                .iter()
+                .any(|c| matches!(c, LlmMessageContent::File(_))),
+            "文件不应内联为 File content"
+        );
+    }
+
+    #[test]
+    fn file_attachment_notice_injected_even_when_include_media_false() {
+        // include_media=false 时同样应注入 notice
+        let msg = test_user_message_with_media(
+            "分析这个",
+            MediaKind::File,
+            "/tmp/doc.docx",
+            Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+            None,
+        );
+        let result = provider_message_from_session(&msg, false).expect("应生成消息");
+        assert!(result.content.iter().any(|c| matches!(
+            c,
+            LlmMessageContent::Text(t) if t.contains("path=/tmp/doc.docx")
+        )));
+    }
+
+    #[test]
+    fn image_attachment_still_inlines_when_multimodal() {
+        // 图片附件在 include_media=true 时应内联，不走 notice（回归保护）
+        let msg = test_user_message_with_media(
+            "看这张图",
+            MediaKind::Image,
+            "data:image/png;base64,iVBORw0KGgo=",
+            Some("image/png"),
+            None,
+        );
+        let result = provider_message_from_session(&msg, true).expect("应生成消息");
+        assert!(
+            result
+                .content
+                .iter()
+                .any(|c| matches!(c, LlmMessageContent::Image(_))),
+            "图片应内联为 Image content"
+        );
+    }
+
+    /// 构造测试用 user Message（含一个 media block）
+    fn test_user_message_with_media(
+        text: &str,
+        kind: MediaKind,
+        url: &str,
+        mime_type: Option<&str>,
+        title: Option<&str>,
+    ) -> Message {
+        Message {
+            id: "msg_test".to_string(),
+            role: MessageRole::User,
+            content: vec![
+                ContentBlock::text(text),
+                ContentBlock::Media {
+                    kind,
+                    url: url.to_string(),
+                    mime_type: mime_type.map(str::to_string),
+                    title: title.map(str::to_string),
+                },
+            ],
+            reasoning_content: String::new(),
+            reasoning_signature: None,
+            worker_id: None,
+            media: Vec::new(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_result_is_error: false,
+            compact: false,
+            created_at: String::new(),
+            media_migrated: true,
+        }
+    }
+
+    #[test]
+    fn end_to_end_request_contains_rules_and_notice() {
+        // 端到端验证：完整 ModelRequest 构建（build_provider_messages）后，
+        // system prompt 必须含「文档附件解析规则」，user message 必须含
+        // attachment_notice（含文件路径）。
+        // 这是离实际 LLM 请求最近的测试，能暴露注入链路的任何断点。
+        let user_msg = test_user_message_with_media(
+            "请处理这些附件。",
+            MediaKind::File,
+            "/Users/test/.tiangong/media/files/report.pdf",
+            Some("application/pdf"),
+            Some("report.pdf"),
+        );
+
+        // 构造一条含解析规则的 System 消息（模拟 rebuild_system_prompt 的输出）
+        let system_msg = Message {
+            id: "sys".to_string(),
+            role: MessageRole::System,
+            content: vec![ContentBlock::text(
+                "你是天工助手。\n## 文档附件解析规则\n源文件已归档在 ~/.tiangong/media/files/。",
+            )],
+            reasoning_content: String::new(),
+            reasoning_signature: None,
+            worker_id: None,
+            media: Vec::new(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_result_is_error: false,
+            compact: false,
+            created_at: String::new(),
+            media_migrated: true,
+        };
+
+        let req = ModelRequest {
+            session_title: "测试".to_string(),
+            user_input: String::new(),
+            context: vec![system_msg, user_msg],
+            thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
+            include_media: true,
+        };
+
+        let (system, messages) = build_provider_messages(&req);
+
+        // system prompt 必须含解析规则（来自 System 消息，不是 fallback 常量）
+        assert!(
+            system.contains("文档附件解析规则"),
+            "system prompt 应含解析规则，实际前200字：{}",
+            &system[..system.len().min(200)]
+        );
+        assert!(
+            system.contains("media/files"),
+            "system prompt 应含 media/files 路径说明"
+        );
+
+        // user message 必须含 attachment_notice（含文件路径）
+        let user_content = messages
+            .iter()
+            .find(|m| m.role == LlmMessageRole::User)
+            .expect("应有 user 消息");
+        let has_notice = user_content.content.iter().any(|c| match c {
+            LlmMessageContent::Text(t) => {
+                t.contains("path=/Users/test/.tiangong/media/files/report.pdf")
+            }
+            _ => false,
+        });
+        assert!(has_notice, "user message 应含带路径的 attachment_notice");
     }
 }

@@ -224,9 +224,17 @@ fn build_user_item(message: &ChatMessage) -> Result<Option<Value>> {
             _ => None,
         })
         .collect::<Vec<_>>();
+    let files = message
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            MessageContent::File(file) => Some(file),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     let text = collect_text(message);
 
-    if images.is_empty() {
+    if images.is_empty() && files.is_empty() {
         if text.trim().is_empty() {
             return Ok(None);
         }
@@ -247,6 +255,20 @@ fn build_user_item(message: &ChatMessage) -> Result<Option<Value>> {
             "image_url": image.data,
         }));
     }
+    // 文档附件（PDF/Office）的 Responses API 原生 file block 映射。
+    // 官方规范：{ "type": "file", "file": { "filename": "...", "file_data": "data:<mime>;base64,..." } }
+    // 注：当前上层策略下文件附件统一走本地脚本解析，不会产生 MessageContent::File；
+    // 此分支保留以支持未来直传场景，并维持 provider 层映射的完整性。
+    for file in files {
+        let filename = file_filename_with_fallback(&file.title, &file.mime_type);
+        content.push(json!({
+            "type": "file",
+            "file": {
+                "filename": filename,
+                "file_data": file.data,
+            }
+        }));
+    }
     Ok(Some(json!({
         "type": "message",
         "role": "user",
@@ -264,16 +286,32 @@ fn collect_text(message: &ChatMessage) -> String {
                 crate::tool::ToolResultContent::Text(text) => text.clone(),
                 crate::tool::ToolResultContent::Json(value) => value.to_string(),
             }),
-            MessageContent::File(file) => Some(format!(
-                "<attachment title=\"{}\" mime_type=\"{}\">\n{}\n</attachment>",
-                file.title.as_deref().unwrap_or("attachment"),
-                file.mime_type,
-                file.data
-            )),
+            // File 由 build_user_item 走原生 file block，此处不再降级为文本，
+            // 避免 base64 data URL 塞进文本导致 token 膨胀且模型无法读取。
             _ => None,
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// 推断文档附件的文件名，供 Responses API 的 file block 使用。
+///
+/// 优先用 title（前端传入的用户可见文件名）；否则按 MIME 兜底一个通用名。
+fn file_filename_with_fallback(title: &Option<String>, mime_type: &str) -> String {
+    if let Some(title) = title {
+        let trimmed = title.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    let ext = match mime_type {
+        "application/pdf" => "pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
+        _ => "bin",
+    };
+    format!("attachment.{ext}")
 }
 
 /// 解析 Responses API 完整响应。
@@ -691,5 +729,80 @@ mod tests {
         assert_eq!(base, "https://api.openai.com/v1");
         let err = normalize_api_base("  ");
         assert!(err.is_err(), "空 base_url 应报错：{err:?}");
+    }
+
+    #[test]
+    fn user_item_with_pdf_uses_native_file_block() {
+        // Responses API 文件输入必须用 {"type":"file","file":{...}} 结构，
+        // file_data 为 data URI。错误结构（如 input_file/file_url）会被静默丢弃，
+        // 导致模型无法感知文件（issue #149）。
+        let message = ChatMessage::new(
+            MessageRole::User,
+            vec![
+                MessageContent::Text("总结这份文档".to_string()),
+                MessageContent::File(crate::message::FileContent {
+                    mime_type: "application/pdf".to_string(),
+                    data: "data:application/pdf;base64,JVBERi0xLjQ=".to_string(),
+                    title: Some("report.pdf".to_string()),
+                }),
+            ],
+        );
+        let item = build_user_item(&message)
+            .unwrap()
+            .expect("应生成 user item");
+        let content = item
+            .get("content")
+            .and_then(|v| v.as_array())
+            .expect("应有 content 数组");
+
+        let file_block = content
+            .iter()
+            .find(|v| v.get("type").and_then(|t| t.as_str()) == Some("file"))
+            .expect("应包含 type=file 的内容块");
+
+        assert_eq!(
+            file_block
+                .get("file")
+                .and_then(|f| f.get("filename"))
+                .and_then(|v| v.as_str()),
+            Some("report.pdf")
+        );
+        assert_eq!(
+            file_block
+                .get("file")
+                .and_then(|f| f.get("file_data"))
+                .and_then(|v| v.as_str()),
+            Some("data:application/pdf;base64,JVBERi0xLjQ=")
+        );
+        // 不应再出现已废弃的 input_file/file_url 结构
+        assert!(
+            content
+                .iter()
+                .all(|v| v.get("type").and_then(|t| t.as_str()) != Some("input_file")),
+            "不应使用 input_file 类型"
+        );
+    }
+
+    #[test]
+    fn file_block_filename_falls_back_by_mime() {
+        assert_eq!(
+            file_filename_with_fallback(&None, "application/pdf"),
+            "attachment.pdf"
+        );
+        assert_eq!(
+            file_filename_with_fallback(
+                &None,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            "attachment.xlsx"
+        );
+        assert_eq!(
+            file_filename_with_fallback(&Some("  ".to_string()), "application/pdf"),
+            "attachment.pdf"
+        );
+        assert_eq!(
+            file_filename_with_fallback(&Some("用户文档.docx".to_string()), "application/pdf"),
+            "用户文档.docx"
+        );
     }
 }

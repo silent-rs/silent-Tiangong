@@ -157,6 +157,8 @@ pub struct SystemPromptConfig {
     pub user_context: Vec<String>,
     /// Plugin 注入的额外段落（如终端交互引导、浏览器使用规范等）
     pub plugin_sections: Vec<String>,
+    /// 文档附件解析规则段（PDF/Office 处理引导，issue #149）
+    pub attachment_rules_text: String,
 }
 
 impl SystemPromptConfig {
@@ -173,6 +175,7 @@ impl SystemPromptConfig {
             team_text: build_agent_team_section(),
             user_context: build_user_context(session_id, None),
             plugin_sections: Vec::new(),
+            attachment_rules_text: super::attachment_rules::attachment_rules_section(),
         }
     }
 
@@ -233,6 +236,9 @@ fn collect_dynamic_parts(config: &SystemPromptConfig) -> Vec<String> {
     let mut parts = Vec::new();
     if !config.media_text.is_empty() {
         parts.push(config.media_text.clone());
+    }
+    if !config.attachment_rules_text.is_empty() {
+        parts.push(config.attachment_rules_text.clone());
     }
     if !config.skills_text.is_empty() {
         parts.push(config.skills_text.clone());
