@@ -284,24 +284,30 @@ fn run_gui() {
 
             // 注册进程内插件（issue #156）：每个插件封装自己的全部能力，
             // 在 engine 创建/重建时自行注册，替代旧的逐字段手工注册。
-            if let Some(plugin) = tiangong_plugin_browser::build_plugin(app.handle()) {
-                state.register_plugin(plugin);
+            // 注意：build_plugin 必须在对应 Tauri plugin（.plugin(init())）注册之后调用，
+            // 否则 app.state::<X>() 拿不到插件 state，from_app_handle 返回 None。
+            match tiangong_plugin_browser::build_plugin(app.handle()) {
+                Some(plugin) => state.register_plugin(plugin),
+                None => warn!("浏览器插件构造失败（Tauri state 未就绪），浏览器能力将缺失"),
             }
-            if let Some(plugin) = tiangong_plugin_terminal::build_plugin(app.handle()) {
-                state.register_plugin(plugin);
+            match tiangong_plugin_terminal::build_plugin(app.handle()) {
+                Some(plugin) => {
+                    state.register_plugin(plugin);
 
-                // 将 workspace 目录设为系统 PTY 默认 cwd。
-                // 系统 PTY 启动时 cwd 取自环境变量（HOME/tmp），若不在此 cd，
-                // agent 命令会在用户主目录而非 workspace 执行。
-                let app_handle = app.handle().clone();
-                let core_state = state.state.clone();
-                tauri::async_runtime::spawn(async move {
-                    let workspace = {
-                        let guard = core_state.lock().await;
-                        guard.workspace_dir().to_string()
-                    };
-                    tiangong_plugin_terminal::set_cwd(&app_handle, workspace).await;
-                });
+                    // 将 workspace 目录设为系统 PTY 默认 cwd。
+                    // 系统 PTY 启动时 cwd 取自环境变量（HOME/tmp），若不在此 cd，
+                    // agent 命令会在用户主目录而非 workspace 执行。
+                    let app_handle = app.handle().clone();
+                    let core_state = state.state.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let workspace = {
+                            let guard = core_state.lock().await;
+                            guard.workspace_dir().to_string()
+                        };
+                        tiangong_plugin_terminal::set_cwd(&app_handle, workspace).await;
+                    });
+                }
+                None => warn!("终端插件构造失败（Tauri state 未就绪），终端能力将缺失"),
             }
 
             // 启动工具消息注入消费者任务（插件 push → 消费者统一处理）
