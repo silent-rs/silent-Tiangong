@@ -41,22 +41,63 @@ impl SessionPtyRegistry {
     }
 
     /// 更新默认 cwd（workspace 切换或初始化同步时调用）。
-    /// 仅影响后续懒创建的 PTY；已存在的对话 PTY 的 cwd 由其自身管理。
+    ///
+    /// 仅影响后续懒创建的 PTY；已存在对话 PTY 的 cwd 由其自身管理。
     pub fn set_default_cwd(&self, cwd: String) {
         if let Ok(mut guard) = self.default_cwd.lock() {
             *guard = cwd;
         }
     }
 
-    /// 懒创建：获取或创建指定 session 的 PTY。返回 true 表示 PTY 存活。
-    pub fn ensure(&self, session_id: &str, cwd: &str) -> bool {
-        {
-            let sessions = self.sessions.lock().unwrap();
-            if sessions.contains_key(session_id) {
-                return true;
-            }
-        }
+    /// workspace 切换时同步：更新默认 cwd，并销毁所有存活 PTY。
+    ///
+    /// workspace 切换发生在尚未产生对话的阶段（活跃 session 处于草稿/无消息状态），
+    /// 此时终端 PTY 不承载有价值的 shell 状态，直接销毁重建比发送 `cd` 更干净：
+    /// - 不在终端历史里留下自动 `cd` 痕迹
+    /// - 不误把 `cd` 当作按键发给交互式前台程序（vi/nano/REPL）
+    /// - 用户下次打开终端时 `ensure` 用新 `default_cwd` 创建全新 PTY
+    ///
+    /// 已销毁的 PTY（如固定 id `__draft_terminal__`）会在前端 TerminalPanel 的
+    /// `ensure` effect 中被重新创建，xterm 渲染层会感知到后端 PTY 重建。
+    pub fn reset_all_for_workspace(&self, cwd: &str) {
+        // 1. 更新默认 cwd，使后续懒创建的 PTY 落入新 workspace
+        self.set_default_cwd(cwd.to_string());
 
+        // 2. 销毁所有存活 PTY（drop cmd_tx → 命令循环退出 → 子进程终止）
+        let ids: Vec<String> = {
+            let sessions = self.sessions.lock().unwrap();
+            sessions.keys().cloned().collect()
+        };
+        for id in ids {
+            self.destroy(&id);
+        }
+    }
+
+    /// 懒创建：获取或创建指定 session 的 PTY。返回 true 表示 PTY 存活。
+    ///
+    /// 若注册表里已存在该 session 的条目但底层 PTY 已死亡（子进程退出、
+    /// `cmd_tx` 失效），会先销毁陈旧条目再重建，避免复用死掉的 PTY 导致
+    /// 「终端未就绪」（草稿态固定 id 复用场景的根因，见 issue #156 后续修复）。
+    pub fn ensure(&self, session_id: &str, cwd: &str) -> bool {
+        // 检查是否已有存活 PTY（注意：必须在此块作用域内释放 sessions 锁，
+        // 不得在持锁时调用 create_pty——create_pty 末尾会再次获取 sessions 锁，
+        // std::sync::Mutex 不支持递归获取，会导致死锁。）
+        let existing_is_dead = {
+            let sessions = self.sessions.lock().unwrap();
+            match sessions.get(session_id) {
+                Some(pty) if pty.manager.is_alive() => return true,
+                Some(_) => true, // 存在但已死亡，需销毁重建
+                None => false,   // 不存在，直接创建
+            }
+        };
+        if existing_is_dead {
+            self.destroy(session_id);
+        }
+        self.create_pty(session_id, cwd)
+    }
+
+    /// 创建指定 session 的 PTY（调用方负责保证注册表里无该 session 的存活条目）。
+    fn create_pty(&self, session_id: &str, cwd: &str) -> bool {
         let default_cwd = self
             .default_cwd
             .lock()

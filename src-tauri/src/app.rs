@@ -8,7 +8,7 @@ use tiangong_core::agent_input::{AgentInput, AgentInputKind};
 use tiangong_core::core::TiangongCore;
 use tiangong_core::core_config::CoreConfigProvider;
 use tokio::sync::Mutex as AsyncMutex;
-use tracing::warn;
+use tracing::{error, warn};
 
 /// 天工应用状态
 ///
@@ -77,8 +77,13 @@ impl TiangongApp {
     /// 全部能力（页面获取、终端能力、工具覆盖、Prompt 段落等），替代旧的
     /// `set_page_fetcher` / `register_tool_override` 等逐字段注册。
     pub fn register_plugin(&self, plugin: std::sync::Arc<dyn tiangong_core::core::Plugin>) {
-        if let Ok(mut guard) = self.plugins.lock() {
-            guard.push(plugin);
+        match self.plugins.lock() {
+            Ok(mut guard) => guard.push(plugin),
+            Err(err) => error!(
+                plugin_id = plugin.id(),
+                error = %err,
+                "plugins 锁已污染，插件注册失败，其能力将静默缺失",
+            ),
         }
     }
 

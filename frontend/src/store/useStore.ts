@@ -328,6 +328,12 @@ export const useStore = create<AppState>((set, get) => ({
     // 为草稿态终端生成稳定临时 id：同一时刻只有一个草稿，用固定常量即可。
     // TerminalPanel 草稿态会以此 id 创建 PTY；转正时迁移归属到真实 session_id。
     const draftTerminalId = '__draft_terminal__';
+    // 销毁上一轮草稿残留的 PTY（草稿用固定 id，若上次草稿没转正也没销毁，
+    // 后端会残留死掉的 PTY，导致下次 ensure 复用陈旧条目、终端显示「未就绪」）。
+    // 销毁是幂等的：后端无此 id 时 no-op。后端 ensure 也会兜底检测陈旧 PTY 重建。
+    api.terminalDestroySession(draftTerminalId).catch((e) =>
+      console.error('销毁陈旧草稿 PTY 失败:', e),
+    );
     set({
       isDraft: true,
       activeSessionId: null,

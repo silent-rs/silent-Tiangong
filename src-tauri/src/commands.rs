@@ -2263,6 +2263,7 @@ pub async fn get_workspace_dir(state: State<'_, TiangongApp>) -> Result<String, 
 /// 设置 Desktop 工作空间目录
 #[tauri::command]
 pub async fn set_workspace_dir(
+    app: tauri::AppHandle,
     workspace_dir: String,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
@@ -2273,6 +2274,10 @@ pub async fn set_workspace_dir(
     state
         .with_state(|core_state| core_state.update_workspace_dir(workspace_dir.clone()))
         .await?;
+
+    // 同步终端：更新终端默认 cwd（后续懒创建的 PTY），并对所有存活 PTY
+    // 发送 cd 使已打开的终端进入新 workspace。
+    tiangong_plugin_terminal::sync_workspace_cwd(&app, &workspace_dir);
 
     // 同步活跃 core 的 cwd（仅限无对话的 Inherit 会话）
     let active_session_id = state
