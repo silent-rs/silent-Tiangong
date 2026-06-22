@@ -79,20 +79,20 @@ impl SessionPtyRegistry {
     /// `cmd_tx` 失效），会先销毁陈旧条目再重建，避免复用死掉的 PTY 导致
     /// 「终端未就绪」（草稿态固定 id 复用场景的根因，见 issue #156 后续修复）。
     pub fn ensure(&self, session_id: &str, cwd: &str) -> bool {
-        {
+        // 检查是否已有存活 PTY（注意：必须在此块作用域内释放 sessions 锁，
+        // 不得在持锁时调用 create_pty——create_pty 末尾会再次获取 sessions 锁，
+        // std::sync::Mutex 不支持递归获取，会导致死锁。）
+        let existing_is_dead = {
             let sessions = self.sessions.lock().unwrap();
-            if let Some(pty) = sessions.get(session_id) {
-                if pty.manager.is_alive() {
-                    return true;
-                }
-                // PTY 已死亡：释放锁后销毁重建
-            } else {
-                // 不存在，走下面的创建分支
-                return self.create_pty(session_id, cwd);
+            match sessions.get(session_id) {
+                Some(pty) if pty.manager.is_alive() => return true,
+                Some(_) => true, // 存在但已死亡，需销毁重建
+                None => false,   // 不存在，直接创建
             }
+        };
+        if existing_is_dead {
+            self.destroy(session_id);
         }
-        // 走到这里说明存在陈旧 PTY，先销毁再创建
-        self.destroy(session_id);
         self.create_pty(session_id, cwd)
     }
 
