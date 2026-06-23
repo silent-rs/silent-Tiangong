@@ -100,6 +100,28 @@ pub fn parse_stream_event(
             {
                 events.push(Ok(ProviderStreamEvent::Usage(parse_usage(usage))));
             }
+            // 兜底提取 function_call 的完整 arguments。
+            // 某些中转/模型不发 function_call_arguments.delta，导致流式拼接的
+            // arguments 为空。response.completed 的 output 里含完整 function_call
+            // items（带 arguments），此处补发确保工具参数不丢失。
+            if let Some(output) = payload
+                .get("response")
+                .and_then(|r| r.get("output"))
+                .and_then(Value::as_array)
+            {
+                for item in output {
+                    if item.get("type").and_then(Value::as_str) == Some("function_call")
+                        && let Some(call) = parse_function_call_item(item)
+                        && let Some(args) = call.arguments
+                        && !args.trim().is_empty()
+                    {
+                        events.push(Ok(ProviderStreamEvent::ToolCallDelta {
+                            call_id: call.call_id,
+                            partial_json: args,
+                        }));
+                    }
+                }
+            }
             // 兜底解析 reasoning 由 provider 层根据"是否收到过 delta"决定，
             // 避免此处无条件补发导致与流式增量重复。
             events.push(Ok(ProviderStreamEvent::MessageEnd));
@@ -151,12 +173,21 @@ pub(super) fn extract_completed_reasoning(payload: &Value) -> Option<String> {
 pub(super) struct ParsedFunctionCall {
     pub(super) call_id: String,
     pub(super) name: String,
+    pub(super) arguments: Option<String>,
 }
 
 pub(super) fn parse_function_call_item(item: &Value) -> Option<ParsedFunctionCall> {
     let call_id = item.get("call_id").and_then(Value::as_str)?.to_string();
     let name = item.get("name").and_then(Value::as_str)?.to_string();
-    Some(ParsedFunctionCall { call_id, name })
+    let arguments = item
+        .get("arguments")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Some(ParsedFunctionCall {
+        call_id,
+        name,
+        arguments,
+    })
 }
 
 #[cfg(test)]
@@ -283,5 +314,62 @@ mod tests {
             .iter()
             .any(|e| matches!(e, Ok(ProviderStreamEvent::ReasoningDelta(_))));
         assert!(no_reasoning, "无 reasoning item 时不应输出 reasoning");
+    }
+
+    #[test]
+    fn completed_event_backfills_function_call_arguments() {
+        // 某些中转不发 function_call_arguments.delta，导致流式拼接的 arguments 为空。
+        // response.completed 的 output 含完整 function_call items（带 arguments），
+        // 应兜底提取并通过 ToolCallDelta 补发。
+        let payload = json!({
+            "type": "response.completed",
+            "response": {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_abc",
+                        "name": "run_command",
+                        "arguments": "{\"command\": \"python3 -c 'print(1)'\"}"
+                    }
+                ],
+                "usage": { "input_tokens": 1, "output_tokens": 1, "total_tokens": 2 }
+            }
+        });
+        let events = parse_stream_event(&payload);
+        let has_tool_delta = events.iter().any(|e| {
+            matches!(
+                e,
+                Ok(ProviderStreamEvent::ToolCallDelta { call_id, partial_json })
+                    if call_id == "call_abc" && partial_json.contains("python3")
+            )
+        });
+        assert!(
+            has_tool_delta,
+            "completed 应兜底补发 function_call arguments，实际 events: {events:?}"
+        );
+    }
+
+    #[test]
+    fn completed_event_skips_empty_function_call_arguments() {
+        // arguments 为空字符串时不应补发（无意义）
+        let payload = json!({
+            "type": "response.completed",
+            "response": {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_xyz",
+                        "name": "run_command",
+                        "arguments": ""
+                    }
+                ],
+                "usage": { "input_tokens": 1, "output_tokens": 1, "total_tokens": 2 }
+            }
+        });
+        let events = parse_stream_event(&payload);
+        let has_tool_delta = events
+            .iter()
+            .any(|e| matches!(e, Ok(ProviderStreamEvent::ToolCallDelta { .. })));
+        assert!(!has_tool_delta, "空 arguments 不应补发 ToolCallDelta");
     }
 }

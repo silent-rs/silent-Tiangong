@@ -465,6 +465,10 @@ async fn worker_loop_async(
                 media,
             } => {
                 let turn_start_idx = session.messages.len();
+                // 归档附件到本地（图片→images/，PDF/Office→files/）。
+                // 必须在 append 之前归档，否则 attachment_notice 引用的是 data URL
+                // 而非本地路径，agent 无法读取文件（issue #149）。
+                let media = crate::media_archive::archive_input_media_assets(media);
                 // 记录用户消息
                 let user_msg_id =
                     append_or_reuse_user_message(&mut session, &content, message_id, media);

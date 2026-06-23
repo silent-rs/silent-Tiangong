@@ -517,8 +517,10 @@ impl ReactEngine {
         }
 
         'react_loop: loop {
-            // 首轮：确保 system prompt 已构建
-            if round == 0 && session.system_prompt_message.is_none() {
+            // 首轮：始终重建 system prompt，确保规则段（如「文档附件解析规则」）
+            // 与当前代码版本一致。旧 session 持久化的 system_prompt_message 可能
+            // 是旧版本生成、缺少新增的规则段，必须重建。
+            if round == 0 {
                 crate::react::context::rebuild_system_prompt(session, &self.engine);
             }
             match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {

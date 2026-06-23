@@ -571,7 +571,7 @@ export function MessageInput() {
         directory: false,
         title: '选择图片或文件',
         filters: [
-          { name: '图片和文件', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'pdf', 'txt', 'md', 'json', 'csv'] },
+          { name: '图片和文件', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'pdf', 'docx', 'xlsx', 'pptx', 'txt', 'md', 'json', 'csv'] },
         ],
       });
       const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];

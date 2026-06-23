@@ -247,6 +247,21 @@ impl Message {
         self.content.iter().any(|b| !b.is_text())
     }
 
+    /// 判断是否包含文件类附件（PDF/Office 等非图片媒体）。
+    ///
+    /// 文件附件统一走本地脚本解析，不内联进 LLM 请求（issue #149）。
+    pub fn has_file_media(&self) -> bool {
+        self.content.iter().any(|b| {
+            matches!(
+                b,
+                ContentBlock::Media {
+                    kind: MediaKind::File,
+                    ..
+                }
+            )
+        })
+    }
+
     /// 将旧格式 media 字段迁移到 content 数组。
     /// 加载旧 session 后调用此方法完成自动升级。
     pub fn migrate_legacy_media(&mut self) {
