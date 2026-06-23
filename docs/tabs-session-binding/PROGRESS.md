@@ -4,11 +4,11 @@
 >
 > 任务索引：`README.md`
 >
-> 当前分支：`feature/frontend-tabs-container`
+> 当前分支：`feature/tabs-api-permissions`
 
 ## 当前状态
 
-- 阶段：已完成 09，统一 Tabs 容器已可混排浏览器和终端 Tab。
+- 阶段：已完成 13，新增 Tabs 相关 Tauri API 和权限声明已补齐。
 - 最近更新：2026-06-23
 - 当前建议任务：`10-terminal-tab-content.md`
 - 当前阻塞：无。
@@ -29,7 +29,7 @@
 | 10 | 终端 Tab 内容组件 | 未开始 | - | - | - |
 | 11 | 浏览器 Tab 内容组件 | 未开始 | - | - | - |
 | 12 | 会话切换恢复与防抖持久化 | 未开始 | - | - | - |
-| 13 | Tauri API 与权限声明 | 未开始 | - | - | - |
+| 13 | Tauri API 与权限声明 | 已完成 | `feature/tabs-api-permissions` | `bc32615` | `cargo fmt -- --check` 通过；`cargo check --workspace` 通过；`yarn build` 通过 |
 | 14 | 端到端验收 | 未开始 | - | - | - |
 
 ## 依赖总览
@@ -66,6 +66,7 @@
 | 2026-06-23 | 完成浏览器空白页懒创建 | `e9d3521` |
 | 2026-06-23 | 完成前端单一工作区面板 | `8bca60a` |
 | 2026-06-23 | 完成统一 Tabs 容器 | `2d63c45` |
+| 2026-06-23 | 完成 Tauri API 与权限声明 | `bc32615` |
 
 ## 更新规则
 
@@ -97,3 +98,6 @@
 - 2026-06-23：07 浏览器空白页懒创建，`yarn build` 通过。
 - 2026-06-23：08 前端单一工作区面板，`yarn build` 通过。
 - 2026-06-23：09 统一 Tabs 容器，`yarn build` 通过。
+- 2026-06-23：13 Tauri API 与权限声明，`cargo fmt -- --check` 通过。
+- 2026-06-23：13 Tauri API 与权限声明，`cargo check --workspace` 通过。
+- 2026-06-23：13 Tauri API 与权限声明，`yarn build` 通过。
