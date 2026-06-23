@@ -4,13 +4,13 @@
 >
 > 任务索引：`README.md`
 >
-> 当前分支：`feature/tabs-api-permissions`
+> 当前分支：`feature/terminal-tab-content`
 
 ## 当前状态
 
-- 阶段：已完成 13，新增 Tabs 相关 Tauri API 和权限声明已补齐。
+- 阶段：已完成 10，终端 Tab 内容已按复合 id 路由到独立 PTY。
 - 最近更新：2026-06-23
-- 当前建议任务：`10-terminal-tab-content.md`
+- 当前建议任务：`11-browser-tab-content.md`
 - 当前阻塞：无。
 
 ## 进度总览
@@ -26,7 +26,7 @@
 | 07 | 浏览器空白页懒创建 | 已完成 | `feature/browser-blank-lazy-webview` | `e9d3521` | `cargo fmt -- --check` 通过；`cargo check --workspace` 通过；`yarn build` 通过 |
 | 08 | 前端单一工作区面板 | 已完成 | `feature/frontend-workspace-shell` | `8bca60a` | `yarn build` 通过 |
 | 09 | 统一 Tabs 容器 | 已完成 | `feature/frontend-tabs-container` | `2d63c45` | `yarn build` 通过 |
-| 10 | 终端 Tab 内容组件 | 未开始 | - | - | - |
+| 10 | 终端 Tab 内容组件 | 已完成 | `feature/terminal-tab-content` | `02bdcaa` | `yarn build` 通过 |
 | 11 | 浏览器 Tab 内容组件 | 未开始 | - | - | - |
 | 12 | 会话切换恢复与防抖持久化 | 未开始 | - | - | - |
 | 13 | Tauri API 与权限声明 | 已完成 | `feature/tabs-api-permissions` | `bc32615` | `cargo fmt -- --check` 通过；`cargo check --workspace` 通过；`yarn build` 通过 |
@@ -67,6 +67,7 @@
 | 2026-06-23 | 完成前端单一工作区面板 | `8bca60a` |
 | 2026-06-23 | 完成统一 Tabs 容器 | `2d63c45` |
 | 2026-06-23 | 完成 Tauri API 与权限声明 | `bc32615` |
+| 2026-06-23 | 完成终端 Tab 内容组件 | `02bdcaa` |
 
 ## 更新规则
 
@@ -101,3 +102,4 @@
 - 2026-06-23：13 Tauri API 与权限声明，`cargo fmt -- --check` 通过。
 - 2026-06-23：13 Tauri API 与权限声明，`cargo check --workspace` 通过。
 - 2026-06-23：13 Tauri API 与权限声明，`yarn build` 通过。
+- 2026-06-23：10 终端 Tab 内容组件，`yarn build` 通过。
