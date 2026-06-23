@@ -167,7 +167,7 @@
 - [x] 04：终端空闲选择与繁忙新建 - `docs/tabs-session-binding/04-terminal-selection.md`
 - [x] 05：命令结果反馈终端选择信息 - `docs/tabs-session-binding/05-terminal-result-feedback.md`
 - [x] 06：浏览器会话切换 - `docs/tabs-session-binding/06-browser-session-switch.md`
-- [ ] 07：浏览器空白页懒创建 - `docs/tabs-session-binding/07-browser-blank-lazy-webview.md`
+- [x] 07：浏览器空白页懒创建 - `docs/tabs-session-binding/07-browser-blank-lazy-webview.md`
 - [ ] 08：前端单一工作区面板 - `docs/tabs-session-binding/08-frontend-workspace-shell.md`
 - [ ] 09：统一 Tabs 容器 - `docs/tabs-session-binding/09-frontend-tabs-container.md`
 - [ ] 10：终端 Tab 内容组件 - `docs/tabs-session-binding/10-terminal-tab-content.md`

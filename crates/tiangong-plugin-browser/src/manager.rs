@@ -376,10 +376,11 @@ impl BrowserManager {
         w: f64,
         h: f64,
     ) -> Result<(), String> {
-        {
+        let existing_tab_webview_to_create = {
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
             if !state.tabs.is_empty() {
                 // 已初始化：更新活跃标签（有 WebView 则导航，无则标记 URL 等待按需创建）
+                let mut webview_to_create = None;
                 if let Some(matching_tab) = state
                     .tabs
                     .iter()
@@ -399,6 +400,8 @@ impl BrowserManager {
                         if let Some(new_wv) = state.webviews.get(&matching_id) {
                             let _ = new_wv.set_position(LogicalPosition::new(x, y));
                             let _ = new_wv.set_size(LogicalSize::new(w, h));
+                        } else if url != "about:blank" {
+                            webview_to_create = Some(matching_id.clone());
                         }
                         state.active_tab_id = Some(matching_id);
                     } else {
@@ -406,6 +409,8 @@ impl BrowserManager {
                         if let Some(wv) = state.active_webview() {
                             let _ = wv.set_position(LogicalPosition::new(x, y));
                             let _ = wv.set_size(LogicalSize::new(w, h));
+                        } else if url != "about:blank" {
+                            webview_to_create = Some(matching_id);
                         }
                     }
                 } else {
@@ -419,6 +424,8 @@ impl BrowserManager {
                         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             let _ = wv.navigate(parsed_url);
                         }));
+                    } else if url != "about:blank" {
+                        webview_to_create = state.active_tab_id.clone();
                     }
                     // 更新活跃标签 URL
                     let active_id = state.active_tab_id.clone();
@@ -432,8 +439,22 @@ impl BrowserManager {
                 state
                     .visible
                     .store(true, std::sync::atomic::Ordering::Relaxed);
-                return Ok(());
+                Some(webview_to_create)
+            } else {
+                None
             }
+        };
+
+        if let Some(webview_to_create) = existing_tab_webview_to_create {
+            if let Some(tab_id) = webview_to_create {
+                let webview = Self::create_webview_for_tab(app, &tab_id, url, x, y, w, h)?;
+                let mut state = self.state.lock().map_err(|e| e.to_string())?;
+                state.webviews.insert(tab_id, webview);
+                drop(state);
+                self.start_url_poll(app, url);
+                self.start_event_poll(app);
+            }
+            return Ok(());
         }
 
         // 首次创建：创建标签 + WebView（about:blank 跳过 WebView 创建）
@@ -837,6 +858,7 @@ impl BrowserManager {
                 }
                 drop(state);
                 self.start_url_poll(app, url);
+                self.start_event_poll(app);
                 return Ok(());
             }
         }
