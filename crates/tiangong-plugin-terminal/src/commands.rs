@@ -1,7 +1,7 @@
 use tauri::{Emitter, State};
 
 use crate::session_pty::SessionPty;
-use crate::types::{TerminalSessionInfo, TerminalSessionStatus};
+use crate::types::{TerminalSessionInfo, TerminalSessionStatus, TerminalTabListResponse};
 use crate::TerminalPluginState;
 
 /// 等待命令循环的响应，并附加 300s 兜底超时。
@@ -152,6 +152,67 @@ pub async fn terminal_list_statuses(
     state: State<'_, TerminalPluginState>,
 ) -> Result<Vec<TerminalSessionStatus>, String> {
     Ok(state.registry.list_statuses())
+}
+
+#[tauri::command]
+pub async fn terminal_tab_list(
+    session_id: String,
+    state: State<'_, TerminalPluginState>,
+) -> Result<TerminalTabListResponse, String> {
+    Ok(state.registry.list_tabs(&session_id))
+}
+
+#[tauri::command]
+pub async fn terminal_tab_new(
+    session_id: String,
+    title: Option<String>,
+    cwd: Option<String>,
+    state: State<'_, TerminalPluginState>,
+) -> Result<String, String> {
+    state
+        .registry
+        .tab_new(&session_id, title, cwd)
+        .ok_or_else(|| format!("终端 Tab 创建失败：{session_id}"))
+}
+
+#[tauri::command]
+pub async fn terminal_tab_restore(
+    session_id: String,
+    tab_id: String,
+    title: Option<String>,
+    state: State<'_, TerminalPluginState>,
+) -> Result<(), String> {
+    if state.registry.tab_restore(&session_id, &tab_id, title) {
+        Ok(())
+    } else {
+        Err(format!("终端 Tab 恢复失败：{session_id}:{tab_id}"))
+    }
+}
+
+#[tauri::command]
+pub async fn terminal_tab_switch(
+    session_id: String,
+    tab_id: String,
+    state: State<'_, TerminalPluginState>,
+) -> Result<(), String> {
+    if state.registry.tab_switch(&session_id, &tab_id) {
+        Ok(())
+    } else {
+        Err(format!("终端 Tab 不存在：{session_id}:{tab_id}"))
+    }
+}
+
+#[tauri::command]
+pub async fn terminal_tab_close(
+    session_id: String,
+    tab_id: String,
+    state: State<'_, TerminalPluginState>,
+) -> Result<(), String> {
+    if state.registry.tab_close(&session_id, &tab_id) {
+        Ok(())
+    } else {
+        Err(format!("终端 Tab 不存在：{session_id}:{tab_id}"))
+    }
 }
 
 #[tauri::command]

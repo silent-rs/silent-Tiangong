@@ -28,6 +28,21 @@ export interface SessionTabs {
   active_tab_id: string | null;
 }
 
+export interface TerminalTabInfo {
+  id: string;
+  title: string;
+  created_at: string;
+  alive: boolean;
+  cwd: string;
+  shell: string;
+  phase: string;
+}
+
+export interface TerminalTabListResponse {
+  tabs: TerminalTabInfo[];
+  active_tab_id: string | null;
+}
+
 export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
 export type RunStatus =
   | 'idle'
@@ -962,4 +977,35 @@ export const api = {
     shell: string;
     phase: string;
   }>> => invoke('plugin:terminal|terminal_list_statuses'),
+
+  terminalTabList: (sessionId: string): Promise<TerminalTabListResponse> =>
+    invoke('plugin:terminal|terminal_tab_list', { sessionId }),
+
+  terminalTabNew: (
+    sessionId: string,
+    title?: string | null,
+    cwd?: string | null,
+  ): Promise<string> =>
+    invoke('plugin:terminal|terminal_tab_new', {
+      sessionId,
+      title: title ?? null,
+      cwd: cwd ?? null,
+    }),
+
+  terminalTabRestore: (
+    sessionId: string,
+    tabId: string,
+    title?: string | null,
+  ): Promise<void> =>
+    invoke('plugin:terminal|terminal_tab_restore', {
+      sessionId,
+      tabId,
+      title: title ?? null,
+    }),
+
+  terminalTabSwitch: (sessionId: string, tabId: string): Promise<void> =>
+    invoke('plugin:terminal|terminal_tab_switch', { sessionId, tabId }),
+
+  terminalTabClose: (sessionId: string, tabId: string): Promise<void> =>
+    invoke('plugin:terminal|terminal_tab_close', { sessionId, tabId }),
 };

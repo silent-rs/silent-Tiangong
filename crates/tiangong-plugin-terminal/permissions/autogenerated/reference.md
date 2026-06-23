@@ -23,6 +23,11 @@
 - `allow-terminal-session-reset`
 - `allow-terminal-session-update-screen`
 - `allow-terminal-panel-set-session`
+- `allow-terminal-tab-list`
+- `allow-terminal-tab-new`
+- `allow-terminal-tab-restore`
+- `allow-terminal-tab-switch`
+- `allow-terminal-tab-close`
 
 ## Permission Table
 
@@ -523,6 +528,136 @@ Enables the terminal_system_session_info command without any pre-configured scop
 <td>
 
 Denies the terminal_system_session_info command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-terminal:allow-terminal-tab-close`
+
+</td>
+<td>
+
+Enables the terminal_tab_close command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-terminal:deny-terminal-tab-close`
+
+</td>
+<td>
+
+Denies the terminal_tab_close command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-terminal:allow-terminal-tab-list`
+
+</td>
+<td>
+
+Enables the terminal_tab_list command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-terminal:deny-terminal-tab-list`
+
+</td>
+<td>
+
+Denies the terminal_tab_list command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-terminal:allow-terminal-tab-new`
+
+</td>
+<td>
+
+Enables the terminal_tab_new command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-terminal:deny-terminal-tab-new`
+
+</td>
+<td>
+
+Denies the terminal_tab_new command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-terminal:allow-terminal-tab-restore`
+
+</td>
+<td>
+
+Enables the terminal_tab_restore command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-terminal:deny-terminal-tab-restore`
+
+</td>
+<td>
+
+Denies the terminal_tab_restore command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-terminal:allow-terminal-tab-switch`
+
+</td>
+<td>
+
+Enables the terminal_tab_switch command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-terminal:deny-terminal-tab-switch`
+
+</td>
+<td>
+
+Denies the terminal_tab_switch command without any pre-configured scope.
 
 </td>
 </tr>

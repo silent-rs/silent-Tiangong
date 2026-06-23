@@ -300,6 +300,89 @@ impl SessionPtyRegistry {
         tabs.get(&tab_id).cloned()
     }
 
+    pub fn list_tabs(&self, session_id: &str) -> crate::types::TerminalTabListResponse {
+        let Some(session_tabs) = self.existing_session_tabs(session_id) else {
+            return crate::types::TerminalTabListResponse {
+                tabs: Vec::new(),
+                active_tab_id: None,
+            };
+        };
+
+        let tabs = session_tabs.tabs.lock().unwrap();
+        let mut tab_infos: Vec<_> = tabs
+            .values()
+            .map(|slot| crate::types::TerminalTabInfo {
+                id: slot.tab_id.clone(),
+                title: slot.title.clone(),
+                created_at: slot.created_at.clone(),
+                alive: slot.manager.is_alive(),
+                cwd: slot.manager.cwd(),
+                shell: slot.manager.shell(),
+                phase: slot.activity.busy_state().phase_label().to_string(),
+            })
+            .collect();
+        tab_infos.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        crate::types::TerminalTabListResponse {
+            tabs: tab_infos,
+            active_tab_id: session_tabs.active_or_first_tab_id(),
+        }
+    }
+
+    pub fn tab_new(
+        &self,
+        session_id: &str,
+        title: Option<String>,
+        cwd: Option<String>,
+    ) -> Option<String> {
+        let tab_id = scru128::new().to_string();
+        let terminal_id = terminal_instance_id(session_id, &tab_id);
+        let cwd = cwd.unwrap_or_default();
+        if !self.ensure(&terminal_id, &cwd) {
+            return None;
+        }
+        if let Some(title) = title {
+            if let Some(session_tabs) = self.existing_session_tabs(session_id) {
+                if let Some(slot) = session_tabs.tabs.lock().unwrap().get_mut(&tab_id) {
+                    slot.title = title;
+                }
+            }
+        }
+        Some(tab_id)
+    }
+
+    pub fn tab_restore(&self, session_id: &str, tab_id: &str, title: Option<String>) -> bool {
+        let terminal_id = terminal_instance_id(session_id, tab_id);
+        if !self.ensure(&terminal_id, "") {
+            return false;
+        }
+        if let Some(title) = title {
+            if let Some(session_tabs) = self.existing_session_tabs(session_id) {
+                if let Some(slot) = session_tabs.tabs.lock().unwrap().get_mut(tab_id) {
+                    slot.title = title;
+                }
+            }
+        }
+        true
+    }
+
+    pub fn tab_switch(&self, session_id: &str, tab_id: &str) -> bool {
+        let Some(session_tabs) = self.existing_session_tabs(session_id) else {
+            return false;
+        };
+        if !session_tabs.tabs.lock().unwrap().contains_key(tab_id) {
+            return false;
+        }
+        session_tabs.set_active_tab(tab_id.to_string());
+        true
+    }
+
+    pub fn tab_close(&self, session_id: &str, tab_id: &str) -> bool {
+        let terminal_id = terminal_instance_id(session_id, tab_id);
+        let existed = self.get(&terminal_id).is_some();
+        self.destroy(&terminal_id);
+        existed
+    }
+
     /// 为 Agent 命令执行选择终端：优先复用当前会话空闲终端，全部繁忙时创建新终端。
     pub fn select_for_command(
         &self,
