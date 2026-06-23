@@ -160,21 +160,13 @@ export function MainApp() {
       setShowWorkspacePanel(true);
     }
 
-    if (kind === 'browser') {
-      await expandWindowForBrowser(lockResize, unlockResize);
-      workspaceExpandedForBrowserRef.current = true;
-      chatPanelWidthRef.current = MIN_CHAT_WIDTH;
-      setChatPanelWidth(MIN_CHAT_WIDTH);
-      return;
-    }
+    await expandWindowForBrowser(lockResize, unlockResize);
+    workspaceExpandedForBrowserRef.current = true;
+    chatPanelWidthRef.current = MIN_CHAT_WIDTH;
+    setChatPanelWidth(MIN_CHAT_WIDTH);
 
-    await api.browserHide().catch(console.error);
-    const mainEl = document.querySelector('main');
-    if (mainEl) {
-      const half = Math.floor(mainEl.getBoundingClientRect().width / 2);
-      const clamped = Math.max(MIN_CHAT_WIDTH, half);
-      chatPanelWidthRef.current = clamped;
-      setChatPanelWidth(clamped);
+    if (kind === 'terminal') {
+      await api.browserHide().catch(console.error);
     }
   }, [lockResize, setSidebarOpenByLayout, unlockResize]);
 
