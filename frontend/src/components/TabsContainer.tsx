@@ -89,6 +89,9 @@ export function TabsContainer({
   const tabsRef = useRef<TabState[]>([]);
   const activeTabIdRef = useRef('');
   const activeSessionIdRef = useRef<string | null>(null);
+  const initialTabKindRef = useRef<TabKind>(initialTabKind);
+  const requestedTerminalTabIdRef = useRef<string | null>(requestedTerminalTabId ?? null);
+  const isVisibleRef = useRef(isVisible);
   const lastInitialActivationKeyRef = useRef<string | null>(null);
   const lastHydratedSessionRef = useRef<string | null>(null);
   const hydratingRef = useRef(false);
@@ -100,6 +103,10 @@ export function TabsContainer({
     () => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0] ?? null,
     [activeTabId, tabs],
   );
+
+  initialTabKindRef.current = initialTabKind;
+  requestedTerminalTabIdRef.current = requestedTerminalTabId ?? null;
+  isVisibleRef.current = isVisible;
 
   const restoreRuntimeForTabs = useCallback(async (
     sessionId: string,
@@ -193,7 +200,15 @@ export function TabsContainer({
         return [...updatedTabs, ...newTabs];
       });
 
-      if (nextActiveId) {
+      const shouldActivate = isVisibleRef.current
+        && initialTabKindRef.current === 'terminal'
+        && (
+          preferredTabId
+            ? requestedTerminalTabIdRef.current === preferredTabId
+            : requestedTerminalTabIdRef.current === null
+        );
+
+      if (nextActiveId && shouldActivate) {
         void api.browserHide().catch(console.error);
         if (result.active_tab_id !== nextActiveId) {
           void api.terminalTabSwitch(terminalSessionId, nextActiveId).catch(console.error);

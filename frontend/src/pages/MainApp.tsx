@@ -99,6 +99,7 @@ export function MainApp() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const showWorkspacePanelRef = useRef(false);
   const workspaceTabKindRef = useRef<TabKind>('browser');
+  const workspaceOpenRequestIdRef = useRef(0);
   const chatPanelWidthRef = useRef(MIN_CHAT_WIDTH);
   const isDraggingRef = useRef(false);
   const unlistenRef = useRef<UnlistenFn | null>(null);
@@ -148,6 +149,8 @@ export function MainApp() {
   }, [lockResize, unlockResize]);
 
   const openWorkspacePanel = useCallback(async (kind: TabKind, terminalTabId?: string | null) => {
+    const requestId = workspaceOpenRequestIdRef.current + 1;
+    workspaceOpenRequestIdRef.current = requestId;
     workspaceTabKindRef.current = kind;
     setWorkspaceTabKind(kind);
     setRequestedTerminalTabId(kind === 'terminal' ? terminalTabId ?? null : null);
@@ -165,6 +168,7 @@ export function MainApp() {
     setShowWorkspacePanel(true);
 
     await expandWindowForBrowser(lockResize, unlockResize);
+    if (workspaceOpenRequestIdRef.current !== requestId) return;
     workspaceExpandedForBrowserRef.current = true;
     chatPanelWidthRef.current = MIN_CHAT_WIDTH;
     setChatPanelWidth(MIN_CHAT_WIDTH);
@@ -176,6 +180,7 @@ export function MainApp() {
 
   const closeWorkspacePanel = useCallback(async (restoreSize = true) => {
     if (!showWorkspacePanelRef.current) return;
+    workspaceOpenRequestIdRef.current += 1;
     const restoreW = savedWindowWidthRef.current;
     savedWindowWidthRef.current = null;
     showWorkspacePanelRef.current = false;
