@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Globe, Plus, TerminalSquare, X } from 'lucide-react';
 import type { TabKind, TabState } from '@/api/tauri';
+import { useStore } from '@/store/useStore';
+import { TerminalTabContent } from './TerminalTabContent';
 import { Button } from './ui/button';
 
 interface TabsContainerProps {
@@ -9,6 +11,7 @@ interface TabsContainerProps {
 }
 
 const DEFAULT_BROWSER_URL = 'about:blank';
+const DRAFT_TERMINAL_ID = '__draft_terminal__';
 
 function nowText(): string {
   return new Date().toISOString();
@@ -36,8 +39,11 @@ function pickNextActiveTab(tabs: TabState[], closedIndex: number): string | null
 }
 
 export function TabsContainer({ initialTabKind, onClose }: TabsContainerProps) {
+  const activeSessionId = useStore((state) => state.activeSessionId);
+  const draftTerminalId = useStore((state) => state.draftTerminalId);
   const [tabs, setTabs] = useState<TabState[]>(() => [createTab(initialTabKind)]);
   const [activeTabId, setActiveTabId] = useState<string>(() => tabs[0]?.id ?? '');
+  const terminalSessionId = activeSessionId || draftTerminalId || DRAFT_TERMINAL_ID;
 
   const activeTab = useMemo(
     () => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0] ?? null,
@@ -153,10 +159,26 @@ export function TabsContainer({ initialTabKind, onClose }: TabsContainerProps) {
         </Button>
       </div>
 
-      <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">
-        {activeTab?.kind === 'browser'
-          ? '浏览器 Tab 内容将在后续任务接入'
-          : '终端 Tab 内容将在后续任务接入'}
+      <div className="min-h-0 flex-1">
+        {tabs.map((tab) => (
+          tab.kind === 'terminal' ? (
+            <TerminalTabContent
+              key={tab.id}
+              sessionId={terminalSessionId}
+              tabId={tab.id}
+              isActive={tab.id === activeTab?.id}
+            />
+          ) : (
+            <div
+              key={tab.id}
+              className={`h-full items-center justify-center text-sm text-muted-foreground ${
+                tab.id === activeTab?.id ? 'flex' : 'hidden'
+              }`}
+            >
+              浏览器 Tab 内容将在后续任务接入
+            </div>
+          )
+        ))}
       </div>
     </div>
   );
