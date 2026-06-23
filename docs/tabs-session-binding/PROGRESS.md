@@ -4,13 +4,13 @@
 >
 > 任务索引：`README.md`
 >
-> 当前分支：`feature/session-tab-model`
+> 当前分支：`feature/session-tab-commands`
 
 ## 当前状态
 
-- 阶段：已完成 01，会话 Tab 数据模型已落地。
+- 阶段：已完成 02，会话 Tab 读写命令已落地。
 - 最近更新：2026-06-23
-- 当前建议任务：`02-session-tab-commands.md`
+- 当前建议任务：`03-terminal-registry-multitab.md`
 - 当前阻塞：无。
 
 ## 进度总览
@@ -18,7 +18,7 @@
 | 序号 | 任务 | 状态 | 开发分支 | 提交 | 验证 |
 |------|------|------|----------|------|------|
 | 01 | 会话 Tab 数据模型 | 已完成 | `feature/session-tab-model` | `d8ec603` | `cargo fmt -- --check` 通过；`cargo check --workspace` 通过 |
-| 02 | 会话 Tab 读写命令 | 未开始 | - | - | - |
+| 02 | 会话 Tab 读写命令 | 已完成 | `feature/session-tab-commands` | 待提交 | `cargo fmt -- --check` 通过；`cargo check --workspace` 通过；`yarn build` 通过 |
 | 03 | 终端多 Tab 注册表 | 未开始 | - | - | - |
 | 04 | 终端空闲选择与繁忙新建 | 未开始 | - | - | - |
 | 05 | 命令结果反馈终端选择信息 | 未开始 | - | - | - |
@@ -58,6 +58,7 @@
 | 2026-06-23 | 创建统一工作区 Tabs 设计文档 | `7a7e0ec9` |
 | 2026-06-23 | 拆分 14 个独立任务 spec | `eb587065` |
 | 2026-06-23 | 完成会话 Tab 数据模型 | `d8ec603` |
+| 2026-06-23 | 完成会话 Tab 读写命令 | 待提交 |
 
 ## 更新规则
 
@@ -72,3 +73,6 @@
 
 - 2026-06-23：01 会话 Tab 数据模型，`cargo fmt -- --check` 通过。
 - 2026-06-23：01 会话 Tab 数据模型，`cargo check --workspace` 通过。
+- 2026-06-23：02 会话 Tab 读写命令，`cargo fmt -- --check` 通过。
+- 2026-06-23：02 会话 Tab 读写命令，`cargo check --workspace` 通过。
+- 2026-06-23：02 会话 Tab 读写命令，`yarn build` 通过。

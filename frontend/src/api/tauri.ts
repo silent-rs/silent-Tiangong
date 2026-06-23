@@ -13,6 +13,21 @@ export interface Session {
   message_count: number;
 }
 
+export type TabKind = 'browser' | 'terminal';
+
+export interface TabState {
+  id: string;
+  kind: TabKind;
+  title: string;
+  url: string;
+  created_at: string;
+}
+
+export interface SessionTabs {
+  tabs: TabState[];
+  active_tab_id: string | null;
+}
+
 export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
 export type RunStatus =
   | 'idle'
@@ -413,6 +428,12 @@ export const api = {
   // ----------------------------------------------------------------
   getSessions: (): Promise<Session[]> =>
     invoke('get_sessions'),
+
+  getSessionTabs: (sessionId: string): Promise<SessionTabs> =>
+    invoke('get_session_tabs', { sessionId }),
+
+  setSessionTabs: (sessionId: string, tabs: TabState[], activeTabId: string | null): Promise<void> =>
+    invoke('set_session_tabs', { sessionId, tabs, activeTabId }),
 
   createSession: (): Promise<Session> =>
     invoke('create_session'),

@@ -162,7 +162,7 @@
 - [x] 拆分任务 spec：`docs/tabs-session-binding/README.md`
 - [x] 新增开发进度记录：`docs/tabs-session-binding/PROGRESS.md`
 - [x] 01：会话 Tab 数据模型 - `docs/tabs-session-binding/01-session-tab-model.md`
-- [ ] 02：会话 Tab 读写命令 - `docs/tabs-session-binding/02-session-tab-commands.md`
+- [x] 02：会话 Tab 读写命令 - `docs/tabs-session-binding/02-session-tab-commands.md`
 - [ ] 03：终端多 Tab 注册表 - `docs/tabs-session-binding/03-terminal-registry-multitab.md`
 - [ ] 04：终端空闲选择与繁忙新建 - `docs/tabs-session-binding/04-terminal-selection.md`
 - [ ] 05：命令结果反馈终端选择信息 - `docs/tabs-session-binding/05-terminal-result-feedback.md`
