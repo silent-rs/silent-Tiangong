@@ -159,10 +159,10 @@ export function MainApp() {
       const innerSize = await appWindow.innerSize();
       const scaleFactor = await appWindow.scaleFactor();
       savedWindowWidthRef.current = innerSize.width / scaleFactor;
-      showWorkspacePanelRef.current = true;
-      setWorkspacePanelMounted(true);
-      setShowWorkspacePanel(true);
     }
+    showWorkspacePanelRef.current = true;
+    setWorkspacePanelMounted(true);
+    setShowWorkspacePanel(true);
 
     await expandWindowForBrowser(lockResize, unlockResize);
     workspaceExpandedForBrowserRef.current = true;

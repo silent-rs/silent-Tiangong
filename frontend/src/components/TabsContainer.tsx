@@ -217,6 +217,9 @@ export function TabsContainer({
     if (existing) {
       if (existing.kind === 'terminal') {
         void api.browserHide().catch(console.error);
+        void api.terminalTabSwitch(terminalSessionId, existing.id).catch(console.error);
+      } else {
+        void api.browserTabSwitch(existing.id).catch(console.error);
       }
       setActiveTabId(existing.id);
       return;
