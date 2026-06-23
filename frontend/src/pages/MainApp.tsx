@@ -92,8 +92,10 @@ async function expandWindowForBrowser(lock?: () => void, unlock?: () => void) {
 export function MainApp() {
   const { loadSessions, updateFromSnapshot } = useStore();
   useUpdateCheck();
+  const [workspacePanelMounted, setWorkspacePanelMounted] = useState(false);
   const [showWorkspacePanel, setShowWorkspacePanel] = useState(false);
   const [workspaceTabKind, setWorkspaceTabKind] = useState<WorkspaceTabKind>('browser');
+  const [workspaceOpenRequestVersion, setWorkspaceOpenRequestVersion] = useState(0);
   const [chatPanelWidth, setChatPanelWidth] = useState(MIN_CHAT_WIDTH);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const showWorkspacePanelRef = useRef(false);
@@ -149,6 +151,7 @@ export function MainApp() {
   const openWorkspacePanel = useCallback(async (kind: WorkspaceTabKind) => {
     workspaceTabKindRef.current = kind;
     setWorkspaceTabKind(kind);
+    setWorkspaceOpenRequestVersion((version) => version + 1);
     setSidebarOpenByLayout(false);
 
     if (!showWorkspacePanelRef.current) {
@@ -157,6 +160,7 @@ export function MainApp() {
       const scaleFactor = await appWindow.scaleFactor();
       savedWindowWidthRef.current = innerSize.width / scaleFactor;
       showWorkspacePanelRef.current = true;
+      setWorkspacePanelMounted(true);
       setShowWorkspacePanel(true);
     }
 
@@ -385,18 +389,22 @@ export function MainApp() {
                 <LazyMessageInput />
               </div>
 
-              {showWorkspacePanel && (
+              {workspacePanelMounted && showWorkspacePanel && (
                 <div
                   className="w-[3px] shrink-0 cursor-col-resize bg-border hover:bg-muted-foreground/30 active:bg-muted-foreground/50 transition-colors"
                   onMouseDown={handleDividerDrag}
                 />
               )}
 
-              {showWorkspacePanel && (
-                <TabsContainer
-                  initialTabKind={workspaceTabKind}
-                  onClose={() => { void closeWorkspacePanel(); }}
-                />
+              {workspacePanelMounted && (
+                <div className={`min-w-0 flex-1 ${showWorkspacePanel ? 'flex' : 'hidden'}`}>
+                  <TabsContainer
+                    initialTabKind={workspaceTabKind}
+                    isVisible={showWorkspacePanel}
+                    openRequestVersion={workspaceOpenRequestVersion}
+                    onClose={() => { void closeWorkspacePanel(); }}
+                  />
+                </div>
               )}
             </div>
           </main>
