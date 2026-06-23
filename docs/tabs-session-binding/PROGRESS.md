@@ -4,13 +4,13 @@
 >
 > 任务索引：`README.md`
 >
-> 当前分支：`feature/frontend-workspace-shell`
+> 当前分支：`feature/frontend-tabs-container`
 
 ## 当前状态
 
-- 阶段：已完成 08，前端主布局已收敛为单一工作区面板外壳。
+- 阶段：已完成 09，统一 Tabs 容器已可混排浏览器和终端 Tab。
 - 最近更新：2026-06-23
-- 当前建议任务：`09-frontend-tabs-container.md`
+- 当前建议任务：`10-terminal-tab-content.md`
 - 当前阻塞：无。
 
 ## 进度总览
@@ -25,7 +25,7 @@
 | 06 | 浏览器会话切换 | 已完成 | `feature/browser-session-switch` | `318390b` | `cargo fmt -- --check` 通过；`cargo check --workspace` 通过；`yarn build` 通过 |
 | 07 | 浏览器空白页懒创建 | 已完成 | `feature/browser-blank-lazy-webview` | `e9d3521` | `cargo fmt -- --check` 通过；`cargo check --workspace` 通过；`yarn build` 通过 |
 | 08 | 前端单一工作区面板 | 已完成 | `feature/frontend-workspace-shell` | `8bca60a` | `yarn build` 通过 |
-| 09 | 统一 Tabs 容器 | 未开始 | - | - | - |
+| 09 | 统一 Tabs 容器 | 已完成 | `feature/frontend-tabs-container` | `2d63c45` | `yarn build` 通过 |
 | 10 | 终端 Tab 内容组件 | 未开始 | - | - | - |
 | 11 | 浏览器 Tab 内容组件 | 未开始 | - | - | - |
 | 12 | 会话切换恢复与防抖持久化 | 未开始 | - | - | - |
@@ -65,6 +65,7 @@
 | 2026-06-23 | 完成浏览器会话切换 | `318390b` |
 | 2026-06-23 | 完成浏览器空白页懒创建 | `e9d3521` |
 | 2026-06-23 | 完成前端单一工作区面板 | `8bca60a` |
+| 2026-06-23 | 完成统一 Tabs 容器 | `2d63c45` |
 
 ## 更新规则
 
@@ -95,3 +96,4 @@
 - 2026-06-23：07 浏览器空白页懒创建，`cargo check --workspace` 通过。
 - 2026-06-23：07 浏览器空白页懒创建，`yarn build` 通过。
 - 2026-06-23：08 前端单一工作区面板，`yarn build` 通过。
+- 2026-06-23：09 统一 Tabs 容器，`yarn build` 通过。
