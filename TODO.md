@@ -153,3 +153,17 @@
 - [x] 更新测试以适配新的消息注入格式
 
 ---
+
+## Phase 21-M：统一工作区 Tabs 与会话绑定
+
+- [x] 从最新 `main` 创建 `feature/unified-tabs-session-binding` worktree
+- [x] 补充统一工作区 Tab 需求到 `docs/requirements.md`
+- [x] 引入并重写统一工作区 Tabs 设计文档
+- [ ] M-2：会话持久化统一 `tabs` / `active_tab_id` 元数据
+- [ ] M-3：终端支持同一会话内多个独立 Tab
+- [ ] M-4：浏览器 Tab 与会话切换绑定
+- [ ] M-5：前端改为统一 Tabs 容器，浏览器/终端共享同一个工作区面板
+- [ ] M-6：Agent 命令自动选择空闲终端；全部繁忙时新建终端并反馈给 Agent
+- [ ] M-7：完成 Rust 检查和前端构建验证
+
+---
