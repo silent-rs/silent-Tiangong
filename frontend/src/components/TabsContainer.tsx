@@ -14,6 +14,7 @@ interface TabsContainerProps {
 
 const DEFAULT_BROWSER_URL = 'about:blank';
 const DRAFT_TERMINAL_ID = '__draft_terminal__';
+const TABS_PERSIST_DEBOUNCE_MS = 500;
 
 function nowText(): string {
   return new Date().toISOString();
@@ -44,6 +45,23 @@ function createBrowserTabFromBackend(tab: { id: string; url: string; title: stri
   };
 }
 
+function browserRuntimeTabs(tabs: TabState[]): Array<{ id: string; url: string; title: string }> {
+  return tabs
+    .filter((tab) => tab.kind === 'browser')
+    .map((tab) => ({
+      id: tab.id,
+      url: tab.url || DEFAULT_BROWSER_URL,
+      title: tab.title || '浏览器',
+    }));
+}
+
+function normalizeActiveTabId(tabs: TabState[], activeTabId: string | null | undefined): string {
+  if (activeTabId && tabs.some((tab) => tab.id === activeTabId)) {
+    return activeTabId;
+  }
+  return tabs[0]?.id ?? '';
+}
+
 function pickNextActiveTab(tabs: TabState[], closedIndex: number): string | null {
   if (tabs.length === 0) return null;
   const nextIndex = Math.min(closedIndex, tabs.length - 1);
@@ -53,16 +71,47 @@ function pickNextActiveTab(tabs: TabState[], closedIndex: number): string | null
 export function TabsContainer({ initialTabKind, onClose }: TabsContainerProps) {
   const activeSessionId = useStore((state) => state.activeSessionId);
   const draftTerminalId = useStore((state) => state.draftTerminalId);
+  const workspaceTabsTransfer = useStore((state) => state.workspaceTabsTransfer);
   const [tabs, setTabs] = useState<TabState[]>([]);
   const [activeTabId, setActiveTabId] = useState('');
+  const [hydrateVersion, setHydrateVersion] = useState(0);
   const tabsRef = useRef<TabState[]>([]);
   const lastInitialTabKindRef = useRef<TabKind | null>(null);
+  const lastHydratedSessionRef = useRef<string | null>(null);
+  const hydratingRef = useRef(false);
+  const persistTimerRef = useRef<number | null>(null);
+  const transferVersionRef = useRef<number | null>(null);
   const terminalSessionId = activeSessionId || draftTerminalId || DRAFT_TERMINAL_ID;
 
   const activeTab = useMemo(
     () => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0] ?? null,
     [activeTabId, tabs],
   );
+
+  const restoreRuntimeForTabs = useCallback(async (
+    sessionId: string,
+    nextTabs: TabState[],
+    nextActiveTabId: string,
+  ) => {
+    const browserTabs = browserRuntimeTabs(nextTabs);
+    await api.browserSwitchSession(
+      sessionId,
+      browserTabs,
+      browserTabs.some((tab) => tab.id === nextActiveTabId) ? nextActiveTabId : null,
+    ).catch(console.error);
+
+    await Promise.all(nextTabs
+      .filter((tab) => tab.kind === 'terminal')
+      .map((tab) => api.terminalTabRestore(sessionId, tab.id, tab.title).catch(console.error)));
+
+    const activeTab = nextTabs.find((tab) => tab.id === nextActiveTabId);
+    if (activeTab?.kind === 'terminal') {
+      await api.terminalTabSwitch(sessionId, activeTab.id).catch(console.error);
+      await api.browserHide().catch(console.error);
+    } else if (!activeTab || activeTab.kind !== 'browser') {
+      await api.browserHide().catch(console.error);
+    }
+  }, []);
 
   const handleNewTab = useCallback(async (kind: TabKind) => {
     if (kind === 'browser') {
@@ -88,6 +137,62 @@ export function TabsContainer({ initialTabKind, onClose }: TabsContainerProps) {
   useEffect(() => {
     tabsRef.current = tabs;
   }, [tabs]);
+
+  useEffect(() => {
+    if (!activeSessionId) {
+      if (lastHydratedSessionRef.current !== DRAFT_TERMINAL_ID) {
+        lastHydratedSessionRef.current = DRAFT_TERMINAL_ID;
+        lastInitialTabKindRef.current = null;
+        setTabs([]);
+        setActiveTabId('');
+      }
+      return;
+    }
+
+    if (
+      workspaceTabsTransfer?.fromSessionId === DRAFT_TERMINAL_ID
+      && workspaceTabsTransfer.toSessionId === activeSessionId
+      && transferVersionRef.current !== workspaceTabsTransfer.version
+      && tabsRef.current.length > 0
+    ) {
+      return;
+    }
+
+    if (lastHydratedSessionRef.current === activeSessionId) return;
+    lastHydratedSessionRef.current = activeSessionId;
+    hydratingRef.current = true;
+
+    let cancelled = false;
+    const hydrate = async () => {
+      try {
+        const sessionTabs = await api.getSessionTabs(activeSessionId);
+        if (cancelled) return;
+        const nextTabs = sessionTabs.tabs;
+        const nextActiveTabId = normalizeActiveTabId(nextTabs, sessionTabs.active_tab_id);
+        lastInitialTabKindRef.current = nextTabs.length > 0 ? initialTabKind : null;
+        setTabs(nextTabs);
+        setActiveTabId(nextActiveTabId);
+        await restoreRuntimeForTabs(activeSessionId, nextTabs, nextActiveTabId);
+      } catch (err) {
+        console.error('恢复会话 Tab 失败：', err);
+        if (!cancelled) {
+          setTabs([]);
+          setActiveTabId('');
+          await api.browserSwitchSession(activeSessionId, [], null).catch(console.error);
+        }
+      } finally {
+        if (!cancelled) {
+          hydratingRef.current = false;
+          setHydrateVersion((version) => version + 1);
+        }
+      }
+    };
+
+    void hydrate();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSessionId, initialTabKind, restoreRuntimeForTabs, workspaceTabsTransfer]);
 
   const activateOrCreateTab = useCallback(async (kind: TabKind) => {
     const existing = tabsRef.current.find((tab) => tab.kind === kind);
@@ -126,20 +231,24 @@ export function TabsContainer({ initialTabKind, onClose }: TabsContainerProps) {
   }, [handleNewTab]);
 
   useEffect(() => {
+    if (hydratingRef.current) return;
     if (lastInitialTabKindRef.current === initialTabKind && tabsRef.current.length > 0) {
       return;
     }
     lastInitialTabKindRef.current = initialTabKind;
     void activateOrCreateTab(initialTabKind);
-  }, [activateOrCreateTab, initialTabKind]);
+  }, [activateOrCreateTab, hydrateVersion, initialTabKind]);
 
   const handleSwitchTab = useCallback((tabId: string) => {
     const nextTab = tabs.find((tab) => tab.id === tabId);
     if (nextTab?.kind === 'terminal') {
       void api.browserHide().catch(console.error);
+      void api.terminalTabSwitch(terminalSessionId, tabId).catch(console.error);
+    } else if (nextTab?.kind === 'browser') {
+      void api.browserTabSwitch(tabId).catch(console.error);
     }
     setActiveTabId(tabId);
-  }, [tabs]);
+  }, [tabs, terminalSessionId]);
 
   const handleCloseTab = useCallback((tabId: string) => {
     setTabs((currentTabs) => {
@@ -154,6 +263,10 @@ export function TabsContainer({ initialTabKind, onClose }: TabsContainerProps) {
       const nextTabs = currentTabs.filter((tab) => tab.id !== tabId);
       if (nextTabs.length === 0) {
         setActiveTabId('');
+        if (activeSessionId) {
+          void api.setSessionTabs(activeSessionId, [], null).catch(console.error);
+        }
+        void api.browserSwitchSession(terminalSessionId, [], null).catch(console.error);
         onClose();
         return [];
       }
@@ -182,6 +295,77 @@ export function TabsContainer({ initialTabKind, onClose }: TabsContainerProps) {
       };
     }));
   }, []);
+
+  useEffect(() => {
+    if (persistTimerRef.current !== null) {
+      window.clearTimeout(persistTimerRef.current);
+      persistTimerRef.current = null;
+    }
+
+    if (hydratingRef.current || !activeSessionId) return;
+    if (lastHydratedSessionRef.current !== activeSessionId) return;
+    if (tabs.length === 0) return;
+
+    const tabsToPersist = tabs;
+    const activeTabIdToPersist = activeTabId || tabsToPersist[0]?.id || null;
+    persistTimerRef.current = window.setTimeout(() => {
+      api.setSessionTabs(activeSessionId, tabsToPersist, activeTabIdToPersist).catch(console.error);
+      persistTimerRef.current = null;
+    }, TABS_PERSIST_DEBOUNCE_MS);
+
+    return () => {
+      if (persistTimerRef.current !== null) {
+        window.clearTimeout(persistTimerRef.current);
+        persistTimerRef.current = null;
+      }
+    };
+  }, [activeSessionId, activeTabId, tabs]);
+
+  useEffect(() => {
+    if (!workspaceTabsTransfer || transferVersionRef.current === workspaceTabsTransfer.version) {
+      return;
+    }
+    transferVersionRef.current = workspaceTabsTransfer.version;
+
+    const { fromSessionId, toSessionId } = workspaceTabsTransfer;
+    if (fromSessionId !== DRAFT_TERMINAL_ID || activeSessionId !== toSessionId) {
+      return;
+    }
+
+    const currentTabs = tabsRef.current;
+    if (currentTabs.length === 0) return;
+
+    const nextActiveTabId = normalizeActiveTabId(currentTabs, activeTabId);
+    lastHydratedSessionRef.current = toSessionId;
+    hydratingRef.current = true;
+
+    const transfer = async () => {
+      try {
+        await Promise.all(currentTabs
+          .filter((tab) => tab.kind === 'terminal')
+          .map(async (tab) => {
+            try {
+              await api.terminalTabSwitch(toSessionId, tab.id);
+            } catch {
+              await api.terminalTabRestore(toSessionId, tab.id, tab.title).catch(console.error);
+            }
+          }));
+        const browserTabs = browserRuntimeTabs(currentTabs);
+        if (browserTabs.length > 0) {
+          await api.browserSwitchSession(
+            toSessionId,
+            browserTabs,
+            browserTabs.some((tab) => tab.id === nextActiveTabId) ? nextActiveTabId : null,
+          ).catch(console.error);
+        }
+        await api.setSessionTabs(toSessionId, currentTabs, nextActiveTabId || null);
+      } finally {
+        hydratingRef.current = false;
+      }
+    };
+
+    void transfer();
+  }, [activeSessionId, activeTabId, workspaceTabsTransfer]);
 
   return (
     <div className="flex h-full flex-1 flex-col bg-background">
@@ -252,14 +436,14 @@ export function TabsContainer({ initialTabKind, onClose }: TabsContainerProps) {
         {tabs.map((tab) => (
           tab.kind === 'terminal' ? (
             <TerminalTabContent
-              key={tab.id}
+              key={`${terminalSessionId}:${tab.id}`}
               sessionId={terminalSessionId}
               tabId={tab.id}
               isActive={tab.id === activeTab?.id}
             />
           ) : (
             <BrowserTabContent
-              key={tab.id}
+              key={`${terminalSessionId}:${tab.id}`}
               tabId={tab.id}
               initialUrl={tab.url}
               isActive={tab.id === activeTab?.id}
