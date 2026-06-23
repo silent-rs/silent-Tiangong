@@ -79,6 +79,7 @@ export function TabsContainer({ initialTabKind, onClose }: TabsContainerProps) {
   const [hydrateVersion, setHydrateVersion] = useState(0);
   const tabsRef = useRef<TabState[]>([]);
   const lastInitialTabKindRef = useRef<TabKind | null>(null);
+  const lastInitialActivationKeyRef = useRef<string | null>(null);
   const lastHydratedSessionRef = useRef<string | null>(null);
   const hydratingRef = useRef(false);
   const persistTimerRef = useRef<number | null>(null);
@@ -242,9 +243,14 @@ export function TabsContainer({ initialTabKind, onClose }: TabsContainerProps) {
     if (lastInitialTabKindRef.current === initialTabKind && tabsRef.current.length > 0) {
       return;
     }
+    const activationKey = `${terminalSessionId}:${hydrateVersion}:${initialTabKind}`;
+    if (lastInitialActivationKeyRef.current === activationKey) {
+      return;
+    }
+    lastInitialActivationKeyRef.current = activationKey;
     lastInitialTabKindRef.current = initialTabKind;
     void activateOrCreateTab(initialTabKind);
-  }, [activateOrCreateTab, hydrateVersion, initialTabKind]);
+  }, [activateOrCreateTab, hydrateVersion, initialTabKind, terminalSessionId]);
 
   const handleSwitchTab = useCallback((tabId: string) => {
     const nextTab = tabs.find((tab) => tab.id === tabId);
@@ -382,10 +388,8 @@ export function TabsContainer({ initialTabKind, onClose }: TabsContainerProps) {
             const active = tab.id === activeTab?.id;
             const Icon = tab.kind === 'browser' ? Globe : TerminalSquare;
             return (
-              <button
+              <div
                 key={tab.id}
-                type="button"
-                onClick={() => handleSwitchTab(tab.id)}
                 className={`group flex h-7 min-w-28 max-w-44 shrink-0 items-center gap-1.5 rounded px-2 text-xs transition-colors ${
                   active
                     ? 'bg-muted text-foreground'
@@ -393,28 +397,27 @@ export function TabsContainer({ initialTabKind, onClose }: TabsContainerProps) {
                 }`}
                 title={tab.title}
               >
-                <Icon className="h-3.5 w-3.5 shrink-0" />
-                <span className="min-w-0 flex-1 truncate text-left">{tab.title}</span>
-                <span
-                  role="button"
-                  tabIndex={0}
-                  className="shrink-0 rounded p-0.5 opacity-70 hover:bg-background hover:text-destructive"
+                <button
+                  type="button"
+                  className="flex min-w-0 flex-1 items-center gap-1.5"
+                  onClick={() => handleSwitchTab(tab.id)}
+                >
+                  <Icon className="h-3.5 w-3.5 shrink-0" />
+                  <span className="min-w-0 flex-1 truncate text-left">{tab.title}</span>
+                </button>
+                <button
+                  type="button"
+                  className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-background hover:text-destructive"
                   onClick={(event) => {
                     event.stopPropagation();
                     handleCloseTab(tab.id);
                   }}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      handleCloseTab(tab.id);
-                    }
-                  }}
                   title="关闭"
+                  aria-label="关闭标签页"
                 >
                   <X className="h-3 w-3" />
-                </span>
-              </button>
+                </button>
+              </div>
             );
           })}
         </div>
