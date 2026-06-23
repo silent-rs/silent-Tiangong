@@ -159,11 +159,20 @@
 - [x] 从最新 `main` 创建 `feature/unified-tabs-session-binding` worktree
 - [x] 补充统一工作区 Tab 需求到 `docs/requirements.md`
 - [x] 引入并重写统一工作区 Tabs 设计文档
-- [ ] M-2：会话持久化统一 `tabs` / `active_tab_id` 元数据
-- [ ] M-3：终端支持同一会话内多个独立 Tab
-- [ ] M-4：浏览器 Tab 与会话切换绑定
-- [ ] M-5：前端改为统一 Tabs 容器，浏览器/终端共享同一个工作区面板
-- [ ] M-6：Agent 命令自动选择空闲终端；全部繁忙时新建终端并反馈给 Agent
-- [ ] M-7：完成 Rust 检查和前端构建验证
+- [x] 拆分任务 spec：`docs/tabs-session-binding/README.md`
+- [ ] 01：会话 Tab 数据模型 - `docs/tabs-session-binding/01-session-tab-model.md`
+- [ ] 02：会话 Tab 读写命令 - `docs/tabs-session-binding/02-session-tab-commands.md`
+- [ ] 03：终端多 Tab 注册表 - `docs/tabs-session-binding/03-terminal-registry-multitab.md`
+- [ ] 04：终端空闲选择与繁忙新建 - `docs/tabs-session-binding/04-terminal-selection.md`
+- [ ] 05：命令结果反馈终端选择信息 - `docs/tabs-session-binding/05-terminal-result-feedback.md`
+- [ ] 06：浏览器会话切换 - `docs/tabs-session-binding/06-browser-session-switch.md`
+- [ ] 07：浏览器空白页懒创建 - `docs/tabs-session-binding/07-browser-blank-lazy-webview.md`
+- [ ] 08：前端单一工作区面板 - `docs/tabs-session-binding/08-frontend-workspace-shell.md`
+- [ ] 09：统一 Tabs 容器 - `docs/tabs-session-binding/09-frontend-tabs-container.md`
+- [ ] 10：终端 Tab 内容组件 - `docs/tabs-session-binding/10-terminal-tab-content.md`
+- [ ] 11：浏览器 Tab 内容组件 - `docs/tabs-session-binding/11-browser-tab-content.md`
+- [ ] 12：会话切换恢复与防抖持久化 - `docs/tabs-session-binding/12-session-restore-persistence.md`
+- [ ] 13：Tauri API 与权限声明 - `docs/tabs-session-binding/13-permissions-and-api.md`
+- [ ] 14：端到端验收 - `docs/tabs-session-binding/14-end-to-end-verification.md`
 
 ---

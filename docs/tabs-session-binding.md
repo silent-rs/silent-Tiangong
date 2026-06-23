@@ -116,8 +116,6 @@ SessionTabs
   tabs: HashMap<tab_id, SessionPty>
   active_tab_id: Option<String>
   activity: TerminalActivityTracker
-  activity: TerminalActivityTracker
-  active_tab_id: Option<String>
 
 SessionPty
   tab_id
@@ -270,49 +268,24 @@ interface TabState {
 - `terminal_send` 写入当前会话选中的可用终端。
 - 对交互式进程仍要求先用 `run_shell{interactive:true}` 启动，再用 `terminal_send` 分步操作。
 
-## 开发拆分
+## 任务拆分
 
-### M-1：文档和需求对齐
+任务 spec 已按可独立开发、独立验证的粒度拆分到 `docs/tabs-session-binding/` 目录：
 
-- 引入开发文档。
-- 更新 `docs/requirements.md`。
-- 更新 `TODO.md`，拆分后续任务。
-
-### M-2：会话元数据
-
-- 在 Session 中增加 `tabs` / `active_tab_id`。
-- 增加 `get_session_tabs` / `set_session_tabs`。
-- 保证老会话可加载。
-
-### M-3：终端多 Tab
-
-- 改造 `SessionPtyRegistry`。
-- 增加终端 Tab 命令和权限声明。
-- 增加复合 id 路由。
-- 增加终端忙闲状态检测。
-- 增加命令执行前的空闲终端选择策略。
-- 增加所有终端繁忙时自动新建终端执行的策略。
-- 在工具结果中反馈本次使用的终端和是否为新建终端。
-
-### M-4：浏览器会话绑定
-
-- 增加浏览器 Tab 快照命令。
-- 增加浏览器会话切换命令。
-- 修复 `about:blank` 恢复策略。
-
-### M-5：前端统一面板
-
-- 改造 `MainApp` 为单一工作区面板。
-- 新增 `TabsContainer`。
-- 拆分 `BrowserTabContent` 和 `TerminalTabContent`。
-- 改造 `StatusPanel` 的浏览器/终端入口。
-
-### M-6：验证
-
-- 运行 `cargo fmt -- --check`。
-- 运行 `cargo check --workspace`。
-- 运行 `yarn build`。
-- 手动确认新建、切换、关闭、会话切换路径。
+1. `01-session-tab-model.md`：会话 Tab 数据模型
+2. `02-session-tab-commands.md`：会话 Tab 读写命令
+3. `03-terminal-registry-multitab.md`：终端多 Tab 注册表
+4. `04-terminal-selection.md`：终端空闲选择与繁忙新建
+5. `05-terminal-result-feedback.md`：命令结果反馈终端选择信息
+6. `06-browser-session-switch.md`：浏览器会话切换
+7. `07-browser-blank-lazy-webview.md`：浏览器空白页懒创建
+8. `08-frontend-workspace-shell.md`：前端单一工作区面板
+9. `09-frontend-tabs-container.md`：统一 Tabs 容器
+10. `10-terminal-tab-content.md`：终端 Tab 内容组件
+11. `11-browser-tab-content.md`：浏览器 Tab 内容组件
+12. `12-session-restore-persistence.md`：会话切换恢复与防抖持久化
+13. `13-permissions-and-api.md`：Tauri API 与权限声明
+14. `14-end-to-end-verification.md`：端到端验收
 
 ## 验收清单
 
