@@ -149,3 +149,9 @@ pub struct TerminalTabListResponse {
     pub tabs: Vec<TerminalTabInfo>,
     pub active_tab_id: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalTabUpdatedEvent {
+    pub session_id: String,
+    pub active_tab_id: Option<String>,
+}

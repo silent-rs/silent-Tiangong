@@ -94,6 +94,7 @@ export function MainApp() {
   const [showWorkspacePanel, setShowWorkspacePanel] = useState(false);
   const [workspaceTabKind, setWorkspaceTabKind] = useState<TabKind>('browser');
   const [workspaceOpenRequestVersion, setWorkspaceOpenRequestVersion] = useState(0);
+  const [requestedTerminalTabId, setRequestedTerminalTabId] = useState<string | null>(null);
   const [chatPanelWidth, setChatPanelWidth] = useState(MIN_CHAT_WIDTH);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const showWorkspacePanelRef = useRef(false);
@@ -146,9 +147,10 @@ export function MainApp() {
     setSidebarOpen(open);
   }, [lockResize, unlockResize]);
 
-  const openWorkspacePanel = useCallback(async (kind: TabKind) => {
+  const openWorkspacePanel = useCallback(async (kind: TabKind, terminalTabId?: string | null) => {
     workspaceTabKindRef.current = kind;
     setWorkspaceTabKind(kind);
+    setRequestedTerminalTabId(kind === 'terminal' ? terminalTabId ?? null : null);
     setWorkspaceOpenRequestVersion((version) => version + 1);
     setSidebarOpenByLayout(false);
 
@@ -294,6 +296,16 @@ export function MainApp() {
         await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
         await api.browserNavigate(url).catch(console.error);
       });
+      const unlistenTerminalTabUpdated = await listen<{
+        session_id: string;
+        active_tab_id?: string | null;
+      }>('terminal:tab_updated', async (event) => {
+        const { session_id, active_tab_id } = event.payload;
+        const store = useStore.getState();
+        const terminalSessionId = store.activeSessionId || store.draftTerminalId;
+        if (!terminalSessionId || session_id !== terminalSessionId) return;
+        await openWorkspacePanel('terminal', active_tab_id ?? null);
+      });
 
       const unlistenResize = await getCurrentWindow().onResized(async () => {
         if (programmaticResizeRef.current) return;
@@ -328,6 +340,7 @@ export function MainApp() {
         unlistenSessions();
         unlistenOpenSession();
         unlistenBrowserOpen();
+        unlistenTerminalTabUpdated();
         unlistenResize();
       };
     };
@@ -400,6 +413,7 @@ export function MainApp() {
                     initialTabKind={workspaceTabKind}
                     isVisible={showWorkspacePanel}
                     openRequestVersion={workspaceOpenRequestVersion}
+                    requestedTerminalTabId={requestedTerminalTabId}
                     onClose={() => { void closeWorkspacePanel(); }}
                   />
                 </div>

@@ -11,6 +11,7 @@ interface TabsContainerProps {
   initialTabKind: TabKind;
   isVisible: boolean;
   openRequestVersion: number;
+  requestedTerminalTabId?: string | null;
   onClose: () => void;
 }
 
@@ -74,6 +75,7 @@ export function TabsContainer({
   initialTabKind,
   isVisible,
   openRequestVersion,
+  requestedTerminalTabId,
   onClose,
 }: TabsContainerProps) {
   const activeSessionId = useStore((state) => state.activeSessionId);
@@ -155,6 +157,55 @@ export function TabsContainer({
       console.error('新建终端 Tab 失败：', err);
     }
   }, [sessionCwd, terminalSessionId, workspaceDir]);
+
+  const mergeTerminalRuntimeTabs = useCallback(async (preferredTabId?: string | null) => {
+    try {
+      const result = await api.terminalTabList(terminalSessionId);
+      if (result.tabs.length === 0) return false;
+
+      const terminalTabs = result.tabs.map((tab) => ({
+        id: tab.id,
+        kind: 'terminal' as const,
+        title: tab.title || '终端',
+        url: '',
+        created_at: tab.created_at || nowText(),
+      }));
+      const preferredExists = Boolean(
+        preferredTabId && terminalTabs.some((tab) => tab.id === preferredTabId),
+      );
+      const nextActiveId = (preferredExists ? preferredTabId : null)
+        || result.active_tab_id
+        || terminalTabs[0]?.id
+        || '';
+
+      setTabs((currentTabs) => {
+        const terminalIds = new Set(terminalTabs.map((tab) => tab.id));
+        const nonTerminalTabs = currentTabs.filter((tab) => (
+          tab.kind !== 'terminal' || terminalIds.has(tab.id)
+        ));
+        const existingIds = new Set(nonTerminalTabs.map((tab) => tab.id));
+        const updatedTabs = nonTerminalTabs.map((tab) => {
+          if (tab.kind !== 'terminal') return tab;
+          const backendTab = terminalTabs.find((item) => item.id === tab.id);
+          return backendTab ? { ...tab, title: backendTab.title, created_at: backendTab.created_at } : tab;
+        });
+        const newTabs = terminalTabs.filter((tab) => !existingIds.has(tab.id));
+        return [...updatedTabs, ...newTabs];
+      });
+
+      if (nextActiveId) {
+        void api.browserHide().catch(console.error);
+        if (result.active_tab_id !== nextActiveId) {
+          void api.terminalTabSwitch(terminalSessionId, nextActiveId).catch(console.error);
+        }
+        setActiveTabId(nextActiveId);
+      }
+      return true;
+    } catch (err) {
+      console.error('同步终端 Tab 失败：', err);
+      return false;
+    }
+  }, [terminalSessionId]);
 
   useEffect(() => {
     tabsRef.current = tabs;
@@ -238,6 +289,15 @@ export function TabsContainer({
   }, [activeSessionId, isVisible, restoreRuntimeForTabs, workspaceTabsTransfer]);
 
   const activateOrCreateTab = useCallback(async (kind: TabKind) => {
+    if (
+      kind === 'terminal'
+      && requestedTerminalTabId
+      && !tabsRef.current.some((tab) => tab.id === requestedTerminalTabId)
+      && await mergeTerminalRuntimeTabs(requestedTerminalTabId)
+    ) {
+      return;
+    }
+
     const existing = tabsRef.current.find((tab) => tab.kind === kind);
     if (existing) {
       if (existing.kind === 'terminal') {
@@ -247,6 +307,10 @@ export function TabsContainer({
         void api.browserTabSwitch(existing.id).catch(console.error);
       }
       setActiveTabId(existing.id);
+      return;
+    }
+
+    if (kind === 'terminal' && await mergeTerminalRuntimeTabs(requestedTerminalTabId)) {
       return;
     }
 
@@ -274,7 +338,7 @@ export function TabsContainer({
     }
 
     await handleNewTab(kind);
-  }, [handleNewTab]);
+  }, [handleNewTab, mergeTerminalRuntimeTabs, requestedTerminalTabId]);
 
   useEffect(() => {
     if (!isVisible) return;
@@ -293,6 +357,11 @@ export function TabsContainer({
     openRequestVersion,
     terminalSessionId,
   ]);
+
+  useEffect(() => {
+    if (!isVisible || !requestedTerminalTabId) return;
+    void mergeTerminalRuntimeTabs(requestedTerminalTabId);
+  }, [isVisible, mergeTerminalRuntimeTabs, requestedTerminalTabId]);
 
   const handleSwitchTab = useCallback((tabId: string) => {
     const nextTab = tabs.find((tab) => tab.id === tabId);

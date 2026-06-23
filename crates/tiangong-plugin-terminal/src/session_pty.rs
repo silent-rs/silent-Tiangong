@@ -8,6 +8,7 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use tauri::Emitter;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
@@ -170,6 +171,16 @@ impl SessionPtyRegistry {
 
     fn existing_session_tabs(&self, session_id: &str) -> Option<Arc<SessionTabs>> {
         self.sessions.lock().unwrap().get(session_id).cloned()
+    }
+
+    fn emit_tab_updated(&self, session_id: &str, active_tab_id: Option<String>) {
+        let _ = self.app.emit(
+            "terminal:tab_updated",
+            &crate::types::TerminalTabUpdatedEvent {
+                session_id: session_id.to_string(),
+                active_tab_id,
+            },
+        );
     }
 
     /// 懒创建：获取或创建指定 session / terminal id 的 PTY。返回 true 表示 PTY 存活。
@@ -420,6 +431,7 @@ impl SessionPtyRegistry {
                 return None;
             }
             session_tabs.set_active_tab(tab_id.clone());
+            self.emit_tab_updated(&route.session_id, Some(tab_id.clone()));
             return Some(tiangong_core::terminal_trait::TerminalSelection {
                 session_id: route.session_id,
                 tab_id,
@@ -460,6 +472,7 @@ impl SessionPtyRegistry {
 
         if let Some(tab_id) = idle_tab_id {
             session_tabs.set_active_tab(tab_id.clone());
+            self.emit_tab_updated(&route.session_id, Some(tab_id.clone()));
             return Some(tiangong_core::terminal_trait::TerminalSelection {
                 session_id: route.session_id.clone(),
                 tab_id: tab_id.clone(),
@@ -480,6 +493,7 @@ impl SessionPtyRegistry {
             return None;
         }
         session_tabs.set_active_tab(tab_id.clone());
+        self.emit_tab_updated(&route.session_id, Some(tab_id.clone()));
         Some(tiangong_core::terminal_trait::TerminalSelection {
             session_id: route.session_id,
             tab_id,
@@ -504,7 +518,7 @@ impl SessionPtyRegistry {
             };
             if removed.is_some() {
                 let next_active = session_tabs.active_or_first_tab_id();
-                *session_tabs.active_tab_id.lock().unwrap() = next_active;
+                *session_tabs.active_tab_id.lock().unwrap() = next_active.clone();
                 info!(session_id = %route.session_id, tab_id = %tab_id, "终端 Tab PTY 已销毁");
             }
             return;
