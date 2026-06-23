@@ -4,13 +4,13 @@
 >
 > 任务索引：`README.md`
 >
-> 当前分支：`feature/browser-tab-content`
+> 当前分支：`feature/session-tabs-persistence`
 
 ## 当前状态
 
-- 阶段：已完成 11，浏览器 Tab 内容已接入统一 Tabs 容器。
+- 阶段：已完成 12，会话 Tab 已支持恢复与防抖持久化。
 - 最近更新：2026-06-23
-- 当前建议任务：`12-session-restore-persistence.md`
+- 当前建议任务：`14-end-to-end-verification.md`
 - 当前阻塞：无。
 
 ## 进度总览
@@ -28,7 +28,7 @@
 | 09 | 统一 Tabs 容器 | 已完成 | `feature/frontend-tabs-container` | `2d63c45` | `yarn build` 通过 |
 | 10 | 终端 Tab 内容组件 | 已完成 | `feature/terminal-tab-content` | `02bdcaa` | `yarn build` 通过 |
 | 11 | 浏览器 Tab 内容组件 | 已完成 | `feature/browser-tab-content` | `7ba22bd` | `yarn build` 通过 |
-| 12 | 会话切换恢复与防抖持久化 | 未开始 | - | - | - |
+| 12 | 会话切换恢复与防抖持久化 | 已完成 | `feature/session-tabs-persistence` | `43cbb9b` | `yarn build` 通过 |
 | 13 | Tauri API 与权限声明 | 已完成 | `feature/tabs-api-permissions` | `bc32615` | `cargo fmt -- --check` 通过；`cargo check --workspace` 通过；`yarn build` 通过 |
 | 14 | 端到端验收 | 未开始 | - | - | - |
 
@@ -69,6 +69,7 @@
 | 2026-06-23 | 完成 Tauri API 与权限声明 | `bc32615` |
 | 2026-06-23 | 完成终端 Tab 内容组件 | `02bdcaa` |
 | 2026-06-23 | 完成浏览器 Tab 内容组件 | `7ba22bd` |
+| 2026-06-23 | 完成会话切换恢复与防抖持久化 | `43cbb9b` |
 
 ## 更新规则
 
@@ -105,3 +106,4 @@
 - 2026-06-23：13 Tauri API 与权限声明，`yarn build` 通过。
 - 2026-06-23：10 终端 Tab 内容组件，`yarn build` 通过。
 - 2026-06-23：11 浏览器 Tab 内容组件，`yarn build` 通过。
+- 2026-06-23：12 会话切换恢复与防抖持久化，`yarn build` 通过。
