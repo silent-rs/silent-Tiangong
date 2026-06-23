@@ -4,13 +4,13 @@
 >
 > 任务索引：`README.md`
 >
-> 当前分支：`feature/terminal-selection`
+> 当前分支：`feature/terminal-result-feedback`
 
 ## 当前状态
 
-- 阶段：已完成 04，命令执行前会自动选择空闲终端或新建终端。
+- 阶段：已完成 05，命令结果会反馈终端选择信息。
 - 最近更新：2026-06-23
-- 当前建议任务：`05-terminal-result-feedback.md`
+- 当前建议任务：`06-browser-session-switch.md`
 - 当前阻塞：无。
 
 ## 进度总览
@@ -21,7 +21,7 @@
 | 02 | 会话 Tab 读写命令 | 已完成 | `feature/session-tab-commands` | `20f22b4` | `cargo fmt -- --check` 通过；`cargo check --workspace` 通过；`yarn build` 通过 |
 | 03 | 终端多 Tab 注册表 | 已完成 | `feature/terminal-registry-multitab` | `a9e8b60` | `cargo fmt -- --check` 通过；`cargo check --workspace` 通过 |
 | 04 | 终端空闲选择与繁忙新建 | 已完成 | `feature/terminal-selection` | `765bb85` | `cargo fmt -- --check` 通过；`cargo check --workspace` 通过 |
-| 05 | 命令结果反馈终端选择信息 | 未开始 | - | - | - |
+| 05 | 命令结果反馈终端选择信息 | 已完成 | `feature/terminal-result-feedback` | 待提交 | `cargo fmt -- --check` 通过；`cargo check --workspace` 通过 |
 | 06 | 浏览器会话切换 | 未开始 | - | - | - |
 | 07 | 浏览器空白页懒创建 | 未开始 | - | - | - |
 | 08 | 前端单一工作区面板 | 未开始 | - | - | - |
@@ -61,6 +61,7 @@
 | 2026-06-23 | 完成会话 Tab 读写命令 | `20f22b4` |
 | 2026-06-23 | 完成终端多 Tab 注册表 | `a9e8b60` |
 | 2026-06-23 | 完成终端空闲选择与繁忙新建 | `765bb85` |
+| 2026-06-23 | 完成命令结果反馈终端选择信息 | 待提交 |
 
 ## 更新规则
 
@@ -82,3 +83,5 @@
 - 2026-06-23：03 终端多 Tab 注册表，`cargo check --workspace` 通过。
 - 2026-06-23：04 终端空闲选择与繁忙新建，`cargo fmt -- --check` 通过。
 - 2026-06-23：04 终端空闲选择与繁忙新建，`cargo check --workspace` 通过。
+- 2026-06-23：05 命令结果反馈终端选择信息，`cargo fmt -- --check` 通过。
+- 2026-06-23：05 命令结果反馈终端选择信息，`cargo check --workspace` 通过。

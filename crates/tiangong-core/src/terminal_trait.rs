@@ -21,6 +21,24 @@ pub enum TerminalSelectionReason {
     AllBusy,
 }
 
+impl TerminalSelection {
+    pub fn feedback_text(&self) -> String {
+        let reason = match self.reason {
+            TerminalSelectionReason::ReusedIdle => "复用空闲终端",
+            TerminalSelectionReason::NoAvailableTerminal => "当前会话没有可用终端",
+            TerminalSelectionReason::AllBusy => "当前会话已有终端都在忙",
+        };
+        if self.created_new {
+            format!(
+                "；本次在新终端 {} 中执行，原因：{}，没有写入旧终端",
+                self.terminal_id, reason
+            )
+        } else {
+            format!("；本次使用终端 {} 执行，原因：{}", self.terminal_id, reason)
+        }
+    }
+}
+
 /// 终端会话能力抽象。
 ///
 /// GUI 模式下由 tiangong-plugin-terminal 实现，CLI/Server 模式下为 None（回退到独立进程）。

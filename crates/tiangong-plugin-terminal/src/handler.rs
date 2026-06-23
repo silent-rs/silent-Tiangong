@@ -175,7 +175,7 @@ impl TerminalToolOverride {
                 Some(selection) => selection,
                 None => return None,
             };
-            let terminal_id = selection.terminal_id;
+            let terminal_id = selection.terminal_id.clone();
 
             // 若 agent 指定了 cwd 且与终端当前 cwd 不同，包装为 cd <cwd> && <script>。
             // exec_command trait 方法不携带 cwd，这里手动前置 cd。
@@ -235,6 +235,7 @@ impl TerminalToolOverride {
             if !result.cwd_after.is_empty() {
                 summary.push_str(&format!("（cwd: {}）", result.cwd_after));
             }
+            summary.push_str(&selection.feedback_text());
 
             let mut stderr = result.stderr.clone();
             if interactive && result.interactive_mode {

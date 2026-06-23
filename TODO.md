@@ -165,7 +165,7 @@
 - [x] 02：会话 Tab 读写命令 - `docs/tabs-session-binding/02-session-tab-commands.md`
 - [x] 03：终端多 Tab 注册表 - `docs/tabs-session-binding/03-terminal-registry-multitab.md`
 - [x] 04：终端空闲选择与繁忙新建 - `docs/tabs-session-binding/04-terminal-selection.md`
-- [ ] 05：命令结果反馈终端选择信息 - `docs/tabs-session-binding/05-terminal-result-feedback.md`
+- [x] 05：命令结果反馈终端选择信息 - `docs/tabs-session-binding/05-terminal-result-feedback.md`
 - [ ] 06：浏览器会话切换 - `docs/tabs-session-binding/06-browser-session-switch.md`
 - [ ] 07：浏览器空白页懒创建 - `docs/tabs-session-binding/07-browser-blank-lazy-webview.md`
 - [ ] 08：前端单一工作区面板 - `docs/tabs-session-binding/08-frontend-workspace-shell.md`

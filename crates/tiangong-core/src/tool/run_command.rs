@@ -210,7 +210,7 @@ impl LocalToolExecutor {
                 // 此时 PTY 前台进程仍在运行。应报告失败，避免 Agent 误判成功后继续
                 // 在卡住的 PTY 上执行后续命令。
                 let ok = !r.timed_out && !r.interactive_mode && r.exit_code == 0;
-                let summary = if r.interactive_mode {
+                let mut summary = if r.interactive_mode {
                     format!("命令进入交互模式：{cmd}（当前不支持 Agent 交互式终端）")
                 } else if ok {
                     format!("命令执行成功：{cmd}")
@@ -219,6 +219,7 @@ impl LocalToolExecutor {
                 } else {
                     format!("命令执行失败：{cmd} (exit_code={})", r.exit_code)
                 };
+                summary.push_str(&selection.feedback_text());
                 let stderr = if r.interactive_mode {
                     format!(
                         "{stderr}\n[提示] 命令似乎进入了交互模式（等待输入或未正常退出）。\
