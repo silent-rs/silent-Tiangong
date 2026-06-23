@@ -1,6 +1,8 @@
 # 统一工作区 Tabs 任务索引
 
 > 总设计：`../tabs-session-binding.md`
+>
+> 进度记录：`PROGRESS.md`
 
 任务按可单独开发、单独验证的粒度拆分。每个任务原则上独立提交。
 
