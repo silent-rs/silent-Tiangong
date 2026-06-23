@@ -1195,6 +1195,7 @@ impl BrowserManager {
 
     pub fn switch_session(
         &self,
+        app: &AppHandle<Wry>,
         session_id: &str,
         tabs_to_restore: Vec<BrowserTab>,
         active_tab_id: Option<String>,
@@ -1204,6 +1205,40 @@ impl BrowserManager {
             && state.tabs == tabs_to_restore
             && state.active_tab_id == active_tab_id
         {
+            let active_tab = state
+                .active_tab_id
+                .as_ref()
+                .and_then(|id| state.tabs.iter().find(|tab| tab.id == *id).cloned());
+            let rect = state.browser_rect;
+            let needs_webview = active_tab.as_ref().is_some_and(|tab| {
+                !tab.url.starts_with("about:") && !state.webviews.contains_key(&tab.id)
+            });
+            if !needs_webview {
+                return Ok(BrowserTabsSnapshot {
+                    session_id: state.active_session_id.clone(),
+                    tabs: state.tabs.clone(),
+                    active_tab_id: state.active_tab_id.clone(),
+                });
+            }
+
+            if let Some(tab) = active_tab {
+                drop(state);
+                let webview = Self::create_webview_for_tab(
+                    app, &tab.id, &tab.url, rect.0, rect.1, rect.2, rect.3,
+                )?;
+                let mut state = self.state.lock().map_err(|e| e.to_string())?;
+                state.webviews.insert(tab.id.clone(), webview);
+                drop(state);
+                self.start_url_poll(app, &tab.url);
+                self.start_event_poll(app);
+                let state = self.state.lock().map_err(|e| e.to_string())?;
+                return Ok(BrowserTabsSnapshot {
+                    session_id: state.active_session_id.clone(),
+                    tabs: state.tabs.clone(),
+                    active_tab_id: state.active_tab_id.clone(),
+                });
+            }
+
             return Ok(BrowserTabsSnapshot {
                 session_id: state.active_session_id.clone(),
                 tabs: state.tabs.clone(),
@@ -1219,6 +1254,27 @@ impl BrowserManager {
         state
             .visible
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        let active_tab = state
+            .active_tab_id
+            .as_ref()
+            .and_then(|id| state.tabs.iter().find(|tab| tab.id == *id).cloned());
+        let rect = state.browser_rect;
+        drop(state);
+
+        if let Some(tab) = active_tab {
+            if !tab.url.starts_with("about:") {
+                let webview = Self::create_webview_for_tab(
+                    app, &tab.id, &tab.url, rect.0, rect.1, rect.2, rect.3,
+                )?;
+                let mut state = self.state.lock().map_err(|e| e.to_string())?;
+                state.webviews.insert(tab.id.clone(), webview);
+                drop(state);
+                self.start_url_poll(app, &tab.url);
+                self.start_event_poll(app);
+            }
+        }
+
+        let state = self.state.lock().map_err(|e| e.to_string())?;
 
         Ok(BrowserTabsSnapshot {
             session_id: state.active_session_id.clone(),

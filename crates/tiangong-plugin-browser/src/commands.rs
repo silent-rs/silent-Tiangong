@@ -107,9 +107,10 @@ pub async fn browser_switch_session(
     app: AppHandle,
     state: State<'_, BrowserPluginState>,
 ) -> Result<BrowserTabsSnapshot, String> {
-    let snapshot = state
-        .manager
-        .switch_session(&session_id, tabs_to_restore, active_tab_id)?;
+    let snapshot =
+        state
+            .manager
+            .switch_session(&app, &session_id, tabs_to_restore, active_tab_id)?;
     let _ = app.emit(
         "browser:tab_updated",
         serde_json::json!({
