@@ -86,6 +86,7 @@ export function TabsContainer({
   const [tabs, setTabs] = useState<TabState[]>([]);
   const [activeTabId, setActiveTabId] = useState('');
   const [hydrateVersion, setHydrateVersion] = useState(0);
+  const [activationRetryVersion, setActivationRetryVersion] = useState(0);
   const tabsRef = useRef<TabState[]>([]);
   const activeTabIdRef = useRef('');
   const activeSessionIdRef = useRef<string | null>(null);
@@ -293,6 +294,7 @@ export function TabsContainer({
         if (!cancelled) {
           hydratingRef.current = false;
           setHydrateVersion((version) => version + 1);
+          setActivationRetryVersion((version) => version + 1);
         }
       }
     };
@@ -357,7 +359,9 @@ export function TabsContainer({
 
   useEffect(() => {
     if (!isVisible) return;
-    if (hydratingRef.current) return;
+    if (hydratingRef.current) {
+      return;
+    }
     const activationKey = `${terminalSessionId}:${hydrateVersion}:${initialTabKind}:${openRequestVersion}`;
     if (lastInitialActivationKeyRef.current === activationKey) {
       return;
@@ -366,6 +370,7 @@ export function TabsContainer({
     void activateOrCreateTab(initialTabKind);
   }, [
     activateOrCreateTab,
+    activationRetryVersion,
     hydrateVersion,
     initialTabKind,
     isVisible,
@@ -518,6 +523,7 @@ export function TabsContainer({
         await api.setSessionTabs(toSessionId, currentTabs, nextActiveTabId || null);
       } finally {
         hydratingRef.current = false;
+        setActivationRetryVersion((version) => version + 1);
       }
     };
 
