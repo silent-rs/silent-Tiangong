@@ -10,6 +10,13 @@
 - `crates/tiangong-plugin-terminal/src/types.rs`
 - 必要时更新内部类型引用
 
+## 依赖
+
+- 前置任务：01。
+- 后续任务：04、10、12、13。
+- 可并行任务：02、06、08。
+- 阻塞说明：需要统一 Tab id 作为终端 Tab 的持久化元数据基础。
+
 ## 任务
 
 - 新增 `SessionTabs`：

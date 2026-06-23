@@ -10,6 +10,13 @@
 - `crates/tiangong-plugin-terminal/src/handler.rs`
 - 必要时扩展 `TerminalExecResult`
 
+## 依赖
+
+- 前置任务：04。
+- 后续任务：14。
+- 可并行任务：07、08、09、11。
+- 阻塞说明：必须先有终端选择结果，才能把复用或新建终端的信息反馈给 Agent。
+
 ## 任务
 
 - 将终端选择信息传入命令执行结果整理阶段。

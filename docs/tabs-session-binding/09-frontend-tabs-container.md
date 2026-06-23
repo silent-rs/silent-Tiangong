@@ -9,6 +9,13 @@
 - `frontend/src/components/TabsContainer.tsx`
 - `frontend/src/api/tauri.ts`
 
+## 依赖
+
+- 前置任务：01、02、08。
+- 后续任务：10、11、12、14。
+- 可并行任务：05、07。
+- 阻塞说明：统一容器需要会话 Tab 类型、读写 API 和单一工作区面板入口。
+
 ## 任务
 
 - 定义前端 `TabState` 类型。

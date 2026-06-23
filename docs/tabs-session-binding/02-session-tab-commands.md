@@ -10,6 +10,13 @@
 - `src-tauri/src/main.rs`
 - `frontend/src/api/tauri.ts` 仅增加 API 封装
 
+## 依赖
+
+- 前置任务：01。
+- 后续任务：09、12。
+- 可并行任务：03、06。
+- 阻塞说明：必须先有 `Session.tabs` 和 `Session.active_tab_id` 字段，才能提供读写命令。
+
 ## 任务
 
 - 新增 `get_session_tabs(session_id)`。

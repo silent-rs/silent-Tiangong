@@ -9,6 +9,13 @@
 - `frontend/src/components/BrowserTabContent.tsx`
 - `frontend/src/api/tauri.ts`
 
+## 依赖
+
+- 前置任务：06、07、09、13。
+- 后续任务：12、14。
+- 可并行任务：10。
+- 阻塞说明：浏览器内容组件需要浏览器会话切换、空白页懒创建、统一容器和 Tauri 权限/API 可调用。
+
 ## 任务
 
 - 组件 props 包含 `tabId`、`initialUrl`、`isActive`。

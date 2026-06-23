@@ -9,6 +9,13 @@
 - `crates/tiangong-plugin-browser/src/manager.rs`
 - `frontend/src/components/BrowserTabContent.tsx`（拆分后）
 
+## 依赖
+
+- 前置任务：06。
+- 后续任务：11、12、14。
+- 可并行任务：05、08、09、10。
+- 阻塞说明：必须先完成浏览器会话切换和 Tab 元数据恢复，才能约束空白页恢复时的 WebView 创建行为。
+
 ## 任务
 
 - `browser_tab_new("about:blank")` 只创建 Tab 元数据。

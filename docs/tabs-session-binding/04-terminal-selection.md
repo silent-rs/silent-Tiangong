@@ -11,6 +11,13 @@
 - `crates/tiangong-plugin-terminal/src/session_pty.rs`
 - `crates/tiangong-plugin-terminal/src/handler.rs`
 
+## 依赖
+
+- 前置任务：03。
+- 后续任务：05、10、14。
+- 可并行任务：06、08。
+- 阻塞说明：必须先支持同一会话多终端运行时，才能实现空闲选择和繁忙新建。
+
 ## 任务
 
 - 定义终端选择结果结构：

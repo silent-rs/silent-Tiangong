@@ -9,6 +9,13 @@
 - `frontend/src/components/TerminalTabContent.tsx`
 - `frontend/src/api/tauri.ts`
 
+## 依赖
+
+- 前置任务：03、04、09、13。
+- 后续任务：12、14。
+- 可并行任务：11。
+- 阻塞说明：终端内容组件需要终端多 Tab 后端、选择策略、统一容器和 Tauri 权限/API 可调用。
+
 ## 任务
 
 - 组件 props 包含 `sessionId`、`tabId`、`isActive`。

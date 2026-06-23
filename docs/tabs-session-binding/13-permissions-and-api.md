@@ -13,6 +13,13 @@
 - `crates/tiangong-plugin-terminal/permissions/**`
 - `src-tauri/capabilities/default.json` 如有需要
 
+## 依赖
+
+- 前置任务：02、03、06。
+- 后续任务：10、11、12、14。
+- 可并行任务：04、05、08、09。
+- 阻塞说明：权限和 API 封装需要新增命令名称和参数基本稳定后再统一补齐。
+
 ## 任务
 
 - 为新增浏览器命令生成权限。

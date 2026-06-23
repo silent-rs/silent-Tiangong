@@ -10,6 +10,13 @@
 - `frontend/src/store/useStore.ts`
 - `frontend/src/api/tauri.ts`
 
+## 依赖
+
+- 前置任务：01、02、03、06、07、09、10、11、13。
+- 后续任务：14。
+- 可并行任务：无。
+- 阻塞说明：会话恢复和防抖持久化需要前后端 Tab 能力基本闭环后才能验证。
+
 ## 任务
 
 - 监听 active session 变化。

@@ -9,6 +9,13 @@
 - `frontend/src/pages/MainApp.tsx`
 - `frontend/src/components/StatusPanel.tsx`
 
+## 依赖
+
+- 前置任务：无。
+- 后续任务：09、10、11、12。
+- 可并行任务：02、03、04、06。
+- 阻塞说明：该任务只收敛前端面板外壳，不依赖后端运行时能力；后续统一 Tabs 容器会接入具体能力。
+
 ## 任务
 
 - 用 `showWorkspacePanel` 替代 `showBrowser` / `showTerminal`。

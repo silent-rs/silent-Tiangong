@@ -10,6 +10,13 @@
 - `crates/tiangong-plugin-browser/src/commands.rs`
 - `crates/tiangong-plugin-browser/src/lib.rs`
 
+## 依赖
+
+- 前置任务：01。
+- 后续任务：07、11、12、13。
+- 可并行任务：02、03、04、08。
+- 阻塞说明：浏览器会话切换需要统一 Tab 元数据来恢复浏览器 Tab 列表和活跃 Tab。
+
 ## 任务
 
 - `BrowserManager` 增加当前绑定会话 id。
