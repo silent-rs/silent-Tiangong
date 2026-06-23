@@ -171,11 +171,17 @@ impl TerminalToolOverride {
         let provider = provider.clone();
         let session_id = session_id.to_string();
         Box::pin(async move {
+            let selection = match provider.select_for_command(&session_id).await {
+                Some(selection) => selection,
+                None => return None,
+            };
+            let terminal_id = selection.terminal_id;
+
             // 若 agent 指定了 cwd 且与终端当前 cwd 不同，包装为 cd <cwd> && <script>。
             // exec_command trait 方法不携带 cwd，这里手动前置 cd。
             let command = match cwd.as_deref() {
                 Some(want) if !want.is_empty() => {
-                    let current = provider.current_cwd(&session_id).await;
+                    let current = provider.current_cwd(&terminal_id).await;
                     let need_cd = match current.as_deref() {
                         Some(cur) => !cur
                             .trim_end_matches('/')
@@ -193,12 +199,12 @@ impl TerminalToolOverride {
             let result = if interactive {
                 // 交互模式：以 CR 提交命令，等待初始渲染，进入 AgentInteractive 态。
                 // wait_secs=3 给 vi/nano 足够时间绘制界面。
-                match provider.exec_interactive(&session_id, &command, 3).await {
+                match provider.exec_interactive(&terminal_id, &command, 3).await {
                     Some(r) => r,
                     None => return None, // 终端不可用，回退到默认 run_shell
                 }
             } else {
-                match provider.exec(&session_id, &command, timeout_secs).await {
+                match provider.exec(&terminal_id, &command, timeout_secs).await {
                     Some(r) => r,
                     None => return None, // 终端不可用，回退到默认 run_shell
                 }

@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
-use crate::collaboration::TerminalActivityTracker;
+use crate::collaboration::{TerminalActivityTracker, TerminalBusyState};
 use crate::manager::{spawn_command_loop, TerminalManager};
 use crate::output_processor;
 use crate::types::TerminalCommand;
@@ -300,6 +300,90 @@ impl SessionPtyRegistry {
         tabs.get(&tab_id).cloned()
     }
 
+    /// 为 Agent 命令执行选择终端：优先复用当前会话空闲终端，全部繁忙时创建新终端。
+    pub fn select_for_command(
+        &self,
+        session_id: &str,
+    ) -> Option<tiangong_core::terminal_trait::TerminalSelection> {
+        let route = parse_terminal_id(session_id)?;
+        let session_tabs = self.session_tabs(&route.session_id);
+
+        if let Some(tab_id) = route.tab_id {
+            let terminal_id = terminal_instance_id(&route.session_id, &tab_id);
+            let existed = self.get(&terminal_id).is_some();
+            if !self.ensure(&terminal_id, "") {
+                return None;
+            }
+            session_tabs.set_active_tab(tab_id.clone());
+            return Some(tiangong_core::terminal_trait::TerminalSelection {
+                session_id: route.session_id,
+                tab_id,
+                terminal_id,
+                created_new: !existed,
+                reason: if existed {
+                    tiangong_core::terminal_trait::TerminalSelectionReason::ReusedIdle
+                } else {
+                    tiangong_core::terminal_trait::TerminalSelectionReason::NoAvailableTerminal
+                },
+            });
+        }
+
+        let mut had_live_terminal = false;
+        let mut dead_tabs = Vec::new();
+        let mut idle_tab_id = None;
+        {
+            let tabs = session_tabs.tabs.lock().unwrap();
+            for (tab_id, slot) in tabs.iter() {
+                if !slot.manager.is_alive() {
+                    dead_tabs.push(tab_id.clone());
+                    continue;
+                }
+                had_live_terminal = true;
+                if matches!(slot.activity.busy_state(), TerminalBusyState::Idle) {
+                    idle_tab_id = Some(tab_id.clone());
+                    break;
+                }
+            }
+        }
+
+        if !dead_tabs.is_empty() {
+            let mut tabs = session_tabs.tabs.lock().unwrap();
+            for tab_id in dead_tabs {
+                tabs.remove(&tab_id);
+            }
+        }
+
+        if let Some(tab_id) = idle_tab_id {
+            session_tabs.set_active_tab(tab_id.clone());
+            return Some(tiangong_core::terminal_trait::TerminalSelection {
+                session_id: route.session_id.clone(),
+                tab_id: tab_id.clone(),
+                terminal_id: terminal_instance_id(&route.session_id, &tab_id),
+                created_new: false,
+                reason: tiangong_core::terminal_trait::TerminalSelectionReason::ReusedIdle,
+            });
+        }
+
+        let reason = if had_live_terminal {
+            tiangong_core::terminal_trait::TerminalSelectionReason::AllBusy
+        } else {
+            tiangong_core::terminal_trait::TerminalSelectionReason::NoAvailableTerminal
+        };
+        let tab_id = scru128::new().to_string();
+        let terminal_id = terminal_instance_id(&route.session_id, &tab_id);
+        if !self.ensure(&terminal_id, "") {
+            return None;
+        }
+        session_tabs.set_active_tab(tab_id.clone());
+        Some(tiangong_core::terminal_trait::TerminalSelection {
+            session_id: route.session_id,
+            tab_id,
+            terminal_id,
+            created_new: true,
+            reason,
+        })
+    }
+
     /// 销毁指定 session 或终端 Tab 的 PTY（drop cmd_tx → 命令循环退出 → 子进程终止）。
     pub fn destroy(&self, terminal_id: &str) {
         let Some(route) = parse_terminal_id(terminal_id) else {
@@ -514,6 +598,20 @@ macro_rules! send_and_wait {
 }
 
 impl tiangong_core::terminal_trait::TerminalProvider for SessionAwareTerminalProvider {
+    fn select_for_command(
+        &self,
+        session_id: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Option<tiangong_core::terminal_trait::TerminalSelection>,
+                > + Send,
+        >,
+    > {
+        let selection = self.registry.select_for_command(session_id);
+        Box::pin(async move { selection })
+    }
+
     fn exec(
         &self,
         session_id: &str,

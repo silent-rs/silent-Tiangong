@@ -188,7 +188,18 @@ impl LocalToolExecutor {
             None
         };
 
-        let result = exec_via_pty(provider, cmd, args, effective_cwd, timeout_secs, session_id)?;
+        let Some(selection) = select_terminal_for_command(provider, session_id)? else {
+            return Err(anyhow!("终端会话不可用"));
+        };
+
+        let result = exec_via_pty(
+            provider,
+            cmd,
+            args,
+            effective_cwd,
+            timeout_secs,
+            &selection.terminal_id,
+        )?;
 
         match result {
             Some(r) => {
@@ -488,6 +499,34 @@ fn pty_current_cwd_blocking(
                 .join()
                 .expect("PTY cwd 读取线程 panic")
         }),
+    }
+}
+
+fn select_terminal_for_command(
+    provider: &std::sync::Arc<dyn crate::terminal_trait::TerminalProvider>,
+    session_id: &str,
+) -> anyhow::Result<Option<crate::terminal_trait::TerminalSelection>> {
+    let provider = provider.clone();
+    let session_id = session_id.to_string();
+    let handle = tokio::runtime::Handle::try_current();
+    match handle {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            Ok(tokio::task::block_in_place(|| {
+                h.block_on(provider.select_for_command(&session_id))
+            }))
+        }
+        _ => Ok(std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let rt = TokioRuntimeBuilder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("初始化终端选择运行时失败");
+                    rt.block_on(provider.select_for_command(&session_id))
+                })
+                .join()
+                .expect("终端选择线程 panic")
+        })),
     }
 }
 
