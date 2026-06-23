@@ -16,6 +16,8 @@
 - `allow-browser-get-zoom`
 - `allow-browser-reset-zoom`
 - `allow-browser-tab-list`
+- `allow-browser-snapshot-tabs`
+- `allow-browser-switch-session`
 - `allow-browser-tab-new`
 - `allow-browser-tab-switch`
 - `allow-browser-tab-close`
@@ -420,6 +422,58 @@ Enables the browser_set_zoom command without any pre-configured scope.
 <td>
 
 Denies the browser_set_zoom command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:allow-browser-snapshot-tabs`
+
+</td>
+<td>
+
+Enables the browser_snapshot_tabs command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:deny-browser-snapshot-tabs`
+
+</td>
+<td>
+
+Denies the browser_snapshot_tabs command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:allow-browser-switch-session`
+
+</td>
+<td>
+
+Enables the browser_switch_session command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:deny-browser-switch-session`
+
+</td>
+<td>
+
+Denies the browser_switch_session command without any pre-configured scope.
 
 </td>
 </tr>

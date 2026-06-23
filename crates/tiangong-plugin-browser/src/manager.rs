@@ -12,8 +12,8 @@ use tauri::{
 
 use crate::bridge::BRIDGE_SCRIPT;
 use crate::types::{
-    BrowserEvent, BrowserPageSnapshot, BrowserResponse, BrowserTab, HistoryEntry, PageStatus,
-    TabHistoryResult, TabListResponse,
+    BrowserEvent, BrowserPageSnapshot, BrowserResponse, BrowserTab, BrowserTabsSnapshot,
+    HistoryEntry, PageStatus, TabHistoryResult, TabListResponse,
 };
 
 fn webview_label(tab_id: &str) -> String {
@@ -65,6 +65,8 @@ pub struct BrowserState {
     pub tab_history_indices: HashMap<String, usize>,
     /// 当前页面缩放比例，clamp 到 [0.25, 5.0]，持久化在 ~/.tiangong/browser-zoom.json
     pub zoom_factor: f64,
+    /// 当前浏览器运行时绑定的对话会话 ID
+    pub active_session_id: Option<String>,
 }
 
 impl BrowserState {
@@ -112,6 +114,7 @@ impl BrowserManager {
                 tab_histories: HashMap::new(),
                 tab_history_indices: HashMap::new(),
                 zoom_factor,
+                active_session_id: None,
             })),
         }
     }
@@ -482,31 +485,8 @@ impl BrowserManager {
 
     pub fn close(&self) -> Result<(), String> {
         if let Ok(mut state) = self.state.lock() {
-            state
-                .poll_stop
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            state
-                .event_poll_stop
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            for (_, webview) in state.webviews.drain() {
-                let _ = webview.close();
-            }
-            for signal in state.page_loaded_signals.values() {
-                let (lock, cvar) = &**signal;
-                if let Ok(mut loaded) = lock.lock() {
-                    *loaded = false;
-                }
-                cvar.notify_all();
-            }
-            state.page_loaded_signals.clear();
-            state.latest_snapshots.clear();
-            state.last_known_url.clear();
-            state.last_known_text_signature.clear();
-            state.pending_events.clear();
-            state.tabs.clear();
-            state.active_tab_id = None;
-            state.tab_histories.clear();
-            state.tab_history_indices.clear();
+            reset_runtime_state(&mut state, true);
+            state.active_session_id = None;
             state
                 .visible
                 .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1173,6 +1153,58 @@ impl BrowserManager {
         }
     }
 
+    pub fn snapshot_tabs(&self) -> BrowserTabsSnapshot {
+        match self.state.lock() {
+            Ok(s) => BrowserTabsSnapshot {
+                session_id: s.active_session_id.clone(),
+                tabs: s.tabs.clone(),
+                active_tab_id: s.active_tab_id.clone(),
+            },
+            Err(e) => {
+                let s = e.into_inner();
+                BrowserTabsSnapshot {
+                    session_id: s.active_session_id.clone(),
+                    tabs: s.tabs.clone(),
+                    active_tab_id: s.active_tab_id.clone(),
+                }
+            }
+        }
+    }
+
+    pub fn switch_session(
+        &self,
+        session_id: &str,
+        tabs_to_restore: Vec<BrowserTab>,
+        active_tab_id: Option<String>,
+    ) -> Result<BrowserTabsSnapshot, String> {
+        let mut state = self.state.lock().map_err(|e| e.to_string())?;
+        if state.active_session_id.as_deref() == Some(session_id)
+            && state.tabs == tabs_to_restore
+            && state.active_tab_id == active_tab_id
+        {
+            return Ok(BrowserTabsSnapshot {
+                session_id: state.active_session_id.clone(),
+                tabs: state.tabs.clone(),
+                active_tab_id: state.active_tab_id.clone(),
+            });
+        }
+
+        reset_runtime_state(&mut state, true);
+        state.tabs = tabs_to_restore;
+        state.active_tab_id = resolve_active_browser_tab(&state.tabs, active_tab_id);
+        restore_tab_runtime_metadata(&mut state);
+        state.active_session_id = Some(session_id.to_string());
+        state
+            .visible
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        Ok(BrowserTabsSnapshot {
+            session_id: state.active_session_id.clone(),
+            tabs: state.tabs.clone(),
+            active_tab_id: state.active_tab_id.clone(),
+        })
+    }
+
     pub fn tab_new(&self, app: &AppHandle<Wry>, url: &str) -> Result<String, String> {
         let tab_id = scru128::new().to_string();
         let is_blank = url == "about:blank";
@@ -1497,6 +1529,80 @@ impl BrowserManager {
             };
             state.tab_histories.insert(tab_id.to_string(), vec![entry]);
             state.tab_history_indices.insert(tab_id.to_string(), 0);
+        }
+    }
+}
+
+fn reset_runtime_state(state: &mut BrowserState, close_webviews: bool) {
+    state
+        .poll_stop
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    state
+        .event_poll_stop
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    state.poll_stop = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    state.event_poll_stop = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+    if close_webviews {
+        for (_, webview) in state.webviews.drain() {
+            let _ = webview.close();
+        }
+    } else {
+        state.webviews.clear();
+    }
+
+    for signal in state.page_loaded_signals.values() {
+        let (lock, cvar) = &**signal;
+        if let Ok(mut loaded) = lock.lock() {
+            *loaded = false;
+        }
+        cvar.notify_all();
+    }
+
+    state.page_loaded_signals.clear();
+    state.latest_snapshots.clear();
+    state.last_known_url.clear();
+    state.last_known_text_signature.clear();
+    state.pending_events.clear();
+    state.tabs.clear();
+    state.active_tab_id = None;
+    state.tab_histories.clear();
+    state.tab_history_indices.clear();
+}
+
+fn resolve_active_browser_tab(
+    tabs: &[BrowserTab],
+    active_tab_id: Option<String>,
+) -> Option<String> {
+    active_tab_id
+        .filter(|id| tabs.iter().any(|tab| tab.id == *id))
+        .or_else(|| tabs.first().map(|tab| tab.id.clone()))
+}
+
+fn restore_tab_runtime_metadata(state: &mut BrowserState) {
+    for tab in &state.tabs {
+        state.page_loaded_signals.insert(
+            tab.id.clone(),
+            Arc::new((Mutex::new(false), Condvar::new())),
+        );
+        if !tab.url.starts_with("about:") {
+            let title = if tab.title.is_empty() {
+                tab.url.clone()
+            } else {
+                tab.title.clone()
+            };
+            state.tab_histories.insert(
+                tab.id.clone(),
+                vec![HistoryEntry {
+                    url: tab.url.clone(),
+                    title,
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64,
+                }],
+            );
+            state.tab_history_indices.insert(tab.id.clone(), 0);
         }
     }
 }

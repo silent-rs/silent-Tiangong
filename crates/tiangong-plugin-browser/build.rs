@@ -8,6 +8,8 @@ const COMMANDS: &[&str] = &[
     "browser_go_back",
     "browser_go_forward",
     "browser_tab_list",
+    "browser_snapshot_tabs",
+    "browser_switch_session",
     "browser_tab_new",
     "browser_tab_switch",
     "browser_tab_close",

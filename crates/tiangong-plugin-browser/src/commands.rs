@@ -1,6 +1,9 @@
 use tauri::{AppHandle, Emitter, State};
 
-use crate::types::{AnnotationExtractResult, HistoryEntry, TabHistoryResult, TabListResponse};
+use crate::types::{
+    AnnotationExtractResult, BrowserTab, BrowserTabsSnapshot, HistoryEntry, TabHistoryResult,
+    TabListResponse,
+};
 use crate::BrowserPluginState;
 
 #[tauri::command]
@@ -87,6 +90,35 @@ pub async fn browser_tab_list(
     state: State<'_, BrowserPluginState>,
 ) -> Result<TabListResponse, String> {
     Ok(state.manager.tab_list_with_active())
+}
+
+#[tauri::command]
+pub async fn browser_snapshot_tabs(
+    state: State<'_, BrowserPluginState>,
+) -> Result<BrowserTabsSnapshot, String> {
+    Ok(state.manager.snapshot_tabs())
+}
+
+#[tauri::command]
+pub async fn browser_switch_session(
+    session_id: String,
+    tabs_to_restore: Vec<BrowserTab>,
+    active_tab_id: Option<String>,
+    app: AppHandle,
+    state: State<'_, BrowserPluginState>,
+) -> Result<BrowserTabsSnapshot, String> {
+    let snapshot = state
+        .manager
+        .switch_session(&session_id, tabs_to_restore, active_tab_id)?;
+    let _ = app.emit(
+        "browser:tab_updated",
+        serde_json::json!({
+            "action": "switch_session",
+            "session_id": session_id,
+            "active_tab_id": snapshot.active_tab_id.clone(),
+        }),
+    );
+    Ok(snapshot)
 }
 
 #[tauri::command]

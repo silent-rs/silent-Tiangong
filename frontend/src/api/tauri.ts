@@ -837,6 +837,28 @@ export const api = {
   browserTabList: (): Promise<{ tabs: Array<{ id: string; url: string; title: string }>; active_tab_id: string | null }> =>
     invoke('plugin:browser|browser_tab_list'),
 
+  browserSnapshotTabs: (): Promise<{
+    session_id: string | null;
+    tabs: Array<{ id: string; url: string; title: string }>;
+    active_tab_id: string | null;
+  }> =>
+    invoke('plugin:browser|browser_snapshot_tabs'),
+
+  browserSwitchSession: (
+    sessionId: string,
+    tabsToRestore: Array<{ id: string; url: string; title: string }>,
+    activeTabId?: string | null,
+  ): Promise<{
+    session_id: string | null;
+    tabs: Array<{ id: string; url: string; title: string }>;
+    active_tab_id: string | null;
+  }> =>
+    invoke('plugin:browser|browser_switch_session', {
+      sessionId,
+      tabsToRestore,
+      activeTabId: activeTabId ?? null,
+    }),
+
   browserTabNew: (url: string): Promise<string> =>
     invoke('plugin:browser|browser_tab_new', { url }),
 
