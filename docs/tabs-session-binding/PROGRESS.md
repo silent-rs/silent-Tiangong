@@ -4,13 +4,13 @@
 >
 > 任务索引：`README.md`
 >
-> 当前分支：`feature/browser-blank-lazy-webview`
+> 当前分支：`feature/frontend-workspace-shell`
 
 ## 当前状态
 
-- 阶段：已完成 07，浏览器空白 Tab 不再提前创建 WebView。
+- 阶段：已完成 08，前端主布局已收敛为单一工作区面板外壳。
 - 最近更新：2026-06-23
-- 当前建议任务：`08-frontend-workspace-shell.md`
+- 当前建议任务：`09-frontend-tabs-container.md`
 - 当前阻塞：无。
 
 ## 进度总览
@@ -24,7 +24,7 @@
 | 05 | 命令结果反馈终端选择信息 | 已完成 | `feature/terminal-result-feedback` | `a371b54` | `cargo fmt -- --check` 通过；`cargo check --workspace` 通过 |
 | 06 | 浏览器会话切换 | 已完成 | `feature/browser-session-switch` | `318390b` | `cargo fmt -- --check` 通过；`cargo check --workspace` 通过；`yarn build` 通过 |
 | 07 | 浏览器空白页懒创建 | 已完成 | `feature/browser-blank-lazy-webview` | `e9d3521` | `cargo fmt -- --check` 通过；`cargo check --workspace` 通过；`yarn build` 通过 |
-| 08 | 前端单一工作区面板 | 未开始 | - | - | - |
+| 08 | 前端单一工作区面板 | 已完成 | `feature/frontend-workspace-shell` | `8bca60a` | `yarn build` 通过 |
 | 09 | 统一 Tabs 容器 | 未开始 | - | - | - |
 | 10 | 终端 Tab 内容组件 | 未开始 | - | - | - |
 | 11 | 浏览器 Tab 内容组件 | 未开始 | - | - | - |
@@ -64,6 +64,7 @@
 | 2026-06-23 | 完成命令结果反馈终端选择信息 | `a371b54` |
 | 2026-06-23 | 完成浏览器会话切换 | `318390b` |
 | 2026-06-23 | 完成浏览器空白页懒创建 | `e9d3521` |
+| 2026-06-23 | 完成前端单一工作区面板 | `8bca60a` |
 
 ## 更新规则
 
@@ -93,3 +94,4 @@
 - 2026-06-23：07 浏览器空白页懒创建，`cargo fmt -- --check` 通过。
 - 2026-06-23：07 浏览器空白页懒创建，`cargo check --workspace` 通过。
 - 2026-06-23：07 浏览器空白页懒创建，`yarn build` 通过。
+- 2026-06-23：08 前端单一工作区面板，`yarn build` 通过。
