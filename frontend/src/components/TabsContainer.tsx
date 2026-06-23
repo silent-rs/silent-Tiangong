@@ -295,6 +295,11 @@ export function TabsContainer({ initialTabKind, onClose }: TabsContainerProps) {
     });
   }, [activeTabId, onClose, terminalSessionId]);
 
+  const handleCloseWorkspace = useCallback(() => {
+    void api.browserHide().catch(console.error);
+    onClose();
+  }, [onClose]);
+
   const handleBrowserMetadataChange = useCallback((
     tabId: string,
     metadata: { title?: string; url?: string },
@@ -420,25 +425,37 @@ export function TabsContainer({ initialTabKind, onClose }: TabsContainerProps) {
               </div>
             );
           })}
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7 w-7 shrink-0 p-0"
+            onClick={() => handleNewTab('terminal')}
+            title="新建终端"
+            aria-label="新建终端标签页"
+          >
+            <TerminalSquare className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7 w-7 shrink-0 p-0"
+            onClick={() => handleNewTab('browser')}
+            title="新建浏览器"
+            aria-label="新建浏览器标签页"
+          >
+            <Plus className="h-3.5 w-3.5" />
+          </Button>
         </div>
 
         <Button
           size="sm"
           variant="ghost"
-          className="h-7 w-7 shrink-0 p-0"
-          onClick={() => handleNewTab('terminal')}
-          title="新建终端"
+          className="h-7 w-7 shrink-0 p-0 text-muted-foreground hover:text-foreground"
+          onClick={handleCloseWorkspace}
+          title="关闭工作区"
+          aria-label="关闭工作区"
         >
-          <TerminalSquare className="h-3.5 w-3.5" />
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          className="h-7 w-7 shrink-0 p-0"
-          onClick={() => handleNewTab('browser')}
-          title="新建浏览器"
-        >
-          <Plus className="h-3.5 w-3.5" />
+          <X className="h-3.5 w-3.5" />
         </Button>
       </div>
 
