@@ -169,10 +169,7 @@ pub async fn terminal_tab_new(
     cwd: Option<String>,
     state: State<'_, TerminalPluginState>,
 ) -> Result<String, String> {
-    state
-        .registry
-        .tab_new(&session_id, title, cwd)
-        .ok_or_else(|| format!("终端 Tab 创建失败：{session_id}"))
+    state.registry.tab_new(&session_id, title, cwd)
 }
 
 #[tauri::command]
@@ -182,11 +179,7 @@ pub async fn terminal_tab_restore(
     title: Option<String>,
     state: State<'_, TerminalPluginState>,
 ) -> Result<(), String> {
-    if state.registry.tab_restore(&session_id, &tab_id, title) {
-        Ok(())
-    } else {
-        Err(format!("终端 Tab 恢复失败：{session_id}:{tab_id}"))
-    }
+    state.registry.tab_restore(&session_id, &tab_id, title)
 }
 
 #[tauri::command]

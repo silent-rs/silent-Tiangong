@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useStore } from '@/store/useStore';
-import { api, type RunSnapshot } from '@/api/tauri';
+import { api, type RunSnapshot, type TabKind } from '@/api/tauri';
 import { AppSidebar } from '@/components/AppSidebar';
 import { SidebarProvider } from '@/components/ui/sidebar';
 import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components/LazyComponents';
@@ -36,8 +36,6 @@ const SCREEN_EDGE_MARGIN = 32;
 
 /** 启动时裁剪窗口的最小高度兜底 */
 const MIN_INITIAL_HEIGHT = 480;
-
-type WorkspaceTabKind = 'browser' | 'terminal';
 
 /** 启动时按当前屏幕工作区裁剪窗口：仅当默认/上次的窗口尺寸超出屏幕可视区时才缩小 */
 async function fitWindowToScreen(
@@ -94,12 +92,12 @@ export function MainApp() {
   useUpdateCheck();
   const [workspacePanelMounted, setWorkspacePanelMounted] = useState(false);
   const [showWorkspacePanel, setShowWorkspacePanel] = useState(false);
-  const [workspaceTabKind, setWorkspaceTabKind] = useState<WorkspaceTabKind>('browser');
+  const [workspaceTabKind, setWorkspaceTabKind] = useState<TabKind>('browser');
   const [workspaceOpenRequestVersion, setWorkspaceOpenRequestVersion] = useState(0);
   const [chatPanelWidth, setChatPanelWidth] = useState(MIN_CHAT_WIDTH);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const showWorkspacePanelRef = useRef(false);
-  const workspaceTabKindRef = useRef<WorkspaceTabKind>('browser');
+  const workspaceTabKindRef = useRef<TabKind>('browser');
   const chatPanelWidthRef = useRef(MIN_CHAT_WIDTH);
   const isDraggingRef = useRef(false);
   const unlistenRef = useRef<UnlistenFn | null>(null);
@@ -148,7 +146,7 @@ export function MainApp() {
     setSidebarOpen(open);
   }, [lockResize, unlockResize]);
 
-  const openWorkspacePanel = useCallback(async (kind: WorkspaceTabKind) => {
+  const openWorkspacePanel = useCallback(async (kind: TabKind) => {
     workspaceTabKindRef.current = kind;
     setWorkspaceTabKind(kind);
     setWorkspaceOpenRequestVersion((version) => version + 1);

@@ -85,6 +85,8 @@ export function TabsContainer({
   const [activeTabId, setActiveTabId] = useState('');
   const [hydrateVersion, setHydrateVersion] = useState(0);
   const tabsRef = useRef<TabState[]>([]);
+  const activeTabIdRef = useRef('');
+  const activeSessionIdRef = useRef<string | null>(null);
   const lastInitialActivationKeyRef = useRef<string | null>(null);
   const lastHydratedSessionRef = useRef<string | null>(null);
   const hydratingRef = useRef(false);
@@ -157,6 +159,29 @@ export function TabsContainer({
   useEffect(() => {
     tabsRef.current = tabs;
   }, [tabs]);
+
+  useEffect(() => {
+    activeTabIdRef.current = activeTabId;
+  }, [activeTabId]);
+
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
+
+  const persistTabsNow = useCallback(() => {
+    if (persistTimerRef.current !== null) {
+      window.clearTimeout(persistTimerRef.current);
+      persistTimerRef.current = null;
+    }
+
+    const sessionId = activeSessionIdRef.current;
+    const currentTabs = tabsRef.current;
+    if (hydratingRef.current || !sessionId || currentTabs.length === 0) return;
+    if (lastHydratedSessionRef.current !== sessionId) return;
+
+    const activeId = activeTabIdRef.current || currentTabs[0]?.id || null;
+    void api.setSessionTabs(sessionId, currentTabs, activeId).catch(console.error);
+  }, []);
 
   useEffect(() => {
     if (!activeSessionId) {
@@ -344,7 +369,7 @@ export function TabsContainer({
     const tabsToPersist = tabs;
     const activeTabIdToPersist = activeTabId || tabsToPersist[0]?.id || null;
     persistTimerRef.current = window.setTimeout(() => {
-      api.setSessionTabs(activeSessionId, tabsToPersist, activeTabIdToPersist).catch(console.error);
+      void api.setSessionTabs(activeSessionId, tabsToPersist, activeTabIdToPersist).catch(console.error);
       persistTimerRef.current = null;
     }, TABS_PERSIST_DEBOUNCE_MS);
 
@@ -355,6 +380,19 @@ export function TabsContainer({
       }
     };
   }, [activeSessionId, activeTabId, tabs]);
+
+  useEffect(() => {
+    const handlePageHide = () => persistTabsNow();
+    window.addEventListener('pagehide', handlePageHide);
+    window.addEventListener('beforeunload', handlePageHide);
+    document.addEventListener('visibilitychange', handlePageHide);
+    return () => {
+      persistTabsNow();
+      window.removeEventListener('pagehide', handlePageHide);
+      window.removeEventListener('beforeunload', handlePageHide);
+      document.removeEventListener('visibilitychange', handlePageHide);
+    };
+  }, [persistTabsNow]);
 
   useEffect(() => {
     if (!workspaceTabsTransfer || transferVersionRef.current === workspaceTabsTransfer.version) {

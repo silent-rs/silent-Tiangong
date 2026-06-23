@@ -4,6 +4,7 @@
 //! 旧的纯 session_id 调用会路由到当前活跃终端 Tab，新的 session_id:tab_id
 //! 复合 id 可以精确路由到指定 Tab。
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -177,6 +178,10 @@ impl SessionPtyRegistry {
     /// `cmd_tx` 失效），会先销毁陈旧条目再重建，避免复用死掉的 PTY 导致
     /// 「终端未就绪」（草稿态固定 id 复用场景的根因，见 issue #156 后续修复）。
     pub fn ensure(&self, terminal_id: &str, cwd: &str) -> bool {
+        self.ensure_with_title(terminal_id, cwd, None)
+    }
+
+    fn ensure_with_title(&self, terminal_id: &str, cwd: &str, title: Option<String>) -> bool {
         let Some(route) = parse_terminal_id(terminal_id) else {
             return false;
         };
@@ -191,6 +196,9 @@ impl SessionPtyRegistry {
             let mut tabs = session_tabs.tabs.lock().unwrap();
             match tabs.get(&tab_id) {
                 Some(pty) if pty.manager.is_alive() => {
+                    if let Some(title) = title {
+                        tabs.get_mut(&tab_id).expect("tab exists").title = title;
+                    }
                     drop(tabs);
                     session_tabs.set_active_tab(tab_id);
                     return true;
@@ -203,11 +211,18 @@ impl SessionPtyRegistry {
         }
 
         let instance_id = terminal_instance_id(&route.session_id, &tab_id);
-        self.create_pty(&route.session_id, &tab_id, &instance_id, cwd)
+        self.create_pty(&route.session_id, &tab_id, &instance_id, cwd, title)
     }
 
     /// 创建指定终端 Tab 的 PTY（调用方负责保证注册表里无该 Tab 的存活条目）。
-    fn create_pty(&self, session_id: &str, tab_id: &str, instance_id: &str, cwd: &str) -> bool {
+    fn create_pty(
+        &self,
+        session_id: &str,
+        tab_id: &str,
+        instance_id: &str,
+        cwd: &str,
+        title: Option<String>,
+    ) -> bool {
         let default_cwd = self
             .default_cwd
             .lock()
@@ -276,7 +291,7 @@ impl SessionPtyRegistry {
             tab_id.to_string(),
             SessionPty {
                 tab_id: tab_id.to_string(),
-                title: "终端".to_string(),
+                title: title.unwrap_or_else(|| "终端".to_string()),
                 created_at: tiangong_types::now_text(),
                 manager,
                 cmd_tx: tx,
@@ -308,7 +323,17 @@ impl SessionPtyRegistry {
             };
         };
 
+        let active = session_tabs.active_tab_id.lock().unwrap().clone();
         let tabs = session_tabs.tabs.lock().unwrap();
+        let active_tab_id = if let Some(active) = active {
+            if tabs.contains_key(&active) {
+                Some(active)
+            } else {
+                tabs.keys().next().cloned()
+            }
+        } else {
+            tabs.keys().next().cloned()
+        };
         let mut tab_infos: Vec<_> = tabs
             .values()
             .map(|slot| crate::types::TerminalTabInfo {
@@ -324,7 +349,7 @@ impl SessionPtyRegistry {
         tab_infos.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
         crate::types::TerminalTabListResponse {
             tabs: tab_infos,
-            active_tab_id: session_tabs.active_or_first_tab_id(),
+            active_tab_id,
         }
     }
 
@@ -333,36 +358,33 @@ impl SessionPtyRegistry {
         session_id: &str,
         title: Option<String>,
         cwd: Option<String>,
-    ) -> Option<String> {
+    ) -> Result<String, String> {
+        if session_id.trim().is_empty() {
+            return Err("终端 Tab 创建失败：session_id 为空".to_string());
+        }
         let tab_id = scru128::new().to_string();
         let terminal_id = terminal_instance_id(session_id, &tab_id);
         let cwd = cwd.unwrap_or_default();
-        if !self.ensure(&terminal_id, &cwd) {
-            return None;
+        if !self.ensure_with_title(&terminal_id, &cwd, title) {
+            return Err(format!("终端 Tab PTY 启动失败：{session_id}:{tab_id}"));
         }
-        if let Some(title) = title {
-            if let Some(session_tabs) = self.existing_session_tabs(session_id) {
-                if let Some(slot) = session_tabs.tabs.lock().unwrap().get_mut(&tab_id) {
-                    slot.title = title;
-                }
-            }
-        }
-        Some(tab_id)
+        Ok(tab_id)
     }
 
-    pub fn tab_restore(&self, session_id: &str, tab_id: &str, title: Option<String>) -> bool {
+    pub fn tab_restore(
+        &self,
+        session_id: &str,
+        tab_id: &str,
+        title: Option<String>,
+    ) -> Result<(), String> {
+        if session_id.trim().is_empty() || tab_id.trim().is_empty() {
+            return Err("终端 Tab 恢复失败：session_id 或 tab_id 为空".to_string());
+        }
         let terminal_id = terminal_instance_id(session_id, tab_id);
-        if !self.ensure(&terminal_id, "") {
-            return false;
+        if !self.ensure_with_title(&terminal_id, "", title) {
+            return Err(format!("终端 Tab PTY 恢复失败：{session_id}:{tab_id}"));
         }
-        if let Some(title) = title {
-            if let Some(session_tabs) = self.existing_session_tabs(session_id) {
-                if let Some(slot) = session_tabs.tabs.lock().unwrap().get_mut(tab_id) {
-                    slot.title = title;
-                }
-            }
-        }
-        true
+        Ok(())
     }
 
     pub fn tab_switch(&self, session_id: &str, tab_id: &str) -> bool {
@@ -527,8 +549,12 @@ impl SessionPtyRegistry {
             }
         }
 
-        let mut sessions = self.sessions.lock().unwrap();
-        if let Some(existing_tabs) = sessions.get(persistent_id).cloned() {
+        let existing_tabs = {
+            let sessions = self.sessions.lock().unwrap();
+            sessions.get(persistent_id).cloned()
+        };
+
+        if let Some(existing_tabs) = existing_tabs {
             let mut existing = existing_tabs.tabs.lock().unwrap();
             let mut draft = draft_tabs.tabs.lock().unwrap();
             for (tab_id, slot) in draft.drain() {
@@ -539,7 +565,25 @@ impl SessionPtyRegistry {
                     draft_tabs.active_tab_id.lock().unwrap().clone();
             }
         } else {
-            sessions.insert(persistent_id.to_string(), draft_tabs);
+            let mut sessions = self.sessions.lock().unwrap();
+            match sessions.entry(persistent_id.to_string()) {
+                Entry::Vacant(entry) => {
+                    entry.insert(draft_tabs);
+                }
+                Entry::Occupied(entry) => {
+                    let existing_tabs = entry.get().clone();
+                    drop(sessions);
+                    let mut existing = existing_tabs.tabs.lock().unwrap();
+                    let mut draft = draft_tabs.tabs.lock().unwrap();
+                    for (tab_id, slot) in draft.drain() {
+                        existing.entry(tab_id).or_insert(slot);
+                    }
+                    if existing_tabs.active_tab_id.lock().unwrap().is_none() {
+                        *existing_tabs.active_tab_id.lock().unwrap() =
+                            draft_tabs.active_tab_id.lock().unwrap().clone();
+                    }
+                }
+            }
         }
         info!(
             draft_id,
@@ -549,9 +593,9 @@ impl SessionPtyRegistry {
 
     /// 列出所有 session 的状态摘要（phase 取自各对话的协作状态机）
     pub fn list_statuses(&self) -> Vec<crate::types::TerminalSessionStatus> {
-        let sessions = self.sessions.lock().unwrap();
+        let sessions: Vec<_> = self.sessions.lock().unwrap().values().cloned().collect();
         let mut statuses = Vec::new();
-        for session_tabs in sessions.values() {
+        for session_tabs in sessions {
             let tabs = session_tabs.tabs.lock().unwrap();
             statuses.extend(
                 tabs.values()
@@ -657,11 +701,18 @@ fn migrate_terminal_log(draft_id: &str, persistent_id: &str, tab_id: &str) {
             );
         }
     }
-    if let Err(e) = std::fs::rename(&draft_log, &real_log) {
-        error!(
-            draft_id, persistent_id, tab_id, error = %e,
-            "迁移终端日志文件失败（PTY 已迁移，日志保留在草稿目录）"
-        );
+    if let Err(rename_err) = std::fs::rename(&draft_log, &real_log) {
+        match std::fs::copy(&draft_log, &real_log).and_then(|_| std::fs::remove_file(&draft_log)) {
+            Ok(()) => {}
+            Err(fallback_err) => error!(
+                draft_id,
+                persistent_id,
+                tab_id,
+                rename_error = %rename_err,
+                fallback_error = %fallback_err,
+                "迁移终端日志文件失败（PTY 已迁移，日志保留在草稿目录）"
+            ),
+        }
     }
 }
 
