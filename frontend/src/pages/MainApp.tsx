@@ -4,8 +4,7 @@ import { api, type RunSnapshot } from '@/api/tauri';
 import { AppSidebar } from '@/components/AppSidebar';
 import { SidebarProvider } from '@/components/ui/sidebar';
 import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components/LazyComponents';
-import { BrowserPanel } from '@/components/BrowserPanel';
-import { TerminalPanel } from '@/components/TerminalPanel';
+import { TabsContainer } from '@/components/TabsContainer';
 import { ensureDesktopNotificationPermission } from '@/utils/desktopNotification';
 import { useUpdateCheck } from '@/hooks/useUpdateCheck';
 import type { UnlistenFn } from '@tauri-apps/api/event';
@@ -96,7 +95,6 @@ export function MainApp() {
   const [showWorkspacePanel, setShowWorkspacePanel] = useState(false);
   const [workspaceTabKind, setWorkspaceTabKind] = useState<WorkspaceTabKind>('browser');
   const [chatPanelWidth, setChatPanelWidth] = useState(MIN_CHAT_WIDTH);
-  const [browserUrl, setBrowserUrl] = useState<string | undefined>(undefined);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const showWorkspacePanelRef = useRef(false);
   const workspaceTabKindRef = useRef<WorkspaceTabKind>('browser');
@@ -298,14 +296,9 @@ export function MainApp() {
 
       const unlistenBrowserOpen = await listen<string>('browser:open', async (event) => {
         const url = event.payload;
-        setBrowserUrl(url);
         await openWorkspacePanel('browser');
         await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
         await api.browserNavigate(url).catch(console.error);
-      });
-
-      const unlistenBrowserPageLoaded = await listen<{ title: string; url: string; text: string }>('browser:page_loaded', (event) => {
-        setBrowserUrl(event.payload.url);
       });
 
       const unlistenResize = await getCurrentWindow().onResized(async () => {
@@ -341,7 +334,6 @@ export function MainApp() {
         unlistenSessions();
         unlistenOpenSession();
         unlistenBrowserOpen();
-        unlistenBrowserPageLoaded();
         unlistenResize();
       };
     };
@@ -357,7 +349,6 @@ export function MainApp() {
     const onOpenBrowser = async (e: Event) => {
       const url = (e as CustomEvent).detail;
       if (typeof url === 'string') {
-        setBrowserUrl(url);
         await openWorkspacePanel('browser');
         // 等待面板渲染和位置同步后再导航
         await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
@@ -410,17 +401,10 @@ export function MainApp() {
               )}
 
               {showWorkspacePanel && (
-                workspaceTabKind === 'browser' ? (
-                  <BrowserPanel
-                    initialUrl={browserUrl}
-                    currentUrl={browserUrl}
-                    onClose={closeWorkspacePanel}
-                  />
-                ) : (
-                  <div className="flex-1 min-w-0">
-                    <TerminalPanel onClose={() => { void closeWorkspacePanel(); }} />
-                  </div>
-                )
+                <TabsContainer
+                  initialTabKind={workspaceTabKind}
+                  onClose={() => { void closeWorkspacePanel(); }}
+                />
               )}
             </div>
           </main>

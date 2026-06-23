@@ -169,7 +169,7 @@
 - [x] 06：浏览器会话切换 - `docs/tabs-session-binding/06-browser-session-switch.md`
 - [x] 07：浏览器空白页懒创建 - `docs/tabs-session-binding/07-browser-blank-lazy-webview.md`
 - [x] 08：前端单一工作区面板 - `docs/tabs-session-binding/08-frontend-workspace-shell.md`
-- [ ] 09：统一 Tabs 容器 - `docs/tabs-session-binding/09-frontend-tabs-container.md`
+- [x] 09：统一 Tabs 容器 - `docs/tabs-session-binding/09-frontend-tabs-container.md`
 - [ ] 10：终端 Tab 内容组件 - `docs/tabs-session-binding/10-terminal-tab-content.md`
 - [ ] 11：浏览器 Tab 内容组件 - `docs/tabs-session-binding/11-browser-tab-content.md`
 - [ ] 12：会话切换恢复与防抖持久化 - `docs/tabs-session-binding/12-session-restore-persistence.md`
