@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Globe, Plus, TerminalSquare, X } from 'lucide-react';
+import { api } from '@/api/tauri';
 import type { TabKind, TabState } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
+import { BrowserTabContent } from './BrowserTabContent';
 import { TerminalTabContent } from './TerminalTabContent';
 import { Button } from './ui/button';
 
@@ -21,14 +23,24 @@ function newLocalTabId(kind: TabKind): string {
   return `${kind}-${crypto.randomUUID()}`;
 }
 
-function createTab(kind: TabKind): TabState {
+function createLocalTab(kind: TabKind, id = newLocalTabId(kind)): TabState {
   const createdAt = nowText();
   return {
-    id: newLocalTabId(kind),
+    id,
     kind,
     title: kind === 'browser' ? '浏览器' : '终端',
     url: kind === 'browser' ? DEFAULT_BROWSER_URL : '',
     created_at: createdAt,
+  };
+}
+
+function createBrowserTabFromBackend(tab: { id: string; url: string; title: string }): TabState {
+  return {
+    id: tab.id,
+    kind: 'browser',
+    title: tab.title || '浏览器',
+    url: tab.url || DEFAULT_BROWSER_URL,
+    created_at: nowText(),
   };
 }
 
@@ -41,8 +53,10 @@ function pickNextActiveTab(tabs: TabState[], closedIndex: number): string | null
 export function TabsContainer({ initialTabKind, onClose }: TabsContainerProps) {
   const activeSessionId = useStore((state) => state.activeSessionId);
   const draftTerminalId = useStore((state) => state.draftTerminalId);
-  const [tabs, setTabs] = useState<TabState[]>(() => [createTab(initialTabKind)]);
-  const [activeTabId, setActiveTabId] = useState<string>(() => tabs[0]?.id ?? '');
+  const [tabs, setTabs] = useState<TabState[]>([]);
+  const [activeTabId, setActiveTabId] = useState('');
+  const tabsRef = useRef<TabState[]>([]);
+  const lastInitialTabKindRef = useRef<TabKind | null>(null);
   const terminalSessionId = activeSessionId || draftTerminalId || DRAFT_TERMINAL_ID;
 
   const activeTab = useMemo(
@@ -50,37 +64,93 @@ export function TabsContainer({ initialTabKind, onClose }: TabsContainerProps) {
     [activeTabId, tabs],
   );
 
-  useEffect(() => {
-    setTabs((currentTabs) => {
-      if (currentTabs.some((tab) => tab.kind === initialTabKind)) {
-        const existing = currentTabs.find((tab) => tab.kind === initialTabKind);
-        if (existing) {
-          setActiveTabId(existing.id);
-        }
-        return currentTabs;
+  const handleNewTab = useCallback(async (kind: TabKind) => {
+    if (kind === 'browser') {
+      try {
+        const tabId = await api.browserTabNew(DEFAULT_BROWSER_URL);
+        const nextTab = createLocalTab(kind, tabId);
+        setTabs((currentTabs) => [...currentTabs, nextTab]);
+        setActiveTabId(nextTab.id);
+      } catch (err) {
+        console.error('新建浏览器 Tab 失败：', err);
       }
-      const nextTab = createTab(initialTabKind);
-      setActiveTabId(nextTab.id);
-      return [...currentTabs, nextTab];
-    });
-  }, [initialTabKind]);
+      return;
+    }
 
-  const handleNewTab = useCallback((kind: TabKind) => {
+    void api.browserHide().catch(console.error);
     setTabs((currentTabs) => {
-      const nextTab = createTab(kind);
+      const nextTab = createLocalTab(kind);
       setActiveTabId(nextTab.id);
       return [...currentTabs, nextTab];
     });
   }, []);
+
+  useEffect(() => {
+    tabsRef.current = tabs;
+  }, [tabs]);
+
+  const activateOrCreateTab = useCallback(async (kind: TabKind) => {
+    const existing = tabsRef.current.find((tab) => tab.kind === kind);
+    if (existing) {
+      if (existing.kind === 'terminal') {
+        void api.browserHide().catch(console.error);
+      }
+      setActiveTabId(existing.id);
+      return;
+    }
+
+    if (kind === 'browser') {
+      try {
+        const result = await api.browserTabList();
+        if (result.tabs.length > 0) {
+          const browserTabs = result.tabs.map(createBrowserTabFromBackend);
+          const activeId = result.active_tab_id || browserTabs[0]?.id || '';
+          setTabs((currentTabs) => {
+            const currentIds = new Set(currentTabs.map((tab) => tab.id));
+            const newTabs = browserTabs.filter((tab) => !currentIds.has(tab.id));
+            const updatedTabs = currentTabs.map((tab) => {
+              const backendTab = browserTabs.find((item) => item.id === tab.id);
+              return backendTab ? { ...tab, title: backendTab.title, url: backendTab.url } : tab;
+            });
+            return [...updatedTabs, ...newTabs];
+          });
+          setActiveTabId(activeId);
+          return;
+        }
+      } catch {
+        // 浏览器运行时可能尚未初始化，继续按空白 Tab 创建。
+      }
+    }
+
+    await handleNewTab(kind);
+  }, [handleNewTab]);
+
+  useEffect(() => {
+    if (lastInitialTabKindRef.current === initialTabKind && tabsRef.current.length > 0) {
+      return;
+    }
+    lastInitialTabKindRef.current = initialTabKind;
+    void activateOrCreateTab(initialTabKind);
+  }, [activateOrCreateTab, initialTabKind]);
 
   const handleSwitchTab = useCallback((tabId: string) => {
+    const nextTab = tabs.find((tab) => tab.id === tabId);
+    if (nextTab?.kind === 'terminal') {
+      void api.browserHide().catch(console.error);
+    }
     setActiveTabId(tabId);
-  }, []);
+  }, [tabs]);
 
   const handleCloseTab = useCallback((tabId: string) => {
     setTabs((currentTabs) => {
       const closedIndex = currentTabs.findIndex((tab) => tab.id === tabId);
       if (closedIndex === -1) return currentTabs;
+      const closingTab = currentTabs[closedIndex];
+      if (closingTab.kind === 'browser') {
+        void api.browserTabClose(tabId).catch(console.error);
+      } else {
+        void api.terminalTabClose(terminalSessionId, tabId).catch(console.error);
+      }
       const nextTabs = currentTabs.filter((tab) => tab.id !== tabId);
       if (nextTabs.length === 0) {
         setActiveTabId('');
@@ -88,11 +158,30 @@ export function TabsContainer({ initialTabKind, onClose }: TabsContainerProps) {
         return [];
       }
       if (activeTabId === tabId) {
-        setActiveTabId(pickNextActiveTab(nextTabs, closedIndex) ?? '');
+        const nextActiveId = pickNextActiveTab(nextTabs, closedIndex) ?? '';
+        const nextActiveTab = nextTabs.find((tab) => tab.id === nextActiveId);
+        if (nextActiveTab?.kind !== 'browser') {
+          void api.browserHide().catch(console.error);
+        }
+        setActiveTabId(nextActiveId);
       }
       return nextTabs;
     });
-  }, [activeTabId, onClose]);
+  }, [activeTabId, onClose, terminalSessionId]);
+
+  const handleBrowserMetadataChange = useCallback((
+    tabId: string,
+    metadata: { title?: string; url?: string },
+  ) => {
+    setTabs((currentTabs) => currentTabs.map((tab) => {
+      if (tab.id !== tabId) return tab;
+      return {
+        ...tab,
+        title: metadata.title || tab.title,
+        url: metadata.url ?? tab.url,
+      };
+    }));
+  }, []);
 
   return (
     <div className="flex h-full flex-1 flex-col bg-background">
@@ -169,14 +258,13 @@ export function TabsContainer({ initialTabKind, onClose }: TabsContainerProps) {
               isActive={tab.id === activeTab?.id}
             />
           ) : (
-            <div
+            <BrowserTabContent
               key={tab.id}
-              className={`h-full items-center justify-center text-sm text-muted-foreground ${
-                tab.id === activeTab?.id ? 'flex' : 'hidden'
-              }`}
-            >
-              浏览器 Tab 内容将在后续任务接入
-            </div>
+              tabId={tab.id}
+              initialUrl={tab.url}
+              isActive={tab.id === activeTab?.id}
+              onMetadataChange={handleBrowserMetadataChange}
+            />
           )
         ))}
       </div>
