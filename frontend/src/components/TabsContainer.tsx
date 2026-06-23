@@ -72,6 +72,8 @@ export function TabsContainer({ initialTabKind, onClose }: TabsContainerProps) {
   const activeSessionId = useStore((state) => state.activeSessionId);
   const draftTerminalId = useStore((state) => state.draftTerminalId);
   const workspaceTabsTransfer = useStore((state) => state.workspaceTabsTransfer);
+  const workspaceDir = useStore((state) => state.workspaceDir);
+  const sessionCwd = useStore((state) => state.sessionCwd);
   const [tabs, setTabs] = useState<TabState[]>([]);
   const [activeTabId, setActiveTabId] = useState('');
   const [hydrateVersion, setHydrateVersion] = useState(0);
@@ -126,13 +128,18 @@ export function TabsContainer({ initialTabKind, onClose }: TabsContainerProps) {
       return;
     }
 
-    void api.browserHide().catch(console.error);
-    setTabs((currentTabs) => {
-      const nextTab = createLocalTab(kind);
-      setActiveTabId(nextTab.id);
-      return [...currentTabs, nextTab];
-    });
-  }, []);
+    try {
+      void api.browserHide().catch(console.error);
+      const tabId = await api.terminalTabNew(terminalSessionId, '终端', sessionCwd || workspaceDir || null);
+      const nextTab = createLocalTab(kind, tabId);
+      setTabs((currentTabs) => {
+        setActiveTabId(nextTab.id);
+        return [...currentTabs, nextTab];
+      });
+    } catch (err) {
+      console.error('新建终端 Tab 失败：', err);
+    }
+  }, [sessionCwd, terminalSessionId, workspaceDir]);
 
   useEffect(() => {
     tabsRef.current = tabs;

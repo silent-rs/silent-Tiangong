@@ -174,6 +174,6 @@
 - [x] 11：浏览器 Tab 内容组件 - `docs/tabs-session-binding/11-browser-tab-content.md`
 - [x] 12：会话切换恢复与防抖持久化 - `docs/tabs-session-binding/12-session-restore-persistence.md`
 - [x] 13：Tauri API 与权限声明 - `docs/tabs-session-binding/13-permissions-and-api.md`
-- [ ] 14：端到端验收 - `docs/tabs-session-binding/14-end-to-end-verification.md`
+- [x] 14：端到端验收 - `docs/tabs-session-binding/14-end-to-end-verification.md`
 
 ---
