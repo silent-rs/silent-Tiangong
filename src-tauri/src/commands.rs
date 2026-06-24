@@ -3164,10 +3164,15 @@ pub async fn probe_embedding_dimension(
     timeout_ms: Option<u64>,
     protocol: Option<String>,
 ) -> Result<usize, String> {
+    use tiangong_core::model::ProviderProtocol;
     use tiangong_core::models_config::ModelsConfig;
 
-    let protocol = protocol.unwrap_or_else(|| "openai".to_string());
-    if protocol != "openai" {
+    let protocol = protocol
+        .as_deref()
+        .unwrap_or_default()
+        .parse::<ProviderProtocol>()
+        .map_err(|err| err.to_string())?;
+    if !matches!(protocol, ProviderProtocol::OpenAiChatCompletions) {
         return Err("Embedding 维度探测仅支持 OpenAI 兼容协议".to_string());
     }
 

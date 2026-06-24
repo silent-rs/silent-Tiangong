@@ -46,9 +46,7 @@ impl CancelStrategy {
             tiangong_llm::model::ProviderProtocol::Anthropic => {
                 CancelStrategy::AbortWithStreamingUsage
             }
-            // Responses 与 Chat Completions 的 usage 均在流式末尾返回，需等请求完成。
-            tiangong_llm::model::ProviderProtocol::OpenAi
-            | tiangong_llm::model::ProviderProtocol::OpenAiChatCompletions
+            tiangong_llm::model::ProviderProtocol::OpenAiChatCompletions
             | tiangong_llm::model::ProviderProtocol::DeepSeek => CancelStrategy::WaitForUsage,
         }
     }

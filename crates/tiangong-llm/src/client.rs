@@ -13,8 +13,7 @@ pub fn rerank_provider_from_config(
     config: &RerankEndpointConfig,
 ) -> Result<Arc<dyn RerankProvider>> {
     match config.protocol {
-        // Rerank 端点（/rerank）与 OpenAI 两种协议变体兼容。
-        ProviderProtocol::OpenAi | ProviderProtocol::OpenAiChatCompletions => {
+        ProviderProtocol::OpenAiChatCompletions => {
             let mut provider_config =
                 OpenAiChatConfig::new(config.api_key.clone(), config.base_url.clone());
             provider_config.timeout = config.timeout;

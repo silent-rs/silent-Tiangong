@@ -170,6 +170,6 @@ pub fn now_text() -> String {
 | `API_BASE_URL` | API 基础 URL |
 | `API_TIMEOUT_MS` | 请求超时（毫秒） |
 | `API_MODEL` | 模型名称 |
-| `API_PROTOCOL` | LLM 协议：`openai`（Responses）/ `openai_chatcompletions`（Chat Completions，默认）/ `anthropic` / `deepseek` |
+| `API_PROTOCOL` | LLM 协议：`openai_chatcompletions`（Chat Completions，默认）/ `openai`（历史兼容别名，也走 Chat Completions）/ `anthropic` / `deepseek` |
 | `API_STREAM` | 是否启用流式输出（默认 true） |
 | `API_CLI_COMMAND` | CLI 模式命令 |
