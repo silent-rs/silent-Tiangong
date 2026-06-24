@@ -1,10 +1,30 @@
 # TODO - 天工当前开发任务
 
-> 最后更新：2026-06-19
-> 当前主线：0.10.0 发布准备
+> 最后更新：2026-06-24
+> 当前主线：0.10.1 发布后异常修复
 > 参考：`PLAN.md`、Issue #95
 
 ---
+
+## 当前入口（0.10.1）
+
+- 0.10.0 已从 `main` 发布，版本标签为 `v0.10.0`。
+- 当前阶段不扩展新功能，优先修复发布后暴露的 Agent 协作与运行时异常。
+- 后续开发以 `docs/exception-fixes-0.10.1/README.md` 为任务清单，以 `docs/exception-fixes-0.10.1/PROGRESS.md` 为进度记录。
+- Phase 21-M 统一工作区 Tabs 与会话绑定已完成，不再作为当前开发主线。
+
+## 0.10.1 异常修复任务
+
+| 序号 | Issue | 优先级 | 任务 | 状态 | Spec |
+|---|---|---:|---|---|---|
+| 01 | #163 | P0 | 0.10.0 发布后文档边界对齐 | 已完成 | `docs/exception-fixes-0.10.1/01-doc-boundary-alignment.md` |
+| 02 | #166 | P0 | Workspace Index 写入器失败修复 | 未开始 | `docs/exception-fixes-0.10.1/02-workspace-index-writer-fix.md` |
+| 03 | #168 | P1 | 工具空参数/解析失败恢复增强 | 未开始 | `docs/exception-fixes-0.10.1/03-empty-tool-arguments-recovery.md` |
+| 04 | #167 | P1 | ReAct 主循环阶段化重构设计 | 未开始 | `docs/exception-fixes-0.10.1/04-react-loop-refactor-design.md` |
+| 05 | #170 | P2 | 自动上下文压缩闭环核查 | 未开始 | `docs/exception-fixes-0.10.1/05-context-compression-audit.md` |
+| 06 | #165 | P2 | 工具失败恢复结构化 | 未开始 | `docs/exception-fixes-0.10.1/06-structured-tool-failure-recovery.md` |
+| 07 | #169 | P2 | 只读工具并行执行设计 | 未开始 | `docs/exception-fixes-0.10.1/07-readonly-tool-parallel-design.md` |
+| 08 | #164 | P0 | 桌面端 MCP HTTP/SSE 注册异常修复 | 未开始 | `docs/exception-fixes-0.10.1/08-desktop-mcp-http-sse-registration.md` |
 
 ## 已完成
 
