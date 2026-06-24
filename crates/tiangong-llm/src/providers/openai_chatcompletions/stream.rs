@@ -65,3 +65,54 @@ pub fn parse_stream_payload(
     }
     events
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unwrap_events(payload: Value) -> Vec<ProviderStreamEvent> {
+        parse_stream_payload(&payload)
+            .into_iter()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    #[test]
+    fn parses_chat_completions_tool_call_start_and_delta_by_id() {
+        let start_events = unwrap_events(serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_a",
+                        "type": "function",
+                        "function": { "name": "run_shell" }
+                    }]
+                }
+            }]
+        }));
+        assert_eq!(start_events.len(), 1);
+        assert!(matches!(
+            &start_events[0],
+            ProviderStreamEvent::ToolCallStart(call)
+                if call.id == "call_a" && call.name == "run_shell"
+        ));
+
+        let delta_events = unwrap_events(serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": { "arguments": "{\"script\":\"pwd\"}" }
+                    }]
+                }
+            }]
+        }));
+        assert_eq!(delta_events.len(), 1);
+        assert!(matches!(
+            &delta_events[0],
+            ProviderStreamEvent::ToolCallDelta { call_id, partial_json }
+                if call_id == "0" && partial_json == "{\"script\":\"pwd\"}"
+        ));
+    }
+}

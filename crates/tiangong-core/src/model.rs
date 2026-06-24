@@ -1621,7 +1621,11 @@ fn summarize_provider_raw_response(raw: &Value) -> Option<String> {
 
 fn parse_tool_arguments_or_error(tool_name: &str, call_id: &str, raw_args: &str) -> Value {
     if raw_args.trim().is_empty() {
-        return json!({});
+        return json!({
+            "__parse_error": format!(
+                "工具参数为空：tool={tool_name} id={call_id}。请重新生成完整 JSON 参数后再调用工具。"
+            ),
+        });
     }
 
     serde_json::from_str(raw_args).unwrap_or_else(|err| {
@@ -1971,6 +1975,19 @@ fn parse_function_timeout_ms(raw: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_tool_arguments_become_parse_error() {
+        let arguments = parse_tool_arguments_or_error("run_shell", "call_empty", "");
+        let error = arguments
+            .get("__parse_error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+
+        assert!(error.contains("工具参数为空"));
+        assert!(error.contains("run_shell"));
+        assert!(error.contains("call_empty"));
+    }
 
     #[test]
     fn sanitize_defers_internal_tool_context_until_tool_results_complete() {
