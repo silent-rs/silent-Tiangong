@@ -409,6 +409,7 @@ impl SessionPtyRegistry {
         if !self.ensure_with_title(&terminal_id, &cwd, title) {
             return Err(format!("终端 Tab PTY 启动失败：{session_id}:{tab_id}"));
         }
+        self.emit_tab_updated(session_id, Some(tab_id.clone()), "user");
         Ok(tab_id)
     }
 
@@ -425,6 +426,7 @@ impl SessionPtyRegistry {
         if !self.ensure_with_title(&terminal_id, "", title) {
             return Err(format!("终端 Tab PTY 恢复失败：{session_id}:{tab_id}"));
         }
+        self.emit_tab_updated(session_id, Some(tab_id.to_string()), "restore");
         Ok(())
     }
 
@@ -436,6 +438,7 @@ impl SessionPtyRegistry {
             return false;
         }
         session_tabs.set_active_tab(tab_id.to_string());
+        self.emit_tab_updated(session_id, Some(tab_id.to_string()), "user");
         true
     }
 
@@ -443,6 +446,12 @@ impl SessionPtyRegistry {
         let terminal_id = terminal_instance_id(session_id, tab_id);
         let existed = self.get(&terminal_id).is_some();
         self.destroy(&terminal_id);
+        if existed {
+            let next_active = self
+                .existing_session_tabs(session_id)
+                .and_then(|tabs| tabs.active_or_first_tab_id());
+            self.emit_tab_updated(session_id, next_active, "user");
+        }
         existed
     }
 

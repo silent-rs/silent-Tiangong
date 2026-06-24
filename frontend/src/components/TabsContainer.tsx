@@ -203,7 +203,8 @@ export function TabsContainer({
         || terminalTabs[0]?.id
         || '';
 
-      setTabs((currentTabs) => {
+      const nextTabs = (() => {
+        const currentTabs = tabsRef.current;
         const terminalIds = new Set(terminalTabs.map((tab) => tab.id));
         const nonTerminalTabs = currentTabs.filter((tab) => (
           tab.kind !== 'terminal' || terminalIds.has(tab.id)
@@ -216,7 +217,10 @@ export function TabsContainer({
         });
         const newTabs = terminalTabs.filter((tab) => !existingIds.has(tab.id));
         return [...updatedTabs, ...newTabs];
-      });
+      })();
+
+      tabsRef.current = nextTabs;
+      setTabs(nextTabs);
 
       const shouldActivate = isVisibleRef.current
         && initialTabKindRef.current === 'terminal'
@@ -231,7 +235,14 @@ export function TabsContainer({
         if (result.active_tab_id !== nextActiveId) {
           void api.terminalTabSwitch(terminalSessionId, nextActiveId).catch(console.error);
         }
+        activeTabIdRef.current = nextActiveId;
         setActiveTabId(nextActiveId);
+      }
+      if (activeSessionIdRef.current === terminalSessionId) {
+        const activeId = shouldActivate && nextActiveId
+          ? nextActiveId
+          : activeTabIdRef.current || nextActiveId || nextTabs[0]?.id || null;
+        void api.setSessionTabs(terminalSessionId, nextTabs, activeId).catch(console.error);
       }
       return true;
     } catch (err) {
@@ -397,6 +408,11 @@ export function TabsContainer({
     if (!isVisible || !requestedTerminalTabId) return;
     void mergeTerminalRuntimeTabs(requestedTerminalTabId);
   }, [isVisible, mergeTerminalRuntimeTabs, requestedTerminalTabId]);
+
+  useEffect(() => {
+    if (!isVisible || initialTabKind !== 'terminal') return;
+    void mergeTerminalRuntimeTabs(requestedTerminalTabId ?? null);
+  }, [initialTabKind, isVisible, mergeTerminalRuntimeTabs, requestedTerminalTabId, openRequestVersion]);
 
   const handleSwitchTab = useCallback((tabId: string) => {
     const nextTab = tabs.find((tab) => tab.id === tabId);

@@ -360,15 +360,16 @@ export function MainApp() {
         const store = useStore.getState();
         const terminalSessionId = store.activeSessionId || store.draftTerminalId;
         if (!terminalSessionId || session_id !== terminalSessionId) return;
-        if (source === 'agent_command') {
-          if (store.activeSessionId && session_id === store.activeSessionId) {
-            await syncTerminalRuntimeTabsToSession(session_id, active_tab_id ?? null).catch(console.error);
-          }
-          if (!showWorkspacePanelRef.current || workspaceTabKindRef.current !== 'terminal') {
-            return;
-          }
+        if (store.activeSessionId && session_id === store.activeSessionId) {
+          await syncTerminalRuntimeTabsToSession(session_id, active_tab_id ?? null).catch(console.error);
         }
-        await openWorkspacePanel('terminal', active_tab_id ?? null);
+        if (source === 'restore') {
+          return;
+        }
+        if (!showWorkspacePanelRef.current || workspaceTabKindRef.current !== 'terminal' || !active_tab_id) {
+          return;
+        }
+        await openWorkspacePanel('terminal', active_tab_id);
       });
 
       const unlistenResize = await getCurrentWindow().onResized(async () => {
