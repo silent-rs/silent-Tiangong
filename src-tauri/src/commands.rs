@@ -31,6 +31,13 @@ fn format_agent_reply_message(agent_label: &str, content: &str) -> String {
     format!("<!-- tiangong-agent-reply -->\n<!-- label:{safe_label} -->\n\n{content}")
 }
 
+fn done_event_keeps_turn_running(
+    event: &tiangong_types::StreamEvent,
+    has_pending_turn: bool,
+) -> bool {
+    matches!(event, tiangong_types::StreamEvent::Done { usage: None }) && has_pending_turn
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct AttachmentDataUrl {
     pub data_url: String,
@@ -1244,11 +1251,23 @@ pub(crate) fn start_stream_consumer(
                         }
                     }
                     StreamEvent::Done { .. } => {
-                        core_state.report_run_idle(format!(
-                            "模型供应商：{}",
-                            core_state.provider_label()
-                        ));
-                        core_state.clear_pending_turn_for(&sid);
+                        if done_event_keeps_turn_running(
+                            &event,
+                            core_state.has_pending_turn_for(&sid),
+                        ) {
+                            core_state.store.runtime.run.status =
+                                tiangong_core::runtime::RunStatus::Executing;
+                            core_state.store.runtime.run.summary = "正在处理".to_string();
+                            core_state.store.runtime.run.last_session_id = Some(sid.clone());
+                            core_state.store.runtime.run.updated_at =
+                                tiangong_core::session::now_text();
+                        } else {
+                            core_state.report_run_idle(format!(
+                                "模型供应商：{}",
+                                core_state.provider_label()
+                            ));
+                            core_state.clear_pending_turn_for(&sid);
+                        }
                     }
                     StreamEvent::Error { ref message } => {
                         core_state.report_run_idle(format!("执行失败：{message}"));
@@ -1365,7 +1384,20 @@ pub(crate) fn start_stream_consumer(
                     &event,
                     StreamEvent::ContextCompressing { .. } | StreamEvent::ContextCompressed { .. }
                 );
-                let is_exec = if is_done || is_error {
+                let keeps_running = if is_done {
+                    rt.block_on(app.state::<TiangongApp>().with_state_read(|s| {
+                        Ok(done_event_keeps_turn_running(
+                            &event,
+                            s.has_pending_turn_for(&sid),
+                        ))
+                    }))
+                    .unwrap_or(false)
+                } else {
+                    false
+                };
+                let is_exec = if keeps_running {
+                    true
+                } else if is_done || is_error {
                     false
                 } else if matches!(&event, StreamEvent::ContextCompressing { .. }) {
                     true
@@ -1410,9 +1442,17 @@ pub(crate) fn start_stream_consumer(
                 // 提取标题生成所需数据（在锁内完成，避免长时间持锁）
                 let title_task = rt.block_on(app.state::<TiangongApp>().with_state(|core_state| {
                     let _ = core_state.persist_session_and_app(&final_sid);
-                    let snapshot = build_full_snapshot_with_status(core_state, false);
+                    let still_running = done_event_keeps_turn_running(
+                        &event,
+                        core_state.has_pending_turn_for(&final_sid),
+                    );
+                    let snapshot = build_full_snapshot_with_status(core_state, still_running);
                     let _ = app.emit("run_snapshot", &snapshot);
                     let _ = app.emit("sessions_updated", &());
+
+                    if still_running {
+                        return Ok(None);
+                    }
 
                     // 检查是否需要生成标题
                     if let Some(session) = core_state.sessions().iter().find(|s| s.id == final_sid)
@@ -1462,8 +1502,12 @@ pub(crate) fn start_stream_consumer(
                                             }
                                             let _ =
                                                 core_state.persist_session_and_app(&sid_for_title);
-                                            let snapshot =
-                                                build_full_snapshot_with_status(core_state, false);
+                                            let still_running =
+                                                core_state.has_pending_turn_for(&sid_for_title);
+                                            let snapshot = build_full_snapshot_with_status(
+                                                core_state,
+                                                still_running,
+                                            );
                                             let _ = app_for_title.emit("run_snapshot", &snapshot);
                                             let _ = app_for_title.emit("sessions_updated", &());
                                             Ok(())
@@ -3213,10 +3257,15 @@ pub async fn probe_embedding_dimension(
     timeout_ms: Option<u64>,
     protocol: Option<String>,
 ) -> Result<usize, String> {
+    use tiangong_core::model::ProviderProtocol;
     use tiangong_core::models_config::ModelsConfig;
 
-    let protocol = protocol.unwrap_or_else(|| "openai".to_string());
-    if protocol != "openai" {
+    let protocol = protocol
+        .as_deref()
+        .unwrap_or_default()
+        .parse::<ProviderProtocol>()
+        .map_err(|err| err.to_string())?;
+    if !matches!(protocol, ProviderProtocol::OpenAiChatCompletions) {
         return Err("Embedding 维度探测仅支持 OpenAI 兼容协议".to_string());
     }
 
@@ -3512,4 +3561,32 @@ pub async fn webhook_list_runs(
         .into_iter()
         .map(|r| serde_json::to_value(r).unwrap())
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::done_event_keeps_turn_running;
+
+    #[test]
+    fn empty_done_keeps_pending_turn_running() {
+        let event = tiangong_types::StreamEvent::Done { usage: None };
+        assert!(done_event_keeps_turn_running(&event, true));
+        assert!(!done_event_keeps_turn_running(&event, false));
+    }
+
+    #[test]
+    fn final_done_with_usage_finishes_pending_turn() {
+        let event = tiangong_types::StreamEvent::Done {
+            usage: Some(tiangong_types::TokenUsage::default()),
+        };
+        assert!(!done_event_keeps_turn_running(&event, true));
+    }
+
+    #[test]
+    fn error_event_never_keeps_turn_running() {
+        let event = tiangong_types::StreamEvent::Error {
+            message: "failed".to_string(),
+        };
+        assert!(!done_event_keeps_turn_running(&event, true));
+    }
 }

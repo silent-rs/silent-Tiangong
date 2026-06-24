@@ -270,7 +270,7 @@ pub(crate) fn force_final_response(
         pending_msg_id,
         MessageRole::Assistant,
         resp.text,
-        String::new(),
+        resp.reasoning_content,
     );
     emit_token_usage(
         stream_tx,
@@ -283,4 +283,5 @@ pub(crate) fn force_final_response(
     let _ = stream_tx.send(StreamEvent::Done {
         usage: Some(resp.usage.clone()),
     });
+    session.persist_to_disk();
 }

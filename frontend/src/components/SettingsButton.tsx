@@ -62,7 +62,7 @@ export function SettingsButton() {
     base_url: '',
     api_key: '',
     timeout_ms: 60000,
-    protocol: 'openai',
+    protocol: 'openai_chatcompletions',
   };
 
   const updateProvider = (updates: Partial<ProviderConfigView>) => {
@@ -128,14 +128,14 @@ export function SettingsButton() {
             <div className="space-y-2">
               <Label>协议类型</Label>
               <Select
-                value={firstProvider.protocol || 'openai'}
+                value={firstProvider.protocol || 'openai_chatcompletions'}
                 onValueChange={(value) => updateProvider({ protocol: value })}
               >
                 <SelectTrigger className="bg-[#1E1E1E] border-[#3C3C3C] text-white">
                   <SelectValue placeholder="选择协议" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="openai">OpenAI 兼容</SelectItem>
+                  <SelectItem value="openai_chatcompletions">OpenAI Chat Completions</SelectItem>
                   <SelectItem value="anthropic">Anthropic</SelectItem>
                 </SelectContent>
               </Select>

@@ -46,9 +46,7 @@ impl CancelStrategy {
             tiangong_llm::model::ProviderProtocol::Anthropic => {
                 CancelStrategy::AbortWithStreamingUsage
             }
-            // Responses 与 Chat Completions 的 usage 均在流式末尾返回，需等请求完成。
-            tiangong_llm::model::ProviderProtocol::OpenAi
-            | tiangong_llm::model::ProviderProtocol::OpenAiChatCompletions
+            tiangong_llm::model::ProviderProtocol::OpenAiChatCompletions
             | tiangong_llm::model::ProviderProtocol::DeepSeek => CancelStrategy::WaitForUsage,
         }
     }
@@ -921,6 +919,39 @@ impl ReactEngine {
                     false,
                 )
                 .await;
+
+                if let Some(parse_error) = call
+                    .arguments
+                    .get("__parse_error")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    let message = parse_error.to_string();
+                    let _ = stream_tx.send(StreamEvent::ToolResult {
+                        name: call.name.clone(),
+                        tool_call_id: Some(call.id.clone()),
+                        ok: false,
+                        output: message.clone(),
+                        full_output: Some(message.clone()),
+                        media: vec![],
+                    });
+                    append_tool_result_message(
+                        session,
+                        &call.id,
+                        &call.name,
+                        message.clone(),
+                        true,
+                    );
+                    append_runtime_tool_message(
+                        session,
+                        &call.name,
+                        format!("工具参数无效 [{}]\n{message}", call.name),
+                    );
+                    let tool_call_key = tool_call_dedupe_key(&call.name, &call.arguments);
+                    failed_tool_call_keys.insert(tool_call_key, message);
+                    failed_tool_names.insert(call.name.clone());
+                    need_failure_recovery_prompt = true;
+                    continue;
+                }
 
                 // 团队协作工具拦截
                 if crate::agent_team::lifecycle::is_team_tool(&call.name) {

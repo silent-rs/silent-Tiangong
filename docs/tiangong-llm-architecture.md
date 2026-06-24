@@ -26,7 +26,6 @@
   - `crates/tiangong-llm/src/provider.rs`
 - 维护 provider 适配入口：
   - `crates/tiangong-llm/src/providers/anthropic`
-  - `crates/tiangong-llm/src/providers/openai`（Responses API）
   - `crates/tiangong-llm/src/providers/openai_chatcompletions`（Chat Completions API）
   - `crates/tiangong-llm/src/providers/deepseek`
 - 在 provider 内完成统一模型与协议模型之间的映射
@@ -75,7 +74,7 @@
 - Anthropic 链路相对符合目标结构
   - `crates/tiangong-anthropic` 承担了原生 transport
   - `tiangong-llm` 中 Anthropic provider 主要负责映射和封装
-- OpenAI 链路分为 Responses（`providers/openai`）与 Chat Completions（`providers/openai_chatcompletions`）两套适配，仍处于过渡态
+- OpenAI 主线当前只启用 Chat Completions（`providers/openai_chatcompletions`）适配；Responses 适配在独立分支中验证，未合入主线前不得暴露为可选协议
   - `crates/tiangong-llm/src/providers/openai_chatcompletions/provider.rs` 目前同时承担了 client 构建、重试、timeout、list models、错误分类等职责
   - 这部分后续应拆出独立 transport 或共享执行层，但当前不作为阻塞其他功能开发的前置任务
 

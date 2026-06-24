@@ -475,10 +475,7 @@ async fn embedded_hybrid_retrieval_loads_configured_embedding_and_recalls_semant
         println!("[skip] 未在配置文件中找到 embedding 路由或 options.dimension");
         return;
     };
-    if !matches!(
-        embedding.protocol,
-        ProviderProtocol::OpenAi | ProviderProtocol::OpenAiChatCompletions
-    ) {
+    if !matches!(embedding.protocol, ProviderProtocol::OpenAiChatCompletions) {
         println!(
             "[skip] embedding 协议不是 OpenAI 兼容协议: {}",
             embedding.protocol.as_str()

@@ -26,7 +26,7 @@
 本系统**不在后端写死 Rust 解析器**，而是采用两层策略：
 
 1. **多模态优先**：让模型直接读取文档原生内容
-   - PDF 走 Anthropic `document` block / OpenAI Responses `input_file` 原生 API
+   - PDF 走 Anthropic `document` block；OpenAI 主线当前使用 Chat Completions，不启用 Responses 原生文件输入
    - Office 文件因多模态原生 API 支持有限，主要靠本地转换后喂模型
 2. **Agent 自主 fallback**：把"如何用 python3/node 解析这些格式"的知识嵌入 system prompt，
    当多模态不可用或失败时，由 agent 自主调用 `run_command` 执行脚本解析
@@ -50,7 +50,7 @@
         ├─ 路径A: chat 模型自带 multimodal
         │     └─ provider_message_from_session → 随主请求发送
         │           ├─ Anthropic: document block（PDF 原生）✅
-        │           └─ OpenAI Responses: input_file 🔧（本期新增）
+        │           └─ OpenAI Chat Completions：当前不支持原生文件 block，走 fallback
         │
         └─ 路径B: chat 非 multimodal，有独立 multimodal 端点
               └─ analyze_attachment 工具 → multimodal_client 解析
@@ -89,11 +89,9 @@
 
 ### Provider 原生支持
 
-- `crates/tiangong-llm/src/providers/openai/mapping.rs`：
-  - `build_user_item()` 新增 `MessageContent::File` 分支 → `input_file` 原生 block
-  - `collect_text()` 移除 File 降级为文本的行为（避免 base64 膨胀 token）
 - Anthropic 路径无需改动（`anthropic/mapping.rs` 已映射为 document block）
 - OpenAI Chat Completions / DeepSeek：文件原生支持弱，维持现状靠 prompt fallback
+- OpenAI Responses 原生文件输入适配放在独立分支验证，未合入主线前不作为当前能力描述
 
 ### System Prompt
 
