@@ -39,7 +39,7 @@
 | 03 | #168 | P1 | 工具空参数/解析失败恢复增强 | 已完成 | `03-empty-tool-arguments-recovery.md` |
 | 04 | #167 | P1 | ReAct 主循环阶段化重构设计 | 已完成 | `04-react-loop-refactor-design.md` |
 | 05 | #170 | P2 | 自动上下文压缩闭环核查 | 已完成 | `05-context-compression-audit.md` |
-| 06 | #165 | P2 | 工具失败恢复结构化 | 未开始 | `06-structured-tool-failure-recovery.md` |
+| 06 | #165 | P2 | 工具失败恢复结构化 | 已完成 | `06-structured-tool-failure-recovery.md` |
 | 07 | #169 | P2 | 只读工具并行执行设计 | 未开始 | `07-readonly-tool-parallel-design.md` |
 | 08 | #164 | P0 | 桌面端 MCP HTTP/SSE 注册异常修复 | 已完成 | `08-desktop-mcp-http-sse-registration.md` |
 
