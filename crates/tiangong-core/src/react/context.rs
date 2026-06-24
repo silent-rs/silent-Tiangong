@@ -52,13 +52,14 @@ pub(crate) fn emit_token_usage(
 pub(crate) fn maybe_update_context_summary(
     session: &mut Session,
     engine: &RuntimeEngine,
-    observed_prompt_tokens: usize,
+    observed_usage: &TokenUsage,
     stream_tx: &StdSender<StreamEvent>,
 ) {
     let organizer = ContextOrganizer::new(engine.context_limit)
         .with_threshold(0.95)
         .with_keep_recent_turns(6);
-    if !organizer.needs_compression(observed_prompt_tokens) {
+    let observed_tokens = observed_total_tokens(observed_usage);
+    if !organizer.needs_compression(observed_tokens) {
         return;
     }
     let total_messages = session.messages.len();
@@ -66,17 +67,13 @@ pub(crate) fn maybe_update_context_summary(
         summary_up_to: session.summary_up_to,
         total_messages,
     });
-    match organizer.maybe_update_summary_with_usage(
-        session,
-        engine.client(),
-        observed_prompt_tokens,
-    ) {
+    match organizer.maybe_update_summary_with_usage(session, engine.client(), observed_tokens) {
         Ok(update) if update.compressed => {
             // 重置 current_tokens，压缩后上下文已大幅缩减
             session.current_tokens = 0;
             let remaining = session.messages.len().saturating_sub(session.summary_up_to);
             // 估算压缩后的 token 数（基于剩余消息比例）
-            let estimated_tokens = (observed_prompt_tokens as f64
+            let estimated_tokens = (observed_tokens as f64
                 * (remaining as f64 / total_messages.max(1) as f64))
                 as usize;
             session.current_tokens = estimated_tokens;
@@ -98,7 +95,9 @@ pub(crate) fn maybe_update_context_summary(
             session.persist_to_disk();
             tracing::info!(
                 session_id = %session.id,
-                observed_prompt_tokens,
+                observed_tokens,
+                observed_prompt_tokens = observed_usage.prompt_tokens,
+                observed_completion_tokens = observed_usage.completion_tokens,
                 threshold_tokens = organizer.token_threshold(),
                 summary_up_to = session.summary_up_to,
                 "上下文与本轮输出达到压缩阈值，已更新早期对话摘要"
@@ -112,6 +111,14 @@ pub(crate) fn maybe_update_context_summary(
                 "上下文压缩失败，继续使用原始上下文"
             );
         }
+    }
+}
+
+pub(crate) fn observed_total_tokens(usage: &TokenUsage) -> usize {
+    if usage.total_tokens > 0 {
+        usage.total_tokens
+    } else {
+        usage.prompt_tokens.saturating_add(usage.completion_tokens)
     }
 }
 
@@ -284,4 +291,35 @@ pub(crate) fn force_final_response(
         usage: Some(resp.usage.clone()),
     });
     session.persist_to_disk();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn observed_total_tokens_prefers_provider_total() {
+        let usage = TokenUsage {
+            prompt_tokens: 900,
+            completion_tokens: 120,
+            total_tokens: 1100,
+            prompt_cache_hit_tokens: None,
+            prompt_cache_miss_tokens: None,
+        };
+
+        assert_eq!(observed_total_tokens(&usage), 1100);
+    }
+
+    #[test]
+    fn observed_total_tokens_falls_back_to_prompt_plus_completion() {
+        let usage = TokenUsage {
+            prompt_tokens: 900,
+            completion_tokens: 120,
+            total_tokens: 0,
+            prompt_cache_hit_tokens: None,
+            prompt_cache_miss_tokens: None,
+        };
+
+        assert_eq!(observed_total_tokens(&usage), 1020);
+    }
 }

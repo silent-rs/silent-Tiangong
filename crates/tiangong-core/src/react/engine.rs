@@ -747,7 +747,13 @@ impl ReactEngine {
                         crate::react::context::maybe_update_context_summary(
                             session,
                             &self.engine,
-                            self.engine.context_limit,
+                            &tiangong_types::TokenUsage {
+                                prompt_tokens: self.engine.context_limit,
+                                completion_tokens: 0,
+                                total_tokens: self.engine.context_limit,
+                                prompt_cache_hit_tokens: None,
+                                prompt_cache_miss_tokens: None,
+                            },
                             stream_tx,
                         );
                         if session.summary_up_to > before_summary_up_to {
@@ -827,12 +833,7 @@ impl ReactEngine {
                     format_llm_output_message(&output),
                 );
                 session.persist_to_disk();
-                maybe_update_context_summary(
-                    session,
-                    &self.engine,
-                    response.usage.prompt_tokens,
-                    stream_tx,
-                );
+                maybe_update_context_summary(session, &self.engine, &response.usage, stream_tx);
 
                 if user_message_injected_during_stream {
                     memory_recall_attempted = false;
@@ -1420,12 +1421,7 @@ impl ReactEngine {
                         memory_candidate_count += 1;
                     }
                 }
-                maybe_update_context_summary(
-                    session,
-                    &self.engine,
-                    response.usage.prompt_tokens,
-                    stream_tx,
-                );
+                maybe_update_context_summary(session, &self.engine, &response.usage, stream_tx);
 
                 match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
                     PendingCommandEffect::Terminate => return accumulated_usage,
