@@ -23,7 +23,7 @@
 | 04 | #167 | ReAct 主循环阶段化重构设计 | P1 | 已完成 | `fix/exception-fixes-0.10.1` | `61091f26` | 手动审查设计文档、`git diff --check` |
 | 05 | #170 | 自动上下文压缩闭环核查 | P2 | 已完成 | `fix/exception-fixes-0.10.1` | `7f909847` | `cargo fmt -- --check`、`cargo check --workspace`、`cargo test -p tiangong-core observed_total_tokens -- --nocapture`、`git diff --check` |
 | 06 | #165 | 工具失败恢复结构化 | P2 | 已完成 | `fix/exception-fixes-0.10.1` | `5e15714c` | `cargo fmt -- --check`、`cargo check --workspace`、`cargo test -p tiangong-core tool_failure -- --nocapture`、`cargo test -p tiangong-core failure_distinguishes -- --nocapture`、`git diff --check` |
-| 07 | #169 | 只读工具并行执行设计 | P2 | 已完成 | `fix/exception-fixes-0.10.1` | 待提交 | 手动审查设计文档、`git diff --check` |
+| 07 | #169 | 只读工具并行执行设计 | P2 | 已完成 | `fix/exception-fixes-0.10.1` | `6b166718` | 手动审查设计文档、`git diff --check` |
 | 08 | #164 | 桌面端 MCP HTTP/SSE 注册异常修复 | P0 | 已完成 | `fix/exception-fixes-0.10.1` | `bdbfd9fa` | `cargo fmt -- --check`、`cargo check --workspace`、`yarn --cwd frontend build`、`git diff --check` |
 
 ## 依赖总览
