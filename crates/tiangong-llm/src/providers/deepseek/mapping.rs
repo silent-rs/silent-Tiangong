@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use crate::message::{ChatMessage, MessageContent, MessageRole};
 use crate::request::{ProviderRequest, ReasoningEffort};
 use crate::response::{ProviderResponse, StopReason};
-use crate::tool::{ToolChoice, ToolSpec};
+use crate::tool::{ToolChoice, ToolSpec, parse_tool_arguments_or_error};
 use crate::usage::TokenUsageData;
 
 pub fn to_deepseek_request(
@@ -269,7 +269,7 @@ pub fn from_deepseek_response(
     if let Some(tool_calls) = &choice.message.tool_calls {
         for tc in tool_calls {
             let arguments =
-                serde_json::from_str(&tc.function.arguments).unwrap_or_else(|_| json!({}));
+                parse_tool_arguments_or_error(&tc.function.name, &tc.id, &tc.function.arguments);
             content.push(MessageContent::ToolCall(crate::tool::ToolCall {
                 id: tc.id.clone(),
                 name: tc.function.name.clone(),
@@ -318,5 +318,84 @@ fn map_stop_reason(reason: &str) -> StopReason {
         "length" => StopReason::MaxTokens,
         "content_filter" | "insufficient_system_resource" => StopReason::Other(reason.to_string()),
         _ => StopReason::Other(reason.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::MessageContent;
+
+    fn response_with_arguments(
+        arguments: &str,
+    ) -> tiangong_deepseek::types::ChatCompletionResponse {
+        tiangong_deepseek::types::ChatCompletionResponse {
+            id: "chatcmpl-test".to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "test-model".to_string(),
+            choices: vec![tiangong_deepseek::types::Choice {
+                index: 0,
+                message: tiangong_deepseek::types::ChoiceMessage {
+                    role: tiangong_deepseek::types::MessageRole::Assistant,
+                    content: None,
+                    reasoning_content: None,
+                    tool_calls: Some(vec![tiangong_deepseek::types::ToolCall {
+                        id: "call_bad".to_string(),
+                        kind: "function".to_string(),
+                        function: tiangong_deepseek::types::FunctionCall {
+                            name: "read_file".to_string(),
+                            arguments: arguments.to_string(),
+                        },
+                    }]),
+                },
+                finish_reason: "tool_calls".to_string(),
+                logprobs: None,
+            }],
+            usage: tiangong_deepseek::types::Usage {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                total_tokens: 2,
+                prompt_cache_hit_tokens: None,
+                prompt_cache_miss_tokens: None,
+                completion_tokens_details: None,
+            },
+            system_fingerprint: String::new(),
+        }
+    }
+
+    #[test]
+    fn invalid_tool_arguments_become_parse_error() {
+        let response =
+            from_deepseek_response(response_with_arguments("{\"path\":")).expect("response");
+        let MessageContent::ToolCall(call) = &response.assistant_message.content[0] else {
+            panic!("expected tool call");
+        };
+        assert!(
+            call.arguments
+                .get("__parse_error")
+                .and_then(Value::as_str)
+                .is_some_and(|message| message.contains("工具参数 JSON 无效"))
+        );
+        assert_eq!(
+            call.arguments
+                .get("__raw_args_preview")
+                .and_then(Value::as_str),
+            Some("{\"path\":")
+        );
+    }
+
+    #[test]
+    fn empty_tool_arguments_become_parse_error() {
+        let response = from_deepseek_response(response_with_arguments("")).expect("response");
+        let MessageContent::ToolCall(call) = &response.assistant_message.content[0] else {
+            panic!("expected tool call");
+        };
+        assert!(
+            call.arguments
+                .get("__parse_error")
+                .and_then(Value::as_str)
+                .is_some_and(|message| message.contains("工具参数为空"))
+        );
     }
 }

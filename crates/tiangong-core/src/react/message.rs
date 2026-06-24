@@ -119,6 +119,212 @@ pub(crate) fn append_runtime_tool_message_with_reasoning(
     );
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolFailureKind {
+    Argument,
+    PermissionDenied,
+    UserRejected,
+    CommandFailed,
+    Timeout,
+    EnvironmentMissing,
+    Network,
+    ToolInternal,
+}
+
+impl ToolFailureKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Argument => "argument_error",
+            Self::PermissionDenied => "permission_denied",
+            Self::UserRejected => "user_rejected",
+            Self::CommandFailed => "command_failed",
+            Self::Timeout => "timeout",
+            Self::EnvironmentMissing => "environment_missing",
+            Self::Network => "network_failure",
+            Self::ToolInternal => "tool_internal_error",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ToolFailureRecord {
+    pub tool_name: String,
+    pub tool_call_id: String,
+    pub arguments_summary: String,
+    pub error_kind: ToolFailureKind,
+    pub error_message: String,
+    pub retryable: bool,
+    pub same_failure_count: usize,
+    pub recommended_next_action: String,
+    pub requires_user_input: bool,
+}
+
+impl ToolFailureRecord {
+    pub(crate) fn new(
+        tool_name: &str,
+        tool_call_id: &str,
+        arguments_summary: impl Into<String>,
+        error_kind: ToolFailureKind,
+        error_message: impl Into<String>,
+    ) -> Self {
+        let error_message = error_message.into();
+        let retryable = default_retryable(error_kind);
+        let requires_user_input = default_requires_user_input(error_kind);
+        let recommended_next_action =
+            default_recommended_next_action(error_kind, &error_message).to_string();
+        Self {
+            tool_name: tool_name.to_string(),
+            tool_call_id: tool_call_id.to_string(),
+            arguments_summary: arguments_summary.into(),
+            error_kind,
+            error_message,
+            retryable,
+            same_failure_count: 1,
+            recommended_next_action,
+            requires_user_input,
+        }
+    }
+
+    pub(crate) fn repeated(
+        tool_name: &str,
+        tool_call_id: &str,
+        arguments_summary: impl Into<String>,
+        original_error: impl Into<String>,
+    ) -> Self {
+        let original_error = original_error.into();
+        let mut record = Self::new(
+            tool_name,
+            tool_call_id,
+            arguments_summary,
+            classify_failure_message(&original_error),
+            "",
+        );
+        record.error_message = original_error;
+        record.retryable = false;
+        record.same_failure_count = 2;
+        record.requires_user_input = false;
+        record.recommended_next_action =
+            "不要重复相同工具和参数；请修正参数、切换工具，或在缺少外部条件时询问用户。"
+                .to_string();
+        record
+    }
+
+    pub(crate) fn render_for_model(&self) -> String {
+        let arguments_summary = if self.arguments_summary.trim().is_empty() {
+            "(empty)".to_string()
+        } else {
+            self.arguments_summary.trim().to_string()
+        };
+        format!(
+            "[tool_failure]\n\
+tool_name: {tool_name}\n\
+tool_call_id: {tool_call_id}\n\
+arguments_summary: {arguments_summary}\n\
+error_kind: {error_kind}\n\
+error_message: {error_message}\n\
+retryable: {retryable}\n\
+same_failure_count: {same_failure_count}\n\
+requires_user_input: {requires_user_input}\n\
+recommended_next_action: {recommended_next_action}",
+            tool_name = self.tool_name,
+            tool_call_id = self.tool_call_id,
+            error_kind = self.error_kind.as_str(),
+            error_message = self.error_message.trim(),
+            retryable = self.retryable,
+            same_failure_count = self.same_failure_count,
+            requires_user_input = self.requires_user_input,
+            recommended_next_action = self.recommended_next_action
+        )
+    }
+}
+
+pub(crate) fn classify_tool_result_failure(result: &crate::tool::ToolResult) -> ToolFailureKind {
+    let combined = format!("{}\n{}", result.summary, result.stderr).to_lowercase();
+    if combined.contains("timed out") || combined.contains("timeout") || combined.contains("超时")
+    {
+        ToolFailureKind::Timeout
+    } else if combined.contains("not found")
+        || combined.contains("no such file")
+        || combined.contains("command not found")
+        || combined.contains("未找到")
+        || combined.contains("不存在")
+        || combined.contains("缺失")
+    {
+        ToolFailureKind::EnvironmentMissing
+    } else if combined.contains("network")
+        || combined.contains("connection")
+        || combined.contains("dns")
+        || combined.contains("网络")
+        || combined.contains("连接")
+    {
+        ToolFailureKind::Network
+    } else if result.exit_code != 0 || !result.stderr.trim().is_empty() {
+        ToolFailureKind::CommandFailed
+    } else {
+        ToolFailureKind::ToolInternal
+    }
+}
+
+pub(crate) fn structured_tool_failure_provider_text(record: &ToolFailureRecord) -> String {
+    record.render_for_model()
+}
+
+fn classify_failure_message(message: &str) -> ToolFailureKind {
+    let lowered = message.to_lowercase();
+    if lowered.contains("__parse_error") || lowered.contains("参数") || lowered.contains("json") {
+        ToolFailureKind::Argument
+    } else if lowered.contains("权限") || lowered.contains("permission") {
+        ToolFailureKind::PermissionDenied
+    } else if lowered.contains("拒绝") || lowered.contains("rejected") {
+        ToolFailureKind::UserRejected
+    } else if lowered.contains("timeout") || lowered.contains("超时") {
+        ToolFailureKind::Timeout
+    } else if lowered.contains("network") || lowered.contains("网络") {
+        ToolFailureKind::Network
+    } else {
+        ToolFailureKind::ToolInternal
+    }
+}
+
+fn default_retryable(kind: ToolFailureKind) -> bool {
+    matches!(
+        kind,
+        ToolFailureKind::Timeout | ToolFailureKind::Network | ToolFailureKind::ToolInternal
+    )
+}
+
+fn default_requires_user_input(kind: ToolFailureKind) -> bool {
+    matches!(
+        kind,
+        ToolFailureKind::PermissionDenied | ToolFailureKind::UserRejected
+    )
+}
+
+fn default_recommended_next_action(kind: ToolFailureKind, message: &str) -> &'static str {
+    match kind {
+        ToolFailureKind::Argument => {
+            if message.contains("__parse_error") {
+                "重新生成完整 JSON 参数，不要把 __parse_error 当作真实参数。"
+            } else {
+                "检查工具 schema 和参数类型，修正参数后再调用。"
+            }
+        }
+        ToolFailureKind::PermissionDenied => {
+            "不要重复执行被拒绝的操作；改用安全方案或请求用户授权。"
+        }
+        ToolFailureKind::UserRejected => {
+            "用户已拒绝该操作；不要重复请求同一操作，改用不需要该授权的方案。"
+        }
+        ToolFailureKind::CommandFailed => "阅读 stderr/stdout，修正命令、路径或环境后再试。",
+        ToolFailureKind::Timeout => "缩小操作范围、增加过滤条件，或改用更轻量的命令/工具。",
+        ToolFailureKind::EnvironmentMissing => {
+            "确认路径、命令、依赖或工作目录是否存在；缺少外部条件时询问用户。"
+        }
+        ToolFailureKind::Network => "检查网络、端点和凭据；可短暂重试，持续失败时询问用户。",
+        ToolFailureKind::ToolInternal => "根据错误信息重新规划；不要盲目重复同一调用。",
+    }
+}
+
 pub(crate) fn tool_result_provider_text(
     tool_name: &str,
     result: &crate::tool::ToolResult,
@@ -211,7 +417,7 @@ pub(crate) fn append_repeated_failed_tool_result(
         format!("失败原因：{original_error}\n")
     };
     let message = format!(
-        "{error_hint}本轮已经执行过完全相同的 {tool_name} 工具调用且执行失败，系统已跳过重复执行。请不要继续重复相同工具和参数；请修正参数后重试，或切换到其他可行方式。"
+        "{error_hint}本轮已经执行过完全相同的 {tool_name} 工具调用且执行失败，系统已跳过重复执行。请不要继续重复相同工具和参数；如果失败原因包含 __parse_error，请重新生成完整 JSON 参数，不要把 __parse_error 当作真实参数；也可以切换到其他可行方式。"
     );
     let _ = stream_tx.send(StreamEvent::ToolResult {
         name: tool_name.to_string(),
@@ -529,5 +735,53 @@ mod tests {
         let tool_text = session.messages[1].text_content();
         assert!(tool_text.contains("数据来源：terminal_user_input"));
         assert!(tool_text.contains("command: ls -la"));
+    }
+
+    #[test]
+    fn structured_tool_failure_renders_argument_guidance() {
+        let record = ToolFailureRecord::new(
+            "read_file",
+            "call_bad",
+            "path=(empty)",
+            ToolFailureKind::Argument,
+            "工具参数 JSON 无效：__parse_error",
+        );
+
+        let text = structured_tool_failure_provider_text(&record);
+
+        assert!(text.contains("[tool_failure]"));
+        assert!(text.contains("tool_name: read_file"));
+        assert!(text.contains("error_kind: argument_error"));
+        assert!(text.contains("retryable: false"));
+        assert!(text.contains("不要把 __parse_error 当作真实参数"));
+    }
+
+    #[test]
+    fn classify_tool_result_failure_distinguishes_common_kinds() {
+        let command_failed = crate::tool::ToolResult {
+            ok: false,
+            summary: "命令执行失败".to_string(),
+            stdout: String::new(),
+            stderr: "exit status 2".to_string(),
+            exit_code: 2,
+            execution: None,
+        };
+        assert_eq!(
+            classify_tool_result_failure(&command_failed),
+            ToolFailureKind::CommandFailed
+        );
+
+        let missing_environment = crate::tool::ToolResult {
+            ok: false,
+            summary: "工具执行失败".to_string(),
+            stdout: String::new(),
+            stderr: "command not found: rg".to_string(),
+            exit_code: 127,
+            execution: None,
+        };
+        assert_eq!(
+            classify_tool_result_failure(&missing_environment),
+            ToolFailureKind::EnvironmentMissing
+        );
     }
 }

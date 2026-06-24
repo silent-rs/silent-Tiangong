@@ -747,7 +747,13 @@ impl ReactEngine {
                         crate::react::context::maybe_update_context_summary(
                             session,
                             &self.engine,
-                            self.engine.context_limit,
+                            &tiangong_types::TokenUsage {
+                                prompt_tokens: self.engine.context_limit,
+                                completion_tokens: 0,
+                                total_tokens: self.engine.context_limit,
+                                prompt_cache_hit_tokens: None,
+                                prompt_cache_miss_tokens: None,
+                            },
                             stream_tx,
                         );
                         if session.summary_up_to > before_summary_up_to {
@@ -827,12 +833,7 @@ impl ReactEngine {
                     format_llm_output_message(&output),
                 );
                 session.persist_to_disk();
-                maybe_update_context_summary(
-                    session,
-                    &self.engine,
-                    response.usage.prompt_tokens,
-                    stream_tx,
-                );
+                maybe_update_context_summary(session, &self.engine, &response.usage, stream_tx);
 
                 if user_message_injected_during_stream {
                     memory_recall_attempted = false;
@@ -926,6 +927,14 @@ impl ReactEngine {
                     .and_then(serde_json::Value::as_str)
                 {
                     let message = parse_error.to_string();
+                    let failure = ToolFailureRecord::new(
+                        &call.name,
+                        &call.id,
+                        format_call_args_summary(call),
+                        ToolFailureKind::Argument,
+                        message.clone(),
+                    );
+                    let provider_text = structured_tool_failure_provider_text(&failure);
                     let _ = stream_tx.send(StreamEvent::ToolResult {
                         name: call.name.clone(),
                         tool_call_id: Some(call.id.clone()),
@@ -938,16 +947,16 @@ impl ReactEngine {
                         session,
                         &call.id,
                         &call.name,
-                        message.clone(),
+                        provider_text.clone(),
                         true,
                     );
                     append_runtime_tool_message(
                         session,
                         &call.name,
-                        format!("工具参数无效 [{}]\n{message}", call.name),
+                        format!("工具参数无效 [{}]\n{provider_text}", call.name),
                     );
                     let tool_call_key = tool_call_dedupe_key(&call.name, &call.arguments);
-                    failed_tool_call_keys.insert(tool_call_key, message);
+                    failed_tool_call_keys.insert(tool_call_key, provider_text);
                     failed_tool_names.insert(call.name.clone());
                     need_failure_recovery_prompt = true;
                     continue;
@@ -994,12 +1003,36 @@ impl ReactEngine {
                         session,
                         &call.id,
                         &call.name,
-                        tool_result_provider_text(&call.name, &result, false),
+                        if result.ok {
+                            tool_result_provider_text(&call.name, &result, false)
+                        } else {
+                            structured_tool_failure_provider_text(&ToolFailureRecord::new(
+                                &call.name,
+                                &call.id,
+                                args_summary.clone(),
+                                classify_tool_result_failure(&result),
+                                tool_result_full_output(&result),
+                            ))
+                        },
                         !result.ok,
                     );
                     if result.ok {
                         let tool_call_key = tool_call_dedupe_key(&call.name, &call.arguments);
                         successful_tool_call_keys.insert(tool_call_key);
+                    } else {
+                        let tool_call_key = tool_call_dedupe_key(&call.name, &call.arguments);
+                        failed_tool_call_keys.insert(
+                            tool_call_key,
+                            structured_tool_failure_provider_text(&ToolFailureRecord::new(
+                                &call.name,
+                                &call.id,
+                                args_summary.clone(),
+                                classify_tool_result_failure(&result),
+                                tool_result_full_output(&result),
+                            )),
+                        );
+                        failed_tool_names.insert(call.name.clone());
+                        need_failure_recovery_prompt = true;
                     }
                     continue;
                 }
@@ -1017,12 +1050,18 @@ impl ReactEngine {
                     continue;
                 }
                 if let Some(original_error) = failed_tool_call_keys.get(&tool_call_key).cloned() {
+                    let repeated_failure = ToolFailureRecord::repeated(
+                        &call.name,
+                        &call.id,
+                        args_summary.clone(),
+                        original_error,
+                    );
                     append_repeated_failed_tool_result(
                         session,
                         stream_tx,
                         &call.id,
                         &call.name,
-                        &original_error,
+                        &structured_tool_failure_provider_text(&repeated_failure),
                     );
                     failed_tool_names.insert(call.name.clone());
                     need_failure_recovery_prompt = true;
@@ -1070,9 +1109,27 @@ impl ReactEngine {
                             session,
                             &call.id,
                             &call.name,
-                            format!("权限拒绝：{reason}"),
+                            structured_tool_failure_provider_text(&ToolFailureRecord::new(
+                                &call.name,
+                                &call.id,
+                                args_summary.clone(),
+                                ToolFailureKind::PermissionDenied,
+                                format!("权限拒绝：{reason}"),
+                            )),
                             true,
                         );
+                        failed_tool_call_keys.insert(
+                            tool_call_key,
+                            structured_tool_failure_provider_text(&ToolFailureRecord::new(
+                                &call.name,
+                                &call.id,
+                                args_summary.clone(),
+                                ToolFailureKind::PermissionDenied,
+                                format!("权限拒绝：{reason}"),
+                            )),
+                        );
+                        failed_tool_names.insert(call.name.clone());
+                        need_failure_recovery_prompt = true;
                         continue;
                     }
                     PermissionDecision::NeedsApproval { request_id } => {
@@ -1185,7 +1242,13 @@ impl ReactEngine {
                                 session,
                                 &call.id,
                                 &call.name,
-                                "用户拒绝执行".to_string(),
+                                structured_tool_failure_provider_text(&ToolFailureRecord::new(
+                                    &call.name,
+                                    &call.id,
+                                    args_summary.clone(),
+                                    ToolFailureKind::UserRejected,
+                                    "用户拒绝执行",
+                                )),
                                 true,
                             );
                             session.persist_to_disk();
@@ -1228,6 +1291,14 @@ impl ReactEngine {
                                     .ensure_can_write(&path_buf, &self.agent_id, &now)
                             });
                         if let Err(message) = lock_error {
+                            let failure =
+                                structured_tool_failure_provider_text(&ToolFailureRecord::new(
+                                    &call.name,
+                                    &call.id,
+                                    args_summary.clone(),
+                                    ToolFailureKind::PermissionDenied,
+                                    message.clone(),
+                                ));
                             let _ = stream_tx.send(StreamEvent::ToolResult {
                                 name: call.name.clone(),
                                 tool_call_id: Some(call.id.clone()),
@@ -1237,8 +1308,15 @@ impl ReactEngine {
                                 media: vec![],
                             });
                             append_tool_result_message(
-                                session, &call.id, &call.name, message, true,
+                                session,
+                                &call.id,
+                                &call.name,
+                                failure.clone(),
+                                true,
                             );
+                            failed_tool_call_keys.insert(tool_call_key, failure);
+                            failed_tool_names.insert(call.name.clone());
+                            need_failure_recovery_prompt = true;
                             continue;
                         }
                     }
@@ -1363,7 +1441,17 @@ impl ReactEngine {
                     session,
                     &call.id,
                     &call.name,
-                    tool_result_provider_text(&call.name, &result, allow_memory_context),
+                    if result.ok {
+                        tool_result_provider_text(&call.name, &result, allow_memory_context)
+                    } else {
+                        structured_tool_failure_provider_text(&ToolFailureRecord::new(
+                            &call.name,
+                            &call.id,
+                            args_summary.clone(),
+                            classify_tool_result_failure(&result),
+                            tool_result_full_output(&result),
+                        ))
+                    },
                     !result.ok,
                 );
                 append_runtime_tool_message(
@@ -1380,15 +1468,14 @@ impl ReactEngine {
                     failed_tool_names.remove(&call.name);
                     successful_tool_call_keys.insert(tool_call_key);
                 } else {
-                    let error_summary = format!(
-                        "{}{}",
-                        result.summary.trim(),
-                        if result.stderr.trim().is_empty() {
-                            String::new()
-                        } else {
-                            format!(": {}", result.stderr.trim())
-                        }
-                    );
+                    let error_summary =
+                        structured_tool_failure_provider_text(&ToolFailureRecord::new(
+                            &call.name,
+                            &call.id,
+                            args_summary.clone(),
+                            classify_tool_result_failure(&result),
+                            tool_result_full_output(&result),
+                        ));
                     failed_tool_call_keys.insert(tool_call_key, error_summary);
                     failed_tool_names.insert(call.name.clone());
                     need_failure_recovery_prompt = true;
@@ -1420,12 +1507,7 @@ impl ReactEngine {
                         memory_candidate_count += 1;
                     }
                 }
-                maybe_update_context_summary(
-                    session,
-                    &self.engine,
-                    response.usage.prompt_tokens,
-                    stream_tx,
-                );
+                maybe_update_context_summary(session, &self.engine, &response.usage, stream_tx);
 
                 match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
                     PendingCommandEffect::Terminate => return accumulated_usage,

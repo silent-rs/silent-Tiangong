@@ -225,8 +225,7 @@ impl IndexManager {
         let mut guard = index
             .lock()
             .map_err(|e| anyhow::anyhow!("Workspace 索引锁获取失败: {}", e))?;
-        guard.index_file(path)?;
-        guard.commit()
+        guard.index_file(path)
     }
 
     pub fn remove_file(&self, root: &Path, rel_path: &str) -> Result<()> {
@@ -234,8 +233,7 @@ impl IndexManager {
         let mut guard = index
             .lock()
             .map_err(|e| anyhow::anyhow!("Workspace 索引锁获取失败: {}", e))?;
-        guard.remove_file(rel_path)?;
-        guard.commit()
+        guard.remove_file(rel_path)
     }
 
     pub fn workspace_entry_count(&self, root: &Path) -> Result<usize> {

@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use crate::message::{ChatMessage, MessageContent, MessageRole};
 use crate::request::{ProviderRequest, ReasoningEffort};
 use crate::response::{ProviderResponse, StopReason};
-use crate::tool::{ToolChoice, ToolSpec};
+use crate::tool::{ToolChoice, ToolSpec, parse_tool_arguments_or_error};
 use crate::usage::TokenUsageData;
 
 pub fn normalize_api_base(base_url: &str) -> Result<String> {
@@ -237,12 +237,12 @@ pub fn parse_complete_response(payload: &Value) -> Result<ProviderResponse> {
             .and_then(|v| v.get("name"))
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let arguments = tool_call
+        let raw_args = tool_call
             .get("function")
             .and_then(|v| v.get("arguments"))
             .and_then(Value::as_str)
-            .and_then(|raw| serde_json::from_str(raw).ok())
-            .unwrap_or_else(|| json!({}));
+            .unwrap_or_default();
+        let arguments = parse_tool_arguments_or_error(name, id, raw_args);
         if !name.is_empty() {
             content.push(MessageContent::ToolCall(crate::tool::ToolCall {
                 id: id.to_string(),
@@ -423,4 +423,89 @@ pub fn strip_think_tags(text: &str) -> String {
     }
     result.push_str(remaining);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::MessageContent;
+
+    #[test]
+    fn invalid_tool_arguments_become_parse_error() {
+        let payload = json!({
+            "id": "chatcmpl-test",
+            "model": "test-model",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_bad",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{\"path\":"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "total_tokens": 2
+            }
+        });
+
+        let response = parse_complete_response(&payload).expect("response should parse");
+        let MessageContent::ToolCall(call) = &response.assistant_message.content[0] else {
+            panic!("expected tool call");
+        };
+        assert_eq!(call.name, "read_file");
+        assert!(
+            call.arguments
+                .get("__parse_error")
+                .and_then(Value::as_str)
+                .is_some_and(|message| message.contains("工具参数 JSON 无效"))
+        );
+        assert_eq!(
+            call.arguments
+                .get("__raw_args_preview")
+                .and_then(Value::as_str),
+            Some("{\"path\":")
+        );
+    }
+
+    #[test]
+    fn empty_tool_arguments_become_parse_error() {
+        let payload = json!({
+            "id": "chatcmpl-test",
+            "model": "test-model",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_empty",
+                        "type": "function",
+                        "function": {
+                            "name": "run_shell",
+                            "arguments": ""
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let response = parse_complete_response(&payload).expect("response should parse");
+        let MessageContent::ToolCall(call) = &response.assistant_message.content[0] else {
+            panic!("expected tool call");
+        };
+        assert_eq!(call.name, "run_shell");
+        assert!(
+            call.arguments
+                .get("__parse_error")
+                .and_then(Value::as_str)
+                .is_some_and(|message| message.contains("工具参数为空"))
+        );
+    }
 }

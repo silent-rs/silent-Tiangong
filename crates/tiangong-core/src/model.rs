@@ -1623,7 +1623,7 @@ fn parse_tool_arguments_or_error(tool_name: &str, call_id: &str, raw_args: &str)
     if raw_args.trim().is_empty() {
         return json!({
             "__parse_error": format!(
-                "工具参数为空：tool={tool_name} id={call_id}。请重新生成完整 JSON 参数后再调用工具。"
+                "工具参数为空：tool={tool_name} id={call_id}。请重新生成完整 JSON 参数后再调用工具，不要把 __parse_error 当作真实参数。"
             ),
         });
     }
@@ -1633,6 +1633,7 @@ fn parse_tool_arguments_or_error(tool_name: &str, call_id: &str, raw_args: &str)
         json!({
             "__parse_error": format!(
                 "工具参数 JSON 无效：tool={tool_name} id={call_id} error={err}。\
+        请重新生成完整 JSON 参数后再调用工具，不要把 __parse_error 当作真实参数。\
         长内容写入请分段调用 write_file，第一次 append=false，后续 append=true。"
             ),
             "__raw_args_preview": raw_preview,

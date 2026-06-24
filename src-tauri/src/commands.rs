@@ -2487,19 +2487,46 @@ pub async fn get_mcp_health() -> Result<Vec<serde_json::Value>, String> {
 
 /// 注册 MCP 服务器
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn register_mcp_server(
     name: String,
     command: String,
     args: Vec<String>,
+    transport: Option<String>,
+    endpoint: Option<String>,
+    auth_header: Option<String>,
+    headers: Option<std::collections::HashMap<String, String>>,
     env: Option<std::collections::HashMap<String, String>>,
+    cwd: Option<String>,
     state: State<'_, TiangongApp>,
 ) -> Result<String, String> {
+    use tiangong_core::agent_config::McpTransportMode;
     use tiangong_core::app_state::RegisterMcpServerOptions;
     use tiangong_core::app_state::RegisterMcpServerRequest;
 
+    let transport = match transport
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => match value.to_ascii_lowercase().as_str() {
+            "auto" => Some(McpTransportMode::Auto),
+            "stdio" => Some(McpTransportMode::Stdio),
+            "http" | "sse" | "streamablehttp" | "streamable_http" | "streamable-http" => {
+                Some(McpTransportMode::Http)
+            }
+            other => {
+                return Err(format!(
+                    "不支持的 MCP transport：{other}，支持 auto/stdio/http/sse"
+                ));
+            }
+        },
+        None => None,
+    };
+
     let message = state
         .with_state(|core_state| {
-            // 转换 env HashMap 为 Vec<(String, String)>
+            let header_vec = headers.unwrap_or_default().into_iter().collect();
             let env_vec = env.unwrap_or_default().into_iter().collect();
 
             let request = RegisterMcpServerRequest {
@@ -2509,8 +2536,12 @@ pub async fn register_mcp_server(
                 tags: vec![],
                 enabled: true,
                 options: RegisterMcpServerOptions {
+                    transport,
+                    endpoint,
+                    auth_header,
+                    headers: header_vec,
                     env: env_vec,
-                    ..Default::default()
+                    cwd,
                 },
             };
             core_state.register_mcp_server(request)
