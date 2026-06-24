@@ -36,7 +36,7 @@
 |---|---|---:|---|---|---|
 | 01 | #163 | P0 | 0.10.0 发布后文档边界对齐 | 已完成 | `01-doc-boundary-alignment.md` |
 | 02 | #166 | P0 | Workspace Index 写入器失败修复 | 已完成 | `02-workspace-index-writer-fix.md` |
-| 03 | #168 | P1 | 工具空参数/解析失败恢复增强 | 未开始 | `03-empty-tool-arguments-recovery.md` |
+| 03 | #168 | P1 | 工具空参数/解析失败恢复增强 | 已完成 | `03-empty-tool-arguments-recovery.md` |
 | 04 | #167 | P1 | ReAct 主循环阶段化重构设计 | 未开始 | `04-react-loop-refactor-design.md` |
 | 05 | #170 | P2 | 自动上下文压缩闭环核查 | 未开始 | `05-context-compression-audit.md` |
 | 06 | #165 | P2 | 工具失败恢复结构化 | 未开始 | `06-structured-tool-failure-recovery.md` |
