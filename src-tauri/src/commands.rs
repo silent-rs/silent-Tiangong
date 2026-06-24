@@ -495,6 +495,12 @@ fn build_session_snapshot(
 // 会话管理
 // ============================================================================
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionTabsView {
+    pub tabs: Vec<tiangong_core::session::TabState>,
+    pub active_tab_id: Option<String>,
+}
+
 /// 获取所有会话列表
 #[tauri::command]
 pub async fn get_sessions(state: State<'_, TiangongApp>) -> Result<Vec<SessionListItem>, String> {
@@ -506,6 +512,49 @@ pub async fn get_sessions(state: State<'_, TiangongApp>) -> Result<Vec<SessionLi
                 .filter(|session| session.parent_session_id.is_none())
                 .map(SessionListItem::from_core)
                 .collect())
+        })
+        .await
+}
+
+/// 获取指定会话的统一工作区 Tab 元数据
+#[tauri::command]
+pub async fn get_session_tabs(
+    session_id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<SessionTabsView, String> {
+    state
+        .with_state_read(|core_state| {
+            let session = core_state
+                .sessions()
+                .iter()
+                .find(|session| session.id == session_id)
+                .ok_or_else(|| anyhow::anyhow!("会话不存在：{session_id}"))?;
+            Ok(SessionTabsView {
+                tabs: session.tabs.clone(),
+                active_tab_id: session.active_tab_id.clone(),
+            })
+        })
+        .await
+}
+
+/// 写入指定会话的统一工作区 Tab 元数据
+#[tauri::command]
+pub async fn set_session_tabs(
+    session_id: String,
+    tabs: Vec<tiangong_core::session::TabState>,
+    active_tab_id: Option<String>,
+    state: State<'_, TiangongApp>,
+) -> Result<(), String> {
+    state
+        .with_state(|core_state| {
+            let session = core_state
+                .sessions_mut()
+                .iter_mut()
+                .find(|session| session.id == session_id)
+                .ok_or_else(|| anyhow::anyhow!("会话不存在：{session_id}"))?;
+            session.tabs = tabs;
+            session.active_tab_id = active_tab_id;
+            core_state.persist_session_and_app(&session_id)
         })
         .await
 }

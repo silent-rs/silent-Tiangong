@@ -55,6 +55,10 @@ function formatTime(ts: number): string {
 const DEFAULT_URL = 'about:blank';
 const HISTORY_PAGE_SIZE = 20;
 
+function isBlankBrowserUrl(url: string): boolean {
+  return !url || url === DEFAULT_URL;
+}
+
 export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelProps) {
   const [url, setUrl] = useState(initialUrl || '');
   const [tabs, setTabs] = useState<TabInfo[]>([]);
@@ -269,6 +273,24 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
     await api.browserSetPosition(rect.x, rect.y, rect.width, rect.height).catch(console.error);
   }, []);
 
+  const ensureBlankTabMetadata = useCallback(async (rect: DOMRect) => {
+    await api.browserSetPosition(rect.x, rect.y, rect.width, rect.height);
+    const result = await api.browserTabList();
+    if (result.tabs.length === 0) {
+      const tabId = await api.browserTabNew(DEFAULT_URL);
+      activeTabIdRef.current = tabId;
+      setActiveTabId(tabId);
+      setUrl('');
+      setTabHistories(prev => {
+        const next = new Map(prev);
+        next.set(tabId, { entries: [], currentIndex: -1 });
+        return next;
+      });
+    }
+    browserOpenedRef.current = true;
+    await refreshTabs();
+  }, [refreshTabs]);
+
   // 关闭 Modal 时恢复 WebView 位置
   useEffect(() => {
     if (!showHistoryModal && browserOpenedRef.current) {
@@ -283,7 +305,12 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
     navigationIntentRef.current = 'new';
 
     try {
+      if (containerRef.current) {
+        const rect = containerRef.current.getBoundingClientRect();
+        await api.browserSetPosition(rect.x, rect.y, rect.width, rect.height);
+      }
       await api.browserNavigate(nextUrl);
+      browserOpenedRef.current = true;
     } catch (err) {
       console.error('打开浏览器失败：', err);
     }
@@ -423,7 +450,7 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
       setActiveTabId(tabId);
       const tab = tabs.find(t => t.id === tabId);
       if (tab) {
-        setUrl(tab.url);
+        setUrl(tab.url === DEFAULT_URL ? '' : tab.url);
       }
     } catch (err) {
       console.error('切换标签失败：', err);
@@ -483,10 +510,8 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
       } else if (containerRef.current) {
         const rect = containerRef.current.getBoundingClientRect();
         if (rect.width > 0 && rect.height > 0) {
-          api.browserOpen(DEFAULT_URL, rect.x, rect.y, rect.width, rect.height)
-            .then(() => { browserOpenedRef.current = true; })
-            .then(() => refreshTabs())
-            .catch(console.error);
+          await ensureBlankTabMetadata(rect);
+          return;
         }
       }
       refreshTabs();
@@ -529,8 +554,15 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
           requestAnimationFrame(tryOpen);
           return;
         }
-        api.browserOpen(initialUrl || DEFAULT_URL, rect.x, rect.y, rect.width, rect.height)
-          .then(() => { browserOpenedRef.current = true; })
+        const normalizedInitialUrl = normalizeBrowserUrl(initialUrl || '');
+        const openPromise = isBlankBrowserUrl(normalizedInitialUrl)
+          ? ensureBlankTabMetadata(rect)
+          : api.browserOpen(normalizedInitialUrl, rect.x, rect.y, rect.width, rect.height)
+            .then(() => {
+              browserOpenedRef.current = true;
+              setUrl(normalizedInitialUrl);
+            });
+        openPromise
           .then(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())))
           .then(() => {
             if (containerRef.current) {
@@ -546,7 +578,7 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
       requestAnimationFrame(tryOpen);
       return () => { cancelled = true; };
     }
-  }, [initialUrl, refreshTabs]);
+  }, [ensureBlankTabMetadata, initialUrl, refreshTabs]);
 
   return (
     <div className="flex flex-1 flex-col h-full bg-background">

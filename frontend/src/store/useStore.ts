@@ -2,6 +2,8 @@ import { create } from 'zustand';
 import { api, Session, Message, RunSnapshot, McpServer, Skill, TaskPlan, MediaAsset, TokenStats, textContent } from '../api/tauri';
 import { notifyBackgroundSessionCompleted } from '../utils/desktopNotification';
 
+const DRAFT_TERMINAL_ID = '__draft_terminal__';
+
 // ---------------------------------------------------------------------------
 // Agent 信息（从系统消息解析）
 // ---------------------------------------------------------------------------
@@ -149,6 +151,11 @@ interface AppState {
    * 转正完成（或切换/删除对话）时清空。
    */
   draftTerminalId: string | null;
+  workspaceTabsTransfer: {
+    fromSessionId: string;
+    toSessionId: string;
+    version: number;
+  } | null;
   messages: Message[];
   runStatus: string;
   runSummary: string;
@@ -234,6 +241,7 @@ export const useStore = create<AppState>((set, get) => ({
   sessions: [],
   activeSessionId: null as string | null,
   draftTerminalId: null as string | null,
+  workspaceTabsTransfer: null,
   messages: [],
   runStatus: 'idle',
   runSummary: '',
@@ -327,7 +335,7 @@ export const useStore = create<AppState>((set, get) => ({
     const draftEffort = reasoningEffortPerSession['__draft__'] || 'medium';
     // 为草稿态终端生成稳定临时 id：同一时刻只有一个草稿，用固定常量即可。
     // TerminalPanel 草稿态会以此 id 创建 PTY；转正时迁移归属到真实 session_id。
-    const draftTerminalId = '__draft_terminal__';
+    const draftTerminalId = DRAFT_TERMINAL_ID;
     // 销毁上一轮草稿残留的 PTY（草稿用固定 id，若上次草稿没转正也没销毁，
     // 后端会残留死掉的 PTY，导致下次 ensure 复用陈旧条目、终端显示「未就绪」）。
     // 销毁是幂等的：后端无此 id 时 no-op。后端 ensure 也会兜底检测陈旧 PTY 重建。
@@ -370,6 +378,7 @@ export const useStore = create<AppState>((set, get) => ({
         isDraft: false,
         activeSessionId: id,
         draftTerminalId: null,
+        workspaceTabsTransfer: null,
         messages: snapshot.messages,
         inputContent: snapshot.input_draft,
         runStatus: snapshot.status,
@@ -405,6 +414,7 @@ export const useStore = create<AppState>((set, get) => ({
         isDraft: false,
         activeSessionId: snapshot.messages.length > 0 ? snapshot.messages[0].id : null,
         draftTerminalId: null,
+        workspaceTabsTransfer: null,
         messages: snapshot.messages,
         inputContent: snapshot.input_draft,
         runStatus: snapshot.status,
@@ -438,17 +448,20 @@ export const useStore = create<AppState>((set, get) => ({
         // 草稿态若用户打开过终端，已用 draftTerminalId 创建了 PTY，这里迁移它
         // （PTY 内 shell 历史、cwd 一并保留）；若草稿态没开终端（draftTerminalId
         // 不存在或未创建），迁移是幂等的 no-op。
-        const draftId = get().draftTerminalId;
-        if (draftId) {
-          await api
-            .terminalAttachSession(draftId, session.id)
-            .catch(e => console.error('草稿终端 PTY 转正迁移失败:', e));
-        }
+        const draftId = get().draftTerminalId || DRAFT_TERMINAL_ID;
+        await api
+          .terminalAttachSession(draftId, session.id)
+          .catch(e => console.error('草稿终端 PTY 转正迁移失败:', e));
         set(state => ({
           sessions: [session, ...state.sessions],
           activeSessionId: session.id,
           isDraft: false,
           draftTerminalId: null,
+          workspaceTabsTransfer: {
+            fromSessionId: draftId,
+            toSessionId: session.id,
+            version: (state.workspaceTabsTransfer?.version ?? 0) + 1,
+          },
         }));
         // 兜底：确保转正后真实 session 一定有 PTY。
         // 草稿态未开终端时迁移是 no-op，这里补建；草稿态开过终端时迁移已完成，

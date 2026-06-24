@@ -23,6 +23,22 @@ pub enum SessionCwdMode {
     Custom,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TabKind {
+    Browser,
+    Terminal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TabState {
+    pub id: String,
+    pub kind: TabKind,
+    pub title: String,
+    pub url: String,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
@@ -59,6 +75,12 @@ pub struct Session {
     pub task_records: Vec<SessionTaskRecord>,
     #[serde(default)]
     pub task_plans: Vec<SessionTaskPlan>,
+    /// 当前会话的工作区 Tab 元数据列表。
+    #[serde(default)]
+    pub tabs: Vec<TabState>,
+    /// 当前会话最后活跃的工作区 Tab。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_tab_id: Option<String>,
     /// 会话级工作目录，工具执行时以此为根目录
     #[serde(default)]
     pub cwd: String,
@@ -246,6 +268,8 @@ impl Session {
             agent_token_usage: HashMap::new(),
             task_records: Vec::new(),
             task_plans: Vec::new(),
+            tabs: Vec::new(),
+            active_tab_id: None,
             cwd: String::new(),
             cwd_mode: SessionCwdMode::Inherit,
             trust_mode: TrustMode::default(),
@@ -283,6 +307,8 @@ impl Session {
             agent_token_usage: HashMap::new(),
             task_records: Vec::new(),
             task_plans: Vec::new(),
+            tabs: Vec::new(),
+            active_tab_id: None,
             cwd: workspace_dir.to_string_lossy().to_string(),
             cwd_mode: SessionCwdMode::Isolated,
             trust_mode: TrustMode::default(),

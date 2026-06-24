@@ -1,6 +1,44 @@
 use std::future::Future;
 use std::pin::Pin;
 
+/// 终端选择结果。
+///
+/// `terminal_id` 是实际执行命令时使用的路由 id。纯 session id 表示当前默认终端；
+/// `session_id:tab_id` 表示指定终端 Tab。
+#[derive(Debug, Clone)]
+pub struct TerminalSelection {
+    pub session_id: String,
+    pub tab_id: String,
+    pub terminal_id: String,
+    pub created_new: bool,
+    pub reason: TerminalSelectionReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalSelectionReason {
+    ReusedIdle,
+    NoAvailableTerminal,
+    AllBusy,
+}
+
+impl TerminalSelection {
+    pub fn feedback_text(&self) -> String {
+        let reason = match self.reason {
+            TerminalSelectionReason::ReusedIdle => "复用空闲终端",
+            TerminalSelectionReason::NoAvailableTerminal => "当前会话没有可用终端",
+            TerminalSelectionReason::AllBusy => "当前会话已有终端都在忙",
+        };
+        if self.created_new {
+            format!(
+                "；本次在新终端 {} 中执行，原因：{}，没有写入旧终端",
+                self.terminal_id, reason
+            )
+        } else {
+            format!("；本次使用终端 {} 执行，原因：{}", self.terminal_id, reason)
+        }
+    }
+}
+
 /// 终端会话能力抽象。
 ///
 /// GUI 模式下由 tiangong-plugin-terminal 实现，CLI/Server 模式下为 None（回退到独立进程）。
@@ -8,6 +46,23 @@ use std::pin::Pin;
 /// 所有方法都显式接收 `session_id`，按对话路由到对应对话的 PTY。
 /// 这样避免了全局 mutable state 在并发工具调用时的竞态。
 pub trait TerminalProvider: Send + Sync + 'static {
+    /// 为一次命令执行选择终端。默认返回当前 session，保持非多 Tab provider 兼容。
+    fn select_for_command(
+        &self,
+        session_id: &str,
+    ) -> Pin<Box<dyn Future<Output = Option<TerminalSelection>> + Send>> {
+        let session_id = session_id.to_string();
+        Box::pin(async move {
+            Some(TerminalSelection {
+                session_id: session_id.clone(),
+                tab_id: String::new(),
+                terminal_id: session_id,
+                created_new: false,
+                reason: TerminalSelectionReason::ReusedIdle,
+            })
+        })
+    }
+
     /// 在指定对话的终端会话中执行 shell 脚本（run_shell 用），返回执行结果。
     /// 返回 None 表示终端会话不可用，调用方应回退到独立进程模式。
     fn exec(

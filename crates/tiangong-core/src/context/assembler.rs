@@ -169,6 +169,8 @@ mod tests {
             agent_token_usage: Default::default(),
             task_records: Vec::new(),
             task_plans: Vec::new(),
+            tabs: Vec::new(),
+            active_tab_id: None,
             parent_session_id: None,
             cwd: String::new(),
             cwd_mode: Default::default(),

@@ -13,6 +13,36 @@ export interface Session {
   message_count: number;
 }
 
+export type TabKind = 'browser' | 'terminal';
+
+export interface TabState {
+  id: string;
+  kind: TabKind;
+  title: string;
+  url: string;
+  created_at: string;
+}
+
+export interface SessionTabs {
+  tabs: TabState[];
+  active_tab_id: string | null;
+}
+
+export interface TerminalTabInfo {
+  id: string;
+  title: string;
+  created_at: string;
+  alive: boolean;
+  cwd: string;
+  shell: string;
+  phase: string;
+}
+
+export interface TerminalTabListResponse {
+  tabs: TerminalTabInfo[];
+  active_tab_id: string | null;
+}
+
 export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
 export type RunStatus =
   | 'idle'
@@ -413,6 +443,12 @@ export const api = {
   // ----------------------------------------------------------------
   getSessions: (): Promise<Session[]> =>
     invoke('get_sessions'),
+
+  getSessionTabs: (sessionId: string): Promise<SessionTabs> =>
+    invoke('get_session_tabs', { sessionId }),
+
+  setSessionTabs: (sessionId: string, tabs: TabState[], activeTabId: string | null): Promise<void> =>
+    invoke('set_session_tabs', { sessionId, tabs, activeTabId }),
 
   createSession: (): Promise<Session> =>
     invoke('create_session'),
@@ -816,6 +852,28 @@ export const api = {
   browserTabList: (): Promise<{ tabs: Array<{ id: string; url: string; title: string }>; active_tab_id: string | null }> =>
     invoke('plugin:browser|browser_tab_list'),
 
+  browserSnapshotTabs: (): Promise<{
+    session_id: string | null;
+    tabs: Array<{ id: string; url: string; title: string }>;
+    active_tab_id: string | null;
+  }> =>
+    invoke('plugin:browser|browser_snapshot_tabs'),
+
+  browserSwitchSession: (
+    sessionId: string,
+    tabsToRestore: Array<{ id: string; url: string; title: string }>,
+    activeTabId?: string | null,
+  ): Promise<{
+    session_id: string | null;
+    tabs: Array<{ id: string; url: string; title: string }>;
+    active_tab_id: string | null;
+  }> =>
+    invoke('plugin:browser|browser_switch_session', {
+      sessionId,
+      tabsToRestore,
+      activeTabId: activeTabId ?? null,
+    }),
+
   browserTabNew: (url: string): Promise<string> =>
     invoke('plugin:browser|browser_tab_new', { url }),
 
@@ -919,4 +977,35 @@ export const api = {
     shell: string;
     phase: string;
   }>> => invoke('plugin:terminal|terminal_list_statuses'),
+
+  terminalTabList: (sessionId: string): Promise<TerminalTabListResponse> =>
+    invoke('plugin:terminal|terminal_tab_list', { sessionId }),
+
+  terminalTabNew: (
+    sessionId: string,
+    title?: string | null,
+    cwd?: string | null,
+  ): Promise<string> =>
+    invoke('plugin:terminal|terminal_tab_new', {
+      sessionId,
+      title: title ?? null,
+      cwd: cwd ?? null,
+    }),
+
+  terminalTabRestore: (
+    sessionId: string,
+    tabId: string,
+    title?: string | null,
+  ): Promise<void> =>
+    invoke('plugin:terminal|terminal_tab_restore', {
+      sessionId,
+      tabId,
+      title: title ?? null,
+    }),
+
+  terminalTabSwitch: (sessionId: string, tabId: string): Promise<void> =>
+    invoke('plugin:terminal|terminal_tab_switch', { sessionId, tabId }),
+
+  terminalTabClose: (sessionId: string, tabId: string): Promise<void> =>
+    invoke('plugin:terminal|terminal_tab_close', { sessionId, tabId }),
 };

@@ -153,3 +153,27 @@
 - [x] 更新测试以适配新的消息注入格式
 
 ---
+
+## Phase 21-M：统一工作区 Tabs 与会话绑定
+
+- [x] 从最新 `main` 创建 `feature/unified-tabs-session-binding` worktree
+- [x] 补充统一工作区 Tab 需求到 `docs/requirements.md`
+- [x] 引入并重写统一工作区 Tabs 设计文档
+- [x] 拆分任务 spec：`docs/tabs-session-binding/README.md`
+- [x] 新增开发进度记录：`docs/tabs-session-binding/PROGRESS.md`
+- [x] 01：会话 Tab 数据模型 - `docs/tabs-session-binding/01-session-tab-model.md`
+- [x] 02：会话 Tab 读写命令 - `docs/tabs-session-binding/02-session-tab-commands.md`
+- [x] 03：终端多 Tab 注册表 - `docs/tabs-session-binding/03-terminal-registry-multitab.md`
+- [x] 04：终端空闲选择与繁忙新建 - `docs/tabs-session-binding/04-terminal-selection.md`
+- [x] 05：命令结果反馈终端选择信息 - `docs/tabs-session-binding/05-terminal-result-feedback.md`
+- [x] 06：浏览器会话切换 - `docs/tabs-session-binding/06-browser-session-switch.md`
+- [x] 07：浏览器空白页懒创建 - `docs/tabs-session-binding/07-browser-blank-lazy-webview.md`
+- [x] 08：前端单一工作区面板 - `docs/tabs-session-binding/08-frontend-workspace-shell.md`
+- [x] 09：统一 Tabs 容器 - `docs/tabs-session-binding/09-frontend-tabs-container.md`
+- [x] 10：终端 Tab 内容组件 - `docs/tabs-session-binding/10-terminal-tab-content.md`
+- [x] 11：浏览器 Tab 内容组件 - `docs/tabs-session-binding/11-browser-tab-content.md`
+- [x] 12：会话切换恢复与防抖持久化 - `docs/tabs-session-binding/12-session-restore-persistence.md`
+- [x] 13：Tauri API 与权限声明 - `docs/tabs-session-binding/13-permissions-and-api.md`
+- [x] 14：端到端验收 - `docs/tabs-session-binding/14-end-to-end-verification.md`
+
+---

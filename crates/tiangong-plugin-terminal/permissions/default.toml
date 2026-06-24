@@ -20,4 +20,9 @@ permissions = [
     "allow-terminal-session-reset",
     "allow-terminal-session-update-screen",
     "allow-terminal-panel-set-session",
+    "allow-terminal-tab-list",
+    "allow-terminal-tab-new",
+    "allow-terminal-tab-restore",
+    "allow-terminal-tab-switch",
+    "allow-terminal-tab-close",
 ]

@@ -132,3 +132,26 @@ pub struct TerminalSessionStatus {
     /// 协作阶段：Idle / Running / Interactive / UserActive
     pub phase: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalTabInfo {
+    pub id: String,
+    pub title: String,
+    pub created_at: String,
+    pub alive: bool,
+    pub cwd: String,
+    pub shell: String,
+    pub phase: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalTabListResponse {
+    pub tabs: Vec<TerminalTabInfo>,
+    pub active_tab_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalTabUpdatedEvent {
+    pub session_id: String,
+    pub active_tab_id: Option<String>,
+}

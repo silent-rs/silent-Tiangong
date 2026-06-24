@@ -1,11 +1,10 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useStore } from '@/store/useStore';
-import { api, type RunSnapshot } from '@/api/tauri';
+import { api, type RunSnapshot, type TabKind } from '@/api/tauri';
 import { AppSidebar } from '@/components/AppSidebar';
 import { SidebarProvider } from '@/components/ui/sidebar';
 import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components/LazyComponents';
-import { BrowserPanel } from '@/components/BrowserPanel';
-import { TerminalPanel } from '@/components/TerminalPanel';
+import { TabsContainer } from '@/components/TabsContainer';
 import { ensureDesktopNotificationPermission } from '@/utils/desktopNotification';
 import { useUpdateCheck } from '@/hooks/useUpdateCheck';
 import type { UnlistenFn } from '@tauri-apps/api/event';
@@ -91,19 +90,23 @@ async function expandWindowForBrowser(lock?: () => void, unlock?: () => void) {
 export function MainApp() {
   const { loadSessions, updateFromSnapshot } = useStore();
   useUpdateCheck();
-  const [showBrowser, setShowBrowser] = useState(false);
-  const [showTerminal, setShowTerminal] = useState(false);
+  const [workspacePanelMounted, setWorkspacePanelMounted] = useState(false);
+  const [showWorkspacePanel, setShowWorkspacePanel] = useState(false);
+  const [workspaceTabKind, setWorkspaceTabKind] = useState<TabKind>('browser');
+  const [workspaceOpenRequestVersion, setWorkspaceOpenRequestVersion] = useState(0);
+  const [requestedTerminalTabId, setRequestedTerminalTabId] = useState<string | null>(null);
   const [chatPanelWidth, setChatPanelWidth] = useState(MIN_CHAT_WIDTH);
-  const [browserUrl, setBrowserUrl] = useState<string | undefined>(undefined);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const showBrowserRef = useRef(false);
-  const showTerminalRef = useRef(false);
+  const showWorkspacePanelRef = useRef(false);
+  const workspaceTabKindRef = useRef<TabKind>('browser');
+  const workspaceOpenRequestIdRef = useRef(0);
   const chatPanelWidthRef = useRef(MIN_CHAT_WIDTH);
   const isDraggingRef = useRef(false);
   const unlistenRef = useRef<UnlistenFn | null>(null);
   const latestSnapshotRef = useRef<RunSnapshot | null>(null);
   const snapshotTimerRef = useRef<number | null>(null);
   const savedWindowWidthRef = useRef<number | null>(null);
+  const workspaceExpandedForBrowserRef = useRef(false);
   const preferredSidebarOpenRef = useRef(true);
   const programmaticResizeRef = useRef(false);
   const resizeLockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -145,27 +148,45 @@ export function MainApp() {
     setSidebarOpen(open);
   }, [lockResize, unlockResize]);
 
-  const openBrowserPanel = useCallback(async () => {
-    const appWindow = getCurrentWindow();
-    const innerSize = await appWindow.innerSize();
-    const scaleFactor = await appWindow.scaleFactor();
-    savedWindowWidthRef.current = innerSize.width / scaleFactor;
+  const openWorkspacePanel = useCallback(async (kind: TabKind, terminalTabId?: string | null) => {
+    const requestId = workspaceOpenRequestIdRef.current + 1;
+    workspaceOpenRequestIdRef.current = requestId;
+    workspaceTabKindRef.current = kind;
+    setWorkspaceTabKind(kind);
+    setRequestedTerminalTabId(kind === 'terminal' ? terminalTabId ?? null : null);
+    setWorkspaceOpenRequestVersion((version) => version + 1);
     setSidebarOpenByLayout(false);
+
+    if (!showWorkspacePanelRef.current) {
+      const appWindow = getCurrentWindow();
+      const innerSize = await appWindow.innerSize();
+      const scaleFactor = await appWindow.scaleFactor();
+      savedWindowWidthRef.current = innerSize.width / scaleFactor;
+    }
+    showWorkspacePanelRef.current = true;
+    setWorkspacePanelMounted(true);
+    setShowWorkspacePanel(true);
+
     await expandWindowForBrowser(lockResize, unlockResize);
+    if (workspaceOpenRequestIdRef.current !== requestId) return;
+    workspaceExpandedForBrowserRef.current = true;
     chatPanelWidthRef.current = MIN_CHAT_WIDTH;
     setChatPanelWidth(MIN_CHAT_WIDTH);
-    showBrowserRef.current = true;
-    setShowBrowser(true);
+
+    if (kind === 'terminal') {
+      await api.browserHide().catch(console.error);
+    }
   }, [lockResize, setSidebarOpenByLayout, unlockResize]);
 
-  const closeBrowserPanel = useCallback(async (restoreSize = true) => {
-    if (!showBrowserRef.current) return;
+  const closeWorkspacePanel = useCallback(async (restoreSize = true) => {
+    if (!showWorkspacePanelRef.current) return;
+    workspaceOpenRequestIdRef.current += 1;
     const restoreW = savedWindowWidthRef.current;
     savedWindowWidthRef.current = null;
-    showBrowserRef.current = false;
-    setShowBrowser(false);
+    showWorkspacePanelRef.current = false;
+    setShowWorkspacePanel(false);
     await api.browserHide().catch(console.error);
-    if (restoreSize) {
+    if (restoreSize && workspaceExpandedForBrowserRef.current) {
       const appWindow = getCurrentWindow();
       const innerSize = await appWindow.innerSize();
       const scaleFactor = await appWindow.scaleFactor();
@@ -180,51 +201,16 @@ export function MainApp() {
     } else if (preferredSidebarOpenRef.current) {
       setSidebarOpenByLayout(true);
     }
+    workspaceExpandedForBrowserRef.current = false;
   }, [lockResize, setSidebarOpenByLayout, unlockResize]);
 
-  const handleToggleBrowser = useCallback(async () => {
-    if (!showBrowserRef.current) {
-      await openBrowserPanel();
-    } else {
-      await closeBrowserPanel();
-    }
-  }, [openBrowserPanel, closeBrowserPanel]);
-
-  // 打开终端面板：收起侧边栏，对话区与终端对半分（区别于浏览器固定 400px），
-  // 不扩展窗口（对半分是在现有窗口内重排）。保留拖拉分隔条调整宽度的能力。
-  // 若浏览器面板已打开，先关闭它（二者互斥，终端优先在当前窗口对半分）。
-  const openTerminalPanel = useCallback(() => {
-    if (showBrowserRef.current) {
-      void closeBrowserPanel(false);
-    }
-    setSidebarOpenByLayout(false);
-    const mainEl = document.querySelector('main');
-    if (mainEl) {
-      const half = Math.floor(mainEl.getBoundingClientRect().width / 2);
-      const clamped = Math.max(MIN_CHAT_WIDTH, half);
-      chatPanelWidthRef.current = clamped;
-      setChatPanelWidth(clamped);
-    }
-    showTerminalRef.current = true;
-    setShowTerminal(true);
-  }, [closeBrowserPanel, setSidebarOpenByLayout]);
-
-  const closeTerminalPanel = useCallback(() => {
-    if (!showTerminalRef.current) return;
-    showTerminalRef.current = false;
-    setShowTerminal(false);
-    if (preferredSidebarOpenRef.current) {
-      setSidebarOpenByLayout(true);
-    }
-  }, [setSidebarOpenByLayout]);
+  const handleToggleBrowser = useCallback(() => {
+    void openWorkspacePanel('browser');
+  }, [openWorkspacePanel]);
 
   const handleToggleTerminal = useCallback(() => {
-    if (!showTerminalRef.current) {
-      openTerminalPanel();
-    } else {
-      closeTerminalPanel();
-    }
-  }, [openTerminalPanel, closeTerminalPanel]);
+    void openWorkspacePanel('terminal');
+  }, [openWorkspacePanel]);
 
   const handleDividerDrag = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -246,14 +232,10 @@ export function MainApp() {
       if (!isDraggingRef.current) return;
       const rect = mainEl.getBoundingClientRect();
       const next = ev.clientX - rect.left;
-      // 拖到右侧剩余宽度小于面板最小宽度时，关闭当前打开的面板（浏览器优先，否则终端）
+      // 拖到右侧剩余宽度小于面板最小宽度时，关闭工作区面板。
       if (rect.width - next < MIN_BROWSER_WIDTH) {
         cleanup();
-        if (showBrowserRef.current) {
-          closeBrowserPanel(false);
-        } else if (showTerminalRef.current) {
-          closeTerminalPanel();
-        }
+        void closeWorkspacePanel(false);
         return;
       }
       const clamped = Math.max(MIN_CHAT_WIDTH, next);
@@ -265,7 +247,7 @@ export function MainApp() {
     document.body.style.userSelect = 'none';
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
-  }, [closeBrowserPanel, closeTerminalPanel]);
+  }, [closeWorkspacePanel]);
 
   useEffect(() => {
     ensureDesktopNotificationPermission().catch(console.warn);
@@ -315,16 +297,19 @@ export function MainApp() {
 
       const unlistenBrowserOpen = await listen<string>('browser:open', async (event) => {
         const url = event.payload;
-        setBrowserUrl(url);
-        if (!showBrowserRef.current) {
-          await openBrowserPanel();
-        }
+        await openWorkspacePanel('browser');
         await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
         await api.browserNavigate(url).catch(console.error);
       });
-
-      const unlistenBrowserPageLoaded = await listen<{ title: string; url: string; text: string }>('browser:page_loaded', (event) => {
-        setBrowserUrl(event.payload.url);
+      const unlistenTerminalTabUpdated = await listen<{
+        session_id: string;
+        active_tab_id?: string | null;
+      }>('terminal:tab_updated', async (event) => {
+        const { session_id, active_tab_id } = event.payload;
+        const store = useStore.getState();
+        const terminalSessionId = store.activeSessionId || store.draftTerminalId;
+        if (!terminalSessionId || session_id !== terminalSessionId) return;
+        await openWorkspacePanel('terminal', active_tab_id ?? null);
       });
 
       const unlistenResize = await getCurrentWindow().onResized(async () => {
@@ -335,19 +320,19 @@ export function MainApp() {
         const scaleFactor = await appWindow.scaleFactor();
         const logicalW = innerSize.width / scaleFactor;
 
-        if (showBrowserRef.current) {
+        if (showWorkspacePanelRef.current) {
           const mainEl = document.querySelector('main');
           const sidebarW = mainEl ? mainEl.offsetLeft : 0;
           const browserSpace = logicalW - sidebarW - chatPanelWidthRef.current;
           if (browserSpace < MIN_BROWSER_WIDTH) {
-            await closeBrowserPanel(false);
+            await closeWorkspacePanel(false);
           }
         }
 
         if (logicalW <= SIDEBAR_RESTORE_THRESHOLD) {
           setSidebarOpenByLayout(false);
         } else if (
-          !showBrowserRef.current
+          !showWorkspacePanelRef.current
           && preferredSidebarOpenRef.current
         ) {
           setSidebarOpenByLayout(true);
@@ -360,7 +345,7 @@ export function MainApp() {
         unlistenSessions();
         unlistenOpenSession();
         unlistenBrowserOpen();
-        unlistenBrowserPageLoaded();
+        unlistenTerminalTabUpdated();
         unlistenResize();
       };
     };
@@ -376,10 +361,7 @@ export function MainApp() {
     const onOpenBrowser = async (e: Event) => {
       const url = (e as CustomEvent).detail;
       if (typeof url === 'string') {
-        setBrowserUrl(url);
-        if (!showBrowserRef.current) {
-          await openBrowserPanel();
-        }
+        await openWorkspacePanel('browser');
         // 等待面板渲染和位置同步后再导航
         await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
         await api.browserNavigate(url).catch(console.error);
@@ -395,16 +377,16 @@ export function MainApp() {
       window.removeEventListener('tiangong:open-browser', onOpenBrowser);
       unlistenRef.current?.();
     };
-  }, [setSidebarOpenByLayout, openBrowserPanel, lockResize, unlockResize]);
+  }, [setSidebarOpenByLayout, openWorkspacePanel, closeWorkspacePanel, lockResize, unlockResize]);
 
   return (
     <SidebarProvider open={sidebarOpen} onOpenChange={handleSidebarChange}>
       <div className="flex flex-col h-screen w-full overflow-hidden">
         <LazyStatusPanel
-          showBrowser={showBrowser}
-          onToggleBrowser={handleToggleBrowser}
-          showTerminal={showTerminal}
-          onToggleTerminal={handleToggleTerminal}
+          browserActive={showWorkspacePanel && workspaceTabKind === 'browser'}
+          onOpenBrowser={handleToggleBrowser}
+          terminalActive={showWorkspacePanel && workspaceTabKind === 'terminal'}
+          onOpenTerminal={handleToggleTerminal}
         />
 
         <div className="flex flex-1 min-h-0">
@@ -413,8 +395,8 @@ export function MainApp() {
           <main className="flex flex-1 flex-col min-w-0 bg-background">
             <div className="flex flex-1 min-h-0">
               <div
-                className={`flex flex-col min-w-0 ${showBrowser || showTerminal ? 'shrink-0' : 'flex-1'}`}
-                style={showBrowser || showTerminal ? { width: chatPanelWidth } : undefined}
+                className={`flex flex-col min-w-0 ${showWorkspacePanel ? 'shrink-0' : 'flex-1'}`}
+                style={showWorkspacePanel ? { width: chatPanelWidth } : undefined}
               >
                 <div className="flex-1 overflow-hidden">
                   <LazyMessageList />
@@ -423,27 +405,23 @@ export function MainApp() {
                 <LazyMessageInput />
               </div>
 
-              {showBrowser && (
+              {workspacePanelMounted && showWorkspacePanel && (
                 <div
                   className="w-[3px] shrink-0 cursor-col-resize bg-border hover:bg-muted-foreground/30 active:bg-muted-foreground/50 transition-colors"
                   onMouseDown={handleDividerDrag}
                 />
               )}
 
-              {showBrowser && (
-                <BrowserPanel initialUrl={browserUrl} currentUrl={browserUrl} onClose={closeBrowserPanel} />
-              )}
-
-              {showTerminal && !showBrowser && (
-                <>
-                  <div
-                    className="w-[3px] shrink-0 cursor-col-resize bg-border hover:bg-muted-foreground/30 active:bg-muted-foreground/50 transition-colors"
-                    onMouseDown={handleDividerDrag}
+              {workspacePanelMounted && (
+                <div className={`min-w-0 flex-1 ${showWorkspacePanel ? 'flex' : 'hidden'}`}>
+                  <TabsContainer
+                    initialTabKind={workspaceTabKind}
+                    isVisible={showWorkspacePanel}
+                    openRequestVersion={workspaceOpenRequestVersion}
+                    requestedTerminalTabId={requestedTerminalTabId}
+                    onClose={() => { void closeWorkspacePanel(); }}
                   />
-                  <div className="flex-1 min-w-0">
-                    <TerminalPanel onClose={closeTerminalPanel} />
-                  </div>
-                </>
+                </div>
               )}
             </div>
           </main>

@@ -20,10 +20,10 @@ import {
 const appWindow = getCurrentWindow();
 
 interface StatusPanelProps {
-  showBrowser?: boolean;
-  onToggleBrowser?: () => void;
-  showTerminal?: boolean;
-  onToggleTerminal?: () => void;
+  browserActive?: boolean;
+  onOpenBrowser?: () => void;
+  terminalActive?: boolean;
+  onOpenTerminal?: () => void;
 }
 
 function SearchButton() {
@@ -47,7 +47,7 @@ function SearchButton() {
   );
 }
 
-export function StatusPanel({ showBrowser, onToggleBrowser, showTerminal, onToggleTerminal }: StatusPanelProps) {
+export function StatusPanel({ browserActive, onOpenBrowser, terminalActive, onOpenTerminal }: StatusPanelProps) {
   const { activeSessionId, isDraft, sessions, loadSessions, createSession, updateAvailable, setPendingSettingsTab } = useStore();
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState('');
@@ -79,7 +79,7 @@ export function StatusPanel({ showBrowser, onToggleBrowser, showTerminal, onTogg
         );
         setTerminalBusy(busy);
         // 从空闲变忙时弹一次 toast（且当前面板未开）
-        if (busy && !lastBusyRef.current && !showTerminal) {
+        if (busy && !lastBusyRef.current && !terminalActive) {
           toast.showInfo('命令在终端执行中', '点击终端按钮查看输出', 2500);
         }
         lastBusyRef.current = busy;
@@ -93,7 +93,7 @@ export function StatusPanel({ showBrowser, onToggleBrowser, showTerminal, onTogg
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [showTerminal, onToggleTerminal, toast]);
+  }, [terminalActive, toast]);
 
   const activeSession = isDraft ? null : sessions.find((s) => s.id === activeSessionId);
   const currentTitle = isDraft ? '新对话' : (activeSession?.title || '新对话');
@@ -256,19 +256,19 @@ export function StatusPanel({ showBrowser, onToggleBrowser, showTerminal, onTogg
           </button>
         )}
         <SearchButton />
-        {onToggleTerminal && (
+        {onOpenTerminal && (
           <button
             data-no-drag
-            onClick={onToggleTerminal}
+            onClick={onOpenTerminal}
             className={`relative transition-colors ${
-              showTerminal
+              terminalActive
                 ? 'text-primary'
                 : 'text-muted-foreground hover:text-foreground'
             }`}
-            title={showTerminal ? '关闭终端' : '打开终端'}
+            title={terminalActive ? '终端已打开' : '打开终端'}
           >
             <TerminalSquare className="w-4 h-4" />
-            {terminalBusy && !showTerminal && (
+            {terminalBusy && !terminalActive && (
               <span
                 className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-500 animate-pulse"
                 title="有命令在终端执行中"
@@ -278,13 +278,13 @@ export function StatusPanel({ showBrowser, onToggleBrowser, showTerminal, onTogg
         )}
         <button
           data-no-drag
-          onClick={onToggleBrowser}
+          onClick={onOpenBrowser}
           className={`transition-colors ${
-            showBrowser
+            browserActive
               ? 'text-primary'
               : 'text-muted-foreground hover:text-foreground'
           }`}
-          title={showBrowser ? '关闭浏览器' : '打开浏览器'}
+          title={browserActive ? '浏览器已打开' : '打开浏览器'}
         >
           <Globe className="w-4 h-4" />
         </button>

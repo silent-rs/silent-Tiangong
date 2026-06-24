@@ -13,6 +13,8 @@ permissions = [
     "allow-browser-get-zoom",
     "allow-browser-reset-zoom",
     "allow-browser-tab-list",
+    "allow-browser-snapshot-tabs",
+    "allow-browser-switch-session",
     "allow-browser-tab-new",
     "allow-browser-tab-switch",
     "allow-browser-tab-close",

@@ -47,6 +47,8 @@ pub fn init() -> TauriPlugin<Wry> {
             commands::browser_get_zoom,
             commands::browser_reset_zoom,
             commands::browser_tab_list,
+            commands::browser_snapshot_tabs,
+            commands::browser_switch_session,
             commands::browser_tab_new,
             commands::browser_tab_switch,
             commands::browser_tab_close,

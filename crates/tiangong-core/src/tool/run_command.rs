@@ -188,7 +188,18 @@ impl LocalToolExecutor {
             None
         };
 
-        let result = exec_via_pty(provider, cmd, args, effective_cwd, timeout_secs, session_id)?;
+        let Some(selection) = select_terminal_for_command(provider, session_id)? else {
+            return Err(anyhow!("终端会话不可用"));
+        };
+
+        let result = exec_via_pty(
+            provider,
+            cmd,
+            args,
+            effective_cwd,
+            timeout_secs,
+            &selection.terminal_id,
+        )?;
 
         match result {
             Some(r) => {
@@ -199,7 +210,7 @@ impl LocalToolExecutor {
                 // 此时 PTY 前台进程仍在运行。应报告失败，避免 Agent 误判成功后继续
                 // 在卡住的 PTY 上执行后续命令。
                 let ok = !r.timed_out && !r.interactive_mode && r.exit_code == 0;
-                let summary = if r.interactive_mode {
+                let mut summary = if r.interactive_mode {
                     format!("命令进入交互模式：{cmd}（当前不支持 Agent 交互式终端）")
                 } else if ok {
                     format!("命令执行成功：{cmd}")
@@ -208,6 +219,7 @@ impl LocalToolExecutor {
                 } else {
                     format!("命令执行失败：{cmd} (exit_code={})", r.exit_code)
                 };
+                summary.push_str(&selection.feedback_text());
                 let stderr = if r.interactive_mode {
                     format!(
                         "{stderr}\n[提示] 命令似乎进入了交互模式（等待输入或未正常退出）。\
@@ -488,6 +500,34 @@ fn pty_current_cwd_blocking(
                 .join()
                 .expect("PTY cwd 读取线程 panic")
         }),
+    }
+}
+
+fn select_terminal_for_command(
+    provider: &std::sync::Arc<dyn crate::terminal_trait::TerminalProvider>,
+    session_id: &str,
+) -> anyhow::Result<Option<crate::terminal_trait::TerminalSelection>> {
+    let provider = provider.clone();
+    let session_id = session_id.to_string();
+    let handle = tokio::runtime::Handle::try_current();
+    match handle {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            Ok(tokio::task::block_in_place(|| {
+                h.block_on(provider.select_for_command(&session_id))
+            }))
+        }
+        _ => Ok(std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let rt = TokioRuntimeBuilder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("初始化终端选择运行时失败");
+                    rt.block_on(provider.select_for_command(&session_id))
+                })
+                .join()
+                .expect("终端选择线程 panic")
+        })),
     }
 }
 

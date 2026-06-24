@@ -18,6 +18,11 @@ const COMMANDS: &[&str] = &[
     "terminal_session_reset",
     "terminal_session_update_screen",
     "terminal_panel_set_session",
+    "terminal_tab_list",
+    "terminal_tab_new",
+    "terminal_tab_restore",
+    "terminal_tab_switch",
+    "terminal_tab_close",
 ];
 
 fn main() {

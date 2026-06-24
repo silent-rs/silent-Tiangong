@@ -12,8 +12,8 @@ use tauri::{
 
 use crate::bridge::BRIDGE_SCRIPT;
 use crate::types::{
-    BrowserEvent, BrowserPageSnapshot, BrowserResponse, BrowserTab, HistoryEntry, PageStatus,
-    TabHistoryResult, TabListResponse,
+    BrowserEvent, BrowserPageSnapshot, BrowserResponse, BrowserTab, BrowserTabsSnapshot,
+    HistoryEntry, PageStatus, TabHistoryResult, TabListResponse,
 };
 
 fn webview_label(tab_id: &str) -> String {
@@ -65,6 +65,8 @@ pub struct BrowserState {
     pub tab_history_indices: HashMap<String, usize>,
     /// 当前页面缩放比例，clamp 到 [0.25, 5.0]，持久化在 ~/.tiangong/browser-zoom.json
     pub zoom_factor: f64,
+    /// 当前浏览器运行时绑定的对话会话 ID
+    pub active_session_id: Option<String>,
 }
 
 impl BrowserState {
@@ -112,6 +114,7 @@ impl BrowserManager {
                 tab_histories: HashMap::new(),
                 tab_history_indices: HashMap::new(),
                 zoom_factor,
+                active_session_id: None,
             })),
         }
     }
@@ -373,10 +376,11 @@ impl BrowserManager {
         w: f64,
         h: f64,
     ) -> Result<(), String> {
-        {
+        let existing_tab_webview_to_create = {
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
             if !state.tabs.is_empty() {
                 // 已初始化：更新活跃标签（有 WebView 则导航，无则标记 URL 等待按需创建）
+                let mut webview_to_create = None;
                 if let Some(matching_tab) = state
                     .tabs
                     .iter()
@@ -396,6 +400,8 @@ impl BrowserManager {
                         if let Some(new_wv) = state.webviews.get(&matching_id) {
                             let _ = new_wv.set_position(LogicalPosition::new(x, y));
                             let _ = new_wv.set_size(LogicalSize::new(w, h));
+                        } else if url != "about:blank" {
+                            webview_to_create = Some(matching_id.clone());
                         }
                         state.active_tab_id = Some(matching_id);
                     } else {
@@ -403,6 +409,8 @@ impl BrowserManager {
                         if let Some(wv) = state.active_webview() {
                             let _ = wv.set_position(LogicalPosition::new(x, y));
                             let _ = wv.set_size(LogicalSize::new(w, h));
+                        } else if url != "about:blank" {
+                            webview_to_create = Some(matching_id);
                         }
                     }
                 } else {
@@ -416,6 +424,8 @@ impl BrowserManager {
                         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             let _ = wv.navigate(parsed_url);
                         }));
+                    } else if url != "about:blank" {
+                        webview_to_create = state.active_tab_id.clone();
                     }
                     // 更新活跃标签 URL
                     let active_id = state.active_tab_id.clone();
@@ -429,8 +439,22 @@ impl BrowserManager {
                 state
                     .visible
                     .store(true, std::sync::atomic::Ordering::Relaxed);
-                return Ok(());
+                Some(webview_to_create)
+            } else {
+                None
             }
+        };
+
+        if let Some(webview_to_create) = existing_tab_webview_to_create {
+            if let Some(tab_id) = webview_to_create {
+                let webview = Self::create_webview_for_tab(app, &tab_id, url, x, y, w, h)?;
+                let mut state = self.state.lock().map_err(|e| e.to_string())?;
+                state.webviews.insert(tab_id, webview);
+                drop(state);
+                self.start_url_poll(app, url);
+                self.start_event_poll(app);
+            }
+            return Ok(());
         }
 
         // 首次创建：创建标签 + WebView（about:blank 跳过 WebView 创建）
@@ -482,31 +506,8 @@ impl BrowserManager {
 
     pub fn close(&self) -> Result<(), String> {
         if let Ok(mut state) = self.state.lock() {
-            state
-                .poll_stop
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            state
-                .event_poll_stop
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            for (_, webview) in state.webviews.drain() {
-                let _ = webview.close();
-            }
-            for signal in state.page_loaded_signals.values() {
-                let (lock, cvar) = &**signal;
-                if let Ok(mut loaded) = lock.lock() {
-                    *loaded = false;
-                }
-                cvar.notify_all();
-            }
-            state.page_loaded_signals.clear();
-            state.latest_snapshots.clear();
-            state.last_known_url.clear();
-            state.last_known_text_signature.clear();
-            state.pending_events.clear();
-            state.tabs.clear();
-            state.active_tab_id = None;
-            state.tab_histories.clear();
-            state.tab_history_indices.clear();
+            reset_runtime_state(&mut state, true);
+            state.active_session_id = None;
             state
                 .visible
                 .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -857,6 +858,7 @@ impl BrowserManager {
                 }
                 drop(state);
                 self.start_url_poll(app, url);
+                self.start_event_poll(app);
                 return Ok(());
             }
         }
@@ -1171,6 +1173,114 @@ impl BrowserManager {
                 }
             }
         }
+    }
+
+    pub fn snapshot_tabs(&self) -> BrowserTabsSnapshot {
+        match self.state.lock() {
+            Ok(s) => BrowserTabsSnapshot {
+                session_id: s.active_session_id.clone(),
+                tabs: s.tabs.clone(),
+                active_tab_id: s.active_tab_id.clone(),
+            },
+            Err(e) => {
+                let s = e.into_inner();
+                BrowserTabsSnapshot {
+                    session_id: s.active_session_id.clone(),
+                    tabs: s.tabs.clone(),
+                    active_tab_id: s.active_tab_id.clone(),
+                }
+            }
+        }
+    }
+
+    pub fn switch_session(
+        &self,
+        app: &AppHandle<Wry>,
+        session_id: &str,
+        tabs_to_restore: Vec<BrowserTab>,
+        active_tab_id: Option<String>,
+    ) -> Result<BrowserTabsSnapshot, String> {
+        let mut state = self.state.lock().map_err(|e| e.to_string())?;
+        if state.active_session_id.as_deref() == Some(session_id)
+            && state.tabs == tabs_to_restore
+            && state.active_tab_id == active_tab_id
+        {
+            let active_tab = state
+                .active_tab_id
+                .as_ref()
+                .and_then(|id| state.tabs.iter().find(|tab| tab.id == *id).cloned());
+            let rect = state.browser_rect;
+            let needs_webview = active_tab.as_ref().is_some_and(|tab| {
+                !tab.url.starts_with("about:") && !state.webviews.contains_key(&tab.id)
+            });
+            if !needs_webview {
+                return Ok(BrowserTabsSnapshot {
+                    session_id: state.active_session_id.clone(),
+                    tabs: state.tabs.clone(),
+                    active_tab_id: state.active_tab_id.clone(),
+                });
+            }
+
+            if let Some(tab) = active_tab {
+                drop(state);
+                let webview = Self::create_webview_for_tab(
+                    app, &tab.id, &tab.url, rect.0, rect.1, rect.2, rect.3,
+                )?;
+                let mut state = self.state.lock().map_err(|e| e.to_string())?;
+                state.webviews.insert(tab.id.clone(), webview);
+                drop(state);
+                self.start_url_poll(app, &tab.url);
+                self.start_event_poll(app);
+                let state = self.state.lock().map_err(|e| e.to_string())?;
+                return Ok(BrowserTabsSnapshot {
+                    session_id: state.active_session_id.clone(),
+                    tabs: state.tabs.clone(),
+                    active_tab_id: state.active_tab_id.clone(),
+                });
+            }
+
+            return Ok(BrowserTabsSnapshot {
+                session_id: state.active_session_id.clone(),
+                tabs: state.tabs.clone(),
+                active_tab_id: state.active_tab_id.clone(),
+            });
+        }
+
+        reset_runtime_state(&mut state, true);
+        state.tabs = tabs_to_restore;
+        state.active_tab_id = resolve_active_browser_tab(&state.tabs, active_tab_id);
+        restore_tab_runtime_metadata(&mut state);
+        state.active_session_id = Some(session_id.to_string());
+        state
+            .visible
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let active_tab = state
+            .active_tab_id
+            .as_ref()
+            .and_then(|id| state.tabs.iter().find(|tab| tab.id == *id).cloned());
+        let rect = state.browser_rect;
+        drop(state);
+
+        if let Some(tab) = active_tab {
+            if !tab.url.starts_with("about:") {
+                let webview = Self::create_webview_for_tab(
+                    app, &tab.id, &tab.url, rect.0, rect.1, rect.2, rect.3,
+                )?;
+                let mut state = self.state.lock().map_err(|e| e.to_string())?;
+                state.webviews.insert(tab.id.clone(), webview);
+                drop(state);
+                self.start_url_poll(app, &tab.url);
+                self.start_event_poll(app);
+            }
+        }
+
+        let state = self.state.lock().map_err(|e| e.to_string())?;
+
+        Ok(BrowserTabsSnapshot {
+            session_id: state.active_session_id.clone(),
+            tabs: state.tabs.clone(),
+            active_tab_id: state.active_tab_id.clone(),
+        })
     }
 
     pub fn tab_new(&self, app: &AppHandle<Wry>, url: &str) -> Result<String, String> {
@@ -1497,6 +1607,80 @@ impl BrowserManager {
             };
             state.tab_histories.insert(tab_id.to_string(), vec![entry]);
             state.tab_history_indices.insert(tab_id.to_string(), 0);
+        }
+    }
+}
+
+fn reset_runtime_state(state: &mut BrowserState, close_webviews: bool) {
+    state
+        .poll_stop
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    state
+        .event_poll_stop
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    state.poll_stop = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    state.event_poll_stop = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+    if close_webviews {
+        for (_, webview) in state.webviews.drain() {
+            let _ = webview.close();
+        }
+    } else {
+        state.webviews.clear();
+    }
+
+    for signal in state.page_loaded_signals.values() {
+        let (lock, cvar) = &**signal;
+        if let Ok(mut loaded) = lock.lock() {
+            *loaded = false;
+        }
+        cvar.notify_all();
+    }
+
+    state.page_loaded_signals.clear();
+    state.latest_snapshots.clear();
+    state.last_known_url.clear();
+    state.last_known_text_signature.clear();
+    state.pending_events.clear();
+    state.tabs.clear();
+    state.active_tab_id = None;
+    state.tab_histories.clear();
+    state.tab_history_indices.clear();
+}
+
+fn resolve_active_browser_tab(
+    tabs: &[BrowserTab],
+    active_tab_id: Option<String>,
+) -> Option<String> {
+    active_tab_id
+        .filter(|id| tabs.iter().any(|tab| tab.id == *id))
+        .or_else(|| tabs.first().map(|tab| tab.id.clone()))
+}
+
+fn restore_tab_runtime_metadata(state: &mut BrowserState) {
+    for tab in &state.tabs {
+        state.page_loaded_signals.insert(
+            tab.id.clone(),
+            Arc::new((Mutex::new(false), Condvar::new())),
+        );
+        if !tab.url.starts_with("about:") {
+            let title = if tab.title.is_empty() {
+                tab.url.clone()
+            } else {
+                tab.title.clone()
+            };
+            state.tab_histories.insert(
+                tab.id.clone(),
+                vec![HistoryEntry {
+                    url: tab.url.clone(),
+                    title,
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64,
+                }],
+            );
+            state.tab_history_indices.insert(tab.id.clone(), 0);
         }
     }
 }

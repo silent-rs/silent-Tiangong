@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
 /// 浏览器标签
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowserTab {
     pub id: String,
     pub url: String,
@@ -14,6 +14,14 @@ pub struct BrowserTab {
 /// 标签列表响应（包含活跃标签 ID）
 #[derive(Debug, Clone, Serialize)]
 pub struct TabListResponse {
+    pub tabs: Vec<BrowserTab>,
+    pub active_tab_id: Option<String>,
+}
+
+/// 浏览器会话 Tab 快照
+#[derive(Debug, Clone, Serialize)]
+pub struct BrowserTabsSnapshot {
+    pub session_id: Option<String>,
     pub tabs: Vec<BrowserTab>,
     pub active_tab_id: Option<String>,
 }

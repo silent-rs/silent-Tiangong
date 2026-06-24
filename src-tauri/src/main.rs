@@ -479,6 +479,8 @@ fn run_gui() {
         })
         .invoke_handler(tauri::generate_handler![
             tiangong_app::commands::get_sessions,
+            tiangong_app::commands::get_session_tabs,
+            tiangong_app::commands::set_session_tabs,
             tiangong_app::commands::create_session,
             tiangong_app::commands::switch_session,
             tiangong_app::commands::delete_session,
