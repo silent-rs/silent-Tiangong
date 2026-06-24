@@ -23,7 +23,7 @@
 | 04 | #167 | P1 | ReAct 主循环阶段化重构设计 | 已完成 | `docs/exception-fixes-0.10.1/04-react-loop-refactor-design.md` |
 | 05 | #170 | P2 | 自动上下文压缩闭环核查 | 已完成 | `docs/exception-fixes-0.10.1/05-context-compression-audit.md` |
 | 06 | #165 | P2 | 工具失败恢复结构化 | 已完成 | `docs/exception-fixes-0.10.1/06-structured-tool-failure-recovery.md` |
-| 07 | #169 | P2 | 只读工具并行执行设计 | 未开始 | `docs/exception-fixes-0.10.1/07-readonly-tool-parallel-design.md` |
+| 07 | #169 | P2 | 只读工具并行执行设计 | 已完成 | `docs/exception-fixes-0.10.1/07-readonly-tool-parallel-design.md` |
 | 08 | #164 | P0 | 桌面端 MCP HTTP/SSE 注册异常修复 | 已完成 | `docs/exception-fixes-0.10.1/08-desktop-mcp-http-sse-registration.md` |
 
 ## 已完成
