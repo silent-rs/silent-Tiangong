@@ -653,6 +653,7 @@ pub(crate) fn compress_context_for_session(
             session.current_tokens = 0;
             session.active_agent_current_tokens = 0;
             session.agent_current_tokens.clear();
+            crate::react::context::rebuild_system_prompt(session, engine);
             crate::react::context::emit_token_usage(
                 stream_tx,
                 &update.usage,

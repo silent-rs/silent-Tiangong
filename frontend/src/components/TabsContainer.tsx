@@ -13,6 +13,7 @@ interface TabsContainerProps {
   openRequestVersion: number;
   requestedTerminalTabId?: string | null;
   onClose: () => void;
+  onActiveKindChange?: (kind: TabKind | null) => void;
 }
 
 const DEFAULT_BROWSER_URL = 'about:blank';
@@ -77,6 +78,7 @@ export function TabsContainer({
   openRequestVersion,
   requestedTerminalTabId,
   onClose,
+  onActiveKindChange,
 }: TabsContainerProps) {
   const activeSessionId = useStore((state) => state.activeSessionId);
   const draftTerminalId = useStore((state) => state.draftTerminalId);
@@ -104,6 +106,10 @@ export function TabsContainer({
     () => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0] ?? null,
     [activeTabId, tabs],
   );
+
+  useEffect(() => {
+    onActiveKindChange?.(isVisible ? activeTab?.kind ?? null : null);
+  }, [activeTab?.kind, isVisible, onActiveKindChange]);
 
   initialTabKindRef.current = initialTabKind;
   requestedTerminalTabIdRef.current = requestedTerminalTabId ?? null;
@@ -324,12 +330,7 @@ export function TabsContainer({
   }, [activeSessionId, isVisible, restoreRuntimeForTabs, syncBrowserRuntimeForTabs, workspaceTabsTransfer]);
 
   const activateOrCreateTab = useCallback(async (kind: TabKind) => {
-    if (
-      kind === 'terminal'
-      && requestedTerminalTabId
-      && !tabsRef.current.some((tab) => tab.id === requestedTerminalTabId)
-      && await mergeTerminalRuntimeTabs(requestedTerminalTabId)
-    ) {
+    if (kind === 'terminal' && await mergeTerminalRuntimeTabs(requestedTerminalTabId)) {
       return;
     }
 
@@ -342,10 +343,6 @@ export function TabsContainer({
         void api.browserTabSwitch(existing.id).catch(console.error);
       }
       setActiveTabId(existing.id);
-      return;
-    }
-
-    if (kind === 'terminal' && await mergeTerminalRuntimeTabs(requestedTerminalTabId)) {
       return;
     }
 

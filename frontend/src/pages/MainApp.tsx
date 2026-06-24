@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useStore } from '@/store/useStore';
-import { api, type RunSnapshot, type TabKind } from '@/api/tauri';
+import { api, type RunSnapshot, type TabKind, type TabState, type TerminalTabInfo } from '@/api/tauri';
 import { AppSidebar } from '@/components/AppSidebar';
 import { SidebarProvider } from '@/components/ui/sidebar';
 import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components/LazyComponents';
@@ -85,6 +85,16 @@ async function expandWindowForBrowser(lock?: () => void, unlock?: () => void) {
   await appWindow.setSize(new LogicalSize(targetW, logicalH));
   unlock?.();
   return { browserW, logicalH };
+}
+
+function terminalRuntimeTabToState(tab: TerminalTabInfo): TabState {
+  return {
+    id: tab.id,
+    kind: 'terminal',
+    title: tab.title || '终端',
+    url: '',
+    created_at: tab.created_at || new Date().toISOString(),
+  };
 }
 
 export function MainApp() {
@@ -212,6 +222,46 @@ export function MainApp() {
     void openWorkspacePanel('terminal');
   }, [openWorkspacePanel]);
 
+  const handleWorkspaceActiveKindChange = useCallback((kind: TabKind | null) => {
+    if (!kind) return;
+    workspaceTabKindRef.current = kind;
+    setWorkspaceTabKind(kind);
+  }, []);
+
+  const syncTerminalRuntimeTabsToSession = useCallback(async (
+    sessionId: string,
+    preferredTabId?: string | null,
+  ) => {
+    const [sessionTabs, runtimeTabs] = await Promise.all([
+      api.getSessionTabs(sessionId),
+      api.terminalTabList(sessionId),
+    ]);
+    if (runtimeTabs.tabs.length === 0) return;
+
+    const terminalTabs = runtimeTabs.tabs.map(terminalRuntimeTabToState);
+    const terminalById = new Map(terminalTabs.map((tab) => [tab.id, tab]));
+    const nextExistingTabs = sessionTabs.tabs
+      .filter((tab) => tab.kind !== 'terminal' || terminalById.has(tab.id))
+      .map((tab) => (
+        tab.kind === 'terminal' && terminalById.has(tab.id)
+          ? terminalById.get(tab.id)!
+          : tab
+      ));
+    const existingIds = new Set(nextExistingTabs.map((tab) => tab.id));
+    const nextTabs = [
+      ...nextExistingTabs,
+      ...terminalTabs.filter((tab) => !existingIds.has(tab.id)),
+    ];
+    const nextActiveTabId = [
+      preferredTabId,
+      runtimeTabs.active_tab_id,
+      sessionTabs.active_tab_id,
+      nextTabs[0]?.id,
+    ].find((tabId) => tabId && nextTabs.some((tab) => tab.id === tabId)) || null;
+
+    await api.setSessionTabs(sessionId, nextTabs, nextActiveTabId);
+  }, []);
+
   const handleDividerDrag = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     isDraggingRef.current = true;
@@ -304,11 +354,20 @@ export function MainApp() {
       const unlistenTerminalTabUpdated = await listen<{
         session_id: string;
         active_tab_id?: string | null;
+        source?: string | null;
       }>('terminal:tab_updated', async (event) => {
-        const { session_id, active_tab_id } = event.payload;
+        const { session_id, active_tab_id, source } = event.payload;
         const store = useStore.getState();
         const terminalSessionId = store.activeSessionId || store.draftTerminalId;
         if (!terminalSessionId || session_id !== terminalSessionId) return;
+        if (source === 'agent_command') {
+          if (store.activeSessionId && session_id === store.activeSessionId) {
+            await syncTerminalRuntimeTabsToSession(session_id, active_tab_id ?? null).catch(console.error);
+          }
+          if (!showWorkspacePanelRef.current || workspaceTabKindRef.current !== 'terminal') {
+            return;
+          }
+        }
         await openWorkspacePanel('terminal', active_tab_id ?? null);
       });
 
@@ -377,7 +436,14 @@ export function MainApp() {
       window.removeEventListener('tiangong:open-browser', onOpenBrowser);
       unlistenRef.current?.();
     };
-  }, [setSidebarOpenByLayout, openWorkspacePanel, closeWorkspacePanel, lockResize, unlockResize]);
+  }, [
+    setSidebarOpenByLayout,
+    openWorkspacePanel,
+    closeWorkspacePanel,
+    lockResize,
+    unlockResize,
+    syncTerminalRuntimeTabsToSession,
+  ]);
 
   return (
     <SidebarProvider open={sidebarOpen} onOpenChange={handleSidebarChange}>
@@ -420,6 +486,7 @@ export function MainApp() {
                     openRequestVersion={workspaceOpenRequestVersion}
                     requestedTerminalTabId={requestedTerminalTabId}
                     onClose={() => { void closeWorkspacePanel(); }}
+                    onActiveKindChange={handleWorkspaceActiveKindChange}
                   />
                 </div>
               )}

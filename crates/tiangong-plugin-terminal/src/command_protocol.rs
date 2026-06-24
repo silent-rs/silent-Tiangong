@@ -151,77 +151,17 @@ fn collect_command_output(
     (lines.join("\n"), interrupted)
 }
 
-fn looks_like_interactive_prompt(text: &str) -> bool {
-    let Some(line) = text.lines().rev().find(|line| !line.trim().is_empty()) else {
-        return false;
-    };
-    let line = line.trim();
-    let lower = line.to_lowercase();
-
-    if matches!(line, ">>>" | "..." | ">" | "$" | "%" | "#") {
-        return true;
-    }
-    if line.ends_with('$') || line.ends_with('%') || line.ends_with('#') {
-        return true;
-    }
-    // 以 `?` 结尾的行：仅当它是短行（≤ 80 字符，排除正常程序输出中的疑问句）
-    // 或包含明确的 yes/no 提示词时才判定为交互提示，避免把普通输出里的问句误判。
-    if line.ends_with('?')
-        && (line.chars().count() <= 80
-            || lower.contains("yes/no")
-            || lower.contains("(y/n")
-            || lower.contains("[y/n"))
-    {
-        return true;
-    }
-
-    let prompt_fragments = [
-        "password",
-        "passphrase",
-        "verification code",
-        "one-time code",
-        "otp",
-        "username",
-        "login:",
-        "yes/no",
-        "(y/n",
-        "[y/n",
-        "(yes/no",
-        "[yes/no",
-        "continue connecting",
-        "are you sure",
-        "do you want",
-        "would you like",
-        "proceed",
-        "press enter",
-        "press return",
-        "hit enter",
-        "select",
-        "choice",
-    ];
-    if prompt_fragments
-        .iter()
-        .any(|fragment| lower.contains(fragment))
-    {
-        return true;
-    }
-
-    line.ends_with(':')
-        && [
-            "password",
-            "passphrase",
-            "username",
-            "login",
-            "token",
-            "code",
-            "input",
-            "enter",
-            "select",
-            "choice",
-            "name",
-        ]
-        .iter()
-        .any(|fragment| lower.contains(fragment))
+fn wrap_non_interactive_command(
+    start_marker: &str,
+    command: &str,
+    cwd_marker: &str,
+    rc_marker: &str,
+    end_marker: &str,
+) -> String {
+    format!(
+        "__TIANGONG_= echo '{}'; __tiangong_had_PAGER=${{PAGER+x}}; __tiangong_old_PAGER=${{PAGER-}}; __tiangong_had_GIT_PAGER=${{GIT_PAGER+x}}; __tiangong_old_GIT_PAGER=${{GIT_PAGER-}}; __tiangong_had_LESS=${{LESS+x}}; __tiangong_old_LESS=${{LESS-}}; __tiangong_had_TERM=${{TERM+x}}; __tiangong_old_TERM=${{TERM-}}; export PAGER=cat GIT_PAGER=cat LESS=FRX TERM=dumb; {}\n__TIANGONG_= __rc=$?; if [ -n \"$__tiangong_had_PAGER\" ]; then PAGER=\"$__tiangong_old_PAGER\"; export PAGER; else unset PAGER; fi; if [ -n \"$__tiangong_had_GIT_PAGER\" ]; then GIT_PAGER=\"$__tiangong_old_GIT_PAGER\"; export GIT_PAGER; else unset GIT_PAGER; fi; if [ -n \"$__tiangong_had_LESS\" ]; then LESS=\"$__tiangong_old_LESS\"; export LESS; else unset LESS; fi; if [ -n \"$__tiangong_had_TERM\" ]; then TERM=\"$__tiangong_old_TERM\"; export TERM; else unset TERM; fi; printf '\\n{}'; pwd; echo '{}'$__rc; echo '{}'\n",
+        start_marker, command, cwd_marker, rc_marker, end_marker
+    )
 }
 
 /// 非交互式命令执行：通过 marker 检测命令边界，捕获退出码和 cwd
@@ -305,14 +245,13 @@ pub(crate) async fn handle_exec(
     let fallback_start_pushed = last_seen_pushed;
 
     // 发送组合命令：start marker → 用户命令（禁用 pager）→ 捕获退出码 → pwd → end marker
-    // PAGER=cat 禁用所有命令的分页器，GIT_PAGER=cat 兼容 git 特有变量
+    // 临时导出 PAGER/GIT_PAGER 指向 cat，避免 git diff/log 等命令落入 less；
+    // 命令结束后恢复原环境，避免污染用户终端。
     // printf '\nmarker' 强制换行：即使命令输出不以 \n 结尾，marker 也独占新行
     // 换行分隔用户命令和 marker 捕获命令，确保 marker 行以 __TIANGONG_= 前缀开头
     // 这样多行命令（heredoc）的最后一行不会和 marker 命令混在一起泄漏
-    let combined = format!(
-        "__TIANGONG_= echo '{}'; PAGER=cat GIT_PAGER=cat {}\n__TIANGONG_= __rc=$?; printf '\\n{}'; pwd; echo '{}'$__rc; echo '{}'\n",
-        start_marker, command, cwd_marker, rc_marker, end_marker
-    );
+    let combined =
+        wrap_non_interactive_command(&start_marker, command, &cwd_marker, &rc_marker, &end_marker);
     let send_result = {
         match ps.writer.lock() {
             Ok(mut writer) => send_to_pty(&mut writer, &combined),
@@ -340,7 +279,7 @@ pub(crate) async fn handle_exec(
     let start_time = std::time::Instant::now();
     let timeout_dur = std::time::Duration::from_secs(timeout);
     let interactive_dur = std::time::Duration::from_secs(INTERACTIVE_FALLBACK_SECS);
-    let interactive_prompt_stable_dur =
+    let interactive_output_stable_dur =
         std::time::Duration::from_millis(INTERACTIVE_PROMPT_STABLE_MS);
     let mut start_marker_time: Option<std::time::Instant> = None;
     let mut last_visible_snapshot = String::new();
@@ -454,27 +393,24 @@ pub(crate) async fn handle_exec(
                 last_visible_change = std::time::Instant::now();
             }
             let has_visible_output = !stdout_text.trim().is_empty();
-            let prompt_ready = has_visible_output
-                && looks_like_interactive_prompt(&stdout_text)
-                && last_visible_change.elapsed() >= interactive_prompt_stable_dur;
-            let fallback_ready = has_visible_output && smt.elapsed() >= interactive_dur;
+            let fallback_ready = has_visible_output
+                && last_visible_change.elapsed() >= interactive_output_stable_dur
+                && smt.elapsed() >= interactive_dur;
 
-            if prompt_ready || fallback_ready {
-                let reason = if prompt_ready {
-                    "命令似乎在等待交互输入，当前环境暂不支持交互式终端操作，建议终止后改用非交互方式"
-                } else {
-                    "命令未返回结束标记，已返回当前终端显示内容"
-                };
-
+            if fallback_ready {
                 let tracker_interrupted =
                     activity.map(|t| t.take_user_intervened()).unwrap_or(false);
                 if let Some(tracker) = activity {
-                    tracker.set_busy_state(crate::collaboration::TerminalBusyState::Idle);
+                    tracker.set_busy_state(
+                        crate::collaboration::TerminalBusyState::AgentInteractive {
+                            command_id: command_id.clone(),
+                        },
+                    );
                 }
                 let _ = response_tx.send(TerminalExecResponse {
                     exit_code: 0,
                     stdout: stdout_text,
-                    stderr: reason.to_string(),
+                    stderr: "命令未返回结束标记且输出已稳定，可能在等待交互输入；可继续使用 terminal_send 向同一终端发送按键或文本".to_string(),
                     timed_out: false,
                     cwd_after: manager.cwd(),
                     interrupted_by_user: interrupted || tracker_interrupted,
@@ -544,7 +480,7 @@ pub(crate) async fn handle_exec(
 /// 交互式命令执行：不使用 marker 协议，直接以 CR 提交命令，
 /// 轮询等待终端"第一次变化"后返回完整可见内容。
 ///
-/// 适用场景：vi/nano/python REPL 等需要持续键盘交互的程序。
+/// 适用场景：需要持续键盘交互的程序。
 /// 与 `handle_exec` 的关键差异：
 /// - 不发 marker（交互程序前台时 marker 会污染屏幕甚至被读走）
 /// - 协作状态进入 `AgentInteractive` 而非 `AgentRunning`
@@ -552,7 +488,7 @@ pub(crate) async fn handle_exec(
 /// - 退出码恒为 0、不更新 cwd（交互程序不会回 end/cwd marker）
 ///
 /// 返回内容：终端当前可见文本（ANSI 已处理）。交互程序进入任何状态
-///（编辑页 / swap 提示 / 等待输入）都会在第一次渲染时被捕获，
+///（全屏界面 / 确认提示 / 等待输入）都会在第一次渲染时被捕获，
 /// Agent 直接阅读返回内容即可判断当前状态，无需后端识别提示类型。
 /// 等待终端屏幕发生变化（双信号 + 稳定窗口），用于交互程序首屏/响应检测。
 ///
@@ -691,7 +627,7 @@ pub(crate) async fn handle_exec_interactive(
     wait_for_screen_change(manager, baseline_pushed, baseline_updates, wait_secs).await;
 
     // 返回终端当前可见内容：优先前端 xterm 回传的屏幕快照（与用户看到的画面一致，
-    // vim/nano 全屏界面、swap 提示都能完整呈现），若前端尚未回传（面板未挂载等）
+    // 全屏 TUI 和交互提示都能完整呈现），若前端尚未回传（面板未挂载等）
     // 则回退到后端 output_buffer 的可见内容（recent_output 兜底，保证即时可见性）。
     let stdout_text = manager
         .screen_snapshot()
@@ -937,31 +873,21 @@ mod tests {
     }
 
     #[test]
-    fn interactive_prompt_matches_shell_prompts() {
-        assert!(looks_like_interactive_prompt("user@host:~$"));
-        assert!(looks_like_interactive_prompt(">>> "));
-        assert!(looks_like_interactive_prompt("Password:"));
-        assert!(looks_like_interactive_prompt("Continue? [y/n] "));
-    }
-
-    #[test]
-    fn interactive_prompt_short_question_matches() {
-        // 短问句（≤ 80 字符）视为交互提示
-        assert!(looks_like_interactive_prompt("Proceed with installation?"));
-    }
-
-    #[test]
-    fn interactive_prompt_long_question_does_not_match() {
-        // 长疑问句（> 80 字符）不应误判为交互提示
-        let long = "这是一段非常长的程序输出文字".repeat(10) + "?";
-        assert!(!looks_like_interactive_prompt(&long));
-    }
-
-    #[test]
-    fn interactive_prompt_plain_output_does_not_match() {
-        assert!(!looks_like_interactive_prompt(
-            "Build completed successfully"
-        ));
-        assert!(!looks_like_interactive_prompt(""));
+    fn non_interactive_command_wrapper_disables_pagers() {
+        let combined = wrap_non_interactive_command(
+            "__TIANGONG_START_x__",
+            "git diff HEAD",
+            "__TIANGONG_CWD_x__",
+            "__TIANGONG_RC_x__",
+            "__TIANGONG_END_x__",
+        );
+        assert!(combined.contains("PAGER="));
+        assert!(combined.contains("GIT_PAGER="));
+        assert!(!combined.contains("GIT_CONFIG_PARAMETERS"));
+        assert!(combined.contains("export PAGER=cat GIT_PAGER=cat LESS=FRX TERM=dumb"));
+        assert!(combined.contains("unset PAGER"));
+        assert!(combined.contains("LESS=FRX"));
+        assert!(combined.contains("TERM=dumb"));
+        assert!(combined.contains("git diff HEAD"));
     }
 }

@@ -242,7 +242,7 @@ pub(crate) fn basic_file_function_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "run_shell".to_string(),
-            description: "执行 shell 脚本，自动派生 bash/sh/powershell 参数。需启动交互式程序（vi/nano/REPL）时传 interactive=true，命令在终端面板进入交互态供用户操作".to_string(),
+            description: "执行 shell 脚本，自动派生 bash/sh/powershell 参数。普通命令默认使用本工具前台执行；如果命令会启动需要持续输入的交互程序（编辑器、REPL、TUI、远程会话、确认流程等），必须传 interactive=true，随后用 terminal_send 继续操作。不要仅因命令可能耗时就改用后台 task。".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -250,14 +250,14 @@ pub(crate) fn basic_file_function_tools() -> Vec<ToolSpec> {
                     "shell": { "type": "string", "description": "shell 类型：auto/bash/sh/powershell/pwsh，默认 auto" },
                     "cwd": { "type": "string", "description": "工作目录（可选）" },
                     "timeout": { "type": "integer", "description": "超时时间（秒），0 或不填表示不限时", "minimum": 0 },
-                    "interactive": { "type": "boolean", "description": "是否以交互模式启动（用于 vi/vim/nano/ssh/python REPL 等交互程序）。true 时命令在终端面板进入交互态，用户可手动操作；禁止配合 heredoc/管道使用。默认 false" }
+                    "interactive": { "type": "boolean", "description": "是否以交互模式启动。用于会持续等待输入的程序（编辑器、REPL、TUI、远程会话、确认流程等）；true 时命令进入交互态并由 terminal_send 继续输入。默认 false" }
                 },
                 "required": ["script"]
             }),
         },
         ToolSpec {
             name: "terminal_send".to_string(),
-            description: "向已进入交互态的终端发送按键/文本，并返回屏幕新快照。用于持续操作交互程序（vi/nano/REPL）：每次发送后自动等待屏幕变化，返回当前显示内容。先用 run_shell{interactive:true} 启动交互程序，再用本工具操作。例如 vi 遇到 swap 提示时发 \"d\" 删除 swap、编辑后发 \"\\x1b:wq\\r\" 保存退出。input 原样写入终端，需用转义序列表示特殊键（\\r 回车、\\x1b Esc、\\x03 Ctrl+C）".to_string(),
+            description: "向已进入交互态的终端发送按键/文本，并返回屏幕新快照。用于持续操作由 run_shell{interactive:true} 启动、或被后端兜底识别为等待输入的程序。每次发送后自动等待屏幕变化，返回当前显示内容。input 原样写入终端，需用转义序列表示特殊键（\\r 回车、\\x1b Esc、\\x03 Ctrl+C）".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

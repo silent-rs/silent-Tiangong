@@ -11,7 +11,7 @@ pub enum TerminalBusyState {
     UserActive,
     /// Agent 正在执行非交互命令
     AgentRunning { command_id: String },
-    /// 终端有前台交互进程（Agent 通过 exec_interactive 启动，如 vi/nano/REPL）
+    /// 终端有前台交互进程（Agent 通过 exec_interactive 启动）
     AgentInteractive { command_id: String },
 }
 

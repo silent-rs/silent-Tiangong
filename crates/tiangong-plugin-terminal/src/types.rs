@@ -40,7 +40,7 @@ pub enum TerminalCommand {
         timeout_secs: Option<u64>,
         response_tx: oneshot::Sender<TerminalExecResponse>,
     },
-    /// 交互式命令执行（vi/nano/REPL 等），不使用 marker 协议，直接 CR 提交并等待初始输出
+    /// 交互式命令执行，不使用 marker 协议，直接 CR 提交并等待初始输出
     ExecInteractive {
         command: String,
         wait_secs: u64,
@@ -154,4 +154,5 @@ pub struct TerminalTabListResponse {
 pub struct TerminalTabUpdatedEvent {
     pub session_id: String,
     pub active_tab_id: Option<String>,
+    pub source: String,
 }

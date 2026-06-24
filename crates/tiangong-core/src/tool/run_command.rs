@@ -205,13 +205,9 @@ impl LocalToolExecutor {
             Some(r) => {
                 let stdout = truncate_output(&r.stdout);
                 let stderr = truncate_output(&r.stderr);
-                // 当前基础终端分支不支持 Agent 交互式终端：interactive_mode 为 true
-                // 表示命令进入了交互等待（如 REPL、分页器、未在黑名单中的交互程序），
-                // 此时 PTY 前台进程仍在运行。应报告失败，避免 Agent 误判成功后继续
-                // 在卡住的 PTY 上执行后续命令。
-                let ok = !r.timed_out && !r.interactive_mode && r.exit_code == 0;
+                let ok = !r.timed_out && (r.interactive_mode || r.exit_code == 0);
                 let mut summary = if r.interactive_mode {
-                    format!("命令进入交互模式：{cmd}（当前不支持 Agent 交互式终端）")
+                    format!("命令进入交互模式：{cmd}")
                 } else if ok {
                     format!("命令执行成功：{cmd}")
                 } else if r.timed_out {
@@ -223,8 +219,7 @@ impl LocalToolExecutor {
                 let stderr = if r.interactive_mode {
                     format!(
                         "{stderr}\n[提示] 命令似乎进入了交互模式（等待输入或未正常退出）。\
-当前基础终端分支不支持 Agent 自动操作交互式终端程序，请改用 write_file / \
-replace_in_file，或使用非交互 shell 命令完成。"
+请阅读 stdout 中的终端当前显示内容，并使用 terminal_send 向同一终端继续发送按键或文本。"
                     )
                 } else {
                     stderr

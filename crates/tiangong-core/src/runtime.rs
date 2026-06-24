@@ -1538,7 +1538,7 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<ToolSpec>, engine: &RuntimeE
     for spec in [
         (
             "spawn_task",
-            "在后台启动长时间运行的命令",
+            "在后台启动特殊命令。仅当用户明确要求后台、不阻塞、并行执行、持续运行、启动服务/监听，或需要让命令跨多轮继续运行时使用；普通命令、构建、检查、git、文件操作必须优先使用 run_shell 或 run_command。",
             serde_json::json!({"type":"object","properties":{"name":{"type":"string"},"cmd":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"cwd":{"type":"string"}},"required":["name","cmd"]}),
         ),
         (
@@ -1558,7 +1558,7 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<ToolSpec>, engine: &RuntimeE
         ),
         (
             "wait_tasks",
-            "等待多个后台任务完成",
+            "等待已通过 spawn_task 启动的后台任务完成。仅用于已有后台任务，不用于执行普通命令。",
             serde_json::json!({"type":"object","properties":{"task_ids":{"type":"array","items":{"type":"string"}},"timeout_ms":{"type":"integer"}},"required":["task_ids"]}),
         ),
     ] {

@@ -92,7 +92,7 @@ impl ContextAssembler {
 
         // 根据模式决定工具注入（使用 needs_tools() 统一判断）
         let tools = if mode.needs_tools() {
-            self.select_tools(all_tools, &messages)
+            self.select_tools(all_tools, &messages, user_input)
         } else {
             tracing::info!(
                 input_len = user_input.len(),
@@ -121,7 +121,13 @@ impl ContextAssembler {
     }
 
     /// 选择要注入的工具（预算控制）
-    fn select_tools(&self, all_tools: Vec<ToolSpec>, messages: &[Message]) -> Vec<ToolSpec> {
+    fn select_tools(
+        &self,
+        all_tools: Vec<ToolSpec>,
+        messages: &[Message],
+        user_input: &str,
+    ) -> Vec<ToolSpec> {
+        let all_tools = filter_background_task_tools(all_tools, user_input);
         let remaining = self.budget.remaining_for_input(&all_tools, messages);
         if remaining > 0 {
             return all_tools;
@@ -150,8 +156,60 @@ impl ContextAssembler {
     }
 }
 
+pub(crate) fn is_background_task_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "spawn_task" | "query_task" | "list_tasks" | "cancel_task" | "wait_tasks"
+    )
+}
+
+pub(crate) fn should_expose_background_task_tools(input: &str) -> bool {
+    let lower = input.to_ascii_lowercase();
+    [
+        "后台",
+        "不阻塞",
+        "并行",
+        "同时执行",
+        "持续运行",
+        "长期运行",
+        "服务",
+        "监听",
+        "启动 server",
+        "启动服务",
+        "dev server",
+        "background",
+        "non-blocking",
+        "parallel",
+        "concurrent",
+        "daemon",
+        "server",
+        "watch",
+        "long-running",
+        "keep running",
+        "background task",
+        "后台任务",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+pub(crate) fn filter_background_task_tools(
+    tools: Vec<ToolSpec>,
+    user_input: &str,
+) -> Vec<ToolSpec> {
+    if should_expose_background_task_tools(user_input) {
+        return tools;
+    }
+    tools
+        .into_iter()
+        .filter(|tool| !is_background_task_tool(&tool.name))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::model::ToolSpec;
     use crate::session::Session;
 
     fn empty_session() -> Session {
@@ -205,5 +263,33 @@ mod tests {
                 ..Default::default()
             });
         assert!(session.task_records.iter().any(|r| r.tool_result.is_some()));
+    }
+
+    fn tool(name: &str) -> ToolSpec {
+        ToolSpec {
+            name: name.to_string(),
+            description: String::new(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    #[test]
+    fn normal_command_input_hides_background_task_tools() {
+        let tools = vec![tool("run_shell"), tool("spawn_task"), tool("wait_tasks")];
+        let names: Vec<_> = filter_background_task_tools(tools, "执行 git diff 看一下改动")
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert_eq!(names, vec!["run_shell"]);
+    }
+
+    #[test]
+    fn background_intent_keeps_background_task_tools() {
+        let tools = vec![tool("run_shell"), tool("spawn_task"), tool("wait_tasks")];
+        let names: Vec<_> = filter_background_task_tools(tools, "后台启动 dev server，不要阻塞")
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert_eq!(names, vec!["run_shell", "spawn_task", "wait_tasks"]);
     }
 }

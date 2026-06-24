@@ -1037,8 +1037,8 @@ const SYSTEM_RULES: &str = "规则：\
 6. 回复使用 Markdown 格式：代码和命令用代码块包裹，使用标题、列表等结构化排版。\
 7. 工具调用失败时必须如实告知用户失败原因，绝对不能虚构成功结果。\
 8. 如果已安装的 Skill 能处理用户请求，优先通过 run_command 调用 Skill 脚本。\
-9. 耗时较长的命令使用 spawn_task 在后台执行。\
-10. 多个可并行的耗时任务使用 spawn+join 模式。";
+9. 命令执行默认使用 run_shell 或 run_command，并根据工具结果继续推进。\
+10. 只有用户明确要求后台、不阻塞、并行、持续运行、启动服务/监听，或需要管理已有后台任务时，才使用 spawn_task / wait_tasks。";
 
 fn build_provider_messages(req: &ModelRequest) -> (String, Vec<ChatMessage>) {
     let mut messages = Vec::new();
