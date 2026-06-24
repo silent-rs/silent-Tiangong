@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use tiangong_core::agent_config::ResolvedMcpTransport;
 
 /// 语音合成结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,23 +194,44 @@ pub struct PlanStep {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerView {
     pub name: String,
+    pub transport: String,
     pub command: String,
     pub args: Vec<String>,
+    pub endpoint: String,
+    pub auth_header: String,
+    pub headers: Option<BTreeMap<String, String>>,
     pub env: Option<HashMap<String, String>>,
+    pub cwd: String,
     pub enabled: bool,
 }
 
 impl McpServerView {
     pub fn from_core(core_server: &tiangong_core::agent_config::McpServerConfig) -> Self {
+        let transport = match core_server.resolved_transport() {
+            ResolvedMcpTransport::Stdio => "stdio",
+            ResolvedMcpTransport::Http => "http",
+            ResolvedMcpTransport::Metadata => "auto",
+        }
+        .to_string();
+
         Self {
             name: core_server.name.clone(),
+            transport,
             command: core_server.command.clone(),
             args: core_server.args.clone(),
+            endpoint: core_server.endpoint.clone(),
+            auth_header: core_server.auth_header.clone(),
+            headers: if core_server.headers.is_empty() {
+                None
+            } else {
+                Some(core_server.headers.clone())
+            },
             env: if core_server.env.is_empty() {
                 None
             } else {
                 Some(core_server.env.clone().into_iter().collect())
             },
+            cwd: core_server.cwd.clone(),
             enabled: core_server.enabled,
         }
     }

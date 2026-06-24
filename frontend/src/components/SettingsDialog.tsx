@@ -26,6 +26,38 @@ import { WebhookPanel } from './automation/WebhookPanel';
 const appWindow = getCurrentWindow();
 
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
+type McpTransportDraft = 'stdio' | 'http' | 'sse';
+
+function parseListArgs(value: string): string[] {
+  return value
+    .split(/\s+/)
+    .map((arg) => arg.trim())
+    .filter(Boolean);
+}
+
+function parseKeyValueText(value: string, label: string): Record<string, string> | undefined {
+  const entries: Record<string, string> = {};
+  for (const rawLine of value.split(/[,\n]/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const separatorIndex = line.includes('=') ? line.indexOf('=') : line.indexOf(':');
+    if (separatorIndex <= 0) {
+      throw new Error(`${label}格式错误：${line}`);
+    }
+    const key = line.slice(0, separatorIndex).trim();
+    const itemValue = line.slice(separatorIndex + 1).trim();
+    if (!key || !itemValue) {
+      throw new Error(`${label}格式错误：${line}`);
+    }
+    entries[key] = itemValue;
+  }
+
+  return Object.keys(entries).length > 0 ? entries : undefined;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 export function SettingsDialog() {
   const [open, setOpen] = useState(false);
@@ -1543,9 +1575,14 @@ function McpSettings() {
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [newServer, setNewServer] = useState({
     name: '',
+    transport: 'stdio' as McpTransportDraft,
     command: '',
     args: '',
+    endpoint: '',
+    authHeader: '',
+    headers: '',
     env: '',
+    cwd: '',
   });
   const [editEnvTarget, setEditEnvTarget] = useState<string | null>(null);
   const [editEnvValues, setEditEnvValues] = useState<Record<string, string>>({});
@@ -1578,23 +1615,44 @@ function McpSettings() {
 
   const handleAddServer = async () => {
     try {
-      const args = newServer.args.split(' ').filter(arg => arg.trim());
-      const env = newServer.env
-        ? newServer.env.split(',').reduce((acc, pair) => {
-            const [key, value] = pair.split('=');
-            if (key && value) acc[key.trim()] = value.trim();
-            return acc;
-          }, {} as Record<string, string>)
-        : undefined;
+      const isStdio = newServer.transport === 'stdio';
+      const request = isStdio
+        ? {
+            name: newServer.name.trim(),
+            transport: newServer.transport,
+            command: newServer.command.trim(),
+            args: parseListArgs(newServer.args),
+            env: parseKeyValueText(newServer.env, '环境变量'),
+            cwd: newServer.cwd.trim() || undefined,
+          }
+        : {
+            name: newServer.name.trim(),
+            transport: newServer.transport,
+            command: '',
+            args: [],
+            endpoint: newServer.endpoint.trim(),
+            authHeader: newServer.authHeader.trim() || undefined,
+            headers: parseKeyValueText(newServer.headers, 'Header'),
+          };
 
-      await api.registerMcpServer(newServer.name, newServer.command, args, env);
-      setNewServer({ name: '', command: '', args: '', env: '' });
+      await api.registerMcpServer(request);
+      setNewServer({
+        name: '',
+        transport: 'stdio',
+        command: '',
+        args: '',
+        endpoint: '',
+        authHeader: '',
+        headers: '',
+        env: '',
+        cwd: '',
+      });
       setShowAddDialog(false);
       showSuccess('添加成功', `MCP 服务器 "${newServer.name}" 已添加`);
       loadServers();
     } catch (error) {
       console.error('添加 MCP 服务器失败:', error);
-      showError('添加失败', '无法添加 MCP 服务器，请检查配置');
+      showError('添加失败', errorMessage(error));
     }
   };
 
@@ -1646,12 +1704,19 @@ function McpSettings() {
             const health = healthMap[server.name];
             const isHealthy = health?.healthy ?? true;
             const hasHealth = health !== undefined;
+            const isRemote = server.transport === 'http';
+            const serverTarget = isRemote
+              ? server.endpoint || server.command || '(未配置 endpoint)'
+              : `${server.command} ${server.args.join(' ')}`.trim();
             return (
             <Card key={server.name}>
               <CardContent className="p-4 flex items-center justify-between">
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-medium">{server.name}</span>
+                    <Badge variant="outline" className="text-xs">
+                      {isRemote ? 'HTTP/SSE' : server.transport}
+                    </Badge>
                     <Badge variant={server.enabled ? 'default' : 'secondary'}>
                       {server.enabled ? '已启用' : '已禁用'}
                     </Badge>
@@ -1665,8 +1730,15 @@ function McpSettings() {
                     )}
                   </div>
                   <div className="text-sm text-muted-foreground mt-1 truncate">
-                    {server.command} {server.args.join(' ')}
+                    {serverTarget}
                   </div>
+                  {isRemote && (server.auth_header || server.headers) && (
+                    <div className="text-xs text-muted-foreground mt-1">
+                      {server.auth_header ? '已设置认证头' : ''}
+                      {server.auth_header && server.headers ? ' · ' : ''}
+                      {server.headers ? `${Object.keys(server.headers).length} 个自定义 Header` : ''}
+                    </div>
+                  )}
                   {server.enabled && hasHealth && !isHealthy && health.last_error && (
                     <div className="text-xs text-destructive mt-1 truncate" title={health.last_error}>
                       {health.last_error}
@@ -1674,18 +1746,20 @@ function McpSettings() {
                   )}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-8 w-8"
-                    onClick={() => {
-                      setEditEnvTarget(server.name);
-                      setEditEnvValues(server.env || {});
-                    }}
-                    title="编辑环境变量"
-                  >
-                    <KeyRound className="w-4 h-4" />
-                  </Button>
+                  {!isRemote && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={() => {
+                        setEditEnvTarget(server.name);
+                        setEditEnvValues(server.env || {});
+                      }}
+                      title="编辑环境变量"
+                    >
+                      <KeyRound className="w-4 h-4" />
+                    </Button>
+                  )}
                   <Switch
                     checked={server.enabled}
                     onCheckedChange={(checked) => handleToggleEnabled(server.name, checked)}
@@ -1746,38 +1820,106 @@ function McpSettings() {
                   />
                 </div>
                 <div>
-                  <Label htmlFor="serverCommand">命令</Label>
-                  <Input
-                    id="serverCommand"
-                    value={newServer.command}
-                    onChange={(e) => setNewServer({ ...newServer, command: e.target.value })}
-                    placeholder="npx"
-                  />
+                  <Label htmlFor="serverTransport">连接方式</Label>
+                  <Select
+                    value={newServer.transport}
+                    onValueChange={(value) => setNewServer({ ...newServer, transport: value as McpTransportDraft })}
+                  >
+                    <SelectTrigger id="serverTransport">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="stdio">stdio / npx</SelectItem>
+                      <SelectItem value="http">HTTP/SSE 端点</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
-                <div>
-                  <Label htmlFor="serverArgs">参数（空格分隔）</Label>
-                  <Input
-                    id="serverArgs"
-                    value={newServer.args}
-                    onChange={(e) => setNewServer({ ...newServer, args: e.target.value })}
-                    placeholder="-y @modelcontextprotocol/server-filesystem"
-                  />
-                </div>
-                <div>
-                  <Label htmlFor="serverEnv">环境变量（逗号分隔，格式：KEY=VALUE）</Label>
-                  <Input
-                    id="serverEnv"
-                    value={newServer.env}
-                    onChange={(e) => setNewServer({ ...newServer, env: e.target.value })}
-                    placeholder="PATH=/usr/bin,NODE_ENV=production"
-                  />
-                </div>
+                {newServer.transport === 'stdio' ? (
+                  <>
+                    <div>
+                      <Label htmlFor="serverCommand">命令</Label>
+                      <Input
+                        id="serverCommand"
+                        value={newServer.command}
+                        onChange={(e) => setNewServer({ ...newServer, command: e.target.value })}
+                        placeholder="npx"
+                      />
+                    </div>
+                    <div>
+                      <Label htmlFor="serverArgs">参数（空格分隔）</Label>
+                      <Input
+                        id="serverArgs"
+                        value={newServer.args}
+                        onChange={(e) => setNewServer({ ...newServer, args: e.target.value })}
+                        placeholder="-y @modelcontextprotocol/server-filesystem"
+                      />
+                    </div>
+                    <div>
+                      <Label htmlFor="serverEnv">环境变量（逗号或换行分隔，格式：KEY=VALUE）</Label>
+                      <Textarea
+                        id="serverEnv"
+                        value={newServer.env}
+                        onChange={(e) => setNewServer({ ...newServer, env: e.target.value })}
+                        placeholder="PATH=/usr/bin&#10;NODE_ENV=production"
+                        rows={3}
+                      />
+                    </div>
+                    <div>
+                      <Label htmlFor="serverCwd">工作目录</Label>
+                      <Input
+                        id="serverCwd"
+                        value={newServer.cwd}
+                        onChange={(e) => setNewServer({ ...newServer, cwd: e.target.value })}
+                        placeholder="/path/to/workspace"
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div>
+                      <Label htmlFor="serverEndpoint">Endpoint</Label>
+                      <Input
+                        id="serverEndpoint"
+                        value={newServer.endpoint}
+                        onChange={(e) => setNewServer({ ...newServer, endpoint: e.target.value })}
+                        placeholder="https://example.com/mcp"
+                      />
+                    </div>
+                    <div>
+                      <Label htmlFor="serverAuthHeader">认证 Header</Label>
+                      <Input
+                        id="serverAuthHeader"
+                        value={newServer.authHeader}
+                        onChange={(e) => setNewServer({ ...newServer, authHeader: e.target.value })}
+                        placeholder="Bearer sk-..."
+                      />
+                    </div>
+                    <div>
+                      <Label htmlFor="serverHeaders">自定义 Headers（逗号或换行分隔）</Label>
+                      <Textarea
+                        id="serverHeaders"
+                        value={newServer.headers}
+                        onChange={(e) => setNewServer({ ...newServer, headers: e.target.value })}
+                        placeholder="X-API-Key=xxx&#10;X-Client: tiangong"
+                        rows={3}
+                      />
+                    </div>
+                  </>
+                )}
               </div>
               <div className="flex justify-end gap-2 mt-6">
                 <Button variant="ghost" onClick={() => setShowAddDialog(false)}>
                   取消
                 </Button>
-                <Button onClick={handleAddServer} disabled={!newServer.name || !newServer.command}>
+                <Button
+                  onClick={handleAddServer}
+                  disabled={
+                    !newServer.name.trim()
+                    || (newServer.transport === 'stdio'
+                      ? !newServer.command.trim()
+                      : !newServer.endpoint.trim())
+                  }
+                >
                   添加
                 </Button>
               </div>

@@ -41,7 +41,7 @@
 | 05 | #170 | P2 | 自动上下文压缩闭环核查 | 未开始 | `05-context-compression-audit.md` |
 | 06 | #165 | P2 | 工具失败恢复结构化 | 未开始 | `06-structured-tool-failure-recovery.md` |
 | 07 | #169 | P2 | 只读工具并行执行设计 | 未开始 | `07-readonly-tool-parallel-design.md` |
-| 08 | #164 | P0 | 桌面端 MCP HTTP/SSE 注册异常修复 | 未开始 | `08-desktop-mcp-http-sse-registration.md` |
+| 08 | #164 | P0 | 桌面端 MCP HTTP/SSE 注册异常修复 | 已完成 | `08-desktop-mcp-http-sse-registration.md` |
 
 ## 推荐执行顺序
 

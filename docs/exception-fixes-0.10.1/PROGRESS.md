@@ -9,7 +9,7 @@
 ## 当前状态
 
 - 阶段：0.10.1 发布后异常修复进行中。
-- 当前建议任务：08 - 桌面端 MCP HTTP/SSE 注册异常修复。
+- 当前建议任务：02 - Workspace Index 写入器失败修复。
 - 当前阻塞：无。
 - 目标版本建议：0.10.1。
 
@@ -24,7 +24,7 @@
 | 05 | #170 | 自动上下文压缩闭环核查 | P2 | 未开始 | 待定 | 待定 | 待定 |
 | 06 | #165 | 工具失败恢复结构化 | P2 | 未开始 | 待定 | 待定 | 待定 |
 | 07 | #169 | 只读工具并行执行设计 | P2 | 未开始 | 待定 | 待定 | 待定 |
-| 08 | #164 | 桌面端 MCP HTTP/SSE 注册异常修复 | P0 | 未开始 | 待定 | 待定 | 待定 |
+| 08 | #164 | 桌面端 MCP HTTP/SSE 注册异常修复 | P0 | 已完成 | `fix/exception-fixes-0.10.1` | 待提交 | `cargo fmt -- --check`、`cargo check --workspace`、`yarn --cwd frontend build`、`git diff --check` |
 
 ## 依赖总览
 
@@ -50,3 +50,4 @@
 ## 验证记录
 
 - 2026-06-24：完成 01 文档边界对齐；检查 `PLAN.md`、`TODO.md`、`README.md`、`PROGRESS.md` 的当前主线一致性，未发现旧发布准备阶段的主线残留；`git diff --check` 通过。
+- 2026-06-24：完成 08 桌面端 MCP HTTP/SSE 注册异常修复；Desktop 设置页新增 MCP 连接方式选择，stdio 继续使用 command/args/env/cwd，HTTP/SSE 端点使用 endpoint/auth/header；Tauri 命令透传 transport/endpoint/header/cwd，MCP 列表返回并展示 transport/endpoint。`cargo fmt -- --check`、`cargo check --workspace`、`yarn --cwd frontend build`、`git diff --check` 通过。尝试用 CLI 临时 HOME 做端到端注册验证时卡在应用启动链路，已终止；尝试运行聚焦 cargo test 时首次编译依赖超过 120 秒限时，未跑到测试本体。

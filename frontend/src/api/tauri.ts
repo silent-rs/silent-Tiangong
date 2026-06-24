@@ -210,10 +210,27 @@ export interface PlanStep {
 
 export interface McpServer {
   name: string;
+  transport: 'auto' | 'stdio' | 'http';
   command: string;
   args: string[];
+  endpoint: string;
+  auth_header: string;
+  headers?: Record<string, string>;
   env?: Record<string, string>;
+  cwd: string;
   enabled: boolean;
+}
+
+export interface RegisterMcpServerInput {
+  name: string;
+  transport?: 'auto' | 'stdio' | 'http' | 'sse';
+  command?: string;
+  args?: string[];
+  endpoint?: string;
+  authHeader?: string;
+  headers?: Record<string, string>;
+  env?: Record<string, string>;
+  cwd?: string;
 }
 
 export interface Skill {
@@ -552,8 +569,18 @@ export const api = {
   getMcpHealth: (): Promise<McpHealthStatus[]> =>
     invoke('get_mcp_health'),
 
-  registerMcpServer: (name: string, command: string, args: string[], env?: Record<string, string>): Promise<string> =>
-    invoke('register_mcp_server', { name, command, args, env }),
+  registerMcpServer: (input: RegisterMcpServerInput): Promise<string> =>
+    invoke('register_mcp_server', {
+      name: input.name,
+      command: input.command ?? '',
+      args: input.args ?? [],
+      transport: input.transport,
+      endpoint: input.endpoint,
+      authHeader: input.authHeader,
+      headers: input.headers,
+      env: input.env,
+      cwd: input.cwd,
+    }),
 
   removeMcpServer: (name: string): Promise<string> =>
     invoke('remove_mcp_server', { name }),
