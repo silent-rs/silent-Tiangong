@@ -1,7 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::{Schema, Value};
@@ -264,7 +265,6 @@ struct SymbolEntry {
 
 pub struct WorkspaceIndex {
     index: Index,
-    writer: IndexWriter,
     fields: WorkspaceFields,
     #[allow(dead_code)]
     schema: Schema,
@@ -278,22 +278,57 @@ impl WorkspaceIndex {
         let index_dir = Self::index_dir(root, base_dir);
         let (schema, fields) = workspace_schema();
 
-        let index = if index_dir.exists() {
-            Index::open_in_dir(&index_dir).context("打开 Workspace Tantivy 索引失败")?
+        let existed = index_dir.exists();
+        let index = if existed {
+            match Index::open_in_dir(&index_dir).with_context(|| {
+                workspace_index_context(root, base_dir, "open", "打开 Workspace Tantivy 索引失败")
+            }) {
+                Ok(index) => index,
+                Err(err) => {
+                    tracing::warn!(
+                        workspace = %root.display(),
+                        index_dir = %index_dir.display(),
+                        error = %err,
+                        "Workspace Tantivy 索引打开失败，准备重建索引目录"
+                    );
+                    fs::remove_dir_all(&index_dir).with_context(|| {
+                        workspace_index_context(
+                            root,
+                            base_dir,
+                            "recover_open",
+                            "删除损坏 Workspace 索引目录失败",
+                        )
+                    })?;
+                    fs::create_dir_all(&index_dir).with_context(|| {
+                        workspace_index_context(
+                            root,
+                            base_dir,
+                            "recover_open",
+                            "创建 Workspace 索引目录失败",
+                        )
+                    })?;
+                    Index::create_in_dir(&index_dir, schema.clone()).with_context(|| {
+                        workspace_index_context(
+                            root,
+                            base_dir,
+                            "recover_open",
+                            "重建 Workspace Tantivy 索引失败",
+                        )
+                    })?
+                }
+            }
         } else {
-            fs::create_dir_all(&index_dir).context("创建 Workspace 索引目录失败")?;
-            Index::create_in_dir(&index_dir, schema.clone())
-                .context("创建 Workspace Tantivy 索引失败")?
+            fs::create_dir_all(&index_dir).with_context(|| {
+                workspace_index_context(root, base_dir, "create", "创建 Workspace 索引目录失败")
+            })?;
+            Index::create_in_dir(&index_dir, schema.clone()).with_context(|| {
+                workspace_index_context(root, base_dir, "create", "创建 Workspace Tantivy 索引失败")
+            })?
         };
-
-        let writer = index
-            .writer(15_000_000)
-            .context("创建 Workspace 索引写入器失败")?;
 
         Ok(Self {
             schema,
             index,
-            writer,
             fields,
             root: root.to_path_buf(),
             base_dir: base_dir.to_path_buf(),
@@ -302,17 +337,20 @@ impl WorkspaceIndex {
     }
 
     pub fn full_scan(&mut self) -> Result<usize> {
-        self.writer
+        let mut writer = self.create_writer("full_scan")?;
+        writer
             .delete_all_documents()
-            .context("清空 Workspace 索引失败")?;
+            .with_context(|| self.context("full_scan", "清空 Workspace 索引失败"))?;
         self.entry_count = 0;
-        self.scan_dir(&self.root.clone(), 0)?;
-        self.writer.commit().context("提交 Workspace 索引失败")?;
+        self.scan_dir(&mut writer, &self.root.clone(), 0)?;
+        writer
+            .commit()
+            .with_context(|| self.context("full_scan", "提交 Workspace 索引失败"))?;
         self.write_meta()?;
         Ok(self.entry_count)
     }
 
-    fn scan_dir(&mut self, dir: &Path, depth: usize) -> Result<()> {
+    fn scan_dir(&mut self, writer: &mut IndexWriter, dir: &Path, depth: usize) -> Result<()> {
         if depth > MAX_DEPTH || self.entry_count >= MAX_ENTRIES {
             return Ok(());
         }
@@ -332,15 +370,32 @@ impl WorkspaceIndex {
                 if should_skip_dir(&name_str) {
                     continue;
                 }
-                self.scan_dir(&path, depth + 1)?;
+                self.scan_dir(writer, &path, depth + 1)?;
             } else if path.is_file() && !should_skip_file(&name_str) {
-                let _ = self.index_file(&path);
+                if let Err(err) = self.index_file_with_writer(writer, &path) {
+                    tracing::warn!(
+                        workspace = %self.root.display(),
+                        path = %path.display(),
+                        error = %err,
+                        "Workspace 文件索引写入失败，已跳过该文件"
+                    );
+                }
             }
         }
         Ok(())
     }
 
     pub fn index_file(&mut self, path: &Path) -> Result<()> {
+        let mut writer = self.create_writer("index_file")?;
+        self.index_file_with_writer(&mut writer, path)?;
+        writer
+            .commit()
+            .with_context(|| self.context("index_file", "提交 Workspace 索引失败"))?;
+        self.write_meta()?;
+        Ok(())
+    }
+
+    fn index_file_with_writer(&mut self, writer: &mut IndexWriter, path: &Path) -> Result<()> {
         let metadata = fs::metadata(path).ok();
         let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
         if size > MAX_FILE_SIZE {
@@ -378,19 +433,19 @@ impl WorkspaceIndex {
             }
         }
 
-        self.writer.add_document(doc)?;
+        writer.add_document(doc)?;
         self.entry_count += 1;
         Ok(())
     }
 
-    pub fn commit(&mut self) -> Result<()> {
-        self.writer.commit().context("提交 Workspace 索引失败")?;
-        Ok(())
-    }
-
     pub fn remove_file(&mut self, rel_path: &str) -> Result<()> {
+        let mut writer = self.create_writer("remove_file")?;
         let term = tantivy::Term::from_field_text(self.fields.path, rel_path);
-        self.writer.delete_term(term);
+        writer.delete_term(term);
+        writer
+            .commit()
+            .with_context(|| self.context("remove_file", "提交 Workspace 索引失败"))?;
+        self.write_meta()?;
         Ok(())
     }
 
@@ -398,7 +453,7 @@ impl WorkspaceIndex {
         let reader = self
             .index
             .reader()
-            .context("创建 Workspace 索引读取器失败")?;
+            .with_context(|| self.context("search", "创建 Workspace 索引读取器失败"))?;
         let searcher = reader.searcher();
 
         let path_field = self.fields.path;
@@ -418,7 +473,7 @@ impl WorkspaceIndex {
 
         let query = query_parser
             .parse_query(query_text)
-            .context("解析 Workspace 搜索查询失败")?;
+            .with_context(|| self.context("search", "解析 Workspace 搜索查询失败"))?;
         let top_docs = searcher.search(&query, &TopDocs::with_limit(limit))?;
 
         let mut hits = Vec::new();
@@ -460,19 +515,44 @@ impl WorkspaceIndex {
             .parent()
             .context("索引目录无效")?
             .to_path_buf();
-        std::fs::create_dir_all(&meta_dir).context("创建 Workspace meta 目录失败")?;
+        std::fs::create_dir_all(&meta_dir)
+            .with_context(|| self.context("write_meta", "创建 Workspace meta 目录失败"))?;
         let meta_path = meta_dir.join("meta.json");
-        let json = serde_json::to_string_pretty(&meta).context("序列化 Workspace meta 失败")?;
-        std::fs::write(&meta_path, json).context("写入 Workspace meta 失败")?;
+        let json = serde_json::to_string_pretty(&meta)
+            .with_context(|| self.context("write_meta", "序列化 Workspace meta 失败"))?;
+        std::fs::write(&meta_path, json)
+            .with_context(|| self.context("write_meta", "写入 Workspace meta 失败"))?;
         Ok(())
     }
 
-    fn index_dir(root: &Path, base_dir: &Path) -> PathBuf {
+    pub(crate) fn index_dir(root: &Path, base_dir: &Path) -> PathBuf {
         let workspace_id = md5_hex(root.to_string_lossy().as_bytes());
         base_dir
             .join("workspaces")
             .join(workspace_id)
             .join("tantivy")
+    }
+
+    fn create_writer(&self, stage: &str) -> Result<IndexWriter> {
+        let mut last_error = None;
+        for attempt in 1..=3 {
+            match self.index.writer(15_000_000) {
+                Ok(writer) => return Ok(writer),
+                Err(err) => {
+                    last_error = Some(anyhow!(err));
+                    if attempt < 3 {
+                        std::thread::sleep(Duration::from_millis(50 * attempt));
+                    }
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow!("unknown writer error")))
+            .with_context(|| self.context(stage, "创建 Workspace 索引写入器失败"))
+    }
+
+    fn context(&self, stage: &str, message: &str) -> String {
+        workspace_index_context(&self.root, &self.base_dir, stage, message)
     }
 }
 
@@ -483,6 +563,14 @@ pub struct SearchHit {
 
 pub fn hash_path(root: &Path) -> String {
     md5_hex(root.to_string_lossy().as_bytes())
+}
+
+fn workspace_index_context(root: &Path, base_dir: &Path, stage: &str, message: &str) -> String {
+    format!(
+        "{message}: workspace={} index_dir={} stage={stage}",
+        root.display(),
+        WorkspaceIndex::index_dir(root, base_dir).display()
+    )
 }
 
 fn md5_hex(data: &[u8]) -> String {
@@ -514,5 +602,36 @@ mod fnv {
             }
             self.0 = hash;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_index_does_not_hold_writer_between_operations() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let workspace = temp.path().join("workspace");
+        let base_dir = temp.path().join("index");
+        fs::create_dir_all(workspace.join("src"))?;
+        fs::write(
+            workspace.join("src").join("lib.rs"),
+            "pub struct DemoIndex;\npub fn demo_symbol() {}\n",
+        )?;
+
+        let mut first = WorkspaceIndex::open_or_create(&workspace, &base_dir)?;
+        assert_eq!(first.full_scan()?, 1);
+
+        let mut second = WorkspaceIndex::open_or_create(&workspace, &base_dir)?;
+        assert_eq!(second.full_scan()?, 1);
+
+        let hits = first.search("demo_symbol", 5)?;
+        assert!(
+            hits.iter().any(|hit| hit.path == "src/lib.rs"),
+            "workspace search should find indexed Rust symbol"
+        );
+
+        Ok(())
     }
 }
