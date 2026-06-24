@@ -2487,6 +2487,7 @@ pub async fn get_mcp_health() -> Result<Vec<serde_json::Value>, String> {
 
 /// 注册 MCP 服务器
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn register_mcp_server(
     name: String,
     command: String,
@@ -2541,7 +2542,6 @@ pub async fn register_mcp_server(
                     headers: header_vec,
                     env: env_vec,
                     cwd,
-                    ..Default::default()
                 },
             };
             core_state.register_mcp_server(request)

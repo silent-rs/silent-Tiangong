@@ -371,15 +371,16 @@ impl WorkspaceIndex {
                     continue;
                 }
                 self.scan_dir(writer, &path, depth + 1)?;
-            } else if path.is_file() && !should_skip_file(&name_str) {
-                if let Err(err) = self.index_file_with_writer(writer, &path) {
-                    tracing::warn!(
-                        workspace = %self.root.display(),
-                        path = %path.display(),
-                        error = %err,
-                        "Workspace 文件索引写入失败，已跳过该文件"
-                    );
-                }
+            } else if path.is_file()
+                && !should_skip_file(&name_str)
+                && let Err(err) = self.index_file_with_writer(writer, &path)
+            {
+                tracing::warn!(
+                    workspace = %self.root.display(),
+                    path = %path.display(),
+                    error = %err,
+                    "Workspace 文件索引写入失败，已跳过该文件"
+                );
             }
         }
         Ok(())
