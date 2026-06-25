@@ -2477,16 +2477,36 @@ impl ReactEngine {
                     .join("; ");
                 format!("[{agent_label}] 执行出错：{error_content}")
             } else {
-                let summary = child_session
-                    .messages
-                    .iter()
-                    .filter(|m| m.role == MessageRole::Assistant)
-                    .filter_map(|m| {
-                        let c = m.text_content().trim().to_string();
-                        if c.is_empty() { None } else { Some(c) }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                // 优先收集总结阶段（Summary phase）的最终回复作为汇报内容；
+                // 若无（旧架构或快速路径未标记），回退到所有 Assistant 消息。
+                let summary = {
+                    let summaries: Vec<String> = child_session
+                        .messages
+                        .iter()
+                        .filter(|m| {
+                            m.role == MessageRole::Assistant
+                                && m.phase == crate::session::MessagePhase::Summary
+                        })
+                        .filter_map(|m| {
+                            let c = m.text_content().trim().to_string();
+                            if c.is_empty() { None } else { Some(c) }
+                        })
+                        .collect();
+                    if summaries.is_empty() {
+                        child_session
+                            .messages
+                            .iter()
+                            .filter(|m| m.role == MessageRole::Assistant)
+                            .filter_map(|m| {
+                                let c = m.text_content().trim().to_string();
+                                if c.is_empty() { None } else { Some(c) }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    } else {
+                        summaries.join("\n")
+                    }
+                };
 
                 if summary.is_empty() {
                     format!("[{agent_label}] 已完成本轮工作，但没有生成文本输出。")
