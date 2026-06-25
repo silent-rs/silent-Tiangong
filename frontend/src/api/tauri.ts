@@ -231,6 +231,18 @@ export interface RegisterMcpServerInput {
   env?: Record<string, string>;
 }
 
+export interface UpdateMcpServerInput {
+  name: string;
+  transport?: 'auto' | 'stdio' | 'http' | 'sse';
+  command?: string;
+  args?: string[];
+  endpoint?: string;
+  authHeader?: string;
+  headers?: Record<string, string>;
+  env?: Record<string, string>;
+  enabled: boolean;
+}
+
 export interface Skill {
   id: string;
   name: string;
@@ -577,6 +589,19 @@ export const api = {
       authHeader: input.authHeader,
       headers: input.headers,
       env: input.env,
+    }),
+
+  updateMcpServer: (name: string, input: UpdateMcpServerInput): Promise<string> =>
+    invoke('update_mcp_server', {
+      name,
+      command: input.command ?? '',
+      args: input.args ?? [],
+      transport: input.transport,
+      endpoint: input.endpoint,
+      authHeader: input.authHeader,
+      headers: input.headers,
+      env: input.env,
+      enabled: input.enabled,
     }),
 
   removeMcpServer: (name: string): Promise<string> =>

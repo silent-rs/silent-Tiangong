@@ -504,6 +504,7 @@ fn run_gui() {
             tiangong_app::commands::get_mcp_servers,
             tiangong_app::commands::get_mcp_health,
             tiangong_app::commands::register_mcp_server,
+            tiangong_app::commands::update_mcp_server,
             tiangong_app::commands::remove_mcp_server,
             tiangong_app::commands::set_mcp_server_enabled,
             tiangong_app::commands::get_skills,

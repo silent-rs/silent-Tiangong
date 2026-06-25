@@ -55,6 +55,14 @@ function parseKeyValueText(value: string, label: string): Record<string, string>
   return Object.keys(entries).length > 0 ? entries : undefined;
 }
 
+/// parseKeyValueText 的逆函数：把 Record 格式化为 KEY=VALUE 文本，每行一条。
+function formatKeyValue(record?: Record<string, string>): string {
+  if (!record) return '';
+  return Object.entries(record)
+    .map(([key, value]) => `${key}=${value}`)
+    .join('\n');
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -1572,7 +1580,8 @@ function McpSettings() {
   const [servers, setServers] = useState<McpServer[]>([]);
   const [healthMap, setHealthMap] = useState<Record<string, { healthy: boolean; tool_count: number; last_error?: string; server_version?: string }>>({});
   const [isLoading, setIsLoading] = useState(false);
-  const [showAddDialog, setShowAddDialog] = useState(false);
+  const [serverModalMode, setServerModalMode] = useState<'add' | 'edit' | null>(null);
+  const [editingServerName, setEditingServerName] = useState<string | null>(null);
   const [newServer, setNewServer] = useState({
     name: '',
     transport: 'stdio' as McpTransportDraft,
@@ -1582,9 +1591,8 @@ function McpSettings() {
     authHeader: '',
     headers: '',
     env: '',
+    enabled: true,
   });
-  const [editEnvTarget, setEditEnvTarget] = useState<string | null>(null);
-  const [editEnvValues, setEditEnvValues] = useState<Record<string, string>>({});
   const { showSuccess, showError } = useToast();
 
   const loadServers = async () => {
@@ -1612,6 +1620,42 @@ function McpSettings() {
     loadServers();
   }, []);
 
+  const resetDraft = () => {
+    setNewServer({
+      name: '',
+      transport: 'stdio',
+      command: '',
+      args: '',
+      endpoint: '',
+      authHeader: '',
+      headers: '',
+      env: '',
+      enabled: true,
+    });
+  };
+
+  const closeServerModal = () => {
+    setServerModalMode(null);
+    setEditingServerName(null);
+    resetDraft();
+  };
+
+  const openEditServer = (server: McpServer) => {
+    setEditingServerName(server.name);
+    setNewServer({
+      name: server.name,
+      transport: (server.transport === 'http' ? 'http' : 'stdio') as McpTransportDraft,
+      command: server.command,
+      args: server.args.join(' '),
+      endpoint: server.endpoint,
+      authHeader: server.auth_header,
+      headers: formatKeyValue(server.headers),
+      env: formatKeyValue(server.env),
+      enabled: server.enabled,
+    });
+    setServerModalMode('edit');
+  };
+
   const handleAddServer = async () => {
     try {
       const isStdio = newServer.transport === 'stdio';
@@ -1634,22 +1678,46 @@ function McpSettings() {
           };
 
       await api.registerMcpServer(request);
-      setNewServer({
-        name: '',
-        transport: 'stdio',
-        command: '',
-        args: '',
-        endpoint: '',
-        authHeader: '',
-        headers: '',
-        env: '',
-      });
-      setShowAddDialog(false);
       showSuccess('添加成功', `MCP 服务器 "${newServer.name}" 已添加`);
+      closeServerModal();
       loadServers();
     } catch (error) {
       console.error('添加 MCP 服务器失败:', error);
       showError('添加失败', errorMessage(error));
+    }
+  };
+
+  const handleUpdateServer = async () => {
+    if (!editingServerName) return;
+    try {
+      const isStdio = newServer.transport === 'stdio';
+      const request = isStdio
+        ? {
+            name: editingServerName,
+            transport: newServer.transport,
+            command: newServer.command.trim(),
+            args: parseListArgs(newServer.args),
+            env: parseKeyValueText(newServer.env, '环境变量'),
+            enabled: newServer.enabled,
+          }
+        : {
+            name: editingServerName,
+            transport: newServer.transport,
+            command: '',
+            args: [],
+            endpoint: newServer.endpoint.trim(),
+            authHeader: newServer.authHeader.trim() || undefined,
+            headers: parseKeyValueText(newServer.headers, 'Header'),
+            enabled: newServer.enabled,
+          };
+
+      await api.updateMcpServer(editingServerName, request);
+      showSuccess('保存成功', `MCP 服务器 "${editingServerName}" 已更新`);
+      closeServerModal();
+      loadServers();
+    } catch (error) {
+      console.error('更新 MCP 服务器失败:', error);
+      showError('保存失败', errorMessage(error));
     }
   };
 
@@ -1684,7 +1752,7 @@ function McpSettings() {
             <RefreshCw className="w-4 h-4 mr-2" />
             刷新
           </Button>
-          <Button size="sm" onClick={() => setShowAddDialog(true)}>
+          <Button size="sm" onClick={() => { resetDraft(); setServerModalMode('add'); }}>
             <Plus className="w-4 h-4 mr-2" />
             添加服务器
           </Button>
@@ -1743,20 +1811,15 @@ function McpSettings() {
                   )}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
-                  {!isRemote && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8"
-                      onClick={() => {
-                        setEditEnvTarget(server.name);
-                        setEditEnvValues(server.env || {});
-                      }}
-                      title="编辑环境变量"
-                    >
-                      <KeyRound className="w-4 h-4" />
-                    </Button>
-                  )}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8"
+                    onClick={() => openEditServer(server)}
+                    title="编辑配置"
+                  >
+                    <Edit2 className="w-4 h-4" />
+                  </Button>
                   <Switch
                     checked={server.enabled}
                     onCheckedChange={(checked) => handleToggleEnabled(server.name, checked)}
@@ -1778,34 +1841,16 @@ function McpSettings() {
         </div>
       )}
 
-      {/* MCP 环境变量编辑 */}
-      <EnvEditDialog
-        open={editEnvTarget !== null}
-        title={`编辑环境变量: ${editEnvTarget}`}
-        values={editEnvValues}
-        onChange={setEditEnvValues}
-        onSave={async () => {
-          if (!editEnvTarget) return;
-          try {
-            // MCP env 通过注册接口更新（重新注册同名服务器）
-            // 简单方案：先删后加会丢配置，这里直接修改 mcp.json
-            // TODO: 添加专门的 update_mcp_env 命令
-            showSuccess('环境变量已保存', `MCP "${editEnvTarget}" 的环境变量已更新`);
-            setEditEnvTarget(null);
-            loadServers();
-          } catch (error) {
-            showError('保存失败', `${error}`);
-          }
-        }}
-        onCancel={() => setEditEnvTarget(null)}
-      />
-
-      {/* 添加服务器对话框 */}
-      {showAddDialog && (
+      {/* 添加/编辑服务器对话框 */}
+      {serverModalMode !== null && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
           <Card className="max-w-md w-full mx-4">
             <CardContent className="p-6">
-              <h3 className="text-lg font-medium mb-4">添加 MCP 服务器</h3>
+              <h3 className="text-lg font-medium mb-4">
+                {serverModalMode === 'add'
+                  ? '添加 MCP 服务器'
+                  : `编辑 MCP 服务器: ${editingServerName}`}
+              </h3>
               <div className="space-y-4">
                 <div>
                   <Label htmlFor="serverName">名称</Label>
@@ -1814,6 +1859,7 @@ function McpSettings() {
                     value={newServer.name}
                     onChange={(e) => setNewServer({ ...newServer, name: e.target.value })}
                     placeholder="my-mcp-server"
+                    disabled={serverModalMode === 'edit'}
                   />
                 </div>
                 <div>
@@ -1894,21 +1940,29 @@ function McpSettings() {
                     </div>
                   </>
                 )}
+                <div className="flex items-center gap-2">
+                  <Switch
+                    id="serverEnabled"
+                    checked={newServer.enabled}
+                    onCheckedChange={(checked) => setNewServer({ ...newServer, enabled: checked })}
+                  />
+                  <Label htmlFor="serverEnabled">启用</Label>
+                </div>
               </div>
               <div className="flex justify-end gap-2 mt-6">
-                <Button variant="ghost" onClick={() => setShowAddDialog(false)}>
+                <Button variant="ghost" onClick={closeServerModal}>
                   取消
                 </Button>
                 <Button
-                  onClick={handleAddServer}
+                  onClick={serverModalMode === 'add' ? handleAddServer : handleUpdateServer}
                   disabled={
-                    !newServer.name.trim()
+                    (serverModalMode === 'add' && !newServer.name.trim())
                     || (newServer.transport === 'stdio'
                       ? !newServer.command.trim()
                       : !newServer.endpoint.trim())
                   }
                 >
-                  添加
+                  {serverModalMode === 'add' ? '添加' : '保存'}
                 </Button>
               </div>
             </CardContent>

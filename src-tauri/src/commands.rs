@@ -2549,6 +2549,71 @@ pub async fn register_mcp_server(
     Ok(message)
 }
 
+/// 编辑 MCP 服务器（按 name 定位，name 自身不可改）
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn update_mcp_server(
+    name: String,
+    command: String,
+    args: Vec<String>,
+    transport: Option<String>,
+    endpoint: Option<String>,
+    auth_header: Option<String>,
+    headers: Option<std::collections::HashMap<String, String>>,
+    env: Option<std::collections::HashMap<String, String>>,
+    enabled: bool,
+    state: State<'_, TiangongApp>,
+) -> Result<String, String> {
+    use tiangong_core::agent_config::McpTransportMode;
+    use tiangong_core::app_state::RegisterMcpServerOptions;
+    use tiangong_core::app_state::RegisterMcpServerRequest;
+
+    let transport = match transport
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => match value.to_ascii_lowercase().as_str() {
+            "auto" => Some(McpTransportMode::Auto),
+            "stdio" => Some(McpTransportMode::Stdio),
+            "http" | "sse" | "streamablehttp" | "streamable_http" | "streamable-http" => {
+                Some(McpTransportMode::Http)
+            }
+            other => {
+                return Err(format!(
+                    "不支持的 MCP transport：{other}，支持 auto/stdio/http/sse"
+                ));
+            }
+        },
+        None => None,
+    };
+
+    let message = state
+        .with_state(|core_state| {
+            let header_vec = headers.unwrap_or_default().into_iter().collect();
+            let env_vec = env.unwrap_or_default().into_iter().collect();
+
+            let request = RegisterMcpServerRequest {
+                name: name.clone(),
+                command,
+                args,
+                tags: vec![],
+                enabled,
+                options: RegisterMcpServerOptions {
+                    transport,
+                    endpoint,
+                    auth_header,
+                    headers: header_vec,
+                    env: env_vec,
+                },
+            };
+            core_state.update_mcp_server(&name, request)
+        })
+        .await?;
+    state.sync_core_config_from_state().await?;
+    Ok(message)
+}
+
 /// 移除 MCP 服务器
 #[tauri::command]
 pub async fn remove_mcp_server(
