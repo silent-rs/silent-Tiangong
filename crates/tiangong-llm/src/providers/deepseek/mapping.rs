@@ -7,6 +7,10 @@ use crate::response::{ProviderResponse, StopReason};
 use crate::tool::{ToolChoice, ToolSpec, parse_tool_arguments_or_error};
 use crate::usage::TokenUsageData;
 
+const INTERNAL_INJECTION_TOOL_NAME: &str = "plugin_injection";
+const INTERNAL_INJECTION_REASONING_CONTENT: &str =
+    "内部上下文注入：将外部运行时反馈作为工具结果传回，以便继续处理当前任务。";
+
 pub fn to_deepseek_request(
     req: &ProviderRequest,
 ) -> Result<tiangong_deepseek::types::ChatCompletionRequest> {
@@ -50,6 +54,7 @@ fn build_messages(req: &ProviderRequest) -> Result<Vec<tiangong_deepseek::types:
         messages.push(tiangong_deepseek::types::ChatMessage {
             role: tiangong_deepseek::types::MessageRole::System,
             content: Some(Value::String(system.clone())),
+            reasoning_content: None,
             name: None,
             tool_calls: None,
             tool_call_id: None,
@@ -68,7 +73,13 @@ fn build_messages(req: &ProviderRequest) -> Result<Vec<tiangong_deepseek::types:
             MessageRole::Assistant => {
                 let text = extract_text(message);
                 let tool_calls = build_assistant_tool_calls(message);
-                if !text.is_empty() || !tool_calls.is_empty() {
+                let reasoning_content = extract_thinking(message).or_else(|| {
+                    fallback_reasoning_content_for_internal_tool_calls(
+                        &tool_calls,
+                        req.thinking_disabled,
+                    )
+                });
+                if !text.is_empty() || reasoning_content.is_some() || !tool_calls.is_empty() {
                     messages.push(tiangong_deepseek::types::ChatMessage {
                         role: tiangong_deepseek::types::MessageRole::Assistant,
                         content: if text.is_empty() {
@@ -76,6 +87,7 @@ fn build_messages(req: &ProviderRequest) -> Result<Vec<tiangong_deepseek::types:
                         } else {
                             Some(Value::String(text))
                         },
+                        reasoning_content,
                         name: None,
                         tool_calls: if tool_calls.is_empty() {
                             None
@@ -99,6 +111,7 @@ fn build_messages(req: &ProviderRequest) -> Result<Vec<tiangong_deepseek::types:
                     messages.push(tiangong_deepseek::types::ChatMessage {
                         role: tiangong_deepseek::types::MessageRole::Tool,
                         content: Some(Value::String(content)),
+                        reasoning_content: None,
                         name: None,
                         tool_calls: None,
                         tool_call_id: Some(result.tool_call_id.clone()),
@@ -130,6 +143,7 @@ fn build_user_message(message: &ChatMessage) -> Option<tiangong_deepseek::types:
         return Some(tiangong_deepseek::types::ChatMessage {
             role: tiangong_deepseek::types::MessageRole::User,
             content: Some(Value::String(text)),
+            reasoning_content: None,
             name: None,
             tool_calls: None,
             tool_call_id: None,
@@ -150,6 +164,7 @@ fn build_user_message(message: &ChatMessage) -> Option<tiangong_deepseek::types:
     Some(tiangong_deepseek::types::ChatMessage {
         role: tiangong_deepseek::types::MessageRole::User,
         content: Some(Value::Array(content)),
+        reasoning_content: None,
         name: None,
         tool_calls: None,
         tool_call_id: None,
@@ -173,6 +188,36 @@ fn build_assistant_tool_calls(message: &ChatMessage) -> Vec<tiangong_deepseek::t
             _ => None,
         })
         .collect()
+}
+
+fn extract_thinking(message: &ChatMessage) -> Option<String> {
+    let thinking = message
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            MessageContent::Thinking(thinking) => Some(thinking.thinking.trim()),
+            _ => None,
+        })
+        .filter(|thinking| !thinking.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    (!thinking.is_empty()).then_some(thinking)
+}
+
+fn fallback_reasoning_content_for_internal_tool_calls(
+    tool_calls: &[tiangong_deepseek::types::ToolCall],
+    thinking_disabled: bool,
+) -> Option<String> {
+    if thinking_disabled {
+        return None;
+    }
+    let has_tool_calls = !tool_calls.is_empty();
+    let only_internal_injections = tool_calls
+        .iter()
+        .all(|tool_call| tool_call.function.name == INTERNAL_INJECTION_TOOL_NAME);
+    (has_tool_calls && only_internal_injections)
+        .then(|| INTERNAL_INJECTION_REASONING_CONTENT.to_string())
 }
 
 fn build_tools(specs: &[ToolSpec]) -> Vec<tiangong_deepseek::types::ToolSpec> {
@@ -325,6 +370,8 @@ fn map_stop_reason(reason: &str) -> StopReason {
 mod tests {
     use super::*;
     use crate::message::MessageContent;
+    use crate::message::ThinkingContent;
+    use crate::tool::ToolCall;
 
     fn response_with_arguments(
         arguments: &str,
@@ -362,6 +409,146 @@ mod tests {
             },
             system_fingerprint: String::new(),
         }
+    }
+
+    #[test]
+    fn assistant_thinking_is_passed_back_as_reasoning_content() {
+        let req = ProviderRequest {
+            model: "deepseek-v4-pro".to_string(),
+            system: None,
+            messages: vec![ChatMessage::new(
+                MessageRole::Assistant,
+                vec![
+                    MessageContent::Thinking(ThinkingContent {
+                        thinking: "需要先查询当前数据".to_string(),
+                        signature: None,
+                    }),
+                    MessageContent::ToolCall(ToolCall {
+                        id: "call_1".to_string(),
+                        name: "current_time".to_string(),
+                        arguments: json!({}),
+                    }),
+                ],
+            )],
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: 1024,
+            temperature: None,
+            top_p: None,
+            stop_sequences: Vec::new(),
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
+        };
+
+        let request = to_deepseek_request(&req).expect("request");
+        let assistant = request
+            .messages
+            .iter()
+            .find(|message| message.role == tiangong_deepseek::types::MessageRole::Assistant)
+            .expect("assistant message");
+
+        assert_eq!(
+            assistant.reasoning_content.as_deref(),
+            Some("需要先查询当前数据")
+        );
+        assert!(assistant.tool_calls.is_some());
+    }
+
+    #[test]
+    fn internal_plugin_injection_tool_call_gets_reasoning_fallback() {
+        let req = ProviderRequest {
+            model: "deepseek-v4-pro".to_string(),
+            system: None,
+            messages: vec![
+                ChatMessage::text(MessageRole::User, "继续整理浏览器数据"),
+                ChatMessage::new(
+                    MessageRole::Assistant,
+                    vec![MessageContent::ToolCall(ToolCall {
+                        id: "inj_1".to_string(),
+                        name: INTERNAL_INJECTION_TOOL_NAME.to_string(),
+                        arguments: json!({"source": "browser_data"}),
+                    })],
+                ),
+                ChatMessage::new(
+                    MessageRole::Tool,
+                    vec![MessageContent::ToolResult(crate::tool::ToolResult {
+                        tool_call_id: "inj_1".to_string(),
+                        content: crate::tool::ToolResultContent::Text(
+                            "数据来源：browser_data\n相关数据：世界杯战况".to_string(),
+                        ),
+                        is_error: false,
+                    })],
+                ),
+            ],
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: 1024,
+            temperature: None,
+            top_p: None,
+            stop_sequences: Vec::new(),
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
+        };
+
+        let request = to_deepseek_request(&req).expect("request");
+        let assistant = request
+            .messages
+            .iter()
+            .find(|message| message.role == tiangong_deepseek::types::MessageRole::Assistant)
+            .expect("assistant message");
+
+        assert_eq!(
+            assistant.reasoning_content.as_deref(),
+            Some(INTERNAL_INJECTION_REASONING_CONTENT)
+        );
+        assert_eq!(
+            assistant
+                .tool_calls
+                .as_ref()
+                .and_then(|calls| calls.first())
+                .map(|call| call.function.name.as_str()),
+            Some(INTERNAL_INJECTION_TOOL_NAME)
+        );
+    }
+
+    #[test]
+    fn internal_plugin_injection_skips_reasoning_fallback_when_thinking_disabled() {
+        let req = ProviderRequest {
+            model: "deepseek-chat".to_string(),
+            system: None,
+            messages: vec![ChatMessage::new(
+                MessageRole::Assistant,
+                vec![MessageContent::ToolCall(ToolCall {
+                    id: "inj_1".to_string(),
+                    name: INTERNAL_INJECTION_TOOL_NAME.to_string(),
+                    arguments: json!({"source": "browser_data"}),
+                })],
+            )],
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: 1024,
+            temperature: None,
+            top_p: None,
+            stop_sequences: Vec::new(),
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: true,
+        };
+
+        let request = to_deepseek_request(&req).expect("request");
+        let assistant = request
+            .messages
+            .iter()
+            .find(|message| message.role == tiangong_deepseek::types::MessageRole::Assistant)
+            .expect("assistant message");
+
+        assert!(assistant.reasoning_content.is_none());
+        assert!(assistant.tool_calls.is_some());
     }
 
     #[test]

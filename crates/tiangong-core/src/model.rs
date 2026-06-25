@@ -324,20 +324,6 @@ impl SingleProviderClient {
         build_anthropic_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())
     }
 
-    /// 构建 OpenAI Chat Completions provider。
-    fn build_openai_variant_provider(&self, timeout_ms: u64) -> Result<Box<dyn LlmProvider>> {
-        match self.protocol() {
-            ProviderProtocol::OpenAiChatCompletions => Ok(Box::new(
-                build_openai_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())?,
-            )),
-            // 其它协议（Anthropic/DeepSeek）不应进入此方法，给出明确错误。
-            protocol => Err(anyhow!(
-                "build_openai_variant_provider 不支持协议 {}",
-                protocol.as_str()
-            )),
-        }
-    }
-
     fn build_provider_dispatch(&self, timeout_ms: u64) -> Result<ProviderDispatch> {
         match self.protocol() {
             ProviderProtocol::Anthropic => Ok(ProviderDispatch::Anthropic(Box::new(
@@ -387,36 +373,6 @@ impl SingleProviderClient {
             .build()
             .context("初始化异步运行时失败")?;
         runtime.block_on(future).map_err(map_llm_error)
-    }
-
-    fn complete_anthropic(&self, req: &ModelRequest) -> Result<ModelResponse> {
-        self.complete_with_functions_anthropic(req, &[])
-    }
-
-    fn complete_with_functions_anthropic(
-        &self,
-        req: &ModelRequest,
-        functions: &[ToolSpec],
-    ) -> Result<ModelFunctionResponse> {
-        self.complete_with_functions_anthropic_with_tool_choice(req, functions, None)
-    }
-
-    fn complete_with_functions_anthropic_with_tool_choice(
-        &self,
-        req: &ModelRequest,
-        functions: &[ToolSpec],
-        tool_choice: Option<ToolChoice>,
-    ) -> Result<ModelFunctionResponse> {
-        let timeout_ms = parse_function_timeout_ms(&self.cfg.api_timeout_ms)?;
-        let model = self.cfg.api_model.trim();
-        if model.is_empty() {
-            return Err(anyhow!("API_MODEL 不能为空，无法发起 Anthropic 请求"));
-        }
-
-        let provider = self.build_anthropic_provider(timeout_ms)?;
-        let request = build_provider_request(req, model, MAX_TOKENS_MAIN, functions, tool_choice);
-        let response = self.block_on_llm(provider.complete(request))?;
-        convert_provider_response_to_function_response(response)
     }
 
     fn complete_lite_anthropic(&self, prompt: &str) -> Result<String> {
@@ -514,7 +470,7 @@ impl SingleProviderClient {
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起轻量级模型请求"));
         }
-        let provider = self.build_openai_variant_provider(timeout_ms)?;
+        let provider = self.build_provider_dispatch(timeout_ms)?;
         let request = ProviderRequest {
             model: model.to_string(),
             system: Some(
@@ -571,7 +527,7 @@ impl SingleProviderClient {
                 .trim()
                 .to_string());
         }
-        let provider = self.build_openai_variant_provider(timeout_ms)?;
+        let provider = self.build_provider_dispatch(timeout_ms)?;
         let response = self.block_on_llm(provider.complete(request))?;
         Ok(collect_provider_text(&response).trim().to_string())
     }
@@ -793,20 +749,12 @@ impl SingleProviderClient {
         functions: &[ToolSpec],
         tool_choice: Option<ToolChoice>,
     ) -> Result<ModelFunctionResponse> {
-        if self.protocol() == ProviderProtocol::Anthropic {
-            return self.complete_with_functions_anthropic_with_tool_choice(
-                req,
-                functions,
-                tool_choice,
-            );
-        }
-
         let timeout_ms = parse_function_timeout_ms(&self.cfg.api_timeout_ms)?;
         let model = self.cfg.api_model.trim();
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起工具模型请求"));
         }
-        let provider = self.build_openai_variant_provider(timeout_ms)?;
+        let provider = self.build_provider_dispatch(timeout_ms)?;
         let request = build_provider_request(req, model, MAX_TOKENS_MAIN, functions, tool_choice);
         let response = self.block_on_llm(provider.complete(request))?;
         convert_provider_response_to_function_response(response)
@@ -892,16 +840,12 @@ impl ModelClient for SingleProviderClient {
     }
 
     fn complete(&self, req: &ModelRequest) -> Result<ModelResponse> {
-        if self.protocol() == ProviderProtocol::Anthropic {
-            return self.complete_anthropic(req);
-        }
-
         let timeout_ms = parse_timeout_ms(&self.cfg.api_timeout_ms)?;
         let model = self.cfg.api_model.trim();
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起模型请求"));
         }
-        let provider = self.build_openai_variant_provider(timeout_ms)?;
+        let provider = self.build_provider_dispatch(timeout_ms)?;
         let request = build_provider_request(req, model, MAX_TOKENS_MAIN, &[], None);
         let response = self.block_on_llm(provider.complete(request))?;
         Ok(ModelResponse {
@@ -1776,6 +1720,17 @@ enum ProviderDispatch {
 }
 
 impl ProviderDispatch {
+    async fn complete(
+        self,
+        request: ProviderRequest,
+    ) -> std::result::Result<ProviderResponse, tiangong_llm::error::LlmError> {
+        match self {
+            ProviderDispatch::Anthropic(provider) => provider.complete(request).await,
+            ProviderDispatch::OpenAi(provider) => provider.complete(request).await,
+            ProviderDispatch::DeepSeek(provider) => provider.complete(request).await,
+        }
+    }
+
     async fn stream(
         self,
         request: ProviderRequest,
