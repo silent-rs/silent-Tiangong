@@ -215,9 +215,30 @@ export function MainApp() {
     workspaceExpandedForBrowserRef.current = false;
   }, [lockResize, setSidebarOpenByLayout, unlockResize]);
 
-  const handleToggleBrowser = useCallback(() => {
-    void openWorkspacePanel('browser');
-  }, [openWorkspacePanel]);
+  // 浏览器面板挂载后，显式触达后端以渲染浏览器表面。
+  // 与 `browser:open` / `tiangong:open-browser` 入口保持一致，
+  // 避免依赖 TabsContainer 的隐式激活 effect（首次挂载时被 hydration 短路）。
+  const ensureBrowserVisible = useCallback(async () => {
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    try {
+      const result = await api.browserTabList();
+      if (result.tabs.length > 0) {
+        const activeId = result.active_tab_id || result.tabs[0]?.id;
+        if (activeId) {
+          await api.browserTabSwitch(activeId).catch(console.error);
+          return;
+        }
+      }
+    } catch {
+      // 浏览器运行时可能尚未初始化，按空白 Tab 创建。
+    }
+    await api.browserTabNew('about:blank').catch(console.error);
+  }, []);
+
+  const handleToggleBrowser = useCallback(async () => {
+    await openWorkspacePanel('browser');
+    await ensureBrowserVisible();
+  }, [ensureBrowserVisible, openWorkspacePanel]);
 
   const handleToggleTerminal = useCallback(() => {
     void openWorkspacePanel('terminal');

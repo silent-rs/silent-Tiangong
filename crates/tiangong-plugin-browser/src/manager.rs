@@ -1246,32 +1246,52 @@ impl BrowserManager {
             });
         }
 
-        reset_runtime_state(&mut state, true);
-        state.tabs = tabs_to_restore;
-        state.active_tab_id = resolve_active_browser_tab(&state.tabs, active_tab_id);
-        restore_tab_runtime_metadata(&mut state);
-        state.active_session_id = Some(session_id.to_string());
-        state
-            .visible
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        let active_tab = state
-            .active_tab_id
-            .as_ref()
-            .and_then(|id| state.tabs.iter().find(|tab| tab.id == *id).cloned());
+        // 同一会话下的重新同步：按 id 增量同步，避免 url/title 元数据差异
+        // （后端导航时持续更新 state.tabs）触发全量 reset 而销毁所有 webview。
+        // 仅当 session 真正切换时才走完整重建。
+        let same_session = state.active_session_id.as_deref() == Some(session_id);
+        let next_active_id = resolve_active_browser_tab(&tabs_to_restore, active_tab_id);
         let rect = state.browser_rect;
+
+        let mut tabs_needing_webview: Vec<BrowserTab> = Vec::new();
+        if same_session {
+            Self::sync_tabs_by_id(&mut state, &tabs_to_restore);
+            state.active_tab_id = next_active_id.clone();
+            state
+                .visible
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            reset_runtime_state(&mut state, true);
+            state.tabs = tabs_to_restore;
+            state.active_tab_id = next_active_id.clone();
+            restore_tab_runtime_metadata(&mut state);
+            state.active_session_id = Some(session_id.to_string());
+            state
+                .visible
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        // 仅当 active tab 缺少 webview 且 url 非 about: 时才补建，
+        // 其余现有 webview（包括非活跃的）一律保留。
+        if let Some(active_id) = state.active_tab_id.as_ref() {
+            let active_tab = state.tabs.iter().find(|tab| &tab.id == active_id).cloned();
+            if let Some(tab) = active_tab {
+                if !tab.url.starts_with("about:") && !state.webviews.contains_key(&tab.id) {
+                    tabs_needing_webview.push(tab);
+                }
+            }
+        }
         drop(state);
 
-        if let Some(tab) = active_tab {
-            if !tab.url.starts_with("about:") {
-                let webview = Self::create_webview_for_tab(
-                    app, &tab.id, &tab.url, rect.0, rect.1, rect.2, rect.3,
-                )?;
-                let mut state = self.state.lock().map_err(|e| e.to_string())?;
-                state.webviews.insert(tab.id.clone(), webview);
-                drop(state);
-                self.start_url_poll(app, &tab.url);
-                self.start_event_poll(app);
-            }
+        for tab in tabs_needing_webview {
+            let webview = Self::create_webview_for_tab(
+                app, &tab.id, &tab.url, rect.0, rect.1, rect.2, rect.3,
+            )?;
+            let mut state = self.state.lock().map_err(|e| e.to_string())?;
+            state.webviews.insert(tab.id.clone(), webview);
+            drop(state);
+            self.start_url_poll(app, &tab.url);
+            self.start_event_poll(app);
         }
 
         let state = self.state.lock().map_err(|e| e.to_string())?;
@@ -1281,6 +1301,84 @@ impl BrowserManager {
             tabs: state.tabs.clone(),
             active_tab_id: state.active_tab_id.clone(),
         })
+    }
+
+    /// 同一会话下按 id 增量同步 tabs。
+    ///
+    /// - 不在 `next_tabs` 中的 id：关闭其 webview 并移除记录；
+    /// - 新增的 id：按元数据补建记录（history/page_loaded_signals 等），
+    ///   但**不**创建 webview（由调用方按需补建）；
+    /// - id 仍存在的 tab：保留其现有 webview，仅用传入的 url/title 覆盖元数据，
+    ///   避免 url/title 字段差异（后端导航持续更新）触发误销毁。
+    fn sync_tabs_by_id(state: &mut BrowserState, next_tabs: &[BrowserTab]) {
+        let next_ids: std::collections::HashSet<&str> =
+            next_tabs.iter().map(|tab| tab.id.as_str()).collect();
+
+        // 关闭被移除的 tab：先收集 id，再逐个释放锁以关闭 webview。
+        let removed_ids: Vec<String> = state
+            .tabs
+            .iter()
+            .filter(|tab| !next_ids.contains(tab.id.as_str()))
+            .map(|tab| tab.id.clone())
+            .collect();
+
+        // 移除被移除 tab 的记录与 webview（close_webviews 由此处直接处理，
+        // 因为这些是显式移除，而非元数据差异）。
+        let mut webviews_to_close: Vec<Webview<Wry>> = Vec::new();
+        for id in &removed_ids {
+            if let Some(wv) = state.webviews.remove(id) {
+                webviews_to_close.push(wv);
+            }
+            state.page_loaded_signals.remove(id);
+            state.latest_snapshots.remove(id);
+            state.tab_histories.remove(id);
+            state.tab_history_indices.remove(id);
+        }
+        state.tabs.retain(|tab| next_ids.contains(tab.id.as_str()));
+        // 关闭被移除 tab 的 webview（从 map 移除后直接 drop，drop 时关闭）。
+        drop(webviews_to_close);
+
+        // 更新仍存在的 tab 元数据（仅 url/title），保留其 webview。
+        for next in next_tabs {
+            if let Some(existing) = state.tabs.iter_mut().find(|t| t.id == next.id) {
+                existing.url = next.url.clone();
+                existing.title = next.title.clone();
+            }
+        }
+
+        // 追加新增 tab 并补建元数据（不含 webview）。
+        let existing_ids: std::collections::HashSet<String> =
+            state.tabs.iter().map(|tab| tab.id.clone()).collect();
+        for tab in next_tabs {
+            if existing_ids.contains(&tab.id) {
+                continue;
+            }
+            // 新增 tab：插入记录并补建元数据（不含 webview）。
+            state.tabs.push(tab.clone());
+            state.page_loaded_signals.insert(
+                tab.id.clone(),
+                Arc::new((Mutex::new(false), Condvar::new())),
+            );
+            if !tab.url.starts_with("about:") {
+                let title = if tab.title.is_empty() {
+                    tab.url.clone()
+                } else {
+                    tab.title.clone()
+                };
+                state.tab_histories.insert(
+                    tab.id.clone(),
+                    vec![HistoryEntry {
+                        url: tab.url.clone(),
+                        title,
+                        timestamp: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64,
+                    }],
+                );
+                state.tab_history_indices.insert(tab.id.clone(), 0);
+            }
+        }
     }
 
     pub fn tab_new(&self, app: &AppHandle<Wry>, url: &str) -> Result<String, String> {
@@ -1796,5 +1894,85 @@ mod tests {
         assert_eq!(removed, 1);
         let state = manager.state.lock().unwrap();
         assert_eq!(state.pending_events, vec![second]);
+    }
+
+    fn tab(id: &str, url: &str, title: &str) -> BrowserTab {
+        BrowserTab {
+            id: id.to_string(),
+            url: url.to_string(),
+            title: title.to_string(),
+        }
+    }
+
+    #[test]
+    fn sync_tabs_by_id_preserves_records_when_only_metadata_differs() {
+        // 模拟后端导航后 url/title 已更新，而前端传入的是旧元数据：
+        // 按 id 同步时不应因 url/title 差异移除 tab 记录。
+        let manager = BrowserManager::new();
+        let mut state = manager.state.lock().unwrap();
+        state.tabs = vec![tab("t1", "https://real.example.com", "真实标题")];
+
+        // 前端传入同 id 但 url/title 过时（仍是 about:blank）。
+        BrowserManager::sync_tabs_by_id(&mut state, &[tab("t1", "about:blank", "")]);
+
+        // tab 记录仍在，元数据被前端传入值覆盖。
+        assert_eq!(state.tabs.len(), 1);
+        assert_eq!(state.tabs[0].id, "t1");
+        assert_eq!(state.tabs[0].url, "about:blank");
+    }
+
+    #[test]
+    fn sync_tabs_by_id_closes_records_for_removed_ids() {
+        let manager = BrowserManager::new();
+        let mut state = manager.state.lock().unwrap();
+        state.tabs = vec![
+            tab("t1", "https://a.example.com", "A"),
+            tab("t2", "https://b.example.com", "B"),
+        ];
+
+        // 前端仅保留 t1（t2 被显式关闭）。
+        BrowserManager::sync_tabs_by_id(&mut state, &[tab("t1", "https://a.example.com", "A")]);
+
+        let ids: Vec<&str> = state.tabs.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["t1"]);
+    }
+
+    #[test]
+    fn sync_tabs_by_id_adds_new_tab_records() {
+        let manager = BrowserManager::new();
+        let mut state = manager.state.lock().unwrap();
+        state.tabs = vec![tab("t1", "https://a.example.com", "A")];
+
+        // 前端新增 t2（非 about: 链接，应补建 history）。
+        BrowserManager::sync_tabs_by_id(
+            &mut state,
+            &[
+                tab("t1", "https://a.example.com", "A"),
+                tab("t2", "https://b.example.com", "B"),
+            ],
+        );
+
+        assert_eq!(state.tabs.len(), 2);
+        assert!(state.tab_histories.contains_key("t2"));
+        assert!(state.page_loaded_signals.contains_key("t2"));
+    }
+
+    #[test]
+    fn sync_tabs_by_id_clears_metadata_for_removed_ids() {
+        let manager = BrowserManager::new();
+        let mut state = manager.state.lock().unwrap();
+        state.tabs = vec![tab("t1", "https://a.example.com", "A")];
+        state.tab_histories.insert("t1".to_string(), Vec::new());
+        state.page_loaded_signals.insert(
+            "t1".to_string(),
+            Arc::new((Mutex::new(false), Condvar::new())),
+        );
+
+        // t1 被移除后其元数据应一并清理。
+        BrowserManager::sync_tabs_by_id(&mut state, &[]);
+
+        assert!(state.tabs.is_empty());
+        assert!(!state.tab_histories.contains_key("t1"));
+        assert!(!state.page_loaded_signals.contains_key("t1"));
     }
 }
