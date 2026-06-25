@@ -142,7 +142,7 @@ impl SessionPtyRegistry {
     /// workspace 切换发生在尚未产生对话的阶段（活跃 session 处于草稿/无消息状态），
     /// 此时终端 PTY 不承载有价值的 shell 状态，直接销毁重建比发送 `cd` 更干净：
     /// - 不在终端历史里留下自动 `cd` 痕迹
-    /// - 不误把 `cd` 当作按键发给交互式前台程序（vi/nano/REPL）
+    /// - 不误把 `cd` 当作按键发给交互式前台程序
     /// - 用户下次打开终端时 `ensure` 用新 `default_cwd` 创建全新 PTY
     ///
     /// 已销毁的 PTY（如固定 id `__draft_terminal__`）会在前端 TerminalPanel 的
@@ -173,12 +173,13 @@ impl SessionPtyRegistry {
         self.sessions.lock().unwrap().get(session_id).cloned()
     }
 
-    fn emit_tab_updated(&self, session_id: &str, active_tab_id: Option<String>) {
+    fn emit_tab_updated(&self, session_id: &str, active_tab_id: Option<String>, source: &str) {
         let _ = self.app.emit(
             "terminal:tab_updated",
             &crate::types::TerminalTabUpdatedEvent {
                 session_id: session_id.to_string(),
                 active_tab_id,
+                source: source.to_string(),
             },
         );
     }
@@ -326,6 +327,35 @@ impl SessionPtyRegistry {
         tabs.get(&tab_id).cloned()
     }
 
+    fn interactive_slot_for_session(&self, session_id: &str) -> Option<SessionPty> {
+        let session_tabs = self.existing_session_tabs(session_id)?;
+        let active = session_tabs.active_tab_id.lock().unwrap().clone();
+        let tabs = session_tabs.tabs.lock().unwrap();
+
+        if let Some(active) = active {
+            if let Some(slot) = tabs.get(&active) {
+                if slot.manager.is_alive()
+                    && matches!(
+                        slot.activity.busy_state(),
+                        TerminalBusyState::AgentInteractive { .. }
+                    )
+                {
+                    return Some(slot.clone());
+                }
+            }
+        }
+
+        tabs.values()
+            .find(|slot| {
+                slot.manager.is_alive()
+                    && matches!(
+                        slot.activity.busy_state(),
+                        TerminalBusyState::AgentInteractive { .. }
+                    )
+            })
+            .cloned()
+    }
+
     pub fn list_tabs(&self, session_id: &str) -> crate::types::TerminalTabListResponse {
         let Some(session_tabs) = self.existing_session_tabs(session_id) else {
             return crate::types::TerminalTabListResponse {
@@ -379,6 +409,7 @@ impl SessionPtyRegistry {
         if !self.ensure_with_title(&terminal_id, &cwd, title) {
             return Err(format!("终端 Tab PTY 启动失败：{session_id}:{tab_id}"));
         }
+        self.emit_tab_updated(session_id, Some(tab_id.clone()), "user");
         Ok(tab_id)
     }
 
@@ -395,6 +426,7 @@ impl SessionPtyRegistry {
         if !self.ensure_with_title(&terminal_id, "", title) {
             return Err(format!("终端 Tab PTY 恢复失败：{session_id}:{tab_id}"));
         }
+        self.emit_tab_updated(session_id, Some(tab_id.to_string()), "restore");
         Ok(())
     }
 
@@ -406,6 +438,7 @@ impl SessionPtyRegistry {
             return false;
         }
         session_tabs.set_active_tab(tab_id.to_string());
+        self.emit_tab_updated(session_id, Some(tab_id.to_string()), "user");
         true
     }
 
@@ -413,6 +446,12 @@ impl SessionPtyRegistry {
         let terminal_id = terminal_instance_id(session_id, tab_id);
         let existed = self.get(&terminal_id).is_some();
         self.destroy(&terminal_id);
+        if existed {
+            let next_active = self
+                .existing_session_tabs(session_id)
+                .and_then(|tabs| tabs.active_or_first_tab_id());
+            self.emit_tab_updated(session_id, next_active, "user");
+        }
         existed
     }
 
@@ -426,23 +465,55 @@ impl SessionPtyRegistry {
 
         if let Some(tab_id) = route.tab_id {
             let terminal_id = terminal_instance_id(&route.session_id, &tab_id);
-            let existed = self.get(&terminal_id).is_some();
-            if !self.ensure(&terminal_id, "") {
-                return None;
-            }
-            session_tabs.set_active_tab(tab_id.clone());
-            self.emit_tab_updated(&route.session_id, Some(tab_id.clone()));
-            return Some(tiangong_core::terminal_trait::TerminalSelection {
-                session_id: route.session_id,
-                tab_id,
-                terminal_id,
-                created_new: !existed,
-                reason: if existed {
-                    tiangong_core::terminal_trait::TerminalSelectionReason::ReusedIdle
+            let slot = self.get(&terminal_id);
+            if let Some(slot) = slot {
+                if slot.manager.is_alive() {
+                    if matches!(slot.activity.busy_state(), TerminalBusyState::Idle) {
+                        session_tabs.set_active_tab(tab_id.clone());
+                        self.emit_tab_updated(
+                            &route.session_id,
+                            Some(tab_id.clone()),
+                            "agent_command",
+                        );
+                        return Some(tiangong_core::terminal_trait::TerminalSelection {
+                            session_id: route.session_id,
+                            tab_id,
+                            terminal_id,
+                            created_new: false,
+                            reason:
+                                tiangong_core::terminal_trait::TerminalSelectionReason::ReusedIdle,
+                        });
+                    }
+                    // 指定 Tab 存活但正在忙，避开它，后续走空闲 Tab / 新建 Tab。
                 } else {
-                    tiangong_core::terminal_trait::TerminalSelectionReason::NoAvailableTerminal
-                },
-            });
+                    if !self.ensure(&terminal_id, "") {
+                        return None;
+                    }
+                    session_tabs.set_active_tab(tab_id.clone());
+                    self.emit_tab_updated(&route.session_id, Some(tab_id.clone()), "agent_command");
+                    return Some(tiangong_core::terminal_trait::TerminalSelection {
+                        session_id: route.session_id,
+                        tab_id,
+                        terminal_id,
+                        created_new: true,
+                        reason: tiangong_core::terminal_trait::TerminalSelectionReason::NoAvailableTerminal,
+                    });
+                }
+            } else {
+                if !self.ensure(&terminal_id, "") {
+                    return None;
+                }
+                session_tabs.set_active_tab(tab_id.clone());
+                self.emit_tab_updated(&route.session_id, Some(tab_id.clone()), "agent_command");
+                return Some(tiangong_core::terminal_trait::TerminalSelection {
+                    session_id: route.session_id,
+                    tab_id,
+                    terminal_id,
+                    created_new: true,
+                    reason:
+                        tiangong_core::terminal_trait::TerminalSelectionReason::NoAvailableTerminal,
+                });
+            }
         }
 
         let mut had_live_terminal = false;
@@ -472,7 +543,7 @@ impl SessionPtyRegistry {
 
         if let Some(tab_id) = idle_tab_id {
             session_tabs.set_active_tab(tab_id.clone());
-            self.emit_tab_updated(&route.session_id, Some(tab_id.clone()));
+            self.emit_tab_updated(&route.session_id, Some(tab_id.clone()), "agent_command");
             return Some(tiangong_core::terminal_trait::TerminalSelection {
                 session_id: route.session_id.clone(),
                 tab_id: tab_id.clone(),
@@ -493,7 +564,7 @@ impl SessionPtyRegistry {
             return None;
         }
         session_tabs.set_active_tab(tab_id.clone());
-        self.emit_tab_updated(&route.session_id, Some(tab_id.clone()));
+        self.emit_tab_updated(&route.session_id, Some(tab_id.clone()), "agent_command");
         Some(tiangong_core::terminal_trait::TerminalSelection {
             session_id: route.session_id,
             tab_id,
@@ -673,6 +744,17 @@ impl SessionAwareTerminalProvider {
         }
         self.registry.get(session_id).map(|s| s.manager)
     }
+
+    fn interactive_tx(&self, session_id: &str) -> Option<mpsc::Sender<TerminalCommand>> {
+        let route = parse_terminal_id(session_id)?;
+        if route.tab_id.is_some() {
+            return self.tx(session_id);
+        }
+        self.registry
+            .interactive_slot_for_session(&route.session_id)
+            .map(|slot| slot.cmd_tx)
+            .or_else(|| self.tx(session_id))
+    }
 }
 
 /// 系统 PTY 日志回填的最大行数
@@ -772,7 +854,7 @@ impl tiangong_core::terminal_trait::TerminalProvider for SessionAwareTerminalPro
                 > + Send,
         >,
     > {
-        let tx = match self.tx(session_id) {
+        let tx = match self.interactive_tx(session_id) {
             Some(tx) => tx,
             None => return Box::pin(async { None }),
         };

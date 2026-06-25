@@ -13,6 +13,14 @@
 - 后续开发以 `docs/exception-fixes-0.10.1/README.md` 为任务清单，以 `docs/exception-fixes-0.10.1/PROGRESS.md` 为进度记录。
 - Phase 21-M 统一工作区 Tabs 与会话绑定已完成，不再作为当前开发主线。
 
+## 当前调整
+
+- [x] 从最新主分支创建 `feature/agent-terminal-no-panel-open`
+- [x] 补充 Agent 命令执行不主动打开工作区终端面板的需求约束
+- [x] 调整 `run_command` / `run_shell` 通过插件终端执行但不主动打开面板的前端同步行为
+- [x] Agent 创建或选中终端时立即附加到当前会话的工作区 Tab 列表
+- [x] 运行检查命令验证改动
+
 ## 0.10.1 异常修复任务
 
 | 序号 | Issue | 优先级 | 任务 | 状态 | Spec |

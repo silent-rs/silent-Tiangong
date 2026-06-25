@@ -34,7 +34,7 @@ pub(crate) struct TerminalState {
     pub current_line: String,
     /// 前端 xterm.js 回传的屏幕快照（终端可见区域的文本序列化）。
     ///
-    /// 后端的 `TerminalLineProcessor` 是单行模型，无法重建 vim/nano 等全屏 TUI 界面
+    /// 后端的 `TerminalLineProcessor` 是单行模型，无法重建全屏 TUI 界面
     ///（光标在屏幕各处定位、多行同时存在）。前端 xterm.js 维护了完整的二维屏幕缓冲区，
     ///（正是它渲染了用户看到的终端画面），由前端在内容变化时序列化回传。
     /// `handle_exec_interactive` 返回此快照，让 Agent 看到与用户一致的屏幕内容。
@@ -369,7 +369,7 @@ pub(crate) async fn spawn_command_loop(
                         busy_state = %busy,
                         last_lines = ?last_lines,
                         current_line = %current,
-                        "terminal_reset 被调用：丢弃当前 PTY 状态并重启 shell，可能导致 vi/nano 等未保存数据留下 swap 文件"
+                        "terminal_reset 被调用：丢弃当前 PTY 状态并重启 shell，可能导致交互程序中的未保存数据丢失"
                     );
                 }
 

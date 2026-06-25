@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useStore } from '@/store/useStore';
-import { api, type RunSnapshot, type TabKind } from '@/api/tauri';
+import { api, type RunSnapshot, type TabKind, type TabState, type TerminalTabInfo } from '@/api/tauri';
 import { AppSidebar } from '@/components/AppSidebar';
 import { SidebarProvider } from '@/components/ui/sidebar';
 import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components/LazyComponents';
@@ -87,6 +87,16 @@ async function expandWindowForBrowser(lock?: () => void, unlock?: () => void) {
   return { browserW, logicalH };
 }
 
+function terminalRuntimeTabToState(tab: TerminalTabInfo): TabState {
+  return {
+    id: tab.id,
+    kind: 'terminal',
+    title: tab.title || '终端',
+    url: '',
+    created_at: tab.created_at || new Date().toISOString(),
+  };
+}
+
 export function MainApp() {
   const { loadSessions, updateFromSnapshot } = useStore();
   useUpdateCheck();
@@ -95,6 +105,7 @@ export function MainApp() {
   const [workspaceTabKind, setWorkspaceTabKind] = useState<TabKind>('browser');
   const [workspaceOpenRequestVersion, setWorkspaceOpenRequestVersion] = useState(0);
   const [requestedTerminalTabId, setRequestedTerminalTabId] = useState<string | null>(null);
+  const [terminalSyncVersion, setTerminalSyncVersion] = useState(0);
   const [chatPanelWidth, setChatPanelWidth] = useState(MIN_CHAT_WIDTH);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const showWorkspacePanelRef = useRef(false);
@@ -212,6 +223,47 @@ export function MainApp() {
     void openWorkspacePanel('terminal');
   }, [openWorkspacePanel]);
 
+  const handleWorkspaceActiveKindChange = useCallback((kind: TabKind | null) => {
+    if (!kind) return;
+    workspaceTabKindRef.current = kind;
+    setWorkspaceTabKind(kind);
+  }, []);
+
+  const syncTerminalRuntimeTabsToSession = useCallback(async (
+    sessionId: string,
+    preferredTabId?: string | null,
+  ): Promise<boolean> => {
+    const [sessionTabs, runtimeTabs] = await Promise.all([
+      api.getSessionTabs(sessionId),
+      api.terminalTabList(sessionId),
+    ]);
+    if (runtimeTabs.tabs.length === 0) return false;
+
+    const terminalTabs = runtimeTabs.tabs.map(terminalRuntimeTabToState);
+    const terminalById = new Map(terminalTabs.map((tab) => [tab.id, tab]));
+    const nextExistingTabs = sessionTabs.tabs
+      .filter((tab) => tab.kind !== 'terminal' || terminalById.has(tab.id))
+      .map((tab) => (
+        tab.kind === 'terminal' && terminalById.has(tab.id)
+          ? terminalById.get(tab.id)!
+          : tab
+      ));
+    const existingIds = new Set(nextExistingTabs.map((tab) => tab.id));
+    const nextTabs = [
+      ...nextExistingTabs,
+      ...terminalTabs.filter((tab) => !existingIds.has(tab.id)),
+    ];
+    const nextActiveTabId = [
+      preferredTabId,
+      runtimeTabs.active_tab_id,
+      sessionTabs.active_tab_id,
+      nextTabs[0]?.id,
+    ].find((tabId) => tabId && nextTabs.some((tab) => tab.id === tabId)) || null;
+
+    await api.setSessionTabs(sessionId, nextTabs, nextActiveTabId);
+    return true;
+  }, []);
+
   const handleDividerDrag = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     isDraggingRef.current = true;
@@ -304,12 +356,34 @@ export function MainApp() {
       const unlistenTerminalTabUpdated = await listen<{
         session_id: string;
         active_tab_id?: string | null;
+        source?: string | null;
       }>('terminal:tab_updated', async (event) => {
-        const { session_id, active_tab_id } = event.payload;
+        const { session_id, active_tab_id, source } = event.payload;
         const store = useStore.getState();
         const terminalSessionId = store.activeSessionId || store.draftTerminalId;
-        if (!terminalSessionId || session_id !== terminalSessionId) return;
-        await openWorkspacePanel('terminal', active_tab_id ?? null);
+        const isCurrentTerminalSession = Boolean(terminalSessionId && session_id === terminalSessionId);
+        const isDraftTerminalSession = Boolean(store.draftTerminalId && session_id === store.draftTerminalId);
+        let synced = false;
+        if (!isDraftTerminalSession) {
+          synced = await syncTerminalRuntimeTabsToSession(session_id, active_tab_id ?? null)
+            .catch((error) => {
+              console.error('同步终端 Tab 到会话失败：', error);
+              return false;
+            });
+        }
+        if (synced && isCurrentTerminalSession) {
+          setWorkspacePanelMounted(true);
+          setTerminalSyncVersion((version) => version + 1);
+        }
+        if (!isCurrentTerminalSession) {
+          return;
+        }
+        if (source === 'restore' || source === 'agent_command') {
+          return;
+        }
+        if (showWorkspacePanelRef.current && workspaceTabKindRef.current === 'terminal' && active_tab_id) {
+          await openWorkspacePanel('terminal', active_tab_id);
+        }
       });
 
       const unlistenResize = await getCurrentWindow().onResized(async () => {
@@ -377,7 +451,14 @@ export function MainApp() {
       window.removeEventListener('tiangong:open-browser', onOpenBrowser);
       unlistenRef.current?.();
     };
-  }, [setSidebarOpenByLayout, openWorkspacePanel, closeWorkspacePanel, lockResize, unlockResize]);
+  }, [
+    setSidebarOpenByLayout,
+    openWorkspacePanel,
+    closeWorkspacePanel,
+    lockResize,
+    unlockResize,
+    syncTerminalRuntimeTabsToSession,
+  ]);
 
   return (
     <SidebarProvider open={sidebarOpen} onOpenChange={handleSidebarChange}>
@@ -419,7 +500,9 @@ export function MainApp() {
                     isVisible={showWorkspacePanel}
                     openRequestVersion={workspaceOpenRequestVersion}
                     requestedTerminalTabId={requestedTerminalTabId}
+                    terminalSyncVersion={terminalSyncVersion}
                     onClose={() => { void closeWorkspacePanel(); }}
+                    onActiveKindChange={handleWorkspaceActiveKindChange}
                   />
                 </div>
               )}

@@ -12,7 +12,9 @@ interface TabsContainerProps {
   isVisible: boolean;
   openRequestVersion: number;
   requestedTerminalTabId?: string | null;
+  terminalSyncVersion?: number;
   onClose: () => void;
+  onActiveKindChange?: (kind: TabKind | null) => void;
 }
 
 const DEFAULT_BROWSER_URL = 'about:blank';
@@ -76,7 +78,9 @@ export function TabsContainer({
   isVisible,
   openRequestVersion,
   requestedTerminalTabId,
+  terminalSyncVersion = 0,
   onClose,
+  onActiveKindChange,
 }: TabsContainerProps) {
   const activeSessionId = useStore((state) => state.activeSessionId);
   const draftTerminalId = useStore((state) => state.draftTerminalId);
@@ -104,6 +108,10 @@ export function TabsContainer({
     () => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0] ?? null,
     [activeTabId, tabs],
   );
+
+  useEffect(() => {
+    onActiveKindChange?.(isVisible ? activeTab?.kind ?? null : null);
+  }, [activeTab?.kind, isVisible, onActiveKindChange]);
 
   initialTabKindRef.current = initialTabKind;
   requestedTerminalTabIdRef.current = requestedTerminalTabId ?? null;
@@ -133,9 +141,23 @@ export function TabsContainer({
       await syncBrowserRuntimeForTabs(sessionId, nextTabs, nextActiveTabId);
     }
 
-    await Promise.all(nextTabs
-      .filter((tab) => tab.kind === 'terminal')
-      .map((tab) => api.terminalTabRestore(sessionId, tab.id, tab.title).catch(console.error)));
+    const terminalTabs = nextTabs.filter((tab) => tab.kind === 'terminal');
+    if (terminalTabs.length > 0) {
+      let tabsToRestore = terminalTabs;
+      try {
+        const runtimeTabs = await api.terminalTabList(sessionId);
+        const liveRuntimeIds = new Set(
+          runtimeTabs.tabs
+            .filter((tab) => tab.alive)
+            .map((tab) => tab.id),
+        );
+        tabsToRestore = terminalTabs.filter((tab) => !liveRuntimeIds.has(tab.id));
+      } catch {
+        tabsToRestore = terminalTabs;
+      }
+      await Promise.all(tabsToRestore
+        .map((tab) => api.terminalTabRestore(sessionId, tab.id, tab.title).catch(console.error)));
+    }
 
     if (!visible) {
       await api.browserHide().catch(console.error);
@@ -197,7 +219,8 @@ export function TabsContainer({
         || terminalTabs[0]?.id
         || '';
 
-      setTabs((currentTabs) => {
+      const nextTabs = (() => {
+        const currentTabs = tabsRef.current;
         const terminalIds = new Set(terminalTabs.map((tab) => tab.id));
         const nonTerminalTabs = currentTabs.filter((tab) => (
           tab.kind !== 'terminal' || terminalIds.has(tab.id)
@@ -210,7 +233,10 @@ export function TabsContainer({
         });
         const newTabs = terminalTabs.filter((tab) => !existingIds.has(tab.id));
         return [...updatedTabs, ...newTabs];
-      });
+      })();
+
+      tabsRef.current = nextTabs;
+      setTabs(nextTabs);
 
       const shouldActivate = isVisibleRef.current
         && initialTabKindRef.current === 'terminal'
@@ -225,7 +251,14 @@ export function TabsContainer({
         if (result.active_tab_id !== nextActiveId) {
           void api.terminalTabSwitch(terminalSessionId, nextActiveId).catch(console.error);
         }
+        activeTabIdRef.current = nextActiveId;
         setActiveTabId(nextActiveId);
+      }
+      if (activeSessionIdRef.current === terminalSessionId) {
+        const activeId = shouldActivate && nextActiveId
+          ? nextActiveId
+          : activeTabIdRef.current || nextActiveId || nextTabs[0]?.id || null;
+        void api.setSessionTabs(terminalSessionId, nextTabs, activeId).catch(console.error);
       }
       return true;
     } catch (err) {
@@ -233,6 +266,26 @@ export function TabsContainer({
       return false;
     }
   }, [terminalSessionId]);
+
+  const refreshTabsFromSession = useCallback(async (preserveActive: boolean) => {
+    if (!activeSessionId) return;
+    try {
+      const sessionTabs = await api.getSessionTabs(activeSessionId);
+      const preservedActiveId = preserveActive
+        && activeTabIdRef.current
+        && sessionTabs.tabs.some((tab) => tab.id === activeTabIdRef.current)
+          ? activeTabIdRef.current
+          : null;
+      const nextActiveTabId = preservedActiveId
+        || normalizeActiveTabId(sessionTabs.tabs, sessionTabs.active_tab_id);
+      tabsRef.current = sessionTabs.tabs;
+      activeTabIdRef.current = nextActiveTabId;
+      setTabs(sessionTabs.tabs);
+      setActiveTabId(nextActiveTabId);
+    } catch (err) {
+      console.error('刷新会话 Tab 失败：', err);
+    }
+  }, [activeSessionId]);
 
   useEffect(() => {
     tabsRef.current = tabs;
@@ -324,12 +377,7 @@ export function TabsContainer({
   }, [activeSessionId, isVisible, restoreRuntimeForTabs, syncBrowserRuntimeForTabs, workspaceTabsTransfer]);
 
   const activateOrCreateTab = useCallback(async (kind: TabKind) => {
-    if (
-      kind === 'terminal'
-      && requestedTerminalTabId
-      && !tabsRef.current.some((tab) => tab.id === requestedTerminalTabId)
-      && await mergeTerminalRuntimeTabs(requestedTerminalTabId)
-    ) {
+    if (kind === 'terminal' && await mergeTerminalRuntimeTabs(requestedTerminalTabId)) {
       return;
     }
 
@@ -342,10 +390,6 @@ export function TabsContainer({
         void api.browserTabSwitch(existing.id).catch(console.error);
       }
       setActiveTabId(existing.id);
-      return;
-    }
-
-    if (kind === 'terminal' && await mergeTerminalRuntimeTabs(requestedTerminalTabId)) {
       return;
     }
 
@@ -398,8 +442,20 @@ export function TabsContainer({
 
   useEffect(() => {
     if (!isVisible || !requestedTerminalTabId) return;
+    if (tabsRef.current.some((tab) => tab.id === requestedTerminalTabId)) return;
     void mergeTerminalRuntimeTabs(requestedTerminalTabId);
   }, [isVisible, mergeTerminalRuntimeTabs, requestedTerminalTabId]);
+
+  useEffect(() => {
+    if (!isVisible || initialTabKind !== 'terminal') return;
+    if (tabsRef.current.some((tab) => tab.kind === 'terminal')) return;
+    void mergeTerminalRuntimeTabs(requestedTerminalTabId ?? null);
+  }, [initialTabKind, isVisible, mergeTerminalRuntimeTabs, requestedTerminalTabId, openRequestVersion]);
+
+  useEffect(() => {
+    if (!activeSessionId || terminalSyncVersion === 0) return;
+    void refreshTabsFromSession(true);
+  }, [activeSessionId, refreshTabsFromSession, terminalSyncVersion]);
 
   const handleSwitchTab = useCallback((tabId: string) => {
     const nextTab = tabs.find((tab) => tab.id === tabId);

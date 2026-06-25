@@ -264,7 +264,7 @@ pub async fn terminal_panel_set_session(
 ///
 /// 前端在终端内容变化时，把 xterm.js buffer.active 的可见区域序列化成文本回传。
 /// 后端缓存到对应 session 的 TerminalManager，`handle_exec_interactive` 读取此快照
-/// 返回给 Agent——这样 Agent 看到的是与用户一致的屏幕内容（含 vim/nano 全屏界面），
+/// 返回给 Agent——这样 Agent 看到的是与用户一致的屏幕内容（含全屏 TUI），
 /// 而非后端单行 processor 无法重建的碎片。
 #[tauri::command]
 pub async fn terminal_session_update_screen(

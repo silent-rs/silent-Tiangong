@@ -13,6 +13,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::agents::execution_mcp_agent::McpFunctionTarget;
 use crate::app_state::formatting::{format_llm_output_message, format_tool_trace_message};
+use crate::context::assembler::filter_background_task_tools;
 use crate::core::command::{Command, PendingCommandEffect};
 use crate::model::{ModelRequest, TokenUsage, ToolSpec};
 use crate::observe::{audit_permission_with_context, audit_tool_execution};
@@ -551,7 +552,7 @@ impl ReactEngine {
                 break;
             }
 
-            let request_tools = self.tools.to_vec();
+            let request_tools = tools_for_current_turn(&self.tools, session, user_input);
 
             let (thinking, reasoning_effort, thinking_disabled) = self.build_thinking_config();
             let req = ModelRequest {
@@ -1628,6 +1629,25 @@ fn format_team_roster(team_arc: &Arc<Mutex<TeamContext>>) -> String {
         .join("\n")
 }
 
+fn tools_for_current_turn(
+    tools: &[ToolSpec],
+    session: &Session,
+    user_input: &str,
+) -> Vec<ToolSpec> {
+    let intent_text = if user_input.trim().is_empty() {
+        session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == MessageRole::User)
+            .map(|message| message.text_content())
+            .unwrap_or_default()
+    } else {
+        user_input.to_string()
+    };
+    filter_background_task_tools(tools.to_vec(), &intent_text)
+}
+
 impl ReactEngine {
     #[allow(clippy::too_many_arguments)]
     fn spawn_ready_sub_agents(
@@ -2347,4 +2367,62 @@ fn check_cancel(
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool(name: &str) -> ToolSpec {
+        ToolSpec {
+            name: name.to_string(),
+            description: String::new(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    fn tool_names(tools: Vec<ToolSpec>) -> Vec<String> {
+        tools.into_iter().map(|tool| tool.name).collect()
+    }
+
+    #[test]
+    fn current_turn_hides_background_task_tools_for_normal_commands() {
+        let session = Session::new("test");
+        let tools = vec![tool("run_shell"), tool("spawn_task"), tool("wait_tasks")];
+
+        let names = tool_names(tools_for_current_turn(
+            &tools,
+            &session,
+            "执行 git diff 看一下改动",
+        ));
+
+        assert_eq!(names, vec!["run_shell"]);
+    }
+
+    #[test]
+    fn current_turn_uses_latest_user_message_when_input_is_empty() {
+        let mut session = Session::new("test");
+        session
+            .messages
+            .push(Message::new(MessageRole::User, "执行 git diff 看一下改动"));
+        let tools = vec![tool("run_shell"), tool("spawn_task"), tool("wait_tasks")];
+
+        let names = tool_names(tools_for_current_turn(&tools, &session, ""));
+
+        assert_eq!(names, vec!["run_shell"]);
+    }
+
+    #[test]
+    fn current_turn_keeps_background_task_tools_for_background_intent() {
+        let mut session = Session::new("test");
+        session.messages.push(Message::new(
+            MessageRole::User,
+            "后台启动 dev server，不要阻塞",
+        ));
+        let tools = vec![tool("run_shell"), tool("spawn_task"), tool("wait_tasks")];
+
+        let names = tool_names(tools_for_current_turn(&tools, &session, ""));
+
+        assert_eq!(names, vec!["run_shell", "spawn_task", "wait_tasks"]);
+    }
 }
