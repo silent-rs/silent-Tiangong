@@ -22,7 +22,8 @@ use crate::permission::{
     normalize_permission_target,
 };
 use crate::react::context::{
-    emit_token_usage, force_final_response, maybe_update_context_summary, select_client_for_request,
+    ForceFinalReason, emit_token_usage, force_final_response, maybe_update_context_summary,
+    request_for_summary_phase, select_client_for_request,
 };
 use crate::react::message::*;
 use crate::runtime::LlmOutputRecord;
@@ -204,6 +205,14 @@ fn spawn_sub_agent_stream_forwarder(
                 StreamEvent::Delta {
                     message_id,
                     content,
+                }
+                | StreamEvent::ReactText {
+                    message_id,
+                    content,
+                }
+                | StreamEvent::SummaryText {
+                    message_id,
+                    content,
                 } => send_sub_agent_output(
                     &parent_tx,
                     &agent_id,
@@ -344,7 +353,8 @@ fn spawn_sub_agent_stream_forwarder(
                 | StreamEvent::AgentStatusChanged { .. }
                 | StreamEvent::AgentNotification { .. }
                 | StreamEvent::AgentMessage { .. }
-                | StreamEvent::FileLockChanged { .. } => {
+                | StreamEvent::FileLockChanged { .. }
+                | StreamEvent::PhaseChanged { .. } => {
                     let _ = parent_tx.send(event);
                 }
                 StreamEvent::TokenUsage {
@@ -486,10 +496,246 @@ impl ReactEngine {
         self
     }
 
+    /// 执行总结阶段。
+    ///
+    /// 由主模型（非 lite 模型）基于工具执行阶段的全部结果，判断任务完成度：
+    /// - 完成 → 输出最终回复（Summary phase），返回 `Completed`
+    /// - 需要用户输入 → 输出提问，返回 `Completed`（视作本轮结束）
+    /// - 仍有遗漏且可继续 → 输出 [NEED_MORE_WORK]，返回 `NeedMoreWork`
+    /// - 取消 → 返回 `Cancelled`
+    /// - LLM 错误 → 返回 `Failed`
+    async fn run_summary_phase(
+        &self,
+        session: &mut Session,
+        stream_tx: &StdSender<StreamEvent>,
+        cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+        iteration: u32,
+    ) -> SummaryPhaseResult {
+        let _phase = TurnPhase::Summary;
+        let _ = stream_tx.send(StreamEvent::PhaseChanged {
+            phase: "summary".to_string(),
+            iteration,
+        });
+
+        if session.system_prompt_message.is_none() {
+            crate::react::context::rebuild_system_prompt(session, &self.engine);
+        }
+
+        let req = request_for_summary_phase(session);
+        let pending_msg_id = scru128::new().to_string();
+        let sink = ThrottledStreamSink::with_text_kind(
+            pending_msg_id.clone(),
+            stream_tx.clone(),
+            crate::stream_throttle::StreamTextKind::Summary,
+        );
+
+        let (chunk_tx, mut chunk_rx) =
+            tokio_mpsc::unbounded_channel::<crate::model::ModelStreamChunk>();
+        let client = select_client_for_request(&self.engine, &req).clone();
+        let req_clone = req.clone();
+        let mut llm_fut = Some(tokio::task::spawn(async move {
+            client
+                .stream_function_calls_with_tool_choice(req_clone, Vec::new(), None, chunk_tx)
+                .await
+        }));
+        let mut streaming_usage = tiangong_types::TokenUsage::default();
+        let cancel_strategy = CancelStrategy::from_protocol(self.engine.client().protocol());
+
+        let response_result: anyhow::Result<crate::model::ModelFunctionResponse> = loop {
+            tokio::select! {
+                biased;
+                cmd_opt = cmd_rx.recv() => {
+                    match cmd_opt {
+                        Some(Command::Cancel) | Some(Command::Shutdown) | None => {
+                            break Err(match cancel_strategy {
+                                CancelStrategy::AbortWithStreamingUsage => {
+                                    anyhow::Error::new(CancelSignal::Abort)
+                                }
+                                CancelStrategy::WaitForUsage => {
+                                    anyhow::Error::new(CancelSignal::WaitForUsage)
+                                }
+                            });
+                        }
+                        Some(Command::Message { content, message_id, media }) => {
+                            let mid = append_or_reuse_user_message(session, &content, message_id, media);
+                            let media = session
+                                .messages
+                                .iter()
+                                .find(|message| message.id == mid)
+                                .map(|message| message.media.clone())
+                                .unwrap_or_default();
+                            let _ = stream_tx.send(StreamEvent::UserMessage {
+                                message_id: mid,
+                                content: content.clone(),
+                                media,
+                            });
+                        }
+                        Some(Command::UpdateCwd { cwd }) => {
+                            session.cwd = cwd;
+                            crate::core::apply_session_cwd(session);
+                        }
+                        Some(Command::ReloadConfig) => {}
+                        Some(Command::Approval { .. }) => {}
+                        Some(Command::CancelAgent { .. }) => {}
+                        Some(Command::InjectTool { tool_name, payload }) => {
+                            crate::react::message::inject_tool_to_session(
+                                session,
+                                stream_tx,
+                                &tool_name,
+                                &payload,
+                            );
+                        }
+                        Some(Command::CompressContext) => {
+                            crate::core::compress_context_for_session(
+                                session,
+                                &self.engine,
+                                stream_tx,
+                            );
+                        }
+                        Some(Command::ResetContext) => {
+                            crate::core::reset_context_for_session(
+                                session,
+                                stream_tx,
+                                &self.engine,
+                            );
+                        }
+                    }
+                }
+                chunk_opt = chunk_rx.recv() => {
+                    match chunk_opt {
+                        Some(chunk) => {
+                            if let Some(ref chunk_usage) = chunk.usage {
+                                let tu: tiangong_types::TokenUsage = chunk_usage.clone().into();
+                                streaming_usage.accumulate(&tu);
+                            }
+                            sink.push_chunk(&chunk);
+                        }
+                        None => {
+                            let response_result = match llm_fut.take().unwrap().await {
+                                Ok(r) => r,
+                                Err(e) if e.is_cancelled() => {
+                                    sink.finish();
+                                    let _ = stream_tx.send(StreamEvent::Error {
+                                        message: "已取消".into(),
+                                    });
+                                    return SummaryPhaseResult::Cancelled(streaming_usage);
+                                }
+                                Err(e) => Err(anyhow::anyhow!(e.to_string())),
+                            };
+                            break response_result;
+                        }
+                    }
+                }
+            }
+        };
+        sink.finish();
+
+        let response = match response_result {
+            Ok(response) => response,
+            Err(err) => {
+                if let Some(signal) = CancelSignal::from_error(&err) {
+                    match signal {
+                        CancelSignal::Abort => {
+                            if let Some(handle) = llm_fut.take() {
+                                handle.abort();
+                            }
+                            emit_cancel_usage(
+                                stream_tx,
+                                &streaming_usage,
+                                self.engine.context_limit,
+                            );
+                            return SummaryPhaseResult::Cancelled(streaming_usage);
+                        }
+                        CancelSignal::WaitForUsage => {
+                            if streaming_usage.total_tokens > 0 {
+                                emit_token_usage(
+                                    stream_tx,
+                                    &streaming_usage,
+                                    None,
+                                    self.engine.context_limit,
+                                    "summary-cancelled",
+                                    None,
+                                );
+                            }
+                            let _ = stream_tx.send(StreamEvent::Error {
+                                message: "已取消".into(),
+                            });
+                            if let Some(handle) = llm_fut.take() {
+                                let ctx_limit = self.engine.context_limit;
+                                let tx = stream_tx.clone();
+                                tokio::task::spawn(async move {
+                                    if let Ok(Ok(resp)) = handle.await
+                                        && resp.usage.total_tokens > 0
+                                    {
+                                        emit_token_usage(
+                                            &tx,
+                                            &resp.usage,
+                                            None,
+                                            ctx_limit,
+                                            "summary-cancelled-background",
+                                            None,
+                                        );
+                                    }
+                                });
+                            }
+                            return SummaryPhaseResult::Cancelled(streaming_usage);
+                        }
+                    }
+                }
+                return SummaryPhaseResult::Failed {
+                    message: err.to_string(),
+                    usage: streaming_usage,
+                };
+            }
+        };
+
+        emit_token_usage(
+            stream_tx,
+            &response.usage,
+            Some(response.usage.prompt_tokens.max(session.current_tokens)),
+            self.engine.context_limit,
+            format!("summary-iteration-{iteration}"),
+            None,
+        );
+        let mut usage = response.usage.clone();
+        if usage.total_tokens == 0 {
+            usage.accumulate(&streaming_usage);
+        }
+
+        // 解析 [NEED_MORE_WORK] 标记，判定是否需要重入工具执行阶段。
+        let (needs_more_work, summary_content) = parse_summary_need_more_work(&response.text);
+        session.append_message_with_id(
+            pending_msg_id,
+            MessageRole::Assistant,
+            summary_content.clone(),
+            response.reasoning_content,
+        );
+        if let Some(message) = session.messages.last_mut() {
+            message.reasoning_signature = response.reasoning_signature;
+            // 需要 more work 的总结视为过程性内容；其余视为最终回复。
+            message.phase = if needs_more_work {
+                crate::session::MessagePhase::React
+            } else {
+                crate::session::MessagePhase::Summary
+            };
+        }
+        maybe_update_context_summary(session, &self.engine, &usage, stream_tx);
+        session.persist_to_disk();
+
+        if needs_more_work {
+            SummaryPhaseResult::NeedMoreWork {
+                reason: summary_content,
+                usage,
+            }
+        } else {
+            SummaryPhaseResult::Completed(usage)
+        }
+    }
+
     /// 执行一个完整的对话轮次（可能多轮工具调用），async 版
     ///
     /// 每轮之间检查 cmd_rx：新消息注入上下文，cancel 立即生效。
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, unreachable_code)]
     pub(crate) async fn execute_turn(
         &mut self,
         session: &mut Session,
@@ -549,13 +795,15 @@ impl ReactEngine {
         // - 每次迭代先走内层 'react_loop（工具执行阶段），break 后进入总结阶段。
         // - 总结阶段判定未完成且未超 outer 上限时，注入重入上下文后 continue 'outer。
         // - Task 02/03 将实现内层逻辑改造与总结阶段；当前总结阶段为占位。
-        let _phase = if outer_iteration == 0 {
-            TurnPhase::Initial
-        } else {
-            TurnPhase::ToolExecution
-        };
-
         'outer: loop {
+            let _phase = if outer_iteration == 0 {
+                TurnPhase::Initial
+            } else {
+                TurnPhase::ToolExecution
+            };
+            let iteration_start_round = round;
+            let mut executed_tool_in_iteration = false;
+
             'react_loop: loop {
                 // 首轮：始终重建 system prompt，确保规则段（如「文档附件解析规则」）
                 // 与当前代码版本一致。旧 session 持久化的 system_prompt_message 可能
@@ -588,9 +836,10 @@ impl ReactEngine {
                     .await;
                 }
 
-                if round >= self.max_tool_rounds {
-                    force_final_response(session, &self.engine, stream_tx);
-                    break;
+                // 内层工具执行阶段轮次上限：达到即结束工具阶段，进入总结。
+                // 以本次外层迭代的起始轮次为基准计算，避免重入 Loop 时累计。
+                if round.saturating_sub(iteration_start_round) >= self.max_tool_rounds {
+                    break 'react_loop;
                 }
 
                 let request_tools = tools_for_current_turn(&self.tools, session, user_input);
@@ -610,7 +859,12 @@ impl ReactEngine {
                 };
 
                 let pending_msg_id = scru128::new().to_string();
-                let sink = ThrottledStreamSink::new(pending_msg_id.clone(), stream_tx.clone());
+                // 工具执行阶段的流式文本作为过程性输出（ReactText），前端紧凑展示。
+                let sink = ThrottledStreamSink::with_text_kind(
+                    pending_msg_id.clone(),
+                    stream_tx.clone(),
+                    crate::stream_throttle::StreamTextKind::React,
+                );
 
                 // async 流式调用 + select! 取消
                 let (chunk_tx, mut chunk_rx) =
@@ -866,6 +1120,22 @@ impl ReactEngine {
                         continue 'react_loop;
                     }
 
+                    // 简单问答快速路径：首轮、本轮未执行工具、未注入新消息且 LLM 已给出
+                    // 实质文本回复时，直接将该回复提升为最终回复（Summary），跳过总结阶段
+                    // 的额外模型调用，满足"简单问答零额外开销"。
+                    if outer_iteration == 0
+                        && !executed_tool_in_iteration
+                        && !response.text.trim().is_empty()
+                    {
+                        if let Some(message) = session.messages.last_mut() {
+                            message.phase = crate::session::MessagePhase::Summary;
+                        }
+                        let _ = stream_tx.send(StreamEvent::Done {
+                            usage: Some(accumulated_usage.clone()),
+                        });
+                        return accumulated_usage;
+                    }
+
                     break 'react_loop;
                 }
 
@@ -917,6 +1187,9 @@ impl ReactEngine {
                 // 执行工具
                 let mut need_failure_recovery_prompt = false;
                 for call in executable_calls {
+                    // 本轮已尝试执行工具调用（无论成功/失败/跳过），标记以阻止
+                    // 简单问答快速路径把后续无 tool_calls 的回复误判为直接回复。
+                    executed_tool_in_iteration = true;
                     match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
                         PendingCommandEffect::Terminate => return accumulated_usage,
                         PendingCommandEffect::MessageInjected => {
@@ -1634,11 +1907,70 @@ impl ReactEngine {
                 session.persist_to_disk();
             }
 
-            // ── 总结阶段（Task 03 实现，当前为占位兜底）──
-            // 内层工具执行阶段结束后进入总结。Task 03 将由主模型独立请求判断完成度；
-            // 此处先用 force_final_response 保证骨架可用，避免无限循环。
-            force_final_response(session, &self.engine, stream_tx);
-            break 'outer;
+            // ── 总结阶段 ──
+            // 内层工具执行阶段结束后，由主模型独立判断任务完成度并输出最终回复。
+            let summary_result = self
+                .run_summary_phase(session, stream_tx, cmd_rx, outer_iteration + 1)
+                .await;
+            match summary_result {
+                SummaryPhaseResult::Completed(usage) => {
+                    accumulated_usage.accumulate(&usage);
+                    let _ = stream_tx.send(StreamEvent::Done {
+                        usage: Some(accumulated_usage.clone()),
+                    });
+                    return accumulated_usage;
+                }
+                SummaryPhaseResult::NeedMoreWork { reason, usage } => {
+                    accumulated_usage.accumulate(&usage);
+                    outer_iteration += 1;
+                    if outer_iteration >= self.max_outer_iterations {
+                        // 重入次数已达上限，强制输出最终回复。
+                        force_final_response(
+                            session,
+                            &self.engine,
+                            stream_tx,
+                            ForceFinalReason::OuterLimit,
+                        );
+                        return accumulated_usage;
+                    }
+                    // 注入"上轮总结判定未完成"的上下文，重新进入工具执行阶段。
+                    let mut reminder = Message::new(
+                        MessageRole::Tool,
+                        format!(
+                            "<system-reminder>上轮总结判定任务未完成，原因：{}。请继续执行。</system-reminder>",
+                            reason.trim()
+                        ),
+                    );
+                    reminder.tool_name = Some("summary_need_more_work".to_string());
+                    reminder.phase = crate::session::MessagePhase::React;
+                    session.messages.push(reminder);
+                    session.persist_to_disk();
+                    memory_recall_attempted = false;
+                    successful_tool_call_keys.clear();
+                    failed_tool_call_keys.clear();
+                    failed_tool_names.clear();
+                    memory_candidate_count = 0;
+                    continue 'outer;
+                }
+                SummaryPhaseResult::Cancelled(usage) => {
+                    accumulated_usage.accumulate(&usage);
+                    session.persist_to_disk();
+                    return accumulated_usage;
+                }
+                SummaryPhaseResult::Failed { message, usage } => {
+                    accumulated_usage.accumulate(&usage);
+                    let _ = stream_tx.send(StreamEvent::Error {
+                        message: format!("总结阶段失败：{message}"),
+                    });
+                    force_final_response(
+                        session,
+                        &self.engine,
+                        stream_tx,
+                        ForceFinalReason::SummaryError,
+                    );
+                    return accumulated_usage;
+                }
+            }
         }
 
         accumulated_usage
@@ -1650,6 +1982,37 @@ impl ReactEngine {
             .and_then(|team| team.lock().ok().map(|mut team| team.drain_main_inbox()))
             .unwrap_or_default()
     }
+}
+
+/// 解析总结阶段回复，判断是否需要重入工具执行阶段。
+///
+/// - 首行 `[NEED_MORE_WORK]` → 返回 `(true, 去标记后的正文)`
+/// - 首行 `[DONE]` / `[ASK_USER]` → 返回 `(false, 去标记后的正文)`
+/// - 无标记 → 视为完成，返回 `(false, 原文)`
+fn parse_summary_need_more_work(text: &str) -> (bool, String) {
+    let trimmed = text.trim();
+    if let Some(rest) = strip_summary_marker(trimmed, "[NEED_MORE_WORK]") {
+        return (true, rest.trim().to_string());
+    }
+    if let Some(rest) = strip_summary_marker(trimmed, "[DONE]") {
+        return (false, rest.trim().to_string());
+    }
+    if let Some(rest) = strip_summary_marker(trimmed, "[ASK_USER]") {
+        return (false, rest.trim().to_string());
+    }
+    (false, trimmed.to_string())
+}
+
+fn strip_summary_marker<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
+    let text = text.trim_start();
+    let prefix = text.get(..marker.len())?;
+    if !prefix.eq_ignore_ascii_case(marker) {
+        return None;
+    }
+    Some(
+        text[marker.len()..]
+            .trim_start_matches(|c: char| c.is_whitespace() || matches!(c, ':' | '：' | '-')),
+    )
 }
 
 fn format_team_roster(team_arc: &Arc<Mutex<TeamContext>>) -> String {

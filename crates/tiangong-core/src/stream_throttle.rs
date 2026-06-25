@@ -16,6 +16,18 @@ use crate::model::ModelStreamChunk;
 
 const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_millis(100);
 
+/// 流式文本所属的阶段，决定 flush 时发送的 StreamEvent 变体。
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum StreamTextKind {
+    /// 普通文本增量（向后兼容，发送 Delta）。保留供未标记阶段的调用方使用。
+    #[allow(dead_code)]
+    Delta,
+    /// ReAct 工具执行阶段的过程性文本（发送 ReactText）
+    React,
+    /// 总结阶段的最终回复（发送 SummaryText）
+    Summary,
+}
+
 #[derive(Default)]
 struct StreamBuffers {
     content: String,
@@ -26,17 +38,34 @@ struct StreamBuffers {
 pub(crate) struct ThrottledStreamSink {
     message_id: String,
     tx: Sender<StreamEvent>,
+    text_kind: StreamTextKind,
     buffers: Arc<Mutex<StreamBuffers>>,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl ThrottledStreamSink {
+    /// 创建默认（Delta）文本类型的 sink。保留作为向后兼容入口。
+    #[allow(dead_code)]
     pub(crate) fn new(message_id: String, tx: Sender<StreamEvent>) -> Self {
-        Self::with_interval(message_id, tx, DEFAULT_FLUSH_INTERVAL)
+        Self::with_text_kind(message_id, tx, StreamTextKind::Delta)
     }
 
-    fn with_interval(message_id: String, tx: Sender<StreamEvent>, interval: Duration) -> Self {
+    /// 指定文本阶段类型，决定 flush 时发送 ReactText / SummaryText / Delta。
+    pub(crate) fn with_text_kind(
+        message_id: String,
+        tx: Sender<StreamEvent>,
+        text_kind: StreamTextKind,
+    ) -> Self {
+        Self::with_interval(message_id, tx, text_kind, DEFAULT_FLUSH_INTERVAL)
+    }
+
+    fn with_interval(
+        message_id: String,
+        tx: Sender<StreamEvent>,
+        text_kind: StreamTextKind,
+        interval: Duration,
+    ) -> Self {
         let buffers = Arc::new(Mutex::new(StreamBuffers::default()));
         let stop = Arc::new(AtomicBool::new(false));
 
@@ -49,15 +78,16 @@ impl ThrottledStreamSink {
             .spawn(move || {
                 while !worker_stop.load(Ordering::Acquire) {
                     thread::sleep(interval);
-                    flush_buffers(&worker_buffers, &worker_tx, &worker_message_id);
+                    flush_buffers(&worker_buffers, &worker_tx, &worker_message_id, text_kind);
                 }
-                flush_buffers(&worker_buffers, &worker_tx, &worker_message_id);
+                flush_buffers(&worker_buffers, &worker_tx, &worker_message_id, text_kind);
             })
             .ok();
 
         Self {
             message_id,
             tx,
+            text_kind,
             buffers,
             stop,
             worker,
@@ -85,7 +115,7 @@ impl ThrottledStreamSink {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         } else {
-            flush_buffers(&self.buffers, &self.tx, &self.message_id);
+            flush_buffers(&self.buffers, &self.tx, &self.message_id, self.text_kind);
         }
     }
 }
@@ -96,7 +126,12 @@ impl Drop for ThrottledStreamSink {
     }
 }
 
-fn flush_buffers(buffers: &Arc<Mutex<StreamBuffers>>, tx: &Sender<StreamEvent>, message_id: &str) {
+fn flush_buffers(
+    buffers: &Arc<Mutex<StreamBuffers>>,
+    tx: &Sender<StreamEvent>,
+    message_id: &str,
+    text_kind: StreamTextKind,
+) {
     let (content, reasoning) = {
         let Ok(mut buffers) = buffers.lock() else {
             return;
@@ -108,10 +143,21 @@ fn flush_buffers(buffers: &Arc<Mutex<StreamBuffers>>, tx: &Sender<StreamEvent>, 
     };
 
     if !content.is_empty() {
-        let _ = tx.send(StreamEvent::Delta {
-            message_id: message_id.to_string(),
-            content,
-        });
+        let event = match text_kind {
+            StreamTextKind::Delta => StreamEvent::Delta {
+                message_id: message_id.to_string(),
+                content,
+            },
+            StreamTextKind::React => StreamEvent::ReactText {
+                message_id: message_id.to_string(),
+                content,
+            },
+            StreamTextKind::Summary => StreamEvent::SummaryText {
+                message_id: message_id.to_string(),
+                content,
+            },
+        };
+        let _ = tx.send(event);
     }
     if !reasoning.is_empty() {
         let _ = tx.send(StreamEvent::Reasoning {

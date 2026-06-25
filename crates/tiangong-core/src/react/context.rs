@@ -1,4 +1,4 @@
-//! ReAct 循环上下文管理：强制回复、上下文压缩
+//! ReAct 循环上下文管理：总结阶段请求、强制回复、上下文压缩
 
 use std::sync::mpsc::Sender as StdSender;
 
@@ -7,7 +7,7 @@ use crate::model::{ModelClient, ModelRequest, SingleProviderClient, TokenUsage};
 use crate::prompt::SystemPromptConfig;
 use crate::runtime::{RuntimeEngine, use_stream_mode};
 use crate::session::{Message, MessagePhase, MessageRole, Session, now_text};
-use crate::stream_throttle::ThrottledStreamSink;
+use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
 use tiangong_types::StreamEvent;
 
 /// 从 RuntimeEngine 配置构建 SystemPromptConfig 并重建 session 的 system prompt
@@ -129,60 +129,77 @@ pub(crate) fn select_client_for_request<'a>(
     engine.client()
 }
 
-const COMPLETION_CHECK_SYSTEM_PROMPT: &str = "\
-你是一个任务完成度判断器。你需要判断 AI 助手是否已经充分完成了用户的请求。
+/// 总结阶段的判断指令（作为运行时上下文注入，不常驻 system prompt）。
+///
+/// 由主模型在总结阶段判断任务完成度：完成则给最终回复；需要用户提供信息则提问；
+/// 仍有遗漏且本 Agent 能继续通过工具推进时，输出 [NEED_MORE_WORK] 触发重入 Loop。
+pub(crate) const SUMMARY_PHASE_PROMPT: &str = "\
+你当前处于总结阶段。请基于以上所有工作，给出最终回复。\n\
+\n\
+判断逻辑：\n\
+1. 如果用户请求的所有操作都已执行并得到结果，请总结结果给出最终回复。\n\
+2. 如果需要用户提供额外信息、凭据、授权、选择或确认才能继续，请直接向用户提问。\n\
+3. 如果有关键步骤遗漏未执行、且你确实可以通过工具继续推进，请在回复开头输出 [NEED_MORE_WORK]，\n\
+   然后简要说明还需要做什么。系统将重新进入工具执行阶段。\n\
+\n\
+注意：不要重复执行工具调用。不要重复已有内容。如果只是给用户后续建议，不要使用 [NEED_MORE_WORK]。";
 
-判断标准（偏向判定为已完成）：
-- 助手是否给出了实质性的回复内容（代码改动说明、执行结果、分析结论等）
-- 如果助手回复了具体的操作结果（如编译通过、文件已修改、命令已执行），应判定为已完成
-- 只有当回复明显空洞（如只有\"好的\"\"让我来\"等过渡语）或用户请求明显需要操作但助手未执行任何工具时，才判定为未完成
-
-回复规则：
-- 已完成：COMPLETE
-- 未完成：INCOMPLETE
-- 只回复一个词，不要添加任何其他文字";
-
-/// 使用 lite 模型判断当前回复是否真正完成了任务。
-/// 返回 `true` 表示任务已完成，`false` 表示需要继续 react 循环。
-/// 如果 lite 模型调用失败，降级返回 `true`（直接结束，不影响原有流程）。
-pub(crate) async fn check_completion_with_lite_model(
-    engine: &RuntimeEngine,
-    user_input: &str,
-    assistant_response: &str,
-) -> bool {
-    if assistant_response.trim().is_empty() {
-        return false;
+/// 构建总结阶段的 LLM 请求。
+///
+/// 将 `SUMMARY_PHASE_PROMPT` 作为运行时上下文追加到对话末尾，不携带 tools，
+/// 使用主模型 client，由主模型自行判断任务完成度并输出最终回复。
+pub(crate) fn request_for_summary_phase(session: &Session) -> ModelRequest {
+    let mut context = session.context();
+    context.push(
+        Message::new(
+            MessageRole::System,
+            format!("<runtime_context>\n{SUMMARY_PHASE_PROMPT}\n</runtime_context>"),
+        )
+        .with_phase(MessagePhase::Normal),
+    );
+    ModelRequest {
+        session_title: session.title.clone(),
+        user_input: String::new(),
+        context,
+        thinking: Some(crate::model::ThinkingConfig {
+            budget_tokens: 4096,
+        }),
+        reasoning_effort: None,
+        thinking_disabled: false,
+        include_media: false,
     }
+}
 
-    let lite = engine.lite_client().clone();
-    let system_prompt = COMPLETION_CHECK_SYSTEM_PROMPT.to_string();
-    let user_prompt = format_completion_check_prompt(user_input, assistant_response);
+/// 强制最终回复的触发原因。
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ForceFinalReason {
+    /// 总结阶段后重入 Loop 的次数已达上限。
+    OuterLimit,
+    /// 总结阶段 LLM 请求失败。
+    SummaryError,
+}
 
-    let result = tokio::task::spawn_blocking(move || {
-        lite.complete_lite_with_system(&system_prompt, &user_prompt)
-    })
-    .await;
-
-    match result {
-        Ok(Ok(response_text)) => parse_completion_response(&response_text),
-        _ => {
-            tracing::warn!("lite 模型完成度检测失败，降级为直接结束");
-            true
+impl ForceFinalReason {
+    fn prompt(self) -> &'static str {
+        match self {
+            Self::OuterLimit => {
+                "任务已经过多轮迭代仍未完全完成。请基于以上所有工作给出最终回复。\n\
+要求：\n\
+1. 总结已完成的操作和结果。\n\
+2. 如果有未完成的任务，说明原因和后续建议。\n\
+3. 不要重复执行工具调用。\n\
+4. 如果需要用户提供信息才能继续，请明确列出需要什么。"
+            }
+            Self::SummaryError => {
+                "总结阶段执行失败。请基于以上所有工作，尽量给出最终回复。\n\
+要求：\n\
+1. 总结已完成的操作和结果。\n\
+2. 如果有未完成的任务，说明原因和后续建议。\n\
+3. 不要重复执行工具调用。\n\
+4. 如果需要用户提供信息才能继续，请明确列出需要什么。"
+            }
         }
     }
-}
-
-fn format_completion_check_prompt(user_input: &str, assistant_response: &str) -> String {
-    format!(
-        "用户原始请求：\n{user_input}\n\n\
-         AI 助手的最新回复：\n{assistant_response}\n\n\
-         请判断：AI 助手是否已经充分完成了用户的请求？"
-    )
-}
-
-fn parse_completion_response(response: &str) -> bool {
-    let trimmed = response.trim().to_uppercase();
-    trimmed.contains("COMPLETE") && !trimmed.contains("INCOMPLETE")
 }
 
 /// 超限时强制最终回复
@@ -190,6 +207,7 @@ pub(crate) fn force_final_response(
     session: &mut Session,
     engine: &RuntimeEngine,
     stream_tx: &StdSender<StreamEvent>,
+    reason: ForceFinalReason,
 ) {
     // 确保 system prompt 已构建
     if session.system_prompt_message.is_none() {
@@ -199,10 +217,10 @@ pub(crate) fn force_final_response(
     session.messages.push(Message {
         id: scru128::new().to_string(),
         role: MessageRole::Tool,
-        content: vec![crate::session::ContentBlock::text(
-            "<system-reminder>\n请基于以上所有工具执行结果，直接给出最终回复。\n</system-reminder>"
-                .to_string(),
-        )],
+        content: vec![crate::session::ContentBlock::text(format!(
+            "<system-reminder>\n{}\n</system-reminder>",
+            reason.prompt()
+        ))],
         reasoning_content: String::new(),
         reasoning_signature: None,
         worker_id: None,
@@ -232,7 +250,11 @@ pub(crate) fn force_final_response(
     let pending_msg_id = scru128::new().to_string();
 
     let resp = if use_stream_mode() {
-        let sink = ThrottledStreamSink::new(pending_msg_id.clone(), stream_tx.clone());
+        let sink = ThrottledStreamSink::with_text_kind(
+            pending_msg_id.clone(),
+            stream_tx.clone(),
+            StreamTextKind::Summary,
+        );
         let response_result = select_client_for_request(engine, &req)
             .complete_stream_with_callback(&req, |delta| {
                 sink.push_chunk(delta);
@@ -252,7 +274,7 @@ pub(crate) fn force_final_response(
         match select_client_for_request(engine, &req).complete(&req) {
             Ok(r) => {
                 if !r.text.is_empty() {
-                    let _ = stream_tx.send(StreamEvent::Delta {
+                    let _ = stream_tx.send(StreamEvent::SummaryText {
                         message_id: msg_id_non_stream,
                         content: r.text.clone(),
                     });
@@ -280,6 +302,10 @@ pub(crate) fn force_final_response(
         resp.text,
         resp.reasoning_content,
     );
+    if let Some(message) = session.messages.last_mut() {
+        message.phase = MessagePhase::Summary;
+        message.reasoning_signature = resp.reasoning_signature.clone();
+    }
     emit_token_usage(
         stream_tx,
         &resp.usage,

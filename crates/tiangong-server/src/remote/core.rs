@@ -445,7 +445,16 @@ fn sync_stream_event_to_state(
         StreamEvent::Delta {
             message_id,
             content,
+        }
+        | StreamEvent::ReactText {
+            message_id,
+            content,
+        }
+        | StreamEvent::SummaryText {
+            message_id,
+            content,
         } => append_assistant_delta(session, message_id, content),
+        StreamEvent::PhaseChanged { .. } => {}
         StreamEvent::Reasoning {
             message_id,
             content,

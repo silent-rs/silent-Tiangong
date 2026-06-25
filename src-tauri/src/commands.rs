@@ -824,7 +824,10 @@ pub(crate) fn start_stream_consumer(
             if cancel_flag.load(Ordering::Acquire)
                 && matches!(
                     event,
-                    StreamEvent::Delta { .. } | StreamEvent::Reasoning { .. }
+                    StreamEvent::Delta { .. }
+                        | StreamEvent::ReactText { .. }
+                        | StreamEvent::SummaryText { .. }
+                        | StreamEvent::Reasoning { .. }
                 )
             {
                 continue;
@@ -869,6 +872,14 @@ pub(crate) fn start_stream_consumer(
                             }
                         }
                         StreamEvent::Delta {
+                            message_id,
+                            content,
+                        }
+                        | StreamEvent::ReactText {
+                            message_id,
+                            content,
+                        }
+                        | StreamEvent::SummaryText {
                             message_id,
                             content,
                         } => {
@@ -1284,9 +1295,12 @@ pub(crate) fn start_stream_consumer(
                     StreamEvent::Reasoning { .. } => {
                         core_state.store.runtime.run.summary = "正在思考...".to_string();
                     }
-                    StreamEvent::Delta { .. } => {
+                    StreamEvent::Delta { .. }
+                    | StreamEvent::ReactText { .. }
+                    | StreamEvent::SummaryText { .. } => {
                         core_state.store.runtime.run.summary = "正在回复...".to_string();
                     }
+                    StreamEvent::PhaseChanged { .. } => {}
                     StreamEvent::MemoryRecallStart { .. } => {
                         core_state.store.runtime.run.summary = "正在检索记忆...".to_string();
                     }

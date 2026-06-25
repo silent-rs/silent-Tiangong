@@ -76,7 +76,8 @@ pub(crate) fn append_assistant_tool_call_message(
         MessageRole::Assistant,
         text.trim().to_string(),
         reasoning_content.trim().to_string(),
-    );
+    )
+    .with_phase(crate::session::MessagePhase::React);
     message.id = message_id;
     message.reasoning_signature = reasoning_signature;
     message.tool_calls = tool_calls;
@@ -90,7 +91,8 @@ pub(crate) fn append_tool_result_message(
     text: String,
     is_error: bool,
 ) {
-    let mut message = Message::new(MessageRole::Tool, text);
+    let mut message =
+        Message::new(MessageRole::Tool, text).with_phase(crate::session::MessagePhase::React);
     message.tool_call_id = Some(tool_call_id.to_string());
     message.tool_name = Some(tool_name.to_string());
     message.tool_result_is_error = is_error;
