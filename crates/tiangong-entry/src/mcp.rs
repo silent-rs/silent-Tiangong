@@ -37,7 +37,6 @@ pub(crate) fn run_mcp_command(args: McpArgs) -> anyhow::Result<()> {
             auth_header,
             headers,
             env,
-            cwd,
             cmdline,
             enabled,
         } => {
@@ -52,7 +51,6 @@ pub(crate) fn run_mcp_command(args: McpArgs) -> anyhow::Result<()> {
                     &auth_header,
                     &headers,
                     &env,
-                    &cwd,
                     &cmdline,
                 )?;
                 let raw_json = load_add_json_payload(json, json_file)?;
@@ -84,7 +82,6 @@ pub(crate) fn run_mcp_command(args: McpArgs) -> anyhow::Result<()> {
                         auth_header,
                         headers,
                         env,
-                        cwd,
                     },
                 })?;
                 println!("{msg}");
@@ -151,7 +148,6 @@ fn ensure_no_mixed_json_add_args(
     auth_header: &Option<String>,
     headers: &[(String, String)],
     env: &[(String, String)],
-    cwd: &Option<String>,
     cmdline: &[String],
 ) -> anyhow::Result<()> {
     if name.as_ref().is_some_and(|value| !value.trim().is_empty())
@@ -169,11 +165,10 @@ fn ensure_no_mixed_json_add_args(
             .is_some_and(|value| !value.trim().is_empty())
         || !headers.is_empty()
         || !env.is_empty()
-        || cwd.as_ref().is_some_and(|value| !value.trim().is_empty())
         || !cmdline.is_empty()
     {
         return Err(anyhow!(
-            "JSON 导入模式下不允许同时传 name/command/arg/tags/transport/endpoint/auth/header/env/cwd/CMDLINE 参数"
+            "JSON 导入模式下不允许同时传 name/command/arg/tags/transport/endpoint/auth/header/env/CMDLINE 参数"
         ));
     }
     Ok(())
@@ -233,7 +228,9 @@ struct JsonMcpServerInput {
     headers: BTreeMap<String, String>,
     #[serde(default)]
     env: BTreeMap<String, String>,
+    /// 旧配置可能含 cwd 字段，已废弃：stdio MCP 现跟随会话工作目录。保留反序列化以容忍旧 JSON。
     #[serde(default)]
+    #[allow(dead_code)]
     cwd: String,
     #[serde(default = "default_enabled")]
     enabled: bool,
@@ -321,7 +318,6 @@ fn normalize_json_server(
     let headers = normalize_map_pairs(input.headers);
     let env = normalize_map_pairs(input.env);
     let auth_header = input.auth_header.trim().to_string();
-    let cwd = input.cwd.trim().to_string();
 
     Ok(ImportedMcpServer {
         name,
@@ -335,7 +331,6 @@ fn normalize_json_server(
             auth_header: Some(auth_header),
             headers,
             env,
-            cwd: Some(cwd),
         },
     })
 }
@@ -469,7 +464,6 @@ fn ensure_import_conflicts(
 fn imported_server_to_config(server: &ImportedMcpServer) -> McpServerConfig {
     let endpoint = server.options.endpoint.clone().unwrap_or_default();
     let auth_header = server.options.auth_header.clone().unwrap_or_default();
-    let cwd = server.options.cwd.clone().unwrap_or_default();
     let headers = server
         .options
         .headers
@@ -492,7 +486,6 @@ fn imported_server_to_config(server: &ImportedMcpServer) -> McpServerConfig {
         auth_header,
         headers,
         env,
-        cwd,
         enabled: server.enabled,
         tags: server.tags.clone(),
     }

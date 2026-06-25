@@ -415,7 +415,9 @@ async fn run_stdio_mcp_request_async(
     let (transport, _stderr) = TokioChildProcess::builder(Command::new(command).configure(|cmd| {
         configure_tokio_no_window(cmd);
         cmd.args(&server.args);
-        if let Some(cwd) = server.cwd_text() {
+        // stdio MCP 跟随当前会话工作目录（与 run_command 一致）；能力探测等无会话上下文
+        // 的路径下此值为 None，子进程自然继承宿主进程 cwd。
+        if let Some(cwd) = crate::tool::session_workspace_root() {
             cmd.current_dir(cwd);
         }
         for (key, value) in &server.env {

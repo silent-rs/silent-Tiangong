@@ -28,7 +28,6 @@ fn repository_persist_to_disk_round_trips_split_configs_and_sessions() -> Result
                 auth_header: String::new(),
                 headers: Default::default(),
                 env: Default::default(),
-                cwd: String::new(),
                 enabled: true,
                 tags: vec!["demo".to_string()],
             });

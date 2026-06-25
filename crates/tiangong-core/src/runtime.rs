@@ -1767,7 +1767,6 @@ mod tests {
             auth_header: String::new(),
             headers: Default::default(),
             env: Default::default(),
-            cwd: String::new(),
             enabled: true,
             tags: Vec::new(),
         });

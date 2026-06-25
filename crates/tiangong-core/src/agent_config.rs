@@ -104,8 +104,6 @@ pub struct McpServerConfig {
     pub headers: BTreeMap<String, String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
-    #[serde(default)]
-    pub cwd: String,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     #[serde(default)]
@@ -146,11 +144,6 @@ impl McpServerConfig {
 
     pub fn command_text(&self) -> &str {
         self.command.trim()
-    }
-
-    pub fn cwd_text(&self) -> Option<&str> {
-        let cwd = self.cwd.trim();
-        if cwd.is_empty() { None } else { Some(cwd) }
     }
 }
 

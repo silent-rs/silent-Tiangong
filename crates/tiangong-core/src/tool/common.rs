@@ -30,6 +30,14 @@ pub(super) fn workspace_root() -> Result<PathBuf> {
     })
 }
 
+/// 读取当前线程的会话工作目录，供需要跟随会话 workspace 的子系统（如 stdio MCP 子进程）使用。
+///
+/// 仅当线程已通过 [`set_session_cwd`] 设置过有效目录时返回 `Some`；否则返回 `None`，
+/// 由调用方自行决定回退策略（典型做法是不设置 `current_dir`，让子进程继承宿主 cwd）。
+pub fn session_workspace_root() -> Option<PathBuf> {
+    SESSION_CWD.with(|cell| cell.borrow().as_ref().filter(|cwd| cwd.is_dir()).cloned())
+}
+
 fn write_allowed_roots() -> Result<Vec<PathBuf>> {
     let workspace = workspace_root()?;
     let workspace_canonical = workspace

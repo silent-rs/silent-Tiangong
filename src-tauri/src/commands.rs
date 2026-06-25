@@ -2497,7 +2497,6 @@ pub async fn register_mcp_server(
     auth_header: Option<String>,
     headers: Option<std::collections::HashMap<String, String>>,
     env: Option<std::collections::HashMap<String, String>>,
-    cwd: Option<String>,
     state: State<'_, TiangongApp>,
 ) -> Result<String, String> {
     use tiangong_core::agent_config::McpTransportMode;
@@ -2541,7 +2540,6 @@ pub async fn register_mcp_server(
                     auth_header,
                     headers: header_vec,
                     env: env_vec,
-                    cwd,
                 },
             };
             core_state.register_mcp_server(request)

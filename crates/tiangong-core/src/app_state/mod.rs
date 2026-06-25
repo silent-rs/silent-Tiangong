@@ -69,7 +69,6 @@ pub struct RegisterMcpServerOptions {
     pub auth_header: Option<String>,
     pub headers: Vec<(String, String)>,
     pub env: Vec<(String, String)>,
-    pub cwd: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]

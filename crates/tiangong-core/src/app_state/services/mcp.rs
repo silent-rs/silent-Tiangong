@@ -52,7 +52,6 @@ impl AppMcpService {
             .unwrap_or_default()
             .trim()
             .to_string();
-        let cwd = request.options.cwd.unwrap_or_default().trim().to_string();
 
         let headers = request
             .options
@@ -108,7 +107,6 @@ impl AppMcpService {
                 auth_header,
                 headers,
                 env,
-                cwd,
                 enabled: request.enabled,
                 tags,
             });

@@ -29,7 +29,6 @@ impl TiangongState {
                         auth_header: None,
                         headers: Vec::new(),
                         env,
-                        cwd: None,
                     },
                 })
             }

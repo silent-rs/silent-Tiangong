@@ -1582,7 +1582,6 @@ function McpSettings() {
     authHeader: '',
     headers: '',
     env: '',
-    cwd: '',
   });
   const [editEnvTarget, setEditEnvTarget] = useState<string | null>(null);
   const [editEnvValues, setEditEnvValues] = useState<Record<string, string>>({});
@@ -1623,7 +1622,6 @@ function McpSettings() {
             command: newServer.command.trim(),
             args: parseListArgs(newServer.args),
             env: parseKeyValueText(newServer.env, '环境变量'),
-            cwd: newServer.cwd.trim() || undefined,
           }
         : {
             name: newServer.name.trim(),
@@ -1645,7 +1643,6 @@ function McpSettings() {
         authHeader: '',
         headers: '',
         env: '',
-        cwd: '',
       });
       setShowAddDialog(false);
       showSuccess('添加成功', `MCP 服务器 "${newServer.name}" 已添加`);
@@ -1862,15 +1859,6 @@ function McpSettings() {
                         onChange={(e) => setNewServer({ ...newServer, env: e.target.value })}
                         placeholder="PATH=/usr/bin&#10;NODE_ENV=production"
                         rows={3}
-                      />
-                    </div>
-                    <div>
-                      <Label htmlFor="serverCwd">工作目录</Label>
-                      <Input
-                        id="serverCwd"
-                        value={newServer.cwd}
-                        onChange={(e) => setNewServer({ ...newServer, cwd: e.target.value })}
-                        placeholder="/path/to/workspace"
                       />
                     </div>
                   </>

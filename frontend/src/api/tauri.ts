@@ -217,7 +217,6 @@ export interface McpServer {
   auth_header: string;
   headers?: Record<string, string>;
   env?: Record<string, string>;
-  cwd: string;
   enabled: boolean;
 }
 
@@ -230,7 +229,6 @@ export interface RegisterMcpServerInput {
   authHeader?: string;
   headers?: Record<string, string>;
   env?: Record<string, string>;
-  cwd?: string;
 }
 
 export interface Skill {
@@ -579,7 +577,6 @@ export const api = {
       authHeader: input.authHeader,
       headers: input.headers,
       env: input.env,
-      cwd: input.cwd,
     }),
 
   removeMcpServer: (name: string): Promise<string> =>

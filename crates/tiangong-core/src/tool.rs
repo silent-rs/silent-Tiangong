@@ -9,7 +9,7 @@ use crate::agent_config::AgentConfig;
 pub mod background_task;
 mod common;
 mod current_time;
-pub use common::set_session_cwd;
+pub use common::{session_workspace_root, set_session_cwd};
 mod list_dir;
 mod read_file;
 mod replace_in_file;
