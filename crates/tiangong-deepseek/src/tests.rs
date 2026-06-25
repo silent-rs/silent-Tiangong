@@ -51,6 +51,7 @@ fn chat_message_skip_none_fields() {
     let msg = ChatMessage {
         role: MessageRole::User,
         content: Some(json!("hello")),
+        reasoning_content: None,
         name: None,
         tool_calls: None,
         tool_call_id: None,
@@ -58,9 +59,25 @@ fn chat_message_skip_none_fields() {
     };
     let serialized = serde_json::to_string(&msg).unwrap();
     assert!(!serialized.contains("name"));
+    assert!(!serialized.contains("reasoning_content"));
     assert!(!serialized.contains("tool_calls"));
     assert!(!serialized.contains("tool_call_id"));
     assert!(!serialized.contains("prefix"));
+}
+
+#[test]
+fn chat_message_with_reasoning_content() {
+    let msg = ChatMessage {
+        role: MessageRole::Assistant,
+        content: Some(json!("final text")),
+        reasoning_content: Some("thinking trace".into()),
+        name: None,
+        tool_calls: None,
+        tool_call_id: None,
+        prefix: false,
+    };
+    let value = serde_json::to_value(&msg).unwrap();
+    assert_eq!(value["reasoning_content"], "thinking trace");
 }
 
 #[test]
@@ -68,6 +85,7 @@ fn chat_message_with_tool_calls() {
     let msg = ChatMessage {
         role: MessageRole::Assistant,
         content: None,
+        reasoning_content: None,
         name: None,
         tool_calls: Some(vec![ToolCall {
             id: "call_123".into(),
@@ -92,6 +110,7 @@ fn chat_request_serialization() {
         messages: vec![ChatMessage {
             role: MessageRole::User,
             content: Some(json!("hello")),
+            reasoning_content: None,
             name: None,
             tool_calls: None,
             tool_call_id: None,
