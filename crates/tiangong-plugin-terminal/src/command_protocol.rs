@@ -159,7 +159,7 @@ fn wrap_non_interactive_command(
     end_marker: &str,
 ) -> String {
     format!(
-        "__TIANGONG_= echo '{}'; __tiangong_had_PAGER=${{PAGER+x}}; __tiangong_old_PAGER=${{PAGER-}}; __tiangong_had_GIT_PAGER=${{GIT_PAGER+x}}; __tiangong_old_GIT_PAGER=${{GIT_PAGER-}}; __tiangong_had_LESS=${{LESS+x}}; __tiangong_old_LESS=${{LESS-}}; __tiangong_had_TERM=${{TERM+x}}; __tiangong_old_TERM=${{TERM-}}; export PAGER=cat GIT_PAGER=cat LESS=FRX TERM=dumb; {}\n__TIANGONG_= __rc=$?; if [ -n \"$__tiangong_had_PAGER\" ]; then PAGER=\"$__tiangong_old_PAGER\"; export PAGER; else unset PAGER; fi; if [ -n \"$__tiangong_had_GIT_PAGER\" ]; then GIT_PAGER=\"$__tiangong_old_GIT_PAGER\"; export GIT_PAGER; else unset GIT_PAGER; fi; if [ -n \"$__tiangong_had_LESS\" ]; then LESS=\"$__tiangong_old_LESS\"; export LESS; else unset LESS; fi; if [ -n \"$__tiangong_had_TERM\" ]; then TERM=\"$__tiangong_old_TERM\"; export TERM; else unset TERM; fi; printf '\\n{}'; pwd; echo '{}'$__rc; echo '{}'\n",
+        "__TIANGONG_= echo '{}'; __tiangong_had_PAGER=${{PAGER+x}}; __tiangong_old_PAGER=${{PAGER-}}; __tiangong_had_GIT_PAGER=${{GIT_PAGER+x}}; __tiangong_old_GIT_PAGER=${{GIT_PAGER-}}; __tiangong_had_LESS=${{LESS+x}}; __tiangong_old_LESS=${{LESS-}}; export PAGER=cat GIT_PAGER=cat LESS=FRX; {}\n__TIANGONG_= __rc=$?; if [ -n \"$__tiangong_had_PAGER\" ]; then PAGER=\"$__tiangong_old_PAGER\"; export PAGER; else unset PAGER; fi; if [ -n \"$__tiangong_had_GIT_PAGER\" ]; then GIT_PAGER=\"$__tiangong_old_GIT_PAGER\"; export GIT_PAGER; else unset GIT_PAGER; fi; if [ -n \"$__tiangong_had_LESS\" ]; then LESS=\"$__tiangong_old_LESS\"; export LESS; else unset LESS; fi; printf '\\n{}'; pwd; echo '{}'$__rc; echo '{}'\n",
         start_marker, command, cwd_marker, rc_marker, end_marker
     )
 }
@@ -884,10 +884,10 @@ mod tests {
         assert!(combined.contains("PAGER="));
         assert!(combined.contains("GIT_PAGER="));
         assert!(!combined.contains("GIT_CONFIG_PARAMETERS"));
-        assert!(combined.contains("export PAGER=cat GIT_PAGER=cat LESS=FRX TERM=dumb"));
+        assert!(combined.contains("export PAGER=cat GIT_PAGER=cat LESS=FRX"));
         assert!(combined.contains("unset PAGER"));
         assert!(combined.contains("LESS=FRX"));
-        assert!(combined.contains("TERM=dumb"));
+        assert!(!combined.contains("TERM=dumb"));
         assert!(combined.contains("git diff HEAD"));
     }
 }

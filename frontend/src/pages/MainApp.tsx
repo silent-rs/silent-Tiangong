@@ -105,6 +105,7 @@ export function MainApp() {
   const [workspaceTabKind, setWorkspaceTabKind] = useState<TabKind>('browser');
   const [workspaceOpenRequestVersion, setWorkspaceOpenRequestVersion] = useState(0);
   const [requestedTerminalTabId, setRequestedTerminalTabId] = useState<string | null>(null);
+  const [terminalSyncVersion, setTerminalSyncVersion] = useState(0);
   const [chatPanelWidth, setChatPanelWidth] = useState(MIN_CHAT_WIDTH);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const showWorkspacePanelRef = useRef(false);
@@ -231,12 +232,12 @@ export function MainApp() {
   const syncTerminalRuntimeTabsToSession = useCallback(async (
     sessionId: string,
     preferredTabId?: string | null,
-  ) => {
+  ): Promise<boolean> => {
     const [sessionTabs, runtimeTabs] = await Promise.all([
       api.getSessionTabs(sessionId),
       api.terminalTabList(sessionId),
     ]);
-    if (runtimeTabs.tabs.length === 0) return;
+    if (runtimeTabs.tabs.length === 0) return false;
 
     const terminalTabs = runtimeTabs.tabs.map(terminalRuntimeTabToState);
     const terminalById = new Map(terminalTabs.map((tab) => [tab.id, tab]));
@@ -260,6 +261,7 @@ export function MainApp() {
     ].find((tabId) => tabId && nextTabs.some((tab) => tab.id === tabId)) || null;
 
     await api.setSessionTabs(sessionId, nextTabs, nextActiveTabId);
+    return true;
   }, []);
 
   const handleDividerDrag = useCallback((e: React.MouseEvent) => {
@@ -359,17 +361,29 @@ export function MainApp() {
         const { session_id, active_tab_id, source } = event.payload;
         const store = useStore.getState();
         const terminalSessionId = store.activeSessionId || store.draftTerminalId;
-        if (!terminalSessionId || session_id !== terminalSessionId) return;
-        if (store.activeSessionId && session_id === store.activeSessionId) {
-          await syncTerminalRuntimeTabsToSession(session_id, active_tab_id ?? null).catch(console.error);
+        const isCurrentTerminalSession = Boolean(terminalSessionId && session_id === terminalSessionId);
+        const isDraftTerminalSession = Boolean(store.draftTerminalId && session_id === store.draftTerminalId);
+        let synced = false;
+        if (!isDraftTerminalSession) {
+          synced = await syncTerminalRuntimeTabsToSession(session_id, active_tab_id ?? null)
+            .catch((error) => {
+              console.error('同步终端 Tab 到会话失败：', error);
+              return false;
+            });
         }
-        if (source === 'restore') {
+        if (synced && isCurrentTerminalSession) {
+          setWorkspacePanelMounted(true);
+          setTerminalSyncVersion((version) => version + 1);
+        }
+        if (!isCurrentTerminalSession) {
           return;
         }
-        if (!showWorkspacePanelRef.current || workspaceTabKindRef.current !== 'terminal' || !active_tab_id) {
+        if (source === 'restore' || source === 'agent_command') {
           return;
         }
-        await openWorkspacePanel('terminal', active_tab_id);
+        if (showWorkspacePanelRef.current && workspaceTabKindRef.current === 'terminal' && active_tab_id) {
+          await openWorkspacePanel('terminal', active_tab_id);
+        }
       });
 
       const unlistenResize = await getCurrentWindow().onResized(async () => {
@@ -486,6 +500,7 @@ export function MainApp() {
                     isVisible={showWorkspacePanel}
                     openRequestVersion={workspaceOpenRequestVersion}
                     requestedTerminalTabId={requestedTerminalTabId}
+                    terminalSyncVersion={terminalSyncVersion}
                     onClose={() => { void closeWorkspacePanel(); }}
                     onActiveKindChange={handleWorkspaceActiveKindChange}
                   />
