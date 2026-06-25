@@ -2485,6 +2485,12 @@ pub async fn get_mcp_health() -> Result<Vec<serde_json::Value>, String> {
         .collect()
 }
 
+/// 探测单个 MCP 服务器（按 name），写回健康缓存。供前端添加/编辑/重试后刷新该行。
+#[tauri::command]
+pub async fn probe_mcp_server(name: String) -> Result<(), String> {
+    tiangong_core::mcp::probe_single_mcp_server_by_name(&name).map_err(|e| e.to_string())
+}
+
 /// 注册 MCP 服务器
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]

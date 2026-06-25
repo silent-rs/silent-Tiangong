@@ -141,25 +141,47 @@ pub fn refresh_mcp_capabilities_async(config: McpConfig) {
 }
 
 pub fn refresh_mcp_capabilities(config: &McpConfig) {
+    // 第一段：并发探测所有启用的 server，全程不持锁，避免阻塞 getMcpHealth 读锁。
+    let targets: Vec<&McpServerConfig> = config
+        .servers
+        .iter()
+        .filter(|server| server.enabled)
+        .collect();
+    let results: Vec<(String, McpServerCapability)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = targets
+            .iter()
+            .map(|server| {
+                let server = (**server).clone();
+                scope.spawn(move || {
+                    (
+                        server.name.clone(),
+                        probe_server_capability(&server, config.timeout_ms),
+                    )
+                })
+            })
+            .collect();
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    });
+
+    // 第二段：短暂持写锁，只做合并 + 清理。
     if let Ok(mut guard) = capability_index().write() {
-        for server in config.servers.iter().filter(|server| server.enabled) {
-            let capability = probe_server_capability(server, config.timeout_ms);
+        for (name, capability) in results {
             if !capability.healthy {
                 // 探测失败：更新健康状态和错误信息，但保留已有工具缓存
-                if let Some(existing) = guard.get_mut(&server.name) {
+                if let Some(existing) = guard.get_mut(&name) {
                     existing.healthy = false;
                     existing.last_error = capability.last_error;
                     tracing::warn!(
                         "MCP 探测失败，标记为不健康并保留工具缓存：server={}（缓存 {} 个工具）",
-                        server.name,
+                        name,
                         existing.tools.len()
                     );
                 } else {
-                    guard.insert(server.name.clone(), capability);
+                    guard.insert(name, capability);
                 }
                 continue;
             }
-            guard.insert(server.name.clone(), capability);
+            guard.insert(name, capability);
         }
         // 清理已移除或禁用的服务器
         let active_names: std::collections::HashSet<_> = config
@@ -170,6 +192,54 @@ pub fn refresh_mcp_capabilities(config: &McpConfig) {
             .collect();
         guard.retain(|name, _| active_names.contains(name));
     }
+}
+
+/// 按 name 探测单个 MCP server 并写回缓存。
+/// 供前端"添加/编辑后只探测该 server"和"行内重试"使用，避免触发全量探测。
+pub fn probe_single_mcp_server_by_name(name: &str) -> Result<()> {
+    // 从 scheduler 缓存的 config 取 server 配置 + timeout_ms
+    let (server, timeout_ms) = {
+        let guard = capability_scheduler()
+            .read()
+            .map_err(|_| anyhow!("MCP 能力调度器锁中毒"))?;
+        let server = guard
+            .mcp_config
+            .servers
+            .iter()
+            .find(|s| s.name == name && s.enabled)
+            .ok_or_else(|| anyhow!("未找到启用中的 MCP server：{name}"))?
+            .clone();
+        (server, guard.mcp_config.timeout_ms)
+    };
+
+    // 探测期间不持锁，探测完只短暂持写锁写回单个结果
+    let capability = probe_server_capability(&server, timeout_ms);
+    if let Ok(mut guard) = capability_index().write() {
+        if !capability.healthy {
+            if let Some(existing) = guard.get_mut(name) {
+                existing.healthy = false;
+                existing.last_error = capability.last_error;
+                tracing::warn!(
+                    "MCP 单 server 探测失败，保留工具缓存：server={}（缓存 {} 个工具）",
+                    name,
+                    existing.tools.len()
+                );
+            } else {
+                guard.insert(name.to_string(), capability);
+            }
+        } else {
+            guard.insert(name.to_string(), capability);
+        }
+    }
+    // 探测完持久化一次，避免重启丢失
+    if let Some(path) = capability_scheduler()
+        .read()
+        .ok()
+        .and_then(|guard| guard.cache_path.clone())
+    {
+        let _ = persist_mcp_capabilities_cache(&path);
+    }
+    Ok(())
 }
 
 pub fn cached_server_tools(server_name: &str) -> Option<Vec<McpToolMeta>> {

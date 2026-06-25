@@ -1595,24 +1595,43 @@ function McpSettings() {
   });
   const { showSuccess, showError } = useToast();
 
+  // 立即拉取 server 列表（config 读，瞬时），不等待探测。健康状态单独异步更新。
   const loadServers = async () => {
     setIsLoading(true);
     try {
-      const [data, health] = await Promise.all([
-        api.getMcpServers(),
-        api.getMcpHealth(),
-      ]);
+      const data = await api.getMcpServers();
       setServers(data);
+    } catch (error) {
+      console.error('加载 MCP 服务器失败:', error);
+      showError('加载失败', '无法加载 MCP 服务器列表');
+    } finally {
+      setIsLoading(false);
+    }
+    // 健康状态异步刷新，不阻塞列表渲染
+    refreshHealth();
+  };
+
+  const refreshHealth = async () => {
+    try {
+      const health = await api.getMcpHealth();
       const map: typeof healthMap = {};
       for (const s of health) {
         map[s.name] = { healthy: s.healthy, tool_count: s.tool_count, last_error: s.last_error, server_version: s.server_version };
       }
       setHealthMap(map);
     } catch (error) {
-      console.error('加载 MCP 服务器失败:', error);
-      showError('加载失败', '无法加载 MCP 服务器列表');
+      console.error('加载 MCP 健康状态失败:', error);
+    }
+  };
+
+  // 探测单个 server 后刷新健康状态（用于添加/编辑/行内重试）
+  const probeServer = async (name: string) => {
+    try {
+      await api.probeMcpServer(name);
+    } catch (error) {
+      console.error('探测 MCP 服务器失败:', error);
     } finally {
-      setIsLoading(false);
+      refreshHealth();
     }
   };
 
@@ -1679,8 +1698,11 @@ function McpSettings() {
 
       await api.registerMcpServer(request);
       showSuccess('添加成功', `MCP 服务器 "${newServer.name}" 已添加`);
+      const addedName = newServer.name.trim();
       closeServerModal();
-      loadServers();
+      await loadServers();
+      // 异步探测新 server，完成后刷新该行健康状态（不阻塞列表渲染）
+      probeServer(addedName);
     } catch (error) {
       console.error('添加 MCP 服务器失败:', error);
       showError('添加失败', errorMessage(error));
@@ -1713,8 +1735,11 @@ function McpSettings() {
 
       await api.updateMcpServer(editingServerName, request);
       showSuccess('保存成功', `MCP 服务器 "${editingServerName}" 已更新`);
+      const updatedName = editingServerName;
       closeServerModal();
-      loadServers();
+      await loadServers();
+      // 编辑后重新探测该 server（配置可能影响握手）
+      probeServer(updatedName);
     } catch (error) {
       console.error('更新 MCP 服务器失败:', error);
       showError('保存失败', errorMessage(error));
@@ -1743,12 +1768,29 @@ function McpSettings() {
     }
   };
 
+  // 刷新：对全部 server 并发重探，全部完成后统一读一次健康状态。真正重置探测状态。
+  const handleRefresh = async () => {
+    setIsLoading(true);
+    try {
+      const data = await api.getMcpServers();
+      setServers(data);
+      // 并发探测所有 server（后端单 server 探测互不阻塞）
+      await Promise.allSettled(data.map((s) => api.probeMcpServer(s.name)));
+      await refreshHealth();
+    } catch (error) {
+      console.error('刷新 MCP 服务器失败:', error);
+      showError('刷新失败', '无法刷新 MCP 服务器状态');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   return (
     <div className="p-4">
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-lg font-medium">MCP 服务器</h3>
         <div className="flex items-center gap-2">
-          <Button size="sm" variant="outline" onClick={loadServers}>
+          <Button size="sm" variant="outline" onClick={handleRefresh}>
             <RefreshCw className="w-4 h-4 mr-2" />
             刷新
           </Button>
@@ -1811,6 +1853,17 @@ function McpSettings() {
                   )}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
+                  {server.enabled && hasHealth && !isHealthy && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={() => probeServer(server.name)}
+                      title="重新探测"
+                    >
+                      <RefreshCw className="w-4 h-4" />
+                    </Button>
+                  )}
                   <Button
                     variant="ghost"
                     size="icon"

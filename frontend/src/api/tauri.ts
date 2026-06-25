@@ -579,6 +579,9 @@ export const api = {
   getMcpHealth: (): Promise<McpHealthStatus[]> =>
     invoke('get_mcp_health'),
 
+  probeMcpServer: (name: string): Promise<void> =>
+    invoke('probe_mcp_server', { name }),
+
   registerMcpServer: (input: RegisterMcpServerInput): Promise<string> =>
     invoke('register_mcp_server', {
       name: input.name,
