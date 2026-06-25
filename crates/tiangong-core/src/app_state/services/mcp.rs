@@ -90,7 +90,8 @@ impl AppMcpService {
             return Err(anyhow!("MCP server 需至少配置 command、endpoint 或 tags"));
         }
 
-        // name 作为主键保持不变，就地更新其余字段
+        // name 作为主键保持不变，就地更新其余字段。
+        // enabled 由列表里的开关单独控制，编辑表单不覆盖它。
         server.transport = fields.transport;
         server.command = fields.command;
         server.args = fields.args;
@@ -98,7 +99,6 @@ impl AppMcpService {
         server.auth_header = fields.auth_header;
         server.headers = fields.headers;
         server.env = fields.env;
-        server.enabled = fields.enabled;
         server.tags = fields.tags;
 
         validate_agent_config(&state.store.agent.agent_config)?;

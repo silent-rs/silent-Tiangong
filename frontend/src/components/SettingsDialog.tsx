@@ -1591,7 +1591,6 @@ function McpSettings() {
     authHeader: '',
     headers: '',
     env: '',
-    enabled: true,
   });
   const { showSuccess, showError } = useToast();
 
@@ -1649,7 +1648,6 @@ function McpSettings() {
       authHeader: '',
       headers: '',
       env: '',
-      enabled: true,
     });
   };
 
@@ -1670,7 +1668,6 @@ function McpSettings() {
       authHeader: server.auth_header,
       headers: formatKeyValue(server.headers),
       env: formatKeyValue(server.env),
-      enabled: server.enabled,
     });
     setServerModalMode('edit');
   };
@@ -1720,7 +1717,6 @@ function McpSettings() {
             command: newServer.command.trim(),
             args: parseListArgs(newServer.args),
             env: parseKeyValueText(newServer.env, '环境变量'),
-            enabled: newServer.enabled,
           }
         : {
             name: editingServerName,
@@ -1730,7 +1726,6 @@ function McpSettings() {
             endpoint: newServer.endpoint.trim(),
             authHeader: newServer.authHeader.trim() || undefined,
             headers: parseKeyValueText(newServer.headers, 'Header'),
-            enabled: newServer.enabled,
           };
 
       await api.updateMcpServer(editingServerName, request);
@@ -1993,14 +1988,6 @@ function McpSettings() {
                     </div>
                   </>
                 )}
-                <div className="flex items-center gap-2">
-                  <Switch
-                    id="serverEnabled"
-                    checked={newServer.enabled}
-                    onCheckedChange={(checked) => setNewServer({ ...newServer, enabled: checked })}
-                  />
-                  <Label htmlFor="serverEnabled">启用</Label>
-                </div>
               </div>
               <div className="flex justify-end gap-2 mt-6">
                 <Button variant="ghost" onClick={closeServerModal}>

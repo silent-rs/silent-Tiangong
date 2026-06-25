@@ -2567,7 +2567,6 @@ pub async fn update_mcp_server(
     auth_header: Option<String>,
     headers: Option<std::collections::HashMap<String, String>>,
     env: Option<std::collections::HashMap<String, String>>,
-    enabled: bool,
     state: State<'_, TiangongApp>,
 ) -> Result<String, String> {
     use tiangong_core::agent_config::McpTransportMode;
@@ -2604,7 +2603,8 @@ pub async fn update_mcp_server(
                 command,
                 args,
                 tags: vec![],
-                enabled,
+                // enabled 由列表开关单独控制，编辑表单不覆盖；update_mcp_server 会保留原值
+                enabled: true,
                 options: RegisterMcpServerOptions {
                     transport,
                     endpoint,

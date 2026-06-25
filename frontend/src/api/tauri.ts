@@ -240,7 +240,6 @@ export interface UpdateMcpServerInput {
   authHeader?: string;
   headers?: Record<string, string>;
   env?: Record<string, string>;
-  enabled: boolean;
 }
 
 export interface Skill {
@@ -604,7 +603,6 @@ export const api = {
       authHeader: input.authHeader,
       headers: input.headers,
       env: input.env,
-      enabled: input.enabled,
     }),
 
   removeMcpServer: (name: string): Promise<string> =>
