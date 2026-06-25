@@ -1931,6 +1931,7 @@ fn parse_function_timeout_ms(raw: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::MessagePhase;
 
     #[test]
     fn empty_tool_arguments_become_parse_error() {
@@ -2105,6 +2106,7 @@ mod tests {
             tool_name: None,
             tool_result_is_error: false,
             compact: false,
+            phase: MessagePhase::Normal,
             created_at: String::new(),
             media_migrated: true,
         }
@@ -2140,6 +2142,7 @@ mod tests {
             tool_name: None,
             tool_result_is_error: false,
             compact: false,
+            phase: MessagePhase::Normal,
             created_at: String::new(),
             media_migrated: true,
         };

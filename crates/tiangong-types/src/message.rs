@@ -21,6 +21,22 @@ pub struct MessageToolCall {
     pub arguments: Value,
 }
 
+/// 消息所属的执行阶段。
+///
+/// 用于前端区分 ReAct 工具执行阶段的过程消息与总结阶段的最终回复，
+/// 实现消息分层展示。向后兼容：旧 session 缺失该字段时默认为 `Normal`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum MessagePhase {
+    /// 默认值：旧消息或未标记阶段的消息。
+    #[default]
+    Normal,
+    /// ReAct 工具执行阶段的消息（工具调用、工具结果、过程文本）。
+    React,
+    /// 总结阶段的最终回复（可复制）。
+    Summary,
+}
+
 /// 消息内容块
 ///
 /// 统一表达消息中的文本、图片、视频、音频、文件等内容。
@@ -143,6 +159,9 @@ pub struct Message {
     /// 表示从当前消息及以前的历史已被压缩摘要覆盖。
     #[serde(default, skip_serializing_if = "is_false")]
     pub compact: bool,
+    /// 消息所属的执行阶段，用于前端消息分层展示。
+    #[serde(default)]
+    pub phase: MessagePhase,
     pub created_at: String,
     /// 标记 media 是否已迁移到 content（避免重复迁移）
     #[serde(default, skip)]
@@ -206,6 +225,7 @@ impl Message {
             tool_name: None,
             tool_result_is_error: false,
             compact: false,
+            phase: MessagePhase::Normal,
             created_at: now_text(),
         }
     }
@@ -229,8 +249,15 @@ impl Message {
             tool_name: None,
             tool_result_is_error: false,
             compact: false,
+            phase: MessagePhase::Normal,
             created_at: now_text(),
         }
+    }
+
+    /// 设置消息的执行阶段标记（链式调用）。
+    pub fn with_phase(mut self, phase: MessagePhase) -> Self {
+        self.phase = phase;
+        self
     }
 
     /// 获取纯文本内容（拼接所有 Text 块）

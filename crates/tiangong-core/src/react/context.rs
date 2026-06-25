@@ -6,7 +6,7 @@ use crate::context::organizer::ContextOrganizer;
 use crate::model::{ModelClient, ModelRequest, SingleProviderClient, TokenUsage};
 use crate::prompt::SystemPromptConfig;
 use crate::runtime::{RuntimeEngine, use_stream_mode};
-use crate::session::{Message, MessageRole, Session, now_text};
+use crate::session::{Message, MessagePhase, MessageRole, Session, now_text};
 use crate::stream_throttle::ThrottledStreamSink;
 use tiangong_types::StreamEvent;
 
@@ -213,6 +213,7 @@ pub(crate) fn force_final_response(
         tool_name: Some("force_final_response".to_string()),
         tool_result_is_error: false,
         compact: false,
+        phase: MessagePhase::Normal,
         created_at: now_text(),
     });
 

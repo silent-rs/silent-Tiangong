@@ -22,8 +22,7 @@ use crate::permission::{
     normalize_permission_target,
 };
 use crate::react::context::{
-    check_completion_with_lite_model, emit_token_usage, force_final_response,
-    maybe_update_context_summary, select_client_for_request,
+    emit_token_usage, force_final_response, maybe_update_context_summary, select_client_for_request,
 };
 use crate::react::message::*;
 use crate::runtime::LlmOutputRecord;
@@ -32,6 +31,31 @@ use crate::stream_throttle::ThrottledStreamSink;
 use tiangong_types::{StreamEvent, StreamToolCall};
 
 use crate::agent_team::lifecycle::TeamContext;
+
+/// 单个 turn 内的执行阶段。
+///
+/// ReAct Loop 与总结阶段分离后的阶段状态机：
+/// - `Initial`：外层循环第一次迭代，主模型决定是否需要工具。
+/// - `ToolExecution`：工具执行阶段，LLM 只负责调用工具。
+/// - `Summary`：总结阶段，主模型判断任务完成度并输出最终回复。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnPhase {
+    Initial,
+    ToolExecution,
+    Summary,
+}
+
+/// 总结阶段的执行结果。
+enum SummaryPhaseResult {
+    /// 任务完成，已输出最终回复。
+    Completed(TokenUsage),
+    /// 任务未完成，需要重新进入工具执行阶段。
+    NeedMoreWork { reason: String, usage: TokenUsage },
+    /// 用户取消。
+    Cancelled(TokenUsage),
+    /// 总结阶段 LLM 请求失败。
+    Failed { message: String, usage: TokenUsage },
+}
 
 /// 取消时 LLM 请求的处理策略，按 Provider 协议区分。
 enum CancelStrategy {
@@ -131,6 +155,7 @@ fn sub_agent_stream_message(
         tool_name: None,
         tool_result_is_error: false,
         compact: false,
+        phase: crate::session::MessagePhase::Normal,
         created_at: now_text(),
     }
 }
@@ -370,7 +395,10 @@ pub(crate) struct ReactEngine {
     engine: crate::runtime::RuntimeEngine,
     tools: Vec<ToolSpec>,
     mcp_targets: HashMap<String, McpFunctionTarget>,
-    max_rounds: usize,
+    /// 单次工具执行阶段（ReAct Loop 内层）的最大轮次。
+    max_tool_rounds: usize,
+    /// 总结阶段后重新进入工具执行阶段的最大次数。
+    max_outer_iterations: u32,
     team: Option<Arc<Mutex<TeamContext>>>,
     agent_id: String,
 }
@@ -380,13 +408,15 @@ impl ReactEngine {
         engine: crate::runtime::RuntimeEngine,
         tools: Vec<ToolSpec>,
         mcp_targets: HashMap<String, McpFunctionTarget>,
-        max_rounds: usize,
+        max_tool_rounds: usize,
+        max_outer_iterations: u32,
     ) -> Self {
         Self {
             engine,
             tools,
             mcp_targets,
-            max_rounds,
+            max_tool_rounds,
+            max_outer_iterations,
             team: None,
             agent_id: "main".to_string(),
         }
@@ -469,14 +499,14 @@ impl ReactEngine {
         memory_handle: Option<&tiangong_memory::MemoryHandle>,
         index_manager: Option<std::sync::Arc<crate::index::IndexManager>>,
     ) -> TokenUsage {
-        let mut round = 0;
+        let mut round = 0usize;
+        let mut outer_iteration = 0u32;
         let mut accumulated_usage = TokenUsage::default();
         let mut memory_recall_attempted = false;
         let mut successful_tool_call_keys = HashSet::new();
         let mut failed_tool_call_keys: HashMap<String, String> = HashMap::new();
         let mut failed_tool_names = HashSet::new();
         let mut memory_candidate_count = 0usize;
-        let mut completion_check_count: u32 = 0;
         let mut last_browser_snapshot: Option<crate::browser_trait::PageSnapshot> = None;
         let mut last_browser_check: Option<std::time::Instant> = None;
 
@@ -515,389 +545,24 @@ impl ReactEngine {
             }
         }
 
-        'react_loop: loop {
-            // 首轮：始终重建 system prompt，确保规则段（如「文档附件解析规则」）
-            // 与当前代码版本一致。旧 session 持久化的 system_prompt_message 可能
-            // 是旧版本生成、缺少新增的规则段，必须重建。
-            if round == 0 {
-                crate::react::context::rebuild_system_prompt(session, &self.engine);
-            }
-            match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
-                PendingCommandEffect::Terminate => return accumulated_usage,
-                PendingCommandEffect::MessageInjected => {
-                    memory_recall_attempted = false;
-                    successful_tool_call_keys.clear();
-                    failed_tool_call_keys.clear();
-                    failed_tool_names.clear();
-                    memory_candidate_count = 0;
+        // 外层循环：ReAct Loop（工具执行）与总结阶段分离。
+        // - 每次迭代先走内层 'react_loop（工具执行阶段），break 后进入总结阶段。
+        // - 总结阶段判定未完成且未超 outer 上限时，注入重入上下文后 continue 'outer。
+        // - Task 02/03 将实现内层逻辑改造与总结阶段；当前总结阶段为占位。
+        let _phase = if outer_iteration == 0 {
+            TurnPhase::Initial
+        } else {
+            TurnPhase::ToolExecution
+        };
+
+        'outer: loop {
+            'react_loop: loop {
+                // 首轮：始终重建 system prompt，确保规则段（如「文档附件解析规则」）
+                // 与当前代码版本一致。旧 session 持久化的 system_prompt_message 可能
+                // 是旧版本生成、缺少新增的规则段，必须重建。
+                if round == 0 {
+                    crate::react::context::rebuild_system_prompt(session, &self.engine);
                 }
-                PendingCommandEffect::None => {}
-            }
-
-            // 首轮：主动获取浏览器当前状态并注入上下文
-            if round == 0 {
-                maybe_inject_browser_update(
-                    &self.engine,
-                    session,
-                    stream_tx,
-                    &mut last_browser_snapshot,
-                    &mut last_browser_check,
-                    false,
-                )
-                .await;
-            }
-
-            if round >= self.max_rounds {
-                force_final_response(session, &self.engine, stream_tx);
-                break;
-            }
-
-            let request_tools = tools_for_current_turn(&self.tools, session, user_input);
-
-            let (thinking, reasoning_effort, thinking_disabled) = self.build_thinking_config();
-            let req = ModelRequest {
-                session_title: session.title.clone(),
-                // 当前用户消息已在 Command::Message 入口写入 session.messages。
-                // ReAct 多轮继续请求时不能再次追加 user_input，否则模型会把同一请求
-                // 误认为新的用户消息，反复从第一步重新开始。
-                user_input: String::new(),
-                context: session.context(),
-                thinking,
-                reasoning_effort,
-                thinking_disabled,
-                include_media: self.engine.chat_is_multimodal(),
-            };
-
-            let pending_msg_id = scru128::new().to_string();
-            let sink = ThrottledStreamSink::new(pending_msg_id.clone(), stream_tx.clone());
-
-            // async 流式调用 + select! 取消
-            let (chunk_tx, mut chunk_rx) =
-                tokio_mpsc::unbounded_channel::<crate::model::ModelStreamChunk>();
-            let client = select_client_for_request(&self.engine, &req).clone();
-            let req_clone = req.clone();
-            let tools_clone = request_tools.clone();
-            let mut llm_fut = Some(tokio::task::spawn(async move {
-                client
-                    .stream_function_calls_with_tool_choice(req_clone, tools_clone, None, chunk_tx)
-                    .await
-            }));
-            let mut user_message_injected_during_stream = false;
-            let mut streaming_usage = tiangong_types::TokenUsage::default();
-            let cancel_strategy = CancelStrategy::from_protocol(self.engine.client().protocol());
-            let response_result: anyhow::Result<crate::model::ModelFunctionResponse> = loop {
-                tokio::select! {
-                    biased;
-                    cmd_opt = cmd_rx.recv() => {
-                        match cmd_opt {
-                            Some(Command::Cancel) | Some(Command::Shutdown) | None => {
-                                match cancel_strategy {
-                                    CancelStrategy::AbortWithStreamingUsage => {
-                                        break Err(anyhow::Error::new(CancelSignal::Abort));
-                                    }
-                                    CancelStrategy::WaitForUsage => {
-                                        break Err(anyhow::Error::new(CancelSignal::WaitForUsage));
-                                    }
-                                }
-                            }
-                            Some(Command::Message { content, message_id, media }) => {
-                                let mid = append_or_reuse_user_message(
-                                    session, &content, message_id, media,
-                                );
-                                let media = session
-                                    .messages
-                                    .iter()
-                                    .find(|message| message.id == mid)
-                                    .map(|message| message.media.clone())
-                                    .unwrap_or_default();
-                                let _ = stream_tx.send(StreamEvent::UserMessage {
-                                    message_id: mid,
-                                    content: content.clone(),
-                                    media,
-                                });
-                                user_message_injected_during_stream = true;
-                    memory_candidate_count = 0;
-                            }
-                            Some(Command::UpdateCwd { cwd }) => {
-                                session.cwd = cwd;
-                                crate::core::apply_session_cwd(session);
-                            }
-                            Some(Command::ReloadConfig) => {}
-                            Some(Command::Approval { .. }) => {}
-                            Some(Command::CancelAgent { .. }) => {}
-                            Some(Command::InjectTool { tool_name, payload }) => {
-                                crate::react::message::inject_tool_to_session(
-                                    session,
-                                    stream_tx,
-                                    &tool_name,
-                                    &payload,
-                                );
-                            }
-                            Some(Command::CompressContext) => {
-                                crate::core::compress_context_for_session(
-                                    session,
-                                    &self.engine,
-                                    stream_tx,
-                                );
-                            }
-                            Some(Command::ResetContext) => {
-                                crate::core::reset_context_for_session(
-                                    session,
-                                    stream_tx,
-                                    &self.engine,
-                                );
-                            }
-                        }
-                    }
-                    chunk_opt = chunk_rx.recv() => {
-                        match chunk_opt {
-                            Some(chunk) => {
-                                if let Some(ref chunk_usage) = chunk.usage {
-                                    let tu: tiangong_types::TokenUsage =
-                                        chunk_usage.clone().into();
-                                    streaming_usage.accumulate(&tu);
-                                }
-                                sink.push_chunk(&chunk)
-                            }
-                            None => {
-                                let response_result = match llm_fut.take().unwrap().await {
-                                    Ok(r) => r,
-                                    Err(e) if e.is_cancelled() => {
-                                        sink.finish();
-                                        let _ = stream_tx.send(StreamEvent::Error {
-                                            message: "已取消".into(),
-                                        });
-                                        return accumulated_usage;
-                                    }
-                                    Err(e) => Err(anyhow::anyhow!(e.to_string())),
-                                };
-                                break response_result;
-                            }
-                        }
-                    }
-                }
-            };
-            sink.finish();
-
-            let response = match response_result {
-                Ok(r) => r,
-                Err(err) => {
-                    if let Some(signal) = CancelSignal::from_error(&err) {
-                        match signal {
-                            CancelSignal::Abort => {
-                                if let Some(handle) = llm_fut.take() {
-                                    handle.abort();
-                                }
-                                accumulated_usage.accumulate(&streaming_usage);
-                                emit_cancel_usage(
-                                    stream_tx,
-                                    &accumulated_usage,
-                                    self.engine.context_limit,
-                                );
-                                return accumulated_usage;
-                            }
-                            CancelSignal::WaitForUsage => {
-                                accumulated_usage.accumulate(&streaming_usage);
-                                // 先上报已知的 streaming_usage 作为保底
-                                if streaming_usage.total_tokens > 0 {
-                                    emit_token_usage(
-                                        stream_tx,
-                                        &streaming_usage,
-                                        None,
-                                        self.engine.context_limit,
-                                        "cancelled",
-                                        None,
-                                    );
-                                }
-                                // 立即通知前端取消已完成
-                                let _ = stream_tx.send(StreamEvent::Error {
-                                    message: "已取消".into(),
-                                });
-                                // 后台等待 LLM 自然完成以补充完整 usage
-                                if let Some(handle) = llm_fut.take() {
-                                    let ctx_limit = self.engine.context_limit;
-                                    let tx = stream_tx.clone();
-                                    tokio::task::spawn(async move {
-                                        if let Ok(Ok(resp)) = handle.await
-                                            && resp.usage.total_tokens > 0
-                                        {
-                                            emit_token_usage(
-                                                &tx,
-                                                &resp.usage,
-                                                None,
-                                                ctx_limit,
-                                                "cancelled_background",
-                                                None,
-                                            );
-                                        }
-                                    });
-                                }
-                                return accumulated_usage;
-                            }
-                        }
-                    }
-                    let err_msg = err.to_string();
-                    // 上下文超限或空响应时强制压缩后重试
-                    if err_msg.contains("context_window_exceeded")
-                        || err_msg.contains("context_length_exceeded")
-                        || (err_msg.contains("content_blocks=0")
-                            && err_msg.contains("stop_reason=end_turn"))
-                    {
-                        tracing::warn!("检测到上下文超限，尝试强制压缩");
-                        let before_summary_up_to = session.summary_up_to;
-                        crate::react::context::maybe_update_context_summary(
-                            session,
-                            &self.engine,
-                            &tiangong_types::TokenUsage {
-                                prompt_tokens: self.engine.context_limit,
-                                completion_tokens: 0,
-                                total_tokens: self.engine.context_limit,
-                                prompt_cache_hit_tokens: None,
-                                prompt_cache_miss_tokens: None,
-                            },
-                            stream_tx,
-                        );
-                        if session.summary_up_to > before_summary_up_to {
-                            continue 'react_loop;
-                        }
-                    }
-                    let _ = stream_tx.send(StreamEvent::Error { message: err_msg });
-                    return accumulated_usage;
-                }
-            };
-
-            accumulated_usage.accumulate(&response.usage);
-            emit_token_usage(
-                stream_tx,
-                &response.usage,
-                Some(response.usage.prompt_tokens.max(session.current_tokens)),
-                self.engine.context_limit,
-                format!("react-round-{round}", round = round + 1),
-                None,
-            );
-            round += 1;
-
-            if response.tool_calls.is_empty() {
-                if is_synthetic_tool_call_placeholder(&response.text) {
-                    continue;
-                }
-
-                // lite 模型完成度检测：判断回复是否真正完成了任务
-                if round < self.max_rounds && completion_check_count < 2 {
-                    completion_check_count += 1;
-                    let is_complete =
-                        check_completion_with_lite_model(&self.engine, user_input, &response.text)
-                            .await;
-
-                    if !is_complete {
-                        // 将已流式输出的回复保存到 session，避免上下文丢失
-                        session.append_message_with_id(
-                            pending_msg_id.clone(),
-                            MessageRole::Assistant,
-                            response.text.clone(),
-                            response.reasoning_content.clone(),
-                        );
-                        if let Some(message) = session.messages.last_mut() {
-                            message.reasoning_signature = response.reasoning_signature.clone();
-                        }
-                        session.messages.push(Message::new(
-                            MessageRole::Tool,
-                            "<system-reminder>\n上方回复被判定为未完成任务。\
-                                不要重复上方已说过的内容。\
-                                如果需要执行操作，直接返回 tool_calls；\
-                                如果确实无需更多操作，简要补充未覆盖的要点即可。\n</system-reminder>"
-                                .to_string(),
-                        ));
-                        continue 'react_loop;
-                    }
-                }
-
-                session.append_message_with_id(
-                    pending_msg_id,
-                    MessageRole::Assistant,
-                    response.text.clone(),
-                    response.reasoning_content.clone(),
-                );
-                if let Some(message) = session.messages.last_mut() {
-                    message.reasoning_signature = response.reasoning_signature.clone();
-                }
-                let output = LlmOutputRecord {
-                    stage: format!("react-round-{round}"),
-                    content: String::new(),
-                    reasoning_content: String::new(),
-                    tool_calls: Vec::new(),
-                    usage: response.usage.clone(),
-                };
-                append_runtime_tool_message(
-                    session,
-                    "llm_output",
-                    format_llm_output_message(&output),
-                );
-                session.persist_to_disk();
-                maybe_update_context_summary(session, &self.engine, &response.usage, stream_tx);
-
-                if user_message_injected_during_stream {
-                    memory_recall_attempted = false;
-                    successful_tool_call_keys.clear();
-                    failed_tool_call_keys.clear();
-                    failed_tool_names.clear();
-                    memory_candidate_count = 0;
-                    continue 'react_loop;
-                }
-
-                let _ = stream_tx.send(StreamEvent::Done {
-                    usage: Some(accumulated_usage.clone()),
-                });
-                return accumulated_usage;
-            }
-
-            // 工具调用
-            let executable_calls = response.tool_calls.iter().collect::<Vec<_>>();
-            if executable_calls.is_empty() {
-                let _ = stream_tx.send(StreamEvent::Error {
-                    message: "模型没有返回可执行工具调用，任务已停止".to_string(),
-                });
-                return accumulated_usage;
-            }
-            let tool_names: Vec<String> = executable_calls.iter().map(|c| c.name.clone()).collect();
-            let output = LlmOutputRecord {
-                stage: format!("react-round-{round}"),
-                content: response.text.clone(),
-                reasoning_content: response.reasoning_content.clone(),
-                tool_calls: tool_names.clone(),
-                usage: response.usage.clone(),
-            };
-            append_runtime_tool_message_with_reasoning(
-                session,
-                "llm_output",
-                format_llm_output_message(&output),
-                response.reasoning_content.clone(),
-            );
-            let _ = stream_tx.send(StreamEvent::ToolCalls {
-                message_id: pending_msg_id.clone(),
-                names: tool_names.clone(),
-                calls: executable_calls
-                    .iter()
-                    .map(|call| StreamToolCall {
-                        id: call.id.clone(),
-                        name: call.name.clone(),
-                        arguments: call.arguments.clone(),
-                    })
-                    .collect(),
-                usage: Some(response.usage.clone()),
-            });
-            append_assistant_tool_call_message(
-                session,
-                pending_msg_id.clone(),
-                &response.text,
-                &response.reasoning_content,
-                response.reasoning_signature.clone(),
-                &executable_calls,
-            );
-
-            // 执行工具
-            let mut need_failure_recovery_prompt = false;
-            for call in executable_calls {
                 match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
                     PendingCommandEffect::Terminate => return accumulated_usage,
                     PendingCommandEffect::MessageInjected => {
@@ -905,282 +570,88 @@ impl ReactEngine {
                         successful_tool_call_keys.clear();
                         failed_tool_call_keys.clear();
                         failed_tool_names.clear();
-                        session.persist_to_disk();
-                        continue 'react_loop;
+                        memory_candidate_count = 0;
                     }
                     PendingCommandEffect::None => {}
                 }
 
-                // 工具执行间隙：检测浏览器状态变化
-                maybe_inject_browser_update(
-                    &self.engine,
-                    session,
-                    stream_tx,
-                    &mut last_browser_snapshot,
-                    &mut last_browser_check,
-                    false,
-                )
-                .await;
-
-                if let Some(parse_error) = call
-                    .arguments
-                    .get("__parse_error")
-                    .and_then(serde_json::Value::as_str)
-                {
-                    let message = parse_error.to_string();
-                    let failure = ToolFailureRecord::new(
-                        &call.name,
-                        &call.id,
-                        format_call_args_summary(call),
-                        ToolFailureKind::Argument,
-                        message.clone(),
-                    );
-                    let provider_text = structured_tool_failure_provider_text(&failure);
-                    let _ = stream_tx.send(StreamEvent::ToolResult {
-                        name: call.name.clone(),
-                        tool_call_id: Some(call.id.clone()),
-                        ok: false,
-                        output: message.clone(),
-                        full_output: Some(message.clone()),
-                        media: vec![],
-                    });
-                    append_tool_result_message(
-                        session,
-                        &call.id,
-                        &call.name,
-                        provider_text.clone(),
-                        true,
-                    );
-                    append_runtime_tool_message(
-                        session,
-                        &call.name,
-                        format!("工具参数无效 [{}]\n{provider_text}", call.name),
-                    );
-                    let tool_call_key = tool_call_dedupe_key(&call.name, &call.arguments);
-                    failed_tool_call_keys.insert(tool_call_key, provider_text);
-                    failed_tool_names.insert(call.name.clone());
-                    need_failure_recovery_prompt = true;
-                    continue;
-                }
-
-                // 团队协作工具拦截
-                if crate::agent_team::lifecycle::is_team_tool(&call.name) {
-                    let args_summary = format_call_args_summary(call);
-                    let _ = stream_tx.send(StreamEvent::ToolStart {
-                        name: call.name.clone(),
-                        args_summary: args_summary.clone(),
-                    });
-                    let result = if let Some(team) = self.team.as_ref() {
-                        if let Ok(mut team) = team.lock() {
-                            crate::agent_team::lifecycle::execute_team_tool(
-                                &mut team,
-                                &self.agent_id,
-                                call,
-                                session,
-                                &self.tools,
-                                stream_tx,
-                            )
-                        } else {
-                            crate::agent_team::lifecycle::error_tool_result(
-                                &call.name,
-                                "团队状态锁定失败",
-                            )
-                        }
-                    } else {
-                        crate::agent_team::lifecycle::error_tool_result(
-                            &call.name,
-                            "团队功能未启用",
-                        )
-                    };
-                    let _ = stream_tx.send(StreamEvent::ToolResult {
-                        name: call.name.clone(),
-                        tool_call_id: Some(call.id.clone()),
-                        ok: result.ok,
-                        output: tool_result_stream_output(&result),
-                        full_output: Some(tool_result_full_output(&result)),
-                        media: vec![],
-                    });
-                    append_tool_result_message(
-                        session,
-                        &call.id,
-                        &call.name,
-                        if result.ok {
-                            tool_result_provider_text(&call.name, &result, false)
-                        } else {
-                            structured_tool_failure_provider_text(&ToolFailureRecord::new(
-                                &call.name,
-                                &call.id,
-                                args_summary.clone(),
-                                classify_tool_result_failure(&result),
-                                tool_result_full_output(&result),
-                            ))
-                        },
-                        !result.ok,
-                    );
-                    if result.ok {
-                        let tool_call_key = tool_call_dedupe_key(&call.name, &call.arguments);
-                        successful_tool_call_keys.insert(tool_call_key);
-                    } else {
-                        let tool_call_key = tool_call_dedupe_key(&call.name, &call.arguments);
-                        failed_tool_call_keys.insert(
-                            tool_call_key,
-                            structured_tool_failure_provider_text(&ToolFailureRecord::new(
-                                &call.name,
-                                &call.id,
-                                args_summary.clone(),
-                                classify_tool_result_failure(&result),
-                                tool_result_full_output(&result),
-                            )),
-                        );
-                        failed_tool_names.insert(call.name.clone());
-                        need_failure_recovery_prompt = true;
-                    }
-                    continue;
-                }
-
-                let args_summary = format_call_args_summary(call);
-                let (target_scope, target_summary) = infer_audit_target(call);
-                let normalized_target = normalize_permission_target(
-                    session,
-                    target_scope.as_deref(),
-                    target_summary.as_deref(),
-                );
-                let tool_call_key = tool_call_dedupe_key(&call.name, &call.arguments);
-                if successful_tool_call_keys.contains(&tool_call_key) {
-                    append_duplicate_tool_result(session, stream_tx, &call.id, &call.name);
-                    continue;
-                }
-                if let Some(original_error) = failed_tool_call_keys.get(&tool_call_key).cloned() {
-                    let repeated_failure = ToolFailureRecord::repeated(
-                        &call.name,
-                        &call.id,
-                        args_summary.clone(),
-                        original_error,
-                    );
-                    append_repeated_failed_tool_result(
+                // 首轮：主动获取浏览器当前状态并注入上下文
+                if round == 0 {
+                    maybe_inject_browser_update(
+                        &self.engine,
                         session,
                         stream_tx,
-                        &call.id,
-                        &call.name,
-                        &structured_tool_failure_provider_text(&repeated_failure),
-                    );
-                    failed_tool_names.insert(call.name.clone());
-                    need_failure_recovery_prompt = true;
-                    continue;
+                        &mut last_browser_snapshot,
+                        &mut last_browser_check,
+                        false,
+                    )
+                    .await;
                 }
 
-                let decision = evaluate_tool_permission(
-                    &self.engine,
-                    &call.name,
-                    target_scope.as_deref(),
-                    normalized_target.as_deref(),
-                );
-                let trust_mode = format!("{:?}", self.engine.permission_gate().trust_mode());
-                match decision {
-                    PermissionDecision::Approved => {
-                        audit_permission_with_context(
-                            &session.id,
-                            &call.name,
-                            "approved",
-                            &trust_mode,
-                            (!args_summary.is_empty()).then_some(args_summary.as_str()),
-                            target_scope.as_deref(),
-                            normalized_target.as_deref().or(target_summary.as_deref()),
-                        );
-                    }
-                    PermissionDecision::Denied { reason } => {
-                        audit_permission_with_context(
-                            &session.id,
-                            &call.name,
-                            "denied",
-                            &trust_mode,
-                            (!args_summary.is_empty()).then_some(args_summary.as_str()),
-                            target_scope.as_deref(),
-                            normalized_target.as_deref().or(target_summary.as_deref()),
-                        );
-                        let _ = stream_tx.send(StreamEvent::ToolResult {
-                            name: call.name.clone(),
-                            tool_call_id: Some(call.id.clone()),
-                            ok: false,
-                            output: format!("权限拒绝：{reason}"),
-                            full_output: None,
-                            media: vec![],
-                        });
-                        append_tool_result_message(
-                            session,
-                            &call.id,
-                            &call.name,
-                            structured_tool_failure_provider_text(&ToolFailureRecord::new(
-                                &call.name,
-                                &call.id,
-                                args_summary.clone(),
-                                ToolFailureKind::PermissionDenied,
-                                format!("权限拒绝：{reason}"),
-                            )),
-                            true,
-                        );
-                        failed_tool_call_keys.insert(
-                            tool_call_key,
-                            structured_tool_failure_provider_text(&ToolFailureRecord::new(
-                                &call.name,
-                                &call.id,
-                                args_summary.clone(),
-                                ToolFailureKind::PermissionDenied,
-                                format!("权限拒绝：{reason}"),
-                            )),
-                        );
-                        failed_tool_names.insert(call.name.clone());
-                        need_failure_recovery_prompt = true;
-                        continue;
-                    }
-                    PermissionDecision::NeedsApproval { request_id } => {
-                        audit_permission_with_context(
-                            &session.id,
-                            &call.name,
-                            "needs_approval",
-                            &trust_mode,
-                            (!args_summary.is_empty()).then_some(args_summary.as_str()),
-                            target_scope.as_deref(),
-                            normalized_target.as_deref().or(target_summary.as_deref()),
-                        );
-                        crate::approval_store::add_pending(
-                            &session.id,
-                            crate::session::PendingApproval {
-                                request_id: request_id.clone(),
-                                tool_name: call.name.clone(),
-                                tool_args_summary: args_summary.clone(),
-                                created_at: now_text(),
-                            },
-                        );
-                        let _ = stream_tx.send(StreamEvent::ApprovalNeeded {
-                            request_id: request_id.clone(),
-                            tool_name: call.name.clone(),
-                            args_summary: args_summary.clone(),
-                        });
+                if round >= self.max_tool_rounds {
+                    force_final_response(session, &self.engine, stream_tx);
+                    break;
+                }
 
-                        let approved = loop {
-                            match cmd_rx.recv().await {
-                                Some(Command::Approval {
-                                    request_id: rid,
-                                    approved,
-                                }) if rid == request_id => {
-                                    break approved;
-                                }
+                let request_tools = tools_for_current_turn(&self.tools, session, user_input);
+
+                let (thinking, reasoning_effort, thinking_disabled) = self.build_thinking_config();
+                let req = ModelRequest {
+                    session_title: session.title.clone(),
+                    // 当前用户消息已在 Command::Message 入口写入 session.messages。
+                    // ReAct 多轮继续请求时不能再次追加 user_input，否则模型会把同一请求
+                    // 误认为新的用户消息，反复从第一步重新开始。
+                    user_input: String::new(),
+                    context: session.context(),
+                    thinking,
+                    reasoning_effort,
+                    thinking_disabled,
+                    include_media: self.engine.chat_is_multimodal(),
+                };
+
+                let pending_msg_id = scru128::new().to_string();
+                let sink = ThrottledStreamSink::new(pending_msg_id.clone(), stream_tx.clone());
+
+                // async 流式调用 + select! 取消
+                let (chunk_tx, mut chunk_rx) =
+                    tokio_mpsc::unbounded_channel::<crate::model::ModelStreamChunk>();
+                let client = select_client_for_request(&self.engine, &req).clone();
+                let req_clone = req.clone();
+                let tools_clone = request_tools.clone();
+                let mut llm_fut = Some(tokio::task::spawn(async move {
+                    client
+                        .stream_function_calls_with_tool_choice(
+                            req_clone,
+                            tools_clone,
+                            None,
+                            chunk_tx,
+                        )
+                        .await
+                }));
+                let mut user_message_injected_during_stream = false;
+                let mut streaming_usage = tiangong_types::TokenUsage::default();
+                let cancel_strategy =
+                    CancelStrategy::from_protocol(self.engine.client().protocol());
+                let response_result: anyhow::Result<crate::model::ModelFunctionResponse> = loop {
+                    tokio::select! {
+                        biased;
+                        cmd_opt = cmd_rx.recv() => {
+                            match cmd_opt {
                                 Some(Command::Cancel) | Some(Command::Shutdown) | None => {
-                                    let _ = stream_tx.send(StreamEvent::Error {
-                                        message: "已取消".into(),
-                                    });
-                                    return accumulated_usage;
+                                    match cancel_strategy {
+                                        CancelStrategy::AbortWithStreamingUsage => {
+                                            break Err(anyhow::Error::new(CancelSignal::Abort));
+                                        }
+                                        CancelStrategy::WaitForUsage => {
+                                            break Err(anyhow::Error::new(CancelSignal::WaitForUsage));
+                                        }
+                                    }
                                 }
-                                Some(Command::Message {
-                                    content,
-                                    message_id,
-                                    media,
-                                }) => {
+                                Some(Command::Message { content, message_id, media }) => {
                                     let mid = append_or_reuse_user_message(
                                         session, &content, message_id, media,
                                     );
-                                    let msg_media = session
+                                    let media = session
                                         .messages
                                         .iter()
                                         .find(|message| message.id == mid)
@@ -1189,9 +660,10 @@ impl ReactEngine {
                                     let _ = stream_tx.send(StreamEvent::UserMessage {
                                         message_id: mid,
                                         content: content.clone(),
-                                        media: msg_media,
+                                        media,
                                     });
-                                    memory_candidate_count = 0;
+                                    user_message_injected_during_stream = true;
+                        memory_candidate_count = 0;
                                 }
                                 Some(Command::UpdateCwd { cwd }) => {
                                     session.cwd = cwd;
@@ -1202,7 +674,10 @@ impl ReactEngine {
                                 Some(Command::CancelAgent { .. }) => {}
                                 Some(Command::InjectTool { tool_name, payload }) => {
                                     crate::react::message::inject_tool_to_session(
-                                        session, stream_tx, &tool_name, &payload,
+                                        session,
+                                        stream_tx,
+                                        &tool_name,
+                                        &payload,
                                     );
                                 }
                                 Some(Command::CompressContext) => {
@@ -1220,389 +695,950 @@ impl ReactEngine {
                                     );
                                 }
                             }
-                        };
-
-                        crate::approval_store::remove_pending(&session.id, &request_id);
-
-                        if !approved {
-                            audit_tool_execution(
-                                &session.id,
-                                &call.name,
-                                false,
-                                (!args_summary.is_empty()).then_some(args_summary.as_str()),
-                                target_scope.as_deref(),
-                                normalized_target.as_deref().or(target_summary.as_deref()),
-                                "用户拒绝执行",
-                            );
-                            append_runtime_tool_message(
-                                session,
-                                &call.name,
-                                format!("工具 {} 被用户拒绝执行", call.name),
-                            );
-                            append_tool_result_message(
-                                session,
-                                &call.id,
-                                &call.name,
-                                structured_tool_failure_provider_text(&ToolFailureRecord::new(
-                                    &call.name,
-                                    &call.id,
-                                    args_summary.clone(),
-                                    ToolFailureKind::UserRejected,
-                                    "用户拒绝执行",
-                                )),
-                                true,
-                            );
-                            session.persist_to_disk();
-                            let _ = stream_tx.send(StreamEvent::ToolResult {
-                                name: call.name.clone(),
-                                tool_call_id: Some(call.id.clone()),
-                                ok: false,
-                                output: "用户拒绝执行".to_string(),
-                                full_output: None,
-                                media: vec![],
-                            });
-                            let _ = stream_tx.send(StreamEvent::Done {
-                                usage: Some(accumulated_usage.clone()),
-                            });
-                            return accumulated_usage;
+                        }
+                        chunk_opt = chunk_rx.recv() => {
+                            match chunk_opt {
+                                Some(chunk) => {
+                                    if let Some(ref chunk_usage) = chunk.usage {
+                                        let tu: tiangong_types::TokenUsage =
+                                            chunk_usage.clone().into();
+                                        streaming_usage.accumulate(&tu);
+                                    }
+                                    sink.push_chunk(&chunk)
+                                }
+                                None => {
+                                    let response_result = match llm_fut.take().unwrap().await {
+                                        Ok(r) => r,
+                                        Err(e) if e.is_cancelled() => {
+                                            sink.finish();
+                                            let _ = stream_tx.send(StreamEvent::Error {
+                                                message: "已取消".into(),
+                                            });
+                                            return accumulated_usage;
+                                        }
+                                        Err(e) => Err(anyhow::anyhow!(e.to_string())),
+                                    };
+                                    break response_result;
+                                }
+                            }
                         }
                     }
-                }
-
-                if check_cancel(session, &self.engine, cmd_rx, stream_tx) {
-                    return accumulated_usage;
-                }
-
-                // 文件编辑锁检查
-                if matches!(call.name.as_str(), "write_file" | "replace_in_file")
-                    && let Some(team) = self.team.as_ref()
-                {
-                    let file_path = call
-                        .arguments
-                        .as_object()
-                        .and_then(|o| o.get("path").and_then(|v| v.as_str()).map(String::from));
-                    if let Some(ref path) = file_path {
-                        let path_buf = std::path::PathBuf::from(path);
-                        let now = chrono::Local::now().naive_local();
-                        let lock_error = team
-                            .lock()
-                            .map_err(|_| "团队状态锁定失败".to_string())
-                            .and_then(|mut team| {
-                                team.file_locks
-                                    .ensure_can_write(&path_buf, &self.agent_id, &now)
-                            });
-                        if let Err(message) = lock_error {
-                            let failure =
-                                structured_tool_failure_provider_text(&ToolFailureRecord::new(
-                                    &call.name,
-                                    &call.id,
-                                    args_summary.clone(),
-                                    ToolFailureKind::PermissionDenied,
-                                    message.clone(),
-                                ));
-                            let _ = stream_tx.send(StreamEvent::ToolResult {
-                                name: call.name.clone(),
-                                tool_call_id: Some(call.id.clone()),
-                                ok: false,
-                                output: message.clone(),
-                                full_output: None,
-                                media: vec![],
-                            });
-                            append_tool_result_message(
-                                session,
-                                &call.id,
-                                &call.name,
-                                failure.clone(),
-                                true,
-                            );
-                            failed_tool_call_keys.insert(tool_call_key, failure);
-                            failed_tool_names.insert(call.name.clone());
-                            need_failure_recovery_prompt = true;
-                            continue;
-                        }
-                    }
-                }
-
-                let _ = stream_tx.send(StreamEvent::ToolStart {
-                    name: call.name.clone(),
-                    args_summary: args_summary.clone(),
-                });
-
-                let (result, tool_llm_usage, allow_memory_context, usage_source) = {
-                    let (mut result, tool_llm_usage, allow_memory_context, usage_source) =
-                        if call.name == "index_search" {
-                            if let Some(ref im) = index_manager {
-                                let (result, usage, allow_context) =
-                                    crate::index::execute_index_search_tool(call, im, session);
-                                (result, usage, allow_context, "index_search")
-                            } else {
-                                (
-                                    crate::tool::ToolResult {
-                                        ok: false,
-                                        summary: "索引系统未初始化".to_string(),
-                                        stdout: String::new(),
-                                        stderr: "index manager not available".to_string(),
-                                        exit_code: 1,
-                                        execution: None,
-                                    },
-                                    tiangong_types::TokenUsage::default(),
-                                    false,
-                                    "index_search",
-                                )
-                            }
-                        } else if call.name == "recall_memory" {
-                            if memory_recall_attempted {
-                                let (result, usage, allow_context) =
-                                    crate::core::duplicate_memory_recall_tool_result();
-                                (result, usage, allow_context, "recall_memory")
-                            } else {
-                                memory_recall_attempted = true;
-                                let (result, usage, allow_context) =
-                                    crate::core::execute_memory_recall_tool(
-                                        call,
-                                        memory_handle,
-                                        session,
-                                    )
-                                    .await;
-                                (result, usage, allow_context, "recall_memory")
-                            }
-                        } else if call.name == "analyze_attachment" {
-                            let (result, usage) = crate::core::execute_attachment_analysis_tool(
-                                call,
-                                &self.engine,
-                                session,
-                            );
-                            (result, usage, false, "analyze_attachment")
-                        } else {
-                            (
-                                self.engine
-                                    .execute_tool_call(
-                                        call,
-                                        &self.mcp_targets,
-                                        &self.engine.agent_config().mcp,
-                                        &session.id,
-                                    )
-                                    .await,
-                                tiangong_types::TokenUsage::default(),
-                                false,
-                                "",
-                            )
-                        };
-                    crate::memory::turn_result::localize_tool_result_images(
-                        &call.name,
-                        &mut result,
-                    );
-                    (result, tool_llm_usage, allow_memory_context, usage_source)
                 };
-                accumulated_usage.accumulate(&tool_llm_usage);
+                sink.finish();
+
+                let response = match response_result {
+                    Ok(r) => r,
+                    Err(err) => {
+                        if let Some(signal) = CancelSignal::from_error(&err) {
+                            match signal {
+                                CancelSignal::Abort => {
+                                    if let Some(handle) = llm_fut.take() {
+                                        handle.abort();
+                                    }
+                                    accumulated_usage.accumulate(&streaming_usage);
+                                    emit_cancel_usage(
+                                        stream_tx,
+                                        &accumulated_usage,
+                                        self.engine.context_limit,
+                                    );
+                                    return accumulated_usage;
+                                }
+                                CancelSignal::WaitForUsage => {
+                                    accumulated_usage.accumulate(&streaming_usage);
+                                    // 先上报已知的 streaming_usage 作为保底
+                                    if streaming_usage.total_tokens > 0 {
+                                        emit_token_usage(
+                                            stream_tx,
+                                            &streaming_usage,
+                                            None,
+                                            self.engine.context_limit,
+                                            "cancelled",
+                                            None,
+                                        );
+                                    }
+                                    // 立即通知前端取消已完成
+                                    let _ = stream_tx.send(StreamEvent::Error {
+                                        message: "已取消".into(),
+                                    });
+                                    // 后台等待 LLM 自然完成以补充完整 usage
+                                    if let Some(handle) = llm_fut.take() {
+                                        let ctx_limit = self.engine.context_limit;
+                                        let tx = stream_tx.clone();
+                                        tokio::task::spawn(async move {
+                                            if let Ok(Ok(resp)) = handle.await
+                                                && resp.usage.total_tokens > 0
+                                            {
+                                                emit_token_usage(
+                                                    &tx,
+                                                    &resp.usage,
+                                                    None,
+                                                    ctx_limit,
+                                                    "cancelled_background",
+                                                    None,
+                                                );
+                                            }
+                                        });
+                                    }
+                                    return accumulated_usage;
+                                }
+                            }
+                        }
+                        let err_msg = err.to_string();
+                        // 上下文超限或空响应时强制压缩后重试
+                        if err_msg.contains("context_window_exceeded")
+                            || err_msg.contains("context_length_exceeded")
+                            || (err_msg.contains("content_blocks=0")
+                                && err_msg.contains("stop_reason=end_turn"))
+                        {
+                            tracing::warn!("检测到上下文超限，尝试强制压缩");
+                            let before_summary_up_to = session.summary_up_to;
+                            crate::react::context::maybe_update_context_summary(
+                                session,
+                                &self.engine,
+                                &tiangong_types::TokenUsage {
+                                    prompt_tokens: self.engine.context_limit,
+                                    completion_tokens: 0,
+                                    total_tokens: self.engine.context_limit,
+                                    prompt_cache_hit_tokens: None,
+                                    prompt_cache_miss_tokens: None,
+                                },
+                                stream_tx,
+                            );
+                            if session.summary_up_to > before_summary_up_to {
+                                continue 'react_loop;
+                            }
+                        }
+                        let _ = stream_tx.send(StreamEvent::Error { message: err_msg });
+                        return accumulated_usage;
+                    }
+                };
+
+                accumulated_usage.accumulate(&response.usage);
                 emit_token_usage(
                     stream_tx,
-                    &tool_llm_usage,
-                    None,
+                    &response.usage,
+                    Some(response.usage.prompt_tokens.max(session.current_tokens)),
                     self.engine.context_limit,
-                    usage_source,
+                    format!("react-round-{round}", round = round + 1),
                     None,
                 );
+                round += 1;
 
-                audit_tool_execution(
-                    &session.id,
-                    &call.name,
-                    result.ok,
-                    (!args_summary.is_empty()).then_some(args_summary.as_str()),
-                    target_scope.as_deref(),
-                    normalized_target.as_deref().or(target_summary.as_deref()),
-                    &result.summary,
-                );
-                let tool_media = if result.ok {
-                    crate::memory::turn_result::parse_media_assets_from_tool_result(
-                        &call.name,
-                        &result.stdout,
-                        &result.summary,
-                    )
-                } else {
-                    Vec::new()
-                };
-                let _ = stream_tx.send(StreamEvent::ToolResult {
-                    name: call.name.clone(),
-                    tool_call_id: Some(call.id.clone()),
-                    ok: result.ok,
-                    output: tool_result_stream_output(&result),
-                    full_output: Some(tool_result_full_output(&result)),
-                    media: tool_media.clone(),
-                });
-                // 媒体工具成功时，立即创建一条携带媒体的 assistant 消息，前端可实时渲染
-                if !tool_media.is_empty() {
-                    session.append_message_with_media(
-                        MessageRole::Assistant,
-                        String::new(),
-                        tool_media.clone(),
-                    );
-                }
-                append_tool_result_message(
-                    session,
-                    &call.id,
-                    &call.name,
-                    if result.ok {
-                        tool_result_provider_text(&call.name, &result, allow_memory_context)
-                    } else {
-                        structured_tool_failure_provider_text(&ToolFailureRecord::new(
-                            &call.name,
-                            &call.id,
-                            args_summary.clone(),
-                            classify_tool_result_failure(&result),
-                            tool_result_full_output(&result),
-                        ))
-                    },
-                    !result.ok,
-                );
-                append_runtime_tool_message(
-                    session,
-                    &call.name,
-                    format_tool_trace_message(&result),
-                );
-                if !result.ok && check_cancel(session, &self.engine, cmd_rx, stream_tx) {
-                    return accumulated_usage;
-                }
-
-                if result.ok {
-                    failed_tool_call_keys.remove(&tool_call_key);
-                    failed_tool_names.remove(&call.name);
-                    successful_tool_call_keys.insert(tool_call_key);
-                } else {
-                    let error_summary =
-                        structured_tool_failure_provider_text(&ToolFailureRecord::new(
-                            &call.name,
-                            &call.id,
-                            args_summary.clone(),
-                            classify_tool_result_failure(&result),
-                            tool_result_full_output(&result),
-                        ));
-                    failed_tool_call_keys.insert(tool_call_key, error_summary);
-                    failed_tool_names.insert(call.name.clone());
-                    need_failure_recovery_prompt = true;
-                }
-
-                // 记忆候选评估
-                if check_cancel(session, &self.engine, cmd_rx, stream_tx) {
-                    return accumulated_usage;
-                }
-                if let Some(handle) = memory_handle {
-                    let file_path =
-                        if matches!(call.name.as_str(), "write_file" | "replace_in_file") {
-                            call.arguments.as_object().and_then(|o| {
-                                o.get("path").and_then(|v| v.as_str()).map(String::from)
-                            })
-                        } else {
-                            None
-                        };
-                    if let Some(candidate) =
-                        crate::memory::turn_result::evaluate_tool_result_for_memory(
-                            &call.name,
-                            result.ok,
-                            &result.summary,
-                            file_path.as_deref(),
-                            memory_candidate_count,
-                        )
-                    {
-                        handle.submit_memory_candidate(candidate);
-                        memory_candidate_count += 1;
+                if response.tool_calls.is_empty() {
+                    if is_synthetic_tool_call_placeholder(&response.text) {
+                        break 'react_loop;
                     }
-                }
-                maybe_update_context_summary(session, &self.engine, &response.usage, stream_tx);
 
-                match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
-                    PendingCommandEffect::Terminate => return accumulated_usage,
-                    PendingCommandEffect::MessageInjected => {
+                    // 工具执行阶段：LLM 未调用工具即视为该阶段结束。
+                    // 将已流式输出的过程文本保存到 session（避免上下文丢失），
+                    // 由外层总结阶段接管最终回复生成。
+                    session.append_message_with_id(
+                        pending_msg_id,
+                        MessageRole::Assistant,
+                        response.text.clone(),
+                        response.reasoning_content.clone(),
+                    );
+                    if let Some(message) = session.messages.last_mut() {
+                        message.reasoning_signature = response.reasoning_signature.clone();
+                    }
+                    let output = LlmOutputRecord {
+                        stage: format!("react-round-{round}"),
+                        content: response.text.clone(),
+                        reasoning_content: response.reasoning_content.clone(),
+                        tool_calls: Vec::new(),
+                        usage: response.usage.clone(),
+                    };
+                    append_runtime_tool_message_with_reasoning(
+                        session,
+                        "llm_output",
+                        format_llm_output_message(&output),
+                        response.reasoning_content.clone(),
+                    );
+                    session.persist_to_disk();
+                    maybe_update_context_summary(session, &self.engine, &response.usage, stream_tx);
+
+                    if user_message_injected_during_stream {
                         memory_recall_attempted = false;
                         successful_tool_call_keys.clear();
                         failed_tool_call_keys.clear();
                         failed_tool_names.clear();
                         memory_candidate_count = 0;
-                        session.persist_to_disk();
                         continue 'react_loop;
                     }
-                    PendingCommandEffect::None => {}
+
+                    break 'react_loop;
                 }
 
-                // 工具执行后：检测浏览器状态变化
-                maybe_inject_browser_update(
-                    &self.engine,
+                // 工具调用
+                let executable_calls = response.tool_calls.iter().collect::<Vec<_>>();
+                if executable_calls.is_empty() {
+                    let _ = stream_tx.send(StreamEvent::Error {
+                        message: "模型没有返回可执行工具调用，任务已停止".to_string(),
+                    });
+                    return accumulated_usage;
+                }
+                let tool_names: Vec<String> =
+                    executable_calls.iter().map(|c| c.name.clone()).collect();
+                let output = LlmOutputRecord {
+                    stage: format!("react-round-{round}"),
+                    content: response.text.clone(),
+                    reasoning_content: response.reasoning_content.clone(),
+                    tool_calls: tool_names.clone(),
+                    usage: response.usage.clone(),
+                };
+                append_runtime_tool_message_with_reasoning(
                     session,
-                    stream_tx,
-                    &mut last_browser_snapshot,
-                    &mut last_browser_check,
-                    true,
-                )
-                .await;
-            }
-
-            if need_failure_recovery_prompt {
-                let mut failed_tools = failed_tool_names.iter().cloned().collect::<Vec<_>>();
-                failed_tools.sort();
-                let collaboration_hint = if self.agent_id == "main"
-                    && request_tools.iter().any(|tool| tool.name == "create_agent")
-                {
-                    "如果问题适合并行排查或需要第二视角，请创建 temporary Sub Agent 协作处理，并把失败工具、失败原因、已尝试方案和用户目标一并分配给它。"
-                } else {
-                    "如果当前 Agent 无法继续独立推进，请向用户说明需要的外部条件、凭据、授权、环境调整或人工确认。"
-                };
-                let recall_hint = if request_tools
-                    .iter()
-                    .any(|tool| tool.name == "recall_memory")
-                {
-                    memory_recall_attempted = false;
-                    "优先调用 recall_memory，充分使用 Memory 系统查询这个工具以前成功调用时使用的参数、环境前置条件、配置方式、替代步骤和相关经验；只有回忆不足以解决时，再切换工具、创建子 Agent 或请求用户协作。"
-                } else {
-                    ""
-                };
-                let mut reminder = Message::new(
-                    MessageRole::Tool,
-                    format!(
-                        "<system-reminder>\n以下工具调用在本轮出现失败，暂时不要重复调用相同工具和相同参数：\n{}\n请重新规划：{}{}\n</system-reminder>",
-                        failed_tools.join("\n"),
-                        recall_hint,
-                        collaboration_hint
-                    ),
+                    "llm_output",
+                    format_llm_output_message(&output),
+                    response.reasoning_content.clone(),
                 );
-                reminder.tool_name = Some("react_failed_tool_recovery".to_string());
-                session.messages.push(reminder);
-                session.persist_to_disk();
-                continue 'react_loop;
-            }
-
-            // 执行有待处理任务的 Sub Agent
-            let sub_result = self
-                .drain_sub_agent_inboxes(session, stream_tx, cmd_rx, memory_handle, &index_manager)
-                .await;
-            accumulated_usage.accumulate(&sub_result.usage);
-            if sub_result.cancelled {
-                session.persist_to_disk();
-                return accumulated_usage;
-            }
-
-            let main_messages = self.drain_main_agent_messages();
-            if !main_messages.is_empty() {
-                for message in main_messages {
-                    session.messages.push(Message::new(
-                        MessageRole::User,
-                        format!(
-                            "[from:{} at {}]\n{}",
-                            message.from, message.created_at, message.content
-                        ),
-                    ));
-                }
-                continue 'react_loop;
-            }
-
-            if sub_result.ran {
-                session.persist_to_disk();
-                let _ = stream_tx.send(StreamEvent::Done {
-                    usage: Some(accumulated_usage.clone()),
+                let _ = stream_tx.send(StreamEvent::ToolCalls {
+                    message_id: pending_msg_id.clone(),
+                    names: tool_names.clone(),
+                    calls: executable_calls
+                        .iter()
+                        .map(|call| StreamToolCall {
+                            id: call.id.clone(),
+                            name: call.name.clone(),
+                            arguments: call.arguments.clone(),
+                        })
+                        .collect(),
+                    usage: Some(response.usage.clone()),
                 });
-                return accumulated_usage;
+                append_assistant_tool_call_message(
+                    session,
+                    pending_msg_id.clone(),
+                    &response.text,
+                    &response.reasoning_content,
+                    response.reasoning_signature.clone(),
+                    &executable_calls,
+                );
+
+                // 执行工具
+                let mut need_failure_recovery_prompt = false;
+                for call in executable_calls {
+                    match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
+                        PendingCommandEffect::Terminate => return accumulated_usage,
+                        PendingCommandEffect::MessageInjected => {
+                            memory_recall_attempted = false;
+                            successful_tool_call_keys.clear();
+                            failed_tool_call_keys.clear();
+                            failed_tool_names.clear();
+                            session.persist_to_disk();
+                            continue 'react_loop;
+                        }
+                        PendingCommandEffect::None => {}
+                    }
+
+                    // 工具执行间隙：检测浏览器状态变化
+                    maybe_inject_browser_update(
+                        &self.engine,
+                        session,
+                        stream_tx,
+                        &mut last_browser_snapshot,
+                        &mut last_browser_check,
+                        false,
+                    )
+                    .await;
+
+                    if let Some(parse_error) = call
+                        .arguments
+                        .get("__parse_error")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        let message = parse_error.to_string();
+                        let failure = ToolFailureRecord::new(
+                            &call.name,
+                            &call.id,
+                            format_call_args_summary(call),
+                            ToolFailureKind::Argument,
+                            message.clone(),
+                        );
+                        let provider_text = structured_tool_failure_provider_text(&failure);
+                        let _ = stream_tx.send(StreamEvent::ToolResult {
+                            name: call.name.clone(),
+                            tool_call_id: Some(call.id.clone()),
+                            ok: false,
+                            output: message.clone(),
+                            full_output: Some(message.clone()),
+                            media: vec![],
+                        });
+                        append_tool_result_message(
+                            session,
+                            &call.id,
+                            &call.name,
+                            provider_text.clone(),
+                            true,
+                        );
+                        append_runtime_tool_message(
+                            session,
+                            &call.name,
+                            format!("工具参数无效 [{}]\n{provider_text}", call.name),
+                        );
+                        let tool_call_key = tool_call_dedupe_key(&call.name, &call.arguments);
+                        failed_tool_call_keys.insert(tool_call_key, provider_text);
+                        failed_tool_names.insert(call.name.clone());
+                        need_failure_recovery_prompt = true;
+                        continue;
+                    }
+
+                    // 团队协作工具拦截
+                    if crate::agent_team::lifecycle::is_team_tool(&call.name) {
+                        let args_summary = format_call_args_summary(call);
+                        let _ = stream_tx.send(StreamEvent::ToolStart {
+                            name: call.name.clone(),
+                            args_summary: args_summary.clone(),
+                        });
+                        let result = if let Some(team) = self.team.as_ref() {
+                            if let Ok(mut team) = team.lock() {
+                                crate::agent_team::lifecycle::execute_team_tool(
+                                    &mut team,
+                                    &self.agent_id,
+                                    call,
+                                    session,
+                                    &self.tools,
+                                    stream_tx,
+                                )
+                            } else {
+                                crate::agent_team::lifecycle::error_tool_result(
+                                    &call.name,
+                                    "团队状态锁定失败",
+                                )
+                            }
+                        } else {
+                            crate::agent_team::lifecycle::error_tool_result(
+                                &call.name,
+                                "团队功能未启用",
+                            )
+                        };
+                        let _ = stream_tx.send(StreamEvent::ToolResult {
+                            name: call.name.clone(),
+                            tool_call_id: Some(call.id.clone()),
+                            ok: result.ok,
+                            output: tool_result_stream_output(&result),
+                            full_output: Some(tool_result_full_output(&result)),
+                            media: vec![],
+                        });
+                        append_tool_result_message(
+                            session,
+                            &call.id,
+                            &call.name,
+                            if result.ok {
+                                tool_result_provider_text(&call.name, &result, false)
+                            } else {
+                                structured_tool_failure_provider_text(&ToolFailureRecord::new(
+                                    &call.name,
+                                    &call.id,
+                                    args_summary.clone(),
+                                    classify_tool_result_failure(&result),
+                                    tool_result_full_output(&result),
+                                ))
+                            },
+                            !result.ok,
+                        );
+                        if result.ok {
+                            let tool_call_key = tool_call_dedupe_key(&call.name, &call.arguments);
+                            successful_tool_call_keys.insert(tool_call_key);
+                        } else {
+                            let tool_call_key = tool_call_dedupe_key(&call.name, &call.arguments);
+                            failed_tool_call_keys.insert(
+                                tool_call_key,
+                                structured_tool_failure_provider_text(&ToolFailureRecord::new(
+                                    &call.name,
+                                    &call.id,
+                                    args_summary.clone(),
+                                    classify_tool_result_failure(&result),
+                                    tool_result_full_output(&result),
+                                )),
+                            );
+                            failed_tool_names.insert(call.name.clone());
+                            need_failure_recovery_prompt = true;
+                        }
+                        continue;
+                    }
+
+                    let args_summary = format_call_args_summary(call);
+                    let (target_scope, target_summary) = infer_audit_target(call);
+                    let normalized_target = normalize_permission_target(
+                        session,
+                        target_scope.as_deref(),
+                        target_summary.as_deref(),
+                    );
+                    let tool_call_key = tool_call_dedupe_key(&call.name, &call.arguments);
+                    if successful_tool_call_keys.contains(&tool_call_key) {
+                        append_duplicate_tool_result(session, stream_tx, &call.id, &call.name);
+                        continue;
+                    }
+                    if let Some(original_error) = failed_tool_call_keys.get(&tool_call_key).cloned()
+                    {
+                        let repeated_failure = ToolFailureRecord::repeated(
+                            &call.name,
+                            &call.id,
+                            args_summary.clone(),
+                            original_error,
+                        );
+                        append_repeated_failed_tool_result(
+                            session,
+                            stream_tx,
+                            &call.id,
+                            &call.name,
+                            &structured_tool_failure_provider_text(&repeated_failure),
+                        );
+                        failed_tool_names.insert(call.name.clone());
+                        need_failure_recovery_prompt = true;
+                        continue;
+                    }
+
+                    let decision = evaluate_tool_permission(
+                        &self.engine,
+                        &call.name,
+                        target_scope.as_deref(),
+                        normalized_target.as_deref(),
+                    );
+                    let trust_mode = format!("{:?}", self.engine.permission_gate().trust_mode());
+                    match decision {
+                        PermissionDecision::Approved => {
+                            audit_permission_with_context(
+                                &session.id,
+                                &call.name,
+                                "approved",
+                                &trust_mode,
+                                (!args_summary.is_empty()).then_some(args_summary.as_str()),
+                                target_scope.as_deref(),
+                                normalized_target.as_deref().or(target_summary.as_deref()),
+                            );
+                        }
+                        PermissionDecision::Denied { reason } => {
+                            audit_permission_with_context(
+                                &session.id,
+                                &call.name,
+                                "denied",
+                                &trust_mode,
+                                (!args_summary.is_empty()).then_some(args_summary.as_str()),
+                                target_scope.as_deref(),
+                                normalized_target.as_deref().or(target_summary.as_deref()),
+                            );
+                            let _ = stream_tx.send(StreamEvent::ToolResult {
+                                name: call.name.clone(),
+                                tool_call_id: Some(call.id.clone()),
+                                ok: false,
+                                output: format!("权限拒绝：{reason}"),
+                                full_output: None,
+                                media: vec![],
+                            });
+                            append_tool_result_message(
+                                session,
+                                &call.id,
+                                &call.name,
+                                structured_tool_failure_provider_text(&ToolFailureRecord::new(
+                                    &call.name,
+                                    &call.id,
+                                    args_summary.clone(),
+                                    ToolFailureKind::PermissionDenied,
+                                    format!("权限拒绝：{reason}"),
+                                )),
+                                true,
+                            );
+                            failed_tool_call_keys.insert(
+                                tool_call_key,
+                                structured_tool_failure_provider_text(&ToolFailureRecord::new(
+                                    &call.name,
+                                    &call.id,
+                                    args_summary.clone(),
+                                    ToolFailureKind::PermissionDenied,
+                                    format!("权限拒绝：{reason}"),
+                                )),
+                            );
+                            failed_tool_names.insert(call.name.clone());
+                            need_failure_recovery_prompt = true;
+                            continue;
+                        }
+                        PermissionDecision::NeedsApproval { request_id } => {
+                            audit_permission_with_context(
+                                &session.id,
+                                &call.name,
+                                "needs_approval",
+                                &trust_mode,
+                                (!args_summary.is_empty()).then_some(args_summary.as_str()),
+                                target_scope.as_deref(),
+                                normalized_target.as_deref().or(target_summary.as_deref()),
+                            );
+                            crate::approval_store::add_pending(
+                                &session.id,
+                                crate::session::PendingApproval {
+                                    request_id: request_id.clone(),
+                                    tool_name: call.name.clone(),
+                                    tool_args_summary: args_summary.clone(),
+                                    created_at: now_text(),
+                                },
+                            );
+                            let _ = stream_tx.send(StreamEvent::ApprovalNeeded {
+                                request_id: request_id.clone(),
+                                tool_name: call.name.clone(),
+                                args_summary: args_summary.clone(),
+                            });
+
+                            let approved = loop {
+                                match cmd_rx.recv().await {
+                                    Some(Command::Approval {
+                                        request_id: rid,
+                                        approved,
+                                    }) if rid == request_id => {
+                                        break approved;
+                                    }
+                                    Some(Command::Cancel) | Some(Command::Shutdown) | None => {
+                                        let _ = stream_tx.send(StreamEvent::Error {
+                                            message: "已取消".into(),
+                                        });
+                                        return accumulated_usage;
+                                    }
+                                    Some(Command::Message {
+                                        content,
+                                        message_id,
+                                        media,
+                                    }) => {
+                                        let mid = append_or_reuse_user_message(
+                                            session, &content, message_id, media,
+                                        );
+                                        let msg_media = session
+                                            .messages
+                                            .iter()
+                                            .find(|message| message.id == mid)
+                                            .map(|message| message.media.clone())
+                                            .unwrap_or_default();
+                                        let _ = stream_tx.send(StreamEvent::UserMessage {
+                                            message_id: mid,
+                                            content: content.clone(),
+                                            media: msg_media,
+                                        });
+                                        memory_candidate_count = 0;
+                                    }
+                                    Some(Command::UpdateCwd { cwd }) => {
+                                        session.cwd = cwd;
+                                        crate::core::apply_session_cwd(session);
+                                    }
+                                    Some(Command::ReloadConfig) => {}
+                                    Some(Command::Approval { .. }) => {}
+                                    Some(Command::CancelAgent { .. }) => {}
+                                    Some(Command::InjectTool { tool_name, payload }) => {
+                                        crate::react::message::inject_tool_to_session(
+                                            session, stream_tx, &tool_name, &payload,
+                                        );
+                                    }
+                                    Some(Command::CompressContext) => {
+                                        crate::core::compress_context_for_session(
+                                            session,
+                                            &self.engine,
+                                            stream_tx,
+                                        );
+                                    }
+                                    Some(Command::ResetContext) => {
+                                        crate::core::reset_context_for_session(
+                                            session,
+                                            stream_tx,
+                                            &self.engine,
+                                        );
+                                    }
+                                }
+                            };
+
+                            crate::approval_store::remove_pending(&session.id, &request_id);
+
+                            if !approved {
+                                audit_tool_execution(
+                                    &session.id,
+                                    &call.name,
+                                    false,
+                                    (!args_summary.is_empty()).then_some(args_summary.as_str()),
+                                    target_scope.as_deref(),
+                                    normalized_target.as_deref().or(target_summary.as_deref()),
+                                    "用户拒绝执行",
+                                );
+                                append_runtime_tool_message(
+                                    session,
+                                    &call.name,
+                                    format!("工具 {} 被用户拒绝执行", call.name),
+                                );
+                                append_tool_result_message(
+                                    session,
+                                    &call.id,
+                                    &call.name,
+                                    structured_tool_failure_provider_text(&ToolFailureRecord::new(
+                                        &call.name,
+                                        &call.id,
+                                        args_summary.clone(),
+                                        ToolFailureKind::UserRejected,
+                                        "用户拒绝执行",
+                                    )),
+                                    true,
+                                );
+                                session.persist_to_disk();
+                                let _ = stream_tx.send(StreamEvent::ToolResult {
+                                    name: call.name.clone(),
+                                    tool_call_id: Some(call.id.clone()),
+                                    ok: false,
+                                    output: "用户拒绝执行".to_string(),
+                                    full_output: None,
+                                    media: vec![],
+                                });
+                                let _ = stream_tx.send(StreamEvent::Done {
+                                    usage: Some(accumulated_usage.clone()),
+                                });
+                                return accumulated_usage;
+                            }
+                        }
+                    }
+
+                    if check_cancel(session, &self.engine, cmd_rx, stream_tx) {
+                        return accumulated_usage;
+                    }
+
+                    // 文件编辑锁检查
+                    if matches!(call.name.as_str(), "write_file" | "replace_in_file")
+                        && let Some(team) = self.team.as_ref()
+                    {
+                        let file_path = call
+                            .arguments
+                            .as_object()
+                            .and_then(|o| o.get("path").and_then(|v| v.as_str()).map(String::from));
+                        if let Some(ref path) = file_path {
+                            let path_buf = std::path::PathBuf::from(path);
+                            let now = chrono::Local::now().naive_local();
+                            let lock_error = team
+                                .lock()
+                                .map_err(|_| "团队状态锁定失败".to_string())
+                                .and_then(|mut team| {
+                                    team.file_locks.ensure_can_write(
+                                        &path_buf,
+                                        &self.agent_id,
+                                        &now,
+                                    )
+                                });
+                            if let Err(message) = lock_error {
+                                let failure =
+                                    structured_tool_failure_provider_text(&ToolFailureRecord::new(
+                                        &call.name,
+                                        &call.id,
+                                        args_summary.clone(),
+                                        ToolFailureKind::PermissionDenied,
+                                        message.clone(),
+                                    ));
+                                let _ = stream_tx.send(StreamEvent::ToolResult {
+                                    name: call.name.clone(),
+                                    tool_call_id: Some(call.id.clone()),
+                                    ok: false,
+                                    output: message.clone(),
+                                    full_output: None,
+                                    media: vec![],
+                                });
+                                append_tool_result_message(
+                                    session,
+                                    &call.id,
+                                    &call.name,
+                                    failure.clone(),
+                                    true,
+                                );
+                                failed_tool_call_keys.insert(tool_call_key, failure);
+                                failed_tool_names.insert(call.name.clone());
+                                need_failure_recovery_prompt = true;
+                                continue;
+                            }
+                        }
+                    }
+
+                    let _ = stream_tx.send(StreamEvent::ToolStart {
+                        name: call.name.clone(),
+                        args_summary: args_summary.clone(),
+                    });
+
+                    let (result, tool_llm_usage, allow_memory_context, usage_source) = {
+                        let (mut result, tool_llm_usage, allow_memory_context, usage_source) =
+                            if call.name == "index_search" {
+                                if let Some(ref im) = index_manager {
+                                    let (result, usage, allow_context) =
+                                        crate::index::execute_index_search_tool(call, im, session);
+                                    (result, usage, allow_context, "index_search")
+                                } else {
+                                    (
+                                        crate::tool::ToolResult {
+                                            ok: false,
+                                            summary: "索引系统未初始化".to_string(),
+                                            stdout: String::new(),
+                                            stderr: "index manager not available".to_string(),
+                                            exit_code: 1,
+                                            execution: None,
+                                        },
+                                        tiangong_types::TokenUsage::default(),
+                                        false,
+                                        "index_search",
+                                    )
+                                }
+                            } else if call.name == "recall_memory" {
+                                if memory_recall_attempted {
+                                    let (result, usage, allow_context) =
+                                        crate::core::duplicate_memory_recall_tool_result();
+                                    (result, usage, allow_context, "recall_memory")
+                                } else {
+                                    memory_recall_attempted = true;
+                                    let (result, usage, allow_context) =
+                                        crate::core::execute_memory_recall_tool(
+                                            call,
+                                            memory_handle,
+                                            session,
+                                        )
+                                        .await;
+                                    (result, usage, allow_context, "recall_memory")
+                                }
+                            } else if call.name == "analyze_attachment" {
+                                let (result, usage) = crate::core::execute_attachment_analysis_tool(
+                                    call,
+                                    &self.engine,
+                                    session,
+                                );
+                                (result, usage, false, "analyze_attachment")
+                            } else {
+                                (
+                                    self.engine
+                                        .execute_tool_call(
+                                            call,
+                                            &self.mcp_targets,
+                                            &self.engine.agent_config().mcp,
+                                            &session.id,
+                                        )
+                                        .await,
+                                    tiangong_types::TokenUsage::default(),
+                                    false,
+                                    "",
+                                )
+                            };
+                        crate::memory::turn_result::localize_tool_result_images(
+                            &call.name,
+                            &mut result,
+                        );
+                        (result, tool_llm_usage, allow_memory_context, usage_source)
+                    };
+                    accumulated_usage.accumulate(&tool_llm_usage);
+                    emit_token_usage(
+                        stream_tx,
+                        &tool_llm_usage,
+                        None,
+                        self.engine.context_limit,
+                        usage_source,
+                        None,
+                    );
+
+                    audit_tool_execution(
+                        &session.id,
+                        &call.name,
+                        result.ok,
+                        (!args_summary.is_empty()).then_some(args_summary.as_str()),
+                        target_scope.as_deref(),
+                        normalized_target.as_deref().or(target_summary.as_deref()),
+                        &result.summary,
+                    );
+                    let tool_media = if result.ok {
+                        crate::memory::turn_result::parse_media_assets_from_tool_result(
+                            &call.name,
+                            &result.stdout,
+                            &result.summary,
+                        )
+                    } else {
+                        Vec::new()
+                    };
+                    let _ = stream_tx.send(StreamEvent::ToolResult {
+                        name: call.name.clone(),
+                        tool_call_id: Some(call.id.clone()),
+                        ok: result.ok,
+                        output: tool_result_stream_output(&result),
+                        full_output: Some(tool_result_full_output(&result)),
+                        media: tool_media.clone(),
+                    });
+                    // 媒体工具成功时，立即创建一条携带媒体的 assistant 消息，前端可实时渲染
+                    if !tool_media.is_empty() {
+                        session.append_message_with_media(
+                            MessageRole::Assistant,
+                            String::new(),
+                            tool_media.clone(),
+                        );
+                    }
+                    append_tool_result_message(
+                        session,
+                        &call.id,
+                        &call.name,
+                        if result.ok {
+                            tool_result_provider_text(&call.name, &result, allow_memory_context)
+                        } else {
+                            structured_tool_failure_provider_text(&ToolFailureRecord::new(
+                                &call.name,
+                                &call.id,
+                                args_summary.clone(),
+                                classify_tool_result_failure(&result),
+                                tool_result_full_output(&result),
+                            ))
+                        },
+                        !result.ok,
+                    );
+                    append_runtime_tool_message(
+                        session,
+                        &call.name,
+                        format_tool_trace_message(&result),
+                    );
+                    if !result.ok && check_cancel(session, &self.engine, cmd_rx, stream_tx) {
+                        return accumulated_usage;
+                    }
+
+                    if result.ok {
+                        failed_tool_call_keys.remove(&tool_call_key);
+                        failed_tool_names.remove(&call.name);
+                        successful_tool_call_keys.insert(tool_call_key);
+                    } else {
+                        let error_summary =
+                            structured_tool_failure_provider_text(&ToolFailureRecord::new(
+                                &call.name,
+                                &call.id,
+                                args_summary.clone(),
+                                classify_tool_result_failure(&result),
+                                tool_result_full_output(&result),
+                            ));
+                        failed_tool_call_keys.insert(tool_call_key, error_summary);
+                        failed_tool_names.insert(call.name.clone());
+                        need_failure_recovery_prompt = true;
+                    }
+
+                    // 记忆候选评估
+                    if check_cancel(session, &self.engine, cmd_rx, stream_tx) {
+                        return accumulated_usage;
+                    }
+                    if let Some(handle) = memory_handle {
+                        let file_path =
+                            if matches!(call.name.as_str(), "write_file" | "replace_in_file") {
+                                call.arguments.as_object().and_then(|o| {
+                                    o.get("path").and_then(|v| v.as_str()).map(String::from)
+                                })
+                            } else {
+                                None
+                            };
+                        if let Some(candidate) =
+                            crate::memory::turn_result::evaluate_tool_result_for_memory(
+                                &call.name,
+                                result.ok,
+                                &result.summary,
+                                file_path.as_deref(),
+                                memory_candidate_count,
+                            )
+                        {
+                            handle.submit_memory_candidate(candidate);
+                            memory_candidate_count += 1;
+                        }
+                    }
+                    maybe_update_context_summary(session, &self.engine, &response.usage, stream_tx);
+
+                    match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
+                        PendingCommandEffect::Terminate => return accumulated_usage,
+                        PendingCommandEffect::MessageInjected => {
+                            memory_recall_attempted = false;
+                            successful_tool_call_keys.clear();
+                            failed_tool_call_keys.clear();
+                            failed_tool_names.clear();
+                            memory_candidate_count = 0;
+                            session.persist_to_disk();
+                            continue 'react_loop;
+                        }
+                        PendingCommandEffect::None => {}
+                    }
+
+                    // 工具执行后：检测浏览器状态变化
+                    maybe_inject_browser_update(
+                        &self.engine,
+                        session,
+                        stream_tx,
+                        &mut last_browser_snapshot,
+                        &mut last_browser_check,
+                        true,
+                    )
+                    .await;
+                }
+
+                if need_failure_recovery_prompt {
+                    let mut failed_tools = failed_tool_names.iter().cloned().collect::<Vec<_>>();
+                    failed_tools.sort();
+                    let collaboration_hint = if self.agent_id == "main"
+                        && request_tools.iter().any(|tool| tool.name == "create_agent")
+                    {
+                        "如果问题适合并行排查或需要第二视角，请创建 temporary Sub Agent 协作处理，并把失败工具、失败原因、已尝试方案和用户目标一并分配给它。"
+                    } else {
+                        "如果当前 Agent 无法继续独立推进，请向用户说明需要的外部条件、凭据、授权、环境调整或人工确认。"
+                    };
+                    let recall_hint = if request_tools
+                        .iter()
+                        .any(|tool| tool.name == "recall_memory")
+                    {
+                        memory_recall_attempted = false;
+                        "优先调用 recall_memory，充分使用 Memory 系统查询这个工具以前成功调用时使用的参数、环境前置条件、配置方式、替代步骤和相关经验；只有回忆不足以解决时，再切换工具、创建子 Agent 或请求用户协作。"
+                    } else {
+                        ""
+                    };
+                    let mut reminder = Message::new(
+                        MessageRole::Tool,
+                        format!(
+                            "<system-reminder>\n以下工具调用在本轮出现失败，暂时不要重复调用相同工具和相同参数：\n{}\n请重新规划：{}{}\n</system-reminder>",
+                            failed_tools.join("\n"),
+                            recall_hint,
+                            collaboration_hint
+                        ),
+                    );
+                    reminder.tool_name = Some("react_failed_tool_recovery".to_string());
+                    session.messages.push(reminder);
+                    session.persist_to_disk();
+                    continue 'react_loop;
+                }
+
+                // 执行有待处理任务的 Sub Agent
+                let sub_result = self
+                    .drain_sub_agent_inboxes(
+                        session,
+                        stream_tx,
+                        cmd_rx,
+                        memory_handle,
+                        &index_manager,
+                    )
+                    .await;
+                accumulated_usage.accumulate(&sub_result.usage);
+                if sub_result.cancelled {
+                    session.persist_to_disk();
+                    return accumulated_usage;
+                }
+
+                let main_messages = self.drain_main_agent_messages();
+                if !main_messages.is_empty() {
+                    for message in main_messages {
+                        session.messages.push(Message::new(
+                            MessageRole::User,
+                            format!(
+                                "[from:{} at {}]\n{}",
+                                message.from, message.created_at, message.content
+                            ),
+                        ));
+                    }
+                    continue 'react_loop;
+                }
+
+                if sub_result.ran {
+                    session.persist_to_disk();
+                    let _ = stream_tx.send(StreamEvent::Done {
+                        usage: Some(accumulated_usage.clone()),
+                    });
+                    return accumulated_usage;
+                }
+
+                session.persist_to_disk();
             }
 
-            session.persist_to_disk();
+            // ── 总结阶段（Task 03 实现，当前为占位兜底）──
+            // 内层工具执行阶段结束后进入总结。Task 03 将由主模型独立请求判断完成度；
+            // 此处先用 force_final_response 保证骨架可用，避免无限循环。
+            force_final_response(session, &self.engine, stream_tx);
+            break 'outer;
         }
 
         accumulated_usage
@@ -1768,6 +1804,7 @@ impl ReactEngine {
                 sub_tools,
                 self.mcp_targets.clone(),
                 sub_max_rounds,
+                crate::agent_team::tools::SUB_AGENT_MAX_OUTER_ITERATIONS,
             )
             .with_shared_team(team_arc.clone(), agent_id.clone());
 
@@ -1875,7 +1912,7 @@ impl ReactEngine {
 
         let max_concurrent = crate::agent_team::tools::MAX_CONCURRENT_SUB_AGENTS;
         let token_budget = crate::agent_team::tools::SUB_AGENT_TOTAL_TOKEN_BUDGET;
-        let sub_max_rounds = crate::agent_team::tools::SUB_AGENT_MAX_ROUNDS;
+        let sub_max_rounds = crate::agent_team::tools::SUB_AGENT_MAX_TOOL_ROUNDS;
 
         let (dispatch_wake_tx, mut dispatch_wake_rx) = tokio_mpsc::unbounded_channel();
         {

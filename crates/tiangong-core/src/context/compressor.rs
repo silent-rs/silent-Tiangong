@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use crate::model::{ModelClient, ModelRequest, SingleProviderClient, TokenUsage};
-use crate::session::{ContentBlock, Message, MessageRole, Session, now_text};
+use crate::session::{ContentBlock, Message, MessagePhase, MessageRole, Session, now_text};
 
 /// 上下文压缩器
 ///
@@ -138,6 +138,7 @@ impl ContextCompressor {
             tool_name: None,
             tool_result_is_error: false,
             compact: false,
+            phase: MessagePhase::Normal,
             created_at: crate::session::now_text(),
         });
 
@@ -260,6 +261,7 @@ pub fn compress_loop_messages(
         tool_name: Some("loop_summary".to_string()),
         tool_result_is_error: false,
         compact: true,
+        phase: MessagePhase::Normal,
         created_at: now_text(),
     }];
     result.extend_from_slice(recent_messages);

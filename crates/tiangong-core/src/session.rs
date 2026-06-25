@@ -7,7 +7,8 @@ use crate::permission::TrustMode;
 use crate::planner::{PlanItem, PlanStepSource, PlanStepStatus};
 
 pub use tiangong_types::{
-    ContentBlock, MediaAsset, MediaKind, Message, MessageRole, MessageToolCall, now_text,
+    ContentBlock, MediaAsset, MediaKind, Message, MessagePhase, MessageRole, MessageToolCall,
+    now_text,
 };
 
 /// 会话工作目录模式
@@ -375,6 +376,7 @@ impl Session {
             tool_name: None,
             tool_result_is_error: false,
             compact: false,
+            phase: crate::session::MessagePhase::Normal,
             created_at: now_text(),
         });
     }
@@ -399,6 +401,7 @@ impl Session {
             tool_name: None,
             tool_result_is_error: false,
             compact: false,
+            phase: crate::session::MessagePhase::Normal,
             created_at: now_text(),
         });
     }
@@ -441,6 +444,7 @@ impl Session {
             tool_name: None,
             tool_result_is_error: false,
             compact: false,
+            phase: crate::session::MessagePhase::Normal,
             created_at: now_text(),
         });
     }
@@ -475,6 +479,7 @@ impl Session {
             tool_name: None,
             tool_result_is_error: false,
             compact: false,
+            phase: crate::session::MessagePhase::Normal,
             created_at: now_text(),
         });
     }

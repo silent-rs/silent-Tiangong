@@ -1,4 +1,4 @@
-use crate::session::{ContentBlock, Message, MessageRole, now_text};
+use crate::session::{ContentBlock, Message, MessagePhase, MessageRole, now_text};
 
 pub(crate) fn runtime_message(role: MessageRole, content: impl Into<String>) -> Message {
     Message {
@@ -15,6 +15,7 @@ pub(crate) fn runtime_message(role: MessageRole, content: impl Into<String>) -> 
         tool_name: None,
         tool_result_is_error: false,
         compact: false,
+        phase: MessagePhase::Normal,
         created_at: now_text(),
     }
 }
