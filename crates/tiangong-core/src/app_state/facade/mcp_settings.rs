@@ -49,6 +49,15 @@ impl TiangongState {
         service.set_mcp_server_enabled(self, name, enabled)
     }
 
+    pub fn update_mcp_server(
+        &mut self,
+        name: &str,
+        request: RegisterMcpServerRequest,
+    ) -> Result<String> {
+        let service = self.services.mcp_service;
+        service.update_mcp_server(self, name, request)
+    }
+
     pub fn update_agent_config_entry(&mut self, key: &str, value: &str) -> Result<String> {
         let service = self.services.mcp_service;
         service.update_agent_config_entry(self, key, value)

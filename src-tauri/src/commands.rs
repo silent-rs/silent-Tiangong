@@ -2485,6 +2485,12 @@ pub async fn get_mcp_health() -> Result<Vec<serde_json::Value>, String> {
         .collect()
 }
 
+/// 探测单个 MCP 服务器（按 name），写回健康缓存。供前端添加/编辑/重试后刷新该行。
+#[tauri::command]
+pub async fn probe_mcp_server(name: String) -> Result<(), String> {
+    tiangong_core::mcp::probe_single_mcp_server_by_name(&name).map_err(|e| e.to_string())
+}
+
 /// 注册 MCP 服务器
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -2497,7 +2503,6 @@ pub async fn register_mcp_server(
     auth_header: Option<String>,
     headers: Option<std::collections::HashMap<String, String>>,
     env: Option<std::collections::HashMap<String, String>>,
-    cwd: Option<String>,
     state: State<'_, TiangongApp>,
 ) -> Result<String, String> {
     use tiangong_core::agent_config::McpTransportMode;
@@ -2541,10 +2546,74 @@ pub async fn register_mcp_server(
                     auth_header,
                     headers: header_vec,
                     env: env_vec,
-                    cwd,
                 },
             };
             core_state.register_mcp_server(request)
+        })
+        .await?;
+    state.sync_core_config_from_state().await?;
+    Ok(message)
+}
+
+/// 编辑 MCP 服务器（按 name 定位，name 自身不可改）
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn update_mcp_server(
+    name: String,
+    command: String,
+    args: Vec<String>,
+    transport: Option<String>,
+    endpoint: Option<String>,
+    auth_header: Option<String>,
+    headers: Option<std::collections::HashMap<String, String>>,
+    env: Option<std::collections::HashMap<String, String>>,
+    state: State<'_, TiangongApp>,
+) -> Result<String, String> {
+    use tiangong_core::agent_config::McpTransportMode;
+    use tiangong_core::app_state::RegisterMcpServerOptions;
+    use tiangong_core::app_state::RegisterMcpServerRequest;
+
+    let transport = match transport
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => match value.to_ascii_lowercase().as_str() {
+            "auto" => Some(McpTransportMode::Auto),
+            "stdio" => Some(McpTransportMode::Stdio),
+            "http" | "sse" | "streamablehttp" | "streamable_http" | "streamable-http" => {
+                Some(McpTransportMode::Http)
+            }
+            other => {
+                return Err(format!(
+                    "不支持的 MCP transport：{other}，支持 auto/stdio/http/sse"
+                ));
+            }
+        },
+        None => None,
+    };
+
+    let message = state
+        .with_state(|core_state| {
+            let header_vec = headers.unwrap_or_default().into_iter().collect();
+            let env_vec = env.unwrap_or_default().into_iter().collect();
+
+            let request = RegisterMcpServerRequest {
+                name: name.clone(),
+                command,
+                args,
+                tags: vec![],
+                // enabled 由列表开关单独控制，编辑表单不覆盖；update_mcp_server 会保留原值
+                enabled: true,
+                options: RegisterMcpServerOptions {
+                    transport,
+                    endpoint,
+                    auth_header,
+                    headers: header_vec,
+                    env: env_vec,
+                },
+            };
+            core_state.update_mcp_server(&name, request)
         })
         .await?;
     state.sync_core_config_from_state().await?;

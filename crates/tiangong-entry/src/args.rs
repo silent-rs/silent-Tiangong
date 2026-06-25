@@ -176,8 +176,6 @@ pub(crate) enum McpSubcommand {
             help = "stdio env，格式 key=value，可重复"
         )]
         env: Vec<(String, String)>,
-        #[arg(long, help = "stdio 工作目录")]
-        cwd: Option<String>,
         #[arg(
             trailing_var_arg = true,
             allow_hyphen_values = true,

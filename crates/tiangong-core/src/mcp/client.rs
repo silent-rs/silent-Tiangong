@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -12,13 +12,17 @@ use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig
 use rmcp::transport::{ConfigureCommandExt, StreamableHttpClientTransport, TokioChildProcess};
 use rmcp::{Peer, RoleClient, ServiceExt};
 use serde_json::{Value, json};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use crate::agent_config::{McpServerConfig, ResolvedMcpTransport};
 use crate::process::configure_tokio_no_window;
 
 const MAX_LIST_PAGES: usize = 8;
+/// 最多保留的 stderr 末尾字节数，用于在握手失败时诊断子进程报错。
+const STDERR_CAPTURE_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -412,44 +416,110 @@ async fn run_stdio_mcp_request_async(
     params: Option<Value>,
 ) -> Result<Value> {
     let command = server.command_text();
-    let (transport, _stderr) = TokioChildProcess::builder(Command::new(command).configure(|cmd| {
-        configure_tokio_no_window(cmd);
-        cmd.args(&server.args);
-        if let Some(cwd) = server.cwd_text() {
-            cmd.current_dir(cwd);
-        }
-        for (key, value) in &server.env {
-            cmd.env(key, value);
-        }
-    }))
-    .stderr(Stdio::null())
-    .spawn()
-    .with_context(|| {
-        format!(
-            "MCP进程启动失败：server={} command={} args={}",
-            server.name,
-            command,
-            if server.args.is_empty() {
-                "(none)".to_string()
-            } else {
-                server.args.join(" ")
+    let args_desc = if server.args.is_empty() {
+        "(none)".to_string()
+    } else {
+        server.args.join(" ")
+    };
+    let (transport, stderr_handle) =
+        TokioChildProcess::builder(Command::new(command).configure(|cmd| {
+            configure_tokio_no_window(cmd);
+            cmd.args(&server.args);
+            // stdio MCP 跟随当前会话工作目录（与 run_command 一致）；能力探测等无会话上下文
+            // 的路径下此值为 None，子进程自然继承宿主进程 cwd。
+            if let Some(cwd) = crate::tool::session_workspace_root() {
+                cmd.current_dir(cwd);
             }
-        )
-    })?;
+            for (key, value) in &server.env {
+                cmd.env(key, value);
+            }
+        }))
+        // 捕获 stderr 用于握手失败时诊断子进程报错（如 npx 下载失败、缺少 API key 等）。
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| {
+            format!(
+                "MCP进程启动失败：server={} command={} args={}",
+                server.name, command, args_desc
+            )
+        })?;
 
-    let service = ()
-        .serve(transport)
-        .await
-        .with_context(|| format!("MCP握手失败：server={} command={}", server.name, command))?;
+    // 后台持续读取 stderr，仅保留末尾窗口，避免缓冲区写满阻塞子进程。
+    let stderr_tail = Arc::new(Mutex::new(String::new()));
+    if let Some(mut child_stderr) = stderr_handle {
+        let tail = stderr_tail.clone();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            loop {
+                match child_stderr.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let chunk = String::from_utf8_lossy(&buf[..n]).into_owned();
+                        let mut guard = tail.lock().await;
+                        guard.push_str(&chunk);
+                        if guard.len() > STDERR_CAPTURE_BYTES {
+                            let start = guard.len() - STDERR_CAPTURE_BYTES;
+                            let trimmed = guard.split_off(start);
+                            *guard = trimmed;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    let stderr_snapshot = || -> String {
+        stderr_tail
+            .try_lock()
+            .ok()
+            .map(|guard| guard.trim().to_string())
+            .unwrap_or_default()
+    };
+
+    let service = ().serve(transport).await.with_context(|| {
+        let mut msg = format!("MCP握手失败：server={} command={}", server.name, command);
+        if let Some(snippet) = nonempty_snippet(&stderr_snapshot()) {
+            msg.push_str(" stderr=");
+            msg.push_str(&snippet);
+        }
+        msg
+    })?;
 
     // 缓存 server 版本信息
     if let Some(info) = service.peer_info() {
         cache_server_version(&server.name, &info.server_info.version);
     }
 
-    let response = dispatch_mcp_request(service.peer(), method, params).await;
+    let response = dispatch_mcp_request(service.peer(), method, params)
+        .await
+        .with_context(|| {
+            let mut msg = format!(
+                "MCP调用失败：server={} method={} command={}",
+                server.name, method, command
+            );
+            if let Some(snippet) = nonempty_snippet(&stderr_snapshot()) {
+                msg.push_str(" stderr=");
+                msg.push_str(&snippet);
+            }
+            msg
+        });
     let _ = service.cancel().await;
     response
+}
+
+/// 截取 stderr 末尾用于错误诊断；超长时只保留最后若干行。
+fn nonempty_snippet(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    const MAX_LINES: usize = 12;
+    let lines: Vec<&str> = trimmed.lines().collect();
+    if lines.len() <= MAX_LINES {
+        Some(trimmed.to_string())
+    } else {
+        Some(lines[lines.len() - MAX_LINES..].join("\n"))
+    }
 }
 
 async fn run_http_mcp_request_async(

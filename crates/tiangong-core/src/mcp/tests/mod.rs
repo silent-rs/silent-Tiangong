@@ -17,7 +17,6 @@ fn server(name: &str, command: &str, tags: &[&str]) -> McpServerConfig {
         auth_header: String::new(),
         headers: Default::default(),
         env: Default::default(),
-        cwd: String::new(),
         enabled: true,
         tags: tags.iter().map(|item| item.to_string()).collect(),
     }
@@ -126,7 +125,6 @@ fn validate_mcp_config_rejects_invalid_server() {
             auth_header: String::new(),
             headers: Default::default(),
             env: Default::default(),
-            cwd: String::new(),
             enabled: true,
             tags: Vec::new(),
         }],
@@ -149,7 +147,6 @@ fn validate_mcp_config_accepts_http_server_with_endpoint() {
             auth_header: "token".to_string(),
             headers: Default::default(),
             env: Default::default(),
-            cwd: String::new(),
             enabled: true,
             tags: vec!["remote".to_string()],
         }],
@@ -172,7 +169,6 @@ fn validate_mcp_config_rejects_http_server_with_args() {
             auth_header: String::new(),
             headers: Default::default(),
             env: Default::default(),
-            cwd: String::new(),
             enabled: true,
             tags: vec!["remote".to_string()],
         }],
@@ -275,7 +271,6 @@ done
         auth_header: String::new(),
         headers: Default::default(),
         env: Default::default(),
-        cwd: String::new(),
         enabled: true,
         tags: vec!["demo".to_string()],
     };
@@ -361,7 +356,6 @@ done
         auth_header: String::new(),
         headers: Default::default(),
         env: Default::default(),
-        cwd: String::new(),
         enabled: true,
         tags: vec!["slow".to_string()],
     };
@@ -439,7 +433,6 @@ done
             auth_header: String::new(),
             headers: Default::default(),
             env: Default::default(),
-            cwd: String::new(),
             enabled: true,
             tags: vec!["filesystem".to_string()],
         }],
@@ -461,7 +454,6 @@ async fn test_http_mcp_rmcp_connect() {
         auth_header: String::new(),
         headers: Default::default(),
         env: Default::default(),
-        cwd: String::new(),
         enabled: true,
         tags: Vec::new(),
     };

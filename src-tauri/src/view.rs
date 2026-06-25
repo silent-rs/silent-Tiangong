@@ -201,7 +201,6 @@ pub struct McpServerView {
     pub auth_header: String,
     pub headers: Option<BTreeMap<String, String>>,
     pub env: Option<HashMap<String, String>>,
-    pub cwd: String,
     pub enabled: bool,
 }
 
@@ -231,7 +230,6 @@ impl McpServerView {
             } else {
                 Some(core_server.env.clone().into_iter().collect())
             },
-            cwd: core_server.cwd.clone(),
             enabled: core_server.enabled,
         }
     }

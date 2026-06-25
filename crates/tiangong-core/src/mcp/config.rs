@@ -94,11 +94,10 @@ fn format_server_detail(server: &McpServerConfig) -> String {
     };
 
     format!(
-        "mcp name: {name}\n  status: {status}\n  transport: {transport}\n  command: {command}\n  args: {args}\n  endpoint: {endpoint}\n  auth: {auth}\n  headers: {headers}\n  env: {env}\n  cwd: {cwd}\n  tags: {tags}",
+        "mcp name: {name}\n  status: {status}\n  transport: {transport}\n  command: {command}\n  args: {args}\n  endpoint: {endpoint}\n  auth: {auth}\n  headers: {headers}\n  env: {env}\n  tags: {tags}",
         name = server.name,
         headers = server.headers.len(),
-        env = server.env.len(),
-        cwd = server.cwd_text().unwrap_or("(none)")
+        env = server.env.len()
     )
 }
 
@@ -194,11 +193,8 @@ pub fn validate_mcp_config(config: &McpConfig) -> Result<()> {
                 if !server.args.is_empty() {
                     return Err(anyhow!("mcp.servers http 模式不支持 args：{}", server.name));
                 }
-                if !server.env.is_empty() || server.cwd_text().is_some() {
-                    return Err(anyhow!(
-                        "mcp.servers http 模式不支持 env/cwd：{}",
-                        server.name
-                    ));
+                if !server.env.is_empty() {
+                    return Err(anyhow!("mcp.servers http 模式不支持 env：{}", server.name));
                 }
             }
         }

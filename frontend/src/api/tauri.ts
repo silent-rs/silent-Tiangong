@@ -217,7 +217,6 @@ export interface McpServer {
   auth_header: string;
   headers?: Record<string, string>;
   env?: Record<string, string>;
-  cwd: string;
   enabled: boolean;
 }
 
@@ -230,7 +229,17 @@ export interface RegisterMcpServerInput {
   authHeader?: string;
   headers?: Record<string, string>;
   env?: Record<string, string>;
-  cwd?: string;
+}
+
+export interface UpdateMcpServerInput {
+  name: string;
+  transport?: 'auto' | 'stdio' | 'http' | 'sse';
+  command?: string;
+  args?: string[];
+  endpoint?: string;
+  authHeader?: string;
+  headers?: Record<string, string>;
+  env?: Record<string, string>;
 }
 
 export interface Skill {
@@ -569,6 +578,9 @@ export const api = {
   getMcpHealth: (): Promise<McpHealthStatus[]> =>
     invoke('get_mcp_health'),
 
+  probeMcpServer: (name: string): Promise<void> =>
+    invoke('probe_mcp_server', { name }),
+
   registerMcpServer: (input: RegisterMcpServerInput): Promise<string> =>
     invoke('register_mcp_server', {
       name: input.name,
@@ -579,7 +591,18 @@ export const api = {
       authHeader: input.authHeader,
       headers: input.headers,
       env: input.env,
-      cwd: input.cwd,
+    }),
+
+  updateMcpServer: (name: string, input: UpdateMcpServerInput): Promise<string> =>
+    invoke('update_mcp_server', {
+      name,
+      command: input.command ?? '',
+      args: input.args ?? [],
+      transport: input.transport,
+      endpoint: input.endpoint,
+      authHeader: input.authHeader,
+      headers: input.headers,
+      env: input.env,
     }),
 
   removeMcpServer: (name: string): Promise<string> =>

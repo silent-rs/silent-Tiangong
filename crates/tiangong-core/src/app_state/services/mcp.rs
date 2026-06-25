@@ -10,8 +10,7 @@ impl AppMcpService {
         state: &mut TiangongState,
         request: RegisterMcpServerRequest,
     ) -> Result<String> {
-        let name = request.name.trim();
-        let command = request.command.trim();
+        let name = request.name.trim().to_string();
         if name.is_empty() {
             return Err(anyhow!("MCP server 名称不能为空"));
         }
@@ -27,69 +26,8 @@ impl AppMcpService {
             return Err(anyhow!("MCP server 已存在：{name}"));
         }
 
-        let tags = request
-            .tags
-            .into_iter()
-            .map(|tag| tag.trim().to_string())
-            .filter(|tag| !tag.is_empty())
-            .collect::<Vec<_>>();
-        let args = request
-            .args
-            .into_iter()
-            .map(|arg| arg.trim().to_string())
-            .filter(|arg| !arg.is_empty())
-            .collect::<Vec<_>>();
-        let transport = request.options.transport.unwrap_or_default();
-        let endpoint = request
-            .options
-            .endpoint
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        let auth_header = request
-            .options
-            .auth_header
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        let cwd = request.options.cwd.unwrap_or_default().trim().to_string();
-
-        let headers = request
-            .options
-            .headers
-            .into_iter()
-            .filter_map(|(key, value)| {
-                let key = key.trim().to_string();
-                let value = value.trim().to_string();
-                if key.is_empty() || value.is_empty() {
-                    None
-                } else {
-                    Some((key, value))
-                }
-            })
-            .fold(BTreeMap::new(), |mut map, (key, value)| {
-                map.insert(key, value);
-                map
-            });
-        let env = request
-            .options
-            .env
-            .into_iter()
-            .filter_map(|(key, value)| {
-                let key = key.trim().to_string();
-                let value = value.trim().to_string();
-                if key.is_empty() || value.is_empty() {
-                    None
-                } else {
-                    Some((key, value))
-                }
-            })
-            .fold(BTreeMap::new(), |mut map, (key, value)| {
-                map.insert(key, value);
-                map
-            });
-
-        if command.is_empty() && endpoint.is_empty() && tags.is_empty() {
+        let fields = normalize_request_fields(request)?;
+        if fields.command.is_empty() && fields.endpoint.is_empty() && fields.tags.is_empty() {
             return Err(anyhow!("MCP server 需至少配置 command、endpoint 或 tags"));
         }
 
@@ -100,17 +38,16 @@ impl AppMcpService {
             .mcp
             .servers
             .push(McpServerConfig {
-                name: name.to_string(),
-                transport,
-                command: command.to_string(),
-                args,
-                endpoint,
-                auth_header,
-                headers,
-                env,
-                cwd,
-                enabled: request.enabled,
-                tags,
+                name: name.clone(),
+                transport: fields.transport,
+                command: fields.command,
+                args: fields.args,
+                endpoint: fields.endpoint,
+                auth_header: fields.auth_header,
+                headers: fields.headers,
+                env: fields.env,
+                enabled: fields.enabled,
+                tags: fields.tags,
             });
         validate_agent_config(&state.store.agent.agent_config)?;
         state.rebuild_runtime_for_agent_config();
@@ -118,11 +55,63 @@ impl AppMcpService {
         state.persist_agent_configs_only()?;
         audit::append_audit_log(&audit::AuditEntry::new(
             "mcp.register",
-            name,
+            &name,
             &format!("MCP server 已注册：{name}"),
             true,
         ));
         Ok(format!("MCP server 已注册：{name}"))
+    }
+
+    pub(in crate::app_state) fn update_mcp_server(
+        self,
+        state: &mut TiangongState,
+        name: &str,
+        request: RegisterMcpServerRequest,
+    ) -> Result<String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(anyhow!("MCP server 名称不能为空"));
+        }
+
+        let Some(server) = state
+            .store
+            .agent
+            .agent_config
+            .mcp
+            .servers
+            .iter_mut()
+            .find(|server| server.name == name)
+        else {
+            return Err(anyhow!("未找到 MCP server：{name}"));
+        };
+
+        let fields = normalize_request_fields(request)?;
+        if fields.command.is_empty() && fields.endpoint.is_empty() && fields.tags.is_empty() {
+            return Err(anyhow!("MCP server 需至少配置 command、endpoint 或 tags"));
+        }
+
+        // name 作为主键保持不变，就地更新其余字段。
+        // enabled 由列表里的开关单独控制，编辑表单不覆盖它。
+        server.transport = fields.transport;
+        server.command = fields.command;
+        server.args = fields.args;
+        server.endpoint = fields.endpoint;
+        server.auth_header = fields.auth_header;
+        server.headers = fields.headers;
+        server.env = fields.env;
+        server.tags = fields.tags;
+
+        validate_agent_config(&state.store.agent.agent_config)?;
+        state.rebuild_runtime_for_agent_config();
+        state.persist_app_only()?;
+        state.persist_agent_configs_only()?;
+        audit::append_audit_log(&audit::AuditEntry::new(
+            "mcp.update",
+            name,
+            &format!("MCP server 已更新：{name}"),
+            true,
+        ));
+        Ok(format!("MCP server 已更新：{name}"))
     }
 
     pub(in crate::app_state) fn remove_mcp_server(
@@ -266,4 +255,88 @@ impl AppMcpService {
 
         Ok(format!("配置已更新：{key}={updated_value}"))
     }
+}
+
+/// 规范化后的 MCP server 字段（不含 name，name 作为主键由调用方处理）。
+struct NormalizedMcpFields {
+    transport: McpTransportMode,
+    command: String,
+    args: Vec<String>,
+    endpoint: String,
+    auth_header: String,
+    headers: BTreeMap<String, String>,
+    env: BTreeMap<String, String>,
+    enabled: bool,
+    tags: Vec<String>,
+}
+
+/// 把注册/编辑请求规范化为可直接写入 McpServerConfig 的字段。
+/// register_mcp_server 与 update_mcp_server 共用，避免 trim/filter 逻辑重复。
+fn normalize_request_fields(request: RegisterMcpServerRequest) -> Result<NormalizedMcpFields> {
+    let tags = request
+        .tags
+        .into_iter()
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+        .collect::<Vec<_>>();
+    let args = request
+        .args
+        .into_iter()
+        .map(|arg| arg.trim().to_string())
+        .filter(|arg| !arg.is_empty())
+        .collect::<Vec<_>>();
+    let transport = request.options.transport.unwrap_or_default();
+    let endpoint = request
+        .options
+        .endpoint
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let auth_header = request
+        .options
+        .auth_header
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    let headers = request
+        .options
+        .headers
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let key = key.trim().to_string();
+            let value = value.trim().to_string();
+            if key.is_empty() || value.is_empty() {
+                None
+            } else {
+                Some((key, value))
+            }
+        })
+        .collect::<BTreeMap<_, _>>();
+    let env = request
+        .options
+        .env
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let key = key.trim().to_string();
+            let value = value.trim().to_string();
+            if key.is_empty() || value.is_empty() {
+                None
+            } else {
+                Some((key, value))
+            }
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    Ok(NormalizedMcpFields {
+        transport,
+        command: request.command.trim().to_string(),
+        args,
+        endpoint,
+        auth_header,
+        headers,
+        env,
+        enabled: request.enabled,
+        tags,
+    })
 }

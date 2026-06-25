@@ -55,6 +55,14 @@ function parseKeyValueText(value: string, label: string): Record<string, string>
   return Object.keys(entries).length > 0 ? entries : undefined;
 }
 
+/// parseKeyValueText 的逆函数：把 Record 格式化为 KEY=VALUE 文本，每行一条。
+function formatKeyValue(record?: Record<string, string>): string {
+  if (!record) return '';
+  return Object.entries(record)
+    .map(([key, value]) => `${key}=${value}`)
+    .join('\n');
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -1572,7 +1580,8 @@ function McpSettings() {
   const [servers, setServers] = useState<McpServer[]>([]);
   const [healthMap, setHealthMap] = useState<Record<string, { healthy: boolean; tool_count: number; last_error?: string; server_version?: string }>>({});
   const [isLoading, setIsLoading] = useState(false);
-  const [showAddDialog, setShowAddDialog] = useState(false);
+  const [serverModalMode, setServerModalMode] = useState<'add' | 'edit' | null>(null);
+  const [editingServerName, setEditingServerName] = useState<string | null>(null);
   const [newServer, setNewServer] = useState({
     name: '',
     transport: 'stdio' as McpTransportDraft,
@@ -1582,36 +1591,86 @@ function McpSettings() {
     authHeader: '',
     headers: '',
     env: '',
-    cwd: '',
   });
-  const [editEnvTarget, setEditEnvTarget] = useState<string | null>(null);
-  const [editEnvValues, setEditEnvValues] = useState<Record<string, string>>({});
   const { showSuccess, showError } = useToast();
 
+  // 立即拉取 server 列表（config 读，瞬时），不等待探测。健康状态单独异步更新。
   const loadServers = async () => {
     setIsLoading(true);
     try {
-      const [data, health] = await Promise.all([
-        api.getMcpServers(),
-        api.getMcpHealth(),
-      ]);
+      const data = await api.getMcpServers();
       setServers(data);
-      const map: typeof healthMap = {};
-      for (const s of health) {
-        map[s.name] = { healthy: s.healthy, tool_count: s.tool_count, last_error: s.last_error, server_version: s.server_version };
-      }
-      setHealthMap(map);
     } catch (error) {
       console.error('加载 MCP 服务器失败:', error);
       showError('加载失败', '无法加载 MCP 服务器列表');
     } finally {
       setIsLoading(false);
     }
+    // 健康状态异步刷新，不阻塞列表渲染
+    refreshHealth();
+  };
+
+  const refreshHealth = async () => {
+    try {
+      const health = await api.getMcpHealth();
+      const map: typeof healthMap = {};
+      for (const s of health) {
+        map[s.name] = { healthy: s.healthy, tool_count: s.tool_count, last_error: s.last_error, server_version: s.server_version };
+      }
+      setHealthMap(map);
+    } catch (error) {
+      console.error('加载 MCP 健康状态失败:', error);
+    }
+  };
+
+  // 探测单个 server 后刷新健康状态（用于添加/编辑/行内重试）
+  const probeServer = async (name: string) => {
+    try {
+      await api.probeMcpServer(name);
+    } catch (error) {
+      console.error('探测 MCP 服务器失败:', error);
+    } finally {
+      refreshHealth();
+    }
   };
 
   useEffect(() => {
     loadServers();
   }, []);
+
+  const resetDraft = () => {
+    setNewServer({
+      name: '',
+      transport: 'stdio',
+      command: '',
+      args: '',
+      endpoint: '',
+      authHeader: '',
+      headers: '',
+      env: '',
+    });
+  };
+
+  const closeServerModal = () => {
+    setServerModalMode(null);
+    setEditingServerName(null);
+    resetDraft();
+  };
+
+  const openEditServer = (server: McpServer) => {
+    setEditingServerName(server.name);
+    setNewServer({
+      name: server.name,
+      transport: (server.transport === 'http' ? 'http' : 'stdio') as McpTransportDraft,
+      command: server.command,
+      args: server.args.join(' '),
+      endpoint: server.endpoint,
+      authHeader: server.auth_header,
+      headers: formatKeyValue(server.headers),
+      env: formatKeyValue(server.env),
+    });
+    setServerModalMode('edit');
+  };
 
   const handleAddServer = async () => {
     try {
@@ -1623,7 +1682,6 @@ function McpSettings() {
             command: newServer.command.trim(),
             args: parseListArgs(newServer.args),
             env: parseKeyValueText(newServer.env, '环境变量'),
-            cwd: newServer.cwd.trim() || undefined,
           }
         : {
             name: newServer.name.trim(),
@@ -1636,23 +1694,50 @@ function McpSettings() {
           };
 
       await api.registerMcpServer(request);
-      setNewServer({
-        name: '',
-        transport: 'stdio',
-        command: '',
-        args: '',
-        endpoint: '',
-        authHeader: '',
-        headers: '',
-        env: '',
-        cwd: '',
-      });
-      setShowAddDialog(false);
       showSuccess('添加成功', `MCP 服务器 "${newServer.name}" 已添加`);
-      loadServers();
+      const addedName = newServer.name.trim();
+      closeServerModal();
+      await loadServers();
+      // 异步探测新 server，完成后刷新该行健康状态（不阻塞列表渲染）
+      probeServer(addedName);
     } catch (error) {
       console.error('添加 MCP 服务器失败:', error);
       showError('添加失败', errorMessage(error));
+    }
+  };
+
+  const handleUpdateServer = async () => {
+    if (!editingServerName) return;
+    try {
+      const isStdio = newServer.transport === 'stdio';
+      const request = isStdio
+        ? {
+            name: editingServerName,
+            transport: newServer.transport,
+            command: newServer.command.trim(),
+            args: parseListArgs(newServer.args),
+            env: parseKeyValueText(newServer.env, '环境变量'),
+          }
+        : {
+            name: editingServerName,
+            transport: newServer.transport,
+            command: '',
+            args: [],
+            endpoint: newServer.endpoint.trim(),
+            authHeader: newServer.authHeader.trim() || undefined,
+            headers: parseKeyValueText(newServer.headers, 'Header'),
+          };
+
+      await api.updateMcpServer(editingServerName, request);
+      showSuccess('保存成功', `MCP 服务器 "${editingServerName}" 已更新`);
+      const updatedName = editingServerName;
+      closeServerModal();
+      await loadServers();
+      // 编辑后重新探测该 server（配置可能影响握手）
+      probeServer(updatedName);
+    } catch (error) {
+      console.error('更新 MCP 服务器失败:', error);
+      showError('保存失败', errorMessage(error));
     }
   };
 
@@ -1678,16 +1763,33 @@ function McpSettings() {
     }
   };
 
+  // 刷新：对全部 server 并发重探，全部完成后统一读一次健康状态。真正重置探测状态。
+  const handleRefresh = async () => {
+    setIsLoading(true);
+    try {
+      const data = await api.getMcpServers();
+      setServers(data);
+      // 并发探测所有 server（后端单 server 探测互不阻塞）
+      await Promise.allSettled(data.map((s) => api.probeMcpServer(s.name)));
+      await refreshHealth();
+    } catch (error) {
+      console.error('刷新 MCP 服务器失败:', error);
+      showError('刷新失败', '无法刷新 MCP 服务器状态');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   return (
     <div className="p-4">
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-lg font-medium">MCP 服务器</h3>
         <div className="flex items-center gap-2">
-          <Button size="sm" variant="outline" onClick={loadServers}>
+          <Button size="sm" variant="outline" onClick={handleRefresh}>
             <RefreshCw className="w-4 h-4 mr-2" />
             刷新
           </Button>
-          <Button size="sm" onClick={() => setShowAddDialog(true)}>
+          <Button size="sm" onClick={() => { resetDraft(); setServerModalMode('add'); }}>
             <Plus className="w-4 h-4 mr-2" />
             添加服务器
           </Button>
@@ -1746,20 +1848,26 @@ function McpSettings() {
                   )}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
-                  {!isRemote && (
+                  {server.enabled && hasHealth && !isHealthy && (
                     <Button
                       variant="ghost"
                       size="icon"
                       className="h-8 w-8"
-                      onClick={() => {
-                        setEditEnvTarget(server.name);
-                        setEditEnvValues(server.env || {});
-                      }}
-                      title="编辑环境变量"
+                      onClick={() => probeServer(server.name)}
+                      title="重新探测"
                     >
-                      <KeyRound className="w-4 h-4" />
+                      <RefreshCw className="w-4 h-4" />
                     </Button>
                   )}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8"
+                    onClick={() => openEditServer(server)}
+                    title="编辑配置"
+                  >
+                    <Edit2 className="w-4 h-4" />
+                  </Button>
                   <Switch
                     checked={server.enabled}
                     onCheckedChange={(checked) => handleToggleEnabled(server.name, checked)}
@@ -1781,34 +1889,16 @@ function McpSettings() {
         </div>
       )}
 
-      {/* MCP 环境变量编辑 */}
-      <EnvEditDialog
-        open={editEnvTarget !== null}
-        title={`编辑环境变量: ${editEnvTarget}`}
-        values={editEnvValues}
-        onChange={setEditEnvValues}
-        onSave={async () => {
-          if (!editEnvTarget) return;
-          try {
-            // MCP env 通过注册接口更新（重新注册同名服务器）
-            // 简单方案：先删后加会丢配置，这里直接修改 mcp.json
-            // TODO: 添加专门的 update_mcp_env 命令
-            showSuccess('环境变量已保存', `MCP "${editEnvTarget}" 的环境变量已更新`);
-            setEditEnvTarget(null);
-            loadServers();
-          } catch (error) {
-            showError('保存失败', `${error}`);
-          }
-        }}
-        onCancel={() => setEditEnvTarget(null)}
-      />
-
-      {/* 添加服务器对话框 */}
-      {showAddDialog && (
+      {/* 添加/编辑服务器对话框 */}
+      {serverModalMode !== null && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
           <Card className="max-w-md w-full mx-4">
             <CardContent className="p-6">
-              <h3 className="text-lg font-medium mb-4">添加 MCP 服务器</h3>
+              <h3 className="text-lg font-medium mb-4">
+                {serverModalMode === 'add'
+                  ? '添加 MCP 服务器'
+                  : `编辑 MCP 服务器: ${editingServerName}`}
+              </h3>
               <div className="space-y-4">
                 <div>
                   <Label htmlFor="serverName">名称</Label>
@@ -1817,6 +1907,7 @@ function McpSettings() {
                     value={newServer.name}
                     onChange={(e) => setNewServer({ ...newServer, name: e.target.value })}
                     placeholder="my-mcp-server"
+                    disabled={serverModalMode === 'edit'}
                   />
                 </div>
                 <div>
@@ -1864,15 +1955,6 @@ function McpSettings() {
                         rows={3}
                       />
                     </div>
-                    <div>
-                      <Label htmlFor="serverCwd">工作目录</Label>
-                      <Input
-                        id="serverCwd"
-                        value={newServer.cwd}
-                        onChange={(e) => setNewServer({ ...newServer, cwd: e.target.value })}
-                        placeholder="/path/to/workspace"
-                      />
-                    </div>
                   </>
                 ) : (
                   <>
@@ -1908,19 +1990,19 @@ function McpSettings() {
                 )}
               </div>
               <div className="flex justify-end gap-2 mt-6">
-                <Button variant="ghost" onClick={() => setShowAddDialog(false)}>
+                <Button variant="ghost" onClick={closeServerModal}>
                   取消
                 </Button>
                 <Button
-                  onClick={handleAddServer}
+                  onClick={serverModalMode === 'add' ? handleAddServer : handleUpdateServer}
                   disabled={
-                    !newServer.name.trim()
+                    (serverModalMode === 'add' && !newServer.name.trim())
                     || (newServer.transport === 'stdio'
                       ? !newServer.command.trim()
                       : !newServer.endpoint.trim())
                   }
                 >
-                  添加
+                  {serverModalMode === 'add' ? '添加' : '保存'}
                 </Button>
               </div>
             </CardContent>
