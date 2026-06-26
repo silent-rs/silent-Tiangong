@@ -18,7 +18,12 @@ use crate::runtime::{RuntimeEngine, inject_enhanced_tools};
 use crate::session::{Message, MessageRole, Session};
 use tiangong_types::{SessionStreamEvent, StreamEvent};
 
-const MAX_TOOL_ROUNDS: usize = 15;
+/// 单次工具执行阶段（ReAct Loop 内层）的最大轮次。
+///
+/// 30 轮：review 类多步骤任务（连续读取多个文件做审查）在 15 轮时容易触顶，
+/// 过早进入总结阶段。30 轮给复杂任务更多空间；触顶后仍走与正常完成相同的总结
+/// 路径（由模型自行判断完成度），无需特殊触顶逻辑。
+const MAX_TOOL_ROUNDS: usize = 30;
 /// 总结阶段后重新进入工具执行阶段的最大次数。
 const MAX_OUTER_ITERATIONS: u32 = 3;
 

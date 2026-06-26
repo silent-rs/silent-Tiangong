@@ -23,7 +23,7 @@ use crate::permission::{
 };
 use crate::react::context::{
     ForceFinalReason, emit_token_usage, force_final_response, maybe_update_context_summary,
-    request_for_summary_phase, select_client_for_request,
+    persist_error, request_for_summary_phase, select_client_for_request,
 };
 use crate::react::message::*;
 use crate::runtime::LlmOutputRecord;
@@ -1066,7 +1066,11 @@ impl ReactEngine {
                                 continue 'react_loop;
                             }
                         }
-                        let _ = stream_tx.send(StreamEvent::Error { message: err_msg });
+                        let _ = stream_tx.send(StreamEvent::Error {
+                            message: err_msg.clone(),
+                        });
+                        // 持久化错误到 session，避免前端 Error 事件时序丢失导致中断无痕迹。
+                        persist_error(session, format!("ReAct 循环请求失败：{err_msg}"));
                         return accumulated_usage;
                     }
                 };
@@ -1146,9 +1150,11 @@ impl ReactEngine {
                 // 工具调用
                 let executable_calls = response.tool_calls.iter().collect::<Vec<_>>();
                 if executable_calls.is_empty() {
+                    let msg = "模型没有返回可执行工具调用，任务已停止".to_string();
                     let _ = stream_tx.send(StreamEvent::Error {
-                        message: "模型没有返回可执行工具调用，任务已停止".to_string(),
+                        message: msg.clone(),
                     });
+                    persist_error(session, msg);
                     return accumulated_usage;
                 }
                 let tool_names: Vec<String> =
@@ -1967,6 +1973,7 @@ impl ReactEngine {
                     let _ = stream_tx.send(StreamEvent::Error {
                         message: format!("总结阶段失败：{message}"),
                     });
+                    persist_error(session, format!("总结阶段失败：{message}"));
                     force_final_response(
                         session,
                         &self.engine,
@@ -2464,20 +2471,21 @@ impl ReactEngine {
         // 处理结果
         for (agent_id, agent_label, _agent_role, child_session, _output_messages, usage) in results
         {
-            // 检查 Sub Agent 是否有错误输出
-            let has_error = child_session
-                .messages
-                .iter()
-                .any(|m| m.role == MessageRole::System && m.text_content().starts_with("[错误]"));
+            // 检查 Sub Agent 是否有错误输出。
+            // 错误由 persist_error 经 inject_tool_to_messages 注入（plugin_injection
+            // 消息对，渲染文本含 "数据来源：react_loop_error"）。
+            let is_error_message = |m: &Message| {
+                m.tool_name.as_deref() == Some(crate::react::message::INJECTION_TOOL_NAME)
+                    && m.text_content().contains("数据来源：react_loop_error")
+            };
+            let has_error = child_session.messages.iter().any(is_error_message);
 
             let completion_content = if has_error {
                 let error_content = child_session
                     .messages
                     .iter()
-                    .filter(|m| {
-                        m.role == MessageRole::System && m.text_content().starts_with("[错误]")
-                    })
-                    .map(|m| m.text_content().replace("[错误] ", ""))
+                    .filter(|m: &&Message| is_error_message(m))
+                    .map(|m| m.text_content())
                     .collect::<Vec<_>>()
                     .join("; ");
                 format!("[{agent_label}] 执行出错：{error_content}")

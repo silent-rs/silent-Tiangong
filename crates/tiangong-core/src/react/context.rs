@@ -226,6 +226,28 @@ impl ForceFinalReason {
     }
 }
 
+/// 将错误持久化到 session，作为 LLM 请求失败时的诊断痕迹。
+///
+/// 复用 `inject_tool_to_messages` 统一注入通道（合法的 assistant tool_call + tool result
+/// 消息对），而非手工追加消息：
+/// - 避免使用 `MessageRole::System`——它会被 `build_provider_messages` 的
+///   `system_texts.clear()` 覆盖整个 system prompt，污染 prompt 并破坏 KV cache 前缀；
+/// - 走标准注入通道保证 append-only、provider 序列化为合法 tool pair，cache 友好。
+///
+/// 去重边界：`inject_tool_to_messages` 仅对连续相同的 plugin_injection 结果去重，
+/// 不会与前端 `StreamEvent::Error` 落盘的 `[错误]` System 消息跨格式去重——因此
+/// 前端若也落盘，UI 上仍可能出现重复错误消息。engine 侧落盘作为前端时序丢失的
+/// 兜底，确保会话重载后至少能看到失败原因。
+pub(crate) fn persist_error(session: &mut Session, message: impl Into<String>) {
+    let message = message.into();
+    let payload = serde_json::json!({
+        "error": message,
+        "instruction": "上一步执行失败，请基于已有结果继续或向用户说明原因。",
+    });
+    crate::react::message::inject_tool_to_messages(session, "react_loop_error", &payload);
+    session.persist_to_disk();
+}
+
 /// 超限时强制最终回复
 pub(crate) fn force_final_response(
     session: &mut Session,
@@ -290,6 +312,7 @@ pub(crate) fn force_final_response(
                 let _ = stream_tx.send(StreamEvent::Error {
                     message: err.to_string(),
                 });
+                persist_error(session, format!("force_final_response（流式）失败：{err}"));
                 return;
             }
         }
@@ -315,6 +338,10 @@ pub(crate) fn force_final_response(
                 let _ = stream_tx.send(StreamEvent::Error {
                     message: err.to_string(),
                 });
+                persist_error(
+                    session,
+                    format!("force_final_response（非流式）失败：{err}"),
+                );
                 return;
             }
         }
