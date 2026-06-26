@@ -2471,19 +2471,22 @@ impl ReactEngine {
         // 处理结果
         for (agent_id, agent_label, _agent_role, child_session, _output_messages, usage) in results
         {
-            // 检查 Sub Agent 是否有错误输出
-            let has_error = child_session
-                .messages
-                .iter()
-                .any(|m| m.role == MessageRole::System && m.text_content().starts_with("[错误]"));
+            // 检查 Sub Agent 是否有错误输出。
+            // 错误由 persist_error 经 inject_tool_to_messages 注入（plugin_injection 消息对，
+            // 渲染文本含 "数据来源：react_loop_error"）；兼容历史 System 角色 [错误] 消息。
+            let is_error_message = |m: &Message| {
+                let text = m.text_content();
+                (m.tool_name.as_deref() == Some(crate::react::message::INJECTION_TOOL_NAME)
+                    && text.contains("数据来源：react_loop_error"))
+                    || (m.role == MessageRole::System && text.starts_with("[错误]"))
+            };
+            let has_error = child_session.messages.iter().any(is_error_message);
 
             let completion_content = if has_error {
                 let error_content = child_session
                     .messages
                     .iter()
-                    .filter(|m| {
-                        m.role == MessageRole::System && m.text_content().starts_with("[错误]")
-                    })
+                    .filter(|m: &&Message| is_error_message(m))
                     .map(|m| m.text_content().replace("[错误] ", ""))
                     .collect::<Vec<_>>()
                     .join("; ");
