@@ -232,10 +232,12 @@ impl ForceFinalReason {
 /// 消息对），而非手工追加消息：
 /// - 避免使用 `MessageRole::System`——它会被 `build_provider_messages` 的
 ///   `system_texts.clear()` 覆盖整个 system prompt，污染 prompt 并破坏 KV cache 前缀；
-/// - 走标准注入通道保证 append-only、去重、provider 序列化为合法 tool pair，cache 友好。
+/// - 走标准注入通道保证 append-only、provider 序列化为合法 tool pair，cache 友好。
 ///
-/// 前端 `StreamEvent::Error` 也会落盘 `[错误]` 消息，`inject_tool_to_messages` 内置
-/// 去重（与上一条 plugin_injection 渲染文本相同则跳过），避免重复。
+/// 去重边界：`inject_tool_to_messages` 仅对连续相同的 plugin_injection 结果去重，
+/// 不会与前端 `StreamEvent::Error` 落盘的 `[错误]` System 消息跨格式去重——因此
+/// 前端若也落盘，UI 上仍可能出现重复错误消息。engine 侧落盘作为前端时序丢失的
+/// 兜底，确保会话重载后至少能看到失败原因。
 pub(crate) fn persist_error(session: &mut Session, message: impl Into<String>) {
     let message = message.into();
     let payload = serde_json::json!({
