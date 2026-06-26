@@ -487,6 +487,9 @@ export const api = {
   deleteSession: (): Promise<void> =>
     invoke('delete_session'),
 
+  deleteSessionsByCwd: (cwd: string): Promise<void> =>
+    invoke('delete_sessions_by_cwd', { cwd }),
+
   updateSessionTitle: (title: string): Promise<void> =>
     invoke('update_session_title', { title }),
 

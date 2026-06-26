@@ -214,6 +214,7 @@ interface AppState {
   createSession: (targetCwd?: string) => void;
   switchSession: (id: string) => Promise<void>;
   deleteSession: () => Promise<void>;
+  deleteSessionsByCwd: (cwd: string) => Promise<void>;
 
   sendMessage: (content: string, media?: MediaAsset[]) => Promise<void>;
   editAndResend: (messageId: string, newContent: string, media?: MediaAsset[]) => Promise<void>;
@@ -430,6 +431,37 @@ export const useStore = create<AppState>((set, get) => ({
       });
     } catch (error) {
       console.error('删除会话失败:', error);
+    }
+  },
+
+  // 删除指定 workspace（cwd）下的所有会话
+  deleteSessionsByCwd: async (cwd: string) => {
+    try {
+      await api.deleteSessionsByCwd(cwd);
+      const sessions = await api.getSessions();
+      const snapshot = await api.getRunSnapshot();
+      const [sessionCwd] = await Promise.all([api.getSessionCwd()]);
+
+      set({
+        sessions,
+        isDraft: false,
+        activeSessionId: snapshot.messages.length > 0 ? snapshot.messages[0].id : null,
+        draftTerminalId: null,
+        workspaceTabsTransfer: null,
+        messages: snapshot.messages,
+        inputContent: snapshot.input_draft,
+        runStatus: snapshot.status,
+        runSummary: snapshot.summary || '',
+        lastDurationMs: snapshot.last_duration_ms ?? null,
+        lastUsage: snapshot.last_usage ?? null,
+        tokenStats: snapshot.token_stats ?? null,
+        approvalRequestId: snapshot.approval_request_id || null,
+        sessionCwd,
+        agents: parseAgentsFromMessages(snapshot.messages),
+        selectedAgentTab: null,
+      });
+    } catch (error) {
+      console.error('删除 workspace 会话失败:', error);
     }
   },
 

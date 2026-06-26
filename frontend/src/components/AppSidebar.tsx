@@ -2,7 +2,14 @@ import { useStore } from '@/store/useStore';
 import { Button } from './ui/button';
 import { ScrollArea } from './ui/scroll-area';
 import { useSidebar } from './ui/sidebar';
-import { Plus, Trash2, ChevronRight, ChevronDown, Folder } from 'lucide-react';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from './ui/context-menu';
+import { Plus, Trash2, ChevronRight, ChevronDown, Folder, FilePlus2, FolderX } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { SettingsDialog } from './SettingsDialog';
 import type { Session } from '@/api/tauri';
@@ -87,12 +94,15 @@ export function AppSidebar() {
     createSession,
     switchSession,
     deleteSession,
+    deleteSessionsByCwd,
     isLoadingSessions,
     workspaceDir,
   } = useStore();
 
   const { open } = useSidebar();
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  // 待删除的 workspace 分组（cwd + 显示名），null 表示无待删除
+  const [pendingDeleteWorkspace, setPendingDeleteWorkspace] = useState<{ cwd: string; label: string; count: number } | null>(null);
   // 每个分组的展开状态：默认收缩（只显示最近 COLLAPSED_LIMIT 个）；true=展开显示全部
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
@@ -116,6 +126,13 @@ export function AppSidebar() {
   const handleDeleteSession = async () => {
     await deleteSession();
     setShowDeleteConfirm(false);
+  };
+
+  const handleDeleteWorkspace = async () => {
+    if (!pendingDeleteWorkspace) return;
+    const { cwd } = pendingDeleteWorkspace;
+    setPendingDeleteWorkspace(null);
+    await deleteSessionsByCwd(cwd);
   };
 
   const renderSessionItem = (session: Session) => {
@@ -182,46 +199,74 @@ export function AppSidebar() {
       );
     }
 
-    // 非默认分组：显示分组头 + 会话列表
+    // 非默认分组：显示分组头 + 会话列表，整组支持右键菜单
     return (
-      <div key={group.key} className="space-y-1">
-        <div className="flex items-center gap-1 group">
-          <button
-            className="flex-1 flex items-center gap-1.5 px-2 py-1.5 rounded-md text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors min-w-0"
-            onClick={() => canCollapse && toggleGroup(group.key)}
-            title={group.fullPath}
-            disabled={!canCollapse}
-          >
-            {isExpanded ? (
-              <ChevronDown className="w-3 h-3 shrink-0" />
-            ) : (
-              <ChevronRight className="w-3 h-3 shrink-0" />
+      <ContextMenu key={group.key}>
+        <ContextMenuTrigger asChild>
+          <div className="space-y-1">
+            <div className="flex items-center gap-1 group">
+              <button
+                className="flex-1 flex items-center gap-1.5 px-2 py-1.5 rounded-md text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors min-w-0"
+                onClick={() => canCollapse && toggleGroup(group.key)}
+                title={group.fullPath}
+                disabled={!canCollapse}
+              >
+                {isExpanded ? (
+                  <ChevronDown className="w-3 h-3 shrink-0" />
+                ) : (
+                  <ChevronRight className="w-3 h-3 shrink-0" />
+                )}
+                <Folder className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">{group.label}</span>
+                <span className="text-muted-foreground/70 shrink-0">{group.sessions.length}</span>
+              </button>
+              <button
+                className="p-1 rounded text-muted-foreground opacity-0 group-hover:opacity-100 hover:text-foreground hover:bg-sidebar-accent/50 transition-opacity shrink-0"
+                onClick={() => !isSending && createSession(group.fullPath)}
+                disabled={isSending}
+                title="在此 workspace 下新建对话"
+              >
+                <Plus className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <div className="space-y-1 pl-1">
+              {visibleItems.map(renderSessionItem)}
+            </div>
+            {canCollapse && (
+              <button
+                className="w-full text-left px-3 py-1.5 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors"
+                onClick={() => toggleGroup(group.key)}
+              >
+                {isExpanded ? '收起' : `显示全部 (${group.sessions.length})`}
+              </button>
             )}
-            <Folder className="w-3.5 h-3.5 shrink-0" />
-            <span className="truncate">{group.label}</span>
-            <span className="text-muted-foreground/70 shrink-0">{group.sessions.length}</span>
-          </button>
-          <button
-            className="p-1 rounded text-muted-foreground opacity-0 group-hover:opacity-100 hover:text-foreground hover:bg-sidebar-accent/50 transition-opacity shrink-0"
-            onClick={() => !isSending && createSession(group.fullPath)}
+          </div>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          <ContextMenuItem
             disabled={isSending}
-            title="在此 workspace 下新建对话"
+            onSelect={() => createSession(group.fullPath)}
           >
-            <Plus className="w-3.5 h-3.5" />
-          </button>
-        </div>
-        <div className="space-y-1 pl-1">
-          {visibleItems.map(renderSessionItem)}
-        </div>
-        {canCollapse && (
-          <button
-            className="w-full text-left px-3 py-1.5 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors"
-            onClick={() => toggleGroup(group.key)}
+            <FilePlus2 className="w-4 h-4 mr-2" />
+            新对话
+          </ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem
+            disabled={isSending}
+            className="text-destructive focus:text-destructive"
+            onSelect={() =>
+              setPendingDeleteWorkspace({
+                cwd: group.fullPath,
+                label: group.label,
+                count: group.sessions.length,
+              })
+            }
           >
-            {isExpanded ? '收起' : `显示全部 (${group.sessions.length})`}
-          </button>
-        )}
-      </div>
+            <FolderX className="w-4 h-4 mr-2" />
+            删除 workspace（{group.sessions.length} 个对话）
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
     );
   };
 
@@ -277,6 +322,26 @@ export function AppSidebar() {
     </div>
   );
 
+  const deleteWorkspaceConfirm = pendingDeleteWorkspace && (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50">
+      <div className="bg-popover border rounded-lg p-4 max-w-sm w-full mx-4">
+        <h3 className="font-medium mb-2">删除 workspace</h3>
+        <p className="text-muted-foreground text-sm mb-4">
+          将删除 workspace「<span className="font-mono text-foreground">{pendingDeleteWorkspace.label}</span>
+          」下的全部 {pendingDeleteWorkspace.count} 个对话。此操作无法撤销。
+        </p>
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" onClick={() => setPendingDeleteWorkspace(null)}>
+            取消
+          </Button>
+          <Button variant="destructive" onClick={handleDeleteWorkspace}>
+            删除全部
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+
   return (
     <aside
       className="shrink-0 min-h-0 border-r bg-sidebar text-sidebar-foreground flex flex-col overflow-hidden transition-[width] duration-200 ease-linear"
@@ -284,6 +349,7 @@ export function AppSidebar() {
     >
       {content}
       {deleteConfirm}
+      {deleteWorkspaceConfirm}
     </aside>
   );
 }
