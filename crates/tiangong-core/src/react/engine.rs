@@ -533,9 +533,13 @@ impl ReactEngine {
             tokio_mpsc::unbounded_channel::<crate::model::ModelStreamChunk>();
         let client = select_client_for_request(&self.engine, &req).clone();
         let req_clone = req.clone();
+        // 传与 ReAct 阶段相同的 tools schema（按相同 intent 过滤），保持 KV cache
+        // 前缀一致；不传 tools 会导致 tools 段缺失，从该位置起 cache miss。
+        // 模型不会真正调用工具——SUMMARY_PHASE_PROMPT 已指示只输出文本回复。
+        let summary_tools = tools_for_current_turn(&self.tools, session, "");
         let mut llm_fut = Some(tokio::task::spawn(async move {
             client
-                .stream_function_calls_with_tool_choice(req_clone, Vec::new(), None, chunk_tx)
+                .stream_function_calls_with_tool_choice(req_clone, summary_tools, None, chunk_tx)
                 .await
         }));
         let mut streaming_usage = tiangong_types::TokenUsage::default();
@@ -1934,16 +1938,17 @@ impl ReactEngine {
                         return accumulated_usage;
                     }
                     // 注入"上轮总结判定未完成"的上下文，重新进入工具执行阶段。
-                    let mut reminder = Message::new(
-                        MessageRole::Tool,
-                        format!(
-                            "<system-reminder>上轮总结判定任务未完成，原因：{}。请继续执行。</system-reminder>",
-                            reason.trim()
-                        ),
+                    // 必须用合法的 tool injection pair（assistant tool_call + tool result），
+                    // 而非孤立的 Tool 消息——后者破坏 OpenAI/DeepSeek 消息协议，
+                    // 也会因非 append-only 的协议异常破坏 KV cache 前缀命中。
+                    crate::react::message::inject_tool_to_messages(
+                        session,
+                        "summary_need_more_work",
+                        &serde_json::json!({
+                            "reason": reason.trim(),
+                            "instruction": "上轮总结判定任务未完成，请根据原因继续执行剩余工作。",
+                        }),
                     );
-                    reminder.tool_name = Some("summary_need_more_work".to_string());
-                    reminder.phase = crate::session::MessagePhase::React;
-                    session.messages.push(reminder);
                     session.persist_to_disk();
                     memory_recall_attempted = false;
                     successful_tool_call_keys.clear();

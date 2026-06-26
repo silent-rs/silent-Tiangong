@@ -39,12 +39,36 @@ pub(crate) fn emit_token_usage(
     if usage.total_tokens == 0 {
         return;
     }
+    let source = source.into();
+    // 按 source（阶段）记录 KV cache 命中率，便于实测 ReAct/Summary 各阶段命中情况。
+    // hit_ratio = hit / (hit + miss)，仅当 DeepSeek 返回了 cache 字段时记录。
+    if let (Some(hit), Some(miss)) = (
+        usage.prompt_cache_hit_tokens,
+        usage.prompt_cache_miss_tokens,
+    ) {
+        let total = hit + miss;
+        let ratio = if total > 0 {
+            hit as f64 / total as f64
+        } else {
+            0.0
+        };
+        tracing::info!(
+            source = %source,
+            agent_id = ?agent_id,
+            prompt_tokens = usage.prompt_tokens,
+            completion_tokens = usage.completion_tokens,
+            prompt_cache_hit_tokens = hit,
+            prompt_cache_miss_tokens = miss,
+            cache_hit_ratio = format!("{:.2}%", ratio * 100.0),
+            "kv cache 命中统计",
+        );
+    }
     let _ = stream_tx.send(StreamEvent::TokenUsage {
         usage: usage.clone(),
         current_tokens,
         compression_threshold_tokens: Some(compression_threshold_tokens(context_limit)),
         context_limit_tokens: Some(context_limit),
-        source: source.into(),
+        source,
         agent_id: agent_id.map(|s| s.to_string()),
     });
 }

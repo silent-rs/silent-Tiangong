@@ -52,6 +52,54 @@ fn token_usage_accumulate() {
 }
 
 #[test]
+fn token_usage_accumulate_cache_fields() {
+    // 双方都有 cache 值 → 相加
+    let mut a = TokenUsage {
+        prompt_tokens: 100,
+        completion_tokens: 50,
+        total_tokens: 150,
+        prompt_cache_hit_tokens: Some(80),
+        prompt_cache_miss_tokens: Some(20),
+    };
+    let b = TokenUsage {
+        prompt_tokens: 200,
+        completion_tokens: 100,
+        total_tokens: 300,
+        prompt_cache_hit_tokens: Some(60),
+        prompt_cache_miss_tokens: Some(40),
+    };
+    a.accumulate(&b);
+    assert_eq!(a.prompt_cache_hit_tokens, Some(140));
+    assert_eq!(a.prompt_cache_miss_tokens, Some(60));
+
+    // 自身为 None、对方为 Some → 取对方值（修复前的 bug：会被丢弃）
+    let mut c = TokenUsage {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+        prompt_cache_hit_tokens: None,
+        prompt_cache_miss_tokens: None,
+    };
+    let d = TokenUsage {
+        prompt_tokens: 100,
+        completion_tokens: 0,
+        total_tokens: 100,
+        prompt_cache_hit_tokens: Some(90),
+        prompt_cache_miss_tokens: Some(10),
+    };
+    c.accumulate(&d);
+    assert_eq!(c.prompt_cache_hit_tokens, Some(90), "None+Some 应取对方值");
+    assert_eq!(c.prompt_cache_miss_tokens, Some(10), "None+Some 应取对方值");
+
+    // 双方都为 None → 仍为 None
+    let mut e = TokenUsage::default();
+    let f = TokenUsage::default();
+    e.accumulate(&f);
+    assert_eq!(e.prompt_cache_hit_tokens, None);
+    assert_eq!(e.prompt_cache_miss_tokens, None);
+}
+
+#[test]
 fn run_status_serde() {
     let json = serde_json::to_string(&RunStatus::Executing).unwrap();
     assert_eq!(json, r#""executing""#);
