@@ -20,6 +20,7 @@ import {
   parseAgentReply,
   displayTextContent,
   stripSummaryStatusMarker,
+  isNeedMoreWorkMessage,
 } from "./utils";
 import type { MessageItem } from "./types";
 import { useExpansionState } from "./useExpansionState";
@@ -119,6 +120,15 @@ function AgentTurnView({
       if (!isStreaming && assistantReasoning && !shownReasonings.has(assistantReasoning)) {
         shownReasonings.add(assistantReasoning);
         fragments.push({ type: "thinking", content: assistantReasoning, time: msg.created_at });
+      }
+      // 总结阶段判定"任务未完成、需重入 Loop"的回复（[NEED_MORE_WORK] 标头）：
+      // 前端作为思考过程展示，剥除标头，不作为最终回复正文。
+      if (isNeedMoreWorkMessage(msg)) {
+        const needMoreWorkBody = stripSummaryStatusMarker(textContent(msg)).trim();
+        if (needMoreWorkBody || isStreaming) {
+          fragments.push({ type: "thinking", content: needMoreWorkBody, time: msg.created_at });
+        }
+        continue;
       }
       fragments.push({ type: "assistant", msg, isStreaming });
     } else if (msg.role === "system" && textContent(msg).startsWith("[错误]")) {
