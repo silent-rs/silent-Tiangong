@@ -6,6 +6,7 @@ import { useStore } from "@/store/useStore";
 import { findTextOccurrences } from "@/utils/search";
 import { HighlightText } from "../HighlightText";
 import { ThinkingBlock } from "../ThinkingBlock";
+import { AgentReplyCard } from "./AgentReplyCard";
 import { useResolvedTheme } from "@/hooks/useTheme";
 import { textContent } from "@/api/tauri";
 import {
@@ -191,20 +192,17 @@ function AgentTurnView({
           const visibleStreamingContent = msg.phase === "summary" ? stripSummaryStatusMarker(streamingContent) : streamingContent;
           const agentReply = !isStreaming ? parseAgentReply(visibleText) : null;
           if (agentReply) {
+            // Sub Agent 汇报：默认折叠为一行摘要，点击展开完整正文。
+            // 搜索命中时强制展开，便于定位。
+            const hasSearchHit = !!searchQuery && findTextOccurrences(visibleText, searchQuery, caseSensitive).length > 0;
             return (
-              <div key={msg.id} className="text-foreground" title={formatMessageTime(msg.created_at)}>
-                <div className="inline-flex items-center gap-1.5 rounded-full border border-green-500/30 bg-green-500/10 px-2 py-0.5 text-xs font-medium text-green-700 dark:text-green-300 mb-1">
-                  <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
-                  {agentReply.label}
-                </div>
-                <div className="border-l-2 border-green-500/50 pl-3">
-                  {agentReply.body ? (
-                    searchQuery && findTextOccurrences(visibleText, searchQuery, caseSensitive).length > 0
-                      ? <div className="text-sm whitespace-pre-wrap break-words">{renderWithHighlight(msg.id, agentReply.body)}</div>
-                      : <MdPreview modelValue={resolveMarkdownImages(agentReply.body)} theme={resolvedTheme} previewTheme="github" />
-                  ) : null}
-                </div>
-                {agentReply.body && <MessageActions text={agentReply.body} showTts={hasTts} />}
+              <div key={msg.id} className="py-0.5">
+                <AgentReplyCard
+                  label={agentReply.label}
+                  body={hasSearchHit ? visibleText : agentReply.body}
+                  time={msg.created_at}
+                  defaultExpanded={hasSearchHit}
+                />
               </div>
             );
           }
