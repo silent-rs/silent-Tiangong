@@ -302,6 +302,7 @@ pub(crate) fn force_final_response(
                 let _ = stream_tx.send(StreamEvent::Error {
                     message: err.to_string(),
                 });
+                persist_error(session, format!("force_final_response（流式）失败：{err}"));
                 return;
             }
         }
@@ -327,6 +328,10 @@ pub(crate) fn force_final_response(
                 let _ = stream_tx.send(StreamEvent::Error {
                     message: err.to_string(),
                 });
+                persist_error(
+                    session,
+                    format!("force_final_response（非流式）失败：{err}"),
+                );
                 return;
             }
         }
