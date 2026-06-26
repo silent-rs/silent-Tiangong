@@ -18,7 +18,7 @@ use crate::runtime::{RuntimeEngine, inject_enhanced_tools};
 use crate::session::{Message, MessageRole, Session};
 use tiangong_types::{SessionStreamEvent, StreamEvent};
 
-const MAX_TOOL_ROUNDS: usize = 15;
+const MAX_TOOL_ROUNDS: usize = 30;
 /// 总结阶段后重新进入工具执行阶段的最大次数。
 const MAX_OUTER_ITERATIONS: u32 = 3;
 
