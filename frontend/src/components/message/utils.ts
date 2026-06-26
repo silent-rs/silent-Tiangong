@@ -26,6 +26,31 @@ export function msgReasoning(message: MessageItem): string {
   return message.reasoning_content.trim();
 }
 
+/** 总结阶段的状态标记，需在前端展示时剥离。 */
+const SUMMARY_STATUS_MARKERS = ["[DONE]", "[ASK_USER]", "[NEED_MORE_WORK]"];
+const NEED_MORE_WORK_MARKER = "[NEED_MORE_WORK]";
+
+/** 剥离总结阶段回复首行的状态标记（[DONE]/[ASK_USER]/[NEED_MORE_WORK]）。 */
+export function stripSummaryStatusMarker(text: string): string {
+  const trimmed = text.trimStart();
+  for (const marker of SUMMARY_STATUS_MARKERS) {
+    if (trimmed.slice(0, marker.length).toLowerCase() !== marker.toLowerCase()) continue;
+    return trimmed.slice(marker.length).replace(/^[\s:：-]+/, "");
+  }
+  return text;
+}
+
+/** 判断消息是否为总结阶段判定"任务未完成、需重入 Loop"的回复（带 [NEED_MORE_WORK] 标头）。 */
+export function isNeedMoreWorkMessage(message: MessageItem): boolean {
+  return textContent(message).trimStart().slice(0, NEED_MORE_WORK_MARKER.length).toLowerCase() === NEED_MORE_WORK_MARKER.toLowerCase();
+}
+
+/** 获取消息的可展示文本：总结阶段消息去掉状态标记，其余原样返回。 */
+export function displayTextContent(message: MessageItem): string {
+  const content = textContent(message);
+  return message.phase === "summary" ? stripSummaryStatusMarker(content) : content;
+}
+
 export function resolveAssetUrl(url: string): string {
   if (!url) return "";
   if (url.startsWith("http://") || url.startsWith("https://") || url.startsWith("asset://")) {

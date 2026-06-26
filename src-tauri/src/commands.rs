@@ -824,7 +824,10 @@ pub(crate) fn start_stream_consumer(
             if cancel_flag.load(Ordering::Acquire)
                 && matches!(
                     event,
-                    StreamEvent::Delta { .. } | StreamEvent::Reasoning { .. }
+                    StreamEvent::Delta { .. }
+                        | StreamEvent::ReactText { .. }
+                        | StreamEvent::SummaryText { .. }
+                        | StreamEvent::Reasoning { .. }
                 )
             {
                 continue;
@@ -869,6 +872,14 @@ pub(crate) fn start_stream_consumer(
                             }
                         }
                         StreamEvent::Delta {
+                            message_id,
+                            content,
+                        }
+                        | StreamEvent::ReactText {
+                            message_id,
+                            content,
+                        }
+                        | StreamEvent::SummaryText {
                             message_id,
                             content,
                         } => {
@@ -1115,53 +1126,17 @@ pub(crate) fn start_stream_consumer(
                             ref agent_label,
                             ref messages,
                         } => {
-                            let worker_id = format!("agent:{agent_role}:{agent_id}");
-                            let header = format!("🔧 Worker: {agent_label} (@{agent_role})");
-                            if !session.messages.iter().any(|message| {
-                                message.worker_id.as_deref() == Some(worker_id.as_str())
-                                    && message.text_content() == header
-                            }) {
-                                session.append_worker_message(
-                                    tiangong_core::session::MessageRole::System,
-                                    header,
-                                    &worker_id,
-                                );
-                            }
-                            for message in messages {
-                                let role = match message.role {
-                                    tiangong_core::session::MessageRole::Assistant => {
-                                        tiangong_core::session::MessageRole::Assistant
-                                    }
-                                    tiangong_core::session::MessageRole::System
-                                    | tiangong_core::session::MessageRole::Tool => {
-                                        tiangong_core::session::MessageRole::System
-                                    }
-                                    tiangong_core::session::MessageRole::User => {
-                                        tiangong_core::session::MessageRole::User
-                                    }
-                                };
-
-                                if let Some(existing) = session.messages.iter_mut().find(|item| {
-                                    item.id == message.id
-                                        && item.worker_id.as_deref() == Some(worker_id.as_str())
-                                }) {
-                                    if role == tiangong_core::session::MessageRole::Assistant {
-                                        for block in &message.content {
-                                            existing.content.push(block.clone());
-                                        }
-                                        existing
-                                            .reasoning_content
-                                            .push_str(&message.reasoning_content);
-                                    }
-                                    continue;
-                                }
-
-                                let mut worker_message = message.clone();
-                                worker_message.role = role;
-                                worker_message.worker_id = Some(worker_id.clone());
-                                session.messages.push(worker_message);
-                                session.updated_at = tiangong_core::session::now_text();
-                            }
+                            // Sub Agent 的内部对话（工具调用、过程文本、中间推理）不写入主对话，
+                            // 主对话只保留与 Sub Agent 的交互摘要：创建/状态变更（[Agent] 系统
+                            // 消息）和最终汇报（AgentMessage → agent-reply）。这里仅记录 tracing，
+                            // 供调试排查，不再 append_worker_message 到 session.messages。
+                            let _ = (agent_id, agent_role, agent_label);
+                            tracing::debug!(
+                                agent_id = %agent_id,
+                                agent_label = %agent_label,
+                                message_count = messages.len(),
+                                "sub agent internal output suppressed from main session",
+                            );
                         }
                         StreamEvent::FileLockChanged {
                             ref path,
@@ -1284,9 +1259,12 @@ pub(crate) fn start_stream_consumer(
                     StreamEvent::Reasoning { .. } => {
                         core_state.store.runtime.run.summary = "正在思考...".to_string();
                     }
-                    StreamEvent::Delta { .. } => {
+                    StreamEvent::Delta { .. }
+                    | StreamEvent::ReactText { .. }
+                    | StreamEvent::SummaryText { .. } => {
                         core_state.store.runtime.run.summary = "正在回复...".to_string();
                     }
+                    StreamEvent::PhaseChanged { .. } => {}
                     StreamEvent::MemoryRecallStart { .. } => {
                         core_state.store.runtime.run.summary = "正在检索记忆...".to_string();
                     }

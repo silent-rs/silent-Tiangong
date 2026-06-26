@@ -4,8 +4,10 @@ use crate::model::ToolSpec;
 pub const MAX_AGENTS: usize = 8;
 /// 同时运行的 Sub Agent 数量上限
 pub const MAX_CONCURRENT_SUB_AGENTS: usize = 4;
-/// Sub Agent 最大执行轮次
-pub const SUB_AGENT_MAX_ROUNDS: usize = 10;
+/// Sub Agent 单次工具执行阶段（ReAct Loop 内层）的最大轮次
+pub const SUB_AGENT_MAX_TOOL_ROUNDS: usize = 8;
+/// Sub Agent 总结后重新进入工具执行阶段的最大次数
+pub const SUB_AGENT_MAX_OUTER_ITERATIONS: u32 = 2;
 /// Sub Agent 共享的 token 总预算（所有 Sub Agent 累计不超过此值）
 pub const SUB_AGENT_TOTAL_TOKEN_BUDGET: usize = 200_000;
 

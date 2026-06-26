@@ -24,6 +24,17 @@ pub enum StreamEvent {
         message_id: String,
         content: String,
     },
+    /// ReAct 工具执行阶段的过程性文本增量（前端紧凑展示，不提供复制按钮）
+    ReactText { message_id: String, content: String },
+    /// 总结阶段的最终回复文本增量（前端作为主消息展示，提供复制按钮）
+    SummaryText { message_id: String, content: String },
+    /// 单个 turn 的执行阶段切换通知
+    PhaseChanged {
+        /// 阶段名："tool_execution" / "summary"
+        phase: String,
+        /// 第几次外层循环（从 1 开始）
+        iteration: u32,
+    },
     /// 思考过程增量
     Reasoning {
         /// 所属消息 ID

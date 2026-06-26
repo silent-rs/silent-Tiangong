@@ -8,7 +8,7 @@ use crate::execution::{
 };
 use crate::model::{ModelClient, ModelRequest, ModelStreamChunk, SingleProviderClient, TokenUsage};
 use crate::planner::{PlanStep, PlanStepStatus, TaskPlan};
-use crate::session::{Message, MessageRole, Session, now_text};
+use crate::session::{Message, MessagePhase, MessageRole, Session, now_text};
 use crate::tool::{LocalToolExecutor, ToolExecutor, ToolResult};
 
 use crate::agents::execution_completion_agent::parse_completion_signal;
@@ -192,6 +192,7 @@ pub async fn execute_single_plan_step_with_execution_agent(
                 tool_name: Some("execution_feedback".to_string()),
                 tool_result_is_error: false,
                 compact: false,
+                phase: MessagePhase::Normal,
                 created_at: now_text(),
             });
             continue;

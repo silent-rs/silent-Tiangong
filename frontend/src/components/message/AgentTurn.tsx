@@ -6,6 +6,7 @@ import { useStore } from "@/store/useStore";
 import { findTextOccurrences } from "@/utils/search";
 import { HighlightText } from "../HighlightText";
 import { ThinkingBlock } from "../ThinkingBlock";
+import { AgentReplyCard } from "./AgentReplyCard";
 import { useResolvedTheme } from "@/hooks/useTheme";
 import { textContent } from "@/api/tauri";
 import {
@@ -18,6 +19,9 @@ import {
   hasMessage,
   extractAgentRoles,
   parseAgentReply,
+  displayTextContent,
+  stripSummaryStatusMarker,
+  isNeedMoreWorkMessage,
 } from "./utils";
 import type { MessageItem } from "./types";
 import { useExpansionState } from "./useExpansionState";
@@ -118,6 +122,15 @@ function AgentTurnView({
         shownReasonings.add(assistantReasoning);
         fragments.push({ type: "thinking", content: assistantReasoning, time: msg.created_at });
       }
+      // 总结阶段判定"任务未完成、需重入 Loop"的回复（[NEED_MORE_WORK] 标头）：
+      // 前端作为思考过程展示，剥除标头，不作为最终回复正文。
+      if (isNeedMoreWorkMessage(msg)) {
+        const needMoreWorkBody = stripSummaryStatusMarker(textContent(msg)).trim();
+        if (needMoreWorkBody || isStreaming) {
+          fragments.push({ type: "thinking", content: needMoreWorkBody, time: msg.created_at });
+        }
+        continue;
+      }
       fragments.push({ type: "assistant", msg, isStreaming });
     } else if (msg.role === "system" && textContent(msg).startsWith("[错误]")) {
       flushTools();
@@ -173,38 +186,53 @@ function AgentTurnView({
         }
         if (frag.type === "assistant") {
           const { msg, isStreaming } = frag;
-          const agentReply = !isStreaming ? parseAgentReply(textContent(msg)) : null;
+          const visibleText = displayTextContent(msg);
+          const isReactPhase = msg.phase === "react";
+          // 总结阶段流式输出需剥离状态标记（[DONE]/[NEED_MORE_WORK] 等）。
+          const visibleStreamingContent = msg.phase === "summary" ? stripSummaryStatusMarker(streamingContent) : streamingContent;
+          const agentReply = !isStreaming ? parseAgentReply(visibleText) : null;
           if (agentReply) {
+            // Sub Agent 汇报：默认折叠为一行摘要，点击展开完整正文。
+            // 搜索命中时强制展开，便于定位。
+            const hasSearchHit = !!searchQuery && findTextOccurrences(visibleText, searchQuery, caseSensitive).length > 0;
             return (
-              <div key={msg.id} className="text-foreground" title={formatMessageTime(msg.created_at)}>
-                <div className="inline-flex items-center gap-1.5 rounded-full border border-green-500/30 bg-green-500/10 px-2 py-0.5 text-xs font-medium text-green-700 dark:text-green-300 mb-1">
-                  <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
-                  {agentReply.label}
-                </div>
-                <div className="border-l-2 border-green-500/50 pl-3">
-                  {agentReply.body ? (
-                    searchQuery && findTextOccurrences(textContent(msg), searchQuery, caseSensitive).length > 0
-                      ? <div className="text-sm whitespace-pre-wrap break-words">{renderWithHighlight(msg.id, agentReply.body)}</div>
-                      : <MdPreview modelValue={resolveMarkdownImages(agentReply.body)} theme={resolvedTheme} previewTheme="github" />
-                  ) : null}
-                </div>
-                {agentReply.body && <MessageActions text={agentReply.body} showTts={hasTts} />}
+              <div key={msg.id} className="py-0.5">
+                <AgentReplyCard
+                  label={agentReply.label}
+                  body={hasSearchHit ? visibleText : agentReply.body}
+                  time={msg.created_at}
+                  defaultExpanded={hasSearchHit}
+                />
+              </div>
+            );
+          }
+          // ReAct 工具执行阶段的过程性文本：紧凑展示，不提供复制按钮。
+          if (isReactPhase) {
+            const body = isStreaming ? visibleStreamingContent : visibleText;
+            if (!body && !streamingReasoningContent) return null;
+            return (
+              <div key={msg.id} className="text-xs text-muted-foreground leading-relaxed whitespace-pre-wrap break-words" title={formatMessageTime(msg.created_at)}>
+                {isStreaming ? (
+                  <StreamingMessage content={body} reasoningContent={streamingReasoningContent} />
+                ) : (
+                  renderWithHighlight(msg.id, body)
+                )}
               </div>
             );
           }
           return (
             <div key={msg.id} className="text-foreground" title={formatMessageTime(msg.created_at)}>
               {isStreaming ? (
-                <StreamingMessage content={streamingContent} reasoningContent={streamingReasoningContent} />
-              ) : textContent(msg) || (msg.media && msg.media.length > 0) || msg.content.some((b) => b.type === "media") ? (
+                <StreamingMessage content={visibleStreamingContent} reasoningContent={streamingReasoningContent} />
+              ) : visibleText || (msg.media && msg.media.length > 0) || msg.content.some((b) => b.type === "media") ? (
                 <div>
                   <ContentMedia message={msg} />
-                  {searchQuery && findTextOccurrences(textContent(msg), searchQuery, caseSensitive).length > 0
-                    ? <div className="text-sm whitespace-pre-wrap break-words">{renderWithHighlight(msg.id, textContent(msg))}</div>
-                    : <MdPreview modelValue={resolveMarkdownImages(textContent(msg))} theme={resolvedTheme} previewTheme="github" />}
+                  {searchQuery && findTextOccurrences(visibleText, searchQuery, caseSensitive).length > 0
+                    ? <div className="text-sm whitespace-pre-wrap break-words">{renderWithHighlight(msg.id, visibleText)}</div>
+                    : <MdPreview modelValue={resolveMarkdownImages(visibleText)} theme={resolvedTheme} previewTheme="github" />}
                 </div>
               ) : null}
-              {!isStreaming && msg.content && <MessageActions text={textContent(msg)} showTts={hasTts} />}
+              {!isStreaming && msg.content && visibleText && <MessageActions text={visibleText} showTts={hasTts} />}
             </div>
           );
         }

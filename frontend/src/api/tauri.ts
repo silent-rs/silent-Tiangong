@@ -44,6 +44,7 @@ export interface TerminalTabListResponse {
 }
 
 export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
+export type MessagePhase = 'normal' | 'react' | 'summary';
 export type RunStatus =
   | 'idle'
   | 'planning'
@@ -149,6 +150,7 @@ export interface Message {
   tool_name?: string;
   tool_result_is_error?: boolean;
   compact?: boolean;
+  phase?: MessagePhase;
   created_at: string;
 }
 

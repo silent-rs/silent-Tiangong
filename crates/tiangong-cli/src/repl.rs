@@ -179,10 +179,20 @@ impl ResponseState {
             StreamEvent::Delta {
                 message_id,
                 content,
+            }
+            | StreamEvent::ReactText {
+                message_id,
+                content,
+            }
+            | StreamEvent::SummaryText {
+                message_id,
+                content,
             } => {
                 self.ensure_assistant_stream(message_id);
                 output::delta(content);
             }
+
+            StreamEvent::PhaseChanged { .. } => {}
 
             StreamEvent::ToolCalls { names, .. } => {
                 self.end_active_stream();

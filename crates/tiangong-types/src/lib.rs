@@ -11,7 +11,8 @@ pub mod stream;
 pub mod token;
 
 pub use message::{
-    ContentBlock, MediaAsset, MediaKind, Message, MessageRole, MessageToolCall, now_text,
+    ContentBlock, MediaAsset, MediaKind, Message, MessagePhase, MessageRole, MessageToolCall,
+    now_text,
 };
 pub use remote::{IncomingMessage, MessageContent, OutgoingMessage, RemoteRole};
 pub use session::Session;

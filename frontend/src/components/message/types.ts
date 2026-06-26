@@ -18,6 +18,7 @@ export interface MessageItem {
   tool_name?: string;
   tool_result_is_error?: boolean;
   compact?: boolean;
+  phase?: "normal" | "react" | "summary";
   created_at: string;
 }
 
