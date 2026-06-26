@@ -211,7 +211,7 @@ interface AppState {
 
   // 操作
   loadSessions: () => Promise<void>;
-  createSession: () => void;
+  createSession: (targetCwd?: string) => void;
   switchSession: (id: string) => Promise<void>;
   deleteSession: () => Promise<void>;
 
@@ -329,8 +329,10 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   // 创建新会话 — 纯前端草稿模式，不立即调后端
-  createSession: () => {
+  // targetCwd 用于在指定 workspace 分组下创建对话；不传则用全局 workspace。
+  createSession: (targetCwd?: string) => {
     const workspaceDir = get().workspaceDir;
+    const draftCwd = targetCwd || workspaceDir;
     const { reasoningEffortPerSession } = get();
     const draftEffort = reasoningEffortPerSession['__draft__'] || 'medium';
     // 为草稿态终端生成稳定临时 id：同一时刻只有一个草稿，用固定常量即可。
@@ -356,7 +358,7 @@ export const useStore = create<AppState>((set, get) => ({
       streamingMessageId: null,
       streamingContent: '',
       streamingReasoningContent: '',
-      sessionCwd: workspaceDir,
+      sessionCwd: draftCwd,
       agents: [],
       selectedAgentTab: null,
       reasoningEffort: draftEffort,

@@ -11,6 +11,8 @@ export interface Session {
   created_at: string;
   updated_at: string;
   message_count: number;
+  /** 会话工作目录，用于按 workspace 分组展示 */
+  cwd: string;
 }
 
 export type TabKind = 'browser' | 'terminal';

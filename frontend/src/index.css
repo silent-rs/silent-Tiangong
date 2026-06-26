@@ -116,6 +116,18 @@
 
 /* 自定义滚动条 */
 @layer components {
+  .custom-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+    transition: scrollbar-color 0.2s ease;
+  }
+
+  .custom-scrollbar:hover {
+    scrollbar-color: hsl(var(--muted-foreground) / 0.3) transparent;
+  }
+
+  /* Firefox 悬浮时 thumb 高亮（scrollbar-color 仅支持单一 thumb 颜色，hover 用 :hover 上的近似值） */
+
   .custom-scrollbar::-webkit-scrollbar {
     width: 8px;
     height: 8px;
@@ -126,10 +138,16 @@
   }
 
   .custom-scrollbar::-webkit-scrollbar-thumb {
-    @apply bg-muted-foreground/30 rounded-full;
+    @apply bg-transparent rounded-full;
+    transition: background-color 0.2s ease;
   }
 
-  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  /* 滚动条所在容器悬浮时才显示 thumb */
+  .custom-scrollbar:hover::-webkit-scrollbar-thumb {
+    @apply bg-muted-foreground/30;
+  }
+
+  .custom-scrollbar:hover::-webkit-scrollbar-thumb:hover {
     @apply bg-muted-foreground/50;
   }
 }
