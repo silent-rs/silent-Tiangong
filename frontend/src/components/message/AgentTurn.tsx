@@ -169,7 +169,7 @@ function AgentTurnView({
         if (selectedAgentTab && frag.type !== "agent_event") return null;
         if (selectedAgentTab && frag.type === "agent_event" && frag.agentRoles.length > 0 && !frag.agentRoles.includes(selectedAgentTab)) return null;
         if (frag.type === "thinking") {
-          return <div key={`think-${i}`} title={formatMessageTime(frag.time)}><ThinkingBlock content={frag.content} defaultExpanded={isActive} /></div>;
+          return <div key={`think-${i}`} title={formatMessageTime(frag.time)}><ThinkingBlock content={frag.content} isActive={isActive} defaultExpanded={isActive} /></div>;
         }
         if (frag.type === "explanation") {
           return <p key={`expl-${i}`} className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap break-words" title={formatMessageTime(frag.time)}>{frag.text}</p>;
