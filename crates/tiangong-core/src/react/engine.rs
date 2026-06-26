@@ -2027,27 +2027,6 @@ fn strip_summary_marker<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
     )
 }
 
-/// 从错误消息文本中提取简洁的错误描述。
-///
-/// 支持两种格式：
-/// - `plugin_injection` 渲染格式（`数据来源：react_loop_error\n相关数据：\n    error: ...`）：
-///   只提取 `error:` 字段值，剔除 instruction 等噪声；
-/// - 历史 `[错误] xxx` System 消息：去掉前缀后返回。
-fn extract_error_brief(text: &str) -> String {
-    // plugin_injection 渲染格式：逐行查找 "    error: " 开头的字段值。
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("error:") {
-            return rest.trim().to_string();
-        }
-    }
-    // 历史 System 格式：去掉 "[错误] " 前缀。
-    text.strip_prefix("[错误] ")
-        .unwrap_or(text)
-        .trim()
-        .to_string()
-}
-
 fn format_team_roster(team_arc: &Arc<Mutex<TeamContext>>) -> String {
     let Ok(team) = team_arc.lock() else {
         return String::new();
@@ -2493,24 +2472,20 @@ impl ReactEngine {
         for (agent_id, agent_label, _agent_role, child_session, _output_messages, usage) in results
         {
             // 检查 Sub Agent 是否有错误输出。
-            // 错误由 persist_error 经 inject_tool_to_messages 注入（plugin_injection 消息对，
-            // 渲染文本含 "数据来源：react_loop_error"）；兼容历史 System 角色 [错误] 消息。
+            // 错误由 persist_error 经 inject_tool_to_messages 注入（plugin_injection
+            // 消息对，渲染文本含 "数据来源：react_loop_error"）。
             let is_error_message = |m: &Message| {
-                let text = m.text_content();
-                (m.tool_name.as_deref() == Some(crate::react::message::INJECTION_TOOL_NAME)
-                    && text.contains("数据来源：react_loop_error"))
-                    || (m.role == MessageRole::System && text.starts_with("[错误]"))
+                m.tool_name.as_deref() == Some(crate::react::message::INJECTION_TOOL_NAME)
+                    && m.text_content().contains("数据来源：react_loop_error")
             };
             let has_error = child_session.messages.iter().any(is_error_message);
 
             let completion_content = if has_error {
-                // 从错误消息中提取简洁的错误描述，避免把完整渲染文本（含 instruction
-                // 等字段）当作汇报内容传给主 Agent。
                 let error_content = child_session
                     .messages
                     .iter()
                     .filter(|m: &&Message| is_error_message(m))
-                    .map(|m| extract_error_brief(&m.text_content()))
+                    .map(|m| m.text_content())
                     .collect::<Vec<_>>()
                     .join("; ");
                 format!("[{agent_label}] 执行出错：{error_content}")
