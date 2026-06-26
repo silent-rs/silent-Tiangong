@@ -11,6 +11,8 @@ export interface Session {
   created_at: string;
   updated_at: string;
   message_count: number;
+  /** 会话工作目录，用于按 workspace 分组展示 */
+  cwd: string;
 }
 
 export type TabKind = 'browser' | 'terminal';
@@ -486,6 +488,9 @@ export const api = {
 
   deleteSession: (): Promise<void> =>
     invoke('delete_session'),
+
+  deleteSessionsByCwd: (cwd: string): Promise<void> =>
+    invoke('delete_sessions_by_cwd', { cwd }),
 
   updateSessionTitle: (title: string): Promise<void> =>
     invoke('update_session_title', { title }),

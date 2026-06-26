@@ -211,9 +211,10 @@ interface AppState {
 
   // 操作
   loadSessions: () => Promise<void>;
-  createSession: () => void;
+  createSession: (targetCwd?: string) => void;
   switchSession: (id: string) => Promise<void>;
   deleteSession: () => Promise<void>;
+  deleteSessionsByCwd: (cwd: string) => Promise<void>;
 
   sendMessage: (content: string, media?: MediaAsset[]) => Promise<void>;
   editAndResend: (messageId: string, newContent: string, media?: MediaAsset[]) => Promise<void>;
@@ -329,8 +330,10 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   // 创建新会话 — 纯前端草稿模式，不立即调后端
-  createSession: () => {
+  // targetCwd 用于在指定 workspace 分组下创建对话；不传则用全局 workspace。
+  createSession: (targetCwd?: string) => {
     const workspaceDir = get().workspaceDir;
+    const draftCwd = targetCwd || workspaceDir;
     const { reasoningEffortPerSession } = get();
     const draftEffort = reasoningEffortPerSession['__draft__'] || 'medium';
     // 为草稿态终端生成稳定临时 id：同一时刻只有一个草稿，用固定常量即可。
@@ -356,7 +359,7 @@ export const useStore = create<AppState>((set, get) => ({
       streamingMessageId: null,
       streamingContent: '',
       streamingReasoningContent: '',
-      sessionCwd: workspaceDir,
+      sessionCwd: draftCwd,
       agents: [],
       selectedAgentTab: null,
       reasoningEffort: draftEffort,
@@ -428,6 +431,47 @@ export const useStore = create<AppState>((set, get) => ({
       });
     } catch (error) {
       console.error('删除会话失败:', error);
+    }
+  },
+
+  // 删除指定 workspace（cwd）下的所有会话
+  deleteSessionsByCwd: async (cwd: string) => {
+    try {
+      // 删除前记录是否处于草稿态：删除分组不应打断当前草稿
+      const wasDraft = get().isDraft;
+      await api.deleteSessionsByCwd(cwd);
+      const sessions = await api.getSessions();
+
+      if (wasDraft) {
+        // 草稿态：仅刷新会话列表，保持草稿不变
+        set({ sessions });
+        return;
+      }
+
+      // 非草稿态：跟随后端活跃会话快照
+      const snapshot = await api.getRunSnapshot();
+      const [sessionCwd] = await Promise.all([api.getSessionCwd()]);
+
+      set({
+        sessions,
+        isDraft: false,
+        activeSessionId: snapshot.messages.length > 0 ? snapshot.messages[0].id : null,
+        draftTerminalId: null,
+        workspaceTabsTransfer: null,
+        messages: snapshot.messages,
+        inputContent: snapshot.input_draft,
+        runStatus: snapshot.status,
+        runSummary: snapshot.summary || '',
+        lastDurationMs: snapshot.last_duration_ms ?? null,
+        lastUsage: snapshot.last_usage ?? null,
+        tokenStats: snapshot.token_stats ?? null,
+        approvalRequestId: snapshot.approval_request_id || null,
+        sessionCwd,
+        agents: parseAgentsFromMessages(snapshot.messages),
+        selectedAgentTab: null,
+      });
+    } catch (error) {
+      console.error('删除 workspace 会话失败:', error);
     }
   },
 

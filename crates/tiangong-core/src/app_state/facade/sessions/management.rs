@@ -137,4 +137,61 @@ impl TiangongState {
         }
         self.persist_app_only()
     }
+
+    /// 删除指定 workspace（cwd）下的所有会话。
+    ///
+    /// 返回被删除的会话 id 列表（供调用方销毁交互 PTY）。删除后若会话列表
+    /// 清空，会自动新建一个默认会话；若删除涉及当前活跃会话，会把它切换
+    /// 到剩余列表中的第一个。
+    pub fn delete_sessions_by_cwd(&mut self, cwd: &str) -> Result<Vec<String>> {
+        // 收集待删除的会话 id（cwd 完全匹配）
+        let deleted_ids: Vec<String> = self
+            .store
+            .session
+            .sessions
+            .iter()
+            .filter(|s| s.cwd == cwd)
+            .map(|s| s.id.clone())
+            .collect();
+
+        if deleted_ids.is_empty() {
+            return Ok(deleted_ids);
+        }
+
+        let active_was_deleted = deleted_ids.contains(&self.store.session.active_session_id);
+
+        // 从列表移除匹配会话并删除会话文件
+        self.store.session.sessions.retain(|s| s.cwd != cwd);
+        for id in &deleted_ids {
+            let _ = self.remove_session_file(id);
+        }
+
+        if self.store.session.sessions.is_empty() {
+            // 全部删空：新建一个默认会话作为活跃会话
+            let mut session = Session::new(DEFAULT_SESSION_TITLE);
+            session.cwd = self.store.session.workspace_dir.clone();
+            session.trust_mode = self.store.agent.agent_config.default_trust_mode;
+            self.store.session.active_session_id = session.id.clone();
+            self.store.session.session_title_draft = session.title.clone();
+            self.store.session.sessions.push(session);
+            let current_id = self.store.session.sessions[0].id.clone();
+            self.persist_session(&current_id)?;
+        } else if active_was_deleted {
+            // 活跃会话被删除：切到剩余列表的第一个
+            self.store.session.active_session_id = self.store.session.sessions[0].id.clone();
+            self.store.session.session_title_draft = self.store.session.sessions[0].title.clone();
+        }
+
+        // 同步活跃会话的 trust_mode 到运行时
+        if let Some(trust_mode) = self.active_session().map(|session| session.trust_mode) {
+            self.store.agent.agent_config.trust_mode = trust_mode;
+            self.services
+                .runtime
+                .permission_gate()
+                .set_trust_mode(trust_mode);
+        }
+
+        self.persist_app_only()?;
+        Ok(deleted_ids)
+    }
 }

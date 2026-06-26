@@ -691,6 +691,26 @@ pub async fn delete_session(app: AppHandle, state: State<'_, TiangongApp>) -> Re
     Ok(())
 }
 
+/// 删除指定 workspace（cwd）下的所有会话
+#[tauri::command]
+pub async fn delete_sessions_by_cwd(
+    cwd: String,
+    app: AppHandle,
+    state: State<'_, TiangongApp>,
+) -> Result<(), String> {
+    let deleted_ids = state
+        .with_state(|core_state| {
+            let ids = core_state.delete_sessions_by_cwd(&cwd)?;
+            Ok::<Vec<String>, anyhow::Error>(ids)
+        })
+        .await?;
+    // 逐个销毁被删会话的交互 PTY
+    for id in &deleted_ids {
+        tiangong_plugin_terminal::destroy_session_pty(&app, id);
+    }
+    Ok(())
+}
+
 /// 更新会话标题
 #[tauri::command]
 pub async fn update_session_title(

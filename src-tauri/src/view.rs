@@ -66,6 +66,8 @@ pub struct SessionListItem {
     pub created_at: String,
     pub updated_at: String,
     pub message_count: usize,
+    /// 会话工作目录，前端用于按 workspace 分组展示
+    pub cwd: String,
 }
 
 impl SessionListItem {
@@ -76,6 +78,7 @@ impl SessionListItem {
             created_at: core_session.created_at.clone(),
             updated_at: core_session.updated_at.clone(),
             message_count: core_session.messages.len(),
+            cwd: core_session.cwd.clone(),
         }
     }
 }
