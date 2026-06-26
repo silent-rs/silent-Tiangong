@@ -17,7 +17,7 @@ interface ToolCallBlockProps {
 /**
  * 工具参数 / 结果在前端截取的最大字符数，避免超长输出卡顿 UI。
  */
-const TOOL_FIELD_PREVIEW_LIMIT = 2000;
+const TOOL_FIELD_PREVIEW_LIMIT = 500;
 
 /** 工具参数 / 结果渲染：超长内容截取为预览，点击展开全部回看完整内容。 */
 function ToolField({ label, value }: { label: string; value: string }) {
@@ -38,7 +38,7 @@ function ToolField({ label, value }: { label: string; value: string }) {
         >
           {showAll
             ? '收起'
-            : `展开全部（${(value.length / 1000).toFixed(1)}k 字符，已截取前 ${(TOOL_FIELD_PREVIEW_LIMIT / 1000).toFixed(0)}k）`}
+            : `展开全部（${(value.length / 1000).toFixed(1)}k 字符，已截取前 ${TOOL_FIELD_PREVIEW_LIMIT}）`}
         </button>
       )}
     </div>

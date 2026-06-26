@@ -10,7 +10,7 @@ import type { ExpansionState } from "./useExpansionState";
  * 超过阈值时默认折叠为摘要预览，并提供「展开全部」入口，
  * 避免超长输出（大文件读取、冗长命令回显）撑爆渲染、卡顿 UI。
  */
-const TOOL_OUTPUT_PREVIEW_LIMIT = 2000;
+const TOOL_OUTPUT_PREVIEW_LIMIT = 500;
 
 export function ToolGroup({ tools, expansion }: { tools: MessageItem[]; expansion: ExpansionState }) {
   if (tools.length === 0) return null;
@@ -71,7 +71,7 @@ function ToolOutput({ content }: { content: string }) {
         >
           {showAll
             ? "收起"
-            : `展开全部（${(content.length / 1000).toFixed(1)}k 字符，已截取前 ${(TOOL_OUTPUT_PREVIEW_LIMIT / 1000).toFixed(0)}k）`}
+            : `展开全部（${(content.length / 1000).toFixed(1)}k 字符，已截取前 ${TOOL_OUTPUT_PREVIEW_LIMIT}）`}
         </button>
       )}
     </div>
