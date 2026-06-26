@@ -92,9 +92,79 @@ fn stream_event_serde() {
 }
 
 #[test]
+fn stream_event_phase_variants_serde() {
+    // ReAct 阶段过程性文本
+    let react = StreamEvent::ReactText {
+        message_id: "m1".into(),
+        content: "正在处理".into(),
+    };
+    let json = serde_json::to_string(&react).unwrap();
+    assert!(
+        json.contains(r#""type":"react_text""#),
+        "react_text 标签错误: {json}"
+    );
+    let parsed: StreamEvent = serde_json::from_str(&json).unwrap();
+    assert!(matches!(parsed, StreamEvent::ReactText { .. }));
+
+    // 总结阶段最终回复
+    let summary = StreamEvent::SummaryText {
+        message_id: "m2".into(),
+        content: "已完成".into(),
+    };
+    let json = serde_json::to_string(&summary).unwrap();
+    assert!(
+        json.contains(r#""type":"summary_text""#),
+        "summary_text 标签错误: {json}"
+    );
+
+    // 阶段切换通知
+    let phase = StreamEvent::PhaseChanged {
+        phase: "summary".into(),
+        iteration: 1,
+    };
+    let json = serde_json::to_string(&phase).unwrap();
+    assert_eq!(
+        json,
+        r#"{"type":"phase_changed","phase":"summary","iteration":1}"#
+    );
+}
+
+#[test]
 fn message_role_serde() {
     let json = serde_json::to_string(&MessageRole::Assistant).unwrap();
     assert_eq!(json, r#""assistant""#);
+}
+
+#[test]
+fn message_phase_serde() {
+    assert_eq!(
+        serde_json::to_string(&MessagePhase::Normal).unwrap(),
+        r#""normal""#
+    );
+    assert_eq!(
+        serde_json::to_string(&MessagePhase::React).unwrap(),
+        r#""react""#
+    );
+    assert_eq!(
+        serde_json::to_string(&MessagePhase::Summary).unwrap(),
+        r#""summary""#
+    );
+}
+
+#[test]
+fn message_phase_defaults_to_normal_for_legacy_messages() {
+    // 旧 session 持久化的消息没有 phase 字段，反序列化时应默认为 Normal。
+    // 这里手动构造一条缺失 phase 字段的旧格式消息 JSON。
+    let legacy_json = r#"{
+        "id": "legacy-1",
+        "role": "assistant",
+        "content": "旧消息",
+        "reasoning_content": "",
+        "created_at": "2026-01-01 00:00:00"
+    }"#;
+    let msg: Message = serde_json::from_str(legacy_json).unwrap();
+    assert_eq!(msg.phase, MessagePhase::Normal);
+    assert_eq!(msg.text_content(), "旧消息");
 }
 
 #[test]
