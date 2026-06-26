@@ -437,8 +437,18 @@ export const useStore = create<AppState>((set, get) => ({
   // 删除指定 workspace（cwd）下的所有会话
   deleteSessionsByCwd: async (cwd: string) => {
     try {
+      // 删除前记录是否处于草稿态：删除分组不应打断当前草稿
+      const wasDraft = get().isDraft;
       await api.deleteSessionsByCwd(cwd);
       const sessions = await api.getSessions();
+
+      if (wasDraft) {
+        // 草稿态：仅刷新会话列表，保持草稿不变
+        set({ sessions });
+        return;
+      }
+
+      // 非草稿态：跟随后端活跃会话快照
       const snapshot = await api.getRunSnapshot();
       const [sessionCwd] = await Promise.all([api.getSessionCwd()]);
 

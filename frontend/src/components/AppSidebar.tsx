@@ -203,7 +203,7 @@ export function AppSidebar() {
     return (
       <ContextMenu key={group.key}>
         <ContextMenuTrigger asChild>
-          <div className="space-y-1">
+          <div className="space-y-1 select-none">
             <div className="flex items-center gap-1 group">
               <button
                 className="flex-1 flex items-center gap-1.5 px-2 py-1.5 rounded-md text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors min-w-0"
