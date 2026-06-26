@@ -205,6 +205,15 @@ export function TerminalTabContent({ sessionId, tabId, isActive }: TerminalTabCo
           } catch {
             // ignore
           }
+          // xterm 的输入捕获依赖一个隐藏的辅助 textarea 获得焦点：
+          // 没有焦点时 onData 不触发，键盘输入被丢弃（Windows WebView2 下
+          // 尤其明显，容器不会从父元素继承焦点）。终端 open 后主动聚焦，
+          // 同时覆盖 terminal:reset 重建（全新 textarea）的路径。
+          try {
+            terminalRef.current?.focus();
+          } catch {
+            // ignore
+          }
         });
 
         const info = await api.terminalSessionStatus(terminalId).catch(() => null);
@@ -221,6 +230,20 @@ export function TerminalTabContent({ sessionId, tabId, isActive }: TerminalTabCo
 
     mountTerminal();
   }, [isActive, ptyVersion, sessionCwd, sessionId, tabId, terminalId, workspaceDir]);
+
+  // Tab 激活时重新聚焦：终端已存在会跳过创建分支，焦点不会自动重建，
+  // 需在此显式聚焦，否则切回终端 Tab 后键盘输入静默失效。
+  useEffect(() => {
+    if (!isActive) return;
+    const raf = requestAnimationFrame(() => {
+      try {
+        terminalRef.current?.focus();
+      } catch {
+        // ignore
+      }
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [isActive]);
 
   useEffect(() => {
     return () => {
@@ -258,7 +281,17 @@ export function TerminalTabContent({ sessionId, tabId, isActive }: TerminalTabCo
           <RotateCw className="h-3 w-3" />
         </Button>
       </div>
-      <div ref={containerRef} className="min-h-0 flex-1" />
+      <div
+        ref={containerRef}
+        className="min-h-0 flex-1"
+        onMouseDown={() => {
+          try {
+            terminalRef.current?.focus();
+          } catch {
+            // ignore
+          }
+        }}
+      />
     </div>
   );
 }
