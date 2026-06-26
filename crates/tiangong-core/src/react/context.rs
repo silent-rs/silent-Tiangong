@@ -226,6 +226,18 @@ impl ForceFinalReason {
     }
 }
 
+/// 将错误持久化到 session，作为 LLM 请求失败时的诊断痕迹。
+///
+/// 前端 `StreamEvent::Error` 会在 commands.rs 写入 `[错误]` 系统消息，但存在
+/// 时序丢失风险（execute_turn return 后转发线程可能未及时处理）。本函数在
+/// engine 侧直接写入 session 并持久化，确保事后重载会话仍可看到失败原因。
+pub(crate) fn persist_error(session: &mut Session, message: impl Into<String>) {
+    let mut msg = Message::new(MessageRole::System, format!("[错误] {}", message.into()));
+    msg.tool_name = Some("react_loop_error".to_string());
+    session.messages.push(msg);
+    session.persist_to_disk();
+}
+
 /// 超限时强制最终回复
 pub(crate) fn force_final_response(
     session: &mut Session,
