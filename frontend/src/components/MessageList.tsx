@@ -11,6 +11,7 @@ import {
   ArrowUp,
   ArrowDown,
   ArrowDownToLine,
+  Clock,
 } from "lucide-react";
 import 'md-editor-rt/lib/preview.css';
 import { open } from '@tauri-apps/plugin-dialog';
@@ -166,6 +167,30 @@ export function MessageList() {
 
   const isThinking = runStatus !== "idle";
   const isContextCompressing = runSummary.includes("正在压缩");
+
+  // 推理计时器：仅在执行态（isThinking）运行，实时累计本轮已用时长，
+  // 显示在执行状态指示器左侧。回到 idle 时归零（最终时长由回复末尾展示）。
+  const [liveElapsedMs, setLiveElapsedMs] = useState(0);
+  const liveStartRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!isThinking) {
+      liveStartRef.current = null;
+      setLiveElapsedMs(0);
+      return;
+    }
+    if (liveStartRef.current == null) {
+      liveStartRef.current = performance.now();
+    }
+    const timer = window.setInterval(() => {
+      if (liveStartRef.current != null) {
+        setLiveElapsedMs(performance.now() - liveStartRef.current);
+      }
+    }, 100);
+    return () => window.clearInterval(timer);
+  }, [isThinking]);
+  const liveDurationLabel = liveElapsedMs >= 1000
+    ? `${(liveElapsedMs / 1000).toFixed(1)}s`
+    : "";
 
   // 消息分组
   const messageGroups = useMemo(() => groupMessages(messages), [messages]);
@@ -758,6 +783,14 @@ export function MessageList() {
               {/* 流式消息区域（始终渲染，不参与虚拟化） */}
               {streamingGroup && (
                 <div className="mt-3">
+                  {liveDurationLabel && (
+                    <div className="flex justify-start mb-1">
+                      <span className="inline-flex items-center gap-0.5 text-sm text-blue-500 tabular-nums" title="本轮已用时长">
+                        <Clock className="w-3.5 h-3.5 animate-pulse" />
+                        {liveDurationLabel}
+                      </span>
+                    </div>
+                  )}
                   <AgentTurn
                     key={`turn-streaming-${isThinking ? 'active' : 'done'}`}
                     messages={streamingGroup.messages}
@@ -780,6 +813,12 @@ export function MessageList() {
                 <div className="flex justify-start mt-3">
                   <div className="text-foreground">
                     <div className="flex items-center gap-2">
+                      {liveDurationLabel && (
+                        <span className="inline-flex items-center gap-0.5 text-sm text-blue-500 tabular-nums" title="本轮已用时长">
+                          <Clock className="w-3.5 h-3.5 animate-pulse" />
+                          {liveDurationLabel}
+                        </span>
+                      )}
                       <Loader2 className="w-4 h-4 animate-spin" />
                       <span className="text-sm text-muted-foreground">
                         {runSummary || (
