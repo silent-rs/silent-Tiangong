@@ -2,7 +2,7 @@ import { useState, KeyboardEvent, ClipboardEvent, DragEvent, useEffect, useRef, 
 import { useStore } from '@/store/useStore';
 import { Textarea } from './ui/textarea';
 import { Button } from './ui/button';
-import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Users, Brain } from 'lucide-react';
+import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Users, Brain, Clock } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { DragDropEvent } from '@tauri-apps/api/webview';
@@ -151,6 +151,28 @@ export function MessageInput() {
   const isIdle = currentSessionStatus === 'idle';
   const canSend = inputContent.trim().length > 0 || (hasMultimodal && attachments.length > 0);  // 执行中也允许输入
   const isTextDropTargetActive = !voiceMode && hasMultimodal && isIdle;
+
+  // 推理计时器：运行中实时累计；空闲时显示上一轮持久化时长（lastDurationMs）。
+  const [liveElapsedMs, setLiveElapsedMs] = useState(0);
+  const liveStartRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (isIdle) {
+      liveStartRef.current = null;
+      setLiveElapsedMs(0);
+      return;
+    }
+    if (liveStartRef.current == null) {
+      liveStartRef.current = performance.now();
+    }
+    const timer = window.setInterval(() => {
+      if (liveStartRef.current != null) {
+        setLiveElapsedMs(performance.now() - liveStartRef.current);
+      }
+    }, 100);
+    return () => window.clearInterval(timer);
+  }, [isIdle, currentSessionStatus]);
+  // 状态栏展示时长：运行中用实时计时，空闲时回退到上一轮持久化时长。
+  const displayDurationMs = !isIdle ? liveElapsedMs : (lastDurationMs ?? 0);
 
   // 自动调整文本框高度
   useEffect(() => {
@@ -1014,6 +1036,15 @@ export function MessageInput() {
                   <FolderOpen className="w-3 h-3 shrink-0" />
                   {!compact && <span className="truncate">{displayCwd || '设置对话目录'}</span>}
                 </button>
+                {displayDurationMs > 0 && (
+                  <span
+                    className={`inline-flex items-center gap-1 shrink-0 tabular-nums ${!isIdle ? 'text-blue-500' : 'text-muted-foreground/60'}`}
+                    title={isIdle ? '上一轮推理总时长' : '当前推理已用时长'}
+                  >
+                    <Clock className={`w-3 h-3 ${!isIdle ? 'animate-pulse' : ''}`} />
+                    {!compact && <span>{(displayDurationMs / 1000).toFixed(1)}s</span>}
+                  </span>
+                )}
               </div>
               <div className="flex items-center gap-2 shrink-0">
                 {(displayTokens > 0 || totalTokens > 0) && (
@@ -1025,7 +1056,6 @@ export function MessageInput() {
                         : `当前 ${displayTokens.toLocaleString()} tokens / 压缩阈值 ${compressionThreshold.toLocaleString()} tokens / 总计 ${totalTokens.toLocaleString()} tokens`
                     }
                   >
-                    {!compact && lastDurationMs ? <span>{(lastDurationMs / 1000).toFixed(1)}s</span> : null}
                     {compressionThreshold > 0 && (
                       <div className="h-1.5 w-20 overflow-hidden rounded-full bg-muted">
                         <div

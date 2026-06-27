@@ -275,7 +275,11 @@ function AgentTurnView({
                     : <MdPreview modelValue={resolveMarkdownImages(visibleText)} theme={resolvedTheme} previewTheme="github" />}
                 </div>
               ) : null}
-              {!isStreaming && msg.content && visibleText && <MessageActions text={visibleText} showTts={hasTts} />}
+              {!isStreaming && msg.content && visibleText && (
+                <div className="mt-1 border-t border-border/50 pt-1">
+                  <MessageActions text={visibleText} showTts={hasTts} durationMs={!isActive ? userFrag?.msg.elapsed_ms : undefined} />
+                </div>
+              )}
             </div>
           );
         }
