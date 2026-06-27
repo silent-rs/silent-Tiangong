@@ -1,6 +1,6 @@
-import { memo } from "react";
+import { memo, useEffect, useState } from "react";
 import { MdPreview } from "md-editor-rt";
-import { FileText } from "lucide-react";
+import { FileText, ChevronRight, ChevronDown } from "lucide-react";
 import { useSearchStore } from "@/store/useSearchStore";
 import { useStore } from "@/store/useStore";
 import { findTextOccurrences } from "@/utils/search";
@@ -40,6 +40,18 @@ interface AgentTurnProps {
   isActive?: boolean;
 }
 
+/** 将毫秒格式化为人类可读时长：< 1s 显示 ms，否则显示 s（保留 1 位小数）。 */
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+/** 轮次状态对应的中文标签与颜色（失败/取消直观醒目，成功保持低调）。 */
+const TURN_STATUS_META: Record<string, { label: string; className: string; dot: string }> = {
+  failed: { label: "失败", className: "text-destructive", dot: "bg-destructive" },
+  cancelled: { label: "已取消", className: "text-muted-foreground", dot: "bg-muted-foreground" },
+};
+
 function AgentTurnView({
   messages,
   streamingMessageId,
@@ -56,6 +68,14 @@ function AgentTurnView({
   const toolGroupExpansion = useExpansionState(isActive);
   const agents = useStore((state) => state.agents);
   const resolvedTheme = useResolvedTheme();
+
+  // 已完成轮次默认折叠「过程」（思考/解释/工具/ReAct 文本等），仅保留总结回复可见，
+  // 使历史会话整洁；用户点击摘要行可展开查看完整过程。活跃轮次保持展开。
+  const [showProcess, setShowProcess] = useState(isActive);
+  // 活跃态结束（isActive: true→false）时自动折叠过程，避免完成后仍展开堆叠。
+  useEffect(() => {
+    setShowProcess(isActive);
+  }, [isActive]);
 
   const renderWithHighlight = (msgId: string, text: string) => {
     if (!searchQuery) return text;
@@ -163,14 +183,31 @@ function AgentTurnView({
     mergedFragments.push(frag);
   }
 
-  return (
-    <div className="space-y-1.5">
-      {mergedFragments.map((frag, i) => {
-        if (selectedAgentTab && frag.type !== "agent_event") return null;
-        if (selectedAgentTab && frag.type === "agent_event" && frag.agentRoles.length > 0 && !frag.agentRoles.includes(selectedAgentTab)) return null;
-        if (frag.type === "thinking") {
-          return <div key={`think-${i}`} title={formatMessageTime(frag.time)}><ThinkingBlock content={frag.content} defaultExpanded={isActive} /></div>;
-        }
+  // 分组：用户消息（锚点）/ 过程片段（思考、解释、工具、ReAct 文本等）/ 总结回复。
+  // 已完成轮次默认折叠「过程」仅保留总结可见；活跃轮次全部展示。
+  // summaryFrags 收集同一轮次内全部非 react 的助手回复（含总结阶段产出），
+  // 全部渲染而非仅取最后一条，避免遗漏或互相覆盖。
+  let userFrag: Fragment | null = null;
+  const summaryFrags: Fragment[] = [];
+  const processFrags: Fragment[] = [];
+  for (const frag of mergedFragments) {
+    if (frag.type === "user") {
+      userFrag = frag;
+    } else if (frag.type === "assistant" && frag.msg.phase !== "react") {
+      summaryFrags.push(frag);
+    } else {
+      processFrags.push(frag);
+    }
+  }
+
+  const renderFragment = (frag: Fragment, i: number) => {
+    if (selectedAgentTab && frag.type !== "agent_event") return null;
+    if (selectedAgentTab && frag.type === "agent_event" && frag.agentRoles.length > 0 && !frag.agentRoles.includes(selectedAgentTab)) return null;
+    if (frag.type === "thinking") {
+      // 历史/已完成思考块一律视为非活跃且默认折叠：不在 ThinkingBlock 上传入
+      // 整轮 elapsed_ms（那是「轮次耗时」而非「深度思考耗时」，会误导），也不启动计时。
+      return <div key={`think-${i}`} title={formatMessageTime(frag.time)}><ThinkingBlock content={frag.content} isActive={false} defaultExpanded={false} /></div>;
+    }
         if (frag.type === "explanation") {
           return <p key={`expl-${i}`} className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap break-words" title={formatMessageTime(frag.time)}>{frag.text}</p>;
         }
@@ -178,9 +215,23 @@ function AgentTurnView({
           return <ToolGroup key={`tools-${frag.key}`} tools={frag.tools} expansion={toolGroupExpansion} />;
         }
         if (frag.type === "user") {
+          const statusMeta = frag.msg.turn_status ? TURN_STATUS_META[frag.msg.turn_status] : null;
           return (
-            <div key={frag.msg.id} className="flex justify-end" title={formatMessageTime(frag.msg.created_at)}>
-              <div className="max-w-[85%] rounded-2xl bg-primary/10 px-4 py-2.5 text-sm text-foreground whitespace-pre-wrap break-words">{textContent(frag.msg)}</div>
+            <div key={frag.msg.id} className="flex flex-col items-end gap-0.5" title={formatMessageTime(frag.msg.created_at)}>
+              <div className="flex justify-end">
+                <div className="max-w-[85%] rounded-2xl bg-primary/10 px-4 py-2.5 text-sm text-foreground whitespace-pre-wrap break-words">{textContent(frag.msg)}</div>
+              </div>
+              {(frag.msg.elapsed_ms != null || statusMeta) && (
+                <div className="flex items-center gap-1.5 pr-1 text-[11px] text-muted-foreground/80 tabular-nums">
+                  {statusMeta && (
+                    <span className={`inline-flex items-center gap-1 ${statusMeta.className}`}>
+                      <span className={`inline-block w-1.5 h-1.5 rounded-full ${statusMeta.dot}`} />
+                      {statusMeta.label}
+                    </span>
+                  )}
+                  {frag.msg.elapsed_ms != null && <span>⏱ {formatDuration(frag.msg.elapsed_ms)}</span>}
+                </div>
+              )}
             </div>
           );
         }
@@ -232,7 +283,11 @@ function AgentTurnView({
                     : <MdPreview modelValue={resolveMarkdownImages(visibleText)} theme={resolvedTheme} previewTheme="github" />}
                 </div>
               ) : null}
-              {!isStreaming && msg.content && visibleText && <MessageActions text={visibleText} showTts={hasTts} />}
+              {!isStreaming && msg.content && visibleText && (
+                <div className="mt-1 border-t border-border/50 pt-1">
+                  <MessageActions text={visibleText} showTts={hasTts} durationMs={!isActive ? userFrag?.msg.elapsed_ms : undefined} />
+                </div>
+              )}
             </div>
           );
         }
@@ -259,7 +314,47 @@ function AgentTurnView({
           return <p key={frag.msg.id} className="text-xs text-muted-foreground">{textContent(frag.msg).split("\n")[0]}</p>;
         }
         return null;
-      })}
+  };
+
+  // 过程片段计数：用于折叠态摘要文案（思考/工具条数）。
+  const processStats = {
+    thinking: processFrags.filter((f) => f.type === "thinking").length,
+    tools: processFrags.filter((f) => f.type === "tool_group").reduce((acc, f) => acc + (f.type === "tool_group" ? f.tools.length : 0), 0),
+  };
+  const collapseProcess = !isActive && processFrags.length > 0;
+
+  return (
+    <div className="space-y-1.5">
+      {userFrag && renderFragment(userFrag, 0)}
+      {collapseProcess && !showProcess && (
+        <button
+          type="button"
+          onClick={() => setShowProcess(true)}
+          className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors py-0.5"
+        >
+          <ChevronRight className="w-3 h-3" />
+          <span>展开过程</span>
+          <span className="opacity-60">
+            （{processStats.thinking > 0 ? `思考 ${processStats.thinking}·` : ""}{processStats.tools > 0 ? `工具 ${processStats.tools}` : ""}{processStats.thinking === 0 && processStats.tools === 0 ? `${processFrags.length} 条` : ""}）
+          </span>
+        </button>
+      )}
+      {(!collapseProcess || showProcess) && processFrags.length > 0 && (
+        <div className="space-y-1.5">
+          {processFrags.map((frag, i) => renderFragment(frag, i))}
+          {collapseProcess && showProcess && (
+            <button
+              type="button"
+              onClick={() => setShowProcess(false)}
+              className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors py-0.5"
+            >
+              <ChevronDown className="w-3 h-3" />
+              <span>收起过程</span>
+            </button>
+          )}
+        </div>
+      )}
+      {summaryFrags.map((frag, i) => renderFragment(frag, mergedFragments.length + i))}
     </div>
   );
 }

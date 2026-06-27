@@ -7,7 +7,7 @@ export function StreamingMessage({ content, reasoningContent }: { content: strin
   const resolvedTheme = useResolvedTheme();
   return (
     <div>
-      {reasoningContent && <ThinkingBlock content={reasoningContent} defaultExpanded={true} />}
+      {reasoningContent && <ThinkingBlock content={reasoningContent} isActive defaultExpanded />}
       <MdPreview modelValue={resolveMarkdownImages(content)} theme={resolvedTheme} previewTheme="github" />
       {content.length > 0 && <span className="inline-block w-1.5 h-4 bg-primary ml-0.5 animate-pulse" />}
     </div>

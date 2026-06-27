@@ -344,8 +344,27 @@ async fn worker_loop_async(
     let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
     let fwd_session_id = session_id.clone();
     let fwd_tx = external_tx.clone();
+    // 轮次终态记录：转发线程在透传事件的同时，捕获 Done/Error 终态，
+    // 供 worker_loop_async 在 execute_turn_async 返回后读取并写入用户消息。
+    // 每个轮次开始前由 worker_loop_async 清空。
+    let turn_outcome: Arc<Mutex<Option<TurnOutcome>>> = Arc::new(Mutex::new(None));
+    let fwd_outcome = turn_outcome.clone();
     let forward_handle = thread::spawn(move || {
         while let Ok(event) = stream_rx.recv() {
+            // 捕获终态：Done → Success；Error → 按文案区分 Cancelled/Failed。
+            match &event {
+                StreamEvent::Done { .. } => {
+                    if let Ok(mut slot) = fwd_outcome.lock() {
+                        *slot = Some(TurnOutcome::success());
+                    }
+                }
+                StreamEvent::Error { message } => {
+                    if let Ok(mut slot) = fwd_outcome.lock() {
+                        *slot = Some(TurnOutcome::from_error(message));
+                    }
+                }
+                _ => {}
+            }
             if fwd_tx
                 .send(SessionStreamEvent {
                     session_id: fwd_session_id.clone(),
@@ -472,6 +491,13 @@ async fn worker_loop_async(
                 media,
             } => {
                 let turn_start_idx = session.messages.len();
+                // 记录本轮起点；执行结束后用于计算 elapsed_ms 并写入用户消息（持久化，
+                // 使历史会话同样展示执行总时长与状态）。
+                let turn_started = std::time::Instant::now();
+                // 清空上一轮终态记录
+                if let Ok(mut slot) = turn_outcome.lock() {
+                    *slot = None;
+                }
                 // 归档附件到本地（图片→images/，PDF/Office→files/）。
                 // 必须在 append 之前归档，否则 attachment_notice 引用的是 data URL
                 // 而非本地路径，agent 无法读取文件（issue #149）。
@@ -505,6 +531,28 @@ async fn worker_loop_async(
                     team_context.clone(),
                 )
                 .await;
+
+                // 轮次结束：将执行时长与终态写入用户消息（turn 锚点）并落盘。
+                // 所有终态分支（成功/失败/取消）都会回到这里，故统一处理。
+                let elapsed_ms = turn_started.elapsed().as_millis() as u64;
+                let status = turn_outcome
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.as_ref().map(|o| o.status))
+                    .unwrap_or(tiangong_types::TurnStatus::Success);
+                let mut user_msg_updated = false;
+                if let Some(msg) = session
+                    .messages
+                    .iter_mut()
+                    .find(|m| m.id == user_msg_id && m.role == MessageRole::User)
+                {
+                    msg.elapsed_ms = Some(elapsed_ms);
+                    msg.turn_status = Some(status);
+                    user_msg_updated = true;
+                }
+                if user_msg_updated {
+                    session.persist_to_disk();
+                }
 
                 // Turn 完成后 → Session 索引
                 if let Some(ref im) = index_manager {
@@ -708,6 +756,39 @@ pub(crate) fn reset_context_for_session(
         remaining_messages: 0,
     });
     session.persist_to_disk();
+}
+
+/// 转发线程捕获的单个对话轮次终态。
+///
+/// `status` 由终态事件推导：`Done` → Success；`Error` 文案含「取消/cancel/abort」
+/// 时为 Cancelled，否则为 Failed。worker_loop_async 据此把 `status` 与执行时长
+/// 写入用户消息，供前端（含历史会话）展示。
+struct TurnOutcome {
+    status: tiangong_types::TurnStatus,
+}
+
+impl TurnOutcome {
+    fn success() -> Self {
+        Self {
+            status: tiangong_types::TurnStatus::Success,
+        }
+    }
+
+    /// 根据错误文案区分用户取消与执行失败。
+    fn from_error(message: &str) -> Self {
+        let lower = message.to_lowercase();
+        let is_cancel = lower.contains("取消")
+            || lower.contains("cancel")
+            || lower.contains("abort")
+            || lower.contains("中断");
+        Self {
+            status: if is_cancel {
+                tiangong_types::TurnStatus::Cancelled
+            } else {
+                tiangong_types::TurnStatus::Failed
+            },
+        }
+    }
 }
 
 /// 执行一个完整的对话轮次（可能多轮工具调用），async 版

@@ -151,6 +151,8 @@ fn sub_agent_stream_message(
         worker_id: None,
         media: Vec::new(),
         media_migrated: true,
+        elapsed_ms: None,
+        turn_status: None,
         tool_calls: Vec::new(),
         tool_call_id: None,
         tool_name: None,
@@ -1102,6 +1104,9 @@ impl ReactEngine {
                     );
                     if let Some(message) = session.messages.last_mut() {
                         message.reasoning_signature = response.reasoning_signature.clone();
+                        // 过程性回复标记为 React 阶段：避免与总结阶段的最终回复混淆，
+                        // 前端据此将其折叠为过程内容，只展示总结阶段的最终回复。
+                        message.phase = crate::session::MessagePhase::React;
                     }
                     let output = LlmOutputRecord {
                         stage: format!("react-round-{round}"),
@@ -1138,6 +1143,23 @@ impl ReactEngine {
                         if let Some(message) = session.messages.last_mut() {
                             message.phase = crate::session::MessagePhase::Summary;
                         }
+                        let _ = stream_tx.send(StreamEvent::Done {
+                            usage: Some(accumulated_usage.clone()),
+                        });
+                        return accumulated_usage;
+                    }
+
+                    // 智能提升（工具场景）：本轮执行过工具、且 LLM 已给出一段「看起来像
+                    // 完整回答」的实质文本（足够长、非提问、非 [NEED_MORE_WORK]）时，
+                    // 直接将其提升为最终回复（Summary），跳过总结阶段。
+                    // 动机：总结阶段是一次独立 LLM 调用，被提示词引导去"总结"，常把 ReAct
+                    // 阶段已有的详实回答压缩成更精简、丢细节的版本。已有好答案时，再归纳
+                    // 只会退化或冗余。详见 SUMMARY_PHASE_PROMPT 改进。
+                    if executed_tool_in_iteration && looks_like_final_answer(&response.text) {
+                        if let Some(message) = session.messages.last_mut() {
+                            message.phase = crate::session::MessagePhase::Summary;
+                        }
+                        session.persist_to_disk();
                         let _ = stream_tx.send(StreamEvent::Done {
                             usage: Some(accumulated_usage.clone()),
                         });
@@ -2027,6 +2049,41 @@ fn strip_summary_marker<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
     )
 }
 
+/// ReAct 阶段给出一段实质性回答时，可跳过总结阶段直接作为最终回复。
+const FINAL_ANSWER_MIN_CHARS: usize = 200;
+
+/// 判断 ReAct 阶段的文本回复是否「看起来像一个完整回答」（而非向用户提问）。
+///
+/// 用于智能提升：当本轮执行过工具、但模型已给出一段足够长的实质文本，
+/// 且不像是反问用户（以问号结尾或显式请求输入）时，直接把它作为最终回复，
+/// 避免总结阶段再生成一个更精简、反而丢失细节的版本。
+fn looks_like_final_answer(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.chars().count() < FINAL_ANSWER_MIN_CHARS {
+        return false;
+    }
+    // 以问号结尾 → 多为向用户提问，不作为最终回答。
+    if trimmed.ends_with('?') || trimmed.ends_with('？') {
+        return false;
+    }
+    // 显式请求用户提供信息：仅在文本以这些短语开头时才排除。
+    // （较长文本里偶尔出现这些词通常是正常叙述，不应误判。）
+    let intro = trimmed.chars().take(16).collect::<String>();
+    let ask_intro = [
+        "请问",
+        "请提供",
+        "请确认",
+        "请选择",
+        "你想",
+        "你希望",
+        "你是否",
+    ];
+    if ask_intro.iter().any(|p| intro.starts_with(p)) {
+        return false;
+    }
+    true
+}
+
 fn format_team_roster(team_arc: &Arc<Mutex<TeamContext>>) -> String {
     let Ok(team) = team_arc.lock() else {
         return String::new();
@@ -2816,6 +2873,45 @@ mod tests {
 
     fn tool_names(tools: Vec<ToolSpec>) -> Vec<String> {
         tools.into_iter().map(|tool| tool.name).collect()
+    }
+
+    #[test]
+    fn looks_like_final_answer_short_text_is_not_final() {
+        // 过短文本不视为完整回答（即便执行过工具）。
+        assert!(!looks_like_final_answer("好的，已完成。"));
+    }
+
+    #[test]
+    fn looks_like_final_answer_long_substantive_is_final() {
+        // 一段足够长、不以问号结尾、不以提问短语开头的实质文本 → 视为完整回答。
+        let text = "我重新检查了当前分支的全部改动，结论是核心问题已经修复。\
+                    首先，AgentTurn 不再把整轮 elapsed_ms 当作深度思考耗时传给 ThinkingBlock，\
+                    语义已经修正。其次，历史思考块固定 isActive 为 false，避免误计时与误展开。\
+                    第三，showProcess 通过 useEffect 跟随 isActive 同步，完成后自动折叠过程。\
+                    最后，summaryFrag 改为数组，多条非 react 助手回复不再互相覆盖。\
+                    前端构建通过，整体改动合理，建议合并。";
+        assert!(text.chars().count() >= FINAL_ANSWER_MIN_CHARS);
+        assert!(looks_like_final_answer(text));
+    }
+
+    #[test]
+    fn looks_like_final_answer_ending_with_question_is_not_final() {
+        let mut text = "我重新检查了代码，发现了一些问题，但还需要你确认以下几点：".to_string();
+        // 补足长度后仍以问号结尾 → 视为向用户提问，不作为最终回答。
+        while text.chars().count() < FINAL_ANSWER_MIN_CHARS + 50 {
+            text.push_str("补充说明内容。");
+        }
+        text.push('？');
+        assert!(!looks_like_final_answer(&text));
+    }
+
+    #[test]
+    fn looks_like_final_answer_intro_question_phrase_is_not_final() {
+        let mut text = "请提供你的 API 凭据以便继续：".to_string();
+        while text.chars().count() < FINAL_ANSWER_MIN_CHARS + 50 {
+            text.push_str("这里需要更多信息。");
+        }
+        assert!(!looks_like_final_answer(&text));
     }
 
     #[test]

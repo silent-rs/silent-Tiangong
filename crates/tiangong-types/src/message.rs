@@ -13,6 +13,20 @@ pub enum MessageRole {
     Tool,
 }
 
+/// 单个对话轮次的最终执行状态，仅持久化到用户消息（turn 锚点）。
+///
+/// 向后兼容：旧 session 反序列化时缺失该字段默认为 None，前端不展示状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TurnStatus {
+    /// 正常完成（含总结阶段产出最终回复）。
+    Success,
+    /// 执行过程中出错。
+    Failed,
+    /// 用户主动取消。
+    Cancelled,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MessageToolCall {
     pub id: String,
@@ -166,6 +180,13 @@ pub struct Message {
     /// 标记 media 是否已迁移到 content（避免重复迁移）
     #[serde(default, skip)]
     pub media_migrated: bool,
+    /// 该用户消息所属轮次的执行时长（毫秒）。仅持久化到用户消息（turn 锚点），
+    /// 前端据此展示「执行总时长」，历史会话重新打开同样可见。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    /// 该轮次的最终状态。仅持久化到用户消息，便于前端直观区分成功/失败/取消。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_status: Option<TurnStatus>,
 }
 
 /// 向后兼容的 content 反序列化：
@@ -227,6 +248,8 @@ impl Message {
             compact: false,
             phase: MessagePhase::Normal,
             created_at: now_text(),
+            elapsed_ms: None,
+            turn_status: None,
         }
     }
 
@@ -251,6 +274,8 @@ impl Message {
             compact: false,
             phase: MessagePhase::Normal,
             created_at: now_text(),
+            elapsed_ms: None,
+            turn_status: None,
         }
     }
 

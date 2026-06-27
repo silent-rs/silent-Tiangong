@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Terminal, CheckCircle2, XCircle, Loader2 } from 'lucide-react';
 
 export interface ToolCall {
@@ -11,6 +12,37 @@ export interface ToolCall {
 
 interface ToolCallBlockProps {
   toolCalls: ToolCall[];
+}
+
+/**
+ * 工具参数 / 结果在前端截取的最大字符数，避免超长输出卡顿 UI。
+ */
+const TOOL_FIELD_PREVIEW_LIMIT = 500;
+
+/** 工具参数 / 结果渲染：超长内容截取为预览，点击展开全部回看完整内容。 */
+function ToolField({ label, value }: { label: string; value: string }) {
+  const [showAll, setShowAll] = useState(false);
+  const overLimit = value.length > TOOL_FIELD_PREVIEW_LIMIT;
+  const preview = overLimit && !showAll ? value.slice(0, TOOL_FIELD_PREVIEW_LIMIT) : value;
+  return (
+    <div>
+      <div className="text-xs text-[#6B7280] mb-1">{label}：</div>
+      <pre className="text-xs font-mono text-[#94A3B8] bg-[#0D0D1A] rounded p-2 overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap break-words">
+        {preview}
+      </pre>
+      {overLimit && (
+        <button
+          type="button"
+          onClick={() => setShowAll((v) => !v)}
+          className="text-xs text-[#6366F1] hover:underline mt-1"
+        >
+          {showAll
+            ? '收起'
+            : `展开全部（${(value.length / 1000).toFixed(1)}k 字符，已截取前 ${TOOL_FIELD_PREVIEW_LIMIT}）`}
+        </button>
+      )}
+    </div>
+  );
 }
 
 export function ToolCallBlock({ toolCalls }: ToolCallBlockProps) {
@@ -90,23 +122,16 @@ export function ToolCallBlock({ toolCalls }: ToolCallBlockProps) {
           {/* 参数和结果 */}
           <div className="px-3 py-2 space-y-2">
             {toolCall.arguments && Object.keys(toolCall.arguments).length > 0 && (
-              <div>
-                <div className="text-xs text-[#6B7280] mb-1">参数：</div>
-                <pre className="text-xs font-mono text-[#A5B4FC] bg-[#0D0D1A] rounded p-2 overflow-x-auto">
-                  {JSON.stringify(toolCall.arguments, null, 2)}
-                </pre>
-              </div>
+              <ToolField label="参数" value={JSON.stringify(toolCall.arguments, null, 2)} />
             )}
 
             {toolCall.result && (
-              <div>
-                <div className="text-xs text-[#6B7280] mb-1">结果：</div>
-                <pre className="text-xs font-mono text-[#94A3B8] bg-[#0D0D1A] rounded p-2 overflow-x-auto max-h-32 overflow-y-auto">
-                  {typeof toolCall.result === 'string'
-                    ? toolCall.result
-                    : JSON.stringify(toolCall.result, null, 2)}
-                </pre>
-              </div>
+              <ToolField
+                label="结果"
+                value={typeof toolCall.result === 'string'
+                  ? toolCall.result
+                  : JSON.stringify(toolCall.result, null, 2)}
+              />
             )}
           </div>
         </div>

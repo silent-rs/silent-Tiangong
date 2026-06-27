@@ -12,7 +12,7 @@ pub mod token;
 
 pub use message::{
     ContentBlock, MediaAsset, MediaKind, Message, MessagePhase, MessageRole, MessageToolCall,
-    now_text,
+    TurnStatus, now_text,
 };
 pub use remote::{IncomingMessage, MessageContent, OutgoingMessage, RemoteRole};
 pub use session::Session;

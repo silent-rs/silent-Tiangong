@@ -47,6 +47,9 @@ export interface TerminalTabListResponse {
 
 export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
 export type MessagePhase = 'normal' | 'react' | 'summary';
+
+/** 单个对话轮次的最终执行状态（持久化在用户消息上，历史会话同样可见）。 */
+export type TurnStatus = 'success' | 'failed' | 'cancelled';
 export type RunStatus =
   | 'idle'
   | 'planning'
@@ -154,6 +157,10 @@ export interface Message {
   compact?: boolean;
   phase?: MessagePhase;
   created_at: string;
+  /** 该用户消息所属轮次的执行时长（毫秒）。仅用户消息携带，前端展示「执行总时长」。 */
+  elapsed_ms?: number;
+  /** 该轮次的最终状态。仅用户消息携带，便于区分成功/失败/取消。 */
+  turn_status?: TurnStatus;
 }
 
 /** 提取消息的纯文本内容，兼容旧格式 content 为字符串的情况 */

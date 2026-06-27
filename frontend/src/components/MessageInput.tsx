@@ -2,7 +2,7 @@ import { useState, KeyboardEvent, ClipboardEvent, DragEvent, useEffect, useRef, 
 import { useStore } from '@/store/useStore';
 import { Textarea } from './ui/textarea';
 import { Button } from './ui/button';
-import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Users, Brain } from 'lucide-react';
+import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Users, Brain, Clock } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { DragDropEvent } from '@tauri-apps/api/webview';
@@ -60,7 +60,6 @@ export function MessageInput() {
   const sessionCwd = useStore((state) => state.sessionCwd);
   const setSessionCwd = useStore((state) => state.setSessionCwd);
   const addVoiceMessage = useStore((state) => state.addVoiceMessage);
-  const lastDurationMs = useStore((state) => state.lastDurationMs);
   const lastUsage = useStore((state) => state.lastUsage);
   const tokenStats = useStore((state) => state.tokenStats);
   const agents = useStore((state) => state.agents);
@@ -151,6 +150,30 @@ export function MessageInput() {
   const isIdle = currentSessionStatus === 'idle';
   const canSend = inputContent.trim().length > 0 || (hasMultimodal && attachments.length > 0);  // 执行中也允许输入
   const isTextDropTargetActive = !voiceMode && hasMultimodal && isIdle;
+
+  // 推理计时器：仅在执行态（非 idle）运行，实时累计本轮已用时长，
+  // 显示在「执行状态」指示器（Circle + runSummary）左侧；回到 idle 归零。
+  const [liveElapsedMs, setLiveElapsedMs] = useState(0);
+  const liveStartRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (isIdle) {
+      liveStartRef.current = null;
+      setLiveElapsedMs(0);
+      return;
+    }
+    if (liveStartRef.current == null) {
+      liveStartRef.current = performance.now();
+    }
+    const timer = window.setInterval(() => {
+      if (liveStartRef.current != null) {
+        setLiveElapsedMs(performance.now() - liveStartRef.current);
+      }
+    }, 100);
+    return () => window.clearInterval(timer);
+  }, [isIdle, currentSessionStatus]);
+  const liveDurationLabel = liveElapsedMs >= 1000
+    ? `${(liveElapsedMs / 1000).toFixed(1)}s`
+    : '';
 
   // 自动调整文本框高度
   useEffect(() => {
@@ -810,6 +833,12 @@ export function MessageInput() {
             {/* 输入框上方：运行状态 + 思考强度 */}
             <div className="mb-1 flex items-center justify-between text-xs text-muted-foreground">
               <div className="flex items-center gap-2 min-w-0">
+                {liveDurationLabel && (
+                  <span className="inline-flex items-center gap-0.5 shrink-0 text-blue-500 tabular-nums" title="本轮已用时长">
+                    <Clock className="w-3 h-3 animate-pulse" />
+                    {liveDurationLabel}
+                  </span>
+                )}
                 {currentRunStatus !== 'idle' ? (
                   <span className="flex items-center gap-1 text-yellow-500 truncate" title={runSummary || '执行中'}>
                     <Circle className="w-1.5 h-1.5 animate-pulse shrink-0" />
@@ -1025,7 +1054,6 @@ export function MessageInput() {
                         : `当前 ${displayTokens.toLocaleString()} tokens / 压缩阈值 ${compressionThreshold.toLocaleString()} tokens / 总计 ${totalTokens.toLocaleString()} tokens`
                     }
                   >
-                    {!compact && lastDurationMs ? <span>{(lastDurationMs / 1000).toFixed(1)}s</span> : null}
                     {compressionThreshold > 0 && (
                       <div className="h-1.5 w-20 overflow-hidden rounded-full bg-muted">
                         <div

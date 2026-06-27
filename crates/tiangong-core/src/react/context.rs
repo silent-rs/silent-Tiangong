@@ -160,8 +160,13 @@ pub(crate) fn select_client_for_request<'a>(
 pub(crate) const SUMMARY_PHASE_PROMPT: &str = "\
 你当前处于总结阶段。请基于以上所有工作，给出最终回复。\n\
 \n\
+输出原则：\n\
+- 若上一轮（工具执行阶段）已经给出详实的回答/结果，请**保留其要点与细节**，不要过度精简，\n\
+  只需补充结论或下一步建议即可。用户需要的是完整可用的信息，而非被压缩的摘要。\n\
+- 仅当信息确实冗余、重复或与结论无关时才删减。\n\
+\n\
 判断逻辑：\n\
-1. 如果用户请求的所有操作都已执行并得到结果，请总结结果给出最终回复。\n\
+1. 如果用户请求的所有操作都已执行并得到结果，请保留要点并给出最终回复。\n\
 2. 如果需要用户提供额外信息、凭据、授权、选择或确认才能继续，请直接向用户提问。\n\
 3. 如果有关键步骤遗漏未执行、且你确实可以通过工具继续推进，请在回复开头输出 [NEED_MORE_WORK]，\n\
    然后简要说明还需要做什么。系统将重新进入工具执行阶段。\n\
@@ -272,6 +277,8 @@ pub(crate) fn force_final_response(
         worker_id: None,
         media: Vec::new(),
         media_migrated: true,
+        elapsed_ms: None,
+        turn_status: None,
         tool_calls: Vec::new(),
         tool_call_id: None,
         tool_name: Some("force_final_response".to_string()),

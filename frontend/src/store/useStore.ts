@@ -102,7 +102,9 @@ function sameMessage(left: Message, right: Message): boolean {
     && left.compact === right.compact
     && left.created_at === right.created_at
     && sameJsonValue(left.media, right.media)
-    && sameJsonValue(left.tool_calls, right.tool_calls);
+    && sameJsonValue(left.tool_calls, right.tool_calls)
+    && left.elapsed_ms === right.elapsed_ms
+    && left.turn_status === right.turn_status;
 }
 
 function mergeSnapshotMessages(oldMessages: Message[], newMessages: Message[]): Message[] {
