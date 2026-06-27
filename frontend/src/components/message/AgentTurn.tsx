@@ -1,4 +1,4 @@
-import { memo, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { MdPreview } from "md-editor-rt";
 import { FileText, ChevronRight, ChevronDown } from "lucide-react";
 import { useSearchStore } from "@/store/useSearchStore";
@@ -72,6 +72,10 @@ function AgentTurnView({
   // 已完成轮次默认折叠「过程」（思考/解释/工具/ReAct 文本等），仅保留总结回复可见，
   // 使历史会话整洁；用户点击摘要行可展开查看完整过程。活跃轮次保持展开。
   const [showProcess, setShowProcess] = useState(isActive);
+  // 活跃态结束（isActive: true→false）时自动折叠过程，避免完成后仍展开堆叠。
+  useEffect(() => {
+    setShowProcess(isActive);
+  }, [isActive]);
 
   const renderWithHighlight = (msgId: string, text: string) => {
     if (!searchQuery) return text;
@@ -181,14 +185,16 @@ function AgentTurnView({
 
   // 分组：用户消息（锚点）/ 过程片段（思考、解释、工具、ReAct 文本等）/ 总结回复。
   // 已完成轮次默认折叠「过程」仅保留总结可见；活跃轮次全部展示。
+  // summaryFrags 收集同一轮次内全部非 react 的助手回复（含总结阶段产出），
+  // 全部渲染而非仅取最后一条，避免遗漏或互相覆盖。
   let userFrag: Fragment | null = null;
-  let summaryFrag: Fragment | null = null;
+  const summaryFrags: Fragment[] = [];
   const processFrags: Fragment[] = [];
   for (const frag of mergedFragments) {
     if (frag.type === "user") {
       userFrag = frag;
     } else if (frag.type === "assistant" && frag.msg.phase !== "react") {
-      summaryFrag = frag;
+      summaryFrags.push(frag);
     } else {
       processFrags.push(frag);
     }
@@ -198,7 +204,9 @@ function AgentTurnView({
     if (selectedAgentTab && frag.type !== "agent_event") return null;
     if (selectedAgentTab && frag.type === "agent_event" && frag.agentRoles.length > 0 && !frag.agentRoles.includes(selectedAgentTab)) return null;
     if (frag.type === "thinking") {
-      return <div key={`think-${i}`} title={formatMessageTime(frag.time)}><ThinkingBlock content={frag.content} isActive={isActive} defaultExpanded={isActive} durationMs={userFrag && !isActive && userFrag.msg.elapsed_ms != null ? userFrag.msg.elapsed_ms : undefined} /></div>;
+      // 历史/已完成思考块一律视为非活跃且默认折叠：不在 ThinkingBlock 上传入
+      // 整轮 elapsed_ms（那是「轮次耗时」而非「深度思考耗时」，会误导），也不启动计时。
+      return <div key={`think-${i}`} title={formatMessageTime(frag.time)}><ThinkingBlock content={frag.content} isActive={false} defaultExpanded={false} /></div>;
     }
         if (frag.type === "explanation") {
           return <p key={`expl-${i}`} className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap break-words" title={formatMessageTime(frag.time)}>{frag.text}</p>;
@@ -346,7 +354,7 @@ function AgentTurnView({
           )}
         </div>
       )}
-      {summaryFrag && renderFragment(summaryFrag, mergedFragments.length)}
+      {summaryFrags.map((frag, i) => renderFragment(frag, mergedFragments.length + i))}
     </div>
   );
 }
