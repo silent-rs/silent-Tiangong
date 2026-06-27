@@ -5,8 +5,6 @@ interface ThinkingBlockProps {
   content: string;
   /** 是否处于活跃（推理/流式）态。活跃时默认展开并实时计时；结束后自动收起为一行。 */
   isActive?: boolean;
-  /** 推理总时长（毫秒）。结束后用于展示「推理总时长」，未提供时回退到组件自身计时。 */
-  durationMs?: number | null;
   defaultExpanded?: boolean;
 }
 
@@ -18,10 +16,10 @@ function formatDuration(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
-export function ThinkingBlock({ content, isActive = false, durationMs, defaultExpanded }: ThinkingBlockProps) {
+export function ThinkingBlock({ content, isActive = false, defaultExpanded }: ThinkingBlockProps) {
   // 推理完成后默认收起为一行摘要；活跃态保持展开（便于用户跟随推理过程）。
   const [isExpanded, setIsExpanded] = useState(defaultExpanded ?? isActive);
-  // 本地实时计时器：仅在活跃态且未提供外部 durationMs 时启用。
+  // 本地实时计时器：仅在活跃态启用，结束后保留最终值。
   const [elapsedMs, setElapsedMs] = useState(0);
   const startRef = useRef<number | null>(null);
 
@@ -43,7 +41,9 @@ export function ThinkingBlock({ content, isActive = false, durationMs, defaultEx
     }
   }, [isActive]);
 
-  const displayDuration = durationMs != null ? durationMs : elapsedMs;
+  // 仅展示活跃态的本地计时；不接收/展示外部 elapsed_ms（那是「轮次耗时」而非
+  // 「深度思考耗时」，会误导）。
+  const displayDuration = elapsedMs;
 
   return (
     <div className="mb-2">
