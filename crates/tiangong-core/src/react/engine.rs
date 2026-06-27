@@ -1104,6 +1104,9 @@ impl ReactEngine {
                     );
                     if let Some(message) = session.messages.last_mut() {
                         message.reasoning_signature = response.reasoning_signature.clone();
+                        // 过程性回复标记为 React 阶段：避免与总结阶段的最终回复混淆，
+                        // 前端据此将其折叠为过程内容，只展示总结阶段的最终回复。
+                        message.phase = crate::session::MessagePhase::React;
                     }
                     let output = LlmOutputRecord {
                         stage: format!("react-round-{round}"),
