@@ -272,6 +272,8 @@ pub(crate) fn force_final_response(
         worker_id: None,
         media: Vec::new(),
         media_migrated: true,
+        elapsed_ms: None,
+        turn_status: None,
         tool_calls: Vec::new(),
         tool_call_id: None,
         tool_name: Some("force_final_response".to_string()),

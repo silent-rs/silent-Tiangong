@@ -287,6 +287,8 @@ fn assemble_system_message(parts: Vec<String>) -> Message {
         worker_id: None,
         media: Vec::new(),
         media_migrated: true,
+        elapsed_ms: None,
+        turn_status: None,
         tool_calls: Vec::new(),
         tool_call_id: None,
         tool_name: None,

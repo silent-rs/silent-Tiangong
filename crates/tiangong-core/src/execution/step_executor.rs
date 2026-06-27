@@ -187,6 +187,8 @@ pub async fn execute_single_plan_step_with_execution_agent(
                 worker_id: None,
                 media: Vec::new(),
                 media_migrated: true,
+                elapsed_ms: None,
+                turn_status: None,
                 tool_calls: Vec::new(),
                 tool_call_id: None,
                 tool_name: Some("execution_feedback".to_string()),

@@ -16,6 +16,35 @@ fn message_with_reasoning() {
 }
 
 #[test]
+fn turn_status_serde() {
+    // 序列化为小写形式，与 RunStatus/MessagePhase 风格一致。
+    assert_eq!(
+        serde_json::to_string(&TurnStatus::Cancelled).unwrap(),
+        "\"cancelled\""
+    );
+    assert_eq!(
+        serde_json::from_str::<TurnStatus>("\"failed\"").unwrap(),
+        TurnStatus::Failed
+    );
+}
+
+#[test]
+fn message_turn_metadata_backward_compatible() {
+    // 旧 session 的用户消息不包含 elapsed_ms / turn_status，反序列化应为 None。
+    let legacy = r#"{
+        "id": "u1",
+        "role": "user",
+        "content": "你好",
+        "reasoning_content": "",
+        "created_at": "2026-01-01 00:00:00"
+    }"#;
+    let msg: Message = serde_json::from_str(legacy).unwrap();
+    assert_eq!(msg.role, MessageRole::User);
+    assert_eq!(msg.elapsed_ms, None);
+    assert_eq!(msg.turn_status, None);
+}
+
+#[test]
 fn session_new() {
     let session = Session::new("测试");
     assert_eq!(session.title, "测试");

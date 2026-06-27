@@ -2109,6 +2109,8 @@ mod tests {
             phase: MessagePhase::Normal,
             created_at: String::new(),
             media_migrated: true,
+            elapsed_ms: None,
+            turn_status: None,
         }
     }
 
@@ -2145,6 +2147,8 @@ mod tests {
             phase: MessagePhase::Normal,
             created_at: String::new(),
             media_migrated: true,
+            elapsed_ms: None,
+            turn_status: None,
         };
 
         let req = ModelRequest {
