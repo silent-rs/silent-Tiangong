@@ -19,8 +19,7 @@ use crate::permission::{
     normalize_permission_target,
 };
 use crate::react::context::{
-    ForceFinalReason, emit_token_usage, force_final_response, maybe_update_context_summary,
-    persist_error, select_client_for_request,
+    emit_token_usage, maybe_update_context_summary, persist_error, select_client_for_request,
 };
 use crate::react::message::*;
 use crate::runtime::LlmOutputRecord;
@@ -35,7 +34,7 @@ use super::helpers::{
     check_cancel, drain_pending_commands_async, looks_like_final_answer,
     maybe_inject_browser_update,
 };
-use super::summary::SummaryPhaseResult;
+use super::summary::{ForceFinalReason, SummaryPhaseResult, force_final_response};
 
 /// 单个 turn 内的执行阶段。
 ///
