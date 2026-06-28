@@ -253,8 +253,7 @@ impl Message {
         }
     }
 
-    /// 构造带推理内容的消息。历史兼容 API；新代码优先使用
-    /// [`Message::assistant_with_reasoning`]，避免在非 Assistant 角色上写入推理。
+    /// 构造带推理内容的消息。`reasoning` 通常仅对 Assistant 有意义。
     pub fn with_reasoning(
         role: MessageRole,
         content: impl Into<String>,
@@ -289,26 +288,6 @@ impl Message {
 
     // ── 语义构造器：按角色表达专属字段，减少非法组合 ──
 
-    /// 构造 User 消息（turn 锚点）。
-    pub fn user(content: impl Into<String>) -> Self {
-        Self::new(MessageRole::User, content)
-    }
-
-    /// 构造 Assistant 消息。
-    pub fn assistant(content: impl Into<String>) -> Self {
-        Self::new(MessageRole::Assistant, content)
-    }
-
-    /// 构造带推理内容的 Assistant 消息。
-    pub fn assistant_with_reasoning(
-        content: impl Into<String>,
-        reasoning: impl Into<String>,
-    ) -> Self {
-        let mut msg = Self::assistant(content);
-        msg.reasoning_content = reasoning.into();
-        msg
-    }
-
     /// 构造 Tool 结果消息，一次性写入 tool 专属字段。
     pub fn tool_result(
         tool_call_id: impl Into<String>,
@@ -324,7 +303,7 @@ impl Message {
     }
 
     /// 在 User 消息上写入该轮次的执行时长与最终状态（turn 锚点）。
-    /// 非 User 消息调用为空操作（避免越权写入 turn metadata）。
+    /// 仅 User 消息会写入；debug 构建下非 User 调用会触发断言，release 下为空操作。
     pub fn set_turn_result(&mut self, elapsed_ms: u64, status: TurnStatus) {
         debug_assert_eq!(
             self.role,
