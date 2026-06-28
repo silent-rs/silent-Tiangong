@@ -1658,16 +1658,6 @@ fn missing_managed_mcp_servers(
         .collect()
 }
 
-pub(crate) fn use_stream_mode() -> bool {
-    match std::env::var("API_STREAM") {
-        Ok(raw) => {
-            let normalized = raw.trim().to_ascii_lowercase();
-            !matches!(normalized.as_str(), "0" | "false" | "off" | "no")
-        }
-        Err(_) => true,
-    }
-}
-
 /// 清理 LLM 响应中混入的工具执行 trace 文本
 #[allow(dead_code)]
 pub(crate) fn strip_tool_traces_from_response(text: &str) -> String {

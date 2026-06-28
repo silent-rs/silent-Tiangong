@@ -13,13 +13,12 @@ use std::sync::mpsc::Sender as StdSender;
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::core::command::Command;
-use crate::model::{ModelClient, ModelRequest, TokenUsage};
+use crate::model::{ModelRequest, TokenUsage};
 use crate::react::context::{
     emit_token_usage, maybe_update_context_summary, rebuild_system_prompt,
     select_client_for_request,
 };
 use crate::react::message::append_or_reuse_user_message;
-use crate::runtime::{RuntimeEngine, use_stream_mode};
 use crate::session::{Message, MessagePhase, MessageRole, Session, now_text};
 use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
 use tiangong_types::StreamEvent;
@@ -78,9 +77,9 @@ impl ReactEngine {
         let client = select_client_for_request(&self.engine, &req).clone();
         let req_clone = req.clone();
         // 总结阶段传与 ReAct 阶段相同的 tools schema（按相同 intent 过滤）以保持
-        // KV cache 前缀一致，但通过 tool_choice = None 显式禁止模型调用工具。
+        // KV cache 前缀一致，但通过 Some(ToolChoice::None) 显式禁止模型调用工具。
         //
-        // 此前曾用 tool_choice=None（缺省），但 build_provider_request 在有 tools 时
+        // 此前曾用 tool_choice 缺省（None），但 build_provider_request 在有 tools 时
         // 会把缺省回落到 ToolChoice::Auto（model.rs::build_provider_request），模型可
         // 在总结阶段发起工具调用；而本阶段只消费 response.text、忽略 response.tool_calls，
         // 误调用会出现空文本被当作最终回复。ToolChoice 现已新增 None 变体（各 provider
@@ -261,6 +260,24 @@ impl ReactEngine {
             usage.accumulate(&streaming_usage);
         }
 
+        // 兼容性防御：正常 provider 在 ToolChoice::None 下不应返回 tool_calls，
+        // 但部分 OpenAI-compatible / vLLM / 第三方后端可能忽略 tool_choice: "none"。
+        // 一旦出现 tool_calls 且文本为空，说明本阶段未产出有效最终回复——
+        // 视作总结失败，交由上层 force_final_response 兜底，避免把空文本当作完成。
+        if !response.tool_calls.is_empty() {
+            tracing::warn!(
+                count = response.tool_calls.len(),
+                protocol = ?self.engine.client().protocol(),
+                "summary phase returned tool calls despite ToolChoice::None"
+            );
+            if response.text.trim().is_empty() {
+                return SummaryPhaseResult::Failed {
+                    message: "总结阶段无视 ToolChoice::None 返回了工具调用且无文本回复".to_string(),
+                    usage,
+                };
+            }
+        }
+
         // 解析总结阶段标记，判定完成度（Done/AskUser/NeedMoreWork）。
         let decision = parse_summary_phase_output(&response.text);
         let summary_content = decision.payload().to_string();
@@ -438,17 +455,35 @@ pub(super) const SUMMARY_PHASE_PROMPT: &str = "\
 /// 构建总结阶段的 LLM 请求。
 ///
 /// 将 `SUMMARY_PHASE_PROMPT` 作为运行时上下文追加到对话末尾。请求本身不携带 tools
-/// 选择信息——是否禁用工具调用由调用方通过 `tool_choice = None` 显式控制（见
-/// `run_summary_phase`），本函数只负责构造消息上下文与 thinking 预算。
+/// 选择信息——是否禁用工具调用由调用方通过 `Some(ToolChoice::None)` 显式控制（见
+/// `run_summary_phase` / `force_final_response`），本函数只负责构造消息上下文与
+/// thinking 预算。
+/// 构建总结阶段（完成度判断器）的 LLM 请求。
+///
+/// 将 `SUMMARY_PHASE_PROMPT` 作为运行时上下文追加到对话末尾。请求本身不携带 tools
+/// 选择信息——是否禁用工具调用由调用方通过 `Some(ToolChoice::None)` 显式控制（见
+/// `run_summary_phase` / `force_final_response`）。
 pub(super) fn request_for_summary_phase(session: &Session) -> ModelRequest {
+    build_text_finalization_request(
+        session,
+        &format!("<runtime_context>\n{SUMMARY_PHASE_PROMPT}\n</runtime_context>"),
+    )
+}
+
+/// 构建一次「只产出文本最终回复」的 LLM 请求（共用请求体）。
+///
+/// 总结阶段（`run_summary_phase`）与强制终结（`force_final_response`）的请求体
+/// 仅在 runtime_context 提示内容上不同——其余（thinking 预算、无 media、空 user_input）
+/// 完全一致。本函数抽出共用部分，调用方负责提供 prompt 文本；传空串时跳过 push
+/// （用于 force-final：提示已作为 Tool 消息进入 session 历史，无需在请求里重复）。
+/// 工具调用禁用由调用方在发起 client 调用时通过 `Some(ToolChoice::None)` 控制。
+fn build_text_finalization_request(session: &Session, prompt: &str) -> ModelRequest {
     let mut context = session.context();
-    context.push(
-        Message::new(
-            MessageRole::System,
-            format!("<runtime_context>\n{SUMMARY_PHASE_PROMPT}\n</runtime_context>"),
-        )
-        .with_phase(MessagePhase::Normal),
-    );
+    if !prompt.is_empty() {
+        context.push(
+            Message::new(MessageRole::System, prompt.to_string()).with_phase(MessagePhase::Normal),
+        );
+    }
     ModelRequest {
         session_title: session.title.clone(),
         user_input: String::new(),
@@ -494,136 +529,159 @@ impl ForceFinalReason {
     }
 }
 
-/// 超限时强制最终回复（兜底路径）。
-///
-/// 触发场景：
-/// - `OuterLimit`：总结阶段判定 NeedMoreWork，但重入 Loop 次数已达上限
-/// - `SummaryError`：总结阶段 LLM 请求失败
-///
-/// 与 `run_summary_phase`（正常路径）共同构成最终回复的唯一出口。
-pub(super) fn force_final_response(
-    session: &mut Session,
-    engine: &RuntimeEngine,
-    stream_tx: &StdSender<StreamEvent>,
-    reason: ForceFinalReason,
-) {
-    // 确保 system prompt 已构建
-    if session.system_prompt_message.is_none() {
-        rebuild_system_prompt(session, engine);
+impl ReactEngine {
+    /// 超限时强制最终回复（兜底路径）。
+    ///
+    /// 触发场景：
+    /// - `OuterLimit`：总结阶段判定 NeedMoreWork，但重入 Loop 次数已达上限
+    /// - `SummaryError`：总结阶段 LLM 请求失败
+    ///
+    /// 与 `run_summary_phase`（正常路径）共同构成最终回复的唯一出口。
+    ///
+    /// 与正常总结阶段保持一致的 KV cache 策略：传入与 ReAct 阶段相同的 tools schema，
+    /// 并通过 `ToolChoice::None` 禁止工具调用。兜底路径恰恰发生在长上下文、多轮 ReAct
+    /// 之后——这正是 KV cache 最有价值的场景，若此处不传 tools 会在最需要 cache 前缀命中的阶段损失命中。
+    ///
+    /// 注意：force-final 的提示词以「强制终结」语义给出（不允许 [NEED_MORE_WORK]），
+    /// 与 `run_summary_phase` 的「完成度判断器」语义相反——这是二者不能合并的根本原因：
+    /// 否则 OuterLimit / SummaryError 会再次触发重入，造成无限循环。
+    pub(super) fn force_final_response(
+        &self,
+        session: &mut Session,
+        stream_tx: &StdSender<StreamEvent>,
+        reason: ForceFinalReason,
+    ) {
+        // 确保 system prompt 已构建
+        if session.system_prompt_message.is_none() {
+            rebuild_system_prompt(session, &self.engine);
+        }
+        // 将强制终结提示作为 Tool 消息持久化进 session（区别于 run_summary_phase 把
+        // 提示放在请求 context 而不入 session）：兜底原因需在会话恢复后可见，便于诊断。
+        session.messages.push(Message {
+            id: scru128::new().to_string(),
+            role: MessageRole::Tool,
+            content: vec![crate::session::ContentBlock::text(format!(
+                "<system-reminder>\n{}\n</system-reminder>",
+                reason.prompt()
+            ))],
+            reasoning_content: String::new(),
+            reasoning_signature: None,
+            worker_id: None,
+            media: Vec::new(),
+            media_migrated: true,
+            elapsed_ms: None,
+            turn_status: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: Some("force_final_response".to_string()),
+            tool_result_is_error: false,
+            compact: false,
+            phase: MessagePhase::Normal,
+            created_at: now_text(),
+        });
+
+        // force-final 的提示已作为 Tool 消息进入 session 历史（用于恢复后可见）；
+        // 请求构造复用 build_text_finalization_request 的统一请求体（thinking 预算等），
+        // 这里无需再向请求 context 追加 prompt——传空串时 build_text_finalization_request
+        // 会跳过 push，避免空 system 消息污染上下文。
+        let req = build_text_finalization_request(session, "");
+
+        let pending_msg_id = scru128::new().to_string();
+
+        let resp = match self.run_text_finalization_llm(session, &req, &pending_msg_id, stream_tx) {
+            Some(r) => r,
+            None => {
+                crate::react::context::persist_error(
+                    session,
+                    "force_final_response 失败".to_string(),
+                );
+                return;
+            }
+        };
+
+        self.commit_summary_message(
+            session,
+            stream_tx,
+            &pending_msg_id,
+            &resp,
+            "force_final_response",
+        );
+        let _ = stream_tx.send(StreamEvent::Done {
+            usage: Some(resp.usage.clone()),
+        });
     }
-    // 注入提示消息到 session
-    session.messages.push(Message {
-        id: scru128::new().to_string(),
-        role: MessageRole::Tool,
-        content: vec![crate::session::ContentBlock::text(format!(
-            "<system-reminder>\n{}\n</system-reminder>",
-            reason.prompt()
-        ))],
-        reasoning_content: String::new(),
-        reasoning_signature: None,
-        worker_id: None,
-        media: Vec::new(),
-        media_migrated: true,
-        elapsed_ms: None,
-        turn_status: None,
-        tool_calls: Vec::new(),
-        tool_call_id: None,
-        tool_name: Some("force_final_response".to_string()),
-        tool_result_is_error: false,
-        compact: false,
-        phase: MessagePhase::Normal,
-        created_at: now_text(),
-    });
 
-    let req = ModelRequest {
-        session_title: session.title.clone(),
-        user_input: String::new(),
-        context: session.context(),
-        thinking: Some(crate::model::ThinkingConfig {
-            budget_tokens: 4096,
-        }),
-        reasoning_effort: None,
-        thinking_disabled: false,
-        include_media: false,
-    };
-
-    let pending_msg_id = scru128::new().to_string();
-
-    let resp = if use_stream_mode() {
+    /// 执行一次「只产出文本最终回复」的 LLM 调用（tools + `ToolChoice::None`，流式）。
+    ///
+    /// 总结阶段与强制终结共用：传相同 intent 过滤后的 tools schema 保持 KV cache 前缀，
+    /// 通过 `ToolChoice::None` 禁止工具调用。`complete_with_functions_stream_with_tool_choice`
+    /// 内部按 `use_stream_mode()` 自动选择流式/非流式实现，并在流式失败时回退非流式。
+    ///
+    /// 成功返回响应；失败则上报错误、持久化错误痕迹并返回 `None`（调用方据此终止）。
+    fn run_text_finalization_llm(
+        &self,
+        session: &Session,
+        req: &ModelRequest,
+        pending_msg_id: &str,
+        stream_tx: &StdSender<StreamEvent>,
+    ) -> Option<crate::model::ModelFunctionResponse> {
+        let final_tools = tools_for_current_turn(&self.tools, session, "");
         let sink = ThrottledStreamSink::with_text_kind(
-            pending_msg_id.clone(),
+            pending_msg_id.to_string(),
             stream_tx.clone(),
             StreamTextKind::Summary,
         );
-        let response_result = select_client_for_request(engine, &req)
-            .complete_stream_with_callback(&req, |delta| {
-                sink.push_chunk(delta);
-            });
+        let response_result = select_client_for_request(&self.engine, req)
+            .complete_with_functions_stream_with_tool_choice(
+                req,
+                &final_tools,
+                Some(crate::model::ToolChoice::None),
+                &mut |delta| {
+                    sink.push_chunk(delta);
+                },
+            );
         sink.finish();
         match response_result {
-            Ok(r) => r,
+            Ok(r) => Some(r),
             Err(err) => {
                 let _ = stream_tx.send(StreamEvent::Error {
                     message: err.to_string(),
                 });
-                crate::react::context::persist_error(
-                    session,
-                    format!("force_final_response（流式）失败：{err}"),
-                );
-                return;
+                None
             }
         }
-    } else {
-        let msg_id_non_stream = pending_msg_id.clone();
-        match select_client_for_request(engine, &req).complete(&req) {
-            Ok(r) => {
-                if !r.text.is_empty() {
-                    let _ = stream_tx.send(StreamEvent::SummaryText {
-                        message_id: msg_id_non_stream,
-                        content: r.text.clone(),
-                    });
-                }
-                if !r.reasoning_content.is_empty() {
-                    let _ = stream_tx.send(StreamEvent::Reasoning {
-                        message_id: pending_msg_id.clone(),
-                        content: r.reasoning_content.clone(),
-                    });
-                }
-                r
-            }
-            Err(err) => {
-                let _ = stream_tx.send(StreamEvent::Error {
-                    message: err.to_string(),
-                });
-                crate::react::context::persist_error(
-                    session,
-                    format!("force_final_response（非流式）失败：{err}"),
-                );
-                return;
-            }
-        }
-    };
-
-    session.append_message_with_id(
-        pending_msg_id,
-        MessageRole::Assistant,
-        resp.text,
-        resp.reasoning_content,
-    );
-    if let Some(message) = session.messages.last_mut() {
-        message.phase = MessagePhase::Summary;
-        message.reasoning_signature = resp.reasoning_signature.clone();
     }
-    emit_token_usage(
-        stream_tx,
-        &resp.usage,
-        Some(resp.usage.prompt_tokens.max(session.current_tokens)),
-        engine.context_limit,
-        "force_final_response",
-        None,
-    );
-    let _ = stream_tx.send(StreamEvent::Done {
-        usage: Some(resp.usage.clone()),
-    });
-    session.persist_to_disk();
+
+    /// 把一次「只产出文本最终回复」的 LLM 调用结果落盘为 Summary 消息。
+    ///
+    /// 共用于总结阶段的 Done/AskUser 分支与强制终结：append assistant 消息、
+    /// 设置 phase=Summary 与 reasoning_signature、上报 token usage、持久化。
+    fn commit_summary_message(
+        &self,
+        session: &mut Session,
+        stream_tx: &StdSender<StreamEvent>,
+        pending_msg_id: &str,
+        resp: &crate::model::ModelFunctionResponse,
+        usage_source: &str,
+    ) {
+        session.append_message_with_id(
+            pending_msg_id.to_string(),
+            MessageRole::Assistant,
+            resp.text.clone(),
+            resp.reasoning_content.clone(),
+        );
+        if let Some(message) = session.messages.last_mut() {
+            message.phase = MessagePhase::Summary;
+            message.reasoning_signature = resp.reasoning_signature.clone();
+        }
+        emit_token_usage(
+            stream_tx,
+            &resp.usage,
+            Some(resp.usage.prompt_tokens.max(session.current_tokens)),
+            self.engine.context_limit,
+            usage_source,
+            None,
+        );
+        session.persist_to_disk();
+    }
 }

@@ -34,7 +34,7 @@ use super::helpers::{
     check_cancel, drain_pending_commands_async, looks_like_final_answer,
     maybe_inject_browser_update,
 };
-use super::summary::{ForceFinalReason, SummaryPhaseResult, force_final_response};
+use super::summary::{ForceFinalReason, SummaryPhaseResult};
 
 /// 单个 turn 内的执行阶段。
 ///
@@ -582,14 +582,12 @@ impl ReactEngine {
 
                 // 工具调用
                 let executable_calls = response.tool_calls.iter().collect::<Vec<_>>();
-                if executable_calls.is_empty() {
-                    let msg = "模型没有返回可执行工具调用，任务已停止".to_string();
-                    let _ = stream_tx.send(StreamEvent::Error {
-                        message: msg.clone(),
-                    });
-                    persist_error(session, msg);
-                    return accumulated_usage;
-                }
+                // 此处 tool_calls 必非空（上方 is_empty 分支已 break 'react_loop）；
+                // 用 debug_assert! 固化这一不变式，避免后续维护误删上方分支后留下静默死代码。
+                debug_assert!(
+                    !executable_calls.is_empty(),
+                    "react_loop tool_calls 非空不变式被破坏"
+                );
                 let tool_names: Vec<String> =
                     executable_calls.iter().map(|c| c.name.clone()).collect();
                 let output = LlmOutputRecord {
@@ -1368,12 +1366,7 @@ impl ReactEngine {
                     outer_iteration += 1;
                     if outer_iteration >= self.max_outer_iterations {
                         // 重入次数已达上限，强制输出最终回复。
-                        force_final_response(
-                            session,
-                            &self.engine,
-                            stream_tx,
-                            ForceFinalReason::OuterLimit,
-                        );
+                        self.force_final_response(session, stream_tx, ForceFinalReason::OuterLimit);
                         return accumulated_usage;
                     }
                     // 注入"上轮总结判定未完成"的上下文，重新进入工具执行阶段。
@@ -1407,12 +1400,7 @@ impl ReactEngine {
                         message: format!("总结阶段失败：{message}"),
                     });
                     persist_error(session, format!("总结阶段失败：{message}"));
-                    force_final_response(
-                        session,
-                        &self.engine,
-                        stream_tx,
-                        ForceFinalReason::SummaryError,
-                    );
+                    self.force_final_response(session, stream_tx, ForceFinalReason::SummaryError);
                     return accumulated_usage;
                 }
             }
