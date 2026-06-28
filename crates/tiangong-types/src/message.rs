@@ -13,24 +13,6 @@ pub enum MessageRole {
     Tool,
 }
 
-impl MessageRole {
-    pub fn is_system(self) -> bool {
-        matches!(self, Self::System)
-    }
-
-    pub fn is_user(self) -> bool {
-        matches!(self, Self::User)
-    }
-
-    pub fn is_assistant(self) -> bool {
-        matches!(self, Self::Assistant)
-    }
-
-    pub fn is_tool(self) -> bool {
-        matches!(self, Self::Tool)
-    }
-}
-
 /// 单个对话轮次的最终执行状态，仅持久化到用户消息（turn 锚点）。
 ///
 /// 向后兼容：旧 session 反序列化时缺失该字段默认为 None，前端不展示状态。
@@ -271,6 +253,8 @@ impl Message {
         }
     }
 
+    /// 构造带推理内容的消息。历史兼容 API；新代码优先使用
+    /// [`Message::assistant_with_reasoning`]，避免在非 Assistant 角色上写入推理。
     pub fn with_reasoning(
         role: MessageRole,
         content: impl Into<String>,
@@ -342,6 +326,11 @@ impl Message {
     /// 在 User 消息上写入该轮次的执行时长与最终状态（turn 锚点）。
     /// 非 User 消息调用为空操作（避免越权写入 turn metadata）。
     pub fn set_turn_result(&mut self, elapsed_ms: u64, status: TurnStatus) {
+        debug_assert_eq!(
+            self.role,
+            MessageRole::User,
+            "set_turn_result should only be called on user messages"
+        );
         if self.role == MessageRole::User {
             self.elapsed_ms = Some(elapsed_ms);
             self.turn_status = Some(status);
@@ -360,22 +349,6 @@ impl Message {
     /// 是否包含非文本内容块
     pub fn has_media(&self) -> bool {
         self.content.iter().any(|b| !b.is_text())
-    }
-
-    pub fn is_user(&self) -> bool {
-        self.role.is_user()
-    }
-
-    pub fn is_assistant(&self) -> bool {
-        self.role.is_assistant()
-    }
-
-    pub fn is_tool(&self) -> bool {
-        self.role.is_tool()
-    }
-
-    pub fn is_system(&self) -> bool {
-        self.role.is_system()
     }
 
     /// 判断是否包含文件类附件（PDF/Office 等非图片媒体）。
@@ -404,36 +377,6 @@ impl Message {
             self.content.push(asset.to_content_block());
         }
         self.media_migrated = true;
-    }
-
-    /// 校验 role 专属字段未被错误地写入其它角色（用于 debug/持久化前自查）。
-    ///
-    /// 类型本身保持扁平以贴近 JSON 契约；非法组合由调用方在关键边界
-    /// （持久化前、model 请求构造前）调用此方法发现。
-    pub fn validate_role_fields(&self) -> Result<(), String> {
-        match self.role {
-            MessageRole::User => {
-                if !self.reasoning_content.is_empty()
-                    || !self.tool_calls.is_empty()
-                    || self.tool_call_id.is_some()
-                    || self.tool_name.is_some()
-                {
-                    return Err("user 消息不应携带 assistant/tool 专属字段".into());
-                }
-            }
-            MessageRole::Assistant => {
-                if self.tool_call_id.is_some() || self.tool_name.is_some() {
-                    return Err("assistant 消息不应携带 tool 结果字段".into());
-                }
-            }
-            MessageRole::Tool => {
-                if !self.reasoning_content.is_empty() || !self.tool_calls.is_empty() {
-                    return Err("tool 消息不应携带 assistant 专属字段".into());
-                }
-            }
-            MessageRole::System => {}
-        }
-        Ok(())
     }
 }
 
