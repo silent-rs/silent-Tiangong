@@ -11,11 +11,63 @@ use crate::session::{Message, Session};
 use super::budget::TokenBudget;
 use super::organizer::ContextOrganizer;
 
-/// 查询执行模式（重导出自 orchestrator 层）
+/// 查询执行模式
 ///
 /// 由查询编排层判断，传递给上下文装配层，决定注入哪些内容。
-/// 详细定义见 `crate::orchestrator::types::QueryMode`。
-pub use crate::orchestrator::QueryMode;
+/// 历史上位于独立的 `orchestrator` 模块，随编排层退场收敛到上下文装配层内部。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryMode {
+    /// 直接回答：不注入工具定义（简单对话、闲聊、知识问答）
+    DirectAnswer,
+    /// 单工具执行：简单的单步工具调用
+    SingleToolExecution,
+    /// 多步工具链执行：需要规划 + 多轮工具调用
+    MultiStepExecution,
+    /// 子任务拆分：拆分为多个独立子任务并行执行（多代理）
+    TaskSplit,
+    /// 后台执行：长时间运行的任务移至后台
+    BackgroundExecution,
+}
+
+impl QueryMode {
+    /// 是否需要注入工具定义
+    pub fn needs_tools(&self) -> bool {
+        !matches!(self, Self::DirectAnswer)
+    }
+
+    /// 是否需要规划阶段
+    pub fn needs_planning(&self) -> bool {
+        matches!(self, Self::MultiStepExecution | Self::TaskSplit)
+    }
+
+    /// 是否需要多代理协调
+    pub fn needs_coordinator(&self) -> bool {
+        matches!(self, Self::TaskSplit)
+    }
+
+    /// 是否应在后台执行
+    pub fn is_background(&self) -> bool {
+        matches!(self, Self::BackgroundExecution)
+    }
+
+    /// 获取简短显示名
+    pub fn display_name(&self) -> &str {
+        match self {
+            Self::DirectAnswer => "直接回答",
+            Self::SingleToolExecution => "单工具执行",
+            Self::MultiStepExecution => "多步执行",
+            Self::TaskSplit => "子任务拆分",
+            Self::BackgroundExecution => "后台执行",
+        }
+    }
+}
+
+impl std::fmt::Display for QueryMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.display_name())
+    }
+}
 
 /// 查询意图分类器
 ///

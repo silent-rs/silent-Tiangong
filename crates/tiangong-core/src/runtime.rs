@@ -44,7 +44,21 @@ pub struct LlmOutputRecord {
     pub usage: TokenUsage,
 }
 
-pub use crate::agents::response_agent::VerifyExecutionRecord;
+/// 单条验证命令的执行结果记录。
+///
+/// 由 ReAct 执行链路在需要时收集（如运行测试、构建等验证命令），用于
+/// 上下文呈现与结果汇总。历史定义位于 `agents::response_agent`，随旧
+/// 流水线退场而收敛到 `runtime` 作为通用数据类型。
+#[derive(Debug, Clone)]
+pub struct VerifyExecutionRecord {
+    pub command: String,
+    pub ok: bool,
+    pub exit_code: i32,
+    pub duration_ms: u64,
+    pub summary: String,
+    pub stdout: String,
+    pub stderr: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct TurnExecution {
