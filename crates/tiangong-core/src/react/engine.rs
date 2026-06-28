@@ -548,8 +548,12 @@ impl ReactEngine {
                         && !response.text.trim().is_empty()
                     {
                         if let Some(message) = session.messages.last_mut() {
+                            // 该消息此前已标记为 phase=React（上方无工具调用分支），
+                            // 此处提升为 Summary：必须重新落盘，否则会话恢复后 phase 仍为
+                            // React，前端会把最终回复折叠为过程内容（双总结问题的根因）。
                             message.phase = crate::session::MessagePhase::Summary;
                         }
+                        session.persist_to_disk();
                         let _ = stream_tx.send(StreamEvent::Done {
                             usage: Some(accumulated_usage.clone()),
                         });

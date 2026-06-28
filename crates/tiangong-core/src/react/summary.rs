@@ -25,7 +25,7 @@ use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
 use tiangong_types::StreamEvent;
 
 use super::cancel::{CancelSignal, CancelStrategy, emit_cancel_usage};
-use super::engine::{ReactEngine, TurnPhase, tools_for_current_turn};
+use super::engine::{ReactEngine, TurnPhase};
 
 /// 总结阶段的执行结果。
 pub(super) enum SummaryPhaseResult {
@@ -77,13 +77,19 @@ impl ReactEngine {
             tokio_mpsc::unbounded_channel::<crate::model::ModelStreamChunk>();
         let client = select_client_for_request(&self.engine, &req).clone();
         let req_clone = req.clone();
-        // 传与 ReAct 阶段相同的 tools schema（按相同 intent 过滤），保持 KV cache
-        // 前缀一致；不传 tools 会导致 tools 段缺失，从该位置起 cache miss。
-        // 模型不会真正调用工具——SUMMARY_PHASE_PROMPT 已指示只输出文本回复。
-        let summary_tools = tools_for_current_turn(&self.tools, session, "");
+        // 总结阶段不注入任何工具（传空 tools）。
+        //
+        // 历史上这里曾传与 ReAct 阶段相同的 tools schema 以"保持 KV cache 前缀一致"，
+        // 但带来真实风险：tool_choice 为 None 时，build_provider_request 会回落到
+        // ToolChoice::Auto（见 model.rs::build_provider_request），模型可在总结阶段
+        // 发起工具调用。而本阶段只消费 response.text、完全忽略 response.tool_calls，
+        // 一旦模型误调用工具就会出现空文本被当作最终回复、用户看不到有效答复。
+        //
+        // 正确性优先于 KV cache 命中率：总结阶段的语义就是只产出最终文本回复，
+        // 因此显式不提供工具，从源头杜绝误调用。
         let mut llm_fut = Some(tokio::task::spawn(async move {
             client
-                .stream_function_calls_with_tool_choice(req_clone, summary_tools, None, chunk_tx)
+                .stream_function_calls_with_tool_choice(req_clone, Vec::new(), None, chunk_tx)
                 .await
         }));
         let mut streaming_usage = tiangong_types::TokenUsage::default();
