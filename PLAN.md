@@ -20,12 +20,13 @@
 | 0.10.0 | 工作区标签页、文档解析与 OpenAI Responses | ✅ |
 | 0.10.1 | 发布后异常修复：Agent 协作与运行时稳定性 | ✅ |
 | 0.10.2 | Hotfix：DeepSeek reasoning_content、浏览器标签与 MCP 体验修复 | ✅ |
+| 0.11.0 | ReAct Loop 与总结阶段分离、会话列表分组、工具输出截取与执行时间持久化 | ✅ |
 
-## 当前执行策略（2026-06-25）
+## 当前执行策略（2026-06-26）
 
 - Phase 1~21 已完成。
-- 0.10.2 已从 `main` 发布，版本标签为 `v0.10.2`。
-- 0.10.2 紧急修复：DeepSeek reasoning_content 解析与注入工具调用丢失、标题栏浏览器图标不渲染与切换终端误关浏览器标签、MCP 工作目录跟随会话/握手诊断/编辑能力/探测并发化。
+- 0.11.0 已从 `main` 发布，版本标签为 `v0.11.0`。
+- 0.11.0 聚焦 ReAct Loop 与总结阶段分离架构重构、左侧会话列表按 workspace 分组、工具输出截取与执行时间持久化、双总结修复与智能提升最终回复、终端面板聚焦修复、ReAct 循环失败错误痕迹持久化，以及扁平 Message 语义构造器与前端 reasoning 空值保护。
 - Phase 21-M 统一工作区 Tabs 与会话绑定已完成，不再作为当前开发主线。
 - 0.10.0 已交付内容包括工作区标签页与会话绑定、Office/PDF 文件上传与本地脚本解析、OpenAI Responses provider 与 Chat Completions 拆分、插件能力 Plugin::register 自注册、统一 Agent 交互通道（AgentInput trait）及若干终端与 OpenAI 流式修复。
 
