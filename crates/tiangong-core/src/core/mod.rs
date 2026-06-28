@@ -546,8 +546,7 @@ async fn worker_loop_async(
                     .iter_mut()
                     .find(|m| m.id == user_msg_id && m.role == MessageRole::User)
                 {
-                    msg.elapsed_ms = Some(elapsed_ms);
-                    msg.turn_status = Some(status);
+                    msg.set_turn_result(elapsed_ms, status);
                     user_msg_updated = true;
                 }
                 if user_msg_updated {

@@ -13,6 +13,24 @@ pub enum MessageRole {
     Tool,
 }
 
+impl MessageRole {
+    pub fn is_system(self) -> bool {
+        matches!(self, Self::System)
+    }
+
+    pub fn is_user(self) -> bool {
+        matches!(self, Self::User)
+    }
+
+    pub fn is_assistant(self) -> bool {
+        matches!(self, Self::Assistant)
+    }
+
+    pub fn is_tool(self) -> bool {
+        matches!(self, Self::Tool)
+    }
+}
+
 /// 单个对话轮次的最终执行状态，仅持久化到用户消息（turn 锚点）。
 ///
 /// 向后兼容：旧 session 反序列化时缺失该字段默认为 None，前端不展示状态。
@@ -285,6 +303,51 @@ impl Message {
         self
     }
 
+    // ── 语义构造器：按角色表达专属字段，减少非法组合 ──
+
+    /// 构造 User 消息（turn 锚点）。
+    pub fn user(content: impl Into<String>) -> Self {
+        Self::new(MessageRole::User, content)
+    }
+
+    /// 构造 Assistant 消息。
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self::new(MessageRole::Assistant, content)
+    }
+
+    /// 构造带推理内容的 Assistant 消息。
+    pub fn assistant_with_reasoning(
+        content: impl Into<String>,
+        reasoning: impl Into<String>,
+    ) -> Self {
+        let mut msg = Self::assistant(content);
+        msg.reasoning_content = reasoning.into();
+        msg
+    }
+
+    /// 构造 Tool 结果消息，一次性写入 tool 专属字段。
+    pub fn tool_result(
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        content: impl Into<String>,
+        is_error: bool,
+    ) -> Self {
+        let mut msg = Self::new(MessageRole::Tool, content);
+        msg.tool_call_id = Some(tool_call_id.into());
+        msg.tool_name = Some(tool_name.into());
+        msg.tool_result_is_error = is_error;
+        msg
+    }
+
+    /// 在 User 消息上写入该轮次的执行时长与最终状态（turn 锚点）。
+    /// 非 User 消息调用为空操作（避免越权写入 turn metadata）。
+    pub fn set_turn_result(&mut self, elapsed_ms: u64, status: TurnStatus) {
+        if self.role == MessageRole::User {
+            self.elapsed_ms = Some(elapsed_ms);
+            self.turn_status = Some(status);
+        }
+    }
+
     /// 获取纯文本内容（拼接所有 Text 块）
     pub fn text_content(&self) -> String {
         self.content
@@ -297,6 +360,22 @@ impl Message {
     /// 是否包含非文本内容块
     pub fn has_media(&self) -> bool {
         self.content.iter().any(|b| !b.is_text())
+    }
+
+    pub fn is_user(&self) -> bool {
+        self.role.is_user()
+    }
+
+    pub fn is_assistant(&self) -> bool {
+        self.role.is_assistant()
+    }
+
+    pub fn is_tool(&self) -> bool {
+        self.role.is_tool()
+    }
+
+    pub fn is_system(&self) -> bool {
+        self.role.is_system()
     }
 
     /// 判断是否包含文件类附件（PDF/Office 等非图片媒体）。
@@ -325,6 +404,36 @@ impl Message {
             self.content.push(asset.to_content_block());
         }
         self.media_migrated = true;
+    }
+
+    /// 校验 role 专属字段未被错误地写入其它角色（用于 debug/持久化前自查）。
+    ///
+    /// 类型本身保持扁平以贴近 JSON 契约；非法组合由调用方在关键边界
+    /// （持久化前、model 请求构造前）调用此方法发现。
+    pub fn validate_role_fields(&self) -> Result<(), String> {
+        match self.role {
+            MessageRole::User => {
+                if !self.reasoning_content.is_empty()
+                    || !self.tool_calls.is_empty()
+                    || self.tool_call_id.is_some()
+                    || self.tool_name.is_some()
+                {
+                    return Err("user 消息不应携带 assistant/tool 专属字段".into());
+                }
+            }
+            MessageRole::Assistant => {
+                if self.tool_call_id.is_some() || self.tool_name.is_some() {
+                    return Err("assistant 消息不应携带 tool 结果字段".into());
+                }
+            }
+            MessageRole::Tool => {
+                if !self.reasoning_content.is_empty() || !self.tool_calls.is_empty() {
+                    return Err("tool 消息不应携带 assistant 专属字段".into());
+                }
+            }
+            MessageRole::System => {}
+        }
+        Ok(())
     }
 }
 

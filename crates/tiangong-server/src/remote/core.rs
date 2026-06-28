@@ -681,10 +681,7 @@ fn append_tool_result_message(
     let Some(tool_call_id) = tool_call_id else {
         return;
     };
-    let mut message = Message::new(MessageRole::Tool, content);
-    message.tool_call_id = Some(tool_call_id.to_string());
-    message.tool_name = Some(tool_name.to_string());
-    message.tool_result_is_error = is_error;
+    let message = Message::tool_result(tool_call_id, tool_name, content, is_error);
     session.messages.push(message);
     session.updated_at = now_text();
 }
