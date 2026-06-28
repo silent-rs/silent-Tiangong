@@ -23,7 +23,7 @@ export function formatMessageTime(createdAt?: string): string {
 }
 
 export function msgReasoning(message: MessageItem): string {
-  return message.reasoning_content.trim();
+  return (message.reasoning_content ?? "").trim();
 }
 
 /** 总结阶段的状态标记，需在前端展示时剥离。 */

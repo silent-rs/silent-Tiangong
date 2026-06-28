@@ -253,6 +253,7 @@ impl Message {
         }
     }
 
+    /// 构造带推理内容的消息。`reasoning` 通常仅对 Assistant 有意义。
     pub fn with_reasoning(
         role: MessageRole,
         content: impl Into<String>,
@@ -283,6 +284,36 @@ impl Message {
     pub fn with_phase(mut self, phase: MessagePhase) -> Self {
         self.phase = phase;
         self
+    }
+
+    // ── 语义构造器：按角色表达专属字段，减少非法组合 ──
+
+    /// 构造 Tool 结果消息，一次性写入 tool 专属字段。
+    pub fn tool_result(
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        content: impl Into<String>,
+        is_error: bool,
+    ) -> Self {
+        let mut msg = Self::new(MessageRole::Tool, content);
+        msg.tool_call_id = Some(tool_call_id.into());
+        msg.tool_name = Some(tool_name.into());
+        msg.tool_result_is_error = is_error;
+        msg
+    }
+
+    /// 在 User 消息上写入该轮次的执行时长与最终状态（turn 锚点）。
+    /// 仅 User 消息会写入；debug 构建下非 User 调用会触发断言，release 下为空操作。
+    pub fn set_turn_result(&mut self, elapsed_ms: u64, status: TurnStatus) {
+        debug_assert_eq!(
+            self.role,
+            MessageRole::User,
+            "set_turn_result should only be called on user messages"
+        );
+        if self.role == MessageRole::User {
+            self.elapsed_ms = Some(elapsed_ms);
+            self.turn_status = Some(status);
+        }
     }
 
     /// 获取纯文本内容（拼接所有 Text 块）

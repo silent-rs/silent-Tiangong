@@ -91,11 +91,8 @@ pub(crate) fn append_tool_result_message(
     text: String,
     is_error: bool,
 ) {
-    let mut message =
-        Message::new(MessageRole::Tool, text).with_phase(crate::session::MessagePhase::React);
-    message.tool_call_id = Some(tool_call_id.to_string());
-    message.tool_name = Some(tool_name.to_string());
-    message.tool_result_is_error = is_error;
+    let message = Message::tool_result(tool_call_id, tool_name, text, is_error)
+        .with_phase(crate::session::MessagePhase::React);
     session.messages.push(message);
 }
 
