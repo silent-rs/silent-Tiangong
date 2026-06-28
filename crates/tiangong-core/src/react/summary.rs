@@ -25,7 +25,7 @@ use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
 use tiangong_types::StreamEvent;
 
 use super::cancel::{CancelSignal, CancelStrategy, emit_cancel_usage};
-use super::engine::{ReactEngine, TurnPhase};
+use super::engine::{ReactEngine, TurnPhase, tools_for_current_turn};
 
 /// 总结阶段的执行结果。
 pub(super) enum SummaryPhaseResult {
@@ -77,19 +77,24 @@ impl ReactEngine {
             tokio_mpsc::unbounded_channel::<crate::model::ModelStreamChunk>();
         let client = select_client_for_request(&self.engine, &req).clone();
         let req_clone = req.clone();
-        // 总结阶段不注入任何工具（传空 tools）。
+        // 总结阶段传与 ReAct 阶段相同的 tools schema（按相同 intent 过滤）以保持
+        // KV cache 前缀一致，但通过 tool_choice = None 显式禁止模型调用工具。
         //
-        // 历史上这里曾传与 ReAct 阶段相同的 tools schema 以"保持 KV cache 前缀一致"，
-        // 但带来真实风险：tool_choice 为 None 时，build_provider_request 会回落到
-        // ToolChoice::Auto（见 model.rs::build_provider_request），模型可在总结阶段
-        // 发起工具调用。而本阶段只消费 response.text、完全忽略 response.tool_calls，
-        // 一旦模型误调用工具就会出现空文本被当作最终回复、用户看不到有效答复。
-        //
-        // 正确性优先于 KV cache 命中率：总结阶段的语义就是只产出最终文本回复，
-        // 因此显式不提供工具，从源头杜绝误调用。
+        // 此前曾用 tool_choice=None（缺省），但 build_provider_request 在有 tools 时
+        // 会把缺省回落到 ToolChoice::Auto（model.rs::build_provider_request），模型可
+        // 在总结阶段发起工具调用；而本阶段只消费 response.text、忽略 response.tool_calls，
+        // 误调用会出现空文本被当作最终回复。ToolChoice 现已新增 None 变体（各 provider
+        // 映射为 OpenAI/DeepSeek "none"、Anthropic {"type":"none"}），显式禁用工具调用，
+        // 既保留 cache 前缀又从源头杜绝误调用。
+        let summary_tools = tools_for_current_turn(&self.tools, session, "");
         let mut llm_fut = Some(tokio::task::spawn(async move {
             client
-                .stream_function_calls_with_tool_choice(req_clone, Vec::new(), None, chunk_tx)
+                .stream_function_calls_with_tool_choice(
+                    req_clone,
+                    summary_tools,
+                    Some(crate::model::ToolChoice::None),
+                    chunk_tx,
+                )
                 .await
         }));
         let mut streaming_usage = tiangong_types::TokenUsage::default();
@@ -256,8 +261,10 @@ impl ReactEngine {
             usage.accumulate(&streaming_usage);
         }
 
-        // 解析 [NEED_MORE_WORK] 标记，判定是否需要重入工具执行阶段。
-        let (needs_more_work, summary_content) = parse_summary_need_more_work(&response.text);
+        // 解析总结阶段标记，判定完成度（Done/AskUser/NeedMoreWork）。
+        let decision = parse_summary_phase_output(&response.text);
+        let summary_content = decision.payload().to_string();
+        let needs_more_work = matches!(decision, SummaryDecision::NeedMoreWork(_));
         session.append_message_with_id(
             pending_msg_id,
             MessageRole::Assistant,
@@ -266,7 +273,7 @@ impl ReactEngine {
         );
         if let Some(message) = session.messages.last_mut() {
             message.reasoning_signature = response.reasoning_signature;
-            // 需要 more work 的总结视为过程性内容；其余视为最终回复。
+            // 需要 more work 的总结视为过程性内容；Done/AskUser 视为最终回复。
             message.phase = if needs_more_work {
                 crate::session::MessagePhase::React
             } else {
@@ -287,23 +294,48 @@ impl ReactEngine {
     }
 }
 
-/// 解析总结阶段回复，判断是否需要重入工具执行阶段。
+/// 总结阶段对任务完成度的判定结果。
 ///
-/// - 首行 `[NEED_MORE_WORK]` → 返回 `(true, 去标记后的正文)`
-/// - 首行 `[DONE]` / `[ASK_USER]` → 返回 `(false, 去标记后的正文)`
-/// - 无标记 → 视为完成，返回 `(false, 原文)`
-fn parse_summary_need_more_work(text: &str) -> (bool, String) {
+/// 由 [`parse_summary_phase_output`] 从模型回复的标记解析得到。语义上：
+/// - `Done`：任务完成（含普通最终回复与 `[DONE]`），本轮结束
+/// - `AskUser`：需要用户提供信息（`[ASK_USER]`），视作本轮结束
+/// - `NeedMoreWork`：未完成但可继续（`[NEED_MORE_WORK]`），重入 ReAct Loop
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum SummaryDecision {
+    Done(String),
+    AskUser(String),
+    NeedMoreWork(String),
+}
+
+impl SummaryDecision {
+    /// 取判定附带的文本正文（去标记后的回复内容）。
+    fn payload(&self) -> &str {
+        match self {
+            SummaryDecision::Done(s)
+            | SummaryDecision::AskUser(s)
+            | SummaryDecision::NeedMoreWork(s) => s,
+        }
+    }
+}
+
+/// 解析总结阶段回复，得到完成度判定。
+///
+/// - 首行 `[NEED_MORE_WORK]` → [`SummaryDecision::NeedMoreWork`]（去标记后的正文为下一步说明）
+/// - 首行 `[ASK_USER]` → [`SummaryDecision::AskUser`]（去标记后的正文为向用户的提问）
+/// - 首行 `[DONE]` → [`SummaryDecision::Done`]（去标记后的正文为最终回复）
+/// - 无标记 → 视为完成，[`SummaryDecision::Done`]（原文）
+fn parse_summary_phase_output(text: &str) -> SummaryDecision {
     let trimmed = text.trim();
     if let Some(rest) = strip_summary_marker(trimmed, "[NEED_MORE_WORK]") {
-        return (true, rest.trim().to_string());
-    }
-    if let Some(rest) = strip_summary_marker(trimmed, "[DONE]") {
-        return (false, rest.trim().to_string());
+        return SummaryDecision::NeedMoreWork(rest.trim().to_string());
     }
     if let Some(rest) = strip_summary_marker(trimmed, "[ASK_USER]") {
-        return (false, rest.trim().to_string());
+        return SummaryDecision::AskUser(rest.trim().to_string());
     }
-    (false, trimmed.to_string())
+    if let Some(rest) = strip_summary_marker(trimmed, "[DONE]") {
+        return SummaryDecision::Done(rest.trim().to_string());
+    }
+    SummaryDecision::Done(trimmed.to_string())
 }
 
 fn strip_summary_marker<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
@@ -318,30 +350,96 @@ fn strip_summary_marker<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
     )
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn done_marker_parses_to_done() {
+        assert_eq!(
+            parse_summary_phase_output("[DONE]\n已完成。变更包括 A 和 B。"),
+            SummaryDecision::Done("已完成。变更包括 A 和 B。".to_string())
+        );
+    }
+
+    #[test]
+    fn done_marker_case_insensitive_and_strips_separators() {
+        // 大小写不敏感；标记后可跟冒号/中文冒号/连字符/空白
+        assert_eq!(
+            parse_summary_phase_output("[done]：已完成。"),
+            SummaryDecision::Done("已完成。".to_string())
+        );
+    }
+
+    #[test]
+    fn ask_user_marker_parses_to_ask_user() {
+        assert_eq!(
+            parse_summary_phase_output("[ASK_USER] 请提供 API 凭据。"),
+            SummaryDecision::AskUser("请提供 API 凭据。".to_string())
+        );
+    }
+
+    #[test]
+    fn need_more_work_marker_parses_to_need_more_work() {
+        assert_eq!(
+            parse_summary_phase_output("[NEED_MORE_WORK] 还需运行测试并修复失败用例。"),
+            SummaryDecision::NeedMoreWork("还需运行测试并修复失败用例。".to_string())
+        );
+    }
+
+    #[test]
+    fn no_marker_defaults_to_done() {
+        // 无标记视为完成，保留原文。
+        assert_eq!(
+            parse_summary_phase_output("  任务已全部完成。  "),
+            SummaryDecision::Done("任务已全部完成。".to_string())
+        );
+    }
+
+    #[test]
+    fn empty_text_defaults_to_done_empty() {
+        assert_eq!(
+            parse_summary_phase_output("   "),
+            SummaryDecision::Done(String::new())
+        );
+    }
+
+    #[test]
+    fn payload_returns_inner_text() {
+        assert_eq!(SummaryDecision::Done("a".into()).payload(), "a");
+        assert_eq!(SummaryDecision::AskUser("b".into()).payload(), "b");
+        assert_eq!(SummaryDecision::NeedMoreWork("c".into()).payload(), "c");
+    }
+}
+
 /// 总结阶段的判断指令（作为运行时上下文注入，不常驻 system prompt）。
 ///
-/// 由主模型在总结阶段判断任务完成度：完成则给最终回复；需要用户提供信息则提问；
-/// 仍有遗漏且本 Agent 能继续通过工具推进时，输出 [NEED_MORE_WORK] 触发重入 Loop。
+/// 总结阶段的核心职责是「完成度判断器 + 续作路由」，而非无条件重写最终答案：
+/// 完成则结束、未完成且可继续则 NEED_MORE_WORK 回到 ReAct、需要用户输入则提问。
 pub(super) const SUMMARY_PHASE_PROMPT: &str = "\
-你当前处于总结阶段。请基于以上所有工作，给出最终回复。\n\
+你当前处于总结阶段。你首先是一个「完成度判断器」，其次才是最终回复的作者。\n\
+请先判断上一轮 ReAct 是否已经完成用户任务，再据此输出。\n\
+\n\
+判断与输出规则（请在回复首行用对应标记）：\n\
+1. 若上一轮已经给出完整、可用的最终答复：不要重写、不要压缩。输出 [DONE]，\n\
+   然后复述该答复的关键结论与必要细节（保留用户需要的完整信息，不要过度精简）。\n\
+2. 若任务已完成但缺少面向用户的最终说明：输出 [DONE]，并给出最终回复。\n\
+3. 若任务未完成、且你确实还能通过工具继续推进（例如只查了一半、改了没验证、\n\
+   测试失败但可继续修、还有明确下一步）：输出 [NEED_MORE_WORK]，\n\
+   然后简要说明还需要做什么。系统将重新进入工具执行阶段。\n\
+4. 若需要用户提供信息（凭据、授权、选择、确认）才能继续：输出 [ASK_USER]，\n\
+   然后提出问题。这视作本轮结束。\n\
 \n\
 输出原则：\n\
-- 若上一轮（工具执行阶段）已经给出详实的回答/结果，请**保留其要点与细节**，不要过度精简，\n\
-  只需补充结论或下一步建议即可。用户需要的是完整可用的信息，而非被压缩的摘要。\n\
-- 仅当信息确实冗余、重复或与结论无关时才删减。\n\
-\n\
-判断逻辑：\n\
-1. 如果用户请求的所有操作都已执行并得到结果，请保留要点并给出最终回复。\n\
-2. 如果需要用户提供额外信息、凭据、授权、选择或确认才能继续，请直接向用户提问。\n\
-3. 如果有关键步骤遗漏未执行、且你确实可以通过工具继续推进，请在回复开头输出 [NEED_MORE_WORK]，\n\
-   然后简要说明还需要做什么。系统将重新进入工具执行阶段。\n\
-\n\
-注意：不要重复执行工具调用。不要重复已有内容。如果只是给用户后续建议，不要使用 [NEED_MORE_WORK]。";
+- 用户需要的是完整可用的信息，而非被压缩的摘要；仅当信息确实冗余、重复或与结论无关时才删减。\n\
+- 本阶段不会执行任何工具调用。不要在回复中要求调用工具。\n\
+- 不要重复已有内容。如果只是给用户后续建议（而非确实还有未完成工作），不要使用 [NEED_MORE_WORK]。";
 
 /// 构建总结阶段的 LLM 请求。
 ///
-/// 将 `SUMMARY_PHASE_PROMPT` 作为运行时上下文追加到对话末尾，不携带 tools，
-/// 使用主模型 client，由主模型自行判断任务完成度并输出最终回复。
+/// 将 `SUMMARY_PHASE_PROMPT` 作为运行时上下文追加到对话末尾。请求本身不携带 tools
+/// 选择信息——是否禁用工具调用由调用方通过 `tool_choice = None` 显式控制（见
+/// `run_summary_phase`），本函数只负责构造消息上下文与 thinking 预算。
 pub(super) fn request_for_summary_phase(session: &Session) -> ModelRequest {
     let mut context = session.context();
     context.push(

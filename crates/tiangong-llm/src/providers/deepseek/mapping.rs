@@ -243,6 +243,8 @@ fn build_tool_choice(choice: Option<&ToolChoice>) -> Option<Value> {
             "type": "function",
             "function": { "name": name }
         })),
+        // 明确禁止工具调用（DeepSeek 兼容 OpenAI 的 tool_choice: "none"）。
+        Some(ToolChoice::None) => Some(json!("none")),
         None => None,
     }
 }
@@ -583,6 +585,15 @@ mod tests {
                 .get("__parse_error")
                 .and_then(Value::as_str)
                 .is_some_and(|message| message.contains("工具参数为空"))
+        );
+    }
+
+    #[test]
+    fn tool_choice_none_maps_to_none_string() {
+        // ToolChoice::None 必须映射为 "none"，在提供 tools schema 的同时禁止调用工具。
+        assert_eq!(
+            build_tool_choice(Some(&ToolChoice::None)),
+            Some(json!("none"))
         );
     }
 }

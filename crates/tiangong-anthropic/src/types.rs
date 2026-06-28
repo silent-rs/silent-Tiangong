@@ -107,6 +107,8 @@ pub enum ToolChoice {
         #[serde(skip_serializing_if = "Option::is_none")]
         disable_parallel_tool_use: Option<bool>,
     },
+    /// 禁止调用任何工具（Anthropic API：`tool_choice: {"type": "none"}`）。
+    None,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

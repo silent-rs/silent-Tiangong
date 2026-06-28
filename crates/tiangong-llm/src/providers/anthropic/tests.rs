@@ -125,6 +125,21 @@ fn test_request_mapping_with_system_and_tools() {
 }
 
 #[test]
+fn test_tool_choice_none_maps_to_anthropic_none() {
+    // ToolChoice::None 必须映射为 Anthropic 的 {"type": "none"}，
+    // 在提供 tools schema 的同时禁止调用工具（如总结阶段）。
+    let mut req = sample_request();
+    req.tool_choice = Some(ToolChoice::None);
+    let mapped = super::mapping::to_anthropic_request(&req).expect("mapped request");
+    assert!(matches!(
+        mapped.tool_choice,
+        Some(tiangong_anthropic::types::ToolChoice::None)
+    ));
+    // tools schema 仍保留，保持 KV cache 前缀一致
+    assert!(mapped.tools.is_some());
+}
+
+#[test]
 fn test_tool_and_thinking_mapping_back_to_message_content() {
     let response = MessagesCreateResponse {
         id: "msg_1".to_string(),

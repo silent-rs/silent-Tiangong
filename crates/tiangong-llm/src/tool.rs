@@ -13,9 +13,18 @@ pub struct ToolSpec {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolChoice {
+    /// 由模型自行决定是否调用工具（提供 tools 时的默认行为）。
     Auto,
+    /// 强制必须调用某个工具（任意一个）。
     Any,
+    /// 强制调用指定名称的工具。
     Tool(String),
+    /// 禁止调用任何工具。
+    ///
+    /// 用于「提供 tools schema（保持 KV cache 前缀一致）但明确不允许模型在本阶段
+    /// 发起工具调用」的场景，例如总结阶段：模型只应产出文本最终回复。
+    /// 映射到各 provider 的 none 语义（OpenAI/DeepSeek `"none"`、Anthropic `{"type":"none"}`）。
+    None,
 }
 
 /// 统一工具调用。

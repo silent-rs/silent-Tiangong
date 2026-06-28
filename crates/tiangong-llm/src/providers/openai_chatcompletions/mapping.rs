@@ -370,6 +370,12 @@ fn inject_function_tools(
                 }),
             );
         }
+        // 明确禁止工具调用：显式 tool_choice: "none"。
+        // OpenAI Chat Completions 原生支持；提供 tools schema 但不允许调用，
+        // 用于保持 KV cache 前缀一致同时杜绝误调用（如总结阶段）。
+        Some(ToolChoice::None) => {
+            obj.insert("tool_choice".to_string(), Value::String("none".to_string()));
+        }
         // 兼容 vLLM / 部分 OpenAI-compatible 后端：
         // 显式 `tool_choice: "auto"` 可能要求服务端开启
         // --enable-auto-tool-choice 和 --tool-call-parser。
@@ -507,5 +513,21 @@ mod tests {
                 .and_then(Value::as_str)
                 .is_some_and(|message| message.contains("工具参数为空"))
         );
+    }
+
+    #[test]
+    fn tool_choice_none_injects_explicit_none() {
+        // ToolChoice::None 必须显式注入 tool_choice: "none"，
+        // 在提供 tools schema 的同时禁止模型调用工具（如总结阶段）。
+        let mut payload = json!({});
+        let tools = vec![ToolSpec {
+            name: "read_file".into(),
+            description: String::new(),
+            input_schema: json!({"type": "object"}),
+        }];
+        inject_function_tools(&mut payload, &tools, Some(&ToolChoice::None));
+        assert_eq!(payload["tool_choice"], json!("none"));
+        // tools schema 仍然注入，保持 KV cache 前缀一致
+        assert!(payload["tools"].is_array());
     }
 }
