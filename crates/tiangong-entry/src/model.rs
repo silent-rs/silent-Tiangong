@@ -265,6 +265,12 @@ fn test_model(config: &ModelsConfig, target: Option<&str>) -> Result<()> {
     };
 
     println!("正在测试 {target} 连通性...");
+    // 请求前检查 API Key 非空（${ENV} 未设置会解析为空串，避免无效请求）
+    if provider_config.api_auth_token.trim().is_empty() {
+        return Err(anyhow!(
+            "API Key 为空，可能是环境变量未设置。请检查 models.json 中的 api_key 或设置对应环境变量"
+        ));
+    }
     let models =
         SingleProviderClient::list_models(&provider_config).context("模型连通性测试失败")?;
     println!("✅ 连通成功，返回 {} 个模型", models.len());

@@ -102,7 +102,7 @@ fn check_models(report: &mut DoctorReport, deep: bool) {
             report.hint("  tiangong model add-model deepseek-chat \\");
             report.hint("    --provider deepseek --model-id deepseek-chat --capability chat");
             report.hint("");
-            report.hint("  tiangong model route chat deepseek-chat");
+            report.hint("  tiangong model route set chat deepseek-chat");
             report.blank();
         }
     }
