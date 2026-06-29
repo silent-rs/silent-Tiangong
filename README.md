@@ -247,6 +247,7 @@ yarn --cwd frontend dev
 
 ## 文档
 
+- [CLI 配置指南](docs/cli-configuration-guide.md)
 - [Server API](docs/server-api.md)
 - [Linux 服务器部署指南](docs/linux-server-deployment.md)
 - [RFC 0015：CLI 模块化配置](docs/rfc/0015-cli-modular-config.md)
