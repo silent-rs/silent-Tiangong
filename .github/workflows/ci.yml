@@ -27,7 +27,11 @@ jobs:
       # 仅包含「自身或其传递依赖发生改动」的 crate，matrix 作业据此按需启动 runner。
       matrix: ${{ steps.resolve.outputs.matrix }}
     steps:
+      # 完整克隆：crate 闭包计算需用 git diff base.sha...HEAD 解析改动文件，
+      # 默认 fetch-depth: 1 是浅克隆，base commit 不可达会导致 diff 为空、matrix=[]。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Filter changed paths
         id: filter
