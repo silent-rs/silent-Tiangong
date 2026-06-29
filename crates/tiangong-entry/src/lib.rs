@@ -1,6 +1,8 @@
 mod args;
 mod config;
+mod configure;
 mod doctor;
+mod interactive;
 mod mcp;
 mod memory;
 mod model;

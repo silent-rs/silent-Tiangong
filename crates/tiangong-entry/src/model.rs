@@ -99,6 +99,9 @@ pub(crate) fn run_model_command(args: ModelArgs) -> Result<()> {
                 );
             }
         }
+        ModelSubcommand::Configure => {
+            super::configure::run_model_configure(&mut config)?;
+        }
         ModelSubcommand::Route { command } => match command {
             RouteSubcommand::List => print_routes(&config),
             RouteSubcommand::Set { capability, model } => {

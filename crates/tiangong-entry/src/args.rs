@@ -83,6 +83,8 @@ pub(crate) enum ServerSubcommand {
     Stop,
     #[command(about = "查看 Server 运行状态")]
     Status,
+    #[command(about = "交互式配置向导（引导完成监听地址与 Token）")]
+    Configure,
     #[command(about = "管理 Server 监听配置")]
     Config {
         #[command(subcommand)]
@@ -196,6 +198,8 @@ pub(crate) enum ModelSubcommand {
         #[arg(help = "模型名称（本地别名）")]
         name: String,
     },
+    #[command(about = "交互式配置向导（引导完成 provider → model → route）")]
+    Configure,
     #[command(about = "设置路由槽位指向的模型")]
     Route {
         #[command(subcommand)]
@@ -238,6 +242,8 @@ pub(crate) enum MemorySubcommand {
         #[command(subcommand)]
         command: MemoryConfigSubcommand,
     },
+    #[command(about = "交互式配置向导（引导选择 Memory 端点模型）")]
+    Configure,
     #[command(about = "启用 Memory")]
     Enable,
     #[command(about = "禁用 Memory")]

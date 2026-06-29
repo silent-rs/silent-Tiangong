@@ -8,6 +8,7 @@ pub(crate) fn run_server_command(args: ServerArgs) -> Result<()> {
     match args.command {
         // —— 子命令：配置/状态/Token 管理 ——
         Some(ServerSubcommand::Status) => return run_status(),
+        Some(ServerSubcommand::Configure) => return super::configure::run_server_configure(),
         Some(ServerSubcommand::Config { command }) => return run_config(command),
         Some(ServerSubcommand::Token { command }) => return run_token(command),
         // —— 子命令：停止后台进程 ——

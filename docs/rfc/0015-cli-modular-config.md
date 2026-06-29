@@ -49,6 +49,7 @@
 2. **每类配置独立命令管理**：模型归模型、Server 归 Server、Memory 归 Memory、Prompt 归 Prompt，MCP/Skill 沿用并增强现有命令。
 3. **CLI 与 Desktop 共享同一份配置**：CLI 修改后 Desktop 能看到，Desktop 修改后 CLI 能读取。
 4. **提供诊断，不提供强制初始化**：`doctor` 负责告诉用户还缺什么，但不强制一次性帮用户配置完所有东西。
+5. **非交互式为主，交互式为辅**：所有配置命令均支持参数式（脚本/CI 友好）；`model`/`server`/`memory` 额外提供 `configure` 子命令作为交互式向导，引导不熟悉配置结构的用户完成配置。非 TTY 环境（脚本、管道、CI）下 `configure` 会检测到并退出，不会卡住自动化流程。
 
 ## 5. 命令结构
 
@@ -62,6 +63,7 @@ tiangong
 │   ├── --daemon / -d
 │   ├── stop
 │   ├── status
+│   ├── configure          # 交互式向导（监听地址 + Token）
 │   ├── config
 │   │   ├── show
 │   │   └── set
@@ -75,6 +77,7 @@ tiangong
 │   ├── remove-provider
 │   ├── add-model
 │   ├── remove-model
+│   ├── configure          # 交互式向导（provider → model → route）
 │   ├── route <capability> <model>
 │   ├── route list
 │   ├── validate
@@ -82,6 +85,7 @@ tiangong
 ├── memory
 │   ├── config show
 │   ├── config set
+│   ├── configure          # 交互式向导（端点模型选择）
 │   ├── enable
 │   ├── disable
 │   ├── status
@@ -159,6 +163,14 @@ tiangong model test deepseek-chat  # 测试指定模型
 
 真实请求模型，验证 API Key 读取、base_url、protocol、model id、返回是否正常。实现复用 `ModelsConfig::to_chat_provider_config()` 与 `SingleProviderClient::list_models(&cfg)`（`crates/tiangong-core/src/model.rs:270`），GET `/models` 作为连通性探针。
 
+**交互式向导**：
+
+```bash
+tiangong model configure
+```
+
+引导用户依次完成 provider → model → route 三步：选协议（DeepSeek/OpenAI 兼容/Anthropic）、输入供应商名称与 base_url、选择 API Key 方式（环境变量名或明文）、输入模型别名与能力、设置路由槽位。复用 `upsert_provider`/`upsert_model`/`set_route_by_name`（含 capability 校验）。适合首次配置或不熟悉参数结构的用户；脚本环境请用参数式命令。
+
 ### 6.2 Server 配置 `tiangong server`
 
 **查看配置**：
@@ -201,6 +213,14 @@ tiangong server status
 
 检查：PID 文件是否存在、进程是否存活、端口是否监听、本地 API 是否可访问、当前 Token 是否配置。
 
+**交互式向导**：
+
+```bash
+tiangong server configure
+```
+
+引导设置监听地址（默认 127.0.0.1）、端口（默认 8080）与 Token（生成随机/手动输入/跳过）。复用 `save_server_config`。
+
 **ServerConfig 统一**：当前 `tiangong-config` 与 `tiangong-server` 各自定义同名 `ServerConfig`，是技术债。本 RFC 统一到 `tiangong-config` 版本，为其补齐 `enabled` 字段与 `load_server_config()` / `save_server_config()`，`tiangong-server` 改为 `pub use` 复用。
 
 ### 6.3 Memory 配置 `tiangong memory`
@@ -237,6 +257,14 @@ tiangong memory test
 ```
 
 检查配置存在性、模型能力匹配、端点有效性，并照搬 `crates/tiangong-memory/examples/memory_llm_smoke.rs` 模式发送测试请求。
+
+**交互式向导**：
+
+```bash
+tiangong memory configure
+```
+
+引导选择 Memory 端点模型：先确认启用状态，再从 models.json 已注册模型中选择 Memory LLM（校验 chat 能力）、可选选择 Embedding/Rerank 模型（校验对应能力，可跳过）。复用 `lookup_model_for_llm`/capability 校验，确保不会把错误能力的模型配到对应端点。
 
 ### 6.4 自定义 Prompt `tiangong prompt`
 

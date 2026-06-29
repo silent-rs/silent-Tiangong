@@ -11,6 +11,7 @@ use crate::args::{MemoryArgs, MemoryConfigSubcommand, MemorySubcommand};
 pub(crate) fn run_memory_command(args: MemoryArgs) -> Result<()> {
     match args.command {
         MemorySubcommand::Config { command } => run_config(command),
+        MemorySubcommand::Configure => super::configure::run_memory_configure(),
         MemorySubcommand::Enable => {
             enable_memory()?;
             println!("Memory 已启用");
