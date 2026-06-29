@@ -90,7 +90,8 @@ jobs:
           import json, os
 
           # workspace 中所有 crate -> 其源码目录前缀（相对仓库根）
-          # 包名与 cargo -p 用的标识一致；src-tauri 的二进制包名为 tiangong-app
+          # 包名与 cargo -p 用的标识一致；src-tauri 的二进制包名为 tiangong-app，
+          # 根二进制（src/main.rs）包名为 tiangong
           crate_to_prefix = {
               "tiangong-types":           "crates/tiangong-types/",
               "tiangong-anthropic":       "crates/tiangong-anthropic/",
@@ -107,6 +108,7 @@ jobs:
               "tiangong-plugin-browser":  "crates/tiangong-plugin-browser/",
               "tiangong-plugin-terminal": "crates/tiangong-plugin-terminal/",
               "tiangong-app":             "src-tauri/",
+              "tiangong":                 "src/",
           }
 
           # 正向依赖图：key 直接依赖 value 列表中的 crate（取自各 Cargo.toml 的 workspace 依赖）
@@ -130,6 +132,8 @@ jobs:
                   "tiangong-media", "tiangong-memory", "tiangong-plugin-browser",
                   "tiangong-plugin-terminal", "tiangong-scheduler", "tiangong-server", "tiangong-types",
               ],
+              # 根二进制（src/main.rs），依赖 entry 与 config（取自根 Cargo.toml [dependencies]）
+              "tiangong":                 ["tiangong-entry", "tiangong-config"],
           }
 
           # 反向依赖图：dep -> 直接依赖它的 crate 列表
