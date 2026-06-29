@@ -763,6 +763,163 @@ impl ModelsConfig {
             self.to_chat_provider_config()
         }
     }
+
+    // ── CLI 友好方法（RFC 0015 §6.1，供 tiangong model 命令使用） ──────
+
+    /// 新增或覆盖 Provider。
+    ///
+    /// `api_key` 可为明文或 `${ENV_VAR}` 模板（由调用方决定）。
+    pub fn upsert_provider(
+        &mut self,
+        name: &str,
+        base_url: &str,
+        api_key: &str,
+        protocol: ProviderProtocol,
+        timeout_ms: u64,
+    ) {
+        self.providers.insert(
+            name.to_string(),
+            ProviderConfig {
+                base_url: base_url.to_string(),
+                api_key: api_key.to_string(),
+                timeout_ms,
+                protocol,
+            },
+        );
+    }
+
+    /// 删除 Provider。
+    ///
+    /// 若有模型或路由引用该 Provider，返回引用列表，调用方据此决定是否强制删除。
+    pub fn provider_referenced_by(&self, name: &str) -> ProviderReferences {
+        let mut models = Vec::new();
+        for (key, entry) in &self.models {
+            if entry.provider == name {
+                models.push(key.clone());
+            }
+        }
+        let mut routes = Vec::new();
+        for (slot, entry) in &self.routing {
+            if entry.provider == name {
+                routes.push(slot.key().to_string());
+            }
+        }
+        ProviderReferences { models, routes }
+    }
+
+    /// 强制删除 Provider（连同引用它的 model 注册项与路由）。
+    pub fn remove_provider_force(&mut self, name: &str) -> usize {
+        let mut removed = self.providers.remove(name).is_some() as usize;
+        let model_keys: Vec<String> = self
+            .models
+            .iter()
+            .filter(|(_, e)| e.provider == name)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in &model_keys {
+            self.models.remove(key);
+            removed += 1;
+        }
+        let slots: Vec<RoutingSlot> = self
+            .routing
+            .iter()
+            .filter(|(_, e)| e.provider == name)
+            .map(|(s, _)| *s)
+            .collect();
+        for slot in slots {
+            self.routing.remove(&slot);
+            removed += 1;
+        }
+        removed
+    }
+
+    /// 新增或覆盖模型注册项。
+    pub fn upsert_model(
+        &mut self,
+        name: &str,
+        provider: &str,
+        model_id: &str,
+        capabilities: Vec<ModelCapability>,
+    ) {
+        self.models.insert(
+            name.to_string(),
+            ModelEntry {
+                provider: provider.to_string(),
+                model: model_id.to_string(),
+                capabilities,
+                options: default_options(),
+            },
+        );
+    }
+
+    /// 删除模型注册项。
+    ///
+    /// 返回 (是否删除成功, 删除后变为悬空的路由槽位 key 列表)。
+    /// 悬空路由指其 provider+model 在删除后无法在 models 注册表找到匹配的条目。
+    pub fn remove_model(&mut self, name: &str) -> (bool, Vec<String>) {
+        let removed = self.models.remove(name).is_some();
+        let mut dangling_routes = Vec::new();
+        for (slot, entry) in &self.routing {
+            let still_referenced = self
+                .models
+                .iter()
+                .any(|(_, m)| m.provider == entry.provider && m.model == entry.model);
+            if !still_referenced {
+                dangling_routes.push(slot.key().to_string());
+            }
+        }
+        (removed, dangling_routes)
+    }
+
+    /// 设置路由槽位指向某个已注册的模型。
+    ///
+    /// `name` 必须是 models 注册表中的 key。返回 Ok(()) 或错误（模型不存在）。
+    pub fn set_route_by_name(
+        &mut self,
+        slot: RoutingSlot,
+        name: &str,
+    ) -> std::result::Result<(), String> {
+        let entry = self
+            .models
+            .get(name)
+            .ok_or_else(|| format!("模型 {name} 不存在于 models 注册表"))?
+            .clone();
+        self.routing.insert(slot, entry);
+        Ok(())
+    }
+
+    /// 设置路由槽位（直接传入 provider + model_id）。
+    ///
+    /// 若 models 注册表有匹配条目则复用，否则内联创建路由条目。
+    pub fn set_route_inline(&mut self, slot: RoutingSlot, provider: &str, model_id: &str) {
+        if let Some(entry) = self
+            .models
+            .iter()
+            .find(|(_, m)| m.provider == provider && m.model == model_id)
+            .map(|(_, e)| e.clone())
+        {
+            self.routing.insert(slot, entry);
+        } else {
+            self.routing.insert(
+                slot,
+                ModelEntry {
+                    provider: provider.to_string(),
+                    model: model_id.to_string(),
+                    capabilities: vec![],
+                    options: default_options(),
+                },
+            );
+        }
+    }
+}
+
+/// Provider 引用情况（供 remove_provider 检查）。
+#[derive(Debug, Clone, Default)]
+pub struct ProviderReferences {
+    /// 引用该 provider 的模型注册项 key 列表
+    pub models: Vec<String>,
+    /// 引用该 provider 的路由槽位 key 列表
+    pub routes: Vec<String>,
 }
 
 #[cfg(test)]
@@ -970,5 +1127,124 @@ mod tests {
         let mut cfg = config.clone();
         cfg.ensure_routing_models_registered();
         assert!(cfg.models.values().any(|m| m.model == "gpt-4"));
+    }
+
+    // ── CLI 友好方法测试（RFC 0015 §6.1） ──
+
+    fn sample_provider() -> ProviderConfig {
+        ProviderConfig {
+            base_url: "https://api.deepseek.com".to_string(),
+            api_key: "${DEEPSEEK_API_KEY}".to_string(),
+            timeout_ms: 60_000,
+            protocol: ProviderProtocol::DeepSeek,
+        }
+    }
+
+    #[test]
+    fn upsert_and_reference_provider() {
+        let mut config = ModelsConfig::default();
+        config.upsert_provider(
+            "deepseek",
+            "https://api.deepseek.com",
+            "${DEEPSEEK_API_KEY}",
+            ProviderProtocol::DeepSeek,
+            60_000,
+        );
+        assert!(config.providers.contains_key("deepseek"));
+
+        // 添加引用该 provider 的模型
+        config.upsert_model(
+            "ds-chat",
+            "deepseek",
+            "deepseek-chat",
+            vec![ModelCapability::Chat],
+        );
+        let refs = config.provider_referenced_by("deepseek");
+        assert_eq!(refs.models, vec!["ds-chat".to_string()]);
+        assert!(refs.routes.is_empty());
+    }
+
+    #[test]
+    fn remove_provider_force_cascades() {
+        let mut config = ModelsConfig::default();
+        config.providers.insert("p".to_string(), sample_provider());
+        config.upsert_model("m1", "p", "model-1", vec![ModelCapability::Chat]);
+        config.set_route_by_name(RoutingSlot::Chat, "m1").unwrap();
+
+        let refs = config.provider_referenced_by("p");
+        assert_eq!(refs.models.len(), 1);
+        assert_eq!(refs.routes.len(), 1);
+
+        let removed = config.remove_provider_force("p");
+        assert!(removed >= 3); // provider + model + route
+        assert!(!config.providers.contains_key("p"));
+        assert!(config.models.is_empty());
+        assert!(config.routing.is_empty());
+    }
+
+    #[test]
+    fn set_route_by_name_requires_registered_model() {
+        let mut config = ModelsConfig::default();
+        let result = config.set_route_by_name(RoutingSlot::Chat, "nonexistent");
+        assert!(result.is_err());
+
+        config.upsert_model("ds", "p", "deepseek-chat", vec![ModelCapability::Chat]);
+        config.set_route_by_name(RoutingSlot::Chat, "ds").unwrap();
+        assert_eq!(
+            config.routing.get(&RoutingSlot::Chat).unwrap().model,
+            "deepseek-chat"
+        );
+    }
+
+    #[test]
+    fn set_route_inline_reuses_registered_entry() {
+        let mut config = ModelsConfig::default();
+        config.providers.insert("p".to_string(), sample_provider());
+        config.upsert_model(
+            "ds",
+            "p",
+            "deepseek-chat",
+            vec![ModelCapability::Chat, ModelCapability::Multimodal],
+        );
+        config.set_route_inline(RoutingSlot::Chat, "p", "deepseek-chat");
+        // 复用注册项时应携带 capabilities
+        assert_eq!(
+            config
+                .routing
+                .get(&RoutingSlot::Chat)
+                .unwrap()
+                .capabilities
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn set_route_inline_creates_bare_entry_when_no_match() {
+        let mut config = ModelsConfig::default();
+        config.providers.insert("p".to_string(), sample_provider());
+        config.set_route_inline(RoutingSlot::Lite, "p", "deepseek-lite");
+        let entry = config.routing.get(&RoutingSlot::Lite).unwrap();
+        assert_eq!(entry.model, "deepseek-lite");
+        assert!(entry.capabilities.is_empty());
+    }
+
+    #[test]
+    fn remove_model_reports_dangling_routes() {
+        let mut config = ModelsConfig::default();
+        config.providers.insert("p".to_string(), sample_provider());
+        config.upsert_model("ds", "p", "deepseek-chat", vec![ModelCapability::Chat]);
+        config.set_route_by_name(RoutingSlot::Chat, "ds").unwrap();
+
+        let (removed, dangling) = config.remove_model("ds");
+        assert!(removed);
+        assert_eq!(dangling, vec!["chat".to_string()]);
+    }
+
+    #[test]
+    fn remove_model_not_found() {
+        let mut config = ModelsConfig::default();
+        let (removed, _) = config.remove_model("nope");
+        assert!(!removed);
     }
 }

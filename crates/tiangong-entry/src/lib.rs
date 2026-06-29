@@ -1,5 +1,6 @@
 mod args;
 mod mcp;
+mod model;
 mod prompt;
 mod server;
 mod skill;
@@ -28,6 +29,7 @@ pub fn run() -> anyhow::Result<()> {
     match args.command {
         Some(MainCommand::Server(args)) => server::run_server_command(args),
         Some(MainCommand::Mcp(args)) => mcp::run_mcp_command(args),
+        Some(MainCommand::Model(args)) => model::run_model_command(args),
         Some(MainCommand::Skill(args)) => skill::run_skill_command(args),
         Some(MainCommand::Prompt(args)) => prompt::run_prompt_command(args),
         Some(MainCommand::Update(args)) => update::run_update_command(args),

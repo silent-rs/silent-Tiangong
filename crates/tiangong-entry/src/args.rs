@@ -1,6 +1,7 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use tiangong_core::agent_config::McpTransportMode;
+use tiangong_core::model::ProviderProtocol;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -29,6 +30,8 @@ pub(crate) enum MainCommand {
     Server(ServerArgs),
     #[command(about = "MCP 配置管理")]
     Mcp(McpArgs),
+    #[command(about = "模型配置管理（Provider / Model / Routing）")]
+    Model(ModelArgs),
     #[command(about = "Skill 配置管理")]
     Skill(SkillArgs),
     #[command(about = "自定义 Prompt 管理")]
@@ -119,6 +122,107 @@ pub(crate) enum ServerTokenSubcommand {
 pub(crate) struct McpArgs {
     #[command(subcommand)]
     pub(crate) command: McpSubcommand,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ModelArgs {
+    #[command(subcommand)]
+    pub(crate) command: ModelSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ModelSubcommand {
+    #[command(about = "查看模型配置（providers / models / routes，默认全部）")]
+    List {
+        #[arg(help = "过滤范围：providers | models | routes")]
+        scope: Option<String>,
+    },
+    #[command(about = "新增或覆盖模型供应商")]
+    AddProvider {
+        #[arg(help = "供应商名称")]
+        name: String,
+        #[arg(long, value_parser = parse_protocol, help = "协议（openai_chatcompletions / anthropic / deepseek）")]
+        protocol: ProviderProtocol,
+        #[arg(long = "base-url", help = "API base URL")]
+        base_url: String,
+        #[arg(
+            long = "api-key",
+            conflicts_with = "api_key_env",
+            help = "明文 API Key（不推荐，建议用 --api-key-env）"
+        )]
+        api_key: Option<String>,
+        #[arg(
+            long = "api-key-env",
+            conflicts_with = "api_key",
+            help = "API Key 环境变量名（写入为 ${VAR} 模板）"
+        )]
+        api_key_env: Option<String>,
+        #[arg(
+            long = "timeout-ms",
+            default_value_t = 60_000,
+            help = "请求超时（毫秒）"
+        )]
+        timeout_ms: u64,
+    },
+    #[command(about = "删除模型供应商（--force 连同引用它的模型和路由一并删除）")]
+    RemoveProvider {
+        #[arg(help = "供应商名称")]
+        name: String,
+        #[arg(long, help = "强制删除，连同引用该供应商的模型与路由")]
+        force: bool,
+    },
+    #[command(about = "新增或覆盖模型")]
+    AddModel {
+        #[arg(help = "模型名称（本地别名）")]
+        name: String,
+        #[arg(long, help = "所属供应商名称")]
+        provider: String,
+        #[arg(long = "model-id", help = "供应商侧的模型 ID")]
+        model_id: String,
+        #[arg(
+            long = "capability",
+            help = "模型能力（可重复）：chat/multimodal/image_generation/video_generation/stt/tts/embedding/rerank"
+        )]
+        capability: Vec<String>,
+    },
+    #[command(about = "删除模型")]
+    RemoveModel {
+        #[arg(help = "模型名称（本地别名）")]
+        name: String,
+    },
+    #[command(about = "设置路由槽位指向的模型")]
+    Route {
+        #[command(subcommand)]
+        command: RouteSubcommand,
+    },
+    #[command(about = "校验模型配置结构（路由引用、provider 存在性等）")]
+    Validate,
+    #[command(about = "测试模型连通性（真实请求 /models）")]
+    Test {
+        #[arg(help = "测试目标：capability（chat/lite/...）或模型名；默认 chat")]
+        target: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum RouteSubcommand {
+    #[command(about = "查看当前路由表")]
+    List,
+    #[command(about = "设置 capability 路由指向某个已注册模型")]
+    Set {
+        #[arg(
+            help = "能力槽位：chat/lite/multimodal/image_generation/video_generation/stt/tts/embedding/rerank"
+        )]
+        capability: String,
+        #[arg(help = "模型名称（本地别名）")]
+        model: String,
+    },
+}
+
+/// 解析 ProviderProtocol 字符串
+fn parse_protocol(raw: &str) -> Result<ProviderProtocol, String> {
+    raw.parse::<ProviderProtocol>()
+        .map_err(|e| format!("无效的协议 {raw}：{e}"))
 }
 
 #[derive(Debug, Args)]
