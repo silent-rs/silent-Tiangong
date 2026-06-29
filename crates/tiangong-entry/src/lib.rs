@@ -1,4 +1,6 @@
 mod args;
+mod config;
+mod doctor;
 mod mcp;
 mod memory;
 mod model;
@@ -34,6 +36,8 @@ pub fn run() -> anyhow::Result<()> {
         Some(MainCommand::Memory(args)) => memory::run_memory_command(args),
         Some(MainCommand::Skill(args)) => skill::run_skill_command(args),
         Some(MainCommand::Prompt(args)) => prompt::run_prompt_command(args),
+        Some(MainCommand::Config(args)) => config::run_config_command(args),
+        Some(MainCommand::Doctor(args)) => doctor::run_doctor_command(args),
         Some(MainCommand::Update(args)) => update::run_update_command(args),
         Some(MainCommand::Cli { trust_mode }) => {
             tiangong_cli::run_cli_with_trust_mode(trust_mode.map(|m| m.to_trust_mode()))

@@ -38,6 +38,10 @@ pub(crate) enum MainCommand {
     Skill(SkillArgs),
     #[command(about = "自定义 Prompt 管理")]
     Prompt(PromptArgs),
+    #[command(about = "通用配置查看与校验")]
+    Config(ConfigArgs),
+    #[command(about = "环境诊断")]
+    Doctor(DoctorArgs),
     #[command(about = "检查并安装天工更新")]
     Update(UpdateArgs),
 }
@@ -296,6 +300,29 @@ pub(crate) enum PromptSubcommand {
     Clear,
     #[command(about = "显示自定义 Prompt 存储路径")]
     Path,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ConfigArgs {
+    #[command(subcommand)]
+    pub(crate) command: ConfigSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ConfigSubcommand {
+    #[command(about = "列出全部配置文件路径")]
+    Path,
+    #[command(about = "配置概览（不展开 JSON）")]
+    Show,
+    #[command(about = "校验本地配置结构（不做外部连通性测试）")]
+    Validate,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct DoctorArgs {
+    /// 深度诊断：执行模型连通性与端口探活（可能较慢）
+    #[arg(long, help = "深度诊断（含模型连通性与端口探活）")]
+    pub(crate) deep: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
