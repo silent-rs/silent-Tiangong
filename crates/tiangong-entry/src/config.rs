@@ -44,6 +44,24 @@ fn count_json_entries(path: &std::path::Path, key: &str) -> Option<usize> {
     value.get(key).and_then(|v| v.as_array()).map(|a| a.len())
 }
 
+/// 统计 ~/.tiangong/skills/ 下含 skill.toml 的目录数量（文件系统注册表事实源）。
+///
+/// Skill 注册表已从 skills.json.installed 迁移到文件系统目录存在性，
+/// 因此扫描目录比读 JSON 更准确。目录不存在时返回 0。
+fn count_skill_dirs(root: &std::path::Path) -> usize {
+    let skills_dir = root.join("skills");
+    let Ok(entries) = std::fs::read_dir(&skills_dir) else {
+        return 0;
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .filter(|entry| {
+            let path = entry.path();
+            path.is_dir() && path.join("skill.toml").exists()
+        })
+        .count()
+}
+
 fn print_overview() {
     let root = default_tiangong_dir();
     let models = ModelsConfig::load();
@@ -86,8 +104,8 @@ fn print_overview() {
     let mcp_count = count_json_entries(&root.join("mcp.json"), "servers").unwrap_or(0);
     println!("MCP：      {mcp_count} 个服务");
 
-    // Skill（直接读 skills.json 的 installed 数组长度）
-    let skill_count = count_json_entries(&root.join("skills.json"), "installed").unwrap_or(0);
+    // Skill（扫描 ~/.tiangong/skills/<id>/ 下含 skill.toml 的目录，文件系统注册表事实源）
+    let skill_count = count_skill_dirs(&root);
     println!("Skill：    {skill_count} 个可用");
 
     // 自定义 Prompt（直接读 custom-prompt.md）

@@ -12,12 +12,13 @@
 /// - 非 `${...}` 形式：`(true, None)`。
 /// - `${VAR}` 且变量存在：`(true, None)`。
 /// - `${VAR}` 且变量不存在：`(false, Some("VAR"))`。
+/// - `${}`（空变量名）：视为配置错误 `(false, Some("<empty>"))`。
 pub fn env_secret_resolvable(value: &str) -> (bool, Option<String>) {
     let trimmed = value.trim();
     if let Some(inner) = trimmed.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
         let var_name = inner.trim();
         if var_name.is_empty() {
-            return (true, None);
+            return (false, Some("<empty>".to_string()));
         }
         if std::env::var(var_name).is_ok() {
             (true, None)
@@ -65,7 +66,11 @@ mod tests {
     }
 
     #[test]
-    fn empty_env_name_is_resolvable() {
-        assert_eq!(env_secret_resolvable("${}"), (true, None));
+    fn empty_env_name_is_invalid() {
+        // ${} 空变量名视为配置错误
+        assert_eq!(
+            env_secret_resolvable("${}"),
+            (false, Some("<empty>".to_string()))
+        );
     }
 }

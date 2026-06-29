@@ -64,8 +64,8 @@ fn run_config(command: MemoryConfigSubcommand) -> Result<()> {
 
 /// 从 models.json 引用模型，构建 Memory LLM 端点配置。
 ///
-/// Memory LLM 用于记忆反刍/总结，允许 chat 或 embedding 能力的模型
-/// （实际更宽松，因为很多 OpenAI 兼容端点同时支持 chat 与轻量总结）。
+/// Memory LLM 用于记忆反刍/总结，要求 chat 能力（embedding/rerank 模型
+/// 不适合做文本总结，会被 lookup_model_for_llm 拒绝）。
 fn resolve_to_llm_endpoint(model_name: &str, models: &ModelsConfig) -> Result<MemoryLlmConfig> {
     let (provider_name, provider, model_id) = lookup_model_for_llm(models, model_name)?;
     Ok(MemoryLlmConfig {

@@ -873,7 +873,12 @@ impl ModelsConfig {
 
     /// 设置路由槽位指向某个已注册的模型。
     ///
-    /// `name` 必须是 models 注册表中的 key。返回 Ok(()) 或错误（模型不存在）。
+    /// `name` 必须是 models 注册表中的 key。
+    /// 同时校验模型具备该槽位所需能力：
+    /// - 有明确能力映射的槽位（chat/multimodal/embedding 等）要求模型声明该能力。
+    /// - Lite 槽位无对应能力枚举，宽松接受 chat 能力（轻量文本任务用 chat 模型降级）。
+    ///
+    /// 返回 Ok(()) 或错误（模型不存在 / 能力不匹配）。
     pub fn set_route_by_name(
         &mut self,
         slot: RoutingSlot,
@@ -884,6 +889,47 @@ impl ModelsConfig {
             .get(name)
             .ok_or_else(|| format!("模型 {name} 不存在于 models 注册表"))?
             .clone();
+
+        // capability 校验：确保路由指向的模型确实具备该槽位所需能力
+        match slot.capability() {
+            Some(expected) if !entry.capabilities.contains(&expected) => {
+                let current = if entry.capabilities.is_empty() {
+                    "无".to_string()
+                } else {
+                    entry
+                        .capabilities
+                        .iter()
+                        .map(|c| c.key())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                };
+                return Err(format!(
+                    "模型 {name} 不具备 {} 能力（当前能力：{current}），不能设置到 {} 路由",
+                    expected.key(),
+                    slot.key()
+                ));
+            }
+            None if slot == RoutingSlot::Lite
+                && !entry.capabilities.contains(&ModelCapability::Chat) =>
+            {
+                // Lite 槽位要求 chat 能力（轻量文本任务降级）
+                let current = if entry.capabilities.is_empty() {
+                    "无".to_string()
+                } else {
+                    entry
+                        .capabilities
+                        .iter()
+                        .map(|c| c.key())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                };
+                return Err(format!(
+                    "模型 {name} 不具备 chat 能力（当前能力：{current}），不能设置到 lite 路由"
+                ));
+            }
+            _ => {}
+        }
+
         self.routing.insert(slot, entry);
         Ok(())
     }
@@ -1194,6 +1240,50 @@ mod tests {
             config.routing.get(&RoutingSlot::Chat).unwrap().model,
             "deepseek-chat"
         );
+    }
+
+    #[test]
+    fn set_route_by_name_rejects_capability_mismatch() {
+        // P1 回归：route 设置必须校验模型 capability
+        let mut config = ModelsConfig::default();
+        // chat 模型不应能设置到 embedding 路由
+        config.upsert_model("chat-only", "p", "gpt", vec![ModelCapability::Chat]);
+        let err = config.set_route_by_name(RoutingSlot::Embedding, "chat-only");
+        assert!(err.is_err());
+        assert!(
+            err.unwrap_err().contains("embedding"),
+            "应报告缺少 embedding 能力"
+        );
+        // embedding 模型不应能设置到 chat 路由
+        config.upsert_model(
+            "embed-only",
+            "p",
+            "text-embed",
+            vec![ModelCapability::Embedding],
+        );
+        let err = config.set_route_by_name(RoutingSlot::Chat, "embed-only");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn set_route_lite_accepts_chat_capability() {
+        // Lite 槽位无对应能力枚举，接受 chat 能力（轻量文本降级）
+        let mut config = ModelsConfig::default();
+        config.upsert_model("lite", "p", "deepseek-lite", vec![ModelCapability::Chat]);
+        config.set_route_by_name(RoutingSlot::Lite, "lite").unwrap();
+        assert_eq!(
+            config.routing.get(&RoutingSlot::Lite).unwrap().model,
+            "deepseek-lite"
+        );
+    }
+
+    #[test]
+    fn set_route_lite_rejects_non_chat() {
+        // Lite 槽位要求 chat 能力，embedding 模型不能设为 lite
+        let mut config = ModelsConfig::default();
+        config.upsert_model("embed", "p", "text-embed", vec![ModelCapability::Embedding]);
+        let err = config.set_route_by_name(RoutingSlot::Lite, "embed");
+        assert!(err.is_err());
     }
 
     #[test]

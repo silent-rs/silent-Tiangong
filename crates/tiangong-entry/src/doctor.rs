@@ -110,17 +110,25 @@ fn check_models(report: &mut DoctorReport, deep: bool) {
     // 模型连通性（深度诊断）
     if deep {
         if let Some(resolved) = chat {
-            let cfg = tiangong_core::model::ModelProviderConfig {
-                api_auth_token: resolved.api_key,
-                api_base_url: resolved.base_url,
-                api_timeout_ms: resolved.timeout_ms.to_string(),
-                api_protocol: resolved.protocol,
-                api_model: resolved.model.clone(),
-                api_lite_model: String::new(),
-            };
-            match tiangong_core::model::SingleProviderClient::list_models(&cfg) {
-                Ok(_) => report.ok("模型连通性", format!("{} 请求成功", resolved.model)),
-                Err(e) => report.err("模型连通性", format!("{e:#}")),
+            // 请求前检查 API Key：resolve_slot 已解析 ${ENV}，未设置则返回空串
+            if resolved.api_key.trim().is_empty() {
+                report.err(
+                    "模型连通性",
+                    "API Key 为空（${ENV} 环境变量可能未设置），跳过请求",
+                );
+            } else {
+                let cfg = tiangong_core::model::ModelProviderConfig {
+                    api_auth_token: resolved.api_key,
+                    api_base_url: resolved.base_url,
+                    api_timeout_ms: resolved.timeout_ms.to_string(),
+                    api_protocol: resolved.protocol,
+                    api_model: resolved.model.clone(),
+                    api_lite_model: String::new(),
+                };
+                match tiangong_core::model::SingleProviderClient::list_models(&cfg) {
+                    Ok(_) => report.ok("模型连通性", format!("{} 请求成功", resolved.model)),
+                    Err(e) => report.err("模型连通性", format!("{e:#}")),
+                }
             }
         } else {
             report.skip("模型连通性", "chat 路由未配置，跳过");
