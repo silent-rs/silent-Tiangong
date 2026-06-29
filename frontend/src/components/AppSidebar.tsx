@@ -9,7 +9,7 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from './ui/context-menu';
-import { Plus, Trash2, ChevronRight, ChevronDown, Folder, FilePlus2, FolderX } from 'lucide-react';
+import { Plus, Trash2, Folder, FilePlus2, FolderX } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { SettingsDialog } from './SettingsDialog';
 import type { Session } from '@/api/tauri';
@@ -205,21 +205,15 @@ export function AppSidebar() {
         <ContextMenuTrigger asChild>
           <div className="space-y-1 select-none">
             <div className="flex items-center gap-1 group">
-              <button
-                className="flex-1 flex items-center gap-1.5 px-2 py-1.5 rounded-md text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors min-w-0"
-                onClick={() => canCollapse && toggleGroup(group.key)}
+              {/* 分组头为纯展示：点击不展开，展开仅通过下方"显示全部"按钮 */}
+              <div
+                className="flex-1 flex items-center gap-1.5 px-2 py-1.5 rounded-md text-xs font-medium text-muted-foreground min-w-0"
                 title={group.fullPath}
-                disabled={!canCollapse}
               >
-                {isExpanded ? (
-                  <ChevronDown className="w-3 h-3 shrink-0" />
-                ) : (
-                  <ChevronRight className="w-3 h-3 shrink-0" />
-                )}
                 <Folder className="w-3.5 h-3.5 shrink-0" />
                 <span className="truncate">{group.label}</span>
                 <span className="text-muted-foreground/70 shrink-0">{group.sessions.length}</span>
-              </button>
+              </div>
               <button
                 className="p-1 rounded text-muted-foreground opacity-0 group-hover:opacity-100 hover:text-foreground hover:bg-sidebar-accent/50 transition-opacity shrink-0"
                 onClick={() => !isSending && createSession(group.fullPath)}
