@@ -146,7 +146,7 @@ tiangong model add-model deepseek-chat \
 **Routing 管理**：
 
 ```bash
-tiangong model route chat deepseek-chat
+tiangong model route set chat deepseek-chat
 tiangong model route lite deepseek-lite
 tiangong model route image_generation doubao-image
 tiangong model route list
@@ -356,7 +356,7 @@ Skill 目录          ✅ 5 个 Skill 可用
     --model-id deepseek-chat \
     --capability chat
 
-  tiangong model route chat deepseek-chat
+  tiangong model route set chat deepseek-chat
 ```
 
 ## 7. 最终用户体验
@@ -377,7 +377,7 @@ tiangong model add-model deepseek-chat \
   --capability chat
 
 # 3. 设置 chat 路由
-tiangong model route chat deepseek-chat
+tiangong model route set chat deepseek-chat
 
 # 4. 配 Server
 tiangong server config set --host 127.0.0.1 --port 8080
@@ -393,7 +393,7 @@ tiangong doctor
 tiangong server -d
 ```
 
-只想改 Prompt：`tiangong prompt edit`；只想换模型：`tiangong model route chat glm-4.5`；只想关 Memory：`tiangong memory disable`。
+只想改 Prompt：`tiangong prompt edit`；只想换模型：`tiangong model route set chat glm-4.5`；只想关 Memory：`tiangong memory disable`。
 
 ## 8. Linux 服务器支持
 

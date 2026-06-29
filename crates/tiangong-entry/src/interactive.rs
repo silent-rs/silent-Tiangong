@@ -56,19 +56,46 @@ pub fn input(prompt: &str, default: &str) -> Result<String> {
     Ok(result)
 }
 
-/// 文本输入提示，无默认值，可校验非空。
+/// 文本输入提示，无默认值，强制非空（trim 后）。
 pub fn input_required(prompt: &str) -> Result<String> {
     let result = dialoguer::Input::<String>::new()
         .with_prompt(prompt)
+        .validate_with(|input: &String| -> std::result::Result<(), String> {
+            if input.trim().is_empty() {
+                Err("不能为空".to_string())
+            } else {
+                Ok(())
+            }
+        })
         .interact_text()?;
-    Ok(result)
+    Ok(result.trim().to_string())
 }
 
 /// 多选提示，返回选中项的索引列表。
+#[allow(dead_code)]
 pub fn multiselect(prompt: &str, items: &[&str]) -> Result<Vec<usize>> {
     let selections = dialoguer::MultiSelect::new()
         .with_prompt(prompt)
         .items(items)
+        .interact()?;
+    Ok(selections)
+}
+
+/// 多选提示，可指定默认勾选项的索引列表。
+pub fn multiselect_with_defaults(
+    prompt: &str,
+    items: &[&str],
+    defaults: &[usize],
+) -> Result<Vec<usize>> {
+    let selections = dialoguer::MultiSelect::new()
+        .with_prompt(prompt)
+        .items(items)
+        .defaults(
+            &defaults
+                .iter()
+                .map(|&i| i < items.len())
+                .collect::<Vec<_>>(),
+        )
         .interact()?;
     Ok(selections)
 }

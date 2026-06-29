@@ -139,7 +139,7 @@ tiangong model add-model deepseek-chat \
   --capability chat
 
 # 3. 设置 chat 路由
-tiangong model route chat deepseek-chat
+tiangong model route set chat deepseek-chat
 
 # 4. 验证模型连通性（真实请求一次）
 tiangong model test chat

@@ -135,7 +135,7 @@ sudo install -m 0755 target/release/tiangong /usr/local/bin/tiangong
 ```bash
 tiangong model add-provider deepseek --protocol deepseek --base-url https://api.deepseek.com --api-key-env DEEPSEEK_API_KEY
 tiangong model add-model deepseek-chat --provider deepseek --model-id deepseek-chat --capability chat
-tiangong model route chat deepseek-chat
+tiangong model route set chat deepseek-chat
 tiangong server config set --host 127.0.0.1 --port 8080
 tiangong server token generate
 tiangong doctor
@@ -189,7 +189,7 @@ tiangong update
 
 ```bash
 tiangong model list                      # 查看模型配置
-tiangong model route chat deepseek-chat  # 切换 chat 模型
+tiangong model route set chat deepseek-chat  # 切换 chat 模型
 tiangong server token show               # 查看 Server Token
 tiangong memory enable                   # 启用 Memory
 tiangong prompt edit                     # 编辑自定义 Prompt

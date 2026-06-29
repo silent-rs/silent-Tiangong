@@ -134,7 +134,9 @@ fn prompt_model(
         ("rerank", ModelCapability::Rerank),
     ];
     let cap_labels: Vec<&str> = caps.iter().map(|(k, _)| *k).collect();
-    let selected = ui::multiselect("选择模型能力（空格切换，回车确认）", &cap_labels)?;
+    // 默认勾选 chat（caps[0]），降低误操作概率
+    let selected =
+        ui::multiselect_with_defaults("选择模型能力（空格切换，回车确认）", &cap_labels, &[0])?;
     let capabilities: Vec<ModelCapability> = selected.iter().map(|&i| caps[i].1).collect();
 
     // 至少要有 chat（最常见的对话场景）
@@ -208,9 +210,14 @@ pub fn run_server_configure() -> Result<()> {
     };
 
     let port_input = ui::input("监听端口", &config.port.to_string())?;
-    if let Ok(port) = port_input.trim().parse::<u16>() {
-        config.port = port;
+    let port = port_input
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| anyhow!("端口必须是 1-65535 的整数，实际输入：{port_input}"))?;
+    if port == 0 {
+        return Err(anyhow!("端口不能为 0"));
     }
+    config.port = port;
 
     // Token
     let token_options = [
@@ -230,9 +237,10 @@ pub fn run_server_configure() -> Result<()> {
         }
         1 => {
             let token = ui::password("请输入 Token")?;
-            if !token.trim().is_empty() {
-                config.auth_token = Some(token.trim().to_string());
+            if token.trim().is_empty() {
+                return Err(anyhow!("Token 不能为空；如不想设置鉴权请选择「跳过」"));
             }
+            config.auth_token = Some(token.trim().to_string());
         }
         _ => {
             config.auth_token = None;
@@ -306,12 +314,13 @@ pub fn run_memory_configure() -> Result<()> {
 
 /// 让用户从已注册模型中选择一个作为 Memory LLM（校验 chat 能力）。
 fn pick_memory_llm(models: &ModelsConfig) -> Result<tiangong_memory::MemoryLlmConfig> {
-    let chat_models: Vec<(&String, &str)> = models
+    let mut chat_models: Vec<(&String, &str)> = models
         .models
         .iter()
         .filter(|(_, m)| m.capabilities.contains(&ModelCapability::Chat))
         .map(|(k, m)| (k, m.model.as_str()))
         .collect();
+    chat_models.sort_by_key(|(k, _)| k.as_str());
     if chat_models.is_empty() {
         return Err(anyhow!(
             "没有具备 chat 能力的已注册模型，请先 `tiangong model add-model ... --capability chat`"
@@ -333,12 +342,13 @@ fn pick_memory_endpoint(
     expected: ModelCapability,
     label: &str,
 ) -> Result<Option<tiangong_memory::MemoryEmbeddingConfig>> {
-    let candidates: Vec<(&String, &str)> = models
+    let mut candidates: Vec<(&String, &str)> = models
         .models
         .iter()
         .filter(|(_, m)| m.capabilities.contains(&expected))
         .map(|(k, m)| (k, m.model.as_str()))
         .collect();
+    candidates.sort_by_key(|(k, _)| k.as_str());
     if candidates.is_empty() {
         println!("⚠️  没有具备 {label} 能力的已注册模型，已跳过");
         return Ok(None);
@@ -351,7 +361,10 @@ fn pick_memory_endpoint(
     let idx = ui::select(&format!("选择 {label} 模型"), &label_refs)?;
     let (name, _) = candidates[idx];
     let provider_name = &models.models[name].provider;
-    let provider = &models.providers[provider_name];
+    let provider = models
+        .providers
+        .get(provider_name)
+        .ok_or_else(|| anyhow!("模型 {name} 引用了不存在的 provider {provider_name}"))?;
     use tiangong_memory::MemoryEmbeddingConfig;
     Ok(Some(MemoryEmbeddingConfig {
         provider_key: Some(provider_name.clone()),
@@ -369,12 +382,13 @@ fn pick_memory_rerank(
     models: &ModelsConfig,
     label: &str,
 ) -> Result<Option<tiangong_memory::MemoryRerankConfig>> {
-    let candidates: Vec<(&String, &str)> = models
+    let mut candidates: Vec<(&String, &str)> = models
         .models
         .iter()
         .filter(|(_, m)| m.capabilities.contains(&ModelCapability::Rerank))
         .map(|(k, m)| (k, m.model.as_str()))
         .collect();
+    candidates.sort_by_key(|(k, _)| k.as_str());
     if candidates.is_empty() {
         println!("⚠️  没有具备 {label} 能力的已注册模型，已跳过");
         return Ok(None);
@@ -387,7 +401,10 @@ fn pick_memory_rerank(
     let idx = ui::select(&format!("选择 {label} 模型"), &label_refs)?;
     let (name, _) = candidates[idx];
     let provider_name = &models.models[name].provider;
-    let provider = &models.providers[provider_name];
+    let provider = models
+        .providers
+        .get(provider_name)
+        .ok_or_else(|| anyhow!("模型 {name} 引用了不存在的 provider {provider_name}"))?;
     use tiangong_memory::MemoryRerankConfig;
     Ok(Some(MemoryRerankConfig {
         provider_key: Some(provider_name.clone()),
@@ -402,7 +419,10 @@ fn pick_memory_rerank(
 /// 构建 Memory LLM 配置（复用 provider 端点）。
 fn build_llm_config(models: &ModelsConfig, name: &str) -> Result<tiangong_memory::MemoryLlmConfig> {
     let entry = &models.models[name];
-    let provider = &models.providers[&entry.provider];
+    let provider = models
+        .providers
+        .get(&entry.provider)
+        .ok_or_else(|| anyhow!("模型 {name} 引用了不存在的 provider {}", entry.provider))?;
     Ok(tiangong_memory::MemoryLlmConfig {
         provider_key: Some(entry.provider.clone()),
         base_url: provider.base_url.clone(),

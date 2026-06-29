@@ -224,7 +224,7 @@ fn validate(config: &ModelsConfig) -> Result<()> {
 
     // chat 路由建议配置
     if !config.has_chat() {
-        errors.push("未配置 chat 路由（建议 `tiangong model route chat <model>`）".to_string());
+        errors.push("未配置 chat 路由（建议 `tiangong model route set chat <model>`）".to_string());
     }
 
     if errors.is_empty() {
