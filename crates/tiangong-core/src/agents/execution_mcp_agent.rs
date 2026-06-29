@@ -216,25 +216,6 @@ pub(crate) async fn execute_mcp_tool_call_with_args(
     }
 }
 
-pub(crate) fn build_internal_tool_error_result(tool_name: &str, error: &str) -> ToolResult {
-    let message = format!("工具路由失败：tool={} error={}", tool_name, error);
-    ToolResult {
-        ok: false,
-        summary: message.clone(),
-        stdout: String::new(),
-        stderr: error.to_string(),
-        exit_code: 1,
-        execution: Some(ToolExecutionRecord {
-            tool_name: tool_name.to_string(),
-            args: Vec::new(),
-            duration_ms: 0,
-            ok: false,
-            exit_code: 1,
-            summary: message,
-        }),
-    }
-}
-
 pub(crate) fn normalize_mcp_call_arguments(call: &ToolCall) -> Value {
     if call.arguments.is_object() {
         call.arguments.clone()

@@ -48,6 +48,7 @@ pub(super) fn to_anthropic_request(
             name: name.clone(),
             disable_parallel_tool_use: None,
         },
+        ToolChoice::None => AnthropicToolChoice::None,
     });
 
     Ok(MessagesCreateRequest {
