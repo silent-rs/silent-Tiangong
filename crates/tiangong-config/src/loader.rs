@@ -47,6 +47,11 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
         .map(|f| f.connectors)
         .unwrap_or_default();
 
+    // 自定义 Prompt：从 custom-prompt.md 加载（兼容 app.json 旧字段为空回退）
+    let custom_system_prompt =
+        tiangong_core::custom_prompt::load_custom_prompt_at(&dir.join("custom-prompt.md"), "")
+            .unwrap_or_default();
+
     // 首次安装：释放默认 context_windows.json
     ensure_context_windows(dir);
 
@@ -61,6 +66,7 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
         mcp,
         mcp_capabilities,
         skills,
+        custom_system_prompt,
         server,
         connectors,
         ..Default::default()

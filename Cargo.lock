@@ -9496,6 +9496,7 @@ dependencies = [
  "scru128",
  "serde",
  "serde_json",
+ "tempfile",
  "tiangong-core",
  "tracing",
  "tracing-appender",

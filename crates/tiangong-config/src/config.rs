@@ -161,6 +161,8 @@ pub struct TiangongConfig {
     pub skills: SkillsConfig,
     /// 权限信任模式
     pub trust_mode: TrustMode,
+    /// 自定义系统 Prompt（从 custom-prompt.md 加载，注入 system prompt）
+    pub custom_system_prompt: String,
 
     // ===== 应用层配置 =====
     /// Server 配置
@@ -172,7 +174,8 @@ pub struct TiangongConfig {
 impl TiangongConfig {
     /// 转换为 CoreConfig（提取 Core 所需的最小子集）
     ///
-    /// 将 ModelsConfig（3 层）解析为 LlmConfig（扁平端点）
+    /// 将 ModelsConfig（3 层）解析为 LlmConfig（扁平端点）。
+    /// 自定义 Prompt 来自加载时读取的 custom-prompt.md（见 load_tiangong_config_from_dir）。
     pub fn to_core_config(&self) -> CoreConfig {
         CoreConfig {
             llm: tiangong_core::core_config::LlmConfig::from_models_config(&self.models),
@@ -181,7 +184,7 @@ impl TiangongConfig {
             skills: self.skills.clone(),
             trust_mode: self.trust_mode,
             default_trust_mode: self.trust_mode,
-            custom_system_prompt: String::new(),
+            custom_system_prompt: self.custom_system_prompt.clone(),
             reasoning_effort: "medium".to_string(),
             context_limit: 0, // 0 表示自动根据模型名称解析
         }
@@ -286,5 +289,40 @@ mod tests {
         let a = generate_token(32);
         let b = generate_token(32);
         assert_ne!(a, b, "连续生成的 token 不应相同");
+    }
+
+    #[test]
+    fn to_core_config_carries_custom_system_prompt() {
+        // P0 回归：to_core_config 必须携带 custom_system_prompt，
+        // 否则 CLI/Server 启动的 Core 拿不到自定义 Prompt。
+        let config = TiangongConfig {
+            custom_system_prompt: "总是用简体中文".to_string(),
+            ..Default::default()
+        };
+        let core = config.to_core_config();
+        assert_eq!(core.custom_system_prompt, "总是用简体中文");
+    }
+
+    #[test]
+    fn to_core_config_default_prompt_empty() {
+        let config = TiangongConfig::default();
+        let core = config.to_core_config();
+        assert!(core.custom_system_prompt.is_empty());
+    }
+
+    #[test]
+    fn load_custom_prompt_from_dir_reads_md_file() {
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        // 写入 custom-prompt.md
+        fs::write(dir.path().join("custom-prompt.md"), "测试 Prompt 内容").unwrap();
+
+        // 直接验证 load_custom_prompt_at 行为（与 load_tiangong_config_from_dir 一致）
+        let prompt = tiangong_core::custom_prompt::load_custom_prompt_at(
+            &dir.path().join("custom-prompt.md"),
+            "",
+        )
+        .unwrap();
+        assert_eq!(prompt, "测试 Prompt 内容");
     }
 }
