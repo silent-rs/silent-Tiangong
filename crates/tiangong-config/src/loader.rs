@@ -15,7 +15,7 @@ use tiangong_core::agent_config::{McpConfig, SkillsConfig};
 use tiangong_core::model::ModelProviderConfig;
 use tiangong_core::models_config::ModelsConfig;
 
-use crate::config::{ConnectorConfig, ServerConfig, TiangongConfig};
+use crate::config::{ConnectorConfig, TiangongConfig};
 
 /// Connector 配置文件结构
 #[derive(serde::Deserialize)]
@@ -42,7 +42,7 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
     let models = load_models_config();
     let mcp = load_json_config::<McpConfig>(dir, "mcp.json").unwrap_or_default();
     let skills = load_json_config::<SkillsConfig>(dir, "skills.json").unwrap_or_default();
-    let server = load_json_config::<ServerConfig>(dir, "server.json").unwrap_or_default();
+    let server = crate::config::load_server_config_from_dir(dir);
     let connectors = load_json_config::<ConnectorsFile>(dir, "connectors.json")
         .map(|f| f.connectors)
         .unwrap_or_default();

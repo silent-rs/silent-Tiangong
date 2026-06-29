@@ -245,12 +245,12 @@ fn print_status() {
     println!("禁用标记：{}", if disabled { "存在" } else { "无" });
     println!(
         "启用状态：{}",
-        if !disabled && llm_valid {
-            "\x1b[32m已启用且配置有效\x1b[0m"
-        } else if disabled {
+        if disabled {
             "\x1b[31m已禁用\x1b[0m"
+        } else if llm_valid {
+            "\x1b[32m已启用且配置有效\x1b[0m"
         } else {
-            "\x1b[33m启用但 LLM 端点未配置或无效\x1b[0m"
+            "\x1b[33m已启用（LLM 未配置，将降级为规则策略）\x1b[0m"
         }
     );
     println!("vector_mode: {:?}", config.vector_mode);

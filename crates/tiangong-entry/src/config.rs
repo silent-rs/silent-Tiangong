@@ -1,8 +1,7 @@
 use anyhow::{Result, anyhow};
 
 use tiangong_config::{default_tiangong_dir, load_server_config};
-use tiangong_core::app_state::TiangongState;
-use tiangong_core::custom_prompt::custom_prompt_path;
+use tiangong_core::custom_prompt::{custom_prompt_path, load_custom_prompt};
 use tiangong_core::models_config::ModelsConfig;
 use tiangong_memory::{MemoryConfig, is_memory_disabled};
 
@@ -38,11 +37,18 @@ fn print_paths() {
     println!("Skill 配置：  {}", root.join("skills.json").display());
 }
 
+/// 直接读取 JSON 文件并按数组/对象计数的轻量工具，避免依赖完整 TiangongState。
+fn count_json_entries(path: &std::path::Path, key: &str) -> Option<usize> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    value.get(key).and_then(|v| v.as_array()).map(|a| a.len())
+}
+
 fn print_overview() {
+    let root = default_tiangong_dir();
     let models = ModelsConfig::load();
     let server = load_server_config();
     let memory = MemoryConfig::load_or_default();
-    let state = TiangongState::load_or_default();
 
     // 模型
     let chat_model = models
@@ -76,16 +82,16 @@ fn print_overview() {
     };
     println!("Memory：   {memory_state}，LLM={memory_model}");
 
-    // MCP（从 state 读取已启用的 server 数）
-    let mcp_count = state.agent_config().mcp.servers.len();
+    // MCP（直接读 mcp.json 的 servers 数组长度）
+    let mcp_count = count_json_entries(&root.join("mcp.json"), "servers").unwrap_or(0);
     println!("MCP：      {mcp_count} 个服务");
 
-    // Skill
-    let skills = state.installed_skills();
-    println!("Skill：    {} 个可用", skills.len());
+    // Skill（直接读 skills.json 的 installed 数组长度）
+    let skill_count = count_json_entries(&root.join("skills.json"), "installed").unwrap_or(0);
+    println!("Skill：    {skill_count} 个可用");
 
-    // 自定义 Prompt
-    let prompt = state.custom_system_prompt();
+    // 自定义 Prompt（直接读 custom-prompt.md）
+    let prompt = load_custom_prompt("").unwrap_or_default();
     if prompt.trim().is_empty() {
         println!("自定义 Prompt：未配置");
     } else {

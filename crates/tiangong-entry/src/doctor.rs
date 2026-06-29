@@ -23,7 +23,11 @@ pub(crate) fn run_doctor_command(args: DoctorArgs) -> Result<()> {
     check_custom_prompt(&mut report);
 
     report.print();
-    Ok(())
+    if report.has_error {
+        Err(anyhow::anyhow!("环境诊断发现错误项，详见上方 ❌ 标记"))
+    } else {
+        Ok(())
+    }
 }
 
 #[derive(Default)]

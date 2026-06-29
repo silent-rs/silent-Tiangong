@@ -72,9 +72,9 @@ pub fn server_config_path() -> PathBuf {
         .join("server.json")
 }
 
-/// 从 ~/.tiangong/server.json 加载配置，文件不存在时返回默认值
-pub fn load_server_config() -> ServerConfig {
-    let path = server_config_path();
+/// 从指定目录加载 Server 配置，文件不存在时返回默认值。
+pub fn load_server_config_from_dir(dir: &std::path::Path) -> ServerConfig {
+    let path = dir.join("server.json");
     if !path.exists() {
         return ServerConfig::default();
     }
@@ -84,15 +84,28 @@ pub fn load_server_config() -> ServerConfig {
     }
 }
 
-/// 保存 Server 配置到 ~/.tiangong/server.json
-pub fn save_server_config(config: &ServerConfig) -> anyhow::Result<()> {
-    let path = server_config_path();
+/// 从 ~/.tiangong/server.json 加载配置，文件不存在时返回默认值
+pub fn load_server_config() -> ServerConfig {
+    load_server_config_from_dir(&crate::loader::default_tiangong_dir())
+}
+
+/// 保存 Server 配置到指定目录的 server.json
+pub fn save_server_config_to_dir(
+    dir: &std::path::Path,
+    config: &ServerConfig,
+) -> anyhow::Result<()> {
+    let path = dir.join("server.json");
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let content = serde_json::to_string_pretty(config)?;
     std::fs::write(&path, content)?;
     Ok(())
+}
+
+/// 保存 Server 配置到 ~/.tiangong/server.json
+pub fn save_server_config(config: &ServerConfig) -> anyhow::Result<()> {
+    save_server_config_to_dir(&crate::loader::default_tiangong_dir(), config)
 }
 
 impl ServerConfig {
