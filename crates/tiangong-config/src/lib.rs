@@ -22,8 +22,11 @@ mod config;
 mod loader;
 pub mod logging;
 
-pub use config::{ConnectorConfig, ConnectorType, ServerConfig, TiangongConfig};
-pub use loader::{load_tiangong_config, load_tiangong_config_from_dir};
+pub use config::{
+    ConnectorConfig, ConnectorType, ServerConfig, TiangongConfig, generate_token,
+    load_server_config, save_server_config, server_config_path,
+};
+pub use loader::{default_tiangong_dir, load_tiangong_config, load_tiangong_config_from_dir};
 
 // re-export core config types for convenience
 pub use tiangong_core::core_config::{CoreConfig, CoreConfigBuilder, CoreConfigProvider};

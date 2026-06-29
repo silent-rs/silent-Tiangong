@@ -72,6 +72,47 @@ pub(crate) struct ServerArgs {
 pub(crate) enum ServerSubcommand {
     #[command(about = "停止后台 Server")]
     Stop,
+    #[command(about = "查看 Server 运行状态")]
+    Status,
+    #[command(about = "管理 Server 监听配置")]
+    Config {
+        #[command(subcommand)]
+        command: ServerConfigSubcommand,
+    },
+    #[command(about = "管理 Server 鉴权 Token")]
+    Token {
+        #[command(subcommand)]
+        command: ServerTokenSubcommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ServerConfigSubcommand {
+    #[command(about = "查看 Server 监听配置")]
+    Show,
+    #[command(about = "修改 Server 监听配置（host/port 可选）")]
+    Set {
+        #[arg(long, help = "监听地址")]
+        host: Option<String>,
+        #[arg(long, help = "监听端口")]
+        port: Option<u16>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ServerTokenSubcommand {
+    #[command(about = "查看当前 Token（脱敏）")]
+    Show,
+    #[command(about = "直接设置 Token")]
+    Set {
+        #[arg(help = "Token 值")]
+        token: String,
+    },
+    #[command(about = "生成随机 Token 并写入配置")]
+    Generate {
+        #[arg(long, default_value_t = 32, help = "Token 长度（16-256）")]
+        length: usize,
+    },
 }
 
 #[derive(Debug, Args)]
