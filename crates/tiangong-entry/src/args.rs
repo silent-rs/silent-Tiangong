@@ -32,6 +32,8 @@ pub(crate) enum MainCommand {
     Mcp(McpArgs),
     #[command(about = "模型配置管理（Provider / Model / Routing）")]
     Model(ModelArgs),
+    #[command(about = "Memory 系统配置管理")]
+    Memory(MemoryArgs),
     #[command(about = "Skill 配置管理")]
     Skill(SkillArgs),
     #[command(about = "自定义 Prompt 管理")]
@@ -216,6 +218,44 @@ pub(crate) enum RouteSubcommand {
         capability: String,
         #[arg(help = "模型名称（本地别名）")]
         model: String,
+    },
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct MemoryArgs {
+    #[command(subcommand)]
+    pub(crate) command: MemorySubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum MemorySubcommand {
+    #[command(about = "管理 Memory 配置")]
+    Config {
+        #[command(subcommand)]
+        command: MemoryConfigSubcommand,
+    },
+    #[command(about = "启用 Memory")]
+    Enable,
+    #[command(about = "禁用 Memory")]
+    Disable,
+    #[command(about = "查看 Memory 状态")]
+    Status,
+    #[command(about = "测试 Memory 模型连通性")]
+    Test,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum MemoryConfigSubcommand {
+    #[command(about = "查看 Memory 配置")]
+    Show,
+    #[command(about = "从 models.json 引用模型填充 Memory 端点")]
+    Set {
+        #[arg(long, help = "Memory LLM 模型名（models.json 中的别名）")]
+        llm: Option<String>,
+        #[arg(long, help = "Embedding 模型名")]
+        embedding: Option<String>,
+        #[arg(long, help = "Rerank 模型名")]
+        rerank: Option<String>,
     },
 }
 

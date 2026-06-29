@@ -132,6 +132,48 @@ pub fn default_memory_config_path() -> PathBuf {
     storage_root().join("memory").join("config.json")
 }
 
+/// Memory 禁用标记文件路径：~/.tiangong/memory/.disabled
+///
+/// 用于 `tiangong memory enable/disable` 实现对称开关（RFC 0015 §6.3）。
+/// MemoryConfig 无顶层 enabled 字段，改用此标记文件存在性表示禁用，
+/// 不破坏 MemoryConfig 结构、不丢失端点配置。
+pub fn memory_disabled_marker_path() -> PathBuf {
+    storage_root().join("memory").join(".disabled")
+}
+
+/// 判断 Memory 是否被显式禁用（标记文件存在即禁用）。
+pub fn is_memory_disabled() -> bool {
+    memory_disabled_marker_path().exists()
+}
+
+/// 禁用 Memory（创建标记文件）。
+pub fn disable_memory() -> Result<()> {
+    disable_memory_at(&memory_disabled_marker_path())
+}
+
+/// 在指定路径创建禁用标记（供测试使用）。
+pub fn disable_memory_at(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("创建目录失败：{}", parent.display()))?;
+    }
+    fs::write(path, "disabled by `tiangong memory disable`\n")
+        .with_context(|| format!("写入禁用标记失败：{}", path.display()))
+}
+
+/// 启用 Memory（删除标记文件）。文件不存在视为已启用。
+pub fn enable_memory() -> Result<()> {
+    enable_memory_at(&memory_disabled_marker_path())
+}
+
+/// 在指定路径删除禁用标记（供测试使用）。
+pub fn enable_memory_at(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    fs::remove_file(path).with_context(|| format!("删除禁用标记失败：{}", path.display()))
+}
+
 fn user_home_dir() -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(home));
@@ -319,5 +361,20 @@ mod tests {
         assert!(options.model.is_none());
         assert!(options.embedding.is_none());
         assert!(options.rerank.is_none());
+    }
+
+    #[test]
+    fn disable_enable_marker_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join(".disabled");
+
+        assert!(!marker.exists());
+        disable_memory_at(&marker).unwrap();
+        assert!(marker.exists());
+
+        enable_memory_at(&marker).unwrap();
+        assert!(!marker.exists());
+        // 再次启用不报错
+        enable_memory_at(&marker).unwrap();
     }
 }
