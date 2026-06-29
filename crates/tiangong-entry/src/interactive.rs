@@ -87,15 +87,13 @@ pub fn multiselect_with_defaults(
     items: &[&str],
     defaults: &[usize],
 ) -> Result<Vec<usize>> {
+    // defaults() 需要长度与 items 相同的 bool 数组，每个 bool 表示对应项是否默认勾选。
+    let default_flags: Vec<bool> = (0..items.len()).map(|i| defaults.contains(&i)).collect();
+
     let selections = dialoguer::MultiSelect::new()
         .with_prompt(prompt)
         .items(items)
-        .defaults(
-            &defaults
-                .iter()
-                .map(|&i| i < items.len())
-                .collect::<Vec<_>>(),
-        )
+        .defaults(&default_flags)
         .interact()?;
     Ok(selections)
 }

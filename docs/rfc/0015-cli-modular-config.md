@@ -147,8 +147,8 @@ tiangong model add-model deepseek-chat \
 
 ```bash
 tiangong model route set chat deepseek-chat
-tiangong model route lite deepseek-lite
-tiangong model route image_generation doubao-image
+tiangong model route set lite deepseek-lite
+tiangong model route set image_generation doubao-image
 tiangong model route list
 ```
 
