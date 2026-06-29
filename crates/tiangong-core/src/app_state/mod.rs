@@ -143,9 +143,28 @@ impl TiangongState {
     }
 
     pub fn set_custom_system_prompt(&mut self, prompt: String) -> Result<()> {
-        self.store.agent.agent_config.custom_system_prompt = prompt;
+        let trimmed = prompt.trim();
+        if trimmed.is_empty() {
+            // 清空：删除 custom-prompt.md 并清空旧字段
+            crate::custom_prompt::clear_custom_prompt()?;
+            self.store.agent.agent_config.custom_system_prompt = String::new();
+        } else {
+            // 写入 custom-prompt.md 作为唯一事实来源，并清空 app.json 旧字段
+            crate::custom_prompt::save_custom_prompt(&prompt)?;
+            self.store.agent.agent_config.custom_system_prompt = String::new();
+        }
         self.rebuild_runtime_from_current_config();
         self.persist_app_only()
+    }
+
+    /// 获取自定义 Prompt 内容（已按 custom-prompt.md > 旧字段 > 空 优先级加载）。
+    pub fn custom_system_prompt(&self) -> &str {
+        &self.store.agent.agent_config.custom_system_prompt
+    }
+
+    /// 获取自定义 Prompt 独立存储路径（~/.tiangong/custom-prompt.md）。
+    pub fn custom_prompt_path(&self) -> std::path::PathBuf {
+        crate::custom_prompt::custom_prompt_path()
     }
 
     pub fn set_reasoning_effort(&mut self, effort: String) -> Result<()> {

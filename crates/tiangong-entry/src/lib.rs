@@ -1,5 +1,6 @@
 mod args;
 mod mcp;
+mod prompt;
 mod server;
 mod skill;
 mod update;
@@ -28,6 +29,7 @@ pub fn run() -> anyhow::Result<()> {
         Some(MainCommand::Server(args)) => server::run_server_command(args),
         Some(MainCommand::Mcp(args)) => mcp::run_mcp_command(args),
         Some(MainCommand::Skill(args)) => skill::run_skill_command(args),
+        Some(MainCommand::Prompt(args)) => prompt::run_prompt_command(args),
         Some(MainCommand::Update(args)) => update::run_update_command(args),
         Some(MainCommand::Cli { trust_mode }) => {
             tiangong_cli::run_cli_with_trust_mode(trust_mode.map(|m| m.to_trust_mode()))

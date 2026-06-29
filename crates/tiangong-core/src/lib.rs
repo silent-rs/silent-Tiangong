@@ -9,6 +9,7 @@ pub mod config_watch;
 pub mod context;
 pub mod core;
 pub mod core_config;
+pub mod custom_prompt;
 pub mod event;
 pub mod index;
 pub mod mcp;

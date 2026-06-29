@@ -31,6 +31,8 @@ pub(crate) enum MainCommand {
     Mcp(McpArgs),
     #[command(about = "Skill 配置管理")]
     Skill(SkillArgs),
+    #[command(about = "自定义 Prompt 管理")]
+    Prompt(PromptArgs),
     #[command(about = "检查并安装天工更新")]
     Update(UpdateArgs),
 }
@@ -82,6 +84,33 @@ pub(crate) struct McpArgs {
 pub(crate) struct SkillArgs {
     #[command(subcommand)]
     pub(crate) command: SkillSubcommand,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct PromptArgs {
+    #[command(subcommand)]
+    pub(crate) command: PromptSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum PromptSubcommand {
+    #[command(about = "查看当前自定义 Prompt")]
+    Show,
+    #[command(about = "设置自定义 Prompt（直接传文本或用 --file 从文件读取）")]
+    Set {
+        /// Prompt 文本（与 --file 互斥）
+        #[arg(help = "Prompt 文本")]
+        text: Option<String>,
+        /// 从文件读取 Prompt 内容
+        #[arg(long = "file", value_name = "PATH", conflicts_with = "text")]
+        file: Option<String>,
+    },
+    #[command(about = "通过 $EDITOR 编辑自定义 Prompt")]
+    Edit,
+    #[command(about = "清空自定义 Prompt")]
+    Clear,
+    #[command(about = "显示自定义 Prompt 存储路径")]
+    Path,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
