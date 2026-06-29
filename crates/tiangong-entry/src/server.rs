@@ -1,5 +1,7 @@
 use anyhow::{Result, anyhow};
 
+use tiangong_config::load_server_config;
+
 use crate::args::{ServerArgs, ServerConfigSubcommand, ServerSubcommand, ServerTokenSubcommand};
 
 pub(crate) fn run_server_command(args: ServerArgs) -> Result<()> {
@@ -14,13 +16,19 @@ pub(crate) fn run_server_command(args: ServerArgs) -> Result<()> {
         None => {}
     }
 
+    // 合并启动参数：命令行 > server.json 保存值 > 默认值
+    let saved = load_server_config();
+    let host = args.host.unwrap_or(saved.host);
+    let port = args.port.unwrap_or(saved.port);
+    let token = args.token.or(saved.auth_token);
+
     // daemon 模式：后台启动并退出主进程
     if args.daemon {
-        return tiangong_server::run_daemon(&args.host, args.port, args.token);
+        return tiangong_server::run_daemon(&host, port, token);
     }
 
     // 前台运行
-    tiangong_server::run_server(&args.host, args.port, args.token)
+    tiangong_server::run_server(&host, port, token)
 }
 
 fn run_config(command: ServerConfigSubcommand) -> Result<()> {

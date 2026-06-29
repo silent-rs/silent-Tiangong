@@ -60,14 +60,14 @@ pub(crate) struct UpdateArgs {
 pub(crate) struct ServerArgs {
     #[command(subcommand)]
     pub(crate) command: Option<ServerSubcommand>,
-    /// 监听地址
-    #[arg(long, default_value = "127.0.0.1")]
-    pub(crate) host: String,
-    /// 监听端口
-    #[arg(long, default_value_t = 8080)]
-    pub(crate) port: u16,
-    /// API 认证 Token
-    #[arg(long, help = "API 认证 Token")]
+    /// 监听地址（不传时使用 server.json 保存值，再回退 127.0.0.1）
+    #[arg(long, help = "监听地址，覆盖 server.json 保存值")]
+    pub(crate) host: Option<String>,
+    /// 监听端口（不传时使用 server.json 保存值，再回退 8080）
+    #[arg(long, help = "监听端口，覆盖 server.json 保存值")]
+    pub(crate) port: Option<u16>,
+    /// API 认证 Token（不传时使用 server.json 保存值）
+    #[arg(long, help = "API 认证 Token，覆盖 server.json 保存值")]
     pub(crate) token: Option<String>,
     /// 后台运行
     #[arg(short, long, help = "后台运行")]

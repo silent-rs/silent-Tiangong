@@ -5,6 +5,7 @@ mod mcp;
 mod memory;
 mod model;
 mod prompt;
+mod secrets;
 mod server;
 mod skill;
 mod update;

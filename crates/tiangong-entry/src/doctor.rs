@@ -7,12 +7,14 @@ use tiangong_core::models_config::{ModelsConfig, RoutingSlot};
 use tiangong_memory::{MemoryConfig, is_memory_disabled};
 
 use crate::args::DoctorArgs;
+use crate::secrets::env_secret_resolvable;
 
 pub(crate) fn run_doctor_command(args: DoctorArgs) -> Result<()> {
     let mut report = DoctorReport::default();
 
     check_config_dir(&mut report);
     check_models(&mut report, args.deep);
+    check_model_secrets(&mut report);
     check_server(&mut report);
     check_server_token(&mut report);
     check_memory(&mut report);
@@ -127,6 +129,57 @@ fn check_models(report: &mut DoctorReport, deep: bool) {
 fn check_server(report: &mut DoctorReport) {
     let server = load_server_config();
     report.ok("Server 配置", format!("{}:{}", server.host, server.port));
+}
+
+/// 检查模型与 Memory 配置中 `${ENV}` 形式的密钥是否可解析。
+fn check_model_secrets(report: &mut DoctorReport) {
+    let models = ModelsConfig::load();
+    let mut checked = 0usize;
+    let mut missing: Vec<String> = Vec::new();
+
+    // chat 路由 provider 的 api_key
+    if let Some(entry) = models.routing.get(&RoutingSlot::Chat)
+        && let Some(provider) = models.providers.get(&entry.provider)
+    {
+        checked += 1;
+        let (ok, var) = env_secret_resolvable(&provider.api_key);
+        if !ok {
+            missing.push(format!("chat 模型（{}）", var.unwrap_or_default()));
+        }
+    }
+
+    // Memory 端点的 api_key
+    let memory = MemoryConfig::load_or_default();
+    for (label, cfg) in [
+        ("Memory LLM", memory.model.as_ref().map(|m| &m.api_key)),
+        (
+            "Memory Embedding",
+            memory.embedding.as_ref().map(|e| &e.api_key),
+        ),
+        ("Memory Rerank", memory.rerank.as_ref().map(|r| &r.api_key)),
+    ] {
+        if let Some(key) = cfg {
+            checked += 1;
+            let (ok, var) = env_secret_resolvable(key);
+            if !ok {
+                missing.push(format!("{label}（{}）", var.unwrap_or_default()));
+            }
+        }
+    }
+
+    if missing.is_empty() {
+        if checked > 0 {
+            report.ok("密钥环境变量", format!("{checked} 项密钥均可解析"));
+        } else {
+            report.skip("密钥环境变量", "未配置需解析的密钥");
+        }
+    } else {
+        report.err(
+            "密钥环境变量",
+            format!("{} 项环境变量未设置：{}", missing.len(), missing.join("、")),
+        );
+        report.hint("请在启动 tiangong 前设置对应环境变量");
+    }
 }
 
 fn check_server_token(report: &mut DoctorReport) {
