@@ -310,6 +310,10 @@ fn run_gui() {
                 None => warn!("终端插件构造失败（Tauri state 未就绪），终端能力将缺失"),
             }
 
+            // 定时任务插件：不依赖 Tauri 句柄（纯文件存储），无条件注册，
+            // 让 Agent 可通过命名参数工具调用管理定时任务（替代旧的 LocalToolExecutor 实现）。
+            state.register_plugin(tiangong_plugin_scheduler::build_plugin());
+
             // 启动工具消息注入消费者任务（插件 push → 消费者统一处理）
             let injection_tx = state.tool_injection_tx();
             state.start_tool_injection_consumer(app.handle().clone());

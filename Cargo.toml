@@ -14,6 +14,7 @@ members = [
     "crates/tiangong-config",
     "crates/tiangong-scheduler",
     "crates/tiangong-plugin-browser",
+    "crates/tiangong-plugin-scheduler",
     "crates/tiangong-plugin-terminal",
     "src-tauri",
 ]
@@ -32,6 +33,7 @@ tiangong-llm = { path = "crates/tiangong-llm" }
 tiangong-media = { path = "crates/tiangong-media" }
 tiangong-memory = { path = "crates/tiangong-memory" }
 tiangong-plugin-browser = { path = "crates/tiangong-plugin-browser" }
+tiangong-plugin-scheduler = { path = "crates/tiangong-plugin-scheduler" }
 tiangong-plugin-terminal = { path = "crates/tiangong-plugin-terminal" }
 tiangong-server = { path = "crates/tiangong-server" }
 tiangong-scheduler = { path = "crates/tiangong-scheduler" }

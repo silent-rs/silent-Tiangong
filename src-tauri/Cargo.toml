@@ -12,6 +12,7 @@ tiangong-cli = { workspace = true }
 tiangong-entry = { workspace = true }
 tiangong-server = { workspace = true }
 tiangong-plugin-browser = { workspace = true }
+tiangong-plugin-scheduler = { workspace = true }
 tiangong-plugin-terminal = { workspace = true }
 tiangong-media = { workspace = true }
 tiangong-config = { workspace = true }
