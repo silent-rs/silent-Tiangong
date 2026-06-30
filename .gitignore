@@ -17,3 +17,7 @@ src-tauri/create_skill/
 .playwright-mcp
 src-tauri/gen/schemas/
 crates/tiangong-plugin-browser/permissions/schemas/
+AGENTS.md
+.worktrees/
+PLAN.md
+TODO.md

@@ -775,6 +775,7 @@ async fn artifact_only_turn_is_added_to_memory_and_recalled_by_context_tool() {
             expected: vec!["media".to_string(), "file".to_string()],
             context: vec!["当前上下文没有图片 URL，也没有本地文件路径".to_string()],
             limit: 5,
+            ..Default::default()
         })
         .await;
     eprintln!(
@@ -860,6 +861,7 @@ async fn contextual_recall_returns_incremental_memory_without_repeating_prompt_c
                 format!("assistant: {redundant_summary}"),
             ],
             limit: 5,
+            ..Default::default()
         })
         .await;
     eprintln!(
@@ -946,6 +948,7 @@ async fn contextual_recall_fixed_reference_cases_return_only_incremental_memory(
                     format!("assistant: {}", case.current_context),
                 ],
                 limit: 5,
+                ..Default::default()
             })
             .await;
         eprintln!(
@@ -1396,6 +1399,7 @@ async fn deep_recall_fixed_scenario_traces_cross_session_artifact_entity_and_dec
                 format!("assistant: {current_context}"),
             ],
             limit: 2,
+            ..Default::default()
         })
         .await;
     eprintln!(
@@ -1608,6 +1612,7 @@ async fn memory_recall_levels_cover_injection_depth1_depth2_and_context_summary(
                 "assistant: 当前上下文只包含用户请求，不包含图片 URL".to_string(),
             ],
             limit: 5,
+            ..Default::default()
         })
         .await;
     eprintln!(

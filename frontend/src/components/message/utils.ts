@@ -45,10 +45,18 @@ export function isNeedMoreWorkMessage(message: MessageItem): boolean {
   return textContent(message).trimStart().slice(0, NEED_MORE_WORK_MARKER.length).toLowerCase() === NEED_MORE_WORK_MARKER.toLowerCase();
 }
 
-/** 获取消息的可展示文本：总结阶段消息去掉状态标记，其余原样返回。 */
+/**
+ * 获取消息的可展示文本：无条件剥离总结阶段首行状态标记。
+ *
+ * `[DONE]`/`[ASK_USER]`/`[NEED_MORE_WORK]` 是 summary 阶段提示词要求 LLM 首行输出的
+ * 完成度信号，属于控制标记而非正文。后端不应为显示而篡改正文（否则会污染后续喂回 LLM
+ * 的上下文），剥离职责落在显示层。不依赖 `message.phase`，保证任何情况下都正确显示。
+ *
+ * 注意：`[NEED_MORE_WORK]` 在 AgentTurn 的分组逻辑中已被单独拦截为 thinking 片段，
+ * 不会走到这里；此处主要处理 `[DONE]`/`[ASK_USER]`。
+ */
 export function displayTextContent(message: MessageItem): string {
-  const content = textContent(message);
-  return message.phase === "summary" ? stripSummaryStatusMarker(content) : content;
+  return stripSummaryStatusMarker(textContent(message));
 }
 
 export function resolveAssetUrl(url: string): string {

@@ -1049,37 +1049,11 @@ pub(crate) fn start_stream_consumer(
                         StreamEvent::Done { .. } => {
                             assistant_msg_id = None;
                         }
-                        StreamEvent::MemoryRecallStart { ref strategy } => {
-                            session.append_message(
-                                tiangong_core::session::MessageRole::System,
-                                format!("[记忆检索] 策略: {strategy}"),
-                            );
+                        StreamEvent::MemoryRecallStart { .. } => {
+                            // 仅更新状态栏（见下方状态映射），不写入对话消息列表
                         }
-                        StreamEvent::MemoryRecallDone {
-                            hit_count,
-                            ref hits,
-                        } => {
-                            if *hit_count == 0 {
-                                session.append_message(
-                                    tiangong_core::session::MessageRole::System,
-                                    "[记忆检索] 无相关记忆".to_string(),
-                                );
-                            } else {
-                                let items: Vec<String> = hits
-                                    .iter()
-                                    .map(|h| {
-                                        format!("- [{:.2}] {}: {}", h.score, h.title, h.summary)
-                                    })
-                                    .collect();
-                                session.append_message(
-                                    tiangong_core::session::MessageRole::System,
-                                    format!(
-                                        "[记忆检索] 命中 {} 条\n{}",
-                                        hit_count,
-                                        items.join("\n")
-                                    ),
-                                );
-                            }
+                        StreamEvent::MemoryRecallDone { .. } => {
+                            // 仅更新状态栏（见下方状态映射），不写入对话消息列表
                         }
                         StreamEvent::AgentCreated {
                             ref agent_id,

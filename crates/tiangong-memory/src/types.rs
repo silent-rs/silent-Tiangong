@@ -317,10 +317,13 @@ pub struct RecallHit {
     pub depth1_loaded: bool,
 }
 
+/// 回忆进度回调：参数为当前阶段描述（如 "规划检索策略" / "检索中"）。
+pub type MemoryRecallProgress = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+
 /// Tool 化回忆请求。
 ///
 /// Core 只提供当前请求和最近语境；检索规划、去重和结果整理由 Memory 内部完成。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct MemoryRecallRequest {
     pub query: String,
     #[serde(default)]
@@ -331,6 +334,27 @@ pub struct MemoryRecallRequest {
     pub context: Vec<String>,
     #[serde(default)]
     pub limit: usize,
+    /// 进度回调：每进入一个检索阶段触发一次（如 "规划检索策略" / "检索中"）。
+    ///
+    /// 闭包不可序列化，跨 actor/IPC 边界会被 `#[serde(skip)]` 丢弃（自然降级为不发进度）。
+    #[serde(skip)]
+    pub progress: Option<MemoryRecallProgress>,
+}
+
+impl std::fmt::Debug for MemoryRecallRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryRecallRequest")
+            .field("query", &self.query)
+            .field("reason", &self.reason)
+            .field("expected", &self.expected)
+            .field("context", &self.context)
+            .field("limit", &self.limit)
+            .field(
+                "progress",
+                &self.progress.as_ref().map(|_| "<progress callback>"),
+            )
+            .finish()
+    }
 }
 
 /// Tool 化回忆响应。
