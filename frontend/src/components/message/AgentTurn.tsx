@@ -239,8 +239,9 @@ function AgentTurnView({
           const { msg, isStreaming } = frag;
           const visibleText = displayTextContent(msg);
           const isReactPhase = msg.phase === "react";
-          // 总结阶段流式输出需剥离状态标记（[DONE]/[NEED_MORE_WORK] 等）。
-          const visibleStreamingContent = msg.phase === "summary" ? stripSummaryStatusMarker(streamingContent) : streamingContent;
+          // 流式输出无条件剥离状态标记（[DONE]/[NEED_MORE_WORK]/[ASK_USER] 等），
+          // 即使后端 phase 尚未传播到也兜底，避免标记泄漏到界面。
+          const visibleStreamingContent = stripSummaryStatusMarker(streamingContent);
           const agentReply = !isStreaming ? parseAgentReply(visibleText) : null;
           if (agentReply) {
             // Sub Agent 汇报：默认折叠为一行摘要，点击展开完整正文。
