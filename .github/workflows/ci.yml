@@ -23,11 +23,15 @@ jobs:
       # 是否触发了任何后端 Rust 改动（含 workflow 自身），用于编排 fmt / tauri / frontend
       rust: ${{ steps.resolve.outputs.rust }}
       frontend: ${{ steps.resolve.outputs.frontend }}
-      # 需要校验的 crate 列表（JSON 数组），已根据依赖闭包展开。
-      # 仅包含「自身或其传递依赖发生改动」的 crate，matrix 作业据此按需启动 runner。
+      # 需要校验的 crate 列表（JSON 数组），仅含被直接改动的 crate。
+      # 不做反向依赖闭包扩散，避免底层改动触发几乎全部上游作业。
       matrix: ${{ steps.resolve.outputs.matrix }}
     steps:
+      # 完整克隆：改动文件解析需用 git diff base.sha...HEAD，
+      # 默认 fetch-depth: 1 是浅克隆，base commit 不可达会导致 diff 为空、matrix=[]。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Filter changed paths
         id: filter
@@ -90,7 +94,8 @@ jobs:
           import json, os
 
           # workspace 中所有 crate -> 其源码目录前缀（相对仓库根）
-          # 包名与 cargo -p 用的标识一致；src-tauri 的二进制包名为 tiangong-app
+          # 包名与 cargo -p 用的标识一致；src-tauri 的二进制包名为 tiangong-app，
+          # 根二进制（src/main.rs）包名为 tiangong
           crate_to_prefix = {
               "tiangong-types":           "crates/tiangong-types/",
               "tiangong-anthropic":       "crates/tiangong-anthropic/",
@@ -107,63 +112,21 @@ jobs:
               "tiangong-plugin-browser":  "crates/tiangong-plugin-browser/",
               "tiangong-plugin-terminal": "crates/tiangong-plugin-terminal/",
               "tiangong-app":             "src-tauri/",
+              "tiangong":                 "src/",
           }
-
-          # 正向依赖图：key 直接依赖 value 列表中的 crate（取自各 Cargo.toml 的 workspace 依赖）
-          forward_deps = {
-              "tiangong-types":           [],
-              "tiangong-anthropic":       [],
-              "tiangong-deepseek":        [],
-              "tiangong-media":           [],
-              "tiangong-scheduler":       [],
-              "tiangong-llm":             ["tiangong-types", "tiangong-anthropic", "tiangong-deepseek"],
-              "tiangong-config":          ["tiangong-core"],
-              "tiangong-memory":          ["tiangong-llm", "tiangong-config"],
-              "tiangong-core":            ["tiangong-types", "tiangong-llm", "tiangong-memory", "tiangong-scheduler", "tiangong-media"],
-              "tiangong-cli":             ["tiangong-core", "tiangong-config", "tiangong-types"],
-              "tiangong-server":          ["tiangong-core", "tiangong-config", "tiangong-media", "tiangong-scheduler", "tiangong-types"],
-              "tiangong-entry":           ["tiangong-cli", "tiangong-core", "tiangong-server"],
-              "tiangong-plugin-browser":  ["tiangong-core", "tiangong-types"],
-              "tiangong-plugin-terminal": ["tiangong-core", "tiangong-types"],
-              "tiangong-app":             [
-                  "tiangong-cli", "tiangong-config", "tiangong-core", "tiangong-entry",
-                  "tiangong-media", "tiangong-memory", "tiangong-plugin-browser",
-                  "tiangong-plugin-terminal", "tiangong-scheduler", "tiangong-server", "tiangong-types",
-              ],
-          }
-
-          # 反向依赖图：dep -> 直接依赖它的 crate 列表
-          reverse_deps = {c: [] for c in forward_deps}
-          for crate, deps in forward_deps.items():
-              for dep in deps:
-                  reverse_deps[dep].append(crate)
 
           files = os.environ.get("CHANGED_FILES", "")
           file_list = [f for f in files.splitlines() if f]
 
-          # 4a) 找出被直接改动的 crate
-          directly_changed = set()
-          for crate, prefix in crate_to_prefix.items():
-              if any(f.startswith(prefix) for f in file_list):
-                  directly_changed.add(crate)
-
-          # 4b) 沿反向依赖图扩展传递闭包：改动 types -> 所有依赖 types 的 crate 都要重校验
-          affected = set()
-          stack = list(directly_changed)
-          while stack:
-              cur = stack.pop()
-              if cur in affected:
-                  continue
-              affected.add(cur)
-              for parent in reverse_deps.get(cur, []):
-                  if parent not in affected:
-                      stack.append(parent)
-
-          # 4c) 保持稳定输出顺序（与 workspace members 顺序一致）
+          # 只校验被直接改动的 crate（不做反向依赖闭包扩散）。
+          # 闭包扩散会让底层 crate 改动触发几乎全部上游作业，而每个作业又各自
+          # 全量编译依赖闭包，总编译量远超单次 workspace 校验，反而更慢更费资源。
+          # 直接改动校验已能覆盖大多数破坏；上游编译问题由 Rust fmt（workspace 级）
+          # 与单次 workspace check 兜底。
           order = list(crate_to_prefix.keys())
-          ordered = [c for c in order if c in affected]
+          affected = [c for c in order if any(f.startswith(crate_to_prefix[c]) for f in file_list)]
 
-          print(json.dumps(ordered))
+          print(json.dumps(affected))
           PY
           )"
 

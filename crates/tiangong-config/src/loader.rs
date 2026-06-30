@@ -15,7 +15,7 @@ use tiangong_core::agent_config::{McpConfig, SkillsConfig};
 use tiangong_core::model::ModelProviderConfig;
 use tiangong_core::models_config::ModelsConfig;
 
-use crate::config::{ConnectorConfig, ServerConfig, TiangongConfig};
+use crate::config::{ConnectorConfig, TiangongConfig};
 
 /// Connector 配置文件结构
 #[derive(serde::Deserialize)]
@@ -42,10 +42,15 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
     let models = load_models_config();
     let mcp = load_json_config::<McpConfig>(dir, "mcp.json").unwrap_or_default();
     let skills = load_json_config::<SkillsConfig>(dir, "skills.json").unwrap_or_default();
-    let server = load_json_config::<ServerConfig>(dir, "server.json").unwrap_or_default();
+    let server = crate::config::load_server_config_from_dir(dir);
     let connectors = load_json_config::<ConnectorsFile>(dir, "connectors.json")
         .map(|f| f.connectors)
         .unwrap_or_default();
+
+    // 自定义 Prompt：从 custom-prompt.md 加载（兼容 app.json 旧字段为空回退）
+    let custom_system_prompt =
+        tiangong_core::custom_prompt::load_custom_prompt_at(&dir.join("custom-prompt.md"), "")
+            .unwrap_or_default();
 
     // 首次安装：释放默认 context_windows.json
     ensure_context_windows(dir);
@@ -61,6 +66,7 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
         mcp,
         mcp_capabilities,
         skills,
+        custom_system_prompt,
         server,
         connectors,
         ..Default::default()

@@ -113,6 +113,35 @@ macOS 当前构建暂未接入 Apple 签名和公证，首次打开如提示应�
 xattr -cr /Applications/天工.app
 ```
 
+### Linux 服务器安装
+
+在无桌面环境的服务器上（VPS、云主机、Docker 容器），推荐通过源码编译获得纯 CLI/Server 二进制（不依赖 WebKit/GTK 等桌面运行时）：
+
+```bash
+# 安装编译依赖（Debian/Ubuntu）
+sudo apt-get install -y build-essential pkg-config protobuf-compiler libssl-dev ca-certificates curl
+
+# 安装 Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh && source "$HOME/.cargo/env"
+
+# 编译
+git clone https://github.com/silent-rs/silent-Tiangong.git && cd silent-Tiangong
+cargo build --release
+sudo install -m 0755 target/release/tiangong /usr/local/bin/tiangong
+```
+
+服务端通过模块化 CLI 完成无界面配置（详见 [`docs/linux-server-deployment.md`](docs/linux-server-deployment.md)）：
+
+```bash
+tiangong model add-provider deepseek --protocol deepseek --base-url https://api.deepseek.com --api-key-env DEEPSEEK_API_KEY
+tiangong model add-model deepseek-chat --provider deepseek --model-id deepseek-chat --capability chat
+tiangong model route set chat deepseek-chat
+tiangong server config set --host 127.0.0.1 --port 8080
+tiangong server token generate
+tiangong doctor
+tiangong server -d
+```
+
 ### 命令行入口
 
 桌面安装包内包含同一个 `tiangong` 入口，可用于 CLI、Server 和更新命令。macOS 可创建软链接：
@@ -152,6 +181,22 @@ tiangong update --check
 tiangong update
 ```
 
+**更新机制**：桌面应用通过设置页或 `tiangong update` 自动下载安装更新；CLI/Server 二进制（Linux 服务器）当前需重新编译或下载新版本二进制替换（`tiangong update --check` 仅检查版本不自动安装）。配置独立存储在 `~/.tiangong/`，更新二进制不丢失配置。
+
+### 模块化配置（0.12.0+）
+
+纯服务端环境可通过 CLI 完成与桌面设置页等价的分模块配置，无需 GUI（设计详见 [RFC 0015](docs/rfc/0015-cli-modular-config.md)）：
+
+```bash
+tiangong model list                      # 查看模型配置
+tiangong model route set chat deepseek-chat  # 切换 chat 模型
+tiangong server token show               # 查看 Server Token
+tiangong memory enable                   # 启用 Memory
+tiangong prompt edit                     # 编辑自定义 Prompt
+tiangong config show                     # 配置概览
+tiangong doctor                          # 环境诊断
+```
+
 ## 配置
 
 默认数据目录：
@@ -160,15 +205,19 @@ tiangong update
 ~/.tiangong/
   app.json              应用主配置
   models.json           模型配置：Provider + Model + Routing
+  server.json           Server 监听配置（host/port/auth_token）
+  custom-prompt.md      自定义 Prompt（独立文件，CLI 可直接编辑）
   skills.json           Skill 配置
   mcp.json              MCP 配置
   sessions/             会话持久化
   logs/                 运行日志
   media/                生成或归档的媒体文件
-  memory/               长期记忆数据
+  memory/               长期记忆数据（含独立 config.json）
 ```
 
-模型配置采用 Provider、Model、Routing 三层结构。`api_key` 支持 `${ENV_VAR}` 环境变量引用，便于避免明文保存密钥。
+模型配置采用 Provider、Model、Routing 三层结构。`api_key` 支持 `${ENV_VAR}` 环境变量引用，便于避免明文保存密钥。自定义 Prompt 独立存储为 `custom-prompt.md`，可通过 `tiangong prompt` 命令管理，兼容旧的 `app.json` 内 `custom_system_prompt` 字段。
+
+详细的 Linux 服务器部署、systemd 托管、反向代理与更新策略见 [部署指南](docs/linux-server-deployment.md)。
 
 ## 开发
 
@@ -198,7 +247,10 @@ yarn --cwd frontend dev
 
 ## 文档
 
+- [CLI 配置指南](docs/cli-configuration-guide.md)
 - [Server API](docs/server-api.md)
+- [Linux 服务器部署指南](docs/linux-server-deployment.md)
+- [RFC 0015：CLI 模块化配置](docs/rfc/0015-cli-modular-config.md)
 
 ## 许可证
 

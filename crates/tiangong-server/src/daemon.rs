@@ -155,3 +155,79 @@ pub fn stop_daemon() -> Result<()> {
 
     Ok(())
 }
+
+/// Server 运行状态快照，供 `server status` 命令使用。
+#[derive(Debug, Clone)]
+pub struct ServerStatus {
+    /// PID 文件是否存在
+    pub pid_file_exists: bool,
+    /// PID 文件中记录的 PID（仅当文件存在且可解析时）
+    pub pid: Option<u32>,
+    /// 进程是否存活（仅 Unix，根据 PID 判定）
+    pub process_alive: bool,
+    /// 配置的监听端口是否正在被监听（TCP 探活）
+    pub port_listening: bool,
+}
+
+/// 检查后台 Server 的运行状态。
+///
+/// - 读取 `~/.tiangong/server.pid` 判断 PID 文件存在性。
+/// - 根据存活信号判断进程是否存活（Unix）。
+/// - 尝试 TCP 连接 `host:port` 判断端口是否监听。
+pub fn server_status(host: &str, port: u16) -> ServerStatus {
+    let pid_path = pid_file_path();
+    let (pid_file_exists, pid) = if pid_path.exists() {
+        match fs::read_to_string(&pid_path) {
+            Ok(content) => {
+                let parsed = content.trim().parse::<u32>().ok();
+                (true, parsed)
+            }
+            Err(_) => (true, None),
+        }
+    } else {
+        (false, None)
+    };
+
+    // 进程存活检查（仅 Unix）
+    let process_alive = if let Some(pid) = pid {
+        process_exists(pid)
+    } else {
+        false
+    };
+
+    // 端口监听探活
+    let port_listening = port_is_listening(host, port);
+
+    ServerStatus {
+        pid_file_exists,
+        pid,
+        process_alive,
+        port_listening,
+    }
+}
+
+/// 判断指定 PID 的进程是否存在（存活）。
+#[cfg(unix)]
+fn process_exists(pid: u32) -> bool {
+    // kill(pid, 0) 不发送信号，仅做存在性检查；返回 0 表示存在
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn process_exists(_pid: u32) -> bool {
+    // 非 Unix 平台暂不实现进程存活检查
+    false
+}
+
+/// 尝试 TCP 连接 host:port，判断端口是否正在监听。
+fn port_is_listening(host: &str, port: u16) -> bool {
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let addr = format!("{host}:{port}");
+    // 短超时探测，避免长时间阻塞
+    let Ok(socket_addr) = addr.parse() else {
+        return false;
+    };
+    TcpStream::connect_timeout(&socket_addr, Duration::from_millis(500)).is_ok()
+}

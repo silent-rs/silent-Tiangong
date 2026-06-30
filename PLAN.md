@@ -21,11 +21,13 @@
 | 0.10.1 | 发布后异常修复：Agent 协作与运行时稳定性 | ✅ |
 | 0.10.2 | Hotfix：DeepSeek reasoning_content、浏览器标签与 MCP 体验修复 | ✅ |
 | 0.11.0 | ReAct Loop 与总结阶段分离、会话列表分组、工具输出截取与执行时间持久化 | ✅ |
+| 0.12.0 | CLI 模块化配置增强：Prompt/Server/Model/Memory/doctor + Linux 服务器支持 | 🚧 进行中 |
 
-## 当前执行策略（2026-06-26）
+## 当前执行策略（2026-06-29）
 
 - Phase 1~21 已完成。
 - 0.11.0 已从 `main` 发布，版本标签为 `v0.11.0`。
+- 当前主线为 **0.12.0：CLI 模块化配置增强**（Phase 22），目标是让纯服务端（Linux 服务器、Docker、无桌面环境）具备与桌面设置页等价的分模块配置能力。设计方向见 `docs/rfc/0015-cli-modular-config.md`。
 - 0.11.0 聚焦 ReAct Loop 与总结阶段分离架构重构、左侧会话列表按 workspace 分组、工具输出截取与执行时间持久化、双总结修复与智能提升最终回复、终端面板聚焦修复、ReAct 循环失败错误痕迹持久化，以及扁平 Message 语义构造器与前端 reasoning 空值保护。
 - Phase 21-M 统一工作区 Tabs 与会话绑定已完成，不再作为当前开发主线。
 - 0.10.0 已交付内容包括工作区标签页与会话绑定、Office/PDF 文件上传与本地脚本解析、OpenAI Responses provider 与 Chat Completions 拆分、插件能力 Plugin::register 自注册、统一 Agent 交互通道（AgentInput trait）及若干终端与 OpenAI 流式修复。
@@ -104,9 +106,40 @@
 | 21-J | 用户批注模式 — canvas 覆盖层绘制、Agent 读取批注 | ✅ |
 | 21-G | 浏览器能力插件化 — Core trait 抽象、Tauri Plugin 封装、应用层切换 | ✅ |
 
+## Phase 22：CLI 模块化配置体系（进行中）
+
+> RFC：`docs/rfc/0015-cli-modular-config.md`
+
+让纯服务端环境具备与桌面设置页等价的分模块配置能力。Desktop 优先不变，CLI 与 Desktop 共享同一份 `~/.tiangong/` 配置。不做 `tiangong init` 一站式向导，每类配置由独立命令管理。
+
+**设计原则**：
+
+- 不做 `init`，不把模型/Server/Memory/MCP/Prompt 混在一个流程。
+- 每类配置独立命令，用户按需配置。
+- CLI 与 Desktop 共享同一份配置目录。
+- `doctor` 提供诊断，不强制初始化。
+
+| 子阶段 | 内容 | 状态 |
+|--------|------|------|
+| 22-A | 文档与 Roadmap — RFC 0015、PLAN.md、TODO.md、Linux 服务器部署指南 | 🚧 |
+| 22-B | Prompt 独立配置 — `custom-prompt.md` 独立存储 + 加载优先级兼容 + `prompt show/set/edit/clear/path` | ⬜ |
+| 22-C | Server 配置 CLI — `server config/token/status` + ServerConfig 统一 + Token 生成 | ⬜ |
+| 22-D | 模型配置 CLI — Provider/Model/Routing 增删改查 + `model validate/test` 连通性测试 | ⬜ |
+| 22-E | Memory 配置 CLI — `memory config/enable/disable/status/test` + 标记文件开关 | ⬜ |
+| 22-F | config + doctor — `config path/show/validate` + `doctor` 聚合诊断 | ⬜ |
+
+**关键决策**：
+
+- 自定义 Prompt 写入 `custom-prompt.md` 时清空 app.json 旧字段，使 .md 成为唯一事实来源。
+- Memory enable/disable 用轻量标记文件 `~/.tiangong/memory/.disabled`，不破坏 MemoryConfig 结构。
+- ServerConfig 统一到 `tiangong-config` 版本，消除两套同名结构的技术债。
+- API Key 复用现有 `${VAR}` 模板机制处理 `--api-key-env` / `--api-key`。
+
 ## 参考文档
 
 - 架构基准：`docs/desktop-agent-technical-architecture.md`
 - 需求基线：`docs/requirements.md`
 - Server API：`docs/server-api.md`
 - RFC 0011：`docs/rfc/0011-multi-agent-collaboration.md`
+- RFC 0015（CLI 模块化配置）：`docs/rfc/0015-cli-modular-config.md`
+- Linux 服务器部署：`docs/linux-server-deployment.md`

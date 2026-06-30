@@ -1,17 +1,32 @@
 # TODO - 天工当前开发任务
 
-> 最后更新：2026-06-26
-> 当前主线：0.11.0 已发布
-> 参考：`PLAN.md`、Issue #95
+> 最后更新：2026-06-29
+> 当前主线：0.12.0 CLI 模块化配置增强（进行中）
+> 参考：`PLAN.md`、`docs/rfc/0015-cli-modular-config.md`
 
 ---
 
-## 当前入口（0.10.1）
+## 当前入口（0.12.0）
 
-- 0.10.0 已从 `main` 发布，版本标签为 `v0.10.0`。
-- 当前阶段不扩展新功能，优先修复发布后暴露的 Agent 协作与运行时异常。
-- 后续开发以 `docs/exception-fixes-0.10.1/README.md` 为任务清单，以 `docs/exception-fixes-0.10.1/PROGRESS.md` 为进度记录。
-- Phase 21-M 统一工作区 Tabs 与会话绑定已完成，不再作为当前开发主线。
+- 0.11.0 已从 `main` 发布，版本标签为 `v0.11.0`。
+- 当前主线为 **0.12.0：CLI 模块化配置增强**，从最新 `main` 创建 `feature/cli-modular-config` 分支。
+- 目标：让纯服务端环境具备与桌面设置页等价的分模块配置能力。设计方向见 `docs/rfc/0015-cli-modular-config.md`，进度记录见本文件。
+- 开发顺序：文档先行（Roadmap）→ Prompt → Server → Model → Memory → config + doctor。
+
+## 0.12.0 CLI 模块化配置任务
+
+| 序号 | 子阶段 | 优先级 | 任务 | 状态 | Spec |
+|---|---|---:|---|---|---|
+| 01 | 22-A | P0 | Roadmap 文档（RFC 0015 + PLAN.md + TODO.md） | 🚧 | `docs/rfc/0015-cli-modular-config.md` |
+| 02 | 22-A | P0 | Linux 服务器部署与更新机制文档 | ⬜ | `docs/linux-server-deployment.md` |
+| 03 | 22-B | P0 | Prompt 独立配置（custom-prompt.md + prompt 命令） | ⬜ | `docs/rfc/0015-cli-modular-config.md` §6.4 |
+| 04 | 22-C | P0 | Server 配置 CLI + ServerConfig 统一 + Token 生成 | ⬜ | `docs/rfc/0015-cli-modular-config.md` §6.2 |
+| 05 | 22-D | P0 | 模型配置 CLI（model 命令组） | ⬜ | `docs/rfc/0015-cli-modular-config.md` §6.1 |
+| 06 | 22-E | P1 | Memory 配置 CLI（memory 命令组） | ⬜ | `docs/rfc/0015-cli-modular-config.md` §6.3 |
+| 07 | 22-F | P1 | config + doctor 命令 | ⬜ | `docs/rfc/0015-cli-modular-config.md` §6.5/§6.6 |
+| 08 | — | P0 | 版本号 0.11.0 → 0.12.0 + 完整检查链 | ⬜ | — |
+
+---
 
 ## 当前调整
 

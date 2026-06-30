@@ -61,6 +61,13 @@ pub(crate) async fn get_or_init_memory_async(
     config_generation: u64,
     process_type: tiangong_memory::ProcessType,
 ) -> Option<tiangong_memory::MemoryHandle> {
+    // 运行时禁用检查：`tiangong memory disable` 会创建标记文件。
+    // 标记存在时跳过 Memory 启动，全局生效（CLI/Server/Desktop）。
+    if tiangong_memory::is_memory_disabled() {
+        tracing::info!("Memory 已被禁用标记关闭（memory/.disabled），跳过启动");
+        return None;
+    }
+
     let options = config.to_memory_options();
     let config_summary = memory_config_summary_from_options(&options);
     let slot = MEMORY_HANDLE.get_or_init(|| Mutex::new(None));

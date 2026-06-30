@@ -1,6 +1,7 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use tiangong_core::agent_config::McpTransportMode;
+use tiangong_core::model::ProviderProtocol;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -29,8 +30,18 @@ pub(crate) enum MainCommand {
     Server(ServerArgs),
     #[command(about = "MCP 配置管理")]
     Mcp(McpArgs),
+    #[command(about = "模型配置管理（Provider / Model / Routing）")]
+    Model(ModelArgs),
+    #[command(about = "Memory 系统配置管理")]
+    Memory(MemoryArgs),
     #[command(about = "Skill 配置管理")]
     Skill(SkillArgs),
+    #[command(about = "自定义 Prompt 管理")]
+    Prompt(PromptArgs),
+    #[command(about = "通用配置查看与校验")]
+    Config(ConfigArgs),
+    #[command(about = "环境诊断")]
+    Doctor(DoctorArgs),
     #[command(about = "检查并安装天工更新")]
     Update(UpdateArgs),
 }
@@ -49,14 +60,14 @@ pub(crate) struct UpdateArgs {
 pub(crate) struct ServerArgs {
     #[command(subcommand)]
     pub(crate) command: Option<ServerSubcommand>,
-    /// 监听地址
-    #[arg(long, default_value = "127.0.0.1")]
-    pub(crate) host: String,
-    /// 监听端口
-    #[arg(long, default_value_t = 8080)]
-    pub(crate) port: u16,
-    /// API 认证 Token
-    #[arg(long, help = "API 认证 Token")]
+    /// 监听地址（不传时使用 server.json 保存值，再回退 127.0.0.1）
+    #[arg(long, help = "监听地址，覆盖 server.json 保存值")]
+    pub(crate) host: Option<String>,
+    /// 监听端口（不传时使用 server.json 保存值，再回退 8080）
+    #[arg(long, help = "监听端口，覆盖 server.json 保存值")]
+    pub(crate) port: Option<u16>,
+    /// API 认证 Token（不传时使用 server.json 保存值）
+    #[arg(long, help = "API 认证 Token，覆盖 server.json 保存值")]
     pub(crate) token: Option<String>,
     /// 后台运行
     #[arg(short, long, help = "后台运行")]
@@ -70,6 +81,49 @@ pub(crate) struct ServerArgs {
 pub(crate) enum ServerSubcommand {
     #[command(about = "停止后台 Server")]
     Stop,
+    #[command(about = "查看 Server 运行状态")]
+    Status,
+    #[command(about = "交互式配置向导（引导完成监听地址与 Token）")]
+    Configure,
+    #[command(about = "管理 Server 监听配置")]
+    Config {
+        #[command(subcommand)]
+        command: ServerConfigSubcommand,
+    },
+    #[command(about = "管理 Server 鉴权 Token")]
+    Token {
+        #[command(subcommand)]
+        command: ServerTokenSubcommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ServerConfigSubcommand {
+    #[command(about = "查看 Server 监听配置")]
+    Show,
+    #[command(about = "修改 Server 监听配置（host/port 可选）")]
+    Set {
+        #[arg(long, help = "监听地址")]
+        host: Option<String>,
+        #[arg(long, help = "监听端口")]
+        port: Option<u16>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ServerTokenSubcommand {
+    #[command(about = "查看当前 Token（脱敏）")]
+    Show,
+    #[command(about = "直接设置 Token")]
+    Set {
+        #[arg(help = "Token 值")]
+        token: String,
+    },
+    #[command(about = "生成随机 Token 并写入配置")]
+    Generate {
+        #[arg(long, default_value_t = 32, help = "Token 长度（16-256）")]
+        length: usize,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -79,9 +133,202 @@ pub(crate) struct McpArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct ModelArgs {
+    #[command(subcommand)]
+    pub(crate) command: ModelSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ModelSubcommand {
+    #[command(about = "查看模型配置（providers / models / routes，默认全部）")]
+    List {
+        #[arg(help = "过滤范围：providers | models | routes")]
+        scope: Option<String>,
+    },
+    #[command(about = "新增或覆盖模型供应商")]
+    AddProvider {
+        #[arg(help = "供应商名称")]
+        name: String,
+        #[arg(long, value_parser = parse_protocol, help = "协议（openai_chatcompletions / anthropic / deepseek）")]
+        protocol: ProviderProtocol,
+        #[arg(long = "base-url", help = "API base URL")]
+        base_url: String,
+        #[arg(
+            long = "api-key",
+            conflicts_with = "api_key_env",
+            help = "明文 API Key（不推荐，建议用 --api-key-env）"
+        )]
+        api_key: Option<String>,
+        #[arg(
+            long = "api-key-env",
+            conflicts_with = "api_key",
+            help = "API Key 环境变量名（写入为 ${VAR} 模板）"
+        )]
+        api_key_env: Option<String>,
+        #[arg(
+            long = "timeout-ms",
+            default_value_t = 60_000,
+            help = "请求超时（毫秒）"
+        )]
+        timeout_ms: u64,
+    },
+    #[command(about = "删除模型供应商（--force 连同引用它的模型和路由一并删除）")]
+    RemoveProvider {
+        #[arg(help = "供应商名称")]
+        name: String,
+        #[arg(long, help = "强制删除，连同引用该供应商的模型与路由")]
+        force: bool,
+    },
+    #[command(about = "新增或覆盖模型")]
+    AddModel {
+        #[arg(help = "模型名称（本地别名）")]
+        name: String,
+        #[arg(long, help = "所属供应商名称")]
+        provider: String,
+        #[arg(long = "model-id", help = "供应商侧的模型 ID")]
+        model_id: String,
+        #[arg(
+            long = "capability",
+            help = "模型能力（可重复）：chat/multimodal/image_generation/video_generation/stt/tts/embedding/rerank"
+        )]
+        capability: Vec<String>,
+    },
+    #[command(about = "删除模型")]
+    RemoveModel {
+        #[arg(help = "模型名称（本地别名）")]
+        name: String,
+    },
+    #[command(about = "交互式配置向导（引导完成 provider → model → route）")]
+    Configure,
+    #[command(about = "设置路由槽位指向的模型")]
+    Route {
+        #[command(subcommand)]
+        command: RouteSubcommand,
+    },
+    #[command(about = "校验模型配置结构（路由引用、provider 存在性等）")]
+    Validate,
+    #[command(about = "测试模型连通性（真实请求 /models）")]
+    Test {
+        #[arg(help = "测试目标：capability（chat/lite/...）或模型名；默认 chat")]
+        target: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum RouteSubcommand {
+    #[command(about = "查看当前路由表")]
+    List,
+    #[command(about = "设置 capability 路由指向某个已注册模型")]
+    Set {
+        #[arg(
+            help = "能力槽位：chat/lite/multimodal/image_generation/video_generation/stt/tts/embedding/rerank"
+        )]
+        capability: String,
+        #[arg(help = "模型名称（本地别名）")]
+        model: String,
+    },
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct MemoryArgs {
+    #[command(subcommand)]
+    pub(crate) command: MemorySubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum MemorySubcommand {
+    #[command(about = "管理 Memory 配置")]
+    Config {
+        #[command(subcommand)]
+        command: MemoryConfigSubcommand,
+    },
+    #[command(about = "交互式配置向导（引导选择 Memory 端点模型）")]
+    Configure,
+    #[command(about = "启用 Memory")]
+    Enable,
+    #[command(about = "禁用 Memory")]
+    Disable,
+    #[command(about = "查看 Memory 状态")]
+    Status,
+    #[command(about = "测试 Memory 模型连通性")]
+    Test,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum MemoryConfigSubcommand {
+    #[command(about = "查看 Memory 配置")]
+    Show,
+    #[command(about = "从 models.json 引用模型填充 Memory 端点")]
+    Set {
+        #[arg(long, help = "Memory LLM 模型名（models.json 中的别名）")]
+        llm: Option<String>,
+        #[arg(long, help = "Embedding 模型名")]
+        embedding: Option<String>,
+        #[arg(long, help = "Rerank 模型名")]
+        rerank: Option<String>,
+    },
+}
+
+/// 解析 ProviderProtocol 字符串
+fn parse_protocol(raw: &str) -> Result<ProviderProtocol, String> {
+    raw.parse::<ProviderProtocol>()
+        .map_err(|e| format!("无效的协议 {raw}：{e}"))
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct SkillArgs {
     #[command(subcommand)]
     pub(crate) command: SkillSubcommand,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct PromptArgs {
+    #[command(subcommand)]
+    pub(crate) command: PromptSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum PromptSubcommand {
+    #[command(about = "查看当前自定义 Prompt")]
+    Show,
+    #[command(about = "设置自定义 Prompt（直接传文本或用 --file 从文件读取）")]
+    Set {
+        /// Prompt 文本（与 --file 互斥）
+        #[arg(help = "Prompt 文本")]
+        text: Option<String>,
+        /// 从文件读取 Prompt 内容
+        #[arg(long = "file", value_name = "PATH", conflicts_with = "text")]
+        file: Option<String>,
+    },
+    #[command(about = "通过 $EDITOR 编辑自定义 Prompt")]
+    Edit,
+    #[command(about = "清空自定义 Prompt")]
+    Clear,
+    #[command(about = "显示自定义 Prompt 存储路径")]
+    Path,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ConfigArgs {
+    #[command(subcommand)]
+    pub(crate) command: ConfigSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ConfigSubcommand {
+    #[command(about = "列出全部配置文件路径")]
+    Path,
+    #[command(about = "配置概览（不展开 JSON）")]
+    Show,
+    #[command(about = "校验本地配置结构（不做外部连通性测试）")]
+    Validate,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct DoctorArgs {
+    /// 深度诊断：执行模型连通性与端口探活（可能较慢）
+    #[arg(long, help = "深度诊断（含模型连通性与端口探活）")]
+    pub(crate) deep: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
