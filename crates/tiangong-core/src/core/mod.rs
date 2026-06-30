@@ -63,36 +63,59 @@ pub struct TiangongCore {
 }
 
 impl TiangongCore {
-    /// 创建新对话
-    pub fn new(config: CoreConfigProvider, stream_tx: Sender<SessionStreamEvent>) -> Self {
-        Self::new_for_process(config, stream_tx, tiangong_memory::ProcessType::Cli)
+    /// 创建新对话（CLI 便捷入口）。
+    ///
+    /// `plugins` 为进程内自注册插件（如定时任务插件），传 `Vec::new()` 表示不启用。
+    pub fn new(
+        config: CoreConfigProvider,
+        stream_tx: Sender<SessionStreamEvent>,
+        plugins: Vec<Arc<dyn Plugin>>,
+    ) -> Self {
+        Self::new_for_process(
+            config,
+            stream_tx,
+            tiangong_memory::ProcessType::Cli,
+            plugins,
+        )
     }
 
-    pub fn new_for_cli(config: CoreConfigProvider, stream_tx: Sender<SessionStreamEvent>) -> Self {
-        Self::new_for_process(config, stream_tx, tiangong_memory::ProcessType::Cli)
+    /// 创建 CLI 入口 core。
+    pub fn new_for_cli(
+        config: CoreConfigProvider,
+        stream_tx: Sender<SessionStreamEvent>,
+        plugins: Vec<Arc<dyn Plugin>>,
+    ) -> Self {
+        Self::new_for_process(
+            config,
+            stream_tx,
+            tiangong_memory::ProcessType::Cli,
+            plugins,
+        )
     }
 
     pub fn new_for_process(
         config: CoreConfigProvider,
         stream_tx: Sender<SessionStreamEvent>,
         process_type: tiangong_memory::ProcessType,
+        plugins: Vec<Arc<dyn Plugin>>,
     ) -> Self {
         let session = Session::new("新对话");
-        Self::with_session_for_process(config, session, stream_tx, process_type, Vec::new())
+        Self::with_session_for_process(config, session, stream_tx, process_type, plugins)
     }
 
-    /// 从已有 session 创建
+    /// 从已有 session 创建（CLI 便捷入口）。
     pub fn with_session(
         config: CoreConfigProvider,
         session: Session,
         stream_tx: Sender<SessionStreamEvent>,
+        plugins: Vec<Arc<dyn Plugin>>,
     ) -> Self {
         Self::with_session_for_process(
             config,
             session,
             stream_tx,
             tiangong_memory::ProcessType::Cli,
-            Vec::new(),
+            plugins,
         )
     }
 
@@ -115,13 +138,14 @@ impl TiangongCore {
         config: CoreConfigProvider,
         session: Session,
         stream_tx: Sender<SessionStreamEvent>,
+        plugins: Vec<Arc<dyn Plugin>>,
     ) -> Self {
         Self::with_session_for_process(
             config,
             session,
             stream_tx,
             tiangong_memory::ProcessType::Server,
-            Vec::new(),
+            plugins,
         )
     }
 
@@ -129,7 +153,7 @@ impl TiangongCore {
     ///
     /// `plugins` 为进程内自注册插件（[`Plugin`]），在 worker_loop 的 engine
     /// 创建/重建时遍历调用 `Plugin::register`，向 engine 注入能力。
-    /// CLI / Server / Scheduler 等不使用插件能力的入口传 `Vec::new()`。
+    /// 不需要插件能力的入口传 `Vec::new()`。
     pub fn with_session_for_process(
         config: CoreConfigProvider,
         session: Session,

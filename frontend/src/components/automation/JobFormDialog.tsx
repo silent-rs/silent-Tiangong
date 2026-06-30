@@ -48,7 +48,7 @@ export function JobFormDialog({ job, onClose }: Props) {
           description,
           schedule,
           payload,
-          session_id: sid,
+          sessionId: sid,
         });
       } else {
         await api.jobCreate({
@@ -56,7 +56,7 @@ export function JobFormDialog({ job, onClose }: Props) {
           description,
           schedule,
           payload,
-          session_id: sid,
+          sessionId: sid,
           enabled: true,
         });
       }
@@ -95,7 +95,10 @@ export function JobFormDialog({ job, onClose }: Props) {
                 <SelectValue placeholder="不关联，自动创建新会话" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="__none__">不关联，自动创建新会话</SelectItem>
+                {/* 编辑态下若已绑定会话则禁止清空，避免丢失关联 */}
+                {(!isEdit || !job?.session_id) && (
+                  <SelectItem value="__none__">不关联，自动创建新会话</SelectItem>
+                )}
                 {sessions.map((s) => (
                   <SelectItem key={s.id} value={s.id}>
                     {s.title || s.id}

@@ -70,29 +70,6 @@ pub(crate) fn basic_file_function_tools() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
-            name: "scheduler".to_string(),
-            description: "管理定时任务（Cron Job）。支持创建、列出、更新、删除定时任务，查看执行历史。用户可以通过对话要求设置定时提醒、周期性任务等。".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["create_job", "list_jobs", "update_job", "delete_job", "trigger_job", "get_job_runs"],
-                        "description": "操作类型"
-                    },
-                    "name": { "type": "string", "description": "任务名称（create_job 必填，update_job 可选）" },
-                    "description": { "type": "string", "description": "任务描述（create_job 必填，update_job 可选）" },
-                    "schedule": { "type": "string", "description": "Cron 表达式，如 '0 9 * * *' 表示每天 9 点（create_job 必填，update_job 可选）" },
-                    "payload": { "type": "string", "description": "触发时发送给 LLM 的任务描述（create_job 必填，update_job 可选）" },
-                    "session_id": { "type": "string", "description": "关联已有会话 ID（可选，不指定则自动创建新会话）" },
-                    "id": { "type": "string", "description": "任务 ID（update_job/delete_job/trigger_job/get_job_runs 必填）" },
-                    "enabled": { "type": "boolean", "description": "是否启用（update_job 可选）" },
-                    "limit": { "type": "integer", "description": "返回记录数量，默认 10（get_job_runs 可选）" }
-                },
-                "required": ["action"]
-            }),
-        },
-        ToolSpec {
             name: "web_fetch".to_string(),
             description: "使用内嵌浏览器获取 URL 内容。支持 HTTP/HTTPS 网页和本地 file:// 或绝对路径的 HTML 文件。当用户要求在浏览器中打开页面或预览 HTML 时必须使用此工具，不要使用 run_shell 调用系统浏览器。".to_string(),
             input_schema: serde_json::json!({
@@ -518,41 +495,6 @@ pub(crate) fn build_tool_call_from_function(call: &ToolCall) -> Result<LocalTool
             name: ToolName::CurrentTime,
             args,
         }),
-        "scheduler" => {
-            let action = call
-                .arguments
-                .get("action")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let get_str = |key: &str| -> String {
-                call.arguments
-                    .get(key)
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("")
-                    .to_string()
-            };
-            let get_opt_str = |key: &str| -> String {
-                call.arguments
-                    .get(key)
-                    .and_then(|v| if v.is_null() { None } else { v.as_str() })
-                    .unwrap_or("")
-                    .to_string()
-            };
-            args.push(action);
-            args.push(get_str("name"));
-            args.push(get_str("description"));
-            args.push(get_str("schedule"));
-            args.push(get_str("payload"));
-            args.push(get_opt_str("session_id"));
-            args.push(get_opt_str("enabled"));
-            args.push(get_str("id"));
-            args.push(get_str("limit"));
-            Ok(LocalToolCall {
-                name: ToolName::Scheduler,
-                args,
-            })
-        }
         "replace_in_file" => {
             let path = call
                 .arguments

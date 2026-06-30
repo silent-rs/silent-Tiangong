@@ -815,7 +815,7 @@ export const api = {
     name: string;
     description: string;
     schedule: string;
-    session_id?: string;
+    sessionId?: string;
     payload: string;
     enabled?: boolean;
   }): Promise<Job> =>
@@ -826,7 +826,7 @@ export const api = {
     name?: string;
     description?: string;
     schedule?: string;
-    session_id?: string;
+    sessionId?: string;
     payload?: string;
     enabled?: boolean;
   }): Promise<Job> =>
@@ -850,7 +850,7 @@ export const api = {
   webhookCreate: (params: {
     name: string;
     description: string;
-    session_id?: string;
+    sessionId?: string;
     payload: string;
     secret?: string;
     enabled?: boolean;
@@ -861,7 +861,7 @@ export const api = {
     id: string;
     name?: string;
     description?: string;
-    session_id?: string;
+    sessionId?: string;
     payload?: string;
     secret?: string;
     enabled?: boolean;

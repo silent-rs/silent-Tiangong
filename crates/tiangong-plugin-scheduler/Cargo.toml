@@ -1,0 +1,19 @@
+[package]
+name = "tiangong-plugin-scheduler"
+version.workspace = true
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+tiangong-core = { workspace = true }
+tiangong-scheduler = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+scru128 = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }

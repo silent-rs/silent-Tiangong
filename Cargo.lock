@@ -9493,6 +9493,7 @@ dependencies = [
  "tiangong-media",
  "tiangong-memory",
  "tiangong-plugin-browser",
+ "tiangong-plugin-scheduler",
  "tiangong-plugin-terminal",
  "tiangong-scheduler",
  "tiangong-server",
@@ -9513,6 +9514,7 @@ dependencies = [
  "termimad",
  "tiangong-config",
  "tiangong-core",
+ "tiangong-plugin-scheduler",
  "tiangong-types",
  "tokio",
  "tracing",
@@ -9675,6 +9677,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-plugin-scheduler"
+version = "0.11.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "scru128",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tiangong-core",
+ "tiangong-scheduler",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tiangong-plugin-terminal"
 version = "0.11.0"
 dependencies = [
@@ -9734,6 +9752,7 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-media",
+ "tiangong-plugin-scheduler",
  "tiangong-scheduler",
  "tiangong-types",
  "tokio",

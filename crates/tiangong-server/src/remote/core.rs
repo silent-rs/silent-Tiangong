@@ -143,6 +143,7 @@ impl ServerCoreManager {
             self.config.clone(),
             session.clone(),
             stream_tx,
+            tiangong_plugin_scheduler::default_plugins(),
         );
         core.set_trust_mode(TrustMode::FullTrust);
         let actual_session_id = core.session_id().to_string();

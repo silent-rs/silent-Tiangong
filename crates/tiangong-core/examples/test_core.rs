@@ -8,7 +8,7 @@ fn main() {
     // 示例：使用默认配置（第三方开发者可直接构造 CoreConfig）
     let config = CoreConfigProvider::new(CoreConfig::default());
     let (tx, rx) = mpsc::channel::<SessionStreamEvent>();
-    let core = TiangongCore::new(config, tx);
+    let core = TiangongCore::new(config, tx, Vec::new());
 
     println!("=== 发送: 你好 ===");
     core.deliver(AgentInputKind::message("你好"));
