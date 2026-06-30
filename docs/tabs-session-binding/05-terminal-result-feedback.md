@@ -7,7 +7,7 @@
 ## 范围
 
 - `crates/tiangong-core/src/tool/run_command.rs`
-- `crates/tiangong-plugin-terminal/src/handler.rs`
+- `crates/plugins/tiangong-plugin-terminal/src/handler.rs`
 - 必要时扩展 `TerminalExecResult`
 
 ## 依赖

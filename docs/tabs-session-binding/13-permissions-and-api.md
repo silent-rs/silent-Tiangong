@@ -7,10 +7,10 @@
 ## 范围
 
 - `frontend/src/api/tauri.ts`
-- `crates/tiangong-plugin-browser/build.rs`
-- `crates/tiangong-plugin-browser/permissions/**`
-- `crates/tiangong-plugin-terminal/build.rs`
-- `crates/tiangong-plugin-terminal/permissions/**`
+- `crates/plugins/tiangong-plugin-browser/build.rs`
+- `crates/plugins/tiangong-plugin-browser/permissions/**`
+- `crates/plugins/tiangong-plugin-terminal/build.rs`
+- `crates/plugins/tiangong-plugin-terminal/permissions/**`
 - `src-tauri/capabilities/default.json` 如有需要
 
 ## 依赖

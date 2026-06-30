@@ -6,7 +6,7 @@
 
 ## 范围
 
-- `crates/tiangong-plugin-browser/src/manager.rs`
+- `crates/plugins/tiangong-plugin-browser/src/manager.rs`
 - `frontend/src/components/BrowserTabContent.tsx`（拆分后）
 
 ## 依赖

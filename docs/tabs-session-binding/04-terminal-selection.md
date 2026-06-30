@@ -8,8 +8,8 @@
 
 - `crates/tiangong-core/src/terminal_trait.rs`
 - `crates/tiangong-core/src/tool/run_command.rs`
-- `crates/tiangong-plugin-terminal/src/session_pty.rs`
-- `crates/tiangong-plugin-terminal/src/handler.rs`
+- `crates/plugins/tiangong-plugin-terminal/src/session_pty.rs`
+- `crates/plugins/tiangong-plugin-terminal/src/handler.rs`
 
 ## 依赖
 
