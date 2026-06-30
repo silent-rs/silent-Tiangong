@@ -282,6 +282,17 @@ impl ReactEngine {
         let decision = parse_summary_phase_output(&response.text);
         let summary_content = decision.payload().to_string();
         let needs_more_work = matches!(decision, SummaryDecision::NeedMoreWork(_));
+
+        // 空正文 Done：LLM 只输出 [DONE]，表示「上一轮 ReAct 已有完整可用的最终答复」。
+        // 此时落盘一条空 Summary 消息只会与上一轮回复重复展示（双重总结）。
+        // 改为不落盘新消息，直接把上一轮 ReAct 的过程回复（phase=React）提升为最终回复。
+        if !needs_more_work && summary_content.trim().is_empty() {
+            promote_last_react_message_to_summary(session);
+            maybe_update_context_summary(session, &self.engine, &usage, stream_tx);
+            session.persist_to_disk();
+            return SummaryPhaseResult::Completed(usage);
+        }
+
         session.append_message_with_id(
             pending_msg_id,
             MessageRole::Assistant,
@@ -309,6 +320,23 @@ impl ReactEngine {
             SummaryPhaseResult::Completed(usage)
         }
     }
+}
+
+/// 把 session 中最后一条 `phase=React` 的 assistant 消息提升为最终回复（`phase=Summary`）。
+///
+/// 用于总结阶段判定为「空正文 Done」时：LLM 认为上一轮 ReAct 已有完整可用的答复，
+/// 无需新内容。此时直接复用上一轮回复作为最终回复，避免落盘空消息造成重复展示。
+/// 找不到符合条件的消息时不做任何改动（兜底）。
+fn promote_last_react_message_to_summary(session: &mut Session) {
+    for message in session.messages.iter_mut().rev() {
+        if message.role == MessageRole::Assistant
+            && message.phase == crate::session::MessagePhase::React
+        {
+            message.phase = crate::session::MessagePhase::Summary;
+            return;
+        }
+    }
+    tracing::warn!("空正文 Done 但未找到可提升的 React 消息，保持现状");
 }
 
 /// 总结阶段对任务完成度的判定结果。
@@ -427,6 +455,99 @@ mod tests {
         assert_eq!(SummaryDecision::AskUser("b".into()).payload(), "b");
         assert_eq!(SummaryDecision::NeedMoreWork("c".into()).payload(), "c");
     }
+
+    #[test]
+    fn promote_last_react_message_promotes_the_last_react_assistant() {
+        // 构造一个含多条消息的 session：用户消息 + React 过程回复 + 工具结果。
+        let mut session = Session::new("test");
+        session.append_message(MessageRole::User, "帮我创建定时任务");
+        session.append_message_with_id(
+            "m1".to_string(),
+            MessageRole::Assistant,
+            "已创建定时提醒：每天 9 点叫你起床。",
+            String::new(),
+        );
+        // 把这条 assistant 消息标记为 React（模拟 ReAct 过程回复）
+        if let Some(m) = session.messages.last_mut() {
+            m.phase = MessagePhase::React;
+        }
+
+        promote_last_react_message_to_summary(&mut session);
+
+        // 最后一条 assistant 消息应被提升为 Summary
+        let promoted = session
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::Assistant)
+            .expect("应存在 assistant 消息");
+        assert_eq!(promoted.phase, MessagePhase::Summary);
+    }
+
+    #[test]
+    fn promote_last_react_message_promotes_only_the_latest() {
+        // 多条 React 消息时，只提升最后一条。
+        let mut session = Session::new("test");
+        for i in 0..3 {
+            session.append_message_with_id(
+                format!("m{i}"),
+                MessageRole::Assistant,
+                format!("过程回复 {i}"),
+                String::new(),
+            );
+            if let Some(m) = session.messages.last_mut() {
+                m.phase = MessagePhase::React;
+            }
+        }
+
+        promote_last_react_message_to_summary(&mut session);
+
+        // 只有最后一条（"过程回复 2"）变为 Summary，其余仍为 React
+        let react_count = session
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::Assistant && m.phase == MessagePhase::React)
+            .count();
+        let summary_count = session
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::Assistant && m.phase == MessagePhase::Summary)
+            .count();
+        assert_eq!(react_count, 2, "前两条应仍为 React");
+        assert_eq!(summary_count, 1, "只有最后一条被提升为 Summary");
+    }
+
+    #[test]
+    fn promote_last_react_message_noop_without_react_message() {
+        // session 中没有 React assistant 消息时不做任何改动（兜底）。
+        let mut session = Session::new("test");
+        session.append_message(MessageRole::User, "你好");
+        session.append_message_with_id(
+            "m1".to_string(),
+            MessageRole::Assistant,
+            "你好，有什么可以帮你？",
+            String::new(),
+        );
+        // 这条 assistant 是默认的 Normal，不是 React
+        let before_phase = session
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::Assistant)
+            .map(|m| m.phase)
+            .unwrap();
+
+        promote_last_react_message_to_summary(&mut session);
+
+        let after_phase = session
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::Assistant)
+            .map(|m| m.phase)
+            .unwrap();
+        assert_eq!(before_phase, after_phase, "无 React 消息时不应改动");
+    }
 }
 
 /// 总结阶段的判断指令（作为运行时上下文注入，不常驻 system prompt）。
@@ -438,9 +559,10 @@ pub(super) const SUMMARY_PHASE_PROMPT: &str = "\
 请先判断上一轮 ReAct 是否已经完成用户任务，再据此输出。\n\
 \n\
 判断与输出规则（请在回复首行用对应标记）：\n\
-1. 若上一轮已经给出完整、可用的最终答复：不要重写、不要压缩。输出 [DONE]，\n\
-   然后复述该答复的关键结论与必要细节（保留用户需要的完整信息，不要过度精简）。\n\
-2. 若任务已完成但缺少面向用户的最终说明：输出 [DONE]，并给出最终回复。\n\
+1. 若上一轮已经给出完整、可用的最终答复：只输出 [DONE]，不要带任何正文。\n\
+   系统会自动复用上一轮回复作为最终回复，复述只会造成重复展示。\n\
+2. 若任务已完成，但上一轮回复缺少面向用户的最终说明（例如只输出了工具结果、\n\
+   没有总结性文字）：输出 [DONE]，并在新行给出最终回复正文。\n\
 3. 若任务未完成、且你确实还能通过工具继续推进（例如只查了一半、改了没验证、\n\
    测试失败但可继续修、还有明确下一步）：输出 [NEED_MORE_WORK]，\n\
    然后简要说明还需要做什么。系统将重新进入工具执行阶段。\n\
@@ -448,9 +570,10 @@ pub(super) const SUMMARY_PHASE_PROMPT: &str = "\
    然后提出问题。这视作本轮结束。\n\
 \n\
 输出原则：\n\
-- 用户需要的是完整可用的信息，而非被压缩的摘要；仅当信息确实冗余、重复或与结论无关时才删减。\n\
+- 规则 1 是默认情况：只要上一轮已有可用的最终答复，就只输出 [DONE]，不要复述。\n\
+- 仅当确实需要补充新的面向用户的说明时，才在标记后给出正文（规则 2/3/4）。\n\
 - 本阶段不会执行任何工具调用。不要在回复中要求调用工具。\n\
-- 不要重复已有内容。如果只是给用户后续建议（而非确实还有未完成工作），不要使用 [NEED_MORE_WORK]。";
+- 如果只是给用户后续建议（而非确实还有未完成工作），不要使用 [NEED_MORE_WORK]。";
 
 /// 构建总结阶段的 LLM 请求。
 ///
