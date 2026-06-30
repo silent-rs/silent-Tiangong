@@ -684,4 +684,105 @@ mod tests {
         let call = make_call("not_a_scheduler_tool", json!({}));
         assert!(handler.dispatch(&call).is_none());
     }
+
+    // ── 缺陷回归基线（Review #1/#3/#4，预期失败，标记 #[ignore]）──────────
+    //
+    // 以下三个测试用于暴露并固化当前实现的已知缺陷，**在缺陷修复前应当失败**。
+    // 待对应生产代码修复后，移除 `#[ignore]` 使之成为永久回归保护。
+    //
+    //   - trigger_job_should_record_run            → Review 第 1 项：手动触发未真正执行/记录
+    //   - get_job_runs_unknown_job_should_error    → Review 第 3 项：未校验任务存在
+    //   - update_job_can_clear_optional_field      → Review 第 4 项：无法清空可选字段
+
+    /// 打开与 handler 同一存储根的 JobStore，供测试断言副作用（执行历史等）。
+    fn store_at(dir: &tempfile::TempDir) -> tiangong_scheduler::store::JobStore {
+        tiangong_scheduler::store::JobStore::open_at(dir.path().to_path_buf()).unwrap()
+    }
+
+    /// Review 第 1 项：`scheduler_trigger_job` 当前只返回「已标记触发」提示，
+    /// 既不调用 executor，也不写入任何执行历史。手动触发后应至少产生一条
+    /// 执行记录（JobRun），但当前实现不会，故此测试预期失败。
+    ///
+    /// 修复方向：让 handler 能访问 SchedulerContext（需架构调整，涉及三入口注入）
+    /// 或至少通过 store 记录一次「手动触发」的 run。
+    #[test]
+    #[ignore = "缺陷待修复（Review #1）：手动触发未真正执行或记录执行历史"]
+    fn trigger_job_should_record_run() {
+        let (handler, dir) = handler_in_tmp();
+        let id = seed_job(&handler, "待触发");
+
+        let call = make_call(TOOL_TRIGGER_JOB, json!({ "id": id }));
+        let result = handler.dispatch(&call).expect("trigger 应被处理");
+        assert!(result.ok, "触发应成功：{}", result.summary);
+
+        // 触发后应产生至少一条执行记录 —— 当前实现为 0 条，断言失败。
+        let store = store_at(&dir);
+        let runs = store.list_job_runs(&id, 10).unwrap();
+        assert!(
+            !runs.is_empty(),
+            "手动触发应产生执行记录，当前 {} 条",
+            runs.len()
+        );
+    }
+
+    /// Review 第 3 项：`scheduler_get_job_runs` 不校验任务是否存在。
+    /// 传入不存在的 id 时，当前返回 ok=true + 「0 条记录」，无法与「任务存在但
+    /// 从未执行」区分。期望对未知任务明确报错（ok=false，summary 含「不存在」）。
+    #[test]
+    #[ignore = "缺陷待修复（Review #3）：get_job_runs 未校验任务存在，未知 id 误报成功"]
+    fn get_job_runs_unknown_job_should_error() {
+        let (handler, _dir) = handler_in_tmp();
+        let call = make_call(TOOL_GET_JOB_RUNS, json!({ "id": "不存在的任务id" }));
+        let result = handler.dispatch(&call).expect("get_job_runs 应被处理");
+
+        assert!(
+            !result.ok,
+            "未知任务应报错，当前却返回成功：{}",
+            result.summary
+        );
+        assert!(result.summary.contains("不存在"));
+    }
+
+    /// Review 第 4 项：`scheduler_update_job` 无法清空可选字段。
+    /// 当前 `get_opt_str_field` 把空串/null 都当作「不更新」，因此即使显式传入
+    /// 空串，`session_id` 也不会被清空。期望显式传空串能将字段置为 None。
+    ///
+    /// 注意：store 层 `update_job` 本身支持 `Some("")` 写入，缺陷仅在 handler 的
+    /// 取参逻辑（空串与「不更新」语义混用）。修复需区分「未传」与「显式置空」。
+    #[test]
+    #[ignore = "缺陷待修复（Review #4）：update 无法清空可选字段（空串被当作不更新）"]
+    fn update_job_can_clear_optional_field() {
+        let (handler, dir) = handler_in_tmp();
+
+        // 先创建一个带 session_id 的任务
+        let call = make_call(
+            TOOL_CREATE_JOB,
+            json!({
+                "name": "带会话",
+                "description": "验证清空字段",
+                "schedule": "0 9 * * *",
+                "payload": "ping",
+                "session_id": "sess-original",
+            }),
+        );
+        let result = handler.dispatch(&call).expect("create 应被处理");
+        assert!(result.ok, "{}", result.summary);
+        let id = {
+            let parsed: Value = serde_json::from_str(&result.stdout).unwrap();
+            parsed["id"].as_str().unwrap().to_string()
+        };
+
+        // 显式传空串，意图清空 session_id
+        let call = make_call(TOOL_UPDATE_JOB, json!({ "id": id, "session_id": "" }));
+        let result = handler.dispatch(&call).expect("update 应被处理");
+        assert!(result.ok, "{}", result.summary);
+
+        // 期望 session_id 已被清空（None）—— 当前实现会保留原值，断言失败。
+        let job = store_at(&dir).get_job(&id).unwrap().unwrap();
+        assert!(
+            job.session_id.is_none(),
+            "显式传空串应清空 session_id，实际为 {:?}",
+            job.session_id
+        );
+    }
 }
