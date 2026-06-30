@@ -19,6 +19,5 @@ src-tauri/gen/schemas/
 crates/tiangong-plugin-browser/permissions/schemas/
 AGENTS.md
 .worktrees/
-scripts/
 PLAN.md
 TODO.md

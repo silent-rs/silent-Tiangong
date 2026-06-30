@@ -31,29 +31,28 @@ repos:
         language: system
         files: (\.rs$|Cargo\.toml$|Cargo\.lock$|rustfmt\.toml$|\.cargo/.*\.toml$)
         pass_filenames: false
-      - id: cargo-check-workspace
-        name: cargo check --workspace
-        description: Check the Rust workspace for compile errors.
-        entry: bash -lc 'cargo check --workspace'
+      # 以下三个 hook 与 CI 保持一致：只校验被直接改动的 crate，而非全量 workspace。
+      # pre-commit 把改动的文件路径传给脚本，脚本提取 crate 名后用 cargo -p 执行。
+      - id: cargo-check-crates
+        name: cargo check (changed crates)
+        description: Check only crates with direct changes, mirroring CI.
+        entry: bash scripts/pre-commit-affected-crates.sh check
         language: system
         files: (\.rs$|Cargo\.toml$|Cargo\.lock$|\.cargo/.*\.toml$)
-        pass_filenames: false
         stages: [pre-push]
-      - id: cargo-clippy-workspace
-        name: cargo clippy --workspace
-        description: Lint the Rust workspace.
-        entry: bash -lc 'cargo clippy --workspace --all-targets --tests --benches -- -D warnings'
+      - id: cargo-clippy-crates
+        name: cargo clippy (changed crates)
+        description: Lint only crates with direct changes, mirroring CI.
+        entry: bash scripts/pre-commit-affected-crates.sh clippy
         language: system
         files: (\.rs$|Cargo\.toml$|Cargo\.lock$|\.cargo/.*\.toml$)
-        pass_filenames: false
         stages: [pre-push]
-      - id: cargo-nextest-workspace
-        name: cargo nextest run --workspace
-        description: Run the workspace test suite through nextest.
-        entry: bash -lc 'cargo nextest run --workspace --no-tests pass'
+      - id: cargo-nextest-crates
+        name: cargo nextest (changed crates)
+        description: Test only crates with direct changes, mirroring CI.
+        entry: bash scripts/pre-commit-affected-crates.sh nextest
         language: system
         files: (\.rs$|Cargo\.toml$|Cargo\.lock$|\.cargo/.*\.toml$)
-        pass_filenames: false
         stages: [pre-push]
       - id: frontend-build
         name: yarn build (frontend)
