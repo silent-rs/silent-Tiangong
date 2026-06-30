@@ -70,6 +70,13 @@ struct RawDeepRecallDecision {
     max_rounds: Option<usize>,
 }
 
+/// 触发回忆进度回调。回调为 None 时（如 IPC/Remote 路径）静默降级。
+fn emit_progress(request: &MemoryRecallRequest, phase: &str) {
+    if let Some(progress) = request.progress.as_ref() {
+        progress(phase);
+    }
+}
+
 pub(crate) async fn recall_context(
     store: &MemoryStore,
     model: Option<&LlmEndpointConfig>,
@@ -86,8 +93,8 @@ pub(crate) async fn recall_context(
         };
     }
 
+    emit_progress(&request, "规划检索策略");
     let plan = extract_recall_anchors(model, &request).await;
-    let mut total_usage = plan.usage.clone();
     tracing::debug!(
         query = %request.query,
         strategy = ?plan.anchors.strategy,
@@ -95,6 +102,7 @@ pub(crate) async fn recall_context(
         used_llm = plan.used_llm,
         "内存 recall 规划完成"
     );
+    let mut total_usage = plan.usage.clone();
     if plan.anchors.strategy == Some(SearchStrategy::Skip) {
         return MemoryRecallResponse {
             content: apply_output_budget(
@@ -109,6 +117,7 @@ pub(crate) async fn recall_context(
         };
     }
 
+    emit_progress(&request, "检索中");
     let initial_hits = dedupe_hits(store.recall_async(&plan.anchors, plan.limit).await);
     tracing::debug!(
         query = %request.query,
@@ -121,6 +130,7 @@ pub(crate) async fn recall_context(
             .map(|hit| hit.node_id.clone())
             .collect::<Vec<_>>(),
     );
+    emit_progress(&request, "扩展上下文");
 
     let (decision, decision_usage) =
         decide_deep_recall(model, &request, &initial_hits, &initial_expanded).await;
@@ -139,6 +149,7 @@ pub(crate) async fn recall_context(
             followup_count = decision.followup_queries.len(),
             "Memory deep recall 已触发"
         );
+        emit_progress(&request, "深度回忆");
         let (deep_hits, deep_expanded, deep_usage, queries) =
             deep_recall(store, model, &request, &decision, &hits, &expanded).await;
         if let Some(usage) = deep_usage {
@@ -167,17 +178,20 @@ pub(crate) async fn recall_context(
     }
 
     let (raw_content, synthesis_usage) = match model {
-        Some(config) => synthesize_with_model(config, &request, &hits, &expanded)
-            .await
-            .unwrap_or_else(|err| {
-                log_memory_llm_failure(
-                    "recall_synthesis",
-                    config,
-                    &err,
-                    "内存 recall 整理失败，使用规则 fallback",
-                );
-                (fallback_synthesis(&request, &hits, &expanded), None)
-            }),
+        Some(config) => {
+            emit_progress(&request, "整理结果");
+            synthesize_with_model(config, &request, &hits, &expanded)
+                .await
+                .unwrap_or_else(|err| {
+                    log_memory_llm_failure(
+                        "recall_synthesis",
+                        config,
+                        &err,
+                        "内存 recall 整理失败，使用规则 fallback",
+                    );
+                    (fallback_synthesis(&request, &hits, &expanded), None)
+                })
+        }
         None => (fallback_synthesis(&request, &hits, &expanded), None),
     };
     if let Some(usage) = synthesis_usage {

@@ -6,7 +6,8 @@ use crate::memory::turn_result::compact_single_memory_text;
 use crate::model::ToolSpec;
 use crate::react::message::latest_user_message;
 use crate::session::{MessageRole, Session};
-use tiangong_types::TokenUsage;
+use std::sync::mpsc::Sender as StdSender;
+use tiangong_types::{MemoryRecallHitSummary, StreamEvent, TokenUsage};
 
 pub(crate) type MemoryRecallToolOutput = (crate::tool::ToolResult, TokenUsage, bool);
 
@@ -52,9 +53,18 @@ pub(crate) async fn execute_memory_recall_tool(
     call: &crate::model::ToolCall,
     memory_handle: Option<&tiangong_memory::MemoryHandle>,
     session: &Session,
+    stream_tx: &StdSender<StreamEvent>,
 ) -> MemoryRecallToolOutput {
     let started = std::time::Instant::now();
     let Some(handle) = memory_handle else {
+        // 记忆系统未启用：仍补发 Start/Done，让状态栏有完整的起止过渡
+        let _ = stream_tx.send(StreamEvent::MemoryRecallStart {
+            strategy: "skip".to_string(),
+        });
+        let _ = stream_tx.send(StreamEvent::MemoryRecallDone {
+            hit_count: 0,
+            hits: Vec::new(),
+        });
         return (
             memory_recall_tool_result(
                 false,
@@ -85,6 +95,13 @@ pub(crate) async fn execute_memory_recall_tool(
         }
     };
     if query.is_empty() {
+        let _ = stream_tx.send(StreamEvent::MemoryRecallStart {
+            strategy: "skip".to_string(),
+        });
+        let _ = stream_tx.send(StreamEvent::MemoryRecallDone {
+            hit_count: 0,
+            hits: Vec::new(),
+        });
         return (
             memory_recall_tool_result(
                 false,
@@ -127,6 +144,13 @@ pub(crate) async fn execute_memory_recall_tool(
         .unwrap_or(5)
         .clamp(1, 10) as usize;
 
+    let _ = stream_tx.send(StreamEvent::MemoryRecallStart {
+        strategy: "auto".to_string(),
+    });
+
+    // 进度回调：把 memory 内部的检索阶段透传为 StreamEvent::MemoryRecallProgress。
+    // Sender 是 Clone 的，闭包持有一份副本即可。
+    let progress_tx = std::sync::mpsc::Sender::clone(stream_tx);
     let response = handle
         .recall_context(tiangong_memory::MemoryRecallRequest {
             query: query.to_string(),
@@ -134,8 +158,27 @@ pub(crate) async fn execute_memory_recall_tool(
             expected,
             context: build_memory_recall_context(session),
             limit,
+            progress: Some(std::sync::Arc::new(move |phase: &str| {
+                let _ = progress_tx.send(StreamEvent::MemoryRecallProgress {
+                    phase: phase.to_string(),
+                });
+            })),
         })
         .await;
+
+    let hits_summary: Vec<MemoryRecallHitSummary> = response
+        .hits
+        .iter()
+        .map(|hit| MemoryRecallHitSummary {
+            title: hit.title.clone(),
+            summary: hit.summary.clone(),
+            score: hit.score,
+        })
+        .collect();
+    let _ = stream_tx.send(StreamEvent::MemoryRecallDone {
+        hit_count: hits_summary.len(),
+        hits: hits_summary,
+    });
 
     let memory_usage = tiangong_types::TokenUsage::from(response.usage.clone());
 

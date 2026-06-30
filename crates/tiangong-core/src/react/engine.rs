@@ -1089,6 +1089,14 @@ impl ReactEngine {
                                 }
                             } else if call.name == "recall_memory" {
                                 if memory_recall_attempted {
+                                    // 本轮已完成回忆：补一次 Start→Done，让状态栏有清晰过渡
+                                    let _ = stream_tx.send(StreamEvent::MemoryRecallStart {
+                                        strategy: "skip".to_string(),
+                                    });
+                                    let _ = stream_tx.send(StreamEvent::MemoryRecallDone {
+                                        hit_count: 0,
+                                        hits: Vec::new(),
+                                    });
                                     let (result, usage, allow_context) =
                                         crate::core::duplicate_memory_recall_tool_result();
                                     (result, usage, allow_context, "recall_memory")
@@ -1099,6 +1107,7 @@ impl ReactEngine {
                                             call,
                                             memory_handle,
                                             session,
+                                            stream_tx,
                                         )
                                         .await;
                                     (result, usage, allow_context, "recall_memory")
