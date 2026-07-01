@@ -1,7 +1,7 @@
 //! 工具执行辅助函数（命令拆分、耗时计算）。
 //!
 //! core 内置工具规格已全部迁出至进程内插件（fs / fetch / command / browser / terminal），
-//! synthetic tool（plugin_injection / mark_step_completed）归位到各自语义模块。
+//! plugin_injection synthetic tool 归位到 core/plugin_injection.rs。
 //! 本文件仅保留被 MCP 工具执行链路复用的辅助函数。
 
 /// 拆分命令字符串为参数列表（支持引号、转义）。
