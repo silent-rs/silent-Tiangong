@@ -75,6 +75,25 @@ impl tiangong_core::tool_override::ToolSpecProvider for TerminalPlugin {
         // 必须由本插件提供 spec（core 才能按 spec.name 注册 override）。
         vec![
             ToolSpec {
+                name: "run_command".to_string(),
+                description: "执行受控命令（通过 PTY，输出回显到终端面板）。支持 cwd 和超时设置。"
+                    .to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "cmd": { "type": "string", "description": "命令名" },
+                        "args": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "命令参数列表"
+                        },
+                        "cwd": { "type": "string", "description": "工作目录（可选）" },
+                        "timeout": { "type": "integer", "description": "超时时间（秒），0 或不填表示不限时", "minimum": 0 }
+                    },
+                    "required": ["cmd"]
+                }),
+            },
+            ToolSpec {
                 name: "run_shell".to_string(),
                 description: "在终端执行 shell 脚本（通过 PTY，支持交互式程序）。".to_string(),
                 input_schema: json!({

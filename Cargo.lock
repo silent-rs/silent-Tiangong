@@ -9610,6 +9610,8 @@ dependencies = [
  "termimad",
  "tiangong-config",
  "tiangong-core",
+ "tiangong-plugin-command",
+ "tiangong-plugin-fetch",
  "tiangong-plugin-fs",
  "tiangong-plugin-scheduler",
  "tiangong-types",
@@ -9648,11 +9650,9 @@ dependencies = [
  "notify",
  "reqwest 0.13.4",
  "rmcp",
- "scraper",
  "scru128",
  "serde",
  "serde_json",
- "sha2",
  "tantivy",
  "tempfile",
  "tiangong-llm",
@@ -9772,6 +9772,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-plugin-command"
+version = "0.11.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "tempfile",
+ "tiangong-core",
+ "tokio",
+]
+
+[[package]]
+name = "tiangong-plugin-fetch"
+version = "0.11.0"
+dependencies = [
+ "anyhow",
+ "reqwest 0.13.4",
+ "scraper",
+ "scru128",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tiangong-core",
+ "tokio",
+]
+
+[[package]]
 name = "tiangong-plugin-fs"
 version = "0.11.0"
 dependencies = [
@@ -9862,6 +9889,8 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-media",
+ "tiangong-plugin-command",
+ "tiangong-plugin-fetch",
  "tiangong-plugin-fs",
  "tiangong-plugin-scheduler",
  "tiangong-scheduler",

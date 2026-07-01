@@ -145,6 +145,8 @@ impl ServerCoreManager {
             stream_tx,
             {
                 let mut plugins = tiangong_plugin_fs::default_plugins();
+                plugins.extend(tiangong_plugin_fetch::default_plugins());
+                plugins.extend(tiangong_plugin_command::default_plugins());
                 plugins.extend(tiangong_plugin_scheduler::default_plugins());
                 plugins
             },

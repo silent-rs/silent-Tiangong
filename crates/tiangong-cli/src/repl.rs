@@ -25,6 +25,8 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
     let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
     let core = TiangongCore::new_for_cli(config.clone(), stream_tx, {
         let mut plugins = tiangong_plugin_fs::default_plugins();
+        plugins.extend(tiangong_plugin_fetch::default_plugins());
+        plugins.extend(tiangong_plugin_command::default_plugins());
         plugins.extend(tiangong_plugin_scheduler::default_plugins());
         plugins
     });

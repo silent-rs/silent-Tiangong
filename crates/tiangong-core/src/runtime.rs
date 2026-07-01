@@ -6,14 +6,13 @@ use crate::agent_config::{AgentConfig, McpConfig};
 use crate::agents::execution_mcp_agent::{
     McpFunctionTarget, execute_mcp_tool_call, resolve_mcp_tool_call_from_run_command,
 };
-use crate::agents::execution_tool_agent::build_tool_call_from_function;
 use crate::app_state::ManagementCommand;
 use crate::browser_trait::PageFetcher;
 use crate::model::ToolSpec;
 use crate::model::{ModelClient, SingleProviderClient, TokenUsage, ToolCall};
 use crate::models_config::{ModelCapability, ModelsConfig};
 use crate::planner::TaskPlan;
-use crate::tool::{LocalToolExecutor, ToolExecutionRecord, ToolExecutor, ToolResult};
+use crate::tool::{ToolExecutionRecord, ToolResult};
 use crate::tool_override::ToolOverrideHandler;
 
 pub use tiangong_types::RunStatus;
@@ -83,7 +82,8 @@ pub struct RuntimeEngine {
     lite_client: Option<SingleProviderClient>,
     /// 多模态模型客户端（由主模型通过附件解析工具按需调用）
     multimodal_client: Option<SingleProviderClient>,
-    tool_executor: Arc<Mutex<LocalToolExecutor>>,
+    /// MCP / skills 收集的环境变量（供子进程执行注入，原 LocalToolExecutor.runtime_env）
+    runtime_env: Arc<Mutex<std::collections::BTreeMap<String, String>>>,
     pub context_limit: usize,
     agent_config: AgentConfig,
     models_config: ModelsConfig,
@@ -137,7 +137,7 @@ impl RuntimeEngine {
             client,
             lite_client: None,
             multimodal_client: None,
-            tool_executor: Arc::new(Mutex::new(LocalToolExecutor::from_agent_config(
+            runtime_env: Arc::new(Mutex::new(crate::runtime_env::collect_runtime_env(
                 &agent_config,
             ))),
             context_limit,
@@ -171,10 +171,9 @@ impl RuntimeEngine {
             client,
             lite_client: None,
             multimodal_client: None,
-            tool_executor: Arc::new(Mutex::new(
-                LocalToolExecutor::from_agent_config(&agent_config)
-                    .with_shared_trust_mode(shared_trust_mode),
-            )),
+            runtime_env: Arc::new(Mutex::new(crate::runtime_env::collect_runtime_env(
+                &agent_config,
+            ))),
             context_limit,
             agent_config,
             models_config: ModelsConfig::default(),
@@ -257,18 +256,22 @@ impl RuntimeEngine {
         self.page_fetcher.lock().ok()?.clone()
     }
 
-    /// 注入终端能力（GUI 模式下由 Tauri Plugin 提供）
-    /// 同步更新 tool_executor 使 run_command 校验后走 PTY 执行
+    /// 注入终端能力（GUI 模式下由 terminal 插件提供，PTY 执行）
     pub fn set_terminal_provider(
         &self,
         provider: Arc<dyn crate::terminal_trait::TerminalProvider>,
     ) {
         if let Ok(mut guard) = self.terminal_provider.lock() {
-            *guard = Some(provider.clone());
+            *guard = Some(provider);
         }
-        if let Ok(mut guard) = self.tool_executor.lock() {
-            *guard = guard.clone().with_terminal_provider(provider);
-        }
+    }
+
+    /// 获取 MCP / skills 收集的环境变量快照（供 command 插件注入子进程）。
+    pub fn runtime_env(&self) -> std::collections::BTreeMap<String, String> {
+        self.runtime_env
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     /// 获取 terminal_provider 的克隆
@@ -464,7 +467,7 @@ impl RuntimeEngine {
             };
         }
 
-        // 工具覆盖（Plugin 注入的浏览器获取等能力优先于默认行为）
+        // 工具覆盖（Plugin 注入的能力：fs / fetch / command / browser / terminal 等）
         if let Some(handler) = self
             .tool_overrides
             .lock()
@@ -475,32 +478,14 @@ impl RuntimeEngine {
             return result;
         }
 
-        // 本地工具
-        let executor = self
-            .tool_executor
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or_else(|_| LocalToolExecutor::from_agent_config(&self.agent_config));
-        match build_tool_call_from_function(call) {
-            Ok(tool_call) => match executor.execute(&tool_call, session_id) {
-                Ok(result) => result,
-                Err(err) => ToolResult {
-                    ok: false,
-                    summary: format!("工具执行失败：{err}"),
-                    stdout: String::new(),
-                    stderr: err.to_string(),
-                    exit_code: 1,
-                    execution: None,
-                },
-            },
-            Err(err) => ToolResult {
-                ok: false,
-                summary: format!("工具调用解析失败：{err}"),
-                stdout: String::new(),
-                stderr: err.to_string(),
-                exit_code: 1,
-                execution: None,
-            },
+        // 无任何处理器命中的工具：LocalToolExecutor 已删除，所有工具均由插件提供。
+        ToolResult {
+            ok: false,
+            summary: format!("未注册的工具：{}（请确认对应插件已启用）", call.name),
+            stdout: String::new(),
+            stderr: format!("tool {} not handled by any plugin", call.name),
+            exit_code: 1,
+            execution: None,
         }
     }
 
@@ -551,11 +536,10 @@ impl RuntimeEngine {
                 }
 
                 let env = self
-                    .tool_executor
+                    .runtime_env
                     .lock()
                     .map(|g| {
-                        g.runtime_env()
-                            .iter()
+                        g.iter()
                             .map(|(k, v)| (k.clone(), v.clone()))
                             .collect::<Vec<_>>()
                     })

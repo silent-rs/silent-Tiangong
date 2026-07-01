@@ -7,8 +7,11 @@ use crate::util::shell_quote;
 
 const OUTPUT_THRESHOLD: usize = 2000;
 
-/// 终端工具覆盖处理器（run_shell）。
-/// 注意：run_command 不在此拦截，由 core 的 LocalToolExecutor 校验后自动路由到 PTY。
+/// 终端工具覆盖处理器（run_command / run_shell / terminal_send）。
+///
+/// run_command 与 run_shell 都经 PTY 执行，输出回显到嵌入式终端面板。run_command
+/// 额外做命令白名单 / 路径越界校验（与 core 原 LocalToolExecutor 行为一致），
+/// run_shell 直接执行脚本（保持原有语义）。
 pub struct TerminalToolOverride {
     provider: Arc<dyn TerminalProvider>,
 }
@@ -25,6 +28,149 @@ impl TerminalToolOverride {
             value.push_str("...\n[输出已截断]");
         }
         value
+    }
+
+    /// run_command：校验后经 PTY 执行受控命令。
+    fn handle_run_command(
+        provider: &Arc<dyn TerminalProvider>,
+        call: &tiangong_core::model::ToolCall,
+        session_id: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ToolResult>> + Send>> {
+        let raw_cmd = match call.arguments.get("cmd").and_then(|v| v.as_str()) {
+            Some(c) => c.trim().to_string(),
+            None => {
+                return Box::pin(async {
+                    Some(ToolResult {
+                        ok: false,
+                        summary: "run_command 缺少 cmd 参数".to_string(),
+                        stdout: String::new(),
+                        stderr: "cmd 参数为必填".to_string(),
+                        exit_code: 2,
+                        execution: None,
+                    })
+                });
+            }
+        };
+        if raw_cmd.is_empty() {
+            return Box::pin(async {
+                Some(ToolResult {
+                    ok: false,
+                    summary: "run_command cmd 不能为空".to_string(),
+                    stdout: String::new(),
+                    stderr: "cmd 不能为空".to_string(),
+                    exit_code: 2,
+                    execution: None,
+                })
+            });
+        }
+
+        // 拆分命令 + 收集 args
+        let (cmd, mut args) = split_cmd(&raw_cmd);
+        if let Some(arr) = call.arguments.get("args").and_then(|v| v.as_array()) {
+            args.extend(
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(ToString::to_string),
+            );
+        }
+        let cwd = call
+            .arguments
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned);
+        let timeout_secs = call
+            .arguments
+            .get("timeout")
+            .and_then(|v| {
+                v.as_u64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+            })
+            .filter(|v| *v > 0);
+
+        // 命令白名单 / 路径校验（FullTrust 时跳过——由 engine 的 trust_mode 决定，
+        // 此处保守校验；终端插件无 trust_mode 引用，始终校验）
+        if let Err(e) = validate_terminal_command(&cmd, &args, cwd.as_deref()) {
+            let msg = e.to_string();
+            return Box::pin(async move {
+                Some(ToolResult {
+                    ok: false,
+                    summary: format!("run_command 校验失败：{msg}"),
+                    stdout: String::new(),
+                    stderr: msg,
+                    exit_code: 1,
+                    execution: None,
+                })
+            });
+        }
+
+        // 拼装 PTY 命令字符串：cmd + quoted args
+        let mut command = cmd.clone();
+        for arg in &args {
+            command.push(' ');
+            command.push_str(&shell_quote(arg));
+        }
+
+        let provider = provider.clone();
+        let session_id = session_id.to_string();
+        Box::pin(async move {
+            let selection = match provider.select_for_command(&session_id).await {
+                Some(s) => s,
+                None => return None,
+            };
+            let terminal_id = selection.terminal_id.clone();
+
+            // cwd 包装
+            let command = match cwd.as_deref() {
+                Some(want) if !want.is_empty() => {
+                    let current = provider.current_cwd(&terminal_id).await;
+                    let need_cd = match current.as_deref() {
+                        Some(cur) => !cur
+                            .trim_end_matches('/')
+                            .eq_ignore_ascii_case(want.trim_end_matches('/')),
+                        None => true,
+                    };
+                    if need_cd {
+                        format!("cd {} && {}", shell_quote(want), command)
+                    } else {
+                        command
+                    }
+                }
+                _ => command,
+            };
+
+            let result = match provider.exec(&terminal_id, &command, timeout_secs).await {
+                Some(r) => r,
+                None => return None,
+            };
+
+            let stdout = Self::truncate_text(&result.stdout, OUTPUT_THRESHOLD);
+            let mut summary = if result.interactive_mode {
+                "命令进入交互模式（未声明 interactive:true）".to_string()
+            } else if result.timed_out {
+                "命令执行超时".to_string()
+            } else if result.exit_code != 0 {
+                format!("命令执行失败（退出码 {}）", result.exit_code)
+            } else {
+                "命令执行成功".to_string()
+            };
+            if !result.cwd_after.is_empty() {
+                summary.push_str(&format!("（cwd: {}）", result.cwd_after));
+            }
+            summary.push_str(&selection.feedback_text());
+
+            let ok = result.exit_code == 0 && !result.timed_out && !result.interactive_mode;
+
+            Some(ToolResult {
+                ok,
+                summary,
+                stdout,
+                stderr: result.stderr,
+                exit_code: result.exit_code,
+                execution: None,
+            })
+        })
     }
 
     fn handle_run_shell(
@@ -233,11 +379,72 @@ impl tiangong_core::tool_override::ToolOverrideHandler for TerminalToolOverride 
         session_id: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ToolResult>> + Send>> {
         match call.name.as_str() {
+            "run_command" => Self::handle_run_command(&self.provider, call, session_id),
             "run_shell" => Self::handle_run_shell(&self.provider, call, session_id),
             "terminal_send" => Self::handle_terminal_send(&self.provider, call, session_id),
             _ => Box::pin(async { None }),
         }
     }
+}
+
+/// 拆分命令字符串为 (程序名, 参数列表)。
+fn split_cmd(raw: &str) -> (String, Vec<String>) {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    for ch in raw.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if !in_single => escaped = true,
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if !current.is_empty() {
+                    parts.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    if parts.is_empty() {
+        return (raw.to_string(), Vec::new());
+    }
+    let cmd = parts.remove(0);
+    (cmd, parts)
+}
+
+/// 校验命令（白名单 + 路径越界），与 core 原 LocalToolExecutor 行为一致。
+fn validate_terminal_command(cmd: &str, args: &[String], cwd: Option<&str>) -> anyhow::Result<()> {
+    use tiangong_core::tool::common as shared;
+    // 解析 cwd 为 effective_cwd（用于路径校验）
+    let base = if let Some(cwd) = cwd.filter(|s| !s.is_empty()) {
+        std::path::PathBuf::from(cwd)
+    } else {
+        shared::workspace_root()?
+    };
+    let effective_cwd = if base.is_dir() {
+        base.canonicalize().unwrap_or(base)
+    } else {
+        base
+    };
+    if matches!(cmd, "bash" | "sh" | "powershell" | "pwsh") {
+        shared::validate_shell_command_args(cmd, args, &effective_cwd)?;
+    } else {
+        if !shared::is_allowed_command(cmd) {
+            return Err(anyhow::anyhow!("不允许执行命令：{cmd}"));
+        }
+        shared::validate_command_args_in_allowed_roots(cmd, args, &effective_cwd)?;
+    }
+    Ok(())
 }
 
 /// 终端 Prompt 规则提供者：注入基础命令执行规则
