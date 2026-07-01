@@ -112,25 +112,12 @@ pub fn resolve_effective_cwd_with(raw: Option<&str>, base: &Path) -> Result<Path
     Ok(cwd)
 }
 
-pub(super) fn resolve_workspace_path(raw: &str) -> Result<PathBuf> {
-    let base = workspace_root()?;
-    resolve_path_from_base(raw, &base)
-}
-
-/// 显式传入工作目录的 [`resolve_workspace_path`](super::common::resolve_workspace_path)，
-/// 供插件 handler 使用。
+/// 解析工作空间内的读路径（显式传入工作目录，供插件 handler 使用）。
 pub fn resolve_workspace_path_with(raw: &str, base: &Path) -> Result<PathBuf> {
     resolve_path_from_base(raw, base)
 }
 
-/// 信任模式下的路径解析：不做越界检查，路径不存在时不报错
-pub(super) fn resolve_workspace_path_trusted(raw: &str) -> Result<PathBuf> {
-    let base = workspace_root()?;
-    resolve_workspace_path_trusted_with(raw, &base)
-}
-
-/// 显式传入工作目录的 [`resolve_workspace_path_trusted`](super::common::resolve_workspace_path_trusted)，
-/// 供插件 handler 使用。
+/// 信任模式下的路径解析（显式传入工作目录）：不做越界检查，路径不存在时不报错。
 pub fn resolve_workspace_path_trusted_with(raw: &str, base: &Path) -> Result<PathBuf> {
     let raw = raw.trim();
     if raw.is_empty() {

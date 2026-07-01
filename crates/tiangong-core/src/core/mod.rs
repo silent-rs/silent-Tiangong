@@ -726,8 +726,6 @@ fn register_plugin(
     plugin: std::sync::Arc<dyn Plugin>,
     workspace: Option<&std::path::Path>,
 ) {
-    use crate::tool_override::{PromptSectionProvider, ToolSpecProvider};
-
     // 注入当前会话工作目录（插件可覆写 set_workspace 感知）
     if let Some(ws) = workspace {
         plugin.set_workspace(ws);

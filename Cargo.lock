@@ -9711,7 +9711,6 @@ dependencies = [
  "tiangong-llm",
  "tiangong-media",
  "tiangong-memory",
- "tiangong-scheduler",
  "tiangong-types",
  "tokio",
  "toml 1.1.2+spec-1.1.0",
