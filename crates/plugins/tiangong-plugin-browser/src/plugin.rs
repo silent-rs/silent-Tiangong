@@ -94,34 +94,38 @@ impl tiangong_core::tool_override::ToolSpecProvider for BrowserPlugin {
             },
             ToolSpec {
                 name: "web_form_fill".to_string(),
-                description: "在内嵌浏览器当前页面中填写指定表单字段。".to_string(),
+                description: "在内嵌浏览器当前页面中填写指定表单字段。支持原生 HTML 控件和 UI 库自定义组件。selector 可传 CSS 选择器或自然语言定位描述。".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "selector": { "type": "string", "description": "字段定位描述" },
-                        "value": { "type": "string", "description": "要填写的值" }
+                        "selector": { "type": "string", "description": "字段定位描述。可用 CSS selector 或自然语言，如 label=邮箱、placeholder=请输入、name=email" },
+                        "value": { "type": "string", "description": "要填写的值" },
+                        "strategy": { "type": "string", "enum": ["auto", "native", "keyboard", "paste"], "description": "填写策略，默认 auto（自动选择最佳策略）" },
+                        "wait_for": { "type": "string", "description": "填写后等待的条件（可选），如某个元素出现" }
                     },
                     "required": ["selector", "value"]
                 }),
             },
             ToolSpec {
                 name: "web_click".to_string(),
-                description: "在内嵌浏览器当前页面中点击元素。".to_string(),
+                description: "在内嵌浏览器当前页面中点击元素（按钮、链接等）。selector 可传 CSS 选择器或自然语言定位描述。".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "selector": { "type": "string", "description": "元素定位描述" }
+                        "selector": { "type": "string", "description": "点击目标定位描述，如 登录按钮、text=提交、role=button[name=登录]" },
+                        "wait_for": { "type": "string", "description": "点击后等待的条件（可选），如页面跳转或元素变化" }
                     },
                     "required": ["selector"]
                 }),
             },
             ToolSpec {
                 name: "web_query_dom".to_string(),
-                description: "在内嵌浏览器当前页面中查询 DOM 元素。".to_string(),
+                description: "在内嵌浏览器当前页面中用 CSS 选择器查询 DOM 元素，返回匹配元素的标签、文本、属性和位置信息。".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "selector": { "type": "string", "description": "CSS 选择器或定位描述" }
+                        "selector": { "type": "string", "description": "CSS 选择器表达式（如 .api-key-value、#result、[data-testid]）" },
+                        "max_results": { "type": "integer", "description": "最大返回数量，默认 20", "minimum": 1, "maximum": 50 }
                     },
                     "required": ["selector"]
                 }),

@@ -455,12 +455,23 @@ async fn worker_loop_async(
             for plugin in &plugins {
                 register_plugin(e, plugin.clone(), workspace);
             }
-            let (all_tools, new_mcp_targets) = execution_function_tools(&e.agent_config().mcp);
+            // 先收集插件工具规格 + plugin_injection，作为 MCP 工具的 reserved names，
+            // 避免 MCP server 暴露同名工具（read_file/web_fetch/run_command 等）与插件冲突。
+            let plugin_specs = e.collect_plugin_tool_specs();
+            let injection_spec = crate::core::plugin_injection::tool_spec();
+            let reserved_names: std::collections::HashSet<String> = plugin_specs
+                .iter()
+                .map(|s| s.name.clone())
+                .chain(std::iter::once(injection_spec.name.clone()))
+                .collect();
+
+            let (all_tools, new_mcp_targets) =
+                execution_function_tools(&e.agent_config().mcp, reserved_names);
             let mut new_tools: Vec<ToolSpec> = all_tools;
             // 插件事件注入通道（synthetic tool，声明给模型但不主动调用）
-            new_tools.push(crate::core::plugin_injection::tool_spec());
+            new_tools.push(injection_spec);
             // 合并 plugin 注册的工具规格
-            new_tools.extend(e.collect_plugin_tool_specs());
+            new_tools.extend(plugin_specs);
             inject_enhanced_tools(&mut new_tools, e);
             if index_manager.is_some() {
                 crate::index::inject_index_search_tool(&mut new_tools);

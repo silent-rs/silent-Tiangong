@@ -16,12 +16,16 @@ pub(crate) struct McpFunctionTarget {
 }
 pub(crate) fn execution_function_tools(
     mcp_config: &McpConfig,
+    reserved_names: HashSet<String>,
 ) -> (Vec<ToolSpec>, HashMap<String, McpFunctionTarget>) {
     // core 内置工具 spec 已全部迁出至进程内插件（fs/fetch/command/browser/terminal），
     // 此处仅收集 MCP 工具。plugin_injection / plan 控制等 synthetic tool 由 core/mod.rs
     // 工具汇总阶段单独注入。
+    //
+    // reserved_names 传入插件已注册的工具名（含 plugin_injection），MCP 同名工具会自动
+    // 改名（加 _2/_3 后缀），避免插件工具与 MCP 工具名冲突。
     let mut tools = Vec::new();
-    let mut reserved_names = HashSet::new();
+    let mut reserved_names = reserved_names;
     let mut bindings = HashMap::new();
 
     let active = cached_active_tools();

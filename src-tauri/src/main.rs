@@ -319,6 +319,10 @@ fn run_gui() {
             // 等 8 个工具（替代 core 的 LocalToolExecutor 实现）。
             state.register_plugin(tiangong_plugin_fs::build_plugin());
 
+            // 注意：GUI 不注册 fetch / command 插件。web_fetch 由 browser 插件提供
+            // （内嵌浏览器渲染），run_command / run_shell 由 terminal 插件提供（PTY 执行）。
+            // CLI / Server 才注册 fetch / command（基础 reqwest 获取 + 子进程执行）。
+
             // 启动工具消息注入消费者任务（插件 push → 消费者统一处理）
             let injection_tx = state.tool_injection_tx();
             state.start_tool_injection_consumer(app.handle().clone());

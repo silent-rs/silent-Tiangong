@@ -81,7 +81,7 @@ impl CommandPlugin {
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|s| !s.is_empty());
-        let timeout_ms = args
+        let timeout_secs = args
             .get("timeout")
             .and_then(|v| {
                 v.as_u64()
@@ -90,7 +90,10 @@ impl CommandPlugin {
             .filter(|v| *v > 0);
 
         let effective_cwd = shared::resolve_effective_cwd_with(cwd, &base)?;
-        let timeout_ms = timeout_ms.unwrap_or_else(shared::command_timeout_ms);
+        // schema 暴露的 timeout 单位是秒，执行时转为毫秒
+        let timeout_ms = timeout_secs
+            .map(|s| s.saturating_mul(1000))
+            .unwrap_or_else(shared::command_timeout_ms);
 
         if !self.is_full_trust() {
             validate_command(&cmd, &cmd_args, &effective_cwd)?;
@@ -124,7 +127,7 @@ impl CommandPlugin {
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|s| !s.is_empty());
-        let timeout_ms = args
+        let timeout_secs = args
             .get("timeout")
             .and_then(|v| {
                 v.as_u64()
@@ -134,7 +137,10 @@ impl CommandPlugin {
 
         let (cmd, cmd_args) = shared::derive_shell_exec_args(&script, Some(shell))?;
         let effective_cwd = shared::resolve_effective_cwd_with(cwd, &base)?;
-        let timeout_ms = timeout_ms.unwrap_or_else(shared::command_timeout_ms);
+        // schema 暴露的 timeout 单位是秒，执行时转为毫秒
+        let timeout_ms = timeout_secs
+            .map(|s| s.saturating_mul(1000))
+            .unwrap_or_else(shared::command_timeout_ms);
 
         if !self.is_full_trust() {
             shared::validate_shell_command_args(&cmd, &cmd_args, &effective_cwd)?;
@@ -492,5 +498,28 @@ mod tests {
                 .dispatch_sync(&make_call("not_a_command_tool", json!({})))
                 .is_none()
         );
+    }
+
+    /// timeout 单位是秒：timeout:1 应正常执行 echo（不超时）。
+    /// 回归保护：若误把 timeout 当毫秒（1ms），命令仍可能恰好完成，
+    /// 故同时验证 timeout:0（不限时）路径正常。
+    #[tokio::test]
+    async fn timeout_unit_is_seconds() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let plugin = make_plugin(&dir);
+        // timeout:1（秒 = 1000ms），echo 瞬时完成，不应超时
+        let future = plugin
+            .dispatch_sync(&make_call(
+                TOOL_RUN_COMMAND,
+                json!({ "cmd": "echo ok", "timeout": 1 }),
+            ))
+            .unwrap();
+        let result = future.await;
+        assert!(
+            result.ok,
+            "timeout:1（秒）应允许 echo 完成，实际：{}",
+            result.summary
+        );
+        assert!(result.stdout.contains("ok"));
     }
 }
