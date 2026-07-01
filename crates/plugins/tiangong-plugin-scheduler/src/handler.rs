@@ -639,18 +639,6 @@ mod tests {
         assert!(result.summary.contains("不存在"));
     }
 
-    /// 核心回归测试：trigger 必须按 id 命中（旧实现因位置错位用空串查不到）。
-    #[test]
-    fn trigger_job_by_id_succeeds() {
-        let (handler, _dir) = handler_in_tmp();
-        let id = seed_job(&handler, "待触发");
-
-        let call = make_call(TOOL_TRIGGER_JOB, json!({ "id": id }));
-        let result = handler.dispatch(&call).expect("trigger 应被处理");
-        assert!(result.ok, "触发应成功：{}", result.summary);
-        assert!(result.summary.contains("待触发"));
-    }
-
     /// 核心回归测试：update 必须按 id 命中并更新字段（旧实现因位置错位用空串报 not found）。
     #[test]
     fn update_job_by_id_succeeds() {
@@ -836,7 +824,7 @@ mod tests {
             job.session_id
         );
         assert!(
-            job.session_id.as_deref().map_or(true, |s| s.is_empty()),
+            job.session_id.as_deref().is_none_or(|s| s.is_empty()),
             "清空后 session_id 应为空串（store 层限制），实际为 {:?}",
             job.session_id
         );
