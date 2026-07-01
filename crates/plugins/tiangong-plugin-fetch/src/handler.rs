@@ -562,11 +562,10 @@ fn resolve_download_target(
         .filter(|v| !v.is_empty())
         .map(ToString::to_string)
         .unwrap_or_else(|| infer_download_file_name(final_url));
-    if is_full_trust {
-        shared::resolve_write_path_from_base(&path, base)
-    } else {
-        shared::resolve_write_path_from_base(&path, base)
-    }
+    // trust 模式下写路径校验逻辑与非 trust 相同（core 的 trusted 变体实现等价），
+    // 统一调用 resolve_write_path_from_base，保留 is_full_trust 参数供将来差异化。
+    let _ = is_full_trust;
+    shared::resolve_write_path_from_base(&path, base)
 }
 
 fn infer_download_file_name(url: &Url) -> String {

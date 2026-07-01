@@ -380,12 +380,11 @@ impl FsPlugin {
             Ok(p) => p,
             Err(e) => return tool_error("write_file", e),
         };
-        if let Some(parent) = full_path.parent() {
-            if let Err(e) = fs::create_dir_all(parent)
+        if let Some(parent) = full_path.parent()
+            && let Err(e) = fs::create_dir_all(parent)
                 .with_context(|| format!("创建目录失败：{}", parent.display()))
-            {
-                return tool_error("write_file", anyhow!(e));
-            }
+        {
+            return tool_error("write_file", anyhow!(e));
         }
         if append {
             use std::fs::OpenOptions;
