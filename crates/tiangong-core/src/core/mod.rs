@@ -441,9 +441,18 @@ async fn worker_loop_async(
             ));
             // 遍历插件自注册（issue #156）：在 worker 接收任何用户消息前完成，
             // 根治「注册竞态窗口」。
+            //
+            // 先注入会话工作目录（set_workspace），再收集三种能力（工具规格/覆盖/Prompt
+            // 段落）注册到 engine，最后让插件注入外部能力（PageFetcher 等）。
             let e = engine.as_ref().unwrap();
+            let workspace = std::path::Path::new(&session.cwd);
+            let workspace = if workspace.is_dir() {
+                Some(workspace)
+            } else {
+                None
+            };
             for plugin in &plugins {
-                plugin.register(e);
+                register_plugin(e, plugin.clone(), workspace);
             }
             let (all_tools, new_mcp_targets) = execution_function_tools(&e.agent_config().mcp);
             let mut new_tools: Vec<ToolSpec> = all_tools
@@ -481,6 +490,13 @@ async fn worker_loop_async(
                 let cwd_changed = cwd != session.cwd;
                 session.cwd = cwd;
                 apply_session_cwd(&session);
+                // 同步把新的工作目录注入到所有插件（文件类插件据此感知会话 workspace）
+                let workspace = std::path::Path::new(&session.cwd);
+                if workspace.is_dir() {
+                    for plugin in &plugins {
+                        plugin.set_workspace(workspace);
+                    }
+                }
                 let cfg = config.snapshot();
                 memory.handle = get_or_init_memory_async(
                     &cfg,
@@ -699,6 +715,43 @@ fn index_turn_messages(
     if let Err(e) = index_manager.index_turn_batch(&session.id, &turns) {
         tracing::warn!("Session 索引批量写入失败: {e}");
     }
+}
+
+/// 注册一个进程内插件到 engine：注入会话工作目录、收集三种能力（工具规格/覆盖/Prompt
+/// 段落）、再让插件注入外部能力（PageFetcher 等）。
+///
+/// 编排逻辑集中在调用方（worker_loop），engine 仅暴露原子能力槽位（register_tool_*）。
+fn register_plugin(
+    engine: &RuntimeEngine,
+    plugin: std::sync::Arc<dyn Plugin>,
+    workspace: Option<&std::path::Path>,
+) {
+    use crate::tool_override::{PromptSectionProvider, ToolSpecProvider};
+
+    // 注入当前会话工作目录（插件可覆写 set_workspace 感知）
+    if let Some(ws) = workspace {
+        plugin.set_workspace(ws);
+    }
+
+    // 1) 工具规格：plugin 本身即 ToolSpecProvider
+    let specs = plugin.tool_specs();
+    let plugin_as_spec: std::sync::Arc<dyn crate::tool_override::ToolSpecProvider> = plugin.clone();
+    engine.register_tool_spec_provider(plugin_as_spec);
+
+    // 2) 工具覆盖：按 spec 中的工具名逐个注册，路由到同一 plugin 的 handle
+    let plugin_as_handler: std::sync::Arc<dyn crate::tool_override::ToolOverrideHandler> =
+        plugin.clone();
+    for spec in specs {
+        engine.register_tool_override(&spec.name, plugin_as_handler.clone());
+    }
+
+    // 3) Prompt 段落
+    let plugin_as_prompt: std::sync::Arc<dyn crate::tool_override::PromptSectionProvider> =
+        plugin.clone();
+    engine.register_prompt_section_provider(plugin_as_prompt);
+
+    // 4) 让插件注入外部能力（PageFetcher / TerminalProvider 等）
+    plugin.register(engine);
 }
 
 pub(crate) fn apply_session_cwd(session: &Session) {

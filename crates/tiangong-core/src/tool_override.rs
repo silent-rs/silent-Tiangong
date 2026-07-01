@@ -12,11 +12,14 @@ pub trait ToolOverrideHandler: Send + Sync + 'static {
     /// 处理工具调用。返回 None 表示不拦截，由默认逻辑处理。
     ///
     /// `session_id` 标识当前对话，用于按对话路由终端 PTY 等场景。
+    /// 默认不拦截任何调用，不关心工具覆盖的插件无需覆写。
     fn handle(
         &self,
-        call: &ToolCall,
-        session_id: &str,
-    ) -> Pin<Box<dyn Future<Output = Option<ToolResult>> + Send>>;
+        _call: &ToolCall,
+        _session_id: &str,
+    ) -> Pin<Box<dyn Future<Output = Option<ToolResult>> + Send>> {
+        Box::pin(async { None })
+    }
 }
 
 /// 工具规格提供者。
@@ -24,8 +27,10 @@ pub trait ToolOverrideHandler: Send + Sync + 'static {
 /// Plugin 通过此机制向 Agent 注入新的工具定义（ToolSpec）。
 /// 注册后，新工具会与 core 内置工具合并，统一暴露给 LLM。
 pub trait ToolSpecProvider: Send + Sync + 'static {
-    /// 返回该 plugin 暴露的所有工具规格。
-    fn tool_specs(&self) -> Vec<ToolSpec>;
+    /// 返回该 plugin 暴露的所有工具规格。默认返回空，不暴露新工具的插件无需覆写。
+    fn tool_specs(&self) -> Vec<ToolSpec> {
+        Vec::new()
+    }
 }
 
 /// Prompt 规则提供者。
@@ -34,5 +39,8 @@ pub trait ToolSpecProvider: Send + Sync + 'static {
 /// 段落会按 plugin 注册顺序追加到 system prompt 中。
 pub trait PromptSectionProvider: Send + Sync + 'static {
     /// 返回该 plugin 暴露的所有 prompt 段落（每段会作为独立块拼接到 system prompt）。
-    fn prompt_sections(&self) -> Vec<String>;
+    /// 默认返回空，不注入 prompt 的插件无需覆写。
+    fn prompt_sections(&self) -> Vec<String> {
+        Vec::new()
+    }
 }

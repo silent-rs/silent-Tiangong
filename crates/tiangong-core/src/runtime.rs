@@ -337,6 +337,13 @@ impl RuntimeEngine {
             .unwrap_or_default()
     }
 
+    /// 注册一个进程内 [`Plugin`](crate::core::Plugin)：自动收集其三种能力（工具规格、
+    /// 工具覆盖、Prompt 段落），并调用 `set_workspace` 注入当前会话工作目录，再调用
+    /// `register` 让插件注入外部能力（如 PageFetcher）。
+    ///
+    /// 工具覆盖按 [`ToolSpec::name`](crate::model::ToolSpec::name) 注册：插件 `tool_specs()`
+    /// 返回的每个工具名都会路由到该插件的 `handle`。
+
     /// 获取所有已注册的 Prompt 段落提供者（用于 runtime 重建时保留）
     pub fn prompt_section_providers(
         &self,

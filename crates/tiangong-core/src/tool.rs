@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::agent_config::AgentConfig;
 
 pub mod background_task;
-mod common;
+pub mod common;
 mod current_time;
 pub use common::{session_workspace_root, set_session_cwd};
 mod list_dir;

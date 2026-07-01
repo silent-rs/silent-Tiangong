@@ -4,29 +4,42 @@
 //! [`RuntimeEngine`] 注册，消除三方中转仓库模式。
 //!
 //! 设计要点：
+//! - [`Plugin`] 是能力的声明式聚合：通过 supertrait 约束同时要求实现工具规格、
+//!   工具覆盖与 Prompt 段落三种能力（均提供默认空实现，插件按需覆写）。
 //! - [`Plugin::register`] 接收 `&RuntimeEngine`（engine 内部用 `Arc` + interior
-//!   mutability，`&self` 即可修改）。
-//! - 能力 trait（`PageFetcher` / `TerminalProvider` / `ToolOverrideHandler` 等）不消除，
-//!   插件内部仍然使用它们，[`Plugin`] 只是在外层包了一个「自注册」入口。
-//! - 新增能力类型不需要改 [`Plugin`] trait：插件在 [`Plugin::register`] 中直接调 engine 方法。
+//!   mutability，`&self` 即可修改），core 在调用前会先通过 [`Plugin::set_workspace`]
+//!   注入当前会话工作目录。
+//! - 能力 trait（`PageFetcher` / `TerminalProvider`）不消除，需要注入外部能力的插件
+//!   仍在 [`Plugin::register`] 中调 engine 的 `set_*` 方法。
 //!
 //! 注意：本模块与根 `crate::plugin`（外部清单驱动插件，MCP/skill）是两套不同的机制，
 //! 不要混淆。
 
+use std::path::Path;
+
 use crate::runtime::RuntimeEngine;
+use crate::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
 
 /// 进程内插件：封装自己的全部能力，在 engine 创建/重建时自行注册。
 ///
-/// 由 [`TiangongCore`](crate::core::TiangongCore) 在构造时接收一组 `Arc<dyn Plugin>`，
-/// worker_loop 在 engine 首次创建（或配置变更后重建）时遍历调用 [`Plugin::register`]。
-/// 这样能力注册在 worker 接收任何用户消息之前完成，根治「注册竞态窗口」。
-pub trait Plugin: Send + Sync {
+/// 通过 supertrait 约束声明三种能力（`ToolSpecProvider` / `ToolOverrideHandler` /
+/// `PromptSectionProvider`），三者均提供默认空实现——插件只需覆写自己关心的部分。
+/// core 在 engine 创建时遍历插件，先 [`set_workspace`](Plugin::set_workspace) 注入会话
+/// 工作目录，再 [`register`](Plugin::register) 让插件注入外部能力（如 PageFetcher）；
+/// 工具规格 / 工具覆盖 / Prompt 段落由 core 根据 supertrait 自动收集，无需插件手动注册。
+pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider {
     /// 插件唯一标识（日志/调试用）。
     fn id(&self) -> &str;
 
-    /// 在 engine 创建/重建时调用，插件自行注册所有能力。
+    /// 在 engine 创建/重建时调用，插件注入外部能力（如 PageFetcher / TerminalProvider）。
     ///
-    /// 插件内部调用 `engine.set_page_fetcher(...)`、`engine.register_tool_override(...)`
-    /// 等方法，把持有的 `Arc<dyn ...>` 能力注入到 engine。
-    fn register(&self, engine: &RuntimeEngine);
+    /// 工具规格、工具覆盖、Prompt 段落由 core 通过 supertrait 自动收集，无需在此手动注册。
+    fn register(&self, _engine: &RuntimeEngine) {}
+
+    /// 注入当前会话的工作目录。
+    ///
+    /// core 在 engine 创建时以及每次会话工作目录变更（`Command::UpdateCwd`）时调用。
+    /// 默认实现为空操作；需要感知工作目录的插件（如文件工具）应覆写此方法，将路径
+    /// 存入内部状态，供后续工具调用使用。
+    fn set_workspace(&self, _workspace: &Path) {}
 }
