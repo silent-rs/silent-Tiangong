@@ -1,7 +1,7 @@
 # 浏览器页面缩放
 
 > 状态：待实现
-> 关联：`crates/tiangong-plugin-browser`、`frontend/src/components/BrowserPanel.tsx`、Issue #110
+> 关联：`crates/plugins/tiangong-plugin-browser`、`frontend/src/components/BrowserPanel.tsx`、Issue #110
 
 ---
 
@@ -22,13 +22,13 @@ Issue #110 要求：
 
 - 该 API 由 Tauri 统一封装，底层映射到 WKWebView（macOS）、WebView2（Windows）、WebKitGTK（Linux）的原生缩放能力
 - 等比缩放整个 webview 渲染结果，**不影响 DOM 逻辑坐标**（`getBoundingClientRect`、`innerText` 等仍返回 layout 值）
-- webview 内部的批注 canvas（`crates/tiangong-plugin-browser/js/bridge.js` `_ensureCanvas`）作为 DOM 元素，会随 webview 一起等比缩放，已绘制的批注视觉自动跟随
+- webview 内部的批注 canvas（`crates/plugins/tiangong-plugin-browser/js/bridge.js` `_ensureCanvas`）作为 DOM 元素，会随 webview 一起等比缩放，已绘制的批注视觉自动跟随
 
 不采用 CSS `transform: scale()` 方案的原因：会破坏页面布局、干扰弹窗与覆盖层定位、影响 `position:fixed` 元素，且需要侵入 bridge.js。
 
 ## 3. API 设计
 
-### Tauri 命令（`crates/tiangong-plugin-browser/src/commands.rs`）
+### Tauri 命令（`crates/plugins/tiangong-plugin-browser/src/commands.rs`）
 
 | 命令 | 入参 | 返回 | 说明 |
 |------|------|------|------|

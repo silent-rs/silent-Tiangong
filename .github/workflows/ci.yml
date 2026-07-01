@@ -109,8 +109,9 @@ jobs:
               "tiangong-cli":             "crates/tiangong-cli/",
               "tiangong-server":          "crates/tiangong-server/",
               "tiangong-entry":           "crates/tiangong-entry/",
-              "tiangong-plugin-browser":  "crates/tiangong-plugin-browser/",
-              "tiangong-plugin-terminal": "crates/tiangong-plugin-terminal/",
+              "tiangong-plugin-browser":   "crates/plugins/tiangong-plugin-browser/",
+              "tiangong-plugin-scheduler": "crates/plugins/tiangong-plugin-scheduler/",
+              "tiangong-plugin-terminal":  "crates/plugins/tiangong-plugin-terminal/",
               "tiangong-app":             "src-tauri/",
               "tiangong":                 "src/",
           }

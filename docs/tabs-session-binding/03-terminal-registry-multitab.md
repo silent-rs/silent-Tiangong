@@ -6,8 +6,8 @@
 
 ## 范围
 
-- `crates/tiangong-plugin-terminal/src/session_pty.rs`
-- `crates/tiangong-plugin-terminal/src/types.rs`
+- `crates/plugins/tiangong-plugin-terminal/src/session_pty.rs`
+- `crates/plugins/tiangong-plugin-terminal/src/types.rs`
 - 必要时更新内部类型引用
 
 ## 依赖

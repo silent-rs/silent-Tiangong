@@ -7,7 +7,7 @@ const _require = eval('require') as NodeRequire;
 const { readFileSync } = _require('fs') as typeof import('fs');
 const { resolve } = _require('path') as typeof import('path');
 
-const BRIDGE_PATH = resolve(__dirname, '../../../crates/tiangong-plugin-browser/js/bridge.js');
+const BRIDGE_PATH = resolve(__dirname, '../../../crates/plugins/tiangong-plugin-browser/js/bridge.js');
 
 function loadBridge() {
   const code = readFileSync(BRIDGE_PATH, 'utf-8');

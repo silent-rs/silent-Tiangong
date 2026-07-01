@@ -6,9 +6,9 @@
 
 ## 范围
 
-- `crates/tiangong-plugin-browser/src/manager.rs`
-- `crates/tiangong-plugin-browser/src/commands.rs`
-- `crates/tiangong-plugin-browser/src/lib.rs`
+- `crates/plugins/tiangong-plugin-browser/src/manager.rs`
+- `crates/plugins/tiangong-plugin-browser/src/commands.rs`
+- `crates/plugins/tiangong-plugin-browser/src/lib.rs`
 
 ## 依赖
 

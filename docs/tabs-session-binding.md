@@ -104,7 +104,7 @@ pub struct TabState {
 
 ### 终端插件
 
-位置：`crates/tiangong-plugin-terminal`
+位置：`crates/plugins/tiangong-plugin-terminal`
 
 运行时结构：
 
@@ -147,7 +147,7 @@ SessionPty
 
 ### 浏览器插件
 
-位置：`crates/tiangong-plugin-browser`
+位置：`crates/plugins/tiangong-plugin-browser`
 
 新增能力：
 
