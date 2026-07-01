@@ -12,11 +12,18 @@ set -euo pipefail
 sub="${1:-check}"
 shift || true
 
-# 从文件路径提取 crate 名并去重（crates/<name>/... → <name>；src-tauri/... → tiangong-app）
+# 从文件路径提取 crate 名并去重：
+#   crates/<name>/...           → <name>
+#   crates/plugins/<name>/...   → <name>（插件 crate 嵌套在 plugins/ 子目录下）
+#   src-tauri/...               → tiangong-app
+#   src/...                     → tiangong
 # 用 if [[ ]] 模式匹配 + sort -u 去重，兼容老版本 bash，避免 case 在命令替换内的解析问题
 crates="$(
   for f in "$@"; do
-    if [[ "$f" == crates/*/* ]]; then
+    if [[ "$f" == crates/plugins/*/* ]]; then
+      rest="${f#crates/plugins/}"
+      printf '%s\n' "${rest%%/*}"
+    elif [[ "$f" == crates/*/* ]]; then
       rest="${f#crates/}"
       printf '%s\n' "${rest%%/*}"
     elif [[ "$f" == src-tauri/* ]]; then
