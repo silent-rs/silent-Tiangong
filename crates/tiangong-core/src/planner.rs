@@ -1,5 +1,43 @@
 use serde::{Deserialize, Serialize};
 
+use crate::model::ToolSpec;
+
+/// plan 步骤完成控制工具名。
+pub const MARK_STEP_COMPLETED_TOOL: &str = "mark_step_completed";
+
+/// plan 步骤完成控制的工具规格。
+///
+/// 供 Agent 标记当前执行步骤完成、并声明是否继续追加动态步骤。归属 plan 执行控制，
+/// 而非本地工具能力。
+///
+/// 当前未注入 LLM tools 列表（plan 执行控制走其他路径），保留定义供将来按需启用。
+#[allow(dead_code)]
+pub(crate) fn mark_step_completed_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: MARK_STEP_COMPLETED_TOOL.to_string(),
+        description: "标记当前执行步骤已完成。仅在本步骤真正完成后调用。".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "result": { "type": "string", "description": "本步骤完成结果摘要" },
+                "continue_execution": {
+                    "type": "boolean",
+                    "description": "当前 plan 是否需要继续执行后续动态步骤。true 表示需要追加下一步。"
+                },
+                "next_step_name": {
+                    "type": "string",
+                    "description": "当 continue_execution=true 时，下一步名称（必填）。"
+                },
+                "next_step_description": {
+                    "type": "string",
+                    "description": "当 continue_execution=true 时，下一步描述（必填）。"
+                }
+            },
+            "required": ["continue_execution"]
+        }),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanStep {
     pub id: String,

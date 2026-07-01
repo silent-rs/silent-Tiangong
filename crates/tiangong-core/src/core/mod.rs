@@ -47,6 +47,7 @@ pub(crate) mod command;
 pub(crate) use command::Command;
 pub mod plugin;
 pub use plugin::Plugin;
+mod plugin_injection;
 
 /// 天工智能体核心
 pub struct TiangongCore {
@@ -455,10 +456,9 @@ async fn worker_loop_async(
                 register_plugin(e, plugin.clone(), workspace);
             }
             let (all_tools, new_mcp_targets) = execution_function_tools(&e.agent_config().mcp);
-            let mut new_tools: Vec<ToolSpec> = all_tools
-                .into_iter()
-                .filter(|t| t.name != "mark_step_completed")
-                .collect();
+            let mut new_tools: Vec<ToolSpec> = all_tools;
+            // 插件事件注入通道（synthetic tool，声明给模型但不主动调用）
+            new_tools.push(crate::core::plugin_injection::tool_spec());
             // 合并 plugin 注册的工具规格
             new_tools.extend(e.collect_plugin_tool_specs());
             inject_enhanced_tools(&mut new_tools, e);

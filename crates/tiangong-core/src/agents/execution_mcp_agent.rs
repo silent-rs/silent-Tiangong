@@ -9,7 +9,7 @@ use crate::mcp::{LocalMcpClient, McpClient, McpToolMeta, cached_active_tools};
 use crate::model::{ToolCall, ToolSpec};
 use crate::tool::{ToolExecutionRecord, ToolResult};
 
-use super::execution_tool_agent::{basic_file_function_tools, elapsed_ms_u64, split_command_parts};
+use super::execution_tool_agent::{elapsed_ms_u64, split_command_parts};
 
 #[derive(Debug, Clone)]
 pub(crate) struct McpFunctionTarget {
@@ -19,11 +19,11 @@ pub(crate) struct McpFunctionTarget {
 pub(crate) fn execution_function_tools(
     mcp_config: &McpConfig,
 ) -> (Vec<ToolSpec>, HashMap<String, McpFunctionTarget>) {
-    let mut tools = basic_file_function_tools();
-    let mut reserved_names = tools
-        .iter()
-        .map(|tool| tool.name.clone())
-        .collect::<HashSet<_>>();
+    // core 内置工具 spec 已全部迁出至进程内插件（fs/fetch/command/browser/terminal），
+    // 此处仅收集 MCP 工具。plugin_injection / plan 控制等 synthetic tool 由 core/mod.rs
+    // 工具汇总阶段单独注入。
+    let mut tools = Vec::new();
+    let mut reserved_names = HashSet::new();
     let mut bindings = HashMap::new();
 
     let active = cached_active_tools();

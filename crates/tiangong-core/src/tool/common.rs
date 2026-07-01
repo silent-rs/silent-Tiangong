@@ -90,13 +90,7 @@ fn ensure_path_in_write_allowed_roots_with(path: &Path, label: &str, base: &Path
     Ok(())
 }
 
-pub(super) fn resolve_effective_cwd(raw: Option<&str>) -> Result<PathBuf> {
-    let root = workspace_root()?;
-    resolve_effective_cwd_with(raw, &root)
-}
-
-/// 显式传入工作目录的 [`resolve_effective_cwd`](super::common::resolve_effective_cwd)，
-/// 供插件 handler 使用。
+/// 解析 effective cwd（显式传入工作目录，供插件 handler 使用）。
 pub fn resolve_effective_cwd_with(raw: Option<&str>, base: &Path) -> Result<PathBuf> {
     let value = raw.unwrap_or(".").trim();
     let cwd = if value.is_empty() {
@@ -126,17 +120,6 @@ pub fn resolve_workspace_path_trusted_with(raw: &str, base: &Path) -> Result<Pat
     let candidate = resolve_path_candidate(raw, base);
     // 存在时 canonicalize 解析符号链接，不存在时直接返回
     Ok(candidate.canonicalize().unwrap_or(candidate))
-}
-
-pub(super) fn resolve_workspace_write_path(raw: &str) -> Result<PathBuf> {
-    let base = workspace_root()?;
-    resolve_write_path_from_base(raw, &base)
-}
-
-/// 信任模式下仍然限制写入范围，仅放宽目标文件不存在的场景。
-pub(super) fn resolve_workspace_write_path_trusted(raw: &str) -> Result<PathBuf> {
-    let base = workspace_root()?;
-    resolve_write_path_from_base(raw, &base)
 }
 
 pub fn resolve_path_from_base(raw: &str, base: &Path) -> Result<PathBuf> {
@@ -353,18 +336,7 @@ fn user_home_dir() -> Option<PathBuf> {
     }
 }
 
-pub(super) fn display_rel_path(path: &Path) -> String {
-    let root = match workspace_root().and_then(|root| {
-        root.canonicalize()
-            .with_context(|| format!("解析工作目录失败：{}", root.display()))
-    }) {
-        Ok(root) => root,
-        Err(_) => return path.display().to_string(),
-    };
-    display_rel_path_with(path, &root)
-}
-
-/// 显式传入工作目录的 [`display_rel_path`](super::common::display_rel_path)，供插件 handler 使用。
+/// 相对工作目录的路径展示（显式传入工作目录，供插件 handler 使用）。
 pub fn display_rel_path_with(path: &Path, base: &Path) -> String {
     let root = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
     path.strip_prefix(&root)
@@ -698,10 +670,6 @@ pub fn execute_command_with_timeout(
 
         thread::sleep(Duration::from_millis(20));
     }
-}
-
-pub(super) fn elapsed_ms_u64(raw: u128) -> u64 {
-    raw.min(u64::MAX as u128) as u64
 }
 
 pub fn truncate_output(raw: &str) -> String {
