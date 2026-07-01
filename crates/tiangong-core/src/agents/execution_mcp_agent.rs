@@ -9,8 +9,6 @@ use crate::mcp::{LocalMcpClient, McpClient, McpToolMeta, cached_active_tools};
 use crate::model::{ToolCall, ToolSpec};
 use crate::tool::{ToolExecutionRecord, ToolResult};
 
-use super::execution_tool_agent::{elapsed_ms_u64, split_command_parts};
-
 #[derive(Debug, Clone)]
 pub(crate) struct McpFunctionTarget {
     pub(crate) server_name: String,
@@ -299,4 +297,51 @@ fn find_mcp_server<'a>(config: &'a McpConfig, name: &str) -> Option<&'a McpServe
         .servers
         .iter()
         .find(|server| server.enabled && server.name == name)
+}
+
+/// 拆分命令字符串为参数列表（支持引号、转义）。
+fn split_command_parts(raw: &str) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+
+    for ch in raw.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if !in_single => {
+                escaped = true;
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+            }
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if !current.is_empty() {
+                    out.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if escaped || in_single || in_double {
+        return None;
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+fn elapsed_ms_u64(ms: u128) -> u64 {
+    u64::try_from(ms).unwrap_or(u64::MAX)
 }
