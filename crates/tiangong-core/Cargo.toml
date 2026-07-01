@@ -28,14 +28,13 @@ sha2 = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 zip = { workspace = true, default-features = false, features = ["deflate"] }
-diffy = { workspace = true, optional = true }
 tiangong-media = { workspace = true }
 tantivy = { workspace = true }
 notify = { workspace = true }
 dashmap = { workspace = true }
 
 [features]
-default = ["diffy"]
+default = []
 llm-debug-log = []
 
 [dev-dependencies]

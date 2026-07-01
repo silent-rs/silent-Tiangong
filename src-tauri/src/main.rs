@@ -314,6 +314,11 @@ fn run_gui() {
             // 让 Agent 可通过命名参数工具调用管理定时任务（替代旧的 LocalToolExecutor 实现）。
             state.register_plugin(tiangong_plugin_scheduler::build_plugin());
 
+            // 基础文件工具插件：不依赖 Tauri 句柄，无条件注册，提供 list_dir / read_file /
+            // write_file / tree_dir / search_code / current_time / replace_in_file / apply_patch
+            // 等 8 个工具（替代 core 的 LocalToolExecutor 实现）。
+            state.register_plugin(tiangong_plugin_fs::build_plugin());
+
             // 启动工具消息注入消费者任务（插件 push → 消费者统一处理）
             let injection_tx = state.tool_injection_tx();
             state.start_tool_injection_consumer(app.handle().clone());

@@ -8,49 +8,26 @@ use crate::agent_config::AgentConfig;
 
 pub mod background_task;
 pub mod common;
-mod current_time;
 pub use common::{session_workspace_root, set_session_cwd};
-mod list_dir;
-mod read_file;
-mod replace_in_file;
 mod run_command;
-mod search_code;
-mod tree_dir;
 mod web_fetch;
-mod write_file;
 
-#[cfg(feature = "diffy")]
-mod apply_patch;
-
+/// LocalToolExecutor 内置工具名。
+///
+/// 仅保留 web_fetch / run_command——其余基础文件工具（list_dir / read_file /
+/// write_file / tree_dir / search_code / current_time / replace_in_file /
+/// apply_patch）已迁出至 `tiangong-plugin-fs` 进程内插件，core 不再直接感知。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ToolName {
-    ReadFile,
-    ListDir,
-    TreeDir,
     RunCommand,
-    SearchCode,
-    CurrentTime,
     WebFetch,
-    WriteFile,
-    ReplaceInFile,
-    #[cfg(feature = "diffy")]
-    ApplyPatch,
 }
 
 impl ToolName {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::ReadFile => "read_file",
-            Self::ListDir => "list_dir",
-            Self::TreeDir => "tree_dir",
             Self::RunCommand => "run_command",
-            Self::SearchCode => "search_code",
-            Self::CurrentTime => "current_time",
             Self::WebFetch => "web_fetch",
-            Self::WriteFile => "write_file",
-            Self::ReplaceInFile => "replace_in_file",
-            #[cfg(feature = "diffy")]
-            Self::ApplyPatch => "apply_patch",
         }
     }
 }
@@ -99,17 +76,8 @@ impl ToolExecutor for LocalToolExecutor {
     fn execute(&self, call: &ToolCall, session_id: &str) -> Result<ToolResult> {
         let started = Instant::now();
         let result = match call.name {
-            ToolName::ReadFile => self.read_file(call),
-            ToolName::ListDir => self.list_dir(call),
-            ToolName::TreeDir => self.tree_dir(call),
             ToolName::RunCommand => self.run_command(call, session_id),
-            ToolName::SearchCode => self.search_code(call),
-            ToolName::CurrentTime => self.current_time(call),
             ToolName::WebFetch => self.web_fetch(call),
-            ToolName::WriteFile => self.write_file(call),
-            ToolName::ReplaceInFile => self.replace_in_file(call),
-            #[cfg(feature = "diffy")]
-            ToolName::ApplyPatch => self.apply_patch(call),
         };
         let duration_ms = common::elapsed_ms_u64(started.elapsed().as_millis());
 

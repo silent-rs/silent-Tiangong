@@ -9641,6 +9641,7 @@ dependencies = [
  "tiangong-media",
  "tiangong-memory",
  "tiangong-plugin-browser",
+ "tiangong-plugin-fs",
  "tiangong-plugin-scheduler",
  "tiangong-plugin-terminal",
  "tiangong-scheduler",
@@ -9662,6 +9663,7 @@ dependencies = [
  "termimad",
  "tiangong-config",
  "tiangong-core",
+ "tiangong-plugin-fs",
  "tiangong-plugin-scheduler",
  "tiangong-types",
  "tokio",
@@ -9694,7 +9696,6 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "dashmap",
- "diffy",
  "futures-util",
  "http",
  "notify",
@@ -9825,6 +9826,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-plugin-fs"
+version = "0.11.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "diffy",
+ "scru128",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tiangong-core",
+ "tokio",
+]
+
+[[package]]
 name = "tiangong-plugin-scheduler"
 version = "0.11.0"
 dependencies = [
@@ -9900,6 +9916,7 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-media",
+ "tiangong-plugin-fs",
  "tiangong-plugin-scheduler",
  "tiangong-scheduler",
  "tiangong-types",
