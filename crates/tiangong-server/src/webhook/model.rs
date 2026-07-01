@@ -1,4 +1,4 @@
-pub use tiangong_core::scheduler::webhook::model::*;
+pub use tiangong_scheduler::webhook::model::*;
 
 use silent::prelude::*;
 

@@ -3,10 +3,7 @@ use std::sync::Arc;
 use tiangong_scheduler::executor::SchedulerContext;
 
 /// 执行定时任务（委托给 tiangong_scheduler::executor）
-pub async fn execute_job(
-    ctx: Arc<dyn SchedulerContext>,
-    job: tiangong_core::scheduler::model::Job,
-) {
+pub async fn execute_job(ctx: Arc<dyn SchedulerContext>, job: tiangong_scheduler::model::Job) {
     tiangong_scheduler::executor::execute_job(ctx, job).await;
 }
 
