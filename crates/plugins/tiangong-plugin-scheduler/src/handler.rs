@@ -1,10 +1,10 @@
-//! 定时任务工具覆盖处理器。
+//! 定时任务工具规格与覆盖处理器实现。
 //!
-//! 实现 [`ToolOverrideHandler`]，直接从 LLM 传入的命名参数 JSON（`call.arguments`）
-//! 按 key 取参，彻底绕开旧的「位置参数数组」模式，避免参数顺序错位导致的 not found。
+//! 实现 [`ToolSpecProvider`] 与 [`ToolOverrideHandler`]，直接从 LLM 传入的命名参数
+//! JSON（`call.arguments`）按 key 取参，彻底绕开旧的「位置参数数组」模式，避免参数
+//! 顺序错位导致的 not found。
 //!
-//! 同时实现 [`ToolSpecProvider`]，向 Agent 注入 6 个独立的定时任务工具规格，
-//! 让 core 完全不感知 scheduler 的工具定义。
+//! 向 Agent 注入 6 个独立的定时任务工具规格，让 core 完全不感知 scheduler 的工具定义。
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -14,6 +14,8 @@ use tiangong_core::tool_override::{ToolOverrideHandler, ToolSpecProvider};
 use tiangong_scheduler::model::{Job, JobRun, JobRunStatus, TriggerType, UpdateJobRequest};
 use tiangong_scheduler::store::JobStore;
 
+use crate::plugin::SchedulerPlugin;
+
 /// 工具名常量：每个操作对应一个独立工具，LLM 无需再传 action 字段。
 pub const TOOL_CREATE_JOB: &str = "scheduler_create_job";
 pub const TOOL_LIST_JOBS: &str = "scheduler_list_jobs";
@@ -22,26 +24,7 @@ pub const TOOL_DELETE_JOB: &str = "scheduler_delete_job";
 pub const TOOL_TRIGGER_JOB: &str = "scheduler_trigger_job";
 pub const TOOL_GET_JOB_RUNS: &str = "scheduler_get_job_runs";
 
-/// 定时任务工具覆盖处理器：按工具名分发，命名参数取值。
-#[derive(Clone, Default)]
-pub struct SchedulerToolOverride {
-    /// 可选的存储根目录，用于测试隔离。生产环境为 None，使用默认的 `~/.tiangong/scheduler`。
-    store_base: Option<std::path::PathBuf>,
-}
-
-impl SchedulerToolOverride {
-    pub fn new() -> Self {
-        Self { store_base: None }
-    }
-
-    /// 指定存储根目录（测试用），返回新的 handler 实例。
-    #[cfg(test)]
-    pub(crate) fn with_store_base(store_base: std::path::PathBuf) -> Self {
-        Self {
-            store_base: Some(store_base),
-        }
-    }
-
+impl SchedulerPlugin {
     /// 打开 JobStore：生产用默认路径，测试用注入路径。
     fn open_store(&self) -> Result<JobStore> {
         match &self.store_base {
@@ -54,7 +37,7 @@ impl SchedulerToolOverride {
     ///
     /// 每个处理函数返回 `Some(ToolResult)` 表示已处理；返回 `None` 表示工具名不匹配，
     /// 交回默认逻辑（实际上所有注册的工具名都会命中，None 仅作防御）。
-    fn dispatch(&self, call: &ToolCall) -> Option<ToolResult> {
+    pub(crate) fn dispatch(&self, call: &ToolCall) -> Option<ToolResult> {
         let result = match call.name.as_str() {
             TOOL_CREATE_JOB => self.handle_create_job(call),
             TOOL_LIST_JOBS => self.handle_list_jobs(),
@@ -358,7 +341,7 @@ impl SchedulerToolOverride {
     }
 }
 
-impl ToolSpecProvider for SchedulerToolOverride {
+impl ToolSpecProvider for SchedulerPlugin {
     /// 返回 6 个独立的定时任务工具规格。
     ///
     /// 每个操作一个工具名，LLM 无需再传 action 字段；参数全部命名化，schema 清晰。
@@ -440,7 +423,7 @@ impl ToolSpecProvider for SchedulerToolOverride {
     }
 }
 
-impl ToolOverrideHandler for SchedulerToolOverride {
+impl ToolOverrideHandler for SchedulerPlugin {
     fn handle(
         &self,
         call: &ToolCall,
@@ -552,10 +535,10 @@ mod tests {
     use serde_json::json;
     use tiangong_core::model::ToolCall;
 
-    /// 构造一个绑定到临时存储目录的 handler，避免污染真实的 `~/.tiangong/scheduler`。
-    fn handler_in_tmp() -> (SchedulerToolOverride, tempfile::TempDir) {
+    /// 构造一个绑定到临时存储目录的插件，避免污染真实的 `~/.tiangong/scheduler`。
+    fn handler_in_tmp() -> (SchedulerPlugin, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().unwrap();
-        let handler = SchedulerToolOverride::with_store_base(dir.path().to_path_buf());
+        let handler = SchedulerPlugin::with_store_base(dir.path().to_path_buf());
         (handler, dir)
     }
 
@@ -569,7 +552,7 @@ mod tests {
     }
 
     /// 先通过 create_job 建一个任务，返回其 id（供后续操作使用）。
-    fn seed_job(handler: &SchedulerToolOverride, name: &str) -> String {
+    fn seed_job(handler: &SchedulerPlugin, name: &str) -> String {
         let call = make_call(
             TOOL_CREATE_JOB,
             json!({
@@ -734,7 +717,7 @@ mod tests {
     //   - get_job_runs_unknown_job_should_error    → Review 第 3 项：校验任务存在
     //   - update_job_can_clear_optional_field      → Review 第 4 项：显式空串清空字段
 
-    /// 打开与 handler 同一存储根的 JobStore，供测试断言副作用（执行历史等）。
+    /// 打开与插件同一存储根的 JobStore，供测试断言副作用（执行历史等）。
     fn store_at(dir: &tempfile::TempDir) -> tiangong_scheduler::store::JobStore {
         tiangong_scheduler::store::JobStore::open_at(dir.path().to_path_buf()).unwrap()
     }

@@ -3401,7 +3401,7 @@ pub async fn probe_embedding_dimension(
 
 #[tauri::command]
 pub async fn job_list() -> Result<Vec<serde_json::Value>, String> {
-    let store = tiangong_core::scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
+    let store = tiangong_scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
     let jobs = store.list_jobs().map_err(|e| e.to_string())?;
     Ok(jobs
         .into_iter()
@@ -3418,13 +3418,13 @@ pub async fn job_create(
     payload: String,
     enabled: Option<bool>,
 ) -> Result<serde_json::Value, String> {
-    let store = tiangong_core::scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
+    let store = tiangong_scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
     let now = chrono::Local::now().naive_local().to_string();
-    let job = tiangong_core::scheduler::model::Job {
+    let job = tiangong_scheduler::model::Job {
         id: scru128::new().to_string(),
         name,
         description,
-        trigger_type: tiangong_core::scheduler::model::TriggerType::Cron,
+        trigger_type: tiangong_scheduler::model::TriggerType::Cron,
         schedule: Some(schedule),
         session_id,
         payload,
@@ -3446,8 +3446,8 @@ pub async fn job_update(
     payload: Option<String>,
     enabled: Option<bool>,
 ) -> Result<serde_json::Value, String> {
-    let store = tiangong_core::scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
-    let req = tiangong_core::scheduler::model::UpdateJobRequest {
+    let store = tiangong_scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
+    let req = tiangong_scheduler::model::UpdateJobRequest {
         name,
         description,
         schedule,
@@ -3465,7 +3465,7 @@ pub async fn job_update(
 
 #[tauri::command]
 pub async fn job_delete(id: String) -> Result<(), String> {
-    let store = tiangong_core::scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
+    let store = tiangong_scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
     let deleted = store.delete_job(&id).map_err(|e| e.to_string())?;
     if !deleted {
         return Err(format!("定时任务 '{id}' 不存在"));
@@ -3478,7 +3478,7 @@ pub async fn job_trigger(
     id: String,
     state: State<'_, TiangongApp>,
 ) -> Result<serde_json::Value, String> {
-    let store = tiangong_core::scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
+    let store = tiangong_scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
     let job = store
         .get_job(&id)
         .map_err(|e| e.to_string())?
@@ -3502,7 +3502,7 @@ pub async fn job_list_runs(
     id: String,
     limit: Option<usize>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let store = tiangong_core::scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
+    let store = tiangong_scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
     let runs = store
         .list_job_runs(&id, limit.unwrap_or(20))
         .map_err(|e| e.to_string())?;
@@ -3516,8 +3516,8 @@ pub async fn job_list_runs(
 
 #[tauri::command]
 pub async fn webhook_list() -> Result<Vec<serde_json::Value>, String> {
-    let store = tiangong_core::scheduler::webhook::store::WebhookStore::open()
-        .map_err(|e| e.to_string())?;
+    let store =
+        tiangong_scheduler::webhook::store::WebhookStore::open().map_err(|e| e.to_string())?;
     let webhooks = store.list().map_err(|e| e.to_string())?;
     Ok(webhooks
         .into_iter()
@@ -3534,10 +3534,10 @@ pub async fn webhook_create(
     secret: Option<String>,
     enabled: Option<bool>,
 ) -> Result<serde_json::Value, String> {
-    let store = tiangong_core::scheduler::webhook::store::WebhookStore::open()
-        .map_err(|e| e.to_string())?;
+    let store =
+        tiangong_scheduler::webhook::store::WebhookStore::open().map_err(|e| e.to_string())?;
     let now = chrono::Local::now().naive_local().to_string();
-    let webhook = tiangong_core::scheduler::webhook::model::Webhook {
+    let webhook = tiangong_scheduler::webhook::model::Webhook {
         id: scru128::new().to_string(),
         name,
         description,
@@ -3562,9 +3562,9 @@ pub async fn webhook_update(
     secret: Option<String>,
     enabled: Option<bool>,
 ) -> Result<serde_json::Value, String> {
-    let store = tiangong_core::scheduler::webhook::store::WebhookStore::open()
-        .map_err(|e| e.to_string())?;
-    let req = tiangong_core::scheduler::webhook::model::UpdateWebhookRequest {
+    let store =
+        tiangong_scheduler::webhook::store::WebhookStore::open().map_err(|e| e.to_string())?;
+    let req = tiangong_scheduler::webhook::model::UpdateWebhookRequest {
         name,
         description,
         session_id,
@@ -3582,8 +3582,8 @@ pub async fn webhook_update(
 
 #[tauri::command]
 pub async fn webhook_delete(id: String) -> Result<(), String> {
-    let store = tiangong_core::scheduler::webhook::store::WebhookStore::open()
-        .map_err(|e| e.to_string())?;
+    let store =
+        tiangong_scheduler::webhook::store::WebhookStore::open().map_err(|e| e.to_string())?;
     let deleted = store.delete(&id).map_err(|e| e.to_string())?;
     if !deleted {
         return Err(format!("Webhook '{id}' 不存在"));
@@ -3596,8 +3596,8 @@ pub async fn webhook_trigger(
     id: String,
     state: State<'_, TiangongApp>,
 ) -> Result<serde_json::Value, String> {
-    let store = tiangong_core::scheduler::webhook::store::WebhookStore::open()
-        .map_err(|e| e.to_string())?;
+    let store =
+        tiangong_scheduler::webhook::store::WebhookStore::open().map_err(|e| e.to_string())?;
     let webhook = store
         .get(&id)
         .map_err(|e| e.to_string())?
@@ -3621,8 +3621,8 @@ pub async fn webhook_list_runs(
     id: String,
     limit: Option<usize>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let store = tiangong_core::scheduler::webhook::store::WebhookStore::open()
-        .map_err(|e| e.to_string())?;
+    let store =
+        tiangong_scheduler::webhook::store::WebhookStore::open().map_err(|e| e.to_string())?;
     let runs = store
         .list_runs(&id, limit.unwrap_or(20))
         .map_err(|e| e.to_string())?;

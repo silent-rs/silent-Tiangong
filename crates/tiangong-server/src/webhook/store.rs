@@ -1,1 +1,1 @@
-pub use tiangong_core::scheduler::webhook::store::WebhookStore;
+pub use tiangong_scheduler::webhook::store::WebhookStore;

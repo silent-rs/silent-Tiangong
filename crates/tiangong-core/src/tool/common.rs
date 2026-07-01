@@ -1,3 +1,15 @@
+//! 工具共享 helper：会话工作目录、路径沙箱、命令白名单、命令执行。
+//!
+//! 既是 core 内置工具（`LocalToolExecutor`）的共享基础设施，也通过 `pub` 暴露给
+//! 进程内插件 crate（如 `tiangong-plugin-fs`）复用——插件单向依赖 core，无需重复
+//! 实现安全逻辑。
+//!
+//! 路径解析相关 helper 提供两套 API：
+//! - 隐式 thread-local 版本（`resolve_workspace_path` 等）：依赖 `SESSION_CWD`，
+//!   供 core 内置工具沿用旧行为；
+//! - 显式注入版本（`*_with_base`）：接收 `base: &Path` 参数，供插件 handler 使用，
+//!   无需关心调用方是否设置了 thread-local CWD。
+
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -18,7 +30,7 @@ pub fn set_session_cwd(cwd: Option<PathBuf>) {
     SESSION_CWD.with(|cell| *cell.borrow_mut() = cwd);
 }
 
-pub(super) fn workspace_root() -> Result<PathBuf> {
+pub fn workspace_root() -> Result<PathBuf> {
     // 优先使用会话级工作目录，回退到进程工作目录
     SESSION_CWD.with(|cell| {
         if let Some(ref cwd) = *cell.borrow()
@@ -38,8 +50,11 @@ pub fn session_workspace_root() -> Option<PathBuf> {
     SESSION_CWD.with(|cell| cell.borrow().as_ref().filter(|cwd| cwd.is_dir()).cloned())
 }
 
-fn write_allowed_roots() -> Result<Vec<PathBuf>> {
-    let workspace = workspace_root()?;
+/// 计算允许写入的根目录列表（工作空间 + `~/.tiangong/skills`）。
+///
+/// 显式传入 `workspace`，供无 thread-local CWD 的插件 handler 调用，
+/// 避免隐式依赖 `SESSION_CWD`。
+fn write_allowed_roots_with(workspace: &Path) -> Result<Vec<PathBuf>> {
     let workspace_canonical = workspace
         .canonicalize()
         .with_context(|| format!("解析工作目录失败：{}", workspace.display()))?;
@@ -55,51 +70,59 @@ fn write_allowed_roots() -> Result<Vec<PathBuf>> {
     Ok(roots)
 }
 
-pub(super) fn resolve_effective_cwd(raw: Option<&str>) -> Result<PathBuf> {
-    let root = workspace_root()?;
+pub(super) fn write_allowed_roots() -> Result<Vec<PathBuf>> {
+    let workspace = workspace_root()?;
+    write_allowed_roots_with(&workspace)
+}
+
+/// 基于 `base` 工作目录校验路径是否落在允许写入的根目录内。
+fn ensure_path_in_write_allowed_roots_with(path: &Path, label: &str, base: &Path) -> Result<()> {
+    let roots = write_allowed_roots_with(base)?;
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("解析{label}失败：{}", path.display()))?;
+    if !is_path_in_allowed_roots(&canonical, &roots) {
+        return Err(anyhow!(
+            "{label}越界，仅允许当前工作空间或 ~/.tiangong/skills：{}",
+            canonical.display()
+        ));
+    }
+    Ok(())
+}
+
+/// 解析 effective cwd（显式传入工作目录，供插件 handler 使用）。
+pub fn resolve_effective_cwd_with(raw: Option<&str>, base: &Path) -> Result<PathBuf> {
     let value = raw.unwrap_or(".").trim();
     let cwd = if value.is_empty() {
-        root.canonicalize()
-            .with_context(|| format!("解析工作目录失败：{}", root.display()))?
+        base.canonicalize()
+            .with_context(|| format!("解析工作目录失败：{}", base.display()))?
     } else {
-        resolve_path_from_base(value, &root)?
+        resolve_path_from_base(value, base)?
     };
     if !cwd.is_dir() {
         return Err(anyhow!("workdir 不是目录：{}", cwd.display()));
     }
-    ensure_path_in_write_allowed_roots(&cwd, "workdir")?;
+    ensure_path_in_write_allowed_roots_with(&cwd, "workdir", base)?;
     Ok(cwd)
 }
 
-pub(super) fn resolve_workspace_path(raw: &str) -> Result<PathBuf> {
-    let base = workspace_root()?;
-    resolve_path_from_base(raw, &base)
+/// 解析工作空间内的读路径（显式传入工作目录，供插件 handler 使用）。
+pub fn resolve_workspace_path_with(raw: &str, base: &Path) -> Result<PathBuf> {
+    resolve_path_from_base(raw, base)
 }
 
-/// 信任模式下的路径解析：不做越界检查，路径不存在时不报错
-pub(super) fn resolve_workspace_path_trusted(raw: &str) -> Result<PathBuf> {
-    let base = workspace_root()?;
+/// 信任模式下的路径解析（显式传入工作目录）：不做越界检查，路径不存在时不报错。
+pub fn resolve_workspace_path_trusted_with(raw: &str, base: &Path) -> Result<PathBuf> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err(anyhow!("路径参数不能为空"));
     }
-    let candidate = resolve_path_candidate(raw, &base);
+    let candidate = resolve_path_candidate(raw, base);
     // 存在时 canonicalize 解析符号链接，不存在时直接返回
     Ok(candidate.canonicalize().unwrap_or(candidate))
 }
 
-pub(super) fn resolve_workspace_write_path(raw: &str) -> Result<PathBuf> {
-    let base = workspace_root()?;
-    resolve_write_path_from_base(raw, &base)
-}
-
-/// 信任模式下仍然限制写入范围，仅放宽目标文件不存在的场景。
-pub(super) fn resolve_workspace_write_path_trusted(raw: &str) -> Result<PathBuf> {
-    let base = workspace_root()?;
-    resolve_write_path_from_base(raw, &base)
-}
-
-pub(super) fn resolve_path_from_base(raw: &str, base: &Path) -> Result<PathBuf> {
+pub fn resolve_path_from_base(raw: &str, base: &Path) -> Result<PathBuf> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err(anyhow!("路径参数不能为空"));
@@ -112,7 +135,7 @@ pub(super) fn resolve_path_from_base(raw: &str, base: &Path) -> Result<PathBuf> 
     Ok(canonical)
 }
 
-pub(super) fn resolve_write_path_from_base(raw: &str, base: &Path) -> Result<PathBuf> {
+pub fn resolve_write_path_from_base(raw: &str, base: &Path) -> Result<PathBuf> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err(anyhow!("路径参数不能为空"));
@@ -132,7 +155,7 @@ pub(super) fn resolve_write_path_from_base(raw: &str, base: &Path) -> Result<Pat
     let parent_canonical = anchor
         .canonicalize()
         .with_context(|| format!("解析目标目录失败：{}", anchor.display()))?;
-    let roots = write_allowed_roots()?;
+    let roots = write_allowed_roots_with(base)?;
 
     if !is_path_in_allowed_roots(&parent_canonical, &roots) {
         return Err(anyhow!(
@@ -173,7 +196,7 @@ fn ensure_path_in_write_allowed_roots(path: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn validate_command_args_in_allowed_roots(
+pub fn validate_command_args_in_allowed_roots(
     cmd: &str,
     args: &[String],
     base_dir: &Path,
@@ -182,7 +205,7 @@ pub(super) fn validate_command_args_in_allowed_roots(
         return Ok(());
     }
 
-    let roots = write_allowed_roots()?;
+    let roots = write_allowed_roots_with(base_dir)?;
     let mut skip_next_value = false;
     for arg in args {
         let raw = arg.trim();
@@ -313,15 +336,9 @@ fn user_home_dir() -> Option<PathBuf> {
     }
 }
 
-pub(super) fn display_rel_path(path: &Path) -> String {
-    let root = match workspace_root().and_then(|root| {
-        root.canonicalize()
-            .with_context(|| format!("解析工作目录失败：{}", root.display()))
-    }) {
-        Ok(root) => root,
-        Err(_) => return path.display().to_string(),
-    };
-
+/// 相对工作目录的路径展示（显式传入工作目录，供插件 handler 使用）。
+pub fn display_rel_path_with(path: &Path, base: &Path) -> String {
+    let root = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
     path.strip_prefix(&root)
         .map(|rel| {
             let rel_text = rel.display().to_string();
@@ -334,7 +351,7 @@ pub(super) fn display_rel_path(path: &Path) -> String {
         .unwrap_or_else(|_| path.display().to_string())
 }
 
-pub(super) fn is_allowed_command(cmd: &str) -> bool {
+pub fn is_allowed_command(cmd: &str) -> bool {
     matches!(
         cmd,
         // 基础命令
@@ -387,7 +404,7 @@ pub(super) fn is_allowed_command(cmd: &str) -> bool {
     )
 }
 
-pub(super) fn validate_shell_command_args(
+pub fn validate_shell_command_args(
     shell_cmd: &str,
     args: &[String],
     base_dir: &Path,
@@ -549,10 +566,7 @@ fn is_allowed_shell_head_command(cmd: &str) -> bool {
         )
 }
 
-pub(super) fn derive_shell_exec_args(
-    script: &str,
-    shell: Option<&str>,
-) -> Result<(String, Vec<String>)> {
+pub fn derive_shell_exec_args(script: &str, shell: Option<&str>) -> Result<(String, Vec<String>)> {
     let shell = shell
         .unwrap_or("auto")
         .trim()
@@ -582,7 +596,7 @@ pub(super) fn derive_shell_exec_args(
     Ok((selected.to_string(), args))
 }
 
-pub(super) fn command_env_allowlist() -> Vec<(String, String)> {
+pub fn command_env_allowlist() -> Vec<(String, String)> {
     const ALLOWED: [&str; 21] = [
         "PATH",
         "HOME",
@@ -617,7 +631,7 @@ pub(super) fn command_env_allowlist() -> Vec<(String, String)> {
         .collect::<Vec<_>>()
 }
 
-pub(super) fn command_timeout_ms() -> u64 {
+pub fn command_timeout_ms() -> u64 {
     // 默认 30 秒超时，防止工具执行卡住
     // 可通过 TOOL_COMMAND_TIMEOUT_MS 环境变量覆盖（毫秒，0 表示无限等待）
     std::env::var("TOOL_COMMAND_TIMEOUT_MS")
@@ -626,7 +640,7 @@ pub(super) fn command_timeout_ms() -> u64 {
         .unwrap_or(30_000)
 }
 
-pub(super) fn execute_command_with_timeout(
+pub fn execute_command_with_timeout(
     command: &mut Command,
     timeout_ms: u64,
 ) -> Result<(Output, bool)> {
@@ -658,11 +672,7 @@ pub(super) fn execute_command_with_timeout(
     }
 }
 
-pub(super) fn elapsed_ms_u64(raw: u128) -> u64 {
-    raw.min(u64::MAX as u128) as u64
-}
-
-pub(super) fn truncate_output(raw: &str) -> String {
+pub fn truncate_output(raw: &str) -> String {
     const MAX_CHARS: usize = 6000;
     let mut output = raw.chars().take(MAX_CHARS).collect::<String>();
     if raw.chars().count() > MAX_CHARS {
