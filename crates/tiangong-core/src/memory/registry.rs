@@ -382,7 +382,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn memory_registry_reuses_global_handle_regardless_of_workspace() {
         let _lock = memory_registry_test_lock();
-        let _env = MemoryRegistryEnvGuard::enter();
+        let _env = MemoryRegistryEnvGuard::enter_without_vector();
         shutdown_memory_registry_blocking();
 
         let config = CoreConfig::default();
@@ -414,7 +414,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn memory_registry_async_path_starts_or_connects_inside_runtime() {
         let _lock = memory_registry_test_lock();
-        let _env = MemoryRegistryEnvGuard::enter();
+        let _env = MemoryRegistryEnvGuard::enter_without_vector();
         shutdown_memory_registry_blocking();
 
         let config = CoreConfig::default();
@@ -437,7 +437,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn memory_registry_hot_updates_memory_config_in_place() {
         let _lock = memory_registry_test_lock();
-        let _env = MemoryRegistryEnvGuard::enter();
+        let _env = MemoryRegistryEnvGuard::enter_without_vector();
         shutdown_memory_registry_blocking();
 
         let initial = CoreConfig::default();
@@ -446,7 +446,7 @@ mod tests {
                 .await
                 .expect("初始 MemoryHandle 应启动成功");
 
-        write_memory_test_config(1024, tiangong_memory::MemoryVectorMode::EmbeddedLanceDb);
+        write_memory_test_config(1024, tiangong_memory::MemoryVectorMode::Disabled);
         let updated = CoreConfig::default();
         let expected_summary = memory_config_summary(&updated);
         let updated_handle =
@@ -474,7 +474,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn memory_registry_reacts_to_core_config_provider_hot_reload() {
         let _lock = memory_registry_test_lock();
-        let _env = MemoryRegistryEnvGuard::enter();
+        let _env = MemoryRegistryEnvGuard::enter_without_vector();
         shutdown_memory_registry_blocking();
 
         let provider = CoreConfigProvider::new(CoreConfig::default());
@@ -487,7 +487,7 @@ mod tests {
         .await
         .expect("初始 MemoryHandle 应启动成功");
 
-        write_memory_test_config(2048, tiangong_memory::MemoryVectorMode::EmbeddedLanceDb);
+        write_memory_test_config(2048, tiangong_memory::MemoryVectorMode::Disabled);
         provider.update(|config| {
             config.context_limit += 1;
         });
@@ -575,6 +575,17 @@ mod tests {
                 prev_userprofile,
                 home,
             }
+        }
+
+        /// 进入隔离环境并写入「向量层禁用」的 Memory 配置。
+        ///
+        /// 这些测试只验证 registry 的句柄复用/热更新逻辑，不涉及向量检索。
+        /// 用 `Disabled` 跳过 lancedb（C++ FFI）初始化，从根上消除测试进程 teardown
+        /// 时 Actor 线程析构 lancedb 与进程 C++ 静态析构的竞态（Linux 偶发 SIGSEGV）。
+        fn enter_without_vector() -> Self {
+            let guard = Self::enter();
+            write_memory_test_config(768, tiangong_memory::MemoryVectorMode::Disabled);
+            guard
         }
     }
 
