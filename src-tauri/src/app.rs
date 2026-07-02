@@ -315,6 +315,10 @@ impl TiangongApp {
         }
         plugins.push(tiangong_plugin_fs::build_plugin());
         plugins.push(tiangong_plugin_index::build_plugin());
+        plugins.push(tiangong_plugin_generate_image::build_plugin());
+        plugins.push(tiangong_plugin_generate_video::build_plugin());
+        plugins.push(tiangong_plugin_text_to_speech::build_plugin());
+        plugins.push(tiangong_plugin_speech_to_text::build_plugin());
         plugins.push(tiangong_plugin_memory::build_plugin(memory_handle));
         plugins.push(tiangong_plugin_scheduler::build_plugin());
 

@@ -9589,10 +9589,14 @@ dependencies = [
  "tiangong-memory",
  "tiangong-plugin-browser",
  "tiangong-plugin-fs",
+ "tiangong-plugin-generate-image",
+ "tiangong-plugin-generate-video",
  "tiangong-plugin-index",
  "tiangong-plugin-memory",
  "tiangong-plugin-scheduler",
+ "tiangong-plugin-speech-to-text",
  "tiangong-plugin-terminal",
+ "tiangong-plugin-text-to-speech",
  "tiangong-scheduler",
  "tiangong-server",
  "tiangong-types",
@@ -9616,9 +9620,13 @@ dependencies = [
  "tiangong-plugin-command",
  "tiangong-plugin-fetch",
  "tiangong-plugin-fs",
+ "tiangong-plugin-generate-image",
+ "tiangong-plugin-generate-video",
  "tiangong-plugin-index",
  "tiangong-plugin-memory",
  "tiangong-plugin-scheduler",
+ "tiangong-plugin-speech-to-text",
+ "tiangong-plugin-text-to-speech",
  "tiangong-types",
  "tokio",
  "tracing",
@@ -9820,6 +9828,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-plugin-generate-image"
+version = "0.11.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tiangong-core",
+ "tracing",
+]
+
+[[package]]
+name = "tiangong-plugin-generate-video"
+version = "0.11.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tiangong-core",
+ "tiangong-media",
+ "tracing",
+]
+
+[[package]]
 name = "tiangong-plugin-index"
 version = "0.11.0"
 dependencies = [
@@ -9863,6 +9892,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-plugin-speech-to-text"
+version = "0.11.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tiangong-core",
+ "tracing",
+]
+
+[[package]]
 name = "tiangong-plugin-terminal"
 version = "0.11.0"
 dependencies = [
@@ -9877,6 +9916,17 @@ dependencies = [
  "tiangong-core",
  "tiangong-types",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "tiangong-plugin-text-to-speech"
+version = "0.11.0"
+dependencies = [
+ "scru128",
+ "serde",
+ "serde_json",
+ "tiangong-core",
  "tracing",
 ]
 
@@ -9926,9 +9976,13 @@ dependencies = [
  "tiangong-plugin-command",
  "tiangong-plugin-fetch",
  "tiangong-plugin-fs",
+ "tiangong-plugin-generate-image",
+ "tiangong-plugin-generate-video",
  "tiangong-plugin-index",
  "tiangong-plugin-memory",
  "tiangong-plugin-scheduler",
+ "tiangong-plugin-speech-to-text",
+ "tiangong-plugin-text-to-speech",
  "tiangong-scheduler",
  "tiangong-types",
  "tokio",

@@ -158,6 +158,10 @@ impl ServerCoreManager {
             {
                 let mut plugins = tiangong_plugin_fs::default_plugins();
                 plugins.extend(tiangong_plugin_index::default_plugins());
+                plugins.extend(tiangong_plugin_generate_image::default_plugins());
+                plugins.extend(tiangong_plugin_generate_video::default_plugins());
+                plugins.extend(tiangong_plugin_text_to_speech::default_plugins());
+                plugins.extend(tiangong_plugin_speech_to_text::default_plugins());
                 plugins.extend(tiangong_plugin_memory::default_plugins(memory_handle));
                 plugins.extend(tiangong_plugin_fetch::default_plugins());
                 plugins.extend(tiangong_plugin_command::default_plugins());
