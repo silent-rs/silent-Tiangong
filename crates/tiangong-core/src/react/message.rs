@@ -5,7 +5,6 @@ use std::sync::mpsc::Sender as StdSender;
 use crate::session::{Message, MessageRole, MessageToolCall, Session};
 use tiangong_types::{MediaAsset, StreamEvent};
 
-const MEMORY_LOOP_FEEDBACK_MAX_CHARS: usize = 12_000;
 const TOOL_RESULT_STREAM_MAX_CHARS: usize = 8_000;
 
 pub(crate) fn append_or_reuse_user_message(
@@ -327,11 +326,11 @@ fn default_recommended_next_action(kind: ToolFailureKind, message: &str) -> &'st
 pub(crate) fn tool_result_provider_text(
     tool_name: &str,
     result: &crate::tool::ToolResult,
-    allow_memory_context: bool,
+    _allow_memory_context: bool,
 ) -> String {
-    if tool_name == "recall_memory" {
-        build_memory_recall_feedback(&result.stdout, allow_memory_context)
-    } else if is_media_tool_name(tool_name) && result.ok {
+    // recall_memory 的引导文案已由 memory 插件内嵌进 ToolResult.stdout，
+    // 不再需要 core 特判包装，统一走 tool_result_full_output。
+    if is_media_tool_name(tool_name) && result.ok {
         let media_desc = if result.stdout.trim().is_empty() {
             result.summary.clone()
         } else {
@@ -441,26 +440,6 @@ pub(crate) fn is_media_tool_name(tool_name: &str) -> bool {
     )
 }
 
-pub(crate) fn build_memory_recall_feedback(stdout: &str, allow_memory_context: bool) -> String {
-    let header = if allow_memory_context && !stdout.trim().is_empty() {
-        "recall_memory 已完成。以下是可直接使用的回忆结果，请基于这些内容继续完成用户原始目标；不要再次调用 recall_memory，除非用户提出新的历史查询。"
-    } else if stdout.trim().is_empty() {
-        "recall_memory 已完成，但没有可用的增量历史记忆。请基于当前上下文继续完成用户原始目标；不要再次调用 recall_memory。"
-    } else {
-        "recall_memory 已完成，结果如下。请基于当前上下文继续完成用户原始目标；不要再次调用 recall_memory。"
-    };
-    let body = truncate_chars_with_notice(
-        stdout.trim(),
-        MEMORY_LOOP_FEEDBACK_MAX_CHARS,
-        "\n...(已截断，完整回忆结果已记录在工具执行消息中)",
-    );
-    if body.trim().is_empty() {
-        header.to_string()
-    } else {
-        format!("{header}\n\n{body}")
-    }
-}
-
 pub(crate) fn tool_result_full_output(result: &crate::tool::ToolResult) -> String {
     if result.ok {
         return if result.stdout.trim().is_empty() {
@@ -504,16 +483,6 @@ pub(crate) fn truncate_chars_with_notice(text: &str, max_chars: usize, notice: &
     } else {
         truncated
     }
-}
-
-pub(crate) fn latest_user_message(session: &Session) -> String {
-    session
-        .messages
-        .iter()
-        .rev()
-        .find(|message| message.role == MessageRole::User)
-        .map(|message| message.text_content())
-        .unwrap_or_default()
 }
 
 /// 注入工具的 tool_call name（注册在 tool spec 中，声明 Agent 不调用）。

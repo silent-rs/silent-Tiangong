@@ -77,6 +77,15 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     /// 默认实现为空操作——不需要主动投递外部事件的插件无需覆写。
     fn set_feedback_tx(&self, _tx: PluginFeedbackTx) {}
 
+    /// 注入记忆句柄（记忆系统启用时为 `Some`，否则 `None`）。
+    ///
+    /// core 在 engine 创建时于 [`Plugin::register`] 之前调用一次。需要访问记忆系统的
+    /// 插件（如 `recall_memory`）应覆写此方法，把入参存入内部字段——
+    /// [`tiangong_memory::MemoryHandle`] 内部为 `Arc`，clone 即可跨 turn 复用。
+    ///
+    /// 默认实现为空操作——不关心记忆系统的插件无需覆写。
+    fn set_memory_handle(&self, _handle: Option<tiangong_memory::MemoryHandle>) {}
+
     // ── 生命周期钩子 ──
     //
     // 在 worker_loop 的对应节点遍历插件回调，传入 `&mut Session` 供插件处理

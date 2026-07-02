@@ -416,7 +416,7 @@ impl ToolOverrideHandler for CommandPlugin {
     fn handle(
         &self,
         call: &ToolCall,
-        _session_id: &str,
+        _session: &tiangong_core::session::Session,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ToolResult>> + Send>> {
         // ToolOverrideHandler 要求返回 'static Future。先同步解析参数（借用 &self/&call），
         // 再用捕获的 owned 数据生成 Future，避免借用逃逸到 async 上下文。

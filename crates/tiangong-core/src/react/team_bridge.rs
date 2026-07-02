@@ -722,6 +722,9 @@ impl ReactEngine {
                                 &payload,
                             );
                         }
+                        Some(Command::EmitStreamEvent(ev)) => {
+                            let _ = stream_tx.send(ev);
+                        }
                         None => break,
                     }
                 }

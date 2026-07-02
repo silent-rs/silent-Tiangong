@@ -323,6 +323,10 @@ fn run_gui() {
             // 并通过生命周期钩子维护 workspace / session 索引。不依赖 Tauri 句柄。
             state.register_plugin(tiangong_plugin_index::build_plugin());
 
+            // 记忆召回插件：提供 recall_memory 工具，按需回忆历史上下文。
+            // 记忆句柄由 core 内部创建并经 set_memory_handle 注入，不依赖 Tauri 句柄。
+            state.register_plugin(tiangong_plugin_memory::build_plugin());
+
             // 注意：GUI 不注册 fetch / command 插件。web_fetch 由 browser 插件提供
             // （内嵌浏览器渲染），run_command / run_shell 由 terminal 插件提供（PTY 执行）。
             // CLI / Server 才注册 fetch / command（基础 reqwest 获取 + 子进程执行）。

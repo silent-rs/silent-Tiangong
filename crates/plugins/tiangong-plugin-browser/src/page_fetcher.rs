@@ -857,7 +857,7 @@ impl tiangong_core::tool_override::ToolOverrideHandler for BrowserToolOverride {
     fn handle(
         &self,
         call: &tiangong_core::model::ToolCall,
-        _session_id: &str,
+        _session: &tiangong_core::session::Session,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Option<tiangong_core::tool::ToolResult>> + Send>,
     > {

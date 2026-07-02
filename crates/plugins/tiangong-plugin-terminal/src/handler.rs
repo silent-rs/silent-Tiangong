@@ -376,8 +376,9 @@ impl tiangong_core::tool_override::ToolOverrideHandler for TerminalToolOverride 
     fn handle(
         &self,
         call: &tiangong_core::model::ToolCall,
-        session_id: &str,
+        session: &tiangong_core::session::Session,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ToolResult>> + Send>> {
+        let session_id = session.id.as_str();
         match call.name.as_str() {
             "run_command" => Self::handle_run_command(&self.provider, call, session_id),
             "run_shell" => Self::handle_run_shell(&self.provider, call, session_id),

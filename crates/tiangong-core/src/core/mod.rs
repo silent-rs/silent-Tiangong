@@ -34,9 +34,6 @@ pub use crate::index::{
     workspace_index_exists,
 };
 pub use crate::memory::gui_api::*;
-pub(crate) use crate::memory::recall::{
-    duplicate_memory_recall_tool_result, execute_memory_recall_tool, inject_memory_recall_tool,
-};
 pub(crate) use crate::memory::registry::{WorkerMemoryContext, get_or_init_memory_async};
 pub use crate::memory::registry::{
     get_or_init_memory_handle_async, load_memory_config, save_memory_config,
@@ -451,7 +448,13 @@ async fn worker_loop_async(
                 None
             };
             for plugin in &plugins {
-                crate::core::plugin::register_plugin(e, plugin.clone(), workspace, cmd_tx.clone());
+                crate::core::plugin::register_plugin(
+                    e,
+                    plugin.clone(),
+                    workspace,
+                    cmd_tx.clone(),
+                    memory.handle.as_ref(),
+                );
             }
             // 先收集插件工具规格 + plugin_injection，作为 MCP 工具的 reserved names，
             // 避免 MCP server 暴露同名工具（read_file/web_fetch/run_command 等）与插件冲突。
@@ -471,11 +474,8 @@ async fn worker_loop_async(
             // 合并 plugin 注册的工具规格
             new_tools.extend(plugin_specs);
             inject_enhanced_tools(&mut new_tools, e);
-            // index_search 工具规格改由 index 插件通过 tool_specs() 声明，
+            // recall_memory 工具规格改由 memory 插件通过 tool_specs() 声明，
             // 随 plugin_specs 自动汇入（且自动进入 reserved_names，MCP 同名工具会被避让）。
-            if memory.handle.is_some() {
-                inject_memory_recall_tool(&mut new_tools);
-            }
             tools = new_tools;
             mcp_targets = new_mcp_targets;
             if !team_restored {
@@ -671,6 +671,9 @@ async fn worker_loop_async(
                     &payload,
                 );
                 let _ = stream_tx.send(StreamEvent::Done { usage: None });
+            }
+            Command::EmitStreamEvent(ev) => {
+                let _ = stream_tx.send(ev);
             }
             Command::CompressContext => {
                 compress_context_for_session(&mut session, engine.as_ref().unwrap(), &stream_tx);

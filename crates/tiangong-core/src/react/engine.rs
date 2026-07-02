@@ -160,7 +160,6 @@ impl ReactEngine {
         let mut round = 0usize;
         let mut outer_iteration = 0u32;
         let mut accumulated_usage = TokenUsage::default();
-        let mut memory_recall_attempted = false;
         let mut successful_tool_call_keys = HashSet::new();
         let mut failed_tool_call_keys: HashMap<String, String> = HashMap::new();
         let mut failed_tool_names = HashSet::new();
@@ -220,7 +219,6 @@ impl ReactEngine {
                 match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
                     PendingCommandEffect::Terminate => return accumulated_usage,
                     PendingCommandEffect::MessageInjected => {
-                        memory_recall_attempted = false;
                         successful_tool_call_keys.clear();
                         failed_tool_call_keys.clear();
                         failed_tool_names.clear();
@@ -353,6 +351,9 @@ impl ReactEngine {
                                         stream_tx,
                                         &self.engine,
                                     );
+                                }
+                                Some(Command::EmitStreamEvent(ev)) => {
+                                    let _ = stream_tx.send(ev);
                                 }
                             }
                         }
@@ -525,7 +526,6 @@ impl ReactEngine {
                     maybe_update_context_summary(session, &self.engine, &response.usage, stream_tx);
 
                     if user_message_injected_during_stream {
-                        memory_recall_attempted = false;
                         successful_tool_call_keys.clear();
                         failed_tool_call_keys.clear();
                         failed_tool_names.clear();
@@ -627,7 +627,6 @@ impl ReactEngine {
                     match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
                         PendingCommandEffect::Terminate => return accumulated_usage,
                         PendingCommandEffect::MessageInjected => {
-                            memory_recall_attempted = false;
                             successful_tool_call_keys.clear();
                             failed_tool_call_keys.clear();
                             failed_tool_names.clear();
@@ -946,6 +945,9 @@ impl ReactEngine {
                                             &self.engine,
                                         );
                                     }
+                                    Some(Command::EmitStreamEvent(ev)) => {
+                                        let _ = stream_tx.send(ev);
+                                    }
                                 }
                             };
 
@@ -1060,32 +1062,7 @@ impl ReactEngine {
 
                     let (result, tool_llm_usage, allow_memory_context, usage_source) = {
                         let (mut result, tool_llm_usage, allow_memory_context, usage_source) =
-                            if call.name == "recall_memory" {
-                                if memory_recall_attempted {
-                                    // 本轮已完成回忆：补一次 Start→Done，让状态栏有清晰过渡
-                                    let _ = stream_tx.send(StreamEvent::MemoryRecallStart {
-                                        strategy: "skip".to_string(),
-                                    });
-                                    let _ = stream_tx.send(StreamEvent::MemoryRecallDone {
-                                        hit_count: 0,
-                                        hits: Vec::new(),
-                                    });
-                                    let (result, usage, allow_context) =
-                                        crate::core::duplicate_memory_recall_tool_result();
-                                    (result, usage, allow_context, "recall_memory")
-                                } else {
-                                    memory_recall_attempted = true;
-                                    let (result, usage, allow_context) =
-                                        crate::core::execute_memory_recall_tool(
-                                            call,
-                                            memory_handle,
-                                            session,
-                                            stream_tx,
-                                        )
-                                        .await;
-                                    (result, usage, allow_context, "recall_memory")
-                                }
-                            } else if call.name == "analyze_attachment" {
+                            if call.name == "analyze_attachment" {
                                 let (result, usage) = crate::core::execute_attachment_analysis_tool(
                                     call,
                                     &self.engine,
@@ -1099,7 +1076,7 @@ impl ReactEngine {
                                             call,
                                             &self.mcp_targets,
                                             &self.engine.agent_config().mcp,
-                                            &session.id,
+                                            session,
                                         )
                                         .await,
                                     tiangong_types::TokenUsage::default(),
@@ -1232,7 +1209,6 @@ impl ReactEngine {
                     match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
                         PendingCommandEffect::Terminate => return accumulated_usage,
                         PendingCommandEffect::MessageInjected => {
-                            memory_recall_attempted = false;
                             successful_tool_call_keys.clear();
                             failed_tool_call_keys.clear();
                             failed_tool_names.clear();
@@ -1269,7 +1245,6 @@ impl ReactEngine {
                         .iter()
                         .any(|tool| tool.name == "recall_memory")
                     {
-                        memory_recall_attempted = false;
                         "优先调用 recall_memory，充分使用 Memory 系统查询这个工具以前成功调用时使用的参数、环境前置条件、配置方式、替代步骤和相关经验；只有回忆不足以解决时，再切换工具、创建子 Agent 或请求用户协作。"
                     } else {
                         ""
@@ -1358,7 +1333,6 @@ impl ReactEngine {
                         }),
                     );
                     session.persist_to_disk();
-                    memory_recall_attempted = false;
                     successful_tool_call_keys.clear();
                     failed_tool_call_keys.clear();
                     failed_tool_names.clear();

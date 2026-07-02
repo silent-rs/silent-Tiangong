@@ -12,6 +12,7 @@ use crate::model::ToolSpec;
 use crate::model::{ModelClient, SingleProviderClient, TokenUsage, ToolCall};
 use crate::models_config::{ModelCapability, ModelsConfig};
 use crate::planner::TaskPlan;
+use crate::session::Session;
 use crate::tool::{ToolExecutionRecord, ToolResult};
 use crate::tool_override::ToolOverrideHandler;
 
@@ -376,7 +377,7 @@ impl RuntimeEngine {
         call: &ToolCall,
         mcp_targets: &HashMap<String, McpFunctionTarget>,
         mcp_config: &McpConfig,
-        session_id: &str,
+        session: &Session,
     ) -> ToolResult {
         // 权限检查
         use crate::permission::PermissionDecision;
@@ -466,7 +467,7 @@ impl RuntimeEngine {
             .lock()
             .ok()
             .and_then(|g| g.get(&call.name).cloned())
-            && let Some(result) = handler.handle(call, session_id).await
+            && let Some(result) = handler.handle(call, session).await
         {
             return result;
         }
