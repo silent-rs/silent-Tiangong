@@ -8,7 +8,6 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{Local, SecondsFormat};
@@ -24,7 +23,6 @@ use crate::plugin::FsPlugin;
 const TOOL_LIST_DIR: &str = "list_dir";
 const TOOL_TREE_DIR: &str = "tree_dir";
 const TOOL_READ_FILE: &str = "read_file";
-const TOOL_SEARCH_CODE: &str = "search_code";
 const TOOL_CURRENT_TIME: &str = "current_time";
 const TOOL_WRITE_FILE: &str = "write_file";
 const TOOL_REPLACE_IN_FILE: &str = "replace_in_file";
@@ -49,7 +47,6 @@ impl FsPlugin {
             TOOL_LIST_DIR => self.handle_list_dir(call),
             TOOL_TREE_DIR => self.handle_tree_dir(call),
             TOOL_READ_FILE => self.handle_read_file(call),
-            TOOL_SEARCH_CODE => self.handle_search_code(call),
             TOOL_CURRENT_TIME => self.handle_current_time(),
             TOOL_WRITE_FILE => self.handle_write_file(call),
             TOOL_REPLACE_IN_FILE => self.handle_replace_in_file(call),
@@ -238,99 +235,6 @@ impl FsPlugin {
             stdout,
             stderr: String::new(),
             exit_code: 0,
-            execution: None,
-        }
-    }
-
-    // ── search_code ─────────────────────────────────────────────
-
-    fn handle_search_code(&self, call: &ToolCall) -> ToolResult {
-        let base = match self.base() {
-            Ok(b) => b,
-            Err(e) => return tool_error("search_code", e),
-        };
-        let Some(pattern) = call.arguments.get("pattern").and_then(Value::as_str) else {
-            return param_error("search_code 缺少 pattern 参数");
-        };
-        let pattern = pattern.trim();
-        if pattern.is_empty() {
-            return param_error("search_code pattern 不能为空");
-        }
-        let target = call
-            .arguments
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or(".");
-        let full_path = match self.resolve_read_path(target, &base) {
-            Ok(p) => p,
-            Err(e) => return tool_error("search_code", e),
-        };
-
-        let timeout_ms = shared::command_timeout_ms();
-        let target_text = full_path.display().to_string();
-        let rg_result = shared::execute_command_with_timeout(
-            Command::new("rg")
-                .arg("--line-number")
-                .arg("--no-heading")
-                .arg("--color")
-                .arg("never")
-                .arg(pattern)
-                .arg(&target_text)
-                .current_dir(&base)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped()),
-            timeout_ms,
-        );
-
-        let (output, timed_out) = match rg_result {
-            Ok(payload) => payload,
-            Err(_) => match shared::execute_command_with_timeout(
-                Command::new("grep")
-                    .arg("-R")
-                    .arg("-n")
-                    .arg(pattern)
-                    .arg(&target_text)
-                    .current_dir(&base)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped()),
-                timeout_ms,
-            )
-            .with_context(|| format!("执行代码检索失败：pattern={pattern}"))
-            {
-                Ok(p) => p,
-                Err(e) => return tool_error("search_code", anyhow!(e)),
-            },
-        };
-
-        let exit_code = if timed_out {
-            -1
-        } else {
-            output.status.code().unwrap_or(-1)
-        };
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let stdout = if timed_out {
-            shared::truncate_output(&stdout)
-        } else {
-            stdout
-        };
-        let ok = !timed_out && (output.status.success() || exit_code == 1);
-        let summary = if timed_out {
-            format!("代码检索超时：pattern={pattern} (timeout_ms={timeout_ms})")
-        } else if exit_code == 1 {
-            format!("代码检索完成：未找到匹配（pattern={pattern}）")
-        } else if ok {
-            format!("代码检索成功：pattern={pattern}")
-        } else {
-            format!("代码检索失败：pattern={pattern} (exit_code={exit_code})")
-        };
-
-        ToolResult {
-            ok,
-            summary,
-            stdout,
-            stderr,
-            exit_code,
             execution: None,
         }
     }
@@ -580,7 +484,7 @@ impl FsPlugin {
 
     // ── 路径解析 helper ─────────────────────────────────────────
 
-    /// 读路径解析（list_dir / read_file / tree_dir / search_code 用）。
+    /// 读路径解析（list_dir / read_file / tree_dir 用）。
     fn resolve_read_path(&self, raw: &str, base: &Path) -> Result<std::path::PathBuf> {
         if self.is_full_trust() {
             shared::resolve_workspace_path_trusted_with(raw, base)
@@ -642,18 +546,6 @@ impl ToolSpecProvider for FsPlugin {
                         "max_lines": { "type": "integer", "description": "最大读取行数（默认 200，最大 2000）", "minimum": 1, "maximum": 2000 }
                     },
                     "required": ["path"]
-                }),
-            },
-            ToolSpec {
-                name: TOOL_SEARCH_CODE.to_string(),
-                description: "在目录中检索文本（优先使用 rg）".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "pattern": { "type": "string", "description": "检索文本或正则模式" },
-                        "path": { "type": "string", "description": "目标目录或文件路径，默认当前目录" }
-                    },
-                    "required": ["pattern"]
                 }),
             },
             ToolSpec {

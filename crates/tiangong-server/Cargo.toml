@@ -9,6 +9,7 @@ tiangong-core = { workspace = true }
 tiangong-plugin-command = { workspace = true }
 tiangong-plugin-fetch = { workspace = true }
 tiangong-plugin-fs = { workspace = true }
+tiangong-plugin-index = { workspace = true }
 tiangong-plugin-scheduler = { workspace = true }
 tiangong-config = { workspace = true }
 tiangong-media = { workspace = true }

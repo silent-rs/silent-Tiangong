@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use tiangong_core::core::plugin::{Plugin, check_full_trust};
+use tiangong_core::core::Plugin;
 use tiangong_core::permission::TrustMode;
 
 /// 基础文件工具插件。
@@ -34,9 +34,14 @@ impl FsPlugin {
 
     /// 当前是否处于完全信任模式。
     pub(crate) fn is_full_trust(&self) -> bool {
-        self.trust_mode
-            .read()
-            .map(|g| check_full_trust(g.as_ref()))
+        let Ok(handle) = self.trust_mode.read() else {
+            return false;
+        };
+        let Some(tm) = handle.as_ref() else {
+            return false;
+        };
+        tm.read()
+            .map(|g| *g == TrustMode::FullTrust)
             .unwrap_or(false)
     }
 }

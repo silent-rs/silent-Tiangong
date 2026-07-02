@@ -315,9 +315,13 @@ fn run_gui() {
             state.register_plugin(tiangong_plugin_scheduler::build_plugin());
 
             // 基础文件工具插件：不依赖 Tauri 句柄，无条件注册，提供 list_dir / read_file /
-            // write_file / tree_dir / search_code / current_time / replace_in_file / apply_patch
-            // 等 8 个工具（替代 core 的 LocalToolExecutor 实现）。
+            // write_file / tree_dir / current_time / replace_in_file / apply_patch 等 7 个工具
+            // （替代 core 的 LocalToolExecutor 实现）。
             state.register_plugin(tiangong_plugin_fs::build_plugin());
+
+            // 索引搜索插件：提供 index_search（全文索引）与 search_code（rg/grep 检索），
+            // 并通过生命周期钩子维护 workspace / session 索引。不依赖 Tauri 句柄。
+            state.register_plugin(tiangong_plugin_index::build_plugin());
 
             // 注意：GUI 不注册 fetch / command 插件。web_fetch 由 browser 插件提供
             // （内嵌浏览器渲染），run_command / run_shell 由 terminal 插件提供（PTY 执行）。

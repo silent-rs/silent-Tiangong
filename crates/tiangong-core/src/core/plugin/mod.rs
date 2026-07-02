@@ -30,7 +30,7 @@ mod tool_spec;
 mod trait_def;
 
 pub use feedback::{PluginFeedback, PluginFeedbackTx};
-pub use trait_def::{Plugin, check_full_trust};
+pub use trait_def::Plugin;
 
 pub(crate) use injection::injection_tool_spec;
 pub(crate) use registry::register_plugin;

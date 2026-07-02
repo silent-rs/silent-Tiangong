@@ -11,8 +11,10 @@
 //!   无需关心调用方是否设置了 thread-local CWD。
 
 use std::cell::RefCell;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -645,31 +647,101 @@ pub fn execute_command_with_timeout(
     timeout_ms: u64,
 ) -> Result<(Output, bool)> {
     configure_no_window(command);
-    let mut child = command.spawn().context("spawn 子进程失败")?;
 
-    // timeout_ms=0 表示不设超时
+    // timeout_ms=0 表示不设超时：子进程会自然退出，stdout pipe 不会堵，可直接用标准 API。
     if timeout_ms == 0 {
-        let output = child.wait_with_output().context("读取命令输出失败")?;
+        let output = command.output().context("执行命令失败")?;
         return Ok((output, false));
     }
 
+    // 显式 piped：用独立线程实时 drain stdout/stderr，避免子进程输出写满 pipe 缓冲区
+    //（通常 64KB）后阻塞在写端，导致父进程 try_wait 永远等不到退出、最终被超时杀。
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+
+    let mut child = command.spawn().context("spawn 子进程失败")?;
+
+    // 取出 stdout/stderr 句柄，各自起线程持续读取到独立 buffer。
+    // 用 Box<dyn Read> 统一 ChildStdout / ChildStdErr 两种类型，复用同一个 drain 函数。
+    let stdout: Option<Box<dyn Read + Send>> = child
+        .stdout
+        .take()
+        .map(|s| Box::new(s) as Box<dyn Read + Send>);
+    let stderr: Option<Box<dyn Read + Send>> = child
+        .stderr
+        .take()
+        .map(|s| Box::new(s) as Box<dyn Read + Send>);
+    let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+
+    let stdout_handle = spawn_drain(stdout, stdout_buf.clone());
+    let stderr_handle = spawn_drain(stderr, stderr_buf.clone());
+
     let timeout = Duration::from_millis(timeout_ms);
     let started = Instant::now();
+    let mut timed_out = false;
 
-    loop {
-        if let Some(_status) = child.try_wait().context("轮询子进程状态失败")? {
-            let output = child.wait_with_output().context("读取命令输出失败")?;
-            return Ok((output, false));
+    let status = loop {
+        if let Some(status) = child.try_wait().context("轮询子进程状态失败")? {
+            break status;
         }
-
         if started.elapsed() >= timeout {
             let _ = child.kill();
-            let output = child.wait_with_output().context("读取超时命令输出失败")?;
-            return Ok((output, true));
+            timed_out = true;
+            // kill 后再 wait 拿到最终 status（try_wait 可能需要一次循环才返回）。
+            let status = child.wait().context("等待被杀子进程退出失败")?;
+            break status;
         }
-
         thread::sleep(Duration::from_millis(20));
-    }
+    };
+
+    // 等待两个 drain 线程结束（子进程退出或被 kill 后 pipe 关闭，读线程收到 EOF 返回）。
+    // join 失败（读线程意外 panic）时用已收集的部分输出兜底。
+    let _ = stdout_handle.join();
+    let _ = stderr_handle.join();
+
+    let stdout = take_buf(&stdout_buf);
+    let stderr = take_buf(&stderr_buf);
+
+    Ok((
+        Output {
+            status,
+            stdout,
+            stderr,
+        },
+        timed_out,
+    ))
+}
+
+/// 起一个线程持续读取 `pipe` 到共享 buffer，直到 EOF。
+fn spawn_drain(
+    pipe: Option<Box<dyn Read + Send>>,
+    buf: Arc<Mutex<Vec<u8>>>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let Some(mut pipe) = pipe else {
+            return;
+        };
+        let mut tmp = [0u8; 8192];
+        loop {
+            match pipe.read(&mut tmp) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    if let Ok(mut guard) = buf.lock() {
+                        guard.extend_from_slice(&tmp[..n]);
+                    }
+                }
+                Err(_) => break, // 读取错误（含 pipe 被关闭），结束线程
+            }
+        }
+    })
+}
+
+/// 从共享 buffer 取出全部字节（清空原 buffer，避免长期持锁）。
+fn take_buf(buf: &Arc<Mutex<Vec<u8>>>) -> Vec<u8> {
+    buf.lock()
+        .map(|mut g| std::mem::take(&mut *g))
+        .unwrap_or_default()
 }
 
 pub fn truncate_output(raw: &str) -> String {

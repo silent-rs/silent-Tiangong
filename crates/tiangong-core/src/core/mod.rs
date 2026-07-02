@@ -360,17 +360,13 @@ async fn worker_loop_async(
     let mut mcp_targets: HashMap<String, McpFunctionTarget> = HashMap::new();
     let team_context = Arc::new(Mutex::new(crate::agent_team::lifecycle::TeamContext::new()));
     let mut team_restored = false;
+    // on_session_ready 仅在首次 engine build + 插件注册完成后触发一次
+    let mut session_ready_fired = false;
     // turn 计数器：每 10 个 turn 触发一次 Meta 反刍（归档低活跃节点）
     let mut turn_count: u32 = 0;
 
-    // IndexManager：Workspace 文件索引 + Session 对话索引
-    let index_manager = crate::index::IndexManager::new()
-        .map(std::sync::Arc::new)
-        .map_err(|e| {
-            tracing::warn!("IndexManager 初始化失败: {e}");
-            e
-        })
-        .ok();
+    // IndexManager 已下沉到 index 插件私有持有，core 不再创建/感知它。
+    // 索引的初始扫描、增量写入、finalize 全部由 index 插件的生命周期钩子接管。
 
     // 内部 StreamEvent 通道 —— 转发线程负责包装 session_id
     // stream_tx 保持 std::sync::mpsc（工具执行等同步代码可直接使用）
@@ -412,16 +408,7 @@ async fn worker_loop_async(
 
     apply_session_cwd(&session);
 
-    // 初始索引：仅在索引不存在时扫描
-    if let Some(ref im) = index_manager {
-        let root = std::path::PathBuf::from(&session.cwd);
-        if root.is_dir() && !crate::index::workspace_index_exists(&root) {
-            match im.full_scan(&root) {
-                Ok(count) => tracing::info!(count, "Workspace 初始索引扫描完成"),
-                Err(e) => tracing::warn!("Workspace 初始索引扫描失败: {e}"),
-            }
-        }
-    }
+    // 初始索引扫描已由 index 插件的 on_session_ready 钩子接管（见下方钩子调用）。
 
     // 恢复未完成的审批请求（崩溃恢复场景）
     let pending = crate::approval_store::get_pending(&session_id);
@@ -435,6 +422,9 @@ async fn worker_loop_async(
             });
         }
     }
+
+    // on_session_ready 已移至「首次 engine build + 插件注册完成」之后触发，
+    // 确保插件在钩子内能读到已注入的 workspace / trust_mode / feedback。
 
     while let Some(cmd) = cmd_rx.recv().await {
         // 配置变更检测：仅在 generation 变化时重建 engine 和工具列表
@@ -481,9 +471,8 @@ async fn worker_loop_async(
             // 合并 plugin 注册的工具规格
             new_tools.extend(plugin_specs);
             inject_enhanced_tools(&mut new_tools, e);
-            if index_manager.is_some() {
-                crate::index::inject_index_search_tool(&mut new_tools);
-            }
+            // index_search 工具规格改由 index 插件通过 tool_specs() 声明，
+            // 随 plugin_specs 自动汇入（且自动进入 reserved_names，MCP 同名工具会被避让）。
             if memory.handle.is_some() {
                 inject_memory_recall_tool(&mut new_tools);
             }
@@ -502,6 +491,19 @@ async fn worker_loop_async(
                 team_restored = true;
             }
             last_cfg_gen = cfg_gen;
+
+            // 首次 engine build + 插件注册完成后触发一次 on_session_ready
+            //（此时 workspace / trust_mode / feedback 已注入）；后续重建只调 on_engine_rebuilt。
+            if !session_ready_fired {
+                session_ready_fired = true;
+                for plugin in &plugins {
+                    plugin.on_session_ready(&mut session);
+                }
+            }
+            // engine 创建/重建完成：回调插件生命周期钩子
+            for plugin in &plugins {
+                plugin.on_engine_rebuilt(&mut session);
+            }
         }
 
         match cmd {
@@ -524,18 +526,10 @@ async fn worker_loop_async(
                 )
                 .await;
 
-                // 索引：仅当 CWD 实际变化时扫描
-                if cwd_changed && let Some(ref im) = index_manager {
-                    let root = std::path::PathBuf::from(&session.cwd);
-                    if root.is_dir() {
-                        match im.full_scan(&root) {
-                            Ok(count) => {
-                                tracing::info!(count, "Workspace 索引扫描完成");
-                            }
-                            Err(e) => {
-                                tracing::warn!("Workspace 索引扫描失败: {e}");
-                            }
-                        }
+                // CWD 变更：回调插件生命周期钩子（index 插件在此重扫工作区索引）
+                if cwd_changed {
+                    for plugin in &plugins {
+                        plugin.on_cwd_changed(&mut session);
                     }
                 }
 
@@ -576,6 +570,11 @@ async fn worker_loop_async(
                         .unwrap_or_default(),
                 });
 
+                // Turn 开始前：回调插件生命周期钩子（用户消息已写入 session）
+                for plugin in &plugins {
+                    plugin.on_turn_started(&mut session, turn_start_idx);
+                }
+
                 // 执行对话轮次
                 execute_turn_async(
                     &mut session,
@@ -586,7 +585,6 @@ async fn worker_loop_async(
                     &stream_tx,
                     &mut cmd_rx,
                     memory.handle.as_ref(),
-                    index_manager.clone(),
                     team_context.clone(),
                 )
                 .await;
@@ -612,9 +610,9 @@ async fn worker_loop_async(
                     session.persist_to_disk();
                 }
 
-                // Turn 完成后 → Session 索引
-                if let Some(ref im) = index_manager {
-                    index_turn_messages(im, &session, turn_start_idx);
+                // Turn 完成后：回调插件生命周期钩子（index 插件在此批量写入 Session 索引）
+                for plugin in &plugins {
+                    plugin.on_turn_finished(&mut session, turn_start_idx);
                 }
 
                 // turn 完成后触发增强版 Micro 反刍
@@ -697,43 +695,13 @@ async fn worker_loop_async(
         tracing::info!(session_id = %session_id, "Meso 反刍已触发（会话结束）");
     }
 
-    // 会话结束 → finalize Session 索引
-    if let Some(ref im) = index_manager
-        && let Err(e) = im.finalize_session_index(&session_id)
-    {
-        tracing::warn!("Session 索引 finalize 失败: {e}");
+    // 会话结束：回调插件生命周期钩子（index 插件在此 finalize Session 索引）。
+    // 注意：stream 通道已关闭，钩子内不应再投递流事件。
+    for plugin in &plugins {
+        plugin.on_session_ended(&mut session);
     }
 
     session
-}
-
-fn index_turn_messages(
-    index_manager: &crate::index::IndexManager,
-    session: &Session,
-    turn_start_idx: usize,
-) {
-    let turns: Vec<crate::index::TurnData> = session.messages[turn_start_idx..]
-        .iter()
-        .filter_map(|msg| {
-            let role = match msg.role {
-                MessageRole::User => "user",
-                MessageRole::Assistant => "assistant",
-                MessageRole::Tool => "tool",
-                MessageRole::System => return None,
-            };
-            Some(crate::index::TurnData {
-                turn_id: msg.id.clone(),
-                workspace_id: session.cwd.clone(),
-                role: role.to_string(),
-                content: msg.text_content(),
-                topics: Vec::new(),
-                entity_names: Vec::new(),
-            })
-        })
-        .collect();
-    if let Err(e) = index_manager.index_turn_batch(&session.id, &turns) {
-        tracing::warn!("Session 索引批量写入失败: {e}");
-    }
 }
 
 pub(crate) fn apply_session_cwd(session: &Session) {
@@ -860,7 +828,6 @@ async fn execute_turn_async(
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     memory_handle: Option<&tiangong_memory::MemoryHandle>,
-    index_manager: Option<std::sync::Arc<crate::index::IndexManager>>,
     team_context: Arc<Mutex<crate::agent_team::lifecycle::TeamContext>>,
 ) {
     let mut react = crate::react::engine::ReactEngine::new(
@@ -872,14 +839,7 @@ async fn execute_turn_async(
     )
     .with_shared_team(team_context, "main".to_string());
     react
-        .execute_turn(
-            session,
-            user_input,
-            stream_tx,
-            cmd_rx,
-            memory_handle,
-            index_manager,
-        )
+        .execute_turn(session, user_input, stream_tx, cmd_rx, memory_handle)
         .await;
 }
 

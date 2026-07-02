@@ -156,7 +156,6 @@ impl ReactEngine {
         stream_tx: &StdSender<StreamEvent>,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
         memory_handle: Option<&tiangong_memory::MemoryHandle>,
-        index_manager: Option<std::sync::Arc<crate::index::IndexManager>>,
     ) -> TokenUsage {
         let mut round = 0usize;
         let mut outer_iteration = 0u32;
@@ -183,13 +182,7 @@ impl ReactEngine {
                 .unwrap_or(false);
             if routed {
                 let sub_result = self
-                    .drain_sub_agent_inboxes(
-                        session,
-                        stream_tx,
-                        cmd_rx,
-                        memory_handle,
-                        &index_manager,
-                    )
+                    .drain_sub_agent_inboxes(session, stream_tx, cmd_rx, memory_handle)
                     .await;
                 accumulated_usage.accumulate(&sub_result.usage);
                 if sub_result.cancelled {
@@ -1067,27 +1060,7 @@ impl ReactEngine {
 
                     let (result, tool_llm_usage, allow_memory_context, usage_source) = {
                         let (mut result, tool_llm_usage, allow_memory_context, usage_source) =
-                            if call.name == "index_search" {
-                                if let Some(ref im) = index_manager {
-                                    let (result, usage, allow_context) =
-                                        crate::index::execute_index_search_tool(call, im, session);
-                                    (result, usage, allow_context, "index_search")
-                                } else {
-                                    (
-                                        crate::tool::ToolResult {
-                                            ok: false,
-                                            summary: "索引系统未初始化".to_string(),
-                                            stdout: String::new(),
-                                            stderr: "index manager not available".to_string(),
-                                            exit_code: 1,
-                                            execution: None,
-                                        },
-                                        tiangong_types::TokenUsage::default(),
-                                        false,
-                                        "index_search",
-                                    )
-                                }
-                            } else if call.name == "recall_memory" {
+                            if call.name == "recall_memory" {
                                 if memory_recall_attempted {
                                     // 本轮已完成回忆：补一次 Start→Done，让状态栏有清晰过渡
                                     let _ = stream_tx.send(StreamEvent::MemoryRecallStart {
@@ -1318,13 +1291,7 @@ impl ReactEngine {
 
                 // 执行有待处理任务的 Sub Agent
                 let sub_result = self
-                    .drain_sub_agent_inboxes(
-                        session,
-                        stream_tx,
-                        cmd_rx,
-                        memory_handle,
-                        &index_manager,
-                    )
+                    .drain_sub_agent_inboxes(session, stream_tx, cmd_rx, memory_handle)
                     .await;
                 accumulated_usage.accumulate(&sub_result.usage);
                 if sub_result.cancelled {
