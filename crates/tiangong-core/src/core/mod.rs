@@ -47,7 +47,6 @@ pub(crate) mod command;
 pub(crate) use command::Command;
 pub mod plugin;
 pub use plugin::Plugin;
-mod plugin_injection;
 
 /// 天工智能体核心
 pub struct TiangongCore {
@@ -170,6 +169,9 @@ impl TiangongCore {
         let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel::<Command>();
 
         let worker_trust_mode = shared_trust_mode.clone();
+        // clone 一份 cmd_tx 给 worker，用于在 register_plugin 时注入给插件
+        // （作为状态反馈通道，复用同一命令通道，避免新增 channel）。
+        let worker_cmd_tx = cmd_tx.clone();
         let worker = thread::spawn(move || {
             let memory = WorkerMemoryContext {
                 handle: None,
@@ -185,6 +187,7 @@ impl TiangongCore {
                 worker_trust_mode,
                 memory,
                 plugins,
+                worker_cmd_tx,
             )
         });
 
@@ -295,6 +298,7 @@ impl Drop for TiangongCore {
 // ==================== 工作线程 ====================
 
 /// 工作线程：接收用户命令，执行 LLM + 工具，推送 StreamEvent
+#[allow(clippy::too_many_arguments)]
 fn worker_loop(
     config: CoreConfigProvider,
     session: Session,
@@ -303,6 +307,7 @@ fn worker_loop(
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
     memory: WorkerMemoryContext,
     plugins: Vec<Arc<dyn Plugin>>,
+    cmd_tx: tokio_mpsc::UnboundedSender<Command>,
 ) -> Session {
     // 在专用的 tokio runtime 上运行 async 工作循环，
     // 使 execute_turn_inner 可以用 select! + stream_function_calls 实现真正取消。
@@ -322,10 +327,12 @@ fn worker_loop(
         shared_trust_mode,
         memory,
         plugins,
+        cmd_tx,
     ))
 }
 
 /// 真正的 async 工作循环
+#[allow(clippy::too_many_arguments)]
 async fn worker_loop_async(
     config: CoreConfigProvider,
     mut session: Session,
@@ -334,6 +341,7 @@ async fn worker_loop_async(
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
     mut memory: WorkerMemoryContext,
     plugins: Vec<Arc<dyn Plugin>>,
+    cmd_tx: tokio_mpsc::UnboundedSender<Command>,
 ) -> Session {
     let session_id = session.id.clone();
     let mut last_cfg_gen = 0u64;
@@ -453,12 +461,12 @@ async fn worker_loop_async(
                 None
             };
             for plugin in &plugins {
-                register_plugin(e, plugin.clone(), workspace);
+                crate::core::plugin::register_plugin(e, plugin.clone(), workspace, cmd_tx.clone());
             }
             // 先收集插件工具规格 + plugin_injection，作为 MCP 工具的 reserved names，
             // 避免 MCP server 暴露同名工具（read_file/web_fetch/run_command 等）与插件冲突。
             let plugin_specs = e.collect_plugin_tool_specs();
-            let injection_spec = crate::core::plugin_injection::tool_spec();
+            let injection_spec = crate::core::plugin::injection_tool_spec();
             let reserved_names: std::collections::HashSet<String> = plugin_specs
                 .iter()
                 .map(|s| s.name.clone())
@@ -726,41 +734,6 @@ fn index_turn_messages(
     if let Err(e) = index_manager.index_turn_batch(&session.id, &turns) {
         tracing::warn!("Session 索引批量写入失败: {e}");
     }
-}
-
-/// 注册一个进程内插件到 engine：注入会话工作目录、收集三种能力（工具规格/覆盖/Prompt
-/// 段落）、再让插件注入外部能力（PageFetcher 等）。
-///
-/// 编排逻辑集中在调用方（worker_loop），engine 仅暴露原子能力槽位（register_tool_*）。
-fn register_plugin(
-    engine: &RuntimeEngine,
-    plugin: std::sync::Arc<dyn Plugin>,
-    workspace: Option<&std::path::Path>,
-) {
-    // 注入当前会话工作目录（插件可覆写 set_workspace 感知）
-    if let Some(ws) = workspace {
-        plugin.set_workspace(ws);
-    }
-
-    // 1) 工具规格：plugin 本身即 ToolSpecProvider
-    let specs = plugin.tool_specs();
-    let plugin_as_spec: std::sync::Arc<dyn crate::tool_override::ToolSpecProvider> = plugin.clone();
-    engine.register_tool_spec_provider(plugin_as_spec);
-
-    // 2) 工具覆盖：按 spec 中的工具名逐个注册，路由到同一 plugin 的 handle
-    let plugin_as_handler: std::sync::Arc<dyn crate::tool_override::ToolOverrideHandler> =
-        plugin.clone();
-    for spec in specs {
-        engine.register_tool_override(&spec.name, plugin_as_handler.clone());
-    }
-
-    // 3) Prompt 段落
-    let plugin_as_prompt: std::sync::Arc<dyn crate::tool_override::PromptSectionProvider> =
-        plugin.clone();
-    engine.register_prompt_section_provider(plugin_as_prompt);
-
-    // 4) 让插件注入外部能力（PageFetcher / TerminalProvider 等）
-    plugin.register(engine);
 }
 
 pub(crate) fn apply_session_cwd(session: &Session) {
