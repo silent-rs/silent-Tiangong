@@ -9589,6 +9589,7 @@ dependencies = [
  "tiangong-memory",
  "tiangong-plugin-browser",
  "tiangong-plugin-fs",
+ "tiangong-plugin-index",
  "tiangong-plugin-scheduler",
  "tiangong-plugin-terminal",
  "tiangong-scheduler",
@@ -9613,6 +9614,7 @@ dependencies = [
  "tiangong-plugin-command",
  "tiangong-plugin-fetch",
  "tiangong-plugin-fs",
+ "tiangong-plugin-index",
  "tiangong-plugin-scheduler",
  "tiangong-types",
  "tokio",
@@ -9814,6 +9816,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-plugin-index"
+version = "0.11.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tiangong-core",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tiangong-plugin-scheduler"
 version = "0.11.0"
 dependencies = [
@@ -9892,6 +9907,7 @@ dependencies = [
  "tiangong-plugin-command",
  "tiangong-plugin-fetch",
  "tiangong-plugin-fs",
+ "tiangong-plugin-index",
  "tiangong-plugin-scheduler",
  "tiangong-scheduler",
  "tiangong-types",

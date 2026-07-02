@@ -1,8 +1,9 @@
 //! 基础文件工具进程内插件。
 //!
-//! 把 core `LocalToolExecutor` 中的 8 个纯文件/简单工具（list_dir / tree_dir /
-//! read_file / search_code / current_time / write_file / replace_in_file /
-//! apply_patch）以插件形式注入 Agent，让 core 不再感知这些工具的定义与执行。
+//! 把 core `LocalToolExecutor` 中的 7 个纯文件/简单工具（list_dir / tree_dir /
+//! read_file / current_time / write_file / replace_in_file / apply_patch）以
+//! 插件形式注入 Agent，让 core 不再感知这些工具的定义与执行。
+//! （search_code 已迁至 tiangong-plugin-index 插件，与 index_search 同属检索语义。）
 //!
 //! 工具规格与覆盖处理器直接在 [`FsPlugin`] 上实现（supertrait 自动收集），
 //! 参数全部命名化（直接读 `call.arguments` JSON），绕开旧的位置参数转换。

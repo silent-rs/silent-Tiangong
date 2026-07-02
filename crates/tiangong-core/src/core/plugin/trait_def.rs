@@ -8,8 +8,8 @@
 //! - [`Plugin::set_feedback_tx`]：状态反馈通道（插件可向 session 投递外部事件）。
 //!
 //! 两者都带默认实现，不需要的插件无需任何改动。其中信任模式的**查询**（如
-//! `is_full_trust`）是插件内部工具，不作为 trait 能力暴露，插件借助
-//! [`check_full_trust`] 复用样板即可。
+//! 各插件自定义的 `is_full_trust` 固有方法）是插件内部工具，不作为 trait 能力暴露，
+//! 插件按需读取注入的共享引用并判等即可。
 
 use std::path::Path;
 use std::sync::{Arc, RwLock};
@@ -31,6 +31,10 @@ use crate::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecP
 /// 4. [`register`](Plugin::register) 让插件注入外部能力（如 PageFetcher）。
 ///
 /// 工具规格 / 工具覆盖 / Prompt 段落由 core 根据 supertrait 自动收集，无需插件手动注册。
+///
+/// 此外，core 在 worker_loop 的关键生命周期节点遍历插件，回调下述生命周期钩子
+///（均提供默认空实现），传入 `&mut Session` 供插件做必要处理（如维护索引、归档
+/// 记忆等）。插件按需覆写关心的节点即可。
 pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider {
     /// 插件唯一标识（日志/调试用）。
     fn id(&self) -> &str;
@@ -60,7 +64,7 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     /// 无需覆写；这些插件的工具执行仍受 engine 层 [`PermissionGate::check`] 统一兜底。
     ///
     /// 注意：信任模式的查询是**插件内部工具**，不作为 `Plugin` trait 的状态/能力暴露。
-    /// 插件可借助 [`check_full_trust`] 复用「读 RwLock → 判等」样板。
+    /// 插件自行读取存入的共享引用并判等（如 `*g == TrustMode::FullTrust`）。
     fn set_trust_mode(&self, _trust: Arc<RwLock<TrustMode>>) {}
 
     /// 注入状态反馈通道（复用 worker 的命令通道）。
@@ -72,30 +76,41 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     ///
     /// 默认实现为空操作——不需要主动投递外部事件的插件无需覆写。
     fn set_feedback_tx(&self, _tx: PluginFeedbackTx) {}
-}
 
-/// 读取共享信任模式引用并判断是否为 [`TrustMode::FullTrust`]。
-///
-/// 供插件在自身的「是否完全信任」查询（如 `is_full_trust` 固有方法）中复用，
-/// 消除重复的「读 RwLock → 判等」样板。入参为 `Option` 引用：`None` 或读取锁失败
-/// 均返回 `false`（安全降级）。
-///
-/// # Examples
-///
-/// ```
-/// # use std::sync::{Arc, RwLock};
-/// # use tiangong_core::permission::TrustMode;
-/// # use tiangong_core::core::plugin::check_full_trust;
-/// let cell: Arc<RwLock<TrustMode>> = Arc::new(RwLock::new(TrustMode::FullTrust));
-/// assert!(check_full_trust(Some(&cell)));
-/// assert!(!check_full_trust(None));
-/// ```
-pub fn check_full_trust(trust: Option<&Arc<RwLock<TrustMode>>>) -> bool {
-    let Some(handle) = trust else {
-        return false;
-    };
-    handle
-        .read()
-        .map(|g| *g == TrustMode::FullTrust)
-        .unwrap_or(false)
+    // ── 生命周期钩子 ──
+    //
+    // 在 worker_loop 的对应节点遍历插件回调，传入 `&mut Session` 供插件处理
+    //（如维护索引、归档记忆等）。全部默认空实现，插件按需覆写。
+
+    /// worker 首次处理命令前会按需 build engine；首次 build + 插件注册完成后调用一次。
+    ///
+    /// 注意：此钩子在「收到首条命令后、处理该命令前」触发（worker 收到命令才会按需
+    /// build engine），并非在接收命令前。此时 [`set_workspace`](Plugin::set_workspace) /
+    /// [`set_trust_mode`](Plugin::set_trust_mode) / [`set_feedback_tx`](Plugin::set_feedback_tx)
+    /// 均已注入，插件可安全读取已存储的上下文。适合做一次性的会话级初始化（如对工作
+    /// 目录做首次全量扫描）。仅触发一次；后续 engine 重建只回调 [`Plugin::on_engine_rebuilt`]。
+    fn on_session_ready(&self, _session: &mut crate::session::Session) {}
+
+    /// engine 创建或重建（配置变更）完成后调用。
+    fn on_engine_rebuilt(&self, _session: &mut crate::session::Session) {}
+
+    /// 会话工作目录变更后调用（core 已更新 `session.cwd` 并重注入 `set_workspace`）。
+    fn on_cwd_changed(&self, _session: &mut crate::session::Session) {}
+
+    /// 一个对话轮次开始前调用：用户消息已写入 session，`execute_turn` 调用前。
+    ///
+    /// `turn_start_idx` 为本轮用户消息在 `session.messages` 中的起始索引，
+    /// 可供 [`Plugin::on_turn_finished`] 计算本轮新增消息范围。
+    fn on_turn_started(&self, _session: &mut crate::session::Session, _turn_start_idx: usize) {}
+
+    /// 一个对话轮次结束后调用：执行时长与 turn_result 已写入并落盘。
+    ///
+    /// `turn_start_idx` 与 [`Plugin::on_turn_started`] 接收的值一致，可用于取出本轮
+    /// 新增的消息做后处理（如批量写入索引）。
+    fn on_turn_finished(&self, _session: &mut crate::session::Session, _turn_start_idx: usize) {}
+
+    /// 会话结束、worker 即将退出前调用（finalize 用）。
+    ///
+    /// 注意：此时 stream 通道可能已关闭，钩子内不应再投递流事件。
+    fn on_session_ended(&self, _session: &mut crate::session::Session) {}
 }
