@@ -23,9 +23,9 @@ pub struct TiangongApp {
     embedded_server: Mutex<Option<tiangong_server::EmbeddedServerHandle>>,
     /// Tauri 应用句柄（browser/terminal 插件构造需要）。
     ///
-    /// 每次 [`Self::ensure_core`] 创建 Core 时，用此句柄现场构造全部插件实例，
-    /// 确保 browser/terminal/fs/index/memory/scheduler 都是 per-Core 独立的。
-    app_handle: tauri::AppHandle,
+    /// 由 setup 阶段经 [`Self::set_app_handle`] 注入（builder 链构造时尚无 handle）。
+    /// 每次 [`Self::ensure_core`] 创建 Core 时，用此句柄现场构造全部插件实例。
+    app_handle: std::sync::OnceLock<tauri::AppHandle>,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
     /// 插件通过 [`Self::tool_injection_tx`] 获取 sender，直接 push `ToolInjection`。
     /// 消费者任务由 [`Self::start_tool_injection_consumer`] 启动。
@@ -45,8 +45,8 @@ pub struct ToolInjection {
 }
 
 impl TiangongApp {
-    /// 构造应用状态。`app_handle` 由 setup 阶段传入，供 ensure_core 现场构造插件。
-    pub fn new(app_handle: tauri::AppHandle) -> Self {
+    /// 构造应用状态。`app_handle` 由 setup 阶段经 [`Self::set_app_handle`] 注入。
+    pub fn new() -> Self {
         let app_config = load_tiangong_config();
         let core_config = app_config.to_core_config();
         let config = CoreConfigProvider::new(core_config);
@@ -60,10 +60,15 @@ impl TiangongApp {
             cores: Mutex::new(HashMap::new()),
             config,
             embedded_server: Mutex::new(None),
-            app_handle,
+            app_handle: std::sync::OnceLock::new(),
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
         }
+    }
+
+    /// 注入 Tauri 应用句柄（setup 阶段调用，仅一次）。
+    pub fn set_app_handle(&self, handle: tauri::AppHandle) {
+        let _ = self.app_handle.set(handle);
     }
 
     /// 获取工具消息注入 channel sender。
@@ -278,12 +283,15 @@ impl TiangongApp {
         // 现场构造全部插件实例（per-Core 独立，隔离 per-session 状态）。
         // browser/terminal 依赖 Tauri 句柄；fs/index/memory/scheduler 不依赖。
         let mut plugins: Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> = Vec::new();
-        if let Some(browser) = tiangong_plugin_browser::build_plugin(&self.app_handle) {
+        let Some(app_handle) = self.app_handle.get() else {
+            panic!("TiangongApp.app_handle 未注入，set_app_handle 应在 setup 阶段调用");
+        };
+        if let Some(browser) = tiangong_plugin_browser::build_plugin(app_handle) {
             plugins.push(browser);
         } else {
             warn!("浏览器插件构造失败（Tauri state 未就绪），浏览器能力将缺失");
         }
-        if let Some(terminal) = tiangong_plugin_terminal::build_plugin(&self.app_handle) {
+        if let Some(terminal) = tiangong_plugin_terminal::build_plugin(app_handle) {
             plugins.push(terminal);
         } else {
             warn!("终端插件构造失败（Tauri state 未就绪），终端能力将缺失");

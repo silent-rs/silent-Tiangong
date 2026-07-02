@@ -271,6 +271,7 @@ fn run_gui() {
     let _guard = init_logging(true).expect("failed to initialize logging");
 
     tauri::Builder::default()
+        .manage(tiangong_app::TiangongApp::new())
         .setup(|app| {
             use tauri::Listener;
 
@@ -278,9 +279,9 @@ fn run_gui() {
             app.set_activation_policy(tauri::ActivationPolicy::Regular);
             setup_tray(app)?;
 
-            // 先 manage TiangongApp（需要 app.handle 供 ensure_core 构造 browser/terminal）
-            app.manage(tiangong_app::TiangongApp::new(app.handle().clone()));
+            // 注入 app_handle（builder 链构造时尚无 handle，setup 阶段补入）。
             let state = app.state::<tiangong_app::TiangongApp>();
+            state.set_app_handle(app.handle().clone());
 
             // 全部插件（browser/terminal/fs/index/memory/scheduler）均由 ensure_core
             // 创建 Core 时现场 build_plugin() 构造，确保每个 Core 持有独立实例
