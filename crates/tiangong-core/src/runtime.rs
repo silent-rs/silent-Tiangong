@@ -305,15 +305,6 @@ impl RuntimeEngine {
         }
     }
 
-    /// 收集所有 Plugin 注册的工具规格
-    pub fn collect_plugin_tool_specs(&self) -> Vec<crate::model::ToolSpec> {
-        self.tool_spec_providers
-            .lock()
-            .ok()
-            .map(|guard| guard.iter().flat_map(|p| p.tool_specs()).collect())
-            .unwrap_or_default()
-    }
-
     /// 获取所有已注册的工具规格提供者（用于 runtime 重建时保留）
     pub fn tool_spec_providers(&self) -> Vec<Arc<dyn crate::tool_override::ToolSpecProvider>> {
         self.tool_spec_providers

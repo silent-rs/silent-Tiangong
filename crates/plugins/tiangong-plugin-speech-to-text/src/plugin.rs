@@ -2,8 +2,8 @@
 //!
 //! [`SpeechToTextPlugin`] 通过 [`Plugin::register`] 从 [`RuntimeEngine`] 获取
 //! [`ModelsConfig`]（克隆一份私有持有）并据此判定 STT 能力是否已配置，
-//! 写入内部 [`AtomicBool`]。因 core 在 `register` 之后才收集 [`Plugin::tool_specs`]，
-//! 故 `tool_specs` 读到的能力开关已是最新值。
+//! 写入内部 [`AtomicBool`]。core 的 `register_plugin` 编排保证 `register` 在
+//! `tool_specs` 收集之前执行，故 `tool_specs` 读到的能力开关已是最新值。
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
