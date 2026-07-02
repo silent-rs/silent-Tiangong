@@ -648,7 +648,8 @@ pub fn execute_command_with_timeout(
 ) -> Result<(Output, bool)> {
     configure_no_window(command);
 
-    // timeout_ms=0 表示不设超时：子进程会自然退出，stdout pipe 不会堵，可直接用标准 API。
+    // timeout_ms=0 表示不设超时：标准库 output() 会内部等待并收集输出，
+    // 不走当前自定义轮询逻辑，也不会出现 pipe 堵塞问题。
     if timeout_ms == 0 {
         let output = command.output().context("执行命令失败")?;
         return Ok((output, false));
@@ -713,7 +714,16 @@ pub fn execute_command_with_timeout(
     ))
 }
 
-/// 起一个线程持续读取 `pipe` 到共享 buffer，直到 EOF。
+/// 单路输出最多收集的字节数。达到上限后继续 drain（避免 pipe 再堵）但丢弃后续内容，
+/// 防止命中极多结果（如搜索 `use`/`fn`）时把内存吃满。
+/// 上限刻意大于 `truncate_output` 的 6000 字符，给调用方留出截断判断的余量。
+const MAX_CAPTURE_BYTES: usize = 512 * 1024;
+
+/// 起一个线程持续读取 `pipe` 到共享 buffer，直到 EOF 或达到收集上限。
+///
+/// 达到 `MAX_CAPTURE_BYTES` 后线程**继续读取但不再写入 buffer**——这样既避免 pipe
+/// 缓冲区再次被写满导致子进程阻塞，又保证收集的输出有内存上限。调用方应结合
+/// `truncate_output` 在结果进入 LLM 上下文前做二次截断。
 fn spawn_drain(
     pipe: Option<Box<dyn Read + Send>>,
     buf: Arc<Mutex<Vec<u8>>>,
@@ -727,8 +737,17 @@ fn spawn_drain(
             match pipe.read(&mut tmp) {
                 Ok(0) => break, // EOF
                 Ok(n) => {
-                    if let Ok(mut guard) = buf.lock() {
-                        guard.extend_from_slice(&tmp[..n]);
+                    // 达到上限后只读不存：保持 pipe 畅通，但不再增长 buffer。
+                    let already_full = buf
+                        .lock()
+                        .map(|g| g.len() >= MAX_CAPTURE_BYTES)
+                        .unwrap_or(false);
+                    if !already_full {
+                        if let Ok(mut guard) = buf.lock() {
+                            let remaining = MAX_CAPTURE_BYTES.saturating_sub(guard.len());
+                            let take = n.min(remaining);
+                            guard.extend_from_slice(&tmp[..take]);
+                        }
                     }
                 }
                 Err(_) => break, // 读取错误（含 pipe 被关闭），结束线程

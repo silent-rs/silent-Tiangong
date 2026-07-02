@@ -175,16 +175,16 @@ impl Plugin for IndexPlugin {
     }
 }
 
-// 注入检索工具使用指引：引导安装 ripgrep 以提升 search_code 性能，说明与 index_search 的配合。
+// 注入检索工具使用指引：以操作策略为主，说明 search_code 与 index_search 的配合用法。
 impl PromptSectionProvider for IndexPlugin {
     fn prompt_sections(&self) -> Vec<String> {
-        vec![
-            "## 检索工具使用指引\n\
-             - search_code 用于精确文本/正则检索，依赖 ripgrep(rg)；若当前环境未安装 rg，\
-             会回退到 grep 且明显变慢，建议安装 ripgrep（`brew install ripgrep` / `cargo install ripgrep`）以获得最佳性能。\n\
-             - index_search 用于基于索引的语义检索（工作区文件 + 对话历史），速度更快但受索引覆盖范围限制；\
-             需要精确定位某行代码时优先用 index_search 缩小范围，再用 search_code 取精确行号。"
-                .to_string(),
-        ]
+        vec!["## 检索工具使用指引\n\
+             - search_code 用于精确文本/正则检索，优先使用 rg；若环境缺失 rg，工具会自动\
+             回退到 grep，可能较慢。调用 search_code 时应尽量指定更小的 path 和更精确的\
+             pattern，避免全仓搜索导致超时。\n\
+             - index_search 用于基于索引的语义检索（工作区文件 + 对话历史），速度更快但\
+             受索引覆盖范围限制；需要精确定位某行代码时优先用 index_search 缩小范围，\
+             再用 search_code 取精确行号。"
+            .to_string()]
     }
 }

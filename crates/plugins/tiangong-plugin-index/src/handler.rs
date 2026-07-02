@@ -222,11 +222,10 @@ impl IndexPlugin {
         };
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let stdout = if timed_out {
-            shared::truncate_output(&stdout)
-        } else {
-            stdout
-        };
+        // 无论是否超时都截断：命中很多时（如搜索 use/fn）输出可能巨大，
+        // 避免大块文本进入 ToolResult / session / LLM 上下文。
+        let stdout = shared::truncate_output(&stdout);
+        let stderr = shared::truncate_output(&stderr);
         let ok = !timed_out && (output.status.success() || exit_code == 1);
         let summary = if timed_out {
             format!("代码检索超时：pattern={pattern} (timeout_ms={timeout_ms})")

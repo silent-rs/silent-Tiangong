@@ -82,12 +82,13 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     // 在 worker_loop 的对应节点遍历插件回调，传入 `&mut Session` 供插件处理
     //（如维护索引、归档记忆等）。全部默认空实现，插件按需覆写。
 
-    /// 首次 engine build 与插件注册完成后、接收首条命令前调用一次。
+    /// worker 首次处理命令前会按需 build engine；首次 build + 插件注册完成后调用一次。
     ///
-    /// 此时 [`set_workspace`](Plugin::set_workspace) / [`set_trust_mode`](Plugin::set_trust_mode)
-    /// / [`set_feedback_tx`](Plugin::set_feedback_tx) 均已注入，插件可安全读取已存储的
-    /// 上下文。适合做一次性的会话级初始化（如对工作目录做首次全量扫描）。
-    /// 仅触发一次；后续 engine 重建只回调 [`Plugin::on_engine_rebuilt`]。
+    /// 注意：此钩子在「收到首条命令后、处理该命令前」触发（worker 收到命令才会按需
+    /// build engine），并非在接收命令前。此时 [`set_workspace`](Plugin::set_workspace) /
+    /// [`set_trust_mode`](Plugin::set_trust_mode) / [`set_feedback_tx`](Plugin::set_feedback_tx)
+    /// 均已注入，插件可安全读取已存储的上下文。适合做一次性的会话级初始化（如对工作
+    /// 目录做首次全量扫描）。仅触发一次；后续 engine 重建只回调 [`Plugin::on_engine_rebuilt`]。
     fn on_session_ready(&self, _session: &mut crate::session::Session) {}
 
     /// engine 创建或重建（配置变更）完成后调用。
