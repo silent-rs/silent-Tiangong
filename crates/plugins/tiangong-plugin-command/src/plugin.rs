@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use tiangong_core::core::Plugin;
+use tiangong_core::core::plugin::{Plugin, check_full_trust};
 use tiangong_core::permission::TrustMode;
 
 /// command 插件。
@@ -33,16 +33,9 @@ impl CommandPlugin {
     }
 
     pub(crate) fn is_full_trust(&self) -> bool {
-        let guard = match self.trust_mode.read() {
-            Ok(g) => g,
-            Err(_) => return false,
-        };
-        let Some(trust) = guard.as_ref() else {
-            return false;
-        };
-        trust
+        self.trust_mode
             .read()
-            .map(|g| *g == TrustMode::FullTrust)
+            .map(|g| check_full_trust(g.as_ref()))
             .unwrap_or(false)
     }
 }
@@ -58,12 +51,15 @@ impl Plugin for CommandPlugin {
         }
     }
 
-    fn register(&self, engine: &tiangong_core::runtime::RuntimeEngine) {
-        let trust = engine.permission_gate().shared_trust_mode_ref();
+    fn set_trust_mode(&self, trust: Arc<RwLock<TrustMode>>) {
         if let Ok(mut guard) = self.trust_mode.write() {
             *guard = Some(trust);
         }
-        // 获取 MCP/skills 收集的环境变量快照（子进程执行时注入）
+    }
+
+    fn register(&self, engine: &tiangong_core::runtime::RuntimeEngine) {
+        // 信任模式已由 core 通过 set_trust_mode 统一注入，此处仅获取 MCP/skills 收集的
+        // 环境变量快照（子进程执行时注入）
         if let Ok(mut guard) = self.runtime_env.write() {
             *guard = engine.runtime_env();
         }
