@@ -9834,6 +9834,7 @@ dependencies = [
 name = "tiangong-plugin-memory"
 version = "0.11.0"
 dependencies = [
+ "scru128",
  "serde",
  "serde_json",
  "tiangong-core",

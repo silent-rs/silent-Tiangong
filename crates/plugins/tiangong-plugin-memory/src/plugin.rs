@@ -15,9 +15,9 @@
 
 use std::sync::RwLock;
 
+use crate::turn_extract::build_turn_memory_result;
 use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::core::Plugin;
-use tiangong_core::memory::turn_result::build_turn_memory_result;
 use tiangong_core::session::Session;
 use tiangong_core::tool_override::PromptSectionProvider;
 use tiangong_memory::MemoryHandle;

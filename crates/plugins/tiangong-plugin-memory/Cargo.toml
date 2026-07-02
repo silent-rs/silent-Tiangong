@@ -8,6 +8,7 @@ license = "Apache-2.0"
 tiangong-core = { workspace = true }
 tiangong-memory = { workspace = true }
 tiangong-types = { workspace = true }
+scru128 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true }
